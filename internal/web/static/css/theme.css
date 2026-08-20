@@ -1,0 +1,204 @@
+/* ═══════════════════════════════════════════════════════════════════
+   ClipSync Design Tokens — Refined Cyber-Future Edition
+
+   A polished design system with deep space aesthetics, vibrant neon
+   accents, glass morphism, and holographic effects. Think: premium
+   cyberpunk meets minimalist future — dark, glowing, immersive.
+   ═══════════════════════════════════════════════════════════════════ */
+
+:root {
+  /* ═══════════════════════════════════════════════════════════════
+     Surface colors — refined dark palette
+     ═══════════════════════════════════════════════════════════════ */
+  --clipsync-bg: #080C18;              /* Void with subtle warmth */
+  --clipsync-surface: #0D1224;         /* Card surfaces */
+  --clipsync-panel: #111830;           /* Subtle panel */
+  --clipsync-panel-2: #17203C;         /* Hover / deeper panel */
+  --clipsync-elevated: #1C2848;        /* Elevated (modals) */
+
+  /* ═══════════════════════════════════════════════════════════════
+     Text — refined hierarchy
+     ═══════════════════════════════════════════════════════════════ */
+  --clipsync-fg: #E8ECF4;              /* Primary — soft cool white */
+  --clipsync-fg-muted: #8898B8;        /* Secondary — muted steel */
+  --clipsync-fg-subtle: #5A6A8A;       /* Subtle — warm periwinkle */
+
+  /* ═══════════════════════════════════════════════════════════════
+     Accent — Teal × Soft Violet
+     Professional, refined, approachable
+     ═══════════════════════════════════════════════════════════════ */
+  --clipsync-accent: #20B8D0;
+  --clipsync-accent-2: #8877DD;
+  --clipsync-accent-hover: #40CCE0;
+  --clipsync-accent-glow: rgba(32, 184, 208, 0.10);
+  --clipsync-accent-glow-strong: rgba(32, 184, 208, 0.20);
+  --clipsync-accent-text: #080C18;
+
+  /* Violet variant */
+  --clipsync-violet-glow: rgba(136, 119, 221, 0.10);
+  --clipsync-violet-glow-strong: rgba(136, 119, 221, 0.20);
+
+  /* ═══════════════════════════════════════════════════════════════
+     Semantic colors — refined
+     ═══════════════════════════════════════════════════════════════ */
+  --clipsync-success: #10B878;                           /* Calm emerald */
+  --clipsync-success-glow: rgba(16, 184, 120, 0.10);
+  --clipsync-success-bg: rgba(16, 184, 120, 0.05);
+  --clipsync-success-text: #10B878;
+
+  --clipsync-warning: #E89820;                           /* Warm amber */
+  --clipsync-warning-glow: rgba(232, 152, 32, 0.10);
+  --clipsync-warning-bg: rgba(232, 152, 32, 0.05);
+  --clipsync-warning-text: #E89820;
+
+  --clipsync-danger: #E04858;                            /* Soft crimson */
+  --clipsync-danger-glow: rgba(224, 72, 88, 0.12);
+  --clipsync-danger-bg: rgba(224, 72, 88, 0.05);
+  --clipsync-danger-text: #E04858;
+
+  --clipsync-info: #20B8D0;                              /* Teal (matches accent) */
+  --clipsync-info-glow: rgba(32, 184, 208, 0.10);
+  --clipsync-info-bg: rgba(32, 184, 208, 0.04);
+
+  --clipsync-purple: #8877DD;
+  --clipsync-cyan: #20C0C8;
+
+  /* ═══════════════════════════════════════════════════════════════
+     Borders
+     ═══════════════════════════════════════════════════════════════ */
+  --clipsync-border: rgba(100, 140, 200, 0.07);
+  --clipsync-border-strong: rgba(100, 140, 200, 0.14);
+  --clipsync-border-glow: rgba(32, 184, 208, 0.14);
+  --clipsync-border-glow-strong: rgba(32, 184, 208, 0.25);
+
+  /* ═══════════════════════════════════════════════════════════════
+     Interactive
+     ═══════════════════════════════════════════════════════════════ */
+  --clipsync-hover: rgba(100, 160, 220, 0.06);
+  --clipsync-active: rgba(32, 184, 208, 0.08);
+
+  /* ═══════════════════════════════════════════════════════════════
+     Shadows — dimensional
+     ═══════════════════════════════════════════════════════════════ */
+  --clipsync-shadow-sm: 0 1px 3px rgba(0, 0, 0, 0.40);
+  --clipsync-shadow: 0 2px 10px rgba(0, 0, 0, 0.45), 0 0 1px rgba(32, 184, 208, 0.03);
+  --clipsync-shadow-md: 0 4px 24px rgba(0, 0, 0, 0.50), 0 0 4px rgba(32, 184, 208, 0.04);
+  --clipsync-shadow-lg: 0 12px 48px rgba(0, 0, 0, 0.60), 0 0 12px rgba(32, 184, 208, 0.05);
+  --clipsync-shadow-glow: 0 0 24px rgba(32, 184, 208, 0.16), 0 0 64px rgba(32, 184, 208, 0.05);
+
+  /* ═══════════════════════════════════════════════════════════════
+     Border radii
+     ═══════════════════════════════════════════════════════════════ */
+  --clipsync-radius-sm: 8px;
+  --clipsync-radius-md: 10px;
+  --clipsync-radius: 12px;
+  --clipsync-radius-lg: 16px;
+  --clipsync-radius-xl: 20px;
+  --clipsync-radius-full: 9999px;
+
+  /* ═══════════════════════════════════════════════════════════════
+     Typography
+     ═══════════════════════════════════════════════════════════════ */
+  --clipsync-font: "SF Pro Display", "Inter", -apple-system, BlinkMacSystemFont,
+                   "Segoe UI", Roboto, "Helvetica Neue", sans-serif;
+  --clipsync-font-mono: "JetBrains Mono", "SF Mono", "Cascadia Code", "Fira Code", monospace;
+
+  /* ═══════════════════════════════════════════════════════════════
+     Spacing (4px base)
+     ═══════════════════════════════════════════════════════════════ */
+  --clipsync-space-1: 4px;
+  --clipsync-space-2: 8px;
+  --clipsync-space-3: 12px;
+  --clipsync-space-4: 16px;
+  --clipsync-space-5: 20px;
+  --clipsync-space-6: 24px;
+  --clipsync-space-8: 32px;
+  --clipsync-space-10: 40px;
+
+  /* ═══════════════════════════════════════════════════════════════
+     Transitions
+     ═══════════════════════════════════════════════════════════════ */
+  --clipsync-transition-fast: 120ms cubic-bezier(0.4, 0, 0.2, 1);
+  --clipsync-transition: 200ms cubic-bezier(0.4, 0, 0.2, 1);
+  --clipsync-transition-slow: 350ms cubic-bezier(0.4, 0, 0.2, 1);
+  --clipsync-transition-spring: 400ms cubic-bezier(0.34, 1.56, 0.64, 1);
+  --clipsync-transition-bounce: 500ms cubic-bezier(0.68, -0.55, 0.265, 1.55);
+
+  /* ═══════════════════════════════════════════════════════════════
+     Z-index layers
+     ═══════════════════════════════════════════════════════════════ */
+  --clipsync-z-base: 0;
+  --clipsync-z-dropdown: 100;
+  --clipsync-z-sticky: 200;
+  --clipsync-z-overlay: 300;
+  --clipsync-z-modal: 400;
+  --clipsync-z-toast: 500;
+  --clipsync-z-tooltip: 600;
+}
+
+/* ═══════════════════════════════════════════════════════════════════
+   Light Theme — clean, airy, refined
+   ═══════════════════════════════════════════════════════════════════ */
+
+.light,
+[data-theme="light"] {
+  /* Surfaces — cool gray with clear hierarchy */
+  --clipsync-bg: #EEF1F6;
+  --clipsync-surface: #FFFFFF;
+  --clipsync-panel: #F7F8FB;
+  --clipsync-panel-2: #EDF0F5;
+  --clipsync-elevated: #FFFFFF;
+
+  /* Text — high contrast */
+  --clipsync-fg: #0B1220;
+  --clipsync-fg-muted: #47546B;
+  --clipsync-fg-subtle: #7A8699;
+
+  /* Accent — modern blue × indigo with white label text */
+  --clipsync-accent: #2563EB;
+  --clipsync-accent-2: #4F46E5;
+  --clipsync-accent-hover: #3B82F6;
+  --clipsync-accent-text: #FFFFFF;
+  --clipsync-accent-glow: rgba(37, 99, 235, 0.10);
+  --clipsync-accent-glow-strong: rgba(37, 99, 235, 0.18);
+
+  --clipsync-violet-glow: rgba(79, 70, 229, 0.10);
+  --clipsync-violet-glow-strong: rgba(79, 70, 229, 0.18);
+
+  /* Semantic — deep enough to pass contrast on white */
+  --clipsync-success: #059669;
+  --clipsync-success-text: #047857;
+  --clipsync-success-bg: rgba(5, 150, 105, 0.08);
+  --clipsync-success-glow: rgba(5, 150, 105, 0.14);
+  --clipsync-warning: #B45309;
+  --clipsync-warning-text: #B45309;
+  --clipsync-warning-bg: rgba(180, 83, 9, 0.08);
+  --clipsync-warning-glow: rgba(180, 83, 9, 0.16);
+  --clipsync-danger: #DC2626;
+  --clipsync-danger-text: #DC2626;
+  --clipsync-danger-bg: rgba(220, 38, 38, 0.08);
+  --clipsync-danger-glow: rgba(220, 38, 38, 0.16);
+  --clipsync-info: #2563EB;
+  --clipsync-info-bg: rgba(37, 99, 235, 0.08);
+  --clipsync-info-glow: rgba(37, 99, 235, 0.14);
+
+  --clipsync-purple: #7C3AED;
+  --clipsync-cyan: #0891B2;
+
+  /* Borders */
+  --clipsync-border: rgba(11, 18, 32, 0.08);
+  --clipsync-border-strong: rgba(11, 18, 32, 0.14);
+  --clipsync-border-glow: rgba(37, 99, 235, 0.18);
+  --clipsync-border-glow-strong: rgba(37, 99, 235, 0.30);
+
+  /* Interactive */
+  --clipsync-hover: rgba(11, 18, 32, 0.04);
+  --clipsync-active: rgba(37, 99, 235, 0.08);
+
+  /* Shadows — soft, diffuse */
+  --clipsync-shadow-sm: 0 1px 2px rgba(15, 23, 42, 0.06);
+  --clipsync-shadow: 0 1px 3px rgba(15, 23, 42, 0.06), 0 0 1px rgba(37, 99, 235, 0.04);
+  --clipsync-shadow-md: 0 4px 12px rgba(15, 23, 42, 0.08), 0 0 2px rgba(37, 99, 235, 0.05);
+  --clipsync-shadow-lg: 0 8px 30px rgba(15, 23, 42, 0.12);
+  --clipsync-shadow-glow: 0 0 18px rgba(37, 99, 235, 0.16);
+}

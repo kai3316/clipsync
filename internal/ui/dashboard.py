@@ -44,6 +44,8 @@ class DashboardWindow:
         "IMAGE": ("#8E44AD", "#9B59B6"),
         "IMAGE_EMF": ("#3498DB", "#5DADE2"),
         "RTF": ("#7F8C8D", "#95A5A6"),
+        "FILE": ("#C0392B", "#E74C3C"),
+        "URL": ("#2980B9", "#3498DB"),
     }
 
     def __init__(
@@ -143,6 +145,11 @@ class DashboardWindow:
         self._refresh_job: str | None = None
         self._breathing = False
         self._breath_timer: str | None = None
+
+        # Edge snapping state
+        self._snap_distance = 15
+        self._snap_unsnap_deadzone = 8  # extra px to break free
+        self._snap_state: dict | None = None  # {"side": str|None, "side2": str|None}
 
         # Sidebar
         self._sidebar_buttons: dict[str, ctk.CTkButton] = {}
@@ -250,6 +257,12 @@ class DashboardWindow:
         self._window.bind("<Escape>", lambda _e: self._on_hide())
         self._window.bind("<Control-q>", lambda _e: self._on_close())
 
+        # Edge snapping
+        self._snap_state = {"side": None, "side2": None}
+        self._window.bind("<Configure>", self._on_window_move)
+        # Also bind to the underlying Tk widget for more reliable drag detection
+        self._window.bind("<Configure>", self._on_window_move, add="+")
+
         self._window.update_idletasks()
         sw = self._window.winfo_screenwidth()
         sh = self._window.winfo_screenheight()
@@ -259,6 +272,63 @@ class DashboardWindow:
         self._build_ui()
         self._switch_panel("overview")
         self._schedule_refresh()
+
+    def _on_window_move(self, event=None):
+        """Snap the window to screen edges when within SNAP_DISTANCE pixels."""
+        if self._window is None or self._snap_state is None:
+            return
+        try:
+            x = self._window.winfo_x()
+            y = self._window.winfo_y()
+            w = self._window.winfo_width()
+            h = self._window.winfo_height()
+            screen_w = self._window.winfo_screenwidth()
+            screen_h = self._window.winfo_screenheight()
+        except tk.TclError:
+            return
+
+        # If already snapped, require a larger threshold to break free
+        extra = self._snap_unsnap_deadzone if self._snap_state.get("side") else 0
+        dist = self._snap_distance + extra
+
+        snap_x = x
+        snap_y = y
+        snapped_side = None
+        snapped_side2 = None
+
+        # Left edge
+        if abs(x) <= dist:
+            snap_x = 0
+            snapped_side = "left"
+        # Right edge
+        elif abs(x + w - screen_w) <= dist:
+            snap_x = screen_w - w
+            snapped_side = "right"
+
+        # Top edge
+        if abs(y) <= dist:
+            snap_y = 0
+            snapped_side2 = "top"
+            if snapped_side is None:
+                snapped_side = "top"
+        # Bottom edge (account for taskbar — use screen height minus ~40px buffer)
+        elif abs(y + h - screen_h) <= dist:
+            snap_y = screen_h - h
+            snapped_side2 = "bottom"
+            if snapped_side is None:
+                snapped_side = "bottom"
+
+        # Corner case: if both axes snapped, record both
+        if snapped_side2 and snapped_side != snapped_side2:
+            self._snap_state = {"side": snapped_side, "side2": snapped_side2}
+        else:
+            self._snap_state = {"side": snapped_side, "side2": None}
+
+        if snap_x != x or snap_y != y:
+            try:
+                self._window.geometry(f"+{snap_x}+{snap_y}")
+            except tk.TclError:
+                pass
 
     def _on_hide(self):
         self._breathing = False
@@ -1603,10 +1673,13 @@ class DashboardWindow:
                 "IMAGE": T("history.type_image"),
                 "IMAGE_EMF": T("history.type_vector_image"),
                 "RTF": T("history.type_rich_text"),
+                "FILE": T("history.type_file"),
+                "URL": T("history.type_url"),
             }
             self._card_type_icons = {
                 "TEXT": "📝", "HTML": "🌐", "IMAGE": "🖼️",
                 "IMAGE_EMF": "🎨", "RTF": "📋",
+                "FILE": "📁", "URL": "🔗",
             }
             self._cached_device_id = self._get_config().device_id
 
@@ -1872,11 +1945,26 @@ class DashboardWindow:
         if self._transfer_scroll is None or self._transfer_history_scroll is None:
             return
 
+        # Hash-based change detection: skip rebuild if nothing changed
+        transfers = self._get_transfers() if self._get_transfers else []
+        history = self._get_transfer_history() if self._get_transfer_history else []
+        speed = (self._get_speed_test_result() if self._get_speed_test_result else None) or {}
+        state_key = (
+            tuple((t.get("id"), t.get("status")) for t in transfers),
+            len(history),
+            speed.get("state", ""),
+            speed.get("result_mbps", 0),
+            speed.get("chunks_sent", 0),
+            speed.get("total_chunks", 0),
+        )
+        if state_key == getattr(self, '_transfers_state_key', None):
+            return
+        self._transfers_state_key = state_key
+
         # ── Active transfers ───────────────────────────────────────
         for child in self._transfer_scroll.winfo_children():
             child.destroy()
 
-        transfers = self._get_transfers() if self._get_transfers else []
         if not transfers:
             ctk.CTkLabel(
                 self._transfer_scroll,
@@ -1892,7 +1980,6 @@ class DashboardWindow:
         for child in self._transfer_history_scroll.winfo_children():
             child.destroy()
 
-        history = self._get_transfer_history() if self._get_transfer_history else []
         if not history:
             ctk.CTkLabel(
                 self._transfer_history_scroll,
@@ -1921,14 +2008,13 @@ class DashboardWindow:
                 self._transfer_history_stats.configure(text=" · ".join(parts))
 
         # ── Speed test result ──────────────────────────────────────
-        if self._speed_card and self._get_speed_test_result:
-            st = self._get_speed_test_result()
-            if st:
-                state = st.get("state", "")
-                mbps = st.get("result_mbps", 0)
+        if self._speed_card:
+            if speed:
+                state = speed.get("state", "")
+                mbps = speed.get("result_mbps", 0)
                 if state == "sending":
-                    sent = st.get("chunks_sent", 0)
-                    total = st.get("total_chunks", 0)
+                    sent = speed.get("chunks_sent", 0)
+                    total = speed.get("total_chunks", 0)
                     if total > 0 and self._speed_progress:
                         self._speed_progress.set(sent / total)
                     if self._speed_status:

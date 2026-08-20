@@ -8,7 +8,7 @@ Build locally:
 
 import os
 import sys
-from PyInstaller.utils.hooks import collect_submodules
+from PyInstaller.utils.hooks import collect_data_files, collect_submodules
 
 block_cipher = None
 
@@ -54,6 +54,8 @@ hiddenimports += [
     "internal.security.encryption",
 ]
 
+datas = collect_data_files("internal.web")
+
 if sys.platform == "darwin":
     hiddenimports += ["pyobjc_framework_Cocoa"]
 
@@ -61,7 +63,7 @@ a = Analysis(
     ["src/main.py"],
     pathex=[_PROJ_ROOT],
     binaries=[],
-    datas=[],
+    datas=datas,
     hiddenimports=hiddenimports,
     hookspath=[],
     hooksconfig={},

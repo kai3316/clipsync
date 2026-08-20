@@ -1,0 +1,807 @@
+/* ═══════════════════════════════════════════════════════════════════
+   ClipSync Base Styles
+   CSS reset, document-level defaults, scrollbar styling, selection
+   styling, focus-visible rings, and utility classes.
+   ═══════════════════════════════════════════════════════════════════ */
+
+/* ── Reset ──────────────────────────────────────────────────────── */
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+/* ── Document defaults ──────────────────────────────────────────── */
+
+html {
+  height: 100%;
+  -webkit-text-size-adjust: 100%;
+  -moz-text-size-adjust: 100%;
+  text-size-adjust: 100%;
+}
+
+body {
+  font-family: var(--clipsync-font);
+  font-size: 14px;
+  line-height: 1.5;
+  color: var(--clipsync-fg);
+  background: var(--clipsync-bg);
+  min-height: 100%;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  text-rendering: optimizeLegibility;
+  -webkit-tap-highlight-color: transparent;
+}
+
+/* Subtle radial accent glow in the background (like mobile companion) */
+body::before {
+  content: "";
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  z-index: -1;
+  background: radial-gradient(
+    ellipse 80% 50% at 50% -20%,
+    var(--clipsync-accent-glow),
+    transparent
+  );
+}
+
+/* ── Scrollbar styling (WebKit) ─────────────────────────────────── */
+
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: rgba(156, 163, 175, 0.30);
+  border-radius: 3px;
+  transition: background var(--clipsync-transition-fast);
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(156, 163, 175, 0.50);
+}
+
+::-webkit-scrollbar-corner {
+  background: transparent;
+}
+
+/* Dark mode scrollbar */
+.dark ::-webkit-scrollbar-thumb {
+  background: rgba(75, 85, 99, 0.50);
+}
+
+.dark ::-webkit-scrollbar-thumb:hover {
+  background: rgba(75, 85, 99, 0.70);
+}
+
+/* ── Selection styling ──────────────────────────────────────────── */
+
+::selection {
+  background: var(--clipsync-accent);
+  color: var(--clipsync-accent-text);
+}
+
+::-moz-selection {
+  background: var(--clipsync-accent);
+  color: var(--clipsync-accent-text);
+}
+
+/* ── Focus-visible ring ─────────────────────────────────────────── */
+
+:focus-visible {
+  outline: 2px solid var(--clipsync-accent);
+  outline-offset: 2px;
+  border-radius: 4px;
+}
+
+:focus:not(:focus-visible) {
+  outline: none;
+}
+
+/* Focus ring for buttons/inputs */
+button:focus-visible,
+input:focus-visible,
+textarea:focus-visible,
+select:focus-visible {
+  outline: 2px solid var(--clipsync-accent);
+  outline-offset: 1px;
+  border-radius: var(--clipsync-radius-sm);
+}
+
+/* ── Links ───────────────────────────────────────────────────────── */
+
+a {
+  color: var(--clipsync-accent);
+  text-decoration: none;
+  transition: color var(--clipsync-transition-fast);
+}
+
+a:hover {
+  color: var(--clipsync-accent-hover);
+  text-decoration: underline;
+}
+
+/* ── Image defaults ─────────────────────────────────────────────── */
+
+img {
+  max-width: 100%;
+  height: auto;
+  display: block;
+}
+
+/* ── Button reset ───────────────────────────────────────────────── */
+
+button {
+  cursor: pointer;
+  font-family: inherit;
+  font-size: inherit;
+  line-height: inherit;
+}
+
+/* ── Input/Textarea/Select base ─────────────────────────────────── */
+
+input,
+textarea,
+select {
+  font-family: inherit;
+  font-size: 14px;
+  line-height: 1.5;
+  color: var(--clipsync-fg);
+  background: var(--clipsync-surface);
+  border: 1.5px solid var(--clipsync-border);
+  border-radius: var(--clipsync-radius-sm);
+  padding: 8px 12px;
+  transition: border-color var(--clipsync-transition-fast),
+              box-shadow var(--clipsync-transition-fast);
+}
+
+input:focus,
+textarea:focus,
+select:focus {
+  outline: none;
+  border-color: var(--clipsync-accent);
+  box-shadow: 0 0 0 3px var(--clipsync-accent-glow);
+}
+
+input::placeholder,
+textarea::placeholder {
+  color: var(--clipsync-fg-subtle);
+}
+
+/* ═══════════════════════════════════════════════════════════════════
+   Utility classes — Neo-Futuristic Edition
+   ═══════════════════════════════════════════════════════════════════ */
+
+/* ── Glass Morphism ─────────────────────────────────────────────── */
+
+/* Standard glass */
+.glass {
+  background: color-mix(in srgb, var(--clipsync-bg) 75%, transparent);
+  backdrop-filter: blur(16px) saturate(180%);
+  -webkit-backdrop-filter: blur(16px) saturate(180%);
+  border: 1px solid var(--clipsync-border);
+  transition: border-color var(--clipsync-transition),
+              box-shadow var(--clipsync-transition);
+}
+
+/* Neo glass — deeper blur, subtle violet edge tint */
+.glass-neo {
+  background: linear-gradient(
+    135deg,
+    color-mix(in srgb, var(--clipsync-panel) 70%, transparent),
+    color-mix(in srgb, var(--clipsync-panel-2) 70%, transparent)
+  );
+  backdrop-filter: blur(24px) saturate(200%);
+  -webkit-backdrop-filter: blur(24px) saturate(200%);
+  border: 1px solid var(--clipsync-border-strong);
+  border-radius: var(--clipsync-radius-lg);
+  box-shadow:
+    var(--clipsync-shadow-lg),
+    inset 0 1px 0 color-mix(in srgb, var(--clipsync-accent-2) 8%, transparent);
+  transition: all var(--clipsync-transition-slow);
+}
+
+.glass-neo:hover {
+  border-color: var(--clipsync-border-glow);
+  box-shadow:
+    var(--clipsync-shadow-lg),
+    0 0 24px var(--clipsync-accent-glow),
+    inset 0 1px 0 color-mix(in srgb, var(--clipsync-accent-2) 12%, transparent);
+}
+
+/* ── Cards ───────────────────────────────────────────────────────── */
+
+.card {
+  background: var(--clipsync-surface);
+  border: 1px solid var(--clipsync-border);
+  border-radius: var(--clipsync-radius);
+  box-shadow: var(--clipsync-shadow);
+  transition: all var(--clipsync-transition);
+}
+
+.card:hover {
+  border-color: var(--clipsync-border-strong);
+  box-shadow: var(--clipsync-shadow-md);
+}
+
+/* Holographic card — subtle rainbow sheen on hover */
+.holo-card {
+  background: linear-gradient(
+    135deg,
+    var(--clipsync-panel) 0%,
+    var(--clipsync-panel-2) 50%,
+    var(--clipsync-panel) 100%
+  );
+  background-size: 200% 200%;
+  border: 1px solid var(--clipsync-border);
+  border-radius: var(--clipsync-radius);
+  box-shadow: var(--clipsync-shadow);
+  transition: all var(--clipsync-transition-slow);
+}
+
+.holo-card:hover {
+  background-position: 100% 100%;
+  border-color: var(--clipsync-border-glow);
+  box-shadow:
+    var(--clipsync-shadow-md),
+    0 0 20px var(--clipsync-accent-glow);
+}
+
+/* Active / selected card — glowing accent edge */
+.card-active {
+  border-color: var(--clipsync-border-glow) !important;
+  box-shadow:
+    var(--clipsync-shadow-md),
+    0 0 12px var(--clipsync-accent-glow),
+    inset 0 0 0 1px var(--clipsync-accent-glow) !important;
+}
+
+/* ── Buttons ─────────────────────────────────────────────────────── */
+
+/* Primary — cyan-violet gradient with glow */
+.btn-primary {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--clipsync-space-2);
+  padding: 9px 20px;
+  font-size: 13px;
+  font-weight: 600;
+  font-family: var(--clipsync-font);
+  color: var(--clipsync-accent-text);
+  background: linear-gradient(135deg, var(--clipsync-accent), var(--clipsync-accent-2));
+  border: none;
+  border-radius: var(--clipsync-radius-sm);
+  cursor: pointer;
+  white-space: nowrap;
+  box-shadow: 0 2px 8px var(--clipsync-accent-glow);
+  transition: all var(--clipsync-transition);
+  -webkit-user-select: none;
+  user-select: none;
+}
+
+.btn-primary:hover {
+  transform: translateY(-1px);
+  box-shadow: 0 4px 20px var(--clipsync-accent-glow-strong);
+}
+
+.btn-primary:active {
+  transform: scale(0.96);
+}
+
+.btn-primary:disabled {
+  opacity: 0.35;
+  pointer-events: none;
+  filter: grayscale(30%);
+  box-shadow: none;
+  transform: none;
+}
+
+/* Secondary — outlined with glow on hover */
+.btn-secondary {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--clipsync-space-2);
+  padding: 8px 18px;
+  font-size: 13px;
+  font-weight: 600;
+  font-family: var(--clipsync-font);
+  color: var(--clipsync-fg);
+  background: var(--clipsync-surface);
+  border: 1.5px solid var(--clipsync-border-strong);
+  border-radius: var(--clipsync-radius-sm);
+  cursor: pointer;
+  white-space: nowrap;
+  box-shadow: var(--clipsync-shadow-sm);
+  transition: all var(--clipsync-transition-fast);
+  -webkit-user-select: none;
+  user-select: none;
+}
+
+.btn-secondary:hover {
+  border-color: var(--clipsync-accent);
+  box-shadow: var(--clipsync-shadow), 0 0 8px var(--clipsync-accent-glow);
+  background: var(--clipsync-accent-glow);
+}
+
+.btn-secondary:active {
+  transform: scale(0.97);
+}
+
+/* Ghost — transparent, reveals on hover */
+.btn-ghost {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--clipsync-space-2);
+  padding: 7px 14px;
+  font-size: 13px;
+  font-weight: 500;
+  font-family: var(--clipsync-font);
+  color: var(--clipsync-fg-muted);
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: var(--clipsync-radius-sm);
+  cursor: pointer;
+  white-space: nowrap;
+  transition: all var(--clipsync-transition-fast);
+  -webkit-user-select: none;
+  user-select: none;
+}
+
+.btn-ghost:hover {
+  color: var(--clipsync-fg);
+  background: var(--clipsync-hover);
+}
+
+.btn-ghost:active {
+  background: var(--clipsync-active);
+  color: var(--clipsync-accent);
+}
+
+/* Danger variant — red glow */
+.btn-danger {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--clipsync-space-2);
+  padding: 8px 18px;
+  font-size: 13px;
+  font-weight: 600;
+  font-family: var(--clipsync-font);
+  color: var(--clipsync-danger);
+  background: var(--clipsync-danger-bg);
+  border: 1px solid color-mix(in srgb, var(--clipsync-danger) 25%, transparent);
+  border-radius: var(--clipsync-radius-sm);
+  cursor: pointer;
+  white-space: nowrap;
+  transition: all var(--clipsync-transition-fast);
+  -webkit-user-select: none;
+  user-select: none;
+}
+
+.btn-danger:hover {
+  color: #fff;
+  background: var(--clipsync-danger);
+  box-shadow: 0 0 16px var(--clipsync-danger-glow);
+}
+
+.btn-danger:active {
+  transform: scale(0.97);
+}
+
+/* ── Badges ──────────────────────────────────────────────────────── */
+
+.badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  padding: 2px 8px;
+  font-size: 10px;
+  font-weight: 600;
+  font-family: var(--clipsync-font);
+  line-height: 1.4;
+  color: var(--clipsync-accent);
+  background: var(--clipsync-accent-glow);
+  border: 1px solid color-mix(in srgb, var(--clipsync-accent) 20%, transparent);
+  border-radius: 6px;
+  white-space: nowrap;
+  -webkit-user-select: none;
+  user-select: none;
+}
+
+.badge--success {
+  color: var(--clipsync-success);
+  background: var(--clipsync-success-bg);
+  border-color: color-mix(in srgb, var(--clipsync-success) 25%, transparent);
+}
+
+.badge--warning {
+  color: var(--clipsync-warning);
+  background: var(--clipsync-warning-bg);
+  border-color: color-mix(in srgb, var(--clipsync-warning) 25%, transparent);
+}
+
+.badge--danger {
+  color: var(--clipsync-danger);
+  background: var(--clipsync-danger-bg);
+  border-color: color-mix(in srgb, var(--clipsync-danger) 25%, transparent);
+}
+
+/* Neon pulse badge — glowing dot + text */
+.neon-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 10px;
+  font-size: 11px;
+  font-weight: 500;
+  font-family: var(--clipsync-font);
+  color: var(--clipsync-accent);
+  background: color-mix(in srgb, var(--clipsync-accent) 8%, var(--clipsync-bg));
+  border: 1px solid color-mix(in srgb, var(--clipsync-accent) 25%, transparent);
+  border-radius: var(--clipsync-radius-full);
+  white-space: nowrap;
+  text-shadow: 0 0 6px var(--clipsync-accent-glow);
+  box-shadow: 0 0 8px var(--clipsync-accent-glow);
+}
+
+.neon-badge::before {
+  content: "";
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--clipsync-accent);
+  box-shadow: 0 0 6px var(--clipsync-accent-glow-strong);
+  animation: glowPulse 2s ease-in-out infinite;
+}
+
+.neon-badge--online {
+  color: var(--clipsync-success);
+  border-color: color-mix(in srgb, var(--clipsync-success) 25%, transparent);
+  text-shadow: 0 0 6px var(--clipsync-success-glow);
+  box-shadow: 0 0 8px var(--clipsync-success-glow);
+  background: color-mix(in srgb, var(--clipsync-success) 8%, var(--clipsync-bg));
+}
+
+.neon-badge--online::before {
+  background: var(--clipsync-success);
+  box-shadow: 0 0 6px var(--clipsync-success-glow);
+}
+
+/* ── Glow Effects ────────────────────────────────────────────────── */
+
+/* Text with neon glow */
+.glow-text {
+  text-shadow:
+    0 0 4px var(--clipsync-accent-glow),
+    0 0 12px var(--clipsync-accent-glow-strong),
+    0 0 24px var(--clipsync-accent-glow);
+}
+
+.glow-text-violet {
+  text-shadow:
+    0 0 4px var(--clipsync-violet-glow),
+    0 0 12px var(--clipsync-violet-glow-strong);
+}
+
+/* Border with animated glow */
+.glow-border {
+  border: 1px solid var(--clipsync-border-glow);
+  box-shadow:
+    0 0 8px var(--clipsync-accent-glow),
+    inset 0 0 8px var(--clipsync-accent-glow);
+}
+
+.glow-border-strong {
+  border: 1.5px solid var(--clipsync-border-glow-strong);
+  box-shadow:
+    0 0 16px var(--clipsync-accent-glow-strong),
+    0 0 40px var(--clipsync-accent-glow);
+}
+
+/* Edge glow — accent light on one side (sci-fi panel edge) */
+.edge-glow-top {
+  border-top: 2px solid var(--clipsync-border-glow);
+  box-shadow: 0 -4px 12px var(--clipsync-accent-glow);
+}
+
+.edge-glow-left {
+  border-left: 2px solid var(--clipsync-border-glow);
+  box-shadow: -4px 0 12px var(--clipsync-accent-glow);
+}
+
+/* ── Scan Lines (CRT / holographic overlay) ──────────────────────── */
+
+.scan-lines {
+  position: relative;
+  overflow: hidden;
+}
+
+.scan-lines::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  z-index: 1;
+  background: repeating-linear-gradient(
+    0deg,
+    transparent,
+    transparent 2px,
+    rgba(0, 212, 255, 0.015) 2px,
+    rgba(0, 212, 255, 0.015) 4px
+  );
+}
+
+/* Animated scan line sweep */
+.scan-sweep {
+  position: relative;
+  overflow: hidden;
+}
+
+.scan-sweep::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  z-index: 1;
+  background: linear-gradient(
+    to bottom,
+    transparent 0%,
+    transparent 40%,
+    color-mix(in srgb, var(--clipsync-accent) 4%, transparent) 50%,
+    transparent 60%,
+    transparent 100%
+  );
+  animation: scanLine 3s linear infinite;
+}
+
+/* ── Status Dots ─────────────────────────────────────────────────── */
+
+.status-dot {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+
+.status-dot--online {
+  background: var(--clipsync-success);
+  box-shadow: 0 0 6px var(--clipsync-success-glow);
+  animation: glowPulse 3s ease-in-out infinite;
+}
+
+.status-dot--offline {
+  background: var(--clipsync-fg-subtle);
+  opacity: 0.4;
+}
+
+.status-dot--syncing {
+  background: var(--clipsync-warning);
+  box-shadow: 0 0 6px var(--clipsync-warning-glow);
+  animation: glowPulse 1.5s ease-in-out infinite;
+}
+
+/* ── Dividers ────────────────────────────────────────────────────── */
+
+.divider {
+  width: 100%;
+  height: 1px;
+  background: var(--clipsync-border);
+  border: none;
+  margin: var(--clipsync-space-4) 0;
+  flex-shrink: 0;
+}
+
+/* Glowing divider — gradient from accent to transparent */
+.divider-glow {
+  width: 100%;
+  height: 1px;
+  background: linear-gradient(
+    90deg,
+    transparent,
+    var(--clipsync-border-glow) 20%,
+    var(--clipsync-border-glow-strong) 50%,
+    var(--clipsync-border-glow) 80%,
+    transparent
+  );
+  border: none;
+  margin: var(--clipsync-space-4) 0;
+  flex-shrink: 0;
+}
+
+/* ── Text Utilities ──────────────────────────────────────────────── */
+
+.text-ellipsis {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.text-mono {
+  font-family: var(--clipsync-font-mono);
+}
+
+.text-accent {
+  color: var(--clipsync-accent);
+}
+
+.text-muted {
+  color: var(--clipsync-fg-muted);
+}
+
+.text-subtle {
+  color: var(--clipsync-fg-subtle);
+}
+
+.gradient-text {
+  background: linear-gradient(135deg, var(--clipsync-accent), var(--clipsync-accent-2));
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+}
+
+/* ── Accessibility ───────────────────────────────────────────────── */
+
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+/* ── Empty State ─────────────────────────────────────────────────── */
+
+.empty-state {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: var(--clipsync-space-3);
+  padding: var(--clipsync-space-10) var(--clipsync-space-4);
+  text-align: center;
+}
+
+.empty-state__icon {
+  font-size: 40px;
+  opacity: 0.5;
+  filter: grayscale(30%);
+  margin-bottom: var(--clipsync-space-2);
+}
+
+.empty-state__title {
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--clipsync-fg-muted);
+}
+
+.empty-state__desc {
+  font-size: 12px;
+  color: var(--clipsync-fg-subtle);
+  max-width: 260px;
+  line-height: 1.6;
+}
+
+/* ── Loading Shimmer Placeholder ─────────────────────────────────── */
+
+.skeleton {
+  background: linear-gradient(
+    110deg,
+    var(--clipsync-panel) 25%,
+    var(--clipsync-panel-2) 37%,
+    var(--clipsync-panel) 63%
+  );
+  background-size: 200% 100%;
+  animation: shimmer 1.6s ease-in-out infinite;
+  border-radius: var(--clipsync-radius-sm);
+}
+
+.skeleton-text {
+  height: 14px;
+  margin-bottom: 8px;
+}
+
+.skeleton-text:last-child {
+  width: 60%;
+}
+
+.skeleton-avatar {
+  width: 36px;
+  height: 36px;
+  border-radius: 50%;
+}
+
+/* ── Tooltip ─────────────────────────────────────────────────────── */
+
+[data-tooltip] {
+  position: relative;
+}
+
+[data-tooltip]::after {
+  content: attr(data-tooltip);
+  position: absolute;
+  bottom: calc(100% + 6px);
+  left: 50%;
+  transform: translateX(-50%);
+  padding: 4px 10px;
+  font-size: 11px;
+  font-weight: 500;
+  font-family: var(--clipsync-font);
+  color: var(--clipsync-fg);
+  background: var(--clipsync-elevated);
+  border: 1px solid var(--clipsync-border-strong);
+  border-radius: var(--clipsync-radius-sm);
+  box-shadow: var(--clipsync-shadow-lg);
+  white-space: nowrap;
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity var(--clipsync-transition-fast);
+  z-index: var(--clipsync-z-tooltip);
+}
+
+[data-tooltip]:hover::after {
+  opacity: 1;
+}
+
+/* ── Responsive Utilities ────────────────────────────────────────── */
+
+.hide-mobile {
+  display: none;
+}
+
+@media (min-width: 640px) {
+  .hide-mobile {
+    display: initial;
+  }
+}
+
+.show-mobile {
+  display: initial;
+}
+
+@media (min-width: 640px) {
+  .show-mobile {
+    display: none;
+  }
+}
+
+/* ── Responsive media utility ──────────────────────────────────── */
+
+/* Hide on small screens */
+.hide-mobile {
+  display: none;
+}
+
+@media (min-width: 640px) {
+  .hide-mobile {
+    display: initial;
+  }
+}
+
+/* Show only on small screens */
+.show-mobile {
+  display: initial;
+}
+
+@media (min-width: 640px) {
+  .show-mobile {
+    display: none;
+  }
+}

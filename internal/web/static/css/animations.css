@@ -1,0 +1,356 @@
+/* ═══════════════════════════════════════════════════════════════════
+   ClipSync Animation System — Neo-Futuristic Edition
+
+   Dramatic, immersive motion design. Glow pulses, holographic
+   reveals, elastic transitions, and sci-fi inspired effects.
+   All GPU-accelerated (transform + opacity only).
+   ═══════════════════════════════════════════════════════════════════ */
+
+/* ═══════════════════════════════════════════════════════════════════
+   Keyframe animations
+   ═══════════════════════════════════════════════════════════════════ */
+
+/* Fade in — smooth reveal */
+@keyframes fadeIn {
+  from { opacity: 0; }
+  to   { opacity: 1; }
+}
+
+@keyframes fadeOut {
+  from { opacity: 1; }
+  to   { opacity: 0; }
+}
+
+/* Slide up with spring bounce */
+@keyframes slideUp {
+  from {
+    transform: translateY(16px);
+    opacity: 0;
+  }
+  to {
+    transform: translateY(0);
+    opacity: 1;
+  }
+}
+
+@keyframes slideDown {
+  from {
+    transform: translateY(-16px);
+    opacity: 0;
+  }
+  to {
+    transform: translateY(0);
+    opacity: 1;
+  }
+}
+
+@keyframes slideInRight {
+  from {
+    transform: translateX(24px);
+    opacity: 0;
+  }
+  to {
+    transform: translateX(0);
+    opacity: 1;
+  }
+}
+
+@keyframes slideInLeft {
+  from {
+    transform: translateX(-24px);
+    opacity: 0;
+  }
+  to {
+    transform: translateX(0);
+    opacity: 1;
+  }
+}
+
+/* Scale + fade in (particle materialization) */
+@keyframes scaleIn {
+  from {
+    transform: scale(0.92);
+    opacity: 0;
+    filter: blur(4px);
+  }
+  to {
+    transform: scale(1);
+    opacity: 1;
+    filter: blur(0);
+  }
+}
+
+/* Holographic reveal — scale + glow */
+@keyframes holoReveal {
+  0% {
+    transform: scale(0.96);
+    opacity: 0;
+    filter: brightness(1.4) blur(2px);
+  }
+  60% {
+    filter: brightness(1.1) blur(0);
+  }
+  100% {
+    transform: scale(1);
+    opacity: 1;
+    filter: brightness(1) blur(0);
+  }
+}
+
+/* ── Glow & Pulse Effects ────────────────────────────────────── */
+
+/* Breathing glow — for status indicators and accents */
+@keyframes glowPulse {
+  0%, 100% {
+    box-shadow: 0 0 4px var(--clipsync-accent-glow),
+                0 0 12px var(--clipsync-accent-glow);
+  }
+  50% {
+    box-shadow: 0 0 8px var(--clipsync-accent-glow-strong),
+                0 0 24px var(--clipsync-accent-glow-strong),
+                0 0 40px var(--clipsync-accent-glow);
+  }
+}
+
+/* Stronger glow pulse for primary elements */
+@keyframes glowPulseStrong {
+  0%, 100% {
+    box-shadow: 0 0 8px var(--clipsync-accent-glow-strong),
+                0 0 20px var(--clipsync-accent-glow);
+  }
+  50% {
+    box-shadow: 0 0 16px var(--clipsync-accent-glow-strong),
+                0 0 40px var(--clipsync-accent-glow-strong),
+                0 0 64px var(--clipsync-accent-glow);
+  }
+}
+
+/* Border glow sweep — animated gradient border */
+@keyframes borderGlow {
+  0%   { border-color: var(--clipsync-accent); }
+  25%  { border-color: var(--clipsync-accent-2); }
+  50%  { border-color: var(--clipsync-accent-hover); }
+  75%  { border-color: var(--clipsync-accent-2); }
+  100% { border-color: var(--clipsync-accent); }
+}
+
+/* Gradient shift — animated background gradient */
+@keyframes gradientShift {
+  0%   { background-position: 0% 50%; }
+  50%  { background-position: 100% 50%; }
+  100% { background-position: 0% 50%; }
+}
+
+/* ── Text Effects ─────────────────────────────────────────────── */
+
+/* Neon text flicker — subtle */
+@keyframes neonFlicker {
+  0%, 19%, 21%, 23%, 25%, 54%, 56%, 100% {
+    text-shadow:
+      0 0 4px var(--clipsync-accent),
+      0 0 12px var(--clipsync-accent-glow-strong),
+      0 0 24px var(--clipsync-accent-glow);
+  }
+  20%, 24%, 55% {
+    text-shadow:
+      0 0 2px var(--clipsync-accent),
+      0 0 6px var(--clipsync-accent-glow);
+  }
+}
+
+/* Glitch text shake */
+@keyframes glitchText {
+  0%, 100% { transform: none; }
+  7%  { transform: translate(-1px, 1px); }
+  15% { transform: translate(1px, -1px); }
+  25% { transform: none; }
+}
+
+/* ── Loading & Skeleton ───────────────────────────────────────── */
+
+@keyframes spin {
+  from { transform: rotate(0deg); }
+  to   { transform: rotate(360deg); }
+}
+
+/* Shimmer — holographic scan line effect */
+@keyframes shimmer {
+  0%   { background-position: -200% 0; }
+  100% { background-position: 200% 0; }
+}
+
+/* Scan line — vertical bar sweep */
+@keyframes scanLine {
+  0%   { transform: translateY(-100%); }
+  100% { transform: translateY(400%); }
+}
+
+/* ── Float / Hover ────────────────────────────────────────────── */
+
+/* Gentle bobbing float */
+@keyframes float {
+  0%, 100% { transform: translateY(0px); }
+  50%      { transform: translateY(-4px); }
+}
+
+/* Ring expand — for radar/notification pulses */
+@keyframes ringExpand {
+  0% {
+    transform: scale(0.8);
+    opacity: 0.6;
+  }
+  100% {
+    transform: scale(2.2);
+    opacity: 0;
+  }
+}
+
+/* ═══════════════════════════════════════════════════════════════════
+   Animation utility classes
+   ═══════════════════════════════════════════════════════════════════ */
+
+/* ── Entry animations ──────────────────────────────────────────── */
+
+.animate-fade-in {
+  animation: fadeIn 0.2s ease-out forwards;
+}
+.animate-fade-in-slow {
+  animation: fadeIn 0.4s ease-out forwards;
+}
+.animate-fade-out {
+  animation: fadeOut 0.15s ease-in forwards;
+}
+.animate-slide-up {
+  animation: slideUp 0.3s var(--clipsync-transition-spring) forwards;
+}
+.animate-slide-down {
+  animation: slideDown 0.25s cubic-bezier(0.2, 0.8, 0.2, 1) forwards;
+}
+.animate-slide-in-right {
+  animation: slideInRight 0.35s var(--clipsync-transition-spring) forwards;
+}
+.animate-slide-in-left {
+  animation: slideInLeft 0.35s var(--clipsync-transition-spring) forwards;
+}
+.animate-scale-in {
+  animation: scaleIn 0.3s var(--clipsync-transition-spring) forwards;
+}
+
+/* Holographic entrance — for modals, panels */
+.animate-holo-reveal {
+  animation: holoReveal 0.45s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+}
+
+/* ── Continuous animations ─────────────────────────────────────── */
+
+.animate-spin {
+  animation: spin 0.8s linear infinite;
+}
+.animate-glow-pulse {
+  animation: glowPulse 3s ease-in-out infinite;
+}
+.animate-glow-pulse-strong {
+  animation: glowPulseStrong 2.5s ease-in-out infinite;
+}
+.animate-border-glow {
+  animation: borderGlow 4s ease-in-out infinite;
+}
+.animate-gradient-shift {
+  background-size: 200% 200%;
+  animation: gradientShift 3s ease-in-out infinite;
+}
+.animate-float {
+  animation: float 3s ease-in-out infinite;
+}
+.animate-neon-text {
+  animation: neonFlicker 5s linear infinite;
+}
+.animate-neon-text:hover {
+  animation: none;
+  text-shadow: 0 0 8px var(--clipsync-accent),
+               0 0 24px var(--clipsync-accent-glow-strong),
+               0 0 48px var(--clipsync-accent-glow);
+}
+
+/* ── Loading shimmer (skeleton) ────────────────────────────────── */
+
+.animate-shimmer {
+  background: linear-gradient(
+    110deg,
+    var(--clipsync-panel) 25%,
+    var(--clipsync-panel-2) 37%,
+    var(--clipsync-panel) 63%
+  );
+  background-size: 200% 100%;
+  animation: shimmer 1.6s ease-in-out infinite;
+}
+
+/* ── Ring expand (notification pulse) ──────────────────────────── */
+
+.ring-pulse {
+  position: relative;
+}
+.ring-pulse::after {
+  content: "";
+  position: absolute;
+  inset: -4px;
+  border-radius: inherit;
+  border: 1px solid var(--clipsync-accent);
+  animation: ringExpand 2s cubic-bezier(0, 0.5, 0.5, 1) infinite;
+}
+
+/* ═══════════════════════════════════════════════════════════════════
+   Staggered list item animations
+   Cascading reveal with progressive delays.
+   ═══════════════════════════════════════════════════════════════════ */
+
+.stagger-item {
+  opacity: 0;
+  animation: slideUp 0.35s var(--clipsync-transition-spring) forwards;
+}
+.stagger-item:nth-child(1)  { animation-delay: 0ms; }
+.stagger-item:nth-child(2)  { animation-delay: 35ms; }
+.stagger-item:nth-child(3)  { animation-delay: 70ms; }
+.stagger-item:nth-child(4)  { animation-delay: 105ms; }
+.stagger-item:nth-child(5)  { animation-delay: 140ms; }
+.stagger-item:nth-child(6)  { animation-delay: 175ms; }
+.stagger-item:nth-child(7)  { animation-delay: 210ms; }
+.stagger-item:nth-child(8)  { animation-delay: 245ms; }
+.stagger-item:nth-child(9)  { animation-delay: 280ms; }
+.stagger-item:nth-child(10) { animation-delay: 315ms; }
+.stagger-item:nth-child(11) { animation-delay: 350ms; }
+.stagger-item:nth-child(12) { animation-delay: 385ms; }
+
+/* ═══════════════════════════════════════════════════════════════════
+   Transition utility classes
+   ═══════════════════════════════════════════════════════════════════ */
+
+.transition-base       { transition: all var(--clipsync-transition); }
+.transition-fast       { transition: all var(--clipsync-transition-fast); }
+.transition-slow       { transition: all var(--clipsync-transition-slow); }
+.transition-spring     { transition: all var(--clipsync-transition-spring); }
+.transition-colors     {
+  transition: color var(--clipsync-transition-fast),
+              background-color var(--clipsync-transition-fast),
+              border-color var(--clipsync-transition-fast),
+              box-shadow var(--clipsync-transition-fast);
+}
+.transition-transform  { transition: transform var(--clipsync-transition); }
+.transition-opacity    { transition: opacity var(--clipsync-transition-fast); }
+.transition-glow       {
+  transition: box-shadow var(--clipsync-transition),
+              border-color var(--clipsync-transition);
+}
+
+/* ═══════════════════════════════════════════════════════════════════
+   Reduced motion
+   ═══════════════════════════════════════════════════════════════════ */
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+  html { scroll-behavior: auto; }
+}

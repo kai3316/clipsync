@@ -12,6 +12,8 @@ class ContentType(enum.Enum):
     RTF = 3
     IMAGE_PNG = 4
     IMAGE_EMF = 5  # Windows Enhanced Metafile (vector)
+    FILE = 6       # File paths (CF_HDROP on Windows, NSFilenamesPboardType on macOS)
+    URL = 7        # URL / URI (public.url on macOS, text/uri-list on Linux)
 
 
 @dataclass
@@ -37,13 +39,14 @@ class ClipboardContent:
     def best_format(self) -> tuple[ContentType, bytes] | None:
         """Return the best available format.
 
-        Priority: HTML > EMF (vector) > RTF > TEXT > IMAGE_PNG (raster)
+        Priority: HTML > EMF (vector) > RTF > TEXT > FILE > URL > IMAGE_PNG (raster)
         Text-based formats rank above raster images so editable content
         is preferred for paste. EMF sits between HTML and RTF because
         it preserves editable vector shapes.
         """
         for fmt in (ContentType.HTML, ContentType.IMAGE_EMF, ContentType.RTF,
-                    ContentType.TEXT, ContentType.IMAGE_PNG):
+                    ContentType.TEXT, ContentType.FILE, ContentType.URL,
+                    ContentType.IMAGE_PNG):
             if fmt in self.types:
                 return fmt, self.types[fmt]
         return None

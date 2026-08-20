@@ -19,19 +19,55 @@ logger = logging.getLogger(__name__)
 
 
 def _get_all_local_addresses():
-    addresses = []
-    seen = set()
+    """Enumerate every non-loopback IPv4 address on this host.
+
+    ``socket.gethostname()`` alone is unreliable: on macOS/Linux it can
+    resolve to only the loopback address (or a single adapter), which made
+    us advertise an unreachable IP and caused peers on the same network to
+    fail to discover us. We combine three sources and deduplicate:
+
+      1. the primary routable address (UDP connect trick — no packets sent),
+      2. every address the hostname resolves to,
+      3. every address the FQDN resolves to.
+    """
+    addresses: list[str] = []
+    seen: set[str] = set()
+
+    def _add(ip: str) -> None:
+        ip = (ip or "").strip()
+        if not ip or ip == "0.0.0.0" or ip.startswith("127.") or ip.startswith("169.254."):
+            return
+        if ip not in seen:
+            seen.add(ip)
+            addresses.append(ip)
+
+    # 1. Primary routable address — this is what a peer on the same subnet
+    #    would actually use to reach us.
     try:
-        for info in socket.getaddrinfo(
-            socket.gethostname(), None, family=socket.AF_INET
-        ):
-            ip = info[4][0]
-            if ip.startswith("127.") or ip.startswith("169.254."):
-                continue
-            if ip not in seen:
-                seen.add(ip)
-                addresses.append(ip)
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        try:
+            s.connect(("8.8.8.8", 80))
+            _add(s.getsockname()[0])
+        finally:
+            s.close()
     except Exception:
+        pass
+
+    # 2. Hostname-resolved addresses (Windows usually returns all adapters).
+    try:
+        for info in socket.getaddrinfo(socket.gethostname(), None, family=socket.AF_INET):
+            _add(info[4][0])
+    except Exception:
+        pass
+
+    # 3. FQDN-resolved addresses (covers bare-hostname /etc/hosts gaps).
+    try:
+        for info in socket.getaddrinfo(socket.getfqdn(), None, family=socket.AF_INET):
+            _add(info[4][0])
+    except Exception:
+        pass
+
+    if not addresses:
         logger.warning("Failed to enumerate local addresses")
     return addresses
 
@@ -111,6 +147,42 @@ def _get_local_address():
     return best
 
 
+def _is_private_ip(ip: str) -> bool:
+    """True if *ip* is an RFC1918 private LAN address."""
+    parts = ip.split(".")
+    if len(parts) != 4:
+        return False
+    try:
+        a, b = int(parts[0]), int(parts[1])
+    except ValueError:
+        return False
+    return a == 10 or (a == 192 and b == 168) or (a == 172 and 16 <= b <= 31)
+
+
+def _pick_best_address(candidates: list[str], our_ip: str) -> str:
+    """Choose the remote address most likely reachable on the LAN.
+
+    Prefers an address on the same /24 subnet as our own (peers on the same
+    network share that prefix), then any private address, then the rest.
+    Falls back to the first candidate on a tie.
+    """
+
+    def _subnet(ip: str) -> str:
+        parts = ip.split(".")
+        return ".".join(parts[:3]) if len(parts) == 4 else ip
+
+    our_sub = _subnet(our_ip)
+
+    def rank(ip: str) -> tuple:
+        if _subnet(ip) == our_sub:
+            return (0,)
+        if _is_private_ip(ip):
+            return (1,)
+        return (2,)
+
+    return min(candidates, key=lambda ip: (rank(ip), candidates.index(ip)))
+
+
 class Discovery:
     """mDNS-based peer discovery."""
 
@@ -133,6 +205,7 @@ class Discovery:
         self._lock = threading.Lock()
         self._known_peers: dict[str, dict] = {}  # peer_id -> info
         self._service_to_peer: dict[str, str] = {}  # service_name -> peer_id
+        self._our_ip = "127.0.0.1"
 
     def set_callbacks(self, on_found: Callable, on_lost: Callable):
         """Set callbacks for peer discovery events.
@@ -162,16 +235,25 @@ class Discovery:
             props[f"alt_ip_{i}".encode()] = ip.encode()
 
         local_ip = _get_local_address()
+        self._our_ip = local_ip
         logger.info(
             "Registering mDNS on %s (all IPs: %s)", local_ip, all_ips
         )
 
         # Register our service – use a truncated display name so the
         # real hostname is not broadcast in plaintext on the LAN.
+        #
+        # Advertise ALL local addresses (not just the "best" one) so peers
+        # on any of our subnets can reach us. Previously we only advertised
+        # a single IP chosen by a fragile interface heuristic, which broke
+        # discovery whenever that IP belonged to a VPN/virtual adapter.
+        advertised = [socket.inet_aton(ip) for ip in all_ips]
+        if not advertised:
+            advertised = [socket.inet_aton(local_ip)]
         self._service_info = ServiceInfo(
             type_=self._service_type,
             name=f"{self._display_name}.{self._service_type}",
-            addresses=[socket.inet_aton(local_ip)],
+            addresses=advertised,
             port=self._port,
             properties=props,
         )
@@ -248,10 +330,14 @@ class Discovery:
         for i, ip in enumerate(all_ips):
             props[f"alt_ip_{i}".encode()] = ip.encode()
         local_ip = _get_local_address()
+        self._our_ip = local_ip
+        advertised = [socket.inet_aton(ip) for ip in all_ips]
+        if not advertised:
+            advertised = [socket.inet_aton(local_ip)]
         self._service_info = ServiceInfo(
             type_=self._service_type,
             name=f"{self._display_name}.{self._service_type}",
-            addresses=[socket.inet_aton(local_ip)],
+            addresses=advertised,
             port=self._port,
             properties=props,
         )
@@ -265,24 +351,23 @@ class Discovery:
         """Re-register the mDNS service after wake-from-sleep.
 
         After sleep, network interfaces may have changed and the mDNS
-        registration may be stale. Re-registering ensures other devices
-        can discover us again.
+        registration may be stale. We rebuild the service info with fresh
+        addresses rather than re-registering the stale one, so other devices
+        can discover us again on the new network.
         """
-        if not self._zc or not self._service_info:
+        if not self._zc:
             return
         try:
-            self._zc.unregister_service(self._service_info)
+            if self._service_info is not None:
+                self._zc.unregister_service(self._service_info)
         except Exception:
             pass
-        try:
-            self._zc.register_service(self._service_info)
-            logger.info("Re-registered mDNS service after wake")
-        except Exception as e:
-            logger.warning("Failed to re-register mDNS after wake: %s", e)
+        self._service_info = None
+        self.start_advertising()
 
     def _on_service_state_change(self, zeroconf, service_type, name, state_change):
-        """Handle mDNS service add/remove events."""
-        if state_change.name == "Added":
+        """Handle mDNS service add/update/remove events."""
+        if state_change.name in ("Added", "Updated"):
             self._handle_service_added(zeroconf, service_type, name)
         elif state_change.name == "Removed":
             self._handle_service_removed(name)
@@ -292,22 +377,49 @@ class Discovery:
         if info is None:
             return
 
-        props = info.properties
+        props = info.properties or {}
         # Read the hashed device_id from TXT records.
-        peer_id_hash = b""
-        if props and b"device_id_hash" in props:
+        peer_id_hash = ""
+        if b"device_id_hash" in props:
             peer_id_hash = props[b"device_id_hash"].decode("utf-8")
 
         # Skip our own service by comparing the hashed identity.
         if peer_id_hash == self._device_id_hash:
             return
 
-        if not info.addresses:
+        # Collect every candidate address: all mDNS A/AAAA records plus the
+        # alt_ip_N TXT records we advertise. mDNS may list them in any order
+        # and the first is often not the one reachable on our subnet, so we
+        # gather them all and pick the most likely one below.
+        candidates: list[str] = []
+        seen: set[str] = set()
+
+        def _add_candidate(ip: str) -> None:
+            ip = (ip or "").strip()
+            if not ip or ip == "0.0.0.0" or ip.startswith("127.") or ip.startswith("169.254."):
+                return
+            if ip not in seen:
+                seen.add(ip)
+                candidates.append(ip)
+
+        for raw in (info.addresses or []):
+            try:
+                _add_candidate(socket.inet_ntoa(raw))
+            except Exception:
+                continue
+
+        for key in props:
+            if key.startswith(b"alt_ip_"):
+                try:
+                    _add_candidate(props[key].decode("utf-8"))
+                except Exception:
+                    continue
+
+        if not candidates:
+            logger.warning("Discovered service %s with no usable address", name)
             return
 
-        address = socket.inet_ntoa(info.addresses[0])
         port = info.port
-
         # Derive a privacy-safe display name from the service name.
         # The service name is e.g. "<display_name>._clipsync._tcp.local."
         try:
@@ -315,17 +427,37 @@ class Discovery:
         except (IndexError, TypeError):
             peer_display = peer_id_hash
 
-        with self._lock:
-            if peer_id_hash in self._known_peers:
-                return
-            self._known_peers[peer_id_hash] = {
-                "name": peer_display,
-                "address": address,
-                "port": port,
-            }
-            self._service_to_peer[name] = peer_id_hash
+        our_ip = getattr(self, "_our_ip", None) or _get_local_address()
+        address = _pick_best_address(candidates, our_ip)
 
-        logger.info("Discovered peer: %s at %s:%d", peer_display, address, port)
+        with self._lock:
+            existing = self._known_peers.get(peer_id_hash)
+            self._service_to_peer[name] = peer_id_hash
+            if existing is not None:
+                # Refresh on re-announcement: the peer's address may have
+                # changed (DHCP renewal, Wi-Fi reconnect, interface switch).
+                # Previously we early-returned here, so a changed address was
+                # never updated and peers became permanently unreachable.
+                if (
+                    existing.get("address") == address
+                    and existing.get("port") == port
+                    and existing.get("name") == peer_display
+                ):
+                    return
+                existing["address"] = address
+                existing["port"] = port
+                existing["name"] = peer_display
+            else:
+                self._known_peers[peer_id_hash] = {
+                    "name": peer_display,
+                    "address": address,
+                    "port": port,
+                }
+
+        logger.info(
+            "Discovered peer: %s at %s:%d (candidates: %s)",
+            peer_display, address, port, candidates,
+        )
 
         with self._lock:
             on_found = self._on_peer_found

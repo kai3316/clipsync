@@ -287,6 +287,14 @@ class _ClipboardReader(ClipboardReader):
             content.types[ContentType.IMAGE_PNG] = img
             content.image_fmt = self._image_fmt
 
+        files = self._get_files()
+        if files:
+            content.types[ContentType.FILE] = files
+
+        url_data = self._get_url()
+        if url_data:
+            content.types[ContentType.URL] = url_data
+
         return content
 
     # -- text / html / rtf via pbpaste (no TCC issues) ---------------------
@@ -567,6 +575,72 @@ class _ClipboardReader(ClipboardReader):
                     pass
 
 
+    # -- file paths via NSPasteboard -------------------------------------
+
+    def _get_files(self) -> bytes:
+        """Read file paths from the pasteboard (Finder copies, etc.).
+
+        On modern macOS, Finder copies files as ``public.file-url``.
+        Older apps may use ``NSFilenamesPboardType``.
+        """
+        # Method 1: public.file-url (macOS 10.13+)
+        raw = _pb_data_for_type(b"public.file-url")
+        if raw:
+            try:
+                url_str = raw.decode("utf-8", errors="replace").strip()
+                from urllib.parse import unquote, urlparse
+                parsed = urlparse(url_str)
+                path = unquote(parsed.path)
+                if path:
+                    return path.encode("utf-8")
+            except Exception:
+                logger.debug("Failed to parse public.file-url", exc_info=True)
+
+        # Method 2: NSFilenamesPboardType (legacy, pre-10.13)
+        raw = _pb_data_for_type(b"NSFilenamesPboardType")
+        if raw:
+            try:
+                # Property list serialization — array of file path strings
+                import plistlib
+                paths = plistlib.loads(raw)
+                if isinstance(paths, list) and paths:
+                    return "\n".join(str(p) for p in paths).encode("utf-8")
+            except Exception:
+                logger.debug("Failed to parse NSFilenamesPboardType", exc_info=True)
+
+        # Method 3: Try pbpaste for filenames (some apps)
+        try:
+            result = subprocess.run(
+                ["pbpaste", "-Prefer", "public.file-url"],
+                capture_output=True, timeout=2,
+            )
+            if result.returncode == 0 and result.stdout.strip():
+                return result.stdout.strip()
+        except Exception:
+            pass
+
+        return b""
+
+    # -- URL via NSPasteboard -------------------------------------------
+
+    def _get_url(self) -> bytes:
+        """Read URL from pasteboard (copied links from browsers, etc.).
+
+        macOS stores URLs as ``public.url`` (UTF-8 string).
+        Some apps also use ``public.utf8-plain-text`` with a URL pattern,
+        but we already capture that as TEXT.
+        """
+        raw = _pb_data_for_type(b"public.url")
+        if raw:
+            try:
+                url = raw.decode("utf-8", errors="replace").strip()
+                if url:
+                    return url.encode("utf-8")
+            except Exception:
+                pass
+        return b""
+
+
 # ---------------------------------------------------------------------------
 # Clipboard writer
 # ---------------------------------------------------------------------------
@@ -593,6 +667,10 @@ class _ClipboardWriter(ClipboardWriter):
                 self._set_rtf(data)
             elif fmt_type == ContentType.IMAGE_PNG:
                 self._set_image(data, content.image_fmt)
+            elif fmt_type == ContentType.FILE:
+                self._set_files(data)
+            elif fmt_type == ContentType.URL:
+                self._set_url(data)
 
     def _write_atomic(self, content: ClipboardContent) -> bool:
         """Write all formats atomically via ctypes NSPasteboard.
@@ -629,6 +707,16 @@ class _ClipboardWriter(ClipboardWriter):
                         continue
                 else:
                     write_ops.append((b"public.png", data))
+            elif fmt_type == ContentType.FILE:
+                paths = data.decode("utf-8").split("\n")
+                for path in paths:
+                    path = path.strip()
+                    if path:
+                        from urllib.parse import quote as urllib_quote_path
+                        encoded = ("file://" + urllib_quote_path(path)).encode("utf-8")
+                        write_ops.append((b"public.file-url", encoded))
+            elif fmt_type == ContentType.URL:
+                write_ops.append((b"public.url", data))
             # IMAGE_EMF is Windows-only, skip.
 
         if not write_ops:
@@ -755,6 +843,63 @@ class _ClipboardWriter(ClipboardWriter):
                 except OSError:
                     pass
 
+    def _set_files(self, data: bytes):
+        """Write file paths to pasteboard via osascript.
+
+        Expects newline-separated UTF-8 paths. Writes both
+        public.file-url and the legacy NSFilenamesPboardType so
+        Finder and older apps can pick up the file references.
+        """
+        try:
+            paths = [p.strip() for p in data.decode("utf-8").split("\n") if p.strip()]
+        except Exception:
+            return
+        if not paths:
+            return
+
+        # Use osascript to create a file URL list on the pasteboard
+        path_list = ", ".join(f'"{p}"' for p in paths)
+        script = (
+            f'set theFiles to {{{path_list}}}\n'
+            'set pb to current application\'s NSPasteboard\'s generalPasteboard()\n'
+            'pb\'s clearContents()\n'
+            'repeat with f in theFiles\n'
+            '    set fileURL to current application\'s NSURL\'s fileURLWithPath:f\n'
+            '    pb\'s writeObjects:{fileURL}\n'
+            'end repeat\n'
+        )
+        try:
+            subprocess.run(
+                ["osascript", "-e", script],
+                capture_output=True, timeout=3,
+            )
+        except Exception:
+            logger.debug("osascript file write failed", exc_info=True)
+
+    def _set_url(self, data: bytes):
+        """Write a URL to the pasteboard as public.url."""
+        try:
+            url = data.decode("utf-8").strip()
+            if not url:
+                return
+        except Exception:
+            return
+
+        # Use osascript to set both public.url and public.utf8-plain-text
+        script = (
+            f'set the clipboard to "{url}"\n'
+            f'set pb to current application\'s NSPasteboard\'s generalPasteboard()\n'
+            f'set nsStr to current application\'s NSString\'s stringWithString:"{url}"\n'
+            f'pb\'s setString:nsStr forType:"public.url"\n'
+        )
+        try:
+            subprocess.run(
+                ["osascript", "-e", script],
+                capture_output=True, timeout=3,
+            )
+        except Exception:
+            logger.debug("osascript URL write failed", exc_info=True)
+
 
 # ---------------------------------------------------------------------------
 # Clipboard monitor
@@ -820,8 +965,13 @@ class DarwinClipboardMonitor(ClipboardMonitor):
                 last_hash = current
 
     def _fire_callback(self):
+        if time.time() < self.suppress_until:
+            return
         if self._callback:
             try:
+                # Capture source app info before the callback fires,
+                # so we know which app produced the clipboard content.
+                self.last_source_app = self.get_active_app()
                 self._callback()
             except Exception:
                 logger.warning(

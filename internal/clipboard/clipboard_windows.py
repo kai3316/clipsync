@@ -92,6 +92,7 @@ CF_DIB = 8
 CF_UNICODETEXT = 13
 CF_HDROP = 15
 CF_ENHMETAFILE = 14
+CF_DIBV5 = 17  # BITMAPV5HEADER — same layout as DIB, just longer header
 
 # Registered format for HTML
 CF_HTML = user32.RegisterClipboardFormatW("HTML Format")
@@ -146,10 +147,12 @@ class _ClipboardReader(ClipboardReader):
             # self-describing ASCII or contains \'xx escapes.  Read raw
             # bytes — do NOT round-trip through the system ANSI code page.
             return self._read_raw_handle(handle)
-        elif fmt == CF_DIB:
+        elif fmt in (CF_DIB, CF_DIBV5):
             return self._read_dib_handle(handle)
         elif fmt == CF_ENHMETAFILE:
             return self._read_emf_handle(handle)
+        elif fmt == CF_HDROP:
+            return self._read_hdrop_handle(handle)
         return None
 
     @staticmethod
@@ -246,6 +249,65 @@ class _ClipboardReader(ClipboardReader):
             logger.debug("Failed to read EMF from clipboard", exc_info=True)
             return b""
 
+    def _read_hdrop_handle(self, handle) -> bytes:
+        """Read CF_HDROP: extract file paths as newline-separated UTF-8.
+
+        The DROPFILES structure layout:
+          pFiles: DWORD  (offset from start to file list, typically 20)
+          pt:     POINT  (x, y — 8 bytes)
+          fNC:    BOOL   (4 bytes)
+          fWide:  BOOL   (4 bytes)
+        Total header = 20 bytes, then the double-null-terminated file list.
+        """
+        try:
+            ptr = kernel32.GlobalLock(handle)
+            if not ptr:
+                return b""
+            size = kernel32.GlobalSize(handle)
+            try:
+                raw = ctypes.string_at(ptr, size)
+            finally:
+                kernel32.GlobalUnlock(handle)
+
+            if len(raw) < 24:
+                return b""
+
+            # Parse DROPFILES header
+            p_files = struct.unpack_from("<I", raw, 0)[0]  # offset to file list
+            f_wide = struct.unpack_from("<I", raw, 16)[0]  # non-zero = Unicode
+
+            if p_files >= len(raw):
+                return b""
+
+            file_list_start = p_files
+            if f_wide:
+                # Unicode (UTF-16 LE) — read until double null
+                end = file_list_start
+                while end < len(raw) - 1:
+                    if raw[end] == 0 and raw[end + 1] == 0:
+                        break
+                    end += 2
+                file_data = raw[file_list_start:end]
+                paths_text = file_data.decode("utf-16-le", errors="replace")
+                paths = [p for p in paths_text.split("\x00") if p]
+            else:
+                # ANSI — read until double null
+                end = file_list_start
+                while end < len(raw):
+                    if raw[end] == 0 and raw[end + 1] == 0:
+                        break
+                    end += 1
+                file_data = raw[file_list_start:end]
+                paths_text = file_data.decode("mbcs", errors="replace")
+                paths = [p for p in paths_text.split("\x00") if p]
+
+            if not paths:
+                return b""
+            return "\n".join(paths).encode("utf-8")
+        except Exception:
+            logger.debug("Failed to read CF_HDROP from clipboard", exc_info=True)
+            return b""
+
     def _map_format(self, fmt: int) -> ContentType | None:
         if fmt == CF_UNICODETEXT:
             return ContentType.TEXT
@@ -255,10 +317,12 @@ class _ClipboardReader(ClipboardReader):
             return ContentType.HTML
         elif fmt == CF_RTF:
             return ContentType.RTF
-        elif fmt == CF_DIB:
+        elif fmt in (CF_DIB, CF_DIBV5):
             return ContentType.IMAGE_PNG
         elif fmt == CF_ENHMETAFILE:
             return ContentType.IMAGE_EMF
+        elif fmt == CF_HDROP:
+            return ContentType.FILE
         return None
 
 
@@ -286,6 +350,8 @@ class _ClipboardWriter(ClipboardWriter):
                     self._set_image(data, content.image_fmt)
                 elif fmt_type == ContentType.IMAGE_EMF:
                     self._set_emf(data)
+                elif fmt_type == ContentType.FILE:
+                    self._set_hdrop(data)
         finally:
             user32.CloseClipboard()
 
@@ -395,6 +461,38 @@ class _ClipboardWriter(ClipboardWriter):
         else:
             logger.warning("SetEnhMetaFileBits failed — EMF data may be corrupt")
 
+    def _set_hdrop(self, data: bytes):
+        """Write file paths (newline-separated UTF-8) as CF_HDROP.
+
+        Builds a DROPFILES structure followed by a double-null-terminated
+        wide-char file list so Explorer and other apps can paste as files.
+        """
+        try:
+            paths_text = data.decode("utf-8")
+            paths = [p.strip() for p in paths_text.split("\n") if p.strip()]
+        except Exception:
+            logger.debug("Failed to decode file paths for CF_HDROP")
+            return
+
+        if not paths:
+            return
+
+        wide_paths = "\x00".join(paths) + "\x00\x00"
+        wide_bytes = wide_paths.encode("utf-16-le")
+
+        # DROPFILES header: 20 bytes (pFiles offset, pt, fNC, fWide)
+        header = struct.pack("<IiiII", 20, 0, 0, 0, 1)  # pFiles=20, fWide=TRUE
+        hdrop_data = header + wide_bytes
+
+        handle = kernel32.GlobalAlloc(0x0002, len(hdrop_data))
+        if handle:
+            ptr = kernel32.GlobalLock(handle)
+            ctypes.memmove(ptr, hdrop_data, len(hdrop_data))
+            kernel32.GlobalUnlock(handle)
+            if not user32.SetClipboardData(CF_HDROP, handle):
+                logger.warning("SetClipboardData(CF_HDROP) failed")
+                kernel32.GlobalFree(handle)
+
     def _set_custom_format(self, fmt: int, data: bytes):
         handle = kernel32.GlobalAlloc(0x0002, len(data) + 1)
         if handle:
@@ -478,8 +576,13 @@ class WindowsClipboardMonitor(ClipboardMonitor):
 
     def _window_proc(self, hwnd, msg, wparam, lparam):
         if msg == WM_CLIPBOARDUPDATE:
+            if time.time() < self.suppress_until:
+                return 0
             if self._callback:
                 try:
+                    # Capture source app info before the callback fires,
+                    # so we know which app produced the clipboard content.
+                    self.last_source_app = self.get_active_app()
                     self._callback()
                 except Exception:
                     logger.warning("Clipboard change callback failed", exc_info=True)

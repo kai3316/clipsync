@@ -1,0 +1,828 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Quick Paste</title>
+<style>
+/* ═══════════════════════════════════════════════════════════════════
+   ClipSync Quick Paste — Neo-Futuristic Design System
+   All tokens mirrored from css/theme.css for standalone use.
+   ═══════════════════════════════════════════════════════════════════ */
+
+:root {
+  --clipsync-bg: #06080D;
+  --clipsync-surface: #0C1020;
+  --clipsync-panel: #111827;
+  --clipsync-panel-2: #161E32;
+  --clipsync-elevated: #182032;
+  --clipsync-fg: #E8EDF5;
+  --clipsync-fg-muted: #8899B4;
+  --clipsync-fg-subtle: #556680;
+  --clipsync-accent: #00D4FF;
+  --clipsync-accent-2: #A855F7;
+  --clipsync-accent-hover: #38E0FF;
+  --clipsync-accent-glow: rgba(0,212,255,0.15);
+  --clipsync-accent-glow-strong: rgba(0,212,255,0.30);
+  --clipsync-success: #00E599;
+  --clipsync-danger: #FF4060;
+  --clipsync-border: rgba(100,140,200,0.08);
+  --clipsync-border-strong: rgba(100,140,200,0.16);
+  --clipsync-border-glow: rgba(0,212,255,0.20);
+  --clipsync-shadow-lg: 0 12px 48px rgba(0,0,0,0.50), 0 0 12px rgba(0,212,255,0.08);
+  --clipsync-radius: 12px;
+  --clipsync-radius-sm: 8px;
+  --clipsync-font: "SF Pro Display", "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  --clipsync-font-mono: "JetBrains Mono", "SF Mono", "Cascadia Code", "Fira Code", monospace;
+  --clipsync-transition-spring: 400ms cubic-bezier(0.34, 1.56, 0.64, 1);
+  --clipsync-transition-fast: 120ms cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+html, body {
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+}
+
+body {
+  font-family: var(--clipsync-font);
+  background: var(--clipsync-bg);
+  color: var(--clipsync-fg);
+  -webkit-user-select: none;
+  user-select: none;
+  display: flex;
+  flex-direction: column;
+}
+
+/* ── Ambient radial glow ─────────────────────────────────────── */
+
+body::before {
+  content: '';
+  position: fixed;
+  top: -80px;
+  left: 50%;
+  transform: translateX(-50%);
+  width: 340px;
+  height: 220px;
+  background: radial-gradient(ellipse at center, var(--clipsync-accent-glow) 0%, transparent 70%);
+  pointer-events: none;
+  z-index: 0;
+}
+
+/* ── Scan-line overlay ────────────────────────────────────────── */
+
+body::after {
+  content: '';
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  z-index: 100;
+  background: repeating-linear-gradient(
+    0deg,
+    transparent,
+    transparent 2px,
+    rgba(0, 0, 0, 0.03) 2px,
+    rgba(0, 0, 0, 0.03) 4px
+  );
+}
+
+/* ═══════════════════════════════════════════════════════════════════
+   Container
+   ═══════════════════════════════════════════════════════════════════ */
+
+.qp-container {
+  position: relative;
+  z-index: 1;
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  max-height: 100vh;
+}
+
+/* ═══════════════════════════════════════════════════════════════════
+   Header
+   ═══════════════════════════════════════════════════════════════════ */
+
+.qp-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 14px 16px 10px;
+  flex-shrink: 0;
+  border-bottom: 1px solid var(--clipsync-border);
+  position: relative;
+}
+
+.qp-header__left {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.qp-header__title {
+  font-size: 16px;
+  font-weight: 700;
+  letter-spacing: -0.01em;
+  line-height: 1.2;
+  background: linear-gradient(135deg, var(--clipsync-accent), var(--clipsync-accent-2));
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+  text-shadow:
+    0 0 18px var(--clipsync-accent-glow),
+    0 0 36px var(--clipsync-accent-glow);
+}
+
+.qp-header__subtitle {
+  font-size: 11px;
+  color: var(--clipsync-fg-muted);
+  font-weight: 500;
+  line-height: 1.3;
+}
+
+.qp-header__close {
+  flex-shrink: 0;
+  width: 28px;
+  height: 28px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: transparent;
+  border: 1px solid var(--clipsync-border);
+  border-radius: var(--clipsync-radius-sm);
+  font-size: 16px;
+  color: var(--clipsync-fg-muted);
+  cursor: pointer;
+  padding: 0;
+  line-height: 1;
+  transition: all var(--clipsync-transition-fast);
+}
+
+.qp-header__close:hover {
+  color: var(--clipsync-fg);
+  border-color: var(--clipsync-border-strong);
+  background: var(--clipsync-accent-glow);
+}
+
+/* ═══════════════════════════════════════════════════════════════════
+   Body (items list)
+   ═══════════════════════════════════════════════════════════════════ */
+
+.qp-body {
+  flex: 1;
+  overflow-y: auto;
+  overflow-x: hidden;
+  padding: 8px 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+/* ═══════════════════════════════════════════════════════════════════
+   Item Card — glass neo card
+   ═══════════════════════════════════════════════════════════════════ */
+
+.qp-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 9px 12px;
+  border-radius: var(--clipsync-radius);
+  border: 1px solid var(--clipsync-border);
+  background: linear-gradient(135deg, rgba(12, 16, 32, 0.75), rgba(17, 24, 39, 0.75));
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  cursor: pointer;
+  transition: all var(--clipsync-transition-spring);
+  position: relative;
+  overflow: hidden;
+  opacity: 0;
+  animation: qpSlideUp 0.35s cubic-bezier(0.34, 1.56, 0.64, 1) forwards;
+}
+
+/* Subtle inner glow on hover */
+.qp-item::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  opacity: 0;
+  background: radial-gradient(ellipse at 70% 0%, var(--clipsync-accent-glow) 0%, transparent 60%);
+  transition: opacity var(--clipsync-transition-fast);
+  pointer-events: none;
+}
+
+.qp-item:hover::after {
+  opacity: 1;
+}
+
+.qp-item:hover {
+  border-color: var(--clipsync-border-glow);
+  background: linear-gradient(135deg, rgba(12, 16, 32, 0.9), rgba(22, 30, 50, 0.9));
+  box-shadow: 0 0 20px var(--clipsync-accent-glow), 0 4px 16px rgba(0, 0, 0, 0.3);
+}
+
+/* Selected state */
+.qp-item--selected {
+  border-color: var(--clipsync-accent) !important;
+  box-shadow:
+    0 0 24px var(--clipsync-accent-glow-strong),
+    0 0 4px var(--clipsync-accent-glow-strong),
+    inset 0 0 12px var(--clipsync-accent-glow) !important;
+  transform: scale(1.03);
+  background: linear-gradient(135deg, rgba(0, 212, 255, 0.06), rgba(17, 24, 39, 0.92)) !important;
+}
+
+/* Pasted flash animation */
+.qp-item--pasted {
+  animation: qpPasteFlash 0.45s ease-out forwards;
+}
+
+/* ── Type icon ────────────────────────────────────────────────── */
+
+.qp-item__icon {
+  flex-shrink: 0;
+  width: 30px;
+  height: 30px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 15px;
+  background: var(--clipsync-panel);
+  border-radius: var(--clipsync-radius-sm);
+  border: 1px solid var(--clipsync-border);
+}
+
+/* ── Number badge ─────────────────────────────────────────────── */
+
+.qp-item__number {
+  flex-shrink: 0;
+  width: 22px;
+  height: 22px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 11px;
+  font-weight: 700;
+  font-family: var(--clipsync-font-mono);
+  color: var(--clipsync-fg-muted);
+  background: var(--clipsync-panel-2);
+  border-radius: 6px;
+  border: 1px solid var(--clipsync-border);
+  transition: all var(--clipsync-transition-fast);
+}
+
+.qp-item--selected .qp-item__number {
+  color: var(--clipsync-accent);
+  border-color: var(--clipsync-accent);
+  background: rgba(0, 212, 255, 0.12);
+  box-shadow: 0 0 10px var(--clipsync-accent-glow);
+}
+
+/* ── Content ──────────────────────────────────────────────────── */
+
+.qp-item__content {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.qp-item__text {
+  font-size: 13px;
+  line-height: 1.4;
+  color: var(--clipsync-fg);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.qp-item__time {
+  font-size: 10px;
+  color: var(--clipsync-fg-subtle);
+  font-family: var(--clipsync-font-mono);
+}
+
+/* ═══════════════════════════════════════════════════════════════════
+   Skeleton shimmer
+   ═══════════════════════════════════════════════════════════════════ */
+
+.qp-skeleton {
+  height: 48px;
+  flex-shrink: 0;
+  border-radius: var(--clipsync-radius);
+  background: linear-gradient(
+    90deg,
+    var(--clipsync-panel) 0%,
+    var(--clipsync-panel-2) 40%,
+    var(--clipsync-panel) 80%
+  );
+  background-size: 200% 100%;
+  opacity: 0;
+  animation:
+    qpSlideUp 0.3s ease-out forwards,
+    qpShimmer 1.8s ease-in-out infinite;
+}
+
+/* ═══════════════════════════════════════════════════════════════════
+   Empty state
+   ═══════════════════════════════════════════════════════════════════ */
+
+.qp-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  padding: 48px 20px;
+  text-align: center;
+  flex: 1;
+}
+
+.qp-empty__icon {
+  font-size: 36px;
+  opacity: 0.45;
+}
+
+.qp-empty__text {
+  font-size: 13px;
+  color: var(--clipsync-fg-muted);
+  font-weight: 500;
+}
+
+/* ═══════════════════════════════════════════════════════════════════
+   Toast
+   ═══════════════════════════════════════════════════════════════════ */
+
+.qp-toast {
+  position: fixed;
+  bottom: 14px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 200;
+  padding: 7px 18px;
+  background: var(--clipsync-surface);
+  color: var(--clipsync-fg);
+  border: 1px solid var(--clipsync-border-strong);
+  border-radius: 20px;
+  font-size: 12px;
+  font-weight: 600;
+  box-shadow: var(--clipsync-shadow-lg);
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity var(--clipsync-transition-fast);
+  white-space: nowrap;
+}
+
+.qp-toast--visible {
+  opacity: 1;
+}
+
+.qp-toast--error {
+  border-color: color-mix(in srgb, var(--clipsync-danger) 40%, transparent);
+  color: var(--clipsync-danger);
+}
+
+/* ═══════════════════════════════════════════════════════════════════
+   Keyframes
+   ═══════════════════════════════════════════════════════════════════ */
+
+@keyframes qpSlideUp {
+  from { opacity: 0; transform: translateY(14px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+
+@keyframes qpShimmer {
+  0%   { background-position: 200% 0; }
+  100% { background-position: -200% 0; }
+}
+
+@keyframes qpPasteFlash {
+  0% {
+    box-shadow: 0 0 0 rgba(0, 229, 153, 0), inset 0 0 0 rgba(0, 229, 153, 0);
+    border-color: var(--clipsync-success);
+  }
+  40% {
+    box-shadow: 0 0 22px rgba(0, 229, 153, 0.35), inset 0 0 12px rgba(0, 229, 153, 0.08);
+    border-color: var(--clipsync-success);
+  }
+  100% {
+    box-shadow: 0 0 0 rgba(0, 229, 153, 0), inset 0 0 0 rgba(0, 229, 153, 0);
+    border-color: var(--clipsync-border);
+  }
+}
+
+/* ═══════════════════════════════════════════════════════════════════
+   Scrollbar
+   ═══════════════════════════════════════════════════════════════════ */
+
+.qp-body::-webkit-scrollbar { width: 4px; }
+.qp-body::-webkit-scrollbar-track { background: transparent; }
+.qp-body::-webkit-scrollbar-thumb {
+  background: var(--clipsync-border-strong);
+  border-radius: 2px;
+}
+.qp-body::-webkit-scrollbar-thumb:hover {
+  background: var(--clipsync-fg-subtle);
+}
+</style>
+</head>
+<body>
+
+<div class="qp-container">
+  <!-- Header -->
+  <header class="qp-header">
+    <div class="qp-header__left">
+      <div class="qp-header__title">&#x26A1; Quick Paste</div>
+      <div class="qp-header__subtitle">Press 1&ndash;9 to paste &middot; &uarr;&darr; to navigate &middot; Esc to close</div>
+    </div>
+    <button class="qp-header__close" onclick="closeWindow()" title="Close (Esc)">&times;</button>
+  </header>
+
+  <!-- Items -->
+  <div class="qp-body" id="items" role="listbox" aria-label="Clipboard items">
+    <div class="qp-skeleton" style="animation-delay: 0ms"></div>
+    <div class="qp-skeleton" style="animation-delay: 60ms"></div>
+    <div class="qp-skeleton" style="animation-delay: 120ms"></div>
+  </div>
+
+  <!-- Toast -->
+  <div class="qp-toast" id="toast"></div>
+</div>
+
+<script>
+(function () {
+  'use strict';
+
+  /* ═══════════════════════════════════════════════════════════════
+     Parse URL parameters
+     ═══════════════════════════════════════════════════════════════ */
+
+  var params = new URLSearchParams(window.location.search);
+  var TOKEN = params.get('token') || '';
+  var HOST  = params.get('host')  || '';
+
+  // Strip trailing slash from host
+  if (HOST) { HOST = HOST.replace(/\/+$/, ''); }
+
+  /* ═══════════════════════════════════════════════════════════════
+     State
+     ═══════════════════════════════════════════════════════════════ */
+
+  var state = {
+    items:        [],
+    selected:     -1,
+    loading:      true,
+    error:        null,
+    pastingIndex: -1,
+    toastTimer:   null,
+  };
+
+  /* ═══════════════════════════════════════════════════════════════
+     DOM refs
+     ═══════════════════════════════════════════════════════════════ */
+
+  var itemsEl = document.getElementById('items');
+  var toastEl = document.getElementById('toast');
+
+  /* ═══════════════════════════════════════════════════════════════
+     API helpers
+     ═══════════════════════════════════════════════════════════════ */
+
+  function apiUrl(path) {
+    var sep = path.indexOf('?') !== -1 ? '&' : '?';
+    return HOST + path + sep + 'token=' + encodeURIComponent(TOKEN);
+  }
+
+  function fetchHistory() {
+    state.loading = true;
+    state.error = null;
+    render();
+
+    // Request up to 9 items via the 'limit' query parameter
+    fetch(apiUrl('/api/history?limit=9'))
+      .then(function (r) {
+        if (!r.ok) { throw new Error('HTTP ' + r.status); }
+        return r.json();
+      })
+      .then(function (data) {
+        state.items = (data.items || []).slice(0, 9);
+        state.loading = false;
+        // Auto-select the first item
+        if (state.items.length > 0 && state.selected < 0) {
+          state.selected = 0;
+        }
+        render();
+      })
+      .catch(function (err) {
+        state.loading = false;
+        state.error = err.message || 'Failed to load history';
+        state.items = [];
+        render();
+        showToast('Failed to load history', true);
+      });
+  }
+
+  /**
+   * Get the full text from a history item, preferring decoded types.TEXT
+   * over the potentially-truncated text_preview.
+   */
+  function getFullText(item) {
+    if (item.types && item.types.TEXT) {
+      try {
+        var raw = atob(item.types.TEXT);
+        var bytes = new Uint8Array(raw.length);
+        for (var i = 0; i < raw.length; i++) {
+          bytes[i] = raw.charCodeAt(i);
+        }
+        return new TextDecoder('utf-8').decode(bytes);
+      } catch (e) {
+        // fall through to text_preview
+      }
+    }
+    return item.text_preview || '';
+  }
+
+  function pasteItem(index) {
+    if (index < 0 || index >= state.items.length) { return; }
+
+    var item = state.items[index];
+    var text = getFullText(item);
+
+    if (!text) {
+      showToast('No text content', true);
+      return;
+    }
+
+    // Mark as pasting for the flash animation
+    state.pastingIndex = index;
+    render();
+
+    fetch(apiUrl('/api/push'), {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ text: text }),
+    })
+      .then(function (r) { return r.json(); })
+      .then(function (data) {
+        if (data.ok) {
+          showToast('✓ Pasted!');
+          // Close after a brief delay so the user sees the feedback
+          setTimeout(function () { closeWindow(); }, 350);
+        } else {
+          showToast(data.error || 'Paste failed', true);
+          state.pastingIndex = -1;
+          render();
+        }
+      })
+      .catch(function () {
+        showToast('Paste failed', true);
+        state.pastingIndex = -1;
+        render();
+      });
+  }
+
+  /* ═══════════════════════════════════════════════════════════════
+     Toast
+     ═══════════════════════════════════════════════════════════════ */
+
+  function showToast(msg, isError) {
+    if (state.toastTimer) {
+      clearTimeout(state.toastTimer);
+      state.toastTimer = null;
+    }
+    toastEl.textContent = msg;
+    toastEl.className = 'qp-toast qp-toast--visible';
+    if (isError) { toastEl.classList.add('qp-toast--error'); }
+
+    state.toastTimer = setTimeout(function () {
+      toastEl.className = 'qp-toast';
+      state.toastTimer = null;
+    }, 2200);
+  }
+
+  /* ═══════════════════════════════════════════════════════════════
+     Window close
+     ═══════════════════════════════════════════════════════════════ */
+
+  function closeWindow() {
+    try { window.close(); } catch (e) { /* ignore */ }
+  }
+
+  /* ═══════════════════════════════════════════════════════════════
+     Render
+     ═══════════════════════════════════════════════════════════════ */
+
+  function getTypeIcon(type) {
+    var ct = (type || '').toUpperCase();
+    if (ct === 'TEXT' || ct === 'HTML' || ct === 'RTF') { return '📝'; }  /* 📝 */
+    if (ct === 'IMAGE' || ct === 'IMAGE_EMF' || ct === 'IMAGE_PNG') { return '🖼'; }  /* 🖼 */
+    if (ct === 'FILE') { return '📄'; }  /* 📄 */
+    return '📋';  /* 📋 */
+  }
+
+  function getRelativeTime(ts) {
+    if (!ts) { return ''; }
+    var now = Date.now() / 1000;
+    var diff = now - ts;
+    if (diff < 10)   { return 'just now'; }
+    if (diff < 60)   { return Math.floor(diff) + 's ago'; }
+    if (diff < 3600) { return Math.floor(diff / 60) + 'm ago'; }
+    if (diff < 86400) { return Math.floor(diff / 3600) + 'h ago'; }
+    if (diff < 604800) { return Math.floor(diff / 86400) + 'd ago'; }
+    var d = new Date(ts * 1000);
+    return d.toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
+  }
+
+  function escHtml(s) {
+    return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+  }
+
+  function render() {
+    // ── Loading ──────────────────────────────────────────────────
+    if (state.loading) {
+      itemsEl.innerHTML = '';
+      for (var i = 0; i < 3; i++) {
+        var skel = document.createElement('div');
+        skel.className = 'qp-skeleton';
+        skel.style.animationDelay = (i * 60) + 'ms';
+        itemsEl.appendChild(skel);
+      }
+      return;
+    }
+
+    // ── Error ────────────────────────────────────────────────────
+    if (state.error) {
+      itemsEl.innerHTML = '';
+      var errEl = document.createElement('div');
+      errEl.className = 'qp-empty';
+      errEl.innerHTML =
+        '<div class="qp-empty__icon">&#x26A1;</div>' +
+        '<div class="qp-empty__text">' + escHtml(state.error) + '</div>';
+      itemsEl.appendChild(errEl);
+      return;
+    }
+
+    // ── Empty ────────────────────────────────────────────────────
+    if (state.items.length === 0) {
+      itemsEl.innerHTML =
+        '<div class="qp-empty">' +
+          '<div class="qp-empty__icon">&#x1F4CB;</div>' +
+          '<div class="qp-empty__text">No clipboard history</div>' +
+        '</div>';
+      return;
+    }
+
+    // ── Items ────────────────────────────────────────────────────
+    itemsEl.innerHTML = '';
+
+    for (var i2 = 0; i2 < state.items.length; i2++) {
+      (function (index) {
+        var item = state.items[index];
+        var el = document.createElement('div');
+        el.className = 'qp-item';
+        el.setAttribute('role', 'option');
+        el.setAttribute('aria-selected', index === state.selected ? 'true' : 'false');
+        el.style.animationDelay = (index * 30) + 'ms';
+
+        if (index === state.selected) {
+          el.classList.add('qp-item--selected');
+        }
+        if (index === state.pastingIndex) {
+          el.classList.add('qp-item--pasted');
+        }
+
+        el.addEventListener('click', function () {
+          state.selected = index;
+          render();
+          pasteItem(index);
+        });
+
+        var icon = getTypeIcon(item.content_type);
+        var number = index + 1;
+        var preview = item.text_preview || item.content_type || '(empty)';
+        var time = getRelativeTime(item.timestamp);
+
+        el.innerHTML =
+          '<div class="qp-item__icon">' + icon + '</div>' +
+          '<div class="qp-item__number">' + number + '</div>' +
+          '<div class="qp-item__content">' +
+            '<div class="qp-item__text">' + escHtml(preview) + '</div>' +
+            '<div class="qp-item__time">' + escHtml(time) + '</div>' +
+          '</div>';
+
+        itemsEl.appendChild(el);
+      })(i2);
+    }
+  }
+
+  /* ═══════════════════════════════════════════════════════════════
+     Keyboard handling
+     ═══════════════════════════════════════════════════════════════ */
+
+  document.addEventListener('keydown', function (e) {
+    var key = e.key;
+    var n = state.items.length;
+
+    // ── Number keys 1-9 → direct paste ──────────────────────────
+    if (key >= '1' && key <= '9') {
+      e.preventDefault();
+      var idx = parseInt(key) - 1;
+      if (idx < n) {
+        state.selected = idx;
+        render();
+        pasteItem(idx);
+      }
+      return;
+    }
+
+    // ── Arrow Down ──────────────────────────────────────────────
+    if (key === 'ArrowDown') {
+      e.preventDefault();
+      if (n === 0) { return; }
+      if (state.selected < 0) {
+        state.selected = 0;
+      } else {
+        state.selected = Math.min(state.selected + 1, n - 1);
+      }
+      render();
+      scrollToSelected();
+      return;
+    }
+
+    // ── Arrow Up ────────────────────────────────────────────────
+    if (key === 'ArrowUp') {
+      e.preventDefault();
+      if (n === 0) { return; }
+      if (state.selected < 0) {
+        state.selected = 0;
+      } else {
+        state.selected = Math.max(state.selected - 1, 0);
+      }
+      render();
+      scrollToSelected();
+      return;
+    }
+
+    // ── Enter → paste selected ──────────────────────────────────
+    if (key === 'Enter') {
+      e.preventDefault();
+      if (state.selected >= 0 && state.selected < n) {
+        pasteItem(state.selected);
+      }
+      return;
+    }
+
+    // ── Escape → close ──────────────────────────────────────────
+    if (key === 'Escape') {
+      e.preventDefault();
+      closeWindow();
+      return;
+    }
+
+    // ── Backspace → clear selection ─────────────────────────────
+    if (key === 'Backspace') {
+      e.preventDefault();
+      state.selected = -1;
+      render();
+      return;
+    }
+  });
+
+  function scrollToSelected() {
+    var sel = itemsEl.querySelector('.qp-item--selected');
+    if (sel) {
+      sel.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+    }
+  }
+
+  /* ═══════════════════════════════════════════════════════════════
+     Init — attempt window resize + fetch history
+     ═══════════════════════════════════════════════════════════════ */
+
+  // Ask the browser for a small floating-window size.
+  // Works when opened as a popup (window.open) or in some browsers.
+  try {
+    window.resizeTo(400, 540);
+    window.moveTo(
+      (screen.availWidth - 400) / 2,
+      (screen.availHeight - 540) / 2
+    );
+  } catch (e) { /* ignore */ }
+
+  if (!HOST) {
+    state.loading = false;
+    state.error = 'Missing host parameter';
+    render();
+  } else {
+    fetchHistory();
+  }
+
+})();
+</script>
+
+</body>
+</html>

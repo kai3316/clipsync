@@ -430,7 +430,50 @@ class SettingsWindow:
             text_color=("gray55", "gray55"),
         ).pack(anchor="w", pady=(10, 0))
 
+        # ── UI Backend toggle ──────────────────────────────────────
+        ui_card = ctk.CTkFrame(panel, corner_radius=12,
+                                fg_color=("gray95", "gray17"))
+        ui_card.pack(fill="x", pady=(16, 0))
+
+        ui_inner = ctk.CTkFrame(ui_card, fg_color="transparent")
+        ui_inner.pack(fill="x", padx=20, pady=20)
+
+        ctk.CTkLabel(
+            ui_inner, text=T("settings_window.ui_backend_label"),
+            font=ctk.CTkFont(size=13, weight="bold"),
+        ).pack(anchor="w", pady=(0, 12))
+
+        current_ui = cfg.ui_backend  # "webview" or "ctk"
+        self._ui_backend_var = tk.StringVar(value=current_ui)
+
+        ui_modes = [
+            ("webview", T("settings_window.ui_modern")),
+            ("ctk",     T("settings_window.ui_classic")),
+        ]
+        for mode, label in ui_modes:
+            ctk.CTkRadioButton(
+                ui_inner, text=label, variable=self._ui_backend_var, value=mode,
+                font=ctk.CTkFont(size=13),
+                command=lambda m=mode: self._on_ui_backend_change(m),
+            ).pack(anchor="w", pady=3)
+
+        ctk.CTkLabel(
+            ui_inner, text=T("settings_window.ui_backend_hint"),
+            font=ctk.CTkFont(size=11),
+            text_color=("gray55", "gray55"),
+        ).pack(anchor="w", pady=(10, 0))
+
         return panel
+
+    def _on_ui_backend_change(self, mode: str):
+        cfg = self._get_config()
+        cfg.ui_backend = mode
+        self._save_config()
+        show_info(
+            self._window,
+            T("settings_window.ui_backend_label"),
+            T("settings_window.ui_backend_restart"),
+        )
 
     def _on_appearance_change(self, mode: str):
         ctk.set_appearance_mode(mode)

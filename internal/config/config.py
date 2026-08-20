@@ -47,7 +47,7 @@ class Config:
     history_max_entries: int = 50
     file_receive_dir: str = ""
     sync_debounce: float = 0.3
-    clipboard_poll_interval: float = 0.4
+    clipboard_poll_interval: float = 1.0
     max_reconnect_attempts: int = 10
     transfer_timeout: float = 120.0
     log_level: str = "INFO"
@@ -59,11 +59,51 @@ class Config:
     # UI preferences
     appearance_mode: str = "system"     # "system", "light", "dark"
     language: str = "en"                # locale code: "en", "zh-CN"
+    # Clipboard behavior
+    paste_to_top: bool = True           # move pasted item to top
+    low_memory_mode: bool = False       # reduce polling frequency / disable previews
+    retry_capture_enabled: bool = True  # multi-round retry capture
+    dedup_method: str = "sha256"        # "sha256" or "simple"
+
+    # App filter (blacklist/whitelist apps from clipboard monitoring)
+    app_filter_enabled: bool = False
+    app_filter_mode: str = "blacklist"  # "blacklist" or "whitelist"
+    app_filter_list: list[str] = field(default_factory=list)  # list of process names
+
+    # Source tracking
+    source_tracking_enabled: bool = True  # track which app produced clipboard content
+
+    # UI preferences
+    ui_backend: str = "webview"        # "webview" or "ctk"
+    ui_animation_enabled: bool = True
+    sound_enabled: bool = False
+
+    # Data management
+    favorites_path: str = ""           # empty = default location
+    data_dir: str = ""                 # custom data directory (empty = default)
+
     # Web companion
     web_enabled: bool = False
     web_port: int = 19991
     web_token: str = ""
     web_history_limit: int = 5
+
+    # Hotkeys
+    hotkeys: dict[str, str] = field(default_factory=lambda: {
+        "quick_paste": "Ctrl+`",
+        "paste_1": "Ctrl+1",
+        "paste_2": "Ctrl+2",
+        "paste_3": "Ctrl+3",
+        "paste_4": "Ctrl+4",
+        "paste_5": "Ctrl+5",
+        "paste_6": "Ctrl+6",
+        "paste_7": "Ctrl+7",
+        "paste_8": "Ctrl+8",
+        "paste_9": "Ctrl+9",
+        "paste_plain": "Ctrl+Shift+V",
+        "toggle_monitor": "Ctrl+Shift+M",
+        "show_window": "Ctrl+Shift+Space",
+    })
 
     def add_peer(self, peer: PeerInfo):
         self.peers[peer.device_id] = peer
@@ -123,8 +163,14 @@ def load() -> Config:
             "encryption_password_hash",
             "appearance_mode",
             "language",
+            "paste_to_top", "low_memory_mode", "retry_capture_enabled",
+            "dedup_method", "app_filter_enabled", "app_filter_mode",
+            "app_filter_list", "source_tracking_enabled",
+            "ui_backend", "ui_animation_enabled", "sound_enabled",
+            "favorites_path", "data_dir",
             "web_enabled", "web_port",
             "web_token", "web_history_limit",
+            "hotkeys",
         ):
             if key in data:
                 setattr(cfg, key, data[key])
@@ -185,10 +231,24 @@ def save(cfg: Config, enc_mgr: "EncryptionManager | None" = None):
         "encryption_password_hash": cfg.encryption_password_hash,
         "appearance_mode": cfg.appearance_mode,
         "language": cfg.language,
+        "paste_to_top": cfg.paste_to_top,
+        "low_memory_mode": cfg.low_memory_mode,
+        "retry_capture_enabled": cfg.retry_capture_enabled,
+        "dedup_method": cfg.dedup_method,
+        "app_filter_enabled": cfg.app_filter_enabled,
+        "app_filter_mode": cfg.app_filter_mode,
+        "app_filter_list": cfg.app_filter_list,
+        "source_tracking_enabled": cfg.source_tracking_enabled,
+        "ui_backend": cfg.ui_backend,
+        "ui_animation_enabled": cfg.ui_animation_enabled,
+        "sound_enabled": cfg.sound_enabled,
+        "favorites_path": cfg.favorites_path,
+        "data_dir": cfg.data_dir,
         "web_enabled": cfg.web_enabled,
         "web_port": cfg.web_port,
         "web_token": cfg.web_token,
         "web_history_limit": cfg.web_history_limit,
+        "hotkeys": cfg.hotkeys,
         "peers": [
             {
                 "device_id": p.device_id,

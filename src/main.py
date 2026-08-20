@@ -7,6 +7,7 @@ Runs as a system tray application with an optional settings GUI.
 
 import atexit
 import base64 as _b64
+import secrets
 import logging
 import os
 import shutil
@@ -24,7 +25,9 @@ if not getattr(sys, "frozen", False):
 from internal.clipboard.filter import ContentFilter
 from internal.clipboard.format import ClipboardContent, ContentType as _CT
 from internal.clipboard.history import ClipboardHistory
+from internal.clipboard.history_db import ClipboardHistoryDB
 from internal.clipboard.platform import create_monitor, create_reader, create_writer
+from internal.clipboard.source_tracker import is_app_allowed
 from internal.config.config import Config, PeerInfo, _config_dir, load, save
 from internal.i18n import T, set_locale
 from internal.platform.autostart import disable_autostart, enable_autostart, is_autostart_enabled
@@ -42,6 +45,7 @@ from internal.security.pairing import (
 )
 from internal.sync.file_transfer import FileTransferManager
 from internal.sync.manager import SyncManager
+from internal.system.hotkey import DEFAULT_SHORTCUTS, HotkeyManager
 from internal.transport.connection import MAX_FRAME_SIZE, PortInUseError, TransportManager
 from internal.transport.discovery import Discovery
 from internal.ui.dashboard import DashboardWindow
@@ -263,7 +267,7 @@ def _run_tray(device_name: str, pipe, parent_pid: int):
     def _recv_notifications():
         while True:
             try:
-                if pipe.poll(1):
+                if pipe.poll(100):
                     msg = pipe.recv()
                     if msg[0] == "show_notification" and child_systray._tray:
                         try:
@@ -313,6 +317,9 @@ class Application:
     """
 
     def __init__(self) -> None:
+        import time as _time
+        self._start_time = int(_time.time())
+
         # ── Config ──────────────────────────────────────────────────
         self.cfg: Config | None = None
 
@@ -327,10 +334,14 @@ class Application:
         self.discovery: Discovery | None = None
         self.web_server: WebServer | None = None
 
+        # ── Hotkey manager ─────────────────────────────────────────
+        self.hotkey_mgr: HotkeyManager | None = None
+
         # ── UI ──────────────────────────────────────────────────────
         self.root: tk.Tk | None = None
         self.systray: SystrayApp | None = None
         self.settings_win: SettingsWindow | None = None
+        self.webview_win = None  # WebViewWindow for webview mode
         self.dashboard_win: DashboardWindow | None = None
 
         # ── Threading ───────────────────────────────────────────────
@@ -535,7 +546,7 @@ class Application:
             self._save_cfg_encrypted()
 
         # ── Clipboard history ───────────────────────────────────
-        self.clipboard_history = ClipboardHistory(
+        self.clipboard_history = ClipboardHistoryDB(
             max_entries=cfg.history_max_entries,
             enc_mgr=self.enc_mgr if cfg.encryption_enabled else None,
         )
@@ -568,6 +579,7 @@ class Application:
         monitor = create_monitor(poll_interval=cfg.clipboard_poll_interval)
         reader = create_reader()
         writer = create_writer()
+        self._monitor = monitor
         self.sync_mgr = SyncManager(
             cfg.device_id, cfg.device_name,
             reader=reader, writer=writer, monitor=monitor,
@@ -575,6 +587,14 @@ class Application:
             sync_debounce=cfg.sync_debounce,
         )
         self.sync_mgr.set_enabled(cfg.sync_enabled)
+
+        # ── Source tracking / app filter ────────────────────────
+        # Honor the source_tracking_enabled flag: when disabled, the
+        # monitor stops querying the OS for the foreground app.
+        monitor.set_source_tracking(cfg.source_tracking_enabled)
+        # Wire the app filter (whitelist/blacklist of source processes)
+        # into the capture path so disallowed apps are never synced.
+        self.sync_mgr.set_app_filter(lambda app_info: is_app_allowed(app_info, cfg))
 
         # ── Transport ───────────────────────────────────────────
         self.transport_mgr = TransportManager(
@@ -614,12 +634,48 @@ class Application:
             except Exception as e:
                 logger.error("Failed to forward uploaded file: %s", e)
 
+        def _on_web_window_close():
+            """Close the webview browser window without killing the app."""
+            if self.webview_win is not None:
+                self.webview_win.stop()
+                self.webview_win = None
+
         self.web_server = WebServer(
             cfg, self.clipboard_history, self.sync_mgr,
             get_connected_ids=lambda: self.transport_mgr.get_connected_peers(),
             on_nav_url=_on_web_nav_url,
             on_forward_file=_on_web_forward_file,
+            get_overview_data=self._get_overview_data,
+            on_device_action=self._handle_web_device_action,
+            on_transfer_action=self._handle_web_transfer_action,
+            on_get_transfers=lambda: (
+                self.file_transfer_mgr.get_transfers(),
+                self.file_transfer_mgr.get_history(),
+            ) if self.file_transfer_mgr else ([], []),
+            on_speed_test_start=lambda: self.file_transfer_mgr.start_speed_test(
+                self.transport_mgr.broadcast,
+            ) if self.file_transfer_mgr else False,
+            on_speed_test_poll=lambda: self.file_transfer_mgr.get_speed_test() if self.file_transfer_mgr else {},
+            on_window_close=_on_web_window_close,
+            on_toggle_discovery=self._on_toggle_discovery,
+            on_toggle_visibility=self._on_toggle_visibility,
+            on_settings_change=self._on_web_settings_change,
         )
+
+        # ── Live history push to web clients ────────────────────────
+        # The sync manager records every local/remote clipboard change into
+        # history, but nothing notified the web UI about it. Wire a callback
+        # so the WebSocket layer broadcasts `history_updated` immediately
+        # after each add — this is what makes newly copied items appear in
+        # the history panel without a manual refresh.
+        def _on_history_change():
+            if self.web_server is not None:
+                try:
+                    self.web_server.ws_manager.broadcast_history()
+                except Exception:
+                    logger.debug("Failed to broadcast history to web clients", exc_info=True)
+
+        self.sync_mgr.on_history_change = _on_history_change
 
     # ═══════════════════════════════════════════════════════════════
     # Phase 6: Callback wiring
@@ -646,6 +702,127 @@ class Application:
 
         # ── Wake recovery ───────────────────────────────────────
         self.transport_mgr.set_on_wake(self.discovery._wake_recovery)
+
+        # ── Hotkey callbacks ──────────────────────────────────────
+        self._wire_hotkeys()
+
+    def _wire_hotkeys(self) -> None:
+        """Register global hotkey callbacks from config and start the listener."""
+        self.hotkey_mgr = HotkeyManager()
+
+        def _cb_factory(action: str):
+            if action == "quick_paste":
+                return lambda: self.root.after(0, self._open_quick_paste)
+            elif action == "show_window":
+                return lambda: self.root.after(0, self.open_dashboard)
+            elif action == "toggle_monitor":
+                return lambda: self.root.after(0, self._toggle_monitor)
+            elif action == "paste_plain":
+                return lambda: self.root.after(0, self._paste_plain)
+            elif action.startswith("paste_"):
+                n = int(action.split("_")[1])
+                return lambda n=n: self.root.after(0, lambda: self._paste_nth(n))
+            else:
+                return lambda: None
+
+        self.hotkey_mgr.reload_from_config(self.cfg.hotkeys, _cb_factory)
+        self.hotkey_mgr.start()
+        logger.info("Global hotkeys registered (%d shortcuts)", len(self.cfg.hotkeys))
+
+    def _open_quick_paste(self) -> None:
+        """Open the Quick Paste floating window."""
+        import secrets
+        import webbrowser
+
+        # Ensure the web server is running
+        if self.web_server is not None and not self.web_server.is_running:
+            if not self.cfg.web_token:
+                self.cfg.web_token = secrets.token_urlsafe(16)
+                self._save_cfg_encrypted()
+                logger.info("Generated web token for Quick Paste")
+            self.web_server.start()
+            if not self.web_server.is_running:
+                self._notify_error(
+                    "Web Companion",
+                    f"Failed to start on port {self.cfg.web_port}. "
+                    "Another process may already be using this port.",
+                )
+                return
+            logger.info("Web server started for Quick Paste")
+
+        port = self.cfg.web_port
+        token = self.cfg.web_token
+        host = f"http://127.0.0.1:{port}"
+        url = f"{host}/quickpaste.html?token={token}&host={host}"
+
+        logger.debug("Opening Quick Paste: %s", url)
+        webbrowser.open_new(url)
+
+    def _paste_nth(self, n: int) -> None:
+        """Paste the nth history item (1-indexed) directly to the clipboard."""
+        import base64
+
+        items = self.clipboard_history.get_all()
+        if n < 1 or n > len(items):
+            logger.debug("paste_%d: index out of range (%d items)", n, len(items))
+            return
+
+        entry = items[n - 1]
+        types: dict = entry.get("types", {})
+        if not types:
+            logger.debug("paste_%d: entry has no types", n)
+            return
+
+        _type_map = {
+            "TEXT": _CT.TEXT, "HTML": _CT.HTML,
+            "IMAGE": _CT.IMAGE_PNG, "IMAGE_EMF": _CT.IMAGE_EMF,
+            "RTF": _CT.RTF,
+            "FILE": _CT.FILE, "URL": _CT.URL,
+        }
+        ctypes: dict = {}
+        for key, b64_data in types.items():
+            ct = _type_map.get(key)
+            if ct is not None:
+                ctypes[ct] = base64.b64decode(b64_data)
+
+        if ctypes:
+            content = ClipboardContent(types=ctypes)
+            self.sync_mgr.reset_dedup_for_restore()
+            create_writer().write(content)
+            logger.info("paste_%d: %d type(s) written to clipboard", n, len(ctypes))
+        else:
+            logger.debug("paste_%d: no writable types", n)
+
+    def _paste_plain(self) -> None:
+        """Paste plain text from the most recent clipboard entry."""
+        import base64
+
+        items = self.clipboard_history.get_all()
+        for entry in items:
+            types = entry.get("types", {})
+            text_b64 = types.get("TEXT") or types.get("HTML") or types.get("RTF")
+            if not text_b64:
+                continue
+            try:
+                decoded = base64.b64decode(text_b64).decode("utf-8")
+            except Exception:
+                continue
+            content = ClipboardContent(types={_CT.TEXT: decoded.encode("utf-8")})
+            self.sync_mgr.reset_dedup_for_restore()
+            create_writer().write(content)
+            logger.info("paste_plain: text written to clipboard (%d chars)", len(decoded))
+            return
+
+        logger.debug("paste_plain: no text content in history")
+
+    def _toggle_monitor(self) -> None:
+        """Toggle clipboard monitoring on/off via the global hotkey."""
+        enabled = not self.cfg.sync_enabled
+        self.sync_mgr.set_enabled(enabled)
+        self.cfg.sync_enabled = enabled
+        self._save_cfg_encrypted()
+        self.systray.set_syncing(enabled)
+        logger.info("Sync %s (toggle_monitor hotkey)", "enabled" if enabled else "paused")
 
     # ── Callback implementations ──────────────────────────────────
 
@@ -688,6 +865,7 @@ class Application:
 
     def _on_transfer_progress(self, transfer_id: str, progress: float) -> None:
         logger.debug("File transfer %s: %.0f%%", transfer_id[:8], progress * 100)
+        self._push_web("broadcast_transfer_progress", transfer_id, progress)
 
     def _on_transfer_complete(self, transfer_id: str, success: bool) -> None:
         logger.info("File transfer %s: %s",
@@ -696,6 +874,7 @@ class Application:
             notification_mgr.show("File Transfer", T("transfer.send_success"))
         else:
             notification_mgr.show("File Transfer", T("transfer.send_failed"))
+        self._push_web("broadcast_transfer_complete", transfer_id, success)
 
     def _on_file_received(self, transfer_id: str, saved_path: str, file_name: str) -> None:
         logger.info("File received: %s -> %s",
@@ -710,6 +889,22 @@ class Application:
 
     def _show_transfer_request_dialog(self, transfer_id, file_name, file_size,
                                        mime_type, send_fn):
+        # ── Webview mode: push dialog to web UI ────────────────────
+        if self._is_webview():
+            result = self._web_dialog(
+                "transfer_request",
+                title=T("transfer.incoming"),
+                message=T("transfer.incoming_title"),
+                file_name=file_name,
+                file_size=file_size,
+                sender="",
+            )
+            if result and result.get("action") == "accept":
+                self.file_transfer_mgr.accept_transfer(transfer_id, send_fn)
+            else:
+                self.file_transfer_mgr.reject_transfer(transfer_id, send_fn)
+            return
+
         import platform as _platform
         _is_macos = _platform.system() == "Darwin"
         _is_linux = _platform.system() == "Linux"
@@ -865,6 +1060,9 @@ class Application:
             "Pairing Request",
             T("notify.pairing_request", name=peer_name, code=code),
         )
+        self._push_web("broadcast", "pairing_request", {
+            "peer_id": peer_id, "peer_name": peer_name, "code": code,
+        })
         self.root.after(0, self.open_dashboard)
 
     # ═══════════════════════════════════════════════════════════════
@@ -883,15 +1081,134 @@ class Application:
                         h.setLevel(level)
                         break
 
+    def _on_web_settings_change(self, updated: dict, special: dict | None = None) -> dict | None:
+        """Apply settings changed via the web UI to live services.
+
+        The config has already been mutated and persisted by the settings
+        API; here we push each change into the running components so the
+        new value takes effect immediately (no restart required).
+
+        *special* carries action keys (password, clear_password,
+        factory_reset, regenerate_web_token, clear_web_token) that are not
+        plain config fields.  The returned dict (if any) is merged into the
+        HTTP response so the client can update its local state.
+        """
+        response: dict = {}
+        special = special or {}
+        if "sync_enabled" in updated:
+            enabled = bool(updated["sync_enabled"])
+            self.sync_mgr.set_enabled(enabled)
+            if self.systray is not None:
+                self.systray.set_syncing(enabled)
+        if "filter_enabled_categories" in updated and self.content_filter is not None:
+            self.content_filter.enabled_categories = updated["filter_enabled_categories"]
+        if "source_tracking_enabled" in updated and getattr(self, "_monitor", None) is not None:
+            self._monitor.set_source_tracking(updated["source_tracking_enabled"])
+        if "notifications_enabled" in updated:
+            notification_mgr.enabled = bool(updated["notifications_enabled"])
+        if "history_max_entries" in updated and self.clipboard_history is not None:
+            try:
+                self.clipboard_history.MAX_ENTRIES = int(updated["history_max_entries"])
+            except (TypeError, ValueError):
+                logger.warning("Invalid history_max_entries: %s", updated["history_max_entries"])
+        if "appearance_mode" in updated:
+            try:
+                from customtkinter import set_appearance_mode
+                set_appearance_mode(updated["appearance_mode"])
+            except Exception:
+                logger.debug("Failed to apply appearance_mode live", exc_info=True)
+        if "log_level" in updated:
+            level = getattr(logging, updated["log_level"].upper(), None)
+            if level is not None:
+                for h in logging.getLogger().handlers:
+                    if h is _console_handler:
+                        h.setLevel(level)
+                        break
+
+        # ── Special actions (not plain config fields) ────────────
+        if "regenerate_web_token" in special:
+            import secrets
+            self.cfg.web_token = secrets.token_urlsafe(16)
+            self._save_cfg_encrypted()
+            # Never echo the token back through the settings API; report only
+            # that it changed so the client can prompt for a reconnect.
+            response["token_updated"] = True
+            logger.info("Web token regenerated")
+
+        if "clear_web_token" in special:
+            self.cfg.web_token = ""
+            self._save_cfg_encrypted()
+            response["token_updated"] = True
+            logger.info("Web token cleared")
+
+        if "password" in special and special["password"]:
+            self.cfg.encryption_enabled = True
+            self.cfg.encryption_password = special["password"]
+            self._save_cfg_encrypted()
+            response["password_set"] = True
+            logger.info("Encryption password set via web UI")
+
+        if "clear_password" in special:
+            self.cfg.encryption_password = ""
+            self.cfg.encryption_password_hash = ""
+            self._save_cfg_encrypted()
+            response["password_set"] = False
+            logger.info("Encryption password cleared via web UI")
+
+        if "factory_reset" in special:
+            self.root.after(0, self._do_factory_reset)
+            response["ok"] = True
+
+        return response if response else None
+
+    def _do_factory_reset(self) -> None:
+        """Delete all ClipSync data files and restart the application.
+
+        Runs on the Tk main thread (scheduled via ``root.after``) so the
+        process can cleanly relaunch itself after deleting its own config.
+        """
+        from internal.config.config import _config_dir
+        import subprocess
+        import sys
+        config_dir = _config_dir()
+        deleted = []
+        for fname in ("config.json", "clipboard_history.json",
+                      "clipboard_history.db", "favorites.db", "clipsync.log"):
+            fpath = config_dir / fname
+            try:
+                if fpath.exists():
+                    fpath.unlink()
+                    deleted.append(fname)
+            except OSError as e:
+                logger.warning("Factory reset: failed to delete %s: %s", fpath, e)
+        for pattern in (".config_tmp_*.json", ".history_tmp_*.json"):
+            for tmpf in list(config_dir.glob(pattern)):
+                try:
+                    tmpf.unlink()
+                except OSError:
+                    pass
+        logger.info("Factory reset: deleted %s; restarting", deleted or "no files")
+
+        # Remove the single-instance lock so the new process can start,
+        # spawn a fresh instance, then exit this one without re-saving config.
+        try:
+            (config_dir / ".lock").unlink()
+        except OSError:
+            pass
+        try:
+            subprocess.Popen([sys.executable] + sys.argv)
+        except Exception:
+            logger.warning("Factory reset: failed to spawn new process", exc_info=True)
+        if self.root:
+            self.root.quit()
+        sys.exit(0)
+
     # ═══════════════════════════════════════════════════════════════
     # Phase 8: UI
     # ═══════════════════════════════════════════════════════════════
 
     def _create_ui(self) -> None:
-        from customtkinter import set_appearance_mode
-
-        set_appearance_mode(self.cfg.appearance_mode)
-
+        # ── Root window (needed for systray + mainloop in both modes) ─
         self.root = tk.Tk()
         _hide_dock()
         self.root.title("ClipSync")
@@ -908,7 +1225,12 @@ class Application:
             self.root.withdraw()
         self.root.protocol("WM_DELETE_WINDOW", self.root.withdraw)
 
-        # ── Systray ─────────────────────────────────────────────
+        # ── Appearance mode (CTk only) ───────────────────────────────
+        if self.cfg.ui_backend == "ctk":
+            from customtkinter import set_appearance_mode
+            set_appearance_mode(self.cfg.appearance_mode)
+
+        # ── Systray ──────────────────────────────────────────────────
         self.systray = SystrayApp(
             device_name=self.cfg.device_name,
             on_enable_toggle=lambda e: self.root.after(0, self._on_systray_toggle, e),
@@ -948,13 +1270,37 @@ class Application:
             )
             sys.exit(1)
         self.discovery.start()
-        if self.cfg.web_enabled:
+        # Webview mode always needs the web server
+        if self.cfg.web_enabled or self.cfg.ui_backend == "webview":
             if not self.cfg.web_token:
                 self.cfg.web_token = secrets.token_urlsafe(16)
                 self._save_cfg_encrypted()
                 logger.info("Generated new web companion token")
-            self.web_server.start()
-            logger.info("Web companion auto-started (persisted preference)")
+            base_port = int(self.cfg.web_port)
+            started = bool(self.web_server.start()) and self.web_server.is_running
+            if not started:
+                for port in range(base_port + 1, base_port + 6):
+                    self.cfg.web_port = port
+                    started = bool(self.web_server.start()) and self.web_server.is_running
+                    if started:
+                        self._save_cfg_encrypted()
+                        break
+            if not started:
+                msg = (
+                    f"Failed to start Web Companion on port {base_port}.\n\n"
+                    "Another process may already be using this port, or the server failed to bind.\n\n"
+                    f"Tried ports: {base_port} - {base_port + 5}"
+                )
+                show_error(self.root, "Web Companion", msg)
+                self.cfg.web_enabled = False
+                self.systray.set_web_enabled(False)
+                if self.cfg.ui_backend == "webview":
+                    self.cfg.ui_backend = "ctk"
+                    self._save_cfg_encrypted()
+                return
+            self.cfg.web_enabled = True
+            self.systray.set_web_enabled(True)
+            logger.info("Web companion auto-started (ui_backend=%s)", self.cfg.ui_backend)
 
     # ═══════════════════════════════════════════════════════════════
     # Phase 10: Background threads
@@ -1039,6 +1385,7 @@ class Application:
             if peer_display != prev_display:
                 prev_display = peer_display
                 self.root.after(0, lambda pd=list(peer_display): self.systray.set_peers(pd))
+                self._push_web("broadcast_devices")
 
             connected_set = set(connected_ids)
             for pid in connected_set - prev_connected:
@@ -1088,6 +1435,8 @@ class Application:
         self.sync_mgr.stop()
         self.discovery.stop()
         self.transport_mgr.stop_server()
+        if self.webview_win is not None:
+            self.webview_win.stop()
         if self.web_server:
             self.web_server.stop()
 
@@ -1144,15 +1493,36 @@ class Application:
         self.root.after(0, self._do_show_web_qr)
 
     def _do_show_web_qr(self) -> None:
-        import customtkinter as ctk
-        import qrcode
-        from io import BytesIO
-        from PIL import Image
-
         token = self.cfg.web_token
         port = self.cfg.web_port
         ip = WebServer._get_lan_ip()
         url = f"http://{ip}:{port}?token={token}" if token else f"http://{ip}:{port}"
+
+        # ── Webview mode: push QR code to web UI ────────────────────
+        if self._is_webview():
+            import qrcode
+            from io import BytesIO
+            import base64
+            img = qrcode.make(url)
+            img = img.convert("RGB")
+            img = img.resize((220, 220))
+            buf = BytesIO()
+            img.save(buf, "PNG")
+            data_url = "data:image/png;base64," + base64.b64encode(buf.getvalue()).decode()
+            mgr = self.web_server.dialog_mgr if self.web_server else None
+            if mgr is not None:
+                mgr.push(
+                    "qr_code",
+                    title=T("web.qr_title"),
+                    url=url,
+                    qr_data_url=data_url,
+                )
+            return
+
+        import customtkinter as ctk
+        import qrcode
+        from io import BytesIO
+        from PIL import Image
 
         dlg = ctk.CTkToplevel(self.root)
         dlg.title(T("web.qr_title"))
@@ -1239,6 +1609,13 @@ class Application:
                 self.cfg.web_token = secrets.token_urlsafe(16)
                 self._save_cfg_encrypted()
             self.web_server.start()
+            if not self.web_server.is_running:
+                self._notify_error(
+                    "Web Companion",
+                    f"Failed to start on port {self.cfg.web_port}. "
+                    "Another process may already be using this port.",
+                )
+                return
             self.systray.set_web_enabled(True)
             logger.info("Web companion started via dashboard")
         elif act == "stop":
@@ -1253,6 +1630,13 @@ class Application:
                     self.cfg.web_token = secrets.token_urlsafe(16)
                     self._save_cfg_encrypted()
                 self.web_server.start()
+                if not self.web_server.is_running:
+                    self._notify_error(
+                        "Web Companion",
+                        f"Failed to start on port {self.cfg.web_port}. "
+                        "Another process may already be using this port.",
+                    )
+                    return
             logger.info("Web companion restarted via dashboard")
 
     # ═══════════════════════════════════════════════════════════════
@@ -1273,20 +1657,20 @@ class Application:
             return
         try:
             shutil.copy2(log_path, dest)
-            show_info(self.root, "Exported", f"Log saved to:\n{dest}")
+            self._notify_info("Exported", f"Log saved to:\n{dest}")
             logger.info("Log exported to %s", dest)
         except FileNotFoundError:
-            show_warning(
-                self.root, "Not Found",
+            self._notify_warning(
+                "Not Found",
                 f"No log file found at:\n{log_path}\n\n"
                 "ClipSync may not have been running long enough to generate logs.",
             )
         except PermissionError:
-            show_error(self.root, "Error",
+            self._notify_error("Error",
                        f"Permission denied writing to:\n{dest}")
             logger.error("Permission denied exporting log to %s", dest)
         except OSError as e:
-            show_error(self.root, "Error", f"Failed to export log:\n{e}")
+            self._notify_error("Error", f"Failed to export log:\n{e}")
             logger.error("Failed to export log: %s", e)
 
     def send_file(self) -> None:
@@ -1319,19 +1703,35 @@ class Application:
 
     def _do_send_url(self) -> None:
         """Send a URL to a selected device. Reads clipboard for URL pre-fill."""
-        import re
-        import customtkinter as ctk
-
         # Try to read clipboard for URL pre-fill
         prefill = ""
         try:
             clip_text = self.root.clipboard_get()
-            if clip_text and re.match(r'^https?://', clip_text.strip()):
-                prefill = clip_text.strip()
+            if clip_text and self._is_webview() is False:
+                import re
+                if clip_text and re.match(r'^https?://', clip_text.strip()):
+                    prefill = clip_text.strip()
         except Exception:
             pass
 
+        # ── Webview mode: push URL input dialog to web UI ──────────
+        if self._is_webview():
+            result = self._web_dialog(
+                "url_input",
+                title=T("nav_url.title"),
+                message=T("nav_url.prompt"),
+                prefill=prefill,
+            )
+            if result is None or result.get("action") != "send":
+                return
+            url = (result.get("value") or "").strip()
+            if url:
+                self._send_url_to_peer(url)
+            return
+
         # URL input dialog
+        import re
+        import customtkinter as ctk
         dlg = ctk.CTkToplevel(self.root)
         dlg.title(T("nav_url.title"))
         dlg.resizable(False, False)
@@ -1417,13 +1817,27 @@ class Application:
         """
         peers = self.transport_mgr.get_connected_peers_with_names()
         if not peers:
-            if self.cfg.web_enabled:
+            if self._is_webview():
+                self._web_toast(T("transfer.no_peers"))
+            elif self.cfg.web_enabled:
                 self._pick_peer_phone_guide()
             else:
                 show_error(self.root, T("transfer.error"), T("transfer.no_peers"))
             return None
         if len(peers) == 1:
             return peers[0][0]
+
+        # ── Webview mode: push dialog to web UI ────────────────────
+        if self._is_webview():
+            peer_list = [{"device_id": pid, "device_name": pname} for pid, pname in peers]
+            result = self._web_dialog(
+                "pick_peer",
+                title=T("transfer.select_peer"),
+                peers=peer_list,
+            )
+            if result and result.get("action") == "select":
+                return result.get("value")
+            return None
 
         # Multiple peers — show selection dialog
         import platform as _platform
@@ -1612,12 +2026,12 @@ class Application:
             notification_mgr.show("File Transfer",
                                   T("transfer.sending_file", name=os.path.basename(file_path)))
         except FileNotFoundError:
-            show_error(self.root, "Error", f"File not found:\n{file_path}")
+            self._notify_error("Error", f"File not found:\n{file_path}")
         except PermissionError:
-            show_error(self.root, "Error",
+            self._notify_error("Error",
                        f"Permission denied reading:\n{file_path}")
         except OSError as e:
-            show_error(self.root, "Error", f"Failed to send file:\n{e}")
+            self._notify_error("Error", f"Failed to send file:\n{e}")
             logger.error("Failed to send file: %s", e)
 
     def _send_as_zip(self, paths: list[str]) -> None:
@@ -1635,7 +2049,6 @@ class Application:
             self.transport_mgr.send_to_peer(peer_id, data)
 
         import tempfile, zipfile
-        import customtkinter as _ctk
         from pathlib import Path
 
         def _safe_remove(path):
@@ -1654,16 +2067,96 @@ class Application:
             elif p.is_dir():
                 total_files += sum(1 for fp in p.rglob("*") if fp.is_file())
         if total_files == 0:
-            show_error(self.root, "Error", "No files found to send")
+            self._notify_error("Error", "No files found to send")
             return
 
-        cancel_event = threading.Event()
         names = [os.path.basename(p.rstrip(os.sep).rstrip("/")) for p in paths]
         base = names[0] if len(names) == 1 else f"files-{len(names)}"
         zip_name = f"{base}.zip"
 
-        # ── Progress dialog ────────────────────────────────────────
-        # Compute geometry before creating the window
+        # ── Webview mode: push progress dialog, work in thread ─────
+        if self._is_webview():
+            mgr = self.web_server.dialog_mgr if self.web_server else None
+            if mgr is None:
+                self._notify_error("Error", "Web server not available")
+                return
+
+            dialog_id = mgr.push(
+                "progress",
+                title=T("transfer.creating_archive"),
+                message=T("transfer.zipping", name=zip_name),
+                progress=0,
+                progress_text=T("transfer.preparing"),
+            )
+            if dialog_id is None:
+                self._notify_error("Error", "No web clients connected")
+                return
+
+            def _worker_web():
+                tmp_path = None
+                try:
+                    with tempfile.NamedTemporaryFile(suffix=".zip", delete=False) as tmp:
+                        tmp_path = Path(tmp.name)
+
+                    with zipfile.ZipFile(str(tmp_path), "w", zipfile.ZIP_DEFLATED) as zf:
+                        file_count = 0
+                        for path in paths:
+                            if mgr.is_cancelled(dialog_id):
+                                break
+                            p = Path(path)
+                            if p.is_file():
+                                zf.write(str(p), p.name)
+                                file_count += 1
+                                frac = file_count / total_files
+                                cur = file_count
+                                mgr.update_progress(dialog_id, frac,
+                                    T("transfer.zipping_progress", current=cur, total=total_files))
+                            elif p.is_dir():
+                                for fpath in sorted(p.rglob("*")):
+                                    if mgr.is_cancelled(dialog_id):
+                                        break
+                                    if fpath.is_file():
+                                        arcname = str(fpath.relative_to(p.parent))
+                                        zf.write(str(fpath), arcname)
+                                        file_count += 1
+                                        frac = file_count / total_files
+                                        cur = file_count
+                                        mgr.update_progress(dialog_id, frac,
+                                            T("transfer.zipping_progress", current=cur, total=total_files))
+
+                    if mgr.is_cancelled(dialog_id):
+                        _safe_remove(tmp_path)
+                        mgr.close(dialog_id)
+                        return
+
+                    transfer_id = self.file_transfer_mgr.send_file(
+                        str(tmp_path), _send_fn,
+                    )
+                    logger.info("Zip transfer initiated: %s (%d files)", transfer_id[:8], total_files)
+                    mgr.close(dialog_id)
+                    self._web_toast(T("transfer.sending_file", name=zip_name))
+                except FileNotFoundError:
+                    _safe_remove(tmp_path)
+                    mgr.close(dialog_id)
+                    self._notify_error("Error", "File not found")
+                except PermissionError:
+                    _safe_remove(tmp_path)
+                    mgr.close(dialog_id)
+                    self._notify_error("Error", "Permission denied")
+                except OSError as e:
+                    logger.error("Failed to zip and send: %s", e)
+                    _safe_remove(tmp_path)
+                    mgr.close(dialog_id)
+                    self._notify_error("Error", f"Failed to create archive:\n{e}")
+
+            threading.Thread(target=_worker_web, daemon=True, name="zip-sender-web").start()
+            return
+
+        # ── CTk / tk progress dialog ───────────────────────────────
+        cancel_event = threading.Event()
+
+        import customtkinter as _ctk
+
         dw, dh = 420, 170
         if self.root.winfo_viewable():
             rw, rh = self.root.winfo_width(), self.root.winfo_height()
@@ -1779,7 +2272,7 @@ class Application:
                             zf.write(str(p), p.name)
                             file_count += 1
                             frac = file_count / total_files
-                            cur = file_count  # capture for closure
+                            cur = file_count
                             self.root.after(0, lambda f=frac, c=cur: (
                                 _set_progress(f),
                                 _set_status(
@@ -1817,22 +2310,26 @@ class Application:
                 ))
             except FileNotFoundError:
                 _safe_remove(tmp_path)
-                self.root.after(0, lambda: (dlg.destroy(), show_error(
-                    self.root, "Error", "File not found")))
+                self.root.after(0, lambda: (dlg.destroy(), self._notify_error(
+                    "Error", "File not found")))
             except PermissionError:
                 _safe_remove(tmp_path)
-                self.root.after(0, lambda: (dlg.destroy(), show_error(
-                    self.root, "Error", "Permission denied")))
+                self.root.after(0, lambda: (dlg.destroy(), self._notify_error(
+                    "Error", "Permission denied")))
             except OSError as e:
                 logger.error("Failed to zip and send: %s", e)
                 _safe_remove(tmp_path)
-                self.root.after(0, lambda e=e: (dlg.destroy(), show_error(
-                    self.root, "Error", f"Failed to create archive:\n{e}")))
+                self.root.after(0, lambda e=e: (dlg.destroy(), self._notify_error(
+                    "Error", f"Failed to create archive:\n{e}")))
 
         threading.Thread(target=_worker, daemon=True, name="zip-sender").start()
 
     def open_settings(self) -> None:
-        self.root.after(0, self._create_settings_window)
+        if self.cfg.ui_backend == "webview":
+            # In webview mode, settings are built into the web UI
+            self.root.after(0, self._open_webview_dashboard)
+        else:
+            self.root.after(0, self._create_settings_window)
 
     def _create_settings_window(self) -> None:
         if self.settings_win is not None:
@@ -1859,8 +2356,168 @@ class Application:
         )
         self.settings_win.show()
 
+    # ── Web dialog helper ──────────────────────────────────────────
+
+    def _web_dialog(self, dialog_type: str, **kwargs):
+        """Show a dialog via the web UI and return the response (blocking).
+
+        Only called from background threads or when the tk event loop
+        can tolerate brief blocking (webview mode has no interactive
+        CTk windows, so blocking the main thread is safe).
+        """
+        mgr = self.web_server.dialog_mgr if self.web_server else None
+        if mgr is None:
+            return None
+        return mgr.show(dialog_type, **kwargs)
+
+    def _web_toast(self, message: str, duration: int = 3000) -> None:
+        """Push a non-blocking toast notification to the web UI."""
+        mgr = self.web_server.dialog_mgr if self.web_server else None
+        if mgr is not None:
+            mgr.toast(message, duration)
+
+    def _notify_error(self, title: str, message: str) -> None:
+        """Show an error — toast in webview mode, CTk dialog in CTk mode."""
+        if self._is_webview():
+            self._web_toast(f"{title}: {message}", 5000)
+        else:
+            show_error(self.root, title, message)
+
+    def _notify_warning(self, title: str, message: str) -> None:
+        """Show a warning — toast in webview mode, CTk dialog in CTk mode."""
+        if self._is_webview():
+            self._web_toast(f"{title}: {message}", 4000)
+        else:
+            show_warning(self.root, title, message)
+
+    def _notify_info(self, title: str, message: str) -> None:
+        """Show info — toast in webview mode, CTk dialog in CTk mode."""
+        if self._is_webview():
+            self._web_toast(f"{title}: {message}", 3000)
+        else:
+            show_info(self.root, title, message)
+
+    def _is_webview(self) -> bool:
+        return self.cfg is not None and self.cfg.ui_backend == "webview"
+
+    def _push_web(self, method_name: str, *args) -> None:
+        """Invoke a WebSocketManager broadcast helper by name.
+
+        Used to push real-time updates (devices, transfers, pairing) to the
+        web UI. No-op when the web server isn't running, and never raises.
+        """
+        if self.web_server is None:
+            return
+        try:
+            fn = getattr(self.web_server.ws_manager, method_name, None)
+            if fn is not None:
+                fn(*args)
+        except Exception:
+            logger.debug("Failed to push %s to web clients", method_name, exc_info=True)
+
+    def _get_overview_data(self) -> dict:
+        """Return aggregated dashboard overview data for the web UI."""
+        import time as _time, platform as _platform
+        connected = self.transport_mgr.get_connected_peers() if self.transport_mgr else []
+        paired = getattr(self.pairing_mgr, 'get_paired_peers', lambda: [])() if self.pairing_mgr else []
+        # Count active transfers
+        active_tx = 0
+        try:
+            tx_list = self.file_transfer_mgr.get_transfers() if self.file_transfer_mgr else []
+            active_tx = sum(1 for t in tx_list if t.get('status') not in ('completed', 'cancelled', 'failed'))
+        except Exception:
+            pass
+        # Uptime
+        uptime = int(_time.time()) - getattr(self, '_start_time', int(_time.time()))
+        return {
+            'connected_count': len(connected),
+            'paired_count': len(paired),
+            'history_count': len(self.clipboard_history.get_all()) if self.clipboard_history else 0,
+            'active_transfers': active_tx,
+            'discovering': bool(self.discovery and self.discovery.is_browsing),
+            'visible': bool(self.discovery and self.discovery.is_advertising),
+            'sync_enabled': self.cfg.sync_enabled if self.cfg else True,
+            'web_enabled': self.cfg.web_enabled if self.cfg else True,
+            'uptime_seconds': uptime,
+            'local_ip': WebServer._get_lan_ip(),
+            'port': self.cfg.web_port if self.cfg else 0,
+            'platform': _platform.platform(),
+            'network_type': 'lan',
+            'network_detail': '',
+            'recent_activity': '',
+        }
+
+    def _handle_web_device_action(self, action: str, peer_id: str, *args) -> bool:
+        """Handle device actions from the web UI."""
+        try:
+            if action == 'pair':
+                code = args[0] if args else ''
+                return self._on_pair(peer_id, code)
+            elif action == 'unpair':
+                self._on_unpair(peer_id)
+                return True
+            elif action == 'reject':
+                self.pairing_mgr.reject_pairing(peer_id)
+                self._push_web("broadcast", "pairing_resolved", {"peer_id": peer_id})
+                return True
+            elif action == 'connect':
+                return self._on_connect(peer_id)
+            elif action == 'disconnect':
+                self._on_disconnect(peer_id)
+                return True
+            elif action == 'forget':
+                self._on_remove(peer_id)
+                return True
+            elif action == 'edit_note':
+                note = args[0] if args else ''
+                self._on_edit_note(peer_id, note)
+                return True
+        except Exception as e:
+            logger.error("Device action %s failed: %s", action, e)
+        return False
+
+    def _handle_web_transfer_action(self, action: str, transfer_id: str) -> bool:
+        """Handle transfer actions from the web UI."""
+        try:
+            if not self.file_transfer_mgr:
+                return False
+            if action == 'cancel':
+                self.file_transfer_mgr.cancel_transfer(transfer_id, None)
+            elif action == 'pause':
+                self.file_transfer_mgr.pause_transfer(transfer_id, None)
+            elif action == 'resume':
+                self.file_transfer_mgr.resume_transfer(transfer_id, None)
+            else:
+                return False
+            return True
+        except Exception as e:
+            logger.error("Transfer action %s failed: %s", action, e)
+        return False
+
     def open_dashboard(self) -> None:
-        self.root.after(0, self._create_dashboard_window)
+        if self._is_webview():
+            self.root.after(0, self._open_webview_dashboard)
+        else:
+            self.root.after(0, self._create_dashboard_window)
+
+    def _open_webview_dashboard(self) -> None:
+        """Open the web UI in a browser app-mode window."""
+        # Import here to avoid circular imports
+        from internal.ui.webview_window import WebViewWindow
+
+        # If the webview window is already running, the user needs to
+        # switch to it manually (browser process tracking is best-effort).
+        if self.webview_win is not None and self.webview_win.is_running():
+            logger.debug("WebViewWindow already running")
+            return
+
+        url = (
+            f"http://127.0.0.1:{self.cfg.web_port}"
+            f"/index.html?token={self.cfg.web_token}"
+        )
+        self.webview_win = WebViewWindow(url=url, title="ClipSync", width=960, height=720)
+        self.webview_win.start()
+        logger.info("WebView dashboard opened: %s", url)
 
     def _create_dashboard_window(self) -> None:
         if self.dashboard_win is not None:
@@ -2011,6 +2668,7 @@ class Application:
             self._save_cfg_and_peers()
             if peer_id not in self.transport_mgr.get_connected_peers():
                 self._on_connect(peer_id)
+            self._push_web("broadcast", "pairing_resolved", {"peer_id": peer_id})
         return result
 
     def _on_unpair(self, peer_id: str) -> None:
@@ -2025,7 +2683,7 @@ class Application:
         logger.info("User initiated disconnect from %s", peer_id)
         self.transport_mgr.disconnect_peer(peer_id, reject=True)
 
-    def _on_connect(self, peer_id: str) -> None:
+    def _on_connect(self, peer_id: str) -> bool:
         info = None
         with self._discovered_lock:
             info = self._discovered_peers.get(peer_id)
@@ -2062,9 +2720,13 @@ class Application:
             self.transport_mgr.connect_to_peer(
                 peer_id, info["name"], info["address"], info["port"],
             )
-        else:
-            logger.warning("Cannot connect: peer %s not in discovered list",
-                          peer_id[:12])
+            # True means "connection attempt initiated" — the peer was found
+            # on the network.  The TCP/TLS handshake itself completes
+            # asynchronously and its result is reported via the transport.
+            return True
+        logger.warning("Cannot connect: peer %s not in discovered list",
+                      peer_id[:12])
+        return False
 
     def _on_remove(self, peer_id: str) -> None:
         self.pairing_mgr.remove_peer(peer_id)
@@ -2098,6 +2760,7 @@ class Application:
             "TEXT": _CT.TEXT, "HTML": _CT.HTML,
             "IMAGE": _CT.IMAGE_PNG, "IMAGE_EMF": _CT.IMAGE_EMF,
             "RTF": _CT.RTF,
+            "FILE": _CT.FILE, "URL": _CT.URL,
         }
         for key, b64_data in entry["types"].items():
             ct = _type_map.get(key)
@@ -2126,7 +2789,7 @@ class Application:
         import subprocess, sys as _sys
         resolved = os.path.abspath(file_path) if file_path else ""
         if not os.path.isfile(resolved):
-            show_error(self.root, T("ui.file_not_found_title"),
+            self._notify_error(T("ui.file_not_found_title"),
                        T("ui.file_not_found_msg", path=file_path))
             return
         try:
@@ -2138,7 +2801,7 @@ class Application:
                 subprocess.run(["xdg-open", resolved], check=True)
         except Exception as e:
             logger.error("Failed to open file %s: %s", resolved, e)
-            show_error(self.root, T("ui.open_failed_title"),
+            self._notify_error(T("ui.open_failed_title"),
                        T("ui.open_failed_msg", path=resolved))
 
     def _open_folder(self, file_path: str) -> None:
@@ -2150,11 +2813,11 @@ class Application:
         elif os.path.isdir(resolved):
             folder = resolved
         else:
-            show_error(self.root, T("ui.file_not_found_title"),
+            self._notify_error(T("ui.file_not_found_title"),
                        T("ui.file_not_found_msg", path=file_path))
             return
         if not os.path.isdir(folder):
-            show_error(self.root, T("ui.folder_not_found_title"),
+            self._notify_error(T("ui.folder_not_found_title"),
                        T("ui.folder_not_found_msg", path=folder))
             return
         try:
@@ -2169,7 +2832,7 @@ class Application:
                 subprocess.run(["xdg-open", folder], check=True)
         except Exception as e:
             logger.error("Failed to open folder %s: %s", folder, e)
-            show_error(self.root, T("ui.open_failed_title"),
+            self._notify_error(T("ui.open_failed_title"),
                        T("ui.open_failed_msg", path=folder))
 
     def _retry_file_transfer(self, file_path: str) -> None:
@@ -2207,8 +2870,7 @@ class Application:
 
     def _on_security_alert(self, peer_name: str, expected: str, received: str) -> None:
         """Show a security alert dialog when a peer's certificate changes."""
-        self.root.after(0, lambda: show_error(
-            self.root if not self.dashboard_win else self.dashboard_win._window,
+        self.root.after(0, lambda: self._notify_error(
             T("security.cert_changed_title"),
             T("security.cert_changed_message", name=peer_name),
         ))

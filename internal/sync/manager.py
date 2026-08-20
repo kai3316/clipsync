@@ -12,10 +12,11 @@ import logging
 import threading
 import time
 import uuid
-from typing import Callable, Optional
+from typing import Callable, Optional, Union
 
 from internal.clipboard.format import ClipboardContent, ContentType, SyncMessage
 from internal.clipboard.history import ClipboardHistory
+from internal.clipboard.history_db import ClipboardHistoryDB
 from internal.clipboard.platform import create_monitor, create_reader, create_writer
 
 logger = logging.getLogger(__name__)
@@ -33,8 +34,9 @@ DEDUP_RING_SIZE = 64
 class SyncManager:
     def __init__(self, device_id: str, device_name: str,
                  reader=None, writer=None, monitor=None,
-                 history: Optional[ClipboardHistory] = None,
-                 sync_debounce: float = 0.3):
+                 history: Optional[Union[ClipboardHistory, ClipboardHistoryDB]] = None,
+                 sync_debounce: float = 0.3,
+                 retry_enabled: bool = True):
         self._device_id = device_id
         self._device_name = device_name
         self._reader = reader if reader is not None else create_reader()
@@ -43,12 +45,19 @@ class SyncManager:
         self._history = history
         self._enabled = True
         self._on_send: Callable | None = None
+        self._on_history_change: Callable | None = None
         self._lock = threading.Lock()
         self._last_local_hash: str | None = None
+        self._last_content_hash: str = ""
         self._dedup_ring: list[str] = []
         self._sync_debounce = sync_debounce
         self._pending_timer: threading.Timer | None = None
         self._suppress_monitor_until: float = 0.0
+        self._retry_enabled = retry_enabled
+        # Optional predicate: source-app info -> bool (True = allowed).
+        # Set via set_app_filter(); used to drop clipboard content that
+        # originates from disallowed applications.
+        self._app_filter_fn: Callable[[dict | None], bool] | None = None
 
     @property
     def on_send(self) -> Callable | None:
@@ -58,9 +67,34 @@ class SyncManager:
     def on_send(self, callback: Callable):
         self._on_send = callback
 
+    @property
+    def on_history_change(self) -> Callable | None:
+        return self._on_history_change
+
+    @on_history_change.setter
+    def on_history_change(self, callback: Callable):
+        self._on_history_change = callback
+
     def set_enabled(self, enabled: bool):
         with self._lock:
             self._enabled = enabled
+
+    def set_app_filter(self, fn: Callable[[dict | None], bool] | None):
+        """Set a predicate that decides whether clipboard content from a
+        given source app (dict or None) should be captured.  None disables
+        the filter (everything allowed)."""
+        self._app_filter_fn = fn
+
+    def _notify_history_change(self) -> None:
+        """Invoke the optional history-change callback (e.g. to push a
+        `history_updated` event to connected web clients).  Never raises."""
+        cb = self._on_history_change
+        if cb is None:
+            return
+        try:
+            cb()
+        except Exception:
+            logger.debug("History change callback failed", exc_info=True)
 
     def reset_dedup_for_restore(self):
         """Clear dedup state so a history-restore write is not suppressed.
@@ -71,7 +105,9 @@ class SyncManager:
         """
         with self._lock:
             self._last_local_hash = None
+            self._last_content_hash = ""
             self._suppress_monitor_until = 0.0
+            self._monitor.suppress_until = 0.0
 
     def start(self):
         self._monitor.start(self._on_clipboard_change)
@@ -123,6 +159,9 @@ class SyncManager:
             # each step triggers a change event.  Suppress long enough to
             # cover the slowest writer path (~0.3 s).
             self._suppress_monitor_until = time.time() + self._sync_debounce + 0.2
+            # Also set monitor-level suppression so the monitor itself
+            # drops events during the write window.
+            self._monitor.suppress_for(self._sync_debounce + 0.2)
 
             # Cancel any pending local timer so it doesn't fire with
             # the remote content we're about to write.
@@ -136,6 +175,8 @@ class SyncManager:
                 self._history.add(content)
             except Exception:
                 logger.debug("Failed to add remote content to history", exc_info=True)
+
+        self._notify_history_change()
 
         # Write to local clipboard
         logger.info(
@@ -183,8 +224,14 @@ class SyncManager:
             if not self._enabled:
                 return
 
-        content = self._reader.read()
-        if content.is_empty():
+        # Use multi-round retry capture when enabled
+        if self._retry_enabled:
+            from internal.clipboard.retry import capture_with_retry
+            content = capture_with_retry(self._reader)
+        else:
+            content = self._reader.read()
+
+        if not content or content.is_empty():
             return
 
         # Skip accidental clipboard noise: whitespace-only or single-
@@ -194,6 +241,22 @@ class SyncManager:
             stripped = text.strip()
             if len(stripped) <= 1:
                 return
+
+        # Retrieve source-app info once (captured by the monitor before the
+        # callback fired) for both app filtering and history attribution.
+        source_app = getattr(self._monitor, 'last_source_app', None)
+
+        # App filter: drop content from disallowed source applications.
+        if self._app_filter_fn is not None and not self._app_filter_fn(source_app):
+            logger.debug("Clipboard from disallowed app filtered out: %s", source_app)
+            return
+
+        # SHA256 content-based dedup (catches duplicate captures)
+        from internal.clipboard.dedup import content_hash as sha256_content_hash
+        sha256_hash = sha256_content_hash(content)
+        if sha256_hash == self._last_content_hash:
+            return
+        self._last_content_hash = sha256_hash
 
         content_hash = content.hash_key()
 
@@ -210,9 +273,11 @@ class SyncManager:
         # Record in clipboard history — once per action
         if self._history is not None:
             try:
-                self._history.add(content)
+                self._history.add(content, source_app=source_app)
             except Exception:
                 logger.debug("Failed to add to clipboard history", exc_info=True)
+
+        self._notify_history_change()
 
         msg = SyncMessage(
             content=content,

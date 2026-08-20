@@ -1,0 +1,321 @@
+/* ═══════════════════════════════════════════════════════════════════
+   ClipSync Vue 3 Application Entry
+   Creates the Vue app, provides the reactive store, registers all
+   components, and mounts to #app.
+
+   Components are defined in separate files under components/ and
+   stored on window.__CLIPSYNC_COMPONENTS__ before this script runs.
+   ═══════════════════════════════════════════════════════════════════ */
+
+(function () {
+  'use strict';
+
+  var createApp = Vue.createApp;
+  var store = window.__CLIPSYNC_STORE__;
+
+  if (!store) {
+    console.error('[ClipSync] Store not found. Ensure store.js is loaded before app.js.');
+    return;
+  }
+
+  var app = createApp({
+    data: function () {
+      return {
+        store: store,
+        isWideLayout: window.innerWidth >= 768,
+      };
+    },
+
+    provide: function () {
+      return {
+        store: this.store,
+      };
+    },
+
+    mounted: function () {
+      var self = this;
+
+      // Track layout width for sidebar vs horizontal tabs
+      var mq = window.matchMedia('(min-width: 768px)');
+      this.isWideLayout = mq.matches;
+      mq.addEventListener('change', function (e) {
+        self.isWideLayout = e.matches;
+      });
+
+      // Prevent browser native context menu — we use our own
+      document.addEventListener('contextmenu', function (e) {
+        e.preventDefault();
+      });
+
+      // Parse server URL and token from the current page
+      var url = window.location.origin;
+      var params = new URLSearchParams(window.location.search);
+      var token = params.get('token') || '';
+
+      // Initialise the reactive store with server metadata
+      store.init(url, token, window.__CLIPSYNC_DEVICE_ID__ || '', window.__CLIPSYNC_DEVICE_NAME__ || '');
+
+      // Initialise the API client
+      ClipsyncAPI.init(url, token);
+
+      // Connect the WebSocket (convert http(s):// to ws(s):// + /ws path)
+      var wsUrl = url.replace(/^http/, 'ws') + '/ws';
+      ClipsyncWS.connect(wsUrl, token);
+
+      // Fetch initial data
+      this.loadData();
+
+      // 5-second overview refresh — only when overview tab visible, window focused, page visible
+      this._overviewTimer = setInterval(function () {
+        if (store.activeTab !== 'overview') return;
+        if (!document.hasFocus()) return;
+        if (document.hidden) return;
+        store.fetchOverview();
+      }, 5000);
+
+      // WebSocket events
+      ClipsyncWS.on('clipboard_changed', function () {
+        self.loadHistory();
+      });
+
+      ClipsyncWS.on('history_updated', function () {
+        self.loadHistory();
+      });
+
+      ClipsyncWS.on('devices_updated', function () {
+        self.loadDevices();
+      });
+
+      ClipsyncWS.on('transfer_progress', function () {
+        self.loadTransfers();
+      });
+
+      ClipsyncWS.on('transfer_complete', function () {
+        self.loadTransfers();
+        store.showToast(self.t('transfer.complete_toast'), 2000);
+      });
+
+      ClipsyncWS.on('pairing_request', function (data) {
+        if (data && data.peer_id) {
+          store.pairingRequests.push(data);
+          store.showToast(self.t('notify.pairing_request', {
+            name: data.peer_name || data.peer_id,
+            code: data.code || '',
+          }), 3000);
+        }
+      });
+
+      ClipsyncWS.on('pairing_resolved', function (data) {
+        if (!data || !data.peer_id) return;
+        store.pairingRequests = store.pairingRequests.filter(function (r) {
+          return r.peer_id !== data.peer_id;
+        });
+      });
+
+      ClipsyncWS.on('connected', function () {
+        // Refresh data on reconnect
+        self.loadData();
+      });
+
+      // Keyboard shortcuts
+      document.addEventListener('keydown', this.onKeyDown);
+
+      // System theme change listener
+      if (window.matchMedia) {
+        this._themeQuery = window.matchMedia('(prefers-color-scheme: dark)');
+        this._onThemeChange = function () {
+          if (store.theme === 'system') {
+            store.loadTheme();
+          }
+        };
+        this._themeQuery.addEventListener('change', this._onThemeChange);
+      }
+    },
+
+    beforeUnmount: function () {
+      ClipsyncWS.disconnect();
+      document.removeEventListener('keydown', this.onKeyDown);
+      if (this._overviewTimer) {
+        clearInterval(this._overviewTimer);
+      }
+      if (this._themeQuery && this._onThemeChange) {
+        this._themeQuery.removeEventListener('change', this._onThemeChange);
+      }
+    },
+
+    methods: {
+
+      /**
+       * Fetch all initial data from the server.
+       * Each call is wrapped in try/catch so one failure doesn't block others.
+       */
+      loadData: function () {
+        var self = this;
+        store.loading = store.initialLoad;
+
+        // Failsafe: force loading off after 2s no matter what
+        var failsafeTimer = setTimeout(function () {
+          if (store.loading || store.initialLoad) {
+            store.loading = false;
+            store.initialLoad = false;
+          }
+        }, 2000);
+
+        try {
+          var promises = [
+            this.loadHistory(),
+            this.loadDevices(),
+            this.loadFavorites(),
+            this.loadSettings(),
+          ];
+
+          // Also load overview
+          store.fetchOverview();
+
+          Promise.all(promises).catch(function () {
+            // One or more initial loads failed; each loader surfaces its own
+            // error via a toast, so just settle the loading state here.
+          }).finally(function () {
+            clearTimeout(failsafeTimer);
+            store.loading = false;
+            store.initialLoad = false;
+          });
+        } catch (e) {
+          clearTimeout(failsafeTimer);
+          store.loading = false;
+          store.initialLoad = false;
+        }
+      },
+
+      loadHistory: function () {
+        return ClipsyncAPI.getHistory({ limit: 30, offset: 0 }).then(function (res) {
+          store.history.splice(0, store.history.length);
+          var items = (res && res.items) ? res.items : [];
+          for (var i = 0; i < items.length; i++) {
+            store.history.push(items[i]);
+          }
+          store.historyHasMore = (res && res.total != null) ? (res.offset + items.length < res.total) : false;
+          store.historyOffset = items.length;
+          return items;
+        });
+      },
+
+      loadDevices: function () {
+        return ClipsyncAPI.getDevices().then(function (res) {
+          store.devices.splice(0, store.devices.length);
+          var devs = (res && res.devices) ? res.devices : [];
+          for (var i = 0; i < devs.length; i++) {
+            store.devices.push(devs[i]);
+          }
+          return devs;
+        });
+      },
+
+      loadFavorites: function () {
+        return ClipsyncAPI.getFavorites().then(function (res) {
+          var favs = (res && res.favorites) ? res.favorites : (res && res.items) ? res.items : [];
+          store.favorites.splice(0, store.favorites.length);
+          for (var i = 0; i < favs.length; i++) {
+            store.favorites.push(favs[i]);
+          }
+          return favs;
+        });
+      },
+
+      loadSettings: function () {
+        return ClipsyncAPI.getSettings().then(function (res) {
+          var s = (res && res.settings) || {};
+          store.settingsCache = s;
+          if (s.ui_backend) store.uiBackend = s.ui_backend;
+          if (typeof s.sound_enabled === 'boolean') store.soundEnabled = s.sound_enabled;
+          return s;
+        });
+      },
+
+      loadTransfers: function () {
+        return ClipsyncAPI.getTransfers().then(function (res) {
+          if (res && res.active) {
+            store.activeTransfers.splice(0, store.activeTransfers.length);
+            for (var i = 0; i < res.active.length; i++) {
+              store.activeTransfers.push(res.active[i]);
+            }
+          }
+          if (res && res.history) {
+            store.transferHistory.splice(0, store.transferHistory.length);
+            for (var j = 0; j < res.history.length; j++) {
+              store.transferHistory.push(res.history[j]);
+            }
+          }
+          return res;
+        });
+      },
+
+      /**
+       * Global keyboard shortcut handler.
+       */
+      onKeyDown: function (e) {
+        var store = window.__CLIPSYNC_STORE__;
+
+        // Escape – clear selection, preview, close context menu
+        if (e.key === 'Escape') {
+          store.clearSelection();
+          store.previewItem = null;
+          store.contextMenu.visible = false;
+          if (store.settingsPanelVisible) {
+            store.closeSettingsPanel();
+          }
+          return;
+        }
+
+        // Ctrl+A – select all visible items (ignore when typing in a field)
+        if ((e.ctrlKey || e.metaKey) && e.key === 'a') {
+          var tag = (e.target && e.target.tagName) || '';
+          var editable = tag === 'INPUT' || tag === 'TEXTAREA' || !!(e.target && e.target.isContentEditable);
+          if (!editable && (store.activeTab === 'history' || store.activeTab === 'favorites')) {
+            e.preventDefault();
+            var isFav = store.activeTab === 'favorites';
+            var items = isFav ? store.filteredFavorites() : store.filteredHistory();
+            var ids = [];
+            for (var i = 0; i < items.length; i++) {
+              // Favorites are keyed by `.id`; history items by `.entry_id`.
+              ids.push(isFav ? items[i].id : items[i].entry_id);
+            }
+            store.selectedIds = new Set(ids);
+          }
+          return;
+        }
+      },
+    },
+  });
+
+  // ── Register all components ───────────────────────────────────────
+
+  var components = window.__CLIPSYNC_COMPONENTS__ || {};
+  Object.keys(components).forEach(function (name) {
+    app.component(name, components[name]);
+  });
+
+  // ── Init i18n BEFORE mount so all components see ready translations ──
+
+  if (typeof ClipsyncI18n !== 'undefined' && window.__I18N_JSON__) {
+    ClipsyncI18n.init(window.__I18N_JSON__, window.__I18N_LOCALE__);
+  }
+
+  // ── Global t() helper — all components share this single function ──
+
+  app.config.globalProperties.t = function (key, fmt) {
+    if (typeof ClipsyncI18n !== 'undefined') {
+      return ClipsyncI18n.t(key, fmt);
+    }
+    return key;
+  };
+
+  // ── Mount the app ─────────────────────────────────────────────────
+
+  app.mount('#app');
+
+  // ── Expose for debugging ──────────────────────────────────────────
+
+  window.__CLIPSYNC_APP__ = app;
+
+})();

@@ -30,6 +30,8 @@ _CONTENT_TYPE_LABELS: dict[ContentType, str] = {
     ContentType.RTF: "RTF",
     ContentType.IMAGE_PNG: "IMAGE",
     ContentType.IMAGE_EMF: "IMAGE_EMF",
+    ContentType.FILE: "FILE",
+    ContentType.URL: "URL",
 }
 
 
@@ -151,13 +153,17 @@ class ClipboardHistory:
     # Public API
     # ------------------------------------------------------------------
 
-    def add(self, content: ClipboardContent) -> None:
+    def add(self, content: ClipboardContent,
+            source_app: dict | None = None) -> None:
         """Add a clipboard entry. Silently ignores empty content.
 
         Deduplicates: entries with the same primary content (text body or
         image bytes) within a short window are coalesced into one record.
         This handles multi-step clipboard writes where each format triggers
         a separate monitor event.
+
+        *source_app* is an optional dict with ``name``, ``process``, and
+        ``title`` keys from the source tracker.
         """
         if content.is_empty():
             return
@@ -187,8 +193,11 @@ class ClipboardHistory:
                     for t, data in content.types.items()
                 },
                 "source_device": content.source_device,
+                "source_app": (source_app.get("name") if source_app else ""),
+                "source_title": (source_app.get("title") if source_app else ""),
                 "pinned": False,
                 "entry_id": self._next_id,
+                "paste_count": 0,
             }
             self._next_id += 1
 
@@ -264,6 +273,48 @@ class ClipboardHistory:
         with self._lock:
             self._entries.clear()
             self._save()
+
+    def find_by_id(self, entry_id: str) -> tuple[int, dict] | tuple[None, None]:
+        """Find an entry by its ``entry_id``. Returns (index, entry) or (None, None)."""
+        with self._lock:
+            for i, entry in enumerate(self._entries):
+                if entry.get("entry_id") == entry_id:
+                    return i, dict(entry)
+            return None, None
+
+    def increment_paste(self, entry_id: str) -> int | None:
+        """Increment the paste count for an entry. Returns new count or None if not found."""
+        with self._lock:
+            for entry in self._entries:
+                if entry.get("entry_id") == entry_id:
+                    entry["paste_count"] = entry.get("paste_count", 0) + 1
+                    self._save()
+                    return entry["paste_count"]
+            return None
+
+    def batch_set_pinned(self, entry_ids: list, pinned: bool) -> int:
+        """Set pinned state on entries matching the given IDs. Returns count of entries updated."""
+        id_set = set(entry_ids)
+        count = 0
+        with self._lock:
+            for entry in self._entries:
+                if entry.get("entry_id") in id_set:
+                    entry["pinned"] = pinned
+                    count += 1
+            if count:
+                self._save()
+        return count
+
+    def batch_delete(self, entry_ids: list) -> int:
+        """Delete entries matching the given IDs. Returns count of entries deleted."""
+        id_set = set(entry_ids)
+        with self._lock:
+            before = len(self._entries)
+            self._entries = [e for e in self._entries if e.get("entry_id") not in id_set]
+            removed = before - len(self._entries)
+            if removed:
+                self._save()
+            return removed
 
     # ------------------------------------------------------------------
     # Persistence

@@ -2,6 +2,17 @@
 
 All notable changes to ClipSync are documented in this file.
 
+## [1.0.4] — 2026-08-21
+
+### Added
+- Modern web-based UI (WebView) with an in-app UI mode switch (Modern / Classic)
+- Favorites panel in the web companion
+- Per-device connect/disconnect controls
+- Clipboard de-duplication and source tracking
+- Durable SQLite-backed clipboard history database
+- Send retry for failed clipboard syncs
+- Global hotkey support
+
 ## [1.0.0] — 2026-05-03
 
 ### Added

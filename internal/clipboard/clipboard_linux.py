@@ -122,6 +122,14 @@ class _ClipboardReader(ClipboardReader):
             content.types[ContentType.IMAGE_PNG] = img
             content.image_fmt = self._image_fmt
 
+        files = self._get_files()
+        if files:
+            content.types[ContentType.FILE] = files
+
+        url_data = self._get_url()
+        if url_data:
+            content.types[ContentType.URL] = url_data
+
         logger.debug("Read %d format(s) from clipboard", len(content.types))
         return content
 
@@ -218,6 +226,64 @@ class _ClipboardReader(ClipboardReader):
         logger.debug("Failed to read image from clipboard")
         return b""
 
+    def _get_files(self) -> bytes:
+        """Read file URIs from clipboard (e.g. files copied in a file manager).
+
+        Many Linux file managers copy file paths as ``text/uri-list``.
+        Also tries ``x-special/gnome-copied-files`` for Nautilus metadata.
+        """
+        if not _can_read():
+            return b""
+        # Try text/uri-list (most file managers: Dolphin, Thunar, PCManFM)
+        tools = (
+            [(["wl-paste", "--type", "text/uri-list"], "wl-paste"),
+             (["xclip", "-selection", "clipboard", "-o", "-t", "text/uri-list"], "xclip")]
+            if _BACKEND == "wayland"
+            else [(["xclip", "-selection", "clipboard", "-o", "-t", "text/uri-list"], "xclip"),
+                  (["wl-paste", "--type", "text/uri-list"], "wl-paste")]
+        )
+        for args, _name in tools:
+            try:
+                result = subprocess.run(args, capture_output=True, timeout=2)
+                if result.returncode == 0 and result.stdout.strip():
+                    text = result.stdout.decode("utf-8", errors="replace")
+                    # Convert file:// URIs to paths
+                    paths = []
+                    for line in text.split("\n"):
+                        line = line.strip()
+                        if line and not line.startswith("#"):
+                            from urllib.parse import unquote, urlparse
+                            parsed = urlparse(line)
+                            if parsed.path:
+                                paths.append(unquote(parsed.path))
+                    if paths:
+                        return "\n".join(paths).encode("utf-8")
+            except Exception:
+                continue
+        return b""
+
+    def _get_url(self) -> bytes:
+        """Read URL from clipboard as text/uri-list (browser link copies)."""
+        if not _can_read():
+            return b""
+        tools = (
+            [(["wl-paste", "--type", "text/uri-list"], "wl-paste"),
+             (["xclip", "-selection", "clipboard", "-o", "-t", "text/uri-list"], "xclip")]
+            if _BACKEND == "wayland"
+            else [(["xclip", "-selection", "clipboard", "-o", "-t", "text/uri-list"], "xclip"),
+                  (["wl-paste", "--type", "text/uri-list"], "wl-paste")]
+        )
+        for args, _name in tools:
+            try:
+                result = subprocess.run(args, capture_output=True, timeout=2)
+                if result.returncode == 0 and result.stdout.strip():
+                    text = result.stdout.decode("utf-8", errors="replace").strip()
+                    if text and not text.startswith("file://"):
+                        return text.encode("utf-8")
+            except Exception:
+                continue
+        return b""
+
 
 class _ClipboardWriter(ClipboardWriter):
     def write(self, content: ClipboardContent):
@@ -238,6 +304,10 @@ class _ClipboardWriter(ClipboardWriter):
                 self._set_rtf(data)
             elif fmt_type == ContentType.IMAGE_PNG:
                 self._set_image(data, content.image_fmt)
+            elif fmt_type == ContentType.FILE:
+                self._set_files(data)
+            elif fmt_type == ContentType.URL:
+                self._set_url(data)
             # IMAGE_EMF is Windows-only, skip on Linux
 
     def _set_text(self, data: bytes):
@@ -320,6 +390,70 @@ class _ClipboardWriter(ClipboardWriter):
                 continue
         logger.debug("Failed to write image to clipboard")
 
+    def _set_files(self, data: bytes):
+        """Write file paths to clipboard as text/uri-list.
+
+        Expects newline-separated UTF-8 paths. Each path is converted
+        to a ``file://`` URI so file managers can paste them as files.
+        """
+        try:
+            paths = [p.strip() for p in data.decode("utf-8").split("\n") if p.strip()]
+        except Exception:
+            return
+        if not paths:
+            return
+
+        from urllib.parse import quote as urllib_quote_path
+        uri_list = "\n".join(
+            "file://" + urllib_quote_path(p) for p in paths
+        ).encode("utf-8")
+
+        if not _can_write():
+            _warn_no_clipboard()
+            return
+        tools = (
+            [(["wl-copy", "--type", "text/uri-list"], "wl-copy"),
+             (["xclip", "-selection", "clipboard", "-in", "-t", "text/uri-list"], "xclip")]
+            if _BACKEND == "wayland"
+            else [(["xclip", "-selection", "clipboard", "-in", "-t", "text/uri-list"], "xclip"),
+                  (["wl-copy", "--type", "text/uri-list"], "wl-copy")]
+        )
+        for args, _name in tools:
+            try:
+                subprocess.run(args, input=uri_list, timeout=2)
+                return
+            except Exception:
+                continue
+        logger.debug("Failed to write file URIs to clipboard")
+
+    def _set_url(self, data: bytes):
+        """Write a URL to the clipboard as text/uri-list."""
+        try:
+            url = data.decode("utf-8").strip()
+        except Exception:
+            return
+        if not url:
+            return
+
+        uri_data = url.encode("utf-8")
+        if not _can_write():
+            _warn_no_clipboard()
+            return
+        tools = (
+            [(["wl-copy", "--type", "text/uri-list"], "wl-copy"),
+             (["xclip", "-selection", "clipboard", "-in", "-t", "text/uri-list"], "xclip")]
+            if _BACKEND == "wayland"
+            else [(["xclip", "-selection", "clipboard", "-in", "-t", "text/uri-list"], "xclip"),
+                  (["wl-copy", "--type", "text/uri-list"], "wl-copy")]
+        )
+        for args, _name in tools:
+            try:
+                subprocess.run(args, input=uri_data, timeout=2)
+                return
+            except Exception:
+                continue
+        logger.debug("Failed to write URL to clipboard")
+
 
 class LinuxClipboardMonitor(ClipboardMonitor):
     """Poll-based clipboard monitor for Linux."""
@@ -348,8 +482,12 @@ class LinuxClipboardMonitor(ClipboardMonitor):
             current = self._get_content_hash()
             if current and last_hash and current != last_hash:
                 last_hash = current
+                if time.time() < self.suppress_until:
+                    continue
                 if self._callback:
                     try:
+                        # Capture source app info before the callback fires.
+                        self.last_source_app = self.get_active_app()
                         self._callback()
                     except Exception:
                         pass

@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "clipsync"
-version = "1.0.3"
+version = "1.0.4"
 description = "Cross-platform clipboard sharing over LAN"
 readme = "README.md"
 license = { text = "MIT" }
