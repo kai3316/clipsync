@@ -192,10 +192,11 @@
         };
         var actionName = labels[key] || key;
 
-        var runAction = function (method) {
+        var runAction = function (method, afterSuccess) {
           method.then(function (res) {
             if (res && res.ok) {
               self.store.showToast(self.t('device.action_success', { action: actionName }), 2000);
+              if (afterSuccess) afterSuccess();
             } else {
               self.store.showToast(self.t('device.action_failed', { action: actionName }) +
                 ((res && res.error) ? ': ' + res.error : ''), 2500);
@@ -208,16 +209,39 @@
           });
         };
 
+        // Unpair/forget remove the device from the server's peer list, so it
+        // must also be dropped from the local store — otherwise it lingers in
+        // the UI after a "success" toast.
+        var removeFromStore = function () {
+          var idx = self.store.devices.findIndex(function (d) {
+            return d.device_id === peerId;
+          });
+          if (idx !== -1) {
+            self.store.devices.splice(idx, 1);
+          }
+        };
+
         var method;
-        if (key === 'connect') { runAction(ClipsyncAPI.connectDevice(peerId)); return; }
-        if (key === 'disconnect') { runAction(ClipsyncAPI.disconnectDevice(peerId)); return; }
+        if (key === 'connect') {
+          runAction(ClipsyncAPI.connectDevice(peerId), function () {
+            self.device.connected = true;
+            self.device.paired = true;
+          });
+          return;
+        }
+        if (key === 'disconnect') {
+          runAction(ClipsyncAPI.disconnectDevice(peerId), function () {
+            self.device.connected = false;
+          });
+          return;
+        }
         if (key === 'unpair') {
           var deviceName = self.device.device_name || self.device.name || peerId;
           this.store.confirm(
             self.t('device.unpair_confirm_title'),
             self.t('device.unpair_confirm_msg', {name: deviceName})
           )
-            .then(function () { runAction(ClipsyncAPI.unpairDevice(peerId)); })
+            .then(function () { runAction(ClipsyncAPI.unpairDevice(peerId), removeFromStore); })
             .catch(function () { self.actionLoading = false; });
           return;
         }
@@ -227,7 +251,7 @@
             self.t('device.remove_confirm_title'),
             self.t('device.remove_confirm_msg', {name: deviceName})
           )
-            .then(function () { runAction(ClipsyncAPI.forgetDevice(peerId)); })
+            .then(function () { runAction(ClipsyncAPI.forgetDevice(peerId), removeFromStore); })
             .catch(function () { self.actionLoading = false; });
           return;
         }

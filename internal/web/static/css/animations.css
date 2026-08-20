@@ -221,19 +221,19 @@
   animation: fadeOut 0.15s ease-in forwards;
 }
 .animate-slide-up {
-  animation: slideUp 0.3s var(--clipsync-transition-spring) forwards;
+  animation: slideUp 0.3s cubic-bezier(0.34, 1.56, 0.64, 1) forwards;
 }
 .animate-slide-down {
   animation: slideDown 0.25s cubic-bezier(0.2, 0.8, 0.2, 1) forwards;
 }
 .animate-slide-in-right {
-  animation: slideInRight 0.35s var(--clipsync-transition-spring) forwards;
+  animation: slideInRight 0.35s cubic-bezier(0.34, 1.56, 0.64, 1) forwards;
 }
 .animate-slide-in-left {
-  animation: slideInLeft 0.35s var(--clipsync-transition-spring) forwards;
+  animation: slideInLeft 0.35s cubic-bezier(0.34, 1.56, 0.64, 1) forwards;
 }
 .animate-scale-in {
-  animation: scaleIn 0.3s var(--clipsync-transition-spring) forwards;
+  animation: scaleIn 0.3s cubic-bezier(0.34, 1.56, 0.64, 1) forwards;
 }
 
 /* Holographic entrance — for modals, panels */
@@ -306,7 +306,7 @@
 
 .stagger-item {
   opacity: 0;
-  animation: slideUp 0.35s var(--clipsync-transition-spring) forwards;
+  animation: slideUp 0.35s cubic-bezier(0.34, 1.56, 0.64, 1) forwards;
 }
 .stagger-item:nth-child(1)  { animation-delay: 0ms; }
 .stagger-item:nth-child(2)  { animation-delay: 35ms; }
@@ -328,7 +328,7 @@
 .transition-base       { transition: all var(--clipsync-transition); }
 .transition-fast       { transition: all var(--clipsync-transition-fast); }
 .transition-slow       { transition: all var(--clipsync-transition-slow); }
-.transition-spring     { transition: all var(--clipsync-transition-spring); }
+.transition-spring     { transition: all cubic-bezier(0.34, 1.56, 0.64, 1); }
 .transition-colors     {
   transition: color var(--clipsync-transition-fast),
               background-color var(--clipsync-transition-fast),

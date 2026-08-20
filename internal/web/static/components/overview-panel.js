@@ -201,7 +201,7 @@
               '</span>' +
               '<div class="overview-device-meta">' +
                 '<span class="text-subtle">{{ t(\'overview.id\') }}:</span>' +
-                '<span class="text-mono">{{ store.deviceId ? store.deviceId.substring(0,12) + \'...\' : \'\' }}</span>' +
+                '<span class="text-mono selectable">{{ store.deviceId ? store.deviceId.substring(0,12) + \'...\' : \'\' }}</span>' +
               '</div>' +
               '<div class="overview-device-meta">' +
                 '<span class="text-subtle">{{ t(\'overview.platform\') }}:</span>' +

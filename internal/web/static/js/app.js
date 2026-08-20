@@ -47,6 +47,23 @@
         e.preventDefault();
       });
 
+      // Prevent middle-click auto-scroll and stray text selection so the
+      // app never behaves like a browsable document.  Form fields stay
+      // fully editable and selectable.
+      function isEditable(el) {
+        return !!(el && el.closest && el.closest('input, textarea, [contenteditable]'));
+      }
+      document.addEventListener('mousedown', function (e) {
+        if (e.button === 1 && !isEditable(e.target)) {
+          e.preventDefault();
+        }
+      });
+      document.addEventListener('selectstart', function (e) {
+        if (!isEditable(e.target)) {
+          e.preventDefault();
+        }
+      });
+
       // Parse server URL and token from the current page
       var url = window.location.origin;
       var params = new URLSearchParams(window.location.search);
@@ -73,25 +90,24 @@
         store.fetchOverview();
       }, 5000);
 
-      // WebSocket events
-      ClipsyncWS.on('clipboard_changed', function () {
-        self.loadHistory();
-      });
-
+      // WebSocket events. Each loader is fire-and-forget, so swallow
+      // rejections to avoid unhandled promise rejections on transient
+      // network failures. (The backend never emits `clipboard_changed` —
+      // clipboard changes arrive as `history_updated`.)
       ClipsyncWS.on('history_updated', function () {
-        self.loadHistory();
+        self.loadHistory().catch(function () {});
       });
 
       ClipsyncWS.on('devices_updated', function () {
-        self.loadDevices();
+        self.loadDevices().catch(function () {});
       });
 
       ClipsyncWS.on('transfer_progress', function () {
-        self.loadTransfers();
+        self.loadTransfers().catch(function () {});
       });
 
       ClipsyncWS.on('transfer_complete', function () {
-        self.loadTransfers();
+        self.loadTransfers().catch(function () {});
         store.showToast(self.t('transfer.complete_toast'), 2000);
       });
 
@@ -173,8 +189,8 @@
           store.fetchOverview();
 
           Promise.all(promises).catch(function () {
-            // One or more initial loads failed; each loader surfaces its own
-            // error via a toast, so just settle the loading state here.
+            // Surface the failure instead of leaving an empty UI silently.
+            store.showToast(self.t('ui.load_failed'), 3000);
           }).finally(function () {
             clearTimeout(failsafeTimer);
             store.loading = false;
@@ -188,7 +204,10 @@
       },
 
       loadHistory: function () {
-        return ClipsyncAPI.getHistory({ limit: 30, offset: 0 }).then(function (res) {
+        // Honour the user's web history limit (default 30) instead of a
+        // hardcoded 30 so the setting actually affects the main panel.
+        var limit = (store.settingsCache && store.settingsCache.web_history_limit) || 30;
+        return ClipsyncAPI.getHistory({ limit: limit, offset: 0 }).then(function (res) {
           store.history.splice(0, store.history.length);
           var items = (res && res.items) ? res.items : [];
           for (var i = 0; i < items.length; i++) {

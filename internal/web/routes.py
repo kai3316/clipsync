@@ -44,7 +44,8 @@ def dispatch(method, path, query_params, body, cfg, history, sync_mgr,
              on_window_close=None,
              on_toggle_discovery=None,
              on_toggle_visibility=None,
-             on_settings_change=None):
+             on_settings_change=None,
+             get_discovered=None):
     """Route an API request to the appropriate handler, never raising.
 
     Wraps _dispatch in a safety net so an unexpected exception in a handler
@@ -58,7 +59,7 @@ def dispatch(method, path, query_params, body, cfg, history, sync_mgr,
             dialog_mgr, get_overview_data, on_device_action, on_transfer_action,
             on_get_transfers, on_speed_test_start, on_speed_test_poll,
             on_window_close, on_toggle_discovery, on_toggle_visibility,
-            on_settings_change,
+            on_settings_change, get_discovered,
         )
     except Exception:
         logger.exception("Unhandled error in API route: %s %s", method, path)
@@ -77,7 +78,8 @@ def _dispatch(method, path, query_params, body, cfg, history, sync_mgr,
               on_window_close=None,
               on_toggle_discovery=None,
               on_toggle_visibility=None,
-              on_settings_change=None):
+              on_settings_change=None,
+              get_discovered=None):
     """Route an API request to the appropriate handler.
 
     All handler functions return (data_dict, status_code).
@@ -95,7 +97,7 @@ def _dispatch(method, path, query_params, body, cfg, history, sync_mgr,
             return _json_response(data, status)
 
         elif path == "/api/devices":
-            data, status = get_devices(cfg, get_connected_ids)
+            data, status = get_devices(cfg, get_connected_ids, get_discovered)
             return _json_response(data, status)
 
         elif path == "/api/status":
@@ -392,10 +394,12 @@ def _dispatch(method, path, query_params, body, cfg, history, sync_mgr,
 
         elif path == "/api/history/clear":
             try:
+                # Capture the count BEFORE clearing so the response reflects
+                # how many items were actually removed (not the 0 remaining).
+                count = len(history.get_all()) if hasattr(history, 'get_all') else 0
                 history.clear()
             except Exception as e:
                 return _json_response({"ok": False, "error": str(e)}, 500)
-            count = len(history.get_all()) if hasattr(history, 'get_all') else 0
             return _json_response({"ok": True, "count": count})
 
         elif path == "/api/window":

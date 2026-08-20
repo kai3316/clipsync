@@ -31,7 +31,7 @@
     },
 
     template:
-      '<div v-if="show" role="status" aria-live="polite" aria-atomic="true" :class="[\'toast\', \'toast--\' + store.toastType, { \'toast--leave\': leave }]" @transitionend="onTransitionEnd">' +
+      '<div v-if="show" role="status" aria-live="polite" aria-atomic="true" :class="[\'toast\', \'toast--\' + store.toastType, { \'toast--leave\': leave }]" @animationend="onAnimationEnd">' +
         '<span class="toast__icon">{{ typeIcon }}</span>' +
         '<span class="toast__text">{{ store.toastMessage }}</span>' +
       '</div>',
@@ -52,8 +52,11 @@
         this.leave = true;
       },
 
-      onTransitionEnd: function (e) {
-        if (this.leave && e.propertyName === 'opacity') {
+      onAnimationEnd: function () {
+        // The leave animation (toastOut) drives dismissal; a plain CSS
+        // animation never fires `transitionend`, which is why the old handler
+        // was dead code and the node stayed mounted.
+        if (this.leave) {
           this.show = false;
           this.leave = false;
         }

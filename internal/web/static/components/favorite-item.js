@@ -65,7 +65,7 @@
           ref="titleInput"
           @click.stop
         />
-        <div v-if="item.content" class="favorite-item__preview text-ellipsis">{{ contentPreview }}</div>
+        <div v-if="item.content" class="favorite-item__preview">{{ contentPreview }}</div>
         <div class="history-item__meta">
           <span class="history-item__time">{{ relativeTime }}</span>
           <span v-if="item.group" class="history-item__source badge favorite-item__group-badge">{{ item.group }}</span>

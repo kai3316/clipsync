@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
   <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no,viewport-fit=cover">
   <title>ClipSync</title>
   <!-- ClipSync CSS -->
   <link rel="stylesheet" href="css/theme.css?token=__TOKEN__">
@@ -80,6 +80,7 @@
       border-right: 1px solid var(--clipsync-border);
       overflow-y: auto;
       padding: var(--clipsync-space-3) var(--clipsync-space-2);
+      padding-left: max(var(--clipsync-space-2), env(safe-area-inset-left));
     }
 
     .app-content {
@@ -259,6 +260,9 @@
       align-items: center;
       gap: var(--clipsync-space-3);
       padding: var(--clipsync-space-3) var(--clipsync-space-4);
+      padding-top: max(var(--clipsync-space-3), env(safe-area-inset-top));
+      padding-left: max(var(--clipsync-space-4), env(safe-area-inset-left));
+      padding-right: max(var(--clipsync-space-4), env(safe-area-inset-right));
       flex-shrink: 0;
       user-select: none;
       -webkit-user-select: none;
@@ -571,6 +575,10 @@
       opacity: 0.6;
     }
 
+    .device-card--online {
+      border-color: var(--clipsync-border-strong);
+    }
+
     .device-card__dot--accent {
       background: var(--clipsync-accent);
       box-shadow: 0 0 8px var(--clipsync-accent-glow);
@@ -722,6 +730,11 @@
       border: 1px solid var(--clipsync-warning-glow);
       border-radius: var(--clipsync-radius);
       animation: fadeSlideIn 0.3s ease-out;
+    }
+
+    @keyframes fadeSlideIn {
+      from { opacity: 0; transform: translateY(-8px); }
+      to   { opacity: 1; transform: translateY(0); }
     }
 
     .pairing-request-card__info {
@@ -936,6 +949,14 @@
       flex-direction: column;
       flex: 1;
       position: relative;
+    }
+
+    .history-panel__header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin-bottom: var(--clipsync-space-3);
+      flex-shrink: 0;
     }
 
     .history-panel__filters {
@@ -1473,6 +1494,9 @@
       align-items: center;
       justify-content: space-between;
       padding: var(--clipsync-space-2) var(--clipsync-space-4);
+      padding-bottom: max(var(--clipsync-space-2), env(safe-area-inset-bottom));
+      padding-left: max(var(--clipsync-space-4), env(safe-area-inset-left));
+      padding-right: max(var(--clipsync-space-4), env(safe-area-inset-right));
       font-size: 11px;
       color: var(--clipsync-fg-muted);
       background: var(--clipsync-panel);
@@ -1567,10 +1591,6 @@
       .history-panel__action-bar {
         flex-wrap: wrap;
       }
-
-      .device-card {
-        grid-template-columns: 1fr;
-      }
     }
 
     /* ── Small windows (≤480px) — single column, minimal chrome ── */
@@ -1586,6 +1606,9 @@
 
       .title-bar {
         padding: var(--clipsync-space-2);
+        padding-top: max(var(--clipsync-space-2), env(safe-area-inset-top));
+        padding-left: max(var(--clipsync-space-2), env(safe-area-inset-left));
+        padding-right: max(var(--clipsync-space-2), env(safe-area-inset-right));
       }
 
       .title-bar__title {
@@ -2658,17 +2681,6 @@
     }
 
     /* ═══════════════════════════════════════════════════════════════
-       Feature Carousel — Continuous scroll showcase
-       Adapted from QuickClipboard's "为什么选择" section.
-       Neo-futuristic: glass cards, glow borders, edge fades.
-       ═══════════════════════════════════════════════════════════════ */
-
-    @keyframes scrollLeft {
-      0%   { transform: translateX(0); }
-      100% { transform: translateX(-50%); }
-    }
-
-    /* ═══════════════════════════════════════════════════════════════
        Translate Modal Component
        Glass-neo overlay with language selectors, loading spinner,
        and copyable translation result. Neo-futuristic styling.
@@ -3150,6 +3162,14 @@
     }
 
     /* Sections */
+    .settings-section {
+      margin-bottom: var(--clipsync-space-6);
+    }
+
+    .settings-section:last-child {
+      margin-bottom: 0;
+    }
+
     .settings-section__title {
       font-size: 0.75rem;
       font-weight: 600;
@@ -3422,8 +3442,10 @@
       .settings-dialog {
         width: 100vw;
         max-width: 100vw;
-        height: 100vh;
-        max-height: 100vh;
+        /* The overlay has 20px padding + center alignment; 100vh would
+           overflow 20px above and below and clip the header/footer. */
+        height: calc(100vh - 40px);
+        max-height: calc(100vh - 40px);
         border-radius: 0;
       }
       .settings-dialog__tabs {
@@ -3469,7 +3491,9 @@
 
     .dialog-card--small {
       max-width: 360px;
-      padding: var(--clipsync-space-4);
+      /* Header/body/footer already carry their own padding; an extra padding
+         here double-stacks and makes content look sunken. */
+      padding: 0;
     }
 
     @keyframes dialogSlideUp {
@@ -3548,6 +3572,17 @@
     .dialog-btn--primary:hover {
       background: var(--clipsync-accent-hover);
       box-shadow: var(--clipsync-shadow-glow);
+    }
+
+    .dialog-btn--secondary {
+      background: var(--clipsync-panel);
+      color: var(--clipsync-fg-muted);
+      border: 1px solid var(--clipsync-border);
+    }
+
+    .dialog-btn--secondary:hover {
+      background: var(--clipsync-hover);
+      color: var(--clipsync-fg);
     }
 
     .dialog-btn:disabled {
@@ -3691,7 +3726,7 @@
     <client-dialog></client-dialog>
 
     <!-- App shell -->
-    <div class="app-shell" :class="{ 'app-shell--wide': isWideLayout }">
+    <div class="app-shell">
       <title-bar></title-bar>
 
       <!-- Wide layout: title bar + sidebar + content -->
@@ -3741,7 +3776,7 @@
   <!-- ClipSync I18n — inject translations at serve time -->
   <script src="js/i18n.js?token=__TOKEN__"></script>
   <script>window.__I18N_JSON__ = __CLIPSYNC_I18N_DATA__; window.__I18N_LOCALE__ = __CLIPSYNC_I18N_LOCALE__;</script>
-  <script>window.__CLIPSYNC_DEVICE_ID__ = "__DEVICE_ID__"; window.__CLIPSYNC_DEVICE_NAME__ = "__DEVICE_NAME__";</script>
+  <script>window.__CLIPSYNC_DEVICE_ID__ = __DEVICE_ID__; window.__CLIPSYNC_DEVICE_NAME__ = __DEVICE_NAME__;</script>
   <!-- ClipSync JS -->
   <script src="js/store.js?token=__TOKEN__"></script>
   <script src="js/api.js?token=__TOKEN__"></script>

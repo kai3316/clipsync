@@ -344,6 +344,12 @@
               self.t('history.batch_favorited', { count: res.count }),
               2000
             );
+            // Refresh favorites so the newly added items appear immediately.
+            ClipsyncAPI.getFavorites().then(function (fres) {
+              var favs = (fres && fres.favorites) ? fres.favorites : (fres && fres.items) ? fres.items : [];
+              store.favorites.splice(0, store.favorites.length);
+              for (var i = 0; i < favs.length; i++) store.favorites.push(favs[i]);
+            }).catch(function () {});
           }
         }).catch(function (e) {
           console.error('[ClipSync] Batch favorite failed:', e);
@@ -375,6 +381,9 @@
                 }
               }
               store.history = newHistory;
+              // The pagination cursor must shrink with the array, otherwise a
+              // subsequent "Load more" skips the N items just after the hole.
+              store.historyOffset = Math.max(0, store.historyOffset - selectedIds.length);
 
               store.clearSelection();
               store.showToast(self.t('history.deleted_count', { count: (res.count || selectedIds.length) }), 2000);

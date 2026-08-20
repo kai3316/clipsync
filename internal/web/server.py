@@ -513,10 +513,12 @@ class WebServer:
                  on_speed_test_start=None, on_speed_test_poll=None,
                  on_window_close=None,
                  on_toggle_discovery=None, on_toggle_visibility=None,
-                 on_settings_change=None):
+                 on_settings_change=None,
+                 get_discovered_peers=None):
         self._cfg = cfg
         self._sync_mgr = sync_mgr
         self._get_connected_ids = get_connected_ids
+        self._get_discovered_peers = get_discovered_peers
         self._on_nav_url = on_nav_url
         self._on_forward_file = on_forward_file
         self._get_overview_data = get_overview_data
@@ -550,6 +552,7 @@ class WebServer:
             history=self._history,
             sync_mgr=sync_mgr,
             get_connected_ids=get_connected_ids,
+            get_discovered=get_discovered_peers,
         )
 
         self._dialog_mgr = DialogManager()
@@ -702,6 +705,7 @@ class WebServer:
         history = self._history
         sync_mgr = self._sync_mgr
         get_connected_ids = self._get_connected_ids
+        get_discovered_peers = self._get_discovered_peers
         on_nav_url = self._on_nav_url
         on_forward_file = self._on_forward_file
         get_overview_data = self._get_overview_data
@@ -763,7 +767,7 @@ class WebServer:
                 JSON file doesn't exist yet."""
                 from internal.i18n import LOCALES
                 from internal.version import __version__
-                locale = cfg.language if cfg.language in LOCALES else "en"
+                locale = cfg.language if cfg.language in _Handler._available_locales() else "en"
 
                 # Try JSON locale file first
                 locales_dir = os.path.join(static_dir, "locales")
@@ -906,8 +910,10 @@ class WebServer:
                         ("__CLIPSYNC_I18N_DATA__", i18n_json),
                         ("__CLIPSYNC_I18N_LOCALE__", locale_code_json),
                         ("__I18N__", i18n_json),
-                        ("__DEVICE_ID__", cfg.device_id),
-                        ("__DEVICE_NAME__", cfg.device_name),
+                        # JSON-encode so a device name containing a quote or
+                        # script tag cannot break the inline <script> literals.
+                        ("__DEVICE_ID__", json.dumps(cfg.device_id, ensure_ascii=False)),
+                        ("__DEVICE_NAME__", json.dumps(cfg.device_name, ensure_ascii=False)),
                     ]
                     for placeholder, value in replacements:
                         if placeholder in content:
@@ -1053,6 +1059,7 @@ class WebServer:
                         history=history,
                         sync_mgr=sync_mgr,
                         get_connected_ids=get_connected_ids,
+                        get_discovered=get_discovered_peers,
                         on_nav_url=on_nav_url,
                         on_forward_file=on_forward_file,
                         upload_dir=upload_dir,
@@ -1142,6 +1149,7 @@ class WebServer:
                         history=history,
                         sync_mgr=sync_mgr,
                         get_connected_ids=get_connected_ids,
+                        get_discovered=get_discovered_peers,
                         on_nav_url=on_nav_url,
                         on_forward_file=on_forward_file,
                         upload_dir=upload_dir,
@@ -1192,6 +1200,7 @@ class WebServer:
                         history=history,
                         sync_mgr=sync_mgr,
                         get_connected_ids=get_connected_ids,
+                        get_discovered=get_discovered_peers,
                         on_nav_url=on_nav_url,
                         on_forward_file=on_forward_file,
                         upload_dir=upload_dir,
@@ -1241,6 +1250,7 @@ class WebServer:
                         history=history,
                         sync_mgr=sync_mgr,
                         get_connected_ids=get_connected_ids,
+                        get_discovered=get_discovered_peers,
                         on_nav_url=on_nav_url,
                         on_forward_file=on_forward_file,
                         upload_dir=upload_dir,

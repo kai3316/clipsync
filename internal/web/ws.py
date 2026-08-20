@@ -195,11 +195,12 @@ class WebSocketClient:
 class WebSocketManager:
     """Manages all connected WebSocket clients and provides broadcast."""
 
-    def __init__(self, cfg, history, sync_mgr, get_connected_ids):
+    def __init__(self, cfg, history, sync_mgr, get_connected_ids, get_discovered=None):
         self._cfg = cfg
         self._history = history
         self._sync_mgr = sync_mgr
         self._get_connected_ids = get_connected_ids
+        self._get_discovered = get_discovered
         self._clients: list[WebSocketClient] = []
         self._lock = threading.Lock()
 
@@ -305,7 +306,7 @@ class WebSocketManager:
     def broadcast_devices(self):
         """Convenience: broadcast device list to all clients."""
         from internal.web.api.devices import get_devices
-        dev_data, _ = get_devices(self._cfg, self._get_connected_ids)
+        dev_data, _ = get_devices(self._cfg, self._get_connected_ids, self._get_discovered)
         self.broadcast("devices_updated", dev_data)
 
     def broadcast_transfer_progress(self, transfer_id: str, progress: float,

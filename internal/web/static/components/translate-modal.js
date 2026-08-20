@@ -179,7 +179,7 @@
           '<div class="translate-modal__header">' +
             '<span class="translate-modal__title">' +
               '<span class="translate-modal__title-icon">&#x1F310;</span>' +
-              ' ' + t('translate.title') +
+              ' {{ t(\'translate.title\') }}' +
             '</span>' +
             '<button class="translate-modal__close" @click="close"' +
               ' :aria-label="t(\'ui.close\')">&times;</button>' +
@@ -189,14 +189,14 @@
           '<div class="translate-modal__body">' +
             '<!-- Source text -->' +
             '<div class="translate-modal__section">' +
-              '<label class="translate-modal__label">' + t('translate.original_text') + '</label>' +
+              '<label class="translate-modal__label">{{ t(\'translate.original_text\') }}</label>' +
               '<div class="translate-modal__source-text">{{ store.translateModal.text }}</div>' +
             '</div>' +
 
             '<!-- Language selectors -->' +
             '<div class="translate-modal__lang-row">' +
               '<div class="translate-modal__lang-group">' +
-                '<label class="translate-modal__label">' + t('translate.source') + '</label>' +
+                '<label class="translate-modal__label">{{ t(\'translate.source\') }}</label>' +
                 '<select v-model="sourceLang" class="translate-modal__select">' +
                   '<option' +
                     ' v-for="lang in languages"' +
@@ -207,7 +207,7 @@
               '</div>' +
               '<div class="translate-modal__lang-arrow">&#x27A1;</div>' +
               '<div class="translate-modal__lang-group">' +
-                '<label class="translate-modal__label">' + t('translate.target') + '</label>' +
+                '<label class="translate-modal__label">{{ t(\'translate.target\') }}</label>' +
                 '<select v-model="targetLang" class="translate-modal__select">' +
                   '<option' +
                     ' v-for="lang in targetLanguages"' +
@@ -225,8 +225,8 @@
               ' @click="doTranslate"' +
             '>' +
               '<span v-if="translating" class="translate-modal__spinner"></span>' +
-              '<span v-if="!translating">' + t('translate.translate') + '</span>' +
-              '<span v-if="translating">' + t('translate.translating') + '</span>' +
+              '<span v-if="!translating">{{ t(\'translate.translate\') }}</span>' +
+              '<span v-if="translating">{{ t(\'translate.translating\') }}</span>' +
             '</button>' +
 
             '<!-- Error message -->' +
@@ -238,12 +238,12 @@
             '<!-- Result area -->' +
             '<div v-if="translated" class="translate-modal__result animate-scale-in">' +
               '<div class="translate-modal__result-header">' +
-                '<span class="translate-modal__label">' + t('translate.result') + '</span>' +
+                '<span class="translate-modal__label">{{ t(\'translate.result\') }}</span>' +
                 '<button' +
                   ' class="btn-ghost translate-modal__copy-btn"' +
                   ' @click="copyTranslated"' +
                 '>' +
-                  '<span>&#x1F4CB;</span> ' + t('ui.copy') +
+                  '<span>&#x1F4CB;</span> {{ t(\'ui.copy\') }}' +
                 '</button>' +
               '</div>' +
               '<div class="translate-modal__result-text">{{ translated }}</div>' +

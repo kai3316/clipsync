@@ -544,8 +544,9 @@ var ClipsyncAPI = (function () {
        ═══════════════════════════════════════════════════════════════ */
 
     /**
-     * Send a window control command (minimize, maximize, close).
-     * @param {string} action - 'minimize' | 'maximize' | 'close'
+     * Send a window control command.
+     * Only 'close' is implemented by the backend /api/window endpoint.
+     * @param {string} action - 'close'
      * @returns {Promise<{ok: boolean}>}
      */
     windowAction: function (action) {

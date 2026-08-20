@@ -30,6 +30,7 @@ from internal.clipboard.platform import create_monitor, create_reader, create_wr
 from internal.clipboard.source_tracker import is_app_allowed
 from internal.config.config import Config, PeerInfo, _config_dir, load, save
 from internal.i18n import T, set_locale
+from internal.version import __version__
 from internal.platform.autostart import disable_autostart, enable_autostart, is_autostart_enabled
 from internal.platform.notify import notification_mgr
 from internal.protocol.codec import FILE_TRANSFER_MSG_TYPES, encode_frame, encode_message
@@ -417,8 +418,8 @@ class Application:
         self.cfg = load()
         set_locale(self.cfg.language)
         logger.info("=" * 72)
-        logger.info("  ClipSync v1.1.0 — session start  %s",
-                    time.strftime("%Y-%m-%d %H:%M:%S"))
+        logger.info("  ClipSync v%s — session start  %s",
+                    __version__, time.strftime("%Y-%m-%d %H:%M:%S"))
         logger.info("  Platform: %s  |  PID: %d", sys.platform, os.getpid())
         logger.info("=" * 72)
         logger.info("ClipSync starting...")
@@ -660,6 +661,7 @@ class Application:
             on_toggle_discovery=self._on_toggle_discovery,
             on_toggle_visibility=self._on_toggle_visibility,
             on_settings_change=self._on_web_settings_change,
+            get_discovered_peers=lambda: dict(self._discovered_peers),
         )
 
         # ── Live history push to web clients ────────────────────────
@@ -1490,7 +1492,11 @@ class Application:
 
     def _show_web_qr(self) -> None:
         """Show a popup window with the web companion QR code."""
-        self.root.after(0, self._do_show_web_qr)
+        if self._is_webview():
+            # Wait for a web client so the pushed QR dialog isn't dropped.
+            self._run_when_webview_ready(self._do_show_web_qr)
+        else:
+            self.root.after(0, self._do_show_web_qr)
 
     def _do_show_web_qr(self) -> None:
         token = self.cfg.web_token
@@ -1716,17 +1722,19 @@ class Application:
 
         # ── Webview mode: push URL input dialog to web UI ──────────
         if self._is_webview():
-            result = self._web_dialog(
-                "url_input",
-                title=T("nav_url.title"),
-                message=T("nav_url.prompt"),
-                prefill=prefill,
-            )
-            if result is None or result.get("action") != "send":
-                return
-            url = (result.get("value") or "").strip()
-            if url:
-                self._send_url_to_peer(url)
+            def _show_url_input():
+                result = self._web_dialog(
+                    "url_input",
+                    title=T("nav_url.title"),
+                    message=T("nav_url.prompt"),
+                    prefill=prefill,
+                )
+                if result is None or result.get("action") != "send":
+                    return
+                url = (result.get("value") or "").strip()
+                if url:
+                    self._send_url_to_peer(url)
+            self._run_when_webview_ready(_show_url_input)
             return
 
         # URL input dialog
@@ -2326,8 +2334,11 @@ class Application:
 
     def open_settings(self) -> None:
         if self.cfg.ui_backend == "webview":
-            # In webview mode, settings are built into the web UI
-            self.root.after(0, self._open_webview_dashboard)
+            # In webview mode, settings live in the web UI. Open the window if
+            # needed and wait for a client, then tell it to show the panel.
+            self._run_when_webview_ready(
+                lambda: self._push_web("broadcast", "open_settings", {})
+            )
         else:
             self.root.after(0, self._create_settings_window)
 
@@ -2357,6 +2368,32 @@ class Application:
         self.settings_win.show()
 
     # ── Web dialog helper ──────────────────────────────────────────
+
+    def _run_when_webview_ready(self, action) -> None:
+        """Open the webview window if needed, then run `action` once a web
+        client is connected.  Without a connected client, WebSocket pushes
+        (dialogs, open_settings) are silently dropped, so tray actions fired
+        before the window opened must wait for the client to attach.
+        """
+        def _drain() -> None:
+            if self._shutting_down:
+                return
+            try:
+                ready = (self.web_server is not None
+                         and self.web_server.ws_manager.client_count > 0)
+            except Exception:
+                ready = False
+            if ready:
+                try:
+                    action()
+                except Exception:
+                    logger.debug("pending webview action failed", exc_info=True)
+            else:
+                self.root.after(250, _drain)
+
+        if self.webview_win is None or not self.webview_win.is_running():
+            self._open_webview_dashboard()
+        self.root.after(0, _drain)
 
     def _web_dialog(self, dialog_type: str, **kwargs):
         """Show a dialog via the web UI and return the response (blocking).
@@ -2678,6 +2715,7 @@ class Application:
         if peer_id in self.cfg.peers:
             self.cfg.peers[peer_id].paired = False
         self._save_cfg_encrypted()
+        self._push_web("broadcast_devices")
 
     def _on_disconnect(self, peer_id: str) -> None:
         logger.info("User initiated disconnect from %s", peer_id)
@@ -2735,6 +2773,7 @@ class Application:
             self._discovered_peers.pop(peer_id, None)
         self.cfg.peers.pop(peer_id, None)
         self._save_cfg_encrypted()
+        self._push_web("broadcast_devices")
 
     def _on_edit_note(self, peer_id: str, note: str) -> None:
         if peer_id in self.cfg.peers:

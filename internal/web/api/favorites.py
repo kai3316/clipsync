@@ -262,11 +262,18 @@ def add_favorite(body):
 
     conn = _get_conn()
     try:
+        # Append to the end (max position + 1) so insertion order is preserved
+        # even after drag-reorder assigns explicit non-zero positions.
+        row = conn.execute(
+            "SELECT COALESCE(MAX(position), -1) FROM favorites"
+        ).fetchone()
+        position = (row[0] + 1) if row else 0
+        entry["position"] = position
         conn.execute(
             "INSERT INTO favorites (id, title, content, \"group\", position, created) "
             "VALUES (?, ?, ?, ?, ?, ?)",
             (entry["id"], entry["title"], entry["content"],
-             entry["group"], 0, entry["created"]),
+             entry["group"], position, entry["created"]),
         )
         conn.commit()
     except Exception as exc:
@@ -351,7 +358,10 @@ def update_favorite(body):
         if "group" in data:
             entry["group"] = data["group"].strip()
         if "position" in data:
-            entry["position"] = int(data["position"])
+            try:
+                entry["position"] = int(data["position"])
+            except (ValueError, TypeError):
+                return {"ok": False, "error": "position must be an integer"}, 400
         entry["updated"] = time.time()
 
         conn.execute(

@@ -21,6 +21,7 @@ html {
   -webkit-text-size-adjust: 100%;
   -moz-text-size-adjust: 100%;
   text-size-adjust: 100%;
+  overscroll-behavior: none;
 }
 
 body {
@@ -34,6 +35,14 @@ body {
   -moz-osx-font-smoothing: grayscale;
   text-rendering: optimizeLegibility;
   -webkit-tap-highlight-color: transparent;
+  /* App-like interaction defaults: no text selection outside form fields,
+     no rubber-band/pull-to-refresh, no double-tap zoom, no iOS callout. */
+  user-select: none;
+  -webkit-user-select: none;
+  -webkit-touch-callout: none;
+  cursor: default;
+  touch-action: manipulation;
+  overscroll-behavior: none;
 }
 
 /* Subtle radial accent glow in the background (like mobile companion) */
@@ -43,11 +52,34 @@ body::before {
   inset: 0;
   pointer-events: none;
   z-index: -1;
-  background: radial-gradient(
-    ellipse 80% 50% at 50% -20%,
-    var(--clipsync-accent-glow),
-    transparent
-  );
+  /* Aurora wash — three neon blooms (cyan / violet / pink) so the
+     background glows with the brand triad instead of a single color. */
+  background:
+    radial-gradient(ellipse 60% 45% at 12% -10%, var(--clipsync-violet-glow), transparent),
+    radial-gradient(ellipse 60% 45% at 88% -10%, var(--clipsync-pink-glow), transparent),
+    radial-gradient(ellipse 80% 55% at 50% -20%, var(--clipsync-accent-glow), transparent);
+}
+
+/* ── App-like interaction opt-ins ───────────────────────────────── */
+
+/* Selection is allowed only where it is meaningful: form fields,
+   contenteditable regions, and anything explicitly marked .selectable. */
+input,
+textarea,
+[contenteditable],
+.selectable {
+  user-select: text;
+  -webkit-user-select: text;
+}
+
+/* Disable native drag on media and controls — this only affects the
+   browser's built-in drag of img/a/button; HTML5 draggable attribute
+   drag-and-drop (favorites reorder) is unaffected. */
+img,
+a,
+button,
+[role="button"] {
+  -webkit-user-drag: none;
 }
 
 /* ── Scrollbar styling (WebKit) ─────────────────────────────────── */
@@ -782,26 +814,3 @@ textarea::placeholder {
   }
 }
 
-/* ── Responsive media utility ──────────────────────────────────── */
-
-/* Hide on small screens */
-.hide-mobile {
-  display: none;
-}
-
-@media (min-width: 640px) {
-  .hide-mobile {
-    display: initial;
-  }
-}
-
-/* Show only on small screens */
-.show-mobile {
-  display: initial;
-}
-
-@media (min-width: 640px) {
-  .show-mobile {
-    display: none;
-  }
-}

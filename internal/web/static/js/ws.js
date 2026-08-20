@@ -228,6 +228,11 @@ var ClipsyncWS = (function () {
       if (!store) return;
 
       switch (type) {
+        case 'open_settings':
+          // Tray/dashboard "Settings" requested the settings panel.
+          store.settingsPanelVisible = true;
+          break;
+
         case 'devices_updated':
           if (data.devices && Array.isArray(data.devices)) {
             store.devices.splice(0, store.devices.length);
@@ -262,7 +267,15 @@ var ClipsyncWS = (function () {
               // Update in place
               Object.assign(store.activeTransfers[existing], scaled);
             } else {
-              store.activeTransfers.push(scaled);
+              // Fill the fields the transfer UI expects so the entry does not
+              // render with undefined filename/size until the next refetch.
+              store.activeTransfers.push(Object.assign({
+                filename: '',
+                size: 0,
+                direction: 'outgoing',
+                speed: 0,
+                eta: 0,
+              }, scaled));
             }
           }
           break;
@@ -274,27 +287,12 @@ var ClipsyncWS = (function () {
               return t.id === data.id;
             });
             if (idx !== -1) {
+              // Mark completed so the history row shows the correct state —
+              // the active entry's status was still "transferring"/"paused".
+              store.activeTransfers[idx].status = 'completed';
               store.transferHistory.unshift(store.activeTransfers[idx]);
               store.activeTransfers.splice(idx, 1);
             }
-          }
-          break;
-
-        case 'clipboard_changed':
-          // Trigger a history refresh via API
-          if (window.ClipsyncAPI && store.token) {
-            window.ClipsyncAPI.getHistory({ limit: 30, offset: 0 }).then(function (result) {
-              if (result && result.items) {
-                store.history.splice(0, store.history.length);
-                for (var k = 0; k < result.items.length; k++) {
-                  store.history.push(result.items[k]);
-                }
-                store.historyHasMore = (result.total != null) ? (result.offset + result.items.length < result.total) : false;
-                store.historyOffset = result.items.length;
-              }
-            }).catch(function (e) {
-              console.error('[ClipsyncWS] Failed to refresh history:', e);
-            });
           }
           break;
 

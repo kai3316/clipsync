@@ -588,7 +588,7 @@
                       '<span class="settings-toggle__knob"></span>' +
                     '</button>' +
                   '</div>' +
-                  '<p class="settings-hint">{{ uiBackend === \'webview\' ? \'Modern web UI (current)\' : \'Classic desktop UI (current)\' }} — restart to apply</p>' +
+                  '<p class="settings-hint">{{ t(\'settings_window.ui_backend_hint\') }}</p>' +
                 '</section>' +
 
                 '<!-- ═══════ Network ═══════ -->' +
@@ -643,8 +643,8 @@
                   '<div class="settings-field">' +
                     '<label class="settings-field__label">{{ t(\'settings_window.web_local_url\') }}</label>' +
                     '<div class="settings-field__row">' +
-                      '<code class="settings-token">{{ webLocalUrl || webLanIp + \':\' + webPort }}</code>' +
-                      '<button class="settings-btn settings-btn--sm" @click="copyUrl">' + t('ui.copy') + '</button>' +
+                      '<code class="settings-token selectable">{{ webLocalUrl || webLanIp + \':\' + webPort }}</code>' +
+                      '<button class="settings-btn settings-btn--sm" @click="copyUrl">{{ t(\'ui.copy\') }}</button>' +
                     '</div>' +
                   '</div>' +
                   '<button class="settings-btn settings-btn--accent" @click="saveWeb" :disabled="webSaving" style="width:100%;margin-top:8px">' +
@@ -657,7 +657,7 @@
                   '<h3 class="settings-section__title">{{ t(\'settings_window.filter_title\') }}</h3>' +
                   '<p class="settings-hint" style="margin-bottom:12px">{{ t(\'settings_window.filter_desc\') }}</p>' +
                   '<div class="settings-toggle-row">' +
-                    '<span class="settings-toggle-label">Enable Content Filter</span>' +
+                    '<span class="settings-toggle-label">{{ t(\'settings_window.filter_title\') }}</span>' +
                     '<button class="settings-toggle" :class="{ \'settings-toggle--on\': filterEnabled }" @click="filterEnabled = !filterEnabled">' +
                       '<span class="settings-toggle__knob"></span>' +
                     '</button>' +
@@ -821,10 +821,10 @@
                     '</div>' +
                     '<div class="settings-about-item">' +
                       '<span class="settings-about-item__label">{{ t(\'settings.device_id\') }}</span>' +
-                      '<span class="settings-about-item__value settings-about-item__value--mono">{{ store.deviceId }}</span>' +
+                      '<span class="settings-about-item__value settings-about-item__value--mono selectable">{{ store.deviceId }}</span>' +
                     '</div>' +
                     '<div class="settings-about-item">' +
-                      '<span class="settings-about-item__label">' + t('overview.platform') + '</span>' +
+                      '<span class="settings-about-item__label">{{ t(\'overview.platform\') }}</span>' +
                       '<span class="settings-about-item__value">{{ store.overview.platform || \'—\' }}</span>' +
                     '</div>' +
                   '</div>' +

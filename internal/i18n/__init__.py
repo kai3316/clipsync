@@ -591,6 +591,7 @@ _EN: dict[str, str] = {
     "sync.active": "Sync Active",
     "sync.paused": "Sync Paused",
     "ui.loading": "Loading...",
+    "ui.load_failed": "Failed to load data",
 }
 
 _ZH: dict[str, str] = {
@@ -1144,6 +1145,7 @@ _ZH: dict[str, str] = {
     "sync.active": "同步活跃",
     "sync.paused": "同步暂停",
     "ui.loading": "加载中...",
+    "ui.load_failed": "加载数据失败",
 }
 
 LOCALES: dict[str, dict[str, str]] = {

@@ -43,7 +43,7 @@
       '<footer class="status-bar">' +
         '<div class="status-bar__left">' +
           '<span class="status-bar__device-count">{{ deviceCountText }}</span>' +
-          '<span v-if="store.overview.uptimeSeconds" style="margin-left:12px;font-size:11px;color:var(--clipsync-fg-muted)">' +
+          '<span v-if="store.overview.uptimeSeconds" class="status-bar__uptime" style="margin-left:12px;font-size:11px;color:var(--clipsync-fg-muted)">' +
             '{{ t(\'status.uptime\', { time: store.formatUptime(store.overview.uptimeSeconds) }) }}' +
           '</span>' +
         '</div>' +

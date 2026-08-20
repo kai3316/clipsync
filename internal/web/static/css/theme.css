@@ -1,90 +1,99 @@
 /* ═══════════════════════════════════════════════════════════════════
-   ClipSync Design Tokens — Refined Cyber-Future Edition
+   ClipSync Design Tokens — Aurora Cyber Edition
 
-   A polished design system with deep space aesthetics, vibrant neon
-   accents, glass morphism, and holographic effects. Think: premium
-   cyberpunk meets minimalist future — dark, glowing, immersive.
+   A single coherent identity across light and dark: deep space in the
+   dark theme, iridescent "aurora" glass in the light theme.  Both share
+   one neon triad — cyan → violet → pink — so the two modes read as the
+   same product, not two unrelated skins.
+
+   Dark  = void surfaces + vivid neon
+   Light = cool near-white surfaces + deepened neon (for contrast)
    ═══════════════════════════════════════════════════════════════════ */
 
 :root {
   /* ═══════════════════════════════════════════════════════════════
-     Surface colors — refined dark palette
+     Surface — deep space
      ═══════════════════════════════════════════════════════════════ */
-  --clipsync-bg: #080C18;              /* Void with subtle warmth */
-  --clipsync-surface: #0D1224;         /* Card surfaces */
-  --clipsync-panel: #111830;           /* Subtle panel */
-  --clipsync-panel-2: #17203C;         /* Hover / deeper panel */
-  --clipsync-elevated: #1C2848;        /* Elevated (modals) */
+  --clipsync-bg: #05060D;              /* Void */
+  --clipsync-surface: #0A0E1E;         /* Card surfaces */
+  --clipsync-panel: #0E1328;           /* Subtle panel */
+  --clipsync-panel-2: #161C38;         /* Hover / deeper panel */
+  --clipsync-elevated: #1A2140;        /* Elevated (modals) */
 
   /* ═══════════════════════════════════════════════════════════════
-     Text — refined hierarchy
+     Text — cool white hierarchy
      ═══════════════════════════════════════════════════════════════ */
-  --clipsync-fg: #E8ECF4;              /* Primary — soft cool white */
-  --clipsync-fg-muted: #8898B8;        /* Secondary — muted steel */
-  --clipsync-fg-subtle: #5A6A8A;       /* Subtle — warm periwinkle */
+  --clipsync-fg: #EAF0FA;              /* Primary */
+  --clipsync-fg-muted: #8B98B8;        /* Secondary */
+  --clipsync-fg-subtle: #5A688C;       /* Subtle */
 
   /* ═══════════════════════════════════════════════════════════════
-     Accent — Teal × Soft Violet
-     Professional, refined, approachable
+     Accent — neon cyan × violet × pink (aurora triad)
      ═══════════════════════════════════════════════════════════════ */
-  --clipsync-accent: #20B8D0;
-  --clipsync-accent-2: #8877DD;
-  --clipsync-accent-hover: #40CCE0;
-  --clipsync-accent-glow: rgba(32, 184, 208, 0.10);
-  --clipsync-accent-glow-strong: rgba(32, 184, 208, 0.20);
-  --clipsync-accent-text: #080C18;
+  --clipsync-accent: #22D3EE;          /* Neon cyan */
+  --clipsync-accent-2: #A78BFA;        /* Neon violet */
+  --clipsync-accent-3: #F472B6;        /* Neon pink */
+  --clipsync-accent-hover: #4CE0F5;
+  --clipsync-accent-glow: rgba(34, 211, 238, 0.12);
+  --clipsync-accent-glow-strong: rgba(34, 211, 238, 0.22);
+  --clipsync-accent-text: #05060D;
 
-  /* Violet variant */
-  --clipsync-violet-glow: rgba(136, 119, 221, 0.10);
-  --clipsync-violet-glow-strong: rgba(136, 119, 221, 0.20);
+  /* Aurora gradient — cyan → violet → pink, the brand sweep */
+  --clipsync-gradient: linear-gradient(135deg, #22D3EE, #A78BFA 55%, #F472B6);
+
+  /* Violet / pink ambient glows */
+  --clipsync-violet-glow: rgba(167, 139, 250, 0.12);
+  --clipsync-violet-glow-strong: rgba(167, 139, 250, 0.22);
+  --clipsync-pink-glow: rgba(244, 114, 182, 0.10);
 
   /* ═══════════════════════════════════════════════════════════════
-     Semantic colors — refined
+     Semantic colors — neon-tinted
      ═══════════════════════════════════════════════════════════════ */
-  --clipsync-success: #10B878;                           /* Calm emerald */
-  --clipsync-success-glow: rgba(16, 184, 120, 0.10);
-  --clipsync-success-bg: rgba(16, 184, 120, 0.05);
-  --clipsync-success-text: #10B878;
+  --clipsync-success: #34D399;                        /* Mint */
+  --clipsync-success-glow: rgba(52, 211, 153, 0.12);
+  --clipsync-success-bg: rgba(52, 211, 153, 0.06);
+  --clipsync-success-text: #34D399;
 
-  --clipsync-warning: #E89820;                           /* Warm amber */
-  --clipsync-warning-glow: rgba(232, 152, 32, 0.10);
-  --clipsync-warning-bg: rgba(232, 152, 32, 0.05);
-  --clipsync-warning-text: #E89820;
+  --clipsync-warning: #FBBF24;                        /* Amber */
+  --clipsync-warning-glow: rgba(251, 191, 36, 0.12);
+  --clipsync-warning-bg: rgba(251, 191, 36, 0.06);
+  --clipsync-warning-text: #FBBF24;
 
-  --clipsync-danger: #E04858;                            /* Soft crimson */
-  --clipsync-danger-glow: rgba(224, 72, 88, 0.12);
-  --clipsync-danger-bg: rgba(224, 72, 88, 0.05);
-  --clipsync-danger-text: #E04858;
+  --clipsync-danger: #FB7185;                         /* Rose */
+  --clipsync-danger-glow: rgba(251, 113, 133, 0.14);
+  --clipsync-danger-bg: rgba(251, 113, 133, 0.06);
+  --clipsync-danger-text: #FB7185;
 
-  --clipsync-info: #20B8D0;                              /* Teal (matches accent) */
-  --clipsync-info-glow: rgba(32, 184, 208, 0.10);
-  --clipsync-info-bg: rgba(32, 184, 208, 0.04);
+  --clipsync-info: #22D3EE;                           /* Cyan (matches accent) */
+  --clipsync-info-glow: rgba(34, 211, 238, 0.12);
+  --clipsync-info-bg: rgba(34, 211, 238, 0.05);
 
-  --clipsync-purple: #8877DD;
-  --clipsync-cyan: #20C0C8;
+  --clipsync-purple: #A78BFA;
+  --clipsync-cyan: #22D3EE;
+  --clipsync-pink: #F472B6;
 
   /* ═══════════════════════════════════════════════════════════════
-     Borders
+     Borders — hairlines with a hint of aurora
      ═══════════════════════════════════════════════════════════════ */
-  --clipsync-border: rgba(100, 140, 200, 0.07);
-  --clipsync-border-strong: rgba(100, 140, 200, 0.14);
-  --clipsync-border-glow: rgba(32, 184, 208, 0.14);
-  --clipsync-border-glow-strong: rgba(32, 184, 208, 0.25);
+  --clipsync-border: rgba(140, 160, 210, 0.08);
+  --clipsync-border-strong: rgba(140, 160, 210, 0.16);
+  --clipsync-border-glow: rgba(34, 211, 238, 0.16);
+  --clipsync-border-glow-strong: rgba(34, 211, 238, 0.28);
 
   /* ═══════════════════════════════════════════════════════════════
      Interactive
      ═══════════════════════════════════════════════════════════════ */
-  --clipsync-hover: rgba(100, 160, 220, 0.06);
-  --clipsync-active: rgba(32, 184, 208, 0.08);
+  --clipsync-hover: rgba(120, 170, 240, 0.07);
+  --clipsync-active: rgba(34, 211, 238, 0.10);
 
   /* ═══════════════════════════════════════════════════════════════
-     Shadows — dimensional
+     Shadows — dimensional + neon rim
      ═══════════════════════════════════════════════════════════════ */
   --clipsync-shadow-sm: 0 1px 3px rgba(0, 0, 0, 0.40);
-  --clipsync-shadow: 0 2px 10px rgba(0, 0, 0, 0.45), 0 0 1px rgba(32, 184, 208, 0.03);
-  --clipsync-shadow-md: 0 4px 24px rgba(0, 0, 0, 0.50), 0 0 4px rgba(32, 184, 208, 0.04);
-  --clipsync-shadow-lg: 0 12px 48px rgba(0, 0, 0, 0.60), 0 0 12px rgba(32, 184, 208, 0.05);
-  --clipsync-shadow-glow: 0 0 24px rgba(32, 184, 208, 0.16), 0 0 64px rgba(32, 184, 208, 0.05);
+  --clipsync-shadow: 0 2px 10px rgba(0, 0, 0, 0.45), 0 0 1px rgba(34, 211, 238, 0.04);
+  --clipsync-shadow-md: 0 4px 24px rgba(0, 0, 0, 0.50), 0 0 4px rgba(34, 211, 238, 0.05);
+  --clipsync-shadow-lg: 0 12px 48px rgba(0, 0, 0, 0.60), 0 0 12px rgba(34, 211, 238, 0.06);
+  --clipsync-shadow-glow: 0 0 24px rgba(34, 211, 238, 0.18), 0 0 64px rgba(34, 211, 238, 0.06);
 
   /* ═══════════════════════════════════════════════════════════════
      Border radii
@@ -137,33 +146,40 @@
 }
 
 /* ═══════════════════════════════════════════════════════════════════
-   Light Theme — clean, airy, refined
+   Light Theme — iridescent aurora glass
+   Cool near-white surfaces + deepened neon so the cyber identity stays,
+   but everything passes contrast on white.
    ═══════════════════════════════════════════════════════════════════ */
 
 .light,
 [data-theme="light"] {
-  /* Surfaces — cool gray with clear hierarchy */
-  --clipsync-bg: #EEF1F6;
+  /* Surfaces — cool violet-tinted whites, clear glass hierarchy */
+  --clipsync-bg: #F3F5FC;
   --clipsync-surface: #FFFFFF;
-  --clipsync-panel: #F7F8FB;
-  --clipsync-panel-2: #EDF0F5;
+  --clipsync-panel: #F7F8FD;
+  --clipsync-panel-2: #EEF1F9;
   --clipsync-elevated: #FFFFFF;
 
-  /* Text — high contrast */
-  --clipsync-fg: #0B1220;
-  --clipsync-fg-muted: #47546B;
-  --clipsync-fg-subtle: #7A8699;
+  /* Text — deep ink */
+  --clipsync-fg: #10142A;
+  --clipsync-fg-muted: #4A556E;
+  --clipsync-fg-subtle: #7B869E;
 
-  /* Accent — modern blue × indigo with white label text */
-  --clipsync-accent: #2563EB;
-  --clipsync-accent-2: #4F46E5;
-  --clipsync-accent-hover: #3B82F6;
+  /* Accent — deepened neon triad (contrast-safe on white) */
+  --clipsync-accent: #0891B2;          /* Deep cyan */
+  --clipsync-accent-2: #7C3AED;        /* Deep violet */
+  --clipsync-accent-3: #DB2777;        /* Deep pink */
+  --clipsync-accent-hover: #0EA5C4;
+  --clipsync-accent-glow: rgba(8, 145, 178, 0.12);
+  --clipsync-accent-glow-strong: rgba(8, 145, 178, 0.20);
   --clipsync-accent-text: #FFFFFF;
-  --clipsync-accent-glow: rgba(37, 99, 235, 0.10);
-  --clipsync-accent-glow-strong: rgba(37, 99, 235, 0.18);
 
-  --clipsync-violet-glow: rgba(79, 70, 229, 0.10);
-  --clipsync-violet-glow-strong: rgba(79, 70, 229, 0.18);
+  /* Aurora gradient — deep enough to carry white text */
+  --clipsync-gradient: linear-gradient(135deg, #0891B2, #7C3AED 55%, #DB2777);
+
+  --clipsync-violet-glow: rgba(124, 58, 237, 0.12);
+  --clipsync-violet-glow-strong: rgba(124, 58, 237, 0.20);
+  --clipsync-pink-glow: rgba(219, 39, 119, 0.10);
 
   /* Semantic — deep enough to pass contrast on white */
   --clipsync-success: #059669;
@@ -174,31 +190,32 @@
   --clipsync-warning-text: #B45309;
   --clipsync-warning-bg: rgba(180, 83, 9, 0.08);
   --clipsync-warning-glow: rgba(180, 83, 9, 0.16);
-  --clipsync-danger: #DC2626;
-  --clipsync-danger-text: #DC2626;
-  --clipsync-danger-bg: rgba(220, 38, 38, 0.08);
-  --clipsync-danger-glow: rgba(220, 38, 38, 0.16);
-  --clipsync-info: #2563EB;
-  --clipsync-info-bg: rgba(37, 99, 235, 0.08);
-  --clipsync-info-glow: rgba(37, 99, 235, 0.14);
+  --clipsync-danger: #E11D48;
+  --clipsync-danger-text: #BE123C;
+  --clipsync-danger-bg: rgba(225, 29, 72, 0.08);
+  --clipsync-danger-glow: rgba(225, 29, 72, 0.16);
+  --clipsync-info: #0891B2;
+  --clipsync-info-bg: rgba(8, 145, 178, 0.08);
+  --clipsync-info-glow: rgba(8, 145, 178, 0.14);
 
   --clipsync-purple: #7C3AED;
   --clipsync-cyan: #0891B2;
+  --clipsync-pink: #DB2777;
 
   /* Borders */
-  --clipsync-border: rgba(11, 18, 32, 0.08);
-  --clipsync-border-strong: rgba(11, 18, 32, 0.14);
-  --clipsync-border-glow: rgba(37, 99, 235, 0.18);
-  --clipsync-border-glow-strong: rgba(37, 99, 235, 0.30);
+  --clipsync-border: rgba(16, 20, 42, 0.08);
+  --clipsync-border-strong: rgba(16, 20, 42, 0.14);
+  --clipsync-border-glow: rgba(8, 145, 178, 0.18);
+  --clipsync-border-glow-strong: rgba(8, 145, 178, 0.30);
 
   /* Interactive */
-  --clipsync-hover: rgba(11, 18, 32, 0.04);
-  --clipsync-active: rgba(37, 99, 235, 0.08);
+  --clipsync-hover: rgba(16, 20, 42, 0.04);
+  --clipsync-active: rgba(8, 145, 178, 0.08);
 
   /* Shadows — soft, diffuse */
   --clipsync-shadow-sm: 0 1px 2px rgba(15, 23, 42, 0.06);
-  --clipsync-shadow: 0 1px 3px rgba(15, 23, 42, 0.06), 0 0 1px rgba(37, 99, 235, 0.04);
-  --clipsync-shadow-md: 0 4px 12px rgba(15, 23, 42, 0.08), 0 0 2px rgba(37, 99, 235, 0.05);
+  --clipsync-shadow: 0 1px 3px rgba(15, 23, 42, 0.06), 0 0 1px rgba(8, 145, 178, 0.05);
+  --clipsync-shadow-md: 0 4px 12px rgba(15, 23, 42, 0.08), 0 0 2px rgba(8, 145, 178, 0.06);
   --clipsync-shadow-lg: 0 8px 30px rgba(15, 23, 42, 0.12);
-  --clipsync-shadow-glow: 0 0 18px rgba(37, 99, 235, 0.16);
+  --clipsync-shadow-glow: 0 0 18px rgba(8, 145, 178, 0.16);
 }

@@ -182,6 +182,7 @@ def update_settings(body, cfg, on_settings_change=None):
         logger.debug("Config persisted after settings update")
     except Exception as e:
         logger.error("Failed to persist settings: %s", e)
+        return {"ok": False, "error": "failed to persist settings"}, 500
 
     result = None
     if on_settings_change is not None:

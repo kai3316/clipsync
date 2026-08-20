@@ -40,7 +40,7 @@
         <span>{{ typeIcon }}</span>
       </div>
       <div class="history-item__body">
-        <div class="history-item__text text-ellipsis">{{ item.text_preview || t('history.empty_preview') }}</div>
+        <div class="history-item__text">{{ item.text_preview || t('history.empty_preview') }}</div>
         <div class="history-item__meta">
           <span class="history-item__time">{{ relativeTime }}</span>
           <span v-if="item.source_app" class="history-item__source badge badge--source-app">{{ item.source_app }}</span>
