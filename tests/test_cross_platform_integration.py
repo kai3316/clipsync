@@ -29,6 +29,7 @@ class MockClipboardMonitor:
     def __init__(self):
         self._callback = None
         self._running = False
+        self.suppress_until = 0.0
 
     def start(self, callback):
         self._callback = callback
@@ -38,8 +39,12 @@ class MockClipboardMonitor:
         self._running = False
         self._callback = None
 
+    def suppress_for(self, duration_seconds):
+        """Mirror the real monitor: drop callbacks until the window passes."""
+        self.suppress_until = time.time() + duration_seconds
+
     def fire(self):
-        if self._callback:
+        if self._callback and time.time() >= self.suppress_until:
             self._callback()
 
 

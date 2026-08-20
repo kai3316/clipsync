@@ -762,21 +762,24 @@ class WebServer:
                 locale file.  Falls back to the Python i18n dicts if the
                 JSON file doesn't exist yet."""
                 from internal.i18n import LOCALES
+                from internal.version import __version__
                 locale = cfg.language if cfg.language in LOCALES else "en"
 
                 # Try JSON locale file first
                 locales_dir = os.path.join(static_dir, "locales")
                 json_path = os.path.join(locales_dir, f"{locale}.json")
                 try:
-                    if os.path.isfile(json_path):
-                        with open(json_path, "r", encoding="utf-8") as f:
-                            translations = json.load(f)
-                        return json.dumps(translations, ensure_ascii=False)
+                    if not os.path.isfile(json_path):
+                        raise OSError("no locale JSON file")
+                    with open(json_path, "r", encoding="utf-8") as f:
+                        translations = json.load(f)
                 except (OSError, json.JSONDecodeError, UnicodeDecodeError):
                     logger.warning("Failed to load locale JSON: %s, falling back to Python dict", json_path)
+                    translations = dict(LOCALES.get(locale, LOCALES.get("en", {})))
 
-                # Fallback to Python i18n dicts
-                translations = LOCALES.get(locale, LOCALES.get("en", {}))
+                # The version lives in exactly one place (internal/version.py);
+                # inject it here so the web UI never carries its own copy.
+                translations["settings_window.about_version"] = "v" + __version__
                 return json.dumps(translations, ensure_ascii=False)
 
             def _send_json(inner_self, data, status=200):

@@ -13,6 +13,9 @@ All notable changes to ClipSync are documented in this file.
 - Send retry for failed clipboard syncs
 - Global hotkey support
 
+### Changed
+- Version now has a single source of truth (internal/version.py) — pyproject, native About dialog, and web About panel all derive from it
+
 ## [1.0.0] — 2026-05-03
 
 ### Added

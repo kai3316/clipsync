@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "clipsync"
-version = "1.0.4"
+dynamic = ["version"]
 description = "Cross-platform clipboard sharing over LAN"
 readme = "README.md"
 license = { text = "MIT" }
@@ -41,6 +41,15 @@ dev = [
 
 [project.scripts]
 clipsync = "src.main:main"
+
+[tool.setuptools]
+# Explicit discovery: the top-level `internal/` package and the `src/` package.
+# Auto-discovery previously mis-detected a "src-layout" because of `src/main.py`
+# and dropped `internal` from the wheel entirely.
+packages = {find = {include = ["internal*", "src*"]}}
+
+[tool.setuptools.dynamic]
+version = {attr = "internal.version.__version__"}
 
 [tool.ruff]
 line-length = 100

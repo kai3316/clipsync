@@ -8,6 +8,8 @@ fallback (used when a key is missing in the active locale).
 import logging
 from typing import Any
 
+from internal.version import __version__
+
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
@@ -382,7 +384,7 @@ _EN: dict[str, str] = {
     "settings_window.val_web_history_limit": "History limit must be 1–20",
     "settings_window.port_invalid": "Port must be 1024–65535.",
     "settings_window.logs_title": "Application Logs",
-    "settings_window.about_version": "v1.0.4",
+    "settings_window.about_version": f"v{__version__}",
     "settings_window.about_desc": "Cross-platform clipboard sharing\nbetween Windows, macOS, and Linux.",
     "settings_window.about_features": [
         "Automatic peer discovery on LAN (mDNS/Bonjour)",
@@ -935,7 +937,7 @@ _ZH: dict[str, str] = {
     "settings_window.val_web_history_limit": "历史条数必须在 1–20 范围内",
     "settings_window.port_invalid": "端口必须在 1024–65535 范围内。",
     "settings_window.logs_title": "应用程序日志",
-    "settings_window.about_version": "v1.0.4",
+    "settings_window.about_version": f"v{__version__}",
     "settings_window.about_desc": "跨平台剪贴板共享\n支持 Windows、macOS 和 Linux。",
     "settings_window.about_features": [
         "局域网自动发现对端 (mDNS/Bonjour)",
