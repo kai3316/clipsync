@@ -2,6 +2,33 @@
 
 All notable changes to ClipSync are documented in this file.
 
+## [1.0.9] — 2026-08-21
+
+### Diagnostics
+- New standalone **Diagnostics** page in the left sidebar (Overview / History / Devices & File Transfer / Favorites / Diagnostics): one-click scan that reveals each check one by one (✓/✗) with a translated detail + actionable guidance line, then a final summary. Moved out of Settings → Advanced; the overview network-health chip now jumps straight to the page
+- Checks cover the TCP server port, mDNS discovery, network advertising, web companion, network classification, firewall and permissions (macOS Local Network), plus Linux-specific checks (ufw/firewalld, avahi-daemon, xclip/wl-paste)
+- The firewall and permissions checks carry a **Request permission / open settings** button: macOS opens the relevant System Settings pane; Windows re-applies the firewall allow rule or opens the firewall settings page
+- Fixed the button previously failing with "Failed to open permission settings" (the `/api/diagnostics/request` backend route was missing)
+- Diagnostics detail and guidance are now fully localized in English and Chinese, falling back to the server text when no translation exists
+
+### Web Companion & onboarding
+- PWA support: the web companion is now installable (app manifest, apple-touch-icon, token-safe service worker with offline app-shell caching)
+- First-run onboarding wizard: name this device → pair a device → open it on your phone (skippable, persisted)
+
+### Settings
+- New **Logs** tab: view the log tail, refresh and export
+- **Security** tab now lists trusted devices / certificate fingerprints
+- Per-event notification toggles (device connect, transfer, pairing, sync)
+- **Update download** button that fetches the platform release artifact into ~/Downloads
+- i18n pass: replaced the remaining hardcoded user-facing strings across the frontend and backend dialogs
+
+### UI
+- Tray menu follows the app language and was redesigned (emoji icons, cleaner grouping)
+- Title bar gained a **Refresh** button that reloads all data in one click
+- History panel: filter chips, item count, sort and clear-all merged into a single combined sticky bar
+- Modern app icon; toast text wrapping fixed; high-count badge / history layouts hardened
+- Fixed square-corner glass inconsistencies, stale-data refreshes after idle, and a Settings → Advanced crash; unified remaining icons
+
 ## [1.0.8] — 2026-08-21
 
 ### Settings
