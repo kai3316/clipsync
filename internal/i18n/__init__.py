@@ -146,6 +146,7 @@ _EN: dict[str, str] = {
     "notify.oversize": "Clipboard content too large to sync: %.1f MB (limit: %d MB)",
 
     # UI labels
+    "ui.app_name": "ClipSync",
     "ui.app_title": "\U0001F4CB  ClipSync",
     "ui.theme_dark": "☾  Dark",
     "ui.theme_light": "☀  Light",
@@ -437,6 +438,7 @@ _EN: dict[str, str] = {
     "settings_window.no_logs": "No log entries yet.",
     # Remote access
     "web.page_title": "ClipSync Web",
+    "web.app_name": "ClipSync",
     "web.this_device": "This Device",
     "web.all_devices": "All Devices",
     "web.push_button": "Push to Desktop",
@@ -774,7 +776,8 @@ _ZH: dict[str, str] = {
     "notify.sync_skipped": "已跳过同步",
     "notify.oversize": "剪贴板内容过大无法同步：%.1f MB（上限：%d MB）",
 
-    "ui.app_title": "\U0001F4CB  ClipSync",
+    "ui.app_name": "剪贴同步",
+    "ui.app_title": "\U0001F4CB  剪贴同步",
     "ui.theme_dark": "☾  深色",
     "ui.theme_light": "☀  浅色",
     "ui.overview": "概览",
@@ -1050,6 +1053,7 @@ _ZH: dict[str, str] = {
     "settings_window.no_logs": "暂无日志条目。",
     # Remote access
     "web.page_title": "ClipSync Web",
+    "web.app_name": "剪贴同步",
     "web.this_device": "本机",
     "web.all_devices": "所有设备",
     "web.push_button": "推送到电脑",

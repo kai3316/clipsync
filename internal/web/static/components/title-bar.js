@@ -57,7 +57,7 @@
               '<line x1="9" y1="14" x2="15" y2="14"/>' +
             '</svg>' +
           '</span>' +
-          '<h1 class="title-bar__title">ClipSync</h1>' +
+          '<h1 class="title-bar__title">{{ t(\'web.app_name\') }}</h1>' +
           '<span style="font-size:11px;color:var(--clipsync-fg-muted);margin-left:8px">· {{ store.deviceName }}</span>' +
         '</div>' +
         '<div class="title-bar__search" style="-webkit-app-region:no-drag">' +

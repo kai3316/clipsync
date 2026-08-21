@@ -10,9 +10,9 @@
 <h1 align="center">ClipSync</h1>
 
 <p align="center">
-  <strong>Copy on one device. Paste on another. Instantly.</strong>
+  <strong>一台设备复制，另一台即刻粘贴。</strong>
   <br>
-  Cross-platform &middot; LAN &middot; TLS 1.3 + AES-256-GCM &middot; Zero config
+  全平台 &middot; 局域网 &middot; TLS 1.3 + AES-256-GCM &middot; 零配置
 </p>
 
 <p align="center">
@@ -24,129 +24,129 @@
 
 ---
 
-## Why ClipSync?
+## 为什么选择 ClipSync？
 
-You're working on your desktop and need to paste something on your laptop. Or you copied text on your phone and want it on your PC. Existing solutions either go through the cloud (privacy risk, requires internet) or only sync plain text (losing formatting and images).
+你在台式机上复制了一段内容，想粘贴到笔记本上。或者你在手机上复制了文字，想传到电脑上。市面上的方案要么经过云端（隐私风险、依赖互联网），要么只支持纯文本（丢失格式和图片）。
 
-ClipSync syncs your clipboard across devices **directly over your local network** — no account, no cloud, no internet required. It preserves all clipboard formats (text, HTML, RTF, images), transfers files peer-to-peer with encryption, and even serves a QR code so your phone can join via a web browser with no app install.
-
----
-
-## Quick Start
-
-1. [Download](https://github.com/kai3316/clipsync/releases/latest) and run — portable, no install needed
-2. Run ClipSync on another device on the **same LAN**
-3. Confirm the 8-digit pairing code that appears on both screens
-4. Copy on one device → paste on the other. Done.
-
-> **macOS:** If Gatekeeper blocks the app, run `xattr -cr clipsync.app` then right-click → Open.
+ClipSync 通过**局域网直连**同步剪贴板 — 无需账号、无需云端、无需互联网。支持所有剪贴板格式（文本、HTML、RTF、图片），加密点对点传输文件，甚至能生成二维码让手机浏览器直接接入，无需安装任何 App。
 
 ---
 
-## How It Works
+## 快速开始
+
+1. [下载](https://github.com/kai3316/clipsync/releases/latest) 对应平台的应用，直接运行，无需安装
+2. 在**同一局域网**的另一台设备上也运行 ClipSync
+3. 确认两端显示的 8 位配对码一致
+4. 一台复制，另一台粘贴。就这么简单。
+
+> **macOS：** 如遇 Gatekeeper 拦截，运行 `xattr -cr clipsync.app`，然后右键 → 打开。
+
+---
+
+## 工作原理
 
 ```
   +------------+                             +------------+
-  |  Device A  |  --- mDNS discover -------> |  Device B  |
-  |            |  <-- TLS 1.3 handshake ---  |            |
-  |  clipboard |  --- clipboard content ---> |  clipboard |
-  |            |  <-- AES-256-GCM frame ---  |            |
+  |   设备 A   |  --- mDNS 发现 -----------> |   设备 B   |
+  |            |  <-- TLS 1.3 握手 --------  |            |
+  |   剪贴板   |  --- 剪贴板内容 ----------> |   剪贴板   |
+  |            |  <-- AES-256-GCM 帧 ------  |            |
   +------------+                             +------------+
                                                    |
-                                              QR code scan
+                                              扫码连接
                                                    |
                                              +------------+
-                                             |   Phone    |
+                                             |   手机     |
                                              |   (PWA)    |
                                              +------------+
 ```
 
-1. **Discovery** — Devices find each other via mDNS/Zeroconf on the LAN. No IP configuration needed.
-2. **Pairing** — Trust-on-first-use with 8-digit code verification. Ed25519 certificate pinning thereafter.
-3. **Sync** — Clipboard changes are broadcast over TLS 1.3. Each frame is AES-256-GCM encrypted. A per-peer dedup ring prevents echo loops.
-4. **Phone access** — Enable the Web Companion to get a QR code. Your phone scans it and gets a PWA for viewing history, pushing text, and transferring files.
+1. **发现设备** — 通过 mDNS/Zeroconf 自动发现局域网内的其他设备，无需手动配置 IP
+2. **配对验证** — 首次连接用 8 位验证码确认身份，之后 Ed25519 证书锁定自动信任
+3. **同步内容** — 剪贴板变化通过 TLS 1.3 广播。每帧数据独立 AES-256-GCM 加密。去重环防回声循环
+4. **手机接入** — 开启 Web 伴侣后生成二维码，手机扫码即得 PWA，可查看历史、推送文字、传输文件
 
 ---
 
-## Features
+## 功能特性
 
-### Clipboard Sync
+### 剪贴板同步
 
-| Format | Supported |
+| 格式 | 支持 |
 |--------|-----------|
-| Plain text (UTF-8, CF_TEXT) | ✅ |
-| Unicode text (CF_UNICODETEXT) | ✅ |
+| 纯文本 (UTF-8, CF_TEXT) | ✅ |
+| Unicode 文本 (CF_UNICODETEXT) | ✅ |
 | HTML (CF_HTML / `text/html`) | ✅ |
-| RTF (CF_RTF / `text/rtf`) | ✅ |
-| Images (PNG, BMP, TIFF, DIB) | ✅ |
-| EMF (Windows metafile) | ✅ |
+| RTF 富文本 (CF_RTF / `text/rtf`) | ✅ |
+| 图片 (PNG, BMP, TIFF, DIB) | ✅ |
+| EMF (Windows 图元文件) | ✅ |
 
-Clips are deduplicated by content hash, not timestamp. Rapid alternating copies between devices won't cause echo loops.
+按内容哈希去重而非时间戳。设备间快速交替复制不会产生回声循环。
 
-### File Transfer
+### 文件传输
 
-- **Peer-to-peer** — files go directly between devices, not through a relay
-- **Chunked protocol** — large files split into 1 MB chunks with ACK-based retransmit
-- **Folder support** — drag a folder to send it as a zip
-- **Pause/Resume** — pause mid-transfer and resume from where you left off
-- **Progress tracking** — per-file progress bars with speed readout (Mbps)
-- **Speed test** — measure raw LAN throughput between paired devices
+- **点对点直传** — 文件在设备间直传，不经过中继服务器
+- **分块传输** — 大文件拆分为 1 MB 分块，支持 ACK 确认重传
+- **文件夹支持** — 拖入文件夹自动打包为 zip 发送
+- **暂停/续传** — 中途暂停后可从断点续传
+- **进度追踪** — 逐文件进度条，显示实时速率 (Mbps)
+- **速度测试** — 测试已配对设备间的局域网原始吞吐量
 
-### Web Companion
+### Web 伴侣
 
-- Built-in HTTP server accessible from any device on the LAN
-- QR code to connect — scan with phone camera, no app install needed
-- **PWA** — "Add to Home Screen" on iOS/Android for a native feel
-- View clipboard history, push text to desktop clipboard
-- Upload and download files between phone and desktop
-- Token-based authentication (auto-generated or custom)
+- 内置 HTTP 服务器，局域网内任意设备可访问
+- 二维码扫码连接 — 手机扫一扫即可，无需安装 App
+- **PWA 支持** — iOS/Android 上"添加到主屏幕"获得原生体验
+- 查看剪贴板历史，推送文字到电脑剪贴板
+- 手机与电脑间上传下载文件
+- Token 认证（自动生成或自定义）
 
-### Security
+### 安全机制
 
-- **TLS 1.3** — all transport encrypted with per-device Ed25519 certificates
-- **AES-256-GCM** — application-layer encryption per frame
-- **TOFU pairing** — trust-on-first-use with 8-digit code verification, certificate pinned thereafter
-- **At-rest encryption** — private keys and clipboard history encrypted on disk (AES-256-GCM + PBKDF2)
-- **Optional pre-shared password** — extra key entropy via PBKDF2 with 600K iterations
-- **Certificate change detection** — alerts if a paired device's identity changes (MITM protection)
+- **TLS 1.3** — 所有传输层加密，每设备独立 Ed25519 证书
+- **AES-256-GCM** — 应用层逐帧加密
+- **TOFU 配对** — 首次信任验证，之后证书锁定防止中间人攻击
+- **落盘加密** — 私钥和剪贴板历史加密存储 (AES-256-GCM + PBKDF2)
+- **可选预共享密码** — PBKDF2（60 万次迭代）为密钥增加额外熵值
+- **证书变更检测** — 已配对设备身份变化时告警（防中间人攻击）
 
-### Content Filtering
+### 内容过滤
 
-Regex-based filters to warn or block before sending sensitive data:
-- Credit card numbers
-- SSN / social security numbers
-- API keys and tokens
-- Email addresses
-- Phone numbers
-- Custom patterns
+基于正则的敏感内容过滤，发送前警告或阻止：
+- 信用卡号
+- 身份证号 / 社保号
+- API 密钥和 Token
+- 邮箱地址
+- 手机号码
+- 自定义正则
 
-### System Tray
+### 系统托盘
 
-Runs quietly in the system tray with:
-- Sync on/off toggle
-- Connected device status (per device)
-- Quick access to dashboard and settings
-- Web Companion QR code popup
-- Notifications for pairing requests and completed transfers
+后台静默运行，右键菜单提供：
+- 同步开关
+- 已连接设备状态（逐设备显示）
+- 快速打开主面板和设置
+- Web 伴侣二维码弹窗
+- 配对请求和传输完成通知
 
 ---
 
-## Download
+## 下载
 
-| Platform | File | Notes |
+| 平台 | 文件 | 备注 |
 |----------|------|-------|
-| Windows 10/11 | `clipsync.exe` | Portable, no admin needed |
-| macOS 12+ | `clipsync.app` (zip) | Universal binary (Intel + Apple Silicon) |
-| Linux (X11/Wayland) | `clipsync` (tar.gz x86_64) | Requires `xclip` or `wl-clipboard` |
-| Linux (ARM64) | `clipsync` (tar.gz arm64) | Raspberry Pi 4/5, etc. |
+| Windows 10/11 | `clipsync.exe` | 便携版，无需管理员权限 |
+| macOS 12+ | `clipsync.app` (zip) | 通用二进制 (Intel + Apple Silicon) |
+| Linux (X11/Wayland) | `clipsync` (tar.gz x86_64) | 需要 `xclip` 或 `wl-clipboard` |
+| Linux (ARM64) | `clipsync` (tar.gz arm64) | 树莓派 4/5 等 |
 
-[Latest release](https://github.com/kai3316/clipsync/releases/latest) &nbsp;|&nbsp; [Changelog](CHANGELOG.md)
+[最新版本](https://github.com/kai3316/clipsync/releases/latest) &nbsp;|&nbsp; [更新日志](CHANGELOG.md)
 
 ---
 
-## Install from Source
+## 从源码运行
 
-**Requirements:** Python 3.12+
+**环境要求：** Python 3.12+
 
 ```bash
 git clone https://github.com/kai3316/clipsync.git
@@ -158,131 +158,131 @@ pip install -r requirements.txt
 python src/main.py
 ```
 
-**Linux** — install the clipboard backend for your display server:
+**Linux 用户先安装剪贴板工具：**
 
 ```bash
 sudo apt install xclip          # X11
 sudo apt install wl-clipboard   # Wayland
 ```
 
-**Windows** — clipboard I/O uses the native Win32 API. No extra dependencies.
+**Windows** — 剪贴板 I/O 使用原生 Win32 API，无需额外依赖。
 
 ---
 
-## Build
+## 构建
 
 ```bash
 pip install pyinstaller
 pyinstaller clipsync.spec
 ```
 
-Output in `dist/`: `clipsync.exe` (Windows), `clipsync.app` (macOS), or `clipsync` (Linux).
+构建结果在 `dist/`：`clipsync.exe`（Windows）、`clipsync.app`（macOS）、`clipsync`（Linux）。
 
 ---
 
-## Troubleshooting
+## 常见问题
 
-| Problem | Likely Cause | Fix |
+| 问题 | 可能原因 | 解决方法 |
 |---------|-------------|-----|
-| Devices not discovering | Different subnet or AP client isolation | Ensure all devices are on the same LAN segment. Check router for "AP isolation" or "client isolation" settings. |
-| Devices not discovering | Firewall blocking mDNS | Allow UDP port 5353 and TCP port 19990 (default) in firewall. |
-| Sync not working | Peer not connected | Check Devices panel — peer should show "Connected". If "Paired" only, check firewall on both sides. |
-| Sync not working | Sync toggle off | Click the sync icon in the system tray or toggle in dashboard. |
-| Certificate change alert | Peer re-installed or identity reset | If you recently reset the peer, this is expected. Otherwise, Forget the peer and re-pair. |
-| VPN causes wrong IP | VPN interface prioritized | Fixed in v1.0.1 — LAN IPs (192.168.x.x) now take priority over VPN interfaces. |
-| Port conflict | Another app using port 19990 | Change the TCP port in Settings → Network. |
+| 设备互相发现不了 | 不同子网或 AP 客户端隔离 | 确保所有设备在同一网段。检查路由器是否启用了"AP 隔离"或"客户端隔离"。 |
+| 设备互相发现不了 | 防火墙阻止 mDNS | 防火墙放行 UDP 5353 和 TCP 19990（默认端口）。 |
+| 同步不生效 | 对方未连接 | 检查设备面板 — 对方应显示"已连接"。若仅显示"已配对"，检查双方防火墙。 |
+| 同步不生效 | 同步开关关闭 | 点击系统托盘同步图标或在主面板打开同步开关。 |
+| 证书变更警告 | 对方重装或重置了身份 | 如果最近确实重置过对方设备，属正常。否则应移除并重新配对。 |
+| VPN 导致 IP 错误 | VPN 网卡被优先选取 | v1.0.1 已修复 — 局域网 IP (192.168.x.x) 现在优先于 VPN 网卡。 |
+| 端口冲突 | 其他程序占用 19990 | 在 设置 → 网络 中修改 TCP 端口。 |
 
 ---
 
-## Tech Stack
+## 技术栈
 
-| Layer | Technology |
+| 层级 | 技术 |
 |-------|------------|
-| UI | CustomTkinter (cross-platform desktop) |
-| Transport | Python `asyncio` + `ssl` (TLS 1.3) |
-| Discovery | python-zeroconf (mDNS/DNS-SD) |
-| Encryption | `cryptography` (Ed25519, AES-256-GCM, PBKDF2) |
-| Clipboard | Win32 API / `pbpaste`+`pbcopy` / `xclip`+`wl-paste` |
-| QR Code | `qrcode` + Pillow |
-| Web Server | Python `http.server` (ThreadingHTTPServer) |
-| Build | PyInstaller (single-file executable) |
-| CI/CD | GitHub Actions (multi-platform build + release) |
+| 界面 | CustomTkinter (跨平台桌面) |
+| 传输 | Python `asyncio` + `ssl` (TLS 1.3) |
+| 发现 | python-zeroconf (mDNS/DNS-SD) |
+| 加密 | `cryptography` (Ed25519, AES-256-GCM, PBKDF2) |
+| 剪贴板 | Win32 API / `pbpaste`+`pbcopy` / `xclip`+`wl-paste` |
+| 二维码 | `qrcode` + Pillow |
+| Web 服务 | Python `http.server` (ThreadingHTTPServer) |
+| 构建 | PyInstaller (单文件可执行) |
+| CI/CD | GitHub Actions (多平台构建 + 发布) |
 
 ---
 
-## Architecture
+## 架构
 
 ```
-src/main.py                   # Entry point: tray, lock file, lifecycle
+src/main.py                   # 入口：托盘、锁文件、生命周期管理
 internal/
-  clipboard/                  # Native clipboard I/O per platform
-    clipboard.py              #   Abstract base + factory
-    clipboard_windows.py      #   Win32 clipboard API (CF_* formats)
+  clipboard/                  # 平台原生剪贴板 I/O
+    clipboard.py              #   抽象基类 + 工厂
+    clipboard_windows.py      #   Win32 剪贴板 API (CF_* 格式)
     clipboard_darwin.py       #   macOS pbpaste/pbcopy + osascript
     clipboard_linux.py        #   Linux xclip / wl-clipboard
-    format.py                 #   ClipboardContent dataclass + ContentType enum
-    history.py                #   Encrypted clipboard history store
-    filter.py                 #   Regex-based content filtering
+    format.py                 #   ClipboardContent 数据类 + ContentType 枚举
+    history.py                #   加密剪贴板历史存储
+    filter.py                 #   基于正则的内容过滤
   config/
-    config.py                 #   JSON config + encryption + atomic save
+    config.py                 #   JSON 配置 + 加密 + 原子写入
   i18n/
-    __init__.py               #   EN / ZH translation tables
+    __init__.py               #   中英文翻译表
   platform/
-    autostart.py              #   OS-specific autostart registration
-    notify.py                 #   Desktop notification (native or tkinter)
+    autostart.py              #   各平台开机自启注册
+    notify.py                 #   桌面通知（原生或 tkinter）
   protocol/
-    codec.py                  #   Binary frame encoding (magic + version + JSON + zlib)
+    codec.py                  #   二进制帧编码 (魔数 + 版本 + JSON + zlib)
   security/
-    encryption.py             #   AES-256-GCM at-rest encryption + PBKDF2
-    pairing.py                #   Ed25519 identity, TOFU pairing, fingerprint verification
+    encryption.py             #   AES-256-GCM 落盘加密 + PBKDF2
+    pairing.py                #   Ed25519 身份, TOFU 配对, 指纹验证
   sync/
-    manager.py                #   SyncManager: clipboard change → encode → broadcast
-    file_transfer.py          #   Chunked file transfer with ACK retransmit
+    manager.py                #   SyncManager: 剪贴板变更 → 编码 → 广播
+    file_transfer.py          #   分块文件传输 + ACK 重传
   transport/
-    connection.py             #   TransportManager + PeerConnection (TLS 1.3 sockets)
-    discovery.py              #   mDNS service advertisement + browsing
+    connection.py             #   TransportManager + PeerConnection (TLS 1.3)
+    discovery.py              #   mDNS 服务宣告 + 浏览
   ui/
-    dashboard.py              #   Main window: Overview, Devices, History, Transfers
-    settings_window.py        #   Settings: Network, Appearance, Web Companion, Filter, Security, Advanced, Logs, About
-    dialogs.py                #   Reusable dialogs (ask_string, ask_yesno, show_info, show_error)
-    systray.py                #   Cross-platform system tray icon + menu
+    dashboard.py              #   主窗口：概览、设备、历史、传输
+    settings_window.py        #   设置：网络、外观、Web 伴侣、过滤、安全、高级、日志、关于
+    dialogs.py                #   通用对话框 (输入、确认、信息、错误)
+    systray.py                #   跨平台系统托盘图标 + 菜单
   web/
-    server.py                 #   HTTP server: QR endpoint, history API, file upload/download, PWA manifest
-tests/                        #   218 tests covering clipboard, codec, config, pairing, sync, file transfer, cross-platform
+    server.py                 #   HTTP 服务器：二维码 API、历史 API、文件上传下载、PWA manifest
+tests/                        #   218 个测试覆盖剪贴板、编解码、配置、配对、同步、文件传输、跨平台
 ```
 
-### Data Flow
+### 数据流
 
 ```
-Clipboard change (OS)
-    → platform clipboard reader (native formats)
-    → ClipboardContent (normalized data model)
-    → SyncManager (dedup check, encode)
-    → TransportManager (broadcast to all connected peers)
-    → PeerConnection (TLS 1.3 socket write)
-    → Network (LAN)
-    → PeerConnection (TLS 1.3 socket read)
-    → TransportManager (decode frame)
-    → SyncManager (dedup check, write to local clipboard)
-    → platform clipboard writer (native formats)
+剪贴板变更 (OS)
+    → 平台剪贴板读取器 (原生格式)
+    → ClipboardContent (规范化数据模型)
+    → SyncManager (去重检查、编码)
+    → TransportManager (广播至所有已连接设备)
+    → PeerConnection (TLS 1.3 socket 写入)
+    → 网络 (局域网)
+    → PeerConnection (TLS 1.3 socket 读取)
+    → TransportManager (解码帧)
+    → SyncManager (去重检查、写入本地剪贴板)
+    → 平台剪贴板写入器 (原生格式)
 ```
 
-### Security Model
+### 安全模型
 
-Each device generates an Ed25519 key pair at first launch. The public key becomes the device identity. On first contact with a new peer, both sides display an 8-digit pairing code (derived from the TLS 1.3 session). The user verifies and confirms the code on both sides. The peer's certificate fingerprint is then stored ("pinned"). Future connections verify the fingerprint — if it changes, the user is alerted (potential MITM).
+每个设备首次启动时生成 Ed25519 密钥对。公钥即设备身份。首次与另一设备建立连接时，双端显示 8 位配对验证码（由 TLS 1.3 会话派生）。用户在两端确认后，对方证书指纹被存储（"锁定"）。后续连接验证指纹 — 若发生变化则发出告警（可能的中间人攻击）。
 
-All data on the wire is double-encrypted: TLS 1.3 provides transport security, and each frame body is independently AES-256-GCM encrypted. Data at rest (private keys, clipboard history) uses AES-256-GCM with a key derived from a device-specific seed via PBKDF2 (600K iterations).
+线缆上的数据双重加密：TLS 1.3 提供传输层安全，每个帧体独立 AES-256-GCM 加密。落盘数据（私钥、剪贴板历史）使用 AES-256-GCM，密钥由设备专属种子经 PBKDF2（60 万次迭代）派生。
 
 ---
 
-## Contributing
+## 参与贡献
 
-See [CONTRIBUTING.md](CONTRIBUTING.md) for development setup, project structure, and guidelines.
+详见 [CONTRIBUTING.md](CONTRIBUTING.md) 了解开发环境搭建、项目结构和贡献指南。
 
-PRs welcome. Please run `python -m pytest tests/ -v` before submitting.
+欢迎提交 PR。提交前请运行 `python -m pytest tests/ -v` 确保测试通过。
 
 ---
 
-## License
+## 许可证
 
-MIT — see [LICENSE](LICENSE)
+MIT — 详见 [LICENSE](LICENSE)

@@ -407,6 +407,7 @@
   "web.no_history": "No clipboard history yet.",
   "web.history_title": "Clipboard History",
   "web.loading": "Loading...",
+  "web.app_name": "ClipSync",
   "web.error": "Connection lost. Check that ClipSync is running.",
   "web.dark_mode": "Dark",
   "web.light_mode": "Light",

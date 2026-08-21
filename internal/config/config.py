@@ -78,7 +78,7 @@ class Config:
     encryption_password_hash: str = ""  # persisted verification token
     # UI preferences
     appearance_mode: str = "system"     # "system", "light", "dark"
-    language: str = "en"                # locale code: "en", "zh-CN"
+    language: str = "zh-CN"             # locale code: "en", "zh-CN" (default Chinese)
     # Clipboard behavior
     paste_to_top: bool = True           # move pasted item to top
     low_memory_mode: bool = False       # reduce polling frequency / disable previews

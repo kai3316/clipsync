@@ -251,7 +251,7 @@ class DashboardWindow:
         ctk.set_default_color_theme("blue")
 
         self._window = ctk.CTkToplevel(self._root)
-        self._window.title("ClipSync")
+        self._window.title(T("ui.app_name"))
         self._window.geometry("900x640")
         self._window.minsize(780, 560)
         self._window.protocol("WM_DELETE_WINDOW", self._on_hide)

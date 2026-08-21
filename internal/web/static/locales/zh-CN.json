@@ -407,6 +407,7 @@
   "web.no_history": "暂无剪贴板历史。",
   "web.history_title": "剪贴板历史",
   "web.loading": "加载中...",
+  "web.app_name": "剪贴同步",
   "web.error": "连接断开。请确认 ClipSync 正在运行。",
   "web.dark_mode": "深色",
   "web.light_mode": "浅色",

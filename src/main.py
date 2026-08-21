@@ -1528,7 +1528,7 @@ class Application:
         # ── Root window (needed for systray + mainloop in both modes) ─
         self.root = tk.Tk()
         _hide_dock()
-        self.root.title("ClipSync")
+        self.root.title(T("ui.app_name"))
         # A withdrawn parent prevents child windows (CTkToplevel / tk.Toplevel)
         # from displaying on macOS and many Linux window managers (GNOME, KDE).
         # Use a 1px fully-transparent root so it stays mapped but invisible.
@@ -3153,7 +3153,7 @@ class Application:
             f"http://127.0.0.1:{self.cfg.web_port}"
             f"/index.html?token={self.cfg.web_token}"
         )
-        self.webview_win = WebViewWindow(url=url, title="ClipSync", width=960, height=720)
+        self.webview_win = WebViewWindow(url=url, title=T("ui.app_name"), width=960, height=720)
         self.webview_win.start()
         self._webview_opened_at = time.monotonic()
         # Never log the URL with its ?token= query — it would leak the web token

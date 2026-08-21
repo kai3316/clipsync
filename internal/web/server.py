@@ -1254,6 +1254,10 @@ class WebServer:
                         html = _FALLBACK_HTML.replace("__TOKEN__", cfg.web_token)
                         html = html.replace("__DEVICE_ID__", cfg.device_id)
                         html = html.replace("__DEVICE_NAME__", cfg.device_name)
+                        # Localize the fallback page's brand when the app is in Chinese.
+                        if cfg.language == "zh-CN":
+                            html = html.replace("<title>ClipSync Web</title>", "<title>剪贴同步 Web</title>")
+                            html = html.replace('logo-text">ClipSync</span>', 'logo-text">剪贴同步</span>')
                         inner_self._send_html(html)
                     return
 

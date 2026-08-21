@@ -180,7 +180,7 @@ class SystrayApp:
     def _build_full_menu(self) -> pystray.Menu:
         """Build the complete tray menu."""
         menu_items = [
-            pystray.MenuItem("📋  ClipSync", None, enabled=False),
+            pystray.MenuItem("📋  " + T("ui.app_name"), None, enabled=False),
             pystray.MenuItem(
                 T("tray.device", name=self._device_name), None, enabled=False,
             ),
@@ -230,7 +230,7 @@ class SystrayApp:
         self._tray = pystray.Icon(
             "clipsync",
             self._icon_image,
-            "ClipSync",
+            T("ui.app_name"),
             menu,
         )
 
