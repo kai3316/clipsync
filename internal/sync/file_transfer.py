@@ -1161,21 +1161,24 @@ class FileTransferManager:
         with self._lock:
             return dict(self._speed_test) if self._speed_test else None
 
-    def record_web_upload(self, file_name: str, file_size: int, saved_path: str) -> None:
+    def record_web_upload(self, file_name: str, file_size: int, saved_path: str) -> str:
         """Record a file received from the web companion (phone upload).
 
         The web upload path writes straight to the upload directory and never
         ran through FileTransferManager, so it was invisible in the transfers
-        panel. This records it as an incoming, completed transfer.
+        panel. This records it as an incoming, completed transfer and returns
+        the transfer_id so the caller can broadcast a refresh to web clients.
         """
+        transfer_id = uuid.uuid4().hex
         self._add_to_history({
-            "transfer_id": uuid.uuid4().hex,
+            "transfer_id": transfer_id,
             "file_name": file_name,
             "file_size": file_size,
             "type": "incoming",
             "state": "completed",
             "file_path": saved_path,
         }, True, saved_path=saved_path)
+        return transfer_id
 
     def _add_to_history(self, transfer: dict, success: bool, saved_path: str = ""):
         """Record a completed transfer in the history list."""

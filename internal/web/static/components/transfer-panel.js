@@ -160,17 +160,42 @@
       <!-- Transfer history -->
       <div v-if="hasTransferHistory" class="transfer-panel__section">
         <div class="section-header">📚 {{ t('transfer.history_title') }}</div>
-        <div v-for="tr in store.transferHistory" :key="tr.id" class="transfer-card transfer-card--done card">
-          <div style="display:flex;align-items:center;gap:8px">
-            <span v-if="tr.status === 'completed'">✅</span>
-            <span v-else>❌</span>
-            <span v-if="tr.direction === 'up'">📤</span>
-            <span v-else-if="tr.direction === 'down'">📥</span>
-            <span class="text-ellipsis" style="flex:1">{{ tr.filename || t('transfer.unknown_file') }}</span>
-            <span v-if="tr.size" style="font-size:12px;color:var(--clipsync-fg-muted)">{{ formatSize(tr.size) }}</span>
-            <span v-if="tr.timestamp" style="font-size:11px;color:var(--clipsync-fg-subtle)">{{ formatTimestamp(tr.timestamp) }}</span>
-            <button v-if="tr.path" class="btn-ghost" style="padding:2px 8px;font-size:11px"
-              @click="openFile(tr.path)">{{ t('transfer.open') }}</button>
+        <div class="transfer-history">
+          <div
+            v-for="tr in store.transferHistory"
+            :key="tr.id"
+            class="transfer-history-item card"
+            :class="'transfer-history-item--' + (tr.direction === 'up' ? 'up' : 'down')"
+          >
+            <div
+              class="transfer-history-item__icon"
+              :class="tr.direction === 'up' ? 'transfer-history-item__icon--up' : 'transfer-history-item__icon--down'"
+            >{{ tr.direction === 'up' ? '↗' : '↘' }}</div>
+            <div class="transfer-history-item__body">
+              <div class="transfer-history-item__name">{{ tr.filename || t('transfer.unknown_file') }}</div>
+              <div class="transfer-history-item__meta">
+                <span
+                  class="transfer-history-item__status"
+                  :class="tr.status === 'completed' ? 'transfer-history-item__status--ok' : 'transfer-history-item__status--err'"
+                >{{ tr.status === 'completed' ? t('transfer.status_completed') : t('transfer.status_failed') }}</span>
+                <span v-if="tr.size" class="transfer-history-item__size">{{ formatSize(tr.size) }}</span>
+                <span v-if="tr.timestamp" class="transfer-history-item__time">{{ formatTimestamp(tr.timestamp) }}</span>
+              </div>
+            </div>
+            <div class="transfer-history-item__actions">
+              <button
+                v-if="tr.path"
+                class="transfer-history-item__btn"
+                :title="t('transfer.open')"
+                @click="openFile(tr.path)"
+              >&#128194;</button>
+              <button
+                v-if="tr.path"
+                class="transfer-history-item__btn"
+                :title="t('transfer.open_folder')"
+                @click="revealFile(tr.path)"
+              >&#128193;</button>
+            </div>
           </div>
         </div>
       </div>
@@ -273,6 +298,19 @@
         // /api/nav only accepts http/https URLs, so local file paths must go
         // through the dedicated file-open endpoint on the host.
         ClipsyncAPI.openFile(path)
+          .then(function (res) {
+            if (!res || res.ok !== true) {
+              self.store.showToast(self.t('ui.open_failed_title'), 2000);
+            }
+          })
+          .catch(function () {
+            self.store.showToast(self.t('ui.open_failed_title'), 2000);
+          });
+      },
+
+      revealFile: function (path) {
+        var self = this;
+        ClipsyncAPI.revealFile(path)
           .then(function (res) {
             if (!res || res.ok !== true) {
               self.store.showToast(self.t('ui.open_failed_title'), 2000);

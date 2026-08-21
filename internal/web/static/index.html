@@ -2067,6 +2067,128 @@
       opacity: 0.75;
     }
 
+    /* ── Transfer history item (modern card) ───────────────────── */
+
+    .transfer-history {
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+    }
+
+    .transfer-history-item {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      padding: 12px 14px;
+      border-radius: var(--clipsync-radius);
+      border: 1px solid var(--clipsync-border);
+      background: linear-gradient(135deg, rgba(12,16,32,0.7), rgba(17,24,39,0.7));
+      backdrop-filter: blur(12px);
+      -webkit-backdrop-filter: blur(12px);
+      transition: border-color var(--clipsync-transition-fast);
+    }
+
+    .transfer-history-item:hover {
+      border-color: var(--clipsync-border-strong);
+    }
+
+    .transfer-history-item__icon {
+      flex-shrink: 0;
+      width: 36px;
+      height: 36px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 17px;
+      font-weight: 700;
+      border-radius: 10px;
+      border: 1px solid var(--clipsync-border);
+    }
+
+    .transfer-history-item__icon--up {
+      color: var(--clipsync-accent);
+      background: var(--clipsync-accent-glow);
+    }
+
+    .transfer-history-item__icon--down {
+      color: var(--clipsync-success);
+      background: color-mix(in srgb, var(--clipsync-success) 12%, transparent);
+    }
+
+    .transfer-history-item__body {
+      flex: 1;
+      min-width: 0;
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+    }
+
+    .transfer-history-item__name {
+      font-size: 14px;
+      font-weight: 600;
+      color: var(--clipsync-fg);
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
+    .transfer-history-item__meta {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      font-size: 11px;
+      color: var(--clipsync-fg-subtle);
+      font-family: var(--clipsync-font-mono);
+    }
+
+    .transfer-history-item__status {
+      padding: 1px 8px;
+      border-radius: 20px;
+      font-size: 10px;
+      font-weight: 700;
+      letter-spacing: 0.02em;
+    }
+
+    .transfer-history-item__status--ok {
+      color: var(--clipsync-success);
+      background: color-mix(in srgb, var(--clipsync-success) 14%, transparent);
+      border: 1px solid color-mix(in srgb, var(--clipsync-success) 35%, transparent);
+    }
+
+    .transfer-history-item__status--err {
+      color: var(--clipsync-danger);
+      background: color-mix(in srgb, var(--clipsync-danger) 14%, transparent);
+      border: 1px solid color-mix(in srgb, var(--clipsync-danger) 35%, transparent);
+    }
+
+    .transfer-history-item__actions {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      flex-shrink: 0;
+    }
+
+    .transfer-history-item__btn {
+      width: 32px;
+      height: 32px;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 15px;
+      background: transparent;
+      border: 1px solid var(--clipsync-border);
+      border-radius: 8px;
+      color: var(--clipsync-fg-muted);
+      cursor: pointer;
+      transition: all var(--clipsync-transition-fast);
+    }
+
+    .transfer-history-item__btn:hover {
+      color: var(--clipsync-fg);
+      border-color: var(--clipsync-border-strong);
+      background: var(--clipsync-hover);
+    }
+
     /* ═══════════════════════════════════════════════════════════════
        Status Bar Component
        ═══════════════════════════════════════════════════════════════ */

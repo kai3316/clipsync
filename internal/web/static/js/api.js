@@ -532,6 +532,10 @@ var ClipsyncAPI = (function () {
       return this._fetch('POST', '/api/file/open', { path: path });
     },
 
+    revealFile: function (path) {
+      return this._fetch('POST', '/api/file/reveal', { path: path });
+    },
+
     /**
      * Restart the ClipSync application.
      * @returns {Promise<{ok: boolean}>}

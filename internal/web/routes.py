@@ -345,6 +345,32 @@ def _dispatch(method, path, query_params, body, cfg, history, sync_mgr,
             on_open_file(str(safe))
             return _json_response({"ok": True})
 
+        elif path == "/api/file/reveal":
+            # Open the folder containing a received file (same confinement as
+            # /api/file/open — the file lives in the upload directory).
+            if on_open_folder is None:
+                return _json_response({"ok": False, "error": "not available"}, 503)
+            try:
+                req = json.loads(body.decode("utf-8"))
+            except (json.JSONDecodeError, UnicodeDecodeError):
+                return _json_response({"ok": False, "error": "invalid json"}, 400)
+            file_path = req.get("path", "").strip()
+            if not file_path:
+                return _json_response({"ok": False, "error": "path required"}, 400)
+            from internal.web.api.security import confine_path
+            safe = confine_path(os.path.join(upload_dir, file_path), upload_dir)
+            if safe is None:
+                return _json_response(
+                    {"ok": False, "error": "path must be inside the received-files directory"},
+                    400,
+                )
+            try:
+                on_open_folder(str(safe))
+            except Exception as exc:
+                logger.error("Failed to reveal file folder: %s", exc)
+                return _json_response({"ok": False, "error": str(exc)}, 500)
+            return _json_response({"ok": True})
+
         elif path == "/api/restart":
             if on_restart is None:
                 return _json_response({"ok": False, "error": "not available"}, 503)

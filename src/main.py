@@ -1024,14 +1024,21 @@ class Application:
         """A phone uploaded a file to this computer via the web companion."""
         logger.info("Web upload received: %s (%d bytes) -> %s",
                     _mask_file_name(file_name), file_size, _mask_path(saved_path))
+        transfer_id = ""
         if self.file_transfer_mgr is not None:
             try:
-                self.file_transfer_mgr.record_web_upload(file_name, file_size, saved_path)
+                transfer_id = self.file_transfer_mgr.record_web_upload(
+                    file_name, file_size, saved_path)
             except Exception:
                 logger.debug("record_web_upload failed", exc_info=True)
         self._notify("notify_transfer", T("notify.file_received"),
                      T("transfer.received", name=file_name))
         self._play_transfer_sound()
+        # Tell connected web clients so the transfers panel refreshes without
+        # a manual reload (the web upload never ran through the P2P manager,
+        # which normally broadcasts this itself).
+        if transfer_id:
+            self._push_web("broadcast_transfer_complete", transfer_id, True)
 
     def _play_transfer_sound(self) -> None:
         """Play the transfer notification sound when the user enabled sound."""
