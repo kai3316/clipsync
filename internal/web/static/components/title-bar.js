@@ -78,6 +78,12 @@
           '>{{ themeLabel }}</button>' +
           '<button' +
             ' class="title-bar__action-btn"' +
+            ' :title="t(\'ui.refresh\')"' +
+            ' :aria-label="t(\'ui.refresh\')"' +
+            ' @click="refreshData"' +
+          '>&#128260;</button>' +
+          '<button' +
+            ' class="title-bar__action-btn"' +
             ' :title="t(\'ui.settings\')"' +
             ' :aria-label="t(\'ui.settings\')"' +
             ' @click="openSettings"' +
@@ -106,6 +112,15 @@
         this.searchInput = '';
         this.store.historySearch = '';
         clearTimeout(this._searchTimer);
+      },
+
+      refreshData: function () {
+        var self = this;
+        if (this.$root && typeof this.$root.loadData === 'function') {
+          this.$root.loadData().catch(function () {});
+        }
+        this.store.fetchOverview();
+        this.store.showToast(this.t('ui.refreshed'), 1500);
       },
 
       cycleTheme: function () {

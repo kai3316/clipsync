@@ -199,7 +199,7 @@
   "stats.off": "OFF",
   "network.connection": "Connection",
   "network.tcp_port": "TCP Port",
-  "network.service_type": "Service Type",
+  "network.service_type": "mDNS service type",
   "network.relay": "Relay (optional)",
   "network.relay_url": "Relay URL",
   "network.local_address": "Local address",
@@ -392,7 +392,6 @@
   "settings_nav.web_companion": "Web Companion",
   "settings_nav.translation": "Translation",
   "network.auto_start": "Launch at login",
-  "network.service_type": "mDNS service type",
   "settings_window.service_type_hint": "Zero-config service type advertised over mDNS. Leave default unless you know what you are doing. Restart required.",
   "settings_window.clipboard_behavior": "Clipboard behavior",
   "hotkeys.title": "Global hotkeys",
@@ -760,5 +759,6 @@
   "transfer.history_title": "Transfer History",
   "transfer.open": "Open",
   "transfer.no_transfers": "No transfers yet",
-  "transfer.empty_desc": "Select a device above and send a file or folder."
+  "transfer.empty_desc": "Select a device above and send a file or folder.",
+  "ui.refreshed": "Refreshed"
 }

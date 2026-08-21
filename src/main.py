@@ -318,9 +318,10 @@ def _check_and_cleanup_stale_lock() -> bool:
     return True
 
 
-def _run_tray(device_name: str, pipe, parent_pid: int):
+def _run_tray(device_name: str, pipe, parent_pid: int, locale: str = "en"):
     """Run the system tray in a subprocess (macOS only). Must be module-level for multiprocessing."""
     Application.setup_logging()
+    set_locale(locale)  # tray menu must follow the app language
     _hide_dock()
 
     # Write tray PID to lock file so it can be cleaned up on force quit
@@ -1592,7 +1593,8 @@ class Application:
         parent_conn, child_conn = multiprocessing.Pipe()
         notification_mgr.set_pipe(parent_conn)
         self._tray_proc = multiprocessing.Process(
-            target=_run_tray, args=(self.cfg.device_name, child_conn, os.getpid()),
+            target=_run_tray,
+            args=(self.cfg.device_name, child_conn, os.getpid(), self.cfg.language),
             daemon=True,
         )
         self._tray_proc.start()

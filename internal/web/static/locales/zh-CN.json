@@ -199,7 +199,7 @@
   "stats.off": "关",
   "network.connection": "连接",
   "network.tcp_port": "TCP 端口",
-  "network.service_type": "服务类型",
+  "network.service_type": "mDNS 服务类型",
   "network.relay": "中继（可选）",
   "network.relay_url": "中继地址",
   "network.local_address": "本机地址",
@@ -392,7 +392,6 @@
   "settings_nav.web_companion": "Web 伴侣",
   "settings_nav.translation": "翻译",
   "network.auto_start": "开机自启",
-  "network.service_type": "mDNS 服务类型",
   "settings_window.service_type_hint": "通过 mDNS 广播的零配置服务类型。除非你知道自己在做什么，否则保持默认。重启后生效。",
   "settings_window.clipboard_behavior": "剪贴板行为",
   "hotkeys.title": "全局快捷键",
@@ -760,5 +759,6 @@
   "transfer.history_title": "传输历史",
   "transfer.open": "打开",
   "transfer.no_transfers": "暂无传输",
-  "transfer.empty_desc": "选择上方设备并发送文件或文件夹。"
+  "transfer.empty_desc": "选择上方设备并发送文件或文件夹。",
+  "ui.refreshed": "已刷新"
 }

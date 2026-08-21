@@ -1039,11 +1039,31 @@
 
     .history-panel__filters {
       display: flex;
+      align-items: center;
+      flex-wrap: wrap;
       gap: var(--clipsync-space-2);
       padding-bottom: var(--clipsync-space-3);
       flex-shrink: 0;
-      overflow-x: auto;
-      -webkit-overflow-scrolling: touch;
+    }
+
+    .history-panel__filter-chips {
+      display: flex;
+      flex-wrap: wrap;
+      gap: var(--clipsync-space-2);
+      flex: 1 1 auto;
+    }
+
+    .history-panel__filter-meta {
+      display: flex;
+      align-items: center;
+      gap: var(--clipsync-space-2);
+      margin-left: auto;
+    }
+
+    .history-panel__count {
+      font-size: 12px;
+      color: var(--clipsync-fg-muted);
+      white-space: nowrap;
     }
 
     .history-panel__filter-chip {
@@ -3132,7 +3152,7 @@
       backdrop-filter: blur(16px) saturate(170%);
       -webkit-backdrop-filter: blur(16px) saturate(170%);
       border-radius: var(--clipsync-radius);
-      justify-content: center;
+      justify-content: space-between;
       padding-top: var(--clipsync-space-1);
       padding-bottom: var(--clipsync-space-3);
     }

@@ -102,33 +102,31 @@
     },
 
     template: `<div class="history-panel" @click.self="onPanelClick">
-      <!-- Header with Clear All -->
-      <div class="history-panel__header" v-if="hasContent">
-        <span class="text-muted" style="font-size:12px">{{ sections.pinned.length + sections.unpinned.length }} {{ t('history.items') || 'items' }}</span>
-        <div class="history-panel__header-actions">
+      <!-- One combined bar: filter chips + item count + sort + clear-all -->
+      <div class="history-panel__filters" v-if="hasContent">
+        <div class="history-panel__filter-chips">
+          <button
+            v-for="filt in filters"
+            :key="filt.id"
+            class="history-panel__filter-chip"
+            :class="{
+              'history-panel__filter-chip--active': store.historyFilter === filt.id,
+              'animate-glow-pulse': store.historyFilter === filt.id
+            }"
+            @click="store.historyFilter = filt.id"
+          >
+            <span v-if="filt.icon" class="history-panel__filter-chip-icon">{{ filt.icon }}</span>
+            {{ filt.label }}
+            <span class="history-panel__filter-chip-count">{{ filterCounts[filt.id] }}</span>
+          </button>
+        </div>
+        <div class="history-panel__filter-meta">
+          <span class="history-panel__count">{{ sections.pinned.length + sections.unpinned.length }} {{ t('history.items') || 'items' }}</span>
           <button class="btn-ghost" @click="toggleSort" :title="sortLabel">&#8597;&#65039; {{ sortLabel }}</button>
           <button class="btn-ghost" style="color:var(--clipsync-danger)" @click="clearAll" :disabled="clearingAll">
             {{ clearingAll ? '...' : t('history.clear_all') || 'Clear All' }}
           </button>
         </div>
-      </div>
-
-      <!-- Filter bar -->
-      <div class="history-panel__filters">
-        <button
-          v-for="filt in filters"
-          :key="filt.id"
-          class="history-panel__filter-chip"
-          :class="{
-            'history-panel__filter-chip--active': store.historyFilter === filt.id,
-            'animate-glow-pulse': store.historyFilter === filt.id
-          }"
-          @click="store.historyFilter = filt.id"
-        >
-          <span v-if="filt.icon" class="history-panel__filter-chip-icon">{{ filt.icon }}</span>
-          {{ filt.label }}
-          <span class="history-panel__filter-chip-count">{{ filterCounts[filt.id] }}</span>
-        </button>
       </div>
 
       <!-- Search results count -->

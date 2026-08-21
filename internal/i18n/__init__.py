@@ -332,6 +332,7 @@ _EN: dict[str, str] = {
     "transfers.clear_title": "Clear Transfer History",
     "transfers.clear_confirm": "Delete all transfer history?",
     # Systray
+    "tray.sync": "Clipboard Sync",
     "tray.syncing_on": "Syncing: ON",
     "tray.syncing_off": "Syncing: OFF",
     "tray.device": "Device: {name}",
@@ -942,6 +943,7 @@ _ZH: dict[str, str] = {
     "transfers.clear": "清除",
     "transfers.clear_title": "清除传输历史",
     "transfers.clear_confirm": "删除所有传输历史？",
+    "tray.sync": "剪贴板同步",
     "tray.syncing_on": "同步：开",
     "tray.syncing_off": "同步：关",
     "tray.device": "设备：{name}",

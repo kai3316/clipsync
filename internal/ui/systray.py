@@ -180,36 +180,45 @@ class SystrayApp:
     def _build_full_menu(self) -> pystray.Menu:
         """Build the complete tray menu."""
         menu_items = [
-            pystray.MenuItem("ClipSync", None, enabled=False),
+            pystray.MenuItem("📋  ClipSync", None, enabled=False),
             pystray.MenuItem(
                 T("tray.device", name=self._device_name), None, enabled=False,
             ),
             pystray.Menu.SEPARATOR,
+            # Sync toggle (checkbox)
             pystray.MenuItem(
-                T("tray.syncing_on"),
+                T("tray.sync"),
                 self._on_toggle_sync,
                 checked=lambda item: self._syncing,
             ),
             pystray.Menu.SEPARATOR,
-            pystray.MenuItem(T("tray.show_dashboard"), self._on_open_dashboard_click),
             pystray.MenuItem(
-                T("tray.connected_devices"),
-                self._build_peer_menu(),
+                "🖥  " + T("tray.show_dashboard"), self._on_open_dashboard_click,
             ),
-            pystray.MenuItem(T("tray.send_url"), self._on_send_url_click),
-            pystray.Menu.SEPARATOR,
-            pystray.MenuItem(T("tray.settings"), self._on_open_settings_click),
+            pystray.MenuItem(
+                "📤  " + T("tray.send_url"), self._on_send_url_click,
+            ),
         ]
         if self._web_enabled:
             menu_items.append(
-                pystray.MenuItem(T("tray.show_web_qr"), self._on_show_web_qr_click),
+                pystray.MenuItem("📱  " + T("tray.show_web_qr"), self._on_show_web_qr_click),
             )
+        menu_items.append(
+            pystray.MenuItem(
+                "📶  " + T("tray.connected_devices"),
+                self._build_peer_menu(),
+            ),
+        )
+        menu_items.append(pystray.Menu.SEPARATOR)
+        menu_items.append(
+            pystray.MenuItem("⚙  " + T("tray.settings"), self._on_open_settings_click),
+        )
         menu_items.extend([
-            pystray.MenuItem(T("tray.export_logs"), self._on_export_logs_click),
+            pystray.MenuItem("📝  " + T("tray.export_logs"), self._on_export_logs_click),
             pystray.Menu.SEPARATOR,
-            pystray.MenuItem(T("tray.check_update"), self._on_check_update_click),
-            pystray.MenuItem(T("tray.about"), self._on_about),
-            pystray.MenuItem(T("tray.quit"), self._on_quit),
+            pystray.MenuItem("🔍  " + T("tray.check_update"), self._on_check_update_click),
+            pystray.MenuItem("ℹ️  " + T("tray.about"), self._on_about),
+            pystray.MenuItem("⏻  " + T("tray.quit"), self._on_quit),
         ])
         return pystray.Menu(*menu_items)
 
