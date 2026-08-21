@@ -382,6 +382,9 @@ class Application:
         # transfer_id -> temp zip path, cleaned up when the transfer completes
         # (folder/multi-file sends zip into a temp archive that must not leak).
         self._zip_cleanup: dict[str, str] = {}
+        # transfer_id -> (last_ws_push_time, last_ws_progress) for throttling
+        # per-chunk WebSocket progress broadcasts.
+        self._last_transfer_progress: dict[str, tuple[float, float]] = {}
 
         # ── macOS multiprocessing state ─────────────────────────────
         self._parent_conn = None
@@ -793,7 +796,8 @@ class Application:
         host = f"http://127.0.0.1:{port}"
         url = f"{host}/quickpaste.html?token={token}&host={host}"
 
-        logger.debug("Opening Quick Paste: %s", url)
+        # Never log the token in the URL (the file handler logs at DEBUG).
+        logger.debug("Opening Quick Paste: %s", url.split("?")[0])
         webbrowser.open_new(url)
 
     def _paste_nth(self, n: int) -> None:
@@ -919,6 +923,15 @@ class Application:
 
     def _on_transfer_progress(self, transfer_id: str, progress: float) -> None:
         logger.debug("File transfer %s: %.0f%%", transfer_id[:8], progress * 100)
+        # Throttle WebSocket progress pushes: a large transfer emits one event
+        # per 256 KB chunk, and without throttling that floods the web server
+        # (thousands of WS frames). Push at most ~10 Hz at ~1% granularity,
+        # but always push the final 100%.
+        now = time.monotonic()
+        last_t, last_p = self._last_transfer_progress.get(transfer_id, (0.0, -1.0))
+        if progress < 1.0 and (now - last_t < 0.1 and progress - last_p < 0.01):
+            return
+        self._last_transfer_progress[transfer_id] = (now, progress)
         self._push_web("broadcast_transfer_progress", transfer_id, progress)
 
     def _on_transfer_complete(self, transfer_id: str, success: bool) -> None:
@@ -928,6 +941,7 @@ class Application:
             notification_mgr.show("File Transfer", T("transfer.send_success"))
         else:
             notification_mgr.show("File Transfer", T("transfer.send_failed"))
+        self._last_transfer_progress.pop(transfer_id, None)
         # Remove any temp zip archive created for a folder/multi-file send.
         tmp = self._zip_cleanup.pop(transfer_id, None)
         if tmp:
@@ -1555,7 +1569,9 @@ class Application:
                     public_key_pem=peer.certificate_pem,
                     paired=peer.paired,
                 )
-            self._save_cfg_encrypted()
+            with config_lock:
+                self._persist_peer_addresses()
+                self._save_cfg_encrypted()
 
         # Release OS-level resources: Windows message-only window + registered
         # hotkeys, macOS CGEvent tap, Linux pynput listener.
@@ -2698,11 +2714,20 @@ class Application:
         # Import here to avoid circular imports
         from internal.ui.webview_window import WebViewWindow
 
-        # If the webview window is already running, the user needs to
-        # switch to it manually (browser process tracking is best-effort).
+        # If the webview window is already running, the user needs to switch to
+        # it manually. Process tracking is best-effort: for browsers without
+        # true --app isolation (e.g. the Safari fallback) the process can stay
+        # alive after the window is closed, so also require a live WebSocket
+        # client as evidence the dashboard window is actually open — otherwise
+        # reopening is the right behaviour, not "silently do nothing".
         if self.webview_win is not None and self.webview_win.is_running():
-            logger.debug("WebViewWindow already running")
-            return
+            ws_live = 0
+            if self.web_server is not None:
+                ws_live = getattr(self.web_server.ws_manager, "client_count", lambda: 0)()
+            if ws_live > 0:
+                logger.debug("WebViewWindow already running")
+                return
+            logger.info("WebView process alive but no web client — reopening dashboard")
 
         url = (
             f"http://127.0.0.1:{self.cfg.web_port}"
@@ -2710,7 +2735,9 @@ class Application:
         )
         self.webview_win = WebViewWindow(url=url, title="ClipSync", width=960, height=720)
         self.webview_win.start()
-        logger.info("WebView dashboard opened: %s", url)
+        # Never log the URL with its ?token= query — it would leak the web token
+        # into a (previously world-readable) log file.
+        logger.info("WebView dashboard opened: %s", url.split("?")[0])
 
     def _create_dashboard_window(self) -> None:
         if self.dashboard_win is not None:
@@ -2793,6 +2820,20 @@ class Application:
     def _get_cfg(self) -> Config:
         return self.cfg
 
+    def _persist_peer_addresses(self) -> None:
+        """Copy last-known peer addresses from the transport into cfg.peers.
+
+        Runs under the caller's config_lock. Lets a paired peer be reached
+        right after restart, even before mDNS re-discovers it.
+        """
+        try:
+            for pid, (_name, addr, port) in self.transport_mgr.get_peer_addresses().items():
+                if pid in self.cfg.peers:
+                    self.cfg.peers[pid].last_ip = addr
+                    self.cfg.peers[pid].last_port = port
+        except Exception:
+            logger.debug("Failed to persist peer addresses", exc_info=True)
+
     def _save_cfg_and_peers(self) -> None:
         # Hold the shared config lock so web-server threads can't concurrently
         # iterate/mutate cfg.peers while we snapshot it (avoids RuntimeError).
@@ -2806,6 +2847,7 @@ class Application:
                     paired=peer.paired,
                     notes=existing.notes if existing else "",
                 )
+            self._persist_peer_addresses()
             self._save_cfg_encrypted()
 
     def _get_peers(self) -> list[tuple]:
@@ -2924,9 +2966,23 @@ class Application:
             if saved:
                 sname, saddr, sport = saved
                 info = {"name": sname, "address": saddr, "port": sport}
+        if not info:
+            # Persisted last-known address (survives app restarts, unlike the
+            # in-memory saved-address map which is populated per connection).
+            peer_cfg = self.cfg.peers.get(peer_id)
+            if peer_cfg and peer_cfg.last_ip:
+                info = {
+                    "name": peer_cfg.device_name or peer_cfg.device_id,
+                    "address": peer_cfg.last_ip,
+                    "port": peer_cfg.last_port or self.cfg.port,
+                }
         if info:
             logger.info("User initiated pairing with %s (peer_id=%s)",
                         info["name"], peer_id[:12])
+            peer_cfg = self.cfg.peers.get(peer_id)
+            if peer_cfg:
+                peer_cfg.last_ip = info["address"]
+                peer_cfg.last_port = info["port"]
             self.transport_mgr.connect_to_peer(
                 peer_id, info["name"], info["address"], info["port"],
             )

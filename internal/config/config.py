@@ -35,6 +35,8 @@ class PeerInfo:
     public_key_pem: str = ""  # pinned after pairing
     paired: bool = False
     notes: str = ""  # user-assigned alias or memo
+    last_ip: str = ""  # last known address, so a paired peer can be reached
+    last_port: int = 0  # even when it is momentarily off mDNS / across restarts
 
 
 @dataclass

@@ -939,6 +939,11 @@ class TransportManager:
         with self._lock:
             return dict(self._hash_to_real_id)
 
+    def get_peer_addresses(self) -> dict[str, tuple[str, str, int]]:
+        """Return a copy of all last-known peer addresses (real-id → tuple)."""
+        with self._lock:
+            return dict(self._peer_addresses)
+
     def get_saved_address(self, peer_id: str) -> tuple[str, str, int] | None:
         """Return the last known (name, address, port) for a peer, or None.
 

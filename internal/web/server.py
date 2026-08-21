@@ -8,6 +8,7 @@ The server delegates API routes to routes.py, WebSocket handling to
 ws.py, and serves static files from internal/web/static/.
 """
 
+import hmac
 import json
 import logging
 import mimetypes
@@ -444,7 +445,8 @@ def _validate_token(path: str, expected_token: str) -> bool:
     qs = urllib.parse.urlparse(path).query
     params = urllib.parse.parse_qs(qs)
     tokens = params.get("token", [])
-    return len(tokens) == 1 and tokens[0] == expected_token
+    # Constant-time comparison to avoid leaking token bytes via timing.
+    return len(tokens) == 1 and hmac.compare_digest(tokens[0], expected_token)
 
 
 # ── Safe request body reader ─────────────────────────────────────
