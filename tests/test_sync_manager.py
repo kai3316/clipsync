@@ -200,7 +200,11 @@ class TestSyncManager:
                 types={ContentType.TEXT: f"clip-{i}".encode()},
             )
             self.monitor.fire()
-            time.sleep(0.5)  # exceed SYNC_DEBOUNCE with margin for timer jitter
+            # Wait for this clip to be observed before sending the next one.
+            # A fixed sleep can be flaky on slower CI runners.
+            deadline = time.time() + 2.0
+            while len(self.sent) < i + 1 and time.time() < deadline:
+                time.sleep(0.05)
 
         # All should have been sent (each is different)
         assert len(self.sent) == DEDUP_RING_SIZE + 10
