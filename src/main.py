@@ -2812,9 +2812,14 @@ class Application:
             import platform as _platform
             if action == "firewall":
                 if _platform.system() == "Darwin":
-                    _sp.Popen(["open",
-                               "x-apple.systempreferences:com.apple.preference.security?Firewall"])
-                    return {"ok": True}
+                    # macOS has no CLI to grant the Application Firewall, and
+                    # the Local Network permission (macOS 15+) can only be
+                    # toggled in System Settings — so open the exact pane.
+                    if self._macos_open_settings(
+                            "x-apple.systempreferences:com.apple.preference.security?Firewall"):
+                        return {"ok": True}
+                    return {"ok": False,
+                            "error": "Could not open the macOS firewall settings."}
                 if _platform.system() == "Windows":
                     # Prefer re-applying the allow rule (idempotent). netsh needs
                     # admin rights — retry elevated via a UAC prompt, then fall
@@ -2831,12 +2836,32 @@ class Application:
                     return {"ok": False,
                             "error": "Could not create the firewall rule (admin rights may be "
                                      "required) or open the firewall settings."}
+                if _platform.system() == "Linux":
+                    # Grant both ports on the active firewall (ufw / firewalld)
+                    # via a PolicyKit GUI auth prompt — the Linux equivalent of
+                    # the Windows UAC repair. If pkexec is unavailable, surface
+                    # the exact command so the user can run it as root.
+                    fw_name, script = self._linux_firewall_allow_script(
+                        self.cfg.port, self.cfg.web_port)
+                    if not fw_name:
+                        # No active firewall detected — nothing to request.
+                        return {"ok": True}
+                    try:
+                        _sp.Popen(["pkexec", "sh", "-c", script])
+                        return {"ok": True}
+                    except Exception:
+                        return {"ok": False,
+                                "error": f"Allow the ports manually as root: {script}"}
                 return {"ok": False, "error": "Firewall settings are not supported on this OS."}
             if action == "local_network":
                 if _platform.system() == "Darwin":
-                    _sp.Popen(["open",
-                               "x-apple.systempreferences:com.apple.preference.security?Privacy_LocalNetwork"])
-                    return {"ok": True}
+                    # The macOS 15+ Local Network permission is OS-enforced and
+                    # cannot be granted by CLI — open the exact pane for it.
+                    if self._macos_open_settings(
+                            "x-apple.systempreferences:com.apple.preference.security?Privacy_LocalNetwork"):
+                        return {"ok": True}
+                    return {"ok": False,
+                            "error": "Could not open the macOS Local Network permission settings."}
                 if _platform.system() == "Windows":
                     # Windows has no dedicated local-network permission page on most
                     # builds — the firewall & network settings is the closest target.
@@ -2844,10 +2869,49 @@ class Application:
                         return {"ok": True}
                     return {"ok": False,
                             "error": "Could not open the Windows network/firewall settings."}
+                if _platform.system() == "Linux":
+                    # No local-network permission exists on Linux — nothing to do.
+                    return {"ok": True}
                 return {"ok": False, "error": "Permission settings are not supported on this OS."}
             return {"ok": False, "error": f"Unknown action: {action}"}
         except Exception as e:
             return {"ok": False, "error": str(e)}
+
+    @staticmethod
+    def _linux_firewall_allow_script(port: int, web_port: int) -> tuple[str | None, str | None]:
+        """Return (firewall_name, shell_script) opening both ports on Linux.
+
+        Detects the active firewall (ufw or firewalld) the same way the
+        diagnostics check does and returns the exact commands an admin shell
+        needs to run. Returns (None, None) when no firewall is active.
+        """
+        import subprocess as _sp
+        for cmd, name in ((["ufw", "status"], "ufw"),
+                          (["systemctl", "is-active", "firewalld"], "firewalld")):
+            try:
+                _out = _sp.run(cmd, capture_output=True, text=True, timeout=3).stdout or ""
+            except Exception:
+                continue
+            # Whole-word match: "active" is a substring of "inactive", so a
+            # bare `in` check would misread `ufw status` = "Status: inactive".
+            if "active" in _out.split():
+                if name == "ufw":
+                    return ("ufw", f"ufw allow {port}/tcp && ufw allow {web_port}/tcp")
+                return ("firewalld",
+                        f"firewall-cmd --permanent --add-port={port}/tcp && "
+                        f"firewall-cmd --permanent --add-port={web_port}/tcp && "
+                        f"firewall-cmd --reload")
+        return (None, None)
+
+    @staticmethod
+    def _macos_open_settings(uri: str) -> bool:
+        """Open a macOS System Settings pane (best-effort)."""
+        try:
+            import subprocess as _sp
+            _sp.Popen(["open", uri])
+            return True
+        except Exception:
+            return False
 
     @staticmethod
     def _open_windows_settings(uri: str) -> bool:
@@ -3416,7 +3480,9 @@ class Application:
                         _out = _sp.run(cmd, capture_output=True, text=True, timeout=3).stdout or ""
                     except Exception:
                         continue
-                    if "active" in _out.lower() or "Status: active" in _out or "active (running)" in _out:
+                    # Whole-word match: "active" is a substring of "inactive",
+                    # so a bare `in` check would misread "Status: inactive".
+                    if "active" in _out.split():
                         fw_detail = f"{name} firewall is active"
                         fw_detail_key = "diag.firewall.linux_active.detail"
                         fw_detail_params = {"name": name}
