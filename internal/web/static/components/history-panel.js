@@ -48,12 +48,6 @@
         return counts;
       },
 
-      sortLabel: function () {
-        return this.store.historySort === 'oldest'
-          ? this.t('history.sort_oldest')
-          : this.t('history.sort_newest');
-      },
-
       // Split filtered history into pinned and unpinned
       sections: function () {
         var items = this.store.filteredHistory();
@@ -99,10 +93,28 @@
         });
         return allPinned;
       },
+
+      // A type filter is active and yields nothing — name the type instead of
+      // saying "no history" (there IS history, just none of this kind).
+      emptyFilterTitle: function () {
+        return this.t('history.empty_filter', { type: this.filterLabel(this.store.historyFilter) });
+      },
+
+      emptyFilterDesc: function () {
+        return this.t('history.empty_filter_desc');
+      },
+
+      filterLabel: function (id) {
+        var fl = this.filters;
+        for (var i = 0; i < fl.length; i++) {
+          if (fl[i].id === id) return fl[i].label;
+        }
+        return id;
+      },
     },
 
     template: `<div class="history-panel" @click.self="onPanelClick">
-      <!-- One combined bar: filter chips + item count + sort + clear-all.
+      <!-- One combined bar: filter chips + item count + clear.
            Stays visible whenever there is ANY history (even if the current
            filter yields 0 results) so the bar doesn't vanish on empty filters. -->
       <div class="history-panel__filters" v-if="store.history.length > 0">
@@ -124,9 +136,8 @@
         </div>
         <div class="history-panel__filter-meta">
           <span class="history-panel__count">{{ sections.pinned.length + sections.unpinned.length }} {{ t('history.items') || 'items' }}</span>
-          <button class="btn-ghost" @click="toggleSort" :title="sortLabel">&#8597;&#65039; {{ sortLabel }}</button>
           <button class="btn-ghost" style="color:var(--clipsync-danger)" @click="clearAll" :disabled="clearingAll">
-            {{ clearingAll ? '...' : t('history.clear_all') || 'Clear All' }}
+            {{ clearingAll ? '...' : t('history.clear_all') || 'Clear' }}
           </button>
         </div>
       </div>
@@ -182,6 +193,13 @@
           <button class="btn-ghost" @click="clearSearch">{{ t('ui.cancel') }}</button>
         </div>
 
+        <!-- Type-filter empty state: there IS history, just none of this type -->
+        <div v-else-if="store.historyFilter !== 'all' && store.history.length > 0" class="panel-empty">
+          <span class="panel-empty-icon">&#128203;</span>
+          <p class="panel-empty-title">{{ emptyFilterTitle }}</p>
+          <p class="panel-empty-desc">{{ emptyFilterDesc }}</p>
+        </div>
+
         <!-- General empty state -->
         <div v-else class="panel-empty">
           <span class="panel-empty-icon">&#128203;</span>
@@ -224,10 +242,6 @@
     </div>`,
 
     methods: {
-      toggleSort: function () {
-        this.store.historySort = this.store.historySort === 'oldest' ? 'newest' : 'oldest';
-      },
-
       onPanelClick: function () {
         // Click on background (not on a history-item) clears selection
         this.store.clearSelection();
