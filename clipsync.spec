@@ -127,7 +127,7 @@ if sys.platform == "darwin":
     app = BUNDLE(
         coll,
         name="clipsync.app",
-        icon=None,
+        icon=os.path.join(_PROJ_ROOT, "assets", "icon.icns"),
         bundle_identifier="com.clipsync.app",
         info_plist={
             "CFBundleName": "ClipSync",

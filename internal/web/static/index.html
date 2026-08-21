@@ -209,6 +209,7 @@
       -webkit-backdrop-filter: blur(16px) saturate(180%);
       font-size: 13px;
       font-weight: 500;
+      max-width: min(480px, 86vw);
       animation: slideUp 0.25s cubic-bezier(0.34, 1.56, 0.64, 1) forwards;
       pointer-events: none;
     }
@@ -222,10 +223,9 @@
     }
 
     .toast__text {
-      white-space: nowrap;
-      overflow: hidden;
-      text-overflow: ellipsis;
-      max-width: 320px;
+      white-space: normal;
+      line-height: 1.4;
+      overflow-wrap: anywhere;
     }
 
     /* Toast semantic variants — opaque tinted surface (color-mix keeps the
@@ -475,6 +475,10 @@
       border-radius: 9px;
       background: rgba(255, 255, 255, 0.25);
       color: inherit;
+      /* Large counts (e.g. 10000) must not stretch the tab bar. */
+      max-width: 56px;
+      overflow: hidden;
+      text-overflow: ellipsis;
     }
 
     /* Active tab badge: dark pill + white text so it stays readable on the
@@ -1539,6 +1543,9 @@
       font-weight: 800;
       color: var(--clipsync-accent);
       line-height: 1;
+      max-width: 84px;
+      overflow: hidden;
+      text-overflow: ellipsis;
     }
 
     .overview-ring__label {
