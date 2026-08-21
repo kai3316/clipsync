@@ -758,6 +758,45 @@ class WebServer:
             logger.warning("Firewall setup error: %s", e)
             return False
 
+    def _open_firewall_elevated(self, port: int, web_port: int | None = None) -> bool:
+        """Repair the firewall rule through a UAC-elevated netsh call.
+
+        Deleting/creating rules via netsh needs admin rights, and most runs
+        are not elevated. When the unelevated attempt fails, write a small
+        batch file with the exact delete+add commands and launch it with
+        ShellExecuteW's "runas" verb so the user gets a UAC prompt. Returns
+        True if the prompt was accepted (the elevated process then applies
+        the rule), False if it was cancelled or failed to launch.
+        """
+        if sys.platform != "win32":
+            return True
+        ports = [port]
+        if web_port and web_port != port:
+            ports.append(web_port)
+        import os as _os
+        import tempfile as _tempfile
+        bat = _os.path.join(
+            _tempfile.gettempdir(),
+            "clipsync_firewall_%s.bat" % "_".join(map(str, ports)))
+        try:
+            # Overwrite any pre-existing file so nothing stale runs elevated.
+            with open(bat, "w", encoding="utf-8") as _f:
+                _f.write("\r\n".join([
+                    "@echo off",
+                    f'netsh advfirewall firewall delete rule name="{WebServer.FW_RULE_NAME}" >nul 2>&1',
+                    f'netsh advfirewall firewall add rule name="{WebServer.FW_RULE_NAME}" '
+                    f'dir=in action=allow localport={",".join(map(str, ports))} protocol=TCP profile=any',
+                ]) + "\r\n")
+            import ctypes
+            # ShellExecuteW returns a value >32 on success, but 1223
+            # (ERROR_CANCELLED) when the user declined the UAC prompt —
+            # that is a failure even though it is numerically >32.
+            result = ctypes.windll.shell32.ShellExecuteW(
+                None, "runas", bat, "", None, 1)
+            return result > 32 and result != 1223
+        except Exception:
+            return False
+
     # ── Start / Stop ────────────────────────────────────────────
 
     def start(self) -> bool:

@@ -105,6 +105,13 @@
           .then(function (res) {
             if (!res || res.ok !== true) {
               self.store.showToast(self.t('settings_window.diag_request_failed'), 2500);
+              return;
+            }
+            if (action === 'firewall') {
+              // The rule may be applied by an elevated netsh process — wait a
+              // moment, then re-scan so the fixed rule shows up as OK.
+              self.store.showToast(self.t('settings_window.diag_request_done'), 2500);
+              setTimeout(function () { self.runDiagnostics(); }, 2500);
             }
           })
           .catch(function () {

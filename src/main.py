@@ -2817,10 +2817,14 @@ class Application:
                     return {"ok": True}
                 if _platform.system() == "Windows":
                     # Prefer re-applying the allow rule (idempotent). netsh needs
-                    # admin rights — if it can't, open the firewall settings page so
-                    # the user can allow the ports manually.
+                    # admin rights — retry elevated via a UAC prompt, then fall
+                    # back to opening the firewall settings page so the user can
+                    # allow the ports manually.
                     if (self.web_server is not None
                             and self.web_server._open_firewall(self.cfg.port, self.cfg.web_port)):
+                        return {"ok": True}
+                    if (self.web_server is not None
+                            and self.web_server._open_firewall_elevated(self.cfg.port, self.cfg.web_port)):
                         return {"ok": True}
                     if self._open_windows_settings("ms-settings:network-firewall"):
                         return {"ok": True}
