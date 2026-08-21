@@ -54,7 +54,14 @@ hiddenimports += [
     "internal.security.encryption",
 ]
 
-datas = collect_data_files("internal.web")
+# Bundle the web UI by filesystem path. Do NOT use collect_data_files("internal.web")
+# here: for a dotted package it checks the package in an isolated subprocess whose
+# PYTHONPATH (CONF["pathex"]) is not populated yet at the top of the spec, so it
+# silently finds nothing and the static web UI is left out of the bundle (the web
+# server then only serves the minimal fallback page).
+datas = [
+    (os.path.join(_PROJ_ROOT, "internal", "web", "static"), "internal/web/static"),
+]
 
 if sys.platform == "darwin":
     hiddenimports += ["pyobjc_framework_Cocoa"]
