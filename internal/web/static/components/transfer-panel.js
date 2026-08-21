@@ -65,37 +65,41 @@
 
     template: `<div class="transfer-panel">
       <!-- Send Files Card -->
-      <div class="transfer-card card" style="margin-bottom:12px">
+      <div class="transfer-card glass" style="margin-bottom:12px">
         <div class="transfer-card__header">
-          <span style="font-weight:600">📤 {{ t('transfer.send_files') }}</span>
+          <span class="transfer-card__title">📤 {{ t('transfer.send_files') }}</span>
         </div>
 
         <!-- Device selector -->
-        <div v-if="onlineDevices.length > 0" style="margin-bottom:10px">
-          <label style="font-size:12px;color:var(--clipsync-fg-muted);display:block;margin-bottom:4px">{{ t('transfer.send_to') }}</label>
-          <select class="settings-select" v-model="targetDevice" style="font-size:13px">
+        <div class="transfer-device-select" v-if="onlineDevices.length > 0">
+          <span class="transfer-device-select__label">{{ t('transfer.send_to') }}</span>
+          <select class="settings-select" v-model="targetDevice">
             <option v-for="d in onlineDevices" :key="d.device_id" :value="d.device_id">
               {{ d.device_name || d.name || d.device_id }}
             </option>
           </select>
         </div>
-        <div v-else style="margin-bottom:10px;font-size:12px;color:var(--clipsync-fg-muted)">
-          {{ t('transfer.no_online_devices') }}
-        </div>
+        <div v-else class="transfer-empty-hint">{{ t('transfer.no_online_devices') }}</div>
 
-        <div style="display:flex;gap:8px">
-          <button class="btn-primary" style="flex:1;font-size:13px"
+        <div class="transfer-send-actions">
+          <button class="transfer-send-btn transfer-send-btn--file"
             @click="pickFile" :disabled="sending || !targetDevice">
-            📄 {{ t('transfer.send_file') }}
+            <span class="transfer-send-btn__icon">📄</span>
+            <span class="transfer-send-btn__text">
+              <span class="transfer-send-btn__label">{{ t('transfer.send_file') }}</span>
+              <span class="transfer-send-btn__sub">{{ t('transfer.send_file_hint') }}</span>
+            </span>
           </button>
-          <button class="btn-secondary" style="flex:1;font-size:13px"
+          <button class="transfer-send-btn transfer-send-btn--folder"
             @click="pickFolder" :disabled="sending || !targetDevice">
-            📁 {{ t('transfer.send_folder') }}
+            <span class="transfer-send-btn__icon">📁</span>
+            <span class="transfer-send-btn__text">
+              <span class="transfer-send-btn__label">{{ t('transfer.send_folder') }}</span>
+              <span class="transfer-send-btn__sub">{{ t('transfer.send_folder_hint') }}</span>
+            </span>
           </button>
         </div>
-        <div v-if="sending" style="font-size:12px;color:var(--clipsync-fg-muted);margin-top:6px">
-          {{ t('transfer.uploading') }}
-        </div>
+        <div v-if="sending" class="transfer-uploading">{{ t('transfer.uploading') }}</div>
 
         <!-- Hidden file inputs -->
         <input type="file" ref="fileInput" style="display:none" @change="onFilePicked">
@@ -103,25 +107,25 @@
       </div>
 
       <!-- Speed Test -->
-      <div class="transfer-card card" style="margin-bottom:12px">
+      <div class="transfer-card glass" style="margin-bottom:12px">
         <div class="transfer-card__header">
-          <span style="font-weight:600">⚡ {{ t('transfer.speed_test') }}</span>
-          <button v-if="!speedTest.running"
-            class="btn-primary" style="padding:4px 14px;font-size:12px"
-            @click="store.startSpeedTest()">
-            {{ t('transfer.run') }}
+          <span class="transfer-card__title">⚡ {{ t('transfer.speed_test') }}</span>
+          <span v-if="speedTest.running" class="transfer-speed-status">{{ t('transfer.running') }}</span>
+          <button v-if="!speedTest.running" class="transfer-run-btn" @click="store.startSpeedTest()">
+            ▶ {{ t('transfer.run') }}
           </button>
-          <span v-if="speedTest.status" class="text-muted" style="font-size:12px">{{ speedTest.status }}</span>
         </div>
-        <div v-if="speedTest.running || speedTest.progress > 0" class="transfer-card__progress-track">
-          <div class="transfer-card__progress-fill"
-            :style="{ width: (speedTest.progress * 100) + '%' }"></div>
+        <div class="transfer-speed-body"
+             v-if="speedTest.running || speedTest.progress > 0 || speedTest.resultMbps !== null">
+          <div class="transfer-speed-result" v-if="speedTest.resultMbps !== null">
+            <span class="transfer-speed-value">{{ speedTest.resultMbps.toFixed(1) }}<span class="transfer-speed-unit">Mbps</span></span>
+            <span class="badge" :class="speedQualityClass">{{ speedQualityLabel }}</span>
+          </div>
+          <div class="transfer-speed-progress" v-if="speedTest.running || speedTest.progress > 0">
+            <div class="transfer-speed-progress__fill" :style="{ width: (speedTest.progress * 100) + '%' }"></div>
+          </div>
         </div>
-        <div v-if="speedTest.resultMbps !== null" style="display:flex;align-items:center;gap:8px;margin-top:4px">
-          <span style="font-size:20px;font-weight:700;color:var(--clipsync-success)">{{ speedTest.resultMbps.toFixed(1) }} Mbps</span>
-          <span class="badge" :class="speedQualityClass">{{ speedQualityLabel }}</span>
-        </div>
-        <div v-if="speedTest.error" class="text-muted" style="font-size:12px;color:var(--clipsync-danger)">{{ speedTest.error }}</div>
+        <div v-if="speedTest.error" class="transfer-speed-error">{{ speedTest.error }}</div>
       </div>
 
       <!-- Active transfers -->

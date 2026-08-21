@@ -852,12 +852,20 @@
       transition: all var(--clipsync-transition-fast);
       margin-bottom: var(--clipsync-space-2);
       border-left: 3px solid transparent;
+      border-right: 1px solid var(--clipsync-border);
+      border-top: 1px solid var(--clipsync-border);
+      border-bottom: 1px solid var(--clipsync-border);
+      border-radius: var(--clipsync-radius);
+      background: color-mix(in srgb, var(--clipsync-surface) 55%, transparent);
+      backdrop-filter: blur(10px) saturate(150%);
+      -webkit-backdrop-filter: blur(10px) saturate(150%);
       user-select: none;
       -webkit-user-select: none;
     }
 
     .history-item:hover {
       border-color: var(--clipsync-border-strong);
+      box-shadow: 0 0 14px var(--clipsync-accent-glow);
     }
 
     .history-item--pinned {
@@ -1029,7 +1037,9 @@
       font-weight: 600;
       font-family: var(--clipsync-font);
       color: var(--clipsync-fg-muted);
-      background: var(--clipsync-panel);
+      background: color-mix(in srgb, var(--clipsync-panel) 55%, transparent);
+      backdrop-filter: blur(10px) saturate(150%);
+      -webkit-backdrop-filter: blur(10px) saturate(150%);
       border: 1px solid var(--clipsync-border);
       border-radius: 20px;
       cursor: pointer;
@@ -1545,11 +1555,34 @@
     }
 
     /* ── Connected device chips ───────────────────────────────── */
+    .overview-card__head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: var(--clipsync-space-2);
+    }
+
+    .overview-badge {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      min-width: 22px;
+      height: 22px;
+      padding: 0 6px;
+      border-radius: 999px;
+      font-size: 11px;
+      font-weight: 700;
+      font-family: var(--clipsync-font-mono);
+      color: var(--clipsync-accent);
+      background: color-mix(in srgb, var(--clipsync-accent) 14%, transparent);
+      border: 1px solid var(--clipsync-border-glow);
+    }
+
     .overview-chips {
       display: flex;
       flex-wrap: wrap;
       gap: var(--clipsync-space-2);
-      margin-bottom: var(--clipsync-space-3);
+      margin: var(--clipsync-space-3) 0;
     }
 
     .overview-chip {
@@ -1558,6 +1591,7 @@
       gap: 6px;
       font-size: 12px;
       font-weight: 600;
+      max-width: 100%;
       padding: 5px 12px;
       border-radius: 999px;
       border: 1px solid var(--clipsync-border-glow);
@@ -1570,10 +1604,25 @@
       border-color: var(--clipsync-accent);
     }
 
-    .overview-empty-hint {
-      font-size: 12px;
+    .overview-empty-state {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      gap: var(--clipsync-space-2);
+      padding: var(--clipsync-space-4) 0;
       color: var(--clipsync-fg-subtle);
-      padding: var(--clipsync-space-2) 0;
+      text-align: center;
+    }
+
+    .overview-empty-state__icon {
+      font-size: 26px;
+      opacity: 0.8;
+    }
+
+    .overview-empty-state__text {
+      font-size: 12px;
+      max-width: 240px;
     }
 
     .overview-action-row {
@@ -1583,7 +1632,23 @@
     }
 
     .overview-quick-btn {
+      flex: 1;
+      min-width: 120px;
+      padding: 8px 14px;
+      border-radius: var(--clipsync-radius);
+      border: 1px solid var(--clipsync-border);
+      background: color-mix(in srgb, var(--clipsync-panel) 60%, transparent);
+      color: var(--clipsync-fg);
       font-size: 12px;
+      font-weight: 600;
+      cursor: pointer;
+      transition: all var(--clipsync-transition);
+    }
+
+    .overview-quick-btn:hover {
+      border-color: var(--clipsync-border-glow);
+      box-shadow: 0 0 12px var(--clipsync-accent-glow);
+      transform: translateY(-1px);
     }
 
     /* ── Recent activity feed ─────────────────────────────────── */
@@ -1752,6 +1817,166 @@
       font-family: var(--clipsync-font-mono);
       font-size: 11px;
       color: var(--clipsync-fg-subtle);
+    }
+
+    /* ── Send card (device selector + buttons) ───────────────────── */
+    .transfer-card__title {
+      font-weight: 600;
+      font-size: 14px;
+    }
+
+    .transfer-device-select {
+      display: flex;
+      align-items: center;
+      gap: var(--clipsync-space-2);
+      margin-bottom: var(--clipsync-space-3);
+    }
+
+    .transfer-device-select__label {
+      font-size: 12px;
+      color: var(--clipsync-fg-muted);
+      flex-shrink: 0;
+    }
+
+    .transfer-empty-hint {
+      font-size: 12px;
+      color: var(--clipsync-fg-subtle);
+      margin-bottom: var(--clipsync-space-2);
+    }
+
+    .transfer-send-actions {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: var(--clipsync-space-2);
+    }
+
+    @media (max-width: 480px) {
+      .transfer-send-actions { grid-template-columns: 1fr; }
+    }
+
+    .transfer-send-btn {
+      display: flex;
+      align-items: center;
+      gap: var(--clipsync-space-2);
+      padding: 10px 14px;
+      border-radius: var(--clipsync-radius);
+      border: 1px solid var(--clipsync-border);
+      background: color-mix(in srgb, var(--clipsync-panel) 60%, transparent);
+      color: var(--clipsync-fg);
+      cursor: pointer;
+      text-align: left;
+      transition: all var(--clipsync-transition);
+    }
+
+    .transfer-send-btn:hover:not(:disabled) {
+      border-color: var(--clipsync-border-glow);
+      box-shadow: 0 0 14px var(--clipsync-accent-glow);
+      transform: translateY(-1px);
+    }
+
+    .transfer-send-btn:disabled {
+      opacity: 0.45;
+      cursor: not-allowed;
+    }
+
+    .transfer-send-btn__icon {
+      font-size: 20px;
+      flex-shrink: 0;
+    }
+
+    .transfer-send-btn__text {
+      display: flex;
+      flex-direction: column;
+      min-width: 0;
+    }
+
+    .transfer-send-btn__label {
+      font-size: 13px;
+      font-weight: 600;
+    }
+
+    .transfer-send-btn__sub {
+      font-size: 10px;
+      color: var(--clipsync-fg-subtle);
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
+    .transfer-uploading {
+      font-size: 12px;
+      color: var(--clipsync-fg-muted);
+      margin-top: var(--clipsync-space-2);
+    }
+
+    /* ── Speed test ──────────────────────────────────────────────── */
+    .transfer-speed-status {
+      font-size: 12px;
+      color: var(--clipsync-fg-muted);
+    }
+
+    .transfer-run-btn {
+      margin-left: auto;
+      padding: 4px 16px;
+      border-radius: 999px;
+      border: 1px solid var(--clipsync-border-glow);
+      background: color-mix(in srgb, var(--clipsync-accent) 12%, transparent);
+      color: var(--clipsync-accent);
+      font-size: 12px;
+      font-weight: 600;
+      cursor: pointer;
+      transition: all var(--clipsync-transition);
+    }
+
+    .transfer-run-btn:hover {
+      box-shadow: 0 0 14px var(--clipsync-accent-glow);
+      border-color: var(--clipsync-accent);
+    }
+
+    .transfer-speed-body {
+      margin-top: var(--clipsync-space-2);
+    }
+
+    .transfer-speed-result {
+      display: flex;
+      align-items: baseline;
+      gap: var(--clipsync-space-2);
+      margin-bottom: var(--clipsync-space-2);
+    }
+
+    .transfer-speed-value {
+      font-size: 26px;
+      font-weight: 800;
+      color: var(--clipsync-success);
+      font-family: var(--clipsync-font-mono);
+      line-height: 1;
+    }
+
+    .transfer-speed-unit {
+      font-size: 12px;
+      font-weight: 600;
+      color: var(--clipsync-fg-muted);
+      margin-left: 2px;
+    }
+
+    .transfer-speed-progress {
+      height: 4px;
+      background: var(--clipsync-panel);
+      border-radius: 2px;
+      overflow: hidden;
+    }
+
+    .transfer-speed-progress__fill {
+      height: 100%;
+      background: linear-gradient(90deg, var(--clipsync-accent), var(--clipsync-accent-2));
+      border-radius: 2px;
+      transition: width 0.3s;
+    }
+
+    .transfer-speed-error {
+      margin-top: var(--clipsync-space-2);
+      font-size: 12px;
+      color: var(--clipsync-danger);
     }
 
     /* ── Progress bar ─────────────────────────────────────────────── */

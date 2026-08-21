@@ -19,6 +19,7 @@ All notable changes to ClipSync are documented in this file.
 ### More
 - **Global hotkey editor** added to Advanced settings (all 13 shortcuts, restart required)
 - Config schema version added: old configs with `filter_enabled_categories: []` are migrated to `None` so existing installs keep content redaction ON, while a fresh save of `[]` stays a deliberate "disable all"
+- Panel design aligned with the new overview: history filter chips and history items are now frosted-glass (no more flat white band), the transfer panel's send-file / folder buttons and speed test got proper glass layouts, and the overview "Connected Devices" card gained a count badge, a nicer empty state and solid quick-action buttons
 
 ## [1.0.7] — 2026-08-21
 

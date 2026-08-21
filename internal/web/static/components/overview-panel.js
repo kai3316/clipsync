@@ -361,14 +361,22 @@
           '</div>' +
 
           '<div class="overview-card glass overview-devices-card">' +
-            '<h3 class="overview-card__title">{{ t(\'overview.connected_devices\') }}</h3>' +
-            '<div v-if="connectedChips.length > 0" class="overview-chips">' +
-              '<span v-for="name in connectedChips" :key="name" class="overview-chip"><span class="status-dot status-dot--online"></span>{{ name }}</span>' +
+            '<div class="overview-card__head">' +
+              '<h3 class="overview-card__title">{{ t(\'overview.connected_devices\') }}</h3>' +
+              '<span class="overview-badge" v-if="connectedChips.length > 0">{{ connectedChips.length }}</span>' +
             '</div>' +
-            '<div v-else class="overview-empty-hint">{{ t(\'overview.no_connected_hint\') }}</div>' +
+            '<div v-if="connectedChips.length > 0" class="overview-chips">' +
+              '<span v-for="name in connectedChips" :key="name" class="overview-chip">' +
+                '<span class="status-dot status-dot--online"></span><span class="text-ellipsis">{{ name }}</span>' +
+              '</span>' +
+            '</div>' +
+            '<div v-else class="overview-empty-state">' +
+              '<span class="overview-empty-state__icon">📡</span>' +
+              '<span class="overview-empty-state__text">{{ t(\'overview.no_connected_hint\') }}</span>' +
+            '</div>' +
             '<div class="overview-action-row">' +
-              '<button class="btn-ghost overview-quick-btn" @click="showQr">📱 {{ t(\'tray.show_web_qr\') }}</button>' +
-              '<button class="btn-ghost overview-quick-btn" @click="sendUrl">🔗 {{ t(\'tray.send_url\') }}</button>' +
+              '<button class="overview-quick-btn" @click="showQr">📱 {{ t(\'tray.show_web_qr\') }}</button>' +
+              '<button class="overview-quick-btn" @click="sendUrl">🔗 {{ t(\'tray.send_url\') }}</button>' +
             '</div>' +
           '</div>' +
         '</div>' +
