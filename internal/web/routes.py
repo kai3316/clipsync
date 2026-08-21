@@ -49,7 +49,9 @@ def dispatch(method, path, query_params, body, cfg, history, sync_mgr,
              get_discovered=None,
              get_resolved_hashes=None, get_pending_pairings=None,
              enc_mgr=None, on_open_file=None, on_open_folder=None,
-             on_restart=None, on_reset_dedup=None):
+             on_restart=None, on_reset_dedup=None,
+             get_certs=None, get_diagnostics=None,
+             on_update_download=None):
     """Route an API request to the appropriate handler, never raising.
 
     Wraps _dispatch in a safety net so an unexpected exception in a handler
@@ -66,6 +68,7 @@ def dispatch(method, path, query_params, body, cfg, history, sync_mgr,
             on_settings_change, on_show_web_qr, on_send_url, get_discovered,
             get_resolved_hashes, get_pending_pairings, enc_mgr,
             on_open_file, on_open_folder, on_restart, on_reset_dedup,
+            get_certs, get_diagnostics, on_update_download,
         )
     except Exception:
         logger.exception("Unhandled error in API route: %s %s", method, path)
@@ -89,7 +92,9 @@ def _dispatch(method, path, query_params, body, cfg, history, sync_mgr,
               get_discovered=None,
               get_resolved_hashes=None, get_pending_pairings=None,
               enc_mgr=None, on_open_file=None, on_open_folder=None,
-              on_restart=None, on_reset_dedup=None):
+              on_restart=None, on_reset_dedup=None,
+              get_certs=None, get_diagnostics=None,
+              on_update_download=None):
     """Route an API request to the appropriate handler.
 
     All handler functions return (data_dict, status_code).
@@ -166,6 +171,61 @@ def _dispatch(method, path, query_params, body, cfg, history, sync_mgr,
                 return _json_response({"error": "overview not available"}, 503)
             data = get_overview_data()
             return _json_response({"overview": data})
+
+        elif path == "/api/devices/certs":
+            if get_certs is None:
+                return _json_response({"devices": []})
+            try:
+                devices = get_certs()
+            except Exception:
+                logger.exception("get_certs callback failed")
+                devices = []
+            return _json_response({"devices": devices or []})
+
+        elif path == "/api/logs":
+            lines_str = query_params.get("lines", ["200"])[0]
+            try:
+                n = int(lines_str)
+            except (TypeError, ValueError):
+                n = 200
+            n = max(1, min(n, 1000))
+            logs: list[str] = []
+            try:
+                from internal.config.config import _config_dir
+                log_path = _config_dir() / "clipsync.log"
+                if log_path.exists():
+                    content = log_path.read_text(encoding="utf-8", errors="replace")
+                    logs = content.splitlines()[-n:]
+            except Exception:
+                logger.exception("Failed to read log file for /api/logs")
+                logs = []
+            return _json_response({"logs": logs})
+
+        elif path == "/api/diagnostics":
+            if get_diagnostics is None:
+                return _json_response({
+                    "summary": "fail",
+                    "checks": [
+                        {"id": "server_port", "ok": False,
+                         "detail": "diagnostics unavailable",
+                         "guidance": "Diagnostics are unavailable on this build."},
+                    ],
+                    "discovery_running": False,
+                    "server_running": False,
+                    "connected_count": 0,
+                    "paired_count": 0,
+                    "web_companion_running": False,
+                    "web_port": 0,
+                    "lan_ip": "",
+                    "os": "",
+                    "version": "",
+                })
+            try:
+                data = get_diagnostics()
+            except Exception:
+                logger.exception("get_diagnostics callback failed")
+                data = {}
+            return _json_response(data or {})
 
         elif path == "/api/speed-test":
             data, status = get_speed_test(on_speed_test_poll)
@@ -271,6 +331,23 @@ def _dispatch(method, path, query_params, body, cfg, history, sync_mgr,
                 return _json_response({"ok": False, "error": "not available"}, 503)
             on_restart()
             return _json_response({"ok": True})
+
+        elif path == "/api/update/download":
+            if on_update_download is None:
+                return _json_response({"ok": False, "path": "", "error": "not available"}, 503)
+            try:
+                result = on_update_download()
+            except Exception:
+                logger.exception("on_update_download callback failed")
+                result = None
+            if not isinstance(result, dict):
+                return _json_response({"ok": False, "path": "", "error": "download handler failed"}, 500)
+            ok = bool(result.get("ok"))
+            return _json_response({
+                "ok": ok,
+                "path": result.get("path", ""),
+                "error": result.get("error"),
+            }, 200 if ok else 500)
 
         elif path == "/api/export":
             data, status = export_data(body, cfg, history)

@@ -102,8 +102,10 @@
     },
 
     template: `<div class="history-panel" @click.self="onPanelClick">
-      <!-- One combined bar: filter chips + item count + sort + clear-all -->
-      <div class="history-panel__filters" v-if="hasContent">
+      <!-- One combined bar: filter chips + item count + sort + clear-all.
+           Stays visible whenever there is ANY history (even if the current
+           filter yields 0 results) so the bar doesn't vanish on empty filters. -->
+      <div class="history-panel__filters" v-if="store.history.length > 0">
         <div class="history-panel__filter-chips">
           <button
             v-for="filt in filters"

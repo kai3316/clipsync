@@ -529,7 +529,9 @@ class WebServer:
                  get_discovered_peers=None,
                  get_resolved_hashes=None, get_pending_pairings=None,
                  enc_mgr=None, on_open_file=None, on_open_folder=None,
-                 on_restart=None, on_reset_dedup=None):
+                 on_restart=None, on_reset_dedup=None,
+                 get_certs=None, get_diagnostics=None,
+                 on_update_download=None):
         self._cfg = cfg
         self._sync_mgr = sync_mgr
         self._get_connected_ids = get_connected_ids
@@ -568,6 +570,9 @@ class WebServer:
         self._on_toggle_discovery = on_toggle_discovery
         self._on_toggle_visibility = on_toggle_visibility
         self._on_settings_change = on_settings_change
+        self._get_certs = get_certs
+        self._get_diagnostics = get_diagnostics
+        self._on_update_download = on_update_download
         self._httpd: ThreadingHTTPServer | None = None
         self._thread: threading.Thread | None = None
         self._firewall_ok: bool = False
@@ -770,6 +775,9 @@ class WebServer:
         on_toggle_discovery = self._on_toggle_discovery
         on_toggle_visibility = self._on_toggle_visibility
         on_settings_change = self._on_settings_change
+        get_certs = self._get_certs
+        get_diagnostics = self._get_diagnostics
+        on_update_download = self._on_update_download
         upload_dir = self._upload_dir
         static_dir = self._static_dir
         icon_192 = self._icon_192
@@ -1189,6 +1197,9 @@ class WebServer:
                         on_open_folder=on_open_folder,
                         on_restart=on_restart,
                         on_reset_dedup=on_reset_dedup,
+                        get_certs=get_certs,
+                        get_diagnostics=get_diagnostics,
+                        on_update_download=on_update_download,
                     )
                     inner_self.send_response(status)
                     inner_self.send_header("Content-Type", content_type)
@@ -1289,6 +1300,9 @@ class WebServer:
                         on_open_folder=on_open_folder,
                         on_restart=on_restart,
                         on_reset_dedup=on_reset_dedup,
+                        get_certs=get_certs,
+                        get_diagnostics=get_diagnostics,
+                        on_update_download=on_update_download,
                     )
                     inner_self.send_response(status)
                     inner_self.send_header("Content-Type", content_type)

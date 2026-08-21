@@ -66,6 +66,12 @@ class Config:
     transfer_timeout: float = 120.0
     log_level: str = "INFO"
     notifications_enabled: bool = True
+    # Per-type notification toggles (each defaults ON; the master
+    # notifications_enabled switch above still gates all of them).
+    notify_device_connect: bool = True
+    notify_transfer: bool = True
+    notify_pairing: bool = True
+    notify_sync: bool = True
     # Security
     encryption_enabled: bool = True
     encryption_password: str = ""       # runtime only — never persisted
@@ -180,6 +186,8 @@ def load() -> Config:
                 "sync_debounce", "clipboard_poll_interval",
                 "max_reconnect_attempts", "transfer_timeout",
                 "log_level", "notifications_enabled",
+                "notify_device_connect", "notify_transfer",
+                "notify_pairing", "notify_sync",
                 "encryption_enabled",
                 "encryption_password_hash",
                 "appearance_mode",
@@ -267,6 +275,10 @@ def save(cfg: Config, enc_mgr: "EncryptionManager | None" = None):
             "transfer_timeout": cfg.transfer_timeout,
             "log_level": cfg.log_level,
             "notifications_enabled": cfg.notifications_enabled,
+            "notify_device_connect": cfg.notify_device_connect,
+            "notify_transfer": cfg.notify_transfer,
+            "notify_pairing": cfg.notify_pairing,
+            "notify_sync": cfg.notify_sync,
             "encryption_enabled": cfg.encryption_enabled,
             "encryption_password_hash": cfg.encryption_password_hash,
             "appearance_mode": cfg.appearance_mode,

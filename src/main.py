@@ -758,6 +758,9 @@ class Application:
             get_pending_pairings=self._get_pending,
             get_resolved_hashes=lambda: self.transport_mgr.get_resolved_hashes(),
             enc_mgr=self._make_save_enc(),
+            get_certs=self._get_certs,
+            get_diagnostics=self._get_diagnostics,
+            on_update_download=self._handle_update_download,
         )
 
         # ── Live history push to web clients ────────────────────────
@@ -936,8 +939,9 @@ class Application:
                 "Clipboard content too large to sync: %.1f MB (limit: %d MB)",
                 size_mb, MAX_FRAME_SIZE // (1024 * 1024),
             )
-            notification_mgr.show(
-                "Sync Skipped",
+            self._notify(
+                "notify_sync",
+                T("notify.sync_skipped"),
                 T("sync.oversize", size=size_mb),
             )
             return
@@ -994,9 +998,9 @@ class Application:
         logger.info("File transfer %s: %s",
                     transfer_id[:8], "complete" if success else "failed")
         if success:
-            notification_mgr.show(T("ui.file_transfer"), T("transfer.send_success"))
+            self._notify("notify_transfer", T("ui.file_transfer"), T("transfer.send_success"))
         else:
-            notification_mgr.show(T("ui.file_transfer"), T("transfer.send_failed"))
+            self._notify("notify_transfer", T("ui.file_transfer"), T("transfer.send_failed"))
         self._last_transfer_progress.pop(transfer_id, None)
         # Remove any temp zip archive created for a folder/multi-file send.
         tmp = self._zip_cleanup.pop(transfer_id, None)
@@ -1010,11 +1014,14 @@ class Application:
     def _on_file_received(self, transfer_id: str, saved_path: str, file_name: str) -> None:
         logger.info("File received: %s -> %s",
                     _mask_file_name(file_name), _mask_path(saved_path))
-        notification_mgr.show(T("notify.file_received"), T("transfer.received", name=file_name))
+        self._notify("notify_transfer", T("notify.file_received"),
+                     T("transfer.received", name=file_name))
 
     def _on_transfer_request(self, transfer_id: str, file_name: str, file_size: int,
                              mime_type: str, send_fn) -> None:
         logger.info("File request: %s (%d bytes, %s)", file_name, file_size, mime_type)
+        self._notify("notify_transfer", T("transfer.incoming"),
+                     T("transfer.incoming_title"))
         self.root.after(0, lambda: self._show_transfer_request_dialog(
             transfer_id, file_name, file_size, mime_type, send_fn))
 
@@ -1198,7 +1205,8 @@ class Application:
         if prev == code:
             return
         self._notified_pairings[peer_id] = code
-        notification_mgr.show(
+        self._notify(
+            "notify_pairing",
             "Pairing Request",
             T("notify.pairing_request", name=peer_name, code=code),
         )
@@ -1665,13 +1673,15 @@ class Application:
             for pid in connected_set - prev_connected:
                 found = next((p for p in known_peers if p.device_id == pid), None)
                 name = found.device_name if found else pid[:12]
-                notification_mgr.show(T("notify.device_connected_title"),
-                                      T("notify.device_connected", name=name))
+                self._notify("notify_device_connect",
+                             T("notify.device_connected_title"),
+                             T("notify.device_connected", name=name))
             for pid in prev_connected - connected_set:
                 found = next((p for p in known_peers if p.device_id == pid), None)
                 name = found.device_name if found else pid[:12]
-                notification_mgr.show(T("notify.device_disconnected_title"),
-                                      T("notify.device_disconnected", name=name))
+                self._notify("notify_device_connect",
+                             T("notify.device_disconnected_title"),
+                             T("notify.device_disconnected", name=name))
             prev_connected = connected_set
 
             cleanup_counter += 1
@@ -2742,6 +2752,17 @@ class Application:
         if mgr is not None:
             mgr.toast(message, duration)
 
+    def _notify(self, cfg_flag: str, title: str, message: str) -> None:
+        """Show a desktop notification gated by a per-type config toggle.
+
+        Returns early (no notification) when ``cfg.<cfg_flag>`` is False.
+        The master ``notifications_enabled`` switch is enforced inside
+        ``notification_mgr`` itself, so it applies on top of these toggles.
+        """
+        if not getattr(self.cfg, cfg_flag, True):
+            return
+        notification_mgr.show(title, message)
+
     def _notify_error(self, title: str, message: str) -> None:
         """Show an error — toast in webview mode, CTk dialog in CTk mode."""
         if self._is_webview():
@@ -3111,12 +3132,179 @@ class Application:
 
         return known + discovered
 
+    def _get_certs(self) -> list:
+        """Return known peers with their certificate fingerprints for the web UI.
+
+        Each entry: {"device_id", "device_name", "fingerprint_short",
+        "fingerprint", "paired"}.  Uses getattr so missing attributes on a
+        PeerIdentity degrade gracefully to ''.
+        """
+        try:
+            peers = self.pairing_mgr.get_known_peers() if self.pairing_mgr else []
+        except Exception:
+            logger.exception("Failed to list known peers for certs API")
+            return []
+        result = []
+        for peer in peers:
+            result.append({
+                "device_id": getattr(peer, "device_id", ""),
+                "device_name": getattr(peer, "device_name", ""),
+                "fingerprint_short": getattr(peer, "fingerprint_short", ""),
+                "fingerprint": getattr(peer, "fingerprint", ""),
+                "paired": bool(getattr(peer, "paired", False)),
+            })
+        return result
+
+    @staticmethod
+    def _is_private_ip(ip: str) -> bool:
+        """Return True when *ip* is in a private LAN range (RFC 1918)."""
+        if ip.startswith("192.168."):
+            return True
+        if ip.startswith("10."):
+            return True
+        if ip.startswith("172."):
+            try:
+                return 16 <= int(ip.split(".")[1]) <= 31
+            except (IndexError, ValueError):
+                return False
+        return False
+
+    @staticmethod
+    def _classify_network(lan_ip: str) -> tuple[bool, str, str | None]:
+        """Classify the detected LAN IP for the diagnostics network check.
+
+        Returns (ok, detail, guidance).  guidance is None when the check
+        passes.
+        """
+        if not lan_ip or lan_ip.startswith("127."):
+            return (False, "No LAN address detected",
+                    "No LAN address detected — check that WiFi/Ethernet is connected to a network.")
+        if lan_ip.startswith("169.254."):
+            return (False, "Link-local address (169.254.x.x)",
+                    "No DHCP address (169.254 link-local) — check that WiFi/Ethernet is connected to a network.")
+        if Application._is_private_ip(lan_ip):
+            return (True, f"Private LAN ({lan_ip})", None)
+        return (False, f"Public/routable IP ({lan_ip})",
+                "This device appears to be on a public/routable IP — you may be behind a VPN or on an "
+                "isolated network. VPNs and client isolation prevent LAN discovery.")
+
+    def _get_diagnostics(self) -> dict:
+        """Return a live snapshot of core service state + actionable network checks."""
+        import platform as _platform
+        from internal.version import __version__
+
+        port = int(getattr(self.cfg, "port", 0) or 0)
+        web_port = int(getattr(self.cfg, "web_port", 0) or 0)
+
+        server_running = bool(self.transport_mgr is not None
+                              and getattr(self.transport_mgr, "_running", False))
+        discovery_running = bool(self.discovery is not None
+                                 and getattr(self.discovery, "is_browsing", False))
+        advertising = bool(self.discovery is not None
+                           and getattr(self.discovery, "is_advertising", False))
+        web_running = bool(self.web_server is not None and self.web_server.is_running)
+
+        try:
+            lan_ip = self.web_server._get_lan_ip() if self.web_server is not None else ""
+        except Exception:
+            lan_ip = ""
+
+        checks = []
+
+        # 1. TCP server port
+        if server_running:
+            checks.append({"id": "server_port", "ok": True,
+                           "detail": f"TCP server listening on {port}", "guidance": None})
+        else:
+            checks.append({"id": "server_port", "ok": False,
+                           "detail": f"TCP server not listening on {port}",
+                           "guidance": (f"Port {port} is not listening — another app may be using it, "
+                                        "or the firewall blocks it. Try a different port in Settings → Network.")})
+
+        # 2. mDNS discovery
+        if discovery_running:
+            checks.append({"id": "discovery", "ok": True,
+                           "detail": "mDNS discovery active", "guidance": None})
+        else:
+            checks.append({"id": "discovery", "ok": False,
+                           "detail": "mDNS discovery not active",
+                           "guidance": ("mDNS discovery isn't active. If you're on a guest/enterprise WiFi, "
+                                        "AP/client isolation blocks discovery — connect both devices to the "
+                                        "same private network.")})
+
+        # 3. Advertising (device visible on network)
+        if advertising:
+            checks.append({"id": "advertising", "ok": True,
+                           "detail": "device visible on network", "guidance": None})
+        else:
+            checks.append({"id": "advertising", "ok": False,
+                           "detail": "device not advertising",
+                           "guidance": "This device isn't advertising — enable 'Visible' in the overview."})
+
+        # 4. Web companion
+        if web_running:
+            checks.append({"id": "web_companion", "ok": True,
+                           "detail": f"Web companion on :{web_port}", "guidance": None})
+        else:
+            checks.append({"id": "web_companion", "ok": False,
+                           "detail": "Web companion not running",
+                           "guidance": "Web companion isn't running — enable it in Settings → Web Companion."})
+
+        # 5. Network classification
+        network_ok, network_detail, network_guidance = self._classify_network(lan_ip)
+        checks.append({"id": "network", "ok": network_ok,
+                       "detail": network_detail, "guidance": network_guidance})
+
+        # summary: "fail" if a critical check (server/discovery/network) is down,
+        # "warn" if only advertising/web is down, else "ok".
+        critical_ids = ("server_port", "discovery", "network")
+        if any(not c["ok"] for c in checks if c["id"] in critical_ids):
+            summary = "fail"
+        elif any(not c["ok"] for c in checks):
+            summary = "warn"
+        else:
+            summary = "ok"
+
+        connected = (self.transport_mgr.get_connected_peers()
+                     if self.transport_mgr is not None else [])
+        paired = (self.pairing_mgr.get_paired_peers()
+                  if self.pairing_mgr is not None else [])
+
+        return {
+            "summary": summary,
+            "checks": checks,
+            "discovery_running": discovery_running,
+            "server_running": server_running,
+            "connected_count": len(connected),
+            "paired_count": len(paired),
+            "web_companion_running": web_running,
+            "web_port": web_port,
+            "lan_ip": lan_ip,
+            "os": _platform.system(),
+            "version": __version__,
+        }
+
+    def _handle_update_download(self) -> dict:
+        """Download the latest release into the user's Downloads folder."""
+        from pathlib import Path
+        from internal.system.updater import download_latest_release
+        dest_dir = str(Path.home() / "Downloads")
+        try:
+            path = download_latest_release(dest_dir)
+        except Exception as exc:
+            logger.exception("Update download failed")
+            return {"ok": False, "path": "", "error": str(exc)}
+        if path:
+            return {"ok": True, "path": path, "error": None}
+        return {"ok": False, "path": "", "error": "download failed"}
+
     def _get_pending(self) -> list:
         return self.pairing_mgr.get_pending_pairings()
 
     def _on_pair(self, peer_id: str, code: str) -> bool:
         result = self.pairing_mgr.confirm_pairing(peer_id, code)
         if result:
+            self._notify("notify_pairing", "Pairing", T("notify.paired_success"))
             self._save_cfg_and_peers()
             if peer_id not in self.transport_mgr.get_connected_peers():
                 self._on_connect(peer_id)

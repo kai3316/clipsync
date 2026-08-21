@@ -81,6 +81,19 @@
       // Initialise the reactive store with server metadata
       store.init(url, token, window.__CLIPSYNC_DEVICE_ID__ || '', window.__CLIPSYNC_DEVICE_NAME__ || '');
 
+      // One-time first-run onboarding wizard (only once a device id is known).
+      if (!store.onboardingDone && store.deviceId) {
+        store.showOnboarding = true;
+      }
+
+      // Register the service worker for offline app-shell caching. The server
+      // token-protects static files, so the SW URL must carry the token too.
+      if ('serviceWorker' in navigator && token) {
+        navigator.serviceWorker.register('/sw.js?token=' + encodeURIComponent(token)).catch(function () {
+          // SW is optional — never break the app if registration fails.
+        });
+      }
+
       // Initialise the API client
       ClipsyncAPI.init(url, token);
 

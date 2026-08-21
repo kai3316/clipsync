@@ -144,10 +144,18 @@
        Settings Panel
        ═══════════════════════════════════════════════════════════════ */
     settingsPanelVisible: false,
+    settingsRequestedSection: '',   // open settings on this section when set
     soundEnabled: true,
     animationsEnabled: true,
     uiBackend: 'webview',       // 'webview' | 'ctk'
     settingsCache: {},           // cached settings from server
+
+    /* ═══════════════════════════════════════════════════════════════
+       First-run onboarding wizard
+       ═══════════════════════════════════════════════════════════════ */
+    onboardingDone: false,      // true once the wizard was finished/skipped
+    showOnboarding: false,      // true while the wizard overlay is visible
+    onboardingStep: 1,          // 1 = welcome · 2 = pair a device · 3 = phone access
 
     /* ═══════════════════════════════════════════════════════════════
        Dialog system (server-pushed modals)
@@ -181,6 +189,7 @@
       this.deviceId = deviceId;
       this.deviceName = deviceName;
       this.loadTheme();
+      this.loadOnboarding();
     },
 
     /**
@@ -233,6 +242,66 @@
           localStorage.setItem('clipsync_theme', t);
         }
       } catch (e) { /* ignore */ }
+    },
+
+    /* ═══════════════════════════════════════════════════════════════
+       First-run onboarding helpers
+       ═══════════════════════════════════════════════════════════════ */
+
+    /**
+     * Load the first-run onboarding flag from localStorage.
+     * "clipsync_onboarded" = "1" means the wizard was already completed/skipped.
+     */
+    loadOnboarding: function () {
+      var saved = null;
+      try { saved = localStorage.getItem('clipsync_onboarded'); } catch (e) { /* ignore */ }
+      this.onboardingDone = saved === '1' || saved === 'true';
+    },
+
+    /**
+     * Mark onboarding as done, persist it, and hide the wizard overlay.
+     */
+    completeOnboarding: function () {
+      this.onboardingDone = true;
+      this.showOnboarding = false;
+      this.onboardingStep = 1;
+      try { localStorage.setItem('clipsync_onboarded', '1'); } catch (e) { /* ignore */ }
+    },
+
+    /**
+     * Advance to the next onboarding step (1 → 2 → 3).
+     */
+    nextOnboardingStep: function () {
+      if (this.onboardingStep < 3) this.onboardingStep += 1;
+    },
+
+    /**
+     * Step 1 "Start": persist the editable device name, then advance.
+     */
+    startOnboarding: function () {
+      this.saveDeviceName();
+      this.nextOnboardingStep();
+    },
+
+    /**
+     * Step 2 "Go to Devices": switch to the devices tab and close the wizard.
+     */
+    goToDevices: function () {
+      this.activeTab = 'devices';
+      this.completeOnboarding();
+    },
+
+    /**
+     * Persist the device name typed on the welcome screen to the server.
+     */
+    saveDeviceName: function () {
+      var name = (this.deviceName || '').trim();
+      this.deviceName = name;
+      if (window.ClipsyncAPI && window.ClipsyncAPI.updateSettings) {
+        window.ClipsyncAPI.updateSettings({ device_name: name }).catch(function () {
+          // Non-fatal — the server picks it up on the next settings sync.
+        });
+      }
     },
 
     /**

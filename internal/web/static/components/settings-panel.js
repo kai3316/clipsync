@@ -82,6 +82,29 @@
         // Hotkeys
         hotkeys: {},
 
+        // Notifications (per-event toggles)
+        notifyDeviceConnect: true,
+        notifyTransfer: true,
+        notifyPairing: true,
+        notifySync: true,
+
+        // Logs
+        logs: '',
+        logsLoading: false,
+
+        // Trusted devices / certificates
+        certDevices: [],
+        certsLoading: false,
+
+        // Diagnostics (scan-style: checks revealed one by one)
+        diagScanning: false,
+        diagChecks: [],
+        diagRevealed: 0,
+        diagSummary: '',
+
+        // Update download
+        updateDownloading: false,
+
         // States
         saving: false,
         exporting: false,
@@ -161,9 +184,26 @@
           { id: 'filter',        label: this.t('settings_nav.filter') },
           { id: 'security',      label: this.t('settings_nav.security') },
           { id: 'advanced',      label: this.t('settings_nav.advanced') },
+          { id: 'logs',          label: this.t('settings_nav.logs') },
           { id: 'data',          label: this.t('settings.data') },
           { id: 'about',         label: this.t('settings_nav.about') },
           { id: 'danger',        label: this.t('settings_window.danger_zone') },
+        ];
+      },
+
+      diagRows: function () {
+        var r = this.diagResult || {};
+        var t = this.t;
+        return [
+          { label: t('settings_window.diag_discovery'), value: r.discovery_running, bool: true },
+          { label: t('settings_window.diag_server'), value: r.server_running, bool: true },
+          { label: t('settings_window.diag_web'), value: r.web_companion_running, bool: true },
+          { label: t('settings_window.diag_connected'), value: r.connected_count, bool: false },
+          { label: t('settings_window.diag_paired'), value: r.paired_count, bool: false },
+          { label: t('settings_window.diag_web_port'), value: r.web_port, bool: false },
+          { label: t('settings_window.diag_lan_ip'), value: r.lan_ip, bool: false },
+          { label: t('settings_window.diag_os'), value: r.os, bool: false },
+          { label: t('settings_window.diag_version'), value: r.version, bool: false },
         ];
       },
     },
@@ -211,6 +251,10 @@
         if (s.max_reconnect_attempts !== undefined) this.maxReconnect = s.max_reconnect_attempts;
         if (s.log_level !== undefined) this.logLevel = s.log_level;
         if (s.notifications_enabled !== undefined) this.notificationsEnabled = !!s.notifications_enabled;
+        if (s.notify_device_connect !== undefined) this.notifyDeviceConnect = !!s.notify_device_connect;
+        if (s.notify_transfer !== undefined) this.notifyTransfer = !!s.notify_transfer;
+        if (s.notify_pairing !== undefined) this.notifyPairing = !!s.notify_pairing;
+        if (s.notify_sync !== undefined) this.notifySync = !!s.notify_sync;
         if (s.translate_url !== undefined) this.translateUrl = s.translate_url || '';
         if (s.translate_key_set !== undefined) this.translateKeySet = !!s.translate_key_set;
         if (s.app_filter_enabled !== undefined) this.appFilterEnabled = !!s.app_filter_enabled;
@@ -294,7 +338,13 @@
       saveSecurity: function () {
         var self = this;
         self.securitySaving = true;
-        var payload = { encryption_enabled: self.encryptionEnabled };
+        var payload = {
+          encryption_enabled: self.encryptionEnabled,
+          notify_device_connect: self.notifyDeviceConnect,
+          notify_transfer: self.notifyTransfer,
+          notify_pairing: self.notifyPairing,
+          notify_sync: self.notifySync,
+        };
         if (self.passwordValue) {
           payload.password = self.passwordValue;
         }
@@ -320,6 +370,132 @@
           self.store.showToast(self.t('settings_window.password_cleared'), 2000);
         }).catch(function () {
           self.store.showToast(self.t('settings.clear_password_failed'), 2000);
+        });
+      },
+
+      // ── Logs ────────────────────────────────────────────────────
+
+      loadLogs: function () {
+        var self = this;
+        self.logsLoading = true;
+        ClipsyncAPI._fetch('GET', '/api/logs?lines=200').then(function (res) {
+          self.logsLoading = false;
+          self.logs = (res && Array.isArray(res.logs)) ? res.logs.join('\n') : '';
+        }).catch(function () {
+          self.logsLoading = false;
+          self.store.showToast(self.t('settings_window.logs_load_failed'), 2000);
+        });
+      },
+
+      exportLogs: function () {
+        var self = this;
+        if (!self.logs) {
+          self.store.showToast(self.t('settings_window.no_logs'), 2000);
+          return;
+        }
+        try {
+          var blob = new Blob([self.logs], { type: 'text/plain;charset=utf-8' });
+          var url = URL.createObjectURL(blob);
+          var a = document.createElement('a');
+          a.href = url;
+          a.download = 'clipsync_logs.txt';
+          document.body.appendChild(a);
+          a.click();
+          document.body.removeChild(a);
+          setTimeout(function () { URL.revokeObjectURL(url); }, 1000);
+          self.store.showToast(self.t('settings_window.logs_exported'), 2000);
+        } catch (e) {
+          self.store.showToast(self.t('settings_window.logs_export_failed'), 2000);
+        }
+      },
+
+      // ── Trusted devices / certificates ──────────────────────────
+
+      loadCerts: function () {
+        var self = this;
+        self.certsLoading = true;
+        ClipsyncAPI._fetch('GET', '/api/devices/certs').then(function (res) {
+          self.certsLoading = false;
+          self.certDevices = (res && Array.isArray(res.devices)) ? res.devices : [];
+        }).catch(function () {
+          self.certsLoading = false;
+          self.store.showToast(self.t('settings_window.certs_load_failed'), 2000);
+        });
+      },
+
+      shortId: function (id) {
+        return (id && id.length > 8) ? id.slice(0, 8) : (id || '');
+      },
+
+      // ── Diagnostics ─────────────────────────────────────────────
+
+      runDiagnostics: function () {
+        var self = this;
+        self.diagScanning = true;
+        self.diagChecks = [];
+        self.diagRevealed = 0;
+        self.diagSummary = '';
+        ClipsyncAPI._fetch('GET', '/api/diagnostics').then(function (res) {
+          var checks = (res && res.checks) || [];
+          self.diagChecks = checks;
+          self.diagSummary = (res && res.summary) || 'ok';
+          // Reveal each check one by one (scan effect).
+          if (checks.length === 0) {
+            self.diagScanning = false;
+            return;
+          }
+          checks.forEach(function (_, i) {
+            setTimeout(function () {
+              self.diagRevealed = i + 1;
+              if (i === checks.length - 1) {
+                setTimeout(function () { self.diagScanning = false; }, 400);
+              }
+            }, 350 * (i + 1));
+          });
+        }).catch(function () {
+          self.diagScanning = false;
+          self.diagChecks = [{
+            id: 'error', ok: false, detail: '',
+            guidance: self.t('settings_window.diag_failed'),
+          }];
+          self.diagRevealed = 1;
+          self.diagSummary = 'fail';
+        });
+      },
+
+      diagLabel: function (id) {
+        var labels = {
+          server_port: this.t('settings_window.diag_server_port'),
+          discovery: this.t('settings_window.diag_discovery'),
+          advertising: this.t('settings_window.diag_advertising'),
+          web_companion: this.t('settings_window.diag_web'),
+          network: this.t('settings_window.diag_network'),
+          error: this.t('settings_window.diag_title'),
+        };
+        return labels[id] || id;
+      },
+
+      diagSummaryText: function () {
+        if (this.diagSummary === 'ok') return this.t('settings_window.diag_all_ok');
+        if (this.diagSummary === 'warn') return this.t('settings_window.diag_warn');
+        return this.t('settings_window.diag_fail');
+      },
+
+      // ── Update download ─────────────────────────────────────────
+
+      downloadUpdate: function () {
+        var self = this;
+        self.updateDownloading = true;
+        ClipsyncAPI._fetch('POST', '/api/update/download', {}).then(function (res) {
+          self.updateDownloading = false;
+          if (res && res.ok) {
+            self.store.showToast(self.t('settings_window.update_downloaded', { path: res.path || '' }), 4000);
+          } else {
+            self.store.showToast(self.t('settings_window.update_failed') + ((res && res.error) ? ': ' + res.error : ''), 2500);
+          }
+        }).catch(function () {
+          self.updateDownloading = false;
+          self.store.showToast(self.t('settings_window.update_failed'), 2000);
         });
       },
 
@@ -694,6 +870,16 @@
         if (val) {
           this.populateFromCache();
           this.loadBackups();
+          // A requester (e.g. the overview network-health chip) can ask the
+          // panel to open on a specific section.
+          if (this.store.settingsRequestedSection) {
+            this.activeSection = this.store.settingsRequestedSection;
+            this.store.settingsRequestedSection = '';
+          }
+          // If the panel reopens on the same tab, activeSection won't change,
+          // so reload the section data here too.
+          if (this.activeSection === 'logs') this.loadLogs();
+          if (this.activeSection === 'security') this.loadCerts();
           var self = this;
           this.$nextTick(function () {
             document.addEventListener('keydown', self._onKeyDown);
@@ -701,6 +887,11 @@
         } else {
           document.removeEventListener('keydown', this._onKeyDown);
         }
+      },
+
+      activeSection: function (val) {
+        if (val === 'logs') this.loadLogs();
+        if (val === 'security') this.loadCerts();
       },
     },
 
@@ -971,6 +1162,50 @@
                     '<span class="settings-hint">{{ passwordSet ? t(\'security.password_set\') : t(\'security.no_password\') }}</span>' +
                     '<p class="settings-hint" style="margin-top:8px">{{ t(\'settings_window.password_hint\') }}</p>' +
                   '</div>' +
+
+                  '<h4 style="font-size:12px;color:var(--clipsync-fg-muted);margin:16px 0 4px">{{ t(\'settings_window.notify_title\') }}</h4>' +
+                  '<p class="settings-hint" style="margin-bottom:8px">{{ t(\'settings_window.notify_desc\') }}</p>' +
+                  '<div class="settings-toggle-row">' +
+                    '<span class="settings-toggle-label">{{ t(\'settings_window.notify_device_connect\') }}</span>' +
+                    '<button class="settings-toggle" :class="{ \'settings-toggle--on\': notifyDeviceConnect }" @click="notifyDeviceConnect = !notifyDeviceConnect">' +
+                      '<span class="settings-toggle__knob"></span>' +
+                    '</button>' +
+                  '</div>' +
+                  '<div class="settings-toggle-row">' +
+                    '<span class="settings-toggle-label">{{ t(\'settings_window.notify_transfer\') }}</span>' +
+                    '<button class="settings-toggle" :class="{ \'settings-toggle--on\': notifyTransfer }" @click="notifyTransfer = !notifyTransfer">' +
+                      '<span class="settings-toggle__knob"></span>' +
+                    '</button>' +
+                  '</div>' +
+                  '<div class="settings-toggle-row">' +
+                    '<span class="settings-toggle-label">{{ t(\'settings_window.notify_pairing\') }}</span>' +
+                    '<button class="settings-toggle" :class="{ \'settings-toggle--on\': notifyPairing }" @click="notifyPairing = !notifyPairing">' +
+                      '<span class="settings-toggle__knob"></span>' +
+                    '</button>' +
+                  '</div>' +
+                  '<div class="settings-toggle-row">' +
+                    '<span class="settings-toggle-label">{{ t(\'settings_window.notify_sync\') }}</span>' +
+                    '<button class="settings-toggle" :class="{ \'settings-toggle--on\': notifySync }" @click="notifySync = !notifySync">' +
+                      '<span class="settings-toggle__knob"></span>' +
+                    '</button>' +
+                  '</div>' +
+
+                  '<div style="display:flex;align-items:center;justify-content:space-between;margin:16px 0 4px">' +
+                    '<h4 style="font-size:12px;color:var(--clipsync-fg-muted);margin:0">{{ t(\'settings_window.certs_title\') }}</h4>' +
+                    '<button class="settings-btn settings-btn--sm" @click="loadCerts" :disabled="certsLoading">{{ t(\'ui.refresh\') }}</button>' +
+                  '</div>' +
+                  '<div v-if="certsLoading" class="settings-hint" style="padding:8px 0">{{ t(\'ui.loading\') }}</div>' +
+                  '<div v-else-if="certDevices.length === 0" class="settings-hint" style="padding:8px 0">{{ t(\'settings_window.certs_empty\') }}</div>' +
+                  '<div v-else class="settings-backup-list">' +
+                    '<div v-for="dev in certDevices" :key="dev.device_id" class="settings-backup-item">' +
+                      '<div class="settings-backup-item__info">' +
+                        '<span class="settings-backup-item__name">{{ dev.device_name || shortId(dev.device_id) }}</span>' +
+                        '<span class="settings-backup-item__meta text-mono selectable">{{ shortId(dev.device_id) }} · {{ dev.fingerprint_short || \'—\' }}</span>' +
+                      '</div>' +
+                      '<span v-if="dev.paired" class="settings-hint" style="font-size:11px;color:var(--clipsync-success);flex-shrink:0">{{ t(\'ui.paired\') }}</span>' +
+                    '</div>' +
+                  '</div>' +
+
                   '<button class="settings-btn settings-btn--accent" @click="saveSecurity" :disabled="securitySaving" style="width:100%;margin-top:12px">' +
                     '{{ securitySaving ? \'...\' : t(\'settings_window.save_security\') }}' +
                   '</button>' +
@@ -1067,6 +1302,38 @@
                   '<button class="settings-btn settings-btn--accent" @click="saveAdvanced" :disabled="advancedSaving" style="width:100%;margin-top:12px">' +
                     '{{ advancedSaving ? \'...\' : t(\'settings_window.save_advanced\') }}' +
                   '</button>' +
+
+                  '<h4 style="font-size:12px;color:var(--clipsync-fg-muted);margin:20px 0 8px">{{ t(\'settings_window.diag_title\') }}</h4>' +
+                  '<button class="settings-btn" @click="runDiagnostics" :disabled="diagScanning" style="width:100%">' +
+                    '{{ diagScanning ? t(\'settings_window.diag_scanning\') : t(\'settings_window.diag_run\') }}' +
+                  '</button>' +
+                  '<div class="diag-scan" style="margin-top:12px">' +
+                    '<div v-for="(chk, i) in diagChecks" :key="chk.id" class="diag-check"' +
+                         ':class="{ \'diag-check--revealed\': i < diagRevealed, \'diag-check--ok\': chk.ok === true && i < diagRevealed, \'diag-check--fail\': chk.ok === false && i < diagRevealed }">' +
+                      '<span class="diag-check__status">{{ i < diagRevealed ? (chk.ok ? \'✓\' : \'✕\') : \'·\' }}</span>' +
+                      '<div class="diag-check__body">' +
+                        '<span class="diag-check__label">{{ diagLabel(chk.id) }}</span>' +
+                        '<span v-if="i < diagRevealed && chk.detail" class="diag-check__detail">{{ chk.detail }}</span>' +
+                        '<span v-if="i < diagRevealed && chk.guidance" class="diag-check__guidance">💡 {{ chk.guidance }}</span>' +
+                      '</div>' +
+                    '</div>' +
+                  '</div>' +
+                  '<div v-if="!diagScanning && diagChecks.length > 0 && diagRevealed >= diagChecks.length" class="diag-summary" :class="\'diag-summary--\' + diagSummary">' +
+                    '{{ diagSummaryText }}' +
+                  '</div>' +
+                '</section>' +
+
+                '<!-- ═══════ Logs ═══════ -->' +
+                '<section v-if="activeSection === \'logs\'" class="settings-section">' +
+                  '<h3 class="settings-section__title">{{ t(\'settings_window.logs_title\') }}</h3>' +
+                  '<div class="settings-btn-grid" style="margin-bottom:12px">' +
+                    '<button class="settings-btn" @click="loadLogs" :disabled="logsLoading">' +
+                      '{{ logsLoading ? \'...\' : t(\'settings_window.logs_refresh\') }}' +
+                    '</button>' +
+                    '<button class="settings-btn settings-btn--accent" @click="exportLogs" :disabled="logsLoading || !logs">{{ t(\'settings_window.logs_export\') }}</button>' +
+                  '</div>' +
+                  '<pre v-if="logs" class="settings-log-view selectable" style="max-height:320px;overflow:auto;padding:var(--clipsync-space-3);border-radius:var(--clipsync-radius-md);border:1px solid var(--clipsync-border-strong);background:var(--clipsync-panel-2);color:var(--clipsync-fg);font-family:var(--clipsync-font-mono);font-size:0.75rem;line-height:1.5;white-space:pre-wrap;word-break:break-all;margin:0">{{ logs }}</pre>' +
+                  '<p v-else class="settings-hint" style="padding:8px 0">{{ t(\'settings_window.no_logs\') }}</p>' +
                 '</section>' +
 
                 '<!-- ═══════ Data ═══════ -->' +
@@ -1139,6 +1406,10 @@
                     '</div>' +
                   '</div>' +
                   '<p style="font-size:12px;color:var(--clipsync-fg-muted);margin-top:12px;line-height:1.6">{{ t(\'settings_window.about_desc\') }}</p>' +
+                  '<button class="settings-btn settings-btn--accent" @click="downloadUpdate" :disabled="updateDownloading" style="width:100%;margin-top:16px">' +
+                    '{{ updateDownloading ? \'...\' : t(\'settings_window.update_download\') }}' +
+                  '</button>' +
+                  '<p class="settings-hint" style="margin-top:8px">{{ t(\'settings_window.update_hint\') }}</p>' +
                 '</section>' +
 
                 '<!-- ═══════ Danger Zone ═══════ -->' +

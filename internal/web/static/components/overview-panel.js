@@ -19,6 +19,8 @@
         nameInput: '',
         // Animated stat counters (key -> current displayed number).
         stats: {},
+        // Network health summary ('ok' | 'warn' | 'fail' | '').
+        netHealth: '',
       };
     },
 
@@ -54,6 +56,20 @@
 
       bytesDisplay: function () {
         return this._fmtBytes(this.o.transferBytes || 0);
+      },
+
+      netHealthClass: function () {
+        if (this.netHealth === 'ok') return 'net-health-dot--ok';
+        if (this.netHealth === 'fail') return 'net-health-dot--fail';
+        if (this.netHealth === 'warn') return 'net-health-dot--warn';
+        return '';
+      },
+
+      netHealthLabel: function () {
+        if (this.netHealth === 'ok') return this.t('overview.net_health_ok');
+        if (this.netHealth === 'fail') return this.t('overview.net_health_fail');
+        if (this.netHealth === 'warn') return this.t('overview.net_health_warn');
+        return this.t('overview.net_health_check');
       },
 
       // ── Device ring: connected / paired / discovered ──────────
@@ -103,6 +119,19 @@
       },
     },
 
+    mounted: function () {
+      var self = this;
+      this.loadNetworkHealth();
+      // Refresh network health alongside the overview poll.
+      this._netHealthTimer = setInterval(function () {
+        self.loadNetworkHealth();
+      }, 8000);
+    },
+
+    beforeUnmount: function () {
+      if (this._netHealthTimer) clearInterval(this._netHealthTimer);
+    },
+
     methods: {
       _animate: function (key, target) {
         var self = this;
@@ -141,6 +170,27 @@
         if (sec < 3600) return Math.floor(sec / 60) + 'm';
         if (sec < 86400) return Math.floor(sec / 3600) + 'h';
         return Math.floor(sec / 86400) + 'd';
+      },
+
+      loadNetworkHealth: function () {
+        var self = this;
+        if (!window.ClipsyncAPI) return;
+        ClipsyncAPI._fetch('GET', '/api/diagnostics')
+          .then(function (res) {
+            self.netHealth = (res && res.summary) || '';
+          })
+          .catch(function () { self.netHealth = ''; });
+      },
+
+      openDiagnostics: function () {
+        // Open the settings panel on the Advanced section (which holds the
+        // full scan-style diagnostics).
+        if (this.store) {
+          this.store.settingsRequestedSection = 'advanced';
+          if (typeof this.store.openSettingsPanel === 'function') {
+            this.store.openSettingsPanel();
+          }
+        }
       },
 
       typeIcon: function (type) {
@@ -256,6 +306,10 @@
             '<span class="overview-status-bar__label">{{ stats.connected || 0 }} {{ t(\'overview.connected\') }}</span>' +
           '</div>' +
           '<div class="overview-status-bar__right">' +
+            '<button class="net-health-chip" @click="openDiagnostics" :title="t(\'overview.net_health_hint\')">' +
+              '<span class="net-health-dot" :class="netHealthClass"></span>' +
+              '<span>{{ netHealthLabel }}</span>' +
+            '</button>' +
             '<span class="text-subtle">{{ o.localIp }}:{{ o.port }}</span>' +
             '<span class="overview-status-bar__sep"></span>' +
             '<span class="text-subtle">{{ t(\'overview.uptime\') }} {{ uptimeDisplay }}</span>' +

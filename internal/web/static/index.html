@@ -4,6 +4,13 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no,viewport-fit=cover">
   <title>ClipSync</title>
+  <!-- PWA: installable web companion. The manifest is token-protected like
+       every other static route, so the token is attached to the link. -->
+  <link rel="manifest" href="/manifest.json?token=__TOKEN__">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <link rel="apple-touch-icon" href="/icon-192.png">
   <!-- ClipSync CSS -->
   <link rel="stylesheet" href="css/theme.css?token=__TOKEN__">
   <link rel="stylesheet" href="css/base.css?token=__TOKEN__">
@@ -1049,8 +1056,10 @@
     .history-panel__filter-chips {
       display: flex;
       flex-wrap: wrap;
+      justify-content: flex-start;
       gap: var(--clipsync-space-2);
       flex: 1 1 auto;
+      min-width: 0;
     }
 
     .history-panel__filter-meta {
@@ -3768,6 +3777,138 @@
       font-size: 0.8rem;
     }
 
+    /* ── Log viewer ─────────────────────────────────────────────── */
+    .settings-log-view {
+      max-height: 320px;
+      overflow-y: auto;
+      white-space: pre-wrap;
+      word-break: break-word;
+      font-family: var(--clipsync-font-mono);
+      font-size: 11px;
+      line-height: 1.5;
+      color: var(--clipsync-fg);
+      background: color-mix(in srgb, var(--clipsync-panel) 60%, transparent);
+      border: 1px solid var(--clipsync-border);
+      border-radius: var(--clipsync-radius-sm);
+      padding: var(--clipsync-space-3);
+      user-select: text;
+    }
+
+    .dark .settings-log-view {
+      background: color-mix(in srgb, #0a0e1e 80%, transparent);
+    }
+
+    /* ── Scan-style diagnostics ─────────────────────────────────── */
+    .diag-scan {
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+    }
+
+    .diag-check {
+      display: flex;
+      gap: 10px;
+      padding: 8px 12px;
+      border-radius: var(--clipsync-radius-sm);
+      border: 1px solid var(--clipsync-border);
+      background: color-mix(in srgb, var(--clipsync-panel) 50%, transparent);
+      opacity: 0.45;
+      transition: opacity 0.3s;
+    }
+
+    .diag-check--revealed { opacity: 1; }
+    .diag-check--ok { border-color: color-mix(in srgb, var(--clipsync-success) 40%, transparent); }
+    .diag-check--fail { border-color: color-mix(in srgb, var(--clipsync-danger) 40%, transparent); }
+
+    .diag-check__status {
+      width: 20px;
+      flex-shrink: 0;
+      font-weight: 800;
+      color: var(--clipsync-fg-subtle);
+    }
+
+    .diag-check--ok .diag-check__status { color: var(--clipsync-success); }
+    .diag-check--fail .diag-check__status { color: var(--clipsync-danger); }
+
+    .diag-check__body {
+      display: flex;
+      flex-direction: column;
+      gap: 2px;
+      min-width: 0;
+    }
+
+    .diag-check__label { font-size: 12px; font-weight: 600; }
+    .diag-check__detail { font-size: 11px; color: var(--clipsync-fg-muted); }
+    .diag-check__guidance { font-size: 11px; color: var(--clipsync-warning); }
+
+    .diag-summary {
+      margin-top: 10px;
+      padding: 10px 12px;
+      border-radius: var(--clipsync-radius-sm);
+      font-size: 12px;
+      font-weight: 600;
+    }
+
+    .diag-summary--ok {
+      color: var(--clipsync-success);
+      background: color-mix(in srgb, var(--clipsync-success) 10%, transparent);
+      border: 1px solid color-mix(in srgb, var(--clipsync-success) 30%, transparent);
+    }
+
+    .diag-summary--warn {
+      color: var(--clipsync-warning);
+      background: color-mix(in srgb, var(--clipsync-warning) 10%, transparent);
+      border: 1px solid color-mix(in srgb, var(--clipsync-warning) 30%, transparent);
+    }
+
+    .diag-summary--fail {
+      color: var(--clipsync-danger);
+      background: color-mix(in srgb, var(--clipsync-danger) 10%, transparent);
+      border: 1px solid color-mix(in srgb, var(--clipsync-danger) 30%, transparent);
+    }
+
+    /* ── Overview network-health chip ───────────────────────────── */
+    .net-health-chip {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      background: none;
+      border: none;
+      color: var(--clipsync-fg-muted);
+      font-size: 12px;
+      font-weight: 600;
+      cursor: pointer;
+      padding: 2px 10px;
+      border-radius: 999px;
+      transition: all var(--clipsync-transition);
+    }
+
+    .net-health-chip:hover {
+      background: color-mix(in srgb, var(--clipsync-panel) 60%, transparent);
+    }
+
+    .net-health-dot {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background: var(--clipsync-fg-subtle);
+    }
+
+    .net-health-dot--ok {
+      background: var(--clipsync-success);
+      box-shadow: 0 0 6px var(--clipsync-success-glow);
+    }
+
+    .net-health-dot--warn {
+      background: var(--clipsync-warning);
+      box-shadow: 0 0 6px color-mix(in srgb, var(--clipsync-warning) 50%, transparent);
+    }
+
+    .net-health-dot--fail {
+      background: var(--clipsync-danger);
+      box-shadow: 0 0 6px color-mix(in srgb, var(--clipsync-danger) 50%, transparent);
+    }
+
     .settings-input:focus {
       border-color: var(--clipsync-accent);
       box-shadow: 0 0 0 3px var(--clipsync-active);
@@ -4334,6 +4475,219 @@
       font-size: 13px;
     }
 
+    /* ═══════════════════════════════════════════════════════════════
+       First-Run Onboarding Wizard
+       Full-screen frosted-glass overlay above the app shell, with an
+       aurora wash that matches the app's ambient background.
+       ═══════════════════════════════════════════════════════════════ */
+
+    .onboard-overlay {
+      position: fixed;
+      inset: 0;
+      z-index: var(--clipsync-z-modal);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: var(--clipsync-space-4);
+      /* Aurora wash + dimmed app behind the glass. */
+      background:
+        radial-gradient(ellipse 70% 50% at 15% -10%, var(--clipsync-violet-glow), transparent),
+        radial-gradient(ellipse 70% 50% at 85% -10%, var(--clipsync-pink-glow), transparent),
+        radial-gradient(ellipse 90% 60% at 50% -20%, var(--clipsync-accent-glow), transparent),
+        rgba(5, 6, 13, 0.72);
+      backdrop-filter: blur(14px) saturate(150%);
+      -webkit-backdrop-filter: blur(14px) saturate(150%);
+      overflow-y: auto;
+    }
+
+    .onboard-card {
+      width: 100%;
+      max-width: 420px;
+      position: relative;
+      padding: var(--clipsync-space-6) var(--clipsync-space-5) var(--clipsync-space-5);
+      background: color-mix(in srgb, var(--clipsync-surface) 78%, transparent);
+      border: 1px solid var(--clipsync-border-glow);
+      border-radius: var(--clipsync-radius-xl);
+      box-shadow: var(--clipsync-shadow-lg), 0 0 40px var(--clipsync-accent-glow);
+      backdrop-filter: blur(22px) saturate(180%);
+      -webkit-backdrop-filter: blur(22px) saturate(180%);
+      text-align: center;
+    }
+
+    .onboard-step {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: var(--clipsync-space-3);
+    }
+
+    .onboard-step__icon {
+      font-size: 44px;
+      line-height: 1;
+      filter: drop-shadow(0 0 16px var(--clipsync-accent-glow));
+      animation: glowPulse 2.4s ease-in-out infinite;
+    }
+
+    .onboard-step__title {
+      font-size: 22px;
+      font-weight: 800;
+      letter-spacing: -0.02em;
+      margin: 0;
+      color: var(--clipsync-fg);
+      background: linear-gradient(135deg, var(--clipsync-accent), var(--clipsync-accent-2));
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+      background-clip: text;
+    }
+
+    .onboard-step__sub,
+    .onboard-step__text {
+      font-size: 14px;
+      line-height: 1.6;
+      color: var(--clipsync-fg-muted);
+      margin: 0;
+      max-width: 320px;
+    }
+
+    /* Device name field */
+    .onboard-device {
+      display: flex;
+      flex-direction: column;
+      gap: var(--clipsync-space-2);
+      width: 100%;
+      max-width: 300px;
+      text-align: left;
+      margin-top: var(--clipsync-space-1);
+    }
+
+    .onboard-device__label {
+      font-size: 11px;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.06em;
+      color: var(--clipsync-fg-muted);
+    }
+
+    .onboard-device__input {
+      width: 100%;
+      padding: 10px 14px;
+      font-size: 14px;
+      font-family: var(--clipsync-font);
+      color: var(--clipsync-fg);
+      background: var(--clipsync-panel);
+      border: 1.5px solid var(--clipsync-border);
+      border-radius: var(--clipsync-radius-sm);
+      outline: none;
+      transition: border-color var(--clipsync-transition-fast),
+                  box-shadow var(--clipsync-transition-fast);
+    }
+
+    .onboard-device__input:focus {
+      border-color: var(--clipsync-accent);
+      box-shadow: 0 0 0 3px var(--clipsync-accent-glow);
+    }
+
+    .onboard-device__input::placeholder {
+      color: var(--clipsync-fg-subtle);
+    }
+
+    /* Buttons */
+    .onboard-btn {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: var(--clipsync-space-2);
+      width: 100%;
+      max-width: 300px;
+      margin-top: var(--clipsync-space-2);
+      padding: 11px 20px;
+      font-size: 14px;
+      font-weight: 700;
+      font-family: var(--clipsync-font);
+      color: var(--clipsync-fg-muted);
+      background: var(--clipsync-panel);
+      border: 1px solid var(--clipsync-border);
+      border-radius: var(--clipsync-radius-sm);
+      cursor: pointer;
+      transition: all var(--clipsync-transition-fast);
+    }
+
+    .onboard-btn:hover {
+      color: var(--clipsync-fg);
+      background: var(--clipsync-hover);
+      border-color: var(--clipsync-border-strong);
+    }
+
+    .onboard-btn--primary {
+      color: var(--clipsync-accent-text);
+      background: linear-gradient(135deg, var(--clipsync-accent), var(--clipsync-accent-2));
+      border-color: transparent;
+      box-shadow: 0 4px 18px var(--clipsync-accent-glow);
+    }
+
+    .onboard-btn--primary:hover {
+      color: var(--clipsync-accent-text);
+      background: linear-gradient(135deg, var(--clipsync-accent-hover), var(--clipsync-accent-2));
+      box-shadow: 0 4px 24px var(--clipsync-accent-glow-strong);
+    }
+
+    .onboard-skip {
+      margin-top: var(--clipsync-space-4);
+      padding: 6px 14px;
+      font-size: 12px;
+      font-weight: 600;
+      font-family: var(--clipsync-font);
+      color: var(--clipsync-fg-subtle);
+      background: transparent;
+      border: none;
+      border-radius: var(--clipsync-radius-sm);
+      cursor: pointer;
+      transition: all var(--clipsync-transition-fast);
+    }
+
+    .onboard-skip:hover {
+      color: var(--clipsync-fg-muted);
+      background: var(--clipsync-hover);
+    }
+
+    /* Step indicator dots */
+    .onboard-dots {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 6px;
+      margin-top: var(--clipsync-space-4);
+    }
+
+    .onboard-dots__dot {
+      width: 6px;
+      height: 6px;
+      border-radius: 50%;
+      background: var(--clipsync-border-strong);
+      transition: all var(--clipsync-transition-fast);
+    }
+
+    .onboard-dots__dot--active {
+      width: 18px;
+      border-radius: 3px;
+      background: var(--clipsync-accent);
+      box-shadow: 0 0 8px var(--clipsync-accent-glow);
+    }
+
+    /* Onboarding transition */
+    .onboard-fade-enter-active { animation: onboardFadeIn 0.28s ease-out; }
+    .onboard-fade-leave-active { animation: onboardFadeOut 0.18s ease-in; }
+
+    @keyframes onboardFadeIn {
+      from { opacity: 0; transform: translateY(12px) scale(0.98); }
+      to   { opacity: 1; transform: translateY(0) scale(1); }
+    }
+
+    @keyframes onboardFadeOut {
+      from { opacity: 1; transform: translateY(0) scale(1); }
+      to   { opacity: 0; transform: translateY(-10px) scale(0.98); }
+    }
+
   </style>
 </head>
 <body>
@@ -4405,6 +4759,53 @@
         <status-bar></status-bar>
       </template>
     </div>
+
+    <!-- First-run onboarding wizard (one-time, above the app shell) -->
+    <transition name="onboard-fade">
+      <div v-if="store.showOnboarding" class="onboard-overlay" role="dialog" aria-modal="true" aria-label="ClipSync onboarding">
+        <div class="onboard-card">
+          <!-- Step 1: Welcome + editable device name -->
+          <div v-if="store.onboardingStep === 1" class="onboard-step">
+            <div class="onboard-step__icon">&#x26A1;</div>
+            <h1 class="onboard-step__title">{{ t('onboarding.welcome') }}</h1>
+            <p class="onboard-step__sub">{{ t('onboarding.welcome_sub') }}</p>
+            <div class="onboard-device">
+              <label class="onboard-device__label" for="onboard-device-name">{{ t('onboarding.device_label') }}</label>
+              <input id="onboard-device-name" class="onboard-device__input"
+                     v-model="store.deviceName"
+                     @change="store.saveDeviceName()"
+                     :placeholder="t('onboarding.device_placeholder')"
+                     maxlength="40">
+            </div>
+            <button class="onboard-btn onboard-btn--primary" @click="store.startOnboarding()">{{ t('onboarding.start') }}</button>
+          </div>
+
+          <!-- Step 2: Pair a device -->
+          <div v-else-if="store.onboardingStep === 2" class="onboard-step">
+            <div class="onboard-step__icon">&#x1F517;</div>
+            <h1 class="onboard-step__title">{{ t('onboarding.pair_title') }}</h1>
+            <p class="onboard-step__text">{{ t('onboarding.pair_body') }}</p>
+            <button class="onboard-btn onboard-btn--primary" @click="store.goToDevices()">{{ t('onboarding.pair_cta') }}</button>
+          </div>
+
+          <!-- Step 3: Phone access -->
+          <div v-else class="onboard-step">
+            <div class="onboard-step__icon">&#x1F4F1;</div>
+            <h1 class="onboard-step__title">{{ t('onboarding.phone_title') }}</h1>
+            <p class="onboard-step__text">{{ t('onboarding.phone_body') }}</p>
+            <button class="onboard-btn onboard-btn--primary" @click="store.completeOnboarding()">{{ t('onboarding.finish') }}</button>
+          </div>
+
+          <!-- Step indicator + Skip -->
+          <div class="onboard-dots" aria-hidden="true">
+            <span class="onboard-dots__dot" :class="{ 'onboard-dots__dot--active': store.onboardingStep === 1 }"></span>
+            <span class="onboard-dots__dot" :class="{ 'onboard-dots__dot--active': store.onboardingStep === 2 }"></span>
+            <span class="onboard-dots__dot" :class="{ 'onboard-dots__dot--active': store.onboardingStep === 3 }"></span>
+          </div>
+          <button class="onboard-skip" @click="store.completeOnboarding()">{{ t('onboarding.skip') }}</button>
+        </div>
+      </div>
+    </transition>
   </div>
 
   <!-- ClipSync I18n — inject translations at serve time -->
