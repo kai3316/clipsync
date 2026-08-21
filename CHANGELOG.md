@@ -2,6 +2,27 @@
 
 All notable changes to ClipSync are documented in this file.
 
+## [1.0.5] — 2026-08-21
+
+### Added
+- "Check for Updates" (GitHub releases) and a versioned About dialog in the tray
+- App icon (.ico) for Windows builds
+- Quick actions (Show QR / Send URL) in the Overview panel
+- Richer telemetry across the UI: status bar, overview stats, device cards, history, transfers
+
+### Changed
+- "Aurora Cyber" theme: unified cyan/violet/pink palette across light and dark, glass-morphism surfaces, aurora background glow
+- Static assets served with `no-cache` so UI updates appear immediately after restart
+
+### Fixed
+- Settings panel and translate modal never registered (bare `t()` calls)
+- Device unpair/forget/connect not refreshing the device list
+- Tray actions (QR / send-url / settings) dropped when the webview window was not yet open
+- Status bar showing stale "sync paused" / wrong connected-device count
+- History pagination cursor after batch delete; transfer history missing direction/timestamp
+- i18n keys missing from JSON locale files (sort control, update checker)
+- Cross-platform: macOS tray wiring for check-update/about, Linux pynput dependency, color-mix fallback, spec icon placement
+
 ## [1.0.4] — 2026-08-21
 
 ### Added

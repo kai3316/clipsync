@@ -34,6 +34,26 @@
         ];
       },
 
+      filterCounts: function () {
+        var history = this.store.history;
+        var counts = { all: history.length, text: 0, image: 0, file: 0, link: 0 };
+        for (var i = 0; i < history.length; i++) {
+          var item = history[i];
+          var ct = (item.content_type || '').toUpperCase();
+          if (ct === 'TEXT' || ct === 'HTML' || ct === 'RTF') counts.text++;
+          else if (ct === 'IMAGE' || ct === 'IMAGE_EMF') counts.image++;
+          else if (ct === 'FILE') counts.file++;
+          if (/^https?:\/\//i.test(item.text_preview || '')) counts.link++;
+        }
+        return counts;
+      },
+
+      sortLabel: function () {
+        return this.store.historySort === 'oldest'
+          ? this.t('history.sort_oldest')
+          : this.t('history.sort_newest');
+      },
+
       // Split filtered history into pinned and unpinned
       sections: function () {
         var items = this.store.filteredHistory();
@@ -76,9 +96,12 @@
       <!-- Header with Clear All -->
       <div class="history-panel__header" v-if="hasContent">
         <span class="text-muted" style="font-size:12px">{{ sections.pinned.length + sections.unpinned.length }} {{ t('history.items') || 'items' }}</span>
-        <button class="btn-ghost" style="color:var(--clipsync-danger)" @click="clearAll" :disabled="clearingAll">
-          {{ clearingAll ? '...' : t('history.clear_all') || 'Clear All' }}
-        </button>
+        <div class="history-panel__header-actions">
+          <button class="btn-ghost" @click="toggleSort" :title="sortLabel">↕ {{ sortLabel }}</button>
+          <button class="btn-ghost" style="color:var(--clipsync-danger)" @click="clearAll" :disabled="clearingAll">
+            {{ clearingAll ? '...' : t('history.clear_all') || 'Clear All' }}
+          </button>
+        </div>
       </div>
 
       <!-- Filter bar -->
@@ -95,6 +118,7 @@
         >
           <span v-if="filt.icon" class="history-panel__filter-chip-icon">{{ filt.icon }}</span>
           {{ filt.label }}
+          <span class="history-panel__filter-chip-count">{{ filterCounts[filt.id] }}</span>
         </button>
       </div>
 
@@ -191,6 +215,10 @@
     </div>`,
 
     methods: {
+      toggleSort: function () {
+        this.store.historySort = this.store.historySort === 'oldest' ? 'newest' : 'oldest';
+      },
+
       onPanelClick: function () {
         // Click on background (not on a history-item) clears selection
         this.store.clearSelection();

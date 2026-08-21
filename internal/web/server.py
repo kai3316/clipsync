@@ -514,11 +514,14 @@ class WebServer:
                  on_window_close=None,
                  on_toggle_discovery=None, on_toggle_visibility=None,
                  on_settings_change=None,
+                 on_show_web_qr=None, on_send_url=None,
                  get_discovered_peers=None):
         self._cfg = cfg
         self._sync_mgr = sync_mgr
         self._get_connected_ids = get_connected_ids
         self._get_discovered_peers = get_discovered_peers
+        self._on_show_web_qr = on_show_web_qr
+        self._on_send_url = on_send_url
         self._on_nav_url = on_nav_url
         self._on_forward_file = on_forward_file
         self._get_overview_data = get_overview_data
@@ -706,6 +709,8 @@ class WebServer:
         sync_mgr = self._sync_mgr
         get_connected_ids = self._get_connected_ids
         get_discovered_peers = self._get_discovered_peers
+        on_show_web_qr = self._on_show_web_qr
+        on_send_url = self._on_send_url
         on_nav_url = self._on_nav_url
         on_forward_file = self._on_forward_file
         get_overview_data = self._get_overview_data
@@ -881,7 +886,10 @@ class WebServer:
                 inner_self.send_response(200)
                 inner_self.send_header("Content-Type", mime)
                 inner_self.send_header("Content-Length", str(len(data)))
-                inner_self.send_header("Cache-Control", "public, max-age=3600")
+                # no-cache so the browser always revalidates: without this the
+                # WebView would serve a 1-hour-stale copy of CSS/JS and edits
+                # would never appear after a restart.
+                inner_self.send_header("Cache-Control", "no-cache")
                 inner_self.send_header("Access-Control-Allow-Origin", "*")
                 inner_self.end_headers()
                 try:
@@ -1164,6 +1172,8 @@ class WebServer:
                         on_toggle_discovery=on_toggle_discovery,
                         on_toggle_visibility=on_toggle_visibility,
                         on_settings_change=on_settings_change,
+                        on_show_web_qr=on_show_web_qr,
+                        on_send_url=on_send_url,
                     )
                     inner_self.send_response(status)
                     inner_self.send_header("Content-Type", content_type)

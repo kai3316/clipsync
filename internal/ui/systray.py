@@ -77,6 +77,8 @@ class SystrayApp:
         on_quit: Callable | None = None,
         on_show_web_qr: Callable | None = None,
         on_send_url: Callable | None = None,
+        on_check_update: Callable | None = None,
+        on_about: Callable | None = None,
     ):
         self._device_name = device_name
         self._on_enable_toggle = on_enable_toggle
@@ -86,6 +88,8 @@ class SystrayApp:
         self._on_quit_cb = on_quit
         self._on_show_web_qr = on_show_web_qr
         self._on_send_url = on_send_url
+        self._on_check_update = on_check_update
+        self._on_about_cb = on_about
         self._syncing = True
         self._web_enabled = False
         self._tray = None
@@ -174,6 +178,7 @@ class SystrayApp:
         menu_items.extend([
             pystray.MenuItem(T("tray.export_logs"), self._on_export_logs_click),
             pystray.Menu.SEPARATOR,
+            pystray.MenuItem(T("tray.check_update"), self._on_check_update_click),
             pystray.MenuItem(T("tray.about"), self._on_about),
             pystray.MenuItem(T("tray.quit"), self._on_quit),
         ])
@@ -245,7 +250,14 @@ class SystrayApp:
         if self._on_send_url:
             self._on_send_url()
 
+    def _on_check_update_click(self, icon, item):
+        if self._on_check_update:
+            self._on_check_update()
+
     def _on_about(self, icon, item):
+        if self._on_about_cb:
+            self._on_about_cb()
+            return
         if self._tray:
             self._tray.notify(
                 T("tray.about_message"),

@@ -38,7 +38,11 @@
        ═══════════════════════════════════════════════════════════════ */
     devices: [],
     connectedCount: computed(function () {
-      return store.devices.filter(function (d) { return d.connected; }).length;
+      // Exclude the local device — "connected" counts remote peers only,
+      // matching the backend's get_connected_peers() semantics.
+      return store.devices.filter(function (d) {
+        return d.connected && d.device_id !== store.deviceId;
+      }).length;
     }),
 
     /* ═══════════════════════════════════════════════════════════════

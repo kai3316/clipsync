@@ -133,6 +133,14 @@
         document.body.removeChild(textarea);
         if (done) done();
       },
+
+      showQr: function () {
+        ClipsyncAPI._fetch('POST', '/api/show_qr', {}).catch(function () {});
+      },
+
+      sendUrl: function () {
+        ClipsyncAPI._fetch('POST', '/api/send_url', {}).catch(function () {});
+      },
     },
 
     template:
@@ -143,7 +151,7 @@
             '<span class="status-dot" :class="syncDotClass"></span>' +
             '<span class="overview-status-bar__sync">{{ syncLabel }}</span>' +
             '<span class="overview-status-bar__sep"></span>' +
-            '<span class="overview-status-bar__label">{{ networkLabel }}</span>' +
+            '<span class="overview-status-bar__label">{{ networkLabel }}<span v-if="o.networkDetail"> · {{ o.networkDetail }}</span></span>' +
             '<span class="overview-status-bar__sep"></span>' +
             '<span class="overview-status-bar__label">{{ o.connectedCount }} {{ t(\'overview.connected\') }}</span>' +
           '</div>' +
@@ -201,7 +209,7 @@
               '</span>' +
               '<div class="overview-device-meta">' +
                 '<span class="text-subtle">{{ t(\'overview.id\') }}:</span>' +
-                '<span class="text-mono selectable">{{ store.deviceId ? store.deviceId.substring(0,12) + \'...\' : \'\' }}</span>' +
+                '<span class="text-mono selectable" :title="store.deviceId">{{ store.deviceId }}</span>' +
               '</div>' +
               '<div class="overview-device-meta">' +
                 '<span class="text-subtle">{{ t(\'overview.platform\') }}:</span>' +
@@ -220,18 +228,36 @@
           '<div class="overview-stat-card glass" style="--stat-accent: var(--clipsync-success)">' +
             '<span class="overview-stat-value">{{ o.connectedCount }}</span>' +
             '<span class="overview-stat-label">{{ t(\'overview.connected\') }}</span>' +
+            '<span class="overview-stat-sub">{{ o.pairedCount }} {{ t(\'overview.trusted\') }}</span>' +
           '</div>' +
           '<div class="overview-stat-card glass" style="--stat-accent: var(--clipsync-warning)">' +
             '<span class="overview-stat-value">{{ o.pairedCount }}</span>' +
             '<span class="overview-stat-label">{{ t(\'overview.paired\') }}</span>' +
+            '<span class="overview-stat-sub">{{ o.connectedCount }} {{ t(\'overview.active\') }}</span>' +
           '</div>' +
           '<div class="overview-stat-card glass" style="--stat-accent: var(--clipsync-accent)">' +
             '<span class="overview-stat-value">{{ o.historyCount }}</span>' +
             '<span class="overview-stat-label">{{ t(\'overview.history\') }}</span>' +
+            '<span class="overview-stat-sub">{{ t(\'overview.items\') }}</span>' +
           '</div>' +
           '<div class="overview-stat-card glass" style="--stat-accent: var(--clipsync-purple)">' +
             '<span class="overview-stat-value">{{ o.activeTransferCount || \'--\' }}</span>' +
             '<span class="overview-stat-label">{{ t(\'overview.transfers\') }}</span>' +
+            '<span class="overview-stat-sub">{{ t(\'overview.active\') }}</span>' +
+          '</div>' +
+        '</div>' +
+
+        '<!-- Quick Actions -->' +
+        '<div class="overview-stats-grid overview-action-grid">' +
+          '<div class="overview-stat-card overview-action-card glass" style="--stat-accent: var(--clipsync-accent)" role="button" @click="showQr">' +
+            '<span class="overview-action-icon">📱</span>' +
+            '<span class="overview-stat-label">{{ t(\'tray.show_web_qr\') }}</span>' +
+            '<span class="overview-stat-sub">{{ t(\'overview.scan_hint\') }}</span>' +
+          '</div>' +
+          '<div class="overview-stat-card overview-action-card glass" style="--stat-accent: var(--clipsync-accent-2)" role="button" @click="sendUrl">' +
+            '<span class="overview-action-icon">🔗</span>' +
+            '<span class="overview-stat-label">{{ t(\'tray.send_url\') }}</span>' +
+            '<span class="overview-stat-sub">{{ t(\'overview.send_hint\') }}</span>' +
           '</div>' +
         '</div>' +
 

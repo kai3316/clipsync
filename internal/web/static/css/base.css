@@ -218,10 +218,12 @@ textarea::placeholder {
 
 /* Standard glass */
 .glass {
-  background: color-mix(in srgb, var(--clipsync-bg) 75%, transparent);
-  backdrop-filter: blur(16px) saturate(180%);
-  -webkit-backdrop-filter: blur(16px) saturate(180%);
+  background: var(--clipsync-bg);
+  background: color-mix(in srgb, var(--clipsync-bg) 70%, transparent);
+  backdrop-filter: blur(20px) saturate(190%);
+  -webkit-backdrop-filter: blur(20px) saturate(190%);
   border: 1px solid var(--clipsync-border);
+  box-shadow: inset 0 1px 0 color-mix(in srgb, var(--clipsync-accent-2) 6%, transparent);
   transition: border-color var(--clipsync-transition),
               box-shadow var(--clipsync-transition);
 }
@@ -255,6 +257,9 @@ textarea::placeholder {
 
 .card {
   background: var(--clipsync-surface);
+  background: color-mix(in srgb, var(--clipsync-surface) 82%, transparent);
+  backdrop-filter: blur(12px) saturate(160%);
+  -webkit-backdrop-filter: blur(12px) saturate(160%);
   border: 1px solid var(--clipsync-border);
   border-radius: var(--clipsync-radius);
   box-shadow: var(--clipsync-shadow);
@@ -264,6 +269,7 @@ textarea::placeholder {
 .card:hover {
   border-color: var(--clipsync-border-strong);
   box-shadow: var(--clipsync-shadow-md);
+  transform: translateY(-1px);
 }
 
 /* Holographic card — subtle rainbow sheen on hover */

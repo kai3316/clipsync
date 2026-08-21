@@ -264,9 +264,22 @@
       padding-left: max(var(--clipsync-space-4), env(safe-area-inset-left));
       padding-right: max(var(--clipsync-space-4), env(safe-area-inset-right));
       flex-shrink: 0;
+      position: relative;
       user-select: none;
       -webkit-user-select: none;
       z-index: var(--clipsync-z-sticky);
+    }
+
+    .title-bar::after {
+      content: '';
+      position: absolute;
+      left: 0;
+      right: 0;
+      bottom: 0;
+      height: 1px;
+      background: var(--clipsync-gradient);
+      opacity: 0.6;
+      pointer-events: none;
     }
 
     .title-bar__brand {
@@ -560,6 +573,11 @@
       font-size: 11px;
       font-family: var(--clipsync-font-mono);
       color: var(--clipsync-fg-subtle);
+    }
+
+    .device-card__os {
+      font-size: 10px;
+      color: var(--clipsync-fg-muted);
     }
 
     .device-card__meta {
@@ -882,6 +900,21 @@
       white-space: nowrap;
     }
 
+    .history-item__type {
+      font-size: 10px;
+      color: var(--clipsync-fg-muted);
+      white-space: nowrap;
+    }
+
+    .history-item__source-title {
+      font-size: 10px;
+      color: var(--clipsync-fg-subtle);
+      white-space: nowrap;
+      max-width: 160px;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
     .history-item__source {
       font-size: 10px;
     }
@@ -959,6 +992,12 @@
       flex-shrink: 0;
     }
 
+    .history-panel__header-actions {
+      display: flex;
+      align-items: center;
+      gap: var(--clipsync-space-2);
+    }
+
     .history-panel__filters {
       display: flex;
       gap: var(--clipsync-space-2);
@@ -986,6 +1025,17 @@
     .history-panel__filter-chip:hover {
       color: var(--clipsync-fg);
       border-color: var(--clipsync-border-strong);
+    }
+
+    .history-panel__filter-chip-count {
+      font-size: 10px;
+      font-weight: 600;
+      opacity: 0.7;
+      margin-left: 4px;
+    }
+
+    .history-panel__filter-chip--active .history-panel__filter-chip-count {
+      opacity: 1;
     }
 
     .history-panel__filter-chip--active {
@@ -1294,6 +1344,12 @@
       font-size: 12px;
     }
 
+    .overview-device-actions {
+      margin-top: var(--clipsync-space-2);
+      display: flex;
+      gap: var(--clipsync-space-2);
+    }
+
     .overview-copy-btn {
       font-size: 11px;
       padding: 2px 8px;
@@ -1303,6 +1359,26 @@
       display: grid;
       grid-template-columns: repeat(4, 1fr);
       gap: var(--clipsync-space-3);
+    }
+
+    .overview-action-grid {
+      grid-template-columns: repeat(2, 1fr);
+      margin-top: var(--clipsync-space-3);
+    }
+
+    .overview-action-card {
+      cursor: pointer;
+    }
+
+    .overview-action-card:hover {
+      border-color: var(--clipsync-border-glow);
+      box-shadow: var(--clipsync-shadow-md), 0 0 16px var(--clipsync-accent-glow);
+      transform: translateY(-1px);
+    }
+
+    .overview-action-icon {
+      font-size: 22px;
+      line-height: 1.2;
     }
 
     @media (max-width: 768px) {
@@ -1516,8 +1592,18 @@
       min-width: 0;
     }
 
-    .status-bar__device-count {
+    .status-bar__stat {
       white-space: nowrap;
+    }
+
+    .status-bar__stat--accent {
+      color: var(--clipsync-fg);
+      font-weight: 600;
+    }
+
+    .status-bar__sep {
+      color: var(--clipsync-fg-subtle);
+      opacity: 0.6;
     }
 
     .status-bar__sync {
@@ -1648,6 +1734,10 @@
       }
 
       .status-bar__uptime {
+        display: none;
+      }
+
+      .status-bar__hide-narrow {
         display: none;
       }
     }
@@ -3133,13 +3223,13 @@
       width: 100%;
       padding: var(--clipsync-space-2) var(--clipsync-space-3);
       border-radius: var(--clipsync-radius-md);
-      border: 1px solid var(--clipsync-border);
-      background: var(--clipsync-panel);
+      border: 1px solid var(--clipsync-border-strong);
+      background: var(--clipsync-panel-2);
       color: var(--clipsync-fg);
       font-size: 0.85rem;
       font-family: var(--clipsync-font);
       outline: none;
-      transition: border-color 0.2s;
+      transition: border-color 0.2s, box-shadow 0.2s;
     }
 
     .settings-input:focus {
@@ -3242,8 +3332,8 @@
       width: 100%;
       padding: var(--clipsync-space-2) var(--clipsync-space-3);
       border-radius: var(--clipsync-radius-md);
-      border: 1px solid var(--clipsync-border);
-      background: var(--clipsync-panel);
+      border: 1px solid var(--clipsync-border-strong);
+      background: var(--clipsync-panel-2);
       color: var(--clipsync-fg);
       font-size: 0.9rem;
       cursor: pointer;

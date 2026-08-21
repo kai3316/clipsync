@@ -160,8 +160,11 @@
           <div style="display:flex;align-items:center;gap:8px">
             <span v-if="tr.status === 'completed'">✅</span>
             <span v-else>❌</span>
+            <span v-if="tr.direction === 'up'">📤</span>
+            <span v-else-if="tr.direction === 'down'">📥</span>
             <span class="text-ellipsis" style="flex:1">{{ tr.filename || t('transfer.unknown_file') }}</span>
             <span v-if="tr.size" style="font-size:12px;color:var(--clipsync-fg-muted)">{{ formatSize(tr.size) }}</span>
+            <span v-if="tr.timestamp" style="font-size:11px;color:var(--clipsync-fg-subtle)">{{ formatTimestamp(tr.timestamp) }}</span>
             <button v-if="tr.path" class="btn-ghost" style="padding:2px 8px;font-size:11px"
               @click="openFile(tr.path)">{{ t('transfer.open') }}</button>
           </div>
@@ -233,6 +236,15 @@
         if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + ' KB';
         if (bytes < 1024 * 1024 * 1024) return (bytes / (1024 * 1024)).toFixed(1) + ' MB';
         return (bytes / (1024 * 1024 * 1024)).toFixed(2) + ' GB';
+      },
+      formatTimestamp: function (ts) {
+        if (!ts) return '';
+        var d = new Date(ts * 1000);
+        var month = String(d.getMonth() + 1).padStart(2, '0');
+        var day = String(d.getDate()).padStart(2, '0');
+        var hours = String(d.getHours()).padStart(2, '0');
+        var mins = String(d.getMinutes()).padStart(2, '0');
+        return month + '/' + day + ' ' + hours + ':' + mins;
       },
       cancelTransfer: function (id) {
         var self = this;

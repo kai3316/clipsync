@@ -262,6 +262,8 @@ def _run_tray(device_name: str, pipe, parent_pid: int):
         on_export_logs=lambda: pipe.send(("export_logs",)),
         on_show_web_qr=lambda: pipe.send(("show_web_qr",)),
         on_send_url=lambda: pipe.send(("send_url",)),
+        on_check_update=lambda: pipe.send(("check_update",)),
+        on_about=lambda: pipe.send(("about",)),
         on_quit=lambda: pipe.send(("quit",)),
     )
 
@@ -661,6 +663,8 @@ class Application:
             on_toggle_discovery=self._on_toggle_discovery,
             on_toggle_visibility=self._on_toggle_visibility,
             on_settings_change=self._on_web_settings_change,
+            on_show_web_qr=lambda: self.root.after(0, self._show_web_qr),
+            on_send_url=lambda: self.root.after(0, self._do_send_url),
             get_discovered_peers=lambda: dict(self._discovered_peers),
         )
 
@@ -1241,6 +1245,8 @@ class Application:
             on_export_logs=self.export_logs,
             on_show_web_qr=self._show_web_qr,
             on_send_url=lambda: self.root.after(0, self._do_send_url),
+            on_check_update=lambda: self.root.after(0, self._check_for_update),
+            on_about=lambda: self.root.after(0, self._show_about),
             on_quit=lambda: self.root.after(0, self.shutdown),
         )
         self.systray.set_web_enabled(self.cfg.web_enabled)
@@ -1362,6 +1368,10 @@ class Application:
             self._show_web_qr()
         elif cmd == "send_url":
             self.root.after(0, self._do_send_url)
+        elif cmd == "check_update":
+            self._check_for_update()
+        elif cmd == "about":
+            self._show_about()
         elif cmd == "quit":
             self.shutdown()
 
@@ -1678,6 +1688,35 @@ class Application:
         except OSError as e:
             self._notify_error("Error", f"Failed to export log:\n{e}")
             logger.error("Failed to export log: %s", e)
+
+    def _check_for_update(self) -> None:
+        """Check GitHub for a newer ClipSync release and notify the result."""
+        def _worker():
+            from internal.system.updater import check_for_update
+            result = check_for_update()
+            if result.get("available"):
+                notification_mgr.show(
+                    T("tray.update_available", version=result["latest"]),
+                    f"ClipSync {result['latest']}\n{result.get('url', '')}",
+                )
+            elif result.get("latest"):
+                notification_mgr.show(
+                    T("tray.up_to_date"),
+                    f"ClipSync {result.get('current', '')}",
+                )
+            else:
+                notification_mgr.show(T("tray.update_failed"), "ClipSync")
+
+        threading.Thread(target=_worker, daemon=True, name="update-check").start()
+
+    def _show_about(self) -> None:
+        """Show the About dialog with version and repository link."""
+        from internal.version import __version__
+        notification_mgr.show(
+            T("tray.about_title"),
+            f"ClipSync {__version__}\n\n{T('tray.about_message')}\n"
+            "https://github.com/kai3316/clipsync",
+        )
 
     def send_file(self) -> None:
         self.root.after(0, self._do_send_file)

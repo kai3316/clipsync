@@ -28,6 +28,7 @@ dependencies = [
     "customtkinter>=5.2.0",
     "qrcode>=7.4",
     "pyobjc-framework-Cocoa>=10.0; sys_platform == 'darwin'",
+    "pynput>=1.7; sys_platform == 'linux'",
 ]
 
 [project.optional-dependencies]

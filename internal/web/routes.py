@@ -45,6 +45,7 @@ def dispatch(method, path, query_params, body, cfg, history, sync_mgr,
              on_toggle_discovery=None,
              on_toggle_visibility=None,
              on_settings_change=None,
+             on_show_web_qr=None, on_send_url=None,
              get_discovered=None):
     """Route an API request to the appropriate handler, never raising.
 
@@ -59,7 +60,7 @@ def dispatch(method, path, query_params, body, cfg, history, sync_mgr,
             dialog_mgr, get_overview_data, on_device_action, on_transfer_action,
             on_get_transfers, on_speed_test_start, on_speed_test_poll,
             on_window_close, on_toggle_discovery, on_toggle_visibility,
-            on_settings_change, get_discovered,
+            on_settings_change, on_show_web_qr, on_send_url, get_discovered,
         )
     except Exception:
         logger.exception("Unhandled error in API route: %s %s", method, path)
@@ -79,6 +80,7 @@ def _dispatch(method, path, query_params, body, cfg, history, sync_mgr,
               on_toggle_discovery=None,
               on_toggle_visibility=None,
               on_settings_change=None,
+              on_show_web_qr=None, on_send_url=None,
               get_discovered=None):
     """Route an API request to the appropriate handler.
 
@@ -436,6 +438,18 @@ def _dispatch(method, path, query_params, body, cfg, history, sync_mgr,
             enabled = req.get("enabled", False)
             on_toggle_visibility(enabled)
             return _json_response({"ok": True, "enabled": enabled})
+
+        elif path == "/api/show_qr":
+            if on_show_web_qr is None:
+                return _json_response({"ok": False, "error": "not available"}, 503)
+            on_show_web_qr()
+            return _json_response({"ok": True})
+
+        elif path == "/api/send_url":
+            if on_send_url is None:
+                return _json_response({"ok": False, "error": "not available"}, 503)
+            on_send_url()
+            return _json_response({"ok": True})
 
         elif path == "/api/dialog-response":
             if dialog_mgr is None:

@@ -45,6 +45,8 @@ def _map_history(t: dict) -> dict:
         "size": t.get("file_size", 0),
         "status": "completed" if t.get("success") else "failed",
         "path": t.get("saved_path") or t.get("source_path") or "",
+        "direction": t.get("direction", "down"),
+        "timestamp": t.get("timestamp", 0),
     }
 
 

@@ -43,7 +43,9 @@
         <div class="history-item__text">{{ item.text_preview || t('history.empty_preview') }}</div>
         <div class="history-item__meta">
           <span class="history-item__time">{{ relativeTime }}</span>
+          <span class="history-item__type">{{ typeLabel }}</span>
           <span v-if="item.source_app" class="history-item__source badge badge--source-app">{{ item.source_app }}</span>
+          <span v-if="item.source_title" class="history-item__source-title">{{ item.source_title }}</span>
           <span v-if="item.source_name" class="history-item__source badge">{{ item.source_name }}</span>
           <span v-if="item.paste_count > 0" class="history-item__paste-count badge badge--success">
             {{ item.paste_count }} {{ item.paste_count === 1 ? t('history.paste_singular') : t('history.paste_plural') }}
@@ -78,6 +80,15 @@
         if (ct === 'HTML') return '🌐';
         if (ct === 'RTF') return '📋';
         return '📝';
+      },
+
+      typeLabel: function () {
+        var ct = (this.item.content_type || '').toUpperCase();
+        if (ct === 'IMAGE' || ct === 'IMAGE_EMF') return this.t('preview.type_image');
+        if (ct === 'FILE') return this.t('preview.type_file');
+        if (ct === 'HTML') return this.t('preview.type_html');
+        if (ct === 'RTF') return this.t('preview.type_rtf');
+        return this.t('preview.type_text');
       },
 
       relativeTime: function () {

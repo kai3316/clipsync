@@ -58,6 +58,8 @@ datas = collect_data_files("internal.web")
 
 if sys.platform == "darwin":
     hiddenimports += ["pyobjc_framework_Cocoa"]
+elif sys.platform == "linux":
+    hiddenimports += ["pynput"]
 
 a = Analysis(
     ["src/main.py"],
@@ -132,6 +134,7 @@ else:
         strip=False,
         upx=True,
         console=False,
+        icon="assets/icon.ico" if sys.platform == "win32" else None,
         disable_windowed_traceback=False,
         argv_emulation=False,
         target_arch=None,

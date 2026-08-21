@@ -98,11 +98,11 @@
   /* ═══════════════════════════════════════════════════════════════
      Border radii
      ═══════════════════════════════════════════════════════════════ */
-  --clipsync-radius-sm: 8px;
-  --clipsync-radius-md: 10px;
-  --clipsync-radius: 12px;
-  --clipsync-radius-lg: 16px;
-  --clipsync-radius-xl: 20px;
+  --clipsync-radius-sm: 10px;
+  --clipsync-radius-md: 12px;
+  --clipsync-radius: 16px;
+  --clipsync-radius-lg: 20px;
+  --clipsync-radius-xl: 24px;
   --clipsync-radius-full: 9999px;
 
   /* ═══════════════════════════════════════════════════════════════
