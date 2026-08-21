@@ -70,6 +70,17 @@ jobs:
         run: |
           pyinstaller clipsync.spec
 
+      - name: Re-sign macOS bundle (unified adhoc signature)
+        if: runner.os == 'macOS'
+        run: |
+          # PyInstaller adhoc-signs the bootloader, but the collected
+          # Python.framework keeps its original signature. On macOS 15+
+          # the Team-ID mismatch makes dyld refuse to load Python
+          # ("different Team IDs" -> "Failed to load Python shared library").
+          # Re-sign the whole bundle adhoc so the .app runs everywhere.
+          codesign --force --deep --sign - dist/clipsync.app
+          codesign --verify --strict --deep dist/clipsync.app
+
       - name: Package for release (macOS ditto preserves symlinks)
         if: runner.os == 'macOS'
         run: |
