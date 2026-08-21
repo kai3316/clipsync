@@ -2936,7 +2936,9 @@ class Application:
         if self.webview_win is not None:
             ws_live = 0
             if self.web_server is not None:
-                ws_live = getattr(self.web_server.ws_manager, "client_count", lambda: 0)()
+                # client_count is a property (int), not a method — read it
+                # directly; the attribute default is an int too.
+                ws_live = getattr(self.web_server.ws_manager, "client_count", 0)
             # Grace period after opening: the SPA takes a moment to load and
             # attach its WS client, so rapid repeated clicks during that window
             # must not spawn duplicate browser windows.
