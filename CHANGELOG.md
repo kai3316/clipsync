@@ -2,6 +2,18 @@
 
 All notable changes to ClipSync are documented in this file.
 
+## [1.0.12] — 2026-08-22
+
+### Fixed
+- macOS: crash on launch (`*** CFHash() called with NULL ***` / SIGTRAP) in the global hotkey manager — the run loop mode is now passed correctly instead of as NULL
+- Paired devices now auto-reconnect after a reboot/restart instead of sitting at "waiting for pairing"
+- Windows: firewall setup no longer errors with `'NoneType' object has no attribute 'strip'`
+- Logs tab and Diagnostics page now work on macOS/Linux (logs were read from the wrong directory; the diagnostics summary crashed with `UnboundLocalError`)
+- Global hotkeys are now **off by default**, with a new settings toggle to re-enable them
+
+### Settings
+- Moved **Launch at login** out of the Network section into Preferences (applies immediately on toggle)
+
 ## [1.0.9] — 2026-08-21
 
 ### Diagnostics
