@@ -532,7 +532,8 @@ class WebServer:
                  on_restart=None, on_reset_dedup=None,
                  get_certs=None, get_diagnostics=None,
                  on_update_download=None,
-                 on_diagnostics_request=None):
+                 on_diagnostics_request=None,
+                 on_web_upload=None):
         self._cfg = cfg
         self._sync_mgr = sync_mgr
         self._get_connected_ids = get_connected_ids
@@ -575,6 +576,7 @@ class WebServer:
         self._get_diagnostics = get_diagnostics
         self._on_update_download = on_update_download
         self._on_diagnostics_request = on_diagnostics_request
+        self._on_web_upload = on_web_upload
         self._httpd: ThreadingHTTPServer | None = None
         self._thread: threading.Thread | None = None
         self._firewall_ok: bool = False
@@ -841,6 +843,7 @@ class WebServer:
         on_settings_change = self._on_settings_change
         get_certs = self._get_certs
         on_diagnostics_request = self._on_diagnostics_request
+        on_web_upload = self._on_web_upload
         get_diagnostics = self._get_diagnostics
         on_update_download = self._on_update_download
         upload_dir = self._upload_dir
@@ -1379,6 +1382,14 @@ class WebServer:
                     logger.info("Web upload: %s (%d bytes) -> %s", safe_name, len(fdata), dest)
                     if target_device and target_device != cfg.device_id and on_forward_file:
                         on_forward_file(dest, target_device)
+                    else:
+                        # Arrived locally: record it as a received file and let
+                        # the app notify + play a sound.
+                        try:
+                            if on_web_upload is not None:
+                                on_web_upload(os.path.basename(dest), len(fdata), dest)
+                        except Exception:
+                            logger.debug("on_web_upload callback failed", exc_info=True)
                     inner_self._send_json({"ok": True, "name": os.path.basename(dest), "size": len(fdata)})
                     return
 

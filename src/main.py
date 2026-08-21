@@ -762,6 +762,7 @@ class Application:
             get_diagnostics=self._get_diagnostics,
             on_update_download=self._handle_update_download,
             on_diagnostics_request=self._handle_diagnostics_request,
+            on_web_upload=self._on_web_upload,
         )
 
         # ── Live history push to web clients ────────────────────────
@@ -1017,6 +1018,28 @@ class Application:
                     _mask_file_name(file_name), _mask_path(saved_path))
         self._notify("notify_transfer", T("notify.file_received"),
                      T("transfer.received", name=file_name))
+        self._play_transfer_sound()
+
+    def _on_web_upload(self, file_name: str, file_size: int, saved_path: str) -> None:
+        """A phone uploaded a file to this computer via the web companion."""
+        logger.info("Web upload received: %s (%d bytes) -> %s",
+                    _mask_file_name(file_name), file_size, _mask_path(saved_path))
+        if self.file_transfer_mgr is not None:
+            try:
+                self.file_transfer_mgr.record_web_upload(file_name, file_size, saved_path)
+            except Exception:
+                logger.debug("record_web_upload failed", exc_info=True)
+        self._notify("notify_transfer", T("notify.file_received"),
+                     T("transfer.received", name=file_name))
+        self._play_transfer_sound()
+
+    def _play_transfer_sound(self) -> None:
+        """Play the transfer notification sound when the user enabled sound."""
+        if getattr(self.cfg, "sound_enabled", False):
+            try:
+                notification_mgr.play_sound()
+            except Exception:
+                logger.debug("play_sound failed", exc_info=True)
 
     def _on_transfer_request(self, transfer_id: str, file_name: str, file_size: int,
                              mime_type: str, send_fn) -> None:

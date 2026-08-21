@@ -92,5 +92,39 @@ class NotificationManager:
             except Exception:
                 pass
 
+    @staticmethod
+    def play_sound():
+        """Play a short system notification sound (per platform).
+
+        The caller gates this on the user's ``sound_enabled`` setting. This
+        only ever fails silently — a missing sound tool must not break the
+        notification flow.
+        """
+        import subprocess
+        import sys
+        try:
+            if sys.platform == "win32":
+                import winsound
+                # SystemNotification is the Windows "you got something" sound;
+                # async so it doesn't block the caller.
+                winsound.PlaySound("SystemNotification",
+                                   winsound.SND_ALIAS | winsound.SND_ASYNC)
+            elif sys.platform == "darwin":
+                subprocess.run(
+                    ["afplay", "/System/Library/Sounds/Ping.aiff"],
+                    capture_output=True, timeout=5)
+            else:
+                # Linux: try the freedesktop complete sound via a few tools.
+                for cmd in (["paplay", "/usr/share/sounds/freedesktop/stereo/complete.oga"],
+                            ["canberra-gtk-play", "-i", "complete"],
+                            ["aplay", "/usr/share/sounds/alsa/Front_Center.wav"]):
+                    try:
+                        subprocess.run(cmd, capture_output=True, timeout=5)
+                        break
+                    except Exception:
+                        continue
+        except Exception:
+            logger.debug("play_sound failed", exc_info=True)
+
 
 notification_mgr = NotificationManager()
