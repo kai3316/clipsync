@@ -410,6 +410,7 @@
   "web.error": "连接断开。请确认 ClipSync 正在运行。",
   "web.dark_mode": "深色",
   "web.light_mode": "浅色",
+  "web.system_mode": "系统 — 跟随操作系统主题",
   "web.token_invalid": "令牌无效或缺失",
   "web.server_error": "服务器错误",
   "web.connected_devices": "已连接设备",

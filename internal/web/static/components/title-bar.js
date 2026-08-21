@@ -34,14 +34,14 @@
         var t = this.store.theme;
         if (t === 'dark') return '🌙';
         if (t === 'light') return '☀️';
-        return '🔄'; // system
+        return '🖥️'; // system — monitor reads as "follow the OS", not refresh
       },
 
       themeTitle: function () {
         var t = this.store.theme;
         if (t === 'dark') return this.t('web.dark_mode');
         if (t === 'light') return this.t('web.light_mode');
-        return this.t('web.light_mode') + ' / ' + this.t('web.dark_mode');
+        return this.t('web.system_mode');
       },
     },
 

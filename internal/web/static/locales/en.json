@@ -410,6 +410,7 @@
   "web.error": "Connection lost. Check that ClipSync is running.",
   "web.dark_mode": "Dark",
   "web.light_mode": "Light",
+  "web.system_mode": "System — follow OS theme",
   "web.token_invalid": "Invalid or missing token",
   "web.server_error": "Server error",
   "web.connected_devices": "Connected Devices",
