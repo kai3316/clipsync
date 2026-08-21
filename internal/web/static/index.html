@@ -2813,6 +2813,15 @@
       box-shadow: var(--clipsync-shadow-lg);
     }
 
+    /* Flipped below the item when there's no room above (first item in the
+       list would otherwise be clipped by the content's overflow). */
+    .favorite-item__group-menu--down {
+      bottom: auto;
+      top: 100%;
+      margin-top: 6px;
+      margin-bottom: 0;
+    }
+
     .favorite-item__group-menu-item {
       display: block;
       width: 100%;

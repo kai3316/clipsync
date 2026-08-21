@@ -254,6 +254,22 @@
 
       toggleGroupDropdown: function () {
         this.showGroupDropdown = !this.showGroupDropdown;
+        // The menu opens upward (bottom:100%). For the first item that pokes
+        // out above the scrollable content and gets clipped by its overflow,
+        // so flip it downward when there isn't room above.
+        if (this.showGroupDropdown) {
+          var self = this;
+          this.$nextTick(function () {
+            var menu = self.$el.querySelector('.favorite-item__group-menu');
+            if (!menu) return;
+            menu.classList.remove('favorite-item__group-menu--down');
+            var content = self.$el.closest('.favorites-panel__content');
+            var contentTop = content ? content.getBoundingClientRect().top : 0;
+            if (menu.getBoundingClientRect().top < contentTop) {
+              menu.classList.add('favorite-item__group-menu--down');
+            }
+          });
+        }
       },
 
       changeGroup: function (group) {

@@ -541,6 +541,7 @@
   "overview.paired": "Paired",
   "overview.history": "History",
   "overview.transfers": "Transfers",
+  "overview.completed": "completed",
   "overview.active": "Active",
   "overview.items": "Items",
   "overview.scan_hint": "Scan to connect",

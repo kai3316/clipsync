@@ -388,7 +388,7 @@
           '<div class="overview-stat-card glass" style="--stat-accent: var(--clipsync-accent)">' +
             '<span class="overview-stat-value">{{ stats.transfers || 0 }}</span>' +
             '<span class="overview-stat-label">{{ t(\'overview.transfers\') }}</span>' +
-            '<span class="overview-stat-sub">{{ stats.completed || 0 }} ✓</span>' +
+            '<span class="overview-stat-sub">{{ stats.completed || 0 }} {{ t(\'overview.completed\') }}</span>' +
           '</div>' +
         '</div>' +
 

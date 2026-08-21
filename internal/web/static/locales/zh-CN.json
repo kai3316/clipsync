@@ -541,6 +541,7 @@
   "overview.paired": "已配对",
   "overview.history": "历史记录",
   "overview.transfers": "传输",
+  "overview.completed": "已完成",
   "overview.active": "活跃",
   "overview.items": "条目",
   "overview.scan_hint": "扫码连接",
