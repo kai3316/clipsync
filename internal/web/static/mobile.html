@@ -1,0 +1,875 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no,viewport-fit=cover">
+<meta name="theme-color" content="#06080D">
+<title>ClipSync</title>
+<style>
+/* ═══════════════════════════════════════════════════════════════════
+   ClipSync Mobile — phone companion
+   Three tabs: clipboard history / send text / file transfer.
+   Tokens mirror css/theme.css for a consistent look on a small screen.
+   ═══════════════════════════════════════════════════════════════════ */
+
+:root {
+  --bg: #06080D;
+  --surface: #0C1020;
+  --panel: #111827;
+  --panel-2: #161E32;
+  --fg: #E8EDF5;
+  --fg-muted: #8899B4;
+  --fg-subtle: #556680;
+  --accent: #22D3EE;
+  --accent-2: #A78BFA;
+  --accent-glow: rgba(34,211,238,0.15);
+  --accent-glow-strong: rgba(34,211,238,0.30);
+  --violet-glow: rgba(167,139,250,0.16);
+  --pink-glow: rgba(244,114,182,0.14);
+  --success: #00E599;
+  --danger: #FF4060;
+  --border: rgba(100,140,200,0.08);
+  --border-strong: rgba(100,140,200,0.16);
+  --radius: 12px;
+  --radius-sm: 8px;
+  --font: "SF Pro Display", "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  --font-mono: "JetBrains Mono", "SF Mono", "Cascadia Code", "Fira Code", monospace;
+  --spring: 400ms cubic-bezier(0.34, 1.56, 0.64, 1);
+  --fast: 120ms cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+html, body { width: 100%; height: 100%; overflow: hidden; }
+
+body {
+  font-family: var(--font);
+  background: var(--bg);
+  color: var(--fg);
+  -webkit-user-select: none;
+  user-select: none;
+  -webkit-touch-callout: none;
+  touch-action: manipulation;
+  overscroll-behavior: none;
+  display: flex;
+  flex-direction: column;
+}
+
+/* ── Aurora wash ─────────────────────────────────────────────── */
+
+body::before {
+  content: '';
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  z-index: 0;
+  background:
+    radial-gradient(ellipse 60% 45% at 12% -10%, var(--violet-glow), transparent),
+    radial-gradient(ellipse 60% 45% at 88% -10%, var(--pink-glow), transparent),
+    radial-gradient(ellipse 80% 55% at 50% -20%, var(--accent-glow), transparent);
+  animation: mAurora 18s ease-in-out infinite alternate;
+}
+
+@keyframes mAurora {
+  0%   { transform: translate3d(0,0,0) scale(1); }
+  50%  { transform: translate3d(-3%,2%,0) scale(1.06); }
+  100% { transform: translate3d(3%,-2%,0) scale(1.04); }
+}
+
+.app { position: relative; z-index: 1; display: flex; flex-direction: column; height: 100%; }
+
+/* ── Header ─────────────────────────────────────────────────── */
+
+.header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: calc(14px + env(safe-area-inset-top)) 16px 10px;
+  flex-shrink: 0;
+  border-bottom: 1px solid var(--border);
+  background: linear-gradient(180deg, rgba(10,14,30,0.6), rgba(10,14,30,0.3));
+  backdrop-filter: blur(18px) saturate(170%);
+  -webkit-backdrop-filter: blur(18px) saturate(170%);
+}
+
+.header__left { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+
+.header__title {
+  font-size: 16px;
+  font-weight: 700;
+  letter-spacing: -0.01em;
+  line-height: 1.2;
+  background: linear-gradient(135deg, var(--accent), var(--accent-2));
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+}
+
+.header__sub {
+  font-size: 11px;
+  color: var(--fg-muted);
+  font-weight: 500;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 60vw;
+}
+
+/* ── Tab bar ────────────────────────────────────────────────── */
+
+.tabs {
+  display: flex;
+  gap: 4px;
+  margin: 10px 12px 4px;
+  background: rgba(12,16,32,0.6);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 4px;
+  flex-shrink: 0;
+  backdrop-filter: blur(14px);
+  -webkit-backdrop-filter: blur(14px);
+}
+
+.tab {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  padding: 11px 0;
+  border-radius: 10px;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--fg-muted);
+  border: none;
+  background: transparent;
+  font-family: var(--font);
+  cursor: pointer;
+  transition: all var(--fast);
+  -webkit-tap-highlight-color: transparent;
+}
+
+.tab--active {
+  background: linear-gradient(135deg, var(--accent), var(--accent-2));
+  color: #fff;
+  box-shadow: 0 2px 12px var(--accent-glow-strong);
+}
+
+/* ── Content ────────────────────────────────────────────────── */
+
+.content { flex: 1; overflow-y: auto; overflow-x: hidden; padding: 8px 12px calc(12px + env(safe-area-inset-bottom)); }
+
+.panel { display: none; }
+.panel--active { display: block; }
+
+/* ── History items ──────────────────────────────────────────── */
+
+.h-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 13px 14px;
+  border-radius: var(--radius);
+  border: 1px solid var(--border);
+  background: linear-gradient(135deg, rgba(12,16,32,0.8), rgba(17,24,39,0.8));
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  cursor: pointer;
+  transition: all var(--spring);
+  margin-bottom: 8px;
+}
+
+.h-item:active {
+  border-color: var(--accent);
+  transform: scale(0.99);
+}
+
+.h-item__icon {
+  flex-shrink: 0;
+  width: 34px;
+  height: 34px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 16px;
+  background: var(--panel);
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border);
+}
+
+.h-item__body { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 3px; }
+
+.h-item__text {
+  font-size: 14px;
+  line-height: 1.4;
+  color: var(--fg);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.h-item__meta {
+  font-size: 10px;
+  color: var(--fg-subtle);
+  font-family: var(--font-mono);
+}
+
+/* ── Send panel ─────────────────────────────────────────────── */
+
+.send-card {
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: linear-gradient(135deg, rgba(12,16,32,0.8), rgba(17,24,39,0.8));
+  padding: 14px;
+}
+
+.send-card textarea {
+  width: 100%;
+  min-height: 140px;
+  resize: none;
+  background: var(--panel);
+  color: var(--fg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 12px;
+  font-size: 15px;
+  font-family: var(--font);
+  line-height: 1.5;
+  outline: none;
+  -webkit-user-select: text;
+  user-select: text;
+  transition: border-color var(--fast);
+}
+
+.send-card textarea:focus { border-color: var(--accent); }
+
+.send-btn {
+  width: 100%;
+  margin-top: 12px;
+  padding: 14px 0;
+  border: none;
+  border-radius: var(--radius);
+  font-size: 15px;
+  font-weight: 700;
+  font-family: var(--font);
+  color: #fff;
+  background: linear-gradient(135deg, var(--accent), var(--accent-2));
+  cursor: pointer;
+  box-shadow: 0 4px 16px var(--accent-glow-strong);
+  transition: all var(--fast);
+  -webkit-tap-highlight-color: transparent;
+}
+
+.send-btn:active { transform: scale(0.98); }
+.send-btn:disabled { opacity: 0.5; }
+
+.send-hint { font-size: 12px; color: var(--fg-muted); margin-top: 10px; line-height: 1.5; }
+
+/* ── Files panel ────────────────────────────────────────────── */
+
+.upload-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  width: 100%;
+  padding: 14px 0;
+  border: 1px dashed var(--border-strong);
+  border-radius: var(--radius);
+  background: rgba(12,16,32,0.6);
+  color: var(--fg);
+  font-size: 14px;
+  font-weight: 600;
+  font-family: var(--font);
+  cursor: pointer;
+  margin-bottom: 12px;
+  transition: all var(--fast);
+  -webkit-tap-highlight-color: transparent;
+}
+
+.upload-btn:active { border-color: var(--accent); color: var(--accent); }
+
+.f-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 13px 14px;
+  border-radius: var(--radius);
+  border: 1px solid var(--border);
+  background: linear-gradient(135deg, rgba(12,16,32,0.8), rgba(17,24,39,0.8));
+  margin-bottom: 8px;
+  cursor: pointer;
+  transition: all var(--spring);
+}
+
+.f-item:active { border-color: var(--accent); transform: scale(0.99); }
+
+.f-item__icon {
+  flex-shrink: 0;
+  width: 34px;
+  height: 34px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 16px;
+  background: var(--panel);
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border);
+}
+
+.f-item__body { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 3px; }
+
+.f-item__name {
+  font-size: 14px;
+  color: var(--fg);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.f-item__meta { font-size: 11px; color: var(--fg-subtle); font-family: var(--font-mono); }
+
+/* ── Empty / loading ────────────────────────────────────────── */
+
+.empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  padding: 48px 20px;
+  text-align: center;
+}
+
+.empty__icon { font-size: 34px; opacity: 0.45; }
+.empty__text { font-size: 13px; color: var(--fg-muted); font-weight: 500; }
+
+.skeleton {
+  height: 52px;
+  border-radius: var(--radius);
+  background: linear-gradient(90deg, var(--panel) 0%, var(--panel-2) 40%, var(--panel) 80%);
+  background-size: 200% 100%;
+  margin-bottom: 8px;
+  animation: mShimmer 1.6s ease-in-out infinite;
+}
+
+@keyframes mShimmer {
+  0% { background-position: 200% 0; }
+  100% { background-position: -200% 0; }
+}
+
+/* ── Item detail modal ──────────────────────────────────────── */
+
+.modal-mask {
+  position: fixed;
+  inset: 0;
+  z-index: 50;
+  background: rgba(4,6,10,0.7);
+  backdrop-filter: blur(6px);
+  -webkit-backdrop-filter: blur(6px);
+  display: flex;
+  align-items: flex-end;
+  justify-content: center;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity var(--fast);
+}
+
+.modal-mask--show { opacity: 1; pointer-events: auto; }
+
+.modal {
+  width: 100%;
+  max-height: 80vh;
+  display: flex;
+  flex-direction: column;
+  background: var(--surface);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius) var(--radius) 0 0;
+  padding: 18px 16px calc(18px + env(safe-area-inset-bottom));
+  transform: translateY(100%);
+  transition: transform var(--spring);
+}
+
+.modal-mask--show .modal { transform: translateY(0); }
+
+.modal__title { font-size: 13px; font-weight: 700; color: var(--fg-muted); margin-bottom: 10px; }
+
+.modal__text {
+  font-size: 15px;
+  line-height: 1.6;
+  color: var(--fg);
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 12px;
+  max-height: 46vh;
+  overflow-y: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+  -webkit-user-select: text;
+  user-select: text;
+}
+
+.modal__actions { display: flex; gap: 10px; margin-top: 14px; }
+
+.modal__btn {
+  flex: 1;
+  padding: 13px 0;
+  border: none;
+  border-radius: var(--radius);
+  font-size: 14px;
+  font-weight: 700;
+  font-family: var(--font);
+  cursor: pointer;
+  transition: all var(--fast);
+  -webkit-tap-highlight-color: transparent;
+}
+
+.modal__btn--primary { color: #fff; background: linear-gradient(135deg, var(--accent), var(--accent-2)); }
+.modal__btn--ghost { color: var(--fg-muted); background: var(--panel); border: 1px solid var(--border); }
+.modal__btn:active { transform: scale(0.97); }
+
+/* ── Toast ──────────────────────────────────────────────────── */
+
+.toast {
+  position: fixed;
+  bottom: calc(24px + env(safe-area-inset-bottom));
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 100;
+  padding: 10px 20px;
+  background: color-mix(in srgb, var(--surface) 86%, var(--accent) 14%);
+  color: var(--fg);
+  border: 1px solid var(--accent);
+  border-radius: 24px;
+  font-size: 13px;
+  font-weight: 600;
+  box-shadow: 0 8px 28px rgba(5,6,13,0.5), 0 0 0 1px var(--accent-glow-strong);
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity var(--fast);
+  white-space: nowrap;
+  max-width: 88vw;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.toast--show { opacity: 1; }
+
+.toast--error {
+  background: color-mix(in srgb, var(--surface) 86%, var(--danger) 14%);
+  border-color: var(--danger);
+}
+
+/* ── Scrollbar ──────────────────────────────────────────────── */
+
+.content::-webkit-scrollbar { width: 4px; }
+.content::-webkit-scrollbar-track { background: transparent; }
+.content::-webkit-scrollbar-thumb { background: var(--border-strong); border-radius: 2px; }
+.modal__text::-webkit-scrollbar { width: 4px; }
+.modal__text::-webkit-scrollbar-thumb { background: var(--border-strong); border-radius: 2px; }
+</style>
+</head>
+<body>
+
+<div class="app">
+  <header class="header">
+    <div class="header__left">
+      <div class="header__title">&#x1F4CB; <span id="title">ClipSync</span></div>
+      <div class="header__sub" id="subtitle"></div>
+    </div>
+  </header>
+
+  <nav class="tabs">
+    <button class="tab tab--active" data-tab="history" id="tabHistory"></button>
+    <button class="tab" data-tab="send" id="tabSend"></button>
+    <button class="tab" data-tab="files" id="tabFiles"></button>
+  </nav>
+
+  <main class="content">
+
+    <!-- History -->
+    <section class="panel panel--active" id="panelHistory">
+      <div id="historyList"></div>
+    </section>
+
+    <!-- Send -->
+    <section class="panel" id="panelSend">
+      <div class="send-card">
+        <textarea id="sendText" placeholder=""></textarea>
+        <button class="send-btn" id="sendBtn"></button>
+        <p class="send-hint" id="sendHint"></p>
+      </div>
+    </section>
+
+    <!-- Files -->
+    <section class="panel" id="panelFiles">
+      <button class="upload-btn" id="uploadBtn"></button>
+      <div id="fileList"></div>
+    </section>
+
+  </main>
+</div>
+
+<!-- Item detail modal -->
+<div class="modal-mask" id="modal">
+  <div class="modal">
+    <div class="modal__title" id="modalTitle"></div>
+    <div class="modal__text" id="modalText"></div>
+    <div class="modal__actions">
+      <button class="modal__btn modal__btn--ghost" id="modalClose"></button>
+      <button class="modal__btn modal__btn--primary" id="modalCopy"></button>
+    </div>
+  </div>
+</div>
+
+<div class="toast" id="toast"></div>
+
+<input type="file" id="fileInput" style="display:none">
+
+<script>
+(function () {
+  'use strict';
+
+  /* ── Params & locale ───────────────────────────────────────── */
+
+  var params = new URLSearchParams(window.location.search);
+  var TOKEN = params.get('token') || '';
+  var HOST = window.location.origin;
+  var ZH = (navigator.language || '').toLowerCase().indexOf('zh') === 0;
+
+  var T = {
+    title: ZH ? '剪贴板' : 'ClipSync',
+    sub: ZH ? '电脑的剪贴板 · 局域网' : 'This computer · LAN',
+    tabHistory: ZH ? '历史' : 'History',
+    tabSend: ZH ? '发送' : 'Send',
+    tabFiles: ZH ? '文件' : 'Files',
+    sendPlaceholder: ZH ? '输入要发送到设备的文字…' : 'Type text to send to your devices…',
+    sendBtn: ZH ? '发送' : 'Send',
+    sendHint: ZH ? '发送后文字会写入电脑剪贴板，并自动同步到所有已连接设备。' : 'Sent text is written to this computer\'s clipboard and synced to all connected devices.',
+    sendOk: ZH ? '✓ 已发送' : '✓ Sent',
+    sendEmpty: ZH ? '请输入要发送的内容' : 'Type something to send',
+    sendFail: ZH ? '发送失败' : 'Failed to send',
+    copy: ZH ? '复制' : 'Copy',
+    copied: ZH ? '已复制' : 'Copied',
+    copyFail: ZH ? '复制失败，请长按选择文字' : 'Copy failed — long-press to select',
+    close: ZH ? '关闭' : 'Close',
+    emptyHistory: ZH ? '暂无剪贴板历史' : 'No clipboard history',
+    emptyFiles: ZH ? '电脑上暂无文件' : 'No files on the computer',
+    uploadBtn: ZH ? '⬆ 上传文件到电脑' : '⬆ Upload to this computer',
+    uploading: ZH ? '上传中…' : 'Uploading…',
+    uploadOk: ZH ? '✓ 已上传' : '✓ Uploaded',
+    uploadFail: ZH ? '上传失败' : 'Upload failed',
+    loadFail: ZH ? '加载失败' : 'Failed to load',
+    timeJust: ZH ? '刚刚' : 'just now',
+    timeMin: ZH ? '分钟前' : 'm ago',
+    timeHour: ZH ? '小时前' : 'h ago',
+    timeDay: ZH ? '天前' : 'd ago',
+    fileDownload: ZH ? '下载中…' : 'Downloading…',
+    targetDevice: ZH ? '本电脑' : 'This computer',
+  };
+
+  /* ── Apply strings ─────────────────────────────────────────── */
+
+  document.getElementById('title').textContent = T.title;
+  document.getElementById('subtitle').textContent = T.sub;
+  document.getElementById('tabHistory').textContent = T.tabHistory;
+  document.getElementById('tabSend').textContent = T.tabSend;
+  document.getElementById('tabFiles').textContent = T.tabFiles;
+  var sendText = document.getElementById('sendText');
+  sendText.placeholder = T.sendPlaceholder;
+  document.getElementById('sendBtn').textContent = T.sendBtn;
+  document.getElementById('sendHint').textContent = T.sendHint;
+  document.getElementById('uploadBtn').textContent = T.uploadBtn;
+  document.getElementById('modalClose').textContent = T.close;
+  document.getElementById('modalCopy').textContent = T.copy;
+  document.title = T.title;
+
+  /* ── DOM refs ──────────────────────────────────────────────── */
+
+  var tabs = document.querySelectorAll('.tab');
+  var panels = document.querySelectorAll('.panel');
+  var historyList = document.getElementById('historyList');
+  var fileList = document.getElementById('fileList');
+  var toastEl = document.getElementById('toast');
+  var modalEl = document.getElementById('modal');
+  var modalText = document.getElementById('modalText');
+  var modalTitle = document.getElementById('modalTitle');
+  var fileInput = document.getElementById('fileInput');
+
+  var toastTimer = null;
+  var historyItems = [];
+
+  /* ── Tab switching ─────────────────────────────────────────── */
+
+  tabs.forEach(function (tab) {
+    tab.addEventListener('click', function () {
+      tabs.forEach(function (t) { t.classList.remove('tab--active'); });
+      tab.classList.add('tab--active');
+      var name = tab.getAttribute('data-tab');
+      panels.forEach(function (p) {
+        p.classList.toggle('panel--active', p.id === 'panel' + name.charAt(0).toUpperCase() + name.slice(1));
+      });
+      if (name === 'history') loadHistory();
+      if (name === 'files') loadFiles();
+    });
+  });
+
+  /* ── API helpers ───────────────────────────────────────────── */
+
+  function apiUrl(path) {
+    var sep = path.indexOf('?') !== -1 ? '&' : '?';
+    return HOST + path + sep + 'token=' + encodeURIComponent(TOKEN);
+  }
+
+  function getJson(path) {
+    return fetch(apiUrl(path)).then(function (r) {
+      if (!r.ok) throw new Error('HTTP ' + r.status);
+      return r.json();
+    });
+  }
+
+  /* ── Toast ─────────────────────────────────────────────────── */
+
+  function showToast(msg, isError) {
+    if (toastTimer) clearTimeout(toastTimer);
+    toastEl.textContent = msg;
+    toastEl.className = 'toast toast--show' + (isError ? ' toast--error' : '');
+    toastTimer = setTimeout(function () { toastEl.className = 'toast'; }, 2400);
+  }
+
+  /* ── History ───────────────────────────────────────────────── */
+
+  function typeIcon(ct) {
+    var t = (ct || '').toUpperCase();
+    if (t === 'TEXT' || t === 'HTML' || t === 'RTF') return '📝';
+    if (t.indexOf('IMAGE') === 0) return '🖼';
+    if (t === 'FILE') return '📄';
+    return '📋';
+  }
+
+  function relTime(ts) {
+    if (!ts) return '';
+    var d = Math.floor(Date.now() / 1000) - ts;
+    if (d < 60) return T.timeJust;
+    if (d < 3600) return Math.floor(d / 60) + T.timeMin;
+    if (d < 86400) return Math.floor(d / 3600) + T.timeHour;
+    return Math.floor(d / 86400) + T.timeDay;
+  }
+
+  function esc(s) {
+    return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+  }
+
+  function loadHistory() {
+    historyList.innerHTML = '<div class="skeleton"></div><div class="skeleton"></div><div class="skeleton"></div>';
+    getJson('/api/history?limit=30')
+      .then(function (data) {
+        historyItems = (data.items || []).slice(0, 30);
+        renderHistory();
+      })
+      .catch(function () {
+        historyList.innerHTML = '<div class="empty"><div class="empty__icon">⚠️</div><div class="empty__text">' + esc(T.loadFail) + '</div></div>';
+      });
+  }
+
+  function renderHistory() {
+    if (historyItems.length === 0) {
+      historyList.innerHTML = '<div class="empty"><div class="empty__icon">📋</div><div class="empty__text">' + esc(T.emptyHistory) + '</div></div>';
+      return;
+    }
+    historyList.innerHTML = '';
+    historyItems.forEach(function (item, i) {
+      var el = document.createElement('div');
+      el.className = 'h-item';
+      el.style.animation = 'none';
+      el.innerHTML =
+        '<div class="h-item__icon">' + typeIcon(item.content_type) + '</div>' +
+        '<div class="h-item__body">' +
+          '<div class="h-item__text">' + esc(item.text_preview || item.content_type || '(empty)') + '</div>' +
+          '<div class="h-item__meta">' + esc(relTime(item.timestamp)) + '</div>' +
+        '</div>';
+      el.addEventListener('click', function () { openItem(i); });
+      historyList.appendChild(el);
+    });
+  }
+
+  /* ── Item detail + copy to phone ───────────────────────────── */
+
+  function getFullText(item) {
+    if (item.types && item.types.TEXT) {
+      try {
+        var raw = atob(item.types.TEXT);
+        var bytes = new Uint8Array(raw.length);
+        for (var j = 0; j < raw.length; j++) bytes[j] = raw.charCodeAt(j);
+        return new TextDecoder('utf-8').decode(bytes);
+      } catch (e) { /* fall through */ }
+    }
+    return item.text_preview || '';
+  }
+
+  function openItem(i) {
+    var item = historyItems[i];
+    modalTitle.textContent = T.tabHistory + ' · ' + relTime(item.timestamp);
+    modalText.textContent = item.text_preview || '(empty)';
+    modalEl.classList.add('modal-mask--show');
+    // The list no longer carries full text — fetch it when the modal opens.
+    if (item.entry_id) {
+      getJson('/api/history/item?entry_id=' + encodeURIComponent(item.entry_id))
+        .then(function (data) {
+          if (data && data.item) {
+            modalText.textContent = getFullText(data.item) || item.text_preview || '(empty)';
+          }
+        })
+        .catch(function () { /* keep the preview */ });
+    }
+  }
+
+  function closeModal() { modalEl.classList.remove('modal-mask--show'); }
+
+  document.getElementById('modalClose').addEventListener('click', closeModal);
+  modalEl.addEventListener('click', function (e) { if (e.target === modalEl) closeModal(); });
+
+  document.getElementById('modalCopy').addEventListener('click', function () {
+    var text = modalText.textContent;
+    if (!text) return;
+    // navigator.clipboard needs a secure context (HTTPS) — on plain HTTP LAN
+    // fall back to a hidden textarea + execCommand, and finally tell the user
+    // to long-press the visible text.
+    function fallback() {
+      try {
+        var ta = document.createElement('textarea');
+        ta.value = text;
+        ta.style.position = 'fixed';
+        ta.style.opacity = '0';
+        document.body.appendChild(ta);
+        ta.focus();
+        ta.select();
+        var ok = document.execCommand('copy');
+        document.body.removeChild(ta);
+        if (ok) { showToast(T.copied); return; }
+      } catch (e) { /* fall through */ }
+      showToast(T.copyFail, true);
+    }
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(text).then(function () {
+        showToast(T.copied);
+      }).catch(fallback);
+    } else {
+      fallback();
+    }
+  });
+
+  /* ── Send ──────────────────────────────────────────────────── */
+
+  var sendBtn = document.getElementById('sendBtn');
+  sendBtn.addEventListener('click', function () {
+    var text = sendText.value.trim();
+    if (!text) { showToast(T.sendEmpty, true); return; }
+    sendBtn.disabled = true;
+    fetch(apiUrl('/api/push'), {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ text: text }),
+    })
+      .then(function (r) { return r.json(); })
+      .then(function (data) {
+        sendBtn.disabled = false;
+        if (data.ok) {
+          showToast(T.sendOk);
+          sendText.value = '';
+        } else {
+          showToast(data.error || T.sendFail, true);
+        }
+      })
+      .catch(function () {
+        sendBtn.disabled = false;
+        showToast(T.sendFail, true);
+      });
+  });
+
+  /* ── Files: upload ─────────────────────────────────────────── */
+
+  document.getElementById('uploadBtn').addEventListener('click', function () {
+    fileInput.click();
+  });
+
+  fileInput.addEventListener('change', function () {
+    if (!fileInput.files || fileInput.files.length === 0) return;
+    var btn = document.getElementById('uploadBtn');
+    var orig = btn.textContent;
+    btn.textContent = T.uploading;
+    btn.disabled = true;
+
+    // The server upload endpoint accepts one file per request.
+    var form = new FormData();
+    form.append('file', fileInput.files[0]);
+
+    fetch(apiUrl('/api/upload'), { method: 'POST', body: form })
+      .then(function (r) { return r.json(); })
+      .then(function (data) {
+        btn.textContent = orig;
+        btn.disabled = false;
+        fileInput.value = '';
+        if (data.ok) {
+          showToast(T.uploadOk);
+          loadFiles();
+        } else {
+          showToast(data.error || T.uploadFail, true);
+        }
+      })
+      .catch(function () {
+        btn.textContent = orig;
+        btn.disabled = false;
+        fileInput.value = '';
+        showToast(T.uploadFail, true);
+      });
+  });
+
+  /* ── Files: list + download ────────────────────────────────── */
+
+  function loadFiles() {
+    fileList.innerHTML = '<div class="skeleton"></div><div class="skeleton"></div>';
+    getJson('/api/files')
+      .then(function (data) {
+        var files = (data && data.files) || [];
+        if (files.length === 0) {
+          fileList.innerHTML = '<div class="empty"><div class="empty__icon">📁</div><div class="empty__text">' + esc(T.emptyFiles) + '</div></div>';
+          return;
+        }
+        fileList.innerHTML = '';
+        files.forEach(function (f) {
+          var el = document.createElement('div');
+          el.className = 'f-item';
+          el.innerHTML =
+            '<div class="f-item__icon">📄</div>' +
+            '<div class="f-item__body">' +
+              '<div class="f-item__name">' + esc(f.name) + '</div>' +
+              '<div class="f-item__meta">' + esc(f.size) + ' · ' + esc(f.time) + '</div>' +
+            '</div>';
+          el.addEventListener('click', function () {
+            var a = document.createElement('a');
+            a.href = apiUrl('/api/download?file=' + encodeURIComponent(f.name));
+            a.download = f.name;
+            document.body.appendChild(a);
+            a.click();
+            document.body.removeChild(a);
+            showToast(T.fileDownload);
+          });
+          fileList.appendChild(el);
+        });
+      })
+      .catch(function () {
+        fileList.innerHTML = '<div class="empty"><div class="empty__icon">⚠️</div><div class="empty__text">' + esc(T.loadFail) + '</div></div>';
+      });
+  }
+
+  /* ── Init ──────────────────────────────────────────────────── */
+
+  loadHistory();
+
+})();
+</script>
+
+</body>
+</html>

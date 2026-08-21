@@ -1814,12 +1814,12 @@ class Application:
         token = self.cfg.web_token
         port = self.cfg.web_port
         ip = WebServer._get_lan_ip()
-        # The QR opens the lightweight quick-paste page (a simple clipboard
-        # list that fits a phone screen), not the full desktop dashboard.
+        # The QR opens the phone companion page (history / send / files),
+        # not the full desktop dashboard.
         if token:
-            url = f"http://{ip}:{port}/quickpaste.html?token={token}"
+            url = f"http://{ip}:{port}/mobile.html?token={token}"
         else:
-            url = f"http://{ip}:{port}/quickpaste.html"
+            url = f"http://{ip}:{port}/mobile.html"
 
         # ── Webview mode: push QR code to web UI ────────────────────
         if self._is_webview():
