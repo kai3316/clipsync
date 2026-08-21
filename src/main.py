@@ -1814,7 +1814,12 @@ class Application:
         token = self.cfg.web_token
         port = self.cfg.web_port
         ip = WebServer._get_lan_ip()
-        url = f"http://{ip}:{port}?token={token}" if token else f"http://{ip}:{port}"
+        # The QR opens the lightweight quick-paste page (a simple clipboard
+        # list that fits a phone screen), not the full desktop dashboard.
+        if token:
+            url = f"http://{ip}:{port}/quickpaste.html?token={token}"
+        else:
+            url = f"http://{ip}:{port}/quickpaste.html"
 
         # ── Webview mode: push QR code to web UI ────────────────────
         if self._is_webview():
@@ -3407,14 +3412,14 @@ class Application:
         # 4. Web companion
         if web_running:
             checks.append({"id": "web_companion", "ok": True,
-                           "detail": f"Web companion on :{web_port}",
+                           "detail": f"Remote access on :{web_port}",
                            "detail_key": "diag.web_companion.ok.detail",
                            "detail_params": {"web_port": web_port}, "guidance": None})
         else:
             checks.append({"id": "web_companion", "ok": False,
-                           "detail": "Web companion not running",
+                           "detail": "Remote access not running",
                            "detail_key": "diag.web_companion.fail.detail",
-                           "guidance": "Web companion isn't running — enable it in Settings → Web Companion.",
+                           "guidance": "Remote access isn't running — enable it in Settings → Remote access.",
                            "guidance_key": "diag.web_companion.fail.guidance"})
 
         # 5. Network classification

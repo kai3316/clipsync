@@ -478,6 +478,16 @@ body::after {
 .qp-body::-webkit-scrollbar-thumb:hover {
   background: var(--clipsync-fg-subtle);
 }
+
+/* ── Coarse pointer (phone/tablet): bigger touch targets ──────── */
+@media (pointer: coarse) {
+  .qp-header { padding: 18px 16px 14px; }
+  .qp-header__close { width: 36px; height: 36px; font-size: 18px; }
+  .qp-item { padding: 14px 16px; }
+  .qp-item__icon { width: 36px; height: 36px; font-size: 18px; }
+  .qp-item__text { font-size: 15px; }
+  .qp-item__time { font-size: 11px; }
+}
 </style>
 </head>
 <body>
@@ -486,8 +496,8 @@ body::after {
   <!-- Header -->
   <header class="qp-header">
     <div class="qp-header__left">
-      <div class="qp-header__title">&#x26A1; Quick Paste</div>
-      <div class="qp-header__subtitle">Press 1&ndash;9 to paste &middot; &uarr;&darr; to navigate &middot; Esc to close</div>
+      <div class="qp-header__title">&#x26A1; <span id="qpTitle">Quick Paste</span></div>
+      <div class="qp-header__subtitle" id="qpSubtitle"></div>
     </div>
     <button class="qp-header__close" onclick="closeWindow()" title="Close (Esc)">&times;</button>
   </header>
@@ -513,10 +523,15 @@ body::after {
 
   var params = new URLSearchParams(window.location.search);
   var TOKEN = params.get('token') || '';
-  var HOST  = params.get('host')  || '';
+  // The page is always served by the same server that hosts the API, so the
+  // API origin is the page's own origin. The desktop popup still passes
+  // host= for backwards compatibility; a phone scans the QR without it.
+  var HOST = (params.get('host') || window.location.origin).replace(/\/+$/, '');
 
-  // Strip trailing slash from host
-  if (HOST) { HOST = HOST.replace(/\/+$/, ''); }
+  // Touch vs keyboard determines the hints and whether the popup auto-closes.
+  var IS_TOUCH = ('ontouchstart' in window) ||
+    (navigator.maxTouchPoints && navigator.maxTouchPoints > 0);
+  var IS_ZH = (navigator.language || '').toLowerCase().indexOf('zh') === 0;
 
   /* ═══════════════════════════════════════════════════════════════
      State
@@ -569,10 +584,10 @@ body::after {
       })
       .catch(function (err) {
         state.loading = false;
-        state.error = err.message || 'Failed to load history';
+        state.error = err.message || (IS_ZH ? '加载历史失败' : 'Failed to load history');
         state.items = [];
         render();
-        showToast('Failed to load history', true);
+        showToast(IS_ZH ? '加载历史失败' : 'Failed to load history', true);
       });
   }
 
@@ -603,7 +618,7 @@ body::after {
 
     var doPaste = function (text) {
       if (!text) {
-        showToast('No text content', true);
+        showToast(IS_ZH ? '没有文本内容' : 'No text content', true);
         return;
       }
 
@@ -619,17 +634,20 @@ body::after {
         .then(function (r) { return r.json(); })
         .then(function (data) {
           if (data.ok) {
-            showToast('✓ Pasted!');
-            // Close after a brief delay so the user sees the feedback
-            setTimeout(function () { closeWindow(); }, 350);
+            showToast(IS_ZH ? '✓ 已发送' : '✓ Pasted!');
+            // Desktop popup closes after a beat so the user sees feedback; a
+            // phone tab stays open so more items can be pasted in a row.
+            if (window.opener) {
+              setTimeout(function () { closeWindow(); }, 350);
+            }
           } else {
-            showToast(data.error || 'Paste failed', true);
+            showToast(data.error || (IS_ZH ? '发送失败' : 'Paste failed'), true);
             state.pastingIndex = -1;
             render();
           }
         })
         .catch(function () {
-          showToast('Paste failed', true);
+          showToast(IS_ZH ? '发送失败' : 'Paste failed', true);
           state.pastingIndex = -1;
           render();
         });
@@ -741,7 +759,7 @@ body::after {
       itemsEl.innerHTML =
         '<div class="qp-empty">' +
           '<div class="qp-empty__icon">&#x1F4CB;</div>' +
-          '<div class="qp-empty__text">No clipboard history</div>' +
+          '<div class="qp-empty__text">' + (IS_ZH ? '暂无剪贴板历史' : 'No clipboard history') + '</div>' +
         '</div>';
       return;
     }
@@ -870,22 +888,37 @@ body::after {
   }
 
   /* ═══════════════════════════════════════════════════════════════
-     Init — attempt window resize + fetch history
+     Init — header text, window size, then fetch history
      ═══════════════════════════════════════════════════════════════ */
 
-  // Ask the browser for a small floating-window size.
-  // Works when opened as a popup (window.open) or in some browsers.
-  try {
-    window.resizeTo(400, 540);
-    window.moveTo(
-      (screen.availWidth - 400) / 2,
-      (screen.availHeight - 540) / 2
-    );
-  } catch (e) { /* ignore */ }
+  // Adapt the header hints to the device: a phone scans the QR and taps
+  // items; the desktop popup is keyboard-driven.
+  var subtitleEl = document.getElementById('qpSubtitle');
+  var titleEl = document.getElementById('qpTitle');
+  if (titleEl) {
+    titleEl.textContent = IS_ZH ? '快速粘贴' : 'Quick Paste';
+  }
+  if (subtitleEl) {
+    subtitleEl.textContent = IS_TOUCH
+      ? (IS_ZH ? '点击条目即可发送到电脑' : 'Tap an item to paste to this computer')
+      : (IS_ZH ? '按 1-9 粘贴 · ↑↓ 选择 · Esc 关闭' : 'Press 1–9 to paste · ↑↓ to navigate · Esc to close');
+  }
+
+  // Ask the browser for a small floating-window size. Works when opened as a
+  // desktop popup (window.open); phones ignore resizeTo so skip it there.
+  if (!IS_TOUCH) {
+    try {
+      window.resizeTo(400, 540);
+      window.moveTo(
+        (screen.availWidth - 400) / 2,
+        (screen.availHeight - 540) / 2
+      );
+    } catch (e) { /* ignore */ }
+  }
 
   if (!HOST) {
     state.loading = false;
-    state.error = 'Missing host parameter';
+    state.error = IS_ZH ? '缺少服务器地址' : 'Missing host parameter';
     render();
   } else {
     fetchHistory();

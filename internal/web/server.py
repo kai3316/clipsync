@@ -987,10 +987,10 @@ class WebServer:
                 """Serve a friendly page when the companion is off and a browser
                 (phone / tablet) opens the dashboard — not a raw JSON error."""
                 if cfg.language == "zh-CN":
-                    title, desc = "Web 伴侣已关闭", "该设备的 Web 伴侣已被关闭，暂时无法访问其仪表盘。"
+                    title, desc = "远程访问已关闭", "该设备的远程访问已被关闭，暂时无法访问其仪表盘。"
                 else:
-                    title, desc = ("Web companion disabled",
-                                   "This device's web companion is turned off, so its "
+                    title, desc = ("Remote access disabled",
+                                   "Remote access is turned off on this device, so its "
                                    "dashboard is temporarily unavailable.")
                 html = (
                     "<!doctype html><html lang='zh'><meta charset='utf-8'>"
@@ -1151,7 +1151,7 @@ class WebServer:
                 # opening the dashboard get a friendly page, not raw JSON.
                 if not inner_self._companion_client_ok():
                     if path.startswith("/api/") or path == "/ws":
-                        inner_self._send_json({"error": "web companion disabled"}, 403)
+                        inner_self._send_json({"error": "remote access disabled"}, 403)
                     else:
                         inner_self._send_companion_disabled_page()
                     return
@@ -1336,7 +1336,7 @@ class WebServer:
 
                 # Companion off → local dashboard only (LAN/phones get 403).
                 if not inner_self._companion_client_ok():
-                    inner_self._send_json({"error": "web companion disabled"}, 403)
+                    inner_self._send_json({"error": "remote access disabled"}, 403)
                     return
 
                 if not inner_self._token_ok():
