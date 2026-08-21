@@ -46,6 +46,8 @@ _SAFE_FIELDS = {
     "sound_enabled",
     "ui_animation_enabled",
     "ui_backend",
+    "translate_url",
+    "translate_key_set",
 }
 
 # Fields that the client is allowed to modify
@@ -78,6 +80,7 @@ _MUTABLE_FIELDS = {
     "sound_enabled",
     "ui_animation_enabled",
     "ui_backend",
+    "translate_url",
 }
 
 # Action keys that trigger a host-side operation rather than a plain
@@ -90,6 +93,8 @@ _SPECIAL_ACTIONS = {
     "factory_reset",
     "regenerate_web_token",
     "clear_web_token",
+    "set_translate_key",
+    "clear_translate_key",
 }
 
 # Keys the host application may return from ``on_settings_change`` that are
@@ -100,6 +105,7 @@ _SAFE_RESPONSE_KEYS = {
     "password_set",
     "ok",
     "token_updated",
+    "translate_key_set",
 }
 
 
@@ -116,6 +122,10 @@ def get_settings(cfg):
     result["password_set"] = bool(
         getattr(cfg, "encryption_password_hash", "") or getattr(cfg, "encryption_password", "")
     )
+
+    # Expose only *whether* a translation API key is configured, never the
+    # key itself (see module docstring).
+    result["translate_key_set"] = bool(getattr(cfg, "translate_api_key", ""))
 
     return {"settings": result}, 200
 

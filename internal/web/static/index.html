@@ -204,7 +204,7 @@
       color: var(--clipsync-fg);
       border: 1px solid var(--clipsync-border-strong);
       border-radius: var(--clipsync-radius);
-      box-shadow: var(--clipsync-shadow-lg);
+      box-shadow: 0 8px 28px rgba(5, 6, 13, 0.45), var(--clipsync-shadow-lg);
       font-size: 13px;
       font-weight: 500;
       animation: slideUp 0.25s cubic-bezier(0.34, 1.56, 0.64, 1) forwards;
@@ -226,29 +226,34 @@
       max-width: 320px;
     }
 
-    /* Toast semantic variants */
+    /* Toast semantic variants — opaque tinted surface (color-mix keeps the
+       background solid so nothing shows through), semantic border + glow. */
     .toast--success {
-      background: var(--clipsync-success-bg);
+      background: color-mix(in srgb, var(--clipsync-surface) 86%, var(--clipsync-success) 14%);
       border-color: var(--clipsync-success);
       color: var(--clipsync-success-text);
+      box-shadow: 0 8px 28px rgba(5, 6, 13, 0.45), 0 0 0 1px var(--clipsync-success-glow), var(--clipsync-shadow-lg);
     }
 
     .toast--error {
-      background: var(--clipsync-danger-bg);
+      background: color-mix(in srgb, var(--clipsync-surface) 86%, var(--clipsync-danger) 14%);
       border-color: var(--clipsync-danger);
       color: var(--clipsync-danger-text);
+      box-shadow: 0 8px 28px rgba(5, 6, 13, 0.45), 0 0 0 1px var(--clipsync-danger-glow), var(--clipsync-shadow-lg);
     }
 
     .toast--warning {
-      background: var(--clipsync-warning-bg);
+      background: color-mix(in srgb, var(--clipsync-surface) 86%, var(--clipsync-warning) 14%);
       border-color: var(--clipsync-warning);
       color: var(--clipsync-warning-text);
+      box-shadow: 0 8px 28px rgba(5, 6, 13, 0.45), 0 0 0 1px var(--clipsync-warning-glow), var(--clipsync-shadow-lg);
     }
 
     .toast--info {
-      background: var(--clipsync-info-bg);
+      background: color-mix(in srgb, var(--clipsync-surface) 86%, var(--clipsync-info) 14%);
       border-color: var(--clipsync-info);
       color: var(--clipsync-accent);
+      box-shadow: 0 8px 28px rgba(5, 6, 13, 0.45), 0 0 0 1px var(--clipsync-info-glow), var(--clipsync-shadow-lg);
     }
 
     /* ═══════════════════════════════════════════════════════════════

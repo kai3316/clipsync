@@ -48,8 +48,8 @@ def dispatch(method, path, query_params, body, cfg, history, sync_mgr,
              on_show_web_qr=None, on_send_url=None,
              get_discovered=None,
              get_resolved_hashes=None, get_pending_pairings=None,
-             enc_mgr=None, on_open_file=None, on_restart=None,
-             on_reset_dedup=None):
+             enc_mgr=None, on_open_file=None, on_open_folder=None,
+             on_restart=None, on_reset_dedup=None):
     """Route an API request to the appropriate handler, never raising.
 
     Wraps _dispatch in a safety net so an unexpected exception in a handler
@@ -65,7 +65,7 @@ def dispatch(method, path, query_params, body, cfg, history, sync_mgr,
             on_window_close, on_toggle_discovery, on_toggle_visibility,
             on_settings_change, on_show_web_qr, on_send_url, get_discovered,
             get_resolved_hashes, get_pending_pairings, enc_mgr,
-            on_open_file, on_restart, on_reset_dedup,
+            on_open_file, on_open_folder, on_restart, on_reset_dedup,
         )
     except Exception:
         logger.exception("Unhandled error in API route: %s %s", method, path)
@@ -88,8 +88,8 @@ def _dispatch(method, path, query_params, body, cfg, history, sync_mgr,
               on_show_web_qr=None, on_send_url=None,
               get_discovered=None,
               get_resolved_hashes=None, get_pending_pairings=None,
-              enc_mgr=None, on_open_file=None, on_restart=None,
-              on_reset_dedup=None):
+              enc_mgr=None, on_open_file=None, on_open_folder=None,
+              on_restart=None, on_reset_dedup=None):
     """Route an API request to the appropriate handler.
 
     All handler functions return (data_dict, status_code).
@@ -284,6 +284,26 @@ def _dispatch(method, path, query_params, body, cfg, history, sync_mgr,
             data, status = create_backup_api(cfg, history)
             return _json_response(data, status)
 
+        elif path == "/api/data/open-folder":
+            # Open a well-known data folder on the host (never a client-supplied
+            # path).  "data" = config/data dir, "backups" = its backups/ subdir.
+            if on_open_folder is None:
+                return _json_response({"ok": False, "error": "not available"}, 503)
+            try:
+                req = json.loads(body.decode("utf-8")) if body else {}
+            except (json.JSONDecodeError, UnicodeDecodeError):
+                req = {}
+            which = req.get("which", "data") if isinstance(req, dict) else "data"
+            from internal.config.config import _config_dir
+            folder = _config_dir() / "backups" if which == "backups" else _config_dir()
+            try:
+                folder.mkdir(parents=True, exist_ok=True)
+                on_open_folder(str(folder))
+            except Exception as exc:
+                logger.error("Failed to open data folder: %s", exc)
+                return _json_response({"ok": False, "error": str(exc)}, 500)
+            return _json_response({"ok": True, "folder": str(folder)})
+
         elif path == "/api/restore":
             data, status = restore_backup_api(body, cfg, history)
             return _json_response(data, status)
@@ -298,7 +318,7 @@ def _dispatch(method, path, query_params, body, cfg, history, sync_mgr,
                 return _json_response({"ok": False, "error": "no text provided"}, 400)
             target = req.get("target", "en")
             source = req.get("source", "auto")
-            result = translate_text(text, target, source)
+            result = translate_text(text, target, source, cfg)
             status = 200 if result.get("ok") else 502
             return _json_response(result, status)
 

@@ -325,6 +325,15 @@ var ClipsyncAPI = (function () {
       return this._fetch('GET', '/api/backups');
     },
 
+    /**
+     * Open a well-known data folder on the host in the OS file manager.
+     * @param {string} [which] - 'data' (default) or 'backups'
+     * @returns {Promise<{ok: boolean, folder: string}>}
+     */
+    openDataFolder: function (which) {
+      return this._fetch('POST', '/api/data/open-folder', { which: which || 'data' });
+    },
+
     /* ═══════════════════════════════════════════════════════════════
        Settings endpoints
        ═══════════════════════════════════════════════════════════════ */

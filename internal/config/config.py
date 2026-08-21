@@ -99,6 +99,12 @@ class Config:
     web_token: str = ""
     web_history_limit: int = 30
 
+    # Translation (LibreTranslate-compatible endpoint). Empty url = the
+    # public LibreTranslate instance; when both url and key are empty the
+    # translate endpoint falls back to a free anonymous service.
+    translate_url: str = ""
+    translate_api_key: str = ""   # never exposed to web clients
+
     # Hotkeys
     hotkeys: dict[str, str] = field(default_factory=lambda: {
         "quick_paste": "Ctrl+`",
@@ -182,6 +188,7 @@ def load() -> Config:
                 "favorites_path", "data_dir",
                 "web_enabled", "web_port",
                 "web_token", "web_history_limit",
+                "translate_url", "translate_api_key",
                 "hotkeys",
             ):
                 if key in data:
@@ -270,6 +277,8 @@ def save(cfg: Config, enc_mgr: "EncryptionManager | None" = None):
             "web_port": cfg.web_port,
             "web_token": cfg.web_token,
             "web_history_limit": cfg.web_history_limit,
+            "translate_url": cfg.translate_url,
+            "translate_api_key": cfg.translate_api_key,
             "hotkeys": cfg.hotkeys,
             "peers": [
                 {

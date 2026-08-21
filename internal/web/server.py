@@ -528,8 +528,8 @@ class WebServer:
                  on_show_web_qr=None, on_send_url=None,
                  get_discovered_peers=None,
                  get_resolved_hashes=None, get_pending_pairings=None,
-                 enc_mgr=None, on_open_file=None, on_restart=None,
-                 on_reset_dedup=None):
+                 enc_mgr=None, on_open_file=None, on_open_folder=None,
+                 on_restart=None, on_reset_dedup=None):
         self._cfg = cfg
         self._sync_mgr = sync_mgr
         self._get_connected_ids = get_connected_ids
@@ -538,6 +538,7 @@ class WebServer:
         self._get_pending_pairings = get_pending_pairings
         self._enc_mgr = enc_mgr
         self._on_open_file = on_open_file
+        self._on_open_folder = on_open_folder
         self._on_restart = on_restart
         # Callback invoked before a web-driven clipboard write (paste_rich) so
         # the sync manager's dedup state is cleared and the write re-syncs to
@@ -752,6 +753,7 @@ class WebServer:
         get_pending_pairings = self._get_pending_pairings
         enc_mgr = self._enc_mgr
         on_open_file = self._on_open_file
+        on_open_folder = self._on_open_folder
         on_restart = self._on_restart
         on_reset_dedup = self._on_reset_dedup
         on_show_web_qr = self._on_show_web_qr
@@ -1184,6 +1186,7 @@ class WebServer:
                         get_pending_pairings=get_pending_pairings,
                         enc_mgr=enc_mgr,
                         on_open_file=on_open_file,
+                        on_open_folder=on_open_folder,
                         on_restart=on_restart,
                         on_reset_dedup=on_reset_dedup,
                     )
@@ -1283,6 +1286,7 @@ class WebServer:
                         get_pending_pairings=get_pending_pairings,
                         enc_mgr=enc_mgr,
                         on_open_file=on_open_file,
+                        on_open_folder=on_open_folder,
                         on_restart=on_restart,
                         on_reset_dedup=on_reset_dedup,
                     )

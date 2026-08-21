@@ -241,7 +241,9 @@
      * @param {number} [duration=2000] - Duration in ms
      */
     showToast: function (msg, duration, type) {
-      if (duration === undefined) duration = 2000;
+      // Default display time long enough to read a full notification; many
+      // call sites pass shorter explicit values (e.g. 1500–3000ms).
+      if (duration === undefined) duration = 3500;
       if (type === undefined) type = 'info';
       // Clear any existing timer
       if (this._toastTimer) {

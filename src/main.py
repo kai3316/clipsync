@@ -697,6 +697,7 @@ class Application:
             on_send_url=lambda: self.root.after(0, self._do_send_url),
             get_discovered_peers=lambda: self._snapshot_discovered_peers(),
             on_open_file=self._open_file,
+            on_open_folder=self._open_folder,
             on_restart=self._restart_app,
             get_pending_pairings=self._get_pending,
             get_resolved_hashes=lambda: self.transport_mgr.get_resolved_hashes(),
@@ -1243,6 +1244,26 @@ class Application:
             self._save_cfg_encrypted()
             response["password_set"] = False
             logger.info("Encryption password cleared via web UI")
+
+        if "set_translate_key" in special:
+            key = special["set_translate_key"]
+            if isinstance(key, str) and key.strip():
+                self.cfg.translate_api_key = key.strip()
+                self._save_cfg_encrypted()
+                response["translate_key_set"] = True
+                logger.info("Translation API key set via web UI")
+            else:
+                # Blank/whitespace key means "clear it".
+                self.cfg.translate_api_key = ""
+                self._save_cfg_encrypted()
+                response["translate_key_set"] = False
+                logger.info("Blank translation API key treated as cleared")
+
+        if "clear_translate_key" in special:
+            self.cfg.translate_api_key = ""
+            self._save_cfg_encrypted()
+            response["translate_key_set"] = False
+            logger.info("Translation API key cleared via web UI")
 
         if "factory_reset" in special:
             self.root.after(0, self._do_factory_reset)

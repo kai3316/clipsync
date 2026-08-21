@@ -43,6 +43,13 @@
         passwordSet: false,
         showPassword: false,
 
+        // Translation
+        translateUrl: '',
+        translateKeyValue: '',
+        translateKeySet: false,
+        showTranslateKey: false,
+        translateSaving: false,
+
         // Advanced
         historyMax: 200,
         syncDebounce: 0.5,
@@ -163,6 +170,8 @@
         if (s.max_reconnect_attempts !== undefined) this.maxReconnect = s.max_reconnect_attempts;
         if (s.log_level !== undefined) this.logLevel = s.log_level;
         if (s.notifications_enabled !== undefined) this.notificationsEnabled = !!s.notifications_enabled;
+        if (s.translate_url !== undefined) this.translateUrl = s.translate_url || '';
+        if (s.translate_key_set !== undefined) this.translateKeySet = !!s.translate_key_set;
       },
 
       // ── Save methods ─────────────────────────────────────────────
@@ -252,6 +261,39 @@
           self.store.showToast(self.t('settings_window.password_cleared'), 2000);
         }).catch(function () {
           self.store.showToast(self.t('settings.clear_password_failed'), 2000);
+        });
+      },
+
+      saveTranslation: function () {
+        var self = this;
+        self.translateSaving = true;
+        var payload = { translate_url: (self.translateUrl || '').trim() };
+        // Only set the key when the user typed one — never echo it back.
+        if (self.translateKeyValue) {
+          payload.set_translate_key = self.translateKeyValue;
+        }
+        ClipsyncAPI.updateSettings(payload).then(function (res) {
+          if (res && typeof res.translate_key_set === 'boolean') {
+            self.translateKeySet = res.translate_key_set;
+          }
+          self.translateKeyValue = '';
+          if (res && res.updated) self.store.mergeSettings(res.updated);
+          self.store.showToast(self.t('settings_window.translation_saved'), 3000);
+        }).catch(function () {
+          self.store.showToast(self.t('settings.save_translation_failed'), 2000);
+        }).finally(function () {
+          self.translateSaving = false;
+        });
+      },
+
+      clearTranslateKey: function () {
+        var self = this;
+        ClipsyncAPI.updateSettings({ clear_translate_key: true }).then(function (res) {
+          self.translateKeySet = false;
+          self.translateKeyValue = '';
+          self.store.showToast(self.t('settings_window.translate_key_cleared'), 2000);
+        }).catch(function () {
+          self.store.showToast(self.t('settings.save_translation_failed'), 2000);
         });
       },
 
@@ -485,7 +527,7 @@
         ClipsyncAPI.createBackup().then(function (res) {
           self.backingUp = false;
           if (res && res.ok) {
-            self.store.showToast(self.t('settings.backup_created'), 3000);
+            self.store.showToast(self.t('settings.backup_created', { path: res.backup_path || '' }), 3500);
             self.loadBackups();
           } else {
             self.store.showToast(self.t('settings.backup_failed'), 2000);
@@ -530,6 +572,19 @@
           }
         }).catch(function () {
           self.backupLoading = false;
+        });
+      },
+
+      openDataFolder: function (which) {
+        var self = this;
+        ClipsyncAPI.openDataFolder(which || 'data').then(function (res) {
+          if (res && res.ok) {
+            self.store.showToast(self.t('settings.data_folder_opened'), 2000);
+          } else {
+            self.store.showToast(self.t('settings.open_folder_failed'), 2000);
+          }
+        }).catch(function () {
+          self.store.showToast(self.t('settings.open_folder_failed'), 2000);
         });
       },
 
@@ -702,6 +757,25 @@
                   '<button class="settings-btn settings-btn--accent" @click="saveWeb" :disabled="webSaving" style="width:100%;margin-top:8px">' +
                     '{{ webSaving ? \'...\' : t(\'settings_window.save_web\') }}' +
                   '</button>' +
+
+                  '<h3 class="settings-section__title" style="margin-top:28px">{{ t(\'settings_window.translation_title\') }}</h3>' +
+                  '<p class="settings-hint" style="margin-bottom:12px">{{ t(\'settings_window.translation_hint\') }}</p>' +
+                  '<div class="settings-field">' +
+                    '<label class="settings-field__label">{{ t(\'settings_window.translate_url\') }}</label>' +
+                    '<input type="text" class="settings-input" v-model="translateUrl" :placeholder="t(\'settings_window.translate_url_placeholder\')">' +
+                  '</div>' +
+                  '<div class="settings-field">' +
+                    '<label class="settings-field__label">{{ t(\'settings_window.translate_api_key\') }}</label>' +
+                    '<div class="settings-field__row">' +
+                      '<input :type="showTranslateKey ? \'text\' : \'password\'" class="settings-input" v-model="translateKeyValue" :placeholder="translateKeySet ? \'●●●●●●●●\' : t(\'settings_window.translate_key_placeholder\')">' +
+                      '<button class="settings-btn settings-btn--sm" @click="showTranslateKey = !showTranslateKey">{{ showTranslateKey ? t(\'settings_window.hide\') : t(\'settings_window.show\') }}</button>' +
+                    '</div>' +
+                    '<button v-if="translateKeySet" class="settings-btn settings-btn--sm" @click="clearTranslateKey" style="margin-top:4px">{{ t(\'settings_window.clear_translate_key\') }}</button>' +
+                    '<span class="settings-hint">{{ translateKeySet ? t(\'settings_window.translate_key_set\') : t(\'settings_window.translate_key_not_set\') }}</span>' +
+                  '</div>' +
+                  '<button class="settings-btn settings-btn--accent" @click="saveTranslation" :disabled="translateSaving" style="width:100%;margin-top:8px">' +
+                    '{{ translateSaving ? \'...\' : t(\'settings_window.save_translation\') }}' +
+                  '</button>' +
                 '</section>' +
 
                 '<!-- ═══════ Content Filter ═══════ -->' +
@@ -856,6 +930,10 @@
                         '{{ restoring ? \'...\' : t(\'settings.restore_backup\') }}' +
                       '</button>' +
                     '</div>' +
+                  '</div>' +
+                  '<div class="settings-btn-grid" style="margin-top:12px">' +
+                    '<button class="settings-btn" @click="openDataFolder(\'data\')">{{ t(\'settings.open_data_folder\') }}</button>' +
+                    '<button class="settings-btn" @click="openDataFolder(\'backups\')">{{ t(\'settings.open_backups_folder\') }}</button>' +
                   '</div>' +
                 '</section>' +
 
