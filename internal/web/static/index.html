@@ -1765,6 +1765,13 @@
       gap: var(--clipsync-space-3);
       padding: var(--clipsync-space-3) var(--clipsync-space-4);
       margin-bottom: var(--clipsync-space-2);
+      border-radius: var(--clipsync-radius);
+    }
+
+    /* Send / speed-test panels stack vertically (unlike active-transfer rows). */
+    .transfer-card--panel {
+      flex-direction: column;
+      align-items: stretch;
     }
 
     .transfer-card__icon {
@@ -1857,14 +1864,15 @@
     .transfer-send-btn {
       display: flex;
       align-items: center;
+      justify-content: center;
       gap: var(--clipsync-space-2);
-      padding: 10px 14px;
+      padding: 12px 14px;
       border-radius: var(--clipsync-radius);
       border: 1px solid var(--clipsync-border);
       background: color-mix(in srgb, var(--clipsync-panel) 60%, transparent);
       color: var(--clipsync-fg);
       cursor: pointer;
-      text-align: left;
+      text-align: center;
       transition: all var(--clipsync-transition);
     }
 
@@ -1939,7 +1947,8 @@
 
     .transfer-speed-result {
       display: flex;
-      align-items: baseline;
+      align-items: center;
+      justify-content: center;
       gap: var(--clipsync-space-2);
       margin-bottom: var(--clipsync-space-2);
     }
@@ -3094,7 +3103,11 @@
       position: sticky;
       top: 0;
       z-index: var(--clipsync-z-sticky);
-      background: var(--clipsync-bg);
+      /* Frosted-glass filter bar — NOT a solid square white band. */
+      background: color-mix(in srgb, var(--clipsync-bg) 72%, transparent);
+      backdrop-filter: blur(16px) saturate(170%);
+      -webkit-backdrop-filter: blur(16px) saturate(170%);
+      border-radius: var(--clipsync-radius);
       padding-top: var(--clipsync-space-1);
       padding-bottom: var(--clipsync-space-3);
     }

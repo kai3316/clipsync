@@ -65,7 +65,7 @@
 
     template: `<div class="transfer-panel">
       <!-- Send Files Card -->
-      <div class="transfer-card glass" style="margin-bottom:12px">
+      <div class="transfer-card transfer-card--panel glass" style="margin-bottom:12px">
         <div class="transfer-card__header">
           <span class="transfer-card__title">📤 {{ t('transfer.send_files') }}</span>
         </div>
@@ -107,7 +107,7 @@
       </div>
 
       <!-- Speed Test -->
-      <div class="transfer-card glass" style="margin-bottom:12px">
+      <div class="transfer-card transfer-card--panel glass" style="margin-bottom:12px">
         <div class="transfer-card__header">
           <span class="transfer-card__title">⚡ {{ t('transfer.speed_test') }}</span>
           <span v-if="speedTest.running" class="transfer-speed-status">{{ t('transfer.running') }}</span>
