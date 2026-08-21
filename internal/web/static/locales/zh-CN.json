@@ -427,6 +427,7 @@
   "network.auto_start": "开机自启",
   "settings_window.service_type_hint": "通过 mDNS 广播的零配置服务类型。除非你知道自己在做什么，否则保持默认。重启后生效。",
   "settings_window.clipboard_behavior": "剪贴板行为",
+  "hotkeys.enabled": "启用全局快捷键",
   "hotkeys.title": "全局快捷键",
   "hotkeys.hint": "键盘快捷键（例如 Ctrl+Shift+V）。修改后需重启生效。",
   "hotkeys.quick_paste": "快速粘贴",

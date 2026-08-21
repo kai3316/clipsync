@@ -81,6 +81,7 @@
 
         // Hotkeys
         hotkeys: {},
+        hotkeysEnabled: false,
 
         // Notifications (per-event toggles)
         notifyDeviceConnect: true,
@@ -246,6 +247,7 @@
         if (s.data_dir !== undefined) this.dataDir = s.data_dir || '';
         if (s.favorites_path !== undefined) this.favoritesPath = s.favorites_path || '';
         if (s.hotkeys) this.hotkeys = Object.assign({}, s.hotkeys);
+        if (s.hotkeys_enabled !== undefined) this.hotkeysEnabled = !!s.hotkeys_enabled;
       },
 
       // ── Save methods ─────────────────────────────────────────────
@@ -256,7 +258,6 @@
         ClipsyncAPI.updateSettings({
           port: parseInt(self.port, 10) || 53317,
           relay_url: self.relayUrl,
-          auto_start: self.autoStart,
           service_type: (self.serviceType || '_clipsync._tcp.local.').trim(),
         }).then(function (res) {
           if (res && res.updated) self.store.mergeSettings(res.updated);
@@ -474,6 +475,7 @@
           dedup_method: self.dedupMethod,
           source_tracking_enabled: self.sourceTracking,
           hotkeys: self.hotkeys,
+          hotkeys_enabled: self.hotkeysEnabled,
         }).then(function (res) {
           if (res && res.updated) self.store.mergeSettings(res.updated);
           self.store.showToast(self.t('settings_window.advanced_saved'), 3000);
@@ -640,6 +642,19 @@
             if (typeof ClipsyncSound !== 'undefined' && ClipsyncSound.setEnabled) {
               ClipsyncSound.setEnabled(self.store.soundEnabled);
             }
+            self.store.showToast(self.t('dialog.failed'), 2000);
+          });
+      },
+
+      toggleAutoStart: function () {
+        var self = this;
+        this.autoStart = !this.autoStart;
+        ClipsyncAPI.updateSettings({ auto_start: this.autoStart })
+          .then(function (res) {
+            if (res && res.updated) self.store.mergeSettings(res.updated);
+          })
+          .catch(function () {
+            self.autoStart = !self.autoStart;
             self.store.showToast(self.t('dialog.failed'), 2000);
           });
       },
@@ -881,6 +896,12 @@
 
                   '<h3 class="settings-section__title" style="margin-top:24px">{{ t(\'settings.preferences\') }}</h3>' +
                   '<div class="settings-toggle-row">' +
+                    '<span class="settings-toggle-label">{{ t(\'network.auto_start\') }}</span>' +
+                    '<button class="settings-toggle" :class="{ \'settings-toggle--on\': autoStart }" @click="toggleAutoStart">' +
+                      '<span class="settings-toggle__knob"></span>' +
+                    '</button>' +
+                  '</div>' +
+                  '<div class="settings-toggle-row">' +
                     '<span class="settings-toggle-label">{{ t(\'settings.sound\') }}</span>' +
                     '<button class="settings-toggle" :class="{ \'settings-toggle--on\': store.soundEnabled }" @click="toggleSound">' +
                       '<span class="settings-toggle__knob"></span>' +
@@ -913,12 +934,6 @@
                     '<label class="settings-field__label">{{ t(\'network.relay_url\') }}</label>' +
                     '<input type="text" class="settings-input" v-model="relayUrl" :placeholder="t(\'settings_window.relay_placeholder\')">' +
                     '<span class="settings-hint">{{ t(\'settings_window.relay_hint\') }}</span>' +
-                  '</div>' +
-                  '<div class="settings-toggle-row">' +
-                    '<span class="settings-toggle-label">{{ t(\'network.auto_start\') }}</span>' +
-                    '<button class="settings-toggle" :class="{ \'settings-toggle--on\': autoStart }" @click="autoStart = !autoStart">' +
-                      '<span class="settings-toggle__knob"></span>' +
-                    '</button>' +
                   '</div>' +
                   '<div class="settings-field">' +
                     '<label class="settings-field__label">{{ t(\'network.service_type\') }}</label>' +
@@ -1215,6 +1230,12 @@
                     '</select>' +
                   '</div>' +
 
+                  '<div class="settings-toggle-row">' +
+                    '<span class="settings-toggle-label">{{ t(\'hotkeys.enabled\') }}</span>' +
+                    '<button class="settings-toggle" :class="{ \'settings-toggle--on\': hotkeysEnabled }" @click="hotkeysEnabled = !hotkeysEnabled">' +
+                      '<span class="settings-toggle__knob"></span>' +
+                    '</button>' +
+                  '</div>' +
                   '<h4 style="font-size:12px;color:var(--clipsync-fg-muted);margin:16px 0 4px">{{ t(\'hotkeys.title\') }}</h4>' +
                   '<p class="settings-hint" style="margin-bottom:10px">{{ t(\'hotkeys.hint\') }}</p>' +
                   '<div class="settings-hotkeys">' +

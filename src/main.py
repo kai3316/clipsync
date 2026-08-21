@@ -430,6 +430,7 @@ class Application:
         self._discovered_peers: dict[str, dict] = {}
         self._discovered_lock = threading.Lock()
         self._notified_pairings: dict[str, str] = {}
+        self._auto_connect_pending: set[str] = set()
         # transfer_id -> temp zip path, cleaned up when the transfer completes
         # (folder/multi-file sends zip into a temp archive that must not leak).
         self._zip_cleanup: dict[str, str] = {}
@@ -811,6 +812,10 @@ class Application:
 
     def _wire_hotkeys(self) -> None:
         """Register global hotkey callbacks from config and start the listener."""
+        if not getattr(self.cfg, "hotkeys_enabled", False):
+            self.hotkey_mgr = None
+            logger.info("Global hotkeys disabled by config")
+            return
         self.hotkey_mgr = HotkeyManager()
 
         def _cb_factory(action: str):
@@ -1212,12 +1217,44 @@ class Application:
             self._discovered_peers[peer_id] = {
                 "name": peer_name, "address": address, "port": port,
             }
-        logger.info("Peer discovered: %s (%s) at %s:%d — waiting for pairing",
+        logger.info("Peer discovered: %s (%s) at %s:%d",
                     peer_name, peer_id, address, port)
+        self._maybe_auto_connect(peer_id, peer_name, address, port)
+
+    def _maybe_auto_connect(self, hashed_id: str, peer_name: str, address: str, port: int) -> None:
+        """Auto-connect to a freshly-discovered peer that is already paired.
+
+        Discovery reports peers by a hashed device id while pairing stores them
+        by real device id, so resolve the hash against our known peers first.
+        This lets a paired device that was rebooted or restarted re-attach
+        automatically instead of sitting at "waiting for pairing".
+        """
+        if self.transport_mgr is None or self.pairing_mgr is None:
+            return
+        real_id = None
+        for peer in self.pairing_mgr.get_known_peers():
+            if Discovery._hash_device_id(peer.device_id) == hashed_id:
+                real_id = peer.device_id
+                break
+        if real_id is None or not self.pairing_mgr.is_peer_paired(real_id):
+            return
+        if real_id in self.transport_mgr.get_connected_peers():
+            return
+        # De-duplicate: the discovery thread can fire multiple "found" events
+        # for the same peer in quick succession while a connect is in flight.
+        with self._discovered_lock:
+            if hashed_id in self._auto_connect_pending:
+                return
+            self._auto_connect_pending.add(hashed_id)
+        logger.info("Auto-connecting to paired peer %s (%s) at %s:%d",
+                    peer_name, real_id[:12], address, port)
+        self.transport_mgr.connect_to_peer(real_id, peer_name, address, port)
 
     def _on_peer_lost(self, peer_id: str) -> None:
         with self._discovered_lock:
             self._discovered_peers.pop(peer_id, None)
+            # Allow a future re-discovery to auto-connect again.
+            self._auto_connect_pending.discard(peer_id)
         self.transport_mgr.disconnect_peer(peer_id)
 
     def _snapshot_discovered_peers(self) -> dict:
@@ -1351,6 +1388,19 @@ class Application:
 
         if "retry_capture_enabled" in updated and self.sync_mgr is not None:
             self.sync_mgr._retry_enabled = bool(updated["retry_capture_enabled"])
+
+        if "hotkeys_enabled" in updated:
+            try:
+                if bool(updated["hotkeys_enabled"]):
+                    if self.hotkey_mgr is None:
+                        self._wire_hotkeys()
+                    elif not self.hotkey_mgr.running:
+                        self.hotkey_mgr.start()
+                elif self.hotkey_mgr is not None:
+                    self.hotkey_mgr.stop()
+                    self.hotkey_mgr = None
+            except Exception:
+                logger.debug("Failed to apply hotkeys_enabled live", exc_info=True)
 
         if "clipboard_poll_interval" in updated and getattr(self, "_monitor", None) is not None:
             try:
@@ -3607,13 +3657,6 @@ class Application:
                                                              "wl-paste (Wayland). Install one: "
                                                              "'sudo apt install xclip' or 'sudo apt install wl-clipboard'."),
                            "guidance_key": None if _clip_ok else "diag.clipboard_tool.fail.guidance"})
-        # add new check ids to the critical set for the summary
-        checks_extra = ("server_port", "discovery", "network", "mdns")
-        if any(not c["ok"] for c in checks if c["id"] in checks_extra):
-            summary = "fail" if summary == "ok" else summary
-        # (summary already computed below; recompute critical set to include mdns)
-
-
         # summary: "fail" if a critical check (server/discovery/network) is down,
         # "warn" if only advertising/web is down, else "ok".
         critical_ids = ("server_port", "discovery", "network", "mdns")

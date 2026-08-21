@@ -750,11 +750,16 @@ elif _platform() == "macos":
         _cf.CFRunLoopGetCurrent.restype = _CFRunLoopRef
         _cf.CFRunLoopGetCurrent.argtypes = []
 
+        # kCFRunLoopDefaultMode is a CFString constant, NOT NULL.  Passing
+        # NULL as the mode makes CoreFoundation call CFHash(NULL) and abort
+        # with "*** CFHash() called with NULL ***".
+        _kCFRunLoopDefaultMode = ctypes.c_void_p.in_dll(_cf, "kCFRunLoopDefaultMode")
+
         _cf.CFRunLoopAddSource.restype = None
         _cf.CFRunLoopAddSource.argtypes = [
             _CFRunLoopRef,
             _CFRunLoopSourceRef,
-            ctypes.c_void_p,  # mode (kCFRunLoopDefaultMode = NULL)
+            ctypes.c_void_p,  # mode (CFStringRef, e.g. kCFRunLoopDefaultMode)
         ]
 
         _cf.CFRunLoopRun.restype = None
@@ -839,7 +844,7 @@ elif _platform() == "macos":
         # Get the current thread's run loop and add the source
         rl = _cf.CFRunLoopGetCurrent()
         self._mac_run_loop = rl
-        _cf.CFRunLoopAddSource(rl, source, None)  # kCFRunLoopDefaultMode
+        _cf.CFRunLoopAddSource(rl, source, _kCFRunLoopDefaultMode)
 
         # Enable the tap
         _cg.CGEventTapEnable(tap, True)

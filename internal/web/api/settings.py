@@ -59,6 +59,7 @@ _SAFE_FIELDS = {
     "data_dir",
     "favorites_path",
     "hotkeys",
+    "hotkeys_enabled",
 }
 
 # Fields that the client is allowed to modify
@@ -103,6 +104,7 @@ _MUTABLE_FIELDS = {
     "data_dir",
     "favorites_path",
     "hotkeys",
+    "hotkeys_enabled",
 }
 
 # Action keys that trigger a host-side operation rather than a plain

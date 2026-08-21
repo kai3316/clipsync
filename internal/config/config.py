@@ -131,6 +131,9 @@ class Config:
         "show_window": "Ctrl+Shift+Space",
     })
 
+    # Global hotkeys are off by default; the user can enable them in settings.
+    hotkeys_enabled: bool = False
+
     def add_peer(self, peer: PeerInfo):
         self.peers[peer.device_id] = peer
 
@@ -144,6 +147,23 @@ def _config_dir() -> Path:
         return Path.home() / "Library" / "Application Support" / "ClipSync"
     else:
         return Path.home() / ".config" / "clipsync"
+
+
+def _log_dir() -> Path:
+    """Directory the application writes its rotating log file to.
+
+    Deliberately distinct from ``_config_dir()``: on macOS and Linux logs live
+    in the conventional log/data directory, not the config directory (which
+    holds data files and secrets).
+    """
+    system = platform.system()
+    if system == "Windows":
+        base = os.environ.get("APPDATA", os.path.expanduser("~"))
+        return Path(base) / "ClipSync"
+    elif system == "Darwin":
+        return Path.home() / "Library" / "Logs" / "ClipSync"
+    else:
+        return Path.home() / ".local" / "share" / "clipsync"
 
 
 def _config_path() -> Path:
@@ -200,7 +220,7 @@ def load() -> Config:
                 "web_enabled", "web_port",
                 "web_token", "web_history_limit",
                 "translate_url", "translate_api_key",
-                "hotkeys",
+                "hotkeys", "hotkeys_enabled",
             ):
                 if key in data:
                     setattr(cfg, key, data[key])
@@ -303,6 +323,7 @@ def save(cfg: Config, enc_mgr: "EncryptionManager | None" = None):
             "translate_url": cfg.translate_url,
             "translate_api_key": cfg.translate_api_key,
             "hotkeys": cfg.hotkeys,
+            "hotkeys_enabled": cfg.hotkeys_enabled,
             "peers": [
                 {
                     "device_id": p.device_id,

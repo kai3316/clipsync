@@ -427,6 +427,7 @@
   "network.auto_start": "Launch at login",
   "settings_window.service_type_hint": "Zero-config service type advertised over mDNS. Leave default unless you know what you are doing. Restart required.",
   "settings_window.clipboard_behavior": "Clipboard behavior",
+  "hotkeys.enabled": "Enable global hotkeys",
   "hotkeys.title": "Global hotkeys",
   "hotkeys.hint": "Keyboard shortcuts (e.g. Ctrl+Shift+V). Restart required for changes.",
   "hotkeys.quick_paste": "Quick paste",

@@ -193,8 +193,8 @@ def _dispatch(method, path, query_params, body, cfg, history, sync_mgr,
             n = max(1, min(n, 1000))
             logs: list[str] = []
             try:
-                from internal.config.config import _config_dir
-                log_path = _config_dir() / "clipsync.log"
+                from internal.config.config import _log_dir
+                log_path = _log_dir() / "clipsync.log"
                 if log_path.exists():
                     content = log_path.read_text(encoding="utf-8", errors="replace")
                     logs = content.splitlines()[-n:]

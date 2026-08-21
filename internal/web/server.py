@@ -753,8 +753,10 @@ class WebServer:
                             ",".join(map(str, ports)))
                 return True
             else:
+                stderr = (result.stderr or "").strip()
+                stdout = (result.stdout or "").strip()
                 logger.warning("Failed to create firewall rule: %s",
-                               result.stderr.strip() or result.stdout.strip())
+                               stderr or stdout)
                 return False
         except Exception as e:
             logger.warning("Firewall setup error: %s", e)
