@@ -3306,6 +3306,23 @@ class Application:
                                        f"{self.cfg.port}.")
                 except Exception:
                     pass
+            elif _platform.system() == "Linux":
+                # ufw / firewalld detection + port allow check (best-effort).
+                fw_detail = "No Linux firewall detected"
+                for cmd, name in ((["ufw", "status"], "ufw"),
+                                  (["systemctl", "is-active", "firewalld"], "firewalld")):
+                    try:
+                        _out = _sp.run(cmd, capture_output=True, text=True, timeout=3).stdout or ""
+                    except Exception:
+                        continue
+                    if "active" in _out.lower() or "Status: active" in _out or "active (running)" in _out:
+                        fw_detail = f"{name} firewall is active"
+                        fw_guidance = (f"The {name} firewall is on. If other devices can't reach "
+                                       f"this computer, allow ports {self.cfg.port} and "
+                                       f"{self.cfg.web_port}: 'sudo ufw allow {self.cfg.port}/tcp' and "
+                                       f"'sudo ufw allow {self.cfg.web_port}/tcp' (or the firewalld equivalent).")
+                        fw_ok = discovery_running
+                        break
         except Exception:
             pass
         checks.append({"id": "firewall", "ok": fw_ok, "detail": fw_detail, "guidance": fw_guidance})
@@ -3328,9 +3345,40 @@ class Application:
             pass
         checks.append({"id": "permissions", "ok": perm_ok, "detail": perm_detail, "guidance": perm_guidance})
 
+        # 8. mDNS service (Linux: avahi-daemon is required for discovery).
+        mdns_ok, mdns_detail, mdns_guidance = True, "mDNS service available", None
+        try:
+            if _platform.system() == "Linux":
+                _out = _sp.run(["systemctl", "is-active", "avahi-daemon"],
+                               capture_output=True, text=True, timeout=3).stdout or ""
+                if "active" not in _out.lower():
+                    mdns_ok = False
+                    mdns_detail = "avahi-daemon is not running"
+                    mdns_guidance = ("mDNS discovery needs avahi-daemon. Install/start it: "
+                                     "'sudo apt install avahi-daemon' then 'sudo systemctl start avahi-daemon'.")
+        except Exception:
+            pass
+        checks.append({"id": "mdns", "ok": mdns_ok, "detail": mdns_detail, "guidance": mdns_guidance})
+
+        # 9. Clipboard tool (Linux: xclip / wl-paste needed to read the clipboard).
+        if _platform.system() == "Linux":
+            _clip_ok = bool(_sp.run(["sh", "-c", "command -v xclip || command -v wl-paste"],
+                                    capture_output=True, text=True, timeout=3).stdout.strip())
+            checks.append({"id": "clipboard_tool", "ok": _clip_ok,
+                           "detail": "clipboard tool present" if _clip_ok else "no xclip / wl-paste",
+                           "guidance": None if _clip_ok else ("Clipboard capture needs xclip (X11) or "
+                                                             "wl-paste (Wayland). Install one: "
+                                                             "'sudo apt install xclip' or 'sudo apt install wl-clipboard'.")})
+        # add new check ids to the critical set for the summary
+        checks_extra = ("server_port", "discovery", "network", "mdns")
+        if any(not c["ok"] for c in checks if c["id"] in checks_extra):
+            summary = "fail" if summary == "ok" else summary
+        # (summary already computed below; recompute critical set to include mdns)
+
+
         # summary: "fail" if a critical check (server/discovery/network) is down,
         # "warn" if only advertising/web is down, else "ok".
-        critical_ids = ("server_port", "discovery", "network")
+        critical_ids = ("server_port", "discovery", "network", "mdns")
         if any(not c["ok"] for c in checks if c["id"] in critical_ids):
             summary = "fail"
         elif any(not c["ok"] for c in checks):

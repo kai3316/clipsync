@@ -818,5 +818,7 @@
   "settings_window.diag_firewall": "防火墙",
   "settings_window.diag_permissions": "权限",
   "settings_window.diag_request": "申请授权 / 打开设置",
-  "settings_window.diag_request_failed": "无法打开权限设置"
+  "settings_window.diag_request_failed": "无法打开权限设置",
+  "settings_window.diag_mdns": "mDNS 发现服务",
+  "settings_window.diag_clipboard_tool": "剪贴板工具（xclip / wl-paste）"
 }

@@ -472,6 +472,8 @@
           network: this.t('settings_window.diag_network'),
           firewall: this.t('settings_window.diag_firewall'),
           permissions: this.t('settings_window.diag_permissions'),
+          mdns: this.t('settings_window.diag_mdns'),
+          clipboard_tool: this.t('settings_window.diag_clipboard_tool'),
           error: this.t('settings_window.diag_title'),
         };
         return labels[id] || id;
