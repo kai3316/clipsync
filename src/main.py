@@ -610,7 +610,11 @@ class Application:
         cfg = self.cfg
 
         # ── Sync Manager ────────────────────────────────────────
-        monitor = create_monitor(poll_interval=cfg.clipboard_poll_interval)
+        # Low-memory mode polls the clipboard less aggressively.
+        _poll = cfg.clipboard_poll_interval
+        if cfg.low_memory_mode:
+            _poll = max(_poll, 2.0)
+        monitor = create_monitor(poll_interval=_poll)
         reader = create_reader()
         writer = create_writer()
         self._monitor = monitor
@@ -619,8 +623,12 @@ class Application:
             reader=reader, writer=writer, monitor=monitor,
             history=self.clipboard_history,
             sync_debounce=cfg.sync_debounce,
+            retry_enabled=cfg.retry_capture_enabled,
         )
         self.sync_mgr.set_enabled(cfg.sync_enabled)
+        # Wire the dedup hash algorithm (sha256 default / simple=md5).
+        from internal.clipboard import history_db as _history_db
+        _history_db.DEDUP_ALGO = cfg.dedup_method or "sha256"
 
         # ── Source tracking / app filter ────────────────────────
         # Honor the source_tracking_enabled flag: when disabled, the
@@ -1215,6 +1223,83 @@ class Application:
                     if h is _console_handler:
                         h.setLevel(level)
                         break
+
+        # ── Live-apply the remaining fields so changes take effect
+        # immediately instead of only after a restart ─────────────
+        if "auto_start" in updated:
+            try:
+                if updated["auto_start"]:
+                    enable_autostart()
+                else:
+                    disable_autostart()
+            except Exception:
+                logger.debug("Failed to apply auto_start live", exc_info=True)
+
+        if "web_enabled" in updated and self.web_server is not None:
+            try:
+                if updated["web_enabled"] and not self.web_server.is_running:
+                    self.web_server.start()
+                elif not updated["web_enabled"] and self.web_server.is_running:
+                    self.web_server.stop()
+            except Exception:
+                logger.debug("Failed to apply web_enabled live", exc_info=True)
+
+        if "sync_debounce" in updated and self.sync_mgr is not None:
+            try:
+                self.sync_mgr._sync_debounce = max(0.05, float(updated["sync_debounce"]))
+            except (TypeError, ValueError):
+                pass
+
+        if "retry_capture_enabled" in updated and self.sync_mgr is not None:
+            self.sync_mgr._retry_enabled = bool(updated["retry_capture_enabled"])
+
+        if "clipboard_poll_interval" in updated and getattr(self, "_monitor", None) is not None:
+            try:
+                val = max(0.1, float(updated["clipboard_poll_interval"]))
+                _mon = self._monitor
+                if hasattr(_mon, "_poll_interval"):
+                    _mon._poll_interval = val
+                if hasattr(_mon, "_idle_poll_interval"):
+                    _mon._idle_poll_interval = max(val * 2.0, 2.0)
+            except (TypeError, ValueError):
+                pass
+
+        if "low_memory_mode" in updated and getattr(self, "_monitor", None) is not None:
+            try:
+                base = float(getattr(self.cfg, "clipboard_poll_interval", 1.0) or 1.0)
+                val = max(base, 2.0) if updated["low_memory_mode"] else base
+                _mon = self._monitor
+                if hasattr(_mon, "_poll_interval"):
+                    _mon._poll_interval = val
+            except Exception:
+                logger.debug("Failed to apply low_memory_mode live", exc_info=True)
+
+        if "dedup_method" in updated:
+            from internal.clipboard import history_db as _history_db
+            _history_db.DEDUP_ALGO = updated["dedup_method"] or "sha256"
+
+        if "max_reconnect_attempts" in updated and self.transport_mgr is not None:
+            try:
+                self.transport_mgr._max_reconnect_attempts = max(1, int(updated["max_reconnect_attempts"]))
+            except (TypeError, ValueError):
+                pass
+
+        if "transfer_timeout" in updated and self.file_transfer_mgr is not None:
+            try:
+                self.file_transfer_mgr._transfer_timeout = max(30.0, float(updated["transfer_timeout"]))
+            except (TypeError, ValueError):
+                pass
+
+        if "file_receive_dir" in updated and self.file_transfer_mgr is not None:
+            try:
+                from pathlib import Path
+                new_dir = (updated["file_receive_dir"] or "").strip()
+                if new_dir:
+                    d = Path(new_dir)
+                    d.mkdir(parents=True, exist_ok=True)
+                    self.file_transfer_mgr._output_dir = d
+            except Exception:
+                logger.debug("Failed to apply file_receive_dir live", exc_info=True)
 
         # ── Special actions (not plain config fields) ────────────
         if "regenerate_web_token" in special:
@@ -2666,11 +2751,55 @@ class Application:
             pass
         # Uptime
         uptime = int(_time.time()) - getattr(self, '_start_time', int(_time.time()))
+        # ── History stats ──────────────────────────────────────────
+        hist = self.clipboard_history.get_all() if self.clipboard_history else []
+        import datetime as _dt
+        _today = _dt.date.today()
+        def _is_today(ts):
+            try:
+                return _dt.datetime.fromtimestamp(float(ts)).date() == _today
+            except Exception:
+                return False
+        history_today = sum(1 for e in hist if _is_today(e.get("timestamp", 0)))
+        history_pinned = sum(1 for e in hist if e.get("pinned"))
+        history_images = sum(
+            1 for e in hist
+            if str(e.get("content_type", "")).upper() in ("IMAGE", "IMAGE_PNG", "IMAGE_EMF", "PICTURE")
+        )
+        # ── Transfer stats ─────────────────────────────────────────
+        tx_hist = self.file_transfer_mgr.get_history() if self.file_transfer_mgr else []
+        transfer_completed = sum(1 for t in tx_hist if t.get("success"))
+        transfer_bytes = sum(int(t.get("file_size", 0) or 0) for t in tx_hist if t.get("success"))
+        # ── Connected peers (names for the live device chips) ─────
+        connected_names = []
+        try:
+            connected_names = [
+                name for _pid, name in self.transport_mgr.get_connected_peers_with_names()
+            ]
+        except Exception:
+            pass
+        # ── Recent clipboard activity feed ─────────────────────────
+        recent_items = [
+            {
+                "text": (e.get("text_preview") or "")[:80],
+                "type": str(e.get("content_type") or "TEXT"),
+                "time": e.get("timestamp", 0),
+                "pinned": bool(e.get("pinned")),
+            }
+            for e in hist[:6]
+        ]
         return {
             'connected_count': len(connected),
             'paired_count': len(paired),
-            'history_count': len(self.clipboard_history.get_all()) if self.clipboard_history else 0,
+            'discovered_count': len(self._snapshot_discovered_peers()),
+            'connected_names': connected_names,
+            'history_count': len(hist),
+            'history_today': history_today,
+            'history_pinned': history_pinned,
+            'history_images': history_images,
             'active_transfers': active_tx,
+            'transfer_completed': transfer_completed,
+            'transfer_bytes': transfer_bytes,
             'discovering': bool(self.discovery and self.discovery.is_browsing),
             'visible': bool(self.discovery and self.discovery.is_advertising),
             'sync_enabled': self.cfg.sync_enabled if self.cfg else True,
@@ -2678,9 +2807,11 @@ class Application:
             'uptime_seconds': uptime,
             'local_ip': WebServer._get_lan_ip(),
             'port': self.cfg.web_port if self.cfg else 0,
-            'platform': _platform.platform(),
+            'platform': _platform.system(),
+            'version': __version__,
             'network_type': 'lan',
             'network_detail': '',
+            'recent_items': recent_items,
             'recent_activity': '',
         }
 
@@ -3075,6 +3206,13 @@ class Application:
             # is not suppressed — the restored content will sync to peers.
             self.sync_mgr.reset_dedup_for_restore()
             create_writer().write(content)
+            # paste_to_top: re-using an old item surfaces it as the most
+            # recent history entry.
+            if self.cfg.paste_to_top and entry.get("entry_id"):
+                try:
+                    self.clipboard_history.touch(entry["entry_id"])
+                except Exception:
+                    logger.debug("Failed to touch history entry", exc_info=True)
             return True
         return False
 

@@ -20,6 +20,8 @@
         // Network
         port: '',
         relayUrl: '',
+        autoStart: false,
+        serviceType: '',
 
         // Web Companion
         webEnabled: true,
@@ -36,6 +38,11 @@
         filterApiKey: true,
         filterPrivateKey: true,
         filterPassword: true,
+
+        // App Filter (which apps are monitored)
+        appFilterEnabled: false,
+        appFilterMode: 'blacklist',
+        appFilterList: '',
 
         // Security
         encryptionEnabled: true,
@@ -59,6 +66,18 @@
         maxReconnect: 10,
         logLevel: 'INFO',
         notificationsEnabled: true,
+
+        // Clipboard behavior
+        pasteToTop: true,
+        lowMemory: false,
+        retryCapture: true,
+        dedupMethod: 'sha256',
+        sourceTracking: true,
+
+        // Data locations
+        dataDir: '',
+        favoritesPath: '',
+        dataSaving: false,
 
         // States
         saving: false,
@@ -123,6 +142,7 @@
           { id: 'appearance',    label: this.t('settings_nav.appearance') },
           { id: 'network',       label: this.t('settings_nav.network') },
           { id: 'web',           label: this.t('settings_nav.web_companion') },
+          { id: 'translation',   label: this.t('settings_nav.translation') },
           { id: 'filter',        label: this.t('settings_nav.filter') },
           { id: 'security',      label: this.t('settings_nav.security') },
           { id: 'advanced',      label: this.t('settings_nav.advanced') },
@@ -142,6 +162,8 @@
         var s = this.store.settingsCache || {};
         if (s.port !== undefined) this.port = String(s.port);
         if (s.relay_url !== undefined) this.relayUrl = s.relay_url || '';
+        if (s.auto_start !== undefined) this.autoStart = !!s.auto_start;
+        if (s.service_type !== undefined) this.serviceType = s.service_type || '';
         if (s.web_enabled !== undefined) this.webEnabled = !!s.web_enabled;
         if (s.web_port !== undefined) this.webPort = String(s.web_port);
         if (s.web_history_limit !== undefined) this.webHistoryLimit = s.web_history_limit;
@@ -172,6 +194,16 @@
         if (s.notifications_enabled !== undefined) this.notificationsEnabled = !!s.notifications_enabled;
         if (s.translate_url !== undefined) this.translateUrl = s.translate_url || '';
         if (s.translate_key_set !== undefined) this.translateKeySet = !!s.translate_key_set;
+        if (s.app_filter_enabled !== undefined) this.appFilterEnabled = !!s.app_filter_enabled;
+        if (s.app_filter_mode !== undefined) this.appFilterMode = s.app_filter_mode;
+        if (s.app_filter_list !== undefined) this.appFilterList = (s.app_filter_list || []).join('\n');
+        if (s.paste_to_top !== undefined) this.pasteToTop = !!s.paste_to_top;
+        if (s.low_memory_mode !== undefined) this.lowMemory = !!s.low_memory_mode;
+        if (s.retry_capture_enabled !== undefined) this.retryCapture = !!s.retry_capture_enabled;
+        if (s.dedup_method !== undefined) this.dedupMethod = s.dedup_method || 'sha256';
+        if (s.source_tracking_enabled !== undefined) this.sourceTracking = !!s.source_tracking_enabled;
+        if (s.data_dir !== undefined) this.dataDir = s.data_dir || '';
+        if (s.favorites_path !== undefined) this.favoritesPath = s.favorites_path || '';
       },
 
       // ── Save methods ─────────────────────────────────────────────
@@ -182,6 +214,8 @@
         ClipsyncAPI.updateSettings({
           port: parseInt(self.port, 10) || 53317,
           relay_url: self.relayUrl,
+          auto_start: self.autoStart,
+          service_type: (self.serviceType || '_clipsync._tcp.local.').trim(),
         }).then(function (res) {
           if (res && res.updated) self.store.mergeSettings(res.updated);
           self.store.showToast(self.t('settings_window.network_saved'), 3000);
@@ -222,6 +256,11 @@
         }
         ClipsyncAPI.updateSettings({
           filter_enabled_categories: categories,
+          app_filter_enabled: self.appFilterEnabled,
+          app_filter_mode: self.appFilterMode,
+          app_filter_list: self.appFilterList
+            ? self.appFilterList.split('\n').map(function (s) { return s.trim(); }).filter(Boolean)
+            : [],
         }).then(function (res) {
           if (res && res.updated) self.store.mergeSettings(res.updated);
           self.store.showToast(self.t('settings_window.filter_saved'), 2000);
@@ -309,6 +348,11 @@
           max_reconnect_attempts: parseInt(self.maxReconnect, 10) || 10,
           log_level: self.logLevel,
           notifications_enabled: self.notificationsEnabled,
+          paste_to_top: self.pasteToTop,
+          low_memory_mode: self.lowMemory,
+          retry_capture_enabled: self.retryCapture,
+          dedup_method: self.dedupMethod,
+          source_tracking_enabled: self.sourceTracking,
         }).then(function (res) {
           if (res && res.updated) self.store.mergeSettings(res.updated);
           self.store.showToast(self.t('settings_window.advanced_saved'), 3000);
@@ -316,6 +360,22 @@
           self.store.showToast(self.t('settings.save_advanced_failed'), 2000);
         }).finally(function () {
           self.advancedSaving = false;
+        });
+      },
+
+      saveDataPaths: function () {
+        var self = this;
+        self.dataSaving = true;
+        ClipsyncAPI.updateSettings({
+          data_dir: (self.dataDir || '').trim(),
+          favorites_path: (self.favoritesPath || '').trim(),
+        }).then(function (res) {
+          if (res && res.updated) self.store.mergeSettings(res.updated);
+          self.store.showToast(self.t('settings.data_saved'), 2500);
+        }).catch(function () {
+          self.store.showToast(self.t('settings.save_data_failed'), 2000);
+        }).finally(function () {
+          self.dataSaving = false;
         });
       },
 
@@ -711,6 +771,17 @@
                     '<input type="text" class="settings-input" v-model="relayUrl" :placeholder="t(\'settings_window.relay_placeholder\')">' +
                     '<span class="settings-hint">{{ t(\'settings_window.relay_hint\') }}</span>' +
                   '</div>' +
+                  '<div class="settings-toggle-row">' +
+                    '<span class="settings-toggle-label">{{ t(\'network.auto_start\') }}</span>' +
+                    '<button class="settings-toggle" :class="{ \'settings-toggle--on\': autoStart }" @click="autoStart = !autoStart">' +
+                      '<span class="settings-toggle__knob"></span>' +
+                    '</button>' +
+                  '</div>' +
+                  '<div class="settings-field">' +
+                    '<label class="settings-field__label">{{ t(\'network.service_type\') }}</label>' +
+                    '<input type="text" class="settings-input" v-model="serviceType" placeholder="_clipsync._tcp.local.">' +
+                    '<span class="settings-hint">{{ t(\'settings_window.service_type_hint\') }}</span>' +
+                  '</div>' +
                   '<div class="settings-field">' +
                     '<span class="settings-field__label">{{ t(\'network.local_address\') }}</span>' +
                     '<span class="settings-field__value settings-field__value--mono">{{ store.overview.localIp }}:{{ store.overview.port || port }}</span>' +
@@ -725,10 +796,11 @@
                   '<h3 class="settings-section__title">{{ t(\'settings_nav.web_companion\') }}</h3>' +
                   '<div class="settings-toggle-row">' +
                     '<span class="settings-toggle-label">{{ t(\'settings_window.web_enable\') }}</span>' +
-                    '<button class="settings-toggle" :class="{ \'settings-toggle--on\': webEnabled }" @click="webEnabled = !webEnabled">' +
+                    '<button class="settings-toggle" :class="{ \'settings-toggle--on\': webEnabled, \'settings-toggle--disabled\': uiBackend === \'webview\' }" @click="uiBackend !== \'webview\' && (webEnabled = !webEnabled)">' +
                       '<span class="settings-toggle__knob"></span>' +
                     '</button>' +
                   '</div>' +
+                  '<p v-if="uiBackend === \'webview\'" class="settings-hint" style="margin:-4px 0 8px">{{ t(\'settings_window.web_enable_webview_hint\') }}</p>' +
                   '<div class="settings-field">' +
                     '<label class="settings-field__label">{{ t(\'settings_window.web_port\') }}</label>' +
                     '<input type="number" class="settings-input" v-model="webPort" min="1024" max="65535" placeholder="9580">' +
@@ -757,8 +829,11 @@
                   '<button class="settings-btn settings-btn--accent" @click="saveWeb" :disabled="webSaving" style="width:100%;margin-top:8px">' +
                     '{{ webSaving ? \'...\' : t(\'settings_window.save_web\') }}' +
                   '</button>' +
+                '</section>' +
 
-                  '<h3 class="settings-section__title" style="margin-top:28px">{{ t(\'settings_window.translation_title\') }}</h3>' +
+                '<!-- ═══════ Translation ═══════ -->' +
+                '<section v-if="activeSection === \'translation\'" class="settings-section">' +
+                  '<h3 class="settings-section__title">{{ t(\'settings_window.translation_title\') }}</h3>' +
                   '<p class="settings-hint" style="margin-bottom:12px">{{ t(\'settings_window.translation_hint\') }}</p>' +
                   '<div class="settings-field">' +
                     '<label class="settings-field__label">{{ t(\'settings_window.translate_url\') }}</label>' +
@@ -819,6 +894,28 @@
                       '<button class="settings-toggle" :class="{ \'settings-toggle--on\': filterPassword }" @click="filterPassword = !filterPassword">' +
                         '<span class="settings-toggle__knob"></span>' +
                       '</button>' +
+                    '</div>' +
+                  '</template>' +
+
+                  '<h4 style="font-size:12px;color:var(--clipsync-fg-muted);margin:16px 0 8px">{{ t(\'settings_window.app_filter_title\') }}</h4>' +
+                  '<p class="settings-hint" style="margin-bottom:12px">{{ t(\'settings_window.app_filter_desc\') }}</p>' +
+                  '<div class="settings-toggle-row">' +
+                    '<span class="settings-toggle-label">{{ t(\'settings_window.app_filter_enable\') }}</span>' +
+                    '<button class="settings-toggle" :class="{ \'settings-toggle--on\': appFilterEnabled }" @click="appFilterEnabled = !appFilterEnabled">' +
+                      '<span class="settings-toggle__knob"></span>' +
+                    '</button>' +
+                  '</div>' +
+                  '<template v-if="appFilterEnabled">' +
+                    '<div class="settings-field">' +
+                      '<label class="settings-field__label">{{ t(\'settings_window.app_filter_mode\') }}</label>' +
+                      '<select class="settings-select" v-model="appFilterMode">' +
+                        '<option value="blacklist">{{ t(\'settings_window.app_filter_blacklist\') }}</option>' +
+                        '<option value="whitelist">{{ t(\'settings_window.app_filter_whitelist\') }}</option>' +
+                      '</select>' +
+                    '</div>' +
+                    '<div class="settings-field">' +
+                      '<label class="settings-field__label">{{ t(\'settings_window.app_filter_list\') }}</label>' +
+                      '<textarea class="settings-input" rows="4" v-model="appFilterList" :placeholder="t(\'settings_window.app_filter_list_placeholder\')"></textarea>' +
                     '</div>' +
                   '</template>' +
                   '<button class="settings-btn settings-btn--accent" @click="saveFilter" :disabled="filterSaving" style="width:100%;margin-top:12px">' +
@@ -897,6 +994,39 @@
                       '<span class="settings-toggle__knob"></span>' +
                     '</button>' +
                   '</div>' +
+
+                  '<h4 style="font-size:12px;color:var(--clipsync-fg-muted);margin:16px 0 8px">{{ t(\'settings_window.clipboard_behavior\') }}</h4>' +
+                  '<div class="settings-toggle-row">' +
+                    '<span class="settings-toggle-label">{{ t(\'settings_window.paste_to_top\') }}</span>' +
+                    '<button class="settings-toggle" :class="{ \'settings-toggle--on\': pasteToTop }" @click="pasteToTop = !pasteToTop">' +
+                      '<span class="settings-toggle__knob"></span>' +
+                    '</button>' +
+                  '</div>' +
+                  '<div class="settings-toggle-row">' +
+                    '<span class="settings-toggle-label">{{ t(\'settings_window.low_memory_mode\') }}</span>' +
+                    '<button class="settings-toggle" :class="{ \'settings-toggle--on\': lowMemory }" @click="lowMemory = !lowMemory">' +
+                      '<span class="settings-toggle__knob"></span>' +
+                    '</button>' +
+                  '</div>' +
+                  '<div class="settings-toggle-row">' +
+                    '<span class="settings-toggle-label">{{ t(\'settings_window.retry_capture\') }}</span>' +
+                    '<button class="settings-toggle" :class="{ \'settings-toggle--on\': retryCapture }" @click="retryCapture = !retryCapture">' +
+                      '<span class="settings-toggle__knob"></span>' +
+                    '</button>' +
+                  '</div>' +
+                  '<div class="settings-toggle-row">' +
+                    '<span class="settings-toggle-label">{{ t(\'settings_window.source_tracking\') }}</span>' +
+                    '<button class="settings-toggle" :class="{ \'settings-toggle--on\': sourceTracking }" @click="sourceTracking = !sourceTracking">' +
+                      '<span class="settings-toggle__knob"></span>' +
+                    '</button>' +
+                  '</div>' +
+                  '<div class="settings-field">' +
+                    '<label class="settings-field__label">{{ t(\'settings_window.dedup_method\') }}</label>' +
+                    '<select class="settings-select" v-model="dedupMethod">' +
+                      '<option value="sha256">{{ t(\'settings_window.dedup_sha256\') }}</option>' +
+                      '<option value="simple">{{ t(\'settings_window.dedup_simple\') }}</option>' +
+                    '</select>' +
+                  '</div>' +
                   '<button class="settings-btn settings-btn--accent" @click="saveAdvanced" :disabled="advancedSaving" style="width:100%;margin-top:12px">' +
                     '{{ advancedSaving ? \'...\' : t(\'settings_window.save_advanced\') }}' +
                   '</button>' +
@@ -935,6 +1065,19 @@
                     '<button class="settings-btn" @click="openDataFolder(\'data\')">{{ t(\'settings.open_data_folder\') }}</button>' +
                     '<button class="settings-btn" @click="openDataFolder(\'backups\')">{{ t(\'settings.open_backups_folder\') }}</button>' +
                   '</div>' +
+                  '<div class="settings-field" style="margin-top:16px">' +
+                    '<label class="settings-field__label">{{ t(\'settings.data_dir\') }}</label>' +
+                    '<input type="text" class="settings-input" v-model="dataDir" :placeholder="t(\'settings.data_dir_placeholder\')">' +
+                    '<span class="settings-hint">{{ t(\'settings.data_dir_hint\') }}</span>' +
+                  '</div>' +
+                  '<div class="settings-field">' +
+                    '<label class="settings-field__label">{{ t(\'settings.favorites_path\') }}</label>' +
+                    '<input type="text" class="settings-input" v-model="favoritesPath" :placeholder="t(\'settings.favorites_path_placeholder\')">' +
+                    '<span class="settings-hint">{{ t(\'settings.favorites_path_hint\') }}</span>' +
+                  '</div>' +
+                  '<button class="settings-btn settings-btn--accent" @click="saveDataPaths" :disabled="dataSaving" style="width:100%;margin-top:8px">' +
+                    '{{ dataSaving ? \'...\' : t(\'settings.save_data_paths\') }}' +
+                  '</button>' +
                 '</section>' +
 
                 '<!-- ═══════ About ═══════ -->' +

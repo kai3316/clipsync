@@ -66,41 +66,36 @@ def _strip_html(text: str) -> str:
     return plain.strip()
 
 
+# Dedup hash algorithm, wired from cfg.dedup_method ("sha256" default, or
+# "simple" for a faster md5). Set at startup by the application.
+DEDUP_ALGO = "sha256"
+
+# Config value → hashlib algorithm name ("simple" is the fast path).
+_DEDUP_ALGO_MAP = {"sha256": "sha256", "simple": "md5"}
+
+
 def _make_dedup_key(content: ClipboardContent) -> str:
     """Build a stable dedup key from the 'primary' content."""
+    _h = lambda data: hashlib.new(_DEDUP_ALGO_MAP.get(DEDUP_ALGO, "sha256"), data).hexdigest()
     if ContentType.TEXT in content.types:
         text = content.types[ContentType.TEXT].decode("utf-8", errors="replace")
         # Hash the full body so two long texts sharing a prefix are not
         # wrongly coalesced within the dedup window.
-        return "text:" + hashlib.sha256(
-            text.encode("utf-8", errors="replace")
-        ).hexdigest()
+        return "text:" + _h(text.encode("utf-8", errors="replace"))
     if ContentType.IMAGE_PNG in content.types:
-        return "png:" + hashlib.sha256(
-            content.types[ContentType.IMAGE_PNG]
-        ).hexdigest()
+        return "png:" + _h(content.types[ContentType.IMAGE_PNG])
     if ContentType.IMAGE_EMF in content.types:
-        return "emf:" + hashlib.sha256(
-            content.types[ContentType.IMAGE_EMF]
-        ).hexdigest()
+        return "emf:" + _h(content.types[ContentType.IMAGE_EMF])
     if ContentType.HTML in content.types:
-        return "html:" + hashlib.sha256(
-            content.types[ContentType.HTML]
-        ).hexdigest()
+        return "html:" + _h(content.types[ContentType.HTML])
     if ContentType.RTF in content.types:
-        return "rtf:" + hashlib.sha256(
-            content.types[ContentType.RTF]
-        ).hexdigest()
+        return "rtf:" + _h(content.types[ContentType.RTF])
     if ContentType.FILE in content.types:
         # FILE content is the newline-joined file paths — hash them so
         # file-only copies dedup instead of falling through to a unique key.
-        return "file:" + hashlib.sha256(
-            content.types[ContentType.FILE]
-        ).hexdigest()
+        return "file:" + _h(content.types[ContentType.FILE])
     if ContentType.URL in content.types:
-        return "url:" + hashlib.sha256(
-            content.types[ContentType.URL]
-        ).hexdigest()
+        return "url:" + _h(content.types[ContentType.URL])
     return "other:" + str(time.time())
 
 
@@ -508,6 +503,25 @@ class ClipboardHistoryDB:
                     self._update_row(entry_id, paste_count=entry["paste_count"])
                     return entry["paste_count"]
             return None
+
+    def touch(self, entry_id: str) -> bool:
+        """Move an entry to the top of the newest-first list (paste-to-top).
+
+        Re-using a history item should surface it as the most recent entry.
+        Pinned entries keep their pinned section but move to the front of it.
+        """
+        now = time.time()
+        with self._lock:
+            for entry in self._entries:
+                if entry.get("entry_id") == entry_id:
+                    entry["timestamp"] = now
+                    self._update_row(entry_id, timestamp=now)
+                    # Re-sort in-memory list so the UI reflects the new order.
+                    self._entries.sort(
+                        key=lambda e: (0 if e.get("pinned") else 1, -e.get("timestamp", 0)),
+                    )
+                    return True
+        return False
 
     def batch_set_pinned(self, entry_ids: list, pinned: bool) -> int:
         """Set pinned state on entries matching the given IDs. Returns count of entries updated."""

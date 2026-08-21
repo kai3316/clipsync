@@ -48,6 +48,12 @@ _SAFE_FIELDS = {
     "ui_backend",
     "translate_url",
     "translate_key_set",
+    "paste_to_top",
+    "low_memory_mode",
+    "retry_capture_enabled",
+    "dedup_method",
+    "data_dir",
+    "favorites_path",
 }
 
 # Fields that the client is allowed to modify
@@ -81,6 +87,12 @@ _MUTABLE_FIELDS = {
     "ui_animation_enabled",
     "ui_backend",
     "translate_url",
+    "paste_to_top",
+    "low_memory_mode",
+    "retry_capture_enabled",
+    "dedup_method",
+    "data_dir",
+    "favorites_path",
 }
 
 # Action keys that trigger a host-side operation rather than a plain
