@@ -25,6 +25,8 @@
   --clipsync-accent-hover: #4CE0F5;
   --clipsync-accent-glow: rgba(34,211,238,0.15);
   --clipsync-accent-glow-strong: rgba(34,211,238,0.30);
+  --clipsync-violet-glow: rgba(167,139,250,0.16);
+  --clipsync-pink-glow: rgba(244,114,182,0.14);
   --clipsync-success: #00E599;
   --clipsync-danger: #FF4060;
   --clipsync-border: rgba(100,140,200,0.08);
@@ -60,19 +62,19 @@ body {
   flex-direction: column;
 }
 
-/* ── Ambient radial glow ─────────────────────────────────────── */
+/* ── Aurora wash (mirrors dashboard base.css) + slow drift ──── */
 
 body::before {
   content: '';
   position: fixed;
-  top: -80px;
-  left: 50%;
-  transform: translateX(-50%);
-  width: 340px;
-  height: 220px;
-  background: radial-gradient(ellipse at center, var(--clipsync-accent-glow) 0%, transparent 70%);
+  inset: 0;
   pointer-events: none;
   z-index: 0;
+  background:
+    radial-gradient(ellipse 60% 45% at 12% -10%, var(--clipsync-violet-glow), transparent),
+    radial-gradient(ellipse 60% 45% at 88% -10%, var(--clipsync-pink-glow), transparent),
+    radial-gradient(ellipse 80% 55% at 50% -20%, var(--clipsync-accent-glow), transparent);
+  animation: qpAuroraShift 18s ease-in-out infinite alternate;
 }
 
 /* ── Scan-line overlay ────────────────────────────────────────── */
@@ -117,6 +119,10 @@ body::after {
   flex-shrink: 0;
   border-bottom: 1px solid var(--clipsync-border);
   position: relative;
+  /* Frosted-glass header — the aurora behind it gets blurred + saturated. */
+  background: linear-gradient(180deg, rgba(10, 14, 30, 0.55), rgba(10, 14, 30, 0.28));
+  backdrop-filter: blur(18px) saturate(170%);
+  -webkit-backdrop-filter: blur(18px) saturate(170%);
 }
 
 .qp-header__left {
@@ -371,13 +377,15 @@ body::after {
   transform: translateX(-50%);
   z-index: 200;
   padding: 7px 18px;
-  background: var(--clipsync-surface);
+  background: rgba(14, 19, 40, 0.65);
   color: var(--clipsync-fg);
   border: 1px solid var(--clipsync-border-strong);
   border-radius: 20px;
   font-size: 12px;
   font-weight: 600;
   box-shadow: var(--clipsync-shadow-lg);
+  backdrop-filter: blur(14px) saturate(160%);
+  -webkit-backdrop-filter: blur(14px) saturate(160%);
   opacity: 0;
   pointer-events: none;
   transition: opacity var(--clipsync-transition-fast);
@@ -420,6 +428,41 @@ body::after {
     box-shadow: 0 0 0 rgba(0, 229, 153, 0), inset 0 0 0 rgba(0, 229, 153, 0);
     border-color: var(--clipsync-border);
   }
+}
+
+/* ── Aurora background drift ─────────────────────────────────── */
+
+@keyframes qpAuroraShift {
+  0%   { transform: translate3d(0, 0, 0) scale(1); }
+  50%  { transform: translate3d(-3%, 2%, 0) scale(1.06); }
+  100% { transform: translate3d(3%, -2%, 0) scale(1.04); }
+}
+
+/* ── Title glow pulse ────────────────────────────────────────── */
+
+@keyframes qpGlowPulse {
+  0%, 100% { text-shadow: 0 0 18px var(--clipsync-accent-glow), 0 0 36px var(--clipsync-accent-glow); }
+  50%      { text-shadow: 0 0 26px var(--clipsync-accent-glow-strong), 0 0 52px var(--clipsync-accent-glow-strong); }
+}
+
+/* ── Animated neon border for the selected card ──────────────── */
+
+@keyframes qpBorderGlow {
+  0%, 100% { border-color: var(--clipsync-accent); }
+  33%      { border-color: var(--clipsync-accent-2); }
+  66%      { border-color: var(--clipsync-accent-3); }
+}
+
+.qp-header__title {
+  animation: qpGlowPulse 3.2s ease-in-out infinite;
+}
+
+/* Selected card gets a cycling neon border (cyberpunk touch). Keep opacity
+   pinned to 1 (the base .qp-item has opacity:0 filled forward by its entry
+   animation) and don't re-run qpSlideUp, or the card would vanish/re-slide. */
+.qp-item--selected {
+  opacity: 1;
+  animation: qpBorderGlow 3.4s ease-in-out infinite;
 }
 
 /* ═══════════════════════════════════════════════════════════════════

@@ -230,6 +230,14 @@ var ClipsyncWS = (function () {
       if (!store) return;
 
       switch (type) {
+        case 'close_window':
+          // The app is quitting — close this dashboard window so no orphaned
+          // browser window/process is left behind.
+          try {
+            window.close();
+          } catch (e) { /* window may not be script-openable */ }
+          break;
+
         case 'open_settings':
           // Tray/dashboard "Settings" requested the settings panel.
           store.settingsPanelVisible = true;

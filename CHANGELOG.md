@@ -2,6 +2,17 @@
 
 All notable changes to ClipSync are documented in this file.
 
+## [1.0.7] — 2026-08-21
+
+### Fixed
+- Dashboard window no longer multiplies: opening is now idempotent (a live WebSocket client means the window is already open, and a short grace period covers page load), so repeated tray clicks / settings actions can't spawn duplicate browser windows or accumulate processes
+- Closing the dashboard window is detected reliably, and quitting the app tells open dashboard windows to close themselves (no orphaned browser processes)
+- App startup no longer fails in webview mode (the web server referenced `threading` without importing it)
+
+### Changed (visual)
+- Quick Paste (mobile/QR page) unified with the dashboard: cyberpunk aurora background with a slow drift, frosted-glass header and toast, pulsing title glow, and a cycling neon border on the selected item
+- Dashboard: frosted-glass title bar, status bar, and toasts (backdrop blur + saturation over the aurora background)
+
 ## [1.0.6] — 2026-08-21
 
 ### Security

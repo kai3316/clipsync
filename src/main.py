@@ -367,6 +367,7 @@ class Application:
         self.systray: SystrayApp | None = None
         self.settings_win: SettingsWindow | None = None
         self.webview_win = None  # WebViewWindow for webview mode
+        self._webview_opened_at: float = 0.0  # monotonic time of last dashboard open
         self.dashboard_win: DashboardWindow | None = None
 
         # ── Threading ───────────────────────────────────────────────
@@ -1579,6 +1580,12 @@ class Application:
         self.transport_mgr.stop_server()
         if self.webview_win is not None:
             self.webview_win.stop()
+        # Ask any open dashboard window to close itself so we don't leave
+        # orphaned browser windows/processes behind when the app quits.
+        try:
+            self._push_web("broadcast", "close_window", {})
+        except Exception:
+            logger.debug("Failed to broadcast close_window", exc_info=True)
         if self.web_server:
             self.web_server.stop()
 
@@ -2731,24 +2738,31 @@ class Application:
             self.root.after(0, self._create_dashboard_window)
 
     def _open_webview_dashboard(self) -> None:
-        """Open the web UI in a browser app-mode window."""
+        """Open the web UI in a browser app-mode window (idempotent).
+
+        The only reliable signal that a dashboard window is open is a live
+        WebSocket client: the SPA keeps a WS connection while the window shows,
+        and quickpaste (the phone QR page) does not use WS, so client_count>0
+        means the dashboard itself is open. Process tracking is NOT reliable
+        here — Chrome --app hands off to an already-running instance and the
+        spawned process exits, so is_running() goes False even while the window
+        is open. Gating on is_running() is exactly what made every call spawn a
+        NEW browser window (the "multiple windows / many processes" bug).
+        """
         # Import here to avoid circular imports
         from internal.ui.webview_window import WebViewWindow
 
-        # If the webview window is already running, the user needs to switch to
-        # it manually. Process tracking is best-effort: for browsers without
-        # true --app isolation (e.g. the Safari fallback) the process can stay
-        # alive after the window is closed, so also require a live WebSocket
-        # client as evidence the dashboard window is actually open — otherwise
-        # reopening is the right behaviour, not "silently do nothing".
-        if self.webview_win is not None and self.webview_win.is_running():
+        if self.webview_win is not None:
             ws_live = 0
             if self.web_server is not None:
                 ws_live = getattr(self.web_server.ws_manager, "client_count", lambda: 0)()
-            if ws_live > 0:
-                logger.debug("WebViewWindow already running")
+            # Grace period after opening: the SPA takes a moment to load and
+            # attach its WS client, so rapid repeated clicks during that window
+            # must not spawn duplicate browser windows.
+            recently_opened = (time.monotonic() - self._webview_opened_at) < 8.0
+            if ws_live > 0 or recently_opened:
+                logger.debug("Dashboard already open (ws_clients=%d)", ws_live)
                 return
-            logger.info("WebView process alive but no web client — reopening dashboard")
 
         url = (
             f"http://127.0.0.1:{self.cfg.web_port}"
@@ -2756,6 +2770,7 @@ class Application:
         )
         self.webview_win = WebViewWindow(url=url, title="ClipSync", width=960, height=720)
         self.webview_win.start()
+        self._webview_opened_at = time.monotonic()
         # Never log the URL with its ?token= query — it would leak the web token
         # into a (previously world-readable) log file.
         logger.info("WebView dashboard opened: %s", url.split("?")[0])

@@ -200,11 +200,13 @@
       align-items: center;
       gap: var(--clipsync-space-2);
       padding: 10px 20px;
-      background: var(--clipsync-surface);
+      background: color-mix(in srgb, var(--clipsync-surface) 68%, transparent);
       color: var(--clipsync-fg);
       border: 1px solid var(--clipsync-border-strong);
       border-radius: var(--clipsync-radius);
       box-shadow: 0 8px 28px rgba(5, 6, 13, 0.45), var(--clipsync-shadow-lg);
+      backdrop-filter: blur(16px) saturate(180%);
+      -webkit-backdrop-filter: blur(16px) saturate(180%);
       font-size: 13px;
       font-weight: 500;
       animation: slideUp 0.25s cubic-bezier(0.34, 1.56, 0.64, 1) forwards;
@@ -273,6 +275,14 @@
       user-select: none;
       -webkit-user-select: none;
       z-index: var(--clipsync-z-sticky);
+      /* Frosted-glass title bar over the aurora background. */
+      background: linear-gradient(
+        180deg,
+        color-mix(in srgb, var(--clipsync-surface) 62%, transparent),
+        color-mix(in srgb, var(--clipsync-surface) 34%, transparent)
+      );
+      backdrop-filter: blur(18px) saturate(180%);
+      -webkit-backdrop-filter: blur(18px) saturate(180%);
     }
 
     .title-bar::after {
@@ -1580,7 +1590,9 @@
       padding-right: max(var(--clipsync-space-4), env(safe-area-inset-right));
       font-size: 11px;
       color: var(--clipsync-fg-muted);
-      background: var(--clipsync-panel);
+      background: color-mix(in srgb, var(--clipsync-panel) 55%, transparent);
+      backdrop-filter: blur(14px) saturate(170%);
+      -webkit-backdrop-filter: blur(14px) saturate(170%);
       border-top: 1px solid var(--clipsync-border);
       flex-shrink: 0;
       user-select: none;
