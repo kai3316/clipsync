@@ -19,7 +19,7 @@ import time
 import urllib.parse
 from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from io import BytesIO
-from threading import Thread
+import threading
 
 logger = logging.getLogger(__name__)
 
@@ -568,7 +568,7 @@ class WebServer:
         self._on_toggle_visibility = on_toggle_visibility
         self._on_settings_change = on_settings_change
         self._httpd: ThreadingHTTPServer | None = None
-        self._thread: Thread | None = None
+        self._thread: threading.Thread | None = None
         self._firewall_ok: bool = False
         # Pre-generate PWA icons
         self._icon_192 = _make_icon(192)
@@ -1406,7 +1406,7 @@ class WebServer:
             logger.warning("Web server failed to bind %s:%d: %s", host, port, e)
             return False
 
-        self._thread = Thread(target=self._httpd.serve_forever, daemon=True, name="web-server")
+        self._thread = threading.Thread(target=self._httpd.serve_forever, daemon=True, name="web-server")
         self._thread.start()
         logger.info("Web companion listening on http://%s:%d", self._get_lan_ip(), port)
         return True
