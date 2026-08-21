@@ -22,6 +22,7 @@ All notable changes to ClipSync are documented in this file.
 - History pagination cursor after batch delete; transfer history missing direction/timestamp
 - i18n keys missing from JSON locale files (sort control, update checker)
 - Cross-platform: macOS tray wiring for check-update/about, Linux pynput dependency, color-mix fallback, spec icon placement
+- macOS: web UI now launches the Chrome/Edge/Brave/Chromium binary directly with `--app`, so the dashboard opens even when the browser is already running (previously `open -a … --args --app` just activated the existing window and showed the browser start page instead of the app)
 
 ## [1.0.4] — 2026-08-21
 

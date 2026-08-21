@@ -26,16 +26,16 @@ _BROWSERS = [
     ("brave",     ["--app={url}", "--window-size={width},{height}"], ["Windows"]),
     ("firefox",   ["--new-window", "{url}", "--width={width}", "--height={height}"], ["Windows"]),
     # ── macOS ─────────────────────────────────────────────────────────
-    ("Google Chrome",
-     ["--args", "--app={url}"], ["Darwin"]),
-    ("Microsoft Edge",
-     ["--args", "--app={url}"], ["Darwin"]),
-    ("Chromium",
-     ["--args", "--app={url}"], ["Darwin"]),
-    ("Brave Browser",
-     ["--args", "--app={url}"], ["Darwin"]),
-    ("Safari",
-     ["{url}"], ["Darwin"]),  # Safari doesn't support --app, opens normally
+    # Chrome-based browsers are launched directly via their bundle binary
+    # with `--app` (see _launch_browser): `open -a ... --args --app={url}`
+    # drops the `--args` when the browser is already running and merely
+    # activates the existing window, so the app URL would never load.
+    # Safari has no `--app` mode; it opens the URL as a normal document.
+    ("Google Chrome", ["--app={url}"], ["Darwin"]),
+    ("Microsoft Edge", ["--app={url}"], ["Darwin"]),
+    ("Chromium", ["--app={url}"], ["Darwin"]),
+    ("Brave Browser", ["--app={url}"], ["Darwin"]),
+    ("Safari", ["{url}"], ["Darwin"]),  # Safari doesn't support --app, opens normally
     # ── Linux ─────────────────────────────────────────────────────────
     ("google-chrome",     ["--app={url}", "--window-size={width},{height}"], ["Linux"]),
     ("google-chrome-stable", ["--app={url}", "--window-size={width},{height}"], ["Linux"]),
@@ -206,8 +206,21 @@ class WebViewWindow:
         ]
 
         if system == "Darwin":
-            # macOS: `open -a "Browser" --args ...`
-            full_cmd = ["open", "-a", browser] + args
+            if browser == "Safari":
+                # Safari can't run --app; open the URL as a normal document.
+                full_cmd = ["open", "-a", browser, url]
+            else:
+                # Chrome-based browsers: invoke the bundle binary directly so
+                # `--app={url}` opens a standalone window that loads the URL
+                # even when the browser is already running. `open -a ... --args`
+                # is ignored for a running instance.
+                binary = os.path.join(
+                    "/Applications", browser + ".app", "Contents", "MacOS", browser
+                )
+                if os.path.isfile(binary):
+                    full_cmd = [binary] + args
+                else:
+                    full_cmd = ["open", "-a", browser] + args
             logger.info("WebViewWindow: %s", " ".join(full_cmd))
             self._process = subprocess.Popen(
                 full_cmd,
