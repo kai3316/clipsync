@@ -891,6 +891,21 @@ class WebServer:
             def _token_ok(inner_self) -> bool:
                 return _validate_token(inner_self.path, cfg.web_token)
 
+            def _companion_client_ok(inner_self) -> bool:
+                """Allow the request when the companion serves it.
+
+                The web companion's job is to serve the dashboard to phones /
+                LAN devices. The local webview dashboard is reached over
+                127.0.0.1. When the companion is turned off the server keeps
+                running for the local dashboard but must refuse non-local
+                clients — otherwise the dashboard breaks (it IS served by
+                this server).
+                """
+                if cfg.web_enabled:
+                    return True
+                host = (inner_self.client_address or ("", 0))[0]
+                return host in ("127.0.0.1", "::1")
+
             @staticmethod
             def _available_locales() -> set:
                 """Return the set of available locale codes, discovered from
@@ -1105,6 +1120,11 @@ class WebServer:
                 qs = parsed.query
                 query_params = urllib.parse.parse_qs(qs)
 
+                # Companion off → local dashboard only (LAN/phones get 403).
+                if not inner_self._companion_client_ok():
+                    inner_self._send_json({"error": "web companion disabled"}, 403)
+                    return
+
                 # ── WebSocket upgrade at /ws ─────────────────────
                 if path == "/ws":
                     # Token validation for WebSocket
@@ -1282,6 +1302,11 @@ class WebServer:
                 path = parsed.path
                 qs = parsed.query
                 query_params = urllib.parse.parse_qs(qs)
+
+                # Companion off → local dashboard only (LAN/phones get 403).
+                if not inner_self._companion_client_ok():
+                    inner_self._send_json({"error": "web companion disabled"}, 403)
+                    return
 
                 if not inner_self._token_ok():
                     inner_self._send_json({"error": "invalid token"}, 403)

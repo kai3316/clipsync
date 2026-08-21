@@ -1297,9 +1297,18 @@ class Application:
 
         if "web_enabled" in updated and self.web_server is not None:
             try:
-                if updated["web_enabled"] and not self.web_server.is_running:
-                    self.web_server.start()
-                elif not updated["web_enabled"] and self.web_server.is_running:
+                if updated["web_enabled"]:
+                    if not self.web_server.is_running:
+                        self.web_server.start()
+                elif self.cfg.ui_backend == "webview":
+                    # The webview dashboard IS served by this server, so keep
+                    # it running and only stop serving non-local clients (the
+                    # companion's job) — WebServer._companion_client_ok()
+                    # enforces that. Otherwise the dashboard breaks the moment
+                    # the companion is turned off.
+                    logger.info("Web companion off; keeping server up for the "
+                                "local webview dashboard")
+                elif self.web_server.is_running:
                     self.web_server.stop()
             except Exception:
                 logger.debug("Failed to apply web_enabled live", exc_info=True)
@@ -1572,9 +1581,12 @@ class Application:
                     self.cfg.ui_backend = "ctk"
                     self._save_cfg_encrypted()
                 return
-            self.cfg.web_enabled = True
-            self.systray.set_web_enabled(True)
-            logger.info("Web companion auto-started (ui_backend=%s)", self.cfg.ui_backend)
+            # Respect the user's companion setting. In webview mode the server
+            # stays up for the local dashboard even when the companion is off
+            # (non-local clients are refused by WebServer._companion_client_ok),
+            # so don't force it back on here.
+            logger.info("Web companion ready (ui_backend=%s, web_enabled=%s)",
+                        self.cfg.ui_backend, self.cfg.web_enabled)
 
     # ═══════════════════════════════════════════════════════════════
     # Phase 10: Background threads
