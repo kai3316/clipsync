@@ -150,10 +150,6 @@
         });
       },
 
-      hotkeyLabel: function (key) {
-        return this.t('hotkeys.' + key);
-      },
-
       sectionTabs: function () {
         // Plain-text labels, no emoji — the settings_nav.* translations no
         // longer carry emoji prefixes, so there is no icon column here.
@@ -175,6 +171,10 @@
     methods: {
       selectSection: function (id) {
         this.activeSection = id;
+      },
+
+      hotkeyLabel: function (key) {
+        return this.t('hotkeys.' + key);
       },
 
       populateFromCache: function () {

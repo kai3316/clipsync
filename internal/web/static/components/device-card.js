@@ -108,7 +108,7 @@
         '<div class="device-card__icon">{{ osIcon }}</div>' +
         '<div class="device-card__info">' +
           '<span class="device-card__name text-ellipsis">{{ device.device_name || device.name || device.device_id }}</span>' +
-          '<span class="device-card__id text-ellipsis">{{ isLocal ? \'🖥 \' + t(\'device.this_computer\') : device.device_id }}</span>' +
+          '<span class="device-card__id text-ellipsis">{{ isLocal ? \'💻 \' + t(\'device.this_computer\') : device.device_id }}</span>' +
           '<span v-if="device.os" class="device-card__os">{{ device.os }}</span>' +
           '<!-- Note -->' +
           '<div v-if="!editingNote" class="device-card__note" role="button" tabindex="0" @click.stop="startEditNote" @keyup.enter="startEditNote" @keyup.space.prevent="startEditNote">' +

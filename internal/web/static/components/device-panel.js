@@ -88,7 +88,7 @@
 
           '<!-- This Device -->' +
           '<div v-if="localDev" class="device-panel__section">' +
-            '<div class="section-header">🖥 {{ t(\'devices.this_device\') }}</div>' +
+            '<div class="section-header">💻 {{ t(\'devices.this_device\') }}</div>' +
             '<device-card :device="localDev"></device-card>' +
           '</div>' +
 

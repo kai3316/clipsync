@@ -269,7 +269,7 @@
             '<h3 class="overview-card__title">{{ t(\'overview.this_device\') }}</h3>' +
             '<div class="overview-device-info">' +
               '<span v-if="!editingName" class="overview-device-name">' +
-                '<span class="overview-hero-icon">🖥</span> {{ store.deviceName }}' +
+                '<span class="overview-hero-icon">💻</span> {{ store.deviceName }}' +
                 '<button class="btn-ghost overview-edit-btn" @click="startEditName" :title="t(\'overview.edit_name\')">&#9999;&#65039;</button>' +
               '</span>' +
               '<span v-else class="overview-device-name">' +
