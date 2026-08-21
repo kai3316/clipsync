@@ -263,6 +263,9 @@
         // empty string so the item is not assigned a literal "Ungrouped"
         // group that would then be filtered inconsistently.
         if (group === 'Ungrouped') group = '';
+        // Register the target group so it stays visible even if it ends up
+        // with no items afterwards.
+        if (group) this.store.ensureGroup(group);
         ClipsyncAPI.updateFavorite(this.item.id, { group: group }).then(function (res) {
           if (res && res.ok !== false && res.favorite) {
             var idx = self.store.favorites.findIndex(function (f) { return f.id === self.item.id; });

@@ -61,6 +61,7 @@
     favorites: [],
     activeGroup: '',            // empty string = all groups
     favoriteSearch: '',        // search query for favorites
+    groupNames: [],            // known group names (incl. empty ones), persisted
 
     /* ═══════════════════════════════════════════════════════════════
        Transfers
@@ -190,6 +191,7 @@
       this.deviceName = deviceName;
       this.loadTheme();
       this.loadOnboarding();
+      this.loadGroups();
     },
 
     /**
@@ -681,7 +683,9 @@
     },
 
     /**
-     * Get unique group names with counts.
+     * Get unique group names with counts. Groups created from the sidebar are
+     * kept in `groupNames` so empty ones (no items yet) still show with a 0
+     * count instead of silently disappearing.
      * @returns {Object} { groupName: count, ... }
      */
     groupedFavorites: function () {
@@ -690,7 +694,88 @@
         var g = this.favorites[i].group || 'Ungrouped';
         groups[g] = (groups[g] || 0) + 1;
       }
+      for (var j = 0; j < this.groupNames.length; j++) {
+        var name = this.groupNames[j];
+        if (name && groups[name] === undefined) {
+          groups[name] = 0;
+        }
+      }
       return groups;
+    },
+
+    /* ═══════════════════════════════════════════════════════════════
+       Group registry (persisted in localStorage)
+       ═══════════════════════════════════════════════════════════════ */
+
+    /**
+     * Load the persisted group-name list from localStorage.
+     */
+    loadGroups: function () {
+      var saved = null;
+      try { saved = localStorage.getItem('clipsync_groups'); } catch (e) { /* ignore */ }
+      this.groupNames = [];
+      if (saved) {
+        try {
+          var parsed = JSON.parse(saved);
+          if (Array.isArray(parsed)) {
+            for (var i = 0; i < parsed.length; i++) {
+              if (parsed[i] && typeof parsed[i] === 'string') {
+                this.groupNames.push(parsed[i]);
+              }
+            }
+          }
+        } catch (e) { /* ignore */ }
+      }
+    },
+
+    /**
+     * Persist the group-name list to localStorage.
+     */
+    persistGroups: function () {
+      try {
+        localStorage.setItem('clipsync_groups', JSON.stringify(this.groupNames));
+      } catch (e) { /* ignore */ }
+    },
+
+    /**
+     * Register a group name so an empty group stays visible in the sidebar.
+     */
+    ensureGroup: function (name) {
+      if (!name || typeof name !== 'string') return;
+      name = name.trim();
+      if (!name) return;
+      for (var i = 0; i < this.groupNames.length; i++) {
+        if (this.groupNames[i] === name) return;
+      }
+      this.groupNames.push(name);
+      this.persistGroups();
+    },
+
+    /**
+     * Remove a group name from the registry (e.g. group deleted).
+     */
+    removeGroup: function (name) {
+      var idx = this.groupNames.indexOf(name);
+      if (idx === -1) return;
+      this.groupNames.splice(idx, 1);
+      this.persistGroups();
+    },
+
+    /**
+     * Rename a group in the registry (keeps empty groups alive).
+     */
+    renameGroup: function (oldName, newName) {
+      var idx = this.groupNames.indexOf(oldName);
+      if (idx !== -1) {
+        this.groupNames.splice(idx, 1);
+      }
+      if (newName && typeof newName === 'string') {
+        newName = newName.trim();
+        if (newName && this.groupNames.indexOf(newName) === -1) {
+          this.groupNames.push(newName);
+        }
+      }
+      this.persistGroups();
     },
 
     /* ═══════════════════════════════════════════════════════════════

@@ -542,6 +542,7 @@
       addFromHistory: function (hitem) {
         var self = this;
         var group = this.getEffectiveGroup();
+        this.store.ensureGroup(group);
 
         var preview = hitem.text_preview || '';
 
@@ -598,6 +599,7 @@
         }
 
         var group = this.getEffectiveGroup();
+        this.store.ensureGroup(group);
 
         var self = this;
         this.addingFavorite = true;
@@ -647,7 +649,9 @@
           this.cancelNewGroup();
           return;
         }
-        // Select the new group (it exists as a filter; items get assigned via add or move)
+        // Register the group so it shows in the sidebar even before it has
+        // any items, then select it so items can be added/moved into it.
+        this.store.ensureGroup(name);
         this.store.activeGroup = name;
         this.showNewGroupInput = false;
         this.newGroupInputValue = '';
@@ -690,10 +694,15 @@
         var newName = this.renameValue.trim();
         this.renamingGroup = null;
 
-        if (!oldName || !newName || oldName === newName) return;
+        // "Ungrouped" is a virtual label for items without a group, not a real
+        // group — it cannot be renamed.
+        if (!oldName || oldName === 'Ungrouped' || !newName || oldName === newName) return;
+
+        var store = this.store;
+        // Rename the group itself so empty groups stay alive in the sidebar.
+        store.renameGroup(oldName, newName);
 
         // Rename all favorites in this group
-        var store = this.store;
         var toUpdate = [];
         for (var i = 0; i < store.favorites.length; i++) {
           if ((store.favorites[i].group || 'Ungrouped') === oldName) {
@@ -701,9 +710,16 @@
           }
         }
 
-        if (toUpdate.length === 0) return;
-
         var self = this;
+        if (store.activeGroup === oldName) {
+          store.activeGroup = newName;
+        }
+
+        if (toUpdate.length === 0) {
+          self.store.showToast(self.t('favorites.group_renamed', { name: newName }), 2000);
+          return;
+        }
+
         var completed = 0;
         var total = toUpdate.length;
 
@@ -714,9 +730,6 @@
             }
             completed++;
             if (completed === total) {
-              if (store.activeGroup === oldName) {
-                store.activeGroup = newName;
-              }
               self.store.showToast(self.t('favorites.group_renamed', { name: newName }), 2000);
             }
           }).catch(function (e) {
@@ -733,9 +746,9 @@
 
       deleteGroup: function (group) {
         this.contextMenu.show = false;
-        if (!group) return;
+        // "Ungrouped" is a virtual label, not a real group.
+        if (!group || group === 'Ungrouped') return;
 
-        var groupName = group === 'Ungrouped' ? '' : group;
         var store = this.store;
 
         var toUpdate = [];
@@ -745,35 +758,48 @@
           }
         }
 
-        if (toUpdate.length === 0) return;
-
         var self = this;
-        this.store.confirm(
-          this.t('favorites.delete_group_title'),
-          this.t('favorites.delete_group_confirm', { group: group, count: toUpdate.length })
-        ).then(function () {
+        var doDelete = function () {
+          // Drop the group from the registry (covers groups with no items).
+          store.removeGroup(group);
+          if (store.activeGroup === group) {
+            store.activeGroup = '';
+          }
+
           var completed = 0;
           var total = toUpdate.length;
 
+          if (total === 0) {
+            self.store.showToast(self.t('favorites.group_deleted', { name: group }), 2000);
+            return;
+          }
+
           toUpdate.forEach(function (fav) {
-          ClipsyncAPI.updateFavorite(fav.id, { group: '' }).then(function (res) {
-            if (res && res.ok !== false && res.favorite) {
-              fav.group = res.favorite.group;
-            }
-            completed++;
-            if (completed === total) {
-              if (store.activeGroup === group) {
-                store.activeGroup = '';
+            ClipsyncAPI.updateFavorite(fav.id, { group: '' }).then(function (res) {
+              if (res && res.ok !== false && res.favorite) {
+                fav.group = res.favorite.group;
               }
-              self.store.showToast(self.t('favorites.group_deleted', { name: group }), 2000);
-            }
-          }).catch(function (e) {
-            completed++;
-            console.error('[ClipSync] Delete group item failed:', e);
+              completed++;
+              if (completed === total) {
+                self.store.showToast(self.t('favorites.group_deleted', { name: group }), 2000);
+              }
+            }).catch(function (e) {
+              completed++;
+              console.error('[ClipSync] Delete group item failed:', e);
+            });
           });
-        });
-      }).catch(function () { /* cancelled */ });
-    },
+        };
+
+        if (toUpdate.length === 0) {
+          doDelete();
+          return;
+        }
+
+        this.store.confirm(
+          this.t('favorites.delete_group_title'),
+          this.t('favorites.delete_group_confirm', { group: group, count: toUpdate.length })
+        ).then(doDelete).catch(function () { /* cancelled */ });
+      },
 
     mounted: function () {
       // Close context menu on outside click
