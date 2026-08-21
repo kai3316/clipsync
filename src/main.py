@@ -890,7 +890,7 @@ class Application:
                 self._last_no_peer_warn = now
                 self._web_toast(T("status.no_devices"), 2000)
 
-    def _on_peer_message(self, msg) -> None:
+    def _on_peer_message(self, msg, peer_id: str | None = None) -> None:
         msg_type = getattr(msg, "msg_type", "clipboard")
         if msg_type == "nav_url":
             url = getattr(msg, "_raw_payload", {}).get("url", "") or ""
@@ -907,9 +907,13 @@ class Application:
             return
         if msg_type in FILE_TRANSFER_MSG_TYPES:
             raw_payload = getattr(msg, "_raw_payload", {})
-            self.file_transfer_mgr.handle_message(
-                msg_type, raw_payload, self.transport_mgr.broadcast,
-            )
+            # Respond only to the sending peer (acks, rejections, progress,
+            # chunks) instead of broadcasting to every connected device.
+            if peer_id:
+                send_fn = (lambda data, pid=peer_id: self.transport_mgr.send_to_peer(pid, data))
+            else:
+                send_fn = self.transport_mgr.broadcast
+            self.file_transfer_mgr.handle_message(msg_type, raw_payload, send_fn)
         else:
             self.sync_mgr.handle_remote_message(msg)
 

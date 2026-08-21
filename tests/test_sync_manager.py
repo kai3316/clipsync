@@ -72,15 +72,28 @@ class TestSyncManager:
     def teardown_method(self):
         self.mgr.stop()
 
+    def _wait_sent(self, count: int, timeout: float = 3.0) -> bool:
+        """Deadline-poll until len(self.sent) reaches `count`.
+
+        The debounce timer (SYNC_DEBOUNCE = 0.5s) fires on a background thread,
+        so a fixed ``time.sleep(0.5)`` right at the boundary races it on a
+        loaded CI runner (timer delayed past the boundary → a later fire
+        cancels the pending timer). Polling for the observed outcome instead
+        is robust under load.
+        """
+        deadline = time.time() + timeout
+        while len(self.sent) < count and time.time() < deadline:
+            time.sleep(0.05)
+        return len(self.sent) >= count
+
     def test_local_change_broadcasts(self):
         self.reader.content = ClipboardContent(
             types={ContentType.TEXT: b"hello"},
         )
         self.mgr.start()
         self.monitor.fire()
-        time.sleep(0.5)  # exceed SYNC_DEBOUNCE for timer to fire
 
-        assert len(self.sent) == 1
+        assert self._wait_sent(1)
         assert self.sent[0].source_device == "test-device"
         assert self.sent[0].content.types[ContentType.TEXT] == b"hello"
 
@@ -91,8 +104,8 @@ class TestSyncManager:
         self.mgr.start()
         self.monitor.fire()
         self.monitor.fire()  # second fire cancels timer, restarts — coalesced
-        time.sleep(0.5)  # exceed SYNC_DEBOUNCE
 
+        assert self._wait_sent(1)
         assert len(self.sent) == 1
 
     def test_different_content_sends_both(self):
@@ -101,14 +114,18 @@ class TestSyncManager:
         )
         self.mgr.start()
         self.monitor.fire()
-        time.sleep(0.5)  # exceed SYNC_DEBOUNCE for first timer
+
+        # Wait for the FIRST send to actually complete before firing the second
+        # — otherwise the second fire cancels the first's pending timer and
+        # "first" is coalesced away (a real race at the debounce boundary).
+        assert self._wait_sent(1)
 
         self.reader.content = ClipboardContent(
             types={ContentType.TEXT: b"second"},
         )
         self.monitor.fire()
-        time.sleep(0.5)  # exceed SYNC_DEBOUNCE for second timer
 
+        assert self._wait_sent(2)
         assert len(self.sent) == 2
 
     def test_throttle_rapid_changes(self):
@@ -121,8 +138,8 @@ class TestSyncManager:
             )
             self.monitor.fire()
 
-        time.sleep(0.5)  # exceed SYNC_DEBOUNCE to let final timer fire
         # Rapid changes coalesce into a single send (only the last one)
+        assert self._wait_sent(1)
         assert len(self.sent) == 1, f"Expected coalescing to 1, got {len(self.sent)}"
         assert self.sent[0].content.types[ContentType.TEXT] == b"rapid 4"
 
@@ -171,9 +188,8 @@ class TestSyncManager:
         )
         self.mgr.start()
         self.monitor.fire()
-        time.sleep(0.5)  # exceed SYNC_DEBOUNCE
 
-        assert len(self.sent) == 1
+        assert self._wait_sent(1)
         write_count_before = self.writer.write_count
 
         # Simulate the remote reflecting this back

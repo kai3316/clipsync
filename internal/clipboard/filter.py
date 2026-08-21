@@ -102,26 +102,26 @@ class ContentFilter:
             ("private_key", _PRIVATE_KEY_RE),
             ("password", _PASSWORD_RE),
         ]
-        # Redaction is ON by default: an omitted or empty category list
-        # enables every category, so fresh installs filter sensitive
-        # content out of the box.  Pass a non-empty list to enable a
-        # subset.
-        if enabled_categories:
-            self._enabled = list(enabled_categories)
-        else:
+        # Redaction is ON by default: None (unconfigured) enables every
+        # category, so fresh installs filter sensitive content out of the box.
+        # A non-empty list enables just that subset; an EMPTY list means the
+        # user explicitly disabled redaction (distinct from the None default).
+        if enabled_categories is None:
             self._enabled = list(dict.fromkeys(c for c, _ in self._all_patterns))
+        else:
+            self._enabled = list(enabled_categories)
 
     @property
     def enabled_categories(self) -> list[str]:
         return list(self._enabled)
 
     @enabled_categories.setter
-    def enabled_categories(self, categories: list[str]) -> None:
-        if categories:
-            self._enabled = list(categories)
-        else:
-            # Empty list means "not configured" → default to all enabled.
+    def enabled_categories(self, categories: list[str] | None) -> None:
+        if categories is None:
+            # Not configured → all categories enabled (default).
             self._enabled = list(dict.fromkeys(c for c, _ in self._all_patterns))
+        else:
+            self._enabled = list(categories)
 
     @property
     def is_active(self) -> bool:

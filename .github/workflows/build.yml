@@ -99,10 +99,15 @@ jobs:
       - name: Smoke test (Linux bundle contains web UI)
         if: runner.os == 'Linux'
         run: |
-          if tar -tzf ${{ matrix.artifact }}.tar.gz | grep -q 'internal/web/static/index.html'; then
-            echo "OK: web UI bundled in ${{ matrix.artifact }}.tar.gz"
+          # Linux is a PyInstaller ONEFILE build: the static web UI is embedded
+          # inside the `clipsync` binary, so inspect the archive with
+          # pyi-archive-viewer rather than listing loose tar files.
+          cd dist
+          if python -m PyInstaller.utils.cliutils.archive_viewer -l clipsync \
+               | grep -q 'internal/web/static/index.html'; then
+            echo "OK: web UI bundled in clipsync binary"
           else
-            echo "::error::Web UI (internal/web/static/index.html) missing from ${{ matrix.artifact }}.tar.gz"
+            echo "::error::Web UI (internal/web/static/index.html) missing from clipsync binary"
             exit 1
           fi
 

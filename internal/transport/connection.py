@@ -262,7 +262,10 @@ class PeerConnection:
                             self.device_id[:12],
                         )
                         continue
-                    self._on_message(msg)
+                    # Pass this connection's peer id so handlers can respond to
+                    # the sender (e.g. file-transfer acks/chunks) instead of
+                    # broadcasting to every peer.
+                    self._on_message(msg, self.device_id)
 
             except (ConnectionError, OSError) as e:
                 end_reason = f"ConnectionError: {e}"

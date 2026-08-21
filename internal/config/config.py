@@ -46,7 +46,9 @@ class Config:
     peers: dict[str, PeerInfo] = field(default_factory=dict)
     sync_enabled: bool = True
     auto_start: bool = False
-    filter_enabled_categories: list[str] = field(default_factory=list)
+    # None = not configured → all redaction categories enabled (default ON).
+    # [] = user explicitly disabled redaction. Non-empty = that subset.
+    filter_enabled_categories: list[str] | None = None
     relay_url: str = ""
     private_key_pem: str = ""
     certificate_pem: str = ""
