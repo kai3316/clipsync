@@ -269,6 +269,10 @@ var ClipsyncWS = (function () {
             store.historyOffset = data.items.length;
             store.historyHasMore = (data.total != null) ? (store.historyOffset < data.total) : false;
           }
+          // A clipboard change also means the overview's recent-activity feed
+          // and stats changed — refresh it so the feed stays live without
+          // waiting for the 5s poll.
+          store.fetchOverview();
           break;
 
         case 'transfer_progress':

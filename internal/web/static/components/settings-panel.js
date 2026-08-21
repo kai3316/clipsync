@@ -633,6 +633,13 @@
               history: s.history || 0,
               favorites: s.favorites || 0,
             }), 3000);
+            // Reload history/favorites/devices so the restored data actually
+            // shows up in the panels without a manual page refresh.
+            try {
+              if (self.$root && typeof self.$root.loadData === 'function') {
+                self.$root.loadData().catch(function () {});
+              }
+            } catch (e) { /* root may be gone */ }
           } else {
             self.store.showToast(self.t('settings.restore_failed'), 2000);
           }

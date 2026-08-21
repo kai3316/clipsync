@@ -81,7 +81,7 @@
           class="history-item__action-btn"
           @click="startEditTitle"
           :title="t('favorites.edit_title_tooltip')"
-        >&#9998;</button>
+        >&#9999;&#65039;</button>
         <div class="favorite-item__group-dropdown" :class="{ 'favorite-item__group-dropdown--open': showGroupDropdown }">
           <button
             class="history-item__action-btn"
@@ -105,7 +105,7 @@
           class="history-item__action-btn history-item__action-btn--danger"
           @click="removeFavorite"
           :title="t('favorites.remove_tooltip')"
-        >&#11088;</button>
+        >&#128465;</button>
       </div>
     </div>`,
 

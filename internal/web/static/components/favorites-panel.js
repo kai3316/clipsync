@@ -173,7 +173,7 @@
               v-if="searchInput"
               class="favorites-panel__search-clear"
               @click="clearSearch"
-            >&#10005;</button>
+            >&#10006;&#65039;</button>
           </div>
 
           <!-- Loading state -->
@@ -230,7 +230,7 @@
         @click.stop
       >
         <button class="favorites-panel__context-menu-item" @click="startRenameGroup(contextMenu.group)">
-          &#9998; {{ t('context.rename') }}
+          &#9999;&#65039; {{ t('context.rename') }}
         </button>
         <button class="favorites-panel__context-menu-item favorites-panel__context-menu-item--danger" @click="deleteGroup(contextMenu.group)">
           &#128465; {{ t('ui.delete') }}

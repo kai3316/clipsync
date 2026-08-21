@@ -67,7 +67,7 @@
             ' class="title-bar__search-clear"' +
             ' @click="clearSearch"' +
             ' :title="t(\'ui.cancel\')"' +
-          '>&#10005;</button>' +
+          '>&#10006;&#65039;</button>' +
         '</div>' +
         '<div class="title-bar__actions" style="-webkit-app-region:no-drag">' +
           '<button' +
@@ -81,7 +81,7 @@
             ' :title="t(\'ui.settings\')"' +
             ' :aria-label="t(\'ui.settings\')"' +
             ' @click="openSettings"' +
-          '>&#9881;</button>' +
+          '>&#9881;&#65039;</button>' +
           <!-- Native browser window chrome provides minimize/close buttons in app mode -->
         '</div>' +
       '</header>',

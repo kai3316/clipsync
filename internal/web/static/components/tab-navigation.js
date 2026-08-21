@@ -46,7 +46,7 @@
           {
             id: 'overview',
             label: t('ui.overview'),
-            icon: '◉',
+            icon: '📊',
             count: 0,
           },
           {

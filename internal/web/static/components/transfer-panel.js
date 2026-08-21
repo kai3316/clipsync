@@ -64,6 +64,28 @@
     },
 
     template: `<div class="transfer-panel">
+      <!-- Speed Test -->
+      <div class="transfer-card transfer-card--panel glass" style="margin-bottom:12px">
+        <div class="transfer-card__header">
+          <span class="transfer-card__title">⚡ {{ t('transfer.speed_test') }}</span>
+          <span v-if="speedTest.running" class="transfer-speed-status">{{ t('transfer.running') }}</span>
+          <button v-if="!speedTest.running" class="transfer-run-btn" @click="store.startSpeedTest()">
+            ▶ {{ t('transfer.run') }}
+          </button>
+        </div>
+        <div class="transfer-speed-body"
+             v-if="speedTest.running || speedTest.progress > 0 || speedTest.resultMbps !== null">
+          <div class="transfer-speed-result" v-if="speedTest.resultMbps !== null">
+            <span class="transfer-speed-value">{{ speedTest.resultMbps.toFixed(1) }}<span class="transfer-speed-unit">Mbps</span></span>
+            <span class="badge" :class="speedQualityClass">{{ speedQualityLabel }}</span>
+          </div>
+          <div class="transfer-speed-progress" v-if="speedTest.running || speedTest.progress > 0">
+            <div class="transfer-speed-progress__fill" :style="{ width: (speedTest.progress * 100) + '%' }"></div>
+          </div>
+        </div>
+        <div v-if="speedTest.error" class="transfer-speed-error">{{ speedTest.error }}</div>
+      </div>
+
       <!-- Send Files Card -->
       <div class="transfer-card transfer-card--panel glass" style="margin-bottom:12px">
         <div class="transfer-card__header">
@@ -104,28 +126,6 @@
         <!-- Hidden file inputs -->
         <input type="file" ref="fileInput" style="display:none" @change="onFilePicked">
         <input type="file" ref="folderInput" style="display:none" webkitdirectory @change="onFilePicked">
-      </div>
-
-      <!-- Speed Test -->
-      <div class="transfer-card transfer-card--panel glass" style="margin-bottom:12px">
-        <div class="transfer-card__header">
-          <span class="transfer-card__title">⚡ {{ t('transfer.speed_test') }}</span>
-          <span v-if="speedTest.running" class="transfer-speed-status">{{ t('transfer.running') }}</span>
-          <button v-if="!speedTest.running" class="transfer-run-btn" @click="store.startSpeedTest()">
-            ▶ {{ t('transfer.run') }}
-          </button>
-        </div>
-        <div class="transfer-speed-body"
-             v-if="speedTest.running || speedTest.progress > 0 || speedTest.resultMbps !== null">
-          <div class="transfer-speed-result" v-if="speedTest.resultMbps !== null">
-            <span class="transfer-speed-value">{{ speedTest.resultMbps.toFixed(1) }}<span class="transfer-speed-unit">Mbps</span></span>
-            <span class="badge" :class="speedQualityClass">{{ speedQualityLabel }}</span>
-          </div>
-          <div class="transfer-speed-progress" v-if="speedTest.running || speedTest.progress > 0">
-            <div class="transfer-speed-progress__fill" :style="{ width: (speedTest.progress * 100) + '%' }"></div>
-          </div>
-        </div>
-        <div v-if="speedTest.error" class="transfer-speed-error">{{ speedTest.error }}</div>
       </div>
 
       <!-- Active transfers -->

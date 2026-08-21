@@ -94,6 +94,7 @@
             images: o.historyImages || 0,
             transfers: o.activeTransfers || 0,
             completed: o.transferCompleted || 0,
+            pinned: o.historyPinned || 0,
           };
           Object.keys(targets).forEach(function (key) {
             self._animate(key, targets[key]);
@@ -269,7 +270,7 @@
             '<div class="overview-device-info">' +
               '<span v-if="!editingName" class="overview-device-name">' +
                 '<span class="overview-hero-icon">🖥</span> {{ store.deviceName }}' +
-                '<button class="btn-ghost overview-edit-btn" @click="startEditName" :title="t(\'overview.edit_name\')">✎</button>' +
+                '<button class="btn-ghost overview-edit-btn" @click="startEditName" :title="t(\'overview.edit_name\')">&#9999;&#65039;</button>' +
               '</span>' +
               '<span v-else class="overview-device-name">' +
                 '<input ref="nameInput" v-model="nameInput" class="overview-name-input" @keydown.enter="saveName" @keydown.escape="cancelEditName" @blur="saveName">' +
@@ -284,7 +285,7 @@
               '</div>' +
             '</div>' +
             '<div class="overview-hero-strip">' +
-              '<span class="overview-hero-chip"><span class="status-dot status-dot--online"></span> {{ stats.connected || 0 }} {{ t(\'overview.connected\') }}</span>' +
+              '<span class="overview-hero-chip"><span class="status-dot" :class="stats.connected > 0 ? \'status-dot--online\' : \'status-dot--offline\'"></span> {{ stats.connected || 0 }} {{ t(\'overview.connected\') }}</span>' +
               '<span class="overview-hero-chip">{{ t(\'overview.uptime\') }} {{ uptimeDisplay }}</span>' +
             '</div>' +
             '<div v-if="o.webEnabled && o.localIp" class="overview-web-qr">' +
@@ -394,7 +395,10 @@
               '</span>' +
             '</div>' +
           '</div>' +
-          '<div v-else class="overview-empty-hint">{{ t(\'overview.no_activity_hint\') }}</div>' +
+          '<div v-else class="overview-empty-state">' +
+            '<span class="overview-empty-state__icon">📋</span>' +
+            '<span class="overview-empty-state__text">{{ t(\'overview.no_activity_hint\') }}</span>' +
+          '</div>' +
         '</div>' +
       '</div>',
   };

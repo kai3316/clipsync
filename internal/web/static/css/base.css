@@ -398,6 +398,12 @@ textarea::placeholder {
   user-select: none;
 }
 
+.btn-ghost:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+  pointer-events: none;
+}
+
 .btn-ghost:hover {
   color: var(--clipsync-fg);
   background: var(--clipsync-hover);

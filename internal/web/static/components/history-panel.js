@@ -106,7 +106,7 @@
       <div class="history-panel__header" v-if="hasContent">
         <span class="text-muted" style="font-size:12px">{{ sections.pinned.length + sections.unpinned.length }} {{ t('history.items') || 'items' }}</span>
         <div class="history-panel__header-actions">
-          <button class="btn-ghost" @click="toggleSort" :title="sortLabel">↕ {{ sortLabel }}</button>
+          <button class="btn-ghost" @click="toggleSort" :title="sortLabel">&#8597;&#65039; {{ sortLabel }}</button>
           <button class="btn-ghost" style="color:var(--clipsync-danger)" @click="clearAll" :disabled="clearingAll">
             {{ clearingAll ? '...' : t('history.clear_all') || 'Clear All' }}
           </button>
@@ -215,7 +215,7 @@
               <span class="btn-action-bar__label">{{ deleting ? t('web.deleted') : t('web.delete') }}</span>
             </button>
             <button class="btn-action-bar btn-action-bar--ghost" @click="clearSelection">
-              <span class="btn-action-bar__icon">&#10005;</span>
+              <span class="btn-action-bar__icon">&#10006;&#65039;</span>
               <span class="btn-action-bar__label">{{ t('web.cancel') }}</span>
             </button>
           </div>

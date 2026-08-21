@@ -477,6 +477,13 @@
       color: inherit;
     }
 
+    /* Active tab badge: dark pill + white text so it stays readable on the
+       bright cyan→violet gradient in BOTH light and dark themes. */
+    .tab-nav__btn--active .tab-nav__badge {
+      background: rgba(5, 6, 13, 0.35);
+      color: #ffffff;
+    }
+
     /* ── Vertical tab navigation (sidebar) ─────────────────────── */
 
     .tab-nav-vertical {
@@ -866,6 +873,11 @@
     .history-item:hover {
       border-color: var(--clipsync-border-strong);
       box-shadow: 0 0 14px var(--clipsync-accent-glow);
+    }
+
+    /* Keep the cyan pinned edge on hover (border shorthand would override it). */
+    .history-item--pinned:hover {
+      border-left-color: var(--clipsync-accent);
     }
 
     .history-item--pinned {
@@ -1275,7 +1287,10 @@
     }
 
     .overview-card {
-      background: var(--clipsync-panel);
+      /* Translucent so the .glass frosted backdrop actually shows through. */
+      background: color-mix(in srgb, var(--clipsync-panel) 68%, transparent);
+      backdrop-filter: blur(14px) saturate(160%);
+      -webkit-backdrop-filter: blur(14px) saturate(160%);
       border: 1px solid var(--clipsync-border);
       border-radius: var(--clipsync-radius-lg);
       padding: var(--clipsync-space-4);
@@ -2074,7 +2089,9 @@
       width: 6px;
       height: 6px;
       border-radius: 50%;
-      background: var(--clipsync-danger);
+      /* Gray when paused — matches the overview's status dot (red would
+         read as an error and disagree with the top bar). */
+      background: var(--clipsync-fg-subtle);
       transition: background var(--clipsync-transition);
     }
 
@@ -3961,6 +3978,11 @@
       padding: 0;
     }
 
+    .settings-toggle--disabled {
+      opacity: 0.45;
+      cursor: not-allowed;
+    }
+
     .settings-toggle--on {
       background: var(--clipsync-accent);
       box-shadow: 0 0 10px var(--clipsync-accent-glow);
@@ -4062,7 +4084,10 @@
     .dialog-card {
       width: 100%;
       max-width: 420px;
-      background: var(--clipsync-panel);
+      /* Frosted glass, matching the other modals (settings/translate). */
+      background: color-mix(in srgb, var(--clipsync-panel) 78%, transparent);
+      backdrop-filter: blur(20px) saturate(180%);
+      -webkit-backdrop-filter: blur(20px) saturate(180%);
       border: 1px solid var(--clipsync-border-glow);
       border-radius: var(--clipsync-radius-lg);
       box-shadow: var(--clipsync-shadow-lg);

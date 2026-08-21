@@ -434,6 +434,16 @@
             self.overview.networkType = o.network_type || '';
             self.overview.networkDetail = o.network_detail || '';
             self.overview.recentActivity = o.recent_activity || '';
+            // Newer overview fields (rich stats + live activity feed).
+            self.overview.connectedNames = o.connected_names || [];
+            self.overview.discoveredCount = o.discovered_count || 0;
+            self.overview.historyToday = o.history_today || 0;
+            self.overview.historyPinned = o.history_pinned || 0;
+            self.overview.historyImages = o.history_images || 0;
+            self.overview.transferCompleted = o.transfer_completed || 0;
+            self.overview.transferBytes = o.transfer_bytes || 0;
+            self.overview.version = o.version || '';
+            self.overview.recentItems = o.recent_items || [];
           }
         })
         .catch(function (e) {
