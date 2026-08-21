@@ -814,5 +814,9 @@
   "overview.net_health_ok": "Network OK",
   "overview.net_health_warn": "Network needs attention",
   "overview.net_health_fail": "Network issue",
-  "overview.net_health_check": "Check network"
+  "overview.net_health_check": "Check network",
+  "settings_window.diag_firewall": "Firewall",
+  "settings_window.diag_permissions": "Permissions",
+  "settings_window.diag_request": "Request permission / open settings",
+  "settings_window.diag_request_failed": "Failed to open permission settings"
 }

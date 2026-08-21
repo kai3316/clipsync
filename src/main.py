@@ -761,6 +761,7 @@ class Application:
             get_certs=self._get_certs,
             get_diagnostics=self._get_diagnostics,
             on_update_download=self._handle_update_download,
+            on_diagnostics_request=self._handle_diagnostics_request,
         )
 
         # ── Live history push to web clients ────────────────────────
@@ -2802,6 +2803,30 @@ class Application:
         except Exception:
             logger.debug("Failed to push %s to web clients", method_name, exc_info=True)
 
+
+
+    def _handle_diagnostics_request(self, action: str) -> dict:
+        """Open the relevant OS permission / firewall settings, or re-apply a Windows rule."""
+        try:
+            import subprocess as _sp
+            import platform as _platform
+            if action == "firewall":
+                if _platform.system() == "Darwin":
+                    _sp.Popen(["open",
+                               "x-apple.systempreferences:com.apple.preference.security?Firewall"])
+                elif _platform.system() == "Windows":
+                    if self.web_server is not None:
+                        self.web_server._open_firewall(self.cfg.port)
+                return {"ok": True}
+            if action == "local_network":
+                if _platform.system() == "Darwin":
+                    _sp.Popen(["open",
+                               "x-apple.systempreferences:com.apple.preference.security?Privacy_LocalNetwork"])
+                return {"ok": True}
+            return {"ok": False, "error": f"Unknown action: {action}"}
+        except Exception as e:
+            return {"ok": False, "error": str(e)}
+
     def _get_overview_data(self) -> dict:
         """Return aggregated dashboard overview data for the web UI."""
         import time as _time, platform as _platform
@@ -3254,6 +3279,54 @@ class Application:
         network_ok, network_detail, network_guidance = self._classify_network(lan_ip)
         checks.append({"id": "network", "ok": network_ok,
                        "detail": network_detail, "guidance": network_guidance})
+
+        # 6. Firewall — best-effort OS-level check with a "request" action.
+        fw_ok, fw_detail, fw_guidance = True, "No firewall blockage detected", None
+        try:
+            import subprocess as _sp
+            if _platform.system() == "Darwin":
+                _out = _sp.run(
+                    ["/usr/libexec/ApplicationFirewall/socketfilterfw", "--getglobalstate"],
+                    capture_output=True, text=True, timeout=3,
+                ).stdout or ""
+                if "enabled" in _out.lower():
+                    fw_detail = "macOS firewall is enabled"
+                    fw_guidance = ("The macOS firewall is on. If other devices can't reach this "
+                                   "computer, allow ClipSync: System Settings → Network → Firewall → "
+                                   "Options, or tap 'Request permission' to open it.")
+                    # Only fail the check when discovery is also failing (strong signal).
+                    fw_ok = discovery_running
+            elif _platform.system() == "Windows":
+                try:
+                    ok, detail = self.web_server.check_firewall_rule(self.cfg.port)
+                    if not ok:
+                        fw_ok, fw_detail = False, detail
+                        fw_guidance = ("The Windows firewall may be blocking ClipSync. Tap "
+                                       "'Request permission' to add an allow rule for port "
+                                       f"{self.cfg.port}.")
+                except Exception:
+                    pass
+        except Exception:
+            pass
+        checks.append({"id": "firewall", "ok": fw_ok, "detail": fw_detail, "guidance": fw_guidance})
+
+        # 7. Permissions — macOS Local Network (15+) is required for LAN discovery.
+        perm_ok, perm_detail, perm_guidance = True, "No permission issues detected", None
+        try:
+            if _platform.system() == "Darwin":
+                _mv = [int(x) for x in _platform.mac_ver()[0].split(".")[:2]]
+                if len(_mv) == 2 and _mv[0] >= 15:
+                    if not discovery_running:
+                        perm_ok = False
+                        perm_detail = "Local Network permission may be missing (macOS 15+)"
+                        perm_guidance = ("macOS 15+ needs 'Local Network' permission to discover other "
+                                         "devices. Tap 'Request permission' to open System Settings → "
+                                         "Privacy & Security → Local Network and allow ClipSync.")
+                    else:
+                        perm_detail = "Local Network permission granted"
+        except Exception:
+            pass
+        checks.append({"id": "permissions", "ok": perm_ok, "detail": perm_detail, "guidance": perm_guidance})
 
         # summary: "fail" if a critical check (server/discovery/network) is down,
         # "warn" if only advertising/web is down, else "ok".

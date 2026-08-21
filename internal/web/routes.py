@@ -51,7 +51,8 @@ def dispatch(method, path, query_params, body, cfg, history, sync_mgr,
              enc_mgr=None, on_open_file=None, on_open_folder=None,
              on_restart=None, on_reset_dedup=None,
              get_certs=None, get_diagnostics=None,
-             on_update_download=None):
+             on_update_download=None,
+             on_diagnostics_request=None):
     """Route an API request to the appropriate handler, never raising.
 
     Wraps _dispatch in a safety net so an unexpected exception in a handler
@@ -68,7 +69,7 @@ def dispatch(method, path, query_params, body, cfg, history, sync_mgr,
             on_settings_change, on_show_web_qr, on_send_url, get_discovered,
             get_resolved_hashes, get_pending_pairings, enc_mgr,
             on_open_file, on_open_folder, on_restart, on_reset_dedup,
-            get_certs, get_diagnostics, on_update_download,
+            get_certs, get_diagnostics, on_update_download, on_diagnostics_request,
         )
     except Exception:
         logger.exception("Unhandled error in API route: %s %s", method, path)
@@ -94,7 +95,8 @@ def _dispatch(method, path, query_params, body, cfg, history, sync_mgr,
               enc_mgr=None, on_open_file=None, on_open_folder=None,
               on_restart=None, on_reset_dedup=None,
               get_certs=None, get_diagnostics=None,
-              on_update_download=None):
+              on_update_download=None,
+              on_diagnostics_request=None):
     """Route an API request to the appropriate handler.
 
     All handler functions return (data_dict, status_code).

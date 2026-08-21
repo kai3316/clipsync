@@ -531,7 +531,8 @@ class WebServer:
                  enc_mgr=None, on_open_file=None, on_open_folder=None,
                  on_restart=None, on_reset_dedup=None,
                  get_certs=None, get_diagnostics=None,
-                 on_update_download=None):
+                 on_update_download=None,
+                 on_diagnostics_request=None):
         self._cfg = cfg
         self._sync_mgr = sync_mgr
         self._get_connected_ids = get_connected_ids
@@ -573,6 +574,7 @@ class WebServer:
         self._get_certs = get_certs
         self._get_diagnostics = get_diagnostics
         self._on_update_download = on_update_download
+        self._on_diagnostics_request = on_diagnostics_request
         self._httpd: ThreadingHTTPServer | None = None
         self._thread: threading.Thread | None = None
         self._firewall_ok: bool = False
@@ -776,6 +778,7 @@ class WebServer:
         on_toggle_visibility = self._on_toggle_visibility
         on_settings_change = self._on_settings_change
         get_certs = self._get_certs
+        on_diagnostics_request = self._on_diagnostics_request
         get_diagnostics = self._get_diagnostics
         on_update_download = self._on_update_download
         upload_dir = self._upload_dir

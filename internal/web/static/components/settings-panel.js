@@ -470,9 +470,26 @@
           advertising: this.t('settings_window.diag_advertising'),
           web_companion: this.t('settings_window.diag_web'),
           network: this.t('settings_window.diag_network'),
+          firewall: this.t('settings_window.diag_firewall'),
+          permissions: this.t('settings_window.diag_permissions'),
           error: this.t('settings_window.diag_title'),
         };
         return labels[id] || id;
+      },
+
+      requestDiagnosticsAction: function (chk) {
+        var self = this;
+        var action = chk.id === 'permissions' ? 'local_network' : (chk.id === 'firewall' ? 'firewall' : null);
+        if (!action) return;
+        ClipsyncAPI._fetch('POST', '/api/diagnostics/request', { action: action })
+          .then(function (res) {
+            if (!res || res.ok !== true) {
+              self.store.showToast(self.t('settings_window.diag_request_failed'), 2500);
+            }
+          })
+          .catch(function () {
+            self.store.showToast(self.t('settings_window.diag_request_failed'), 2500);
+          });
       },
 
       diagSummaryText: function () {
@@ -1315,6 +1332,7 @@
                         '<span class="diag-check__label">{{ diagLabel(chk.id) }}</span>' +
                         '<span v-if="i < diagRevealed && chk.detail" class="diag-check__detail">{{ chk.detail }}</span>' +
                         '<span v-if="i < diagRevealed && chk.guidance" class="diag-check__guidance">💡 {{ chk.guidance }}</span>' +
+                        '<button v-if="i < diagRevealed && (chk.id === \'firewall\' || chk.id === \'permissions\')" class="settings-btn settings-btn--sm" style="align-self:flex-start;margin-top:4px" @click="requestDiagnosticsAction(chk)">{{ t(\'settings_window.diag_request\') }}</button>' +
                       '</div>' +
                     '</div>' +
                   '</div>' +

@@ -814,5 +814,9 @@
   "overview.net_health_ok": "网络正常",
   "overview.net_health_warn": "网络需注意",
   "overview.net_health_fail": "网络异常",
-  "overview.net_health_check": "检查网络"
+  "overview.net_health_check": "检查网络",
+  "settings_window.diag_firewall": "防火墙",
+  "settings_window.diag_permissions": "权限",
+  "settings_window.diag_request": "申请授权 / 打开设置",
+  "settings_window.diag_request_failed": "无法打开权限设置"
 }
