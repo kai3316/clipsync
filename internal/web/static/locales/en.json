@@ -850,7 +850,7 @@
   "diag.firewall.macos_ok.guidance": "The macOS firewall is on. If other devices can't reach this computer, allow ClipSync: System Settings → Network → Firewall → Options, or tap 'Request permission' to open it.",
   "diag.firewall.win_blocked.detail": "The Windows firewall may be blocking ClipSync",
   "diag.firewall.wrongport.detail": "Wrong port (got {actual}, needs {port})",
-  "diag.firewall.win_fail.guidance": "The Windows firewall may be blocking ClipSync. Tap 'Request permission' to add an allow rule for port {port}.",
+  "diag.firewall.win_fail.guidance": "The Windows firewall may be blocking ClipSync. Tap 'Request permission' to add an allow rule for ports {port}.",
   "diag.firewall.linux_none.detail": "No Linux firewall detected",
   "diag.firewall.linux_active.detail": "{name} firewall is active",
   "diag.firewall.linux_active.guidance": "The {name} firewall is on. If other devices can't reach this computer, allow ports {port} and {web_port}: 'sudo ufw allow {port}/tcp' and 'sudo ufw allow {web_port}/tcp' (or the firewalld equivalent).",

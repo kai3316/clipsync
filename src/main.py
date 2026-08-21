@@ -2818,18 +2818,15 @@ class Application:
                 if _platform.system() == "Windows":
                     # Prefer re-applying the allow rule (idempotent). netsh needs
                     # admin rights — if it can't, open the firewall settings page so
-                    # the user can allow the port manually.
+                    # the user can allow the ports manually.
                     if (self.web_server is not None
-                            and self.web_server._open_firewall(self.cfg.port)):
+                            and self.web_server._open_firewall(self.cfg.port, self.cfg.web_port)):
                         return {"ok": True}
-                    try:
-                        import os as _os
-                        _os.startfile("ms-settings:network-firewall")
+                    if self._open_windows_settings("ms-settings:network-firewall"):
                         return {"ok": True}
-                    except Exception:
-                        return {"ok": False,
-                                "error": "Could not create the firewall rule (admin rights may be "
-                                         "required) or open the firewall settings."}
+                    return {"ok": False,
+                            "error": "Could not create the firewall rule (admin rights may be "
+                                     "required) or open the firewall settings."}
                 return {"ok": False, "error": "Firewall settings are not supported on this OS."}
             if action == "local_network":
                 if _platform.system() == "Darwin":
@@ -2839,17 +2836,42 @@ class Application:
                 if _platform.system() == "Windows":
                     # Windows has no dedicated local-network permission page on most
                     # builds — the firewall & network settings is the closest target.
-                    try:
-                        import os as _os
-                        _os.startfile("ms-settings:network-firewall")
+                    if self._open_windows_settings("ms-settings:network-firewall"):
                         return {"ok": True}
-                    except Exception:
-                        return {"ok": False,
-                                "error": "Could not open the Windows network/firewall settings."}
+                    return {"ok": False,
+                            "error": "Could not open the Windows network/firewall settings."}
                 return {"ok": False, "error": "Permission settings are not supported on this OS."}
             return {"ok": False, "error": f"Unknown action: {action}"}
         except Exception as e:
             return {"ok": False, "error": str(e)}
+
+    @staticmethod
+    def _open_windows_settings(uri: str) -> bool:
+        """Open a Windows Settings URI through several launchers.
+
+        `os.startfile` on a ms-settings: URI works on most builds but can
+        fail on some systems; fall back to explorer.exe and finally to the
+        Settings app binary itself.
+        """
+        import os as _os
+        import subprocess as _sp
+        try:
+            _os.startfile(uri)
+            return True
+        except Exception:
+            pass
+        try:
+            _sp.Popen(["explorer.exe", uri])
+            return True
+        except Exception:
+            pass
+        try:
+            _sp.Popen([_os.path.join(
+                _os.environ.get("WINDIR", r"C:\Windows"),
+                "ImmersiveControlPanel", "SystemSettings.exe"), uri])
+            return True
+        except Exception:
+            return False
 
     def _get_overview_data(self) -> dict:
         """Return aggregated dashboard overview data for the web UI."""
@@ -3358,14 +3380,18 @@ class Application:
                     fw_ok = discovery_running
             elif _platform.system() == "Windows":
                 try:
-                    ok, detail = self.web_server.check_firewall_rule(self.cfg.port)
+                    # Both the TCP sync port and the web companion port need
+                    # to be open — a single-port rule would otherwise show up
+                    # as a "wrong port" mismatch.
+                    fw_ports = [self.cfg.port, self.cfg.web_port]
+                    ok, detail = self.web_server.check_firewall_rule(fw_ports)
                     if not ok:
                         fw_ok, fw_detail = False, detail
                         fw_guidance = ("The Windows firewall may be blocking ClipSync. Tap "
-                                       "'Request permission' to add an allow rule for port "
-                                       f"{self.cfg.port}.")
+                                       "'Request permission' to add an allow rule for ports "
+                                       f"{self.cfg.port} and {self.cfg.web_port}.")
                         fw_guidance_key = "diag.firewall.win_fail.guidance"
-                        fw_guidance_params = {"port": self.cfg.port}
+                        fw_guidance_params = {"port": f"{self.cfg.port}, {self.cfg.web_port}"}
                         if detail.startswith("Wrong port"):
                             # Stale rule with the wrong port — surface both values.
                             import re as _re

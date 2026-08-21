@@ -675,9 +675,19 @@ class WebServer:
     # ── Firewall management ──────────────────────────────────────
 
     @staticmethod
-    def check_firewall_rule(port: int | None = None) -> tuple[bool, str]:
+    def check_firewall_rule(ports: int | list[int] | None = None) -> tuple[bool, str]:
+        """Check that the ClipSync rule allows all the given ports.
+
+        `ports` may be a single int or a list of ints. The app needs both the
+        TCP sync port and the web companion port open, and a Windows rule's
+        LocalPort is a comma-separated list — so every requested port must be
+        present. Returns (True, "OK") when all ports are allowed.
+        """
         if sys.platform != "win32":
             return (True, "")
+        if isinstance(ports, int):
+            ports = [ports]
+        ports = [str(p) for p in (ports or [])]
         import re
         try:
             import subprocess
@@ -690,20 +700,27 @@ class WebServer:
             )
             if check.returncode != 0 or WebServer.FW_RULE_NAME not in check.stdout:
                 return (False, "Blocked")
-            if port is not None:
-                m = re.search(r"LocalPort:\s+(\S+)", check.stdout)
-                if not m or str(port) not in m.group(1).split(","):
-                    actual = m.group(1) if m else "none"
-                    return (False, f"Wrong port (got {actual}, needs {port})")
+            m = re.search(r"LocalPort:\s+(\S+)", check.stdout)
+            present = set(m.group(1).split(",")) if m else set()
+            missing = [p for p in ports if p not in present]
+            if missing:
+                actual = m.group(1) if m else "none"
+                return (False, f"Wrong port (got {actual}, needs {','.join(missing)})")
             return (True, "OK")
         except Exception:
             return (False, "Unknown")
 
-    def _open_firewall(self, port: int) -> bool:
+    def _open_firewall(self, port: int, web_port: int | None = None) -> bool:
         if sys.platform != "win32":
             return True
+        # One rule must cover both the TCP sync port and the web companion
+        # port, otherwise the diagnostics check / other peers on the TCP port
+        # would report a "wrong port" mismatch against the single-port rule.
+        ports = [port]
+        if web_port and web_port != port:
+            ports.append(web_port)
         import subprocess
-        ok, detail = WebServer.check_firewall_rule(port)
+        ok, detail = WebServer.check_firewall_rule(ports)
         if ok:
             return True
         if detail.startswith("Wrong port"):
@@ -723,14 +740,15 @@ class WebServer:
                 ["netsh", "advfirewall", "firewall", "add", "rule",
                  f"name={WebServer.FW_RULE_NAME}",
                  "dir=in", "action=allow",
-                 f"localport={port}", "protocol=TCP",
+                 f"localport={','.join(map(str, ports))}", "protocol=TCP",
                  "profile=any"],
                 capture_output=True, text=True,
                 creationflags=subprocess.CREATE_NO_WINDOW,
                 timeout=10,
             )
             if result.returncode == 0:
-                logger.info("Firewall rule created for port %d", port)
+                logger.info("Firewall rule created for port %s",
+                            ",".join(map(str, ports)))
                 return True
             else:
                 logger.warning("Failed to create firewall rule: %s",
@@ -748,7 +766,8 @@ class WebServer:
         host = "0.0.0.0"
         port = self._cfg.web_port
         logger.info("Starting web companion on %s:%d", host, port)
-        self._firewall_ok = self._open_firewall(port)
+        # Allow both the TCP sync port and the web companion port.
+        self._firewall_ok = self._open_firewall(self._cfg.port, self._cfg.web_port)
 
         # Capture all dependencies for the handler closure
         cfg = self._cfg
