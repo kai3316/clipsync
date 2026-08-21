@@ -2082,7 +2082,9 @@
       padding: 12px 14px;
       border-radius: var(--clipsync-radius);
       border: 1px solid var(--clipsync-border);
-      background: linear-gradient(135deg, rgba(12,16,32,0.7), rgba(17,24,39,0.7));
+      background: linear-gradient(135deg,
+        color-mix(in srgb, var(--clipsync-panel) 85%, transparent),
+        color-mix(in srgb, var(--clipsync-panel-2) 85%, transparent));
       backdrop-filter: blur(12px);
       -webkit-backdrop-filter: blur(12px);
       transition: border-color var(--clipsync-transition-fast);
