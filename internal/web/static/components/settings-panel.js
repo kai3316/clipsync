@@ -1410,7 +1410,7 @@
                   '<div class="settings-about-grid">' +
                     '<div class="settings-about-item">' +
                       '<span class="settings-about-item__label">{{ t(\'settings.version\') }}</span>' +
-                      '<span class="settings-about-item__value">{{ t(\'settings_window.about_version\') }}</span>' +
+                      '<span class="settings-about-item__value">{{ store.overview.version || t(\'settings_window.about_version\') }}</span>' +
                     '</div>' +
                     '<div class="settings-about-item">' +
                       '<span class="settings-about-item__label">{{ t(\'settings.device_name\') }}</span>' +

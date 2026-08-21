@@ -820,5 +820,6 @@
   "settings_window.diag_request": "Request permission / open settings",
   "settings_window.diag_request_failed": "Failed to open permission settings",
   "settings_window.diag_mdns": "mDNS discovery service",
-  "settings_window.diag_clipboard_tool": "Clipboard tool (xclip / wl-paste)"
+  "settings_window.diag_clipboard_tool": "Clipboard tool (xclip / wl-paste)",
+  "settings_window.about_version": "Unknown"
 }
