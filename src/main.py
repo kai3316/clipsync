@@ -188,6 +188,55 @@ def _remove_lock():
         pass
 
 
+def _detect_network_type() -> tuple[str, str]:
+    """Best-effort primary network type + interface name.
+
+    Returns (type, interface) where type is "wifi", "ethernet" or "lan".
+    Uses the default-route interface so VPN/loopback don't fool it.
+    """
+    import subprocess
+    try:
+        if sys.platform == "darwin":
+            out = subprocess.run(
+                ["route", "-n", "get", "default"],
+                capture_output=True, text=True, timeout=3,
+            ).stdout or ""
+            iface = ""
+            for line in out.splitlines():
+                if line.strip().startswith("interface:"):
+                    iface = line.split(":", 1)[1].strip()
+                    break
+            if not iface:
+                return "lan", ""
+            hp = subprocess.run(
+                ["networksetup", "-listallhardwareports"],
+                capture_output=True, text=True, timeout=3,
+            ).stdout or ""
+            for block in hp.split("\n\n"):
+                if f"Device: {iface}" in block:
+                    if "Wi-Fi" in block or "AirPort" in block:
+                        return "wifi", iface
+                    return "ethernet", iface
+            return "lan", iface
+        if sys.platform.startswith("linux"):
+            iface = ""
+            try:
+                with open("/proc/net/route") as f:
+                    for line in f.readlines()[1:]:
+                        parts = line.split()
+                        if len(parts) >= 3 and parts[1] == "00000000":
+                            iface = parts[0]
+                            break
+            except OSError:
+                pass
+            if iface and os.path.isdir(f"/sys/class/net/{iface}/wireless"):
+                return "wifi", iface
+            return ("ethernet", iface) if iface else ("lan", "")
+    except Exception:
+        pass
+    return "lan", ""
+
+
 def _pid_alive(pid: int) -> bool:
     """Return True if the given PID belongs to a running ClipSync instance."""
     if sys.platform == "win32":
@@ -2788,6 +2837,7 @@ class Application:
             }
             for e in hist[:6]
         ]
+        ntype, niface = _detect_network_type()
         return {
             'connected_count': len(connected),
             'paired_count': len(paired),
@@ -2809,8 +2859,8 @@ class Application:
             'port': self.cfg.web_port if self.cfg else 0,
             'platform': _platform.system(),
             'version': __version__,
-            'network_type': 'lan',
-            'network_detail': '',
+            'network_type': ntype,
+            'network_detail': niface,
             'recent_items': recent_items,
             'recent_activity': '',
         }

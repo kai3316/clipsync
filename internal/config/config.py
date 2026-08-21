@@ -41,6 +41,9 @@ class PeerInfo:
 
 @dataclass
 class Config:
+    # Schema version for one-way migrations on load. v1 configs stored
+    # filter_enabled_categories=[] to mean "all enabled"; v2 uses None=all.
+    config_version: int = 2
     device_id: str = field(default_factory=lambda: uuid.uuid4().hex[:12])
     device_name: str = field(default_factory=platform.node)
     port: int = 19990
@@ -200,6 +203,13 @@ def load() -> Config:
             if "filter_sensitive" in data and not data.get("filter_enabled_categories"):
                 if data["filter_sensitive"]:
                     cfg.filter_enabled_categories = ["credit_card", "ssn", "api_key", "private_key", "password"]
+            # Config v1 stored filter_enabled_categories=[] to mean "all
+            # categories enabled"; v2 distinguishes None=all from []=disabled.
+            # Preserve the old default for existing configs by upgrading []→None
+            # (so redaction stays ON), while a v2 save of [] remains a real
+            # "disable everything" choice.
+            if data.get("config_version", 1) < 2 and cfg.filter_enabled_categories == []:
+                cfg.filter_enabled_categories = None
             # Migrate from legacy dict-format peers (pre-list) to list format:
             #   {"device_id": {device_name, public_key_pem, paired, notes}, ...}
             peers_data = data.get("peers", [])
@@ -227,6 +237,7 @@ def load() -> Config:
 
 def save(cfg: Config, enc_mgr: "EncryptionManager | None" = None):
     with config_lock:
+        cfg.config_version = 2
         config_dir = _config_dir()
         config_dir.mkdir(parents=True, exist_ok=True)
         config_path = _config_path()

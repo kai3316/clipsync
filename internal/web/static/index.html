@@ -3455,6 +3455,36 @@
       transition: border-color 0.2s, box-shadow 0.2s;
     }
 
+    /* ── Hotkeys editor ────────────────────────────────────────── */
+    .settings-hotkeys {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+      gap: var(--clipsync-space-2);
+    }
+
+    .settings-hotkey-row {
+      display: flex;
+      align-items: center;
+      gap: var(--clipsync-space-2);
+    }
+
+    .settings-hotkey-label {
+      flex: 1;
+      min-width: 0;
+      font-size: 12px;
+      color: var(--clipsync-fg-muted);
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
+    .settings-hotkey-input {
+      width: 130px;
+      flex-shrink: 0;
+      font-family: var(--clipsync-font-mono);
+      font-size: 0.8rem;
+    }
+
     .settings-input:focus {
       border-color: var(--clipsync-accent);
       box-shadow: 0 0 0 3px var(--clipsync-active);

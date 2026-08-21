@@ -14,6 +14,11 @@ All notable changes to ClipSync are documented in this file.
 ### Overview page
 - Richer data from the backend: today's copies, pinned items, image count, completed transfers, total bytes transferred, connected-device names, discovered count, a recent clipboard activity feed, and the app version
 - Redesigned overview: animated stat counters, a live network-map ring (connected / paired / discovered), connected-device neon chips, a recent-activity feed with staggered entry animations, and the device hero now shows version + OS
+- Overview now reports the real network type (Wi-Fi / Ethernet + interface name) instead of a hard-coded "LAN"
+
+### More
+- **Global hotkey editor** added to Advanced settings (all 13 shortcuts, restart required)
+- Config schema version added: old configs with `filter_enabled_categories: []` are migrated to `None` so existing installs keep content redaction ON, while a fresh save of `[]` stays a deliberate "disable all"
 
 ## [1.0.7] — 2026-08-21
 

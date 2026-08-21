@@ -79,6 +79,9 @@
         favoritesPath: '',
         dataSaving: false,
 
+        // Hotkeys
+        hotkeys: {},
+
         // States
         saving: false,
         exporting: false,
@@ -133,6 +136,22 @@
 
       logLevelOptions: function () {
         return ['DEBUG', 'INFO', 'WARNING', 'ERROR'];
+      },
+
+      hotkeyFields: function () {
+        var names = [
+          'quick_paste', 'paste_1', 'paste_2', 'paste_3', 'paste_4',
+          'paste_5', 'paste_6', 'paste_7', 'paste_8', 'paste_9',
+          'paste_plain', 'toggle_monitor', 'show_window',
+        ];
+        var self = this;
+        return names.map(function (n) {
+          return { key: n, value: self.hotkeys[n] || '' };
+        });
+      },
+
+      hotkeyLabel: function (key) {
+        return this.t('hotkeys.' + key);
       },
 
       sectionTabs: function () {
@@ -204,6 +223,7 @@
         if (s.source_tracking_enabled !== undefined) this.sourceTracking = !!s.source_tracking_enabled;
         if (s.data_dir !== undefined) this.dataDir = s.data_dir || '';
         if (s.favorites_path !== undefined) this.favoritesPath = s.favorites_path || '';
+        if (s.hotkeys) this.hotkeys = Object.assign({}, s.hotkeys);
       },
 
       // ── Save methods ─────────────────────────────────────────────
@@ -353,6 +373,7 @@
           retry_capture_enabled: self.retryCapture,
           dedup_method: self.dedupMethod,
           source_tracking_enabled: self.sourceTracking,
+          hotkeys: self.hotkeys,
         }).then(function (res) {
           if (res && res.updated) self.store.mergeSettings(res.updated);
           self.store.showToast(self.t('settings_window.advanced_saved'), 3000);
@@ -1026,6 +1047,15 @@
                       '<option value="sha256">{{ t(\'settings_window.dedup_sha256\') }}</option>' +
                       '<option value="simple">{{ t(\'settings_window.dedup_simple\') }}</option>' +
                     '</select>' +
+                  '</div>' +
+
+                  '<h4 style="font-size:12px;color:var(--clipsync-fg-muted);margin:16px 0 4px">{{ t(\'hotkeys.title\') }}</h4>' +
+                  '<p class="settings-hint" style="margin-bottom:10px">{{ t(\'hotkeys.hint\') }}</p>' +
+                  '<div class="settings-hotkeys">' +
+                    '<div v-for="hk in hotkeyFields" :key="hk.key" class="settings-hotkey-row">' +
+                      '<span class="settings-hotkey-label">{{ hotkeyLabel(hk.key) }}</span>' +
+                      '<input type="text" class="settings-input settings-hotkey-input" v-model="hotkeys[hk.key]" :placeholder="hk.value">' +
+                    '</div>' +
                   '</div>' +
                   '<button class="settings-btn settings-btn--accent" @click="saveAdvanced" :disabled="advancedSaving" style="width:100%;margin-top:12px">' +
                     '{{ advancedSaving ? \'...\' : t(\'settings_window.save_advanced\') }}' +

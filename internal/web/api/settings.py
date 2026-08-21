@@ -54,6 +54,7 @@ _SAFE_FIELDS = {
     "dedup_method",
     "data_dir",
     "favorites_path",
+    "hotkeys",
 }
 
 # Fields that the client is allowed to modify
@@ -93,6 +94,7 @@ _MUTABLE_FIELDS = {
     "dedup_method",
     "data_dir",
     "favorites_path",
+    "hotkeys",
 }
 
 # Action keys that trigger a host-side operation rather than a plain
