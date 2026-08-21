@@ -4352,7 +4352,7 @@
           <main class="panel-area">
             <div v-if="store.initialLoad && store.loading" class="panel-loading">
               <div class="panel-loading__spinner"></div>
-              <p class="panel-loading__text">Connecting to ClipSync...</p>
+              <p class="panel-loading__text">{{ t('app.connecting') }}</p>
             </div>
             <transition v-if="!store.initialLoad || !store.loading" name="panel-fade" mode="out-in">
               <overview-panel v-if="store.activeTab === 'overview'" key="overview"></overview-panel>
@@ -4372,7 +4372,7 @@
         <main class="panel-area">
           <div v-if="store.initialLoad && store.loading" class="panel-loading">
             <div class="panel-loading__spinner"></div>
-            <p class="panel-loading__text">Connecting to ClipSync...</p>
+            <p class="panel-loading__text">{{ t('app.connecting') }}</p>
           </div>
           <transition v-if="!store.initialLoad || !store.loading" name="panel-fade" mode="out-in">
             <overview-panel v-if="store.activeTab === 'overview'" key="overview"></overview-panel>

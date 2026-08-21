@@ -541,8 +541,8 @@ class Application:
             try:
                 entered = ask_string(
                     tmp_root,
-                    "Encryption Password",
-                    "Enter the pre-shared encryption password:",
+                    T("encryption.password_title"),
+                    T("encryption.password_prompt"),
                     show="*",
                 )
             finally:
@@ -558,11 +558,8 @@ class Application:
                 try:
                     show_error(
                         tmp_root2,
-                        "Wrong Password",
-                        "The encryption password you entered is incorrect.\n\n"
-                        "ClipSync cannot start without the correct password "
-                        "because your device identity (private key) is encrypted with it.\n\n"
-                        "The application will now exit.",
+                        T("encryption.wrong_password_title"),
+                        T("encryption.wrong_password_msg"),
                     )
                 finally:
                     tmp_root2.destroy()
@@ -843,9 +840,8 @@ class Application:
             self.web_server.start()
             if not self.web_server.is_running:
                 self._notify_error(
-                    "Web Companion",
-                    f"Failed to start on port {self.cfg.web_port}. "
-                    "Another process may already be using this port.",
+                    T("ui.web_companion"),
+                    T("ui.web_start_failed2", port=self.cfg.web_port),
                 )
                 return
             logger.info("Web server started for Quick Paste")
@@ -997,9 +993,9 @@ class Application:
         logger.info("File transfer %s: %s",
                     transfer_id[:8], "complete" if success else "failed")
         if success:
-            notification_mgr.show("File Transfer", T("transfer.send_success"))
+            notification_mgr.show(T("ui.file_transfer"), T("transfer.send_success"))
         else:
-            notification_mgr.show("File Transfer", T("transfer.send_failed"))
+            notification_mgr.show(T("ui.file_transfer"), T("transfer.send_failed"))
         self._last_transfer_progress.pop(transfer_id, None)
         # Remove any temp zip archive created for a folder/multi-file send.
         tmp = self._zip_cleanup.pop(transfer_id, None)
@@ -1013,7 +1009,7 @@ class Application:
     def _on_file_received(self, transfer_id: str, saved_path: str, file_name: str) -> None:
         logger.info("File received: %s -> %s",
                     _mask_file_name(file_name), _mask_path(saved_path))
-        notification_mgr.show("File Received", T("transfer.received", name=file_name))
+        notification_mgr.show(T("notify.file_received"), T("transfer.received", name=file_name))
 
     def _on_transfer_request(self, transfer_id: str, file_name: str, file_size: int,
                              mime_type: str, send_fn) -> None:
@@ -1243,6 +1239,11 @@ class Application:
         """
         response: dict = {}
         special = special or {}
+        # A language change in the web UI must also switch the backend T()
+        # locale — otherwise desktop/webview dialogs (QR, send-URL, transfer
+        # requests) keep showing the previous language's titles.
+        if "language" in updated:
+            set_locale(str(updated["language"]))
         if "sync_enabled" in updated:
             enabled = bool(updated["sync_enabled"])
             self.sync_mgr.set_enabled(enabled)
@@ -1522,7 +1523,7 @@ class Application:
             from internal.clipboard.clipboard_linux import check_clipboard_tools
             msg = check_clipboard_tools()
             if msg:
-                self.root.after(800, lambda: show_warning(self.root, "Clipboard Unavailable", msg))
+                self.root.after(800, lambda: show_warning(self.root, T("ui.clipboard_unavailable"), msg))
 
         self.sync_mgr.start()
         try:
@@ -1530,12 +1531,8 @@ class Application:
         except PortInUseError:
             show_error(
                 self.root,
-                "Port Already in Use",
-                f"Port {self.cfg.port} is already in use by another process.\n\n"
-                "This usually means another instance is still running.\n\n"
-                "Run this command to find and stop it:\n"
-                f"  lsof -i :{self.cfg.port}  &&  kill -9 <PID>\n\n"
-                "ClipSync will now exit.",
+                T("ui.port_in_use"),
+                T("ui.port_in_use_msg", port=self.cfg.port),
             )
             sys.exit(1)
         self.discovery.start()
@@ -1556,11 +1553,9 @@ class Application:
                         break
             if not started:
                 msg = (
-                    f"Failed to start Web Companion on port {base_port}.\n\n"
-                    "Another process may already be using this port, or the server failed to bind.\n\n"
-                    f"Tried ports: {base_port} - {base_port + 5}"
+                    T("ui.web_start_failed", port=base_port, lo=base_port, hi=base_port + 5)
                 )
-                show_error(self.root, "Web Companion", msg)
+                show_error(self.root, T("ui.web_companion"), msg)
                 self.cfg.web_enabled = False
                 self.systray.set_web_enabled(False)
                 if self.cfg.ui_backend == "webview":
@@ -1668,12 +1663,12 @@ class Application:
             for pid in connected_set - prev_connected:
                 found = next((p for p in known_peers if p.device_id == pid), None)
                 name = found.device_name if found else pid[:12]
-                notification_mgr.show("Device Connected",
+                notification_mgr.show(T("notify.device_connected_title"),
                                       T("notify.device_connected", name=name))
             for pid in prev_connected - connected_set:
                 found = next((p for p in known_peers if p.device_id == pid), None)
                 name = found.device_name if found else pid[:12]
-                notification_mgr.show("Device Disconnected",
+                notification_mgr.show(T("notify.device_disconnected_title"),
                                       T("notify.device_disconnected", name=name))
             prev_connected = connected_set
 
@@ -1855,7 +1850,7 @@ class Application:
             qr_label.pack(pady=(0, 12))
         else:
             ctk.CTkLabel(
-                body, text="(no token)",
+                body, text=T("web.no_token"),
                 font=ctk.CTkFont(size=14), text_color=("gray50", "gray60"),
             ).pack(pady=(0, 12))
 
@@ -1909,9 +1904,8 @@ class Application:
             self.web_server.start()
             if not self.web_server.is_running:
                 self._notify_error(
-                    "Web Companion",
-                    f"Failed to start on port {self.cfg.web_port}. "
-                    "Another process may already be using this port.",
+                    T("ui.web_companion"),
+                    T("ui.web_start_failed2", port=self.cfg.web_port),
                 )
                 return
             self.systray.set_web_enabled(True)
@@ -1930,9 +1924,8 @@ class Application:
                 self.web_server.start()
                 if not self.web_server.is_running:
                     self._notify_error(
-                        "Web Companion",
-                        f"Failed to start on port {self.cfg.web_port}. "
-                        "Another process may already be using this port.",
+                        T("ui.web_companion"),
+                        T("ui.web_start_failed2", port=self.cfg.web_port),
                     )
                     return
             logger.info("Web companion restarted via dashboard")
@@ -1968,7 +1961,7 @@ class Application:
                        f"Permission denied writing to:\n{dest}")
             logger.error("Permission denied exporting log to %s", dest)
         except OSError as e:
-            self._notify_error("Error", f"Failed to export log:\n{e}")
+            self._notify_error(T("ui.error_title"), f"{T('ui.export_failed_msg')}{e}")
             logger.error("Failed to export log: %s", e)
 
     def _check_for_update(self) -> None:
@@ -2352,15 +2345,15 @@ class Application:
         try:
             transfer_id = self.file_transfer_mgr.send_file(file_path, _send_fn)
             logger.info("File transfer initiated: %s", transfer_id[:8])
-            notification_mgr.show("File Transfer",
+            notification_mgr.show(T("ui.file_transfer"),
                                   T("transfer.sending_file", name=os.path.basename(file_path)))
         except FileNotFoundError:
-            self._notify_error("Error", f"File not found:\n{file_path}")
+            self._notify_error(T("ui.error_title"), f"{T('ui.file_not_found_msg')}{file_path}")
         except PermissionError:
             self._notify_error("Error",
                        f"Permission denied reading:\n{file_path}")
         except OSError as e:
-            self._notify_error("Error", f"Failed to send file:\n{e}")
+            self._notify_error(T("ui.error_title"), f"{T('ui.send_failed_msg')}{e}")
             logger.error("Failed to send file: %s", e)
 
     def _send_as_zip(self, paths: list[str]) -> None:
@@ -2396,7 +2389,7 @@ class Application:
             elif p.is_dir():
                 total_files += sum(1 for fp in p.rglob("*") if fp.is_file())
         if total_files == 0:
-            self._notify_error("Error", "No files found to send")
+            self._notify_error(T("ui.error_title"), T("ui.no_files_to_send"))
             return
 
         names = [os.path.basename(p.rstrip(os.sep).rstrip("/")) for p in paths]
@@ -2407,7 +2400,7 @@ class Application:
         if self._is_webview():
             mgr = self.web_server.dialog_mgr if self.web_server else None
             if mgr is None:
-                self._notify_error("Error", "Web server not available")
+                self._notify_error(T("ui.error_title"), T("ui.web_server_unavailable"))
                 return
 
             dialog_id = mgr.push(
@@ -2418,7 +2411,7 @@ class Application:
                 progress_text=T("transfer.preparing"),
             )
             if dialog_id is None:
-                self._notify_error("Error", "No web clients connected")
+                self._notify_error(T("ui.error_title"), T("ui.no_web_clients"))
                 return
 
             def _worker_web():
@@ -2474,16 +2467,16 @@ class Application:
                 except FileNotFoundError:
                     _safe_remove(tmp_path)
                     mgr.close(dialog_id)
-                    self._notify_error("Error", "File not found")
+                    self._notify_error(T("ui.error_title"), T("ui.file_not_found"))
                 except PermissionError:
                     _safe_remove(tmp_path)
                     mgr.close(dialog_id)
-                    self._notify_error("Error", "Permission denied")
+                    self._notify_error(T("ui.error_title"), T("ui.permission_denied"))
                 except OSError as e:
                     logger.error("Failed to zip and send: %s", e)
                     _safe_remove(tmp_path)
                     mgr.close(dialog_id)
-                    self._notify_error("Error", f"Failed to create archive:\n{e}")
+                    self._notify_error(T("ui.error_title"), f"{T('ui.archive_failed')}\n{e}")
 
             threading.Thread(target=_worker_web, daemon=True, name="zip-sender-web").start()
             return
@@ -2653,11 +2646,11 @@ class Application:
             except FileNotFoundError:
                 _safe_remove(tmp_path)
                 self.root.after(0, lambda: (dlg.destroy(), self._notify_error(
-                    "Error", "File not found")))
+                    T("ui.error_title"), T("ui.file_not_found"))))
             except PermissionError:
                 _safe_remove(tmp_path)
                 self.root.after(0, lambda: (dlg.destroy(), self._notify_error(
-                    "Error", "Permission denied")))
+                    T("ui.error_title"), T("ui.permission_denied"))))
             except OSError as e:
                 logger.error("Failed to zip and send: %s", e)
                 _safe_remove(tmp_path)
@@ -3340,7 +3333,7 @@ class Application:
         try:
             transfer_id = self.file_transfer_mgr.send_file(file_path, _send_fn)
             logger.info("Retried file transfer: %s (%s)", file_path, transfer_id[:8])
-            notification_mgr.show("File Transfer",
+            notification_mgr.show(T("ui.file_transfer"),
                                   T("transfer.sending_file", name=os.path.basename(file_path)))
         except OSError as e:
             logger.error("Failed to retry sending file %s: %s", file_path, e)
@@ -3393,7 +3386,7 @@ def main():
         # Another instance is running — show error and exit
         _r = tk.Tk()
         _r.withdraw()
-        show_error(_r, "ClipSync", "Another instance is already running.")
+        show_error(_r, "ClipSync", T("ui.already_running"))
         _r.destroy()
         sys.exit(1)
 

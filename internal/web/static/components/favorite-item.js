@@ -94,7 +94,7 @@
               :key="group"
               class="favorite-item__group-menu-item"
               @click="changeGroup(group)"
-            >{{ group }}</button>
+            >{{ group === 'Ungrouped' ? t('favorites.ungrouped') : group }}</button>
             <button
               class="favorite-item__group-menu-item favorite-item__group-menu-item--new"
               @click="promptNewGroup"
@@ -269,7 +269,7 @@
             if (idx !== -1) {
               self.store.favorites.splice(idx, 1, res.favorite);
             }
-            self.store.showToast(self.t('favorites.moved_to', { group: group || 'Ungrouped' }), 1500);
+            self.store.showToast(self.t('favorites.moved_to', { group: (group === 'Ungrouped' ? self.t('favorites.ungrouped') : group) }), 1500);
           }
         }).catch(function (e) {
           console.error('[ClipSync] Change group failed:', e);

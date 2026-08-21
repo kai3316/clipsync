@@ -95,7 +95,7 @@
             v-for="(count, group) in store.groupedFavorites()"
             :key="group"
             :value="group"
-          >{{ group }} ({{ count }})</option>
+          >{{ group === 'Ungrouped' ? t('favorites.ungrouped') : group }} ({{ count }})</option>
         </select>
       </div>
 
@@ -136,7 +136,7 @@
               </span>
               <template v-else>
                 <span class="favorites-panel__group-btn-dot">&#9675;</span>
-                <span class="favorites-panel__group-btn-name">{{ group }}</span>
+                <span class="favorites-panel__group-btn-name">{{ group === 'Ungrouped' ? t('favorites.ungrouped') : group }}</span>
                 <span class="favorites-panel__group-btn-count">{{ count }}</span>
               </template>
             </button>
@@ -314,7 +314,7 @@
                   v-for="(count, group) in store.groupedFavorites()"
                   :key="group"
                   :value="group"
-                >{{ group }}</option>
+                >{{ group === 'Ungrouped' ? t('favorites.ungrouped') : group }}</option>
                 <option value="__new__">{{ t('favorites.create_group') }}</option>
               </select>
               <input

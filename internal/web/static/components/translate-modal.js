@@ -72,15 +72,14 @@
               self.translated = res.translated || '';
               tm.translated = self.translated;
             } else {
-              self.error = (res && res.error) || 'Translation failed.';
+              self.error = (res && res.error) || self.t('translate.failed');
             }
             self.translating = false;
             tm.translating = false;
           })
           .catch(function (e) {
             console.error('[ClipSync] Translate error:', e);
-            self.error =
-              'Translation service unavailable. Check your network connection.';
+            self.error = self.t('translate.service_unavailable');
             self.translating = false;
             tm.translating = false;
           });
