@@ -110,7 +110,7 @@
     /* ═══════════════════════════════════════════════════════════════
        UI state
        ═══════════════════════════════════════════════════════════════ */
-    activeTab: 'overview',      // 'overview' | 'history' | 'devices' | 'transfers' | 'favorites'
+    activeTab: 'overview',      // 'overview' | 'history' | 'devices' | 'transfers' | 'favorites' | 'diagnostics'
     theme: 'system',            // 'system' | 'light' | 'dark'
     sidebarOpen: true,
     selectedIds: new Set(),     // multi-select set of entry IDs

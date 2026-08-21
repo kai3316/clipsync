@@ -288,6 +288,23 @@ def _dispatch(method, path, query_params, body, cfg, history, sync_mgr,
             logger.info("Web nav: %s -> %s", url[:80], target_device[:12] or "local")
             return _json_response({"ok": True})
 
+        elif path == "/api/diagnostics/request":
+            if on_diagnostics_request is None:
+                return _json_response({"ok": False, "error": "not available"}, 503)
+            try:
+                req = json.loads(body.decode("utf-8"))
+            except (json.JSONDecodeError, UnicodeDecodeError):
+                return _json_response({"ok": False, "error": "invalid json"}, 400)
+            action = req.get("action", "").strip()
+            if not action:
+                return _json_response({"ok": False, "error": "action required"}, 400)
+            try:
+                data = on_diagnostics_request(action) or {}
+            except Exception:
+                logger.exception("on_diagnostics_request callback failed")
+                data = {"ok": False, "error": "request failed"}
+            return _json_response(data)
+
         elif path == "/api/upload":
             # Handled directly in server.py due to multipart parsing
             return _json_response({"error": "not found"}, 404)

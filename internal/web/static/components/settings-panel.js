@@ -96,12 +96,6 @@
         certDevices: [],
         certsLoading: false,
 
-        // Diagnostics (scan-style: checks revealed one by one)
-        diagScanning: false,
-        diagChecks: [],
-        diagRevealed: 0,
-        diagSummary: '',
-
         // Update download
         updateDownloading: false,
 
@@ -188,22 +182,6 @@
           { id: 'data',          label: this.t('settings.data') },
           { id: 'about',         label: this.t('settings_nav.about') },
           { id: 'danger',        label: this.t('settings_window.danger_zone') },
-        ];
-      },
-
-      diagRows: function () {
-        var r = this.diagResult || {};
-        var t = this.t;
-        return [
-          { label: t('settings_window.diag_discovery'), value: r.discovery_running, bool: true },
-          { label: t('settings_window.diag_server'), value: r.server_running, bool: true },
-          { label: t('settings_window.diag_web'), value: r.web_companion_running, bool: true },
-          { label: t('settings_window.diag_connected'), value: r.connected_count, bool: false },
-          { label: t('settings_window.diag_paired'), value: r.paired_count, bool: false },
-          { label: t('settings_window.diag_web_port'), value: r.web_port, bool: false },
-          { label: t('settings_window.diag_lan_ip'), value: r.lan_ip, bool: false },
-          { label: t('settings_window.diag_os'), value: r.os, bool: false },
-          { label: t('settings_window.diag_version'), value: r.version, bool: false },
         ];
       },
     },
@@ -425,79 +403,6 @@
 
       shortId: function (id) {
         return (id && id.length > 8) ? id.slice(0, 8) : (id || '');
-      },
-
-      // ── Diagnostics ─────────────────────────────────────────────
-
-      runDiagnostics: function () {
-        var self = this;
-        self.diagScanning = true;
-        self.diagChecks = [];
-        self.diagRevealed = 0;
-        self.diagSummary = '';
-        ClipsyncAPI._fetch('GET', '/api/diagnostics').then(function (res) {
-          var checks = (res && res.checks) || [];
-          self.diagChecks = checks;
-          self.diagSummary = (res && res.summary) || 'ok';
-          // Reveal each check one by one (scan effect).
-          if (checks.length === 0) {
-            self.diagScanning = false;
-            return;
-          }
-          checks.forEach(function (_, i) {
-            setTimeout(function () {
-              self.diagRevealed = i + 1;
-              if (i === checks.length - 1) {
-                setTimeout(function () { self.diagScanning = false; }, 400);
-              }
-            }, 350 * (i + 1));
-          });
-        }).catch(function () {
-          self.diagScanning = false;
-          self.diagChecks = [{
-            id: 'error', ok: false, detail: '',
-            guidance: self.t('settings_window.diag_failed'),
-          }];
-          self.diagRevealed = 1;
-          self.diagSummary = 'fail';
-        });
-      },
-
-      diagLabel: function (id) {
-        var labels = {
-          server_port: this.t('settings_window.diag_server_port'),
-          discovery: this.t('settings_window.diag_discovery'),
-          advertising: this.t('settings_window.diag_advertising'),
-          web_companion: this.t('settings_window.diag_web'),
-          network: this.t('settings_window.diag_network'),
-          firewall: this.t('settings_window.diag_firewall'),
-          permissions: this.t('settings_window.diag_permissions'),
-          mdns: this.t('settings_window.diag_mdns'),
-          clipboard_tool: this.t('settings_window.diag_clipboard_tool'),
-          error: this.t('settings_window.diag_title'),
-        };
-        return labels[id] || id;
-      },
-
-      requestDiagnosticsAction: function (chk) {
-        var self = this;
-        var action = chk.id === 'permissions' ? 'local_network' : (chk.id === 'firewall' ? 'firewall' : null);
-        if (!action) return;
-        ClipsyncAPI._fetch('POST', '/api/diagnostics/request', { action: action })
-          .then(function (res) {
-            if (!res || res.ok !== true) {
-              self.store.showToast(self.t('settings_window.diag_request_failed'), 2500);
-            }
-          })
-          .catch(function () {
-            self.store.showToast(self.t('settings_window.diag_request_failed'), 2500);
-          });
-      },
-
-      diagSummaryText: function () {
-        if (this.diagSummary === 'ok') return this.t('settings_window.diag_all_ok');
-        if (this.diagSummary === 'warn') return this.t('settings_window.diag_warn');
-        return this.t('settings_window.diag_fail');
       },
 
       // ── Update download ─────────────────────────────────────────
@@ -1321,26 +1226,6 @@
                   '<button class="settings-btn settings-btn--accent" @click="saveAdvanced" :disabled="advancedSaving" style="width:100%;margin-top:12px">' +
                     '{{ advancedSaving ? \'...\' : t(\'settings_window.save_advanced\') }}' +
                   '</button>' +
-
-                  '<h4 style="font-size:12px;color:var(--clipsync-fg-muted);margin:20px 0 8px">{{ t(\'settings_window.diag_title\') }}</h4>' +
-                  '<button class="settings-btn" @click="runDiagnostics" :disabled="diagScanning" style="width:100%">' +
-                    '{{ diagScanning ? t(\'settings_window.diag_scanning\') : t(\'settings_window.diag_run\') }}' +
-                  '</button>' +
-                  '<div class="diag-scan" style="margin-top:12px">' +
-                    '<div v-for="(chk, i) in diagChecks" :key="chk.id" class="diag-check"' +
-                         ':class="{ \'diag-check--revealed\': i < diagRevealed, \'diag-check--ok\': chk.ok === true && i < diagRevealed, \'diag-check--fail\': chk.ok === false && i < diagRevealed }">' +
-                      '<span class="diag-check__status">{{ i < diagRevealed ? (chk.ok ? \'✓\' : \'✕\') : \'·\' }}</span>' +
-                      '<div class="diag-check__body">' +
-                        '<span class="diag-check__label">{{ diagLabel(chk.id) }}</span>' +
-                        '<span v-if="i < diagRevealed && chk.detail" class="diag-check__detail">{{ chk.detail }}</span>' +
-                        '<span v-if="i < diagRevealed && chk.guidance" class="diag-check__guidance">💡 {{ chk.guidance }}</span>' +
-                        '<button v-if="i < diagRevealed && (chk.id === \'firewall\' || chk.id === \'permissions\')" class="settings-btn settings-btn--sm" style="align-self:flex-start;margin-top:4px" @click="requestDiagnosticsAction(chk)">{{ t(\'settings_window.diag_request\') }}</button>' +
-                      '</div>' +
-                    '</div>' +
-                  '</div>' +
-                  '<div v-if="!diagScanning && diagChecks.length > 0 && diagRevealed >= diagChecks.length" class="diag-summary" :class="\'diag-summary--\' + diagSummary">' +
-                    '{{ diagSummaryText }}' +
-                  '</div>' +
                 '</section>' +
 
                 '<!-- ═══════ Logs ═══════ -->' +

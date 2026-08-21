@@ -3867,6 +3867,31 @@
       border: 1px solid color-mix(in srgb, var(--clipsync-danger) 30%, transparent);
     }
 
+    /* ── Diagnostics panel (standalone page) ─────────────────────── */
+    .diagnostics-panel {
+      display: flex;
+      flex-direction: column;
+      gap: var(--clipsync-space-3);
+      flex: 1;
+    }
+
+    .diagnostics-panel__intro {
+      font-size: 13px;
+      color: var(--clipsync-fg-muted);
+      line-height: 1.6;
+      margin: 0 0 var(--clipsync-space-3);
+    }
+
+    .diagnostics-panel__run {
+      width: 100%;
+      padding: 10px 14px;
+    }
+
+    .diagnostics-panel__results {
+      display: flex;
+      flex-direction: column;
+    }
+
     /* ── Overview network-health chip ───────────────────────────── */
     .net-health-chip {
       display: inline-flex;
@@ -4734,6 +4759,7 @@
               <device-panel v-else-if="store.activeTab === 'devices'" key="devices"></device-panel>
               <transfer-panel v-else-if="store.activeTab === 'transfers'" key="transfers"></transfer-panel>
               <favorites-panel v-else-if="store.activeTab === 'favorites'" key="favorites"></favorites-panel>
+              <diagnostics-panel v-else-if="store.activeTab === 'diagnostics'" key="diagnostics"></diagnostics-panel>
             </transition>
           </main>
           <status-bar></status-bar>
@@ -4754,6 +4780,7 @@
             <device-panel v-else-if="store.activeTab === 'devices'" key="devices"></device-panel>
             <transfer-panel v-else-if="store.activeTab === 'transfers'" key="transfers"></transfer-panel>
             <favorites-panel v-else-if="store.activeTab === 'favorites'" key="favorites"></favorites-panel>
+            <diagnostics-panel v-else-if="store.activeTab === 'diagnostics'" key="diagnostics"></diagnostics-panel>
           </transition>
         </main>
         <status-bar></status-bar>
@@ -4830,6 +4857,7 @@
   <script src="components/status-bar.js?token=__TOKEN__"></script>
   <script src="components/favorite-item.js?token=__TOKEN__"></script>
   <script src="components/favorites-panel.js?token=__TOKEN__"></script>
+  <script src="components/diagnostics-panel.js?token=__TOKEN__"></script>
   <script src="components/preview-popover.js?token=__TOKEN__"></script>
   <script src="components/context-menu.js?token=__TOKEN__"></script>
   <script src="components/translate-modal.js?token=__TOKEN__"></script>

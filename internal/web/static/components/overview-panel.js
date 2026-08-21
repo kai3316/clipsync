@@ -183,13 +183,9 @@
       },
 
       openDiagnostics: function () {
-        // Open the settings panel on the Advanced section (which holds the
-        // full scan-style diagnostics).
+        // Diagnostics now live on their own page — jump straight there.
         if (this.store) {
-          this.store.settingsRequestedSection = 'advanced';
-          if (typeof this.store.openSettingsPanel === 'function') {
-            this.store.openSettingsPanel();
-          }
+          this.store.activeTab = 'diagnostics';
         }
       },
 

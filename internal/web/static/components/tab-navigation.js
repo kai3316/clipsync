@@ -73,6 +73,12 @@
             icon: '⭐',
             count: s.favorites.length,
           },
+          {
+            id: 'diagnostics',
+            label: t('ui.diagnostics'),
+            icon: '🩺',
+            count: 0,
+          },
         ];
       },
     },

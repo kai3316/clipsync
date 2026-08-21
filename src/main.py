@@ -2814,15 +2814,39 @@ class Application:
                 if _platform.system() == "Darwin":
                     _sp.Popen(["open",
                                "x-apple.systempreferences:com.apple.preference.security?Firewall"])
-                elif _platform.system() == "Windows":
-                    if self.web_server is not None:
-                        self.web_server._open_firewall(self.cfg.port)
-                return {"ok": True}
+                    return {"ok": True}
+                if _platform.system() == "Windows":
+                    # Prefer re-applying the allow rule (idempotent). netsh needs
+                    # admin rights — if it can't, open the firewall settings page so
+                    # the user can allow the port manually.
+                    if (self.web_server is not None
+                            and self.web_server._open_firewall(self.cfg.port)):
+                        return {"ok": True}
+                    try:
+                        import os as _os
+                        _os.startfile("ms-settings:network-firewall")
+                        return {"ok": True}
+                    except Exception:
+                        return {"ok": False,
+                                "error": "Could not create the firewall rule (admin rights may be "
+                                         "required) or open the firewall settings."}
+                return {"ok": False, "error": "Firewall settings are not supported on this OS."}
             if action == "local_network":
                 if _platform.system() == "Darwin":
                     _sp.Popen(["open",
                                "x-apple.systempreferences:com.apple.preference.security?Privacy_LocalNetwork"])
-                return {"ok": True}
+                    return {"ok": True}
+                if _platform.system() == "Windows":
+                    # Windows has no dedicated local-network permission page on most
+                    # builds — the firewall & network settings is the closest target.
+                    try:
+                        import os as _os
+                        _os.startfile("ms-settings:network-firewall")
+                        return {"ok": True}
+                    except Exception:
+                        return {"ok": False,
+                                "error": "Could not open the Windows network/firewall settings."}
+                return {"ok": False, "error": "Permission settings are not supported on this OS."}
             return {"ok": False, "error": f"Unknown action: {action}"}
         except Exception as e:
             return {"ok": False, "error": str(e)}
@@ -3239,49 +3263,83 @@ class Application:
         # 1. TCP server port
         if server_running:
             checks.append({"id": "server_port", "ok": True,
-                           "detail": f"TCP server listening on {port}", "guidance": None})
+                           "detail": f"TCP server listening on {port}",
+                           "detail_key": "diag.server_port.ok.detail",
+                           "detail_params": {"port": port}, "guidance": None})
         else:
             checks.append({"id": "server_port", "ok": False,
                            "detail": f"TCP server not listening on {port}",
+                           "detail_key": "diag.server_port.fail.detail",
+                           "detail_params": {"port": port},
                            "guidance": (f"Port {port} is not listening — another app may be using it, "
-                                        "or the firewall blocks it. Try a different port in Settings → Network.")})
+                                        "or the firewall blocks it. Try a different port in Settings → Network."),
+                           "guidance_key": "diag.server_port.fail.guidance",
+                           "guidance_params": {"port": port}})
 
         # 2. mDNS discovery
         if discovery_running:
             checks.append({"id": "discovery", "ok": True,
-                           "detail": "mDNS discovery active", "guidance": None})
+                           "detail": "mDNS discovery active",
+                           "detail_key": "diag.discovery.ok.detail", "guidance": None})
         else:
             checks.append({"id": "discovery", "ok": False,
                            "detail": "mDNS discovery not active",
+                           "detail_key": "diag.discovery.fail.detail",
                            "guidance": ("mDNS discovery isn't active. If you're on a guest/enterprise WiFi, "
                                         "AP/client isolation blocks discovery — connect both devices to the "
-                                        "same private network.")})
+                                        "same private network."),
+                           "guidance_key": "diag.discovery.fail.guidance"})
 
         # 3. Advertising (device visible on network)
         if advertising:
             checks.append({"id": "advertising", "ok": True,
-                           "detail": "device visible on network", "guidance": None})
+                           "detail": "device visible on network",
+                           "detail_key": "diag.advertising.ok.detail", "guidance": None})
         else:
             checks.append({"id": "advertising", "ok": False,
                            "detail": "device not advertising",
-                           "guidance": "This device isn't advertising — enable 'Visible' in the overview."})
+                           "detail_key": "diag.advertising.fail.detail",
+                           "guidance": "This device isn't advertising — enable 'Visible' in the overview.",
+                           "guidance_key": "diag.advertising.fail.guidance"})
 
         # 4. Web companion
         if web_running:
             checks.append({"id": "web_companion", "ok": True,
-                           "detail": f"Web companion on :{web_port}", "guidance": None})
+                           "detail": f"Web companion on :{web_port}",
+                           "detail_key": "diag.web_companion.ok.detail",
+                           "detail_params": {"web_port": web_port}, "guidance": None})
         else:
             checks.append({"id": "web_companion", "ok": False,
                            "detail": "Web companion not running",
-                           "guidance": "Web companion isn't running — enable it in Settings → Web Companion."})
+                           "detail_key": "diag.web_companion.fail.detail",
+                           "guidance": "Web companion isn't running — enable it in Settings → Web Companion.",
+                           "guidance_key": "diag.web_companion.fail.guidance"})
 
         # 5. Network classification
         network_ok, network_detail, network_guidance = self._classify_network(lan_ip)
+        network_detail_key, network_params = "diag.network.private.detail", {"lan_ip": lan_ip}
+        network_guidance_key = None
+        if not network_ok:
+            if not lan_ip or lan_ip.startswith("127."):
+                network_detail_key = "diag.network.nolan.detail"
+                network_guidance_key = "diag.network.nolan.guidance"
+            elif lan_ip.startswith("169.254."):
+                network_detail_key = "diag.network.linklocal.detail"
+                network_guidance_key = "diag.network.linklocal.guidance"
+            else:
+                network_detail_key = "diag.network.public.detail"
+                network_guidance_key = "diag.network.public.guidance"
+                network_params = {"lan_ip": lan_ip}
         checks.append({"id": "network", "ok": network_ok,
-                       "detail": network_detail, "guidance": network_guidance})
+                       "detail": network_detail, "guidance": network_guidance,
+                       "detail_key": network_detail_key, "detail_params": network_params,
+                       "guidance_key": network_guidance_key,
+                       "guidance_params": network_params})
 
         # 6. Firewall — best-effort OS-level check with a "request" action.
         fw_ok, fw_detail, fw_guidance = True, "No firewall blockage detected", None
+        fw_detail_key, fw_detail_params = "diag.firewall.ok.detail", {}
+        fw_guidance_key, fw_guidance_params = None, {}
         try:
             import subprocess as _sp
             if _platform.system() == "Darwin":
@@ -3291,9 +3349,11 @@ class Application:
                 ).stdout or ""
                 if "enabled" in _out.lower():
                     fw_detail = "macOS firewall is enabled"
+                    fw_detail_key = "diag.firewall.macos_ok.detail"
                     fw_guidance = ("The macOS firewall is on. If other devices can't reach this "
                                    "computer, allow ClipSync: System Settings → Network → Firewall → "
                                    "Options, or tap 'Request permission' to open it.")
+                    fw_guidance_key = "diag.firewall.macos_ok.guidance"
                     # Only fail the check when discovery is also failing (strong signal).
                     fw_ok = discovery_running
             elif _platform.system() == "Windows":
@@ -3304,11 +3364,22 @@ class Application:
                         fw_guidance = ("The Windows firewall may be blocking ClipSync. Tap "
                                        "'Request permission' to add an allow rule for port "
                                        f"{self.cfg.port}.")
+                        fw_guidance_key = "diag.firewall.win_fail.guidance"
+                        fw_guidance_params = {"port": self.cfg.port}
+                        if detail.startswith("Wrong port"):
+                            # Stale rule with the wrong port — surface both values.
+                            import re as _re
+                            _m = _re.search(r"\(got ([^)]+), needs ([^)]+)\)", detail)
+                            fw_detail_key = "diag.firewall.wrongport.detail"
+                            fw_detail_params = {"actual": _m.group(1), "port": _m.group(2)} if _m else {}
+                        else:
+                            fw_detail_key = "diag.firewall.win_blocked.detail"
                 except Exception:
                     pass
             elif _platform.system() == "Linux":
                 # ufw / firewalld detection + port allow check (best-effort).
                 fw_detail = "No Linux firewall detected"
+                fw_detail_key = "diag.firewall.linux_none.detail"
                 for cmd, name in ((["ufw", "status"], "ufw"),
                                   (["systemctl", "is-active", "firewalld"], "firewalld")):
                     try:
@@ -3317,18 +3388,28 @@ class Application:
                         continue
                     if "active" in _out.lower() or "Status: active" in _out or "active (running)" in _out:
                         fw_detail = f"{name} firewall is active"
+                        fw_detail_key = "diag.firewall.linux_active.detail"
+                        fw_detail_params = {"name": name}
                         fw_guidance = (f"The {name} firewall is on. If other devices can't reach "
                                        f"this computer, allow ports {self.cfg.port} and "
                                        f"{self.cfg.web_port}: 'sudo ufw allow {self.cfg.port}/tcp' and "
                                        f"'sudo ufw allow {self.cfg.web_port}/tcp' (or the firewalld equivalent).")
+                        fw_guidance_key = "diag.firewall.linux_active.guidance"
+                        fw_guidance_params = {"name": name, "port": self.cfg.port,
+                                              "web_port": self.cfg.web_port}
                         fw_ok = discovery_running
                         break
         except Exception:
             pass
-        checks.append({"id": "firewall", "ok": fw_ok, "detail": fw_detail, "guidance": fw_guidance})
+        checks.append({"id": "firewall", "ok": fw_ok, "detail": fw_detail,
+                       "detail_key": fw_detail_key, "detail_params": fw_detail_params,
+                       "guidance": fw_guidance,
+                       "guidance_key": fw_guidance_key, "guidance_params": fw_guidance_params})
 
         # 7. Permissions — macOS Local Network (15+) is required for LAN discovery.
         perm_ok, perm_detail, perm_guidance = True, "No permission issues detected", None
+        perm_detail_key, perm_detail_params = "diag.permissions.ok.detail", {}
+        perm_guidance_key, perm_guidance_params = None, {}
         try:
             if _platform.system() == "Darwin":
                 _mv = [int(x) for x in _platform.mac_ver()[0].split(".")[:2]]
@@ -3336,17 +3417,24 @@ class Application:
                     if not discovery_running:
                         perm_ok = False
                         perm_detail = "Local Network permission may be missing (macOS 15+)"
+                        perm_detail_key = "diag.permissions.fail.detail"
                         perm_guidance = ("macOS 15+ needs 'Local Network' permission to discover other "
                                          "devices. Tap 'Request permission' to open System Settings → "
                                          "Privacy & Security → Local Network and allow ClipSync.")
+                        perm_guidance_key = "diag.permissions.fail.guidance"
                     else:
                         perm_detail = "Local Network permission granted"
+                        perm_detail_key = "diag.permissions.ok_macos.detail"
         except Exception:
             pass
-        checks.append({"id": "permissions", "ok": perm_ok, "detail": perm_detail, "guidance": perm_guidance})
+        checks.append({"id": "permissions", "ok": perm_ok, "detail": perm_detail,
+                       "detail_key": perm_detail_key, "detail_params": perm_detail_params,
+                       "guidance": perm_guidance,
+                       "guidance_key": perm_guidance_key, "guidance_params": perm_guidance_params})
 
         # 8. mDNS service (Linux: avahi-daemon is required for discovery).
         mdns_ok, mdns_detail, mdns_guidance = True, "mDNS service available", None
+        mdns_detail_key, mdns_guidance_key = "diag.mdns.ok.detail", None
         try:
             if _platform.system() == "Linux":
                 _out = _sp.run(["systemctl", "is-active", "avahi-daemon"],
@@ -3354,11 +3442,15 @@ class Application:
                 if "active" not in _out.lower():
                     mdns_ok = False
                     mdns_detail = "avahi-daemon is not running"
+                    mdns_detail_key = "diag.mdns.fail.detail"
                     mdns_guidance = ("mDNS discovery needs avahi-daemon. Install/start it: "
                                      "'sudo apt install avahi-daemon' then 'sudo systemctl start avahi-daemon'.")
+                    mdns_guidance_key = "diag.mdns.fail.guidance"
         except Exception:
             pass
-        checks.append({"id": "mdns", "ok": mdns_ok, "detail": mdns_detail, "guidance": mdns_guidance})
+        checks.append({"id": "mdns", "ok": mdns_ok, "detail": mdns_detail,
+                       "detail_key": mdns_detail_key, "guidance": mdns_guidance,
+                       "guidance_key": mdns_guidance_key})
 
         # 9. Clipboard tool (Linux: xclip / wl-paste needed to read the clipboard).
         if _platform.system() == "Linux":
@@ -3366,9 +3458,12 @@ class Application:
                                     capture_output=True, text=True, timeout=3).stdout.strip())
             checks.append({"id": "clipboard_tool", "ok": _clip_ok,
                            "detail": "clipboard tool present" if _clip_ok else "no xclip / wl-paste",
+                           "detail_key": "diag.clipboard_tool.ok.detail" if _clip_ok
+                                        else "diag.clipboard_tool.fail.detail",
                            "guidance": None if _clip_ok else ("Clipboard capture needs xclip (X11) or "
                                                              "wl-paste (Wayland). Install one: "
-                                                             "'sudo apt install xclip' or 'sudo apt install wl-clipboard'.")})
+                                                             "'sudo apt install xclip' or 'sudo apt install wl-clipboard'."),
+                           "guidance_key": None if _clip_ok else "diag.clipboard_tool.fail.guidance"})
         # add new check ids to the critical set for the summary
         checks_extra = ("server_port", "discovery", "network", "mdns")
         if any(not c["ok"] for c in checks if c["id"] in checks_extra):
