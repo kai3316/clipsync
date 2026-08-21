@@ -43,7 +43,9 @@
           position: 'fixed',
           left: x + 'px',
           top: y + 'px',
-          zIndex: String(400),
+          // Above the toast (z-toast=500) so a "favorited" toast can't cover
+          // the menu when it opens near the bottom of the screen.
+          zIndex: String(600),
           minWidth: '200px',
         };
       },

@@ -502,7 +502,11 @@
 
       openAddModal: function () {
         this.addTab = 'history';
-        this.addGroup = '';
+        // Default the new favorite to the group currently being viewed, so
+        // adding while inside a group puts the item there instead of in
+        // "no group" (the previous behaviour).
+        this.addGroup = (this.store.activeGroup && this.store.activeGroup !== '')
+          ? this.store.activeGroup : '';
         this.showAddGroupInput = false;
         this.addNewGroupName = '';
         this.manualTitle = '';
@@ -666,9 +670,17 @@
       /* ── Group context menu ──────────────────────────────────── */
 
       openContextMenu: function (e, group) {
+        // Keep the menu inside the viewport — it's position:fixed with no
+        // clamping, so a right-click near the edge could push it off-screen.
+        var menuW = 170;
+        var menuH = 92;
+        var x = e.clientX;
+        var y = e.clientY;
+        if (x + menuW > window.innerWidth - 8) x = window.innerWidth - menuW - 8;
+        if (y + menuH > window.innerHeight - 8) y = window.innerHeight - menuH - 8;
         this.contextMenu.show = true;
-        this.contextMenu.x = e.clientX;
-        this.contextMenu.y = e.clientY;
+        this.contextMenu.x = Math.max(8, x);
+        this.contextMenu.y = Math.max(8, y);
         this.contextMenu.group = group;
       },
 

@@ -131,28 +131,52 @@
       <!-- Active transfers -->
       <div v-if="hasActiveTransfers" class="transfer-panel__section">
         <div class="section-header">📡 {{ t('transfer.active_transfers') }}</div>
-        <div v-for="tr in store.activeTransfers" :key="tr.id" class="transfer-card card">
-          <div class="transfer-card__header">
-            <span v-if="tr.direction === 'up'">📤</span>
-            <span v-else>📥</span>
-            <span class="text-ellipsis" style="font-weight:600;flex:1">{{ tr.filename || t('transfer.unknown_file') }}</span>
-            <span v-if="tr.size" style="font-size:12px;color:var(--clipsync-fg-muted)">{{ formatSize(tr.size) }}</span>
+        <div
+          v-for="tr in store.activeTransfers"
+          :key="tr.id"
+          class="transfer-history-item card"
+          :class="'transfer-history-item--' + (tr.direction === 'up' ? 'up' : 'down')"
+        >
+          <div
+            class="transfer-history-item__icon"
+            :class="tr.direction === 'up' ? 'transfer-history-item__icon--up' : 'transfer-history-item__icon--down'"
+          >{{ tr.direction === 'up' ? '↗' : '↘' }}</div>
+          <div class="transfer-history-item__body">
+            <div class="transfer-history-item__name">{{ tr.filename || t('transfer.unknown_file') }}</div>
+            <div class="transfer-history-item__meta">
+              <span class="transfer-history-item__status transfer-history-item__status--active">
+                {{ tr.status === 'paused' ? t('transfer.state.paused') : (tr.progress || 0) + '%' }}
+              </span>
+              <span v-if="tr.size">{{ formatSize(tr.size) }}</span>
+              <span v-if="tr.speed">{{ formatSpeed(tr.speed) }}</span>
+              <span v-if="tr.eta">{{ tr.eta }}</span>
+            </div>
+            <div class="transfer-history-item__progress">
+              <div
+                class="transfer-history-item__progress-fill"
+                :class="{ 'transfer-history-item__progress-fill--paused': tr.status === 'paused' }"
+                :style="{ width: (tr.progress || 0) + '%' }"
+              ></div>
+            </div>
           </div>
-          <div class="transfer-card__progress-track">
-            <div class="transfer-card__progress-fill"
-              :style="{ width: (tr.progress || 0) + '%' }"></div>
-          </div>
-          <div style="display:flex;align-items:center;gap:8px;font-size:12px;color:var(--clipsync-fg-muted)">
-            <span>{{ tr.progress || 0 }}%</span>
-            <span v-if="tr.speed">{{ formatSpeed(tr.speed) }}</span>
-            <span v-if="tr.eta">{{ tr.eta }}</span>
-            <span style="flex:1"></span>
-            <button v-if="tr.status !== 'paused'" class="btn-ghost" style="padding:2px 8px;font-size:11px"
-              @click="pauseTransfer(tr.id)">⏸</button>
-            <button v-if="tr.status === 'paused'" class="btn-ghost" style="padding:2px 8px;font-size:11px"
-              @click="resumeTransfer(tr.id)">▶</button>
-            <button class="btn-ghost" style="padding:2px 8px;font-size:11px;color:var(--clipsync-danger)"
-              @click="cancelTransfer(tr.id)">✕</button>
+          <div class="transfer-history-item__actions">
+            <button
+              v-if="tr.status !== 'paused'"
+              class="transfer-history-item__btn"
+              :title="t('transfer.pause')"
+              @click="pauseTransfer(tr.id)"
+            >&#9208;</button>
+            <button
+              v-if="tr.status === 'paused'"
+              class="transfer-history-item__btn"
+              :title="t('transfer.resume')"
+              @click="resumeTransfer(tr.id)"
+            >&#9654;</button>
+            <button
+              class="transfer-history-item__btn transfer-history-item__btn--danger"
+              :title="t('transfer.cancel')"
+              @click="cancelTransfer(tr.id)"
+            >&#10005;</button>
           </div>
         </div>
       </div>

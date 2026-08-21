@@ -2161,6 +2161,32 @@
       border: 1px solid color-mix(in srgb, var(--clipsync-danger) 35%, transparent);
     }
 
+    .transfer-history-item__status--active {
+      color: var(--clipsync-accent);
+      background: var(--clipsync-accent-glow);
+      border: 1px solid color-mix(in srgb, var(--clipsync-accent) 30%, transparent);
+    }
+
+    .transfer-history-item__progress {
+      width: 100%;
+      height: 4px;
+      border-radius: 2px;
+      background: var(--clipsync-panel-2);
+      overflow: hidden;
+      margin-top: 2px;
+    }
+
+    .transfer-history-item__progress-fill {
+      height: 100%;
+      border-radius: 2px;
+      background: linear-gradient(90deg, var(--clipsync-accent), var(--clipsync-accent-2));
+      transition: width 300ms ease;
+    }
+
+    .transfer-history-item__progress-fill--paused {
+      opacity: 0.4;
+    }
+
     .transfer-history-item__actions {
       display: flex;
       align-items: center;
@@ -2187,6 +2213,12 @@
       color: var(--clipsync-fg);
       border-color: var(--clipsync-border-strong);
       background: var(--clipsync-hover);
+    }
+
+    .transfer-history-item__btn--danger:hover {
+      color: var(--clipsync-danger);
+      border-color: color-mix(in srgb, var(--clipsync-danger) 40%, transparent);
+      background: var(--clipsync-danger-bg);
     }
 
     /* ═══════════════════════════════════════════════════════════════
@@ -2773,7 +2805,8 @@
       max-height: 200px;
       overflow-y: auto;
       padding: var(--clipsync-space-1);
-      z-index: var(--clipsync-z-dropdown);
+      /* Above toasts so a transient notification can't cover the picker. */
+      z-index: var(--clipsync-z-tooltip);
       display: flex;
       flex-direction: column;
       gap: 2px;
@@ -2814,7 +2847,8 @@
       position: fixed;
       min-width: 150px;
       padding: var(--clipsync-space-1);
-      z-index: var(--clipsync-z-overlay);
+      /* Above the toast so a transient notification can't cover it. */
+      z-index: var(--clipsync-z-tooltip);
       display: flex;
       flex-direction: column;
       gap: 2px;

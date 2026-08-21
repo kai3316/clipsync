@@ -259,10 +259,11 @@
       changeGroup: function (group) {
         this.showGroupDropdown = false;
         var self = this;
+        var isUngrouped = group === 'Ungrouped';
         // "Ungrouped" is the UI label for an empty group — store it as an
         // empty string so the item is not assigned a literal "Ungrouped"
         // group that would then be filtered inconsistently.
-        if (group === 'Ungrouped') group = '';
+        if (isUngrouped) group = '';
         // Register the target group so it stays visible even if it ends up
         // with no items afterwards.
         if (group) this.store.ensureGroup(group);
@@ -272,7 +273,8 @@
             if (idx !== -1) {
               self.store.favorites.splice(idx, 1, res.favorite);
             }
-            self.store.showToast(self.t('favorites.moved_to', { group: (group === 'Ungrouped' ? self.t('favorites.ungrouped') : group) }), 1500);
+            var label = isUngrouped ? self.t('favorites.ungrouped') : group;
+            self.store.showToast(self.t('favorites.moved_to', { group: label }), 1500);
           }
         }).catch(function (e) {
           console.error('[ClipSync] Change group failed:', e);
