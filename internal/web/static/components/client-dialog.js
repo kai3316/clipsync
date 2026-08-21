@@ -92,6 +92,14 @@
 
     mounted: function () {
       var self = this;
+      // Allow Escape to dismiss any client dialog (the prompt input handles
+      // its own Escape via @keyup.escape; this covers confirm/alert too).
+      this._onDialogKeydown = function (e) {
+        if (e.key === 'Escape' && self.store.clientDialog) {
+          self.store.closeClientDialog();
+        }
+      };
+      document.addEventListener('keydown', this._onDialogKeydown);
       // Focus the OK button or input when dialog opens
       this.$watch('store.clientDialog', function (dlg) {
         if (!dlg) return;
@@ -104,6 +112,12 @@
           }
         });
       });
+    },
+
+    beforeUnmount: function () {
+      if (this._onDialogKeydown) {
+        document.removeEventListener('keydown', this._onDialogKeydown);
+      }
     },
   };
 

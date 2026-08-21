@@ -14,6 +14,10 @@ block_cipher = None
 
 # Project root — needed so PyInstaller finds the 'internal' package
 _PROJ_ROOT = os.path.abspath(SPECPATH)
+sys.path.insert(0, _PROJ_ROOT)
+
+# Single source of truth for versioning (bump internal/version.py only).
+from internal.version import __version__ as _VERSION
 
 hiddenimports = collect_submodules("internal")
 hiddenimports += [
@@ -62,10 +66,16 @@ hiddenimports += [
 datas = [
     (os.path.join(_PROJ_ROOT, "internal", "web", "static"), "internal/web/static"),
 ]
+# Hardening: bundle customtkinter's runtime data (themes, assets) explicitly
+# instead of relying solely on pyinstaller-hooks-contrib.
+datas += collect_data_files("customtkinter")
 
-if sys.platform == "darwin":
-    hiddenimports += ["pyobjc_framework_Cocoa"]
-elif sys.platform == "linux":
+# NOTE: the old "pyobjc_framework_Cocoa" hiddenimport was removed — that is a
+# pip distribution name, not an importable module, so PyInstaller logged a
+# no-op "hidden import not found". main.py's _hide_dock() imports rubicon.objc
+# inside a try/except and falls back to ctypes, so no macOS ObjC hiddenimport
+# is required.
+if sys.platform == "linux":
     hiddenimports += ["pynput"]
 
 a = Analysis(
@@ -96,12 +106,12 @@ if sys.platform == "darwin":
         debug=False,
         bootloader_ignore_signals=False,
         strip=False,
-        upx=True,
+        upx=False,
         console=False,
         disable_windowed_traceback=False,
         argv_emulation=True,
         target_arch=None,
-        codesign_identity=None,
+        codesign_identity="-",
         entitlements_file=None,
     )
     coll = COLLECT(
@@ -110,7 +120,7 @@ if sys.platform == "darwin":
         a.zipfiles,
         a.datas,
         strip=False,
-        upx=True,
+        upx=False,
         upx_exclude=[],
         name="clipsync",
     )
@@ -120,6 +130,10 @@ if sys.platform == "darwin":
         icon=None,
         bundle_identifier="com.clipsync.app",
         info_plist={
+            "CFBundleName": "ClipSync",
+            "CFBundleDisplayName": "ClipSync",
+            "CFBundleShortVersionString": _VERSION,
+            "CFBundleVersion": _VERSION,
             "NSHighResolutionCapable": True,
             "LSUIElement": True,
             "NSAppTransportSecurity": {
@@ -139,9 +153,9 @@ else:
         debug=False,
         bootloader_ignore_signals=False,
         strip=False,
-        upx=True,
+        upx=False,
         console=False,
-        icon="assets/icon.ico" if sys.platform == "win32" else None,
+        icon=os.path.join(_PROJ_ROOT, "assets", "icon.ico") if sys.platform == "win32" else None,
         disable_windowed_traceback=False,
         argv_emulation=False,
         target_arch=None,

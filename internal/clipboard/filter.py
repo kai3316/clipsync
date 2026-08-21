@@ -32,16 +32,25 @@ _SSN_RE = re.compile(r'\b\d{3}-\d{2}-\d{4}\b')
 _API_KEY_RE = re.compile(
     r'(?:'
     # OpenAI / Stripe style: sk-...
-    r'sk-[a-zA-Z0-9_\-]{20,}'
-    # api_key=... or api_key:...
-    r'|api_key\s*[=:]\s*["\']?\s*[a-zA-Z0-9_\-]{20,}["\']?'
-    # token=... or token:... (e.g. GitHub tokens, JWT-style in config)
-    r'|token\s*[=:]\s*["\']?\s*[a-zA-Z0-9_\-\.]{20,}["\']?'
-    # Bearer <token> (Authorization headers)
-    r'|Bearer\s+[a-zA-Z0-9_\-\.]{20,}'
+    r'sk-[a-zA-Z0-9_\-]{16,}'
+    # GitHub tokens
+    r'|gh[pousr]_[a-zA-Z0-9]{16,}'
+    r'|github_pat_[a-zA-Z0-9_]{16,}'
+    # Slack tokens
+    r'|xox[baprs]-[a-zA-Z0-9\-]{16,}'
+    # AWS access key id
+    r'|AKIA[0-9A-Z]{16}'
+    # JWT / session tokens (three base64url segments)
+    r'|eyJ[a-zA-Z0-9_\-]{8,}\.[a-zA-Z0-9_\-]{8,}\.[a-zA-Z0-9_\-]{8,}'
+    # name=value / name:value secret assignments
+    r'|(?:api[_-]?key|access[_-]?key|auth[_-]?token|client[_-]?secret|secret|token|key)\s*[=:]\s*["\']?\s*[a-zA-Z0-9_\-\.]{16,}["\']?'
+    # Authorization / Bearer headers
+    r'|authorization\s*[=:]\s*(?:Bearer\s+)?[a-zA-Z0-9_\-\.]{16,}'
+    r'|Bearer\s+[a-zA-Z0-9_\-\.]{16,}'
     # Generic key- prefix (e.g. key-...)
-    r'|key-[a-zA-Z0-9_\-]{20,}'
+    r'|key-[a-zA-Z0-9_\-]{16,}'
     r')',
+    re.IGNORECASE,
 )
 
 _PRIVATE_KEY_RE = re.compile(
@@ -51,8 +60,13 @@ _PRIVATE_KEY_RE = re.compile(
 )
 
 _PASSWORD_RE = re.compile(
-    r'\b(?:password|passwd|pwd)\s*[=:]\s*\S+',
+    r'\b(?:password|passwd|pwd)\s*[=:]\s*["\']?\s*\S+["\']?',
     re.IGNORECASE,
+)
+
+# Bare email addresses (PII caught even without a key= prefix).
+_EMAIL_RE = re.compile(
+    r'\b[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}\b',
 )
 
 
@@ -84,10 +98,18 @@ class ContentFilter:
             ("credit_card", _CREDIT_CARD_RE),
             ("ssn", _SSN_RE),
             ("api_key", _API_KEY_RE),
+            ("api_key", _EMAIL_RE),  # bare emails grouped under credentials
             ("private_key", _PRIVATE_KEY_RE),
             ("password", _PASSWORD_RE),
         ]
-        self._enabled = enabled_categories or []
+        # Redaction is ON by default: an omitted or empty category list
+        # enables every category, so fresh installs filter sensitive
+        # content out of the box.  Pass a non-empty list to enable a
+        # subset.
+        if enabled_categories:
+            self._enabled = list(enabled_categories)
+        else:
+            self._enabled = list(dict.fromkeys(c for c, _ in self._all_patterns))
 
     @property
     def enabled_categories(self) -> list[str]:
@@ -95,7 +117,11 @@ class ContentFilter:
 
     @enabled_categories.setter
     def enabled_categories(self, categories: list[str]) -> None:
-        self._enabled = list(categories)
+        if categories:
+            self._enabled = list(categories)
+        else:
+            # Empty list means "not configured" → default to all enabled.
+            self._enabled = list(dict.fromkeys(c for c, _ in self._all_patterns))
 
     @property
     def is_active(self) -> bool:

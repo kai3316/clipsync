@@ -137,6 +137,11 @@
             if (res && res.devices) {
               self.store.devices = res.devices;
             }
+            // Polling fallback for pending pairings (the WS push is dropped
+            // when no web client is attached, so refresh must re-sync them).
+            if (res && res.pending_pairings) {
+              self.store.syncPairingRequests(res.pending_pairings);
+            }
           })
           .catch(function () {})
           .finally(function () {
@@ -154,6 +159,10 @@
             });
             if (idx !== -1) self.store.pairingRequests.splice(idx, 1);
             self.store.showToast(self.t('device.pairing_confirmed'), 2000);
+            // Refresh the device list so the newly paired device shows its
+            // connected/paired state right away instead of staying stale
+            // until the next broadcast.
+            self.refresh();
           })
           .catch(function () {
             self.store.showToast(self.t('device.pairing_failed'), 2000);

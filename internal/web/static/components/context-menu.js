@@ -10,6 +10,20 @@
 
   window.__CLIPSYNC_COMPONENTS__ = window.__CLIPSYNC_COMPONENTS__ || {};
 
+  // Decode the base64 TEXT bytes from a history item's `types` map, falling
+  // back to the (possibly truncated) preview. History list responses no longer
+  // carry `types`, so callers fetch the full item via getHistoryItem first.
+  function decodeTypesText(types, fallback) {
+    if (types && types.TEXT) {
+      try {
+        var bytes = Uint8Array.from(atob(types.TEXT), function (c) { return c.charCodeAt(0); });
+        var decoded = new TextDecoder('utf-8').decode(bytes);
+        if (decoded) return decoded;
+      } catch (e) { /* keep fallback */ }
+    }
+    return fallback || '';
+  }
+
   window.__CLIPSYNC_COMPONENTS__['context-menu'] = {
     inject: ['store'],
 
@@ -174,36 +188,44 @@
         var item = this.targetItem;
         if (!item) return;
 
-        // Prefer the full stored text over the truncated preview. The history
-        // list only ships text_preview; the full TEXT bytes ride along as
-        // base64 in item.types.
-        var fullText = item.text_preview || '';
-        if (item.types && item.types.TEXT) {
-          try {
-            var bytes = Uint8Array.from(atob(item.types.TEXT), function (c) { return c.charCodeAt(0); });
-            var decoded = new TextDecoder('utf-8').decode(bytes);
-            if (decoded) fullText = decoded;
-          } catch (e) { /* keep the preview fallback */ }
-        }
-
-        var favData = {
-          title: fullText.substring(0, 80),
-          content: fullText,
-          group: '',
-        };
+        var preview = item.text_preview || '';
         var self = this;
-        ClipsyncAPI.addFavorite(favData).then(function (res) {
-          // Push the created favorite into the store so the favorites panel
-          // reflects it immediately (same as favorites-panel does).
-          if (res && res.ok !== false && res.favorite) {
-            self.store.favorites.push(res.favorite);
-          }
-          self.store.showToast(self.t('favorites.added'), 1500);
-        }).catch(function (e) {
-          console.error('[ClipSync] Add favorite failed:', e);
-          self.store.showToast(self.t('favorites.add_failed'), 2000);
-        });
-        this.closeMenu();
+
+        // List responses no longer carry `types`, so fetch the full item when
+        // we need the complete text rather than the truncated preview.
+        var doAdd = function (fullText) {
+          var favData = {
+            title: fullText.substring(0, 80),
+            content: fullText,
+            group: '',
+          };
+          ClipsyncAPI.addFavorite(favData).then(function (res) {
+            // Push the created favorite into the store so the favorites panel
+            // reflects it immediately (same as favorites-panel does).
+            if (res && res.ok !== false && res.favorite) {
+              self.store.favorites.push(res.favorite);
+            }
+            self.store.showToast(self.t('favorites.added'), 1500);
+          }).catch(function (e) {
+            console.error('[ClipSync] Add favorite failed:', e);
+            self.store.showToast(self.t('favorites.add_failed'), 2000);
+          });
+          self.closeMenu();
+        };
+
+        if (item.types && item.types.TEXT) {
+          doAdd(decodeTypesText(item.types, preview));
+        } else if (item.entry_id) {
+          ClipsyncAPI.getHistoryItem(item.entry_id).then(function (res) {
+            var full = preview;
+            if (res && res.item && res.item.types) {
+              full = decodeTypesText(res.item.types, preview);
+            }
+            doAdd(full);
+          }).catch(function () { doAdd(preview); });
+        } else {
+          doAdd(preview);
+        }
       },
 
       translateItem: function () {

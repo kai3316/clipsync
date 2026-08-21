@@ -2,6 +2,33 @@
 
 All notable changes to ClipSync are documented in this file.
 
+## [1.0.6] — 2026-08-21
+
+### Security
+- Clipboard is now only broadcast to / accepted from **paired** peers — an unpaired TLS peer can no longer read or inject the local clipboard (pastejacking), open arbitrary URLs, or spawn transfer dialogs
+- `nav_url` from peers is restricted to `http`/`https` (no more `file://` / custom-scheme launch)
+- zlib frame decompression is capped (zip-bomb / OOM fix); /api/download rejects Windows drive-relative escapes
+- Web settings save re-encrypts the device private key at rest; backup/export files are chmod 0600 and export temp files cleaned up
+- Web token no longer logged to the (previously world-readable) log file
+- Factory reset is no longer defeated by shutdown re-saving the deleted config
+- Single-instance lock works for PyInstaller-frozen builds
+
+### Fixed
+- macOS web UI opens reliably even when Chrome/Edge is already running (browser binary launched directly with `--app`)
+- Pairing: pairing requests now survive dashboard-closed (polled via /api/devices), Connect no longer claims success before the handshake, hashed-id reconnects still enforce cert pinning, pairing-code rate limit can't be reset by reconnecting
+- File transfer: retransmission actually completes (finalizing flag reset), missing middle-chunk gaps detected, chunks stream to disk instead of buffering the whole file in RAM, 2 GiB size cap, paused transfers no longer auto-cancelled, web pause/resume no longer crash
+- WebSocket: slow/stalled clients can no longer freeze clipboard sync; shutdown doesn't deadlock
+- Clipboard: first copy after empty-clipboard start is no longer dropped, HTML/RTF-only changes detected, FILE/URL content dedups, image re-encode no longer re-broadcasts duplicates, Linux idle polling spawns far fewer subprocesses
+- Web UI: transfers panel populates on load, redundant double-fetches removed, settings (sound/animation/language) persist, "Open file" and "Restart App" actually work, full clipboard text loads on copy/favorite instead of truncated preview
+- Sensitive-content redaction is ON by default with broader matchers (tokens, keys, emails, JWT, AWS/GitHub/Slack secrets)
+- CTk dashboard breath animation no longer re-queries everything at 5 fps; QR + LAN IP are cached
+
+### Build / CI
+- Linux hotkeys restored (`pynput` added to requirements)
+- Release tag is verified to match `internal/version.py`; artifact smoke tests catch missing web UI; releases now run the test suite
+- macOS bundle is ad-hoc signed with version keys; dead `pyobjc_framework_Cocoa` hiddenimport removed
+- `upx` disabled (risky on macOS/arm64); customtkinter data bundled explicitly
+
 ## [1.0.5] — 2026-08-21
 
 ### Added

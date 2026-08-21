@@ -52,6 +52,10 @@ BINARY_MAGIC = 0x4253  # "BS" for binary payload frames (file chunks)
 VERSION = 2
 HEADER_FMT = ">H B I"  # magic, version, payload_length
 HEADER_SIZE = 7
+# Upper bound for any single decompressed content payload.  Mirrors the
+# transport frame cap (10 MB) and prevents a tiny compressed frame from
+# expanding into a zip-bomb OOM during decode.
+MAX_FRAME_SIZE = 10 * 1024 * 1024  # 10 MB
 
 _TYPE_NAME_MAP = {
     ContentType.TEXT: "TEXT",
@@ -62,10 +66,17 @@ _TYPE_NAME_MAP = {
 }
 _NAME_TYPE_MAP = {v: k for k, v in _TYPE_NAME_MAP.items()}
 
+
+def has_syncable_types(content: ClipboardContent) -> bool:
+    """Return True if any format in ``content`` can be encoded for sync."""
+    return any(t in _TYPE_NAME_MAP for t in content.types)
+
+
 # Valid message types for file transfer routing
 FILE_TRANSFER_MSG_TYPES = frozenset({
     "file_request", "file_chunk", "file_ack", "file_reject", "file_complete",
     "file_chunk_ack", "file_pause", "file_resume",
+    "speed_test_data", "speed_test_result",
 })
 
 
@@ -123,6 +134,12 @@ def encode_message(msg: SyncMessage, msg_type: str = "clipboard") -> bytes:
         if content_type == ContentType.IMAGE_PNG and msg.content.image_fmt not in ("", "png"):
             data = zlib.compress(data, level=1)
         payload["types"][name] = base64.b64encode(data).decode("ascii")
+
+    if not payload["types"] and msg.content.types:
+        # Content carried types, but none of them are encodable (e.g. a
+        # FILE/URL-only capture) — there is nothing to sync, so emit no frame.
+        logger.debug("No syncable clipboard types — skipping encode")
+        return b""
 
     return encode_frame(payload, msg.msg_id, msg.source_device)
 
@@ -268,12 +285,24 @@ def decode_message(data: bytes) -> SyncMessage | None:
         if content_type:
             try:
                 decoded = base64.b64decode(b64_data)
-                # zlib decompress non-PNG raster images
+                # zlib decompress non-PNG raster images.  Bound the output so a
+                # tiny compressed frame cannot expand into a zip-bomb OOM.
                 if content_type == ContentType.IMAGE_PNG and image_fmt not in ("", "png"):
                     try:
-                        decoded = zlib.decompress(decoded)
+                        decompressor = zlib.decompressobj()
+                        decoded = decompressor.decompress(decoded, MAX_FRAME_SIZE)
+                        if decompressor.unconsumed_tail or not decompressor.eof:
+                            # Decompressed output would exceed the sane cap —
+                            # drop this content type.
+                            logger.debug(
+                                "Image payload exceeds decompression cap for %s", name,
+                            )
+                            continue
                     except zlib.error:
                         pass  # legacy uncompressed data
+                    except MemoryError:
+                        logger.debug("Memory error decompressing content type %s", name)
+                        continue
                 content.types[content_type] = decoded
             except Exception:
                 logger.debug("Invalid base64 for content type %s", name)

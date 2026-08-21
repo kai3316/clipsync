@@ -76,7 +76,11 @@ def _make_dedup_key(content: ClipboardContent) -> str:
     """
     if ContentType.TEXT in content.types:
         text = content.types[ContentType.TEXT].decode("utf-8", errors="replace")
-        return "text:" + text[:500]
+        # Hash the full body so two long texts sharing a prefix are not
+        # wrongly coalesced within the dedup window.
+        return "text:" + hashlib.sha256(
+            text.encode("utf-8", errors="replace")
+        ).hexdigest()
     if ContentType.IMAGE_PNG in content.types:
         return "png:" + hashlib.sha256(
             content.types[ContentType.IMAGE_PNG]
@@ -92,6 +96,16 @@ def _make_dedup_key(content: ClipboardContent) -> str:
     if ContentType.RTF in content.types:
         return "rtf:" + hashlib.sha256(
             content.types[ContentType.RTF]
+        ).hexdigest()
+    if ContentType.FILE in content.types:
+        # FILE content is the newline-joined file paths — hash them so
+        # file-only copies dedup instead of falling through to a unique key.
+        return "file:" + hashlib.sha256(
+            content.types[ContentType.FILE]
+        ).hexdigest()
+    if ContentType.URL in content.types:
+        return "url:" + hashlib.sha256(
+            content.types[ContentType.URL]
         ).hexdigest()
     return "other:" + str(time.time())
 
@@ -173,8 +187,13 @@ class ClipboardHistory:
         best_type, _best_data = best
 
         # -- dedup ---------------------------------------------------
+        # Use the local clock for the dedup window so a sender's clock
+        # skew can neither defeat dedup (window looks too old) nor break
+        # it (window looks negative).  Keep the sender's timestamp for
+        # display, when one was supplied.
         dedup_key = _make_dedup_key(content)
-        now = content.timestamp or time.time()
+        now = time.time()
+        captured_at = content.timestamp or now
 
         with self._lock:
             if dedup_key == self._last_dedup_key:
@@ -185,7 +204,7 @@ class ClipboardHistory:
 
             preview = _build_preview(content.types)
             entry: dict = {
-                "timestamp": now,
+                "timestamp": captured_at,
                 "content_type": _map_type_to_label(best_type),
                 "text_preview": preview,
                 "types": {
@@ -203,7 +222,12 @@ class ClipboardHistory:
 
             self._entries.insert(0, entry)
             if len(self._entries) > self.MAX_ENTRIES:
-                self._entries = self._entries[: self.MAX_ENTRIES]
+                # Remove oldest unpinned entries beyond the limit.
+                # Keep all pinned entries; trim only unpinned ones.
+                pinned = [e for e in self._entries if e.get("pinned")]
+                unpinned = [e for e in self._entries if not e.get("pinned")]
+                allowed_unpinned = max(0, self.MAX_ENTRIES - len(pinned))
+                self._entries = pinned + unpinned[:allowed_unpinned]
             self._save()
 
     def get_all(self) -> list[dict]:
@@ -214,10 +238,20 @@ class ClipboardHistory:
             return pinned + unpinned
 
     def search(self, query: str) -> list[dict]:
-        """Case-insensitive search in text previews. Returns matching entries, newest first."""
+        """Case-insensitive search in text previews.
+
+        Returns matching entries in the same order as ``get_all()``:
+        pinned first, then newest first within each group.
+        """
         q = query.lower()
         with self._lock:
-            return [e for e in self._entries if q in e.get("text_preview", "").lower()]
+            matches = [
+                e for e in self._entries
+                if q in e.get("text_preview", "").lower()
+            ]
+            pinned = [e for e in matches if e.get("pinned")]
+            unpinned = [e for e in matches if not e.get("pinned")]
+            return pinned + unpinned
 
     def get(self, index: int) -> dict | None:
         """Get a single entry by display index (matching get_all() order). Returns None if out of bounds."""

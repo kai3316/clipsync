@@ -32,6 +32,15 @@
       };
     },
 
+    watch: {
+      // Selection is per-panel: history selects by entry_id, favorites by
+      // `.id`. Clearing on tab switch prevents favorite uuid strings leaking
+      // into the history multi-select action bar (and vice versa).
+      'store.activeTab': function () {
+        this.store.clearSelection();
+      },
+    },
+
     mounted: function () {
       var self = this;
 
@@ -82,9 +91,10 @@
       // Fetch initial data
       this.loadData();
 
-      // 5-second overview refresh — only when overview tab visible, window focused, page visible
+      // 5-second overview refresh — runs whenever the window is focused and
+      // page visible, regardless of the active tab, so the always-visible
+      // status bar counts never go stale.
       this._overviewTimer = setInterval(function () {
-        if (store.activeTab !== 'overview') return;
         if (!document.hasFocus()) return;
         if (document.hidden) return;
         store.fetchOverview();
@@ -92,20 +102,14 @@
 
       // WebSocket events. Each loader is fire-and-forget, so swallow
       // rejections to avoid unhandled promise rejections on transient
-      // network failures. (The backend never emits `clipboard_changed` —
-      // clipboard changes arrive as `history_updated`.)
-      ClipsyncWS.on('history_updated', function () {
-        self.loadHistory().catch(function () {});
-      });
-
-      ClipsyncWS.on('devices_updated', function () {
-        self.loadDevices().catch(function () {});
-      });
-
-      ClipsyncWS.on('transfer_progress', function () {
-        self.loadTransfers().catch(function () {});
-      });
-
+      // network failures.
+      //
+      // `history_updated` and `devices_updated` are handled inside ws.js,
+      // which splices the reactive store from the broadcast payload (the
+      // server sends the full list), so no HTTP refetch is needed here.
+      // `transfer_progress` is likewise applied to activeTransfers by ws.js,
+      // so we only refetch the transfer list on completion (and reconnect,
+      // via loadData) to pick up the completed entry's history path.
       ClipsyncWS.on('transfer_complete', function () {
         self.loadTransfers().catch(function () {});
         store.showToast(self.t('transfer.complete_toast'), 2000);
@@ -183,6 +187,7 @@
             this.loadDevices(),
             this.loadFavorites(),
             this.loadSettings(),
+            this.loadTransfers(),
           ];
 
           // Also load overview
@@ -226,6 +231,11 @@
           for (var i = 0; i < devs.length; i++) {
             store.devices.push(devs[i]);
           }
+          // Polling fallback for pending pairings (the WS push is dropped when
+          // no web client is attached, so the device list fetch re-syncs them).
+          if (res && res.pending_pairings) {
+            store.syncPairingRequests(res.pending_pairings);
+          }
           return devs;
         });
       },
@@ -247,6 +257,12 @@
           store.settingsCache = s;
           if (s.ui_backend) store.uiBackend = s.ui_backend;
           if (typeof s.sound_enabled === 'boolean') store.soundEnabled = s.sound_enabled;
+          if (typeof s.ui_animation_enabled === 'boolean') store.animationsEnabled = s.ui_animation_enabled;
+          // The server is the source of truth for the sound preference — keep
+          // the sound module in sync so WS tones obey the saved setting.
+          if (typeof ClipsyncSound !== 'undefined' && ClipsyncSound.setEnabled) {
+            ClipsyncSound.setEnabled(store.soundEnabled);
+          }
           return s;
         });
       },

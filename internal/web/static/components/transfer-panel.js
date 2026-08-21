@@ -265,7 +265,18 @@
         }).catch(function () {});
       },
       openFile: function (path) {
-        ClipsyncAPI.navigate(path, '');
+        var self = this;
+        // /api/nav only accepts http/https URLs, so local file paths must go
+        // through the dedicated file-open endpoint on the host.
+        ClipsyncAPI.openFile(path)
+          .then(function (res) {
+            if (!res || res.ok !== true) {
+              self.store.showToast(self.t('ui.open_failed_title'), 2000);
+            }
+          })
+          .catch(function () {
+            self.store.showToast(self.t('ui.open_failed_title'), 2000);
+          });
       },
     },
   };

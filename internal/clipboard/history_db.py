@@ -70,7 +70,11 @@ def _make_dedup_key(content: ClipboardContent) -> str:
     """Build a stable dedup key from the 'primary' content."""
     if ContentType.TEXT in content.types:
         text = content.types[ContentType.TEXT].decode("utf-8", errors="replace")
-        return "text:" + text[:500]
+        # Hash the full body so two long texts sharing a prefix are not
+        # wrongly coalesced within the dedup window.
+        return "text:" + hashlib.sha256(
+            text.encode("utf-8", errors="replace")
+        ).hexdigest()
     if ContentType.IMAGE_PNG in content.types:
         return "png:" + hashlib.sha256(
             content.types[ContentType.IMAGE_PNG]
@@ -86,6 +90,16 @@ def _make_dedup_key(content: ClipboardContent) -> str:
     if ContentType.RTF in content.types:
         return "rtf:" + hashlib.sha256(
             content.types[ContentType.RTF]
+        ).hexdigest()
+    if ContentType.FILE in content.types:
+        # FILE content is the newline-joined file paths — hash them so
+        # file-only copies dedup instead of falling through to a unique key.
+        return "file:" + hashlib.sha256(
+            content.types[ContentType.FILE]
+        ).hexdigest()
+    if ContentType.URL in content.types:
+        return "url:" + hashlib.sha256(
+            content.types[ContentType.URL]
         ).hexdigest()
     return "other:" + str(time.time())
 
@@ -171,8 +185,17 @@ class ClipboardHistoryDB:
         self._last_dedup_key: str = ""
         self._last_dedup_time: float = 0.0
         self._next_id: int = 0
+        self._conn: sqlite3.Connection | None = None
 
         self._ensure_db_dir()
+        # Open one long-lived connection (applies PRAGMAs once, secures
+        # file permissions) and make sure the schema exists.
+        try:
+            self._get_conn()
+            if self._conn is not None:
+                self._init_schema(self._conn)
+        except Exception as exc:
+            logger.warning("Failed to initialize history DB: %s", exc)
         self._load()
 
     # ------------------------------------------------------------------
@@ -191,19 +214,138 @@ class ClipboardHistoryDB:
         conn.execute("PRAGMA busy_timeout=5000")
 
     def _get_conn(self) -> sqlite3.Connection:
-        """Return a new SQLite connection for the current thread.
+        """Return the shared long-lived SQLite connection, creating it on first use.
 
         ``check_same_thread=False`` is required because a connection
         created in one thread may be used by another (the HTTP server
-        creates connections in worker threads).
+        creates connections in worker threads).  WAL + ``busy_timeout``
+        make concurrent access safe; all DB writes are serialized under
+        ``self._lock``.
         """
-        conn = sqlite3.connect(str(self._db_path), check_same_thread=False)
-        self._apply_pragmas(conn)
-        return conn
+        if self._conn is None:
+            conn = sqlite3.connect(str(self._db_path), check_same_thread=False)
+            self._apply_pragmas(conn)
+            self._conn = conn
+        self._secure_db_files()
+        return self._conn
 
     def _init_schema(self, conn: sqlite3.Connection) -> None:
         conn.executescript(self._SCHEMA)
         conn.commit()
+
+    def _secure_db_files(self) -> None:
+        """Restrict DB/WAL/SHM permissions to the owner (0600)."""
+        if os.name != "posix":
+            return
+        for path in (
+            self._db_path,
+            Path(str(self._db_path) + "-wal"),
+            Path(str(self._db_path) + "-shm"),
+        ):
+            try:
+                os.chmod(path, 0o600)
+            except OSError:
+                pass
+
+    def _entry_row(self, entry: dict) -> tuple:
+        """Serialize (and encrypt, if configured) one entry into a DB row."""
+        e = self._encrypt_entry(entry) if self._enc_mgr else entry
+        return (
+            e.get("entry_id", 0),
+            e.get("timestamp", 0.0),
+            e.get("content_type", ""),
+            e.get("text_preview", ""),
+            json.dumps(e.get("types", {}), ensure_ascii=False),
+            e.get("source_device", ""),
+            e.get("source_app", ""),
+            e.get("source_title", ""),
+            1 if e.get("pinned") else 0,
+            e.get("paste_count", 0),
+        )
+
+    def _insert_row(self, entry: dict) -> None:
+        """Insert a single history row (incremental write)."""
+        try:
+            conn = self._get_conn()
+            with conn:
+                conn.execute(
+                    "INSERT INTO history "
+                    "(entry_id, timestamp, content_type, text_preview, types, "
+                    "source_device, source_app, source_title, pinned, paste_count) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    self._entry_row(entry),
+                )
+            self._secure_db_files()
+        except Exception as exc:
+            logger.error("Failed to insert history row: %s", exc)
+
+    def _update_row(self, entry_id: int, **fields) -> None:
+        """Update a single history row's columns (incremental write)."""
+        if not fields:
+            return
+        set_clause = ", ".join(f"{col} = ?" for col in fields)
+        values = list(fields.values())
+        try:
+            conn = self._get_conn()
+            with conn:
+                conn.execute(
+                    f"UPDATE history SET {set_clause} WHERE entry_id = ?",
+                    (*values, entry_id),
+                )
+            self._secure_db_files()
+        except Exception as exc:
+            logger.error("Failed to update history row %s: %s", entry_id, exc)
+
+    def _delete_rows(self, entry_ids) -> None:
+        """Delete rows matching the given entry IDs (incremental write)."""
+        ids = list(entry_ids)
+        if not ids:
+            return
+        placeholders = ", ".join("?" for _ in ids)
+        try:
+            conn = self._get_conn()
+            with conn:
+                conn.execute(
+                    f"DELETE FROM history WHERE entry_id IN ({placeholders})",
+                    ids,
+                )
+            self._secure_db_files()
+        except Exception as exc:
+            logger.error("Failed to delete history rows: %s", exc)
+
+    def _delete_all_rows(self) -> None:
+        """Delete every row in the history table (incremental clear)."""
+        try:
+            conn = self._get_conn()
+            with conn:
+                conn.execute("DELETE FROM history")
+            self._secure_db_files()
+        except Exception as exc:
+            logger.error("Failed to clear history table: %s", exc)
+
+    def _trim_db(self) -> None:
+        """Delete oldest unpinned rows beyond MAX_ENTRIES (pinned preserved)."""
+        try:
+            conn = self._get_conn()
+            total = conn.execute(
+                "SELECT COUNT(*) FROM history"
+            ).fetchone()[0]
+            if total <= self.MAX_ENTRIES:
+                return
+            pinned = conn.execute(
+                "SELECT COUNT(*) FROM history WHERE pinned = 1"
+            ).fetchone()[0]
+            allowed_unpinned = max(0, self.MAX_ENTRIES - pinned)
+            with conn:
+                conn.execute(
+                    "DELETE FROM history WHERE pinned = 0 AND entry_id NOT IN ("
+                    "  SELECT entry_id FROM history WHERE pinned = 0 "
+                    "  ORDER BY entry_id DESC LIMIT ?)",
+                    (allowed_unpinned,),
+                )
+            self._secure_db_files()
+        except Exception as exc:
+            logger.error("Failed to trim history table: %s", exc)
 
     # ------------------------------------------------------------------
     # Public API (identical to ClipboardHistory)
@@ -224,8 +366,13 @@ class ClipboardHistoryDB:
         best_type, _best_data = best
 
         # -- dedup ---------------------------------------------------
+        # Use the local clock for the dedup window so a sender's clock
+        # skew can neither defeat dedup (window looks too old) nor break
+        # it (window looks negative).  Keep the sender's timestamp for
+        # display, when one was supplied.
         dedup_key = _make_dedup_key(content)
-        now = content.timestamp or time.time()
+        now = time.time()
+        captured_at = content.timestamp or now
 
         with self._lock:
             if dedup_key == self._last_dedup_key:
@@ -236,7 +383,7 @@ class ClipboardHistoryDB:
 
             preview = _build_preview(content.types)
             entry: dict = {
-                "timestamp": now,
+                "timestamp": captured_at,
                 "content_type": _map_type_to_label(best_type),
                 "text_preview": preview,
                 "types": {
@@ -253,6 +400,9 @@ class ClipboardHistoryDB:
             self._next_id += 1
 
             self._entries.insert(0, entry)
+            # Incremental write: insert only this row (avoids re-encrypting
+            # the whole table on every clipboard capture).
+            self._insert_row(entry)
             if len(self._entries) > self.MAX_ENTRIES:
                 # Remove oldest unpinned entries beyond the limit.
                 # Keep all pinned entries; trim only unpinned ones.
@@ -260,7 +410,7 @@ class ClipboardHistoryDB:
                 unpinned = [e for e in self._entries if not e.get("pinned")]
                 allowed_unpinned = max(0, self.MAX_ENTRIES - len(pinned))
                 self._entries = pinned + unpinned[:allowed_unpinned]
-            self._save()
+                self._trim_db()
 
     def get_all(self) -> list[dict]:
         """Return all entries, pinned first, then newest first within each group."""
@@ -270,10 +420,20 @@ class ClipboardHistoryDB:
             return pinned + unpinned
 
     def search(self, query: str) -> list[dict]:
-        """Case-insensitive search in text previews. Returns matching entries, newest first."""
+        """Case-insensitive search in text previews.
+
+        Returns matching entries in the same order as ``get_all()``:
+        pinned first, then newest first within each group.
+        """
         q = query.lower()
         with self._lock:
-            return [e for e in self._entries if q in e.get("text_preview", "").lower()]
+            matches = [
+                e for e in self._entries
+                if q in e.get("text_preview", "").lower()
+            ]
+            pinned = [e for e in matches if e.get("pinned")]
+            unpinned = [e for e in matches if not e.get("pinned")]
+            return pinned + unpinned
 
     def get(self, index: int) -> dict | None:
         """Get a single entry by display index (matching get_all() order). Returns None if out of bounds."""
@@ -299,8 +459,9 @@ class ClipboardHistoryDB:
         with self._lock:
             internal = self._display_to_internal(index)
             if internal is not None:
+                entry_id = self._entries[internal]["entry_id"]
                 self._entries.pop(internal)
-                self._save()
+                self._delete_rows([entry_id])
                 return True
             return False
 
@@ -310,7 +471,7 @@ class ClipboardHistoryDB:
             internal = self._display_to_internal(index)
             if internal is not None:
                 self._entries[internal]["pinned"] = True
-                self._save()
+                self._update_row(self._entries[internal]["entry_id"], pinned=1)
                 return True
             return False
 
@@ -320,7 +481,7 @@ class ClipboardHistoryDB:
             internal = self._display_to_internal(index)
             if internal is not None:
                 self._entries[internal]["pinned"] = False
-                self._save()
+                self._update_row(self._entries[internal]["entry_id"], pinned=0)
                 return True
             return False
 
@@ -328,7 +489,7 @@ class ClipboardHistoryDB:
         """Delete all history entries and persist the empty state."""
         with self._lock:
             self._entries.clear()
-            self._save()
+            self._delete_all_rows()
 
     def find_by_id(self, entry_id: str) -> tuple[int, dict] | tuple[None, None]:
         """Find an entry by its ``entry_id``. Returns (index, entry) or (None, None)."""
@@ -344,7 +505,7 @@ class ClipboardHistoryDB:
             for entry in self._entries:
                 if entry.get("entry_id") == entry_id:
                     entry["paste_count"] = entry.get("paste_count", 0) + 1
-                    self._save()
+                    self._update_row(entry_id, paste_count=entry["paste_count"])
                     return entry["paste_count"]
             return None
 
@@ -352,24 +513,31 @@ class ClipboardHistoryDB:
         """Set pinned state on entries matching the given IDs. Returns count of entries updated."""
         id_set = set(entry_ids)
         count = 0
+        matched_ids: list = []
         with self._lock:
             for entry in self._entries:
                 if entry.get("entry_id") in id_set:
                     entry["pinned"] = pinned
+                    matched_ids.append(entry.get("entry_id"))
                     count += 1
             if count:
-                self._save()
+                for entry_id in matched_ids:
+                    self._update_row(entry_id, pinned=1 if pinned else 0)
         return count
 
     def batch_delete(self, entry_ids: list) -> int:
         """Delete entries matching the given IDs. Returns count of entries deleted."""
         id_set = set(entry_ids)
         with self._lock:
+            removed_ids = [
+                e.get("entry_id") for e in self._entries
+                if e.get("entry_id") in id_set
+            ]
             before = len(self._entries)
             self._entries = [e for e in self._entries if e.get("entry_id") not in id_set]
             removed = before - len(self._entries)
             if removed:
-                self._save()
+                self._delete_rows(removed_ids)
             return removed
 
     # ------------------------------------------------------------------
@@ -382,7 +550,6 @@ class ClipboardHistoryDB:
         Automatically migrates from the legacy JSON file if the database
         is empty and the JSON file exists.
         """
-        conn = None
         try:
             conn = self._get_conn()
             self._init_schema(conn)
@@ -436,29 +603,21 @@ class ClipboardHistoryDB:
 
         except Exception as exc:
             logger.warning("Failed to load history from DB: %s", exc)
-        finally:
-            if conn:
-                try:
-                    conn.close()
-                except Exception:
-                    pass
 
     def _save(self) -> None:
         """Persist all in-memory entries to the SQLite database.
 
-        Uses a DELETE + INSERT approach within a single transaction for
-        atomicity.  With MAX_ENTRIES=50 this is fast and simple.
+        Full DELETE + INSERT resync of the in-memory ``_entries`` list.
+        Kept for bulk import/restore and for external callers that mutate
+        ``_entries`` directly; the per-capture hot paths use incremental
+        single-row operations instead.
         """
         self._ensure_db_dir()
-        entries_to_save = self._entries
         if self._enc_mgr:
-            entries_to_save = [self._encrypt_entry(e) for e in self._entries]
             logger.debug(
-                "History save: encrypted %d entries for at-rest storage",
-                len(entries_to_save),
+                "History save: encrypting %d entries for at-rest storage",
+                len(self._entries),
             )
-
-        conn = None
         try:
             conn = self._get_conn()
             with conn:
@@ -468,30 +627,11 @@ class ClipboardHistoryDB:
                     "(entry_id, timestamp, content_type, text_preview, types, "
                     "source_device, source_app, source_title, pinned, paste_count) "
                     "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                    (
-                        (
-                            e.get("entry_id", 0),
-                            e.get("timestamp", 0.0),
-                            e.get("content_type", ""),
-                            e.get("text_preview", ""),
-                            json.dumps(e.get("types", {}), ensure_ascii=False),
-                            e.get("source_device", ""),
-                            e.get("source_app", ""),
-                            e.get("source_title", ""),
-                            1 if e.get("pinned") else 0,
-                            e.get("paste_count", 0),
-                        )
-                        for e in entries_to_save
-                    ),
+                    (self._entry_row(e) for e in self._entries),
                 )
+            self._secure_db_files()
         except Exception as exc:
             logger.error("Failed to save history to DB: %s", exc)
-        finally:
-            if conn:
-                try:
-                    conn.close()
-                except Exception:
-                    pass
 
     def migrate_from_json(self) -> int:
         """Public migration entry point.
@@ -501,8 +641,8 @@ class ClipboardHistoryDB:
         Safe to call multiple times — skips if no JSON file exists or
         the database already has entries.
         """
-        conn = self._get_conn()
         try:
+            conn = self._get_conn()
             self._init_schema(conn)
             row_count = conn.execute(
                 "SELECT COUNT(*) FROM history"
@@ -511,11 +651,9 @@ class ClipboardHistoryDB:
                 logger.debug("DB already has %d entries, skipping migration", row_count)
                 return 0
             return self._migrate_from_json_file(conn)
-        finally:
-            try:
-                conn.close()
-            except Exception:
-                pass
+        except Exception as exc:
+            logger.error("Failed to migrate from JSON: %s", exc)
+            return 0
 
     def _migrate_from_json_file(self, conn: sqlite3.Connection) -> int:
         """Read the legacy JSON file and insert its entries into the DB.

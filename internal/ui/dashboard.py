@@ -221,6 +221,9 @@ class DashboardWindow:
         self._web_copy_btn: ctk.CTkButton | None = None
         self._web_switch: ctk.CTkSwitch | None = None
         self._activity_card: ctk.CTkFrame | None = None
+        # Cached QR image + key — regenerated only when token/IP/port change
+        self._web_qr_image: ctk.CTkImage | None = None
+        self._web_qr_key: tuple | None = None
 
     # ═══════════════════════════════════════════════════════════════
     # Public API
@@ -935,6 +938,11 @@ class DashboardWindow:
             return
 
         syncing = self._get_sync()
+        # Reconcile the quick-controls switch with the real sync state so a
+        # toggle from the tray/hotkey (which bypasses _on_toggle_sync) is
+        # reflected here too.
+        if self._sync_var is not None and self._sync_var.get() != syncing:
+            self._sync_var.set(syncing)
         if syncing:
             self._status_label.configure(text=T("ui.sync_active"))
             if not getattr(self, '_breathing', False):
@@ -946,8 +954,17 @@ class DashboardWindow:
             self._status_dot.configure(fg_color=OFFLINE_COLOR)
             self._status_label.configure(text=T("ui.sync_paused"))
 
+        # Stat cards / web card are refreshed on the slow periodic refresh,
+        # never from the 5fps breath animation.
+        self._refresh_overview_stats()
+
     def _animate_breath(self):
-        """Gentle breathing-light animation for the sync status dot."""
+        """Gentle breathing-light animation for the sync status dot.
+
+        Visual only — heavy stat/web-card refreshes live in
+        _refresh_overview_stats (driven by the slow periodic refresh) so this
+        5fps loop never does getaddrinfo, QR generation, or data queries.
+        """
         if not getattr(self, '_breathing', False) or self._status_dot is None:
             return
         import math
@@ -964,6 +981,12 @@ class DashboardWindow:
         self._status_dot.configure(fg_color=color)
         self._breath_timer = self._root.after(200, self._animate_breath)
 
+    def _refresh_overview_stats(self):
+        """Update the overview stat cards, recent activity, and web card.
+
+        Called from the slow periodic refresh (_schedule_refresh), never from
+        the 5fps breath animation.
+        """
         # Uptime
         if self._uptime_label and self._start_time:
             uptime = int(time.time() - self._start_time)
@@ -1125,8 +1148,15 @@ class DashboardWindow:
         except Exception:
             peers = []
 
-        # Hash-based change detection: skip rebuild if peer data hasn't changed
-        state_key = tuple(sorted((p[0], p[1], p[2], p[3], p[4]) for p in peers))
+        # Hash-based change detection: skip rebuild if peer data hasn't changed.
+        # Include the pending-pairing list so a brand-new pairing request for
+        # an already-known (unpaired) peer still shows its Confirm/Reject card
+        # even though the peer list itself is unchanged.
+        pending = self._get_pending() if self._get_pending else []
+        state_key = (
+            tuple(sorted((p[0], p[1], p[2], p[3], p[4]) for p in peers)),
+            tuple(sorted(pending)),
+        )
         if state_key == getattr(self, '_devices_state_key', None):
             return
         self._devices_state_key = state_key
@@ -2382,19 +2412,28 @@ class DashboardWindow:
         url = f"http://{ip}:{port}?token={token}" if token else f"http://{ip}:{port}"
         self._web_url_label.configure(text=url)
 
+        # The QR image is expensive to regenerate (qrcode.make + LANCZOS
+        # resize) — cache it and only rebuild when the token / IP / port
+        # actually changes. The LAN-IP lookup (getaddrinfo) still runs each
+        # slow refresh so IP changes are picked up, but never per-frame.
+        qr_key = (ip, token, port)
         if token:
-            try:
-                import qrcode
-                from PIL import Image
-                img = qrcode.make(url)
-                img = img.convert("RGB")
-                img = img.resize((100, 100), Image.LANCZOS)
-                ctk_img = ctk.CTkImage(light_image=img, dark_image=img, size=(100, 100))
-                self._web_qr_label.configure(image=ctk_img, text="")
-                self._web_qr_label.image = ctk_img
-            except Exception:
-                logger.debug("QR code generation failed", exc_info=True)
-                self._web_qr_label.configure(image=None, text="QR err")
+            if qr_key != getattr(self, '_web_qr_key', None) or self._web_qr_image is None:
+                try:
+                    import qrcode
+                    from PIL import Image
+                    img = qrcode.make(url)
+                    img = img.convert("RGB")
+                    img = img.resize((100, 100), Image.LANCZOS)
+                    ctk_img = ctk.CTkImage(light_image=img, dark_image=img, size=(100, 100))
+                    self._web_qr_image = ctk_img
+                    self._web_qr_key = qr_key
+                except Exception:
+                    logger.debug("QR code generation failed", exc_info=True)
+                    self._web_qr_label.configure(image=None, text="QR err")
+                    return
+            self._web_qr_label.configure(image=self._web_qr_image, text="")
+            self._web_qr_label.image = self._web_qr_image
         else:
             self._web_qr_label.configure(image=None, text="")
 

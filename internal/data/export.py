@@ -8,6 +8,7 @@ import base64
 import csv
 import json
 import logging
+import os
 import time
 from pathlib import Path
 from typing import Union
@@ -61,6 +62,11 @@ def export_history_json(history: _HistoryType, filepath: str) -> int:
     out = Path(filepath)
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(json.dumps(export_list, indent=2, ensure_ascii=False), encoding="utf-8")
+    # Clipboard content is sensitive; don't leave the export world-readable.
+    try:
+        os.chmod(out, 0o600)
+    except OSError:
+        pass
     logger.info("Exported %d history entries to %s", len(export_list), filepath)
     return len(export_list)
 
@@ -148,6 +154,11 @@ def export_history_csv(history: _HistoryType, filepath: str) -> int:
                 "paste_count": entry.get("paste_count", 0),
             })
 
+    # Clipboard content is sensitive; don't leave the export world-readable.
+    try:
+        os.chmod(out, 0o600)
+    except OSError:
+        pass
     logger.info("Exported %d history entries to %s", len(entries), filepath)
     return len(entries)
 

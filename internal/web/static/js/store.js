@@ -259,6 +259,20 @@
     },
 
     /**
+     * Replace the pairing-request list from the backend's authoritative
+     * `pending_pairings` snapshot (polled via /api/devices). This gives the
+     * device page a polling fallback so a request that arrived while the
+     * dashboard was closed still shows up, instead of relying on the WS push
+     * alone (which is dropped when no client is attached).
+     */
+    syncPairingRequests: function (pending) {
+      var list = (pending || []).filter(function (p) {
+        return !!p.peer_id;
+      });
+      this.pairingRequests = list;
+    },
+
+    /**
      * Open the translate modal with selected text.
      * @param {string} text - Source text to translate
      */
@@ -316,7 +330,7 @@
      */
     confirm: function (title, message) {
       var self = this;
-      self.clientDialog = null;  // close any open dialog first
+      self.closeClientDialog();  // reject any pending dialog first
       return new Promise(function (resolve, reject) {
         self.clientDialog = { type: 'confirm', title: title, message: message, resolve: resolve, reject: reject };
       });
@@ -331,7 +345,7 @@
      */
     prompt: function (title, message, defaultValue) {
       var self = this;
-      self.clientDialog = null;
+      self.closeClientDialog();  // reject any pending dialog first
       return new Promise(function (resolve, reject) {
         self.clientDialog = { type: 'prompt', title: title, message: message, defaultValue: defaultValue || '', resolve: resolve, reject: reject };
       });
@@ -345,7 +359,7 @@
      */
     alert: function (title, message) {
       var self = this;
-      self.clientDialog = null;
+      self.closeClientDialog();  // reject any pending dialog first
       return new Promise(function (resolve) {
         self.clientDialog = { type: 'alert', title: title, message: message, resolve: resolve };
       });
@@ -359,6 +373,20 @@
         this.clientDialog.reject();
       }
       this.clientDialog = null;
+    },
+
+    /**
+     * Merge a settings-update response into the local settings cache so the
+     * settings panel shows freshly-saved values without a full reload.
+     * @param {Object} updated - The `updated` map from POST /api/settings
+     */
+    mergeSettings: function (updated) {
+      if (!updated) return;
+      var cache = Object.assign({}, this.settingsCache, updated);
+      this.settingsCache = cache;
+      if (typeof updated.ui_backend === 'string') this.uiBackend = updated.ui_backend;
+      if (typeof updated.sound_enabled === 'boolean') this.soundEnabled = updated.sound_enabled;
+      if (typeof updated.ui_animation_enabled === 'boolean') this.animationsEnabled = updated.ui_animation_enabled;
     },
 
     /**

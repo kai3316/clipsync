@@ -16,6 +16,7 @@ import threading
 import time
 import tkinter as tk
 from tkinter import filedialog
+from urllib.parse import urlparse
 
 # Add project root to Python path so 'internal' package can be found
 # (not needed in a PyInstaller-frozen bundle)
@@ -28,7 +29,7 @@ from internal.clipboard.history import ClipboardHistory
 from internal.clipboard.history_db import ClipboardHistoryDB
 from internal.clipboard.platform import create_monitor, create_reader, create_writer
 from internal.clipboard.source_tracker import is_app_allowed
-from internal.config.config import Config, PeerInfo, _config_dir, load, save
+from internal.config.config import Config, PeerInfo, _config_dir, config_lock, load, save
 from internal.i18n import T, set_locale
 from internal.version import __version__
 from internal.platform.autostart import disable_autostart, enable_autostart, is_autostart_enabled
@@ -156,6 +157,15 @@ def _write_lock(main_pid: int, tray_pid: int | None = None):
     import json
 
     _config_dir().mkdir(parents=True, exist_ok=True)
+    # Preserve an existing tray_pid (e.g. written by the macOS tray subprocess)
+    # so a later main-process write doesn't overwrite it and orphan the tray.
+    if tray_pid is None:
+        try:
+            existing = _read_lock()
+            if existing:
+                tray_pid = existing.get("tray_pid")
+        except Exception:
+            pass
     data: dict = {"pid": main_pid}
     if tray_pid is not None:
         data["tray_pid"] = tray_pid
@@ -165,7 +175,14 @@ def _write_lock(main_pid: int, tray_pid: int | None = None):
 def _remove_lock():
     try:
         lf = _lock_file()
-        if lf.exists():
+        if not lf.exists():
+            return
+        data = _read_lock()
+        # Only remove our own lock (or a dead one). After a factory reset the
+        # replacement instance writes a fresh lock with a new PID; deleting it
+        # here would let a second instance start later.
+        pid = data.get("pid") if data else None
+        if pid is None or pid == os.getpid() or not _pid_alive(pid):
             lf.unlink()
     except Exception:
         pass
@@ -195,11 +212,16 @@ def _pid_alive(pid: int) -> bool:
             if not ok:
                 return False
             name = buf.value.lower()
-            return "python" in name
+            # Frozen PyInstaller builds run as "clipsync.exe" (not "python.exe");
+            # accept both so the single-instance guard works for shipped binaries.
+            return "python" in name or "clipsync" in name
         except Exception:
             return False
     else:
-        # Unix: signal 0 + verify cmdline contains python
+        # Unix: signal 0 + verify cmdline references this app. Accept both a
+        # source run ("python .../main.py") and a frozen run (the "clipsync"
+        # binary), since the frozen executable name contains neither "python"
+        # nor "main.py".
         try:
             os.kill(pid, 0)
         except (ProcessLookupError, OSError):
@@ -207,7 +229,7 @@ def _pid_alive(pid: int) -> bool:
         try:
             from pathlib import Path
             cmdline = Path(f"/proc/{pid}/cmdline").read_text()
-            return "python" in cmdline and "clipsync" in cmdline
+            return ("python" in cmdline and "clipsync" in cmdline) or "clipsync" in cmdline
         except Exception:
             return True  # can't verify, err on safe side
 
@@ -350,11 +372,16 @@ class Application:
         # ── Threading ───────────────────────────────────────────────
         self._stop_updater = threading.Event()
         self._shutting_down = False
+        # Set by factory reset so shutdown() doesn't re-save the deleted config.
+        self._skip_save_on_shutdown = False
 
         # ── Shared mutable state ────────────────────────────────────
         self._discovered_peers: dict[str, dict] = {}
         self._discovered_lock = threading.Lock()
         self._notified_pairings: dict[str, str] = {}
+        # transfer_id -> temp zip path, cleaned up when the transfer completes
+        # (folder/multi-file sends zip into a temp archive that must not leak).
+        self._zip_cleanup: dict[str, str] = {}
 
         # ── macOS multiprocessing state ─────────────────────────────
         self._parent_conn = None
@@ -665,7 +692,12 @@ class Application:
             on_settings_change=self._on_web_settings_change,
             on_show_web_qr=lambda: self.root.after(0, self._show_web_qr),
             on_send_url=lambda: self.root.after(0, self._do_send_url),
-            get_discovered_peers=lambda: dict(self._discovered_peers),
+            get_discovered_peers=lambda: self._snapshot_discovered_peers(),
+            on_open_file=self._open_file,
+            on_restart=self._restart_app,
+            get_pending_pairings=self._get_pending,
+            get_resolved_hashes=lambda: self.transport_mgr.get_resolved_hashes(),
+            enc_mgr=self._make_save_enc(),
         )
 
         # ── Live history push to web clients ────────────────────────
@@ -850,16 +882,28 @@ class Application:
             )
             return
         self.transport_mgr.broadcast(data)
+        # Transient feedback when there's nobody to deliver to, so the user
+        # knows the copy never left this machine. Throttled to avoid spam.
+        if not self.transport_mgr.get_connected_peers():
+            now = time.monotonic()
+            if now - getattr(self, "_last_no_peer_warn", 0.0) > 5.0:
+                self._last_no_peer_warn = now
+                self._web_toast(T("status.no_devices"), 2000)
 
     def _on_peer_message(self, msg) -> None:
         msg_type = getattr(msg, "msg_type", "clipboard")
         if msg_type == "nav_url":
-            url = getattr(msg, "_raw_payload", {}).get("url", "")
-            if url:
+            url = getattr(msg, "_raw_payload", {}).get("url", "") or ""
+            # Only ever open http/https from a peer. Anything else (file://,
+            # custom OS schemes) would let a peer launch local handlers.
+            parsed = urlparse(url)
+            if parsed.scheme in ("http", "https") and parsed.netloc:
                 import webbrowser
                 logger.info("Opening URL from peer: %s", url[:80])
                 webbrowser.open(url)
                 notification_mgr.show(T("nav_url.title"), url[:120])
+            else:
+                logger.warning("Ignoring unsafe nav_url from peer: %s", url[:80])
             return
         if msg_type in FILE_TRANSFER_MSG_TYPES:
             raw_payload = getattr(msg, "_raw_payload", {})
@@ -880,6 +924,13 @@ class Application:
             notification_mgr.show("File Transfer", T("transfer.send_success"))
         else:
             notification_mgr.show("File Transfer", T("transfer.send_failed"))
+        # Remove any temp zip archive created for a folder/multi-file send.
+        tmp = self._zip_cleanup.pop(transfer_id, None)
+        if tmp:
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
         self._push_web("broadcast_transfer_complete", transfer_id, success)
 
     def _on_file_received(self, transfer_id: str, saved_path: str, file_name: str) -> None:
@@ -1057,6 +1108,17 @@ class Application:
             self._discovered_peers.pop(peer_id, None)
         self.transport_mgr.disconnect_peer(peer_id)
 
+    def _snapshot_discovered_peers(self) -> dict:
+        """Return a thread-safe snapshot of the discovered peers dict.
+
+        The discovery thread mutates ``_discovered_peers`` under the lock while
+        web-server threads may read it (via broadcast_devices / _send_snapshot);
+        returning a copy under the lock avoids "dictionary changed size during
+        iteration" races.
+        """
+        with self._discovered_lock:
+            return dict(self._discovered_peers)
+
     def _on_new_pairing(self, peer_id: str, code: str, peer_name: str) -> None:
         prev = self._notified_pairings.get(peer_id)
         if prev == code:
@@ -1069,7 +1131,10 @@ class Application:
         self._push_web("broadcast", "pairing_request", {
             "peer_id": peer_id, "peer_name": peer_name, "code": code,
         })
-        self.root.after(0, self.open_dashboard)
+        # Do NOT force-open the dashboard here: that pops a new window on
+        # every pairing request even when the user is already in the web UI.
+        # The pairing request is pushed over WebSocket and shown in the
+        # device page; the OS notification carries the code as well.
 
     # ═══════════════════════════════════════════════════════════════
     # Phase 7: Apply config
@@ -1205,6 +1270,28 @@ class Application:
             subprocess.Popen([sys.executable] + sys.argv)
         except Exception:
             logger.warning("Factory reset: failed to spawn new process", exc_info=True)
+        # Do NOT re-save the deleted config during shutdown — shutdown() would
+        # otherwise recreate config.json with the OLD device identity/peers.
+        self._skip_save_on_shutdown = True
+        if self.root:
+            self.root.quit()
+        sys.exit(0)
+
+    def _restart_app(self) -> None:
+        """Spawn a fresh instance and exit this one.
+
+        Used by the web UI's "Restart App" action (and the Modern/Classic
+        switch), which in webview mode previously only closed the browser
+        window while the app kept running with the old ui_backend.
+        """
+        import subprocess
+        try:
+            subprocess.Popen([sys.executable] + sys.argv)
+        except Exception:
+            logger.warning("Restart: failed to spawn new process", exc_info=True)
+            return
+        # The new instance owns the config now; don't re-save/rewrite it on exit.
+        self._skip_save_on_shutdown = True
         if self.root:
             self.root.quit()
         sys.exit(0)
@@ -1349,7 +1436,11 @@ class Application:
                 while parent_conn.poll():
                     self._handle_tray_msg(parent_conn.recv())
             except (EOFError, BrokenPipeError, ConnectionResetError, OSError):
-                return
+                return  # tray subprocess is gone
+            except Exception:
+                # An unexpected handler error must not kill the tray channel
+                # for the rest of the session — log and keep polling.
+                logger.exception("Unhandled error in tray poll; continuing")
             self.root.after(500, _poll_tray)
 
         self.root.after(500, _poll_tray)
@@ -1452,14 +1543,23 @@ class Application:
         if self.web_server:
             self.web_server.stop()
 
-        for peer in self.pairing_mgr.get_known_peers():
-            self.cfg.peers[peer.device_id] = PeerInfo(
-                device_id=peer.device_id,
-                device_name=peer.device_name,
-                public_key_pem=peer.certificate_pem,
-                paired=peer.paired,
-            )
-        self._save_cfg_encrypted()
+        if not self._skip_save_on_shutdown:
+            for peer in self.pairing_mgr.get_known_peers():
+                self.cfg.peers[peer.device_id] = PeerInfo(
+                    device_id=peer.device_id,
+                    device_name=peer.device_name,
+                    public_key_pem=peer.certificate_pem,
+                    paired=peer.paired,
+                )
+            self._save_cfg_encrypted()
+
+        # Release OS-level resources: Windows message-only window + registered
+        # hotkeys, macOS CGEvent tap, Linux pynput listener.
+        try:
+            if self.hotkey_mgr is not None:
+                self.hotkey_mgr.stop()
+        except Exception:
+            logger.debug("Failed to stop hotkey manager", exc_info=True)
 
         # Terminate macOS tray subprocess
         if sys.platform == "darwin" and self._tray_proc is not None:
@@ -2180,6 +2280,13 @@ class Application:
                         str(tmp_path), _send_fn,
                     )
                     logger.info("Zip transfer initiated: %s (%d files)", transfer_id[:8], total_files)
+                    if transfer_id:
+                        # Unlink the temp archive when the transfer finishes
+                        # (handled in _on_transfer_complete) so folder sends
+                        # don't leak zip copies in the system temp dir.
+                        self._zip_cleanup[transfer_id] = str(tmp_path)
+                    else:
+                        _safe_remove(tmp_path)
                     mgr.close(dialog_id)
                     self._web_toast(T("transfer.sending_file", name=zip_name))
                 except FileNotFoundError:
@@ -2350,6 +2457,12 @@ class Application:
                     str(tmp_path), _send_fn,
                 )
                 logger.info("Zip transfer initiated: %s (%d files)", transfer_id[:8], total_files)
+                if transfer_id:
+                    # Unlink the temp archive when the transfer finishes
+                    # (see _on_transfer_complete) so folder sends don't leak.
+                    self._zip_cleanup[transfer_id] = str(tmp_path)
+                else:
+                    _safe_remove(tmp_path)
                 self.root.after(0, lambda: (
                     dlg.destroy(),
                     notification_mgr.show(
@@ -2677,16 +2790,19 @@ class Application:
         return self.cfg
 
     def _save_cfg_and_peers(self) -> None:
-        for peer in self.pairing_mgr.get_known_peers():
-            existing = self.cfg.peers.get(peer.device_id)
-            self.cfg.peers[peer.device_id] = PeerInfo(
-                device_id=peer.device_id,
-                device_name=peer.device_name,
-                public_key_pem=peer.certificate_pem,
-                paired=peer.paired,
-                notes=existing.notes if existing else "",
-            )
-        self._save_cfg_encrypted()
+        # Hold the shared config lock so web-server threads can't concurrently
+        # iterate/mutate cfg.peers while we snapshot it (avoids RuntimeError).
+        with config_lock:
+            for peer in self.pairing_mgr.get_known_peers():
+                existing = self.cfg.peers.get(peer.device_id)
+                self.cfg.peers[peer.device_id] = PeerInfo(
+                    device_id=peer.device_id,
+                    device_name=peer.device_name,
+                    public_key_pem=peer.certificate_pem,
+                    paired=peer.paired,
+                    notes=existing.notes if existing else "",
+                )
+            self._save_cfg_encrypted()
 
     def _get_peers(self) -> list[tuple]:
         known = []
@@ -2745,6 +2861,9 @@ class Application:
             if peer_id not in self.transport_mgr.get_connected_peers():
                 self._on_connect(peer_id)
             self._push_web("broadcast", "pairing_resolved", {"peer_id": peer_id})
+            # Refresh the device list so the paired device shows its new
+            # status immediately instead of waiting for the next poll cycle.
+            self._push_web("broadcast_devices")
         return result
 
     def _on_unpair(self, peer_id: str) -> None:
@@ -2791,6 +2910,16 @@ class Application:
                             if pname == tname or tname.startswith(pname):
                                 info = pinfo
                                 break
+        if not info:
+            # Fall back to the last known address for a known/paired peer
+            # even if it isn't currently advertising on mDNS (e.g. it dropped
+            # off discovery for a moment right after pairing). Without this,
+            # auto-connect after pairing fails with "peer not in discovered
+            # list" and the user has to manually retry until it reappears.
+            saved = self.transport_mgr.get_saved_address(peer_id)
+            if saved:
+                sname, saddr, sport = saved
+                info = {"name": sname, "address": saddr, "port": sport}
         if info:
             logger.info("User initiated pairing with %s (peer_id=%s)",
                         info["name"], peer_id[:12])

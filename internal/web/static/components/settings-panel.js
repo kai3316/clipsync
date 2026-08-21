@@ -170,7 +170,8 @@
         ClipsyncAPI.updateSettings({
           port: parseInt(self.port, 10) || 53317,
           relay_url: self.relayUrl,
-        }).then(function () {
+        }).then(function (res) {
+          if (res && res.updated) self.store.mergeSettings(res.updated);
           self.store.showToast(self.t('settings_window.network_saved'), 3000);
         }).catch(function () {
           self.store.showToast(self.t('settings.save_network_failed'), 2000);
@@ -186,7 +187,8 @@
           web_enabled: self.webEnabled,
           web_port: parseInt(self.webPort, 10) || 9580,
           web_history_limit: self.webHistoryLimit,
-        }).then(function () {
+        }).then(function (res) {
+          if (res && res.updated) self.store.mergeSettings(res.updated);
           self.store.showToast(self.t('settings_window.web_saved'), 3000);
         }).catch(function () {
           self.store.showToast(self.t('settings.save_web_failed'), 2000);
@@ -208,7 +210,8 @@
         }
         ClipsyncAPI.updateSettings({
           filter_enabled_categories: categories,
-        }).then(function () {
+        }).then(function (res) {
+          if (res && res.updated) self.store.mergeSettings(res.updated);
           self.store.showToast(self.t('settings_window.filter_saved'), 2000);
         }).catch(function () {
           self.store.showToast(self.t('settings.save_filter_failed'), 2000);
@@ -229,6 +232,7 @@
           if (res && typeof res.password_set === 'boolean') {
             self.passwordSet = res.password_set;
           }
+          if (res && res.updated) self.store.mergeSettings(res.updated);
           self.store.showToast(self.t('settings_window.security_saved'), 3000);
         }).catch(function () {
           self.store.showToast(self.t('settings.save_security_failed'), 2000);
@@ -260,7 +264,8 @@
           max_reconnect_attempts: parseInt(self.maxReconnect, 10) || 10,
           log_level: self.logLevel,
           notifications_enabled: self.notificationsEnabled,
-        }).then(function () {
+        }).then(function (res) {
+          if (res && res.updated) self.store.mergeSettings(res.updated);
           self.store.showToast(self.t('settings_window.advanced_saved'), 3000);
         }).catch(function () {
           self.store.showToast(self.t('settings.save_advanced_failed'), 2000);
@@ -299,7 +304,19 @@
         this.store.confirm(self.t('settings_window.restart_app'), msg)
           .then(function () {
             self.restarting = true;
-            ClipsyncAPI.windowAction('close').catch(function () {});
+            // The backend restarts the whole app process — windowAction('close')
+            // would only stop the browser window and leave the app running.
+            ClipsyncAPI.restartApp()
+              .then(function (res) {
+                if (!res || res.ok !== true) {
+                  self.restarting = false;
+                  self.store.showToast(self.t('dialog.failed'), 2000);
+                }
+              })
+              .catch(function () {
+                self.restarting = false;
+                self.store.showToast(self.t('dialog.failed'), 2000);
+              });
           })
           .catch(function () {});
       },
@@ -363,24 +380,56 @@
       },
 
       selectLocale: function (locale) {
+        var self = this;
         try { localStorage.setItem('clipsync_locale', locale); } catch (e) { /* ignore */ }
         // Persist to the server so the chosen language survives a reload (the
-        // served page reads cfg.language), not just the local preference.
+        // served page reads cfg.language), then reload automatically — an
+        // app-mode window has no address bar to reload manually.
         if (window.ClipsyncAPI && window.ClipsyncAPI.updateSettings) {
-          ClipsyncAPI.updateSettings({ language: locale }).catch(function () { /* ignore */ });
+          ClipsyncAPI.updateSettings({ language: locale })
+            .then(function () {
+              setTimeout(function () { window.location.reload(); }, 600);
+            })
+            .catch(function () {
+              self.store.showToast(self.t('dialog.failed'), 2000);
+            });
+        } else {
+          this.store.showToast(this.t('settings.language_changed'), 2500);
         }
-        this.store.showToast(this.t('settings.language_changed'), 2500);
       },
 
       toggleSound: function () {
+        var self = this;
         this.store.soundEnabled = !this.store.soundEnabled;
         if (typeof ClipsyncSound !== 'undefined' && ClipsyncSound.setEnabled) {
           ClipsyncSound.setEnabled(this.store.soundEnabled);
         }
+        ClipsyncAPI.updateSettings({ sound_enabled: this.store.soundEnabled })
+          .then(function (res) {
+            if (res && res.updated) self.store.mergeSettings(res.updated);
+          })
+          .catch(function () {
+            // Revert so the UI stays truthful to the server setting.
+            self.store.soundEnabled = !self.store.soundEnabled;
+            if (typeof ClipsyncSound !== 'undefined' && ClipsyncSound.setEnabled) {
+              ClipsyncSound.setEnabled(self.store.soundEnabled);
+            }
+            self.store.showToast(self.t('dialog.failed'), 2000);
+          });
       },
 
       toggleAnimation: function () {
+        var self = this;
         this.store.animationsEnabled = !this.store.animationsEnabled;
+        ClipsyncAPI.updateSettings({ ui_animation_enabled: this.store.animationsEnabled })
+          .then(function (res) {
+            if (res && res.updated) self.store.mergeSettings(res.updated);
+          })
+          .catch(function () {
+            // Revert on failure so the UI stays truthful to the server setting.
+            self.store.animationsEnabled = !self.store.animationsEnabled;
+            self.store.showToast(self.t('dialog.failed'), 2000);
+          });
       },
 
       toggleUIMode: function () {

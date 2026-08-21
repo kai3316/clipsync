@@ -46,7 +46,9 @@
           .then(function () {
             self.store.overview.syncEnabled = desired;
           })
-          .catch(function () {});
+          .catch(function () {
+            self.store.showToast(self.t('dialog.failed'), 2000);
+          });
       },
 
       toggleDiscovery: function () {
@@ -56,7 +58,9 @@
           .then(function () {
             self.store.overview.discovering = desired;
           })
-          .catch(function () {});
+          .catch(function () {
+            self.store.showToast(self.t('dialog.failed'), 2000);
+          });
       },
 
       toggleVisibility: function () {
@@ -66,7 +70,9 @@
           .then(function () {
             self.store.overview.visible = desired;
           })
-          .catch(function () {});
+          .catch(function () {
+            self.store.showToast(self.t('dialog.failed'), 2000);
+          });
       },
 
       toggleWebCompanion: function () {
@@ -76,7 +82,9 @@
           .then(function () {
             self.store.overview.webEnabled = desired;
           })
-          .catch(function () {});
+          .catch(function () {
+            self.store.showToast(self.t('dialog.failed'), 2000);
+          });
       },
 
       startEditName: function () {

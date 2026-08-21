@@ -1,5 +1,6 @@
 """TLS-encrypted TCP connection management for peer-to-peer sync."""
 
+import hashlib
 import logging
 import os
 import select
@@ -27,7 +28,7 @@ from cryptography.hazmat.primitives.serialization import Encoding
 
 from internal.protocol.codec import decode_message
 from internal.security.encryption import is_encrypted
-from internal.security.pairing import CertificateChangedError, PairingManager
+from internal.security.pairing import CertificateChangedError, PairingManager, fingerprint_pem
 
 logger = logging.getLogger(__name__)
 
@@ -37,6 +38,10 @@ DATA_TIMEOUT = 30.0  # socket read timeout
 MAX_RECONNECT_ATTEMPTS = 10
 MAX_RECONNECT_BACKOFF = 30
 MIN_RECONNECT_DELAY = 3  # minimum 3s before first reconnect to allow accept_loop to resolve bidirectional races
+MAX_IDLE_SECONDS = 120.0  # max time with no received bytes before a connection is declared dead
+KEEPALIVE_IDLE = 30  # TCP keepalive: idle seconds before probes start
+KEEPALIVE_INTERVAL = 10  # TCP keepalive: seconds between probes
+KEEPALIVE_COUNT = 6  # TCP keepalive: failed probes before declaring the connection dead
 
 # Rejection frame sent after identity exchange when the accepting side
 # refuses the connection (peer in _rejected_peer_ids).  The connecting
@@ -49,7 +54,7 @@ class PeerConnection:
     """Represents a TLS connection to a single peer."""
 
     def __init__(self, device_id: str, device_name: str, sock: socket.socket,
-                 peer_fingerprint: str = "", enc_mgr=None):
+                 peer_fingerprint: str = "", enc_mgr=None, pairing_mgr=None):
         self.device_id = device_id
         self.device_name = device_name
         self._sock = sock
@@ -61,6 +66,10 @@ class PeerConnection:
         self._on_disconnect: Callable | None = None
         self._peer_fingerprint = peer_fingerprint
         self._enc_mgr = enc_mgr
+        self._pairing_mgr = pairing_mgr
+        self._last_recv_time = time.monotonic()
+        self._auth_failures = 0
+        self._enable_keepalive()
 
     def set_on_message(self, callback: Callable):
         self._on_message = callback
@@ -86,6 +95,21 @@ class PeerConnection:
         except Exception:
             pass
 
+    def _enable_keepalive(self):
+        """Enable TCP keepalive with short intervals so half-open connections
+        (a peer that vanished without RST) are detected quickly. Best-effort:
+        some platforms or socket wrappers don't support these options."""
+        try:
+            self._sock.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
+            if hasattr(socket, "TCP_KEEPIDLE"):
+                self._sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPIDLE, KEEPALIVE_IDLE)
+            if hasattr(socket, "TCP_KEEPINTVL"):
+                self._sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPINTVL, KEEPALIVE_INTERVAL)
+            if hasattr(socket, "TCP_KEEPCNT"):
+                self._sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPCNT, KEEPALIVE_COUNT)
+        except (OSError, AttributeError):
+            pass
+
     def send(self, data: bytes) -> bool:
         """Send a frame. Returns False if the send failed.
 
@@ -100,12 +124,20 @@ class PeerConnection:
                     self.device_name, len(data),
                 )
             else:
-                logger.warning(
+                logger.debug(
                     "[%s] Sending unencrypted frame (%d bytes) — enc_mgr=%s peer_fp=%s",
                     self.device_name, len(data),
                     "set" if self._enc_mgr else "none",
                     "set" if self._peer_fingerprint else "empty",
                 )
+            if len(data) > MAX_FRAME_SIZE:
+                # Refuse oversized frames here so the receiver never sees a
+                # frame_len that trips its MAX_FRAME_SIZE guard and disconnects.
+                logger.warning(
+                    "[%s] refusing to send oversized frame (%d bytes > %d)",
+                    self.device_name, len(data), MAX_FRAME_SIZE,
+                )
+                return False
             frame = struct.pack(">I", len(data)) + data
             with self._send_lock:
                 self._sock.sendall(frame)
@@ -144,9 +176,28 @@ class PeerConnection:
         except Exception:
             return False
 
+    def _max_idle_expired(self) -> bool:
+        """True if the connection has been idle past the deadline with no
+        keepalive progress (SO_ERROR set by failed keepalive probes). Healthy
+        idle connections keep SO_ERROR clear, so this never kills them."""
+        if time.monotonic() - self._last_recv_time < MAX_IDLE_SECONDS:
+            return False
+        try:
+            return self._sock.getsockopt(socket.SOL_SOCKET, socket.SO_ERROR) != 0
+        except Exception:
+            return False
+
     def _recv_loop(self):
         end_reason = "unknown"
         while self._running:
+            # Half-open detection fallback: keepalive probes set SO_ERROR when
+            # a peer vanishes without RST. If we've had no bytes for a long
+            # window and the socket reports an error, the connection is dead.
+            # Healthy idle connections keep SO_ERROR clear, so this never
+            # kills a legitimate idle peer.
+            if self._max_idle_expired():
+                end_reason = "no bytes and no keepalive progress for too long"
+                break
             try:
                 header = self._recv_exact(FRAME_HEADER_SIZE)
                 if header is None:
@@ -172,10 +223,20 @@ class PeerConnection:
                         )
                         payload = pt
                     elif is_encrypted(payload):
+                        # Auth tag mismatch — fail closed: skip the frame instead
+                        # of feeding the encrypted bytes to decode_message.
+                        self._auth_failures += 1
                         logger.warning(
                             "[%s] App-layer decrypt FAILED — auth tag mismatch! "
                             "Possible tampering or wrong password.", self.device_name,
                         )
+                        if self._auth_failures >= 3:
+                            logger.error(
+                                "[%s] repeated auth failures (%d) — peer may be "
+                                "using a different key or frames are being tampered with",
+                                self.device_name, self._auth_failures,
+                            )
+                        continue
                     else:
                         logger.warning(
                             "[%s] Received unencrypted frame (%d bytes) — passing through",
@@ -189,6 +250,18 @@ class PeerConnection:
 
                 msg = decode_message(payload)
                 if msg and self._on_message:
+                    # Incoming pairing gate: only paired peers may send app-level
+                    # messages. Pairing happens via the connection's own identity
+                    # frames, not decoded app frames, so no legitimate pre-pairing
+                    # app frames exist. Dropping them stops unpaired LAN peers
+                    # from injecting clipboard / nav_url / file-dialog content.
+                    if self._pairing_mgr is not None and not self._pairing_mgr.is_peer_paired(self.device_id):
+                        logger.warning(
+                            "[%s] dropping %s frame from unpaired peer (device_id=%s)",
+                            self.device_name, getattr(msg, "msg_type", "clipboard"),
+                            self.device_id[:12],
+                        )
+                        continue
                     self._on_message(msg)
 
             except (ConnectionError, OSError) as e:
@@ -213,6 +286,7 @@ class PeerConnection:
                     logger.info("[%s] recv returned empty bytes (remote closed connection)", self.device_name)
                     return None
                 buf.extend(chunk)
+                self._last_recv_time = time.monotonic()
             except socket.timeout:
                 if not self._running:
                     return None
@@ -533,7 +607,12 @@ class TransportManager:
                 sock = socket.create_connection((address, port), timeout=10)
                 logger.info("[%s] TCP connected, starting TLS handshake", peer_name)
 
-                verify_id = peer_id if self._pairing_mgr.is_peer_paired(peer_id) else None
+                # Peers are stored under their real device id, but discovery may
+                # call us with a hashed mDNS id — resolve it so pinning still
+                # applies to an already-paired peer (otherwise is_peer_paired()
+                # returns False and we'd silently drop to CERT_NONE).
+                real = self._hash_to_real_id.get(peer_id, peer_id)
+                verify_id = real if self._pairing_mgr.is_peer_paired(real) else None
                 ssl_context = self._build_ssl_context(
                     server_side=False, verify_peer_id=verify_id)
                 logger.info("[%s] SSL context built (verify_id=%s)", peer_name, verify_id[:12] if verify_id else "None")
@@ -600,11 +679,16 @@ class TransportManager:
                 peer_fp = self._pairing_mgr.get_peer_fingerprint(real_peer_id) if real_peer_id else ""
 
                 conn = PeerConnection(real_peer_id, peer_name, ssl_sock,
-                                      peer_fingerprint=peer_fp, enc_mgr=self._enc_mgr)
+                                      peer_fingerprint=peer_fp, enc_mgr=self._enc_mgr,
+                                      pairing_mgr=self._pairing_mgr)
                 conn.set_on_message(self._on_peer_message)
                 conn.set_on_disconnect(self._on_peer_disconnected)
                 conn.start()
 
+                # Socket shutdown/close and health checks do I/O — collect the
+                # connections to stop under the lock, then stop them outside it.
+                to_stop: list = []
+                existing = None
                 with self._lock:
                     if not self._running:
                         logger.debug("[%s] server stopped, discarding new connection", peer_name)
@@ -622,7 +706,7 @@ class TransportManager:
                             logger.debug("[%s] removing stale hash-keyed connection (conn=%s)",
                                          peer_name, hex(id(old_hash)))
                             old_hash.set_on_disconnect(None)
-                            old_hash.stop()
+                            to_stop.append(old_hash)
                         # Re-key address tracking under the real ID
                         addr_info = self._peer_addresses.pop(peer_id, None)
                         if addr_info:
@@ -634,56 +718,75 @@ class TransportManager:
                     # creating two TCP connections. Use a deterministic tiebreaker
                     # so both sides agree on which one survives: the device with
                     # the lower device_id acts as client — its outgoing wins.
-                    if real_peer_id in self._peers:
-                        existing = self._peers[real_peer_id]
-                        if self._device_id < real_peer_id:
-                            # We are the lower ID — our outgoing wins.
-                            logger.info(
-                                "[%s] tiebreaker: our outgoing wins (we=%s < peer=%s) — replacing",
-                                peer_name, self._device_id[:12], real_peer_id[:12],
-                            )
-                            old = self._peers.pop(real_peer_id)
-                            old.set_on_disconnect(None)
-                            old.stop()
-                            self._peers[real_peer_id] = conn
-                        elif not existing.health_check():
-                            # Peer has lower ID but existing connection is dead
-                            # (e.g. closed by peer during a previous race round).
-                            # Keep our outgoing so we don't lose both connections.
-                            logger.info(
-                                "[%s] tiebreaker: peer should win but existing is dead — keeping our outgoing",
-                                peer_name,
-                            )
-                            old = self._peers.pop(real_peer_id)
-                            old.set_on_disconnect(None)
-                            old.stop()
-                            self._peers[real_peer_id] = conn
-                        else:
-                            # Peer has lower ID — their outgoing wins, discard ours.
-                            logger.info(
-                                "[%s] tiebreaker: peer's outgoing wins (peer=%s < we=%s) — discarding our outgoing",
-                                peer_name, real_peer_id[:12], self._device_id[:12],
-                            )
-                            conn.set_on_disconnect(None)
-                            conn.stop()
-                    else:
+                    existing = self._peers.get(real_peer_id)
+                    if existing is None:
                         self._peers[real_peer_id] = conn
                         logger.debug(
                             "[%s] stored in _peers[%s] (total peers: %d)",
                             peer_name, real_peer_id[:12], len(self._peers),
                         )
+                    elif self._device_id < real_peer_id:
+                        # We are the lower ID — our outgoing wins.
+                        logger.info(
+                            "[%s] tiebreaker: our outgoing wins (we=%s < peer=%s) — replacing",
+                            peer_name, self._device_id[:12], real_peer_id[:12],
+                        )
+                        self._peers.pop(real_peer_id)
+                        existing.set_on_disconnect(None)
+                        to_stop.append(existing)
+                        self._peers[real_peer_id] = conn
+                        existing = None
+                    # else: peer has the lower ID — their outgoing should win.
+                    # Check the existing connection's health outside the lock.
+                if existing is not None and not existing.health_check():
+                    # Peer has lower ID but existing connection is dead
+                    # (e.g. closed by peer during a previous race round).
+                    # Keep our outgoing so we don't lose both connections.
+                    with self._lock:
+                        if self._peers.get(real_peer_id) is existing:
+                            logger.info(
+                                "[%s] tiebreaker: peer should win but existing is dead — keeping our outgoing",
+                                peer_name,
+                            )
+                            self._peers.pop(real_peer_id)
+                            existing.set_on_disconnect(None)
+                            to_stop.append(existing)
+                            self._peers[real_peer_id] = conn
+                            existing = None
+                        elif real_peer_id not in self._peers:
+                            # Existing was removed concurrently — keep our outgoing.
+                            self._peers[real_peer_id] = conn
+                            existing = None
+                if existing is not None:
+                    # Peer has lower ID — their outgoing wins, discard ours.
+                    logger.info(
+                        "[%s] tiebreaker: peer's outgoing wins (peer=%s < we=%s) — discarding our outgoing",
+                        peer_name, real_peer_id[:12], self._device_id[:12],
+                    )
+                    conn.set_on_disconnect(None)
+                    to_stop.append(conn)
+                for c in to_stop:
+                    c.stop()
 
                 self._reconnect_attempts.pop(peer_id, None)
                 self._reconnect_attempts.pop(real_peer_id, None)
                 logger.info("[%s] connected [%s] (%s:%d)", peer_name, real_peer_id[:12], address, port)
 
             except CertificateChangedError:
+                # Expected = the stored fingerprint of the previously paired
+                # cert; received = the fingerprint of the new cert that just
+                # triggered the alert. Populate both so the alert is useful.
+                expected_fp = self._pairing_mgr.get_peer_fingerprint(real_peer_id) if real_peer_id else ""
+                received_fp = fingerprint_pem(peer_cert_pem) if peer_cert_pem else ""
                 logger.error(
                     "SECURITY: Certificate for %s has changed — possible MITM attack! "
-                    "Connection rejected.", peer_name,
+                    "Connection rejected. Expected fp: %s Got: %s",
+                    peer_name,
+                    expected_fp[:16] if expected_fp else "n/a",
+                    received_fp[:16] if received_fp else "n/a",
                 )
                 if self._on_security_alert:
-                    self._on_security_alert(peer_name, "", "")
+                    self._on_security_alert(peer_name, expected_fp, received_fp)
                 if sock:
                     try:
                         sock.close()
@@ -709,6 +812,14 @@ class TransportManager:
         with self._lock:
             peers = list(self._peers.values())
         for conn in peers:
+            # Outgoing pairing gate: never leak clipboard content to unpaired
+            # or anonymous peers. Pairing is done via the connection's own
+            # identity frames, not broadcast, so this is safe to skip.
+            if not self._pairing_mgr.is_peer_paired(conn.device_id):
+                logger.debug(
+                    "[%s] broadcast: skipping unpaired peer", conn.device_id[:12],
+                )
+                continue
             conn.send(data)
 
     def send_to_peer(self, peer_id: str, data: bytes):
@@ -825,6 +936,27 @@ class TransportManager:
         with self._lock:
             return dict(self._hash_to_real_id)
 
+    def get_saved_address(self, peer_id: str) -> tuple[str, str, int] | None:
+        """Return the last known (name, address, port) for a peer, or None.
+
+        Handles real device IDs, the hashed mDNS IDs used during discovery,
+        and the hash→real mapping, so callers can reconnect to a known peer
+        even when it is momentarily absent from mDNS.
+        """
+        def _hashed(pid: str) -> str:
+            return hashlib.sha256(pid.encode()).hexdigest()[:12]
+        with self._lock:
+            if peer_id in self._peer_addresses:
+                return self._peer_addresses[peer_id]
+            hashed = _hashed(peer_id)
+            if hashed in self._peer_addresses:
+                return self._peer_addresses[hashed]
+            # Any hashed mDNS ID that resolves to this real ID
+            for h, r in self._hash_to_real_id.items():
+                if r == peer_id and h in self._peer_addresses:
+                    return self._peer_addresses[h]
+        return None
+
     def _on_peer_disconnected(self, peer_id: str, conn=None):
         with self._lock:
             current = self._peers.get(peer_id)
@@ -891,19 +1023,23 @@ class TransportManager:
                 "[%s] scheduling reconnect attempt %d/%d in %.0fs",
                 peer_id[:12], attempts + 1, self._max_reconnect_attempts, delay,
             )
-        timer = threading.Timer(delay, self._try_reconnect, args=(peer_id,))
-        timer.daemon = True
-        with self._lock:
+            # Atomically replace any existing timer: pop + insert under one
+            # lock so two concurrent calls can't leak a stale timer.
             old = self._reconnect_timers.pop(peer_id, None)
+            timer = threading.Timer(delay, self._try_reconnect, args=(peer_id,))
+            timer.daemon = True
+            self._reconnect_timers[peer_id] = timer
         if old:
             logger.debug("[%s] cancelled previous reconnect timer", peer_id[:12])
             old.cancel()
-        with self._lock:
-            self._reconnect_timers[peer_id] = timer
         timer.start()
 
     def _try_reconnect(self, peer_id: str):
         with self._lock:
+            # This timer just fired — remove it from the dict so it doesn't
+            # linger (a later _schedule_reconnect would otherwise try to
+            # cancel a timer that already ran).
+            self._reconnect_timers.pop(peer_id, None)
             if peer_id in self._peers:
                 logger.debug(
                     "[%s] reconnect timer fired but peer already connected — skipping",
@@ -1079,7 +1215,8 @@ class TransportManager:
                 display_id = peer_id or "unknown"
                 peer_fp2 = self._pairing_mgr.get_peer_fingerprint(peer_id) if peer_id else ""
                 conn = PeerConnection(display_id, peer_name or str(addr), ssl_sock,
-                                      peer_fingerprint=peer_fp2, enc_mgr=self._enc_mgr)
+                                      peer_fingerprint=peer_fp2, enc_mgr=self._enc_mgr,
+                                      pairing_mgr=self._pairing_mgr)
                 conn.set_on_message(self._on_peer_message)
                 conn.set_on_disconnect(self._on_peer_disconnected)
                 conn.start()
@@ -1087,6 +1224,10 @@ class TransportManager:
                 # now that PeerConnection owns the ssl_sock (which wraps it).
                 client_sock = None
 
+                # Socket shutdown/close and health checks do I/O — collect the
+                # connections to stop under the lock, then stop them outside it.
+                to_stop: list = []
+                existing = None
                 with self._lock:
                     if not self._running:
                         # Server was stopped during TLS handshake — clean up
@@ -1118,62 +1259,81 @@ class TransportManager:
                         # client — its outgoing connection wins. This incoming
                         # connection IS the peer's outgoing. If the peer has
                         # the lower ID, this incoming wins over any existing.
-                        if peer_id in self._peers:
-                            existing = self._peers[peer_id]
-                            if self._device_id > peer_id:
-                                # Peer is lower — their outgoing (this incoming) wins.
-                                logger.info(
-                                    "[%s] tiebreaker: peer's outgoing wins (peer=%s < we=%s) — replacing",
-                                    peer_id[:12], peer_id[:12], self._device_id[:12],
-                                )
-                                old = self._peers.pop(peer_id)
-                                old.set_on_disconnect(None)
-                                old.stop()
-                                self._peers[peer_id] = conn
-                            elif not existing.health_check():
-                                # We are lower but existing connection is dead
-                                # (e.g. our outgoing was closed by peer in a
-                                # previous race round). Keep the incoming so
-                                # we don't lose both connections.
-                                logger.info(
-                                    "[%s] tiebreaker: we should win but existing is dead — keeping incoming",
-                                    peer_id[:12],
-                                )
-                                old = self._peers.pop(peer_id)
-                                old.set_on_disconnect(None)
-                                old.stop()
-                                self._peers[peer_id] = conn
-                            else:
-                                # We are lower — our outgoing wins, discard incoming.
-                                logger.info(
-                                    "[%s] tiebreaker: our outgoing wins (we=%s < peer=%s) — discarding incoming",
-                                    peer_id[:12], self._device_id[:12], peer_id[:12],
-                                )
-                                conn.set_on_disconnect(None)
-                                conn.stop()
-                        else:
+                        existing = self._peers.get(peer_id)
+                        if existing is None:
                             self._peers[peer_id] = conn
                             logger.debug(
                                 "[%s] stored in _peers[%s] (total peers: %d)",
                                 peer_name or peer_id, peer_id[:12], len(self._peers),
                             )
+                        elif self._device_id > peer_id:
+                            # Peer is lower — their outgoing (this incoming) wins.
+                            logger.info(
+                                "[%s] tiebreaker: peer's outgoing wins (peer=%s < we=%s) — replacing",
+                                peer_id[:12], peer_id[:12], self._device_id[:12],
+                            )
+                            self._peers.pop(peer_id)
+                            existing.set_on_disconnect(None)
+                            to_stop.append(existing)
+                            self._peers[peer_id] = conn
+                            existing = None
+                        # else: we are lower — our outgoing wins unless the
+                        # existing connection is dead. Check its health outside
+                        # the lock (health_check does non-blocking I/O).
                     else:
                         # Track anonymous connections so they can be cleaned up
                         anon_key = f"__anon__{addr[0]}:{addr[1]}"
                         self._peers[anon_key] = conn
                         logger.debug("Stored anonymous connection under %s", anon_key)
+                if existing is not None and not existing.health_check():
+                    # We are lower but existing connection is dead
+                    # (e.g. our outgoing was closed by peer in a
+                    # previous race round). Keep the incoming so
+                    # we don't lose both connections.
+                    with self._lock:
+                        if self._peers.get(peer_id) is existing:
+                            logger.info(
+                                "[%s] tiebreaker: we should win but existing is dead — keeping incoming",
+                                peer_id[:12],
+                            )
+                            self._peers.pop(peer_id)
+                            existing.set_on_disconnect(None)
+                            to_stop.append(existing)
+                            self._peers[peer_id] = conn
+                            existing = None
+                        elif peer_id not in self._peers:
+                            # Existing was removed concurrently — keep incoming.
+                            self._peers[peer_id] = conn
+                            existing = None
+                if existing is not None:
+                    # We are lower — our outgoing wins, discard incoming.
+                    logger.info(
+                        "[%s] tiebreaker: our outgoing wins (we=%s < peer=%s) — discarding incoming",
+                        peer_id[:12], self._device_id[:12], peer_id[:12],
+                    )
+                    conn.set_on_disconnect(None)
+                    to_stop.append(conn)
+                for c in to_stop:
+                    c.stop()
 
                 logger.info("Accepted connection from %s:%d [%s]", addr[0], addr[1], peer_id[:12] if peer_id else "N/A")
 
             except socket.timeout:
                 continue
             except CertificateChangedError:
+                # Expected = the stored fingerprint of the previously paired
+                # cert; received = the fingerprint of the new cert that just
+                # triggered the alert. Populate both so the alert is useful.
+                expected_fp = self._pairing_mgr.get_peer_fingerprint(peer_id) if peer_id else ""
+                received_fp = fingerprint_pem(peer_cert_pem) if peer_cert_pem else ""
                 logger.error(
                     "SECURITY: Incoming connection presented changed certificate — "
-                    "possible MITM attack! Connection rejected.",
+                    "possible MITM attack! Connection rejected. Expected fp: %s Got: %s",
+                    expected_fp[:16] if expected_fp else "n/a",
+                    received_fp[:16] if received_fp else "n/a",
                 )
                 if self._on_security_alert:
-                    self._on_security_alert(peer_name or "unknown", "", "")
+                    self._on_security_alert(peer_name or "unknown", expected_fp, received_fp)
                 if client_sock:
                     try:
                         client_sock.close()

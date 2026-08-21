@@ -958,11 +958,16 @@ class DarwinClipboardMonitor(ClipboardMonitor):
         while self._running:
             time.sleep(self._poll_interval)
             current = self._get_content_hash()
-            if current and last_hash and current != last_hash:
-                last_hash = current
-                self._fire_callback()
-            elif current and not last_hash:
-                last_hash = current
+            if current == last_hash:
+                continue
+            last_hash = current
+            if not current:
+                # Clipboard became empty — reset so the next copy (even of
+                # previously-seen content) is treated as a change.
+                continue
+            # Content changed, including the first copy after an empty
+            # clipboard (last_hash == "" → current).
+            self._fire_callback()
 
     def _fire_callback(self):
         if time.time() < self.suppress_until:

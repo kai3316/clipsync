@@ -33,8 +33,15 @@ var ClipsyncSound = (function () {
     return true;
   }
 
-  /* ── Check localStorage for sound preference ───────────────────── */
+  /* ── Check sound preference ────────────────────────────────────── */
   function _loadEnabled() {
+    // Prefer the server-loaded value from the store (the source of truth);
+    // fall back to the legacy localStorage key for older installs.
+    var store = window.__CLIPSYNC_STORE__;
+    if (store && typeof store.soundEnabled === 'boolean') {
+      _soundEnabled = store.soundEnabled;
+      return;
+    }
     try {
       var val = localStorage.getItem('clipsync_sound');
       if (val === '0' || val === 'false') {
@@ -151,6 +158,10 @@ var ClipsyncSound = (function () {
     /** Enable or disable sound effects. Persisted to localStorage. */
     setEnabled: function (enabled) {
       _soundEnabled = !!enabled;
+      // Keep the reactive store in sync so WS tones and the settings toggle
+      // always agree with the server-side preference.
+      var store = window.__CLIPSYNC_STORE__;
+      if (store) store.soundEnabled = _soundEnabled;
       try {
         localStorage.setItem('clipsync_sound', enabled ? '1' : '0');
       } catch (e) { /* ignore */ }

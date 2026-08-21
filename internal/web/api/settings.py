@@ -11,7 +11,7 @@ import logging
 import tempfile
 import os
 
-from internal.config.config import save as save_config
+from internal.config.config import save as save_config, _config_path
 
 logger = logging.getLogger(__name__)
 
@@ -143,13 +143,41 @@ def _type_mismatch(old, new) -> bool:
     return False
 
 
-def update_settings(body, cfg, on_settings_change=None):
+def _persist_preserving_at_rest_private_key(cfg) -> None:
+    """Persist cfg to config.json without writing the private key in plaintext.
+
+    ``save_config(cfg)`` writes ``cfg.private_key_pem`` verbatim when no
+    encryption manager is supplied.  In memory that value is the *plaintext*
+    key loaded at startup, so doing that would downgrade an encrypted config
+    to plaintext on disk.  Instead, when no encryption manager is available,
+    preserve whatever is already stored on disk (the encrypted blob when
+    encryption is enabled) and only update the non-secret fields.
+    """
+    stored = {}
+    try:
+        stored = json.loads(_config_path().read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        pass
+    original = cfg.private_key_pem
+    cfg.private_key_pem = stored.get("private_key_pem", "")
+    try:
+        save_config(cfg)
+    finally:
+        cfg.private_key_pem = original
+
+
+def update_settings(body, cfg, on_settings_change=None, enc_mgr=None):
     """Update settings from request body (only safe fields).
 
     If *on_settings_change* is provided, it is called with the ``updated``
     dict plus any ``special`` action keys after persistence so the host
     application can apply the changes to its live services immediately
     (rather than on next restart).
+
+    *enc_mgr* is the encryption manager used to re-encrypt the device private
+    key at rest.  When it is None (callback not wired yet), persistence keeps
+    the already-stored at-rest private key instead of writing the in-memory
+    plaintext value (see ``_persist_preserving_at_rest_private_key``).
     """
     try:
         data = json.loads(body.decode("utf-8"))
@@ -178,7 +206,10 @@ def update_settings(body, cfg, on_settings_change=None):
         return {"ok": False, "error": "no valid fields to update"}, 400
 
     try:
-        save_config(cfg)
+        if enc_mgr is not None:
+            save_config(cfg, enc_mgr)
+        else:
+            _persist_preserving_at_rest_private_key(cfg)
         logger.debug("Config persisted after settings update")
     except Exception as e:
         logger.error("Failed to persist settings: %s", e)
@@ -223,6 +254,12 @@ def export_data(body, cfg, history):
     suffix = ".json" if fmt == "json" else ".csv"
     fd, tmp_path = tempfile.mkstemp(suffix=suffix, prefix="clipsync_export_")
     os.close(fd)
+    # mkstemp creates the file 0600; the exported history is plaintext
+    # clipboard content, so keep it private and never let it linger.
+    try:
+        os.chmod(tmp_path, 0o600)
+    except OSError:
+        pass
 
     try:
         from internal.data.export import export_history_json, export_history_csv
@@ -230,14 +267,19 @@ def export_data(body, cfg, history):
             count = export_history_json(history, tmp_path)
         else:
             count = export_history_csv(history, tmp_path)
+        # The client only uses the count/ok for a confirmation toast today;
+        # the temp file is transient and unlinked below.
         return {"ok": True, "filepath": tmp_path, "count": count, "format": fmt}, 200
     except Exception as exc:
         logger.exception("Export failed")
+        return {"ok": False, "error": str(exc)}, 500
+    finally:
+        # Clean up on every exit path — success or failure — so a plaintext
+        # clipboard-history temp file is never left behind.
         try:
             os.unlink(tmp_path)
         except OSError:
             pass
-        return {"ok": False, "error": str(exc)}, 500
 
 
 def import_data(body, cfg, history):

@@ -1221,9 +1221,16 @@ class SettingsWindow:
             (_config_dir() / ".lock").unlink()
         except Exception:
             pass
-        # Spawn a new instance and exit
+        # Spawn a new instance and exit. In a frozen (PyInstaller) build
+        # sys.argv[0] equals sys.executable, so sys.argv[1:] avoids a stray
+        # duplicate exe argument; from source argv[0] is the script path and
+        # must be kept.
+        if getattr(sys, "frozen", False):
+            args = [sys.executable] + sys.argv[1:]
+        else:
+            args = [sys.executable] + sys.argv
         try:
-            subprocess.Popen([sys.executable] + sys.argv)
+            subprocess.Popen(args)
         except Exception:
             pass
         self._window.destroy()

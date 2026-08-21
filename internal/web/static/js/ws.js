@@ -116,8 +116,9 @@ var ClipsyncWS = (function () {
         _connected = true;
         reconnectDelay = 1000;  // Reset backoff
         self._dispatch('connected', {});
-        // Play connection sound
-        if (window.ClipsyncSound) {
+        // Play connection sound — honour the server-side sound setting.
+        var store = window.__CLIPSYNC_STORE__;
+        if (window.ClipsyncSound && (!store || store.soundEnabled)) {
           ClipsyncSound.playConnect();
         }
       };
@@ -140,8 +141,9 @@ var ClipsyncWS = (function () {
             '). Reconnecting in ' + (reconnectDelay / 1000) + 's...');
           self._dispatch('disconnected', { code: event.code, reason: event.reason });
           self._scheduleReconnect();
-          // Play disconnection sound
-          if (window.ClipsyncSound) {
+          // Play disconnection sound — honour the server-side sound setting.
+          var store = window.__CLIPSYNC_STORE__;
+          if (window.ClipsyncSound && (!store || store.soundEnabled)) {
             ClipsyncSound.playDisconnect();
           }
         } else {
@@ -240,6 +242,11 @@ var ClipsyncWS = (function () {
               store.devices.push(data.devices[i]);
             }
           }
+          // The broadcast carries the authoritative pending_pairings list too,
+          // so keep the pairing-request section in sync with the backend.
+          if (data.pending_pairings && Array.isArray(data.pending_pairings)) {
+            store.syncPairingRequests(data.pending_pairings);
+          }
           break;
 
         case 'history_updated':
@@ -248,6 +255,11 @@ var ClipsyncWS = (function () {
             for (var j = 0; j < data.items.length; j++) {
               store.history.push(data.items[j]);
             }
+            // The broadcast is the full page-1 history, so reset the
+            // pagination cursor to match — otherwise a stale historyOffset
+            // makes "Load more" skip items after a broadcast.
+            store.historyOffset = data.items.length;
+            store.historyHasMore = (data.total != null) ? (store.historyOffset < data.total) : false;
           }
           break;
 

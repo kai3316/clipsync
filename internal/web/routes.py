@@ -10,7 +10,7 @@ import os
 import time
 
 from internal.web.api.history import (
-    get_history, push_text, delete_item, toggle_pin,
+    get_history, get_history_item, push_text, delete_item, toggle_pin,
     increment_paste_count, batch_pin, batch_delete, batch_favorite,
     paste_rich,
 )
@@ -46,7 +46,10 @@ def dispatch(method, path, query_params, body, cfg, history, sync_mgr,
              on_toggle_visibility=None,
              on_settings_change=None,
              on_show_web_qr=None, on_send_url=None,
-             get_discovered=None):
+             get_discovered=None,
+             get_resolved_hashes=None, get_pending_pairings=None,
+             enc_mgr=None, on_open_file=None, on_restart=None,
+             on_reset_dedup=None):
     """Route an API request to the appropriate handler, never raising.
 
     Wraps _dispatch in a safety net so an unexpected exception in a handler
@@ -61,6 +64,8 @@ def dispatch(method, path, query_params, body, cfg, history, sync_mgr,
             on_get_transfers, on_speed_test_start, on_speed_test_poll,
             on_window_close, on_toggle_discovery, on_toggle_visibility,
             on_settings_change, on_show_web_qr, on_send_url, get_discovered,
+            get_resolved_hashes, get_pending_pairings, enc_mgr,
+            on_open_file, on_restart, on_reset_dedup,
         )
     except Exception:
         logger.exception("Unhandled error in API route: %s %s", method, path)
@@ -81,7 +86,10 @@ def _dispatch(method, path, query_params, body, cfg, history, sync_mgr,
               on_toggle_visibility=None,
               on_settings_change=None,
               on_show_web_qr=None, on_send_url=None,
-              get_discovered=None):
+              get_discovered=None,
+              get_resolved_hashes=None, get_pending_pairings=None,
+              enc_mgr=None, on_open_file=None, on_restart=None,
+              on_reset_dedup=None):
     """Route an API request to the appropriate handler.
 
     All handler functions return (data_dict, status_code).
@@ -99,7 +107,15 @@ def _dispatch(method, path, query_params, body, cfg, history, sync_mgr,
             return _json_response(data, status)
 
         elif path == "/api/devices":
-            data, status = get_devices(cfg, get_connected_ids, get_discovered)
+            data, status = get_devices(
+                cfg, get_connected_ids, get_discovered,
+                get_resolved_hashes=get_resolved_hashes,
+                get_pending_pairings=get_pending_pairings,
+            )
+            return _json_response(data, status)
+
+        elif path == "/api/history/item":
+            data, status = get_history_item(query_params, history, cfg)
             return _json_response(data, status)
 
         elif path == "/api/status":
@@ -175,7 +191,7 @@ def _dispatch(method, path, query_params, body, cfg, history, sync_mgr,
             return _json_response(data, status)
 
         elif path == "/api/paste-rich":
-            data, status = paste_rich(body, history)
+            data, status = paste_rich(body, history, on_reset_dedup)
             return _json_response(data, status)
 
         elif path == "/api/batch-pin":
@@ -223,8 +239,38 @@ def _dispatch(method, path, query_params, body, cfg, history, sync_mgr,
             return _json_response(data, status)
 
         elif path == "/api/settings":
-            data, status = update_settings(body, cfg, on_settings_change)
+            data, status = update_settings(body, cfg, on_settings_change, enc_mgr)
             return _json_response(data, status)
+
+        elif path == "/api/file/open":
+            if on_open_file is None:
+                return _json_response({"ok": False, "error": "not available"}, 503)
+            try:
+                req = json.loads(body.decode("utf-8"))
+            except (json.JSONDecodeError, UnicodeDecodeError):
+                return _json_response({"ok": False, "error": "invalid json"}, 400)
+            file_path = req.get("path", "").strip()
+            if not file_path:
+                return _json_response({"ok": False, "error": "path required"}, 400)
+            # Only allow opening files inside the received-files directory.
+            # Resolve against upload_dir first so a bare filename (as sent by
+            # the web UI) is confined correctly, while an absolute path that
+            # points outside upload_dir is rejected.
+            from internal.web.api.security import confine_path
+            safe = confine_path(os.path.join(upload_dir, file_path), upload_dir)
+            if safe is None:
+                return _json_response(
+                    {"ok": False, "error": "path must be inside the received-files directory"},
+                    400,
+                )
+            on_open_file(str(safe))
+            return _json_response({"ok": True})
+
+        elif path == "/api/restart":
+            if on_restart is None:
+                return _json_response({"ok": False, "error": "not available"}, 503)
+            on_restart()
+            return _json_response({"ok": True})
 
         elif path == "/api/export":
             data, status = export_data(body, cfg, history)

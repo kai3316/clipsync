@@ -146,7 +146,12 @@ class _ClipboardReader(ClipboardReader):
             # CF_HTML is UTF-8 per spec (Version 0.9+); CF_RTF is
             # self-describing ASCII or contains \'xx escapes.  Read raw
             # bytes — do NOT round-trip through the system ANSI code page.
-            return self._read_raw_handle(handle)
+            data = self._read_raw_handle(handle)
+            if fmt == CF_HTML and data:
+                # Strip the CF_HTML envelope so peers store clean HTML
+                # instead of our (or another app's) one-time inflation.
+                data = self._strip_cf_html(data)
+            return data
         elif fmt in (CF_DIB, CF_DIBV5):
             return self._read_dib_handle(handle)
         elif fmt == CF_ENHMETAFILE:
@@ -166,6 +171,43 @@ class _ClipboardReader(ClipboardReader):
             return ctypes.string_at(ptr, size).rstrip(b"\x00")
         finally:
             kernel32.GlobalUnlock(handle)
+
+    @staticmethod
+    def _strip_cf_html(raw: bytes) -> bytes:
+        """Extract clean HTML from a Windows CF_HTML clipboard envelope.
+
+        CF_HTML wraps HTML in a header describing byte offsets plus an
+        optional ``<html><body>`` wrapper and ``<!--StartFragment-->`` /
+        ``<!--EndFragment-->`` markers.  Strip those so the HTML stored
+        locally and broadcast to peers matches what other platforms
+        produce, instead of a Windows-specific one-time inflation.
+        """
+        html = raw.decode("utf-8", errors="replace")
+
+        # Prefer the fragment body when the markers are present (the
+        # standard CF_HTML layout, and what _build_cf_html emits).
+        start_marker = "<!--StartFragment-->"
+        end_marker = "<!--EndFragment-->"
+        start = html.find(start_marker)
+        end = html.find(end_marker)
+        if start != -1 and end != -1 and end > start:
+            return html[start + len(start_marker):end].encode("utf-8")
+
+        # No fragment markers — drop the header (up to the first line that
+        # begins with '<') and any <html>/<body> wrapper.
+        body_lines = []
+        started = False
+        for line in html.split("\r\n"):
+            if not started:
+                if line.lstrip().startswith("<"):
+                    started = True
+                else:
+                    continue
+            body_lines.append(line)
+        body = "\r\n".join(body_lines)
+        body = re.sub(r"</body>\s*</html>\s*$", "", body, flags=re.IGNORECASE)
+        body = re.sub(r"^<html[^>]*>\s*<body[^>]*>", "", body, flags=re.IGNORECASE)
+        return body.encode("utf-8")
 
     def _read_text_handle(self, handle, wide: bool) -> bytes:
         ptr = kernel32.GlobalLock(handle)

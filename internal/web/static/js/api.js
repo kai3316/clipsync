@@ -58,6 +58,16 @@ var ClipsyncAPI = (function () {
     },
 
     /**
+     * Get a single history entry with its full content (including the base64
+     * `types` map). List responses strip `types` to keep the payload small, so
+     * clients needing full text (copy / add-to-favorite) fetch it here.
+     * @returns {Promise<{item: Object}>}
+     */
+    getHistoryItem: function (entryId) {
+      return this._fetch('GET', '/api/history/item?entry_id=' + encodeURIComponent(entryId));
+    },
+
+    /**
      * Push text to the server's clipboard.
      * @param {string} text
      * @returns {Promise<{ok: boolean, len: number}>}
@@ -503,6 +513,23 @@ var ClipsyncAPI = (function () {
     /* ═══════════════════════════════════════════════════════════════
        Transfer actions
        ═══════════════════════════════════════════════════════════════ */
+
+    /**
+     * Open a local file on the host desktop.
+     * @param {string} path - Absolute path to the file on the server host
+     * @returns {Promise<{ok: boolean}>}
+     */
+    openFile: function (path) {
+      return this._fetch('POST', '/api/file/open', { path: path });
+    },
+
+    /**
+     * Restart the ClipSync application.
+     * @returns {Promise<{ok: boolean}>}
+     */
+    restartApp: function () {
+      return this._fetch('POST', '/api/restart', {});
+    },
 
     /**
      * Cancel a transfer.

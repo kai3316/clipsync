@@ -34,11 +34,33 @@ class WebSocketClient:
         self.addr = addr
         self._lock = threading.Lock()
         self._closed = False
+        # A stalled client (phone asleep, cable pulled) must not block a
+        # broadcast forever: bound every send/recv on this socket so
+        # sendall() raises instead of blocking indefinitely.  This also
+        # closes clients that send a partial frame and then stall.
+        try:
+            self.sock.settimeout(5.0)
+        except OSError:
+            pass
 
     def send_json(self, data: dict) -> bool:
         """Send a JSON message to the client. Returns True on success."""
         try:
             payload = json.dumps(data, ensure_ascii=False).encode("utf-8")
+            self._send_frame(_OP_TEXT, payload)
+            return True
+        except (OSError, ConnectionError) as e:
+            logger.debug("WS send error (%s): %s", self.addr[0], e)
+            self._closed = True
+            return False
+
+    def send_bytes(self, payload: bytes) -> bool:
+        """Send a pre-serialized JSON text-frame payload.
+
+        Avoids re-running ``json.dumps`` once per client on a broadcast.
+        Returns True on success.
+        """
+        try:
             self._send_frame(_OP_TEXT, payload)
             return True
         except (OSError, ConnectionError) as e:
@@ -195,14 +217,31 @@ class WebSocketClient:
 class WebSocketManager:
     """Manages all connected WebSocket clients and provides broadcast."""
 
-    def __init__(self, cfg, history, sync_mgr, get_connected_ids, get_discovered=None):
+    def __init__(self, cfg, history, sync_mgr, get_connected_ids, get_discovered=None,
+                 get_resolved_hashes=None, get_pending_pairings=None,
+                 on_client_attached=None):
         self._cfg = cfg
         self._history = history
         self._sync_mgr = sync_mgr
         self._get_connected_ids = get_connected_ids
         self._get_discovered = get_discovered
+        self._get_resolved_hashes = get_resolved_hashes
+        self._get_pending_pairings = get_pending_pairings
+        # Called (with no args) after a new client finishes its handshake
+        # snapshot; the DialogManager uses it to flush dialogs that were
+        # queued while no client was connected.
+        self._on_client_attached = on_client_attached
         self._clients: list[WebSocketClient] = []
         self._lock = threading.Lock()
+
+    @property
+    def on_client_attached(self):
+        """Callback invoked after a new client's snapshot is sent."""
+        return self._on_client_attached
+
+    @on_client_attached.setter
+    def on_client_attached(self, cb):
+        self._on_client_attached = cb
 
     def handle_handshake(self, sock: socket.socket, addr: tuple,
                          request_headers: dict[str, str]) -> WebSocketClient | None:
@@ -239,6 +278,14 @@ class WebSocketManager:
             self._clients.append(client)
 
         self._send_snapshot(client)
+        # Flush any dialogs that were queued while no client was connected so
+        # an incoming transfer that arrived "blind" is shown to this client
+        # instead of being silently rejected (see DialogManager.flush_pending).
+        if self._on_client_attached is not None:
+            try:
+                self._on_client_attached()
+            except Exception:
+                logger.debug("on_client_attached hook failed", exc_info=True)
         logger.info("WS client connected: %s:%d (%d clients)", addr[0], addr[1], len(self._clients))
         return client
 
@@ -246,7 +293,11 @@ class WebSocketManager:
         """Send initial state snapshot to a newly connected client."""
         # Device list
         from internal.web.api.devices import get_devices
-        dev_data, _ = get_devices(self._cfg, self._get_connected_ids)
+        dev_data, _ = get_devices(
+            self._cfg, self._get_connected_ids, self._get_discovered,
+            get_resolved_hashes=self._get_resolved_hashes,
+            get_pending_pairings=self._get_pending_pairings,
+        )
         client.send_json({"type": "devices_updated", "data": dev_data})
 
         # History
@@ -265,8 +316,11 @@ class WebSocketManager:
             "data": data or {},
             "ts": time.time(),
         }
+        # Pre-serialize once and reuse the same bytes for every client instead
+        # of re-running json.dumps per client.
+        payload = json.dumps(message, ensure_ascii=False).encode("utf-8")
         # Snapshot the client list under the lock, then send outside it.
-        # send_json() performs blocking socket I/O (sendall); holding the
+        # send_bytes() performs blocking socket I/O (sendall); holding the
         # manager lock while blocked would stall every other broadcast and
         # new handshake for as long as the slowest client's TCP backpressure.
         with self._lock:
@@ -276,18 +330,21 @@ class WebSocketManager:
             if client.closed:
                 dead.append(client)
                 continue
-            if not client.send_json(message):
+            if not client.send_bytes(payload):
                 dead.append(client)
-        # Clean up dead clients
+        # Clean up dead clients.  Close them outside the lock — close() sends
+        # a WS close frame (blocking socket I/O) which would stall the manager
+        # lock if done under it.
         if dead:
             with self._lock:
                 for client in dead:
                     if client in self._clients:
                         self._clients.remove(client)
-                        try:
-                            client.close()
-                        except Exception:
-                            pass
+            for client in dead:
+                try:
+                    client.close()
+                except Exception:
+                    pass
 
     def remove_client(self, client: WebSocketClient) -> None:
         """Remove a client from the managed list."""
@@ -306,7 +363,11 @@ class WebSocketManager:
     def broadcast_devices(self):
         """Convenience: broadcast device list to all clients."""
         from internal.web.api.devices import get_devices
-        dev_data, _ = get_devices(self._cfg, self._get_connected_ids, self._get_discovered)
+        dev_data, _ = get_devices(
+            self._cfg, self._get_connected_ids, self._get_discovered,
+            get_resolved_hashes=self._get_resolved_hashes,
+            get_pending_pairings=self._get_pending_pairings,
+        )
         self.broadcast("devices_updated", dev_data)
 
     def broadcast_transfer_progress(self, transfer_id: str, progress: float,
@@ -332,11 +393,15 @@ class WebSocketManager:
 
     def shutdown(self):
         """Close all connections and clear client list."""
+        # Snapshot the list and clear under the lock, then close each client
+        # outside it: close() sends a WS close frame (blocking socket I/O) and
+        # must not stall the manager lock.
         with self._lock:
-            for client in self._clients:
-                try:
-                    client.close()
-                except Exception:
-                    pass
+            clients = list(self._clients)
             self._clients.clear()
+        for client in clients:
+            try:
+                client.close()
+            except Exception:
+                pass
         logger.info("WebSocket manager shut down")

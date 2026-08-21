@@ -244,6 +244,13 @@ def create_backup(
             for child in tmpdir.iterdir():
                 zf.write(str(child), arcname=child.name)
 
+    # The archive contains plaintext clipboard history and config data; keep
+    # it private (not world-readable).
+    try:
+        os.chmod(str(zip_path), 0o600)
+    except OSError:
+        pass
+
     logger.info("Backup created: %s", zip_path)
     return str(zip_path)
 
@@ -269,10 +276,28 @@ def restore_backup(
     if not zipfile.is_zipfile(str(zip_path)):
         raise ValueError(f"Not a valid zip file: {backup_path}")
 
+    def _assert_safe_zip_member(name: str) -> None:
+        """Reject zip members that would escape the extraction dir.
+
+        Defense-in-depth against zip-slip: the backup is created by our own
+        create_backup, but a restored archive could be hand-crafted.  Reject
+        absolute paths, drive letters and any ``..`` path component.
+        """
+        norm = name.replace("\\", "/")
+        if norm.startswith("/") or norm.startswith("\\"):
+            raise ValueError(f"Unsafe absolute path in backup: {name!r}")
+        # Drive letter (Windows): e.g. "C:/..."
+        if len(norm) >= 2 and norm[1] == ":":
+            raise ValueError(f"Unsafe drive path in backup: {name!r}")
+        if ".." in [part for part in norm.split("/")]:
+            raise ValueError(f"Unsafe '..' path in backup: {name!r}")
+
     with tempfile.TemporaryDirectory(prefix="clipsync_restore_") as tmp:
         tmpdir = Path(tmp)
 
         with zipfile.ZipFile(str(zip_path), "r") as zf:
+            for info in zf.infolist():
+                _assert_safe_zip_member(info.filename)
             zf.extractall(str(tmpdir))
 
         # --- Restore config ---

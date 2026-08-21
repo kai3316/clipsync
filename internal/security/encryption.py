@@ -76,7 +76,15 @@ def _hkdf_extract(salt: bytes, ikm: bytes) -> bytes:
 
 
 def _compute_storage_key(device_fingerprint: str, password: str = "") -> bytes:
-    """Derive the at-rest storage key from device fingerprint + optional password."""
+    """Derive the at-rest storage key from device fingerprint + optional password.
+
+    NOTE: when no password is set, the key is derived solely from the public
+    device fingerprint, which is stored in plaintext next to the data — so
+    this is obfuscation, not encryption. With a password, PBKDF2(password,
+    fingerprint) is folded in, giving real at-rest encryption. Key derivation
+    is intentionally unchanged here so existing data stays readable. Never
+    log the password or include it in exceptions raised from this function.
+    """
     ikm = device_fingerprint.encode("ascii")
     salt = b"clipsync-at-rest-salt"
     if password:
@@ -155,6 +163,12 @@ class EncryptionManager:
             device_fingerprint[:16] + "..." if device_fingerprint else "(none)",
             "set" if password else "not set",
         )
+        if not password:
+            logger.warning(
+                "At-rest encryption WITHOUT a password is obfuscation only: "
+                "the storage key is derived from the public device fingerprint, "
+                "which is stored in plaintext. Set a password for real encryption."
+            )
 
     @property
     def storage_key(self) -> bytes:

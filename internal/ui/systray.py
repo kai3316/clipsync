@@ -106,20 +106,6 @@ class SystrayApp:
 
     def set_syncing(self, enabled: bool):
         self._syncing = enabled
-
-    def set_web_enabled(self, enabled: bool):
-        self._web_enabled = enabled
-        if self._tray is not None:
-            if sys.platform == "win32" and getattr(self, "_WM_UPDATE_MENU", None):
-                hwnd = getattr(self._tray, "_hwnd", None)
-                if hwnd:
-                    ctypes.windll.user32.PostMessageW(
-                        hwnd, self._WM_UPDATE_MENU, 0, 0)
-                    return
-            self._tray.menu = self._build_full_menu()
-
-    def set_peers(self, peers: list[str]):
-        self._peers = peers
         if self._tray is None:
             return
         if sys.platform == "win32" and getattr(self, "_WM_UPDATE_MENU", None):
@@ -128,8 +114,51 @@ class SystrayApp:
                 ctypes.windll.user32.PostMessageW(
                     hwnd, self._WM_UPDATE_MENU, 0, 0)
                 return
-        # Non-Windows (or fallback): direct update
-        self._tray.menu = self._build_full_menu()
+        # The sync checkbox state is dynamic (checked=lambda), so a plain
+        # refresh is enough — no menu rebuild needed. update_menu() marshals
+        # the native rebuild onto the tray thread on GTK/AppIndicator.
+        self._tray.update_menu()
+
+    def set_web_enabled(self, enabled: bool):
+        self._web_enabled = enabled
+        self._schedule_menu_rebuild()
+
+    def set_peers(self, peers: list[str]):
+        self._peers = peers
+        self._schedule_menu_rebuild()
+
+    def _schedule_menu_rebuild(self):
+        """Rebuild the tray menu on the tray thread (thread-safe).
+
+        The menu descriptor bakes in the peer list / web-QR item, so the
+        native menu must be rebuilt. pystray's ``menu`` setter does that, but
+        mutating ``self._tray.menu`` from a non-tray thread races the
+        GTK/AppIndicator event loop and can crash. On Windows we post
+        WM_UPDATE_MENU to the tray window; elsewhere the rebuild is applied
+        via an idle callback on the tray thread (GTK family).
+        """
+        if self._tray is None:
+            return
+        if sys.platform == "win32" and getattr(self, "_WM_UPDATE_MENU", None):
+            hwnd = getattr(self._tray, "_hwnd", None)
+            if hwnd:
+                ctypes.windll.user32.PostMessageW(
+                    hwnd, self._WM_UPDATE_MENU, 0, 0)
+                return
+        menu = self._build_full_menu()
+        try:
+            from gi.repository import GObject
+        except Exception:
+            # Non-GTK backend: fall back to pystray's setter, which marshals
+            # the rebuild onto the tray thread where supported.
+            self._tray.menu = menu
+            return
+
+        def _apply():
+            self._tray.menu = menu
+            return False  # one-shot idle callback
+
+        GObject.idle_add(_apply)
 
     def _apply_pending_menu(self):
         """Apply the latest peer menu on the tray thread (WM_UPDATE_MENU handler)."""

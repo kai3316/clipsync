@@ -234,6 +234,10 @@
           if (res && res.ok !== false) {
             if (idx !== -1) {
               store.history.splice(idx, 1);
+              // Shrink the pagination cursor with the array (matching the
+              // batch delete) so "Load more" doesn't skip the item that just
+              // shifted into the deleted slot.
+              store.historyOffset = Math.max(0, store.historyOffset - 1);
             }
             store.selectedIds.delete(eid);
             store.selectedIds = new Set(store.selectedIds);

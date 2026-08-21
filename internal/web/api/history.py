@@ -55,11 +55,14 @@ def get_history(history, cfg, limit_str=None, offset_str=None):
     result = []
     for entry in items:
         sid = entry.get("source_device", "")
+        # List responses deliberately omit the full base64 ``types`` dict —
+        # it can be large (images, rich text) and is only needed when the
+        # user wants to copy/use a specific item.  Clients fetch the full
+        # content via GET /api/history/item when required.
         result.append({
             "timestamp": entry.get("timestamp"),
             "content_type": entry.get("content_type", "TEXT"),
             "text_preview": entry.get("text_preview", ""),
-            "types": entry.get("types", {}),
             "source_device": sid,
             "source_name": device_names.get(sid, sid),
             "source_app": entry.get("source_app", ""),
@@ -69,6 +72,42 @@ def get_history(history, cfg, limit_str=None, offset_str=None):
             "paste_count": entry.get("paste_count", 0),
         })
     return {"items": result, "total": total, "offset": offset, "limit": limit}, 200
+
+
+def get_history_item(query_params, history, cfg):
+    """Return a single history entry's full content, including ``types``.
+
+    This is the counterpart to ``get_history``: list responses ship only
+    metadata + ``text_preview`` to keep the payload small, and clients that
+    need the full base64 content (copy, add-to-favorites, view detail) fetch
+    it here by ``entry_id``.
+    """
+    entry_id = (query_params.get("entry_id", [""])[0] or "").strip()
+    if not entry_id:
+        return {"error": "entry_id required"}, 400
+
+    _, entry = history.find_by_id(entry_id)
+    if entry is None:
+        return {"error": "not found"}, 404
+
+    device_names = {cfg.device_id: cfg.device_name}
+    for peer in list(cfg.peers.values()):
+        device_names[peer.device_id] = peer.device_name
+    sid = entry.get("source_device", "")
+    result = {
+        "timestamp": entry.get("timestamp"),
+        "content_type": entry.get("content_type", "TEXT"),
+        "text_preview": entry.get("text_preview", ""),
+        "types": entry.get("types", {}),
+        "source_device": sid,
+        "source_name": device_names.get(sid, sid),
+        "source_app": entry.get("source_app", ""),
+        "source_title": entry.get("source_title", ""),
+        "entry_id": entry.get("entry_id"),
+        "pinned": entry.get("pinned", False),
+        "paste_count": entry.get("paste_count", 0),
+    }
+    return {"item": result}, 200
 
 
 def push_text(body, cfg, sync_mgr, history):
@@ -285,13 +324,18 @@ def batch_favorite(body, history):
     return {"ok": True, "count": count}, 200
 
 
-def paste_rich(body, history):
+def paste_rich(body, history, on_reset_dedup=None):
     """Paste all available formats for a history entry to the clipboard.
 
     Looks up the entry by index, decodes all stored format types
     (TEXT, HTML, RTF, IMAGE, IMAGE_EMF, FILE, URL) from base64, and
     writes them all at once to the platform clipboard via the native
     writer.
+
+    *on_reset_dedup* is an optional callback (wired by the host app) that
+    clears the sync manager's dedup state before the write, so the monitor
+    event from this paste is synced to peers instead of being filtered as
+    a duplicate.
 
     Returns a list of format names that were successfully decoded.
     """
@@ -353,6 +397,13 @@ def paste_rich(body, history):
         types=decoded_types,
         source_device=entry.get("source_device", ""),
     )
+    # Clear dedup state so the monitor event from this write is not
+    # suppressed and the pasted content re-syncs to peers.
+    if on_reset_dedup is not None:
+        try:
+            on_reset_dedup()
+        except Exception:
+            logger.debug("reset_dedup callback failed", exc_info=True)
     writer = create_writer()
     writer.write(content)
 

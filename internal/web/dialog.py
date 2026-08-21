@@ -33,6 +33,10 @@ class DialogManager:
     def __init__(self):
         self._ws_manager = None
         self._pending: dict[str, dict] = {}  # dialog_id → {event, response}
+        # Dialogs queued while no web client was connected.  They are flushed
+        # when a client attaches (see flush_pending) instead of being silently
+        # rejected.
+        self._queued_dialogs: list[dict] = []
         self._lock = threading.Lock()
 
     @property
@@ -83,19 +87,29 @@ class DialogManager:
 
         sent = self._broadcast("show_dialog", data)
         if not sent:
+            # No client connected — hold the dialog as pending so it is shown
+            # when a client attaches instead of being silently rejected (e.g.
+            # an incoming file transfer arriving while the web UI is closed).
             with self._lock:
-                self._pending.pop(dialog_id, None)
-            return None
+                self._queued_dialogs.append(data)
 
         if event.wait(timeout=timeout):
             with self._lock:
                 self._pending.pop(dialog_id, None)
+                self._queued_dialogs[:] = [
+                    q for q in self._queued_dialogs
+                    if q.get("dialog_id") != dialog_id
+                ]
             return response_holder
         else:
             # Timeout — send close and clean up
             self._broadcast("close_dialog", {"dialog_id": dialog_id})
             with self._lock:
                 self._pending.pop(dialog_id, None)
+                self._queued_dialogs[:] = [
+                    q for q in self._queued_dialogs
+                    if q.get("dialog_id") != dialog_id
+                ]
             logger.warning("Dialog %s timed out after %.0fs", dialog_id, timeout)
             return None
 
@@ -113,6 +127,10 @@ class DialogManager:
         self._broadcast("close_dialog", {"dialog_id": dialog_id})
         with self._lock:
             self._pending.pop(dialog_id, None)
+            self._queued_dialogs[:] = [
+                q for q in self._queued_dialogs
+                if q.get("dialog_id") != dialog_id
+            ]
 
     def push(self, dialog_type: str, **kwargs) -> str | None:
         """Push a dialog without blocking for a response.
@@ -134,9 +152,10 @@ class DialogManager:
         data = {"dialog_id": dialog_id, "dialog_type": dialog_type, **kwargs}
         sent = self._broadcast("show_dialog", data)
         if not sent:
+            # Hold for when a client attaches (see flush_pending) instead of
+            # dropping the dialog silently.
             with self._lock:
-                self._pending.pop(dialog_id, None)
-            return None
+                self._queued_dialogs.append(data)
         return dialog_id
 
     def is_cancelled(self, dialog_id: str) -> bool:
@@ -153,6 +172,22 @@ class DialogManager:
             "message": message,
             "duration": duration,
         })
+
+    def flush_pending(self) -> None:
+        """Send dialogs that were queued while no client was connected.
+
+        Called when a new WebSocket client attaches (wired via
+        ``WebSocketManager.on_client_attached``) so dialogs that arrived
+        "blind" — e.g. an incoming file transfer — are shown to the client
+        instead of being silently rejected.
+        """
+        if self._ws_manager is None:
+            return
+        with self._lock:
+            queued = list(self._queued_dialogs)
+            self._queued_dialogs.clear()
+        for data in queued:
+            self._ws_manager.broadcast("show_dialog", data)
 
     # ── Response handler (called from API route) ────────────────────
 

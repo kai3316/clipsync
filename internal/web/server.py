@@ -22,6 +22,11 @@ from threading import Thread
 
 logger = logging.getLogger(__name__)
 
+# Compiled i18n JSON cache, keyed by locale code.  _interpolate_html runs on
+# every static asset request; re-reading and re-parsing the locale JSON file
+# each time is wasteful.
+_i18n_cache: dict[str, str] = {}
+
 # ── Upload directory ─────────────────────────────────────────────
 
 def _get_upload_dir() -> str:
@@ -312,10 +317,14 @@ function renderHistory() {
 }
 
 function copyItem(index) {
-  var item = _cache.history[index]; if (!item || !item.types) return;
-  var keys = Object.keys(item.types); if (!keys.length) return;
-  try {
-    var decoded = atob(item.types[keys[0]]);
+  var item = _cache.history[index]; if (!item) return;
+  var eid = item.entry_id; if (!eid) { showToast("No content"); return; }
+  // List responses carry only metadata + text_preview; fetch the full
+  // content (types) from the detail endpoint to copy it.
+  api("/api/history/item?entry_id=" + encodeURIComponent(eid)).then(function(d) {
+    var types = (d.item && d.item.types) || {};
+    var keys = Object.keys(types); if (!keys.length) { showToast("No content"); return; }
+    var decoded = atob(types[keys[0]]);
     var bytes = new Uint8Array(decoded.length);
     for (var i = 0; i < decoded.length; i++) bytes[i] = decoded.charCodeAt(i);
     var text = new TextDecoder("utf-8").decode(bytes);
@@ -327,7 +336,7 @@ function copyItem(index) {
       ta.select(); document.execCommand("copy"); document.body.removeChild(ta);
       showToast("Copied!");
     }
-  } catch(e) { showToast("Copy failed"); }
+  }).catch(function() { showToast("Copy failed"); });
 }
 
 function pushText() {
@@ -515,11 +524,33 @@ class WebServer:
                  on_toggle_discovery=None, on_toggle_visibility=None,
                  on_settings_change=None,
                  on_show_web_qr=None, on_send_url=None,
-                 get_discovered_peers=None):
+                 get_discovered_peers=None,
+                 get_resolved_hashes=None, get_pending_pairings=None,
+                 enc_mgr=None, on_open_file=None, on_restart=None,
+                 on_reset_dedup=None):
         self._cfg = cfg
         self._sync_mgr = sync_mgr
         self._get_connected_ids = get_connected_ids
         self._get_discovered_peers = get_discovered_peers
+        self._get_resolved_hashes = get_resolved_hashes
+        self._get_pending_pairings = get_pending_pairings
+        self._enc_mgr = enc_mgr
+        self._on_open_file = on_open_file
+        self._on_restart = on_restart
+        # Callback invoked before a web-driven clipboard write (paste_rich) so
+        # the sync manager's dedup state is cleared and the write re-syncs to
+        # peers.  Defaults to the sync manager's own method when available.
+        if on_reset_dedup is None:
+            _sync_mgr = self._sync_mgr
+            def _default_reset_dedup():
+                try:
+                    if _sync_mgr is not None and hasattr(_sync_mgr, "reset_dedup_for_restore"):
+                        _sync_mgr.reset_dedup_for_restore()
+                except Exception:
+                    logger.debug("reset_dedup_for_restore failed", exc_info=True)
+            self._on_reset_dedup = _default_reset_dedup
+        else:
+            self._on_reset_dedup = on_reset_dedup
         self._on_show_web_qr = on_show_web_qr
         self._on_send_url = on_send_url
         self._on_nav_url = on_nav_url
@@ -556,10 +587,16 @@ class WebServer:
             sync_mgr=sync_mgr,
             get_connected_ids=get_connected_ids,
             get_discovered=get_discovered_peers,
+            get_resolved_hashes=get_resolved_hashes,
+            get_pending_pairings=get_pending_pairings,
         )
 
         self._dialog_mgr = DialogManager()
         self._dialog_mgr.ws_manager = self._ws_manager
+        # When a new web client attaches, flush any dialogs that were queued
+        # while no client was connected (e.g. an incoming file transfer that
+        # arrived "blind") so they are shown instead of silently rejected.
+        self._ws_manager.on_client_attached = self._dialog_mgr.flush_pending
 
     # ── History upgrade ──────────────────────────────────────────
 
@@ -709,6 +746,12 @@ class WebServer:
         sync_mgr = self._sync_mgr
         get_connected_ids = self._get_connected_ids
         get_discovered_peers = self._get_discovered_peers
+        get_resolved_hashes = self._get_resolved_hashes
+        get_pending_pairings = self._get_pending_pairings
+        enc_mgr = self._enc_mgr
+        on_open_file = self._on_open_file
+        on_restart = self._on_restart
+        on_reset_dedup = self._on_reset_dedup
         on_show_web_qr = self._on_show_web_qr
         on_send_url = self._on_send_url
         on_nav_url = self._on_nav_url
@@ -728,11 +771,38 @@ class WebServer:
         icon_192 = self._icon_192
         icon_512 = self._icon_512
         ws_manager = self._ws_manager
+        # Cap the number of concurrently handled connections so a flood of
+        # slow clients cannot exhaust worker threads.
+        connection_semaphore = threading.Semaphore(64)
         import internal.web.routes as api_routes
 
         class _Handler(BaseHTTPRequestHandler):
+            # Slowloris defence: bound every socket operation on this
+            # connection.  A client that opens a socket but never finishes the
+            # request line / headers (or stalls mid-body) times out instead of
+            # occupying a worker thread forever.  StreamRequestHandler.setup()
+            # applies this to the underlying socket.
+            timeout = 30
+
             def log_message(inner_self, fmt, *args):
                 pass
+
+            def handle(inner_self):
+                # Cap the number of concurrently handled connections so a
+                # flood of slow clients cannot exhaust worker threads.  When
+                # the semaphore is exhausted the connection is rejected
+                # outright rather than queued (which would grow threads
+                # unboundedly).
+                if not connection_semaphore.acquire(blocking=False):
+                    try:
+                        inner_self.connection.close()
+                    except OSError:
+                        pass
+                    return
+                try:
+                    super().handle()
+                finally:
+                    connection_semaphore.release()
 
             def handle_one_request(self):
                 # The client (web UI) disconnects abruptly when the app
@@ -769,10 +839,17 @@ class WebServer:
             def _load_i18n_translations(cfg) -> str:
                 """Load translations for the configured locale from a JSON
                 locale file.  Falls back to the Python i18n dicts if the
-                JSON file doesn't exist yet."""
+                JSON file doesn't exist yet.
+
+                The compiled JSON is cached per locale so static-asset
+                requests don't re-read/re-parse the file every time."""
                 from internal.i18n import LOCALES
                 from internal.version import __version__
                 locale = cfg.language if cfg.language in _Handler._available_locales() else "en"
+
+                cached = _i18n_cache.get(locale)
+                if cached is not None:
+                    return cached
 
                 # Try JSON locale file first
                 locales_dir = os.path.join(static_dir, "locales")
@@ -789,7 +866,9 @@ class WebServer:
                 # The version lives in exactly one place (internal/version.py);
                 # inject it here so the web UI never carries its own copy.
                 translations["settings_window.about_version"] = "v" + __version__
-                return json.dumps(translations, ensure_ascii=False)
+                result = json.dumps(translations, ensure_ascii=False)
+                _i18n_cache[locale] = result
+                return result
 
             def _send_json(inner_self, data, status=200):
                 inner_self.send_response(status)
@@ -822,8 +901,14 @@ class WebServer:
                 if status == 200:
                     try:
                         if isinstance(body, str) and os.path.isfile(body):
+                            # Stream in chunks so large files are not loaded
+                            # into memory all at once.
                             with open(body, "rb") as f:
-                                inner_self.wfile.write(f.read())
+                                while True:
+                                    chunk = f.read(64 * 1024)
+                                    if not chunk:
+                                        break
+                                    inner_self.wfile.write(chunk)
                         else:
                             inner_self.wfile.write(body)
                     except (ConnectionAbortedError, ConnectionResetError, BrokenPipeError):
@@ -1050,11 +1135,23 @@ class WebServer:
                     if path == "/api/download":
                         # File download: handled directly for streaming
                         fname = (query_params.get("file", [""])[0] or "").strip()
-                        if not fname or ".." in fname or "/" in fname or "\\" in fname:
+                        if not fname:
                             inner_self._send_json({"error": "invalid filename"}, 400)
                             return
-                        fpath = os.path.join(upload_dir, fname)
-                        inner_self._send_file(fpath)
+                        # Only a bare filename is allowed: no path separators
+                        # and no drive-relative names (e.g. "C:evil" on Windows
+                        # is drive-relative and could escape the upload dir).
+                        if os.path.basename(fname) != fname or ":" in fname:
+                            inner_self._send_json({"error": "invalid filename"}, 400)
+                            return
+                        # Defense-in-depth: resolve and re-confine against the
+                        # upload dir (also guards symlinks inside it).
+                        from internal.web.api.security import confine_path
+                        safe = confine_path(os.path.join(upload_dir, fname), upload_dir)
+                        if safe is None:
+                            inner_self._send_json({"error": "invalid filename"}, 400)
+                            return
+                        inner_self._send_file(str(safe))
                         return
 
                     # Delegate to routes module
@@ -1081,6 +1178,12 @@ class WebServer:
                         on_window_close=on_window_close,
                         on_toggle_discovery=on_toggle_discovery,
                         on_toggle_visibility=on_toggle_visibility,
+                        get_resolved_hashes=get_resolved_hashes,
+                        get_pending_pairings=get_pending_pairings,
+                        enc_mgr=enc_mgr,
+                        on_open_file=on_open_file,
+                        on_restart=on_restart,
+                        on_reset_dedup=on_reset_dedup,
                     )
                     inner_self.send_response(status)
                     inner_self.send_header("Content-Type", content_type)
@@ -1174,6 +1277,12 @@ class WebServer:
                         on_settings_change=on_settings_change,
                         on_show_web_qr=on_show_web_qr,
                         on_send_url=on_send_url,
+                        get_resolved_hashes=get_resolved_hashes,
+                        get_pending_pairings=get_pending_pairings,
+                        enc_mgr=enc_mgr,
+                        on_open_file=on_open_file,
+                        on_restart=on_restart,
+                        on_reset_dedup=on_reset_dedup,
                     )
                     inner_self.send_response(status)
                     inner_self.send_header("Content-Type", content_type)

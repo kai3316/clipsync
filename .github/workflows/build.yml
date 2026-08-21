@@ -5,6 +5,12 @@ on:
     tags: ['v*']
   workflow_dispatch:
 
+# Cancel overlapping runs for the same tag (e.g. a re-pushed tag) so the
+# delete-then-create release step can never interleave with a concurrent run.
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: true
+
 permissions:
   contents: write
 
@@ -32,6 +38,21 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+
+      - name: Verify tag matches internal version
+        if: startsWith(github.ref, 'refs/tags/v') && matrix.os == 'windows-latest'
+        shell: bash
+        run: |
+          # github.ref_name is the tag that triggered this run (guaranteed on a
+          # tag push); equivalent to `git describe --tags --exact-match HEAD`.
+          ACTUAL="${{ github.ref_name }}"
+          EXPECTED="v$(python -c 'from internal.version import __version__; print(__version__)')"
+          echo "Expected version tag: $EXPECTED"
+          echo "Actual tag at HEAD:   $ACTUAL"
+          if [ "$ACTUAL" != "$EXPECTED" ]; then
+            echo "::error::Tag '$ACTUAL' does not match internal.version.__version__ ('$EXPECTED'). Bump internal/version.py before tagging."
+            exit 1
+          fi
 
       - name: Install system dependencies (Linux)
         if: runner.os == 'Linux'
@@ -64,6 +85,26 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           cd dist && tar -czf ../${{ matrix.artifact }}.tar.gz *
+
+      - name: Smoke test (macOS bundle contains web UI)
+        if: runner.os == 'macOS'
+        run: |
+          if unzip -l clipsync-macos.zip | grep -q 'internal/web/static/index.html'; then
+            echo "OK: web UI bundled in clipsync-macos.zip"
+          else
+            echo "::error::Web UI (internal/web/static/index.html) missing from clipsync-macos.zip"
+            exit 1
+          fi
+
+      - name: Smoke test (Linux bundle contains web UI)
+        if: runner.os == 'Linux'
+        run: |
+          if tar -tzf ${{ matrix.artifact }}.tar.gz | grep -q 'internal/web/static/index.html'; then
+            echo "OK: web UI bundled in ${{ matrix.artifact }}.tar.gz"
+          else
+            echo "::error::Web UI (internal/web/static/index.html) missing from ${{ matrix.artifact }}.tar.gz"
+            exit 1
+          fi
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
@@ -109,15 +150,29 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release delete "${{ github.ref_name }}" --yes 2>/dev/null || true
-          gh release create "${{ github.ref_name }}" \
-            --title "ClipSync ${{ github.ref_name }}" \
-            --notes "Automated build for ${{ github.ref_name }}.
-            - \`clipsync-windows.zip\` — Windows \`.exe\`
-            - \`clipsync-macos.zip\` — macOS \`.app\` bundle
-            - \`clipsync-linux.tar.gz\` — Linux x86_64 binary
-            - \`clipsync-linux-arm64.tar.gz\` — Linux ARM64 binary" \
+          TAG="${{ github.ref_name }}"
+          # Re-create the release in place (delete then create). The workflow
+          # concurrency group cancels overlapping runs for the same tag, so we
+          # never interleave with a concurrent delete/create.
+          gh release delete "$TAG" --yes 2>/dev/null || true
+          gh release create "$TAG" \
+            --title "ClipSync $TAG" \
+            --notes "Automated build for $TAG.
+              - \`clipsync-windows.zip\` — Windows \`.exe\`
+              - \`clipsync-macos.zip\` — macOS \`.app\` bundle
+              - \`clipsync-linux.tar.gz\` — Linux x86_64 binary
+              - \`clipsync-linux-arm64.tar.gz\` — Linux ARM64 binary"
+          # Upload only the artifacts that actually exist, so a missing matrix
+          # leg doesn't fail the whole release.
+          for f in \
             dist/clipsync-windows.zip \
             dist/clipsync-macos.zip \
             dist/clipsync-linux.tar.gz \
             dist/clipsync-linux-arm64.tar.gz
+          do
+            if [ -f "$f" ]; then
+              gh release upload "$TAG" "$f" --clobber
+            else
+              echo "Skipping missing artifact: $f"
+            fi
+          done

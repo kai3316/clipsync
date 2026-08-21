@@ -3,6 +3,7 @@ name: Test
 on:
   push:
     branches: [main, master]
+    tags: ['v*']
   pull_request:
     branches: [main, master]
   workflow_dispatch:
@@ -34,13 +35,25 @@ jobs:
       - name: Run tests
         run: python -m pytest tests/ -v --tb=short
 
+      - name: Collect logs on failure
+        if: failure()
+        shell: bash
+        run: |
+          mkdir -p "$RUNNER_TEMP/clipsync-logs"
+          # upload-artifact does not expand '~', so resolve the per-OS log dir
+          # with runner env vars and stage the files under RUNNER_TEMP first.
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            cp -r "$APPDATA/ClipSync/"*.log "$RUNNER_TEMP/clipsync-logs/" 2>/dev/null || true
+          elif [ "$RUNNER_OS" = "macOS" ]; then
+            cp -r "$HOME/Library/Logs/ClipSync/"*.log "$RUNNER_TEMP/clipsync-logs/" 2>/dev/null || true
+          else
+            cp -r "$HOME/.local/share/clipsync/"*.log "$RUNNER_TEMP/clipsync-logs/" 2>/dev/null || true
+          fi
+
       - name: Upload logs on failure
         if: failure()
         uses: actions/upload-artifact@v4
         with:
           name: test-failure-${{ matrix.os }}-py${{ matrix.python-version }}
-          path: |
-            /tmp/clipsync*.log
-            ~/Library/Logs/ClipSync/*.log
-            ~/.local/share/clipsync/*.log
-            ${{ runner.temp }}/*.log
+          path: ${{ runner.temp }}/clipsync-logs
+          if-no-files-found: warn

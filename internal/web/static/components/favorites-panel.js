@@ -10,6 +10,20 @@
 
   window.__CLIPSYNC_COMPONENTS__ = window.__CLIPSYNC_COMPONENTS__ || {};
 
+  // Decode the base64 TEXT bytes from a history item's `types` map, falling
+  // back to the (possibly truncated) preview. History list responses no longer
+  // carry `types`, so callers fetch the full item via getHistoryItem first.
+  function decodeTypesText(types, fallback) {
+    if (types && types.TEXT) {
+      try {
+        var bytes = Uint8Array.from(atob(types.TEXT), function (c) { return c.charCodeAt(0); });
+        var decoded = new TextDecoder('utf-8').decode(bytes);
+        if (decoded) return decoded;
+      } catch (e) { /* keep fallback */ }
+    }
+    return fallback || '';
+  }
+
   window.__CLIPSYNC_COMPONENTS__['favorites-panel'] = {
     inject: ['store'],
 
@@ -529,37 +543,44 @@
         var self = this;
         var group = this.getEffectiveGroup();
 
-        // Prefer the full stored text over the truncated preview. The history
-        // list only ships text_preview; the full TEXT bytes ride along as
-        // base64 in hitem.types.
-        var fullText = hitem.text_preview || '';
-        if (hitem.types && hitem.types.TEXT) {
-          try {
-            var bytes = Uint8Array.from(atob(hitem.types.TEXT), function (c) { return c.charCodeAt(0); });
-            var decoded = new TextDecoder('utf-8').decode(bytes);
-            if (decoded) fullText = decoded;
-          } catch (e) { /* keep the preview fallback */ }
-        }
+        var preview = hitem.text_preview || '';
 
-        var payload = {
-          title: fullText.substring(0, 80),
-          content: fullText,
-          group: group,
+        // List responses no longer carry `types`, so fetch the full item when
+        // we need the complete text rather than the truncated preview.
+        var doAdd = function (fullText) {
+          var payload = {
+            title: fullText.substring(0, 80),
+            content: fullText,
+            group: group,
+          };
+          self.addingFavorite = true;
+          ClipsyncAPI.addFavorite(payload).then(function (res) {
+            if (res && res.ok !== false && res.favorite) {
+              self.store.favorites.push(res.favorite);
+              self.store.showToast(self.t('favorites.added'), 1500);
+            }
+            self.closeAddModal();
+          }).catch(function (e) {
+            console.error('[ClipSync] Add favorite failed:', e);
+            self.store.showToast(self.t('favorites.add_failed'), 2000);
+          }).finally(function () {
+            self.addingFavorite = false;
+          });
         };
 
-        this.addingFavorite = true;
-        ClipsyncAPI.addFavorite(payload).then(function (res) {
-          if (res && res.ok !== false && res.favorite) {
-            self.store.favorites.push(res.favorite);
-            self.store.showToast(self.t('favorites.added'), 1500);
-            self.closeAddModal();
-          }
-        }).catch(function (e) {
-          console.error('[ClipSync] Add favorite failed:', e);
-          self.store.showToast(self.t('favorites.add_failed'), 2000);
-        }).finally(function () {
-          self.addingFavorite = false;
-        });
+        if (hitem.types && hitem.types.TEXT) {
+          doAdd(decodeTypesText(hitem.types, preview));
+        } else if (hitem.entry_id) {
+          ClipsyncAPI.getHistoryItem(hitem.entry_id).then(function (res) {
+            var full = preview;
+            if (res && res.item && res.item.types) {
+              full = decodeTypesText(res.item.types, preview);
+            }
+            doAdd(full);
+          }).catch(function () { doAdd(preview); });
+        } else {
+          doAdd(preview);
+        }
       },
 
       confirmAdd: function () {

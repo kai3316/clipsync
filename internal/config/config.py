@@ -10,6 +10,7 @@ import logging
 import os
 import platform
 import tempfile
+import threading
 import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -19,6 +20,12 @@ if TYPE_CHECKING:
     from internal.security.encryption import EncryptionManager
 
 logger = logging.getLogger(__name__)
+
+# Guards the shared Config instance. save() and load() hold it, and callers
+# that mutate Config fields across threads (e.g. the coordinator) should hold
+# it around multi-field mutations so concurrent dict iteration / torn reads
+# cannot occur. RLock so save()/load() may be called from within the lock.
+config_lock = threading.RLock()
 
 
 @dataclass
@@ -86,7 +93,7 @@ class Config:
     web_enabled: bool = False
     web_port: int = 19991
     web_token: str = ""
-    web_history_limit: int = 5
+    web_history_limit: int = 30
 
     # Hotkeys
     hotkeys: dict[str, str] = field(default_factory=lambda: {
@@ -140,138 +147,157 @@ def _cleanup_stale_temps():
 
 
 def load() -> Config:
-    _cleanup_stale_temps()
-    path = _config_path()
-    if path.exists():
-        try:
-            data = json.loads(path.read_text(encoding="utf-8"))
-        except (json.JSONDecodeError, OSError, ValueError):
-            logger.warning("Failed to parse config, using defaults", exc_info=True)
-            return Config()
-        cfg = Config()
-        for key in (
-            "device_id", "device_name", "port", "service_type",
-            "sync_enabled", "auto_start",
-            "filter_enabled_categories",
-            "relay_url",
-            "private_key_pem", "certificate_pem",
-            "history_max_entries", "file_receive_dir",
-            "sync_debounce", "clipboard_poll_interval",
-            "max_reconnect_attempts", "transfer_timeout",
-            "log_level", "notifications_enabled",
-            "encryption_enabled",
-            "encryption_password_hash",
-            "appearance_mode",
-            "language",
-            "paste_to_top", "low_memory_mode", "retry_capture_enabled",
-            "dedup_method", "app_filter_enabled", "app_filter_mode",
-            "app_filter_list", "source_tracking_enabled",
-            "ui_backend", "ui_animation_enabled", "sound_enabled",
-            "favorites_path", "data_dir",
-            "web_enabled", "web_port",
-            "web_token", "web_history_limit",
-            "hotkeys",
-        ):
-            if key in data:
-                setattr(cfg, key, data[key])
-        # Migrate from old plaintext password (now stored on next save as hash)
-        if "encryption_password" in data and data["encryption_password"]:
-            cfg.encryption_password = data["encryption_password"]
-        # Migrate from old filter_sensitive bool
-        if "filter_sensitive" in data and not data.get("filter_enabled_categories"):
-            if data["filter_sensitive"]:
-                cfg.filter_enabled_categories = ["credit_card", "ssn", "api_key", "private_key", "password"]
-        for peer_data in data.get("peers", []):
+    with config_lock:
+        _cleanup_stale_temps()
+        path = _config_path()
+        if path.exists():
             try:
-                peer = PeerInfo(
-                    device_id=peer_data["device_id"],
-                    device_name=peer_data["device_name"],
-                    public_key_pem=peer_data.get("public_key_pem", ""),
-                    paired=peer_data.get("paired", False),
-                    notes=peer_data.get("notes", ""),
-                )
-                cfg.peers[peer.device_id] = peer
-            except (KeyError, TypeError):
-                continue
-        return cfg
-    return Config()
+                data = json.loads(path.read_text(encoding="utf-8"))
+            except (json.JSONDecodeError, OSError, ValueError):
+                logger.warning("Failed to parse config, using defaults", exc_info=True)
+                return Config()
+            cfg = Config()
+            for key in (
+                "device_id", "device_name", "port", "service_type",
+                "sync_enabled", "auto_start",
+                "filter_enabled_categories",
+                "relay_url",
+                "private_key_pem", "certificate_pem",
+                "history_max_entries", "file_receive_dir",
+                "sync_debounce", "clipboard_poll_interval",
+                "max_reconnect_attempts", "transfer_timeout",
+                "log_level", "notifications_enabled",
+                "encryption_enabled",
+                "encryption_password_hash",
+                "appearance_mode",
+                "language",
+                "paste_to_top", "low_memory_mode", "retry_capture_enabled",
+                "dedup_method", "app_filter_enabled", "app_filter_mode",
+                "app_filter_list", "source_tracking_enabled",
+                "ui_backend", "ui_animation_enabled", "sound_enabled",
+                "favorites_path", "data_dir",
+                "web_enabled", "web_port",
+                "web_token", "web_history_limit",
+                "hotkeys",
+            ):
+                if key in data:
+                    setattr(cfg, key, data[key])
+            # Migrate from old plaintext password (now stored on next save as hash)
+            if "encryption_password" in data and data["encryption_password"]:
+                cfg.encryption_password = data["encryption_password"]
+            # Migrate from old filter_sensitive bool
+            if "filter_sensitive" in data and not data.get("filter_enabled_categories"):
+                if data["filter_sensitive"]:
+                    cfg.filter_enabled_categories = ["credit_card", "ssn", "api_key", "private_key", "password"]
+            # Migrate from legacy dict-format peers (pre-list) to list format:
+            #   {"device_id": {device_name, public_key_pem, paired, notes}, ...}
+            peers_data = data.get("peers", [])
+            if isinstance(peers_data, dict):
+                peers_data = [
+                    {"device_id": pid, **pinfo}
+                    for pid, pinfo in peers_data.items()
+                    if isinstance(pinfo, dict)
+                ]
+            for peer_data in peers_data:
+                try:
+                    peer = PeerInfo(
+                        device_id=peer_data["device_id"],
+                        device_name=peer_data["device_name"],
+                        public_key_pem=peer_data.get("public_key_pem", ""),
+                        paired=peer_data.get("paired", False),
+                        notes=peer_data.get("notes", ""),
+                    )
+                    cfg.peers[peer.device_id] = peer
+                except (KeyError, TypeError):
+                    continue
+            return cfg
+        return Config()
 
 
 def save(cfg: Config, enc_mgr: "EncryptionManager | None" = None):
-    config_dir = _config_dir()
-    config_dir.mkdir(parents=True, exist_ok=True)
-    config_path = _config_path()
+    with config_lock:
+        config_dir = _config_dir()
+        config_dir.mkdir(parents=True, exist_ok=True)
+        config_path = _config_path()
 
-    # Encrypt private key before writing to disk if encryption is enabled
-    private_key_to_save = cfg.private_key_pem
-    if cfg.encryption_enabled and enc_mgr and cfg.private_key_pem:
-        private_key_to_save = enc_mgr.encrypt_storage(cfg.private_key_pem)
-        logger.debug("Config save: private_key_pem encrypted for at-rest storage")
+        # Encrypt private key before writing to disk if encryption is enabled
+        private_key_to_save = cfg.private_key_pem
+        if cfg.encryption_enabled and enc_mgr and cfg.private_key_pem:
+            private_key_to_save = enc_mgr.encrypt_storage(cfg.private_key_pem)
+            logger.debug("Config save: private_key_pem encrypted for at-rest storage")
 
-    data = {
-        "device_id": cfg.device_id,
-        "device_name": cfg.device_name,
-        "port": cfg.port,
-        "service_type": cfg.service_type,
-        "sync_enabled": cfg.sync_enabled,
-        "auto_start": cfg.auto_start,
-        "filter_enabled_categories": cfg.filter_enabled_categories,
-        "relay_url": cfg.relay_url,
-        "private_key_pem": private_key_to_save,
-        "certificate_pem": cfg.certificate_pem,
-        "history_max_entries": cfg.history_max_entries,
-        "file_receive_dir": cfg.file_receive_dir,
-        "sync_debounce": cfg.sync_debounce,
-        "clipboard_poll_interval": cfg.clipboard_poll_interval,
-        "max_reconnect_attempts": cfg.max_reconnect_attempts,
-        "transfer_timeout": cfg.transfer_timeout,
-        "log_level": cfg.log_level,
-        "notifications_enabled": cfg.notifications_enabled,
-        "encryption_enabled": cfg.encryption_enabled,
-        "encryption_password_hash": cfg.encryption_password_hash,
-        "appearance_mode": cfg.appearance_mode,
-        "language": cfg.language,
-        "paste_to_top": cfg.paste_to_top,
-        "low_memory_mode": cfg.low_memory_mode,
-        "retry_capture_enabled": cfg.retry_capture_enabled,
-        "dedup_method": cfg.dedup_method,
-        "app_filter_enabled": cfg.app_filter_enabled,
-        "app_filter_mode": cfg.app_filter_mode,
-        "app_filter_list": cfg.app_filter_list,
-        "source_tracking_enabled": cfg.source_tracking_enabled,
-        "ui_backend": cfg.ui_backend,
-        "ui_animation_enabled": cfg.ui_animation_enabled,
-        "sound_enabled": cfg.sound_enabled,
-        "favorites_path": cfg.favorites_path,
-        "data_dir": cfg.data_dir,
-        "web_enabled": cfg.web_enabled,
-        "web_port": cfg.web_port,
-        "web_token": cfg.web_token,
-        "web_history_limit": cfg.web_history_limit,
-        "hotkeys": cfg.hotkeys,
-        "peers": [
-            {
-                "device_id": p.device_id,
-                "device_name": p.device_name,
-                "public_key_pem": p.public_key_pem,
-                "paired": p.paired,
-                "notes": p.notes,
-            }
-            for p in cfg.peers.values()
-        ],
-    }
-    # Atomic save: write to temp file then rename
-    tmp_fd, tmp_path = tempfile.mkstemp(
-        dir=str(config_dir), prefix=".config_tmp_", suffix=".json",
-    )
-    try:
-        with os.fdopen(tmp_fd, "w", encoding="utf-8") as f:
-            json.dump(data, f, indent=2, ensure_ascii=False)
-        os.replace(tmp_path, config_path)  # atomic on same filesystem
-        logger.debug("Config saved to %s", config_path)
-    except Exception:
+        data = {
+            "device_id": cfg.device_id,
+            "device_name": cfg.device_name,
+            "port": cfg.port,
+            "service_type": cfg.service_type,
+            "sync_enabled": cfg.sync_enabled,
+            "auto_start": cfg.auto_start,
+            "filter_enabled_categories": cfg.filter_enabled_categories,
+            "relay_url": cfg.relay_url,
+            "private_key_pem": private_key_to_save,
+            "certificate_pem": cfg.certificate_pem,
+            "history_max_entries": cfg.history_max_entries,
+            "file_receive_dir": cfg.file_receive_dir,
+            "sync_debounce": cfg.sync_debounce,
+            "clipboard_poll_interval": cfg.clipboard_poll_interval,
+            "max_reconnect_attempts": cfg.max_reconnect_attempts,
+            "transfer_timeout": cfg.transfer_timeout,
+            "log_level": cfg.log_level,
+            "notifications_enabled": cfg.notifications_enabled,
+            "encryption_enabled": cfg.encryption_enabled,
+            "encryption_password_hash": cfg.encryption_password_hash,
+            "appearance_mode": cfg.appearance_mode,
+            "language": cfg.language,
+            "paste_to_top": cfg.paste_to_top,
+            "low_memory_mode": cfg.low_memory_mode,
+            "retry_capture_enabled": cfg.retry_capture_enabled,
+            "dedup_method": cfg.dedup_method,
+            "app_filter_enabled": cfg.app_filter_enabled,
+            "app_filter_mode": cfg.app_filter_mode,
+            "app_filter_list": cfg.app_filter_list,
+            "source_tracking_enabled": cfg.source_tracking_enabled,
+            "ui_backend": cfg.ui_backend,
+            "ui_animation_enabled": cfg.ui_animation_enabled,
+            "sound_enabled": cfg.sound_enabled,
+            "favorites_path": cfg.favorites_path,
+            "data_dir": cfg.data_dir,
+            "web_enabled": cfg.web_enabled,
+            "web_port": cfg.web_port,
+            "web_token": cfg.web_token,
+            "web_history_limit": cfg.web_history_limit,
+            "hotkeys": cfg.hotkeys,
+            "peers": [
+                {
+                    "device_id": p.device_id,
+                    "device_name": p.device_name,
+                    "public_key_pem": p.public_key_pem,
+                    "paired": p.paired,
+                    "notes": p.notes,
+                }
+                for p in cfg.peers.values()
+            ],
+        }
+        # Atomic save: write to temp file then rename
+        tmp_fd, tmp_path = tempfile.mkstemp(
+            dir=str(config_dir), prefix=".config_tmp_", suffix=".json",
+        )
         try:
-            os.unlink(tmp_path)
-        except OSError:
-            pass
-        raise
+            with os.fdopen(tmp_fd, "w", encoding="utf-8") as f:
+                json.dump(data, f, indent=2, ensure_ascii=False)
+            os.replace(tmp_path, config_path)  # atomic on same filesystem
+            # mkstemp creates the temp file with 0600; os.replace keeps that
+            # inode, so the final file is already private. Re-assert it for
+            # filesystems where replace may reset perms (non-Windows guard).
+            if os.name != "nt":
+                try:
+                    os.chmod(config_path, 0o600)
+                except OSError:
+                    pass
+            logger.debug("Config saved to %s", config_path)
+        except Exception:
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
+            raise

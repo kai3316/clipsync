@@ -87,7 +87,11 @@ class PairingManager:
         self._identity: DeviceIdentity | None = None
         self._peers: dict[str, PeerIdentity] = {}
         self._pending_pairings: dict[str, tuple[str, float]] = {}  # peer_id -> (code, timestamp)
-        self._pairing_attempts: dict[str, list[float]] = {}  # peer_id -> list of attempt timestamps
+        # peer_id -> list of attempt timestamps. NOTE: keyed only by peer_id,
+        # so an attacker who rotates device identities can reset the count per
+        # new identity. Low impact (each identity still pays the 5/5min cost)
+        # and intentionally not restructured — see MAX_PAIRING_ATTEMPTS.
+        self._pairing_attempts: dict[str, list[float]] = {}
         self._lock = threading.Lock()
         self._on_new_pairing: Callable | None = None  # called when a new pairing code is generated
 
@@ -209,7 +213,10 @@ class PairingManager:
 
         with self._lock:
             self._pending_pairings[peer_id] = (code, time.time())
-            self._pairing_attempts[peer_id] = []
+            # Do NOT reset _pairing_attempts here: a connecting peer could
+            # otherwise nullify the rate limit by reconnecting and re-generating
+            # the shared code. Attempts are cleared only on a successful
+            # confirm_pairing() below, or on a deliberate local pairing attempt.
         logger.info("Shared pairing code for %s: %s**** (derived from cert fingerprints)", peer_id, code[:4])
         if self._on_new_pairing:
             peer_name = peer.device_name

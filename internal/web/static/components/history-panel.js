@@ -73,6 +73,15 @@
         return this.sections.pinned.length > 0 || this.sections.unpinned.length > 0;
       },
 
+      // "Load more" only makes sense on the unfiltered raw history — while a
+      // type filter or search is active, pagination is client-side only and
+      // appending the next raw page yields nothing visible.
+      canLoadMore: function () {
+        if (this.store.historyFilter !== 'all') return false;
+        if (this.store.historySearch) return false;
+        return this.store.historyHasMore;
+      },
+
       selectedCount: function () {
         return this.store.selectedIds.size;
       },
@@ -157,7 +166,7 @@
         ></history-item>
 
         <!-- Load more -->
-        <div v-if="store.historyHasMore" class="history-panel__load-more">
+        <div v-if="canLoadMore" class="history-panel__load-more">
           <button class="btn-ghost" @click="loadMore" :disabled="loadingMore">
             {{ loadingMore ? t('ui.loading') || 'Loading...' : t('history.load_more') || 'Load more' }}
           </button>

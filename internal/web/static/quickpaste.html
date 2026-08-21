@@ -557,39 +557,59 @@ body::after {
     if (index < 0 || index >= state.items.length) { return; }
 
     var item = state.items[index];
-    var text = getFullText(item);
 
-    if (!text) {
-      showToast('No text content', true);
-      return;
-    }
+    var doPaste = function (text) {
+      if (!text) {
+        showToast('No text content', true);
+        return;
+      }
 
-    // Mark as pasting for the flash animation
-    state.pastingIndex = index;
-    render();
+      // Mark as pasting for the flash animation
+      state.pastingIndex = index;
+      render();
 
-    fetch(apiUrl('/api/push'), {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ text: text }),
-    })
-      .then(function (r) { return r.json(); })
-      .then(function (data) {
-        if (data.ok) {
-          showToast('✓ Pasted!');
-          // Close after a brief delay so the user sees the feedback
-          setTimeout(function () { closeWindow(); }, 350);
-        } else {
-          showToast(data.error || 'Paste failed', true);
+      fetch(apiUrl('/api/push'), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ text: text }),
+      })
+        .then(function (r) { return r.json(); })
+        .then(function (data) {
+          if (data.ok) {
+            showToast('✓ Pasted!');
+            // Close after a brief delay so the user sees the feedback
+            setTimeout(function () { closeWindow(); }, 350);
+          } else {
+            showToast(data.error || 'Paste failed', true);
+            state.pastingIndex = -1;
+            render();
+          }
+        })
+        .catch(function () {
+          showToast('Paste failed', true);
           state.pastingIndex = -1;
           render();
-        }
-      })
-      .catch(function () {
-        showToast('Paste failed', true);
-        state.pastingIndex = -1;
-        render();
-      });
+        });
+    };
+
+    // History list responses no longer carry `types`, so when the item only
+    // has a (possibly truncated) preview, fetch the full entry first.
+    if (item.types && item.types.TEXT) {
+      doPaste(getFullText(item));
+    } else if (item.entry_id) {
+      fetch(apiUrl('/api/history/item?entry_id=' + encodeURIComponent(item.entry_id)))
+        .then(function (r) { return r.json(); })
+        .then(function (data) {
+          var full = item.text_preview || '';
+          if (data && data.item && data.item.types) {
+            full = getFullText(data.item) || full;
+          }
+          doPaste(full);
+        })
+        .catch(function () { doPaste(item.text_preview || ''); });
+    } else {
+      doPaste(getFullText(item));
+    }
   }
 
   /* ═══════════════════════════════════════════════════════════════

@@ -17,7 +17,17 @@ from internal.clipboard.format import ClipboardContent, ContentType
 
 logger = logging.getLogger(__name__)
 
-POLL_INTERVAL = 0.4
+POLL_INTERVAL = 1.0
+
+# Idle polling backs off to this multiple of the active interval (min 2s)
+# once the clipboard has been unchanged for a few polls.
+IDLE_POLL_FACTOR = 2.0
+
+# Rich content (HTML / image) is only re-probed on this cadence when the
+# cheap plain-text probe is unchanged, so idle polling stays a single
+# xclip/wl-paste subprocess instead of spawning 3-4 per poll.
+RICH_PROBE_EVERY = 3
+IMAGE_PROBE_EVERY = 3
 
 
 def _detect_display_backend() -> str:
@@ -463,6 +473,7 @@ class LinuxClipboardMonitor(ClipboardMonitor):
         self._thread = None
         self._callback = None
         self._poll_interval = poll_interval
+        self._idle_poll_interval = max(poll_interval * IDLE_POLL_FACTOR, 2.0)
 
     def start(self, callback):
         self._callback = callback
@@ -476,12 +487,46 @@ class LinuxClipboardMonitor(ClipboardMonitor):
         logger.info("Clipboard monitor stopped")
 
     def _poll_loop(self):
-        last_hash = self._get_content_hash()
+        # Check for a clipboard tool once up-front; if none is available
+        # there is nothing to monitor (and no point spawning version-check
+        # subprocesses on every poll).
+        if not _can_read():
+            return
+
+        last_text_hash = ""
+        last_full_hash = ""
+        idle_rounds = 0
         while self._running:
-            time.sleep(self._poll_interval)
-            current = self._get_content_hash()
-            if current and last_hash and current != last_hash:
-                last_hash = current
+            # Back the poll interval off once the clipboard has been quiet.
+            time.sleep(
+                self._poll_interval if idle_rounds == 0 else self._idle_poll_interval
+            )
+
+            # Cheap probe: plain text via the primary tool only (one
+            # subprocess), which covers the dominant text-copy case.
+            text = self._read_text_primary()
+            text_hash = hashlib.sha256(text).hexdigest() if text else ""
+            text_changed = text_hash != last_text_hash
+            last_text_hash = text_hash
+            idle_rounds = 0 if text_changed else idle_rounds + 1
+
+            if text:
+                # Plain text present: only HTML needs a slower re-check to
+                # catch rich-only changes that keep the same plain text.
+                if not text_changed and idle_rounds % RICH_PROBE_EVERY != 0:
+                    continue
+            else:
+                # No plain text — the clipboard may hold an image.  Once an
+                # image is known to be present, probe every (backed-off)
+                # poll so image copies are caught promptly; while empty,
+                # probe image only on the slow cadence so idle stays cheap.
+                if not last_full_hash and idle_rounds % IMAGE_PROBE_EVERY != 0:
+                    continue
+
+            current = self._hash_content(text)
+            if current and current != last_full_hash:
+                last_full_hash = current
+                idle_rounds = 0
                 if time.time() < self.suppress_until:
                     continue
                 if self._callback:
@@ -491,34 +536,66 @@ class LinuxClipboardMonitor(ClipboardMonitor):
                         self._callback()
                     except Exception:
                         pass
-            elif current and not last_hash:
-                last_hash = current
+            elif not current:
+                # Clipboard was cleared — reset so the next copy (even of
+                # previously-seen content) is treated as a change.
+                last_full_hash = ""
 
-    def _get_content_hash(self) -> str:
-        if not _can_read():
-            return ""
+    def _read_text_primary(self) -> bytes:
+        """Read plain text for change detection.
 
-        # Try both tools for plain text
-        text_tools = (
-            [(["wl-paste", "--no-newline"], "wl-paste"), (["xclip", "-selection", "clipboard", "-o"], "xclip")]
+        Uses the primary tool for the active backend (one subprocess),
+        which covers the dominant text-copy case.  Falls back to the
+        secondary tool only when the primary tool itself fails (missing
+        binary / non-zero exit) — not when the clipboard is empty.
+        """
+        tools = (
+            (["wl-paste", "--no-newline"], ["xclip", "-selection", "clipboard", "-o"])
             if _BACKEND == "wayland"
-            else [(["xclip", "-selection", "clipboard", "-o"], "xclip"), (["wl-paste", "--no-newline"], "wl-paste")]
+            else (["xclip", "-selection", "clipboard", "-o"], ["wl-paste", "--no-newline"])
         )
-        for args, _name in text_tools:
+        for args in tools:
             try:
                 result = subprocess.run(args, capture_output=True, timeout=2)
-                if result.returncode == 0 and result.stdout:
-                    return hashlib.sha256(result.stdout).hexdigest()
+                if result.returncode == 0:
+                    return result.stdout
             except Exception:
                 continue
+        return b""
 
-        # Text read returned nothing — clipboard may contain an image.
-        img_tools = (
-            [(["wl-paste", "--type", "image/png"], "wl-paste"), (["xclip", "-selection", "clipboard", "-o", "-t", "image/png"], "xclip")]
+    def _get_html_primary(self) -> bytes:
+        """Read text/html for change detection (primary tool, then fallback)."""
+        tools = (
+            (["wl-paste", "--type", "text/html"],
+             ["xclip", "-selection", "clipboard", "-o", "-t", "text/html"])
             if _BACKEND == "wayland"
-            else [(["xclip", "-selection", "clipboard", "-o", "-t", "image/png"], "xclip"), (["wl-paste", "--type", "image/png"], "wl-paste")]
+            else (["xclip", "-selection", "clipboard", "-o", "-t", "text/html"],
+                  ["wl-paste", "--type", "text/html"])
         )
-        for args, _name in img_tools:
+        for args in tools:
+            try:
+                result = subprocess.run(args, capture_output=True, timeout=2)
+                if result.returncode == 0 and result.stdout.strip():
+                    return result.stdout
+            except Exception:
+                continue
+        return b""
+
+    def _get_image_hash(self) -> str:
+        """Read image/png from the clipboard and hash the raw bytes.
+
+        Hashes the exact PNG bytes written (including a PNG produced by
+        ``_set_image`` conversion), so the monitor recognises its own
+        image writes and the manager's dedup sees stable content.
+        """
+        tools = (
+            [(["wl-paste", "--type", "image/png"], "wl-paste"),
+             (["xclip", "-selection", "clipboard", "-o", "-t", "image/png"], "xclip")]
+            if _BACKEND == "wayland"
+            else [(["xclip", "-selection", "clipboard", "-o", "-t", "image/png"], "xclip"),
+                  (["wl-paste", "--type", "image/png"], "wl-paste")]
+        )
+        for args, _name in tools:
             try:
                 result = subprocess.run(args, capture_output=True, timeout=2)
                 if result.returncode == 0 and result.stdout:
@@ -526,6 +603,22 @@ class LinuxClipboardMonitor(ClipboardMonitor):
             except Exception:
                 continue
         return ""
+
+    def _hash_content(self, text: bytes) -> str:
+        """Hash the full clipboard snapshot for change detection.
+
+        Includes both plain text and ``text/html`` so a change that only
+        differs in the HTML representation (same plain text) is caught.
+        With no plain text the clipboard may hold an image — hash that.
+        """
+        if text:
+            html = self._get_html_primary()
+            h = hashlib.sha256()
+            h.update(text)
+            h.update(b"\x00")
+            h.update(html)
+            return h.hexdigest()
+        return self._get_image_hash()
 
 
 _startup_warning_shown = False
