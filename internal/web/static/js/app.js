@@ -81,6 +81,15 @@
       // Initialise the reactive store with server metadata
       store.init(url, token, window.__CLIPSYNC_DEVICE_ID__ || '', window.__CLIPSYNC_DEVICE_NAME__ || '');
 
+      // Restore the tab/search the user was on before a manual refresh, so a
+      // hard reload keeps their place instead of bouncing back to Overview.
+      try {
+        var _prevUi = JSON.parse(sessionStorage.getItem('clipsync_ui_state') || 'null');
+        if (_prevUi && _prevUi.activeTab) store.activeTab = _prevUi.activeTab;
+        if (_prevUi && _prevUi.historySearch) store.historySearch = _prevUi.historySearch;
+        sessionStorage.removeItem('clipsync_ui_state');
+      } catch (e) { /* ignore */ }
+
       // One-time first-run onboarding wizard (only once a device id is known).
       if (!store.onboardingDone && store.deviceId) {
         store.showOnboarding = true;

@@ -20,6 +20,15 @@
       };
     },
 
+    watch: {
+      // Keep the search box in sync when the search is restored after a
+      // refresh (children mount before the root restores it, so the initial
+      // data() copy can be stale).
+      'store.historySearch': function (val) {
+        this.searchInput = val || '';
+      },
+    },
+
     computed: {
       themeLabel: function () {
         var t = this.store.theme;
@@ -116,11 +125,35 @@
 
       refreshData: function () {
         var self = this;
-        if (this.$root && typeof this.$root.loadData === 'function') {
-          this.$root.loadData().catch(function () {});
+        // Keep the user's place across the reload.
+        try {
+          sessionStorage.setItem('clipsync_ui_state', JSON.stringify({
+            activeTab: this.store.activeTab,
+            historySearch: this.store.historySearch,
+          }));
+        } catch (e) { /* ignore */ }
+
+        var doReload = function () { window.location.reload(true); };
+
+        // Genuine hard refresh like Ctrl+Shift+R: the service worker serves
+        // JS/CSS cache-first, so a normal reload can keep showing stale UI.
+        // Drop the shell cache so updated assets are re-fetched, then reload
+        // the whole page. While offline, keep the cached shell and fall back
+        // to a plain data refresh instead of wiping the offline cache.
+        if (window.caches && window.caches.keys && navigator.onLine !== false) {
+          window.caches.keys()
+            .then(function (names) {
+              return Promise.all(names.map(function (n) { return window.caches.delete(n); }));
+            })
+            .then(doReload)
+            .catch(doReload);
+        } else {
+          if (this.$root && typeof this.$root.loadData === 'function') {
+            this.$root.loadData().catch(function () {});
+          }
+          this.store.fetchOverview();
+          this.store.showToast(this.t('ui.refreshed'), 1500);
         }
-        this.store.fetchOverview();
-        this.store.showToast(this.t('ui.refreshed'), 1500);
       },
 
       cycleTheme: function () {

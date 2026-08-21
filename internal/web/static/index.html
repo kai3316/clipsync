@@ -3161,9 +3161,10 @@
       backdrop-filter: blur(16px) saturate(170%);
       -webkit-backdrop-filter: blur(16px) saturate(170%);
       border-radius: var(--clipsync-radius);
-      justify-content: space-between;
-      padding-top: var(--clipsync-space-1);
-      padding-bottom: var(--clipsync-space-3);
+      /* Inset chips from the rounded corners and give wrapped rows room so a
+         crowded second line can't spill past the frosted background edge. */
+      padding: var(--clipsync-space-2) var(--clipsync-space-4);
+      row-gap: var(--clipsync-space-2);
     }
 
     .history-panel__filter-chip {
