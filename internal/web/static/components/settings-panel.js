@@ -939,7 +939,7 @@
                   '<h3 class="settings-section__title">{{ t(\'settings_nav.web_companion\') }}</h3>' +
                   '<div class="settings-toggle-row">' +
                     '<span class="settings-toggle-label">{{ t(\'settings_window.web_enable\') }}</span>' +
-                    '<button class="settings-toggle" :class="{ \'settings-toggle--on\': webEnabled, \'settings-toggle--disabled\': uiBackend === \'webview\' }" @click="uiBackend !== \'webview\' && (webEnabled = !webEnabled)">' +
+                    '<button class="settings-toggle" :class="{ \'settings-toggle--on\': webEnabled }" @click="webEnabled = !webEnabled">' +
                       '<span class="settings-toggle__knob"></span>' +
                     '</button>' +
                   '</div>' +

@@ -125,8 +125,11 @@
             class="history-panel__filter-chip"
             :class="{
               'history-panel__filter-chip--active': store.historyFilter === filt.id,
+              'history-panel__filter-chip--disabled': filterCounts[filt.id] === 0 && store.historyFilter !== filt.id,
               'animate-glow-pulse': store.historyFilter === filt.id
             }"
+            :disabled="filterCounts[filt.id] === 0 && store.historyFilter !== filt.id"
+            :title="filterCounts[filt.id] === 0 && store.historyFilter !== filt.id ? t('history.empty_filter_disabled') : ''"
             @click="store.historyFilter = filt.id"
           >
             <span v-if="filt.icon" class="history-panel__filter-chip-icon">{{ filt.icon }}</span>

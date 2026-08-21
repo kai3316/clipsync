@@ -802,6 +802,10 @@ class WebServer:
     def start(self) -> bool:
         if self._thread is not None:
             return True
+        # Bind all interfaces: the dashboard serves the local webview AND
+        # phones/tablets/other devices on the LAN (a core feature). Whether
+        # remote devices may access is controlled by cfg.web_enabled (see
+        # _companion_client_ok) — the server itself stays up for the UI.
         host = "0.0.0.0"
         port = self._cfg.web_port
         logger.info("Starting web companion on %s:%d", host, port)
@@ -979,6 +983,29 @@ class WebServer:
                 except OSError:
                     pass
 
+            def _send_companion_disabled_page(inner_self) -> None:
+                """Serve a friendly page when the companion is off and a browser
+                (phone / tablet) opens the dashboard — not a raw JSON error."""
+                if cfg.language == "zh-CN":
+                    title, desc = "Web 伴侣已关闭", "该设备的 Web 伴侣已被关闭，暂时无法访问其仪表盘。"
+                else:
+                    title, desc = ("Web companion disabled",
+                                   "This device's web companion is turned off, so its "
+                                   "dashboard is temporarily unavailable.")
+                html = (
+                    "<!doctype html><html lang='zh'><meta charset='utf-8'>"
+                    "<title>" + title + "</title>"
+                    "<body style='font-family:system-ui,-apple-system,sans-serif;"
+                    "background:#0f1117;color:#e6e8ee;display:flex;align-items:center;"
+                    "justify-content:center;height:100vh;margin:0'>"
+                    "<div style='text-align:center;max-width:26rem;padding:1.5rem'>"
+                    "<div style='font-size:2rem;margin-bottom:.5rem'>&#128241;&#128279;</div>"
+                    "<h1 style='font-size:18px;margin:0 0 .5rem'>" + title + "</h1>"
+                    "<p style='color:#9aa0ad;font-size:14px;line-height:1.5'>" + desc + "</p>"
+                    "</div></body></html>"
+                )
+                inner_self._send_html(html, status=403)
+
             def _send_file(inner_self, filepath: str, mime: str = "application/octet-stream"):
                 status, headers, body = _build_file_response(filepath, mime)
                 inner_self.send_response(status)
@@ -1120,9 +1147,13 @@ class WebServer:
                 qs = parsed.query
                 query_params = urllib.parse.parse_qs(qs)
 
-                # Companion off → local dashboard only (LAN/phones get 403).
+                # Companion off → local dashboard only. Browsers (phone/tablet)
+                # opening the dashboard get a friendly page, not raw JSON.
                 if not inner_self._companion_client_ok():
-                    inner_self._send_json({"error": "web companion disabled"}, 403)
+                    if path.startswith("/api/") or path == "/ws":
+                        inner_self._send_json({"error": "web companion disabled"}, 403)
+                    else:
+                        inner_self._send_companion_disabled_page()
                     return
 
                 # ── WebSocket upgrade at /ws ─────────────────────

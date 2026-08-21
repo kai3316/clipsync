@@ -3185,6 +3185,15 @@
       transition: all var(--clipsync-transition-spring);
     }
 
+    /* A type filter with zero items can't be selected — picking it would
+       blank out the whole history list. */
+    .history-panel__filter-chip:disabled,
+    .history-panel__filter-chip--disabled {
+      opacity: 0.4;
+      cursor: not-allowed;
+      pointer-events: none;
+    }
+
     .history-panel__filter-chip:hover {
       color: var(--clipsync-fg);
       border-color: var(--clipsync-border-strong);
