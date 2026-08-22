@@ -1109,7 +1109,18 @@ class Application:
         self._last_transfer_progress[transfer_id] = (now, progress)
         self._push_web("broadcast_transfer_progress", transfer_id, progress)
 
-    def _on_transfer_complete(self, transfer_id: str, success: bool) -> None:
+    def _reject_incoming_transfer(self, transfer_id: str, send_fn) -> None:
+        """Reject an incoming transfer and forget its direction entry.
+
+        Rejected transfers never fire ``_on_transfer_complete`` (rejection is
+        intentionally silent for the receiver), so without popping here the
+        ``_transfer_directions`` dict would accumulate one entry per rejected
+        request forever.
+        """
+        self._transfer_directions.pop(transfer_id, None)
+        self.file_transfer_mgr.reject_transfer(transfer_id, send_fn)
+
+    def _on_transfer_complete(self, transfer_id: str, success: bool, cancelled: bool = False) -> None:
         logger.info("File transfer %s: %s",
                     transfer_id[:8], "complete" if success else "failed")
         # Send confirmations are only meaningful for OUTGOING transfers.  The
@@ -1133,7 +1144,7 @@ class Application:
                 os.unlink(tmp)
             except OSError:
                 pass
-        self._push_web("broadcast_transfer_complete", transfer_id, success)
+        self._push_web("broadcast_transfer_complete", transfer_id, success, cancelled)
 
     def _on_file_received(self, transfer_id: str, saved_path: str, file_name: str) -> None:
         logger.info("File received: %s -> %s",
@@ -1218,7 +1229,7 @@ class Application:
             if result and result.get("action") == "accept":
                 self.file_transfer_mgr.accept_transfer(transfer_id, send_fn)
             else:
-                self.file_transfer_mgr.reject_transfer(transfer_id, send_fn)
+                self._reject_incoming_transfer(transfer_id, send_fn)
             return
 
         import platform as _platform
@@ -1269,7 +1280,7 @@ class Application:
             tk.Button(btn_row, text=T("transfer.reject"), width=12,
                       relief="solid", bd=1, fg="#E74C3C",
                       command=lambda: (
-                          self.file_transfer_mgr.reject_transfer(transfer_id, send_fn),
+                          self._reject_incoming_transfer(transfer_id, send_fn),
                           dlg.destroy(),
                       )).pack(side="left")
 
@@ -1287,7 +1298,7 @@ class Application:
             except Exception:
                 pass
             dlg.protocol("WM_DELETE_WINDOW", lambda: (
-                self.file_transfer_mgr.reject_transfer(transfer_id, send_fn),
+                self._reject_incoming_transfer(transfer_id, send_fn),
                 dlg.destroy(),
             ))
             dlg.wait_window()
@@ -1327,7 +1338,7 @@ class Application:
                 border_color=("#E74C3C", "#C0392B"),
                 hover_color=("#FADBD8", "#5B2C2C"),
                 command=lambda: (
-                    self.file_transfer_mgr.reject_transfer(transfer_id, send_fn),
+                    self._reject_incoming_transfer(transfer_id, send_fn),
                     dlg.destroy(),
                 ),
             ).pack(side="left")
@@ -1349,7 +1360,7 @@ class Application:
             except Exception:
                 pass
             dlg.protocol("WM_DELETE_WINDOW", lambda: (
-                self.file_transfer_mgr.reject_transfer(transfer_id, send_fn),
+                self._reject_incoming_transfer(transfer_id, send_fn),
                 dlg.destroy(),
             ))
             dlg.wait_window()
@@ -1589,6 +1600,11 @@ class Application:
                     d = Path(new_dir)
                     d.mkdir(parents=True, exist_ok=True)
                     self.file_transfer_mgr._output_dir = d
+                    # Keep the web upload landing dir in sync with the P2P one,
+                    # or a phone upload would go to the new dir while the Files
+                    # list / download / delete still target the old startup dir.
+                    if self.web_server is not None:
+                        self.web_server._upload_dir = d
             except Exception:
                 logger.debug("Failed to apply file_receive_dir live", exc_info=True)
 

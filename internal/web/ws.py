@@ -379,11 +379,12 @@ class WebSocketManager:
             "status": status,
         })
 
-    def broadcast_transfer_complete(self, transfer_id: str, success: bool):
+    def broadcast_transfer_complete(self, transfer_id: str, success: bool, cancelled: bool = False):
         """Convenience: broadcast a transfer completion event."""
         self.broadcast("transfer_complete", {
             "id": transfer_id,
             "success": bool(success),
+            "cancelled": bool(cancelled),
         })
 
     @property

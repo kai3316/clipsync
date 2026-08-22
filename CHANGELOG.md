@@ -2,6 +2,15 @@
 
 All notable changes to ClipSync are documented in this file.
 
+## [1.0.18] — 2026-08-22
+
+### Fixed (regressions found by the v1.0.17 self-review)
+- **Rejected incoming transfers no longer leak a direction entry** in memory (the per-transfer direction map grew one entry per rejected request forever).
+- **Changing the receive directory now moves web/phone uploads too** — the Files list, download and delete now follow the same directory, so an uploaded file no longer appears missing after a receive-dir change.
+- **Web-cancelled transfers show "Cancelled" immediately** — the WebSocket completion broadcast now carries the `cancelled` flag (the frontend's handler previously checked a field the backend never sent, so cancels briefly flashed "Failed" before a refetch corrected them).
+- The **transfer target selector no longer silently re-aims** at a different device the instant the chosen peer goes offline — the "peer offline" hint shows and the send buttons disable instead.
+- The web **speed test shows "Connect a device first"** when no peer is connected (was a generic "failed to start").
+
 ## [1.0.17] — 2026-08-22
 
 ### File transfer & speed test

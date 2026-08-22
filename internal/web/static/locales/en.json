@@ -51,6 +51,7 @@
   "transfer.speed_test.starting": "Starting...",
   "transfer.speed_test.start_failed": "Failed to start speed test",
   "transfer.speed_test.unavailable": "Speed test unavailable",
+  "transfer.speed_test.no_peer": "Connect a device first",
   "transfer.speed_test.idle": "Click to test LAN transfer speed",
   "transfer.speed.fast": "fast",
   "transfer.speed.good": "good",

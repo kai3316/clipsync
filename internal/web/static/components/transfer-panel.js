@@ -66,8 +66,11 @@
           }
           self.targetDevice = '';
         }
-        if (!self.targetDevice && devs.length > 0) {
-          self.peerOffline = false;
+        // Only auto-select the first online device when there is genuinely no
+        // selection yet — never immediately after clearing a stale target
+        // (that would re-aim the send buttons at a peer the user never chose
+        // and defeat the "peer offline" hint above).
+        if (!self.targetDevice && !self.peerOffline && devs.length > 0) {
           self.targetDevice = devs[0].device_id;
         }
       }, { immediate: true });

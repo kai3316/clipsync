@@ -381,7 +381,7 @@ class FileTransferManager:
         self._add_to_history(transfer, False)
         logger.info("Transfer %s cancelled by user", transfer_id[:8])
         if self._on_transfer_complete is not None:
-            self._on_transfer_complete(transfer_id, False)
+            self._on_transfer_complete(transfer_id, False, cancelled=True)
         return True
 
     def reject_transfer(self, transfer_id: str, send_fn: Callable[[bytes], None]) -> None:

@@ -640,7 +640,11 @@
             self._pollSpeedTest();
           } else {
             self.speedTest.running = false;
-            self.speedTest.error = t('transfer.speed_test.start_failed');
+            // The backend refuses to run without a connected peer — surface a
+            // helpful message instead of a generic "failed to start".
+            var noPeer = !(self.devices || []).some(function (d) { return d.connected; });
+            self.speedTest.error = noPeer ? t('transfer.speed_test.no_peer')
+                                          : t('transfer.speed_test.start_failed');
           }
         })
         .catch(function (e) {

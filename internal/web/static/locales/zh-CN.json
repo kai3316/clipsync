@@ -51,6 +51,7 @@
   "transfer.speed_test.starting": "正在启动...",
   "transfer.speed_test.start_failed": "启动测速失败",
   "transfer.speed_test.unavailable": "测速不可用",
+  "transfer.speed_test.no_peer": "请先连接设备",
   "transfer.speed_test.idle": "点击测试局域网传输速度",
   "transfer.speed.fast": "快",
   "transfer.speed.good": "良好",
