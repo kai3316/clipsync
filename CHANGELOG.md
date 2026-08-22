@@ -2,6 +2,11 @@
 
 All notable changes to ClipSync are documented in this file.
 
+## [1.0.22] — 2026-08-23
+
+### Fixed
+- **Copying no longer pops a "No devices connected" notification on every copy.** v1.0.21 added a transient warning when there were no connected peers, but with a 5-second throttle it was effectively an alert on every copy for frequent copiers. The copy now simply broadcasts to the (empty) peer set with no nag.
+
 ## [1.0.21] — 2026-08-23
 
 ### macOS & Linux platform (Round 3)
@@ -19,7 +24,7 @@ All notable changes to ClipSync are documented in this file.
 - **"Finalizing on the receiving device…" state** replaces the confusing "Sending… 100%" while the receiver writes the file to disk; the web panel shows it with a spinner.
 - **Sending to a peer that drops now fails fast with "peer went offline"** instead of hanging 120s in "awaiting-ack" — the disconnect path resolves the hashed discovery id to the real device id (the earlier wiring passed the hash and matched nothing) and fails matching transfers immediately.
 - **`awaiting_ack` / `finalizing` transfers are cancellable in the classic dashboard** (previously no cancel button).
-- **Copying with no peer connected gives a desktop notification in classic mode** instead of only a web toast that silently dropped when no web client was attached.
+- **Copying with no peer connected gives a desktop notification in classic mode** instead of only a web toast that silently dropped when no web client was attached. *(Removed in v1.0.22 — see above — as it nagged on every copy.)*
 - **Sensitive-content filtering is no longer silent**: the sender gets a throttled "Sensitive content was not synced" notice, and history/favorites items containing `[FILTERED]` show an explanatory note ("Some sensitive content was replaced with [FILTERED]").
 - **Clipboard write failures surface** a "Clipboard write failed" notification instead of being swallowed.
 - **Transfer sounds respect the notifications master switch** (no more dings with notifications off).

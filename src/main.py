@@ -1200,20 +1200,6 @@ class Application:
             )
             return
         self.transport_mgr.broadcast(data)
-        # Transient feedback when there's nobody to deliver to, so the user
-        # knows the copy never left this machine. Throttled to avoid spam.
-        if not self.transport_mgr.get_connected_peers():
-            now = time.monotonic()
-            if now - getattr(self, "_last_no_peer_warn", 0.0) > 5.0:
-                self._last_no_peer_warn = now
-                if self._web_has_clients():
-                    self._web_toast(T("status.no_devices"), 2000)
-                else:
-                    # No web client attached (classic CTk mode, or a phone
-                    # hasn't connected to remote access) — a toast would reach
-                    # nobody, so fall back to a desktop notification.
-                    self._notify("notify_sync", T("ui.clipboard_sync"),
-                                 T("status.no_devices"))
 
     def _on_peer_message(self, msg, peer_id: str | None = None) -> None:
         msg_type = getattr(msg, "msg_type", "clipboard")
