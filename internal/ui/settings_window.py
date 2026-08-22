@@ -119,7 +119,9 @@ class SettingsWindow:
 
         logger.info("Opening ClipSync settings")
         ctk.set_appearance_mode("dark" if self._dark_mode else "light")
-        ctk.set_default_color_theme("blue")
+        from internal.ui.fonts import configure_platform_theme
+
+        configure_platform_theme()
 
         self._window = ctk.CTkToplevel(self._root)
         self._window.title(T("settings_window.title"))
@@ -160,8 +162,8 @@ class SettingsWindow:
         outer = ctk.CTkFrame(self._window, fg_color="transparent")
         outer.pack(fill="both", expand=True)
 
-        # Header
-        header = ctk.CTkFrame(outer, corner_radius=0, fg_color=("#1A5276", "#1B2A3A"))
+        # Header — aurora theme (deep cyan / void, matching the web UI)
+        header = ctk.CTkFrame(outer, corner_radius=0, fg_color=("#0891B2", "#0A0E1E"))
         header.pack(fill="x")
         h_inner = ctk.CTkFrame(header, fg_color="transparent")
         h_inner.pack(fill="x", padx=20, pady=(14, 14))
@@ -169,15 +171,15 @@ class SettingsWindow:
         ctk.CTkLabel(
             h_inner, text=T("ui.settings"),
             font=ctk.CTkFont(size=18, weight="bold"),
-            text_color=("#FFFFFF", "#E0E0E0"),
+            text_color=("#FFFFFF", "#EAF0FA"),
         ).pack(side="left")
 
         self._theme_btn = ctk.CTkButton(
             h_inner, text=T("ui.theme_dark") if not self._dark_mode else T("ui.theme_light"),
             width=90, height=32, fg_color="transparent",
-            border_width=1, border_color=("#7F8C8D", "#566573"),
-            text_color=("#FFFFFF", "#E0E0E0"),
-            hover_color=("#5D6D7E", "#4A5568"),
+            border_width=1, border_color=("#A78BFA", "#2A3557"),
+            text_color=("#FFFFFF", "#EAF0FA"),
+            hover_color=("#7C3AED", "#161C38"),
             command=self._toggle_theme,
         )
         self._theme_btn.pack(side="right")
@@ -277,8 +279,8 @@ class SettingsWindow:
         for pk, btn in self._sidebar_buttons.items():
             if pk == key:
                 btn.configure(
-                    fg_color=("#2A82C7", "#1F6AA5"),
-                    text_color=("#FFFFFF", "#FFFFFF"),
+                    fg_color=("#0891B2", "#0E1328"),
+                    text_color=("#FFFFFF", "#EAF0FA"),
                 )
             else:
                 btn.configure(
@@ -1453,9 +1455,9 @@ class SettingsWindow:
         ctk.CTkButton(
             center, text=T("settings_window.show_data_folder"), width=200, height=34,
             fg_color="transparent", border_width=1,
-            border_color=("#2980B9", "#3498DB"),
-            text_color=("#2980B9", "#3498DB"),
-            hover_color=("#D6EAF8", "#1A3A4A"),
+            border_color=("#0891B2", "#22D3EE"),
+            text_color=("#0891B2", "#4CE0F5"),
+            hover_color=("#D6F0F8", "#161C38"),
             font=ctk.CTkFont(size=12),
             command=self._open_data_folder,
         ).pack(pady=(18, 20))

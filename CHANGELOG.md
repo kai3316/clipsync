@@ -2,6 +2,16 @@
 
 All notable changes to ClipSync are documented in this file.
 
+## [1.0.19] — 2026-08-22
+
+### Platform UX (macOS / Linux) — typography & theme
+- **Cross-platform UI font resolution.** CustomTkinter defaults every font to "Roboto", which is missing on most macOS/Linux installs — so the whole desktop UI fell back to Tk's dated default. A new `internal/ui/fonts.py` resolves the best actually-installed UI font per platform (SF Pro / Helvetica on macOS, Segoe UI on Windows, Noto Sans / Ubuntu / Cantarell on Linux, with CJK fallbacks like PingFang SC / Microsoft YaHei / WenQuanYi) and applies it to every widget via a small `CTkFont` patch — no per-widget churn. Tk's default font is aligned too.
+- **Web UI font stack is now system-native on every OS.** `--clipsync-font` lists each platform's UI font with interleaved CJK fallbacks (PingFang SC, Hiragino Sans GB, Microsoft YaHei, Noto Sans CJK SC, WenQuanYi) so Chinese text — the app's default UI — renders crisply instead of falling back to an unrelated font, especially on Linux.
+- **Custom aurora CTk theme.** The desktop windows now use a cyan→violet theme (`assets/themes/clipsync.json`) matching the web UI's brand palette instead of CustomTkinter's stock blue. Headers, sidebars, buttons and dialog accents were recolored to the same cyan/violet family.
+- **Firefox scrollbar styling.** `::-webkit-scrollbar` is Chromium-only; Firefox (common on Linux) now gets matching thin styled scrollbars via `scrollbar-width`/`scrollbar-color`.
+- **macOS keyboard shortcuts.** The dashboard now binds ⌘W (hide) and ⌘Q (close) on macOS instead of only Ctrl+W/Ctrl+Q.
+- **macOS webview window size.** Chrome-based `--app` windows on macOS now pass `--window-size`, so the dashboard opens at the requested 960×720 instead of a browser-default size.
+
 ## [1.0.18] — 2026-08-22
 
 ### Fixed (regressions found by the v1.0.17 self-review)

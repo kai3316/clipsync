@@ -66,6 +66,9 @@ hiddenimports += [
 # server then only serves the minimal fallback page).
 datas = [
     (os.path.join(_PROJ_ROOT, "internal", "web", "static"), "internal/web/static"),
+    # Custom CTk aurora theme (cyan→violet), matched by the web UI. Resolved at
+    # runtime via internal/ui/fonts.py:theme_file_path() → assets/themes/<name>.
+    (os.path.join(_PROJ_ROOT, "assets", "themes"), "assets/themes"),
 ]
 # Hardening: bundle customtkinter's runtime data (themes, assets) explicitly
 # instead of relying solely on pyinstaller-hooks-contrib.

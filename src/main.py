@@ -1792,8 +1792,34 @@ class Application:
 
         # ── Appearance mode (CTk only) ───────────────────────────────
         if self.cfg.ui_backend == "ctk":
-            from customtkinter import set_appearance_mode
+            from customtkinter import set_appearance_mode, set_default_color_theme
+
             set_appearance_mode(self.cfg.appearance_mode)
+            # Use the project's aurora theme (cyan→violet, matching the web UI)
+            # instead of CustomTkinter's stock blue.
+            try:
+                from internal.ui.fonts import theme_file_path
+
+                set_default_color_theme(theme_file_path())
+            except Exception:
+                logger.debug("Custom CTk theme not found; using stock blue",
+                             exc_info=True)
+
+        # ── Platform UI font (CTk dialogs exist in both backends) ─────
+        # CTk defaults every font to "Roboto", which is missing on most
+        # macOS/Linux installs → Tk falls back to a dated default. Resolve an
+        # installed platform UI font and align Tk's default font too, so the
+        # CTk dialogs/windows read as native next to the web UI.
+        try:
+            from internal.ui.fonts import (
+                configure_platform_font,
+                install_platform_font_patch,
+            )
+
+            install_platform_font_patch()
+            configure_platform_font(self.root)
+        except Exception:
+            logger.debug("Platform font setup skipped", exc_info=True)
 
         # ── Systray ──────────────────────────────────────────────────
         self.systray = SystrayApp(

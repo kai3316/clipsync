@@ -12,7 +12,7 @@ _INFO_ICON = "ℹ️"     # ℹ
 _WARN_ICON = "⚠️"     # ⚠
 _ERROR_ICON = "❌"          # ❌
 
-_INFO_COLOR = "#3498DB"
+_INFO_COLOR = "#0891B2"
 _WARN_COLOR = "#F39C12"
 _ERROR_COLOR = "#E74C3C"
 

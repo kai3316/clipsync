@@ -172,7 +172,7 @@ _FALLBACK_HTML = r"""<!DOCTYPE html>
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no">
-<meta name="theme-color" content="#1A5276">
+<meta name="theme-color" content="#05060D">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <title>ClipSync Web</title>
@@ -1275,8 +1275,8 @@ class WebServer:
                         "short_name": "ClipSync",
                         "start_url": f"/?token={cfg.web_token}",
                         "display": "standalone",
-                        "background_color": "#F5F7FA",
-                        "theme_color": "#1A5276",
+                        "background_color": "#0A0E1E",
+                        "theme_color": "#05060D",
                         "icons": [
                             {"src": f"/icon-192.png?token={cfg.web_token}",
                              "sizes": "192x192", "type": "image/png"},

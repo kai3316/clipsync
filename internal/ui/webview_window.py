@@ -30,10 +30,12 @@ _BROWSERS = [
     # drops the `--args` when the browser is already running and merely
     # activates the existing window, so the app URL would never load.
     # Safari has no `--app` mode; it opens the URL as a normal document.
-    ("Google Chrome", ["--app={url}"], ["Darwin"]),
-    ("Microsoft Edge", ["--app={url}"], ["Darwin"]),
-    ("Chromium", ["--app={url}"], ["Darwin"]),
-    ("Brave Browser", ["--app={url}"], ["Darwin"]),
+    # `--window-size` makes the app-mode window match the requested dashboard
+    # size; without it Chrome opens at a browser-default window size.
+    ("Google Chrome", ["--app={url}", "--window-size={width},{height}"], ["Darwin"]),
+    ("Microsoft Edge", ["--app={url}", "--window-size={width},{height}"], ["Darwin"]),
+    ("Chromium", ["--app={url}", "--window-size={width},{height}"], ["Darwin"]),
+    ("Brave Browser", ["--app={url}", "--window-size={width},{height}"], ["Darwin"]),
     ("Safari", ["{url}"], ["Darwin"]),  # Safari doesn't support --app, opens normally
     # ── Linux ─────────────────────────────────────────────────────────
     ("google-chrome",     ["--app={url}", "--window-size={width},{height}"], ["Linux"]),

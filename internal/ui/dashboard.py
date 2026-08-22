@@ -25,12 +25,13 @@ STATUS_COLOR = "#2ECC71"
 PAIRING_COLOR = "#E67E22"
 OFFLINE_COLOR = "#95A5A6"
 WARN_COLOR = "#F39C12"
-ACCENT = "#3498DB"
+# Aurora cyan — light/dark pair matching the web UI's --clipsync-accent.
+ACCENT = ("#0891B2", "#22D3EE")
 
 STATUS_COLORS = {
     "Connected":  "#2ECC71",
     "Paired":     "#F39C12",
-    "Discovered": "#3498DB",
+    "Discovered": ("#0891B2", "#22D3EE"),
     "Pending":    "#95A5A6",
 }
 
@@ -40,13 +41,13 @@ class DashboardWindow:
 
     # ── Per-card constants (computed once, not per card) ────────
     _TYPE_COLORS: dict[str, tuple[str, str]] = {
-        "TEXT": ("#27AE60", "#2ECC71"),
-        "HTML": ("#E67E22", "#F39C12"),
-        "IMAGE": ("#8E44AD", "#9B59B6"),
-        "IMAGE_EMF": ("#3498DB", "#5DADE2"),
-        "RTF": ("#7F8C8D", "#95A5A6"),
-        "FILE": ("#C0392B", "#E74C3C"),
-        "URL": ("#2980B9", "#3498DB"),
+        "TEXT": ("#059669", "#34D399"),
+        "HTML": ("#B45309", "#FBBF24"),
+        "IMAGE": ("#7C3AED", "#A78BFA"),
+        "IMAGE_EMF": ("#0891B2", "#22D3EE"),
+        "RTF": ("#64748B", "#94A3B8"),
+        "FILE": ("#E11D48", "#FB7185"),
+        "URL": ("#0891B2", "#4CE0F5"),
     }
 
     def __init__(
@@ -251,7 +252,9 @@ class DashboardWindow:
         logger.info("Opening ClipSync dashboard")
         self._dark_mode = self._get_config().appearance_mode == "dark"
         ctk.set_appearance_mode("dark" if self._dark_mode else "light")
-        ctk.set_default_color_theme("blue")
+        from internal.ui.fonts import configure_platform_theme
+
+        configure_platform_theme()
 
         self._window = ctk.CTkToplevel(self._root)
         self._window.title(T("ui.app_name"))
@@ -259,9 +262,15 @@ class DashboardWindow:
         self._window.minsize(780, 560)
         self._window.protocol("WM_DELETE_WINDOW", self._on_hide)
 
-        # Keyboard shortcuts
+        # Keyboard shortcuts — use ⌘ on macOS, Ctrl elsewhere, per platform
+        # convention.  ⌘W hides the window (like the close button), ⌘Q closes.
         self._window.bind("<Escape>", lambda _e: self._on_hide())
-        self._window.bind("<Control-q>", lambda _e: self._on_close())
+        if sys.platform == "darwin":
+            self._window.bind("<Command-w>", lambda _e: self._on_hide())
+            self._window.bind("<Command-q>", lambda _e: self._on_close())
+        else:
+            self._window.bind("<Control-w>", lambda _e: self._on_hide())
+            self._window.bind("<Control-q>", lambda _e: self._on_close())
 
         # Edge snapping
         self._snap_state = {"side": None, "side2": None}
@@ -426,24 +435,26 @@ class DashboardWindow:
         outer.pack(fill="both", expand=True)
 
         # ── Header ──────────────────────────────────────────────────
-        header = ctk.CTkFrame(outer, corner_radius=0, fg_color=("#1A5276", "#1B2A3A"))
+        # Aurora theme: deep cyan header in light mode, void surface in dark
+        # (matches the web UI's --clipsync-accent / --clipsync-bg tokens).
+        header = ctk.CTkFrame(outer, corner_radius=0, fg_color=("#0891B2", "#0A0E1E"))
         header.pack(fill="x")
         h_inner = ctk.CTkFrame(header, fg_color="transparent")
         h_inner.pack(fill="x", padx=20, pady=(16, 14))
-        # Accent line below header
-        accent_line = ctk.CTkFrame(header, height=2, fg_color=("#3498DB", "#2980B9"))
+        # Accent line below header — neon cyan, the brand sweep
+        accent_line = ctk.CTkFrame(header, height=2, fg_color=("#22D3EE", "#22D3EE"))
         accent_line.pack(fill="x", side="bottom")
 
         ctk.CTkLabel(
             h_inner, text=T("ui.app_title"),
             font=ctk.CTkFont(size=20, weight="bold"),
-            text_color=("#FFFFFF", "#E0E0E0"),
+            text_color=("#FFFFFF", "#EAF0FA"),
         ).pack(side="left")
 
         ctk.CTkLabel(
             h_inner, text="·",
             font=ctk.CTkFont(size=18),
-            text_color=("#5DADE2", "#3498DB"),
+            text_color=("#A78BFA", "#22D3EE"),
         ).pack(side="left", padx=(10, 10))
 
         self._device_name_label = ctk.CTkLabel(
@@ -560,8 +571,8 @@ class DashboardWindow:
         for pk, btn in self._sidebar_buttons.items():
             if pk == key:
                 btn.configure(
-                    fg_color=("#2A82C7", "#1F6AA5"),
-                    text_color=("#FFFFFF", "#FFFFFF"),
+                    fg_color=("#0891B2", "#0E1328"),
+                    text_color=("#FFFFFF", "#EAF0FA"),
                 )
             else:
                 btn.configure(
@@ -954,7 +965,7 @@ class DashboardWindow:
         for c in range(3):
             stat_grid.columnconfigure(c, weight=1, uniform="stat_col")
 
-        accent_colors = ["#2ECC71", "#F39C12", "#3498DB", "#9B59B6", "#1ABC9C", "#E67E22"]
+        accent_colors = ["#34D399", "#FBBF24", "#22D3EE", "#A78BFA", "#2DD4BF", "#F472B6"]
         stat_icons = ["●", "◉", "◷", "⇄", "⌘", "◈"]
         stats_def = [
             (T("stats.connected"), "--", T("stats.online"), "_stat_peers", "_sub_peers"),
@@ -1387,7 +1398,7 @@ class DashboardWindow:
             ctk.CTkButton(
                 r1, text=T("ui.reconnect"), width=68, height=22,
                 fg_color=ACCENT,
-                hover_color=("#2980B9", "#2471A3"),
+                hover_color=("#0EA5C4", "#4CE0F5"),
                 font=ctk.CTkFont(size=10),
                 command=lambda d=dev_id: self._do_reconnect(d),
             ).pack(side="right", padx=(4, 0))
@@ -1396,7 +1407,7 @@ class DashboardWindow:
             ctk.CTkButton(
                 r1, text=T("ui.connect"), width=60, height=22,
                 fg_color=ACCENT,
-                hover_color=("#2980B9", "#2471A3"),
+                hover_color=("#0EA5C4", "#4CE0F5"),
                 font=ctk.CTkFont(size=10),
                 command=lambda d=dev_id: self._do_connect(d),
             ).pack(side="right", padx=(4, 0))
@@ -1821,9 +1832,9 @@ class DashboardWindow:
         if remaining > 0:
             self._history_more_btn = ctk.CTkButton(
                 self._history_scroll, height=32, fg_color="transparent",
-                border_width=1, border_color=("#2A82C7", "#1F6AA5"),
-                text_color=("#2A82C7", "#5DADE2"),
-                hover_color=("#EAF2F8", "#1B2A3A"),
+                border_width=1, border_color=("#0891B2", "#22D3EE"),
+                text_color=("#0891B2", "#4CE0F5"),
+                hover_color=("#E6F2F7", "#161C38"),
                 font=ctk.CTkFont(size=12),
                 text=T("history.show_more", count=remaining),
                 command=self._show_history_batch,
@@ -2060,7 +2071,7 @@ class DashboardWindow:
 
         ctk.CTkButton(
             st_top, text=T("ui.run"), width=64, height=26,
-            fg_color=ACCENT, hover_color=("#2A80C7", "#1A5AA5"),
+            fg_color=ACCENT, hover_color=("#0EA5C4", "#4CE0F5"),
             font=ctk.CTkFont(size=11),
             command=self._do_speed_test,
         ).pack(side="right")

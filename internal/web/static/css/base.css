@@ -82,7 +82,21 @@ button,
   -webkit-user-drag: none;
 }
 
-/* ── Scrollbar styling (WebKit) ─────────────────────────────────── */
+/* ── Scrollbar styling ──────────────────────────────────────────── */
+
+/* Firefox (and newer Chromium) native scrollbar: `::-webkit-scrollbar` below
+   is Chromium/WebKit-only, so Firefox on Linux would otherwise show chunky
+   default scrollbars that clash with the app's look.  These properties are
+   honoured by Firefox and ignored by Chromium/WebKit, which keeps using the
+   styled ::-webkit-scrollbar thumb. */
+html {
+  scrollbar-width: thin;
+  scrollbar-color: rgba(156, 163, 175, 0.30) transparent;
+}
+
+.dark {
+  scrollbar-color: rgba(75, 85, 99, 0.50) transparent;
+}
 
 ::-webkit-scrollbar {
   width: 6px;
