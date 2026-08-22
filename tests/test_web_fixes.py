@@ -465,18 +465,24 @@ def _read_repo_file(rel: str) -> str:
 
 def test_quickpaste_close_no_longer_gated_on_opener():
     """#1: the desktop popup's close paths are gated on the auto_close query
-    flag, not on a touch heuristic or window.opener — it is opened via
-    webbrowser.open_new which has no opener, and a touch-screen laptop reports
-    maxTouchPoints>0 so the old touch gate would leave it open forever."""
+    flag, not on a touch heuristic or window.opener — it is opened via a
+    Chromium --app window / webbrowser.open_new (no opener), and a touch-screen
+    laptop reports maxTouchPoints>0 so the old touch gate would leave it open
+    forever.  IS_TOUCH (coarse-pointer) now gates KEYBOARD NAVIGATION only,
+    deliberately decoupled from AUTO_CLOSE."""
     html = _read_repo_file("internal/web/static/quickpaste.html")
     assert 'onclick="closeWindow()"' not in html, (
         "inline onclick would ReferenceError against the IIFE-local function"
     )
     assert "closeBtn.addEventListener('click'" in html
     assert "var AUTO_CLOSE = params.get('auto_close') === '1'" in html
+    # Close behavior (X/Esc/auto-close) is gated on AUTO_CLOSE, not touch.
     assert "if (!AUTO_CLOSE) { return; }" in html
-    # The touch heuristic is gone entirely — auto_close decides every close path.
-    assert "IS_TOUCH" not in html
+    # IS_TOUCH exists and gates keyboard navigation (listbox focus / 1-9 hint),
+    # not the close paths — a manually-opened desktop tab (no auto_close) still
+    # gets keyboard paste support.
+    assert "var IS_TOUCH = !!(window.matchMedia && window.matchMedia('(pointer: coarse)').matches);" in html
+    assert "if (!IS_APP_WINDOW) {" in html
     # No close path may still be gated on window.opener (it only appears in
     # comments explaining the webbrowser.open_new no-opener behavior).
     assert "if (window.opener)" not in html
@@ -586,3 +592,102 @@ def test_dashboard_history_reconnect_merge_present():
     # The mounted() direct load was removed (WS 'connected' is the sole load
     # trigger) so startup no longer fetches everything twice.
     assert "this.loadData();" not in js
+
+
+# ── v1.0.29-regression guards (#1 mobile pruning, #2 ghost cursor, #3 done) ──
+
+def test_mobile_paged_poll_does_not_prune_loaded_pages():
+    """#1: a page-1 poll while more pages are loaded must NOT prune them — the
+    v1.0.29 paged merge (mergeHistoryPage(items, true)) collapsed pages 31..N
+    every 5s.  The paged path is upsert/prepend-only; ghosts self-heal via the
+    WS / next load-more / full refresh, and a snapshot `total` trims only the
+    exact tail beyond it."""
+    html = _read_repo_file("internal/web/static/mobile.html")
+    # Paged path calls the merge WITHOUT pruning.
+    assert "mergeHistoryPage(items, false);" in html
+    # Tail-trim to the authoritative total (deleted ghosts).
+    assert "historyItems.splice(total, historyItems.length - total);" in html
+    # The not-paged path still prunes (snapshot fully authoritative).
+    assert "mergeHistoryPage(items, true);" in html
+    # Load-more path stays a pure append merge.
+    assert "var seen = {};" in html
+
+
+def test_history_cursor_calibrated_from_total():
+    """#2: when the history API returns `total`, a page-1 merge trims ghost
+    rows beyond it and pins the load-more cursor to total — a missed
+    history_item_deleted broadcast would otherwise inflate the cursor and make
+    Load More skip live entries."""
+    app = _read_repo_file("internal/web/static/js/app.js")
+    assert "store.history.splice(res.total, store.history.length - res.total);" in app
+    assert "store.historyOffset = Math.min(store.history.length, res.total);" in app
+    ws = _read_repo_file("internal/web/static/js/ws.js")
+    assert "store.history.splice(data.total, store.history.length - data.total);" in ws
+    assert "store.historyOffset = Math.min(store.history.length, data.total);" in ws
+
+
+def test_history_api_returns_total():
+    """#1/#2 backend guard: GET /api/history already returns `total` so the
+    frontend can trim ghosts precisely.  (Backwards compatible — clients that
+    ignore it keep working.)"""
+    from internal.web.api.history import get_history
+    src = _read_repo_file("internal/web/api/history.py")
+    assert '"total": total' in src
+
+
+def test_routes_quickpaste_done_invokes_registered_handler():
+    """#3: POST /api/quickpaste/done invokes the registered host callback
+    (main.py's _close_quick_paste) and returns ok.  Token-gating is handled by
+    the server's /api/* POST auth gate."""
+    from internal.web.routes import set_quickpaste_done_handler
+    calls = []
+    set_quickpaste_done_handler(lambda: calls.append(1))
+    try:
+        status, _ct, body_b = _dispatch_post("/api/quickpaste/done", _body({}), None, None)
+        assert status == 200
+        assert json.loads(body_b)["ok"] is True
+        assert calls == [1]
+    finally:
+        set_quickpaste_done_handler(None)
+
+
+def test_routes_quickpaste_done_unavailable_without_handler():
+    from internal.web.routes import set_quickpaste_done_handler
+    set_quickpaste_done_handler(None)
+    status, _ct, body_b = _dispatch_post("/api/quickpaste/done", _body({}), None, None)
+    assert status == 503
+    assert json.loads(body_b)["error"] == "not available"
+
+
+def test_main_prefers_app_window_and_registers_done_handler():
+    """#3: main.py opens Quick Paste as a Chromium --app subprocess (mode=app,
+    so the page enables the done-close flow) and falls back to webbrowser for
+    the plain-tab degradation.  The done handler is registered so the endpoint
+    can kill the process."""
+    src = _read_repo_file("src/main.py")
+    assert "_launch_quickpaste_app_window(url + \"&mode=app\")" in src
+    assert '["--app=" + url' in src or '"--app=" + url' in src
+    assert "webbrowser.open_new(url)" in src
+    assert "set_quickpaste_done_handler(self._close_quick_paste)" in src
+    assert "def _close_quick_paste(self)" in src
+
+
+def test_quickpaste_page_posts_done_and_has_safety_net():
+    """#3: the page POSTs /api/quickpaste/done after a paste (and as a 60s
+    safety net), keeps window.close() as a harmless extra attempt, and shows a
+    '✓ Pasted' confirmation for the plain-tab fallback."""
+    html = _read_repo_file("internal/web/static/quickpaste.html")
+    assert "postDone()" in html
+    assert "fetch(apiUrl('/api/quickpaste/done')," in html
+    assert "setTimeout(postDone, 60000);" in html
+    assert "showPastedFallback()" in html
+    assert "window.close()" in html
+
+
+def test_chat_panel_toasts_expired_not_generic():
+    """#4 frontend guard: the chat file-accept failure toast distinguishes the
+    backend's {error:'expired'} (offer lapsed under the stale-receive reaper
+    while its Accept button was still shown) from a generic send failure."""
+    js = _read_repo_file("internal/web/static/components/chat-panel.js")
+    assert "res.error === 'expired'" in js
+    assert "self.t('pairing.state.expired')" in js

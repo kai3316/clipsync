@@ -2,6 +2,23 @@
 
 All notable changes to ClipSync are documented in this file.
 
+## [1.0.30] — 2026-08-23
+
+### Quick Paste
+- **The popup can actually close itself now.** Browser tabs opened with `webbrowser.open_new` can't be closed by script, so the v1.0.29 affordances were still dead on desktop. The host now launches Quick Paste in a Chromium `--app` window when one is available, and the page signals a paste via `POST /api/quickpaste/done` so the app closes the window for real (X / Esc also work there). Without Chromium it falls back to a plain tab, which degrades to a "✓ Pasted — close this tab" state instead of pretending.
+- **Keyboard shortcuts are back on plain desktop tabs.** Listbox focus, 1-9 / Arrow / Enter, and the "Press 1-9 to paste" hint are gated on touch *hardware* (via `pointer: coarse`) rather than whether the page was script-opened — so a keyboard user who bookmarked the page keeps working keys, while auto-close behaviour stays tied to the app-opened window.
+
+### History (pagination)
+- **No more 5-second list collapse on the phone.** The background poll prunes only when you haven't scrolled past the first page; once you've loaded more, it merges without pruning, and the server's `total` is used to trim genuinely-deleted ghost rows at the tail.
+- **Desktop cursor is calibrated against `total`.** If the WebSocket missed a deletion broadcast, the loaded list can hold ghost rows that inflated the pagination cursor — "load more" would skip live entries. The page-1 merge now trims past `total` before recomputing the offset.
+
+### Misc
+- Accepting a chat file offer that just expired now shows "request expired" instead of a generic failure (the offer state is popped under the lock, so a racing accept can't observe a half-dead offer).
+- Removed dead `peer_completed` bookkeeping in the chat file sender.
+
+### Tests
+- 9 new regressions. Full suite 402 passed / 3 skipped.
+
 ## [1.0.29] — 2026-08-23
 
 ### Quick Paste

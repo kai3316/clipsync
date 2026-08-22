@@ -359,6 +359,15 @@
             }
             store.historyOffset = store.history.length;
             if (res && res.total != null) {
+              // Missed history_item_deleted broadcasts leave ghost rows in the
+              // loaded list, which would inflate the cursor and make Load More
+              // skip live items.  The page-1 snapshot's `total` is the
+              // authoritative count — trim the tail beyond it (deleted ghosts
+              // are always the oldest entries) and pin the cursor to total.
+              if (store.history.length > res.total) {
+                store.history.splice(res.total, store.history.length - res.total);
+              }
+              store.historyOffset = Math.min(store.history.length, res.total);
               store.historyHasMore = store.history.length < res.total;
             }
           } else {

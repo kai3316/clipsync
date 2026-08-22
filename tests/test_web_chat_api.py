@@ -660,3 +660,36 @@ def test_dispatch_post_chat_file_keeps_received_file_on_failure(tmp_path):
     assert status == 400
     assert json.loads(body)["ok"] is False
     assert recv.exists(), "a real received file must not be cleaned up"
+
+
+# ── #4: accept-race window → explicit "expired" error ────────────────────
+
+def test_chat_manager_accept_file_returns_none_when_offer_gone():
+    """#4: ChatManager.accept_file returns None (not False) when the offer is
+    already gone — it was swept by the stale-receive reaper while the UI still
+    showed its Accept button.  None stays falsy so truthiness callers still
+    treat it as a failed accept."""
+    from internal.sync.nearby_chat import ChatManager
+    mgr = ChatManager("dev", "Dev")
+    try:
+        assert mgr.accept_file("sess", "0" * 32, lambda data: True) is None
+    finally:
+        mgr.shutdown()
+
+
+def test_accept_file_expired_offer_returns_explicit_error():
+    """#4: the API handler translates the None sentinel into an explicit
+    {ok: false, error: "expired"} so the frontend can toast "offer expired"
+    instead of a generic failure."""
+
+    class ExpiredManager:
+        def accept_file(self, session_id, transfer_id, send_fn):
+            return None  # offer gone — the widened accept-race case
+
+    data, status = chat_api.accept_file(
+        ExpiredManager(),
+        _body({"session_id": "s1", "transfer_id": "tid-1"}), _send_fn_for,
+    )
+    assert status == 200
+    assert data["ok"] is False
+    assert data["error"] == "expired"

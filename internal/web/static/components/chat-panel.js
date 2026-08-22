@@ -527,7 +527,15 @@
         ClipsyncAPI.chatFileAction(sid, entry.transfer_id, action)
           .then(function (res) {
             if (res && res.ok === false) {
-              self.store.showToast(self.t('chat.err_send_failed'), 2500);
+              // The backend reports {error:"expired"} when the offer was swept
+              // by the stale-receive reaper while its Accept button was still
+              // shown — say so instead of a misleading "send failed".  The
+              // card already flipped to "declined" via the WS broadcast.
+              if (res.error === 'expired') {
+                self.store.showToast(self.t('pairing.state.expired'), 2500);
+              } else {
+                self.store.showToast(self.t('chat.err_send_failed'), 2500);
+              }
               return;
             }
             // Refetch so the card reflects the authoritative status change.

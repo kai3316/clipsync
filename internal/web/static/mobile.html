@@ -902,12 +902,15 @@ body::before {
   var historyHasMore = true;
 
   // Reconcile a page-1 snapshot into the already-loaded list (dedupe by
-  // entry_id, prepend genuinely-new entries) so a background poll refresh
-  // never collapses pages the user has already loaded via "scroll to load
-  // more".  When *pruneMissing* is true — a page-1 (offset=0) poll — entries
-  // the snapshot no longer reports are dropped FIRST, so items deleted on the
-  // desktop can't linger as ghost rows forever.  The load-more path (offset>0)
-  // never prunes; it stays a pure append merge.
+  // entry_id, upsert in place, prepend genuinely-new entries).  When
+  // *pruneMissing* is true — the NOT-paged path, where the snapshot is fully
+  // authoritative — entries the snapshot no longer reports are dropped FIRST,
+  // so items deleted on the desktop can't linger as ghost rows.  The paged
+  // path (length > limit) calls with pruneMissing=false: the snapshot only
+  // governs the first page, so pruning would collapse loaded pages 31..N on
+  // every 5s poll; deletions there heal via the WS broadcast / next load-more,
+  // and the caller trims the tail to the snapshot's `total` when present.
+  // The load-more path (offset>0) never prunes; it stays a pure append merge.
   function mergeHistoryPage(items, pruneMissing) {
     var snapshotIds = {};
     for (var si = 0; si < items.length; si++) {
@@ -986,15 +989,25 @@ body::before {
           }
           historyHasMore = (total != null) ? (historyItems.length < total) : (added > 0);
         } else if (historyItems.length > 30) {
-          // Refresh of page 1 (offset=0) while more pages are loaded — prune
-          // entries the server no longer reports (desktop deletions) then
-          // merge the snapshot in place so the user's loaded pages survive a
-          // background poll.  A cleared history arrives as an empty snapshot,
-          // which prunes everything and empties the list.
-          mergeHistoryPage(items, true);
+          // Refresh of page 1 (offset=0) while more pages are loaded.  The
+          // snapshot is authoritative only for the FIRST page — pruning from
+          // it would collapse the 31..N pages the user already loaded on every
+          // 5s poll.  Merge in place (upsert/prepend) WITHOUT pruning; deleted
+          // entries heal via the WS history_item_deleted broadcast, the next
+          // load-more, or a full refresh.  When the snapshot carries a total,
+          // trim the tail beyond it — those are ghost rows deleted on the
+          // desktop but missed by a dropped WS broadcast.
+          mergeHistoryPage(items, false);
+          if (total != null && historyItems.length > total) {
+            historyItems.splice(total, historyItems.length - total);
+          }
           historyHasMore = (total != null) ? (historyItems.length < total) : historyHasMore;
         } else {
-          historyItems = items.slice();
+          // Not paged: the page-1 snapshot is fully authoritative — prune rows
+          // the snapshot no longer reports (desktop deletions) then merge in
+          // place.  A cleared history arrives as an empty snapshot, which
+          // prunes everything and empties the list.
+          mergeHistoryPage(items, true);
           historyHasMore = (total != null) ? (historyItems.length < total) : true;
         }
         historyOffset = historyItems.length;

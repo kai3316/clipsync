@@ -607,12 +607,23 @@ class ChatManager:
         self._fire("_on_sessions_changed")
         return transfer_id
 
-    def accept_file(self, session_id: str, transfer_id: str, send_fn: SendFn) -> bool:
-        """User accepted an incoming file offer; start receiving."""
+    def accept_file(self, session_id: str, transfer_id: str, send_fn: SendFn):
+        """Accept an incoming file offer; start receiving.
+
+        Returns ``True`` on success, ``False`` when the offer still exists but
+        cannot be accepted right now (wrong session, or already past the
+        ``await_accept`` stage), and ``None`` when the offer is already gone
+        (``_receives`` no longer tracks it).  The ``None`` case is what the web
+        REST handler surfaces as an explicit "expired" error — the offer was
+        swept by the stale-receive reaper while the UI still showed its Accept
+        button, so the user should learn it expired rather than see a generic
+        failure.  ``None`` stays falsy, so callers that only test truthiness
+        (``if mgr.accept_file(...)``) still treat it as a failed accept.
+        """
         with self._lock:
             state = self._receives.get(transfer_id)
             if state is None:
-                return False
+                return None
             session = state["session"]
             if session.session_id != session_id or state["entry"].status != "await_accept":
                 return False
@@ -1238,7 +1249,9 @@ class ChatManager:
                 # Only a clean ack is a success.  The receiver can report a
                 # real failure (e.g. error_size_mismatch) — surface it so the
                 # transcript doesn't claim the file was delivered.
-                send_state["peer_completed"] = status in ("", "ok", "sent")
+                # (The dead ``peer_completed`` write was removed in v1.0.29.1:
+                # nothing reads it — ``_file_sender`` consults ``error_status``
+                # alone to decide between "done" and "declined".)
                 if status not in ("", "ok", "sent"):
                     send_state["error_status"] = status
                 send_state["complete_event"].set()

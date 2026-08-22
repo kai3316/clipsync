@@ -225,7 +225,14 @@ def send_file(chat_mgr, body, send_fn_for_peer):
 
 
 def accept_file(chat_mgr, body, send_fn_for_peer):
-    """POST /api/chat/file/accept {session_id, transfer_id} → {ok}."""
+    """POST /api/chat/file/accept {session_id, transfer_id} → {ok}.
+
+    ``ChatManager.accept_file`` returns ``None`` when the offer is already
+    gone (e.g. it expired under the stale-receive reaper while the UI still
+    showed its Accept button).  Translate that into an explicit ``expired``
+    error so the frontend can tell the user the offer lapsed instead of
+    showing a generic failure — this was the widening accept-race window.
+    """
     err = _require_chat(chat_mgr)
     if err:
         return err
@@ -239,11 +246,13 @@ def accept_file(chat_mgr, body, send_fn_for_peer):
     transfer_id = (data.get("transfer_id") or "").strip()
     send_fn = _send_fn_for(chat_mgr, session_id, send_fn_for_peer)
     try:
-        ok = chat_mgr.accept_file(session_id, transfer_id, send_fn)
+        result = chat_mgr.accept_file(session_id, transfer_id, send_fn)
     except Exception:
         logger.debug("chat: accept_file failed", exc_info=True)
-        ok = False
-    return {"ok": ok}, 200
+        result = False
+    if result is None:
+        return {"ok": False, "error": "expired"}, 200
+    return {"ok": bool(result)}, 200
 
 
 def decline_file(chat_mgr, body, send_fn_for_peer):

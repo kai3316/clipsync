@@ -530,6 +530,9 @@ class Application:
         # Used to keep the "recently opened" guard from blocking a re-open
         # after the window was closed (client disconnected) within 8s.
         self._webview_client_seen = False
+        # Popen handle for the Quick Paste --app window (None when opened as a
+        # plain tab via webbrowser).  POST /api/quickpaste/done terminates it.
+        self._quickpaste_proc = None
 
         # ── macOS multiprocessing state ─────────────────────────────
         self._parent_conn = None
@@ -963,6 +966,16 @@ class Application:
             chat_send_fn=self._web_chat_send_fn,
             chat_start_session=self._web_chat_start_session,
         )
+
+        # Register the Quick Paste done handler so POST /api/quickpaste/done
+        # (token-gated) can terminate the --app popup.  routes.py keeps a
+        # module-level registry instead of threading a new callback through the
+        # WebServer, so no server.py plumbing change is required.
+        try:
+            from internal.web import routes as _web_routes
+            _web_routes.set_quickpaste_done_handler(self._close_quick_paste)
+        except Exception:
+            logger.debug("Could not register quickpaste done handler", exc_info=True)
 
         # ── Live history push to web clients ────────────────────────
         # The sync manager records every local/remote clipboard change into
@@ -1673,21 +1686,106 @@ class Application:
         host = f"http://127.0.0.1:{port}"
         # URL-encode the token (and the host query value) so a token containing
         # '/', '+', '=' etc. cannot break the URL's query string.
-        # The popup is opened with webbrowser.open_new (a plain tab, no
-        # window.opener).  Flag it with auto_close=1 so the page enables the
+        # The popup is opened with auto_close=1 so the page enables the
         # auto-close / Esc / X affordances ONLY for this popup — a user-opened
-        # tab (no auto_close) keeps them hidden because a plain tab cannot
-        # window.close() itself (the X would be a dead button).  This also
-        # decouples the popup behavior from the device's touch capability, so
-        # a touch-screen Windows laptop still auto-closes.
+        # tab (no auto_close) keeps them hidden.  auto_close is deliberately
+        # decoupled from the device's touch capability, so a touch-screen
+        # Windows laptop still auto-closes.
         url = (
             f"{host}/quickpaste.html?token={quote(token, safe='')}"
             f"&host={quote(host, safe='')}&auto_close=1"
         )
 
+        # Preferred open: a dedicated Chromium --app subprocess.  A plain tab
+        # opened via webbrowser.open_new cannot window.close() itself (browsers
+        # block it), so v1.0.29's popup could never actually close.  --app
+        # windows ARE closeable: the page POSTs /api/quickpaste/done after a
+        # paste (or a 60s safety net) and we kill the process.  mode=app tells
+        # the page it was opened this way so it enables that close flow.
+        proc = self._launch_quickpaste_app_window(url + "&mode=app")
+        if proc is not None:
+            self._quickpaste_proc = proc
+            logger.debug("Opening Quick Paste in a Chromium --app window")
+            return
+
+        # Fallback: no Chromium-family browser found.  Open a plain tab and
+        # accept the degradation — the popup cannot be script-closed, so the
+        # page shows a "✓ Pasted" confirmation and the user closes the tab.
+        logger.debug("Quick Paste --app unavailable; falling back to a plain tab")
         # Never log the token in the URL (the file handler logs at DEBUG).
         logger.debug("Opening Quick Paste: %s", url.split("?")[0])
         webbrowser.open_new(url)
+
+    def _launch_quickpaste_app_window(self, url: str):
+        """Launch *url* in a Chromium ``--app`` window; return the Popen or None.
+
+        Probes common Chromium-family executables (msedge / chrome / chromium),
+        preferring PATH hits, then well-known install locations on Windows.
+        ``--app`` renders the page without browser chrome and gives the page a
+        real window that can be torn down by terminating the process (the done
+        handler).  Returns ``None`` when nothing usable was found so the caller
+        can fall back to ``webbrowser.open_new``.
+        """
+        import shutil
+        import subprocess
+
+        candidates: list[str] = []
+        for exe in ("msedge", "chrome", "chromium", "chromium-browser"):
+            found = shutil.which(exe)
+            if found:
+                candidates.append(found)
+        if not candidates and sys.platform == "win32":
+            roots = [
+                os.environ.get("ProgramFiles(x86)", ""),
+                os.environ.get("ProgramFiles", ""),
+                os.environ.get("LOCALAPPDATA", ""),
+            ]
+            for root in roots:
+                if not root:
+                    continue
+                for rel in (
+                    os.path.join("Microsoft", "Edge", "Application", "msedge.exe"),
+                    os.path.join("Google", "Chrome", "Application", "chrome.exe"),
+                ):
+                    candidate = os.path.join(root, rel)
+                    if os.path.isfile(candidate):
+                        candidates.append(candidate)
+        for exe in candidates:
+            try:
+                return subprocess.Popen(
+                    [exe, "--app=" + url, "--window-size=420,560"],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                )
+            except OSError:
+                continue
+        return None
+
+    def _close_quick_paste(self) -> None:
+        """Kill the Quick Paste --app window (registered as the done handler).
+
+        Called via POST /api/quickpaste/done (token-gated).  A plain-tab
+        fallback has no process, so this is a no-op there — the page's
+        window.close() attempt and the "✓ Pasted" confirmation carry it.
+        Idempotent: clears the handle before terminating so a second done
+        POST cannot kill a newer popup.
+        """
+        proc = getattr(self, "_quickpaste_proc", None)
+        self._quickpaste_proc = None
+        if proc is None:
+            return
+        try:
+            proc.terminate()
+        except OSError:
+            pass
+        try:
+            proc.wait(timeout=2.0)
+        except Exception:
+            try:
+                proc.kill()
+            except OSError:
+                pass
+            logger.debug("Quick Paste --app window did not exit cleanly")
 
     def _paste_nth(self, n: int) -> None:
         """Paste the nth history item (1-indexed) directly to the clipboard."""

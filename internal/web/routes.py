@@ -38,6 +38,26 @@ from internal.web.api.translate import translate_text
 
 logger = logging.getLogger(__name__)
 
+# Module-level registry for the host's Quick Paste close callback (see
+# ``set_quickpaste_done_handler``).  Stored at module scope instead of being
+# threaded through the per-request ``dispatch`` call so the existing WebServer
+# wiring (which server.py constructs) does not need a new callback parameter.
+_quickpaste_done_handler = None
+
+
+def set_quickpaste_done_handler(fn) -> None:
+    """Register the host's Quick Paste close callback (called on done).
+
+    main.py opens the Quick Paste popup as a Chromium ``--app`` subprocess and
+    registers this callback; the page POSTs ``/api/quickpaste/done`` after a
+    successful paste (and as a 60s safety net when the popup is abandoned).
+    The callback kills the ``--app`` process so the popup truly closes — a
+    plain-tab popup's ``window.close()`` is blocked by browsers, which was the
+    v1.0.29 gap.  Passing ``None`` clears the registration.
+    """
+    global _quickpaste_done_handler
+    _quickpaste_done_handler = fn
+
 
 def _chat_tmp_dir() -> str:
     """Return the directory purpose=chat web uploads land in (temp only).
@@ -841,6 +861,22 @@ def _dispatch(method, path, query_params, body, cfg, history, sync_mgr,
             if on_send_url is None:
                 return _json_response({"ok": False, "error": "not available"}, 503)
             on_send_url()
+            return _json_response({"ok": True})
+
+        elif path == "/api/quickpaste/done":
+            # The Quick Paste popup reports that it finished (paste succeeded,
+            # or the 60s abandonment safety net fired).  Ask the host to kill
+            # its --app window — the real close mechanism for the popup, since
+            # window.close() is blocked in a plain tab.  Token-gated by the
+            # server's /api/* POST auth gate like every other route here.
+            handler = _quickpaste_done_handler
+            if handler is None:
+                return _json_response({"ok": False, "error": "not available"}, 503)
+            try:
+                handler()
+            except Exception:
+                logger.exception("quickpaste done handler failed")
+                return _json_response({"ok": False, "error": "handler failed"}, 500)
             return _json_response({"ok": True})
 
         elif path == "/api/dialog-response":

@@ -326,8 +326,15 @@ var ClipsyncWS = (function () {
               // mobile.html).
               store.historyOffset = store.history.length;
               // Refresh "has more" from the broadcast total when present so
-              // Load-more stays accurate after new items arrive.
+              // Load-more stays accurate after new items arrive.  A missed
+              // history_item_deleted broadcast leaves ghost rows at the tail;
+              // the snapshot's total is authoritative, so trim past it and pin
+              // the cursor to total (mirrors the page-1 refresh in app.js).
               if (data.total != null) {
+                if (store.history.length > data.total) {
+                  store.history.splice(data.total, store.history.length - data.total);
+                }
+                store.historyOffset = Math.min(store.history.length, data.total);
                 store.historyHasMore = store.history.length < data.total;
               }
             }

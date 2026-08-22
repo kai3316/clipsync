@@ -594,12 +594,25 @@ body::after {
   // host= for backwards compatibility; a phone scans the QR without it.
   var HOST = (params.get('host') || window.location.origin).replace(/\/+$/, '');
 
-  // Whether this tab was opened as the desktop popup.  main.py opens it via
-  // webbrowser.open_new and passes auto_close=1; that flag — NOT a touch
-  // heuristic — decides whether the popup auto-closes / shows the X / accepts
-  // Esc.  A touch-screen laptop reports maxTouchPoints>0, so gating on touch
-  // would leave the popup open forever for those users.
+  // Whether this tab was opened as the desktop popup.  main.py opens it and
+  // passes auto_close=1; that flag — NOT a touch heuristic — decides whether
+  // the popup auto-closes / shows the X / accepts Esc.  A touch-screen laptop
+  // reports maxTouchPoints>0, so gating CLOSE behavior on touch would leave
+  // the popup open forever for those users.  (Keyboard NAVIGATION is gated on
+  // IS_TOUCH below, which uses the coarse-pointer media query instead.)
   var AUTO_CLOSE = params.get('auto_close') === '1';
+  // Whether main.py opened this as a Chromium --app window (mode=app).  Only
+  // an --app window can be genuinely closed: the page POSTs
+  // /api/quickpaste/done and main.py terminates the process.  The plain-tab
+  // webbrowser fallback (no mode=app) cannot be script-closed, so the page
+  // shows a "✓ Pasted" confirmation instead of dead close buttons.
+  var IS_APP_WINDOW = params.get('mode') === 'app';
+  // Coarse-pointer devices (phones/tablets) tap items to paste; fine-pointer
+  // devices (desktops, incl. touch-screen laptops with a trackpad) get
+  // keyboard navigation (Arrow/Enter/1-9).  This is deliberately independent
+  // of AUTO_CLOSE — a manually-opened desktop tab (no auto_close) keeps
+  // keyboard support and the listbox focus.
+  var IS_TOUCH = !!(window.matchMedia && window.matchMedia('(pointer: coarse)').matches);
   // The server knows the app's configured language and injects it as
   // window.__CLIPSYNC_I18N_LOCALE__; prefer that over the device's own
   // navigator.language so this page matches the desktop app's language.
@@ -685,8 +698,10 @@ body::after {
           state.selected = 0;
         }
         render();
-        // Put keyboard focus on the listbox so Arrow/Enter work immediately.
-        if (state.items.length > 0 && AUTO_CLOSE) {
+        // Put keyboard focus on the listbox so Arrow/Enter/1-9 work right away.
+        // Fine-pointer devices get this regardless of AUTO_CLOSE — a manually
+        // opened desktop tab is still keyboard-driven.
+        if (state.items.length > 0 && !IS_TOUCH) {
           itemsEl.focus();
         }
       })
@@ -756,10 +771,18 @@ body::after {
             showToast(IS_ZH ? '已发送到电脑' : 'Sent to computer');
             // The desktop popup closes after a beat so the user sees feedback;
             // a plain tab (no auto_close) stays open so more items can be
-            // pasted in a row.  The popup is opened via webbrowser.open_new
-            // (no window.opener), so gate on the auto_close flag instead.
+            // pasted in a row.  For the --app popup, POST /api/quickpaste/done
+            // so main.py kills the process (the REAL close — window.close() is
+            // blocked in a plain tab, which is why the v1.0.29 popup never
+            // actually closed).  The plain-tab fallback cannot be closed, so
+            // show a confirmation instead of a dead close attempt.
             if (AUTO_CLOSE) {
-              setTimeout(function () { closeWindow(); }, 350);
+              postDone();
+              if (IS_APP_WINDOW) {
+                setTimeout(function () { closeWindow(); }, 350);
+              } else {
+                showPastedFallback();
+              }
             }
           } else {
             showToast(data.error || (IS_ZH ? '发送失败' : 'Paste failed'), true);
@@ -817,13 +840,42 @@ body::after {
      Window close
      ═══════════════════════════════════════════════════════════════ */
 
+  // POST /api/quickpaste/done so main.py terminates the --app process (the
+  // real close mechanism).  Idempotent — the paste path and the 60s safety
+  // net both call it, and only the first matters.
+  var donePosted = false;
+  function postDone() {
+    if (donePosted) return;
+    donePosted = true;
+    // Fire-and-forget; a dropped request is covered by the 60s safety net.
+    fetch(apiUrl('/api/quickpaste/done'), {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: '{}',
+    }).catch(function () { /* ignore */ });
+  }
+
+  // Plain-tab fallback (no --app available): the popup cannot be
+  // script-closed, so after a successful paste drop the item list and show a
+  // clear done state instead of leaving dead close buttons.  Accepted
+  // degradation — the user closes the tab manually.
+  function showPastedFallback() {
+    itemsEl.innerHTML =
+      '<div class="qp-empty">' +
+        '<div class="qp-empty__icon">&#x2705;</div>' +
+        '<div class="qp-empty__text">' + (IS_ZH ? '✓ 已粘贴 — 可以关闭此标签页' : '✓ Pasted — you can close this tab') + '</div>' +
+      '</div>';
+  }
+
   function closeWindow() {
-    // The desktop popup is opened via webbrowser.open_new (no window.opener),
-    // so the old opener gate would silently disable every close path.  Only
-    // the auto_close popup (main.py) attempts to close; window.close() is a
-    // silent no-op in a plain tab, so a non-auto_close tab keeps the Esc/X
-    // affordances hidden (they would be dead buttons).
+    // Only the auto_close popup (main.py) attempts to close; window.close()
+    // is a silent no-op in a plain tab, so a non-auto_close tab keeps the
+    // Esc/X affordances hidden (they would be dead buttons).
     if (!AUTO_CLOSE) { return; }
+    // Ask main.py to kill the --app process first — that is what actually
+    // closes the popup.  window.close() stays as a harmless extra attempt
+    // (it can work for some script-opened windows).
+    postDone();
     try { window.close(); } catch (e) { /* ignore */ }
   }
 
@@ -963,6 +1015,21 @@ body::after {
     var key = e.key;
     var n = state.items.length;
 
+    // ── Escape → close ──────────────────────────────────────────
+    // Gated on AUTO_CLOSE inside closeWindow(); handled first so it works
+    // even on touch pages (where navigation below is disabled).
+    if (key === 'Escape') {
+      e.preventDefault();
+      closeWindow();
+      return;
+    }
+
+    // ── Keyboard navigation is a fine-pointer affordance ─────────
+    // A coarse-pointer (touch) page relies on tapping items — its hint reads
+    // "Tap an item".  This is independent of AUTO_CLOSE: a manually-opened
+    // desktop tab (no auto_close) still navigates with the keyboard.
+    if (IS_TOUCH) { return; }
+
     // ── Number keys 1-9 → direct paste ──────────────────────────
     if (key >= '1' && key <= '9') {
       e.preventDefault();
@@ -1012,13 +1079,6 @@ body::after {
       return;
     }
 
-    // ── Escape → close ──────────────────────────────────────────
-    if (key === 'Escape') {
-      e.preventDefault();
-      closeWindow();
-      return;
-    }
-
     // ── Backspace → clear selection ─────────────────────────────
     if (key === 'Backspace') {
       e.preventDefault();
@@ -1039,9 +1099,10 @@ body::after {
      Init — header text, window size, then fetch history
      ═══════════════════════════════════════════════════════════════ */
 
-  // Adapt the header hints to how the tab was opened: the desktop popup
-  // (auto_close=1) is keyboard-driven; a plain tab (auto_close absent — e.g.
-  // someone opened the URL manually) keeps the simple tap hint.
+  // Adapt the header hints to the input method: coarse-pointer (touch) pages
+  // tap items; fine-pointer (desktop) pages use the keyboard.  This is
+  // independent of AUTO_CLOSE — a manually-opened desktop tab (no auto_close)
+  // still gets the keyboard hint.  The --app popup additionally advertises Esc.
   var subtitleEl = document.getElementById('qpSubtitle');
   var titleEl = document.getElementById('qpTitle');
   if (titleEl) {
@@ -1049,9 +1110,10 @@ body::after {
     titleEl.style.visibility = 'visible';
   }
   // Localize the hardcoded HTML strings now that the locale is known, and
-  // bind the X button.  The desktop popup opens via webbrowser.open_new (no
-  // window.opener) with auto_close=1, so show the button only for it — a
-  // plain tab hides it because window.close() is a silent no-op there.
+  // bind the X button.  Only an --app window shows the X — it is the one
+  // close affordance that actually works there (POST done + process kill).
+  // A plain-tab fallback hides it because window.close() is a silent no-op
+  // and there is no process to kill.
   var closeBtn = document.getElementById('qpCloseBtn');
   if (closeBtn) {
     closeBtn.title = IS_ZH ? '关闭 (Esc)' : 'Close (Esc)';
@@ -1059,15 +1121,19 @@ body::after {
       e.preventDefault();
       closeWindow();
     });
-    if (!AUTO_CLOSE) {
+    if (!IS_APP_WINDOW) {
       closeBtn.style.display = 'none';
     }
   }
   itemsEl.setAttribute('aria-label', IS_ZH ? '剪贴板条目' : 'Clipboard items');
   if (subtitleEl) {
-    subtitleEl.textContent = AUTO_CLOSE
-      ? (IS_ZH ? '按 1-9 粘贴 · ↑↓ 选择 · Esc 关闭' : 'Press 1–9 to paste · ↑↓ to navigate · Esc to close')
-      : (IS_ZH ? '点击条目即可发送到电脑' : 'Tap an item to paste to this computer');
+    if (IS_TOUCH) {
+      subtitleEl.textContent = IS_ZH ? '点击条目即可发送到电脑' : 'Tap an item to paste to this computer';
+    } else if (AUTO_CLOSE && IS_APP_WINDOW) {
+      subtitleEl.textContent = IS_ZH ? '按 1-9 粘贴 · ↑↓ 选择 · Esc 关闭' : 'Press 1–9 to paste · ↑↓ to navigate · Esc to close';
+    } else {
+      subtitleEl.textContent = IS_ZH ? '按 1-9 粘贴 · ↑↓ 选择' : 'Press 1–9 to paste · ↑↓ to navigate';
+    }
   }
 
   // Ask the browser for a small floating-window size. Only the desktop popup
@@ -1080,6 +1146,13 @@ body::after {
         (screen.availHeight - 540) / 2
       );
     } catch (e) { /* ignore */ }
+  }
+
+  // 60s safety net: an abandoned --app popup (opened but never pasted) would
+  // otherwise leak its process.  POST done after 60s so main.py kills it.
+  // postDone() is idempotent, so a paste that already fired it is a no-op.
+  if (AUTO_CLOSE) {
+    setTimeout(postDone, 60000);
   }
 
   if (!HOST) {
