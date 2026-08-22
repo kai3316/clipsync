@@ -399,7 +399,7 @@ class TestFileTransferManager:
         received_args: list[tuple] = []
 
         self.mgr.set_on_transfer_progress(lambda tid, p: progress_vals.append(p))
-        self.mgr.set_on_transfer_complete(lambda tid, ok: complete_args.append((tid, ok)))
+        self.mgr.set_on_transfer_complete(lambda tid, ok, cancelled, status: complete_args.append((tid, ok)))
         self.mgr.set_on_file_received(lambda tid, path, name: received_args.append((tid, path, name)))
 
         file_data = b"callback test data"
@@ -538,7 +538,7 @@ class TestFileTransferManager:
 
     def test_file_reject_cleans_up_outgoing(self):
         complete_calls: list[tuple] = []
-        self.mgr.set_on_transfer_complete(lambda tid, ok: complete_calls.append((tid, ok)))
+        self.mgr.set_on_transfer_complete(lambda tid, ok, cancelled, status: complete_calls.append((tid, ok)))
 
         path = self._create_temp_file("reject_me.txt", 100)
         tid = self.mgr.send_file(path, self._broadcast_fn)
@@ -551,7 +551,7 @@ class TestFileTransferManager:
 
     def test_file_complete_success(self):
         complete_calls: list[tuple] = []
-        self.mgr.set_on_transfer_complete(lambda tid, ok: complete_calls.append((tid, ok)))
+        self.mgr.set_on_transfer_complete(lambda tid, ok, cancelled, status: complete_calls.append((tid, ok)))
 
         path = self._create_temp_file("ok.txt", 50)
         tid = self.mgr.send_file(path, self._broadcast_fn)
@@ -567,7 +567,7 @@ class TestFileTransferManager:
 
     def test_file_complete_error_status(self):
         complete_calls: list[tuple] = []
-        self.mgr.set_on_transfer_complete(lambda tid, ok: complete_calls.append((tid, ok)))
+        self.mgr.set_on_transfer_complete(lambda tid, ok, cancelled, status: complete_calls.append((tid, ok)))
 
         path = self._create_temp_file("err.txt", 50)
         tid = self.mgr.send_file(path, self._broadcast_fn)
@@ -650,7 +650,7 @@ class TestFileTransferManager:
                 self.mgr._transfers["stale001"]["_last_activity"] = 0  # epoch
 
         complete_calls: list[tuple] = []
-        self.mgr.set_on_transfer_complete(lambda tid, ok: complete_calls.append((tid, ok)))
+        self.mgr.set_on_transfer_complete(lambda tid, ok, cancelled, status: complete_calls.append((tid, ok)))
 
         self.mgr.cleanup_stale_transfers()
 
@@ -729,7 +729,7 @@ class TestFileTransferManager:
         os.unlink(path)
 
         complete_calls: list[tuple] = []
-        self.mgr.set_on_transfer_complete(lambda tid, ok: complete_calls.append((tid, ok)))
+        self.mgr.set_on_transfer_complete(lambda tid, ok, cancelled, status: complete_calls.append((tid, ok)))
 
         self.mgr.handle_message("file_ack", {"transfer_id": tid}, self._broadcast_fn)
         time.sleep(0.2)

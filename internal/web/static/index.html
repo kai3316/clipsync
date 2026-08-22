@@ -903,6 +903,11 @@
       box-shadow: 0 0 14px var(--clipsync-accent-glow);
     }
 
+    /* Pressed feedback for the most-tapped element in the app. */
+    .history-item:active {
+      transform: scale(0.985);
+    }
+
     /* Keep the cyan pinned edge on hover (border shorthand would override it). */
     .history-item--pinned:hover {
       border-left-color: var(--clipsync-accent);
@@ -1304,12 +1309,20 @@
       border-radius: var(--clipsync-radius);
       font-size: 12px;
       gap: var(--clipsync-space-3);
+      /* The right-side IP/uptime wraps instead of being clipped on narrow
+         screens (the panel area has overflow-x:hidden). */
+      flex-wrap: wrap;
+      row-gap: var(--clipsync-space-1);
     }
     .overview-status-bar__left,
     .overview-status-bar__right {
       display: flex;
       align-items: center;
       gap: var(--clipsync-space-2);
+      min-width: 0;
+    }
+    .overview-status-bar__right {
+      flex-wrap: wrap;
     }
     .overview-status-bar__sync {
       font-weight: 600;
@@ -1654,11 +1667,24 @@
       border: 1px solid var(--clipsync-border-glow);
       background: color-mix(in srgb, var(--clipsync-accent) 8%, transparent);
       transition: all var(--clipsync-transition);
+      cursor: pointer;
+      user-select: none;
+      -webkit-user-select: none;
     }
 
     .overview-chip:hover {
       box-shadow: 0 0 14px var(--clipsync-accent-glow);
       border-color: var(--clipsync-accent);
+    }
+
+    .overview-chip:focus-visible,
+    .overview-feed__item:focus-visible {
+      outline: 2px solid var(--clipsync-accent);
+      outline-offset: 1px;
+    }
+
+    .overview-chip:active {
+      transform: scale(0.97);
     }
 
     .overview-empty-state {
@@ -1733,6 +1759,11 @@
     .overview-feed__item:hover {
       background: color-mix(in srgb, var(--clipsync-panel) 60%, transparent);
       border-color: var(--clipsync-border);
+      cursor: pointer;
+    }
+
+    .overview-feed__item:active {
+      transform: scale(0.99);
     }
 
     .overview-feed__icon {
@@ -2761,6 +2792,10 @@
       background: color-mix(in srgb, var(--clipsync-panel-2) 80%, transparent);
     }
 
+    .favorite-item:active {
+      transform: scale(0.985);
+    }
+
     .favorite-item__title {
       font-weight: 600;
       font-size: 13px;
@@ -3464,6 +3499,29 @@
       cursor: grabbing;
     }
 
+    /* Drag-to-reorder affordance: a subtle grip icon that appears on hover. */
+    .favorite-item__drag-handle {
+      flex-shrink: 0;
+      align-self: center;
+      margin-left: -4px;
+      margin-right: 2px;
+      font-size: 14px;
+      line-height: 1;
+      color: var(--clipsync-fg-subtle);
+      cursor: grab;
+      opacity: 0.25;
+      transition: opacity var(--clipsync-transition-fast);
+    }
+
+    .favorite-item:hover .favorite-item__drag-handle {
+      opacity: 0.85;
+    }
+
+    .favorite-item__drag-handle:hover {
+      opacity: 1;
+      color: var(--clipsync-accent);
+    }
+
     /* ═══════════════════════════════════════════════════════════════
        Neon source-app badge style
        ═══════════════════════════════════════════════════════════════ */
@@ -3879,6 +3937,14 @@
 
     .settings-dialog__tab-label {
       flex: 1;
+    }
+
+    .settings-dialog__tab-dirty {
+      font-size: 10px;
+      line-height: 1;
+      color: var(--clipsync-warning);
+      flex-shrink: 0;
+      text-shadow: 0 0 6px var(--clipsync-warning);
     }
 
     /* Right content area */
@@ -4361,6 +4427,19 @@
       padding: 0;
     }
 
+    /* Expand the touch target to the 44px touch-target guideline without
+       enlarging the visible 44x26 track — the transparent pseudo-element is
+       part of the button's hit area. */
+    .settings-toggle::before {
+      content: '';
+      position: absolute;
+      top: 50%;
+      left: 50%;
+      width: 44px;
+      height: 44px;
+      transform: translate(-50%, -50%);
+    }
+
     .settings-toggle--disabled {
       opacity: 0.45;
       cursor: not-allowed;
@@ -4373,18 +4452,19 @@
 
     .settings-toggle__knob {
       position: absolute;
-      top: 3px;
+      top: 50%;
       left: 3px;
       width: 20px;
       height: 20px;
       border-radius: 50%;
       background: #fff;
+      transform: translateY(-50%);
       transition: transform 0.2s cubic-bezier(0.34, 1.56, 0.64, 1);
       box-shadow: 0 1px 3px rgba(0, 0, 0, 0.2);
     }
 
     .settings-toggle--on .settings-toggle__knob {
-      transform: translateX(18px);
+      transform: translate(18px, -50%);
     }
 
     /* About grid */
@@ -4961,6 +5041,11 @@
         display: inline-flex;
         align-items: center;
         justify-content: center;
+      }
+      .settings-toggle {
+        width: 44px;
+        height: 44px;
+        border-radius: 22px;
       }
     }
 

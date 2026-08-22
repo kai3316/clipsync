@@ -54,8 +54,8 @@ def show_language_onboarding(parent) -> str | None:
 
     # ── Title ────────────────────────────────────────────────────
     ctk.CTkLabel(
-        body, text="🌐",
-        font=ctk.CTkFont(size=30),
+        body, text="ClipSync",
+        font=ctk.CTkFont(size=30, weight="bold"),
     ).pack(pady=(0, 6))
     ctk.CTkLabel(
         body, text="选择语言 · Choose Language",
@@ -70,11 +70,14 @@ def show_language_onboarding(parent) -> str | None:
     ).pack(pady=(0, 18))
 
     # ── Language options (each shown in both languages) ──────────
+    cards: list[ctk.CTkFrame] = []
+    focus_color = ("#0891B2", "#22D3EE")
+    idle_color = ("gray75", "gray30")
     for code, native, other in LANGUAGE_OPTIONS:
         card = ctk.CTkFrame(
             body, corner_radius=12,
             fg_color=("gray92", "gray17"),
-            border_width=1, border_color=("gray75", "gray30"),
+            border_width=1, border_color=idle_color,
             cursor="hand2",
         )
         card.pack(fill="x", pady=6)
@@ -99,6 +102,49 @@ def show_language_onboarding(parent) -> str | None:
         lbl_other.pack(pady=(0, 14))
         lbl_other.bind("<Button-1>", pick_cmd)
 
+        # Keyboard support: cards are focusable and selectable with
+        # Enter/Space; Tab / Shift+Tab cycle between them.
+        card.bind("<Return>", lambda _e, c=code: _pick(c))
+        card.bind("<space>", lambda _e, c=code: _pick(c))
+        card.bind(
+            "<FocusIn>",
+            lambda _e, c=card: c.configure(border_color=focus_color),
+        )
+        card.bind(
+            "<FocusOut>",
+            lambda _e, c=card: c.configure(border_color=idle_color),
+        )
+        cards.append(card)
+
+    # ── Keyboard navigation between cards ─────────────────────────
+    n = len(cards)
+
+    def _focus(index):
+        try:
+            cards[index % n].focus_set()
+        except Exception:
+            pass
+
+    def _on_tab(event):
+        try:
+            cur = cards.index(event.widget) if event.widget in cards else -1
+        except Exception:
+            cur = -1
+        _focus(cur + 1)
+        return "break"
+
+    def _on_shift_tab(event):
+        try:
+            cur = cards.index(event.widget) if event.widget in cards else -1
+        except Exception:
+            cur = 0
+        _focus(cur - 1)
+        return "break"
+
+    for card in cards:
+        card.bind("<Tab>", _on_tab)
+        card.bind("<Shift-Tab>", _on_shift_tab)
+
     # ── Footer hint ──────────────────────────────────────────────
     ctk.CTkLabel(
         body,
@@ -107,6 +153,17 @@ def show_language_onboarding(parent) -> str | None:
         text_color=("gray45", "gray60"),
         justify="center",
     ).pack(pady=(14, 0))
+
+    # ── Modal behavior + Escape-to-dismiss ────────────────────────
+    dlg.update()
+    dlg.transient(parent)
+    try:
+        dlg.grab_set()
+    except Exception:
+        pass
+    dlg.bind("<Escape>", lambda _e: dlg.destroy())
+    if n:
+        _focus(0)
 
     dlg.wait_window()
     return result[0]

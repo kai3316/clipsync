@@ -68,9 +68,12 @@
         }
       });
       document.addEventListener('selectstart', function (e) {
-        if (!isEditable(e.target)) {
-          e.preventDefault();
-        }
+        // Allow text selection in form fields and anything explicitly marked
+        // .selectable (clip preview text is selectable on purpose — it's a
+        // clipboard manager, so dragging out part of a clip must work).
+        if (isEditable(e.target)) return;
+        if (e.target && e.target.closest && e.target.closest('.selectable')) return;
+        e.preventDefault();
       });
 
       // Parse server URL and token from the current page
@@ -221,13 +224,18 @@
         var self = this;
         store.loading = store.initialLoad;
 
-        // Failsafe: force loading off after 2s no matter what
+        // Failsafe: never leave the UI spinning forever, but don't flip to the
+        // empty-state panels while the first fetch is still in flight either.
+        // Wait up to 8s for the fetches to resolve/reject; if they haven't by
+        // then, surface an explicit "still loading / retry" state via
+        // store.loadError instead of the misleading empty states.
         var failsafeTimer = setTimeout(function () {
           if (store.loading || store.initialLoad) {
             store.loading = false;
             store.initialLoad = false;
+            store.loadError = true;
           }
-        }, 2000);
+        }, 8000);
 
         try {
           var promises = [
@@ -254,18 +262,30 @@
           // Also load overview
           store.fetchOverview();
 
-          Promise.all(promises).catch(function () {
-            // Surface the failure instead of leaving an empty UI silently.
-            store.showToast(self.t('ui.load_failed'), 3000);
-          }).finally(function () {
-            clearTimeout(failsafeTimer);
-            store.loading = false;
-            store.initialLoad = false;
-          });
+          Promise.all(promises)
+            .then(function () {
+              store.loadError = false;
+            })
+            .catch(function () {
+              // A fetch genuinely rejected — surface it instead of leaving an
+              // empty UI silently. Only flip to the error state when there is
+              // nothing to show yet: a background reconnect refresh failing
+              // shouldn't hide already-loaded history/favorites.
+              if (store.history.length === 0 && store.favorites.length === 0) {
+                store.loadError = true;
+              }
+              store.showToast(self.t('ui.load_failed'), 3000);
+            })
+            .finally(function () {
+              clearTimeout(failsafeTimer);
+              store.loading = false;
+              store.initialLoad = false;
+            });
         } catch (e) {
           clearTimeout(failsafeTimer);
           store.loading = false;
           store.initialLoad = false;
+          store.loadError = true;
         }
       },
 
@@ -287,6 +307,7 @@
 
       loadDevices: function () {
         return ClipsyncAPI.getDevices().then(function (res) {
+          store.devicesLoadFailed = false;
           store.devices.splice(0, store.devices.length);
           var devs = (res && res.devices) ? res.devices : [];
           for (var i = 0; i < devs.length; i++) {
@@ -298,6 +319,9 @@
             store.syncPairingRequests(res.pending_pairings);
           }
           return devs;
+        }).catch(function (e) {
+          store.devicesLoadFailed = true;
+          throw e;
         });
       },
 
@@ -354,6 +378,11 @@
 
         // Escape – clear selection, preview, close context menu
         if (e.key === 'Escape') {
+          // A client-side confirm/prompt dialog owns Escape while it is up —
+          // don't clear selection / close panels underneath it too.
+          if (store.clientDialog) {
+            return;
+          }
           // Don't steal Escape from a focused form field (history/favorites
           // search boxes, inline editors, dialog inputs) — the focused control
           // owns Escape there (clears its own input / closes its own popup).
@@ -378,9 +407,9 @@
           store.clearSelection();
           store.previewItem = null;
           store.contextMenu.visible = false;
-          if (store.settingsPanelVisible) {
-            store.closeSettingsPanel();
-          }
+          // NOTE: the settings panel handles its own Escape (via a listener it
+          // installs while open) so closing with unsaved staged edits can
+          // prompt to confirm discarding them.
           return;
         }
 

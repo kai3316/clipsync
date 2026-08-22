@@ -8,13 +8,73 @@ import customtkinter as ctk
 from internal.i18n import T
 
 # ── Icon + color scheme per dialog type ──────────────────────────
-_INFO_ICON = "ℹ️"     # ℹ
-_WARN_ICON = "⚠️"     # ⚠
-_ERROR_ICON = "❌"          # ❌
+# Plain glyphs (not emoji) so they render everywhere, including Linux
+# systems without an emoji font. They are shown large and colored.
+_INFO_ICON = "i"
+_WARN_ICON = "!"
+_ERROR_ICON = "×"
 
 _INFO_COLOR = "#0891B2"
 _WARN_COLOR = "#F39C12"
 _ERROR_COLOR = "#E74C3C"
+
+
+def _system_prefers_dark() -> bool:
+    """Best-effort OS-level dark-mode detection. Returns False on any failure.
+
+    Windows: HKCU Personalize AppsUseLightTheme == 0 means dark.
+    macOS:   ``defaults read -g AppleInterfaceStyle`` == "Dark".
+    Linux:   gsettings ``color-scheme``/``gtk-theme`` containing "dark".
+    """
+    try:
+        import sys
+        if sys.platform == "win32":
+            import winreg
+            key = winreg.OpenKey(
+                winreg.HKEY_CURRENT_USER,
+                r"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize",
+            )
+            try:
+                value, _ = winreg.QueryValueEx(key, "AppsUseLightTheme")
+                return int(value) == 0
+            finally:
+                winreg.CloseKey(key)
+        if sys.platform == "darwin":
+            import subprocess
+            out = subprocess.run(
+                ["defaults", "read", "-g", "AppleInterfaceStyle"],
+                capture_output=True, text=True, timeout=3,
+            ).stdout.strip()
+            return out == "Dark"
+        # Linux (GTK/GNOME-based). Both keys are tried, then we bail.
+        import subprocess
+        for schema, key in (
+            ("org.gnome.desktop.interface", "color-scheme"),
+            ("org.gnome.desktop.interface", "gtk-theme"),
+        ):
+            try:
+                out = subprocess.run(
+                    ["gsettings", "get", schema, key],
+                    capture_output=True, text=True, timeout=3,
+                ).stdout.strip().lower()
+                if "dark" in out:
+                    return True
+            except Exception:
+                pass
+    except Exception:
+        pass
+    return False
+
+
+def _is_dark_mode(appearance_mode: str) -> bool:
+    """Resolve an appearance-mode string ('system'|'light'|'dark') to a
+    concrete boolean. 'system' follows the OS preference, defaulting to
+    light when the OS setting cannot be detected."""
+    if appearance_mode == "dark":
+        return True
+    if appearance_mode == "light":
+        return False
+    return _system_prefers_dark()
 
 
 def _dialog(parent, title, message, icon, accent_color, buttons):
@@ -51,7 +111,8 @@ def _dialog(parent, title, message, icon, accent_color, buttons):
     title_row.pack(fill="x", pady=(0, 10))
 
     ctk.CTkLabel(
-        title_row, text=icon, font=ctk.CTkFont(size=22),
+        title_row, text=icon, font=ctk.CTkFont(size=24, weight="bold"),
+        text_color=accent_color,
     ).pack(side="left", padx=(0, 10))
 
     ctk.CTkLabel(
@@ -72,10 +133,11 @@ def _dialog(parent, title, message, icon, accent_color, buttons):
     btn_row = ctk.CTkFrame(dlg, fg_color="transparent")
     btn_row.pack(fill="x", padx=24, pady=(0, 20))
 
+    default_btn = None
     for i, (label, color) in enumerate(buttons):
         if isinstance(color, tuple):
-            # Tuple (light, dark) — use slightly darker variants for hover
-            hover = color
+            # Tuple (light, dark) — derive a distinct hover for both modes
+            hover = tuple(_darken(c, 0.12) for c in color)
         elif color == "transparent":
             hover = ("gray85", "gray25")
         elif color.startswith("#"):
@@ -89,16 +151,32 @@ def _dialog(parent, title, message, icon, accent_color, buttons):
             font=ctk.CTkFont(size=12),
             command=lambda v=i: _close(v),
         )
+        if i == 0:
+            default_btn = btn
         btn.pack(side="right", padx=(6 if i > 0 else 0, 0))
 
     def _close(value):
-        result[0] = (value == 0)
-        dlg.destroy()
+        try:
+            if dlg.winfo_exists():
+                result[0] = (value == 0)
+                dlg.destroy()
+        except Exception:
+            pass
 
     dlg.update()
     dlg.transient(parent)
     try:
         dlg.grab_set()
+    except Exception:
+        pass
+
+    # Keyboard handling: Enter triggers the primary button, Escape the cancel
+    # (last) button. Return "break" so a focused child widget can't also fire.
+    try:
+        dlg.bind("<Return>", lambda e: (_close(0), "break")[1])
+        dlg.bind("<Escape>", lambda e: (_close(len(buttons) - 1), "break")[1])
+        if default_btn is not None:
+            default_btn.focus_force()
     except Exception:
         pass
 
@@ -201,6 +279,12 @@ def ask_string(parent, title, prompt, initial_value="", show=""):
     btn_row = ctk.CTkFrame(dlg, fg_color="transparent")
     btn_row.pack(fill="x", padx=24, pady=(0, 20))
 
+    default_btn = ctk.CTkButton(
+        btn_row, text=T("ui.save"), width=90, height=32,
+        fg_color=_INFO_COLOR,
+        font=ctk.CTkFont(size=12),
+        command=lambda: _on_close(entry_var.get()),
+    )
     ctk.CTkButton(
         btn_row, text=T("ui.cancel"), width=90, height=32,
         fg_color="transparent", border_width=1,
@@ -210,24 +294,34 @@ def ask_string(parent, title, prompt, initial_value="", show=""):
         font=ctk.CTkFont(size=12),
         command=lambda: _on_close(None),
     ).pack(side="right", padx=(6, 0))
-    ctk.CTkButton(
-        btn_row, text=T("ui.save"), width=90, height=32,
-        fg_color=_INFO_COLOR,
-        font=ctk.CTkFont(size=12),
-        command=lambda: _on_close(entry_var.get()),
-    ).pack(side="right")
+    default_btn.pack(side="right")
 
-    entry.bind("<Return>", lambda e: _on_close(entry_var.get()))
-    entry.bind("<Escape>", lambda e: _on_close(None))
+    # The entry-level bindings clear/commit immediately and return "break" so
+    # the dialog-level bindings below don't also fire against a destroyed
+    # dialog. Dialog-level bindings keep Return/Escape working even after the
+    # user tabs/clicks onto a button.
+    entry.bind("<Return>", lambda e: (_on_close(entry_var.get()), "break")[1])
+    entry.bind("<Escape>", lambda e: (_on_close(None), "break")[1])
 
     def _on_close(value):
-        result[0] = value
-        dlg.destroy()
+        try:
+            if dlg.winfo_exists():
+                result[0] = value
+                dlg.destroy()
+        except Exception:
+            pass
 
     dlg.update()
     dlg.transient(parent)
     try:
         dlg.grab_set()
+    except Exception:
+        pass
+
+    try:
+        dlg.bind("<Return>", lambda e: (_on_close(entry_var.get()), "break")[1])
+        dlg.bind("<Escape>", lambda e: (_on_close(None), "break")[1])
+        default_btn.focus_force()
     except Exception:
         pass
 

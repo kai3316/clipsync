@@ -27,11 +27,15 @@
 
     template: `<div
       class="history-item card"
+      role="button"
+      tabindex="0"
+      :aria-label="copyButtonTitle"
       :class="{
         'history-item--pinned': item.pinned,
         'history-item--selected': isSelected
       }"
       @click="onClick"
+      @keydown="onKeyDown"
       @mouseenter="onMouseEnter"
       @mouseleave="onMouseLeave"
       @contextmenu.prevent="onContextMenu"
@@ -44,7 +48,7 @@
         <span>{{ typeIcon }}</span>
       </div>
       <div class="history-item__body">
-        <div class="history-item__text">{{ item.text_preview || t('history.empty_preview') }}</div>
+        <div class="history-item__text selectable">{{ item.text_preview || t('history.empty_preview') }}</div>
         <div class="history-item__meta">
           <span class="history-item__time">{{ relativeTime }}</span>
           <span class="history-item__type">{{ typeLabel }}</span>
@@ -62,6 +66,7 @@
           :class="{ 'history-item__action-btn--active': item.pinned }"
           @click="togglePin"
           :title="item.pinned ? t('history.unpin_tooltip') : t('history.pin_tooltip')"
+          :aria-label="item.pinned ? t('history.unpin_tooltip') : t('history.pin_tooltip')"
         >&#128204;</button>
         <button
           class="history-item__action-btn"
@@ -73,6 +78,7 @@
           class="history-item__action-btn history-item__action-btn--danger"
           @click="deleteItem"
           :title="t('history.delete_tooltip')"
+          :aria-label="t('history.delete_tooltip')"
         >&#128465;</button>
       </div>
     </div>`,
@@ -135,8 +141,25 @@
     },
 
     methods: {
+      onKeyDown: function (e) {
+        // Only the card itself triggers the primary action — inner action
+        // buttons handle their own Enter/Space. Check the target so a focused
+        // action button's keypress doesn't also paste/copy.
+        if (e.target !== this.$el) return;
+        if (e.key === 'Enter' || e.key === ' ') {
+          e.preventDefault();
+          this.onClick(e);
+        }
+      },
+
       onClick: function (e) {
         var store = this.store;
+
+        // Never treat a click that landed on an inner action button (pin/copy/
+        // delete) as a card primary-action — those buttons own their clicks.
+        if (e.target && e.target.closest && e.target.closest('button, .history-item__actions')) {
+          return;
+        }
 
         // A touch long-press fires, then the browser synthesizes a click —
         // swallow it so the freshly-opened context menu isn't immediately
@@ -291,7 +314,8 @@
           x: e.clientX,
           y: e.clientY,
           mode: 'history-item',
-          target: this.item
+          target: this.item,
+          opener: e.currentTarget || e.target
         };
       },
 
@@ -349,7 +373,8 @@
           x: x,
           y: y,
           mode: 'history-item',
-          target: this.item
+          target: this.item,
+          opener: this.$el
         };
         // The browser synthesizes a click right after a long-press; the
         // context-menu component listens on document in the capture phase and

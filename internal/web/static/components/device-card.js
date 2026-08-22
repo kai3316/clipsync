@@ -266,6 +266,7 @@
           y: e.clientY,
           mode: 'device',
           target: this.device,
+          opener: e.currentTarget || e.target,
         };
       },
     },

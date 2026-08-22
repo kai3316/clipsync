@@ -114,6 +114,17 @@
         advancedSaving: false,
         resetting: false,
         restarting: false,
+
+        // Unsaved-changes tracking for staged sections (section id -> true).
+        dirtySections: {},
+        // True while populateFromCache() is filling local fields so those
+        // programmatic writes don't mark sections as dirty.
+        _skipDirty: false,
+        // Element focused before the dialog opened (restored on close).
+        _prevFocus: null,
+        // True while the "discard unsaved changes?" confirm is up, so an Escape
+        // (which the client-dialog handles by cancelling) doesn't reopen it.
+        _closingPromptOpen: false,
       };
     },
 
@@ -141,6 +152,12 @@
 
       uiBackend: function () {
         return this.store.uiBackend || 'webview';
+      },
+
+      // True when any staged section has unsaved edits.
+      hasDirtySections: function () {
+        var d = this.dirtySections;
+        return Object.keys(d).some(function (k) { return !!d[k]; });
       },
 
       // Derived from the live web-port / LAN-IP fields so editing the port (or
@@ -182,18 +199,19 @@
       sectionTabs: function () {
         // Plain-text labels, no emoji — the settings_nav.* translations no
         // longer carry emoji prefixes, so there is no icon column here.
+        var dirty = this.dirtySections;
         return [
-          { id: 'appearance',    label: this.t('settings_nav.appearance') },
-          { id: 'network',       label: this.t('settings_nav.network') },
-          { id: 'web',           label: this.t('settings_nav.web_companion') },
-          { id: 'translation',   label: this.t('settings_nav.translation') },
-          { id: 'filter',        label: this.t('settings_nav.filter') },
-          { id: 'security',      label: this.t('settings_nav.security') },
-          { id: 'advanced',      label: this.t('settings_nav.advanced') },
-          { id: 'logs',          label: this.t('settings_nav.logs') },
-          { id: 'data',          label: this.t('settings.data') },
-          { id: 'about',         label: this.t('settings_nav.about') },
-          { id: 'danger',        label: this.t('settings_window.danger_zone') },
+          { id: 'appearance',    label: this.t('settings_nav.appearance'),     dirty: false },
+          { id: 'network',       label: this.t('settings_nav.network'),        dirty: !!dirty['network'] },
+          { id: 'web',           label: this.t('settings_nav.web_companion'),  dirty: !!dirty['web'] },
+          { id: 'translation',   label: this.t('settings_nav.translation'),    dirty: !!dirty['translation'] },
+          { id: 'filter',        label: this.t('settings_nav.filter'),         dirty: !!dirty['filter'] },
+          { id: 'security',      label: this.t('settings_nav.security'),       dirty: !!dirty['security'] },
+          { id: 'advanced',      label: this.t('settings_nav.advanced'),       dirty: !!dirty['advanced'] },
+          { id: 'logs',          label: this.t('settings_nav.logs'),           dirty: false },
+          { id: 'data',          label: this.t('settings.data'),               dirty: !!dirty['data'] },
+          { id: 'about',         label: this.t('settings_nav.about'),          dirty: false },
+          { id: 'danger',        label: this.t('settings_window.danger_zone'), dirty: false },
         ];
       },
     },
@@ -203,11 +221,20 @@
         this.activeSection = id;
       },
 
+      // Mark a staged section as having unsaved edits (no-op while the local
+      // fields are being (re)filled from the settings cache).
+      markDirty: function (section) {
+        if (this._skipDirty) return;
+        this.dirtySections[section] = true;
+      },
+
       hotkeyLabel: function (key) {
         return this.t('hotkeys.' + key);
       },
 
       populateFromCache: function () {
+        var self = this;
+        this._skipDirty = true;
         var s = this.store.settingsCache || {};
         if (s.port !== undefined) this.port = String(s.port);
         if (s.relay_url !== undefined) this.relayUrl = s.relay_url || '';
@@ -258,6 +285,9 @@
         if (s.favorites_path !== undefined) this.favoritesPath = s.favorites_path || '';
         if (s.hotkeys) this.hotkeys = Object.assign({}, s.hotkeys);
         if (s.hotkeys_enabled !== undefined) this.hotkeysEnabled = !!s.hotkeys_enabled;
+        // Re-enable dirty tracking on the next tick so the watchers fired by
+        // the assignments above don't mark freshly-loaded values as unsaved.
+        this.$nextTick(function () { self._skipDirty = false; });
       },
 
       // ── Save methods ─────────────────────────────────────────────
@@ -275,6 +305,7 @@
           service_type: (self.serviceType || '_clipsync._tcp.local.').trim(),
         }).then(function (res) {
           if (res && res.updated) self.store.mergeSettings(res.updated);
+          self.dirtySections['network'] = false;
           var msg = self.t('settings_window.network_saved');
           if (portChanged) {
             msg += ' ' + self.t('settings_window.web_restart_note_short');
@@ -303,6 +334,7 @@
           web_history_limit: historyLimit,
         }).then(function (res) {
           if (res && res.updated) self.store.mergeSettings(res.updated);
+          self.dirtySections['web'] = false;
           var msg = self.t('settings_window.web_saved');
           if (portChanged) {
             msg += ' ' + self.t('settings_window.web_restart_note_short');
@@ -335,6 +367,7 @@
             : [],
         }).then(function (res) {
           if (res && res.updated) self.store.mergeSettings(res.updated);
+          self.dirtySections['filter'] = false;
           self.store.showToast(self.t('settings_window.filter_saved'), 2000);
         }).catch(function () {
           self.store.showToast(self.t('settings.save_filter_failed'), 2000);
@@ -362,6 +395,7 @@
             self.passwordSet = res.password_set;
           }
           if (res && res.updated) self.store.mergeSettings(res.updated);
+          self.dirtySections['security'] = false;
           self.store.showToast(self.t('settings_window.security_saved'), 3000);
         }).catch(function () {
           self.store.showToast(self.t('settings.save_security_failed'), 2000);
@@ -375,6 +409,7 @@
         ClipsyncAPI.updateSettings({ password: '', clear_password: true }).then(function () {
           self.passwordSet = false;
           self.passwordValue = '';
+          self.dirtySections['security'] = false;
           self.store.showToast(self.t('settings_window.password_cleared'), 2000);
         }).catch(function () {
           self.store.showToast(self.t('settings.clear_password_failed'), 2000);
@@ -470,6 +505,7 @@
           }
           self.translateKeyValue = '';
           if (res && res.updated) self.store.mergeSettings(res.updated);
+          self.dirtySections['translation'] = false;
           self.store.showToast(self.t('settings_window.translation_saved'), 3000);
         }).catch(function () {
           self.store.showToast(self.t('settings.save_translation_failed'), 2000);
@@ -483,6 +519,7 @@
         ClipsyncAPI.updateSettings({ clear_translate_key: true }).then(function (res) {
           self.translateKeySet = false;
           self.translateKeyValue = '';
+          self.dirtySections['translation'] = false;
           self.store.showToast(self.t('settings_window.translate_key_cleared'), 2000);
         }).catch(function () {
           self.store.showToast(self.t('settings.save_translation_failed'), 2000);
@@ -510,6 +547,7 @@
           hotkeys_enabled: self.hotkeysEnabled,
         }).then(function (res) {
           if (res && res.updated) self.store.mergeSettings(res.updated);
+          self.dirtySections['advanced'] = false;
           self.store.showToast(self.t('settings_window.advanced_saved'), 3000);
         }).catch(function () {
           self.store.showToast(self.t('settings.save_advanced_failed'), 2000);
@@ -529,6 +567,7 @@
           favorites_path: (self.favoritesPath || '').trim(),
         }).then(function (res) {
           if (res && res.updated) self.store.mergeSettings(res.updated);
+          self.dirtySections['data'] = false;
           var msg = self.t('settings.data_saved');
           if (dirChanged || favChanged) {
             msg += ' ' + self.t('settings_window.data_restart_note');
@@ -665,6 +704,25 @@
       },
 
       close: function () {
+        var self = this;
+        // Closing with unsaved staged edits asks for confirmation first. The
+        // client-dialog owns focus/keys while it is up, and the visible watcher
+        // restores staged fields when the panel actually closes.
+        if (this.hasDirtySections) {
+          this._closingPromptOpen = true;
+          this.store.confirm(
+            this.t('common.unsaved_changes'),
+            this.t('settings_window.unsaved_changes_confirm')
+          ).then(function () {
+            self._closingPromptOpen = false;
+            self.dirtySections = {};
+            self.store.closeSettingsPanel();
+          }).catch(function () {
+            self._closingPromptOpen = false;
+            /* stay open */
+          });
+          return;
+        }
         this.store.closeSettingsPanel();
       },
 
@@ -881,9 +939,52 @@
         }
       },
 
+      _getFocusable: function () {
+        var overlay = this.$refs.overlay;
+        if (!overlay) return [];
+        var nodes = overlay.querySelectorAll(
+          'a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), ' +
+          'textarea:not([disabled]), [tabindex]:not([tabindex="-1"])'
+        );
+        var result = [];
+        for (var i = 0; i < nodes.length; i++) {
+          // Skip anything hidden via v-show/v-if remnants or display:none.
+          if (nodes[i].offsetParent === null && nodes[i].getClientRects().length === 0) continue;
+          result.push(nodes[i]);
+        }
+        return result;
+      },
+
+      _trapTab: function (e) {
+        // A modal on top (client dialog / server dialog) owns the Tab key.
+        if (this.store.clientDialog || this.store.activeDialog) return;
+        var focusable = this._getFocusable();
+        if (focusable.length === 0) return;
+        var first = focusable[0];
+        var last = focusable[focusable.length - 1];
+        var active = document.activeElement;
+        if (e.shiftKey) {
+          if (active === first || !this.$refs.overlay.contains(active)) {
+            e.preventDefault();
+            last.focus();
+          }
+        } else if (active === last) {
+          e.preventDefault();
+          first.focus();
+        }
+      },
+
       onKeyDown: function (e) {
+        // A modal on top owns the keys — never close/trap over it. The
+        // _closingPromptOpen guard also blocks the trailing half of an Escape
+        // that the client-dialog already handled (it cancels the confirm and
+        // clears store.clientDialog synchronously, so checking that alone would
+        // re-open the confirm in the same keydown).
+        if (this.store.clientDialog || this.store.activeDialog || this._closingPromptOpen) return;
         if (e.key === 'Escape') {
           this.close();
+        } else if (e.key === 'Tab') {
+          this._trapTab(e);
         }
       },
     },
@@ -904,11 +1005,29 @@
           if (this.activeSection === 'logs') this.loadLogs();
           if (this.activeSection === 'security') this.loadCerts();
           var self = this;
+          if (!this._prevFocus) {
+            this._prevFocus = document.activeElement;
+          }
           this.$nextTick(function () {
             document.addEventListener('keydown', self._onKeyDown);
+            // Move focus into the dialog for keyboard users.
+            var focusable = self._getFocusable();
+            if (focusable.length > 0) {
+              focusable[0].focus();
+            }
           });
         } else {
           document.removeEventListener('keydown', this._onKeyDown);
+          // Restore staged fields on close and clear the dirty indicator so a
+          // discard always lands back on the saved server state.
+          this.populateFromCache();
+          this.dirtySections = {};
+          // Return focus to the element that opened the panel.
+          var prev = this._prevFocus;
+          this._prevFocus = null;
+          if (prev && prev.focus && document.contains(prev)) {
+            prev.focus();
+          }
         }
       },
 
@@ -916,6 +1035,51 @@
         if (val === 'logs') this.loadLogs();
         if (val === 'security') this.loadCerts();
       },
+
+      // ── Staged-section dirty tracking ────────────────────────────
+      port: function () { this.markDirty('network'); },
+      relayUrl: function () { this.markDirty('network'); },
+      serviceType: function () { this.markDirty('network'); },
+      webEnabled: function () { this.markDirty('web'); },
+      webPort: function () { this.markDirty('web'); },
+      webHistoryLimit: function () { this.markDirty('web'); },
+      translateUrl: function () { this.markDirty('translation'); },
+      translateKeyValue: function () { this.markDirty('translation'); },
+      filterEnabled: function () { this.markDirty('filter'); },
+      filterCreditCard: function () { this.markDirty('filter'); },
+      filterSSN: function () { this.markDirty('filter'); },
+      filterApiKey: function () { this.markDirty('filter'); },
+      filterPrivateKey: function () { this.markDirty('filter'); },
+      filterPassword: function () { this.markDirty('filter'); },
+      appFilterEnabled: function () { this.markDirty('filter'); },
+      appFilterMode: function () { this.markDirty('filter'); },
+      appFilterList: function () { this.markDirty('filter'); },
+      encryptionEnabled: function () { this.markDirty('security'); },
+      passwordValue: function () { this.markDirty('security'); },
+      notifyDeviceConnect: function () { this.markDirty('security'); },
+      notifyTransfer: function () { this.markDirty('security'); },
+      notifyPairing: function () { this.markDirty('security'); },
+      notifySync: function () { this.markDirty('security'); },
+      historyMax: function () { this.markDirty('advanced'); },
+      syncDebounce: function () { this.markDirty('advanced'); },
+      pollInterval: function () { this.markDirty('advanced'); },
+      receiveDir: function () { this.markDirty('advanced'); },
+      transferTimeout: function () { this.markDirty('advanced'); },
+      maxReconnect: function () { this.markDirty('advanced'); },
+      logLevel: function () { this.markDirty('advanced'); },
+      notificationsEnabled: function () { this.markDirty('advanced'); },
+      pasteToTop: function () { this.markDirty('advanced'); },
+      lowMemory: function () { this.markDirty('advanced'); },
+      retryCapture: function () { this.markDirty('advanced'); },
+      sourceTracking: function () { this.markDirty('advanced'); },
+      dedupMethod: function () { this.markDirty('advanced'); },
+      hotkeysEnabled: function () { this.markDirty('advanced'); },
+      hotkeys: {
+        deep: true,
+        handler: function () { this.markDirty('advanced'); },
+      },
+      dataDir: function () { this.markDirty('data'); },
+      favoritesPath: function () { this.markDirty('data'); },
     },
 
     created: function () {
@@ -924,7 +1088,7 @@
 
     template:
       '<transition name="dialog-fade">' +
-        '<div v-if="visible" class="settings-dialog-overlay" ref="overlay" @click="onOverlayClick" @contextmenu.prevent>' +
+        '<div v-if="visible" class="settings-dialog-overlay" ref="overlay" role="dialog" aria-modal="true" :aria-label="t(\'settings.title\')" @click="onOverlayClick" @contextmenu.prevent>' +
           '<div class="settings-dialog glass-neo">' +
 
             '<!-- Header -->' +
@@ -950,6 +1114,7 @@
                 '>' +
                   '<span v-if="tab.icon" class="settings-dialog__tab-icon">{{ tab.icon }}</span>' +
                   '<span class="settings-dialog__tab-label">{{ tab.label }}</span>' +
+                  '<span v-if="tab.dirty" class="settings-dialog__tab-dirty" :title="t(\'common.unsaved_changes\')">●</span>' +
                 '</button>' +
               '</div>' +
 

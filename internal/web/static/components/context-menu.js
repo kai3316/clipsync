@@ -31,6 +31,8 @@
       return {
         // Measured height of the rendered menu (0 = not yet measured).
         _menuHeight: 0,
+        // Index of the currently focused menuitem (roving tabindex), -1 = none.
+        _focusedIndex: -1,
       };
     },
 
@@ -106,6 +108,72 @@
             self._menuHeight = self.$el.offsetHeight;
           }
         });
+      },
+
+      // ── Keyboard navigation (roving tabindex over the menuitems) ──
+
+      _getMenuItems: function () {
+        if (!this.$el) return [];
+        var nodes = this.$el.querySelectorAll('.context-menu__item');
+        var items = [];
+        for (var i = 0; i < nodes.length; i++) items.push(nodes[i]);
+        return items;
+      },
+
+      _openMenu: function () {
+        var self = this;
+        this.$nextTick(function () {
+          var cm = self.store.contextMenu;
+          if (!cm || !cm.visible) return;
+          self._focusedIndex = -1;
+          self._focusFirstItem();
+        });
+      },
+
+      _focusFirstItem: function () {
+        var items = this._getMenuItems();
+        if (items.length === 0) return;
+        var idx = 0;
+        for (var j = 0; j < items.length; j++) {
+          if (items[j].getAttribute('aria-disabled') !== 'true') { idx = j; break; }
+        }
+        this._focusedIndex = idx;
+        items[idx].focus();
+      },
+
+      _moveFocus: function (dir) {
+        var items = this._getMenuItems();
+        if (items.length === 0) return;
+        var idx = this._focusedIndex;
+        // If nothing is focused yet, wrap from the opposite end.
+        if (idx < 0 || idx >= items.length) idx = dir > 0 ? -1 : items.length;
+        var next = idx;
+        var steps = 0;
+        do {
+          next = (next + dir + items.length) % items.length;
+          steps++;
+        } while (items[next].getAttribute('aria-disabled') === 'true' && steps <= items.length);
+        this._focusedIndex = next;
+        items[next].focus();
+      },
+
+      _activateFocused: function () {
+        var items = this._getMenuItems();
+        if (this._focusedIndex < 0 || this._focusedIndex >= items.length) return;
+        var el = items[this._focusedIndex];
+        if (el.getAttribute('aria-disabled') === 'true') return;
+        if (el.click) el.click();
+      },
+
+      _restoreOpenerFocus: function () {
+        // A modal on top (client confirm/prompt or a server dialog) owns focus
+        // now — let it keep it rather than yanking it back to the opener.
+        if (this.store.clientDialog || this.store.activeDialog) return;
+        var cm = this.store.contextMenu;
+        var opener = cm && cm.opener;
+        if (opener && opener.focus && document.contains(opener)) {
+          opener.focus();
+        }
       },
 
       // ── History item actions ──────────────────────────────────────
@@ -334,6 +402,9 @@
         });
 
         var self = this;
+        // Close the menu before showing the confirm so the menu never sits
+        // behind the modal (and the confirm's buttons can't re-trigger it).
+        this.closeMenu();
         this.store.confirm(this.t('history.delete_title'), this.t('history.delete_confirm'))
           .then(function () {
             ClipsyncAPI.deleteItem(eid).then(function (res) {
@@ -463,11 +534,75 @@
       },
 
       onKeyDown: function (e) {
+        var cm = this.store.contextMenu;
+        if (!cm || !cm.visible) return;
+
+        // A modal (confirm/prompt/alert or server dialog) is on top: the
+        // shortcut keys must not fire through it. Delete/Backspace would
+        // otherwise re-trigger a pending delete-confirm (looping the dialog)
+        // and Ctrl+C would silently clobber the clipboard.
+        if (this.store.clientDialog || this.store.activeDialog) return;
+
         if (e.key === 'Escape') {
-          var cm = this.store.contextMenu;
-          if (cm && cm.visible) {
+          this.closeMenu();
+          return;
+        }
+
+        // The shortcut keys the menu advertises are real: within a history-item
+        // context, Ctrl/Cmd+C copies the item and Delete removes it. Only fire
+        // when the menu targets a history item and no editable field is focused.
+        if (cm.mode !== 'history-item') return;
+        var t = e.target;
+        if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' ||
+            !!(t.isContentEditable) || !!(t.closest && t.closest('[contenteditable]')))) {
+          return;
+        }
+        if ((e.ctrlKey || e.metaKey) && (e.key === 'c' || e.key === 'C')) {
+          e.preventDefault();
+          this.copyItem();
+        } else if (e.key === 'Delete' || e.key === 'Backspace') {
+          e.preventDefault();
+          this.deleteItem();
+        }
+      },
+
+      // Keydown handled on the menu container (keyboard navigation between the
+      // menuitems). Shortcuts (Ctrl+C / Delete) are intentionally NOT handled
+      // here so they bubble up to the document-level onKeyDown.
+      onMenuKeydown: function (e) {
+        var cm = this.store.contextMenu;
+        if (!cm || !cm.visible) return;
+        switch (e.key) {
+          case 'ArrowDown':
+            e.preventDefault();
+            this._moveFocus(1);
+            break;
+          case 'ArrowUp':
+            e.preventDefault();
+            this._moveFocus(-1);
+            break;
+          case 'Home':
+            e.preventDefault();
+            this._focusedIndex = -1;
+            this._moveFocus(1);
+            break;
+          case 'End':
+            e.preventDefault();
+            this._focusedIndex = this._getMenuItems().length;
+            this._moveFocus(-1);
+            break;
+          case 'Enter':
+          case ' ':
+            e.preventDefault();
+            this._activateFocused();
+            break;
+          case 'Escape':
+            e.preventDefault();
+            e.stopPropagation();
             this.closeMenu();
-          }
+            break;
+          default:
+            break;
         }
       },
 
@@ -480,7 +615,12 @@
       // Measure the rendered menu once it appears so menuStyle clamps against
       // the real height (mirrors preview-popover's approach).
       'store.contextMenu.visible': function (val) {
-        if (val) this._measureMenu();
+        if (val) {
+          this._measureMenu();
+          this._openMenu();
+        } else {
+          this._restoreOpenerFocus();
+        }
       },
       'store.contextMenu.mode': function () {
         var cm = this.store.contextMenu;
@@ -512,40 +652,42 @@
       '<div' +
         ' v-if="store.contextMenu.visible"' +
         ' class="context-menu glass-neo"' +
+        ' role="menu"' +
         ' :style="menuStyle"' +
         ' @click.stop' +
         ' @contextmenu.prevent' +
+        ' @keydown="onMenuKeydown"' +
       '>' +
         '<!-- History item mode -->' +
         '<template v-if="store.contextMenu.mode === \'history-item\'">' +
-          '<div class="context-menu__item" @click="pasteToDevice">' +
+          '<div class="context-menu__item" role="menuitem" tabindex="-1" :aria-disabled="!targetItem" @click="pasteToDevice">' +
             '<span class="context-menu__item-icon">📤</span>' +
             '<span class="context-menu__item-label">{{ t(\'context.paste_device\') }}</span>' +
           '</div>' +
-          '<div class="context-menu__item" @click="copyItem">' +
+          '<div class="context-menu__item" role="menuitem" tabindex="-1" :aria-disabled="!targetItem" @click="copyItem">' +
             '<span class="context-menu__item-icon">📋</span>' +
             '<span class="context-menu__item-label">{{ t(\'context.copy\') }}</span>' +
             '<span class="context-menu__shortcut text-subtle">Ctrl+C</span>' +
           '</div>' +
-          '<div class="context-menu__item" @click="togglePin">' +
+          '<div class="context-menu__item" role="menuitem" tabindex="-1" :aria-disabled="!targetItem || targetItem.entry_id === undefined || targetItem.entry_id === null" @click="togglePin">' +
             '<span class="context-menu__item-icon">📌</span>' +
             '<span class="context-menu__item-label">{{ isPinned ? t(\'context.unpin\') : t(\'context.pin\') }}</span>' +
           '</div>' +
-          '<div class="context-menu__item" @click="addFavorite">' +
+          '<div class="context-menu__item" role="menuitem" tabindex="-1" :aria-disabled="!targetItem" @click="addFavorite">' +
             '<span class="context-menu__item-icon">⭐</span>' +
             '<span class="context-menu__item-label">{{ t(\'context.favorite\') }}</span>' +
           '</div>' +
-          '<div class="context-menu__item" @click="translateItem">' +
+          '<div class="context-menu__item" role="menuitem" tabindex="-1" :aria-disabled="!targetItem" @click="translateItem">' +
             '<span class="context-menu__item-icon">🌐</span>' +
             '<span class="context-menu__item-label">{{ t(\'ui.translate\') }}</span>' +
           '</div>' +
-          '<div class="context-menu__item context-menu__item--danger" @click="deleteItem">' +
+          '<div class="context-menu__item context-menu__item--danger" role="menuitem" tabindex="-1" :aria-disabled="!targetItem || targetItem.entry_id === undefined || targetItem.entry_id === null" @click="deleteItem">' +
             '<span class="context-menu__item-icon">🗑</span>' +
             '<span class="context-menu__item-label">{{ t(\'context.delete\') }}</span>' +
             '<span class="context-menu__shortcut text-subtle">Del</span>' +
           '</div>' +
           '<div class="context-menu__divider divider"></div>' +
-          '<div class="context-menu__item" @click="viewDetails">' +
+          '<div class="context-menu__item" role="menuitem" tabindex="-1" :aria-disabled="!targetItem" @click="viewDetails">' +
             '<span class="context-menu__item-icon">ℹ</span>' +
             '<span class="context-menu__item-label">{{ t(\'ui.view_details\') }}</span>' +
           '</div>' +
@@ -553,15 +695,15 @@
 
         '<!-- Device mode -->' +
         '<template v-if="store.contextMenu.mode === \'device\'">' +
-          '<div v-if="!isLocal" class="context-menu__item" @click="toggleConnect">' +
+          '<div v-if="!isLocal" class="context-menu__item" role="menuitem" tabindex="-1" :aria-disabled="!targetDevice" @click="toggleConnect">' +
             '<span class="context-menu__item-icon">🔗</span>' +
             '<span class="context-menu__item-label">{{ isConnected ? t(\'ui.disconnect\') : t(\'ui.connect\') }}</span>' +
           '</div>' +
-          '<div class="context-menu__item" @click="renameDevice">' +
+          '<div class="context-menu__item" role="menuitem" tabindex="-1" :aria-disabled="!targetDevice" @click="renameDevice">' +
             '<span class="context-menu__item-icon">✏</span>' +
             '<span class="context-menu__item-label">{{ t(\'context.rename\') }}</span>' +
           '</div>' +
-          '<div v-if="!isLocal" class="context-menu__item context-menu__item--danger" @click="forgetDevice">' +
+          '<div v-if="!isLocal" class="context-menu__item context-menu__item--danger" role="menuitem" tabindex="-1" :aria-disabled="!targetDevice" @click="forgetDevice">' +
             '<span class="context-menu__item-icon">🗑</span>' +
             '<span class="context-menu__item-label">{{ t(\'context.forget_device\') }}</span>' +
           '</div>' +

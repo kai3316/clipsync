@@ -3,7 +3,20 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="theme-color" content="#05060D">
+<!-- iOS / Android standalone ("Add to Home Screen") metadata. -->
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<link rel="apple-touch-icon" href="/icon-192.png?token=__TOKEN__">
 <title>Quick Paste</title>
+<script>
+/* The server injects the app-configured locale here (__CLIPSYNC_I18N_LOCALE__
+   becomes e.g. "zh-CN"); the fallback keeps this page valid if it is ever
+   served without interpolation. */
+try { window.__CLIPSYNC_I18N_LOCALE__ = __CLIPSYNC_I18N_LOCALE__; }
+catch (e) { window.__CLIPSYNC_I18N_LOCALE__ = ''; }
+</script>
 <style>
 /* ═══════════════════════════════════════════════════════════════════
    ClipSync Quick Paste — Neo-Futuristic Design System
@@ -375,6 +388,25 @@ body::after {
   font-weight: 500;
 }
 
+.qp-retry {
+  margin-top: 14px;
+  padding: 10px 22px;
+  border: 1px solid var(--clipsync-border-glow);
+  border-radius: var(--clipsync-radius);
+  background: var(--clipsync-panel);
+  color: var(--clipsync-accent);
+  font-size: 13px;
+  font-weight: 600;
+  font-family: var(--clipsync-font);
+  cursor: pointer;
+  transition: all var(--clipsync-transition-fast);
+}
+
+.qp-retry:hover {
+  background: var(--clipsync-accent-glow);
+  border-color: var(--clipsync-accent);
+}
+
 /* ═══════════════════════════════════════════════════════════════════
    Toast
    ═══════════════════════════════════════════════════════════════════ */
@@ -494,7 +526,7 @@ body::after {
 /* ── Coarse pointer (phone/tablet): bigger touch targets ──────── */
 @media (pointer: coarse) {
   .qp-header { padding: calc(18px + env(safe-area-inset-top)) 16px 14px; }
-  .qp-header__close { width: 36px; height: 36px; font-size: 18px; }
+  .qp-header__close { width: 44px; height: 44px; font-size: 18px; }
   .qp-item { padding: 14px 16px; }
   .qp-item__icon { width: 36px; height: 36px; font-size: 18px; }
   .qp-item__text { font-size: 15px; }
@@ -553,7 +585,11 @@ body::after {
   // Touch vs keyboard determines the hints and whether the popup auto-closes.
   var IS_TOUCH = ('ontouchstart' in window) ||
     (navigator.maxTouchPoints && navigator.maxTouchPoints > 0);
-  var IS_ZH = (navigator.language || '').toLowerCase().indexOf('zh') === 0;
+  // The server knows the app's configured language and injects it as
+  // window.__CLIPSYNC_I18N_LOCALE__; prefer that over the device's own
+  // navigator.language so this page matches the desktop app's language.
+  var serverLocale = window.__CLIPSYNC_I18N_LOCALE__ || '';
+  var IS_ZH = (serverLocale || navigator.language || '').toLowerCase().indexOf('zh') === 0;
   document.documentElement.lang = IS_ZH ? 'zh-CN' : 'en';
 
   /* ═══════════════════════════════════════════════════════════════
@@ -588,15 +624,42 @@ body::after {
     return HOST + path + sep + 'token=' + encodeURIComponent(TOKEN);
   }
 
+  var REQUEST_TIMEOUT = 8000;
+
+  // fetch wrapper with an AbortController timeout so a slow / unreachable
+  // server can't leave the Quick Paste window on shimmering skeletons forever.
+  function fetchWithTimeout(url, options) {
+    var opts = options || {};
+    var controller = new AbortController();
+    opts.signal = controller.signal;
+    var timer = setTimeout(function () { controller.abort(); }, REQUEST_TIMEOUT);
+    return fetch(url, opts).then(function (r) {
+      clearTimeout(timer);
+      return r;
+    }).catch(function (e) {
+      clearTimeout(timer);
+      if (e && e.name === 'AbortError') {
+        var err = new Error('timeout');
+        err.timeout = true;
+        throw err;
+      }
+      throw e;
+    });
+  }
+
   function fetchHistory() {
     state.loading = true;
     state.error = null;
     render();
 
     // Request up to 9 items via the 'limit' query parameter
-    fetch(apiUrl('/api/history?limit=9'))
+    fetchWithTimeout(apiUrl('/api/history?limit=9'))
       .then(function (r) {
-        if (!r.ok) { throw new Error('HTTP ' + r.status); }
+        if (!r.ok) {
+          var e = new Error('HTTP ' + r.status);
+          e.status = r.status;
+          throw e;
+        }
         return r.json();
       })
       .then(function (data) {
@@ -614,10 +677,19 @@ body::after {
       })
       .catch(function (err) {
         state.loading = false;
-        state.error = err.message || (IS_ZH ? '加载历史失败' : 'Failed to load history');
         state.items = [];
+        if (err && err.status === 403) {
+          // Stale / regenerated token — the QR link no longer works.
+          state.error = IS_ZH
+            ? '访问令牌已更改，请重新扫描电脑上的二维码'
+            : 'The access token changed — re-scan the QR code on your computer';
+        } else if (err && err.timeout) {
+          state.error = IS_ZH ? '加载超时，请检查网络连接' : 'Request timed out — check the network';
+        } else {
+          state.error = err.message || (IS_ZH ? '加载历史失败' : 'Failed to load history');
+        }
         render();
-        showToast(IS_ZH ? '加载历史失败' : 'Failed to load history', true);
+        showToast(state.error, true);
       });
   }
 
@@ -727,6 +799,10 @@ body::after {
      ═══════════════════════════════════════════════════════════════ */
 
   function closeWindow() {
+    // window.close() only works for pages opened via window.open (a desktop
+    // popup that has an opener).  In a normal tab it is a silent no-op, so
+    // never attempt it there — the close button is hidden in that case.
+    if (!window.opener) { return; }
     try { window.close(); } catch (e) { /* ignore */ }
   }
 
@@ -783,6 +859,13 @@ body::after {
       errEl.innerHTML =
         '<div class="qp-empty__icon">&#x26A1;</div>' +
         '<div class="qp-empty__text">' + escHtml(state.error) + '</div>';
+      // A one-tap Retry recovers from a timeout / transient network blip
+      // without reloading the whole page.
+      var retryBtn = document.createElement('button');
+      retryBtn.className = 'qp-retry';
+      retryBtn.textContent = IS_ZH ? '重试' : 'Retry';
+      retryBtn.addEventListener('click', function () { fetchHistory(); });
+      errEl.appendChild(retryBtn);
       itemsEl.appendChild(errEl);
       return;
     }
@@ -947,6 +1030,12 @@ body::after {
   var closeBtn = document.getElementById('qpCloseBtn');
   if (closeBtn) {
     closeBtn.title = IS_ZH ? '关闭 (Esc)' : 'Close (Esc)';
+    // Only show the close button when this is a desktop popup (it has a
+    // window.opener).  In a normal tab window.close() is a no-op, so the
+    // button would be a dead affordance.
+    if (!window.opener) {
+      closeBtn.style.display = 'none';
+    }
   }
   itemsEl.setAttribute('aria-label', IS_ZH ? '剪贴板条目' : 'Clipboard items');
   if (subtitleEl) {

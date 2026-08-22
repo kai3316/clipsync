@@ -17,6 +17,7 @@ import posixpath
 import socket
 import sys
 import threading
+import time
 import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from io import BytesIO
@@ -171,7 +172,7 @@ _FALLBACK_HTML = r"""<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no">
+<meta name="viewport" content="width=device-width,initial-scale=1">
 <meta name="theme-color" content="#05060D">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
@@ -473,7 +474,15 @@ def _get_static_dir() -> str:
 # ── Token validation helper ─────────────────────────────────────
 
 def _validate_token(path: str, expected_token: str) -> bool:
-    """Check that the query string contains the expected token."""
+    """Check that the query string contains the expected token.
+
+    When ``expected_token`` is empty the web companion treats auth as
+    disabled (the user cleared the token): every request passes.  This is
+    what makes the "Clear token" setting actually work — the QR code then
+    carries no token at all and would otherwise 403 forever.
+    """
+    if not expected_token:
+        return True
     qs = urllib.parse.urlparse(path).query
     params = urllib.parse.parse_qs(qs)
     tokens = params.get("token", [])
@@ -1024,6 +1033,11 @@ class WebServer:
                 except OSError:
                     pass
 
+            @staticmethod
+            def _page_lang() -> str:
+                """Short html ``lang`` attribute matching the configured language."""
+                return "zh" if cfg.language == "zh-CN" else "en"
+
             def _send_companion_disabled_page(inner_self) -> None:
                 """Serve a friendly page when the companion is off and a browser
                 (phone / tablet) opens the dashboard — not a raw JSON error."""
@@ -1034,13 +1048,56 @@ class WebServer:
                                    "Remote access is turned off on this device, so its "
                                    "dashboard is temporarily unavailable.")
                 html = (
-                    "<!doctype html><html lang='zh'><meta charset='utf-8'>"
+                    "<!doctype html><html lang='" + inner_self._page_lang() + "'><meta charset='utf-8'>"
+                    "<meta name='viewport' content='width=device-width,initial-scale=1'>"
+                    "<meta name='theme-color' content='#05060D'>"
                     "<title>" + title + "</title>"
                     "<body style='font-family:system-ui,-apple-system,sans-serif;"
                     "background:#0f1117;color:#e6e8ee;display:flex;align-items:center;"
                     "justify-content:center;height:100vh;margin:0'>"
                     "<div style='text-align:center;max-width:26rem;padding:1.5rem'>"
                     "<div style='font-size:2rem;margin-bottom:.5rem'>&#128241;&#128279;</div>"
+                    "<h1 style='font-size:18px;margin:0 0 .5rem'>" + title + "</h1>"
+                    "<p style='color:#9aa0ad;font-size:14px;line-height:1.5'>" + desc + "</p>"
+                    "</div></body></html>"
+                )
+                inner_self._send_html(html, status=403)
+
+            def _wants_html(inner_self) -> bool:
+                """True when the client asked for an HTML page rather than an API.
+
+                A stale-token phone page (Accept: text/html) should get a
+                friendly "re-scan the QR" page, while the SPA's /api fetches
+                (Accept: */* or application/json) keep the JSON 403.
+                """
+                accept = (inner_self.headers.get("Accept") or "").lower()
+                return "text/html" in accept or "application/xhtml+xml" in accept
+
+            def _send_token_expired_page(inner_self) -> None:
+                """Serve a friendly page when a page request has a stale token.
+
+                After the user regenerates the web token, any phone page / PWA
+                that still holds the OLD token 403s.  Show a helpful message
+                instead of raw JSON so the user knows to re-scan the QR code.
+                """
+                if cfg.language == "zh-CN":
+                    title = "访问链接已失效"
+                    desc = ("访问令牌已更改，此链接已失效。"
+                            "请返回电脑端的 ClipSync，重新扫描二维码。")
+                else:
+                    title = "This link has expired"
+                    desc = ("The access token was changed, so this link no longer works. "
+                            "Re-scan the QR code on your computer to reconnect.")
+                html = (
+                    "<!doctype html><html lang='" + inner_self._page_lang() + "'><meta charset='utf-8'>"
+                    "<meta name='viewport' content='width=device-width,initial-scale=1'>"
+                    "<meta name='theme-color' content='#05060D'>"
+                    "<title>" + title + "</title>"
+                    "<body style='font-family:system-ui,-apple-system,sans-serif;"
+                    "background:#0f1117;color:#e6e8ee;display:flex;align-items:center;"
+                    "justify-content:center;height:100vh;margin:0'>"
+                    "<div style='text-align:center;max-width:26rem;padding:1.5rem'>"
+                    "<div style='font-size:2rem;margin-bottom:.5rem'>&#128279;</div>"
                     "<h1 style='font-size:18px;margin:0 0 .5rem'>" + title + "</h1>"
                     "<p style='color:#9aa0ad;font-size:14px;line-height:1.5'>" + desc + "</p>"
                     "</div></body></html>"
@@ -1124,13 +1181,64 @@ class WebServer:
                     with open(full_path, "rb") as f:
                         data = f.read()
 
-                inner_self.send_response(200)
-                inner_self.send_header("Content-Type", mime)
-                inner_self.send_header("Content-Length", str(len(data)))
-                # no-cache so the browser always revalidates: without this the
-                # WebView would serve a 1-hour-stale copy of CSS/JS and edits
-                # would never appear after a restart.
-                inner_self.send_header("Cache-Control", "no-cache")
+                # HTTP validators + cache policy.
+                #
+                # HTML pages carry the interpolated auth token IN the body, so
+                # they must revalidate on every request (Cache-Control:
+                # no-cache) and must NOT get a 304 based on an ETag — a token
+                # regeneration with a same-length token would otherwise serve
+                # a stale page forever.
+                #
+                # The service worker must also always revalidate (no-cache) so
+                # a changed sw.js is picked up promptly; it is served with the
+                # correct JavaScript MIME type so SW registration works in any
+                # secure context (https / localhost).
+                #
+                # Non-HTML assets (js/css/svg/...) carry the token only in
+                # their URL query string, so a token change produces fresh URLs
+                # and the browser cache naturally misses.  They are served with
+                # Cache-Control: no-cache so the browser REVALIDATES on every
+                # load — a ClipSync update changes the asset bytes without
+                # changing the URL, and max-age would serve stale JS/CSS for up
+                # to an hour.  The ETag/Last-Modified + 304 path below makes
+                # that revalidation cheap (304 = no body transfer).
+                if safe_path.endswith(".html") or safe_path == "sw.js":
+                    if safe_path == "sw.js":
+                        mime = "application/javascript; charset=utf-8"
+                    inner_self.send_response(200)
+                    inner_self.send_header("Content-Type", mime)
+                    inner_self.send_header("Content-Length", str(len(data)))
+                    inner_self.send_header("Cache-Control", "no-cache")
+                else:
+                    etag = None
+                    last_modified = None
+                    try:
+                        st = os.stat(full_path)
+                        etag = '"%x-%x"' % (st.st_mtime_ns, len(data))
+                        last_modified = time.strftime(
+                            "%a, %d %b %Y %H:%M:%S GMT", time.gmtime(st.st_mtime))
+                    except OSError:
+                        pass
+                    if etag is not None and (
+                        inner_self.headers.get("If-None-Match") == etag
+                        or (last_modified is not None
+                            and inner_self.headers.get("If-Modified-Since") == last_modified)
+                    ):
+                        inner_self.send_response(304)
+                        inner_self.send_header("ETag", etag)
+                        inner_self.send_header("Cache-Control", "no-cache")
+                        inner_self.send_header("Referrer-Policy", "no-referrer")
+                        inner_self.send_header("X-Content-Type-Options", "nosniff")
+                        inner_self.end_headers()
+                        return
+                    inner_self.send_response(200)
+                    inner_self.send_header("Content-Type", mime)
+                    inner_self.send_header("Content-Length", str(len(data)))
+                    inner_self.send_header("Cache-Control", "no-cache")
+                    if etag is not None:
+                        inner_self.send_header("ETag", etag)
+                    if last_modified is not None:
+                        inner_self.send_header("Last-Modified", last_modified)
                 # No ACAO:* here: these assets (index.html, JS, CSS) carry the
                 # interpolated auth token, so they must never be readable
                 # cross-origin.  Same-origin loads (webview / PWA) don't need
@@ -1265,23 +1373,42 @@ class WebServer:
 
                 # ── Token validation for all other paths ─────────
                 if not inner_self._token_ok():
-                    inner_self._send_json({"error": "invalid token"}, 403)
+                    # A phone page / PWA opened before a token regeneration
+                    # still carries the OLD token.  Give it a friendly
+                    # "re-scan the QR" page instead of raw JSON; the SPA's API
+                    # fetches keep the JSON 403 so they can react in code.
+                    if inner_self._wants_html():
+                        inner_self._send_token_expired_page()
+                    else:
+                        inner_self._send_json({"error": "invalid token"}, 403)
                     return
 
                 # ── Manifest ─────────────────────────────────────
                 if path == "/manifest.json":
+                    # ``id`` and ``scope`` are deliberately token-independent:
+                    # when the user regenerates the web token the start_url /
+                    # icon URLs change, but the app identity stays the same so
+                    # the OS updates the existing PWA instead of installing a
+                    # duplicate launcher icon.  The maskable-purpose entries
+                    # stop Android launchers cropping the icon.
                     manifest = {
                         "name": "ClipSync Web",
                         "short_name": "ClipSync",
+                        "id": "/",
+                        "scope": "/",
                         "start_url": f"/?token={cfg.web_token}",
                         "display": "standalone",
                         "background_color": "#0A0E1E",
                         "theme_color": "#05060D",
                         "icons": [
                             {"src": f"/icon-192.png?token={cfg.web_token}",
-                             "sizes": "192x192", "type": "image/png"},
+                             "sizes": "192x192", "type": "image/png", "purpose": "any"},
                             {"src": f"/icon-512.png?token={cfg.web_token}",
-                             "sizes": "512x512", "type": "image/png"},
+                             "sizes": "512x512", "type": "image/png", "purpose": "any"},
+                            {"src": f"/icon-192.png?token={cfg.web_token}",
+                             "sizes": "192x192", "type": "image/png", "purpose": "maskable"},
+                            {"src": f"/icon-512.png?token={cfg.web_token}",
+                             "sizes": "512x512", "type": "image/png", "purpose": "maskable"},
                         ],
                     }
                     inner_self._send_json(manifest)
@@ -1382,6 +1509,13 @@ class WebServer:
                     return
 
                 # ── Static file serving ─────────────────────────
+                # /sw.js is served here (correct application/javascript MIME +
+                # Cache-Control from _serve_static), so PWA registration works
+                # in any secure context (https or localhost).  On plain-HTTP
+                # LAN access browsers refuse to register a service worker at
+                # all — that is a platform limitation of the SW API, not a
+                # server one; the manifest + icons are still served with the
+                # right MIME types so install works where secure contexts do.
                 serve_path = path if path != "/" else "/index.html"
                 inner_self._serve_static(serve_path)
 

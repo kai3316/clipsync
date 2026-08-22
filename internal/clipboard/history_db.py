@@ -159,7 +159,8 @@ class ClipboardHistoryDB:
             source_app   TEXT   NOT NULL DEFAULT '',
             source_title TEXT   NOT NULL DEFAULT '',
             pinned       INTEGER NOT NULL DEFAULT 0,
-            paste_count  INTEGER NOT NULL DEFAULT 0
+            paste_count  INTEGER NOT NULL DEFAULT 0,
+            status      TEXT    NOT NULL DEFAULT ''
         );
     """
 
@@ -226,7 +227,25 @@ class ClipboardHistoryDB:
 
     def _init_schema(self, conn: sqlite3.Connection) -> None:
         conn.executescript(self._SCHEMA)
+        self._migrate_schema(conn)
         conn.commit()
+
+    def _migrate_schema(self, conn: sqlite3.Connection) -> None:
+        """Add columns introduced after the initial schema (idempotent).
+
+        ``CREATE TABLE IF NOT EXISTS`` never touches an existing table, so a
+        database created before a column was added keeps working only if we
+        ``ALTER TABLE`` it here.  Wrapped in a column-existence check so it is
+        safe to run on every startup and on already-migrated databases.
+        """
+        try:
+            cols = {row[1] for row in conn.execute("PRAGMA table_info(history)").fetchall()}
+            if "status" not in cols:
+                conn.execute(
+                    "ALTER TABLE history ADD COLUMN status TEXT NOT NULL DEFAULT ''"
+                )
+        except Exception as exc:
+            logger.warning("Failed to migrate history schema: %s", exc)
 
     def _secure_db_files(self) -> None:
         """Restrict DB/WAL/SHM permissions to the owner (0600)."""
@@ -256,6 +275,7 @@ class ClipboardHistoryDB:
             e.get("source_title", ""),
             1 if e.get("pinned") else 0,
             e.get("paste_count", 0),
+            e.get("status", ""),
         )
 
     def _insert_row(self, entry: dict) -> None:
@@ -266,8 +286,8 @@ class ClipboardHistoryDB:
                 conn.execute(
                     "INSERT INTO history "
                     "(entry_id, timestamp, content_type, text_preview, types, "
-                    "source_device, source_app, source_title, pinned, paste_count) "
-                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    "source_device, source_app, source_title, pinned, paste_count, status) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                     self._entry_row(entry),
                 )
             self._secure_db_files()
@@ -604,7 +624,7 @@ class ClipboardHistoryDB:
             rows = conn.execute(
                 "SELECT entry_id, timestamp, content_type, text_preview, "
                 "types, source_device, source_app, source_title, "
-                "pinned, paste_count "
+                "pinned, paste_count, status "
                 "FROM history ORDER BY pinned DESC, timestamp DESC, entry_id DESC"
             ).fetchall()
 
@@ -621,6 +641,7 @@ class ClipboardHistoryDB:
                     "source_title": row[7],
                     "pinned": bool(row[8]),
                     "paste_count": row[9] if row[9] else 0,
+                    "status": row[10] if len(row) > 10 else "",
                 }
                 self._entries.append(entry)
 
@@ -661,8 +682,8 @@ class ClipboardHistoryDB:
                 conn.executemany(
                     "INSERT INTO history "
                     "(entry_id, timestamp, content_type, text_preview, types, "
-                    "source_device, source_app, source_title, pinned, paste_count) "
-                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    "source_device, source_app, source_title, pinned, paste_count, status) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                     (self._entry_row(e) for e in self._entries),
                 )
             self._secure_db_files()
@@ -733,8 +754,8 @@ class ClipboardHistoryDB:
             conn.executemany(
                 "INSERT INTO history "
                 "(entry_id, timestamp, content_type, text_preview, types, "
-                "source_device, source_app, source_title, pinned, paste_count) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "source_device, source_app, source_title, pinned, paste_count, status) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     (
                         e.get("entry_id", 0),
@@ -747,6 +768,7 @@ class ClipboardHistoryDB:
                         e.get("source_title", ""),
                         1 if e.get("pinned") else 0,
                         e.get("paste_count", 0),
+                        e.get("status", ""),
                     )
                     for e in entries
                 ),

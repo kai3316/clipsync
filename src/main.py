@@ -17,7 +17,7 @@ import time
 import tkinter as tk
 from pathlib import Path
 from tkinter import filedialog
-from urllib.parse import urlparse
+from urllib.parse import quote, urlparse
 
 # Add project root to Python path so 'internal' package can be found
 # (not needed in a PyInstaller-frozen bundle)
@@ -463,6 +463,19 @@ class Application:
         # pick the correct notification direction (a receiver must never see
         # "File sent successfully" for a download, nor vice-versa).
         self._transfer_directions: dict[str, str] = {}
+        # peer_id -> {code, peer_name, first_seen} for incoming pairing requests,
+        # used to surface an "expired" row instead of letting the request vanish.
+        self._pairing_req_track: dict[str, dict] = {}
+        # Set once the dashboard has been auto-opened for a silent pairing request
+        # (notifications disabled), so we don't pop a window on every request.
+        self._pairing_dashboard_opened = False
+        # Hotkey-failure bookkeeping: the platform hotkey backend can die
+        # immediately after start() (macOS Accessibility permission), so the
+        # listener thread liveness is probed once after startup.
+        self._hotkey_running = False
+        self._hotkey_failure_notified = False
+        # Guards re-entry into the "Check for updates" action.
+        self._checking_update = False
         # True once a webview dashboard open actually attached a WS client.
         # Used to keep the "recently opened" guard from blocking a re-open
         # after the window was closed (client disconnected) within 8s.
@@ -939,7 +952,36 @@ class Application:
 
         self.hotkey_mgr.reload_from_config(self.cfg.hotkeys, _cb_factory)
         self.hotkey_mgr.start()
+        self._hotkey_running = self.hotkey_mgr.running
+        if not self.hotkey_mgr.running:
+            self._hotkey_failure_notified = True
+            self._notify_hotkey_failure()
         logger.info("Global hotkeys registered (%d shortcuts)", len(self.cfg.hotkeys))
+
+    def _check_hotkey_health(self) -> None:
+        """Surface a one-time warning if the hotkey backend failed at startup.
+
+        ``HotkeyManager.running`` stays True even when the platform listener
+        thread dies immediately (e.g. macOS missing Accessibility permission),
+        so probe the listener thread liveness once after startup.
+        """
+        if getattr(self, "_hotkey_failure_notified", False) or self._shutting_down:
+            return
+        mgr = self.hotkey_mgr
+        if mgr is None:
+            return
+        thread = getattr(mgr, "_thread", None)
+        alive = thread is not None and thread.is_alive()
+        if not mgr.running or not alive:
+            self._hotkey_failure_notified = True
+            self._notify_hotkey_failure()
+
+    def _notify_hotkey_failure(self) -> None:
+        """Notify the user that global hotkeys are unavailable (once)."""
+        try:
+            self._notify_error(T("hotkey.failed_title"), T("hotkey.failed_msg"))
+        except Exception:
+            logger.debug("Could not surface hotkey failure dialog", exc_info=True)
 
     def _open_quick_paste(self) -> None:
         """Open the Quick Paste floating window."""
@@ -962,9 +1004,11 @@ class Application:
             logger.info("Web server started for Quick Paste")
 
         port = self.cfg.web_port
-        token = self.cfg.web_token
+        token = self.cfg.web_token or ""
         host = f"http://127.0.0.1:{port}"
-        url = f"{host}/quickpaste.html?token={token}&host={host}"
+        # URL-encode the token (and the host query value) so a token containing
+        # '/', '+', '=' etc. cannot break the URL's query string.
+        url = f"{host}/quickpaste.html?token={quote(token, safe='')}&host={quote(host, safe='')}"
 
         # Never log the token in the URL (the file handler logs at DEBUG).
         logger.debug("Opening Quick Paste: %s", url.split("?")[0])
@@ -1034,6 +1078,8 @@ class Application:
         self.cfg.sync_enabled = enabled
         self._save_cfg_encrypted()
         self.systray.set_syncing(enabled)
+        self._notify("notify_sync", T("ui.clipboard_sync"),
+                     T("notify.sync_active") if enabled else T("notify.sync_paused"))
         logger.info("Sync %s (toggle_monitor hotkey)", "enabled" if enabled else "paused")
 
     # ── Callback implementations ──────────────────────────────────
@@ -1120,22 +1166,25 @@ class Application:
         self._transfer_directions.pop(transfer_id, None)
         self.file_transfer_mgr.reject_transfer(transfer_id, send_fn)
 
-    def _on_transfer_complete(self, transfer_id: str, success: bool, cancelled: bool = False) -> None:
-        logger.info("File transfer %s: %s",
-                    transfer_id[:8], "complete" if success else "failed")
+    def _on_transfer_complete(self, transfer_id: str, success: bool, cancelled: bool = False,
+                              status: str = "") -> None:
+        logger.info("File transfer %s: %s (status=%s, cancelled=%s)",
+                    transfer_id[:8], "complete" if success else "failed",
+                    status or "unknown", cancelled)
         # Send confirmations are only meaningful for OUTGOING transfers.  The
         # receiver of an incoming file already gets "File received" from
         # _on_file_received; a failed download must not be reported as if this
         # device were the sender ("File transfer failed").
         direction = self._transfer_directions.pop(transfer_id, "outgoing")
-        if direction == "outgoing":
-            if success:
+        if cancelled:
+            # A user-initiated cancel is NOT a failure — never log/push it as one.
+            self._notify("notify_transfer", T("ui.file_transfer"), T("transfer.cancelled"))
+        elif success:
+            if direction == "outgoing":
                 self._notify("notify_transfer", T("ui.file_transfer"), T("transfer.send_success"))
-            else:
-                self._notify("notify_transfer", T("ui.file_transfer"), T("transfer.send_failed"))
         else:
-            if not success:
-                self._notify("notify_transfer", T("ui.file_transfer"), T("transfer.receive_failed"))
+            self._notify("notify_transfer", T("ui.file_transfer"),
+                         self._transfer_failure_message(status, direction))
         self._last_transfer_progress.pop(transfer_id, None)
         # Remove any temp zip archive created for a folder/multi-file send.
         tmp = self._zip_cleanup.pop(transfer_id, None)
@@ -1145,6 +1194,25 @@ class Application:
             except OSError:
                 pass
         self._push_web("broadcast_transfer_complete", transfer_id, success, cancelled)
+
+    def _transfer_failure_message(self, status: str, direction: str) -> str:
+        """Map a transfer status to a specific, localized failure message.
+
+        Unknown/internal statuses fall back to the generic send/receive error so
+        the user always sees something meaningful instead of a blanket "failed".
+        """
+        key = {
+            "error_disk": "transfer.err_disk",
+            "error_size_mismatch": "transfer.err_size_mismatch",
+            "error_missing_chunks": "transfer.err_missing_chunks",
+            "error_security": "transfer.err_security",
+            "peer_offline": "transfer.err_peer_offline",
+            "error_timeout": "transfer.err_timeout",
+            "rejected": "transfer.rejected",
+        }.get(status)
+        if key:
+            return T(key)
+        return T("transfer.send_failed") if direction == "outgoing" else T("transfer.receive_failed")
 
     def _on_file_received(self, transfer_id: str, saved_path: str, file_name: str) -> None:
         logger.info("File received: %s -> %s",
@@ -1185,10 +1253,20 @@ class Application:
                              mime_type: str, send_fn) -> None:
         logger.info("File request: %s (%d bytes, %s)", file_name, file_size, mime_type)
         self._transfer_directions[transfer_id] = "incoming"
-        self._notify("notify_transfer", T("transfer.incoming"),
-                     T("transfer.incoming_title"))
+        sender = self._sender_name_for_send_fn(send_fn)
+        # Notification body carries the file name and sender when available so
+        # the user can decide whether to accept without opening the dialog.
+        if file_name and sender:
+            body = f"{file_name} — {sender}"
+        elif file_name:
+            body = file_name
+        elif sender:
+            body = sender
+        else:
+            body = T("transfer.incoming_title")
+        self._notify("notify_transfer", T("transfer.incoming"), body)
         self.root.after(0, lambda: self._show_transfer_request_dialog(
-            transfer_id, file_name, file_size, mime_type, send_fn))
+            transfer_id, file_name, file_size, mime_type, send_fn, sender_name=sender))
 
     def _sender_name_for_send_fn(self, send_fn) -> str:
         """Best-effort resolve the sending peer's display name from a send_fn.
@@ -1215,7 +1293,7 @@ class Application:
         return ""
 
     def _show_transfer_request_dialog(self, transfer_id, file_name, file_size,
-                                       mime_type, send_fn):
+                                       mime_type, send_fn, sender_name: str = ""):
         # ── Webview mode: push dialog to web UI ────────────────────
         if self._is_webview():
             result = self._web_dialog(
@@ -1224,13 +1302,25 @@ class Application:
                 message=T("transfer.incoming_title"),
                 file_name=file_name,
                 file_size=file_size,
-                sender=self._sender_name_for_send_fn(send_fn),
+                sender=sender_name or self._sender_name_for_send_fn(send_fn),
             )
             if result and result.get("action") == "accept":
-                self.file_transfer_mgr.accept_transfer(transfer_id, send_fn)
+                if self.file_transfer_mgr.is_transfer_available(transfer_id):
+                    self.file_transfer_mgr.accept_transfer(transfer_id, send_fn)
+                else:
+                    self._notify_info(T("transfer.incoming"),
+                                      T("transfer.no_longer_available"))
             else:
                 self._reject_incoming_transfer(transfer_id, send_fn)
             return
+
+        def _accept(manager, dlg):
+            if manager.is_transfer_available(transfer_id):
+                manager.accept_transfer(transfer_id, send_fn)
+            else:
+                self._notify_info(T("transfer.incoming"),
+                                  T("transfer.no_longer_available"))
+            dlg.destroy()
 
         import platform as _platform
         _is_macos = _platform.system() == "Darwin"
@@ -1245,7 +1335,7 @@ class Application:
                 return f"{n/1_000:.1f} KB"
             return f"{n} B"
 
-        dw, dh = 400, 210
+        dw, dh = 400, 240
         if self.root.winfo_viewable():
             rw, rh = self.root.winfo_width(), self.root.winfo_height()
             rx, ry = self.root.winfo_rootx(), self.root.winfo_rooty()
@@ -1270,6 +1360,10 @@ class Application:
             tk.Label(body, text=file_name,
                      font=("Helvetica", 14, "bold")).pack(anchor="w", pady=(0, 4))
 
+            if sender_name:
+                tk.Label(body, text=T("transfer.from_device", name=sender_name),
+                         font=("Helvetica", 12), fg="#2980B9").pack(anchor="w", pady=(0, 4))
+
             tk.Label(body, text=T("transfer.incoming_detail",
                                   name=file_name, size=_fmt_size(file_size)),
                      font=("Helvetica", 12), fg="gray").pack(anchor="w", pady=(0, 16))
@@ -1286,10 +1380,7 @@ class Application:
 
             tk.Button(btn_row, text=T("transfer.accept"), width=12,
                       bg="#27AE60", fg="white",
-                      command=lambda: (
-                          self.file_transfer_mgr.accept_transfer(transfer_id, send_fn),
-                          dlg.destroy(),
-                      )).pack(side="right")
+                      command=lambda: _accept(self.file_transfer_mgr, dlg)).pack(side="right")
 
             dlg.update()
             dlg.transient(self.root)
@@ -1322,6 +1413,13 @@ class Application:
                 font=ctk.CTkFont(size=14, weight="bold"),
             ).pack(anchor="w", pady=(0, 4))
 
+            if sender_name:
+                ctk.CTkLabel(
+                    body, text=T("transfer.from_device", name=sender_name),
+                    font=ctk.CTkFont(size=12),
+                    text_color=("#2980B9", "#5DADE2"),
+                ).pack(anchor="w", pady=(0, 4))
+
             ctk.CTkLabel(
                 body, text=T("transfer.incoming_detail", name=file_name, size=_fmt_size(file_size)),
                 font=ctk.CTkFont(size=12),
@@ -1347,10 +1445,7 @@ class Application:
                 btn_row, text=T("transfer.accept"), width=90, height=34,
                 fg_color=("#27AE60", "#2ECC71"),
                 hover_color=("#1E8449", "#27AE60"),
-                command=lambda: (
-                    self.file_transfer_mgr.accept_transfer(transfer_id, send_fn),
-                    dlg.destroy(),
-                ),
+                command=lambda: _accept(self.file_transfer_mgr, dlg),
             ).pack(side="right")
 
             dlg.update()
@@ -1426,11 +1521,29 @@ class Application:
         if prev == code:
             return
         self._notified_pairings[peer_id] = code
+        # Track the request so the devices refresh can surface "expired"
+        # instead of letting the row vanish silently after the 5-minute window.
+        try:
+            self._pairing_req_track[peer_id] = {
+                "code": code, "peer_name": peer_name,
+                "first_seen": time.time(),
+            }
+        except Exception:
+            logger.debug("Could not track pairing request", exc_info=True)
         self._notify(
             "notify_pairing",
             "Pairing Request",
             T("notify.pairing_request", name=peer_name, code=code),
         )
+        # With desktop notifications off, the request is invisible in classic
+        # mode and would expire silently — open the dashboard once (or toast in
+        # webview mode) so the user actually sees it.
+        notifications_active = (
+            getattr(self.cfg, "notify_pairing", True)
+            and getattr(notification_mgr, "enabled", True)
+        )
+        if not notifications_active:
+            self._pairing_notify_fallback(peer_name, code)
         self._push_web("broadcast", "pairing_request", {
             "peer_id": peer_id, "peer_name": peer_name, "code": code,
         })
@@ -1438,6 +1551,17 @@ class Application:
         # every pairing request even when the user is already in the web UI.
         # The pairing request is pushed over WebSocket and shown in the
         # device page; the OS notification carries the code as well.
+
+    def _pairing_notify_fallback(self, peer_name: str, code: str) -> None:
+        """Surface an incoming pairing request when desktop notifications are off."""
+        msg = T("notify.pairing_request", name=peer_name, code=code)
+        if self._is_webview():
+            self._web_toast(msg, 6000)
+            return
+        # Classic mode: open the dashboard once so the request is visible.
+        if not self._pairing_dashboard_opened:
+            self._pairing_dashboard_opened = True
+            self.root.after(0, self.open_dashboard)
 
     # ═══════════════════════════════════════════════════════════════
     # Phase 7: Apply config
@@ -1907,6 +2031,10 @@ class Application:
         # Surface any certificate-changed peers (one non-blocking dialog)
         # once the main loop is running.
         self.root.after(1200, self._prompt_cert_warnings_startup)
+        # Probe the hotkey backend once (macOS Accessibility failure kills the
+        # listener thread immediately after start()).
+        if getattr(self, "_hotkey_running", False) and not getattr(self, "_hotkey_failure_notified", False):
+            self.root.after(1500, self._check_hotkey_health)
 
         if sys.platform == "darwin":
             self._start_macos_tray()
@@ -2124,7 +2252,7 @@ class Application:
         # The QR opens the phone companion page (history / send / files),
         # not the full desktop dashboard.
         if token:
-            url = f"http://{ip}:{port}/mobile.html?token={token}"
+            url = f"http://{ip}:{port}/mobile.html?token={quote(token, safe='')}"
         else:
             url = f"http://{ip}:{port}/mobile.html"
 
@@ -2305,33 +2433,66 @@ class Application:
             logger.error("Failed to export log: %s", e)
 
     def _check_for_update(self) -> None:
-        """Check GitHub for a newer ClipSync release and notify the result."""
+        """Check GitHub for a newer ClipSync release and notify the result.
+
+        Re-entry is guarded (a second click while a check is in flight is a
+        no-op), a "checking…" state is shown, and the result always surfaces:
+        a desktop notification when enabled, otherwise an info dialog.
+        """
+        if getattr(self, "_checking_update", False):
+            return
+        self._checking_update = True
+        notification_mgr.show(T("ui.app_name"), T("notify.update_checking"))
+
+        def _present(title: str, message: str) -> None:
+            notification_mgr.show(title, message)
+            if not self._notifications_enabled():
+                self._notify_info(title, message)
+
         def _worker():
             from internal.system.updater import check_for_update
-            result = check_for_update()
-            if result.get("available"):
-                notification_mgr.show(
-                    T("tray.update_available", version=result["latest"]),
-                    f"ClipSync {result['latest']}\n{result.get('url', '')}",
-                )
-            elif result.get("latest"):
-                notification_mgr.show(
-                    T("tray.up_to_date"),
-                    f"ClipSync {result.get('current', '')}",
-                )
-            else:
-                notification_mgr.show(T("tray.update_failed"), "ClipSync")
+            try:
+                result = check_for_update()
+            except Exception as exc:
+                logger.warning("Update check failed: %s", exc)
+                result = {}
+            finally:
+                self._checking_update = False
+
+            def _done():
+                if self._shutting_down:
+                    return
+                if result.get("available"):
+                    _present(
+                        T("tray.update_available", version=result["latest"]),
+                        f"ClipSync {result['latest']}\n{result.get('url', '')}",
+                    )
+                elif result.get("latest"):
+                    _present(T("tray.up_to_date"),
+                             f"ClipSync {result.get('current', '')}")
+                else:
+                    _present(T("tray.update_failed"), "ClipSync")
+
+            self.root.after(0, _done)
 
         threading.Thread(target=_worker, daemon=True, name="update-check").start()
 
+    def _notifications_enabled(self) -> bool:
+        """Return True if the desktop notification backend is active."""
+        return bool(getattr(notification_mgr, "enabled", True))
+
     def _show_about(self) -> None:
-        """Show the About dialog with version and repository link."""
-        from internal.version import __version__
-        notification_mgr.show(
-            T("tray.about_title"),
-            f"ClipSync {__version__}\n\n{T('tray.about_message')}\n"
-            "https://github.com/kai3316/clipsync",
-        )
+        """Open the Settings window's About panel (fallback to a notification)."""
+        try:
+            self.open_settings(tab="about")
+        except Exception:
+            logger.debug("Could not open settings for About", exc_info=True)
+            from internal.version import __version__
+            notification_mgr.show(
+                T("tray.about_title"),
+                f"ClipSync {__version__}\n\n{T('tray.about_message')}\n"
+                "https://github.com/kai3316/clipsync",
+            )
 
     def send_file(self) -> None:
         self.root.after(0, self._do_send_file)
@@ -3005,19 +3166,20 @@ class Application:
 
         threading.Thread(target=_worker, daemon=True, name="zip-sender").start()
 
-    def open_settings(self) -> None:
+    def open_settings(self, tab: str | None = None) -> None:
         if self.cfg.ui_backend == "webview":
             # In webview mode, settings live in the web UI. Open the window if
             # needed and wait for a client, then tell it to show the panel.
             self._run_when_webview_ready(
-                lambda: self._push_web("broadcast", "open_settings", {})
+                lambda: self._push_web("broadcast", "open_settings", {"tab": tab})
             )
         else:
-            self.root.after(0, self._create_settings_window)
+            self.root.after(0, lambda: self._create_settings_window(tab))
 
-    def _create_settings_window(self) -> None:
+    def _create_settings_window(self, tab: str | None = None) -> None:
         if self.settings_win is not None:
             self.settings_win.show()
+            self._switch_settings_panel(tab)
             return
 
         def _on_closed():
@@ -3042,6 +3204,16 @@ class Application:
             ),
         )
         self.settings_win.show()
+        self._switch_settings_panel(tab)
+
+    def _switch_settings_panel(self, tab: str | None) -> None:
+        """Best-effort switch the settings window to *tab* (e.g. "about")."""
+        if not tab or self.settings_win is None:
+            return
+        try:
+            self.settings_win._switch_panel(tab)
+        except Exception:
+            logger.debug("Could not switch settings panel to %s", tab, exc_info=True)
 
     # ── Web dialog helper ──────────────────────────────────────────
 
@@ -3455,7 +3627,7 @@ class Application:
 
         url = (
             f"http://127.0.0.1:{self.cfg.web_port}"
-            f"/index.html?token={self.cfg.web_token}"
+            f"/index.html?token={quote(self.cfg.web_token or '', safe='')}"
         )
         self.webview_win = WebViewWindow(url=url, title=T("ui.app_name"), width=960, height=720)
         self.webview_win.start()
@@ -3475,6 +3647,7 @@ class Application:
             get_config=self._get_cfg,
             save_config=self._save_cfg_and_peers,
             get_peers=self._get_peers,
+            on_quit=self.shutdown,
             get_sync_enabled=lambda: self.cfg.sync_enabled,
             set_sync_enabled=lambda v: (
                 self.sync_mgr.set_enabled(v), self.systray.set_syncing(v)
@@ -3951,7 +4124,37 @@ class Application:
         return {"ok": False, "path": "", "error": reason or "download failed"}
 
     def _get_pending(self) -> list:
-        return self.pairing_mgr.get_pending_pairings()
+        pending = self.pairing_mgr.get_pending_pairings() if self.pairing_mgr else []
+        result = list(pending)
+        # The pairing manager drops expired requests entirely, so a request that
+        # times out silently vanishes from the devices refresh.  Surface an
+        # "expired" row for one refresh instead (and notify once).
+        if not self._pairing_req_track:
+            return result
+        try:
+            _PAIRING_TIMEOUT_SECS = 300  # matches internal.security.pairing.PAIRING_TIMEOUT
+            now = time.time()
+            live_ids = {
+                p[0] for p in pending if isinstance(p, (tuple, list)) and p
+            }
+            for pid, info in list(self._pairing_req_track.items()):
+                if pid in live_ids:
+                    continue  # still pending
+                # Not pending anymore — either resolved (paired/rejected) or
+                # expired.  Only surface "expired" once, and only when the
+                # request actually lived past the pairing timeout.
+                if info.get("surfaced_expired"):
+                    continue
+                if now - info.get("first_seen", now) >= _PAIRING_TIMEOUT_SECS:
+                    info["surfaced_expired"] = True
+                    result.append((
+                        pid, info.get("code", ""), info.get("peer_name", pid), "expired",
+                    ))
+                    self._notify("notify_pairing", "Pairing", T("pairing.state.expired"))
+                self._pairing_req_track.pop(pid, None)
+        except Exception:
+            logger.debug("Pairing expiry tracking failed", exc_info=True)
+        return result
 
     def _on_pair(self, peer_id: str, code: str) -> bool:
         result = self.pairing_mgr.confirm_pairing(peer_id, code)
@@ -4505,6 +4708,8 @@ class Application:
         self.cfg.sync_enabled = actual
         self._save_cfg_encrypted()
         self.systray.set_syncing(actual)
+        self._notify("notify_sync", T("ui.clipboard_sync"),
+                     T("notify.sync_active") if actual else T("notify.sync_paused"))
         logger.info("Sync %s", "enabled" if actual else "paused")
 
 

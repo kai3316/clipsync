@@ -17,7 +17,13 @@ from collections.abc import Callable
 import customtkinter as ctk
 
 from internal.i18n import T
-from internal.ui.dialogs import ask_string, ask_yesno, show_error, show_info
+from internal.ui.dialogs import (
+    _is_dark_mode,
+    ask_string,
+    ask_yesno,
+    show_error,
+    show_info,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -34,6 +40,64 @@ STATUS_COLORS = {
     "Discovered": ("#0891B2", "#22D3EE"),
     "Pending":    "#95A5A6",
 }
+
+# Fallback error messages for toggle failures. There is no dedicated i18n key
+# (Agent AB owns the i18n file), so they are shown in both languages, matching
+# the onboarding dialog's bilingual style.
+_DISCOVERY_TOGGLE_FAILED = (
+    "无法更改设备发现设置 / Failed to change device discovery setting."
+)
+_VISIBILITY_TOGGLE_FAILED = (
+    "无法更改设备可见性设置 / Failed to change device visibility setting."
+)
+
+
+def _add_tooltip(widget, text):
+    """Attach a lightweight hover tooltip to a widget (best-effort).
+
+    Used for unlabeled icon buttons so their meaning is discoverable even on
+    platforms where the glyph itself may not render (e.g. Linux without an
+    emoji font).
+    """
+    tip = [None]
+
+    def _show(_event=None):
+        try:
+            if tip[0] is not None:
+                try:
+                    if tip[0].winfo_exists():
+                        return
+                except Exception:
+                    tip[0] = None
+            if not widget.winfo_exists():
+                return
+            x = widget.winfo_rootx() + 14
+            y = widget.winfo_rooty() + 20
+            t = tk.Toplevel(widget)
+            t.wm_overrideredirect(True)
+            t.wm_geometry(f"+{x}+{y}")
+            tk.Label(
+                t, text=text, justify="left", background="#FFFFE1",
+                relief="solid", borderwidth=1,
+                font=("TkDefaultFont", 9), padx=4, pady=2,
+            ).pack()
+            tip[0] = t
+        except Exception:
+            pass
+
+    def _hide(_event=None):
+        if tip[0] is not None:
+            try:
+                tip[0].destroy()
+            except Exception:
+                pass
+            tip[0] = None
+
+    try:
+        widget.bind("<Enter>", _show)
+        widget.bind("<Leave>", _hide)
+    except Exception:
+        pass
 
 
 class DashboardWindow:
@@ -99,6 +163,8 @@ class DashboardWindow:
         on_edit_note: Callable | None = None,
         # Web companion
         on_web_action: Callable | None = None,
+        # Lifecycle: quit the whole app (⌘Q / Ctrl+Q)
+        on_quit: Callable | None = None,
     ):
         self._root = root
         self._get_config = get_config
@@ -140,9 +206,10 @@ class DashboardWindow:
         self._on_retry_transfer = on_retry_transfer
         self._on_edit_note = on_edit_note
         self._on_web_action = on_web_action
+        self._on_quit = on_quit
 
         self._window: ctk.CTkToplevel | None = None
-        self._dark_mode = get_config().appearance_mode == "dark"
+        self._dark_mode = _is_dark_mode(get_config().appearance_mode)
         self._current_panel = "overview"
         self._refresh_job: str | None = None
         self._breathing = False
@@ -250,7 +317,7 @@ class DashboardWindow:
                 self._window = None
 
         logger.info("Opening ClipSync dashboard")
-        self._dark_mode = self._get_config().appearance_mode == "dark"
+        self._dark_mode = _is_dark_mode(self._get_config().appearance_mode)
         ctk.set_appearance_mode("dark" if self._dark_mode else "light")
         from internal.ui.fonts import configure_platform_theme
 
@@ -263,14 +330,15 @@ class DashboardWindow:
         self._window.protocol("WM_DELETE_WINDOW", self._on_hide)
 
         # Keyboard shortcuts — use ⌘ on macOS, Ctrl elsewhere, per platform
-        # convention.  ⌘W hides the window (like the close button), ⌘Q closes.
-        self._window.bind("<Escape>", lambda _e: self._on_hide())
+        # convention.  ⌘W/Ctrl+W hides the window (like the close button),
+        # ⌘Q/Ctrl+Q quits the whole app.
+        self._window.bind("<Escape>", self._on_escape)
         if sys.platform == "darwin":
             self._window.bind("<Command-w>", lambda _e: self._on_hide())
-            self._window.bind("<Command-q>", lambda _e: self._on_close())
+            self._window.bind("<Command-q>", lambda _e: self._request_quit())
         else:
             self._window.bind("<Control-w>", lambda _e: self._on_hide())
-            self._window.bind("<Control-q>", lambda _e: self._on_close())
+            self._window.bind("<Control-q>", lambda _e: self._request_quit())
 
         # Edge snapping
         self._snap_state = {"side": None, "side2": None}
@@ -389,6 +457,34 @@ class DashboardWindow:
         if self._window is not None:
             self._window.destroy()
             self._window = None
+
+    def _request_quit(self):
+        """⌘Q / Ctrl+Q — quit the whole app.
+
+        Prefers the host's shutdown callback (``on_quit``); if none was
+        supplied, falls back to closing just the dashboard window.
+        """
+        if self._on_quit is not None:
+            try:
+                self._on_quit()
+                return
+            except Exception:
+                logger.debug("on_quit callback failed", exc_info=True)
+        self._on_close()
+
+    def _on_escape(self, _event=None):
+        """Escape hides the window — unless focus is in a text entry.
+
+        When the history-search box (or any Entry) has focus, Escape clears
+        the field via the entry's own binding instead of hiding the window.
+        """
+        try:
+            focused = self._window.focus_get()
+        except tk.TclError:
+            focused = None
+        if focused is not None and isinstance(focused, (ctk.CTkEntry, tk.Entry)):
+            return
+        self._on_hide()
 
     def _cancel_refresh_job(self):
         """Cancel any pending periodic refresh so chains can't accumulate."""
@@ -822,17 +918,24 @@ class DashboardWindow:
         )
         self._overview_device_name.pack(side="left")
         # Edit button anchored right so long names don't push it off-screen
-        ctk.CTkButton(
+        edit_btn = ctk.CTkButton(
             nr, text="✎", width=22, height=22,
             fg_color="transparent", border_width=0,
             text_color=("gray55", "gray55"),
             hover_color=("gray85", "gray25"),
             font=ctk.CTkFont(size=10),
             command=self._edit_device_name,
-        ).pack(side="right")
+        )
+        edit_btn.pack(side="right")
+        _add_tooltip(edit_btn, T("ui.edit_name"))
+
+        # Truncate long device ids so they never overflow the fixed row.
+        device_id = cfg.device_id
+        if len(device_id) > 16:
+            device_id = device_id[:16] + "…"
 
         for label, value in [
-            (T("device_info.id"), cfg.device_id),
+            (T("device_info.id"), device_id),
             (T("device_info.platform"), platform.system() + " " + platform.machine()),
             (T("device_info.service"), cfg.service_type.replace("_clipsync._tcp.local.", "clipsync")),
         ]:
@@ -928,8 +1031,10 @@ class DashboardWindow:
         self._web_url_label = ctk.CTkLabel(
             url_row, text="", font=ctk.CTkFont(size=11, family="monospace"),
             text_color=("gray50", "gray70"),
+            wraplength=520, anchor="w", justify="left",
         )
-        self._web_url_label.pack(side="left", padx=(10, 6), pady=8)
+        self._web_url_label.pack(side="left", fill="x", expand=True,
+                                 padx=(10, 6), pady=8)
 
         self._web_copy_btn = ctk.CTkButton(
             url_row, text=T("ui.copy"), width=54, height=28,
@@ -1445,15 +1550,16 @@ class DashboardWindow:
                 text_color=note_color,
             )
             note_label.pack(side="right", padx=(0, 4))
-            ctk.CTkButton(
+            note_btn = ctk.CTkButton(
                 r2, text="✎", width=20, height=20,
                 fg_color="transparent", border_width=0,
                 text_color=("gray55", "gray55"),
                 hover_color=("gray85", "gray25"),
                 font=ctk.CTkFont(size=9),
                 command=lambda d=dev_id, nl=note_label: self._do_edit_note(d, nl),
-            ).pack(side="right")
-
+            )
+            note_btn.pack(side="right")
+            _add_tooltip(note_btn, T("device.note_title"))
 
     # ── Device actions ────────────────────────────────────────────
 
@@ -1532,6 +1638,13 @@ class DashboardWindow:
     def _do_speed_test(self):
         if not self._on_speed_test:
             return
+        # Prevent a second overlapping test (Run button is disabled while a
+        # test is in flight, but guard against programmatic re-entry too).
+        if getattr(self, "_speed_test_running", False):
+            return
+        self._speed_test_running = True
+        if self._speed_run_btn is not None:
+            self._speed_run_btn.configure(state="disabled")
         # Show progress bar, hide hint & result
         if self._speed_hint:
             self._speed_hint.pack_forget()
@@ -1543,6 +1656,9 @@ class DashboardWindow:
         # start_speed_test returns None when no peer is connected; refusing to
         # start avoids an absurd "fast" result from a broadcast that no-ops.
         if not self._on_speed_test():
+            self._speed_test_running = False
+            if self._speed_run_btn is not None:
+                self._speed_run_btn.configure(state="normal")
             if self._speed_progress:
                 self._speed_progress.pack_forget()
             if self._speed_status:
@@ -1555,6 +1671,15 @@ class DashboardWindow:
         if self._speed_status:
             self._speed_status.configure(text=T("transfer.speed_test.running"))
             self._speed_status.pack(anchor="w", padx=14, pady=(2, 0))
+
+    def _set_speed_test_done(self):
+        """Re-enable the speed-test Run button after the test finishes."""
+        self._speed_test_running = False
+        if self._speed_run_btn is not None:
+            try:
+                self._speed_run_btn.configure(state="normal")
+            except Exception:
+                pass
 
     def _create_pending_row(self, peer_id: str, code: str, peer_name: str,
                             status: str = "pending"):
@@ -1612,8 +1737,10 @@ class DashboardWindow:
         code_frame = ctk.CTkFrame(inner, fg_color=("#D6EAF8", "#1A3A4A"),
                                   corner_radius=6)
         code_frame.pack(anchor="w", pady=(4, 0))
+        # Group an unbroken 8-digit code as "4829 1374" for readability.
+        display_code = (code[:4] + " " + code[4:]) if len(code) >= 5 else code
         ctk.CTkLabel(
-            code_frame, text=T("ui.pairing_code", code=code),
+            code_frame, text=T("ui.pairing_code", code=display_code),
             font=ctk.CTkFont(size=20, weight="bold"),
             text_color=ACCENT,
         ).pack(padx=12, pady=6)
@@ -1725,6 +1852,13 @@ class DashboardWindow:
         )
         search_entry.pack(side="left", fill="x", expand=True, padx=(4, 4), pady=8)
         search_entry.bind("<KeyRelease>", self._on_search_keyrelease)
+        # Escape in the search box clears the query instead of hiding the
+        # whole dashboard. "break" stops the toplevel Escape handler firing.
+        search_entry.bind(
+            "<Escape>",
+            lambda e: (self._on_clear_search(), "break")[1],
+        )
+        self._history_search_entry = search_entry
 
         ctk.CTkButton(
             search_frame, text="✕", width=24, height=24,
@@ -1873,7 +2007,9 @@ class DashboardWindow:
             for ch in raw
         )
         cleaned = " ".join(cleaned.split())
-        return cleaned[:max_len]
+        if len(cleaned) > max_len:
+            return cleaned[:max_len] + "…"
+        return cleaned
 
     def _create_history_card(self, index: int, entry: dict,
                             peer_map: dict[str, str] | None = None):
@@ -1947,7 +2083,7 @@ class DashboardWindow:
             r1, text=preview or T("empty.no_preview"),
             font=self._card_font_bold,
             text_color=("gray20", "gray85"),
-            anchor="w",
+            anchor="w", justify="left", wraplength=520,
         )
         preview_lbl.pack(side="left", fill="x", expand=True, padx=(0, 4))
 
@@ -2069,12 +2205,14 @@ class DashboardWindow:
             font=ctk.CTkFont(size=13, weight="bold"),
         ).pack(side="left")
 
-        ctk.CTkButton(
+        self._speed_run_btn = ctk.CTkButton(
             st_top, text=T("ui.run"), width=64, height=26,
             fg_color=ACCENT, hover_color=("#0EA5C4", "#4CE0F5"),
             font=ctk.CTkFont(size=11),
             command=self._do_speed_test,
-        ).pack(side="right")
+        )
+        self._speed_run_btn.pack(side="right")
+        self._speed_test_running = False
 
         # Status / hint label
         self._speed_hint = ctk.CTkLabel(
@@ -2255,6 +2393,7 @@ class DashboardWindow:
                             text=T("transfer.speed_test_progress", sent=sent, total=total),
                         )
                 elif state in ("done", "acknowledged") and mbps > 0:
+                    self._set_speed_test_done()
                     # Hide progress, show result
                     if self._speed_progress:
                         self._speed_progress.pack_forget()
@@ -2285,6 +2424,7 @@ class DashboardWindow:
                         self._speed_result_row.pack(fill="x")
                 else:
                     # Failed — hide progress, show status in red
+                    self._set_speed_test_done()
                     if self._speed_progress:
                         self._speed_progress.pack_forget()
                     if self._speed_hint:
@@ -2299,6 +2439,7 @@ class DashboardWindow:
                         self._speed_status.pack(anchor="w", padx=14, pady=(2, 0))
             else:
                 # No test data — show idle hint
+                self._set_speed_test_done()
                 if self._speed_hint:
                     self._speed_hint.pack(anchor="w", padx=14, pady=(2, 0))
                 if self._speed_progress:
@@ -2558,12 +2699,42 @@ class DashboardWindow:
                 )
 
     def _on_toggle_discovery(self):
-        if self._on_toggle_discovery_cb:
-            self._on_toggle_discovery_cb(self._discovery_var.get())
+        if not self._on_toggle_discovery_cb:
+            return
+        enabled = self._discovery_var.get()
+        try:
+            self._on_toggle_discovery_cb(enabled)
+        except Exception:
+            logger.debug("Discovery toggle failed", exc_info=True)
+            self._discovery_var.set(not enabled)
+            show_info(self._window, T("dialog.error"), _DISCOVERY_TOGGLE_FAILED)
+            return
+        # Verify the requested state actually took effect; revert on mismatch.
+        try:
+            if self._get_discovering and self._get_discovering() != enabled:
+                self._discovery_var.set(not enabled)
+                show_info(self._window, T("dialog.error"), _DISCOVERY_TOGGLE_FAILED)
+        except Exception:
+            logger.debug("Discovery state verification failed", exc_info=True)
 
     def _on_toggle_visibility(self):
-        if self._on_toggle_visibility_cb:
-            self._on_toggle_visibility_cb(self._visibility_var.get())
+        if not self._on_toggle_visibility_cb:
+            return
+        enabled = self._visibility_var.get()
+        try:
+            self._on_toggle_visibility_cb(enabled)
+        except Exception:
+            logger.debug("Visibility toggle failed", exc_info=True)
+            self._visibility_var.set(not enabled)
+            show_info(self._window, T("dialog.error"), _VISIBILITY_TOGGLE_FAILED)
+            return
+        # Verify the requested state actually took effect; revert on mismatch.
+        try:
+            if self._get_visible and self._get_visible() != enabled:
+                self._visibility_var.set(not enabled)
+                show_info(self._window, T("dialog.error"), _VISIBILITY_TOGGLE_FAILED)
+        except Exception:
+            logger.debug("Visibility state verification failed", exc_info=True)
 
     def _edit_device_name(self):
         cfg = self._get_config()
@@ -2634,7 +2805,8 @@ class DashboardWindow:
         token = cfg.web_token or ""
         port = cfg.web_port
         url = f"http://{ip}:{port}?token={token}" if token else f"http://{ip}:{port}"
-        self._web_url_label.configure(text=url)
+        display_url = url if len(url) <= 60 else url[:57] + "..."
+        self._web_url_label.configure(text=display_url)
 
         # The QR image is expensive to regenerate (qrcode.make + LANCZOS
         # resize) — cache it and only rebuild when the token / IP / port

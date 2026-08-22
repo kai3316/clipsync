@@ -38,13 +38,22 @@
       draggable="true"
       :data-id="item.id"
       :data-index="index"
+      role="button"
+      tabindex="0"
+      :aria-label="t('favorites.copy_tooltip')"
       :class="{
         'favorite-item--dragging': isDragging,
       }"
       @click="onClick"
+      @keydown="onKeyDown"
       @dragstart="onDragStart"
       @dragend="onDragEnd"
     >
+      <span
+        class="favorite-item__drag-handle"
+        :title="t('favorites.drag_reorder_hint')"
+        aria-hidden="true"
+      >&#8801;</span>
       <div class="history-item__icon">
         <span>{{ typeIcon }}</span>
       </div>
@@ -65,7 +74,7 @@
           ref="titleInput"
           @click.stop
         />
-        <div v-if="item.content" class="favorite-item__preview">{{ contentPreview }}</div>
+        <div v-if="item.content" class="favorite-item__preview selectable">{{ contentPreview }}</div>
         <div class="history-item__meta">
           <span class="history-item__time">{{ relativeTime }}</span>
           <span v-if="item.group" class="history-item__source badge favorite-item__group-badge">{{ item.group }}</span>
@@ -76,17 +85,22 @@
           class="history-item__action-btn"
           @click="copyItem"
           :title="t('favorites.copy_tooltip')"
+          :aria-label="t('favorites.copy_tooltip')"
         >&#128203;</button>
         <button
           class="history-item__action-btn"
           @click="startEditTitle"
           :title="t('favorites.edit_title_tooltip')"
+          :aria-label="t('favorites.edit_title_tooltip')"
         >&#9999;&#65039;</button>
         <div class="favorite-item__group-dropdown" :class="{ 'favorite-item__group-dropdown--open': showGroupDropdown }">
           <button
             class="history-item__action-btn"
             @click="toggleGroupDropdown"
             :title="t('favorites.move_group_tooltip')"
+            :aria-label="t('favorites.move_group_tooltip')"
+            :aria-expanded="showGroupDropdown"
+            :aria-haspopup="true"
           >&#128193;</button>
           <div v-if="showGroupDropdown" class="favorite-item__group-menu glass-neo">
             <button
@@ -105,6 +119,7 @@
           class="history-item__action-btn history-item__action-btn--danger"
           @click="removeFavorite"
           :title="t('favorites.remove_tooltip')"
+          :aria-label="t('favorites.remove_tooltip')"
         >&#128465;</button>
       </div>
     </div>`,
@@ -151,7 +166,25 @@
     },
 
     methods: {
+      onKeyDown: function (e) {
+        // Only the card itself triggers the primary action — inner buttons and
+        // the title editor handle their own keys.
+        if (e.target !== this.$el) return;
+        if (e.key === 'Enter' || e.key === ' ') {
+          e.preventDefault();
+          this.onClick(e);
+        }
+      },
+
       onClick: function (e) {
+        // Don't copy while a drag is in progress — the browser synthesizes a
+        // click after dragend, which would clobber the clipboard.
+        if (this.isDragging) return;
+        // Ignore clicks on inner action buttons / the group menu.
+        if (e.target && e.target.closest &&
+            e.target.closest('button, .history-item__actions, .favorite-item__group-menu')) {
+          return;
+        }
         // Ignore clicks on the title itself — double-click handles editing
         if (e.target.closest('.favorite-item__title') || e.target.closest('.favorite-item__title-edit')) return;
         this.copyItem();

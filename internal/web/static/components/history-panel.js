@@ -19,6 +19,9 @@
         clearingAll: false,
         loadingMore: false,
         historyPageSize: 20,
+        // True while ANY batch action (push/pin/favorite/delete) is in flight —
+        // disables the whole action bar so a second click can't double-fire.
+        batchBusy: false,
       };
     },
 
@@ -169,6 +172,14 @@
         <div class="skeleton-card animate-shimmer" v-for="n in 2" :key="'s'+n" style="height:64px;margin-bottom:8px;"></div>
       </div>
 
+      <!-- Load error / still-loading state (failsafe fired before data) -->
+      <div v-else-if="store.loadError" class="panel-empty">
+        <span class="panel-empty-icon">&#9888;&#65039;</span>
+        <p class="panel-empty-title">{{ t('ui.load_failed') }}</p>
+        <p class="panel-empty-desc">{{ t('web.error') }}</p>
+        <button class="btn-ghost" @click="retryLoad">{{ t('common.retry') }}</button>
+      </div>
+
       <!-- Content -->
       <template v-else-if="hasContent">
         <!-- Pinned section -->
@@ -233,23 +244,23 @@
             <span class="history-panel__action-bar-count-num">{{ selectedCount }}</span> {{ t('history.selected') }}
           </span>
           <div class="history-panel__action-bar-btns">
-            <button class="btn-action-bar" :title="t('web.push_button')" @click="mergeCopySelected">
+            <button class="btn-action-bar" :title="t('web.push_button')" @click="mergeCopySelected" :disabled="batchBusy">
               <span class="btn-action-bar__icon">&#128203;</span>
-              <span class="btn-action-bar__label">{{ t('web.push_button') }}</span>
+              <span class="btn-action-bar__label">{{ batchBusy ? '...' : t('web.push_button') }}</span>
             </button>
-            <button class="btn-action-bar" :title="allPinned ? t('web.unpin') : t('web.pin')" @click="batchPinSelected">
+            <button class="btn-action-bar" :title="allPinned ? t('web.unpin') : t('web.pin')" @click="batchPinSelected" :disabled="batchBusy">
               <span class="btn-action-bar__icon">&#128204;</span>
-              <span class="btn-action-bar__label">{{ allPinned ? t('web.unpin') : t('web.pin') }}</span>
+              <span class="btn-action-bar__label">{{ batchBusy ? '...' : (allPinned ? t('web.unpin') : t('web.pin')) }}</span>
             </button>
-            <button class="btn-action-bar" :title="t('context.favorite')" @click="batchFavoriteSelected">
+            <button class="btn-action-bar" :title="t('context.favorite')" @click="batchFavoriteSelected" :disabled="batchBusy">
               <span class="btn-action-bar__icon">&#11088;</span>
-              <span class="btn-action-bar__label">{{ t('context.favorite') }}</span>
+              <span class="btn-action-bar__label">{{ batchBusy ? '...' : t('context.favorite') }}</span>
             </button>
-            <button class="btn-action-bar btn-action-bar--danger" @click="deleteSelected" :disabled="deleting">
+            <button class="btn-action-bar btn-action-bar--danger" @click="deleteSelected" :disabled="deleting || batchBusy">
               <span class="btn-action-bar__icon">&#128465;</span>
               <span class="btn-action-bar__label">{{ deleting ? t('web.deleted') : t('web.delete') }}</span>
             </button>
-            <button class="btn-action-bar btn-action-bar--ghost" @click="clearSelection">
+            <button class="btn-action-bar btn-action-bar--ghost" @click="clearSelection" :disabled="batchBusy">
               <span class="btn-action-bar__icon">&#10006;&#65039;</span>
               <span class="btn-action-bar__label">{{ t('web.cancel') }}</span>
             </button>
@@ -262,6 +273,12 @@
       onPanelClick: function () {
         // Click on background (not on a history-item) clears selection
         this.store.clearSelection();
+      },
+
+      retryLoad: function () {
+        if (this.$root && typeof this.$root.loadData === 'function') {
+          this.$root.loadData();
+        }
       },
 
       clearSelection: function () {
@@ -296,6 +313,8 @@
           })
           .catch(function () {
             self.loadingMore = false;
+            // Surface the failure and keep the button usable for a retry.
+            self.store.showToast(self.t('history.load_more_failed'), 2000);
           });
       },
 
@@ -353,13 +372,16 @@
         // local browser clipboard would only put it on this phone.
         var merged = selectedTexts.join('\n---\n');
         var self = this;
+        this.batchBusy = true;
         ClipsyncAPI.pushText(merged).then(function (res) {
+          self.batchBusy = false;
           if (res && res.ok !== false) {
             store.showToast(self.t('web.merged_pushed', { count: selectedTexts.length }), 2000);
           } else {
             store.showToast(self.t('history.push_failed'), 2000);
           }
         }).catch(function () {
+          self.batchBusy = false;
           store.showToast(self.t('history.push_failed'), 2000);
         });
       },
@@ -372,7 +394,9 @@
         var newPinned = !this.allPinned;
         var self = this;
 
+        this.batchBusy = true;
         ClipsyncAPI.batchPin(selectedIds, newPinned).then(function (res) {
+          self.batchBusy = false;
           if (res && res.ok !== false) {
             // Update local state
             for (var i = 0; i < store.history.length; i++) {
@@ -386,6 +410,7 @@
             );
           }
         }).catch(function (e) {
+          self.batchBusy = false;
           console.error('[ClipSync] Batch pin failed:', e);
           store.showToast(self.t('history.pin_failed'), 2000);
         });
@@ -397,7 +422,9 @@
         if (selectedIds.length === 0) return;
 
         var self = this;
+        this.batchBusy = true;
         ClipsyncAPI.batchFavorite(selectedIds, '').then(function (res) {
+          self.batchBusy = false;
           if (res && res.ok !== false) {
             store.showToast(
               self.t('history.batch_favorited', { count: res.count }),
@@ -411,6 +438,7 @@
             }).catch(function () {});
           }
         }).catch(function (e) {
+          self.batchBusy = false;
           console.error('[ClipSync] Batch favorite failed:', e);
           store.showToast(self.t('favorites.add_failed'), 2000);
         });
@@ -428,6 +456,7 @@
           this.t('history.batch_delete_confirm', { count: selectedIds.length })
         ).then(function () {
           self.deleting = true;
+          self.batchBusy = true;
 
           ClipsyncAPI.batchDelete(selectedIds).then(function (res) {
             if (res && res.ok !== false) {
@@ -448,10 +477,12 @@
               store.showToast(self.t('history.deleted_count', { count: (res.count || selectedIds.length) }), 2000);
             }
             self.deleting = false;
+            self.batchBusy = false;
           }).catch(function (e) {
             console.error('[ClipSync] Batch delete failed:', e);
             store.showToast(self.t('history.delete_failed'), 2000);
             self.deleting = false;
+            self.batchBusy = false;
           });
         }).catch(function () {});
       },

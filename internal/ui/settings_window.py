@@ -7,6 +7,7 @@ filtering preferences, and version information.
 
 import logging
 import os
+import sys
 import tkinter as tk
 from collections.abc import Callable
 
@@ -15,7 +16,7 @@ import customtkinter as ctk
 from internal.clipboard.filter import ALL_CATEGORIES
 from internal.i18n import T, available_locales, set_locale
 from internal.platform.notify import notification_mgr
-from internal.ui.dialogs import ask_yesno, show_info, show_warning
+from internal.ui.dialogs import _is_dark_mode, ask_yesno, show_info, show_warning
 from internal.web.server import WebServer
 
 logger = logging.getLogger(__name__)
@@ -24,6 +25,17 @@ logger = logging.getLogger(__name__)
 def _confirm_danger(parent, title: str, message: str) -> bool:
     """Show a confirmation dialog for dangerous actions. Returns True if confirmed."""
     return ask_yesno(parent, title, message)
+
+
+def _strip_ascii_ellipsis(text: str) -> str:
+    """Remove a trailing ASCII '...' only — never a unicode ellipsis '…'.
+
+    ``rstrip("...")`` would strip any sequence of '.' characters and is
+    locale-fragile (translated labels may end in '…' or other punctuation).
+    """
+    if text.endswith("..."):
+        return text[:-3]
+    return text
 
 
 class SettingsWindow:
@@ -41,6 +53,7 @@ class SettingsWindow:
         get_log_text: Callable | None = None,
         on_quit: Callable | None = None,
         set_skip_save_on_shutdown: Callable[[bool], None] | None = None,
+        on_theme_changed: Callable | None = None,
     ):
         self._root = root
         self._get_config = get_config
@@ -51,13 +64,14 @@ class SettingsWindow:
         self._set_filter_categories = set_filter_categories
         self._get_log_text = get_log_text
         self._on_quit = on_quit
+        self._on_theme_changed = on_theme_changed
         # Lets the host application suppress its config re-save during
         # shutdown() after a restart / factory reset (otherwise shutdown
         # would recreate config.json with the old settings).
         self._set_skip_save_on_shutdown = set_skip_save_on_shutdown
 
         self._window: ctk.CTkToplevel | None = None
-        self._dark_mode = get_config().appearance_mode == "dark"
+        self._dark_mode = _is_dark_mode(get_config().appearance_mode)
         self._current_panel = "network"
         self._refresh_job: str | None = None
 
@@ -118,6 +132,10 @@ class SettingsWindow:
                 self._window = None
 
         logger.info("Opening ClipSync settings")
+        # Re-read the appearance mode each time the window is shown so a
+        # "system" mode follows OS changes and external theme changes are
+        # picked up on reopen.
+        self._dark_mode = _is_dark_mode(self._get_config().appearance_mode)
         ctk.set_appearance_mode("dark" if self._dark_mode else "light")
         from internal.ui.fonts import configure_platform_theme
 
@@ -128,6 +146,16 @@ class SettingsWindow:
         self._window.geometry("740x620")
         self._window.minsize(680, 560)
         self._window.protocol("WM_DELETE_WINDOW", self._on_close)
+
+        # Keyboard shortcuts: Escape closes the settings window; ⌘W/Ctrl+W
+        # closes it on macOS / other platforms.  Escape is a no-op while an
+        # Entry is focused (it would otherwise destroy the window and discard
+        # unsaved edits in a text field — e.g. the web token or port).
+        self._window.bind("<Escape>", lambda _e: self._on_escape())
+        if sys.platform == "darwin":
+            self._window.bind("<Command-w>", lambda _e: self._on_close())
+        else:
+            self._window.bind("<Control-w>", lambda _e: self._on_close())
 
         self._window.update_idletasks()
         sw = self._window.winfo_screenwidth()
@@ -153,6 +181,22 @@ class SettingsWindow:
             self._filter_vars.clear()
         if self._on_closed is not None:
             self._on_closed()
+
+    def _on_escape(self):
+        """Close the settings window on Escape, unless focus is in a text
+        field (Entry / Textbox) — there Escape should do nothing so unsaved
+        edits in the web token, port, etc. are not silently discarded."""
+        if self._window is None:
+            return
+        try:
+            focused = self._window.focus_get()
+            if focused is not None and isinstance(
+                focused, (ctk.CTkEntry, ctk.CTkTextbox, tk.Entry, tk.Text)
+            ):
+                return
+        except Exception:
+            pass
+        self._on_close()
 
     # ═══════════════════════════════════════════════════════════════
     # UI construction
@@ -485,7 +529,7 @@ class SettingsWindow:
 
     def _on_appearance_change(self, mode: str):
         ctk.set_appearance_mode(mode)
-        self._dark_mode = (mode == "dark")
+        self._dark_mode = _is_dark_mode(mode)
         # Update header theme button
         if hasattr(self, '_theme_btn') and self._theme_btn:
             self._theme_btn.configure(
@@ -494,6 +538,7 @@ class SettingsWindow:
         cfg = self._get_config()
         cfg.appearance_mode = mode
         self._save_config()
+        self._notify_theme_changed(mode)
         try:
             self._status_label.configure(text=T("footer.settings_saved"))
         except Exception:
@@ -636,7 +681,9 @@ class SettingsWindow:
         url_row = ctk.CTkFrame(card2, fg_color="transparent")
         url_row.pack(fill="x", padx=16, pady=(4, 14))
         self._web_url_label = ctk.CTkLabel(
-            url_row, text="", font=ctk.CTkFont(size=11), text_color=("gray50", "gray60"),
+            url_row, text="", font=ctk.CTkFont(size=11),
+            text_color=("gray50", "gray60"),
+            wraplength=440, anchor="w", justify="left",
         )
         self._web_url_label.pack(side="left", fill="x", expand=True, padx=(0, 8))
         self._web_copy_btn = ctk.CTkButton(
@@ -671,7 +718,8 @@ class SettingsWindow:
             url = f"http://{ip}:{port}?token={token}" if token else f"http://{ip}:{port}"
 
             if self._web_url_label:
-                self._web_url_label.configure(text=url)
+                display_url = url if len(url) <= 60 else url[:57] + "..."
+                self._web_url_label.configure(text=display_url)
 
             if token:
                 img = _qrcode.make(url)
@@ -1380,7 +1428,7 @@ class SettingsWindow:
 
         if self._on_export_logs:
             ctk.CTkButton(
-                btn_row, text="\U0001F4BE  " + T("ui.export_logs").rstrip("..."), width=80, height=30,
+                btn_row, text="\U0001F4BE  " + _strip_ascii_ellipsis(T("ui.export_logs")), width=80, height=30,
                 font=ctk.CTkFont(size=11),
                 command=self._on_export_logs,
             ).pack(side="left")
@@ -1500,3 +1548,12 @@ class SettingsWindow:
         cfg = self._get_config()
         cfg.appearance_mode = new_mode
         self._save_config()
+        self._notify_theme_changed(new_mode)
+
+    def _notify_theme_changed(self, new_mode: str):
+        """Let the host (main.py) refresh an already-open dashboard's theme."""
+        if self._on_theme_changed is not None:
+            try:
+                self._on_theme_changed(new_mode)
+            except Exception:
+                logger.debug("theme-changed callback failed", exc_info=True)

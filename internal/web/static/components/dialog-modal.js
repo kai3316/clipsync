@@ -45,14 +45,18 @@
             '</div>' +
 
             '<!-- pick_peer -->' +
-            '<div v-if="store.activeDialog.dialog_type === \'pick_peer\'" class="dialog-card__body">' +
+            '<div v-if="store.activeDialog.dialog_type === \'pick_peer\'" class="dialog-card__body" role="radiogroup" :aria-label="t(\'transfer.select_peer\')">' +
               '<div v-if="!store.activeDialog.peers || store.activeDialog.peers.length === 0" class="dialog-empty">' +
                 '{{ t(\'dialog.no_peers\') }}' +
               '</div>' +
-              '<div v-for="peer in store.activeDialog.peers" :key="peer.device_id" ' +
+              '<div v-for="(peer, pIndex) in store.activeDialog.peers" :key="peer.device_id" ' +
                    'class="dialog-peer-item" ' +
+                   'role="radio" ' +
+                   'tabindex="0" ' +
+                   ':aria-checked="selectedPeerId === peer.device_id ? \'true\' : \'false\'" ' +
                    ':class="{ \'dialog-peer-item--selected\': selectedPeerId === peer.device_id }" ' +
-                   '@click="selectedPeerId = peer.device_id">' +
+                   '@click="selectedPeerId = peer.device_id" ' +
+                   '@keydown="onPeerKeydown($event, peer.device_id, pIndex)">' +
                 '<span class="dialog-peer-item__name">{{ peer.device_name }}</span>' +
                 '<span class="dialog-peer-item__check" v-if="selectedPeerId === peer.device_id">✓</span>' +
               '</div>' +
@@ -180,12 +184,50 @@
             if (dlg.dialog_type === 'url_input' && self.$refs.urlInput) {
               self.$refs.urlInput.focus();
             }
+            // Focus the first peer row so keyboard users can arrow through.
+            if (dlg.dialog_type === 'pick_peer' && dlg.peers && dlg.peers.length > 0) {
+              self._focusPeerRow(0);
+            }
           });
         },
       },
     },
 
     methods: {
+      // Move the peer-picker selection with the arrow keys (wrapping) and
+      // confirm the send with Enter/Space, mirroring the click behaviour.
+      onPeerKeydown: function (e, peerId, index) {
+        var dlg = this.store.activeDialog;
+        var peers = (dlg && dlg.peers) || [];
+        if (peers.length === 0) return;
+        var self = this;
+        if (e.key === 'ArrowDown' || e.key === 'ArrowRight') {
+          e.preventDefault();
+          var next = (index + 1) % peers.length;
+          this.selectedPeerId = peers[next].device_id;
+          this.$nextTick(function () { self._focusPeerRow(next); });
+        } else if (e.key === 'ArrowUp' || e.key === 'ArrowLeft') {
+          e.preventDefault();
+          var prev = (index - 1 + peers.length) % peers.length;
+          this.selectedPeerId = peers[prev].device_id;
+          this.$nextTick(function () { self._focusPeerRow(prev); });
+        } else if (e.key === ' ') {
+          // Space follows radio semantics: select the focused row.
+          e.preventDefault();
+          this.selectedPeerId = peerId;
+        } else if (e.key === 'Enter') {
+          // Enter confirms the send with the focused peer.
+          e.preventDefault();
+          this.selectedPeerId = peerId;
+          this.respond('select');
+        }
+      },
+
+      _focusPeerRow: function (index) {
+        var rows = this.$el ? this.$el.querySelectorAll('.dialog-peer-item') : [];
+        if (rows[index]) rows[index].focus();
+      },
+
       respond: function (action) {
         var self = this;
         var dlg = this.store.activeDialog;

@@ -2,6 +2,34 @@
 
 All notable changes to ClipSync are documented in this file.
 
+## [1.0.20] — 2026-08-23
+
+### Interaction & accessibility (Round 2)
+- **Web dashboard is now keyboard-usable**: the right-click context menu is a real `role="menu"` with arrow-key navigation, Enter to activate, Escape to close with focus restored — and the advertised Ctrl+C / Del shortcuts now actually work (guarded so they never fire through a modal dialog). History and favorite cards activate with Enter/Space, the settings dialog is `role="dialog"` with a focus trap, peer-picker rows are proper radios with arrow-key selection, and emoji-only action buttons everywhere got accessible labels.
+- **Async operations give feedback instead of silence**: overview toggles (sync / discovery / visibility / web companion) disable and show a busy state during the request and toast the real reason on failure; Show QR / Send URL no longer swallow errors; device-refresh failures show a distinct "failed to load — retry" state instead of a misleading "No devices found"; history "load more" and multi-select batch actions get busy states and failure toasts.
+- **Settings dialog unsaved-changes awareness**: toggles that need a Save are now marked with an "unsaved" badge, closing with staged changes prompts for confirmation, and focus is trapped and restored.
+- **Mobile-friendly polish**: toggle switches have 44px touch targets, the overview status bar wraps instead of clipping, cards get `:active` press feedback, and clip text is selectable (it's a clipboard manager — you should be able to drag-select a portion).
+
+### Core flows — transfer failure taxonomy
+- **The file-transfer failure reason is no longer discarded.** Every terminal state now carries a stable reason (`error_disk`, `error_size_mismatch`, `error_missing_chunks`, `error_security`, `rejected`, `peer_offline`, `timeout`, `cancelled`) from the transfer engine through history and into both UIs, so "Disk full" and "Peer went offline" no longer both read as a generic "File transfer failed".
+- **A user-initiated cancel is reported as "Cancelled", not "Failed"** — in the notification and the history record.
+- **Incoming transfer dialogs can no longer outlive the transfer**: if a request is cleaned up or the sender cancels while the prompt is open, answering shows a clear "transfer no longer available" instead of silently doing nothing.
+- **Cancel can't double-notify**: the send loop and `cancel_transfer` share a once-guard so a cancel races the mid-send thread without firing two callbacks.
+
+### Desktop (CTk) window behavior
+- **⌘Q / Ctrl+Q now actually quits** the app instead of just closing the dashboard window and leaving a zombie in the tray.
+- **"System" appearance mode is honored**: it resolves to the OS light/dark preference (Windows registry, macOS defaults, Linux gsettings) instead of silently rendering Light; re-opening a window re-reads the current system theme.
+- **Escape no longer closes a window while you're typing** in the dashboard history search or any settings text field.
+- **All themed dialogs accept Enter (default) and Escape (cancel)**, focus their default button, and give buttons a real hover state.
+- Settings window closes with Escape/⌘W; the first-run language picker is now a proper modal with Tab/Enter/Escape support; the "About" tray item opens the Settings About panel instead of an ephemeral notification; hotkey-registration failures (macOS Accessibility) surface a one-time actionable dialog; toggling sync notifies "Sync active/paused"; pairing codes are grouped (1234 5678) and expired pairing requests are surfaced.
+
+### Web companion & PWA
+- **Regenerating the access token no longer bricks installed PWAs or open phone pages**: the manifest gets a stable `id`/`scope` and a "link expired — re-scan the QR" page instead of raw 403 JSON; a stale-token phone page shows guidance instead of a wrong "check your Wi-Fi" diagnosis.
+- **Token is URL-encoded** when embedded in QR codes / copy-URLs, so a custom token with reserved characters can't break the flow.
+- **iOS "Add to Home Screen" now yields a standalone app** (apple-mobile-web-app metas on all pages) and the quick-paste page hides its dead close button on normal browser tabs.
+- **Phone pages follow the app's configured language** instead of the phone's browser language; quick-paste history fetches get an 8s timeout with a Retry state; mobile tap targets are ≥44px; the iOS auto-zoom-on-focus bug is fixed (16px textarea).
+- **Static assets are always revalidated** (`no-cache` + ETag/304) so an app update never serves stale JS/CSS, while unchanged assets stay cheap over LAN.
+
 ## [1.0.19] — 2026-08-22
 
 ### Platform UX (macOS / Linux) — typography & theme

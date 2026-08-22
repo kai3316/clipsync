@@ -16,6 +16,9 @@
       return {
         refreshing: false,
         pairingResponding: null,
+        // True when the last device-list fetch rejected — distinguishes
+        // "loaded and empty" from "could not load at all".
+        loadFailed: false,
       };
     },
 
@@ -83,7 +86,7 @@
                 '</button>' +
                 '<span v-else class="pairing-request-card__waiting">⏳ {{ t(\'pairing.state.confirmed_waiting\') }}</span>' +
                 '<button class="device-card__action device-card__action--danger" @click="rejectPairing(pr)" :disabled="pairingResponding === pr.peer_id">' +
-                  '{{ t(\'ui.reject\') }}' +
+                  '{{ pairingResponding === pr.peer_id ? \'...\' : t(\'ui.reject\') }}' +
                 '</button>' +
               '</div>' +
             '</div>' +
@@ -122,8 +125,18 @@
             '<device-card v-for="dev in discoveredDevices" :key="dev.device_id" :device="dev"></device-card>' +
           '</div>' +
 
-          '<!-- Empty -->' +
-          '<div v-if="allRemoteDevices.length === 0 && pairingRequests.length === 0" class="panel-empty">' +
+          '<!-- Load failed -->' +
+          '<div v-if="loadFailed || store.devicesLoadFailed" class="panel-empty">' +
+            '<span class="panel-empty-icon">⚠️</span>' +
+            '<p class="panel-empty-title">{{ t(\'devices.load_failed\') }}</p>' +
+            '<p class="panel-empty-desc">{{ t(\'web.error\') }}</p>' +
+            '<button class="btn-ghost" @click="refresh" :disabled="refreshing">' +
+              '{{ refreshing ? \'...\' : t(\'common.retry\') }}' +
+            '</button>' +
+          '</div>' +
+
+          '<!-- Empty: loaded and genuinely no devices -->' +
+          '<div v-else-if="allRemoteDevices.length === 0 && pairingRequests.length === 0" class="panel-empty">' +
             '<span class="panel-empty-icon">📡</span>' +
             '<p class="panel-empty-title">{{ t(\'devices.no_devices_found\') }}</p>' +
             '<p class="panel-empty-desc">{{ t(\'devices.auto_discover_hint\') }}</p>' +
@@ -137,6 +150,8 @@
         this.refreshing = true;
         ClipsyncAPI.getDevices()
           .then(function (res) {
+            self.loadFailed = false;
+            self.store.devicesLoadFailed = false;
             if (res && res.devices) {
               self.store.devices = res.devices;
             }
@@ -146,7 +161,12 @@
               self.store.syncPairingRequests(res.pending_pairings);
             }
           })
-          .catch(function () {})
+          .catch(function () {
+            // Don't claim "No devices found" when the list simply couldn't be
+            // loaded — surface a distinct failed state with a Retry action.
+            self.loadFailed = true;
+            self.store.devicesLoadFailed = true;
+          })
           .finally(function () {
             self.refreshing = false;
           });

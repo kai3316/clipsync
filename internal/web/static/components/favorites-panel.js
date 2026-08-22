@@ -173,12 +173,22 @@
               v-if="searchInput"
               class="favorites-panel__search-clear"
               @click="clearSearch"
+              :aria-label="t('favorites.clear_search')"
+              :title="t('favorites.clear_search')"
             >&#10006;&#65039;</button>
           </div>
 
           <!-- Loading state -->
           <div v-if="store.loading" class="favorites-panel__loading">
             <div v-for="n in 3" :key="n" class="skeleton skeleton-card"></div>
+          </div>
+
+          <!-- Load error / still-loading state (failsafe fired before data) -->
+          <div v-else-if="store.loadError" class="empty-state">
+            <span class="empty-state__icon">&#9888;&#65039;</span>
+            <h3 class="empty-state__title">{{ t('ui.load_failed') }}</h3>
+            <p class="empty-state__desc">{{ t('web.error') }}</p>
+            <button class="btn-ghost" @click="retryLoad">{{ t('common.retry') }}</button>
           </div>
 
           <!-- Empty: no favorites at all -->
@@ -552,6 +562,12 @@
       clearSearch: function () {
         this.searchInput = '';
         this.store.favoriteSearch = '';
+      },
+
+      retryLoad: function () {
+        if (this.$root && typeof this.$root.loadData === 'function') {
+          this.$root.loadData();
+        }
       },
 
       /* ── Group selection ─────────────────────────────────────── */

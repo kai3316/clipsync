@@ -132,6 +132,8 @@
     selectedIds: new Set(),     // multi-select set of entry IDs
     loading: false,
     initialLoad: true,          // true until first data fetch completes
+    loadError: false,           // true when the initial load fails or times out
+    devicesLoadFailed: false,   // true when the device-list fetch rejected
     toastMessage: '',
     toastVisible: false,
     toastType: 'info',          // 'info' | 'success' | 'warning' | 'error'

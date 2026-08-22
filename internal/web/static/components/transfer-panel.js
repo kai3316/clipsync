@@ -147,12 +147,13 @@
             class="transfer-send-btn"
             @click="showPhoneQr"
             :disabled="phoneQrSending"
+            :aria-busy="phoneQrSending ? 'true' : 'false'"
             style="width:100%"
           >
             <span class="transfer-send-btn__icon">📱</span>
             <span class="transfer-send-btn__text">
-              <span class="transfer-send-btn__label">{{ t('transfer.phone_title') }}</span>
-              <span class="transfer-send-btn__sub">{{ t('transfer.phone_action') }}</span>
+              <span class="transfer-send-btn__label">{{ phoneQrSending ? '...' : t('transfer.phone_title') }}</span>
+              <span class="transfer-send-btn__sub">{{ phoneQrSending ? t('transfer.send_phone_sending') : t('transfer.phone_action') }}</span>
             </span>
           </button>
         </div>
@@ -198,17 +199,20 @@
               v-if="tr.status !== 'paused'"
               class="transfer-history-item__btn"
               :title="t('transfer.pause')"
+              :aria-label="t('transfer.pause')"
               @click="pauseTransfer(tr.id)"
             >&#9208;</button>
             <button
               v-if="tr.status === 'paused'"
               class="transfer-history-item__btn"
               :title="t('transfer.resume')"
+              :aria-label="t('transfer.resume')"
               @click="resumeTransfer(tr.id)"
             >&#9654;</button>
             <button
               class="transfer-history-item__btn transfer-history-item__btn--danger"
               :title="t('transfer.cancel')"
+              :aria-label="t('transfer.cancel')"
               @click="cancelTransfer(tr.id)"
             >&#10005;</button>
           </div>
@@ -245,12 +249,14 @@
                 v-if="tr.path"
                 class="transfer-history-item__btn"
                 :title="t('transfer.open')"
+                :aria-label="t('transfer.open')"
                 @click="openFile(tr.path)"
               ><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg></button>
               <button
                 v-if="tr.path"
                 class="transfer-history-item__btn"
                 :title="t('transfer.open_folder')"
+                :aria-label="t('transfer.open_folder')"
                 @click="revealFile(tr.path)"
               ><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg></button>
             </div>

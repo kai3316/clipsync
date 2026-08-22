@@ -21,6 +21,11 @@
         stats: {},
         // Network health summary ('ok' | 'warn' | 'fail' | '').
         netHealth: '',
+        // Per-toggle busy flags (sync/discovery/visibility/web) while a
+        // request is in flight — disables the switch and shows a busy state.
+        toggleBusy: {},
+        // Quick-action busy flags (qr/url) to prevent double-taps.
+        quickBusy: {},
       };
     },
 
@@ -180,36 +185,91 @@
         return ClipsyncAPI.typeIcon(type);
       },
 
+      _toastError: function (e) {
+        var msg = (e && (e.message || (e.data && e.data.error))) || this.t('dialog.failed');
+        this.store.showToast(msg, 2500, 'error');
+      },
+
+      // Generic ".then" guard for toggle endpoints: surfaces an {ok:false}
+      // response body (HTTP 200 with an error) instead of silently flipping.
+      _toggleSettled: function (key) {
+        this.toggleBusy[key] = false;
+      },
+
       toggleSync: function () {
         var self = this;
         var desired = !this.o.syncEnabled;
+        this.toggleBusy.sync = true;
         ClipsyncAPI.updateSettings({ sync_enabled: desired })
-          .then(function () { self.store.overview.syncEnabled = desired; })
-          .catch(function () { self.store.showToast(self.t('dialog.failed'), 2000); });
+          .then(function (res) {
+            self._toggleSettled('sync');
+            if (res && res.ok === false) {
+              self.store.showToast((res.error) || self.t('dialog.failed'), 2500, 'error');
+              return;
+            }
+            self.store.overview.syncEnabled = desired;
+          })
+          .catch(function (e) {
+            self._toggleSettled('sync');
+            self._toastError(e);
+          });
       },
 
       toggleDiscovery: function () {
         var self = this;
         var desired = !this.o.discovering;
+        this.toggleBusy.discovery = true;
         ClipsyncAPI._fetch('POST', '/api/discovery/toggle', { enabled: desired })
-          .then(function () { self.store.overview.discovering = desired; })
-          .catch(function () { self.store.showToast(self.t('dialog.failed'), 2000); });
+          .then(function (res) {
+            self._toggleSettled('discovery');
+            if (res && res.ok === false) {
+              self.store.showToast((res.error) || self.t('dialog.failed'), 2500, 'error');
+              return;
+            }
+            self.store.overview.discovering = desired;
+          })
+          .catch(function (e) {
+            self._toggleSettled('discovery');
+            self._toastError(e);
+          });
       },
 
       toggleVisibility: function () {
         var self = this;
         var desired = !this.o.visible;
+        this.toggleBusy.visibility = true;
         ClipsyncAPI._fetch('POST', '/api/visibility/toggle', { enabled: desired })
-          .then(function () { self.store.overview.visible = desired; })
-          .catch(function () { self.store.showToast(self.t('dialog.failed'), 2000); });
+          .then(function (res) {
+            self._toggleSettled('visibility');
+            if (res && res.ok === false) {
+              self.store.showToast((res.error) || self.t('dialog.failed'), 2500, 'error');
+              return;
+            }
+            self.store.overview.visible = desired;
+          })
+          .catch(function (e) {
+            self._toggleSettled('visibility');
+            self._toastError(e);
+          });
       },
 
       toggleWebCompanion: function () {
         var self = this;
         var desired = !this.o.webEnabled;
+        this.toggleBusy.web = true;
         ClipsyncAPI.updateSettings({ web_enabled: desired })
-          .then(function () { self.store.overview.webEnabled = desired; })
-          .catch(function () { self.store.showToast(self.t('dialog.failed'), 2000); });
+          .then(function (res) {
+            self._toggleSettled('web');
+            if (res && res.ok === false) {
+              self.store.showToast((res.error) || self.t('dialog.failed'), 2500, 'error');
+              return;
+            }
+            self.store.overview.webEnabled = desired;
+          })
+          .catch(function (e) {
+            self._toggleSettled('web');
+            self._toastError(e);
+          });
       },
 
       startEditName: function () {
@@ -275,11 +335,43 @@
       },
 
       showQr: function () {
-        ClipsyncAPI._fetch('POST', '/api/show_qr', {}).catch(function () {});
+        var self = this;
+        if (this.quickBusy.qr) return;
+        this.quickBusy.qr = true;
+        ClipsyncAPI._fetch('POST', '/api/show_qr', {}).then(function (res) {
+          if (res && res.ok === false) {
+            self.store.showToast((res.error) || self.t('dialog.failed'), 2500, 'error');
+          }
+        }).catch(function (e) {
+          self._toastError(e);
+        }).finally(function () {
+          self.quickBusy.qr = false;
+        });
       },
 
       sendUrl: function () {
-        ClipsyncAPI._fetch('POST', '/api/send_url', {}).catch(function () {});
+        var self = this;
+        if (this.quickBusy.url) return;
+        this.quickBusy.url = true;
+        ClipsyncAPI._fetch('POST', '/api/send_url', {}).then(function (res) {
+          if (res && res.ok === false) {
+            self.store.showToast((res.error) || self.t('dialog.failed'), 2500, 'error');
+          }
+        }).catch(function (e) {
+          self._toastError(e);
+        }).finally(function () {
+          self.quickBusy.url = false;
+        });
+      },
+
+      // Connected-device chips / recent-activity rows are now interactive:
+      // clicking jumps to the relevant panel.
+      openDevicesTab: function () {
+        this.store.activeTab = 'devices';
+      },
+
+      openHistoryTab: function () {
+        this.store.activeTab = 'history';
       },
     },
 
@@ -344,19 +436,19 @@
             '<div class="overview-toggles">' +
               '<div class="overview-toggle-row">' +
                 '<span>{{ t(\'overview.sync\') }}</span>' +
-                '<button class="settings-toggle" role="switch" :aria-checked="o.syncEnabled" :aria-label="t(\'overview.sync\')" :class="{ \'settings-toggle--on\': o.syncEnabled }" @click="toggleSync"><span class="settings-toggle__knob"></span></button>' +
+                '<button class="settings-toggle" role="switch" :aria-checked="o.syncEnabled" :aria-label="t(\'overview.sync\')" :aria-busy="toggleBusy.sync ? \'true\' : \'false\'" :disabled="toggleBusy.sync" :class="{ \'settings-toggle--on\': o.syncEnabled, \'settings-toggle--disabled\': toggleBusy.sync }" @click="toggleSync"><span class="settings-toggle__knob"></span></button>' +
               '</div>' +
               '<div class="overview-toggle-row">' +
                 '<span>{{ t(\'overview.discovery\') }}</span>' +
-                '<button class="settings-toggle" role="switch" :aria-checked="o.discovering" :aria-label="t(\'overview.discovery\')" :class="{ \'settings-toggle--on\': o.discovering }" @click="toggleDiscovery"><span class="settings-toggle__knob"></span></button>' +
+                '<button class="settings-toggle" role="switch" :aria-checked="o.discovering" :aria-label="t(\'overview.discovery\')" :aria-busy="toggleBusy.discovery ? \'true\' : \'false\'" :disabled="toggleBusy.discovery" :class="{ \'settings-toggle--on\': o.discovering, \'settings-toggle--disabled\': toggleBusy.discovery }" @click="toggleDiscovery"><span class="settings-toggle__knob"></span></button>' +
               '</div>' +
               '<div class="overview-toggle-row">' +
                 '<span>{{ t(\'overview.visibility\') }}</span>' +
-                '<button class="settings-toggle" role="switch" :aria-checked="o.visible" :aria-label="t(\'overview.visibility\')" :class="{ \'settings-toggle--on\': o.visible }" @click="toggleVisibility"><span class="settings-toggle__knob"></span></button>' +
+                '<button class="settings-toggle" role="switch" :aria-checked="o.visible" :aria-label="t(\'overview.visibility\')" :aria-busy="toggleBusy.visibility ? \'true\' : \'false\'" :disabled="toggleBusy.visibility" :class="{ \'settings-toggle--on\': o.visible, \'settings-toggle--disabled\': toggleBusy.visibility }" @click="toggleVisibility"><span class="settings-toggle__knob"></span></button>' +
               '</div>' +
               '<div class="overview-toggle-row">' +
                 '<span>{{ t(\'overview.web_companion\') }}</span>' +
-                '<button class="settings-toggle" role="switch" :aria-checked="o.webEnabled" :aria-label="t(\'overview.web_companion\')" :class="{ \'settings-toggle--on\': o.webEnabled }" @click="toggleWebCompanion"><span class="settings-toggle__knob"></span></button>' +
+                '<button class="settings-toggle" role="switch" :aria-checked="o.webEnabled" :aria-label="t(\'overview.web_companion\')" :aria-busy="toggleBusy.web ? \'true\' : \'false\'" :disabled="toggleBusy.web" :class="{ \'settings-toggle--on\': o.webEnabled, \'settings-toggle--disabled\': toggleBusy.web }" @click="toggleWebCompanion"><span class="settings-toggle__knob"></span></button>' +
               '</div>' +
             '</div>' +
           '</div>' +
@@ -411,7 +503,7 @@
               '<span class="overview-badge" v-if="connectedChips.length > 0">{{ connectedChips.length }}</span>' +
             '</div>' +
             '<div v-if="connectedChips.length > 0" class="overview-chips">' +
-              '<span v-for="name in connectedChips" :key="name" class="overview-chip">' +
+              '<span v-for="name in connectedChips" :key="name" class="overview-chip" role="button" tabindex="0" :title="t(\'ui.devices\')" @click="openDevicesTab" @keydown.enter="openDevicesTab" @keydown.space.prevent="openDevicesTab">' +
                 '<span class="status-dot status-dot--online"></span><span class="text-ellipsis">{{ name }}</span>' +
               '</span>' +
             '</div>' +
@@ -420,8 +512,8 @@
               '<span class="overview-empty-state__text">{{ t(\'overview.no_connected_hint\') }}</span>' +
             '</div>' +
             '<div class="overview-action-row">' +
-              '<button class="overview-quick-btn" @click="showQr">📱 {{ t(\'tray.show_web_qr\') }}</button>' +
-              '<button class="overview-quick-btn" @click="sendUrl">🔗 {{ t(\'tray.send_url\') }}</button>' +
+              '<button class="overview-quick-btn" @click="showQr" :disabled="quickBusy.qr">📱 {{ quickBusy.qr ? \'...\' : t(\'tray.show_web_qr\') }}</button>' +
+              '<button class="overview-quick-btn" @click="sendUrl" :disabled="quickBusy.url">🔗 {{ quickBusy.url ? \'...\' : t(\'tray.send_url\') }}</button>' +
             '</div>' +
           '</div>' +
         '</div>' +
@@ -430,7 +522,7 @@
         '<div class="overview-card glass overview-activity-card">' +
           '<h3 class="overview-card__title">{{ t(\'overview.recent_activity\') }}</h3>' +
           '<div v-if="recentList.length > 0" class="overview-feed">' +
-            '<div v-for="(item, i) in recentList" :key="i" class="overview-feed__item" :style="{ animationDelay: (i * 0.06) + \'s\' }">' +
+            '<div v-for="(item, i) in recentList" :key="i" class="overview-feed__item" role="button" tabindex="0" :title="t(\'ui.history\')" :style="{ animationDelay: (i * 0.06) + \'s\' }" @click="openHistoryTab" @keydown.enter="openHistoryTab" @keydown.space.prevent="openHistoryTab">' +
               '<span class="overview-feed__icon">{{ typeIcon(item.type) }}</span>' +
               '<span class="overview-feed__text text-ellipsis">{{ item.text || t(\'history.empty_preview\') }}</span>' +
               '<span class="overview-feed__meta">' +

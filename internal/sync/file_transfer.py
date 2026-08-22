@@ -187,7 +187,7 @@ class FileTransferManager:
 
         # ---- UI callbacks ----
         self._on_transfer_progress: Callable[[str, float], None] | None = None
-        self._on_transfer_complete: Callable[[str, bool], None] | None = None
+        self._on_transfer_complete: Callable[[str, bool, bool, str], None] | None = None
         self._on_file_received: Callable[[str, str, str], None] | None = None
         self._on_transfer_request: Callable[[str, str, int, str, Callable], None] | None = None
 
@@ -199,9 +199,43 @@ class FileTransferManager:
         """*callback(transfer_id, fraction)* -- called as chunks arrive or are sent."""
         self._on_transfer_progress = callback
 
-    def set_on_transfer_complete(self, callback: Callable[[str, bool], None]) -> None:
-        """*callback(transfer_id, success)* -- called when a transfer finishes or fails."""
+    def set_on_transfer_complete(self, callback: Callable[[str, bool, bool, str], None]) -> None:
+        """*callback(transfer_id, success, cancelled, status)* -- called when a
+        transfer finishes or fails.
+
+        *cancelled* is ``True`` only for a user-initiated cancel; *status* is a
+        stable machine-readable reason: ``"success"``, ``"cancelled"``,
+        ``"error_disk"``, ``"error_size_mismatch"``, ``"error_missing_chunks"``,
+        ``"error_security"``, ``"error_internal"``, ``"error_timeout"``,
+        ``"peer_offline"``, or ``"rejected"``.
+        """
         self._on_transfer_complete = callback
+
+    def _fire_complete_once(self, transfer_id: str, success: bool,
+                            cancelled: bool, status: str) -> None:
+        """Invoke ``_on_transfer_complete`` at most once per transfer.
+
+        Both the cancel path and the send/receive thread can detect a terminal
+        state for the same transfer (e.g. ``cancel_transfer`` sets ``cancelled``
+        while the send loop is mid-chunk and wakes to the same flag).  Without
+        a once-guard the callback — and the notification / web push built on it
+        — would fire twice for one transfer.  The guard flag lives on the
+        transfer dict so it survives whichever path removes the transfer.
+        """
+        with self._lock:
+            transfer = self._transfers.get(transfer_id)
+            if transfer is None:
+                # Already removed (and its terminal callback fired by cleanup).
+                return
+            if transfer.get("_complete_fired"):
+                return
+            transfer["_complete_fired"] = True
+        cb = self._on_transfer_complete
+        if cb is not None:
+            try:
+                cb(transfer_id, success, cancelled, status)
+            except Exception:
+                logger.exception("transfer complete callback failed")
 
     def set_on_file_received(self, callback: Callable[[str, str, str], None]) -> None:
         """*callback(transfer_id, saved_path, file_name)* -- called after a file is
@@ -327,7 +361,7 @@ class FileTransferManager:
                 # Surface the failure locally so the receiver isn't left with
                 # a silent rejection (the sender just gets a file_reject).
                 if self._on_transfer_complete is not None:
-                    self._on_transfer_complete(transfer_id, False)
+                    self._on_transfer_complete(transfer_id, False, False, "error_disk")
                 return
 
         self._send_as_frame(
@@ -378,10 +412,12 @@ class FileTransferManager:
         with self._lock:
             self._transfers.pop(transfer_id, None)
 
-        self._add_to_history(transfer, False)
+        self._add_to_history(transfer, False, status="cancelled")
         logger.info("Transfer %s cancelled by user", transfer_id[:8])
-        if self._on_transfer_complete is not None:
-            self._on_transfer_complete(transfer_id, False, cancelled=True)
+        # Once-guard: the send thread may already have fired the terminal
+        # callback for this cancelled transfer, or may fire it a moment later
+        # when it wakes from its pause/cancel poll.  Never double-notify.
+        self._fire_complete_once(transfer_id, False, True, "cancelled")
         return True
 
     def reject_transfer(self, transfer_id: str, send_fn: Callable[[bytes], None]) -> None:
@@ -639,7 +675,7 @@ class FileTransferManager:
                 send_fn,
             )
             if self._on_transfer_complete:
-                self._on_transfer_complete(transfer_id, False)
+                self._on_transfer_complete(transfer_id, False, False, "error_internal")
             return
 
         # Guard against concurrent finalization from _handle_file_chunk and
@@ -676,7 +712,7 @@ class FileTransferManager:
                         send_fn,
                     )
                     if self._on_transfer_complete:
-                        self._on_transfer_complete(transfer_id, False)
+                        self._on_transfer_complete(transfer_id, False, False, "error_missing_chunks")
                     return
 
                 logger.info(
@@ -736,7 +772,7 @@ class FileTransferManager:
                     send_fn,
                 )
                 if self._on_transfer_complete:
-                    self._on_transfer_complete(transfer_id, False)
+                    self._on_transfer_complete(transfer_id, False, False, "error_size_mismatch")
                 return
 
             # Move to final destination, avoiding name collisions
@@ -751,7 +787,7 @@ class FileTransferManager:
                     send_fn,
                 )
                 if self._on_transfer_complete:
-                    self._on_transfer_complete(transfer_id, False)
+                    self._on_transfer_complete(transfer_id, False, False, "error_security")
                 return
             if dest_path.exists():
                 stem = dest_path.stem
@@ -772,12 +808,12 @@ class FileTransferManager:
             )
             saved = str(dest_path)
             logger.info("File received successfully: %s -> %s", _mask_file_name(file_name), _mask_path(saved))
-            self._add_to_history(transfer, True, saved_path=saved)
+            self._add_to_history(transfer, True, saved_path=saved, status="success")
 
             if self._on_file_received is not None:
                 self._on_file_received(transfer_id, saved, file_name)
             if self._on_transfer_complete is not None:
-                self._on_transfer_complete(transfer_id, True)
+                self._on_transfer_complete(transfer_id, True, False, "success")
 
         except OSError as exc:
             logger.error("I/O error finalizing transfer %s: %s", transfer_id[:8], exc)
@@ -794,7 +830,7 @@ class FileTransferManager:
                 send_fn,
             )
             if self._on_transfer_complete:
-                self._on_transfer_complete(transfer_id, False)
+                self._on_transfer_complete(transfer_id, False, False, "error_disk")
 
     def _retransmit_wait(self, transfer_id: str, total_chunks: int) -> None:
         """Wait for retransmitted chunks, then re-trigger finalization.
@@ -874,7 +910,7 @@ class FileTransferManager:
                 transfer_id[:8], _mask_file_name(transfer.get("file_name", "?")),
             )
             if self._on_transfer_complete is not None:
-                self._on_transfer_complete(transfer_id, False)
+                self._on_transfer_complete(transfer_id, False, False, "rejected")
 
     def _handle_file_complete(self, payload: dict, send_fn: Callable[[bytes], None]) -> None:
         transfer_id = payload.get("transfer_id", "")
@@ -898,7 +934,8 @@ class FileTransferManager:
 
         if transfer is not None and transfer.get("type") == "outgoing":
             success = status == "success"
-            self._add_to_history(transfer, success)
+            cancelled = status == "cancelled"
+            self._add_to_history(transfer, success, status=status)
             logger.info(
                 "File transfer %s %s (%s) -- status=%s",
                 transfer_id[:8],
@@ -907,7 +944,7 @@ class FileTransferManager:
                 status,
             )
             if self._on_transfer_complete is not None:
-                self._on_transfer_complete(transfer_id, success)
+                self._on_transfer_complete(transfer_id, success, cancelled, status)
 
     def _handle_file_chunk_ack(self, payload: dict, send_fn: Callable[[bytes], None]) -> None:
         """Sender: receiver reports missing chunks → retransmit them."""
@@ -1032,12 +1069,15 @@ class FileTransferManager:
                     while True:
                         with self._lock:
                             transfer = self._transfers.get(transfer_id)
-                            if transfer is None or transfer.get("cancelled"):
+                            if transfer is None:
+                                return  # removed by cancel/cleanup, which fired the callback
+                            if transfer.get("cancelled"):
                                 logger.info(
                                     "Transfer %s cancelled mid-send", transfer_id[:8],
                                 )
-                                if self._on_transfer_complete is not None:
-                                    self._on_transfer_complete(transfer_id, False)
+                                # Once-guard so a concurrent cancel_transfer()
+                                # can't double-fire the terminal callback.
+                                self._fire_complete_once(transfer_id, False, True, "cancelled")
                                 return
                             if not transfer.get("paused"):
                                 break
@@ -1099,7 +1139,7 @@ class FileTransferManager:
             with self._lock:
                 self._transfers.pop(transfer_id, None)
             if self._on_transfer_complete is not None:
-                self._on_transfer_complete(transfer_id, False)
+                self._on_transfer_complete(transfer_id, False, False, "error_internal")
             return
 
         logger.info(
@@ -1153,11 +1193,26 @@ class FileTransferManager:
                 "File transfer %s timed out waiting for FILE_COMPLETE", transfer_id[:8],
             )
             if self._on_transfer_complete is not None:
-                self._on_transfer_complete(transfer_id, False)
+                self._on_transfer_complete(transfer_id, False, False, "peer_offline")
 
     # ------------------------------------------------------------------
     # Query
     # ------------------------------------------------------------------
+
+    def is_transfer_available(self, transfer_id: str) -> bool:
+        """Return True if *transfer_id* still exists and can still be accepted.
+
+        An incoming transfer that was cleaned up (sender cancelled, or the
+        transfer timed out) while the accept dialog was open must not be
+        accepted silently — the UI calls this before accepting.
+        """
+        with self._lock:
+            t = self._transfers.get(transfer_id)
+            return (
+                t is not None
+                and t.get("type") == "incoming"
+                and t.get("state") == "pending"
+            )
 
     def get_transfers(self) -> list[dict]:
         """Return a snapshot of active transfers for UI display.
@@ -1195,6 +1250,7 @@ class FileTransferManager:
                     "file_size": file_size,
                     "direction": direction,
                     "state": state,
+                    "status": t.get("status", ""),
                     "progress": min(progress, 1.0),
                     "speed_bytes_per_sec": speed,
                     "eta_seconds": eta,
@@ -1242,18 +1298,33 @@ class FileTransferManager:
             "type": "incoming",
             "state": "completed",
             "file_path": saved_path,
-        }, True, saved_path=saved_path)
+        }, True, saved_path=saved_path, status="success")
         return transfer_id
 
-    def _add_to_history(self, transfer: dict, success: bool, saved_path: str = ""):
-        """Record a completed transfer in the history list."""
+    def _add_to_history(self, transfer: dict, success: bool, saved_path: str = "", status: str = ""):
+        """Record a completed transfer in the history list.
+
+        *status* is a stable machine-readable reason (``"success"``,
+        ``"cancelled"``, ``"error_disk"``, ``"error_size_mismatch"``,
+        ``"error_missing_chunks"``, ``"error_security"``, ``"error_internal"``,
+        ``"error_timeout"``, ``"peer_offline"``, ``"rejected"``).  When omitted
+        it is inferred from ``success`` and the ``cancelled`` flag.
+        """
+        if not status:
+            if success:
+                status = "success"
+            elif transfer.get("cancelled"):
+                status = "cancelled"
+            else:
+                status = "error_internal"
         entry = {
             "transfer_id": transfer.get("transfer_id", uuid.uuid4().hex),
             "file_name": transfer.get("file_name", "?"),
             "file_size": transfer.get("file_size", 0),
             "direction": "up" if transfer.get("type") == "outgoing" else "down",
             "success": success,
-            "cancelled": bool(transfer.get("cancelled")),
+            "cancelled": bool(transfer.get("cancelled")) or status == "cancelled",
+            "status": status,
             "state": transfer.get("state", "unknown"),
             "source_path": transfer.get("file_path", ""),
             "saved_path": saved_path,
@@ -1409,4 +1480,4 @@ class FileTransferManager:
                 tid[:8], _mask_file_name(transfer.get("file_name", "?")),
             )
             if self._on_transfer_complete is not None:
-                self._on_transfer_complete(tid, False)
+                self._on_transfer_complete(tid, False, False, "error_timeout")

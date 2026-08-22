@@ -198,13 +198,16 @@
       '<div' +
         ' v-if="store.translateModal.visible"' +
         ' class="translate-overlay"' +
+        ' role="dialog"' +
+        ' aria-modal="true"' +
+        ' aria-labelledby="translate-modal-title"' +
         ' ref="overlay"' +
         ' @click="onOverlayClick"' +
       '>' +
         '<div class="translate-modal glass-neo animate-holo-reveal">' +
           '<!-- Header -->' +
           '<div class="translate-modal__header">' +
-            '<span class="translate-modal__title">' +
+            '<span class="translate-modal__title" id="translate-modal-title">' +
               '<span class="translate-modal__title-icon">&#x1F310;</span>' +
               ' {{ t(\'translate.title\') }}' +
             '</span>' +
