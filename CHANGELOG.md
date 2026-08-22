@@ -2,6 +2,26 @@
 
 All notable changes to ClipSync are documented in this file.
 
+## [1.0.28] — 2026-08-23
+
+### Quick Paste
+- **The desktop popup actually closes again.** The inline close handler referenced an IIFE-local function (a `ReferenceError`), and every close path was gated on `window.opener` — which is `null` for pages opened via `webbrowser.open`. The button is now bound via `addEventListener`, and closing (auto-after-paste, Esc, and the X button, which is visible on desktop) is gated on touch input instead. Paste-then-walk-away popups work as intended.
+- The paste push now uses the same timeout as the history fetch, so a hung server can't leave the "pasting…" state forever.
+
+### Phone companion (mobile.html)
+- **History has pagination** — scroll to the bottom loads more (offset-based, de-duplicated), and background refreshes merge into the already-loaded pages instead of collapsing them back to the first 30.
+- **Files can be deleted from the phone** — new `DELETE /api/files` endpoint (path-confined to the receive dir) plus a delete button with confirmation.
+- **Token expiry is never silent**: the send path and the background polling both surface "re-scan the QR code" when a 403 comes back (throttled so polling doesn't spam).
+- Upload pre-check leaves room for multipart overhead, matching the server's `Content-Length` limit.
+
+### Dashboard
+- **Startup no longer loads everything twice** — the WS `connected` event is the single load entry point (with a fallback timer in case the socket never opens).
+- **WS reconnects keep your pagination** — history that was "load more"-ed is merged, not replaced, so a network blip doesn't drop you back to page 1.
+- Overview fetches are de-duplicated in flight (5s timer + WS-triggered refresh share one request).
+
+### Tests
+- New regressions for the file-delete endpoint (path traversal, absolute paths, missing/deleted, reject-directory) and the Quick Paste / pagination guards. Full suite 386 passed / 3 skipped.
+
 ## [1.0.27] — 2026-08-23
 
 ### Web companion (convergence round)

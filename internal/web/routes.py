@@ -947,6 +947,39 @@ def _dispatch(method, path, query_params, body, cfg, history, sync_mgr,
             data, status = delete_favorite(body)
             return _json_response(data, status)
 
+        elif path == "/api/files":
+            # Delete a phone-uploaded file from the received-files directory.
+            # The web UI sends the bare filename it got back from GET
+            # /api/files; basename strips any directory components and
+            # confine_path resolves + re-validates so traversal or symlinks can
+            # never target a file outside the upload dir.
+            try:
+                req = json.loads(body.decode("utf-8"))
+            except (json.JSONDecodeError, UnicodeDecodeError):
+                return _json_response({"ok": False, "error": "invalid json"}, 400)
+            fname = str(req.get("name") or "").strip() if isinstance(req, dict) else ""
+            if not fname:
+                return _json_response({"ok": False, "error": "filename required"}, 400)
+            from internal.web.api.security import confine_path
+            safe = confine_path(
+                os.path.join(upload_dir, os.path.basename(fname)), upload_dir,
+            )
+            if safe is None:
+                return _json_response(
+                    {"ok": False, "error": "path must be inside the received-files directory"},
+                    400,
+                )
+            try:
+                if os.path.isdir(safe):
+                    return _json_response({"ok": False, "error": "is a directory"}, 400)
+                os.unlink(safe)
+            except FileNotFoundError:
+                return _json_response({"ok": False, "error": "file not found"}, 404)
+            except OSError as exc:
+                logger.warning("Failed to delete uploaded file %s: %s", safe, exc)
+                return _json_response({"ok": False, "error": "delete failed"}, 500)
+            return _json_response({"ok": True, "name": os.path.basename(str(safe))})
+
     # ── PATCH / PUT routes (for favorites update) ───────────────────
 
     elif method in ("PATCH", "PUT"):

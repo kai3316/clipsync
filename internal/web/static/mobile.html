@@ -358,6 +358,28 @@ body::before {
 
 .f-item__meta { font-size: 11px; color: var(--fg-subtle); font-family: var(--font-mono); }
 
+.f-item__delete {
+  flex-shrink: 0;
+  width: 30px;
+  height: 30px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid var(--border);
+  border-radius: 50%;
+  background: var(--panel);
+  color: var(--fg-subtle);
+  font-size: 13px;
+  line-height: 1;
+  cursor: pointer;
+  padding: 0;
+  font-family: var(--font);
+  -webkit-tap-highlight-color: transparent;
+  transition: all var(--fast);
+}
+
+.f-item__delete:active { border-color: var(--danger); color: var(--danger); }
+
 /* ── Upload progress ───────────────────────────────────────── */
 
 .upload-progress {
@@ -677,6 +699,8 @@ body::before {
     timeHour: ZH ? '小时前' : 'h ago',
     timeDay: ZH ? '天前' : 'd ago',
     fileDownload: ZH ? '下载中…' : 'Downloading…',
+    fileDelete: ZH ? '删除' : 'Delete',
+    fileDeleted: ZH ? '已删除' : 'Deleted',
     targetDevice: ZH ? '本电脑' : 'This computer',
     emptyPreview: ZH ? '(空)' : '(empty)',
     loadFailHint: ZH ? '请确认手机与电脑在同一 Wi-Fi，且 ClipSync 正在运行。' : 'Make sure your phone is on the same Wi-Fi as the computer and ClipSync is running.',
@@ -829,6 +853,15 @@ body::before {
     toastTimer = setTimeout(function () { toastEl.className = 'toast'; }, 2400);
   }
 
+  // A stale token 403s every background poll tick; pop the localized
+  // "re-scan the QR code" message at most once so the phone isn't spammed.
+  var tokenExpiredNotified = false;
+  function notifyTokenExpired() {
+    if (tokenExpiredNotified) return;
+    tokenExpiredNotified = true;
+    showToast(T.tokenExpired, true);
+  }
+
   /* ── History ───────────────────────────────────────────────── */
 
   function typeIcon(ct) {
@@ -853,30 +886,97 @@ body::before {
   }
 
   var historyLoading = false;
-  function loadHistory(silent) {
+  var historyOffset = 0;
+  var historyHasMore = true;
+
+  // Upsert a page-1 snapshot into the already-loaded list (dedupe by entry_id,
+  // prepend genuinely-new entries) so a background poll refresh never collapses
+  // pages the user has already loaded via "scroll to load more".
+  function mergeHistoryPage(items) {
+    var idxById = {};
+    for (var i = 0; i < historyItems.length; i++) {
+      var cur = historyItems[i];
+      if (cur && cur.entry_id !== undefined) idxById[cur.entry_id] = i;
+    }
+    var fresh = [];
+    for (var j = 0; j < items.length; j++) {
+      var inc = items[j];
+      if (!inc) continue;
+      var found = (inc.entry_id !== undefined && idxById[inc.entry_id] !== undefined) ? idxById[inc.entry_id] : -1;
+      if (found !== -1) {
+        historyItems[found] = inc;
+      } else {
+        fresh.push(inc);
+      }
+    }
+    for (var k = fresh.length - 1; k >= 0; k--) {
+      historyItems.unshift(fresh[k]);
+    }
+    return fresh.length;
+  }
+
+  function loadHistory(silent, appendOffset) {
     // Skip while a request is already in flight (poll ticks AND user-initiated
     // loads) so slow responses can't overlap and render out of order.  A
     // user-initiated load that arrives mid-flight simply waits for the next
     // poll, which is already queued.
     if (historyLoading) return;
     historyLoading = true;
-    // Silent background refreshes keep the current list on screen; only the
-    // user-initiated load shows the skeleton.
-    if (!silent) {
+    var isAppend = (appendOffset !== undefined && appendOffset !== null);
+    // Silent background refreshes and pagination appends keep the current list
+    // on screen; only the user-initiated first load shows the skeleton.
+    if (!silent && !isAppend) {
       historyList.innerHTML = '<div class="skeleton"></div><div class="skeleton"></div><div class="skeleton"></div>';
     }
-    getJson('/api/history?limit=30')
+    var url = '/api/history?limit=30';
+    if (isAppend && appendOffset > 0) {
+      url += '&offset=' + appendOffset;
+    }
+    getJson(url)
       .then(function (data) {
         historyLoading = false;
-        historyItems = (data.items || []).slice(0, 30);
+        var items = (data.items || []).slice(0, 30);
+        var total = data.total != null ? data.total : null;
+        if (isAppend) {
+          // Append the next page, deduping against what is already loaded so a
+          // raced poll + scroll can't show the same entry twice.
+          var seen = {};
+          for (var i = 0; i < historyItems.length; i++) {
+            var cur = historyItems[i];
+            if (cur && cur.entry_id !== undefined) seen[cur.entry_id] = true;
+          }
+          var added = 0;
+          for (var j = 0; j < items.length; j++) {
+            var it = items[j];
+            if (!it) continue;
+            if (it.entry_id === undefined || !seen[it.entry_id]) {
+              if (it.entry_id !== undefined) seen[it.entry_id] = true;
+              historyItems.push(it);
+              added++;
+            }
+          }
+          historyHasMore = (total != null) ? (historyItems.length < total) : (added > 0);
+        } else if (historyItems.length > 30) {
+          // Refresh of page 1 while more pages are loaded — merge in place so
+          // the user's loaded pages survive a background poll.
+          mergeHistoryPage(items);
+          historyHasMore = (total != null) ? (historyItems.length < total) : historyHasMore;
+        } else {
+          historyItems = items.slice();
+          historyHasMore = (total != null) ? (historyItems.length < total) : true;
+        }
+        historyOffset = historyItems.length;
         renderHistory();
       })
       .catch(function (err) {
         historyLoading = false;
+        // A 403 means the token this page was opened with is no longer valid
+        // (it was regenerated / cleared) — tell the user to re-scan the QR
+        // code, not to check Wi-Fi.  Surface it even on silent background
+        // polls, otherwise the UI looks fresh while every refresh silently
+        // 403s.
+        if (err && err.status === 403) notifyTokenExpired();
         if (!silent) {
-          // A 403 means the token this page was opened with is no longer
-          // valid (it was regenerated / cleared) — tell the user to re-scan
-          // the QR code, not to check Wi-Fi.
           var msg = (err && err.status === 403)
             ? esc(T.tokenExpired)
             : esc(T.loadFail) + '<br>' + esc(T.loadFailHint);
@@ -905,6 +1005,18 @@ body::before {
       historyList.appendChild(el);
     });
   }
+
+  // Infinite scroll: load the next history page when the list scrolls to the
+  // bottom.  Only fires while the history tab is active; the append keeps the
+  // current scroll position (the scrollTop property survives the re-render).
+  var contentEl = document.querySelector('.content');
+  contentEl.addEventListener('scroll', function () {
+    if (activeTabName() !== 'history') return;
+    if (historyLoading || !historyHasMore) return;
+    if (contentEl.scrollTop + contentEl.clientHeight >= contentEl.scrollHeight - 48) {
+      loadHistory(true, historyOffset);
+    }
+  });
 
   /* ── Item detail + copy to phone ───────────────────────────── */
 
@@ -1030,14 +1142,25 @@ body::before {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ text: text }),
     })
-      .then(function (r) { return r.json(); })
-      .then(function (data) {
+      .then(function (r) {
+        // Carry the HTTP status alongside the parsed body so a 403 (stale
+        // token) surfaces as the localized token-expired message instead of
+        // the server's English error string.
+        return r.json().then(function (data) {
+          return { status: r.status, data: data };
+        });
+      })
+      .then(function (res) {
         sendBtn.disabled = false;
-        if (data.ok) {
+        if (res.status === 403) {
+          showToast(T.tokenExpired, true);
+          return;
+        }
+        if (res.data.ok) {
           showToast(T.sendOk);
           sendText.value = '';
         } else {
-          showToast(data.error || T.sendFail, true);
+          showToast(res.data.error || T.sendFail, true);
         }
       })
       .catch(function () {
@@ -1133,8 +1256,10 @@ body::before {
     var total = 0;
     for (var i = 0; i < files.length; i++) total += files[i].size;
     // Pre-flight check: the server buffers the whole body and hard-caps at
-    // 128 MB — reject oversized selections before starting the upload.
-    if (total > MAX_UPLOAD_BYTES) {
+    // 128 MB — reject oversized selections before starting the upload.  Leave
+    // a 64 KB headroom so multipart boundaries / headers never push the actual
+    // request body past the server's Content-Length cap.
+    if (total > MAX_UPLOAD_BYTES - 64 * 1024) {
       showToast(T.uploadTooLarge, true);
       fileInput.value = '';
       return;
@@ -1173,7 +1298,8 @@ body::before {
             '<div class="f-item__body">' +
               '<div class="f-item__name">' + esc(f.name) + '</div>' +
               '<div class="f-item__meta">' + esc(f.size) + ' · ' + esc(f.time) + '</div>' +
-            '</div>';
+            '</div>' +
+            '<button class="f-item__delete" title="' + esc(T.fileDelete) + '">✕</button>';
           el.addEventListener('click', function () {
             var a = document.createElement('a');
             a.href = apiUrl('/api/download?file=' + encodeURIComponent(f.name));
@@ -1183,17 +1309,50 @@ body::before {
             document.body.removeChild(a);
             showToast(T.fileDownload);
           });
+          // The row itself downloads on tap; the delete button stops
+          // propagation so it deletes instead of triggering a download.
+          el.querySelector('.f-item__delete').addEventListener('click', function (ev) {
+            ev.stopPropagation();
+            deleteFile(f.name);
+          });
           fileList.appendChild(el);
         });
       })
       .catch(function (err) {
         filesLoading = false;
+        // Same stale-token handling as history: notify even on silent polls.
+        if (err && err.status === 403) notifyTokenExpired();
         if (!silent) {
           var msg = (err && err.status === 403)
             ? esc(T.tokenExpired)
             : esc(T.loadFail) + '<br>' + esc(T.loadFailHint);
           fileList.innerHTML = '<div class="empty"><div class="empty__icon">⚠️</div><div class="empty__text">' + msg + '</div></div>';
         }
+      });
+  }
+
+  function deleteFile(name) {
+    var label = '“' + name + '”';
+    if (!window.confirm(ZH ? '删除文件 ' + label + '？' : 'Delete file ' + label + '?')) return;
+    fetchWithTimeout(apiUrl('/api/files'), {
+      method: 'DELETE',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name: name }),
+    })
+      .then(function (r) {
+        return r.json().then(function (data) { return { status: r.status, data: data }; });
+      })
+      .then(function (res) {
+        if (res.status === 403) { notifyTokenExpired(); return; }
+        if (res.data && res.data.ok) {
+          showToast(T.fileDeleted);
+          loadFiles();
+        } else {
+          showToast((res.data && res.data.error) || T.uploadFail, true);
+        }
+      })
+      .catch(function () {
+        showToast(T.uploadFail + ' · ' + T.loadFailHint, true);
       });
   }
 

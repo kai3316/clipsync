@@ -362,14 +362,22 @@ class ChatManager:
             bucket.pop(session_id, None)
 
     def _session_has_active_transfer(self, session: ChatSession) -> bool:
-        """True when *session* has a send or receive still in flight."""
+        """True when *session* has a send or receive still MAKING PROGRESS.
+
+        Only transfers that moved recently count — a genuinely-stalled
+        transfer (peer gone) must not pin the peer "online" for the whole
+        stall window; a slow-but-moving one still does.
+        """
         terminal = ("done", "failed", "declined", "cancelled")
+        now = time.monotonic()
         for state in self._sends.values():
             if state["session"] is session and state["entry"].status not in terminal:
-                return True
+                if now - state.get("last_progress_mono", 0.0) < self.TRANSFER_STALL_TIMEOUT:
+                    return True
         for state in self._receives.values():
             if state["session"] is session and state["entry"].status not in terminal:
-                return True
+                if now - state.get("last_progress_mono", 0.0) < self.TRANSFER_STALL_TIMEOUT:
+                    return True
         return False
 
     # ------------------------------------------------------------------
@@ -666,6 +674,13 @@ class ChatManager:
                 self._receives.pop(transfer_id, None)
                 _safe_remove(state.get("temp_path"))
                 state["entry"].status = "failed"
+                # The wire ack never went out — the SENDER is still waiting
+                # in "await_accept".  Fire the done callback so the UI drops
+                # the stale offer and the sender's wait times out instead of
+                # being pinned online for the whole accept window.
+                self._fire(
+                    "_on_file_done", session_id, transfer_id, False, "", "peer_offline",
+                )
         self._fire("_on_sessions_changed")
         return ok
 
@@ -1023,7 +1038,11 @@ class ChatManager:
             logger.debug("chat: dropping control-char-only text from %s", sender_id[:12])
             return
         with self._lock:
-            session = self._resolve_session(str(payload.get("session_id", "")), sender_id)
+            # By-peer fallback like ping/close: a re-invite-adopted session
+            # (or a lost chat_accept) can leave the sender's session_id out
+            # of sync; the text must still land instead of being dropped.
+            session = self._resolve_session(str(payload.get("session_id", "")), sender_id) \
+                or self._sessions.get(sender_id)
             if session is None or session.status != "active":
                 logger.debug("chat: text from %s without active session -- dropped", sender_id[:12])
                 return
@@ -1358,10 +1377,23 @@ class ChatManager:
         self._fire("_on_file_done", session.session_id, transfer_id, True, str(dest_path), "success")
 
     def _fail_receive_locked(self, transfer_id: str, status: str) -> None:
-        """Mark a receive failed from an I/O error (lock held)."""
+        """Mark a receive failed from an I/O error (lock held).
+
+        Must tell the SENDER: without an error frame it sends
+        ``chat_file_complete`` "sent", waits out the ack timeout, and reports
+        its own entry as delivered — leaving the two sides with opposite
+        terminal states.
+        """
         state = self._receives.pop(transfer_id, None)
         if state is None:
             return
+        session = state["session"]
+        self._send_frame({
+            "msg_type": "chat_file_complete",
+            "session_id": session.session_id,
+            "transfer_id": transfer_id,
+            "status": status,
+        }, self._latest_send_fn.get(session.peer_id))
         fh = state.get("fh")
         if fh is not None:
             try:
@@ -1371,7 +1403,6 @@ class ChatManager:
         _safe_remove(state.get("temp_path"))
         entry = state["entry"]
         entry.status = "failed"
-        session = state["session"]
         self._fire("_on_file_done", session.session_id, transfer_id, False, "", status)
 
     def _file_sender(self, transfer_id: str) -> None:
@@ -1473,8 +1504,13 @@ class ChatManager:
             self._fire("_on_file_done", sid, tid, False, err_status, "rejected")
             return
         if not delivered:
-            logger.debug("chat: no completion ack for %s (assuming delivered)", transfer_id[:8])
-        self._fire("_on_file_done", sid, tid, True, "", "success")
+            # Bytes were handed to the transport but the receiver never
+            # confirmed — mark the terminal status "unconfirmed" so the UI
+            # can tell a confirmed delivery from a best-effort one.
+            logger.debug("chat: no completion ack for %s (delivery unconfirmed)", transfer_id[:8])
+            self._fire("_on_file_done", sid, tid, True, "", "unconfirmed")
+        else:
+            self._fire("_on_file_done", sid, tid, True, "", "success")
 
     def _send_frame_raw(self, data: bytes, send_fn: SendFn) -> bool:
         """Send pre-encoded bytes; False when the transport refused."""
@@ -1616,8 +1652,13 @@ class ChatManager:
                         pass
                     state["fh"] = None
                 _safe_remove(state.get("temp_path"))
+                session = state["session"]
                 self._receives.pop(tid, None)
                 entry.status = "declined"
+                # Tell the UI the offer expired so the Accept/Decline card
+                # stops offering actions that can no longer succeed.
+                self._fire("_on_file_done", session.session_id, tid, False, "", "declined")
+                self._fire("_on_sessions_changed")
 
     @staticmethod
     def _transfer_stall_reference(state: dict, now_mono: float) -> float:

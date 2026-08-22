@@ -565,7 +565,7 @@ body::after {
       <div class="qp-header__title">&#x26A1; <span id="qpTitle" style="visibility:hidden">Quick Paste</span></div>
       <div class="qp-header__subtitle" id="qpSubtitle"></div>
     </div>
-    <button class="qp-header__close" id="qpCloseBtn" onclick="closeWindow()" title="Close (Esc)">&times;</button>
+    <button class="qp-header__close" id="qpCloseBtn" title="Close (Esc)">&times;</button>
   </header>
 
   <!-- Items -->
@@ -740,7 +740,9 @@ body::after {
       state.pastingIndex = index;
       render();
 
-      fetch(apiUrl('/api/push'), {
+      // Timeout the push like every other request so a slow / unreachable
+      // server can't leave the popup stuck on the pasting flash forever.
+      fetchWithTimeout(apiUrl('/api/push'), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ text: text }),
@@ -750,8 +752,10 @@ body::after {
           if (data.ok) {
             showToast(IS_ZH ? '已发送到电脑' : 'Sent to computer');
             // Desktop popup closes after a beat so the user sees feedback; a
-            // phone tab stays open so more items can be pasted in a row.
-            if (window.opener) {
+            // phone tab stays open so more items can be pasted in a row.  The
+            // popup is opened via webbrowser.open_new (no window.opener), so
+            // gate on touch instead of opener.
+            if (!IS_TOUCH) {
               setTimeout(function () { closeWindow(); }, 350);
             }
           } else {
@@ -811,10 +815,12 @@ body::after {
      ═══════════════════════════════════════════════════════════════ */
 
   function closeWindow() {
-    // window.close() only works for pages opened via window.open (a desktop
-    // popup that has an opener).  In a normal tab it is a silent no-op, so
-    // never attempt it there — the close button is hidden in that case.
-    if (!window.opener) { return; }
+    // The desktop popup is opened via webbrowser.open_new (no window.opener),
+    // so the old opener gate would silently disable every close path.  Close
+    // on every non-touch device; a phone tab stays open so more items can be
+    // pasted in a row.  window.close() is a silent no-op in a plain tab, which
+    // is fine — the Esc/X affordances simply won't close an un-closable tab.
+    if (IS_TOUCH) { return; }
     try { window.close(); } catch (e) { /* ignore */ }
   }
 
@@ -1038,14 +1044,18 @@ body::after {
     titleEl.textContent = IS_ZH ? '快速粘贴' : 'Quick Paste';
     titleEl.style.visibility = 'visible';
   }
-  // Localize the hardcoded HTML strings now that the locale is known.
+  // Localize the hardcoded HTML strings now that the locale is known, and
+  // bind the X button.  The desktop popup opens via webbrowser.open_new (no
+  // window.opener), so show the button on every non-touch device — only a
+  // phone tab (which stays open to paste multiple items) hides it.
   var closeBtn = document.getElementById('qpCloseBtn');
   if (closeBtn) {
     closeBtn.title = IS_ZH ? '关闭 (Esc)' : 'Close (Esc)';
-    // Only show the close button when this is a desktop popup (it has a
-    // window.opener).  In a normal tab window.close() is a no-op, so the
-    // button would be a dead affordance.
-    if (!window.opener) {
+    closeBtn.addEventListener('click', function (e) {
+      e.preventDefault();
+      closeWindow();
+    });
+    if (IS_TOUCH) {
       closeBtn.style.display = 'none';
     }
   }

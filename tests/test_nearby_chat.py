@@ -204,18 +204,34 @@ class TestTextMessaging:
         self.pair.b.mark_session_read(self.sid)
         assert self.pair.b.get_sessions()[0]["unread"] == 0
 
-    def test_text_without_active_session_is_dropped(self):
+    def test_text_from_unknown_peer_is_dropped(self):
         before = len(self.pair.b.get_messages(self.sid))
         ok = self.pair.b.handle_message(
             "chat_text",
             {"session_id": "0000000000000000", "text": "sneak", "ts": time.time()},
-            DEV_A,
+            "stranger-1",
             FP_A,
             self.pair.send_from_b,
         )
         assert ok is True  # consumed by the chat router...
         # ...but nothing was appended to the real conversation.
         assert len(self.pair.b.get_messages(self.sid)) == before
+
+    def test_text_with_mismatched_session_id_still_delivered(self):
+        """A text tagged with a stale session_id from a KNOWN peer must land
+        via the by-peer fallback (a lost chat_accept after a re-invite would
+        otherwise blackout one direction)."""
+        before = len(self.pair.b.get_messages(self.sid))
+        ok = self.pair.b.handle_message(
+            "chat_text",
+            {"session_id": "ffffffffffffffff", "text": "still lands", "ts": time.time()},
+            DEV_A,
+            FP_A,
+            self.pair.send_from_b,
+        )
+        assert ok is True
+        assert any(e["text"] == "still lands" for e in self.pair.b.get_messages(self.sid))
+        assert len(self.pair.b.get_messages(self.sid)) == before + 1
 
     def test_oversized_text_rejected_locally(self):
         long_text = "x" * (ChatManager.MAX_TEXT_LEN + 1)
@@ -690,5 +706,96 @@ class TestTextRateBudget:
                 assert mgr.send_text(sid, f"fail-{i}", drop) is False
             # The failed sends must not have burned any outgoing slots.
             assert mgr.send_text(sid, "real", lambda data: True) is True
+        finally:
+            mgr.shutdown()
+
+
+class TestR6AuditRegressions:
+    """Regression tests for the deep-audit adversarial review fixes."""
+
+    def _active_session(self, mgr):
+        mgr.handle_message(
+            "chat_invite",
+            {"session_id": "f" * 16, "from_name": "A", "fingerprint_short": "A1"},
+            "peer-a", "A1", None,
+        )
+        sid = mgr.get_sessions()[0]["session_id"]
+        mgr.accept_invitation(sid, None)
+        return sid
+
+    def test_offline_gate_ignores_stalled_transfer(self):
+        """A transfer with stale progress must not pin the peer 'online'."""
+        mgr = ChatManager("x", "X")
+        try:
+            sid = self._active_session(mgr)
+            mgr.handle_message(
+                "chat_file_offer",
+                {"session_id": sid, "transfer_id": "a" * 32,
+                 "file_name": "x.bin", "file_size": 100, "mime": ""},
+                "peer-a", "A1", None,
+            )
+            sess = mgr._sessions["peer-a"]
+            # Stale progress -> NOT an active transfer -> offline detection
+            # is allowed to proceed instead of waiting out the stall window.
+            mgr._receives["a" * 32]["last_progress_mono"] = (
+                time.monotonic() - (ChatManager.TRANSFER_STALL_TIMEOUT + 10)
+            )
+            with mgr._lock:
+                assert mgr._session_has_active_transfer(sess) is False
+            # Fresh progress -> still counts as in-flight.
+            mgr._receives["a" * 32]["last_progress_mono"] = time.monotonic()
+            with mgr._lock:
+                assert mgr._session_has_active_transfer(sess) is True
+        finally:
+            mgr.shutdown()
+
+    def test_expired_offer_fires_done_callback(self):
+        """An offer the user never answered must notify the UI (declined) so
+        the Accept/Decline card stops offering dead actions."""
+        mgr = ChatManager("x", "X")
+        try:
+            sid = self._active_session(mgr)
+            done_events = []
+            mgr.set_on_file_done(
+                lambda s, tid, ok, path, st: done_events.append((tid, ok, st)),
+            )
+            mgr.handle_message(
+                "chat_file_offer",
+                {"session_id": sid, "transfer_id": "b" * 32,
+                 "file_name": "x.bin", "file_size": 100, "mime": ""},
+                "peer-a", "A1", None,
+            )
+            mgr._receives["b" * 32]["entry"].ts -= (
+                ChatManager.INVITE_ACCEPT_TIMEOUT + 10
+            )
+            with mgr._lock:
+                mgr._expire_stale_receives()
+            assert "b" * 32 not in mgr._receives
+            assert done_events == [("b" * 32, False, "declined")]
+        finally:
+            mgr.shutdown()
+
+    def test_fail_receive_notifies_sender(self):
+        """A disk-error on the receive side must send an error chat_file_complete
+        so the sender doesn't report a false 'delivered'."""
+        mgr = ChatManager("x", "X")
+        try:
+            sid = self._active_session(mgr)
+            sent = []
+            mgr._latest_send_fn["peer-a"] = sent.append
+            mgr.handle_message(
+                "chat_file_offer",
+                {"session_id": sid, "transfer_id": "c" * 32,
+                 "file_name": "x.bin", "file_size": 100, "mime": ""},
+                "peer-a", "A1", None,
+            )
+            with mgr._lock:
+                mgr._fail_receive_locked("c" * 32, "error_disk")
+            # The sender must receive an error frame (not silence).
+            assert sent, "receiver emitted no chat_file_complete error frame"
+            import json
+            from internal.protocol.codec import decode_message
+            decoded = decode_message(sent[0])
+            assert decoded._raw_payload["status"] == "error_disk"
         finally:
             mgr.shutdown()

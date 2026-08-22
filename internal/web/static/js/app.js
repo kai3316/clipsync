@@ -122,8 +122,20 @@
       var wsUrl = url.replace(/^http/, 'ws') + '/ws';
       ClipsyncWS.connect(wsUrl, token);
 
-      // Fetch initial data
-      this.loadData();
+      // Initial data loads are driven by the WebSocket 'connected' event
+      // (registered below), which fires once on the first connect and again
+      // on every reconnect — so there is no separate loadData() call here,
+      // or startup would fetch everything twice.  If the WS never connects
+      // (e.g. a LAN proxy blocks the ws:// upgrade), fall back to a one-time
+      // HTTP load so the app still renders instead of sitting on the loading
+      // spinner forever.
+      this._dataLoadTriggered = false;
+      this._loadFallbackTimer = setTimeout(function () {
+        if (!self._dataLoadTriggered) {
+          self._dataLoadTriggered = true;
+          self.loadData();
+        }
+      }, 3000);
 
       // 5-second overview refresh — runs whenever the window is focused and
       // page visible, regardless of the active tab, so the always-visible
@@ -177,7 +189,11 @@
           });
         },
         connected: function () {
-          // Refresh data on reconnect
+          // Refresh data on reconnect.  The initial connect fires this event
+          // too, so it is the single data-load trigger — mounted() no longer
+          // calls loadData() directly (which would load everything twice at
+          // startup).  _dataLoadTriggered only gates the WS-down fallback.
+          self._dataLoadTriggered = true;
           self.loadData();
         },
       };
@@ -216,6 +232,9 @@
       document.removeEventListener('keydown', this.onKeyDown);
       if (this._overviewTimer) {
         clearInterval(this._overviewTimer);
+      }
+      if (this._loadFallbackTimer) {
+        clearTimeout(this._loadFallbackTimer);
       }
       if (this._themeQuery && this._onThemeChange) {
         this._themeQuery.removeEventListener('change', this._onThemeChange);
@@ -303,13 +322,50 @@
         // hardcoded 30 so the setting actually affects the main panel.
         var limit = (store.settingsCache && store.settingsCache.web_history_limit) || 30;
         return ClipsyncAPI.getHistory({ limit: limit, offset: 0 }).then(function (res) {
-          store.history.splice(0, store.history.length);
           var items = (res && res.items) ? res.items : [];
-          for (var i = 0; i < items.length; i++) {
-            store.history.push(items[i]);
+          // This fetches a fresh page-1 snapshot (initial load / WS reconnect).
+          // If the user has already loaded beyond the first page (via "Load
+          // more"), merge the snapshot into the loaded list instead of
+          // clobbering it — otherwise a reconnect collapses their pages.  This
+          // mirrors the history_updated upsert/prepend merge in ws.js.
+          if (store.history.length > limit) {
+            var idxById = {};
+            for (var h = 0; h < store.history.length; h++) {
+              var cur = store.history[h];
+              if (cur && cur.entry_id !== undefined) {
+                idxById[cur.entry_id] = h;
+              }
+            }
+            var fresh = [];
+            for (var j = 0; j < items.length; j++) {
+              var inc = items[j];
+              if (!inc) continue;
+              var found = (inc.entry_id !== undefined && idxById[inc.entry_id] !== undefined) ? idxById[inc.entry_id] : -1;
+              if (found !== -1) {
+                // Update in place — keeps the item's loaded position.
+                Object.assign(store.history[found], inc);
+              } else {
+                fresh.push(inc);
+              }
+            }
+            // Prepend genuinely-new items, preserving snapshot (newest-first)
+            // order, and advance the "load more" cursor by the same count so
+            // the next page fetch does not re-return them.
+            for (var k = fresh.length - 1; k >= 0; k--) {
+              store.history.unshift(fresh[k]);
+            }
+            store.historyOffset += fresh.length;
+            if (res && res.total != null) {
+              store.historyHasMore = store.history.length < res.total;
+            }
+          } else {
+            store.history.splice(0, store.history.length);
+            for (var i = 0; i < items.length; i++) {
+              store.history.push(items[i]);
+            }
+            store.historyHasMore = (res && res.total != null) ? (res.offset + items.length < res.total) : false;
+            store.historyOffset = items.length;
           }
-          store.historyHasMore = (res && res.total != null) ? (res.offset + items.length < res.total) : false;
-          store.historyOffset = items.length;
           return items;
         });
       },

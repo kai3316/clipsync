@@ -374,3 +374,116 @@ def test_dialog_queued_flushed_response_window_starts_at_flush():
     assert not t.is_alive(), "show() should have returned by now"
     assert ok is True
     assert holder["result"] == {"action": "ok"}
+
+
+# ── #7: DELETE /api/files (mobile file delete) ───────────────────────
+
+def _dispatch_delete(path, body_bytes, upload_dir):
+    return dispatch(
+        "DELETE", path, {}, body_bytes,
+        cfg=object(),
+        history=None,
+        sync_mgr=None,
+        get_connected_ids=lambda: [],
+        on_nav_url=None,
+        on_forward_file=None,
+        upload_dir=upload_dir,
+    )
+
+
+def test_dispatch_delete_file_removes_uploaded_file(tmp_path):
+    f = tmp_path / "photo.jpg"
+    f.write_bytes(b"jpg-bytes")
+    status, _ct, body_b = _dispatch_delete(
+        "/api/files", _body({"name": "photo.jpg"}), str(tmp_path),
+    )
+    assert status == 200
+    assert json.loads(body_b)["ok"] is True
+    assert not f.exists(), "the uploaded file should be deleted"
+
+
+def test_dispatch_delete_file_rejects_traversal(tmp_path):
+    uploads = tmp_path / "uploads"
+    uploads.mkdir()
+    evil = tmp_path / "evil.txt"  # sibling of uploads — outside the upload dir
+    evil.write_bytes(b"evil")
+    status, _ct, body_b = _dispatch_delete(
+        "/api/files", _body({"name": "../evil.txt"}), str(uploads),
+    )
+    # basename strips the traversal, so the request can only ever target an
+    # in-dir name (missing here -> 404) — never the outside file.  Either a
+    # 400 rejection or a 404 not-found is safe; the outside file must survive.
+    assert status in (400, 404)
+    assert evil.exists(), "traversal must never delete outside the upload dir"
+
+
+def test_dispatch_delete_file_rejects_absolute_path(tmp_path):
+    uploads = tmp_path / "uploads"
+    uploads.mkdir()
+    keep = tmp_path / "keep.txt"
+    keep.write_bytes(b"keep")
+    # An absolute path is basename-stripped and confined to the upload dir, so
+    # it can never target the outside file — the outside file must survive.
+    status, _ct, _body_b = _dispatch_delete(
+        "/api/files", _body({"name": str(keep)}), str(uploads),
+    )
+    assert status in (400, 404)
+    assert keep.exists()
+
+
+def test_dispatch_delete_file_not_found(tmp_path):
+    status, _ct, body_b = _dispatch_delete(
+        "/api/files", _body({"name": "missing.txt"}), str(tmp_path),
+    )
+    assert status == 404
+    assert json.loads(body_b)["ok"] is False
+
+
+def test_dispatch_delete_file_requires_name(tmp_path):
+    status, _ct, body_b = _dispatch_delete("/api/files", _body({}), str(tmp_path))
+    assert status == 400
+    assert json.loads(body_b)["error"] == "filename required"
+
+
+def test_dispatch_delete_file_rejects_directory(tmp_path):
+    d = tmp_path / "subdir"
+    d.mkdir()
+    status, _ct, body_b = _dispatch_delete(
+        "/api/files", _body({"name": "subdir"}), str(tmp_path),
+    )
+    assert status == 400
+    assert d.is_dir(), "a directory must not be deleted"
+
+
+# ── Frontend fix guards (#1 quickpaste close, #9 reconnect merge) ────
+
+def _read_repo_file(rel: str) -> str:
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    with open(os.path.join(root, rel), encoding="utf-8") as f:
+        return f.read()
+
+
+def test_quickpaste_close_no_longer_gated_on_opener():
+    """#1: the desktop popup's close paths are gated on touch, not
+    window.opener — it is opened via webbrowser.open_new which has no opener.
+    The inline onclick that referenced an IIFE-local closeWindow() is gone."""
+    html = _read_repo_file("internal/web/static/quickpaste.html")
+    assert 'onclick="closeWindow()"' not in html, (
+        "inline onclick would ReferenceError against the IIFE-local function"
+    )
+    assert "closeBtn.addEventListener('click'" in html
+    assert "if (IS_TOUCH) { return; }" in html
+    # No close path may still be gated on window.opener (it only appears in
+    # comments explaining the webbrowser.open_new no-opener behavior).
+    assert "if (window.opener)" not in html
+
+
+def test_dashboard_history_reconnect_merge_present():
+    """#9: loadHistory must not clobber already-loaded pages on a WS
+    reconnect — it merges/upserts when more than one page is loaded."""
+    js = _read_repo_file("internal/web/static/js/app.js")
+    assert "store.history.length > limit" in js
+    assert "store.history.unshift(fresh" in js
+    # The mounted() direct load was removed (WS 'connected' is the sole load
+    # trigger) so startup no longer fetches everything twice.
+    assert "this.loadData();" not in js

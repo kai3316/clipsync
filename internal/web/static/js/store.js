@@ -628,11 +628,21 @@
 
     /**
      * Fetch overview stats from the server.
+     * In-flight calls are coalesced: the 5s polling timer (app.js) and the
+     * WS-event debounce (ws.js) can both fire a fetch in the same tick, and a
+     * slow /api/overview should never stack concurrent requests.  The in-flight
+     * response is fresh enough to satisfy both callers, so a request that
+     * arrives while one is already pending is a no-op.
      */
     fetchOverview: function () {
       var self = this;
+      if (this._overviewInFlight) return;
+      this._overviewInFlight = true;
       this.overview.loading = true;
-      if (!window.ClipsyncAPI) return;
+      if (!window.ClipsyncAPI) {
+        this._overviewInFlight = false;
+        return;
+      }
       window.ClipsyncAPI.getOverview()
         .then(function (res) {
           if (res && res.overview) {
@@ -668,6 +678,7 @@
           console.error('[ClipSync] Failed to fetch overview:', e);
         })
         .finally(function () {
+          self._overviewInFlight = false;
           self.overview.loading = false;
         });
     },
