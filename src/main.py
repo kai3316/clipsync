@@ -1520,15 +1520,18 @@ class Application:
             import secrets
             self.cfg.web_token = secrets.token_urlsafe(16)
             self._save_cfg_encrypted()
-            # Never echo the token back through the settings API; report only
-            # that it changed so the client can prompt for a reconnect.
+            # Echo the fresh token back so the client can re-initialize its API
+            # session in place (a reload would carry the stale URL token and hit
+            # a 403 dead-end).
             response["token_updated"] = True
+            response["web_token"] = self.cfg.web_token
             logger.info("Web token regenerated")
 
         if "clear_web_token" in special:
             self.cfg.web_token = ""
             self._save_cfg_encrypted()
             response["token_updated"] = True
+            response["web_token"] = ""
             logger.info("Web token cleared")
 
         if "password" in special and special["password"]:

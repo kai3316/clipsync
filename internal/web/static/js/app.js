@@ -94,8 +94,13 @@
       // The wizard renames THIS computer and explains P2P pairing — neither
       // makes sense for a phone/tablet that landed on the dashboard, where
       // "Name this device" would rename the PC and pairing is impossible.
-      if (!store.onboardingDone && store.deviceId &&
-          window.matchMedia && window.matchMedia('(pointer: fine)').matches) {
+      // Gate on the local webview host (localhost / 127.0.0.1 — the desktop
+      // webview's only address) OR a fine-pointer device, so a touch-primary
+      // desktop convertible still gets the wizard while a phone on the LAN IP
+      // does not.
+      var isLocalHost = /^(localhost|127\.0\.0\.1)$/.test(window.location.hostname || '');
+      var isDesktop = isLocalHost || (window.matchMedia && window.matchMedia('(pointer: fine)').matches);
+      if (!store.onboardingDone && store.deviceId && isDesktop) {
         store.showOnboarding = true;
       }
 

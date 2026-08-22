@@ -582,17 +582,26 @@
 
       // ── Token management ─────────────────────────────────────────
 
+      // Rewrite the current URL's token query param (to a new token, or an
+      // empty string after clearing) so a reload is re-served by the server
+      // instead of 403'ing on the now-stale token in the address bar.
+      _rewriteUrlToken: function (token) {
+        try {
+          var u = new URL(window.location.href);
+          u.searchParams.set('token', token || '');
+          window.history.replaceState({}, '', u.toString());
+        } catch (e) { /* non-http(s) URL — leave it */ }
+      },
+
       regenerateToken: function () {
         var self = this;
         this.store.confirm(this.t('settings.token_regenerate_title'), this.t('settings.token_regenerate_confirm'))
           .then(function () {
             ClipsyncAPI.updateSettings({ regenerate_web_token: true }).then(function (res) {
               if (res && res.ok) {
-                // The new token is injected into the page at serve time, so a
-                // reload re-serves it with the fresh token (the old token is
-                // invalid server-side the moment this response lands). Reload
-                // instead of clearing in place so the stale-token state can't
-                // leave the session half-connected.
+                if (res.web_token) {
+                  self._rewriteUrlToken(res.web_token);
+                }
                 window.location.reload();
               } else {
                 self.store.showToast(self.t('settings.token_regenerate_failed'), 2000);
@@ -606,12 +615,15 @@
 
       clearToken: function () {
         var self = this;
-        // Clearing the token also invalidates the current page's token — a
-        // reload re-serves the (now token-less) page so the stale-token state
-        // can't persist in this session.
+        // Clearing the token disables web access; the old URL token is now
+        // invalid, so rewrite the URL with an empty token before reloading
+        // (an empty web_token accepts an empty ?token=; the stale one would 403).
         this.store.confirm(this.t('settings.token_clear_title'), this.t('settings.token_clear_confirm'))
           .then(function () {
-            ClipsyncAPI.updateSettings({ clear_web_token: true }).then(function () {
+            ClipsyncAPI.updateSettings({ clear_web_token: true }).then(function (res) {
+              if (res && res.ok) {
+                self._rewriteUrlToken('');
+              }
               window.location.reload();
             }).catch(function () {
               self.store.showToast(self.t('settings.token_clear_failed'), 2000);
@@ -803,14 +815,15 @@
           self.restoring = false;
           if (res && res.ok) {
             var s = res.summary || {};
-            self.store.showToast(self.t('settings.restore_summary', {
+            var summaryMsg = self.t('settings.restore_summary', {
               config: s.config ? self.t('ui.yes') : self.t('ui.no'),
               history: s.history || 0,
               favorites: s.favorites || 0,
-            }), 3000);
+            });
             if (res.needs_restart) {
-              self.store.showToast(self.t('settings.restore_restart_note'), 4000);
+              summaryMsg += ' ' + self.t('settings.restore_restart_note');
             }
+            self.store.showToast(summaryMsg, 4500);
             // Reload history/favorites/devices so the restored data actually
             // shows up in the panels without a manual page refresh.
             try {

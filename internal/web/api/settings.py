@@ -348,6 +348,17 @@ def import_data(body, cfg, history):
     if not os.path.isfile(filepath):
         return {"ok": False, "error": T("web.import_file_not_found", path=filepath)}, 200
 
+    # Confine import to where a legitimate export/backup actually lands — the
+    # app data dir (backups) and the user's Downloads folder (manual exports) —
+    # so a token holder can't read arbitrary files off the disk by importing
+    # them into history and reading the content back out.
+    from internal.config.config import _config_dir
+    data_root = os.path.realpath(_config_dir())
+    downloads_root = os.path.realpath(os.path.join(os.path.expanduser("~"), "Downloads"))
+    real = os.path.realpath(filepath)
+    if not any(real == r or real.startswith(r + os.sep) for r in (data_root, downloads_root)):
+        return {"ok": False, "error": T("web.import_path_not_allowed")}, 200
+
     # Cap at ~10 MB so a huge or mistaken file can't be slurped into memory.
     try:
         size = os.path.getsize(filepath)
@@ -367,6 +378,12 @@ def import_data(body, cfg, history):
             with open(filepath, "r", encoding="utf-8") as f:
                 parsed = json.load(f)
             if not isinstance(parsed, list) or not all(isinstance(item, dict) for item in parsed):
+                return {"ok": False, "error": T("web.import_invalid_content")}, 200
+            # Require ClipSync export fields so a foreign JSON array (e.g. a
+            # browser/app config dump) can't be ingested and read back through
+            # the history API.  An empty list is a valid no-op import.
+            if not all(("text_preview" in item or "types" in item or "content_type" in item)
+                       for item in parsed):
                 return {"ok": False, "error": T("web.import_invalid_content")}, 200
         else:
             with open(filepath, "r", encoding="utf-8", newline="") as f:

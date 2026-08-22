@@ -813,7 +813,12 @@ body::before {
     return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
   }
 
+  var historyLoading = false;
   function loadHistory(silent) {
+    // Skip a silent poll tick while a request is already in flight so slow
+    // responses can't overlap and render out of order.
+    if (historyLoading && silent) return;
+    historyLoading = true;
     // Silent background refreshes keep the current list on screen; only the
     // user-initiated load shows the skeleton.
     if (!silent) {
@@ -821,10 +826,12 @@ body::before {
     }
     getJson('/api/history?limit=30')
       .then(function (data) {
+        historyLoading = false;
         historyItems = (data.items || []).slice(0, 30);
         renderHistory();
       })
       .catch(function () {
+        historyLoading = false;
         if (!silent) {
           historyList.innerHTML = '<div class="empty"><div class="empty__icon">⚠️</div><div class="empty__text">' + esc(T.loadFail) + '<br>' + esc(T.loadFailHint) + '</div></div>';
         }
@@ -891,6 +898,9 @@ body::before {
     if (imgUrl) {
       showImageModal(imgUrl);
     } else {
+      // Drop any stale image from a previously-opened clip before showing text.
+      modalImage.style.display = 'none';
+      modalImage.removeAttribute('src');
       modalText.style.display = '';
       modalCopyBtn.style.display = '';
       modalText.textContent = getFullText(item) || item.text_preview || T.emptyPreview;
@@ -1087,12 +1097,17 @@ body::before {
 
   /* ── Files: list + download ────────────────────────────────── */
 
+  var filesLoading = false;
   function loadFiles(silent) {
+    // Skip a silent poll tick while a request is already in flight.
+    if (filesLoading && silent) return;
+    filesLoading = true;
     if (!silent) {
       fileList.innerHTML = '<div class="skeleton"></div><div class="skeleton"></div>';
     }
     getJson('/api/files')
       .then(function (data) {
+        filesLoading = false;
         var files = (data && data.files) || [];
         if (files.length === 0) {
           fileList.innerHTML = '<div class="empty"><div class="empty__icon">📁</div><div class="empty__text">' + esc(T.emptyFiles) + '</div></div>';
@@ -1121,6 +1136,7 @@ body::before {
         });
       })
       .catch(function () {
+        filesLoading = false;
         if (!silent) {
           fileList.innerHTML = '<div class="empty"><div class="empty__icon">⚠️</div><div class="empty__text">' + esc(T.loadFail) + '<br>' + esc(T.loadFailHint) + '</div></div>';
         }

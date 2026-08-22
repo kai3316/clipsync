@@ -2,6 +2,15 @@
 
 All notable changes to ClipSync are documented in this file.
 
+## [1.0.16] — 2026-08-22
+
+### Fixed (regressions found by the v1.0.15 self-review)
+- **Regenerating or clearing the web token no longer lands on a raw 403 page.** The backend now returns the fresh token; the page rewrites the token in its URL and reloads seamlessly. (v1.0.15's "reload after regenerate" carried the now-stale URL token and hit a 403 dead-end with the SPA gone.)
+- **Import is confined again.** v1.0.15's path relaxation let a token holder read arbitrary files off the disk by importing them into history and reading them back; import is now limited to the Downloads folder and the ClipSync data directory, and JSON items must carry ClipSync export fields to be accepted.
+- **mobile.html**: a text clip no longer leaves a stale image on screen from a previously opened image clip, and the 5-second poll skips a tick while a request is still in flight (no overlapping, out-of-order renders on slow networks).
+- **First-run wizard** now also appears on touch-primary desktop convertibles (it's gated on the local webview host in addition to the pointer type), instead of being silently suppressed by the `(pointer: fine)` check.
+- The **restore summary toast is no longer immediately overwritten** by the restart-required note — both are shown together.
+
 ## [1.0.15] — 2026-08-22
 
 ### First-run & onboarding
