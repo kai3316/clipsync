@@ -398,6 +398,18 @@ class TestFileTransfer:
             None,
         ) is False
 
+    def test_outgoing_file_cap(self):
+        from pathlib import Path
+        sent = []
+        for i in range(ChatManager.MAX_CONCURRENT_OUTGOING_FILES + 1):
+            src = Path(self.dir_a) / f"f{i}.bin"
+            src.write_bytes(b"x" * 512)
+            tid = self.pair.a.send_file(self.sid, str(src), self.pair.send_from_a)
+            if tid is None:
+                break
+            sent.append(tid)
+        assert len(sent) == ChatManager.MAX_CONCURRENT_OUTGOING_FILES
+
 
 class TestDisconnectAndSnapshots:
     def setup_method(self):

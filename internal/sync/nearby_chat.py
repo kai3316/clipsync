@@ -183,6 +183,7 @@ class ChatManager:
     INVITE_ACCEPT_TIMEOUT = 300.0     # sender waits this long for chat_file_accept
     COMPLETION_WAIT_TIMEOUT = 60.0
     MAX_CONCURRENT_INCOMING_FILES = 3
+    MAX_CONCURRENT_OUTGOING_FILES = 3
     # ---- liveness ------------------------------------------------------------
     PING_INTERVAL = 45.0
     OFFLINE_AFTER = 150.0             # silent for ~3 intervals => show offline
@@ -478,6 +479,14 @@ class ChatManager:
         with self._lock:
             session = self._session_by_sid.get(session_id)
             if session is None or session.status != "active" or not session.online:
+                return None
+            # Mirror the incoming cap so a UI bug (or a fast-clicking user)
+            # cannot spawn an unbounded number of chunk threads per session.
+            outgoing_inflight = sum(
+                1 for s in self._sends.values() if s["session"] is session
+            )
+            if outgoing_inflight >= self.MAX_CONCURRENT_OUTGOING_FILES:
+                logger.info("chat: too many outgoing files for session %s", session_id[:8])
                 return None
             fn = send_fn or self._latest_send_fn.get(session.peer_id)
             transfer_id = uuid.uuid4().hex
@@ -786,7 +795,16 @@ class ChatManager:
                 return
 
             if mine is not None and mine.status == "active":
-                # Already chatting: reaffirm so their client converges too.
+                # Already chatting.  If this invite carries a NEW session id
+                # (the peer closed its old session without telling us, then
+                # restarted), adopt the new id — otherwise both sides stay
+                # "active" with mismatched ids and every later message is
+                # dropped as an unknown session.
+                if mine.session_id != sid:
+                    self._session_by_sid.pop(mine.session_id, None)
+                    self._session_by_sid[sid] = mine
+                    mine.session_id = sid
+                # Reaffirm so their client converges too.
                 self._send_frame({"msg_type": "chat_accept", "session_id": sid}, send_fn)
                 self._touch_seen(mine)
                 return
@@ -899,6 +917,13 @@ class ChatManager:
         text = payload.get("text")
         if not isinstance(text, str) or not text or len(text) > self.MAX_TEXT_LEN:
             logger.debug("chat: dropping invalid text from %s", sender_id[:12])
+            return
+        # Strip control characters like the invite strings — this text reaches
+        # OS notifications and the session preview, so a peer could otherwise
+        # inject bidi-override / ESC tricks into what the user reads.
+        text = "".join(ch for ch in text if ch.isprintable())
+        if not text:
+            logger.debug("chat: dropping control-char-only text from %s", sender_id[:12])
             return
         with self._lock:
             session = self._resolve_session(str(payload.get("session_id", "")), sender_id)
