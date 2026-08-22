@@ -536,17 +536,21 @@ class Application:
         logger.info("Device: %s (%s)", self.cfg.device_name, self.cfg.device_id)
 
     def _show_first_run_onboarding_if_needed(self) -> None:
-        """First run only: show the bilingual language picker.
+        """Show the bilingual language picker until a language is actually chosen.
 
         Runs after the Tk root exists but before services/UI start, so the
         chosen language applies to everything created afterwards.  Existing
-        installs (a config file already present) never see it — only a
-        genuinely fresh launch does.
+        installs that already picked a language never see it.  A dismissed
+        picker leaves ``language_chosen`` False, so it reappears on the next
+        launch until the user makes a real choice.
         """
-        if not getattr(self, "_first_run", False):
+        # Session guard: never show the picker twice in one run (even if the
+        # user dismisses it, we don't nag again until the next launch).
+        if getattr(self, "_onboarding_shown", False):
             return
         if getattr(self.cfg, "language_chosen", False):
             return
+        self._onboarding_shown = True
         try:
             from internal.ui.onboarding import show_language_onboarding
             chosen = show_language_onboarding(self.root)
@@ -1628,8 +1632,25 @@ class Application:
             return
         # The new instance owns the config now; don't re-save/rewrite it on exit.
         self._skip_save_on_shutdown = True
-        if self.root:
-            self.root.quit()
+        # Do NOT sys.exit() from the web handler thread — that raises SystemExit
+        # before the HTTP response is sent, so the UI shows a false failure even
+        # though the restart worked.  Give the response time to flush, then exit
+        # from the main thread instead.
+        try:
+            if self.root is not None:
+                self.root.after(300, self._exit_process)
+                return
+        except Exception:
+            logger.warning("Restart: could not schedule exit", exc_info=True)
+        self._exit_process()
+
+    def _exit_process(self) -> None:
+        """Stop the Tk loop and exit the process (main thread only)."""
+        try:
+            if self.root is not None:
+                self.root.quit()
+        except Exception:
+            logger.warning("Could not quit Tk root cleanly", exc_info=True)
         sys.exit(0)
 
     # ═══════════════════════════════════════════════════════════════
@@ -3754,13 +3775,16 @@ class Application:
         from internal.system.updater import download_latest_release
         dest_dir = str(Path.home() / "Downloads")
         try:
-            path = download_latest_release(dest_dir)
+            path, reason = download_latest_release(dest_dir)
         except Exception as exc:
             logger.exception("Update download failed")
             return {"ok": False, "path": "", "error": str(exc)}
         if path:
             return {"ok": True, "path": path, "error": None}
-        return {"ok": False, "path": "", "error": "download failed"}
+        # The updater returns a readable (localized) reason for expected
+        # failures — e.g. no release asset for this platform — so the user
+        # sees the real cause instead of a generic "download failed".
+        return {"ok": False, "path": "", "error": reason or "download failed"}
 
     def _get_pending(self) -> list:
         return self.pairing_mgr.get_pending_pairings()

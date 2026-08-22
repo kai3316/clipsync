@@ -90,8 +90,12 @@
         sessionStorage.removeItem('clipsync_ui_state');
       } catch (e) { /* ignore */ }
 
-      // One-time first-run onboarding wizard (only once a device id is known).
-      if (!store.onboardingDone && store.deviceId) {
+      // One-time first-run onboarding wizard (desktop-like clients only).
+      // The wizard renames THIS computer and explains P2P pairing — neither
+      // makes sense for a phone/tablet that landed on the dashboard, where
+      // "Name this device" would rename the PC and pairing is impossible.
+      if (!store.onboardingDone && store.deviceId &&
+          window.matchMedia && window.matchMedia('(pointer: fine)').matches) {
         store.showOnboarding = true;
       }
 

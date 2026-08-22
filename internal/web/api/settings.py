@@ -6,13 +6,15 @@ passwords, hashes) are never sent to clients.
 All handlers return a (data_dict, status_code) tuple.
 """
 
+import csv
 import json
 import logging
 import os
-import tempfile
+from datetime import datetime
 
 from internal.config.config import _config_path
 from internal.config.config import save as save_config
+from internal.i18n import T
 
 logger = logging.getLogger(__name__)
 
@@ -272,10 +274,12 @@ def update_settings(body, cfg, on_settings_change=None, enc_mgr=None):
 
 
 def export_data(body, cfg, history):
-    """Export clipboard history to a temp file (JSON or CSV).
+    """Export clipboard history to a persistent file (JSON or CSV).
 
     Request body: {"format": "json" | "csv"}
-    Returns the path to the exported file.
+    Writes a uniquely-named file to the user's Downloads folder (falling back
+    to the app data directory) and leaves it in place so the user can open or
+    move it.  Returns the durable path and filename.
     """
     try:
         data = json.loads(body.decode("utf-8"))
@@ -287,41 +291,49 @@ def export_data(body, cfg, history):
         return {"ok": False, "error": "unsupported format (use json or csv)"}, 400
 
     suffix = ".json" if fmt == "json" else ".csv"
-    fd, tmp_path = tempfile.mkstemp(suffix=suffix, prefix="clipsync_export_")
-    os.close(fd)
-    # mkstemp creates the file 0600; the exported history is plaintext
-    # clipboard content, so keep it private and never let it linger.
+    from internal.config.config import _config_dir
+    from pathlib import Path
+    # Downloads is where users expect exported files; if it can't be
+    # determined, fall back to the app data dir (always present).
+    downloads = Path.home() / "Downloads"
+    dest_dir = downloads if downloads.is_dir() else Path(_config_dir())
     try:
-        os.chmod(tmp_path, 0o600)
+        dest_dir.mkdir(parents=True, exist_ok=True)
     except OSError:
-        pass
+        dest_dir = Path(_config_dir())
+    ts = datetime.now().strftime("%Y%m%d-%H%M%S")
+    filename = f"clipsync-history-{ts}{suffix}"
+    dest_path = str(dest_dir / filename)
 
     try:
         from internal.data.export import export_history_csv, export_history_json
         if fmt == "json":
-            count = export_history_json(history, tmp_path)
+            count = export_history_json(history, dest_path)
         else:
-            count = export_history_csv(history, tmp_path)
-        # The client only uses the count/ok for a confirmation toast today;
-        # the temp file is transient and unlinked below.
-        return {"ok": True, "filepath": tmp_path, "count": count, "format": fmt}, 200
+            count = export_history_csv(history, dest_path)
+        # The export functions chmod the file 0600 (plaintext clipboard
+        # content).  Do NOT delete it — the whole point is that the user can
+        # find and use this file.
+        return {"ok": True, "filepath": dest_path, "filename": filename,
+                "count": count, "format": fmt}, 200
     except Exception as exc:
         logger.exception("Export failed")
-        return {"ok": False, "error": str(exc)}, 500
-    finally:
-        # Clean up on every exit path — success or failure — so a plaintext
-        # clipboard-history temp file is never left behind.
+        # Remove a partial export on failure so no broken file is left behind.
         try:
-            os.unlink(tmp_path)
+            os.unlink(dest_path)
         except OSError:
             pass
+        return {"ok": False, "error": str(exc)}, 500
 
 
 def import_data(body, cfg, history):
     """Import clipboard history from a JSON or CSV file path.
 
     Request body: {"filepath": "/path/to/file.json"}
-    Returns the count of imported items.
+    Accepts any existing regular-file path the user points at (no confinement
+    to the app data dir), still caps the file at ~10 MB and validates that it
+    parses as a ClipSync export before applying anything.  The source file is
+    only ever read, never written.  Returns the count of imported items.
     """
     try:
         data = json.loads(body.decode("utf-8"))
@@ -330,23 +342,41 @@ def import_data(body, cfg, history):
 
     filepath = data.get("filepath", "").strip()
     if not filepath:
-        return {"ok": False, "error": "missing filepath"}, 400
+        return {"ok": False, "error": T("web.import_missing_path")}, 200
 
-    # Only allow importing from ClipSync's own data directory — a client
-    # supplied path must not read arbitrary files on the host.
-    from internal.config.config import _config_dir
-    from internal.web.api.security import confine_path
-    safe_path = confine_path(filepath, _config_dir())
-    if safe_path is None:
-        return {"ok": False, "error": "filepath must be inside the ClipSync data directory"}, 400
-    filepath = str(safe_path)
-
+    filepath = os.path.expanduser(filepath)
     if not os.path.isfile(filepath):
-        return {"ok": False, "error": "file not found"}, 404
+        return {"ok": False, "error": T("web.import_file_not_found", path=filepath)}, 200
+
+    # Cap at ~10 MB so a huge or mistaken file can't be slurped into memory.
+    try:
+        size = os.path.getsize(filepath)
+    except OSError:
+        return {"ok": False, "error": T("web.import_file_not_found", path=filepath)}, 200
+    if size > 10 * 1024 * 1024:
+        return {"ok": False, "error": T("web.import_file_too_large")}, 200
 
     ext = os.path.splitext(filepath)[1].lower()
     if ext not in (".json", ".csv"):
-        return {"ok": False, "error": "unsupported file format (use json or csv)"}, 400
+        return {"ok": False, "error": T("web.import_unsupported_format")}, 200
+
+    # Validate before applying so a malformed file fails with a clear
+    # localized error instead of a generic 500 mid-import.
+    try:
+        if ext == ".json":
+            with open(filepath, "r", encoding="utf-8") as f:
+                parsed = json.load(f)
+            if not isinstance(parsed, list) or not all(isinstance(item, dict) for item in parsed):
+                return {"ok": False, "error": T("web.import_invalid_content")}, 200
+        else:
+            with open(filepath, "r", encoding="utf-8", newline="") as f:
+                reader = csv.DictReader(f)
+                expected = {"timestamp", "content_type", "text_preview"}
+                if not expected.intersection(reader.fieldnames or []):
+                    return {"ok": False, "error": T("web.import_invalid_content")}, 200
+    except (OSError, json.JSONDecodeError, UnicodeDecodeError):
+        logger.warning("Import validation failed for %s", filepath, exc_info=True)
+        return {"ok": False, "error": T("web.import_invalid_content")}, 200
 
     try:
         from internal.data.export import import_history_csv, import_history_json
@@ -380,7 +410,9 @@ def restore_backup_api(body, cfg, history):
     """Restore from a backup zip file.
 
     Request body: {"backup_path": "/path/to/backup.zip"}
-    Returns a summary of restored items.
+    Creates a pre-restore backup of the current state first (a safety net so
+    the user can undo a restore), then restores.  Returns a summary of
+    restored items plus the pre-restore backup path.
     """
     try:
         data = json.loads(body.decode("utf-8"))
@@ -398,6 +430,17 @@ def restore_backup_api(body, cfg, history):
         return {"ok": False, "error": "backup_path must be inside the ClipSync data directory"}, 400
     backup_path = str(safe_path)
 
+    # Safety net: snapshot the current state before overwriting it, so a
+    # restore can always be undone from the backups list.  A failure to
+    # snapshot must not block the restore itself — just leave the field None.
+    pre_restore_backup = None
+    try:
+        from internal.data.backup import create_backup
+        pre_restore_backup = create_backup(cfg, history)
+    except Exception as exc:
+        logger.warning("Failed to create pre-restore backup: %s", exc)
+        pre_restore_backup = None
+
     try:
         from internal.data.backup import restore_backup
         summary = restore_backup(backup_path, cfg, history)
@@ -414,7 +457,13 @@ def restore_backup_api(body, cfg, history):
             # A save failure must not fail the restore request — the in-memory
             # restore already succeeded — but it must not pass silently either.
             logger.error("Failed to persist restored config: %s", exc)
-        return {"ok": True, "summary": summary}, 200
+        return {
+            "ok": True,
+            "summary": summary,
+            "restored": summary,
+            "pre_restore_backup": pre_restore_backup,
+            "needs_restart": True,
+        }, 200
     except FileNotFoundError:
         return {"ok": False, "error": "backup file not found"}, 404
     except ValueError as exc:

@@ -2,6 +2,35 @@
 
 All notable changes to ClipSync are documented in this file.
 
+## [1.0.15] — 2026-08-22
+
+### First-run & onboarding
+- The **language picker now reappears on every launch until a language is actually chosen** — previously, closing it (or the config file already existing from identity bootstrap) permanently stranded English-only users in the default Chinese UI. Option cards also respond to clicks anywhere on them now, not just the thin border.
+- The **first-run wizard's step 3 ("Use it on your phone") is reachable and real**: it shows the phone connect URL and a "Show QR Code" button (previously the step was dead code and the third progress dot lied).
+- **Empty device names are rejected inline** with an error instead of being saved silently; the wizard now only appears on desktop-like clients (a phone opening the dashboard gets the normal app, not a "rename your PC" prompt); pressing Enter in the name field advances.
+- Pairing codes render **grouped (1234 5678)** with an "expires in 5 minutes — reconnect to retry" hint.
+
+### Mobile & phone pages
+- `mobile.html` now **polls the active tab every 5s** (paused when the page is hidden), so new history/file entries appear without manually switching tabs.
+- **Phone file uploads get a live progress bar, a cancel button, multi-file support** (uploaded sequentially), and a clear pre-flight error when a selection exceeds the 128 MB server cap (previously a silent "no file field").
+- **Image clipboard items render in the phone modal** with tap-to-zoom (previously "(empty)").
+- Phone fetches get an **8-second timeout with "same Wi-Fi / ClipSync running" guidance** instead of an indefinite shimmering skeleton.
+- **Rich history actions (favorite/translate/paste-to-device/view) are reachable on iPhone** via touch long-press (iOS never fired the right-click menu); favorites can be **reordered with up/down arrows on touch** (HTML5 drag-and-drop doesn't work on phones); the quick-paste confirmation says **"Sent to computer"** instead of the misleading "Pasted!"; the quick-paste header respects the safe-area inset and localizes its tooltip/aria labels.
+
+### Settings & data
+- **Export JSON/CSV writes a real file to Downloads** (path shown in the confirmation) instead of deleting the temp file before the user could use it.
+- **Import accepts any real file path** with clear localized errors (10 MB cap + content validation) instead of rejecting everything outside the private data directory.
+- **Restore now auto-creates a backup of the current state first**, its confirmation states the real semantics (settings overwritten, history *merged*, not undoable), and a "restart required" toast appears when restored settings need one.
+- **"History items shown" now actually persists** (the raw `v-model` string was being rejected by the backend type guard); the **theme choice persists to the app config**; **regenerating/clearing the web token warns first** and reloads the page with the fresh token so the session recovers.
+- **Update downloads use a 120s timeout** (no more false "failed" on slow downloads) and **surface the real reason on failure** (e.g. "no release asset for this platform") instead of a generic error.
+- The classic UI's **factory reset now deletes the full data set** (history/favorites databases included), matching the web path; the web **"Restart App" no longer reports a false failure** (exit is scheduled after the response flushes).
+- Web/Data settings that need a restart now say so in the save confirmation.
+
+### Regressions fixed from v1.0.14 (self-review pass)
+- **Image items copied from the context menu paste the actual image again** (v1.0.14 changed "Copy" to a local text copy, which degraded pure-image items to a truncated text preview).
+- Server-pushed dialog **focus is restored from the very first dialog** (not just the second), and a dialog **can no longer be double-submitted** while its response is in flight.
+- **Cancelling a password change no longer leaks the encryption toggle** into a later unrelated save.
+
 ## [1.0.14] — 2026-08-22
 
 ### Desktop UI (fixed)

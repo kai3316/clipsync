@@ -684,6 +684,16 @@ _EN: dict[str, str] = {
     "settings.version": "Version",
     "settings.device_id": "Device ID",
     "settings.device_name": "Device Name",
+    # Backend import / export / update errors (surfaced by the web UI)
+    "web.import_missing_path": "No file selected",
+    "web.import_file_not_found": "File not found: {path}",
+    "web.import_file_too_large": "File is too large (maximum 10 MB)",
+    "web.import_unsupported_format": "Unsupported file format (use .json or .csv)",
+    "web.import_invalid_content": "The selected file is not a valid ClipSync export",
+    "web.update_no_release": "No release download is available for this platform ({name})",
+    "web.update_server_unreachable": "Could not reach the release server",
+    "web.update_no_assets": "The latest release has no downloadable assets",
+    "web.update_download_failed": "Download failed: {reason}",
     # Favorites
     "favorites.added": "Added to favorites!",
     "favorites.add_failed": "Failed to add favorite",
@@ -1347,6 +1357,16 @@ _ZH: dict[str, str] = {
     "settings.version": "版本",
     "settings.device_id": "设备 ID",
     "settings.device_name": "设备名称",
+    # 后端导入/导出/更新错误（由 Web 界面显示）
+    "web.import_missing_path": "未选择文件",
+    "web.import_file_not_found": "未找到文件：{path}",
+    "web.import_file_too_large": "文件过大（上限 10 MB）",
+    "web.import_unsupported_format": "不支持的文件格式（请使用 .json 或 .csv）",
+    "web.import_invalid_content": "所选文件不是有效的 ClipSync 导出文件",
+    "web.update_no_release": "此平台没有可用的发布下载（{name}）",
+    "web.update_server_unreachable": "无法访问发布服务器",
+    "web.update_no_assets": "最新版本没有可下载的文件",
+    "web.update_download_failed": "下载失败：{reason}",
     # Favorites
     "favorites.added": "已添加到收藏！",
     "favorites.add_failed": "添加收藏失败",

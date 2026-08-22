@@ -73,8 +73,9 @@
               '<div class="pairing-request-card__info">' +
                 '<span class="pairing-request-card__name">{{ pr.peer_name || pr.device_name || pr.peer_id }}</span>' +
                 '<span class="pairing-request-card__id">{{ pr.peer_id }}</span>' +
-                '<span class="pairing-request-card__code">{{ t(\'ui.pairing_code_label\') }} <strong>{{ pr.code }}</strong></span>' +
+                '<span class="pairing-request-card__code">{{ t(\'ui.pairing_code_label\') }} <strong>{{ formattedCode(pr) }}</strong></span>' +
                 '<span class="pairing-request-card__hint">{{ pairingHint(pr) }}</span>' +
+                '<span class="pairing-request-card__hint">{{ t(\'devices.pairing_expiry_hint\') }}</span>' +
               '</div>' +
               '<div class="pairing-request-card__actions">' +
                 '<button v-if="pr.status !== \'confirmed_waiting\'" class="device-card__action device-card__action--accent" @click="acceptPairing(pr)" :disabled="pairingResponding === pr.peer_id">' +
@@ -149,6 +150,13 @@
           .finally(function () {
             self.refreshing = false;
           });
+      },
+
+      formattedCode: function (pr) {
+        var code = (pr && pr.code) || '';
+        // Split the 8-digit code in half so it's easy to compare across
+        // devices without misreading adjacent digits.
+        return code.length > 4 ? code.slice(0, 4) + ' ' + code.slice(4) : code;
       },
 
       pairingHint: function (pr) {

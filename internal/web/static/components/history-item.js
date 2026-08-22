@@ -35,6 +35,10 @@
       @mouseenter="onMouseEnter"
       @mouseleave="onMouseLeave"
       @contextmenu.prevent="onContextMenu"
+      @touchstart="onTouchStart"
+      @touchmove="onTouchMove"
+      @touchend="onTouchEnd"
+      @touchcancel="onTouchCancel"
     >
       <div class="history-item__icon">
         <span>{{ typeIcon }}</span>
@@ -62,7 +66,8 @@
         <button
           class="history-item__action-btn"
           @click="copyItem"
-          :title="t('history.copy_tooltip')"
+          :title="copyButtonTitle"
+          :aria-label="copyButtonTitle"
         >&#128203;</button>
         <button
           class="history-item__action-btn history-item__action-btn--danger"
@@ -113,11 +118,33 @@
         }
         return false;
       },
+
+      // Coarse pointer (touch / phone) — the copy button actually pushes the
+      // item to the DESKTOP clipboard, so its label must be honest on phones.
+      isCoarse: function () {
+        if (this._coarseChecked === undefined) {
+          this._coarseChecked = true;
+          this._coarseValue = !!(window.matchMedia && window.matchMedia('(pointer: coarse)').matches);
+        }
+        return this._coarseValue;
+      },
+
+      copyButtonTitle: function () {
+        return this.isCoarse ? this.t('history.copy_to_desktop_tooltip') : this.t('history.copy_tooltip');
+      },
     },
 
     methods: {
       onClick: function (e) {
         var store = this.store;
+
+        // A touch long-press fires, then the browser synthesizes a click —
+        // swallow it so the freshly-opened context menu isn't immediately
+        // acted on (and the item isn't pasted).
+        if (this._longPressFired) {
+          this._longPressFired = false;
+          return;
+        }
 
         if (e.ctrlKey || e.metaKey) {
           var id = this.item.entry_id;
@@ -144,7 +171,10 @@
               if (idx !== -1) {
                 self.store.history[idx].paste_count = (self.store.history[idx].paste_count || 0) + 1;
               }
-              self.store.showToast(self.t('history.copied'), 1500);
+              self.store.showToast(
+                self.isCoarse ? self.t('history.copy_to_desktop_toast') : self.t('history.copied'),
+                1500
+              );
             } else {
               self.store.showToast(self.t('history.copy_failed'), 2000);
             }
@@ -263,6 +293,73 @@
           mode: 'history-item',
           target: this.item
         };
+      },
+
+      // iOS Safari never fires contextmenu on divs, and long-press is
+      // suppressed by -webkit-touch-callout — so a ~500ms hold opens the same
+      // context menu at the touch position. Normal taps still paste via onClick.
+      onTouchStart: function (e) {
+        // Don't start a long-press from the action buttons (pin/copy/delete).
+        if (e.target && e.target.closest && e.target.closest('.history-item__actions')) return;
+        var self = this;
+        this._cancelLongPress();
+        var t = e.touches && e.touches[0];
+        if (!t) return;
+        this._longPressStart = { x: t.clientX, y: t.clientY };
+        this._longPressFired = false;
+        this._longPressTimer = setTimeout(function () {
+          self._longPressTimer = null;
+          self._longPressFired = true;
+          self.openContextMenuAt(self._longPressStart.x, self._longPressStart.y);
+        }, 500);
+      },
+
+      onTouchMove: function (e) {
+        // Cancel the long-press as soon as the finger moves (scrolling etc.).
+        if (!this._longPressTimer) return;
+        var t = e.touches && e.touches[0];
+        if (!t || !this._longPressStart) return;
+        var dx = Math.abs(t.clientX - this._longPressStart.x);
+        var dy = Math.abs(t.clientY - this._longPressStart.y);
+        if (dx > 10 || dy > 10) {
+          this._cancelLongPress();
+        }
+      },
+
+      onTouchEnd: function () {
+        // End of a normal tap — no menu. If a long-press already fired, the
+        // synthesized click is swallowed by onClick via _longPressFired.
+        this._cancelLongPress();
+      },
+
+      onTouchCancel: function () {
+        this._cancelLongPress();
+      },
+
+      _cancelLongPress: function () {
+        if (this._longPressTimer) {
+          clearTimeout(this._longPressTimer);
+          this._longPressTimer = null;
+        }
+      },
+
+      openContextMenuAt: function (x, y) {
+        this.store.contextMenu = {
+          visible: true,
+          x: x,
+          y: y,
+          mode: 'history-item',
+          target: this.item
+        };
+        // The browser synthesizes a click right after a long-press; the
+        // context-menu component listens on document in the capture phase and
+        // would close the menu instantly. Mark it as touch-opened so that
+        // component ignores that one click.
+        this.store.contextMenu.touchOpened = true;
+        var self = this;
+        setTimeout(function () {
+          if (self.store.contextMenu) self.store.contextMenu.touchOpened = false;
+        }, 600);
       },
     },
   };

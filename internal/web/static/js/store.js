@@ -45,6 +45,21 @@
       }).length;
     }),
 
+    // True when the browser UI language is Chinese. Used for the few inline
+    // bilingual strings that have no locale entry (e.g. wizard "Next").
+    isZh: computed(function () {
+      return (navigator.language || '').toLowerCase().indexOf('zh') === 0;
+    }),
+
+    // The phone-connect URL shown on onboarding step 3:
+    // http://<lan-ip>:<web-port>/mobile.html?token=<token>
+    mobileUrl: computed(function () {
+      var ip = store.overview.localIp || (store.settingsCache && store.settingsCache.web_ip) || '';
+      var port = store.overview.port || (store.settingsCache && store.settingsCache.web_port) || '';
+      if (!ip || !port) return '';
+      return 'http://' + ip + ':' + port + '/mobile.html?token=' + encodeURIComponent(store.token);
+    }),
+
     /* ═══════════════════════════════════════════════════════════════
        History
        ═══════════════════════════════════════════════════════════════ */
@@ -157,6 +172,8 @@
     onboardingDone: false,      // true once the wizard was finished/skipped
     showOnboarding: false,      // true while the wizard overlay is visible
     onboardingStep: 1,          // 1 = welcome · 2 = pair a device · 3 = phone access
+    onboardingError: '',        // inline error shown on the wizard (e.g. empty name)
+    onboardingSaving: false,    // true while the device-name save is in flight
 
     /* ═══════════════════════════════════════════════════════════════
        Dialog system (server-pushed modals)
@@ -267,22 +284,48 @@
       this.onboardingDone = true;
       this.showOnboarding = false;
       this.onboardingStep = 1;
+      this.onboardingError = '';
+      this.onboardingSaving = false;
       try { localStorage.setItem('clipsync_onboarded', '1'); } catch (e) { /* ignore */ }
     },
 
     /**
      * Advance to the next onboarding step (1 → 2 → 3).
+     * Entering step 3 ensures the LAN IP / web port are loaded so the
+     * phone-connect URL and QR button have real data to work with.
      */
     nextOnboardingStep: function () {
-      if (this.onboardingStep < 3) this.onboardingStep += 1;
+      this.onboardingError = '';
+      if (this.onboardingStep < 3) {
+        this.onboardingStep += 1;
+      }
+      if (this.onboardingStep === 3) {
+        this.ensureOverview();
+      }
     },
 
     /**
      * Step 1 "Start": persist the editable device name, then advance.
+     * An empty name is rejected inline (backend has no validation), and a
+     * failed save surfaces a toast instead of silently advancing.
      */
     startOnboarding: function () {
-      this.saveDeviceName();
-      this.nextOnboardingStep();
+      var self = this;
+      var name = (this.deviceName || '').trim();
+      this.deviceName = name;
+      if (!name) {
+        this.onboardingError = this.isZh ? '请输入设备名称' : 'Please enter a device name';
+        return;
+      }
+      this.onboardingError = '';
+      this.onboardingSaving = true;
+      this.saveDeviceName().then(function () {
+        self.onboardingSaving = false;
+        self.nextOnboardingStep();
+      }).catch(function () {
+        self.onboardingSaving = false;
+        self.showToast(self.isZh ? '保存设备名称失败' : 'Failed to save device name', 2500, 'error');
+      });
     },
 
     /**
@@ -295,15 +338,59 @@
 
     /**
      * Persist the device name typed on the welcome screen to the server.
+     * Returns a Promise so callers can await the save and surface failures.
+     * An empty name is a no-op — never persist a blank device name.
      */
     saveDeviceName: function () {
       var name = (this.deviceName || '').trim();
       this.deviceName = name;
+      if (!name) {
+        return Promise.resolve();
+      }
       if (window.ClipsyncAPI && window.ClipsyncAPI.updateSettings) {
-        window.ClipsyncAPI.updateSettings({ device_name: name }).catch(function () {
-          // Non-fatal — the server picks it up on the next settings sync.
+        return window.ClipsyncAPI.updateSettings({ device_name: name }).catch(function (e) {
+          console.error('[ClipSync] Failed to save device name:', e);
+          throw e;
         });
       }
+      return Promise.resolve();
+    },
+
+    /**
+     * Make sure the LAN IP / web port are loaded so the phone-connect URL and
+     * QR button have data. Uses the overview endpoint — the same source the
+     * settings panel reads for its "LAN address" row.
+     * @returns {Promise<void>}
+     */
+    ensureOverview: function () {
+      var self = this;
+      if (this.overview.localIp && this.overview.port) {
+        return Promise.resolve();
+      }
+      if (window.ClipsyncAPI && window.ClipsyncAPI.getOverview) {
+        return window.ClipsyncAPI.getOverview().then(function (res) {
+          if (res && res.overview) {
+            self.overview.localIp = res.overview.local_ip || self.overview.localIp;
+            self.overview.port = res.overview.port || self.overview.port;
+          }
+        }).catch(function () { /* ignore — URL stays empty until overview loads */ });
+      }
+      return Promise.resolve();
+    },
+
+    /**
+     * Step 3 "Show QR Code": ask the server to push the phone-connect QR dialog.
+     */
+    showPhoneQr: function () {
+      var self = this;
+      this.ensureOverview().then(function () {
+        if (window.ClipsyncAPI && window.ClipsyncAPI._fetch) {
+          window.ClipsyncAPI._fetch('POST', '/api/show_qr', {}).catch(function (e) {
+            console.error('[ClipSync] Failed to show phone QR:', e);
+            self.showToast(self.isZh ? '显示二维码失败' : 'Failed to show QR code', 2500, 'error');
+          });
+        }
+      });
     },
 
     /**

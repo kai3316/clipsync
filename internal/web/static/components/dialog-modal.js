@@ -131,6 +131,9 @@
       return {
         selectedPeerId: '',
         inputValue: '',
+        // True while a dialog-response POST is in flight, so a second
+        // Escape/overlay-click/button-press can't double-submit the dialog_id.
+        _responding: false,
       };
     },
 
@@ -141,6 +144,7 @@
           if (!dlg) {
             this.selectedPeerId = '';
             this.inputValue = '';
+            this._responding = false;
             // Restore focus to whatever was focused before the dialog opened.
             var prev = this._prevFocus;
             this._prevFocus = null;
@@ -154,8 +158,9 @@
             this.inputValue = dlg.prefill || '';
           }
           // Remember the previously-focused element so it can be restored
-          // on close.
-          if (this._prevFocus === null) {
+          // on close. Falsy check — on the very first dialog `_prevFocus` is
+          // undefined, not null.
+          if (!this._prevFocus) {
             this._prevFocus = document.activeElement;
           }
           var self = this;
@@ -175,6 +180,11 @@
         var dlg = this.store.activeDialog;
         if (!dlg) return;
 
+        // Ignore further responses while one is in flight — a second Escape
+        // or overlay click during the POST window must not double-submit the
+        // same dialog_id.
+        if (this._responding) return;
+
         var value = undefined;
         if (action === 'select') {
           value = this.selectedPeerId;
@@ -192,11 +202,14 @@
         // accepted. If the POST fails the server is still waiting on this
         // dialog_id, so keep it open (and surface the failure) instead of
         // letting an accepted transfer/pairing silently never happen.
+        this._responding = true;
         return ClipsyncAPI.respondDialog(dlg.dialog_id, action, value)
           .then(function () {
+            self._responding = false;
             self.store.closeDialog();
           })
           .catch(function () {
+            self._responding = false;
             self.store.showToast(self.t('dialog.failed'), 2500, 'error');
           });
       },

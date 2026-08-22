@@ -148,8 +148,11 @@
       // without a separate cached data field going stale.
       webLocalUrl: function () {
         if (!this.webLanIp || !this.webPort) return '';
+        // Deliver the lightweight phone page (mobile.html), matching the QR
+        // code, so a phone opening the copied URL gets the mobile UI instead
+        // of the heavy desktop dashboard.
         return 'http://' + this.webLanIp + ':' + this.webPort +
-          '?token=' + encodeURIComponent(this.store.token);
+          '/mobile.html?token=' + encodeURIComponent(this.store.token);
       },
 
       themeOptions: function () {
@@ -279,13 +282,24 @@
       saveWeb: function () {
         var self = this;
         self.webSaving = true;
+        var cache = self.store.settingsCache || {};
+        // web_history_limit comes from a <input type="number"> v-model, which
+        // yields a string — the backend int type-guard silently rejects
+        // strings, so coerce to a number here.
+        var historyLimit = parseInt(self.webHistoryLimit, 10);
+        if (isNaN(historyLimit) || historyLimit < 1) historyLimit = 10;
+        var portChanged = String(cache.web_port) !== String(self.webPort);
         ClipsyncAPI.updateSettings({
           web_enabled: self.webEnabled,
           web_port: parseInt(self.webPort, 10) || 9580,
-          web_history_limit: self.webHistoryLimit,
+          web_history_limit: historyLimit,
         }).then(function (res) {
           if (res && res.updated) self.store.mergeSettings(res.updated);
-          self.store.showToast(self.t('settings_window.web_saved'), 3000);
+          var msg = self.t('settings_window.web_saved');
+          if (portChanged) {
+            msg += ' ' + self.t('settings_window.web_restart_note_short');
+          }
+          self.store.showToast(msg, 4000);
         }).catch(function () {
           self.store.showToast(self.t('settings.save_web_failed'), 2000);
         }).finally(function () {
@@ -418,7 +432,10 @@
       downloadUpdate: function () {
         var self = this;
         self.updateDownloading = true;
-        ClipsyncAPI._fetch('POST', '/api/update/download', {}).then(function (res) {
+        // The download can take well over the 15s default request timeout, so
+        // give it a long explicit window. Expected failures now come back as
+        // HTTP 200 {ok:false, error:<reason>} — surfaced via res.error below.
+        ClipsyncAPI._fetch('POST', '/api/update/download', {}, 120000).then(function (res) {
           self.updateDownloading = false;
           if (res && res.ok) {
             self.store.showToast(self.t('settings_window.update_downloaded', { path: res.path || '' }), 4000);
@@ -496,12 +513,19 @@
       saveDataPaths: function () {
         var self = this;
         self.dataSaving = true;
+        var cache = self.store.settingsCache || {};
+        var dirChanged = (cache.data_dir || '') !== (self.dataDir || '').trim();
+        var favChanged = (cache.favorites_path || '') !== (self.favoritesPath || '').trim();
         ClipsyncAPI.updateSettings({
           data_dir: (self.dataDir || '').trim(),
           favorites_path: (self.favoritesPath || '').trim(),
         }).then(function (res) {
           if (res && res.updated) self.store.mergeSettings(res.updated);
-          self.store.showToast(self.t('settings.data_saved'), 2500);
+          var msg = self.t('settings.data_saved');
+          if (dirChanged || favChanged) {
+            msg += ' ' + self.t('settings_window.data_restart_note');
+          }
+          self.store.showToast(msg, 4000);
         }).catch(function () {
           self.store.showToast(self.t('settings.save_data_failed'), 2000);
         }).finally(function () {
@@ -560,35 +584,40 @@
 
       regenerateToken: function () {
         var self = this;
-        ClipsyncAPI.updateSettings({ regenerate_web_token: true }).then(function (res) {
-          if (res && res.ok) {
-            // The new token is deliberately never returned to the client, and
-            // the old token is invalid server-side the moment this response
-            // lands — so the current session must not keep using it. Clear it
-            // from the store + API client (a subsequent reload / QR scan then
-            // picks up the fresh token) and prompt the user to reconnect.
-            self.webToken = '';
-            self.store.token = '';
-            if (window.ClipsyncAPI && typeof window.ClipsyncAPI.init === 'function') {
-              window.ClipsyncAPI.init(window.location.origin, '');
-            }
-            self.store.showToast(self.t('settings.token_regenerated'), 3000);
-          } else {
-            self.store.showToast(self.t('settings.token_regenerate_failed'), 2000);
-          }
-        }).catch(function () {
-          self.store.showToast(self.t('settings.token_regenerate_failed'), 2000);
-        });
+        this.store.confirm(this.t('settings.token_regenerate_title'), this.t('settings.token_regenerate_confirm'))
+          .then(function () {
+            ClipsyncAPI.updateSettings({ regenerate_web_token: true }).then(function (res) {
+              if (res && res.ok) {
+                // The new token is injected into the page at serve time, so a
+                // reload re-serves it with the fresh token (the old token is
+                // invalid server-side the moment this response lands). Reload
+                // instead of clearing in place so the stale-token state can't
+                // leave the session half-connected.
+                window.location.reload();
+              } else {
+                self.store.showToast(self.t('settings.token_regenerate_failed'), 2000);
+              }
+            }).catch(function () {
+              self.store.showToast(self.t('settings.token_regenerate_failed'), 2000);
+            });
+          })
+          .catch(function () { /* cancelled */ });
       },
 
       clearToken: function () {
         var self = this;
-        ClipsyncAPI.updateSettings({ clear_web_token: true }).then(function () {
-          self.webToken = '';
-          self.store.showToast(self.t('settings.token_cleared'), 2000);
-        }).catch(function () {
-          self.store.showToast(self.t('settings.token_clear_failed'), 2000);
-        });
+        // Clearing the token also invalidates the current page's token — a
+        // reload re-serves the (now token-less) page so the stale-token state
+        // can't persist in this session.
+        this.store.confirm(this.t('settings.token_clear_title'), this.t('settings.token_clear_confirm'))
+          .then(function () {
+            ClipsyncAPI.updateSettings({ clear_web_token: true }).then(function () {
+              window.location.reload();
+            }).catch(function () {
+              self.store.showToast(self.t('settings.token_clear_failed'), 2000);
+            });
+          })
+          .catch(function () { /* cancelled */ });
       },
 
       copyUrl: function () {
@@ -620,7 +649,18 @@
       },
 
       selectTheme: function (theme) {
+        var self = this;
         this.store.setTheme(theme);
+        // Persist to the backend so the choice survives across sessions and
+        // applies to the classic (native) UI too — not just localStorage.
+        ClipsyncAPI.updateSettings({ appearance_mode: theme })
+          .then(function (res) {
+            if (res && res.updated) self.store.mergeSettings(res.updated);
+          })
+          .catch(function () {
+            // The local theme still applies; just warn that it won't persist.
+            self.store.showToast(self.t('dialog.failed'), 2000);
+          });
       },
 
       selectLocale: function (locale) {
@@ -703,7 +743,11 @@
         ClipsyncAPI.exportData(format).then(function (res) {
           self.exporting = false;
           if (res && res.ok) {
-            self.store.showToast(self.t('settings.exported', { count: res.count, format: format.toUpperCase() }), 2000);
+            self.store.showToast(self.t('settings.exported', {
+              count: res.count,
+              format: format.toUpperCase(),
+              path: res.filepath || '',
+            }), 3000);
           } else {
             self.store.showToast(self.t('settings.export_failed') + ((res && res.error) ? ': ' + res.error : ''), 2500);
           }
@@ -764,6 +808,9 @@
               history: s.history || 0,
               favorites: s.favorites || 0,
             }), 3000);
+            if (res.needs_restart) {
+              self.store.showToast(self.t('settings.restore_restart_note'), 4000);
+            }
             // Reload history/favorites/devices so the restored data actually
             // shows up in the panels without a manual page refresh.
             try {

@@ -78,16 +78,26 @@ def show_language_onboarding(parent) -> str | None:
             cursor="hand2",
         )
         card.pack(fill="x", pady=6)
-        card.bind("<Button-1>", lambda _e, c=code: _pick(c))
-        ctk.CTkLabel(
+        pick_cmd = lambda _e, c=code: _pick(c)
+        # Clicks land on the child labels, not the frame, so bind the same
+        # handler (and hand cursor) to every label inside the card too —
+        # otherwise only the thin card margin responds.
+        card.bind("<Button-1>", pick_cmd)
+        lbl_native = ctk.CTkLabel(
             card, text=native,
             font=ctk.CTkFont(size=16, weight="bold"),
-        ).pack(pady=(14, 0))
-        ctk.CTkLabel(
+            cursor="hand2",
+        )
+        lbl_native.pack(pady=(14, 0))
+        lbl_native.bind("<Button-1>", pick_cmd)
+        lbl_other = ctk.CTkLabel(
             card, text=other,
             font=ctk.CTkFont(size=12),
             text_color=("gray40", "gray60"),
-        ).pack(pady=(0, 14))
+            cursor="hand2",
+        )
+        lbl_other.pack(pady=(0, 14))
+        lbl_other.bind("<Button-1>", pick_cmd)
 
     # ── Footer hint ──────────────────────────────────────────────
     ctk.CTkLabel(

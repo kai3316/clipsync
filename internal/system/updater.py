@@ -109,25 +109,29 @@ def _platform_asset_name() -> str:
     return "clipsync-linux.tar.gz"
 
 
-def download_latest_release(dest_dir: str) -> str | None:
+def download_latest_release(dest_dir: str) -> tuple[str | None, str | None]:
     """Download the latest release asset for this platform into *dest_dir*.
 
     Reuses the same GitHub release lookup as :func:`check_for_update` and
     streams the matching asset to ``dest_dir/<asset-name>`` via urllib.
 
-    Returns the saved file path on success, or None on any failure (network,
-    missing asset, write error).  Never raises.
+    Returns ``(saved_path, None)`` on success, or ``(None, reason)`` on
+    failure where *reason* is a short human-readable (localized) message
+    describing the problem — e.g. that no release asset exists for this
+    platform.  Never raises.
     """
+    from internal.i18n import T
+
     import os
 
     try:
         data = _fetch_latest_release(timeout=60.0)
         if not data:
-            return None
+            return None, T("web.update_server_unreachable")
         assets = data.get("assets") or []
         if not assets:
             logger.warning("Latest release has no downloadable assets")
-            return None
+            return None, T("web.update_no_assets")
 
         asset_name = _platform_asset_name()
         browser_url = None
@@ -137,7 +141,7 @@ def download_latest_release(dest_dir: str) -> str | None:
                 break
         if not browser_url:
             logger.warning("No download asset found for platform: %s", asset_name)
-            return None
+            return None, T("web.update_no_release", name=asset_name)
 
         os.makedirs(dest_dir, exist_ok=True)
         dest_path = os.path.join(dest_dir, asset_name)
@@ -176,7 +180,7 @@ def download_latest_release(dest_dir: str) -> str | None:
                 pass
             raise
         logger.info("Downloaded release asset to %s", dest_path)
-        return dest_path
+        return dest_path, None
     except Exception as exc:
         logger.error("Release download failed: %s", exc)
-        return None
+        return None, T("web.update_download_failed", reason=exc)

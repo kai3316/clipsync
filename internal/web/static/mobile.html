@@ -329,6 +329,49 @@ body::before {
 
 .f-item__meta { font-size: 11px; color: var(--fg-subtle); font-family: var(--font-mono); }
 
+/* ── Upload progress ───────────────────────────────────────── */
+
+.upload-progress {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 12px;
+}
+
+.upload-progress__bar {
+  flex: 1;
+  height: 8px;
+  border-radius: 4px;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  overflow: hidden;
+}
+
+.upload-progress__fill {
+  height: 100%;
+  width: 0%;
+  border-radius: 4px;
+  background: linear-gradient(135deg, var(--accent), var(--accent-2));
+  transition: width var(--fast);
+}
+
+.upload-progress__cancel {
+  flex-shrink: 0;
+  padding: 6px 12px;
+  font-size: 12px;
+  font-weight: 600;
+  font-family: var(--font);
+  color: var(--fg-muted);
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  transition: all var(--fast);
+  -webkit-tap-highlight-color: transparent;
+}
+
+.upload-progress__cancel:active { border-color: var(--danger); color: var(--danger); }
+
 /* ── Empty / loading ────────────────────────────────────────── */
 
 .empty {
@@ -410,6 +453,22 @@ body::before {
   user-select: text;
 }
 
+.modal__image {
+  width: 100%;
+  max-height: 40vh;
+  object-fit: contain;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border);
+  background: var(--panel);
+  cursor: zoom-in;
+  transition: max-height var(--fast);
+}
+
+.modal__image--zoomed {
+  max-height: 74vh;
+  cursor: zoom-out;
+}
+
 .modal__actions { display: flex; gap: 10px; margin-top: 14px; }
 
 .modal__btn {
@@ -448,10 +507,12 @@ body::before {
   opacity: 0;
   pointer-events: none;
   transition: opacity var(--fast);
-  white-space: nowrap;
+  /* Long server error strings must wrap instead of truncating. */
+  white-space: normal;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+  text-align: center;
   max-width: 88vw;
-  overflow: hidden;
-  text-overflow: ellipsis;
 }
 
 .toast--show { opacity: 1; }
@@ -515,6 +576,10 @@ body::before {
     <!-- Files -->
     <section class="panel" id="panelFiles">
       <button class="upload-btn" id="uploadBtn"></button>
+      <div class="upload-progress" id="uploadProgressWrap" style="display:none">
+        <div class="upload-progress__bar"><div class="upload-progress__fill" id="uploadProgressFill"></div></div>
+        <button class="upload-progress__cancel" id="uploadCancelBtn"></button>
+      </div>
       <div id="fileList"></div>
     </section>
 
@@ -525,6 +590,7 @@ body::before {
 <div class="modal-mask" id="modal">
   <div class="modal">
     <div class="modal__title" id="modalTitle"></div>
+    <img class="modal__image" id="modalImage" alt="" style="display:none">
     <div class="modal__text" id="modalText"></div>
     <div class="modal__actions">
       <button class="modal__btn modal__btn--ghost" id="modalClose"></button>
@@ -535,7 +601,7 @@ body::before {
 
 <div class="toast" id="toast"></div>
 
-<input type="file" id="fileInput" style="display:none">
+<input type="file" id="fileInput" multiple style="display:none">
 
 <script>
 (function () {
@@ -579,6 +645,10 @@ body::before {
     fileDownload: ZH ? '下载中…' : 'Downloading…',
     targetDevice: ZH ? '本电脑' : 'This computer',
     emptyPreview: ZH ? '(空)' : '(empty)',
+    loadFailHint: ZH ? '请确认手机与电脑在同一 Wi-Fi，且 ClipSync 正在运行。' : 'Make sure your phone is on the same Wi-Fi as the computer and ClipSync is running.',
+    uploadTooLarge: ZH ? '文件过大（最大 128 MB）' : 'File too large (128 MB max)',
+    uploadCancel: ZH ? '取消' : 'Cancel',
+    uploadCancelled: ZH ? '已取消' : 'Cancelled',
   };
 
   /* ── Apply strings ─────────────────────────────────────────── */
@@ -607,10 +677,18 @@ body::before {
   var modalEl = document.getElementById('modal');
   var modalText = document.getElementById('modalText');
   var modalTitle = document.getElementById('modalTitle');
+  var modalImage = document.getElementById('modalImage');
+  var modalCopyBtn = document.getElementById('modalCopy');
   var fileInput = document.getElementById('fileInput');
+  var uploadProgressWrap = document.getElementById('uploadProgressWrap');
+  var uploadProgressFill = document.getElementById('uploadProgressFill');
+  var uploadCancelBtn = document.getElementById('uploadCancelBtn');
 
   var toastTimer = null;
   var historyItems = [];
+  var uploadXhr = null;
+  var pollTimer = null;
+  var MAX_UPLOAD_BYTES = 128 * 1024 * 1024; // 128 MB — matches the server cap.
 
   /* ── Tab switching ─────────────────────────────────────────── */
 
@@ -627,6 +705,45 @@ body::before {
     });
   });
 
+  /* ── Live polling ──────────────────────────────────────────── */
+
+  function activeTabName() {
+    var active = document.querySelector('.tab--active');
+    return active ? active.getAttribute('data-tab') : 'history';
+  }
+
+  // Lightweight poll: refresh the ACTIVE tab every 5s while the page is
+  // visible. Paused when hidden to avoid background battery drain; tab
+  // switching still reloads immediately.
+  function startPolling() {
+    stopPolling();
+    pollTimer = setInterval(function () {
+      if (document.visibilityState !== 'visible') return;
+      var name = activeTabName();
+      if (name === 'history') loadHistory(true);
+      else if (name === 'files') loadFiles(true);
+    }, 5000);
+  }
+
+  function stopPolling() {
+    if (pollTimer) {
+      clearInterval(pollTimer);
+      pollTimer = null;
+    }
+  }
+
+  document.addEventListener('visibilitychange', function () {
+    if (document.visibilityState === 'visible') {
+      startPolling();
+      // Refresh the active tab right away so the user sees fresh data.
+      var name = activeTabName();
+      if (name === 'history') loadHistory(true);
+      else if (name === 'files') loadFiles(true);
+    } else {
+      stopPolling();
+    }
+  });
+
   /* ── API helpers ───────────────────────────────────────────── */
 
   function apiUrl(path) {
@@ -634,8 +751,31 @@ body::before {
     return HOST + path + sep + 'token=' + encodeURIComponent(TOKEN);
   }
 
+  var REQUEST_TIMEOUT = 8000;
+
+  // fetch wrapper with an AbortController timeout so a phone on a different
+  // network doesn't hang over shimmering skeletons indefinitely.
+  function fetchWithTimeout(url, options) {
+    var opts = options || {};
+    var controller = new AbortController();
+    opts.signal = controller.signal;
+    var timer = setTimeout(function () { controller.abort(); }, REQUEST_TIMEOUT);
+    return fetch(url, opts).then(function (r) {
+      clearTimeout(timer);
+      return r;
+    }).catch(function (e) {
+      clearTimeout(timer);
+      if (e && e.name === 'AbortError') {
+        var err = new Error('timeout');
+        err.timeout = true;
+        throw err;
+      }
+      throw e;
+    });
+  }
+
   function getJson(path) {
-    return fetch(apiUrl(path)).then(function (r) {
+    return fetchWithTimeout(apiUrl(path)).then(function (r) {
       if (!r.ok) throw new Error('HTTP ' + r.status);
       return r.json();
     });
@@ -673,15 +813,21 @@ body::before {
     return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
   }
 
-  function loadHistory() {
-    historyList.innerHTML = '<div class="skeleton"></div><div class="skeleton"></div><div class="skeleton"></div>';
+  function loadHistory(silent) {
+    // Silent background refreshes keep the current list on screen; only the
+    // user-initiated load shows the skeleton.
+    if (!silent) {
+      historyList.innerHTML = '<div class="skeleton"></div><div class="skeleton"></div><div class="skeleton"></div>';
+    }
     getJson('/api/history?limit=30')
       .then(function (data) {
         historyItems = (data.items || []).slice(0, 30);
         renderHistory();
       })
       .catch(function () {
-        historyList.innerHTML = '<div class="empty"><div class="empty__icon">⚠️</div><div class="empty__text">' + esc(T.loadFail) + '</div></div>';
+        if (!silent) {
+          historyList.innerHTML = '<div class="empty"><div class="empty__icon">⚠️</div><div class="empty__text">' + esc(T.loadFail) + '<br>' + esc(T.loadFailHint) + '</div></div>';
+        }
       });
   }
 
@@ -720,29 +866,68 @@ body::before {
     return item.text_preview || '';
   }
 
+  // The backend stores PNG bytes under the "IMAGE" type and EMF under
+  // "IMAGE_EMF" — decode to a data URL so the phone can display image clips
+  // instead of "(empty)".
+  function imageDataUrl(types) {
+    if (!types) return '';
+    if (types.IMAGE) return 'data:image/png;base64,' + types.IMAGE;
+    if (types.IMAGE_EMF) return 'data:image/x-emf;base64,' + types.IMAGE_EMF;
+    return '';
+  }
+
+  function showImageModal(url) {
+    modalImage.src = url;
+    modalImage.alt = T.tabHistory;
+    modalImage.style.display = '';
+    modalText.style.display = 'none';
+    modalCopyBtn.style.display = 'none';
+    modalImage.classList.remove('modal__image--zoomed');
+  }
+
+  function setModalContent(item) {
+    var types = item.types || {};
+    var imgUrl = imageDataUrl(types);
+    if (imgUrl) {
+      showImageModal(imgUrl);
+    } else {
+      modalText.style.display = '';
+      modalCopyBtn.style.display = '';
+      modalText.textContent = getFullText(item) || item.text_preview || T.emptyPreview;
+    }
+  }
+
   function openItem(i) {
     var item = historyItems[i];
     modalTitle.textContent = T.tabHistory + ' · ' + relTime(item.timestamp);
-    modalText.textContent = item.text_preview || T.emptyPreview;
+    setModalContent(item);
     modalEl.classList.add('modal-mask--show');
-    // The list no longer carries full text — fetch it when the modal opens.
+    // The list no longer carries full content — fetch it when the modal opens.
     if (item.entry_id) {
       getJson('/api/history/item?entry_id=' + encodeURIComponent(item.entry_id))
         .then(function (data) {
-          if (data && data.item) {
-            modalText.textContent = getFullText(data.item) || item.text_preview || T.emptyPreview;
-          }
+          if (data && data.item) setModalContent(data.item);
         })
         .catch(function () { /* keep the preview */ });
     }
   }
 
-  function closeModal() { modalEl.classList.remove('modal-mask--show'); }
+  function closeModal() {
+    modalEl.classList.remove('modal-mask--show');
+    modalImage.classList.remove('modal__image--zoomed');
+  }
+
+  // Tap the image to zoom in / out.
+  modalImage.addEventListener('click', function () {
+    modalImage.classList.toggle('modal__image--zoomed');
+  });
 
   document.getElementById('modalClose').addEventListener('click', closeModal);
   modalEl.addEventListener('click', function (e) { if (e.target === modalEl) closeModal(); });
 
   document.getElementById('modalCopy').addEventListener('click', function () {
+    // Copy is text-only — no-op when an image is being displayed.
+    if (modalText.style.display === 'none') return;
     var text = modalText.textContent;
     if (!text) return;
     // navigator.clipboard needs a secure context (HTTPS) — on plain HTTP LAN
@@ -779,7 +964,7 @@ body::before {
     var text = sendText.value.trim();
     if (!text) { showToast(T.sendEmpty, true); return; }
     sendBtn.disabled = true;
-    fetch(apiUrl('/api/push'), {
+    fetchWithTimeout(apiUrl('/api/push'), {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ text: text }),
@@ -796,7 +981,7 @@ body::before {
       })
       .catch(function () {
         sendBtn.disabled = false;
-        showToast(T.sendFail, true);
+        showToast(T.sendFail + ' · ' + T.loadFailHint, true);
       });
   });
 
@@ -806,42 +991,106 @@ body::before {
     fileInput.click();
   });
 
-  fileInput.addEventListener('change', function () {
-    if (!fileInput.files || fileInput.files.length === 0) return;
+  function resetUploadUI() {
+    uploadXhr = null;
     var btn = document.getElementById('uploadBtn');
-    var orig = btn.textContent;
+    btn.textContent = T.uploadBtn;
+    btn.disabled = false;
+    uploadProgressWrap.style.display = 'none';
+    fileInput.value = '';
+  }
+
+  function startUpload(files) {
+    var btn = document.getElementById('uploadBtn');
+    var totalBytes = 0;
+    for (var k = 0; k < files.length; k++) totalBytes += files[k].size;
+    var uploadedBytes = 0;
+    var cancelled = false;
+
     btn.textContent = T.uploading;
     btn.disabled = true;
+    uploadProgressFill.style.width = '0%';
+    uploadProgressWrap.style.display = 'flex';
+    uploadCancelBtn.textContent = T.uploadCancel;
 
-    // The server upload endpoint accepts one file per request.
-    var form = new FormData();
-    form.append('file', fileInput.files[0]);
+    // The server upload endpoint accepts ONE file per request, so queue the
+    // selected files and upload them one at a time (cumulative progress).
+    var queue = files.slice();
 
-    fetch(apiUrl('/api/upload'), { method: 'POST', body: form })
-      .then(function (r) { return r.json(); })
-      .then(function (data) {
-        btn.textContent = orig;
-        btn.disabled = false;
-        fileInput.value = '';
-        if (data.ok) {
-          showToast(T.uploadOk);
-          loadFiles();
-        } else {
-          showToast(data.error || T.uploadFail, true);
+    function uploadNext() {
+      if (cancelled) return;
+      if (queue.length === 0) {
+        resetUploadUI();
+        showToast(T.uploadOk);
+        loadFiles();
+        return;
+      }
+      var file = queue.shift();
+      var form = new FormData();
+      form.append('file', file);
+
+      var xhr = new XMLHttpRequest();
+      uploadXhr = xhr;
+      xhr.open('POST', apiUrl('/api/upload'));
+      xhr.upload.onprogress = function (e) {
+        if (e.lengthComputable) {
+          var pct = Math.round(((uploadedBytes + e.loaded) / totalBytes) * 100);
+          if (pct > 100) pct = 100;
+          uploadProgressFill.style.width = pct + '%';
         }
-      })
-      .catch(function () {
-        btn.textContent = orig;
-        btn.disabled = false;
-        fileInput.value = '';
-        showToast(T.uploadFail, true);
-      });
+      };
+      xhr.onload = function () {
+        var data = null;
+        try { data = JSON.parse(xhr.responseText); } catch (e) { /* ignore */ }
+        var ok = xhr.status >= 200 && xhr.status < 300 && data && data.ok;
+        if (ok) {
+          uploadedBytes += file.size;
+          uploadNext();
+        } else {
+          resetUploadUI();
+          showToast((data && data.error) || T.uploadFail, true);
+        }
+      };
+      xhr.onerror = function () {
+        resetUploadUI();
+        showToast(T.uploadFail + ' · ' + T.loadFailHint, true);
+      };
+      xhr.onabort = function () {
+        cancelled = true;
+        resetUploadUI();
+        showToast(T.uploadCancelled);
+      };
+      xhr.send(form);
+    }
+
+    uploadNext();
+  }
+
+  fileInput.addEventListener('change', function () {
+    if (!fileInput.files || fileInput.files.length === 0) return;
+    var files = Array.prototype.slice.call(fileInput.files);
+    var total = 0;
+    for (var i = 0; i < files.length; i++) total += files[i].size;
+    // Pre-flight check: the server buffers the whole body and hard-caps at
+    // 128 MB — reject oversized selections before starting the upload.
+    if (total > MAX_UPLOAD_BYTES) {
+      showToast(T.uploadTooLarge, true);
+      fileInput.value = '';
+      return;
+    }
+    startUpload(files);
+  });
+
+  uploadCancelBtn.addEventListener('click', function () {
+    if (uploadXhr) uploadXhr.abort();
   });
 
   /* ── Files: list + download ────────────────────────────────── */
 
-  function loadFiles() {
-    fileList.innerHTML = '<div class="skeleton"></div><div class="skeleton"></div>';
+  function loadFiles(silent) {
+    if (!silent) {
+      fileList.innerHTML = '<div class="skeleton"></div><div class="skeleton"></div>';
+    }
     getJson('/api/files')
       .then(function (data) {
         var files = (data && data.files) || [];
@@ -872,13 +1121,16 @@ body::before {
         });
       })
       .catch(function () {
-        fileList.innerHTML = '<div class="empty"><div class="empty__icon">⚠️</div><div class="empty__text">' + esc(T.loadFail) + '</div></div>';
+        if (!silent) {
+          fileList.innerHTML = '<div class="empty"><div class="empty__icon">⚠️</div><div class="empty__text">' + esc(T.loadFail) + '<br>' + esc(T.loadFailHint) + '</div></div>';
+        }
       });
   }
 
   /* ── Init ──────────────────────────────────────────────────── */
 
   loadHistory();
+  startPolling();
 
 })();
 </script>

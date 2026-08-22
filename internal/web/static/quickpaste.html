@@ -115,7 +115,7 @@ body::after {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 14px 16px 10px;
+  padding: calc(14px + env(safe-area-inset-top)) 16px 10px;
   flex-shrink: 0;
   border-bottom: 1px solid var(--clipsync-border);
   position: relative;
@@ -493,7 +493,7 @@ body::after {
 
 /* ── Coarse pointer (phone/tablet): bigger touch targets ──────── */
 @media (pointer: coarse) {
-  .qp-header { padding: 18px 16px 14px; }
+  .qp-header { padding: calc(18px + env(safe-area-inset-top)) 16px 14px; }
   .qp-header__close { width: 36px; height: 36px; font-size: 18px; }
   .qp-item { padding: 14px 16px; }
   .qp-item__icon { width: 36px; height: 36px; font-size: 18px; }
@@ -521,7 +521,7 @@ body::after {
       <div class="qp-header__title">&#x26A1; <span id="qpTitle" style="visibility:hidden">Quick Paste</span></div>
       <div class="qp-header__subtitle" id="qpSubtitle"></div>
     </div>
-    <button class="qp-header__close" onclick="closeWindow()" title="Close (Esc)">&times;</button>
+    <button class="qp-header__close" id="qpCloseBtn" onclick="closeWindow()" title="Close (Esc)">&times;</button>
   </header>
 
   <!-- Items -->
@@ -664,7 +664,7 @@ body::after {
         .then(function (r) { return r.json(); })
         .then(function (data) {
           if (data.ok) {
-            showToast(IS_ZH ? '✓ 已发送' : '✓ Pasted!');
+            showToast(IS_ZH ? '已发送到电脑' : 'Sent to computer');
             // Desktop popup closes after a beat so the user sees feedback; a
             // phone tab stays open so more items can be pasted in a row.
             if (window.opener) {
@@ -943,6 +943,12 @@ body::after {
     titleEl.textContent = IS_ZH ? '快速粘贴' : 'Quick Paste';
     titleEl.style.visibility = 'visible';
   }
+  // Localize the hardcoded HTML strings now that the locale is known.
+  var closeBtn = document.getElementById('qpCloseBtn');
+  if (closeBtn) {
+    closeBtn.title = IS_ZH ? '关闭 (Esc)' : 'Close (Esc)';
+  }
+  itemsEl.setAttribute('aria-label', IS_ZH ? '剪贴板条目' : 'Clipboard items');
   if (subtitleEl) {
     subtitleEl.textContent = IS_TOUCH
       ? (IS_ZH ? '点击条目即可发送到电脑' : 'Tap an item to paste to this computer')

@@ -935,7 +935,7 @@ class SettingsWindow:
 
     def _on_save_security(self):
         cfg = self._get_config()
-        cfg.encryption_enabled = self._enc_enabled_var.get()
+        enc_enabled = self._enc_enabled_var.get()
         new_password = self._enc_password_var.get().strip()
         if new_password:
             # A blank field leaves the stored password untouched; only a
@@ -948,6 +948,10 @@ class SettingsWindow:
                 return
             cfg.encryption_password = new_password
             self._enc_password_var.set("")
+        # Commit the encryption toggle only after any confirmation above
+        # passed, so cancelling the password change never leaves the shared
+        # in-memory config mutated for a later unrelated save.
+        cfg.encryption_enabled = enc_enabled
         # Update status indicator
         if cfg.encryption_password_hash:
             self._enc_pw_status.configure(
@@ -1297,7 +1301,10 @@ class SettingsWindow:
         config_dir = _config_dir()
         deleted = []
         errors = []
-        for fname in ["config.json", "clipboard_history.json", "clipsync.log"]:
+        # Match the web path's factory reset (src/main.py _do_factory_reset):
+        # remove the SQLite databases too so "deletes all data" is actually true.
+        for fname in ["config.json", "clipboard_history.json",
+                      "clipboard_history.db", "favorites.db", "clipsync.log"]:
             fpath = config_dir / fname
             try:
                 if fpath.exists():

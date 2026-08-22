@@ -16,6 +16,7 @@
       return {
         targetDevice: '',       // selected target device id (empty = none selected)
         sending: false,
+        phoneQrSending: false,
       };
     },
 
@@ -122,6 +123,22 @@
           </button>
         </div>
         <div v-if="sending" class="transfer-uploading">{{ t('transfer.uploading') }}</div>
+
+        <!-- Send to Phone (QR) — phones connect via Remote access, not P2P -->
+        <div class="transfer-phone-row" style="margin-top:10px">
+          <button
+            class="transfer-send-btn"
+            @click="showPhoneQr"
+            :disabled="phoneQrSending"
+            style="width:100%"
+          >
+            <span class="transfer-send-btn__icon">📱</span>
+            <span class="transfer-send-btn__text">
+              <span class="transfer-send-btn__label">{{ t('transfer.phone_title') }}</span>
+              <span class="transfer-send-btn__sub">{{ t('transfer.phone_action') }}</span>
+            </span>
+          </button>
+        </div>
 
         <!-- Hidden file inputs -->
         <input type="file" ref="fileInput" style="display:none" @change="onFilePicked">
@@ -240,6 +257,18 @@
       },
       pickFolder: function () {
         this.$refs.folderInput.click();
+      },
+      showPhoneQr: function () {
+        var self = this;
+        self.phoneQrSending = true;
+        // Server-pushed QR dialog — the desktop app displays it so the user
+        // can scan it with their phone.
+        ClipsyncAPI._fetch('POST', '/api/show_qr', {})
+          .then(function () { self.phoneQrSending = false; })
+          .catch(function () {
+            self.phoneQrSending = false;
+            self.store.showToast(self.t('transfer.phone_qr_failed'), 2000);
+          });
       },
       onFilePicked: function (e) {
         var files = e.target.files;

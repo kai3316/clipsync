@@ -246,8 +246,11 @@
 
       copyUrl: function () {
         var proto = window.location.protocol === 'https:' ? 'https' : 'http';
+        // Deliver the lightweight phone page (mobile.html), matching the QR
+        // code, so a phone opening the copied URL gets the mobile UI instead
+        // of the heavy desktop dashboard.
         var url = proto + '://' + this.o.localIp + ':' + this.o.port +
-          '?token=' + this.store.token;
+          '/mobile.html?token=' + encodeURIComponent(this.store.token);
         var self = this;
         var done = function () { self.store.showToast(self.t('toast.url_copied'), 1500); };
         if (navigator.clipboard && navigator.clipboard.writeText) {

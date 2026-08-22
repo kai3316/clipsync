@@ -4805,6 +4805,50 @@
       color: var(--clipsync-fg-subtle);
     }
 
+    /* Inline error under the device-name field */
+    .onboard-error {
+      font-size: 12px;
+      font-weight: 600;
+      color: var(--clipsync-danger);
+      margin: -2px 0 0;
+      width: 100%;
+      max-width: 300px;
+      text-align: left;
+    }
+
+    /* Row of wizard action buttons (steps 2 & 3) */
+    .onboard-actions {
+      display: flex;
+      gap: var(--clipsync-space-2);
+      width: 100%;
+      max-width: 300px;
+    }
+
+    .onboard-actions .onboard-btn {
+      margin-top: var(--clipsync-space-2);
+      flex: 1;
+      min-width: 0;
+    }
+
+    /* Phone-connect URL field (step 3) */
+    .onboard-phone {
+      display: flex;
+      flex-direction: column;
+      gap: var(--clipsync-space-2);
+      width: 100%;
+      max-width: 300px;
+      text-align: left;
+      margin-top: var(--clipsync-space-1);
+    }
+
+    .onboard-phone__input {
+      font-family: var(--clipsync-font-mono);
+      font-size: 12px;
+      color: var(--clipsync-accent);
+      -webkit-user-select: text;
+      user-select: text;
+    }
+
     /* Buttons */
     .onboard-btn {
       display: inline-flex;
@@ -5008,10 +5052,12 @@
               <input id="onboard-device-name" class="onboard-device__input"
                      v-model="store.deviceName"
                      @change="store.saveDeviceName()"
+                     @keyup.enter="store.startOnboarding()"
                      :placeholder="t('onboarding.device_placeholder')"
                      maxlength="40">
             </div>
-            <button class="onboard-btn onboard-btn--primary" @click="store.startOnboarding()">{{ t('onboarding.start') }}</button>
+            <p v-if="store.onboardingError" class="onboard-error">{{ store.onboardingError }}</p>
+            <button class="onboard-btn onboard-btn--primary" @click="store.startOnboarding()" :disabled="store.onboardingSaving">{{ t('onboarding.start') }}</button>
           </div>
 
           <!-- Step 2: Pair a device -->
@@ -5019,7 +5065,10 @@
             <div class="onboard-step__icon">&#x1F517;</div>
             <h1 class="onboard-step__title">{{ t('onboarding.pair_title') }}</h1>
             <p class="onboard-step__text">{{ t('onboarding.pair_body') }}</p>
-            <button class="onboard-btn onboard-btn--primary" @click="store.goToDevices()">{{ t('onboarding.pair_cta') }}</button>
+            <div class="onboard-actions">
+              <button class="onboard-btn" @click="store.goToDevices()">{{ t('onboarding.pair_cta') }}</button>
+              <button class="onboard-btn onboard-btn--primary" @click="store.nextOnboardingStep()">{{ store.isZh ? '下一步' : 'Next' }}</button>
+            </div>
           </div>
 
           <!-- Step 3: Phone access -->
@@ -5027,7 +5076,16 @@
             <div class="onboard-step__icon">&#x1F4F1;</div>
             <h1 class="onboard-step__title">{{ t('onboarding.phone_title') }}</h1>
             <p class="onboard-step__text">{{ t('onboarding.phone_body') }}</p>
-            <button class="onboard-btn onboard-btn--primary" @click="store.completeOnboarding()">{{ t('onboarding.finish') }}</button>
+            <div class="onboard-phone">
+              <label class="onboard-device__label" for="onboard-phone-url">{{ store.isZh ? '手机访问地址' : 'Phone address' }}</label>
+              <input id="onboard-phone-url" class="onboard-device__input onboard-phone__input" readonly
+                     :value="store.mobileUrl"
+                     @focus="$event.target.select()" @click="$event.target.select()">
+            </div>
+            <div class="onboard-actions">
+              <button class="onboard-btn" @click="store.showPhoneQr()">{{ t('transfer.phone_action') }}</button>
+              <button class="onboard-btn onboard-btn--primary" @click="store.completeOnboarding()">{{ t('onboarding.finish') }}</button>
+            </div>
           </div>
 
           <!-- Step indicator + Skip -->

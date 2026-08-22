@@ -184,16 +184,36 @@
           self.closeMenu();
           self._copyText(text, self.t('history.copied'));
         };
-        if (item.types && item.types.TEXT) {
+        // IMAGE / IMAGE_EMF entries carry no TEXT payload, so there is nothing
+        // meaningful to put on the local browser clipboard — fall back to the
+        // push-to-desktop path (pasteRich) so image content still works.
+        var isImage = function (ct) {
+          var t = (ct || '').toUpperCase();
+          return t === 'IMAGE' || t === 'IMAGE_EMF';
+        };
+        var hasText = function (types) {
+          return !!(types && types.TEXT);
+        };
+        var pushImage = function () {
+          self.closeMenu();
+          self._copyFull(item, self.t('history.copied'));
+        };
+        if (hasText(item.types)) {
           doCopy(decodeTypesText(item.types, preview));
         } else if (item.entry_id) {
           ClipsyncAPI.getHistoryItem(item.entry_id).then(function (res) {
-            var full = preview;
-            if (res && res.item && res.item.types) {
-              full = decodeTypesText(res.item.types, preview);
+            var detail = (res && res.item) || {};
+            if (hasText(detail.types)) {
+              doCopy(decodeTypesText(detail.types, preview));
+            } else if (isImage(detail.content_type) || isImage(item.content_type)) {
+              pushImage();
+            } else {
+              doCopy(preview);
             }
-            doCopy(full);
-          }).catch(function () { doCopy(preview); });
+          }).catch(function () {
+            if (isImage(item.content_type)) pushImage();
+            else doCopy(preview);
+          });
         } else {
           doCopy(preview);
         }
@@ -431,6 +451,10 @@
       onDocumentClick: function (e) {
         var cm = this.store.contextMenu;
         if (!cm || !cm.visible) return;
+        // A touch long-press opens the menu and the browser then synthesizes a
+        // click on the source element — ignore it so the menu isn't closed the
+        // instant it appears.
+        if (cm.touchOpened) return;
         // Close if clicking outside the context menu
         var menuEl = this.$el;
         if (menuEl && !menuEl.contains(e.target)) {

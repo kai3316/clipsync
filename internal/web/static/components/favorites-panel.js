@@ -212,13 +212,36 @@
             @dragover.prevent="onDragOver"
             @drop.prevent="onDrop"
           >
-            <favorite-item
+            <div
               v-for="(item, index) in filteredItems"
               :key="item.id"
-              :item="item"
-              :index="index"
               class="stagger-item"
-            ></favorite-item>
+              style="display:flex;align-items:center"
+            >
+              <favorite-item :item="item" :index="index" style="flex:1;min-width:0"></favorite-item>
+              <!-- Touch reordering: HTML5 drag-and-drop doesn't work on touch,
+                   so offer up/down arrows (coarse pointers only) instead. -->
+              <div
+                v-if="isCoarsePointer"
+                class="favorite-reorder-arrows"
+                style="display:flex;flex-direction:column;gap:2px;margin-left:6px;flex-shrink:0"
+              >
+                <button
+                  class="history-item__action-btn"
+                  :disabled="index === 0"
+                  :aria-label="t('favorites.move_up')"
+                  :title="t('favorites.move_up')"
+                  @click="moveFavorite(index, -1)"
+                >&#9650;</button>
+                <button
+                  class="history-item__action-btn"
+                  :disabled="index === filteredItems.length - 1"
+                  :aria-label="t('favorites.move_down')"
+                  :title="t('favorites.move_down')"
+                  @click="moveFavorite(index, 1)"
+                >&#9660;</button>
+              </div>
+            </div>
           </div>
         </div>
       </div>
@@ -368,6 +391,16 @@
         }
         return result;
       },
+
+      // Touch devices can't use HTML5 drag-and-drop to reorder favorites, so
+      // expose up/down arrows only when the primary pointer is coarse.
+      isCoarsePointer: function () {
+        if (this._coarseChecked === undefined) {
+          this._coarseChecked = true;
+          this._coarseValue = !!(window.matchMedia && window.matchMedia('(pointer: coarse)').matches);
+        }
+        return this._coarseValue;
+      },
     },
 
     watch: {
@@ -455,6 +488,28 @@
         store.favorites.splice(toIdx, 0, moved);
 
         // Persist the new order by updating positions via API
+        this._saveOrder();
+      },
+
+      moveFavorite: function (index, direction) {
+        var list = this.filteredItems;
+        var item = list[index];
+        var neighbor = list[index + direction];
+        if (!item || !neighbor) return;
+        // Swap the two entries in the underlying store array so persistence
+        // (position) and filtering stay consistent regardless of the active
+        // group/search, matching what onDrop does.
+        var store = this.store;
+        var aIdx = -1;
+        var bIdx = -1;
+        for (var i = 0; i < store.favorites.length; i++) {
+          if (store.favorites[i].id === item.id) aIdx = i;
+          if (store.favorites[i].id === neighbor.id) bIdx = i;
+        }
+        if (aIdx === -1 || bIdx === -1) return;
+        var tmp = store.favorites[aIdx];
+        store.favorites[aIdx] = store.favorites[bIdx];
+        store.favorites[bIdx] = tmp;
         this._saveOrder();
       },
 

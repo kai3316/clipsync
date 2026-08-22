@@ -445,13 +445,17 @@ def _dispatch(method, path, query_params, body, cfg, history, sync_mgr,
                 logger.exception("on_update_download callback failed")
                 result = None
             if not isinstance(result, dict):
+                # Only an unexpected handler failure is a genuine server error.
                 return _json_response({"ok": False, "path": "", "error": "download handler failed"}, 500)
             ok = bool(result.get("ok"))
+            # Expected failures (no asset for this platform, network failure,
+            # verify failed) carry a readable error on HTTP 200 so the
+            # frontend can surface the real reason instead of a generic 500.
             return _json_response({
                 "ok": ok,
                 "path": result.get("path", ""),
                 "error": result.get("error"),
-            }, 200 if ok else 500)
+            }, 200)
 
         elif path == "/api/export":
             data, status = export_data(body, cfg, history)
