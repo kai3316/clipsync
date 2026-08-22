@@ -1317,13 +1317,18 @@ class Application:
                     now_connected, real_now = set(), peer_id
                 if real_now in now_connected or peer_id in now_connected:
                     try:
-                        self.chat_mgr.start_session(
+                        sid = self.chat_mgr.start_session(
                             real_now, peer_name, fingerprint_short or "",
                             self._chat_send_fn(real_now),
                         )
                     except Exception:
                         logger.debug("chat start: start_session failed", exc_info=True)
+                        sid = None
                     self._chat_event_from_worker()
+                    # Open the freshly invited session instead of making the
+                    # user hunt for it in the session list.
+                    if sid:
+                        self.root.after(0, lambda s=sid: self._chat_select_session(s))
                     return
                 time.sleep(0.3)
             try:
@@ -1342,6 +1347,15 @@ class Application:
             return self.chat_mgr.get_sessions()
         except Exception:
             return []
+
+    def _chat_select_session(self, session_id: str) -> None:
+        """Open a chat session in the dashboard (Tk main thread only)."""
+        try:
+            dash = getattr(self, "dashboard_win", None)
+            if dash is not None:
+                dash._chat_select_session(session_id)
+        except Exception:
+            logger.debug("chat auto-select failed", exc_info=True)
 
     def _chat_get_messages(self, session_id: str) -> list[dict]:
         try:

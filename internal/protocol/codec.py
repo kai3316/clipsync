@@ -97,6 +97,15 @@ CHAT_MSG_TYPES = frozenset({
     "chat_file_cancel", "chat_file_complete",
 })
 
+# Frame types an UNPAIRED peer may send at the transport gate.  Chat file
+# BYTES ride the generic ``file_chunk`` binary frame (not a ``chat_*`` type),
+# so it must be admitted here too.  This is safe: the app router gives chat
+# right-of-first-refusal on ``file_chunk`` (ChatManager.handle_binary_chunk),
+# and FileTransferManager no-ops frames with unknown transfer_ids, so an
+# unpaired peer still cannot initiate clipboard transfers — only chat carries
+# file bytes from unpaired peers.
+UNPAIRED_GATE_MSG_TYPES = PAIRING_MSG_TYPES | CHAT_MSG_TYPES | frozenset({"file_chunk"})
+
 
 def encode_frame(payload_dict: dict, msg_id: str = "", source_device: str = "") -> bytes:
     """Encode a generic JSON payload dict into the binary frame format.

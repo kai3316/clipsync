@@ -432,7 +432,7 @@ class ChatManager:
         now = time.monotonic()
         with self._lock:
             session = self._session_by_sid.get(session_id)
-            if session is None or session.status != "active":
+            if session is None or session.status != "active" or not session.online:
                 return False
             dq = self._text_times.setdefault(session.session_id, deque())
             self._prune_times(dq, now, self.TEXT_RATE_WINDOW)
@@ -477,7 +477,7 @@ class ChatManager:
             return None
         with self._lock:
             session = self._session_by_sid.get(session_id)
-            if session is None or session.status != "active":
+            if session is None or session.status != "active" or not session.online:
                 return None
             fn = send_fn or self._latest_send_fn.get(session.peer_id)
             transfer_id = uuid.uuid4().hex
@@ -543,6 +543,19 @@ class ChatManager:
                 self._receives.pop(transfer_id, None)
                 return False
             temp_path = receive_dir / f".chat{transfer_id}.part"
+            # Defense-in-depth: the offer handler already requires hex
+            # transfer_ids, but accept_file can be reached with arbitrary ids
+            # from UI code — never let the temp write escape the receive dir.
+            try:
+                if temp_path.resolve().parent != receive_dir.resolve():
+                    logger.error("chat: receive path escape blocked for %s", transfer_id[:8])
+                    state["entry"].status = "failed"
+                    self._receives.pop(transfer_id, None)
+                    return False
+            except OSError:
+                state["entry"].status = "failed"
+                self._receives.pop(transfer_id, None)
+                return False
             try:
                 state["fh"] = open(temp_path, "wb")
             except OSError:
@@ -899,9 +912,18 @@ class ChatManager:
                 return
             dq.append(now)
             self._touch_seen(session)
+            now_ts = time.time()
+            try:
+                raw_ts = float(payload.get("ts") or now_ts)
+            except (TypeError, ValueError):
+                raw_ts = now_ts
+            # A peer-controlled timestamp must not pin last_activity_ts into
+            # the future (that would defeat the dead-session reaper).
+            if not (now_ts - 3600.0 <= raw_ts <= now_ts + 60.0):
+                raw_ts = now_ts
             entry = ChatEntry(
                 entry_id=uuid.uuid4().hex[:16], kind="text", outgoing=False,
-                ts=float(payload.get("ts") or time.time()), text=text, status="done",
+                ts=raw_ts, text=text, status="done",
             )
             self._append_entry(session, entry)
             session.unread += 1
@@ -935,7 +957,12 @@ class ChatManager:
         transfer_id = str(payload.get("transfer_id", ""))
         size = payload.get("file_size")
         raw_name = payload.get("file_name")
+        # transfer_id becomes part of the temp-file name on disk
+        # (``.chat{transfer_id}.part``), so it must be strict hex — the same
+        # validation session_id gets — to keep the receive path confined to
+        # the receive directory.
         if not isinstance(transfer_id, str) or len(transfer_id) != 32 \
+                or any(c not in "0123456789abcdef" for c in transfer_id) \
                 or not isinstance(size, int) or isinstance(size, bool) \
                 or size < 0 or size > MAX_FILE_SIZE \
                 or not isinstance(raw_name, str) or not raw_name:
@@ -1418,5 +1445,28 @@ class ChatManager:
                             {"msg_type": "chat_ping", "session_id": session.session_id},
                             self._latest_send_fn.get(session.peer_id),
                         )
+                self._expire_stale_receives()
             for sid, entry_dict in fired:
                 self._fire("_on_message", sid, entry_dict)
+
+    def _expire_stale_receives(self) -> None:
+        """Drop incoming file offers the user never answered (lock held).
+
+        Without this, a few ignored offers would permanently pin the
+        per-session incoming-file cap, and an accepted-but-silent sender
+        could leak an open temp handle for the life of the session.
+        """
+        now = time.time()
+        for tid, state in list(self._receives.items()):
+            entry = state["entry"]
+            if entry.status == "await_accept" and now - entry.ts > self.INVITE_ACCEPT_TIMEOUT:
+                fh = state.get("fh")
+                if fh is not None:
+                    try:
+                        fh.close()
+                    except OSError:
+                        pass
+                    state["fh"] = None
+                _safe_remove(state.get("temp_path"))
+                self._receives.pop(tid, None)
+                entry.status = "declined"

@@ -3312,7 +3312,11 @@ class DashboardWindow:
                 pass
 
         # Enable/disable the input row
-        can_send = bool(session is not None and session.get("status") == "active")
+        can_send = bool(
+            session is not None
+            and session.get("status") == "active"
+            and session.get("online", True)
+        )
         for w in (self._chat_input, self._chat_send_btn, self._chat_attach_btn):
             if w is not None:
                 try:
@@ -3520,14 +3524,22 @@ class DashboardWindow:
                 return
         except Exception:
             pass
-        self._chat_input.delete(0, "end")
         try:
             ok = self._chat_send_text(sid, text)
         except Exception:
             logger.debug("chat send_text raised", exc_info=True)
             ok = False
         if not ok:
-            self._chat_show_hint(T("chat.err_message_too_long"))
+            # Send failed (offline peer, flood control, session closed…) —
+            # keep the typed text so nothing is lost and name the real cause.
+            try:
+                self._chat_input.delete(0, "end")
+                self._chat_input.insert(0, text)
+            except Exception:
+                pass
+            self._chat_show_hint(T("chat.err_send_failed"))
+            return
+        self._chat_input.delete(0, "end")
 
     def _chat_on_attach(self) -> None:
         sid = self._chat_selected_session_id

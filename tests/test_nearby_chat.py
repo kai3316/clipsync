@@ -7,13 +7,21 @@ sockets.
 """
 
 import os
+import struct
 import sys
 import time
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from internal.protocol.codec import decode_message
+from internal.protocol.codec import (
+    CHAT_MSG_TYPES,
+    UNPAIRED_GATE_MSG_TYPES,
+    decode_message,
+    encode_binary_chunk,
+    encode_frame,
+)
 from internal.sync.nearby_chat import ChatManager
+from internal.transport.connection import PeerConnection, TransportManager
 
 DEV_A = "device-aaaa"
 DEV_B = "device-bbbb"
@@ -431,3 +439,140 @@ class TestDisconnectAndSnapshots:
     def test_handle_binary_chunk_ignores_foreign_ids(self):
         assert self.pair.b.handle_binary_chunk({}, DEV_A, None) is False
         assert self.pair.b.handle_binary_chunk(None, DEV_A, None) is False
+
+
+class _ScriptedSocket:
+    """Socket stub that replays pre-baked frames then EOF."""
+
+    def __init__(self, frames):
+        self._buf = b"".join(
+            struct.pack(">I", len(f)) + f for f in frames
+        )
+        self._pos = 0
+
+    def settimeout(self, timeout):
+        pass
+
+    def shutdown(self, how):
+        pass
+
+    def close(self):
+        pass
+
+    def sendall(self, data):
+        pass
+
+    def recv(self, n):
+        if self._pos >= len(self._buf):
+            return b""
+        chunk = self._buf[self._pos:self._pos + n]
+        self._pos += len(chunk)
+        return chunk
+
+
+class _UnpairedPairingMgr:
+    """Pairing manager that reports every peer as unpaired."""
+
+    def is_peer_paired(self, peer_id):
+        return False
+
+
+class TestTransportGate:
+    """The unpaired gate must admit chat frames AND chat file bytes while
+    still blocking clipboard-transfer initiation."""
+
+    def test_unpaired_gate_admits_chat_and_chunk_bytes_only(self):
+        frames = [
+            encode_frame({"msg_type": "file_request", "transfer_id": "d" * 32}),
+            encode_frame({"msg_type": "chat_invite", "session_id": "c" * 16}),
+            encode_binary_chunk("a" * 32, 0, 1, b"bytes"),
+        ]
+        conn = PeerConnection(
+            "peer-1", "Peer One", _ScriptedSocket(frames),
+            pairing_mgr=_UnpairedPairingMgr(),
+        )
+        received = []
+        conn.set_on_message(lambda msg, pid: received.append(getattr(msg, "msg_type", "")))
+        try:
+            conn.start()
+            assert _wait_until(lambda: len(received) >= 2), f"got {received}"
+        finally:
+            conn.stop()
+        assert "chat_invite" in received
+        assert "file_chunk" in received
+        assert "file_request" not in received
+
+    def test_unpaired_gate_constant_shape(self):
+        assert "file_chunk" in UNPAIRED_GATE_MSG_TYPES
+        assert "file_request" not in UNPAIRED_GATE_MSG_TYPES
+        assert "file_ack" not in UNPAIRED_GATE_MSG_TYPES
+        assert "clipboard" not in UNPAIRED_GATE_MSG_TYPES
+        assert all(t in UNPAIRED_GATE_MSG_TYPES for t in CHAT_MSG_TYPES)
+
+
+class TestFingerprintAccessor:
+    def test_get_peer_fingerprint_reads_private_field(self):
+        tm = TransportManager("dev-a", "Device A", 19999, _UnpairedPairingMgr())
+        conn = PeerConnection("peer-1", "Peer One", _ScriptedSocket([]))
+        conn._peer_fingerprint = "AB:CD:EF:01"
+        with tm._lock:
+            tm._peers["peer-1"] = conn
+        assert tm.get_peer_fingerprint("peer-1") == "AB:CD:EF:01"
+        assert tm.get_peer_fingerprint("ghost") == ""
+
+
+class TestReceiveExpiry:
+    def test_ignored_offer_expires_and_releases_cap(self):
+        mgr = ChatManager("x", "X")
+        try:
+            mgr.handle_message(
+                "chat_invite",
+                {"session_id": "f" * 16, "from_name": "A", "fingerprint_short": "A1"},
+                "peer-a", "A1", None,
+            )
+            sid = mgr.get_sessions()[0]["session_id"]
+            mgr.accept_invitation(sid, None)
+            mgr.handle_message(
+                "chat_file_offer",
+                {"session_id": sid, "transfer_id": "b" * 32,
+                 "file_name": "x.bin", "file_size": 100, "mime": ""},
+                "peer-a", "A1", None,
+            )
+            assert mgr.get_messages(sid)[-1]["status"] == "await_accept"
+            # Age the offer past the timeout and sweep.
+            mgr._receives["b" * 32]["entry"].ts -= (ChatManager.INVITE_ACCEPT_TIMEOUT + 10)
+            with mgr._lock:
+                mgr._expire_stale_receives()
+            assert "b" * 32 not in mgr._receives
+            assert mgr.get_messages(sid)[-1]["status"] == "declined"
+        finally:
+            mgr.shutdown()
+
+
+class TestOfflineSendGuard:
+    def setup_method(self):
+        import tempfile
+        from pathlib import Path
+        self._tmp = tempfile.TemporaryDirectory()
+        base = Path(self._tmp.name)
+        self.pair = LinkedPair(base / "a", base / "b")
+        self.sid = self.pair.establish()
+
+    def teardown_method(self):
+        self.pair.close()
+        self._tmp.cleanup()
+
+    def test_sends_blocked_while_offline_then_resume_after_ping(self):
+        self.pair.b.mark_peer_disconnected(DEV_A)
+        assert self.pair.b.get_sessions()[0]["online"] is False
+        assert self.pair.b.send_text(self.sid, "nope", self.pair.send_from_b) is False
+        from pathlib import Path
+        src = Path(self._tmp.name) / "f.bin"
+        src.write_bytes(b"data" * 64)
+        assert self.pair.b.send_file(self.sid, str(src), self.pair.send_from_b) is None
+        # Peer comes back (a ping from A restores liveness).
+        self.pair.b.handle_message(
+            "chat_ping", {"session_id": self.sid}, DEV_A, FP_A, self.pair.send_from_b,
+        )
+        assert self.pair.b.get_sessions()[0]["online"] is True
+        assert self.pair.b.send_text(self.sid, "hi again", self.pair.send_from_b) is True

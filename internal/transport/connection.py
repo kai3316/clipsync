@@ -24,7 +24,11 @@ from pathlib import Path
 from cryptography import x509
 from cryptography.x509.oid import NameOID
 
-from internal.protocol.codec import CHAT_MSG_TYPES, PAIRING_MSG_TYPES, decode_message
+from internal.protocol.codec import (
+    PAIRING_MSG_TYPES,
+    UNPAIRED_GATE_MSG_TYPES,
+    decode_message,
+)
 from internal.security.encryption import is_encrypted
 from internal.security.pairing import CertificateChangedError, PairingManager, fingerprint_pem
 
@@ -320,11 +324,14 @@ class PeerConnection:
                         # Nearby-chat messages also pass: they are consent-gated
                         # at the application layer (the receiving user must
                         # explicitly accept each chat invitation before any
-                        # content flows). Every other app frame from an unpaired
-                        # peer is dropped.
-                        if getattr(msg, "msg_type", "clipboard") not in (
-                            PAIRING_MSG_TYPES | CHAT_MSG_TYPES
-                        ):
+                        # content flows). ``file_chunk`` additionally passes so
+                        # chat file bytes can reach unpaired peers (the app
+                        # router gives chat right-of-first-refusal on it, and
+                        # FileTransferManager no-ops unknown transfer_ids, so
+                        # clipboard transfers still cannot be initiated by
+                        # unpaired peers). Every other app frame from an
+                        # unpaired peer is dropped.
+                        if getattr(msg, "msg_type", "clipboard") not in UNPAIRED_GATE_MSG_TYPES:
                             logger.warning(
                                 "[%s] dropping %s frame from unpaired peer (device_id=%s)",
                                 self.device_name, getattr(msg, "msg_type", "clipboard"),
@@ -1071,13 +1078,13 @@ class TransportManager:
         with self._lock:
             conn = self._peers.get(peer_id)
             if conn is not None:
-                return conn.peer_fingerprint or ""
+                return getattr(conn, "_peer_fingerprint", "") or ""
             # Discovery uses hashed ids; resolve to the real id first.
             real_id = self._hash_to_real_id.get(peer_id)
             if real_id:
                 conn = self._peers.get(real_id)
                 if conn is not None:
-                    return conn.peer_fingerprint or ""
+                    return getattr(conn, "_peer_fingerprint", "") or ""
         return ""
 
     def get_resolved_hashes(self) -> dict[str, str]:
