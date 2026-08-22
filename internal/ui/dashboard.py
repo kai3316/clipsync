@@ -182,7 +182,8 @@ class DashboardWindow:
         self._recent_activity: ctk.CTkLabel | None = None
         self._uptime_label: ctk.CTkLabel | None = None
         self._local_ip_label: ctk.CTkLabel | None = None
-        self._start_time: float = 0.0
+        # Initialize once so uptime is not reset on every window rebuild.
+        self._start_time: float = time.time()
         self._device_name_label: ctk.CTkLabel | None = None
         self._device_scroll: ctk.CTkScrollableFrame | None = None
         self._transfer_scroll: ctk.CTkScrollableFrame | None = None
@@ -239,6 +240,7 @@ class DashboardWindow:
                 self._window.update_idletasks()
                 if self._window.winfo_viewable():
                     self._switch_panel(self._current_panel)
+                    self._cancel_refresh_job()
                     self._schedule_refresh()
                     return
                 self._window.destroy()
@@ -275,6 +277,7 @@ class DashboardWindow:
 
         self._build_ui()
         self._switch_panel("overview")
+        self._cancel_refresh_job()
         self._schedule_refresh()
 
     def _on_window_move(self, event=None):
@@ -378,7 +381,17 @@ class DashboardWindow:
             self._window.destroy()
             self._window = None
 
+    def _cancel_refresh_job(self):
+        """Cancel any pending periodic refresh so chains can't accumulate."""
+        if self._refresh_job is not None:
+            try:
+                self._root.after_cancel(self._refresh_job)
+            except Exception:
+                pass
+            self._refresh_job = None
+
     def _schedule_refresh(self):
+        self._cancel_refresh_job()
         self._refresh_overview()
         if self._current_panel == "devices":
             self._refresh_devices()
@@ -395,6 +408,12 @@ class DashboardWindow:
                 except Exception:
                     pass
         if self._window is not None:
+            try:
+                # A hidden/withdrawn window must not keep polling.
+                if not self._window.winfo_viewable():
+                    return
+            except tk.TclError:
+                return
             self._refresh_job = self._root.after(5000, self._schedule_refresh)
 
     # ═══════════════════════════════════════════════════════════════
@@ -728,7 +747,6 @@ class DashboardWindow:
         ctk.CTkLabel(title_row, text=T("network.connection"),
                     font=ctk.CTkFont(size=13, weight="bold"),
         ).pack(side="left")
-        self._start_time = time.time()
         self._uptime_label = ctk.CTkLabel(
             title_row, text="",
             font=ctk.CTkFont(size=11),
@@ -1056,11 +1074,14 @@ class DashboardWindow:
         if self._uptime_label and self._start_time:
             uptime = int(time.time() - self._start_time)
             if uptime < 120:
-                self._uptime_label.configure(text=f"up {uptime}s")
+                self._uptime_label.configure(text=T("dashboard.up_s", uptime=uptime))
             elif uptime < 7200:
-                self._uptime_label.configure(text=f"up {uptime // 60}m")
+                self._uptime_label.configure(text=T("dashboard.up_m", uptime=uptime // 60))
             else:
-                self._uptime_label.configure(text=f"up {uptime // 3600}h {uptime % 3600 // 60:02d}m")
+                self._uptime_label.configure(
+                    text=T("dashboard.up_hm",
+                           h=uptime // 3600, m=uptime % 3600 // 60)
+                )
 
         # Peer stats
         try:
@@ -1486,11 +1507,16 @@ class DashboardWindow:
         new_note = new_note.strip()
         if self._on_edit_note:
             self._on_edit_note(peer_id, new_note)
-        # Update label in-place
-        note_label.configure(
-            text=new_note if new_note else T("device.add_note"),
-            text_color=("gray50", "gray60") if new_note else ("gray65", "gray55"),
-        )
+        # Update label in-place. ask_string() runs a nested event loop during
+        # which the periodic refresh may have rebuilt/destroyed this widget.
+        try:
+            if note_label.winfo_exists():
+                note_label.configure(
+                    text=new_note if new_note else T("device.add_note"),
+                    text_color=("gray50", "gray60") if new_note else ("gray65", "gray55"),
+                )
+        except tk.TclError:
+            pass
 
     def _do_speed_test(self):
         if not self._on_speed_test:
@@ -2272,11 +2298,12 @@ class DashboardWindow:
         if seconds <= 0:
             return ""
         if seconds < 60:
-            return f"{int(seconds)}s left"
+            return T("dashboard.eta_s", seconds=int(seconds))
         elif seconds < 3600:
-            return f"{int(seconds / 60)}m {int(seconds % 60)}s left"
+            return T("dashboard.eta_ms",
+                     minutes=int(seconds / 60), seconds=int(seconds % 60))
         else:
-            return f"{int(seconds / 3600)}h left"
+            return T("dashboard.eta_h", hours=int(seconds / 3600))
 
     def _create_transfer_card(self, transfer: dict):
         direction = transfer.get("direction", "down")
@@ -2497,6 +2524,16 @@ class DashboardWindow:
                 self._on_toggle_autostart_cb(enabled)
             except Exception:
                 logger.debug("Auto-start toggle failed", exc_info=True)
+                # Revert the switch so the UI reflects the real state, and
+                # surface the failure instead of swallowing it.
+                self._autostart_var.set(not enabled)
+                cfg.auto_start = not enabled
+                self._save_config()
+                show_info(
+                    self._window,
+                    T("dialog.error"),
+                    T("dashboard.autostart_failed"),
+                )
 
     def _on_toggle_discovery(self):
         if self._on_toggle_discovery_cb:
@@ -2595,7 +2632,7 @@ class DashboardWindow:
                     self._web_qr_key = qr_key
                 except Exception:
                     logger.debug("QR code generation failed", exc_info=True)
-                    self._web_qr_label.configure(image=None, text="QR err")
+                    self._web_qr_label.configure(image=None, text=T("dashboard.qr_error"))
                     return
             self._web_qr_label.configure(image=self._web_qr_image, text="")
             self._web_qr_label.image = self._web_qr_image

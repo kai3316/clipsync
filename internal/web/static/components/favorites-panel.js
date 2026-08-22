@@ -122,7 +122,7 @@
               class="favorites-panel__group-btn"
               :class="{ 'favorites-panel__group-btn--active': store.activeGroup === group }"
               @click="selectGroup(group)"
-              @contextmenu.prevent="openContextMenu($event, group)"
+              @contextmenu.prevent="group !== 'Ungrouped' && openContextMenu($event, group)"
             >
               <span v-if="renamingGroup === group" class="favorites-panel__group-rename" @click.stop>
                 <input
@@ -189,19 +189,20 @@
             <button class="btn-primary" @click="openAddModal">{{ t('favorites.add_first') }}</button>
           </div>
 
-          <!-- Empty: active group has no items -->
-          <div v-else-if="filteredItems.length === 0 && store.activeGroup" class="empty-state">
-            <span class="empty-state__icon">&#128193;</span>
-            <h3 class="empty-state__title">{{ t('favorites.empty_group_title') }}</h3>
-            <p class="empty-state__desc">{{ t('favorites.empty_group_desc', { group: store.activeGroup }) }}</p>
-          </div>
-
-          <!-- Empty: search no results -->
+          <!-- Empty: search no results (checked first so a search that matches
+               nothing inside a group shows the search state + "Clear search") -->
           <div v-else-if="filteredItems.length === 0 && store.favoriteSearch" class="empty-state">
             <span class="empty-state__icon">&#128269;</span>
             <h3 class="empty-state__title">{{ t('favorites.no_matches') }}</h3>
             <p class="empty-state__desc">{{ t('favorites.no_matches_desc', { query: store.favoriteSearch }) }}</p>
             <button class="btn-ghost" @click="clearSearch">{{ t('favorites.clear_search') }}</button>
+          </div>
+
+          <!-- Empty: active group has no items -->
+          <div v-else-if="filteredItems.length === 0 && store.activeGroup" class="empty-state">
+            <span class="empty-state__icon">&#128193;</span>
+            <h3 class="empty-state__title">{{ t('favorites.empty_group_title') }}</h3>
+            <p class="empty-state__desc">{{ t('favorites.empty_group_desc', { group: store.activeGroup }) }}</p>
           </div>
 
           <!-- Items list -->
@@ -382,6 +383,7 @@
         if (val) {
           this.loadHistoryForAdd();
           this.store.favoriteSearch = ''; // reset search when opening modal
+          this.searchInput = '';          // keep the search box in sync (debounced)
         }
       },
 
@@ -460,27 +462,32 @@
         // Save the new order by updating each favorite's position
         var store = this.store;
         var self = this;
-        var promises = [];
+        var attempts = [];
+        var failed = 0;
         for (var i = 0; i < store.favorites.length; i++) {
           var fav = store.favorites[i];
           // Only update if position has changed
           if (fav.position !== i) {
             fav.position = i;
             (function (favItem, idx) {
-              promises.push(
-                ClipsyncAPI.updateFavorite(favItem.id, { position: idx }).catch(function () {
-                  // Silently ignore individual failures
+              attempts.push(
+                ClipsyncAPI.updateFavorite(favItem.id, { position: idx }).then(function () {
+                  // ok
+                }).catch(function () {
+                  failed++;
                 })
               );
             })(fav, i);
           }
         }
 
-        if (promises.length > 0) {
-          Promise.all(promises).then(function () {
-            self.store.showToast(self.t('favorites.order_saved'), 1500);
-          }).catch(function () {
-            // Silently ignore
+        if (attempts.length > 0) {
+          Promise.all(attempts).then(function () {
+            if (failed > 0) {
+              self.store.showToast(self.t('favorites.order_failed'), 2000);
+            } else {
+              self.store.showToast(self.t('favorites.order_saved'), 1500);
+            }
           });
         }
       },
@@ -535,12 +542,7 @@
       },
 
       historyIcon: function (item) {
-        var ct = (item.content_type || '').toUpperCase();
-        if (ct === 'IMAGE' || ct === 'IMAGE_EMF') return '🖼';
-        if (ct === 'FILE') return '📄';
-        if (ct === 'HTML') return '🌐';
-        if (ct === 'RTF') return '📋';
-        return '📝';
+        return ClipsyncAPI.typeIcon(item.content_type);
       },
 
       addFromHistory: function (hitem) {

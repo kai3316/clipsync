@@ -14,6 +14,7 @@ import customtkinter as ctk
 
 from internal.clipboard.filter import ALL_CATEGORIES
 from internal.i18n import T, available_locales, set_locale
+from internal.platform.notify import notification_mgr
 from internal.ui.dialogs import ask_yesno, show_info, show_warning
 from internal.web.server import WebServer
 
@@ -676,14 +677,17 @@ class SettingsWindow:
             else:
                 self._web_qr_label.configure(
                     image=None,
-                    text="(no token — enable and save to generate)",
+                    text=T("settings_window.web_token_none_hint"),
                     font=ctk.CTkFont(size=11),
                     text_color=("gray50", "gray60"),
                 )
         except Exception as e:
             logger.debug("QR code generation failed: %s", e)
             if self._web_qr_label:
-                self._web_qr_label.configure(image=None, text="(QR unavailable)")
+                self._web_qr_label.configure(
+                    image=None,
+                    text=T("settings_window.web_qr_unavailable"),
+                )
 
     def _on_regenerate_token(self):
         import secrets
@@ -703,7 +707,16 @@ class SettingsWindow:
             self._window.clipboard_clear()
             self._window.clipboard_append(url)
             self._web_copy_btn.configure(text=T("web.copied"))
-            self._window.after(2000, lambda: self._web_copy_btn.configure(text=T("ui.copy")))
+
+            def _reset_copy_label():
+                if self._web_copy_btn is not None:
+                    try:
+                        if self._web_copy_btn.winfo_exists():
+                            self._web_copy_btn.configure(text=T("ui.copy"))
+                    except Exception:
+                        pass
+
+            self._window.after(2000, _reset_copy_label)
 
     def _on_save_web(self):
         cfg = self._get_config()
@@ -731,7 +744,8 @@ class SettingsWindow:
 
         if self._status_label:
             self._status_label.configure(text=T("settings_window.web_saved"))
-        show_info(self._window, T("dialog.saved"), T("settings_window.web_saved"))
+        msg = T("settings_window.web_saved") + "\n\n" + T("settings_window.web_restart_note")
+        show_info(self._window, T("dialog.saved"), msg)
 
     # ═══════════════════════════════════════════════════════════════
     # Panel: Content Filter
@@ -922,7 +936,18 @@ class SettingsWindow:
     def _on_save_security(self):
         cfg = self._get_config()
         cfg.encryption_enabled = self._enc_enabled_var.get()
-        cfg.encryption_password = self._enc_password_var.get()
+        new_password = self._enc_password_var.get().strip()
+        if new_password:
+            # A blank field leaves the stored password untouched; only a
+            # newly typed password re-encrypts the private key.
+            if not ask_yesno(
+                self._window,
+                T("security.title"),
+                T("settings_window.password_change_confirm"),
+            ):
+                return
+            cfg.encryption_password = new_password
+            self._enc_password_var.set("")
         # Update status indicator
         if cfg.encryption_password_hash:
             self._enc_pw_status.configure(
@@ -1168,8 +1193,10 @@ class SettingsWindow:
             poll = None
 
         receive_dir = self._file_receive_dir_var.get().strip()
-        if receive_dir and not Path(receive_dir).parent.exists():
-            errors.append(T("settings_window.val_receive_dir"))
+        if receive_dir:
+            expanded = os.path.expanduser(receive_dir)
+            if not Path(expanded).parent.exists():
+                errors.append(T("settings_window.val_receive_dir"))
 
         try:
             timeout = float(self._transfer_timeout_var.get())
@@ -1201,6 +1228,8 @@ class SettingsWindow:
         cfg.log_level = self._log_level_var.get()
         cfg.language = self._language_var.get()
         cfg.notifications_enabled = self._notifications_var.get()
+        # Apply the notification toggle live — no restart required.
+        notification_mgr.enabled = cfg.notifications_enabled
         self._save_config()
         set_locale(cfg.language)
 
@@ -1433,6 +1462,9 @@ class SettingsWindow:
         self._dark_mode = not self._dark_mode
         new_mode = "dark" if self._dark_mode else "light"
         ctk.set_appearance_mode(new_mode)
+        # Keep the Appearance radio buttons in sync with the header toggle.
+        if getattr(self, "_appearance_var", None) is not None:
+            self._appearance_var.set(new_mode)
         self._theme_btn.configure(
             text=T("ui.theme_light") if self._dark_mode else T("ui.theme_dark")
         )

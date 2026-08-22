@@ -385,6 +385,11 @@
      * Called by the WebSocket handler when a show_dialog message arrives.
      */
     showDialog: function (dlg) {
+      // A server-pushed dialog takes precedence over any client confirm/
+      // prompt/alert — reject the pending client dialog so its promise
+      // doesn't hang forever under a hidden overlay (mirrors how confirm()/
+      // prompt() close prior client dialogs).
+      this.closeClientDialog();
       this.activeDialog = dlg;
     },
 
@@ -530,13 +535,18 @@
      */
     startSpeedTest: function () {
       var self = this;
-      this.speedTest.running = true;
       this.speedTest.resultMbps = null;
       this.speedTest.quality = '';
       this.speedTest.progress = 0;
       this.speedTest.status = t('transfer.speed_test.starting');
       this.speedTest.error = '';
-      if (!window.ClipsyncAPI) return;
+      if (!window.ClipsyncAPI || !window.ClipsyncAPI.startSpeedTest) {
+        // No API client — don't leave the spinner running forever.
+        this.speedTest.running = false;
+        this.speedTest.error = t('transfer.speed_test.unavailable');
+        return;
+      }
+      this.speedTest.running = true;
       window.ClipsyncAPI.startSpeedTest()
         .then(function (res) {
           if (res && res.ok) {
@@ -557,7 +567,13 @@
       if (!this.speedTest.running) return;
       window.ClipsyncAPI.getSpeedTestResult()
         .then(function (res) {
-          if (!res) return;
+          if (!res) {
+            // Empty/transient response — treat it as a failure so the
+            // spinner doesn't run forever.
+            self.speedTest.running = false;
+            self.speedTest.error = t('transfer.speed_test.failed');
+            return;
+          }
           if (res.done) {
             self.speedTest.running = false;
             self.speedTest.resultMbps = res.mbps;

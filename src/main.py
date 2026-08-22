@@ -556,11 +556,13 @@ class Application:
         if chosen in ("zh-CN", "en"):
             self.cfg.language = chosen
             set_locale(chosen)
-        self.cfg.language_chosen = True
-        try:
-            self._save_cfg_encrypted()
-        except Exception:
-            logger.debug("Failed to persist first-run language choice", exc_info=True)
+            self.cfg.language_chosen = True
+            try:
+                self._save_cfg_encrypted()
+            except Exception:
+                logger.debug("Failed to persist first-run language choice", exc_info=True)
+        # Dismissed (None): leave language_chosen False so the next launch
+        # offers the language picker again.
 
     # ═══════════════════════════════════════════════════════════════
     # Phase 3: Crypto
@@ -2123,17 +2125,18 @@ class Application:
             return
         try:
             shutil.copy2(log_path, dest)
-            self._notify_info("Exported", f"Log saved to:\n{dest}")
+            self._notify_info(T("log.exported_title"), T("log.exported_msg", dest=dest))
             logger.info("Log exported to %s", dest)
         except FileNotFoundError:
             self._notify_warning(
-                "Not Found",
-                f"No log file found at:\n{log_path}\n\n"
-                "ClipSync may not have been running long enough to generate logs.",
+                T("log.not_found_title"),
+                T("log.not_found_msg", path=log_path),
             )
         except PermissionError:
-            self._notify_error("Error",
-                       f"Permission denied writing to:\n{dest}")
+            self._notify_error(
+                T("ui.error_title"),
+                T("log.permission_error_msg", dest=dest),
+            )
             logger.error("Permission denied exporting log to %s", dest)
         except OSError as e:
             self._notify_error(T("ui.error_title"), f"{T('ui.export_failed_msg')}{e}")
@@ -4300,11 +4303,19 @@ class Application:
     # ═══════════════════════════════════════════════════════════════
 
     def _on_systray_toggle(self, enabled: bool) -> None:
-        self.sync_mgr.set_enabled(enabled)
-        self.cfg.sync_enabled = enabled
+        # sync_mgr is the authoritative source of truth: reconcile the tray
+        # checkbox and config from its actual state so the optimistic tray
+        # flip can never leave them disagreeing.
+        try:
+            self.sync_mgr.set_enabled(enabled)
+            actual = getattr(self.sync_mgr, "_enabled", enabled)
+        except Exception:
+            logger.warning("Failed to toggle sync state", exc_info=True)
+            actual = not enabled
+        self.cfg.sync_enabled = actual
         self._save_cfg_encrypted()
-        self.systray.set_syncing(enabled)
-        logger.info("Sync %s", "enabled" if enabled else "paused")
+        self.systray.set_syncing(actual)
+        logger.info("Sync %s", "enabled" if actual else "paused")
 
 
 # ═══════════════════════════════════════════════════════════════════════════════

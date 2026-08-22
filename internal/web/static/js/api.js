@@ -35,6 +35,23 @@ var ClipsyncAPI = (function () {
       _token = token;
     },
 
+    /**
+     * Return a type icon emoji for a clipboard content type.
+     * Single source of truth used by every component that renders a
+     * content-type icon (history items, favorites, overview feed).
+     * @param {string} type - e.g. 'TEXT', 'FILE', 'IMAGE', 'RTF', 'HTML', 'URL'
+     * @returns {string}
+     */
+    typeIcon: function (type) {
+      var t = String(type || '').toUpperCase();
+      if (t.indexOf('IMAGE') !== -1) return '🖼';
+      if (t.indexOf('URL') !== -1) return '🔗';
+      if (t.indexOf('HTML') !== -1) return '🌐';
+      if (t.indexOf('RTF') !== -1) return '📝';
+      if (t.indexOf('FILE') !== -1) return '📄';
+      return '📄';
+    },
+
     /* ═══════════════════════════════════════════════════════════════
        History endpoints
        ═══════════════════════════════════════════════════════════════ */

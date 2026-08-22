@@ -132,32 +132,40 @@
       // `transfer_progress` is likewise applied to activeTransfers by ws.js,
       // so we only refetch the transfer list on completion (and reconnect,
       // via loadData) to pick up the completed entry's history path.
-      ClipsyncWS.on('transfer_complete', function () {
-        self.loadTransfers().catch(function () {});
-        store.showToast(self.t('transfer.complete_toast'), 2000);
-      });
+      //
+      // Handlers are stored so they can be removed in beforeUnmount —
+      // otherwise a teardown/remount would stack duplicate listeners and each
+      // event would fire N times.
+      this._wsHandlers = {
+        transferComplete: function () {
+          self.loadTransfers().catch(function () {});
+          store.showToast(self.t('transfer.complete_toast'), 2000);
+        },
+        pairingRequest: function (data) {
+          if (data && data.peer_id) {
+            store.pairingRequests.push(data);
+            store.showToast(self.t('notify.pairing_request', {
+              name: data.peer_name || data.peer_id,
+              code: data.code || '',
+            }), 3000);
+          }
+        },
+        pairingResolved: function (data) {
+          if (!data || !data.peer_id) return;
+          store.pairingRequests = store.pairingRequests.filter(function (r) {
+            return r.peer_id !== data.peer_id;
+          });
+        },
+        connected: function () {
+          // Refresh data on reconnect
+          self.loadData();
+        },
+      };
 
-      ClipsyncWS.on('pairing_request', function (data) {
-        if (data && data.peer_id) {
-          store.pairingRequests.push(data);
-          store.showToast(self.t('notify.pairing_request', {
-            name: data.peer_name || data.peer_id,
-            code: data.code || '',
-          }), 3000);
-        }
-      });
-
-      ClipsyncWS.on('pairing_resolved', function (data) {
-        if (!data || !data.peer_id) return;
-        store.pairingRequests = store.pairingRequests.filter(function (r) {
-          return r.peer_id !== data.peer_id;
-        });
-      });
-
-      ClipsyncWS.on('connected', function () {
-        // Refresh data on reconnect
-        self.loadData();
-      });
+      ClipsyncWS.on('transfer_complete', this._wsHandlers.transferComplete);
+      ClipsyncWS.on('pairing_request', this._wsHandlers.pairingRequest);
+      ClipsyncWS.on('pairing_resolved', this._wsHandlers.pairingResolved);
+      ClipsyncWS.on('connected', this._wsHandlers.connected);
 
       // Keyboard shortcuts
       document.addEventListener('keydown', this.onKeyDown);
@@ -175,6 +183,15 @@
     },
 
     beforeUnmount: function () {
+      // Unregister WS handlers before closing the socket so a remount never
+      // stacks duplicate listeners (each event would otherwise fire N times).
+      if (this._wsHandlers) {
+        ClipsyncWS.off('transfer_complete', this._wsHandlers.transferComplete);
+        ClipsyncWS.off('pairing_request', this._wsHandlers.pairingRequest);
+        ClipsyncWS.off('pairing_resolved', this._wsHandlers.pairingResolved);
+        ClipsyncWS.off('connected', this._wsHandlers.connected);
+        this._wsHandlers = null;
+      }
       ClipsyncWS.disconnect();
       document.removeEventListener('keydown', this.onKeyDown);
       if (this._overviewTimer) {
@@ -205,12 +222,25 @@
 
         try {
           var promises = [
-            this.loadHistory(),
             this.loadDevices(),
             this.loadFavorites(),
-            this.loadSettings(),
             this.loadTransfers(),
           ];
+
+          // History reads `settingsCache.web_history_limit`, so it must wait
+          // for settings to resolve before the first fetch — otherwise it
+          // always uses the default 30 and the "History items shown" setting
+          // looks dead until a manual reload. If settings fail, history still
+          // loads (with the default limit).
+          promises.push(
+            this.loadSettings()
+              .catch(function () {
+                return null;
+              })
+              .then(function () {
+                return self.loadHistory();
+              })
+          );
 
           // Also load overview
           store.fetchOverview();
@@ -315,6 +345,27 @@
 
         // Escape – clear selection, preview, close context menu
         if (e.key === 'Escape') {
+          // Don't steal Escape from a focused form field (history/favorites
+          // search boxes, inline editors, dialog inputs) — the focused control
+          // owns Escape there (clears its own input / closes its own popup).
+          var escTarget = e.target;
+          var escEditable = !!escTarget && (
+            escTarget.tagName === 'INPUT' || escTarget.tagName === 'TEXTAREA' ||
+            !!(escTarget.isContentEditable) ||
+            !!(escTarget.closest && escTarget.closest('[contenteditable]'))
+          );
+          if (escEditable) {
+            return;
+          }
+          // Close a server-pushed dialog if it is dismissible. dialog-modal.js
+          // handles the primary case (it stops propagation on Escape); this is
+          // the global fallback so a cancellable dialog never stays stuck open.
+          if (store.activeDialog) {
+            var adType = store.activeDialog.dialog_type;
+            if (adType !== 'progress' && adType !== 'confirm') {
+              store.closeDialog();
+            }
+          }
           store.clearSelection();
           store.previewItem = null;
           store.contextMenu.visible = false;

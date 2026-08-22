@@ -145,15 +145,35 @@
           this.translating = tm.translating || false;
           this.error = '';
 
+          // Remember what was focused so it can be restored on close.
+          if (!this._prevFocus) {
+            this._prevFocus = document.activeElement;
+          }
+
           // Bind global Escape key listener
           var self = this;
           this._onKeyDown = this.onKeyDown.bind(this);
           document.addEventListener('keydown', this._onKeyDown);
+
+          // Move focus into the modal (close button) for keyboard users.
+          this.$nextTick(function () {
+            if (self.$refs.closeBtn) {
+              self.$refs.closeBtn.focus();
+            }
+          });
         } else {
           // Clean up Escape key listener
           if (this._onKeyDown) {
             document.removeEventListener('keydown', this._onKeyDown);
             this._onKeyDown = null;
+          }
+          // Restore focus to the element that opened the modal.
+          if (this._prevFocus) {
+            var prev = this._prevFocus;
+            this._prevFocus = null;
+            if (prev.focus && document.contains(prev)) {
+              prev.focus();
+            }
           }
         }
       },
@@ -163,6 +183,14 @@
       if (this._onKeyDown) {
         document.removeEventListener('keydown', this._onKeyDown);
         this._onKeyDown = null;
+      }
+      // Restore focus if the modal is torn down while still open.
+      if (this._prevFocus) {
+        var prev = this._prevFocus;
+        this._prevFocus = null;
+        if (prev.focus && document.contains(prev)) {
+          prev.focus();
+        }
       }
     },
 
@@ -180,7 +208,7 @@
               '<span class="translate-modal__title-icon">&#x1F310;</span>' +
               ' {{ t(\'translate.title\') }}' +
             '</span>' +
-            '<button class="translate-modal__close" @click="close"' +
+            '<button ref="closeBtn" class="translate-modal__close" @click="close"' +
               ' :aria-label="t(\'ui.close\')">&times;</button>' +
           '</div>' +
 

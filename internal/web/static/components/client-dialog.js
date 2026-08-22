@@ -100,9 +100,22 @@
         }
       };
       document.addEventListener('keydown', this._onDialogKeydown);
-      // Focus the OK button or input when dialog opens
+      // Focus the OK button or input when dialog opens, and remember what was
+      // focused beforehand so it can be restored when the dialog closes.
       this.$watch('store.clientDialog', function (dlg) {
-        if (!dlg) return;
+        if (!dlg) {
+          if (self._prevFocus) {
+            var prev = self._prevFocus;
+            self._prevFocus = null;
+            if (prev.focus && document.contains(prev)) {
+              prev.focus();
+            }
+          }
+          return;
+        }
+        if (!self._prevFocus) {
+          self._prevFocus = document.activeElement;
+        }
         self.$nextTick(function () {
           if (dlg.type === 'prompt' && self.$refs.promptInput) {
             self.$refs.promptInput.focus();

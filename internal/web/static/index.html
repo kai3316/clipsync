@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
   <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no,viewport-fit=cover">
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
   <title>ClipSync</title>
   <!-- PWA: installable web companion. The manifest is token-protected like
        every other static route, so the token is attached to the link. -->
@@ -38,6 +38,7 @@
       display: flex;
       flex-direction: column;
       height: 100vh;
+      height: 100dvh;
       width: 100%;
       margin: 0 auto;
       overflow: hidden;
@@ -994,7 +995,8 @@
       transition: opacity var(--clipsync-transition-fast);
     }
 
-    .history-item:hover .history-item__actions {
+    .history-item:hover .history-item__actions,
+    .history-item:focus-within .history-item__actions {
       opacity: 1;
     }
 
@@ -1329,12 +1331,6 @@
       gap: var(--clipsync-space-3);
     }
 
-    @media (max-width: 600px) {
-      .overview-top-row {
-        grid-template-columns: 1fr;
-      }
-    }
-
     .overview-card {
       /* Translucent so the .glass frosted backdrop actually shows through. */
       background: color-mix(in srgb, var(--clipsync-panel) 68%, transparent);
@@ -1468,12 +1464,6 @@
     .overview-action-icon {
       font-size: 22px;
       line-height: 1.2;
-    }
-
-    @media (max-width: 768px) {
-      .overview-stats-grid {
-        grid-template-columns: repeat(2, 1fr);
-      }
     }
 
     .overview-stat-card {
@@ -2247,6 +2237,8 @@
       display: flex;
       align-items: center;
       justify-content: space-between;
+      flex-wrap: wrap;
+      row-gap: var(--clipsync-space-1);
       padding: var(--clipsync-space-2) var(--clipsync-space-4);
       padding-bottom: max(var(--clipsync-space-2), env(safe-area-inset-bottom));
       padding-left: max(var(--clipsync-space-4), env(safe-area-inset-left));
@@ -2396,6 +2388,10 @@
       }
 
       .overview-stats-grid {
+        grid-template-columns: 1fr;
+      }
+
+      .overview-action-grid {
         grid-template-columns: 1fr;
       }
 
@@ -3165,6 +3161,7 @@
 
     .preview-popover {
       width: 360px;
+      max-width: calc(100vw - 24px);
       overflow-y: auto;
       overflow-x: hidden;
       padding: 0;
@@ -3271,7 +3268,7 @@
       flex-direction: column;
       padding: var(--clipsync-space-1);
       min-width: 200px;
-      max-width: 260px;
+      max-width: min(260px, calc(100vw - 24px));
       pointer-events: auto;
       overflow: hidden;
     }
@@ -3360,7 +3357,6 @@
       font-weight: 600;
       font-family: var(--clipsync-font);
       color: var(--clipsync-fg-muted);
-      background: transparent;
       border: 1px solid var(--clipsync-border);
       border-radius: 20px;
       cursor: pointer;
@@ -4906,6 +4902,24 @@
       to   { opacity: 0; transform: translateY(-10px) scale(0.98); }
     }
 
+    /* ── Coarse pointer (phone/tablet): bigger touch targets ──────── */
+    @media (pointer: coarse) {
+      .title-bar__action-btn,
+      .history-item__action-btn,
+      .transfer-history-item__btn {
+        width: 44px;
+        height: 44px;
+      }
+      .title-bar__search-clear,
+      .favorites-panel__search-clear {
+        min-width: 44px;
+        min-height: 44px;
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+      }
+    }
+
   </style>
 </head>
 <body>
@@ -4982,7 +4996,7 @@
 
     <!-- First-run onboarding wizard (one-time, above the app shell) -->
     <transition name="onboard-fade">
-      <div v-if="store.showOnboarding" class="onboard-overlay" role="dialog" aria-modal="true" aria-label="ClipSync onboarding">
+      <div v-if="store.showOnboarding" class="onboard-overlay" role="dialog" aria-modal="true" :aria-label="t('onboarding.welcome')">
         <div class="onboard-card">
           <!-- Step 1: Welcome + editable device name -->
           <div v-if="store.onboardingStep === 1" class="onboard-step">
@@ -5030,7 +5044,7 @@
 
   <!-- ClipSync I18n — inject translations at serve time -->
   <script src="js/i18n.js?token=__TOKEN__"></script>
-  <script>window.__I18N_JSON__ = __CLIPSYNC_I18N_DATA__; window.__I18N_LOCALE__ = __CLIPSYNC_I18N_LOCALE__;</script>
+  <script>window.__I18N_JSON__ = __CLIPSYNC_I18N_DATA__; window.__I18N_LOCALE__ = __CLIPSYNC_I18N_LOCALE__; document.documentElement.lang = window.__I18N_LOCALE__ || 'en';</script>
   <script>window.__CLIPSYNC_DEVICE_ID__ = __DEVICE_ID__; window.__CLIPSYNC_DEVICE_NAME__ = __DEVICE_NAME__;</script>
   <!-- ClipSync JS -->
   <script src="js/store.js?token=__TOKEN__"></script>

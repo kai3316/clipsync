@@ -2,7 +2,7 @@
 <html lang="zh-CN">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no,viewport-fit=cover">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <meta name="theme-color" content="#06080D">
 <title>ClipSync</title>
 <style>
@@ -468,6 +468,16 @@ body::before {
 .content::-webkit-scrollbar-thumb { background: var(--border-strong); border-radius: 2px; }
 .modal__text::-webkit-scrollbar { width: 4px; }
 .modal__text::-webkit-scrollbar-thumb { background: var(--border-strong); border-radius: 2px; }
+
+/* ── Reduced motion: freeze aurora / shimmer animations ───────── */
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+  html { scroll-behavior: auto; }
+}
 </style>
 </head>
 <body>
@@ -537,6 +547,7 @@ body::before {
   var TOKEN = params.get('token') || '';
   var HOST = window.location.origin;
   var ZH = (navigator.language || '').toLowerCase().indexOf('zh') === 0;
+  document.documentElement.lang = ZH ? 'zh-CN' : 'en';
 
   var T = {
     title: ZH ? '剪贴板' : 'ClipSync',
@@ -567,6 +578,7 @@ body::before {
     timeDay: ZH ? '天前' : 'd ago',
     fileDownload: ZH ? '下载中…' : 'Downloading…',
     targetDevice: ZH ? '本电脑' : 'This computer',
+    emptyPreview: ZH ? '(空)' : '(empty)',
   };
 
   /* ── Apply strings ─────────────────────────────────────────── */
@@ -686,7 +698,7 @@ body::before {
       el.innerHTML =
         '<div class="h-item__icon">' + typeIcon(item.content_type) + '</div>' +
         '<div class="h-item__body">' +
-          '<div class="h-item__text">' + esc(item.text_preview || item.content_type || '(empty)') + '</div>' +
+          '<div class="h-item__text">' + esc(item.text_preview || item.content_type || T.emptyPreview) + '</div>' +
           '<div class="h-item__meta">' + esc(relTime(item.timestamp)) + '</div>' +
         '</div>';
       el.addEventListener('click', function () { openItem(i); });
@@ -711,14 +723,14 @@ body::before {
   function openItem(i) {
     var item = historyItems[i];
     modalTitle.textContent = T.tabHistory + ' · ' + relTime(item.timestamp);
-    modalText.textContent = item.text_preview || '(empty)';
+    modalText.textContent = item.text_preview || T.emptyPreview;
     modalEl.classList.add('modal-mask--show');
     // The list no longer carries full text — fetch it when the modal opens.
     if (item.entry_id) {
       getJson('/api/history/item?entry_id=' + encodeURIComponent(item.entry_id))
         .then(function (data) {
           if (data && data.item) {
-            modalText.textContent = getFullText(data.item) || item.text_preview || '(empty)';
+            modalText.textContent = getFullText(data.item) || item.text_preview || T.emptyPreview;
           }
         })
         .catch(function () { /* keep the preview */ });

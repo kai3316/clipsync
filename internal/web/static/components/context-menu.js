@@ -27,6 +27,13 @@
   window.__CLIPSYNC_COMPONENTS__['context-menu'] = {
     inject: ['store'],
 
+    data: function () {
+      return {
+        // Measured height of the rendered menu (0 = not yet measured).
+        _menuHeight: 0,
+      };
+    },
+
     computed: {
       menuStyle: function () {
         var cm = this.store.contextMenu || {};
@@ -34,7 +41,10 @@
         var y = cm.y || 0;
         var w = 220;
         var mode = cm.mode || 'history-item';
-        var h = mode === 'history-item' ? 300 : 170;
+        // Use the measured height once the menu is rendered so the bottom-edge
+        // clamp uses the real footprint instead of a hardcoded estimate that
+        // leaves the last items unreachable near the bottom of the viewport.
+        var h = this._menuHeight || (mode === 'history-item' ? 300 : 170);
         if (x + w > window.innerWidth - 8) x = window.innerWidth - w - 8;
         if (y + h > window.innerHeight - 8) y = window.innerHeight - h - 8;
         if (x < 8) x = 8;
@@ -87,6 +97,15 @@
         if (cm) {
           cm.visible = false;
         }
+      },
+
+      _measureMenu: function () {
+        var self = this;
+        this.$nextTick(function () {
+          if (self.$el && self.$el.offsetHeight) {
+            self._menuHeight = self.$el.offsetHeight;
+          }
+        });
       },
 
       // ── History item actions ──────────────────────────────────────
@@ -156,8 +175,28 @@
       copyItem: function () {
         var item = this.targetItem;
         if (!item) return;
-        this.closeMenu();
-        this._copyFull(item, this.t('history.copied'));
+        var self = this;
+        var preview = item.text_preview || '';
+        // Copy the FULL text to the LOCAL (browser) clipboard — distinct from
+        // "Paste to this device", which pushes to the desktop clipboard via
+        // pasteRich. Fetch the full item so long clips aren't truncated.
+        var doCopy = function (text) {
+          self.closeMenu();
+          self._copyText(text, self.t('history.copied'));
+        };
+        if (item.types && item.types.TEXT) {
+          doCopy(decodeTypesText(item.types, preview));
+        } else if (item.entry_id) {
+          ClipsyncAPI.getHistoryItem(item.entry_id).then(function (res) {
+            var full = preview;
+            if (res && res.item && res.item.types) {
+              full = decodeTypesText(res.item.types, preview);
+            }
+            doCopy(full);
+          }).catch(function () { doCopy(preview); });
+        } else {
+          doCopy(preview);
+        }
       },
 
       togglePin: function () {
@@ -233,14 +272,35 @@
       translateItem: function () {
         var item = this.targetItem;
         if (!item) return;
-        var text = item.text_preview || '';
-        if (!text) {
-          this.store.showToast(this.t('context.nothing_to_translate'), 1500);
-          this.closeMenu();
-          return;
+        var preview = item.text_preview || '';
+        var self = this;
+
+        // The list preview is truncated to ~200 chars; translate the FULL text
+        // by fetching the detail entry, falling back to the preview on error.
+        var open = function (fullText) {
+          var text = fullText || preview;
+          if (!text) {
+            self.store.showToast(self.t('context.nothing_to_translate'), 1500);
+            self.closeMenu();
+            return;
+          }
+          self.store.openTranslateModal(text);
+          self.closeMenu();
+        };
+
+        if (item.types && item.types.TEXT) {
+          open(decodeTypesText(item.types, preview));
+        } else if (item.entry_id) {
+          ClipsyncAPI.getHistoryItem(item.entry_id).then(function (res) {
+            var full = preview;
+            if (res && res.item && res.item.types) {
+              full = decodeTypesText(res.item.types, preview);
+            }
+            open(full);
+          }).catch(function () { open(preview); });
+        } else {
+          open(preview);
         }
-        this.store.openTranslateModal(text);
-        this.closeMenu();
       },
 
       deleteItem: function () {
@@ -389,6 +449,18 @@
 
       onResizeOrScroll: function () {
         this.closeMenu();
+      },
+    },
+
+    watch: {
+      // Measure the rendered menu once it appears so menuStyle clamps against
+      // the real height (mirrors preview-popover's approach).
+      'store.contextMenu.visible': function (val) {
+        if (val) this._measureMenu();
+      },
+      'store.contextMenu.mode': function () {
+        var cm = this.store.contextMenu;
+        if (cm && cm.visible) this._measureMenu();
       },
     },
 

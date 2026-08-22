@@ -2,6 +2,42 @@
 
 All notable changes to ClipSync are documented in this file.
 
+## [1.0.14] — 2026-08-22
+
+### Desktop UI (fixed)
+- **Saving Security settings can no longer wipe the pre-shared encryption password.** The password field always started blank and a save unconditionally copied it over the stored password, clearing the password hash and leaving the device identity key undecryptable after a restart. The field is now only applied when a new password is typed (with a confirmation explaining the private key is re-encrypted); a blank field leaves the stored password untouched.
+- The dashboard's 5-second refresh no longer accumulates: every `show()`/re-show cancels the previous timer chain and the poll only re-arms while the window is actually visible, so repeated tray "Show Dashboard" clicks can't stack N refresh loops (a source of hidden-window CPU/battery drain and stutter).
+- Uptime now measures app lifetime, not time since the window was last built — it no longer resets on every window rebuild.
+- Copy-URL, note-editing, and other timer/dialog callbacks that could fire against a destroyed widget are now guarded (`winfo_exists` / try-except), fixing latent `TclError` crashes when a window is closed mid-action.
+- The **first-run language picker** is no longer "consumed" by dismissing it: closing it with × returns to the picker on the next launch; only an actual language choice marks onboarding complete.
+- The **Enable desktop notifications** toggle now applies live (no restart), the header theme toggle and Appearance radios stay in sync, and the receive-directory field expands `~` before validation so the documented `~/Downloads/ClipSync` placeholder is accepted.
+- Enabling **Remote access** from desktop Settings now clearly states it takes effect after a restart instead of silently leaving the server off.
+- The tray's sync checkbox is reconciled with the real sync-manager state instead of flipping optimistically, and non-Windows tray menu rebuilds are marshaled onto the tray thread (avoiding a context-menu race).
+- A failed "Launch at login" toggle now reverts the switch and explains itself instead of silently sticking.
+
+### Web dashboard (fixed)
+- **Settings → Remote access "Copy" now appends the auth token** (the copied URL previously opened "Invalid token" on a phone, while Overview's copy worked) and the shown URL is derived live from the port/LAN-IP fields, so editing the port is immediately reflected.
+- **Multi-select "Push to Desktop" actually pushes to the desktop** (via the server clipboard) instead of silently copying the merged text to the phone's browser clipboard.
+- **Regenerating the web token no longer leaves the session and Overview Copy-URL on the dead token**; the stale token is cleared from the running session.
+- **History pagination survives background clipboard syncs**: a LAN broadcast used to replace the loaded list with page 1 and discard everything the user had loaded via "Load more"; it now merges the broadcast in place (upsert by id, newest-first), preserving loaded pages.
+- A failing dialog response (pairing/transfer/url-input) is no longer silent — the dialog stays open and a failure toast is shown instead of vanishing while the server keeps it pending.
+- Server-pushed dialogs are now dismissible with **Esc** (blocking progress/confirm excepted), and Esc while typing in a search box no longer wipes selection/preview.
+- The speed-test spinner can no longer stay spinning forever; WebSocket listeners are removed on teardown (no duplicate-handler stacking); the `web_history_limit` setting now applies to the first history fetch; a server dialog arriving over a pending local confirm no longer leaves the confirm promise stuck.
+- **No more silent failures**: reordering favorites, renaming the device, and pausing/resuming/cancelling transfers all report success or failure; **Translate** now uses the full clip text instead of only its first 200 characters.
+- **Clear all history** resets the pagination cursor like the other delete paths (no skipped items on later "Load more").
+
+### Accessibility & mobile
+- Pinch-zoom restored on all three pages (removed `user-scalable=no` / `maximum-scale=1`); `prefers-reduced-motion` handling added to the two phone pages (they previously ran infinite aurora/pulse animations for vestibular-sensitive users).
+- The `lang` attribute is set at runtime to the actual UI language, so screen readers pronounce the text correctly.
+- Settings toggles now expose `role="switch"` + `aria-checked` + accessible names (~27 controls); the quick-paste listbox is keyboard-focusable with `aria-activedescendant`; focus is returned to the triggering element after closing dialogs/modals; keyboard users can no longer tab into invisible (hover-only) history actions.
+- Touch targets on the dashboard grow to ≥44 px on coarse-pointer devices; the app shell uses `100dvh` so the status bar isn't hidden behind mobile browser chrome; the quick-paste toast no longer overflows narrow phones; the status bar wraps instead of clipping.
+- Muted meta-text contrast raised to ~5:1 on both themes.
+
+### Localization & consistency
+- Newly localized: desktop uptime/ETA, "QR err", log-export notifications, and placeholder hints; quick-paste relative-time strings and "(empty)" previews now render in the page language; the missing transfer pause/resume/cancel tooltip keys were added to both locales.
+- Clipboard-type icons (URL/file/RTF/image) now come from one shared helper instead of three drifted per-tab mappings.
+- Removed conflicting duplicate CSS rules (filter-chip background was silently overridden; duplicated media-query blocks), dead code, and a "Ungrouped" context menu whose only actions did nothing.
+
 ## [1.0.13] — 2026-08-22
 
 ### Security

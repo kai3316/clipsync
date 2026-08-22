@@ -259,15 +259,55 @@ var ClipsyncWS = (function () {
 
         case 'history_updated':
           if (data.items && Array.isArray(data.items)) {
-            store.history.splice(0, store.history.length);
-            for (var j = 0; j < data.items.length; j++) {
-              store.history.push(data.items[j]);
+            var incoming = data.items;
+            var histLimit = (store.settingsCache && store.settingsCache.web_history_limit) || 30;
+            // The broadcast is the newest page-1 snapshot. If the user has
+            // loaded beyond the first page (via "Load more"), merge the
+            // broadcast into the existing list instead of clobbering it, so
+            // their loaded pages don't shrink on every background clipboard
+            // change.
+            var hasLoadedMore = store.history.length > histLimit;
+            if (!hasLoadedMore) {
+              // Nothing loaded past the first page — replace wholesale.
+              store.history.splice(0, store.history.length);
+              for (var hi = 0; hi < incoming.length; hi++) {
+                store.history.push(incoming[hi]);
+              }
+              store.historyOffset = incoming.length;
+              store.historyHasMore = (data.total != null) ? (store.historyOffset < data.total) : false;
+            } else {
+              // Upsert by entry_id: update matching rows in place, prepend
+              // genuinely-new rows at the top (dedupe — no duplicates).
+              var idxById = {};
+              for (var hi2 = 0; hi2 < store.history.length; hi2++) {
+                var histItem = store.history[hi2];
+                if (histItem && histItem.entry_id !== undefined) {
+                  idxById[histItem.entry_id] = hi2;
+                }
+              }
+              var fresh = [];
+              for (var hi3 = 0; hi3 < incoming.length; hi3++) {
+                var inc = incoming[hi3];
+                if (!inc) continue;
+                var foundIdx = (inc.entry_id !== undefined && idxById[inc.entry_id] !== undefined) ? idxById[inc.entry_id] : -1;
+                if (foundIdx !== -1) {
+                  // Update in place — keeps the item's loaded position.
+                  Object.assign(store.history[foundIdx], inc);
+                } else {
+                  fresh.push(inc);
+                }
+              }
+              // Prepend new items, preserving broadcast (newest-first) order.
+              for (var hi4 = fresh.length - 1; hi4 >= 0; hi4--) {
+                store.history.unshift(fresh[hi4]);
+              }
+              // Keep the pagination cursor — the user's loaded pages are
+              // preserved. Refresh "has more" from the broadcast total when
+              // present so Load-more stays accurate after new items arrive.
+              if (data.total != null) {
+                store.historyHasMore = store.history.length < data.total;
+              }
             }
-            // The broadcast is the full page-1 history, so reset the
-            // pagination cursor to match — otherwise a stale historyOffset
-            // makes "Load more" skip items after a broadcast.
-            store.historyOffset = data.items.length;
-            store.historyHasMore = (data.total != null) ? (store.historyOffset < data.total) : false;
           }
           // A clipboard change also means the overview's recent-activity feed
           // and stats changed — refresh it so the feed stays live without

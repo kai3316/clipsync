@@ -36,9 +36,23 @@
 
       filterCounts: function () {
         var history = this.store.history;
-        var counts = { all: history.length, text: 0, image: 0, file: 0, link: 0 };
+        var search = (this.store.historySearch || '').toLowerCase().trim();
+        var counts = { all: 0, text: 0, image: 0, file: 0, link: 0 };
         for (var i = 0; i < history.length; i++) {
           var item = history[i];
+          // Apply the same search predicate store.filteredHistory() uses so the
+          // chip counts agree with the visible filtered list.
+          if (search) {
+            var preview = (item.text_preview || '').toLowerCase();
+            var source = (item.source_name || '').toLowerCase();
+            var type = (item.content_type || '').toLowerCase();
+            if (preview.indexOf(search) === -1 &&
+                source.indexOf(search) === -1 &&
+                type.indexOf(search) === -1) {
+              continue;
+            }
+          }
+          counts.all++;
           var ct = (item.content_type || '').toUpperCase();
           if (ct === 'TEXT' || ct === 'HTML' || ct === 'RTF') counts.text++;
           else if (ct === 'IMAGE' || ct === 'IMAGE_EMF') counts.image++;
@@ -293,6 +307,10 @@
             ClipsyncAPI.clearHistory().then(function (res) {
               if (res && res.ok) {
                 self.store.history.splice(0, self.store.history.length);
+                // Reset the pagination cursor so "Load more" can't skip items
+                // that shifted into the now-empty array.
+                self.store.historyOffset = 0;
+                self.store.historyHasMore = false;
                 self.store.showToast(self.t('history.cleared'), 2000);
               }
               self.clearingAll = false;
@@ -330,33 +348,20 @@
           return;
         }
 
+        // Push the merged text through the server so it lands on the DESKTOP
+        // clipboard — the whole point of "Push to Desktop". Writing to the
+        // local browser clipboard would only put it on this phone.
         var merged = selectedTexts.join('\n---\n');
         var self = this;
-        if (navigator.clipboard && navigator.clipboard.writeText) {
-          navigator.clipboard.writeText(merged).then(function () {
-            store.showToast(self.t('history.merged', { count: selectedTexts.length }), 2000);
-          }).catch(function () {
-            self._fallbackCopy(merged, selectedTexts.length);
-          });
-        } else {
-          this._fallbackCopy(merged, selectedTexts.length);
-        }
-      },
-
-      _fallbackCopy: function (text, count) {
-        var textarea = document.createElement('textarea');
-        textarea.value = text;
-        textarea.style.position = 'fixed';
-        textarea.style.opacity = '0';
-        document.body.appendChild(textarea);
-        textarea.select();
-        try {
-          document.execCommand('copy');
-          this.store.showToast(this.t('history.merged', { count: count }), 2000);
-        } catch (e) {
-          this.store.showToast(this.t('history.copy_failed'), 2000);
-        }
-        document.body.removeChild(textarea);
+        ClipsyncAPI.pushText(merged).then(function (res) {
+          if (res && res.ok !== false) {
+            store.showToast(self.t('web.merged_pushed', { count: selectedTexts.length }), 2000);
+          } else {
+            store.showToast(self.t('history.push_failed'), 2000);
+          }
+        }).catch(function () {
+          store.showToast(self.t('history.push_failed'), 2000);
+        });
       },
 
       batchPinSelected: function () {

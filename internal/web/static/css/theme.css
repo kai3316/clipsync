@@ -25,7 +25,7 @@
      ═══════════════════════════════════════════════════════════════ */
   --clipsync-fg: #EAF0FA;              /* Primary */
   --clipsync-fg-muted: #8B98B8;        /* Secondary */
-  --clipsync-fg-subtle: #5A688C;       /* Subtle */
+  --clipsync-fg-subtle: #7584A6;       /* Subtle (raised for 4.5:1 on glass) */
 
   /* ═══════════════════════════════════════════════════════════════
      Accent — neon cyan × violet × pink (aurora triad)
@@ -163,7 +163,7 @@
   /* Text — deep ink */
   --clipsync-fg: #10142A;
   --clipsync-fg-muted: #4A556E;
-  --clipsync-fg-subtle: #7B869E;
+  --clipsync-fg-subtle: #5B6B85;       /* Subtle (raised for ≥4.5:1 on light) */
 
   /* Accent — deepened neon triad (contrast-safe on white) */
   --clipsync-accent: #0891B2;          /* Deep cyan */

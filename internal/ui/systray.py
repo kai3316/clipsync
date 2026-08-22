@@ -114,10 +114,11 @@ class SystrayApp:
                 ctypes.windll.user32.PostMessageW(
                     hwnd, self._WM_UPDATE_MENU, 0, 0)
                 return
-        # The sync checkbox state is dynamic (checked=lambda), so a plain
-        # refresh is enough — no menu rebuild needed. update_menu() marshals
-        # the native rebuild onto the tray thread on GTK/AppIndicator.
-        self._tray.update_menu()
+        # On non-Windows, update_menu() may be invoked from a non-tray thread,
+        # which races the GTK/AppIndicator event loop. Rebuild via the same
+        # thread-safe idle-callback mechanism _schedule_menu_rebuild uses. The
+        # checkbox is live-read via checked=lambda, so the new state renders.
+        self._schedule_menu_rebuild()
 
     def set_web_enabled(self, enabled: bool):
         self._web_enabled = enabled
@@ -261,10 +262,17 @@ class SystrayApp:
             self._tray.stop()
 
     def _on_toggle_sync(self, icon, item):
-        self._syncing = not self._syncing
+        new_state = not self._syncing
+        # Flip optimistically for immediate checkbox feedback (the macOS tray
+        # subprocess relies on this since its callback only forwards the value
+        # to the parent).  main.py's _on_systray_toggle is authoritative and
+        # reconciles the actual state back through set_syncing() once the real
+        # sync_mgr toggle completes, so the checkbox and the manager cannot
+        # disagree in the final state.
+        self._syncing = new_state
         if self._on_enable_toggle:
-            self._on_enable_toggle(self._syncing)
-        logger.info("Sync %s via tray", "enabled" if self._syncing else "paused")
+            self._on_enable_toggle(new_state)
+        logger.info("Sync %s via tray", "enabled" if new_state else "paused")
         # Do NOT call update_menu() here: this callback runs while the context
         # menu is open (TrackPopupMenuEx on Windows), and update_menu() tears
         # down the HMENU being tracked.  The checkbox is live-read via

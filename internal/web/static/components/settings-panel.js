@@ -28,7 +28,6 @@
         webPort: '',
         webHistoryLimit: 10,
         webToken: '',
-        webLocalUrl: '',
         webLanIp: '',
 
         // Content Filter
@@ -144,6 +143,15 @@
         return this.store.uiBackend || 'webview';
       },
 
+      // Derived from the live web-port / LAN-IP fields so editing the port (or
+      // the token) is immediately reflected in the displayed + copied URL
+      // without a separate cached data field going stale.
+      webLocalUrl: function () {
+        if (!this.webLanIp || !this.webPort) return '';
+        return 'http://' + this.webLanIp + ':' + this.webPort +
+          '?token=' + encodeURIComponent(this.store.token);
+      },
+
       themeOptions: function () {
         return [
           { value: 'system', label: this.t('settings_window.theme_system') },
@@ -207,7 +215,6 @@
         if (s.web_history_limit !== undefined) this.webHistoryLimit = s.web_history_limit;
         this.webToken = this.store.token || '';
         this.webLanIp = this.store.overview.localIp || '';
-        this.webLocalUrl = (this.webLanIp && this.webPort) ? 'http://' + this.webLanIp + ':' + this.webPort : '';
         if (s.filter_enabled_categories !== undefined) {
           // null/undefined = not configured → all categories enabled (default).
           // [] = explicitly disabled. Non-empty = that subset.
@@ -555,10 +562,17 @@
         var self = this;
         ClipsyncAPI.updateSettings({ regenerate_web_token: true }).then(function (res) {
           if (res && res.ok) {
-            // The new token is deliberately never returned to the client, so
-            // clear the stale value and prompt the user to reconnect.
+            // The new token is deliberately never returned to the client, and
+            // the old token is invalid server-side the moment this response
+            // lands — so the current session must not keep using it. Clear it
+            // from the store + API client (a subsequent reload / QR scan then
+            // picks up the fresh token) and prompt the user to reconnect.
             self.webToken = '';
-            self.store.showToast(self.t('settings.token_regenerated'), 2500);
+            self.store.token = '';
+            if (window.ClipsyncAPI && typeof window.ClipsyncAPI.init === 'function') {
+              window.ClipsyncAPI.init(window.location.origin, '');
+            }
+            self.store.showToast(self.t('settings.token_regenerated'), 3000);
           } else {
             self.store.showToast(self.t('settings.token_regenerate_failed'), 2000);
           }
@@ -578,7 +592,9 @@
       },
 
       copyUrl: function () {
-        var url = this.webLocalUrl || (this.webLanIp && this.webPort ? 'http://' + this.webLanIp + ':' + this.webPort : '');
+        // webLocalUrl already includes ?token= so a phone opening the copied
+        // URL is authenticated instead of hitting "invalid token".
+        var url = this.webLocalUrl;
         if (!url) return;
         var self = this;
         var done = function () {
@@ -897,25 +913,25 @@
                   '<h3 class="settings-section__title" style="margin-top:24px">{{ t(\'settings.preferences\') }}</h3>' +
                   '<div class="settings-toggle-row">' +
                     '<span class="settings-toggle-label">{{ t(\'network.auto_start\') }}</span>' +
-                    '<button class="settings-toggle" :class="{ \'settings-toggle--on\': autoStart }" @click="toggleAutoStart">' +
+                    '<button class="settings-toggle" role="switch" :aria-checked="autoStart" :aria-label="t(\'network.auto_start\')" :class="{ \'settings-toggle--on\': autoStart }" @click="toggleAutoStart">' +
                       '<span class="settings-toggle__knob"></span>' +
                     '</button>' +
                   '</div>' +
                   '<div class="settings-toggle-row">' +
                     '<span class="settings-toggle-label">{{ t(\'settings.sound\') }}</span>' +
-                    '<button class="settings-toggle" :class="{ \'settings-toggle--on\': store.soundEnabled }" @click="toggleSound">' +
+                    '<button class="settings-toggle" role="switch" :aria-checked="store.soundEnabled" :aria-label="t(\'settings.sound\')" :class="{ \'settings-toggle--on\': store.soundEnabled }" @click="toggleSound">' +
                       '<span class="settings-toggle__knob"></span>' +
                     '</button>' +
                   '</div>' +
                   '<div class="settings-toggle-row">' +
                     '<span class="settings-toggle-label">{{ t(\'settings.animation\') }}</span>' +
-                    '<button class="settings-toggle" :class="{ \'settings-toggle--on\': store.animationsEnabled }" @click="toggleAnimation">' +
+                    '<button class="settings-toggle" role="switch" :aria-checked="store.animationsEnabled" :aria-label="t(\'settings.animation\')" :class="{ \'settings-toggle--on\': store.animationsEnabled }" @click="toggleAnimation">' +
                       '<span class="settings-toggle__knob"></span>' +
                     '</button>' +
                   '</div>' +
                   '<div class="settings-toggle-row">' +
                     '<span class="settings-toggle-label">{{ t(\'settings.ui_mode\') }}</span>' +
-                    '<button class="settings-toggle" :class="{ \'settings-toggle--on\': uiBackend === \'webview\' }" @click="toggleUIMode">' +
+                    '<button class="settings-toggle" role="switch" :aria-checked="uiBackend === \'webview\'" :aria-label="t(\'settings.ui_mode\')" :class="{ \'settings-toggle--on\': uiBackend === \'webview\' }" @click="toggleUIMode">' +
                       '<span class="settings-toggle__knob"></span>' +
                     '</button>' +
                   '</div>' +
@@ -954,7 +970,7 @@
                   '<h3 class="settings-section__title">{{ t(\'settings_nav.web_companion\') }}</h3>' +
                   '<div class="settings-toggle-row">' +
                     '<span class="settings-toggle-label">{{ t(\'settings_window.web_enable\') }}</span>' +
-                    '<button class="settings-toggle" :class="{ \'settings-toggle--on\': webEnabled }" @click="webEnabled = !webEnabled">' +
+                    '<button class="settings-toggle" role="switch" :aria-checked="webEnabled" :aria-label="t(\'settings_window.web_enable\')" :class="{ \'settings-toggle--on\': webEnabled }" @click="webEnabled = !webEnabled">' +
                       '<span class="settings-toggle__knob"></span>' +
                     '</button>' +
                   '</div>' +
@@ -972,7 +988,7 @@
                   '<div class="settings-field">' +
                     '<label class="settings-field__label">{{ t(\'settings_window.web_token\') }}</label>' +
                     '<div class="settings-field__row">' +
-                      '<code class="settings-token">{{ webToken || \'(none)\' }}</code>' +
+                      '<code class="settings-token">{{ webToken || t(\'settings_window.web_token_none\') }}</code>' +
                       '<button class="settings-btn settings-btn--sm" @click="regenerateToken">{{ t(\'settings_window.web_token_regenerate\') }}</button>' +
                       '<button class="settings-btn settings-btn--sm" @click="clearToken">{{ t(\'settings_window.web_token_clear\') }}</button>' +
                     '</div>' +
@@ -1017,7 +1033,7 @@
                   '<p class="settings-hint" style="margin-bottom:12px">{{ t(\'settings_window.filter_desc\') }}</p>' +
                   '<div class="settings-toggle-row">' +
                     '<span class="settings-toggle-label">{{ t(\'settings_window.filter_title\') }}</span>' +
-                    '<button class="settings-toggle" :class="{ \'settings-toggle--on\': filterEnabled }" @click="filterEnabled = !filterEnabled">' +
+                    '<button class="settings-toggle" role="switch" :aria-checked="filterEnabled" :aria-label="t(\'settings_window.filter_title\')" :class="{ \'settings-toggle--on\': filterEnabled }" @click="filterEnabled = !filterEnabled">' +
                       '<span class="settings-toggle__knob"></span>' +
                     '</button>' +
                   '</div>' +
@@ -1025,31 +1041,31 @@
                     '<h4 style="font-size:12px;color:var(--clipsync-fg-muted);margin:12px 0 8px">{{ t(\'settings_window.filter_categories\') }}</h4>' +
                     '<div class="settings-toggle-row">' +
                       '<span class="settings-toggle-label">{{ t(\'filter.credit_card\') }}</span>' +
-                      '<button class="settings-toggle" :class="{ \'settings-toggle--on\': filterCreditCard }" @click="filterCreditCard = !filterCreditCard">' +
+                      '<button class="settings-toggle" role="switch" :aria-checked="filterCreditCard" :aria-label="t(\'filter.credit_card\')" :class="{ \'settings-toggle--on\': filterCreditCard }" @click="filterCreditCard = !filterCreditCard">' +
                         '<span class="settings-toggle__knob"></span>' +
                       '</button>' +
                     '</div>' +
                     '<div class="settings-toggle-row">' +
                       '<span class="settings-toggle-label">{{ t(\'filter.ssn\') }}</span>' +
-                      '<button class="settings-toggle" :class="{ \'settings-toggle--on\': filterSSN }" @click="filterSSN = !filterSSN">' +
+                      '<button class="settings-toggle" role="switch" :aria-checked="filterSSN" :aria-label="t(\'filter.ssn\')" :class="{ \'settings-toggle--on\': filterSSN }" @click="filterSSN = !filterSSN">' +
                         '<span class="settings-toggle__knob"></span>' +
                       '</button>' +
                     '</div>' +
                     '<div class="settings-toggle-row">' +
                       '<span class="settings-toggle-label">{{ t(\'filter.api_key\') }}</span>' +
-                      '<button class="settings-toggle" :class="{ \'settings-toggle--on\': filterApiKey }" @click="filterApiKey = !filterApiKey">' +
+                      '<button class="settings-toggle" role="switch" :aria-checked="filterApiKey" :aria-label="t(\'filter.api_key\')" :class="{ \'settings-toggle--on\': filterApiKey }" @click="filterApiKey = !filterApiKey">' +
                         '<span class="settings-toggle__knob"></span>' +
                       '</button>' +
                     '</div>' +
                     '<div class="settings-toggle-row">' +
                       '<span class="settings-toggle-label">{{ t(\'filter.private_key\') }}</span>' +
-                      '<button class="settings-toggle" :class="{ \'settings-toggle--on\': filterPrivateKey }" @click="filterPrivateKey = !filterPrivateKey">' +
+                      '<button class="settings-toggle" role="switch" :aria-checked="filterPrivateKey" :aria-label="t(\'filter.private_key\')" :class="{ \'settings-toggle--on\': filterPrivateKey }" @click="filterPrivateKey = !filterPrivateKey">' +
                         '<span class="settings-toggle__knob"></span>' +
                       '</button>' +
                     '</div>' +
                     '<div class="settings-toggle-row">' +
                       '<span class="settings-toggle-label">{{ t(\'filter.password\') }}</span>' +
-                      '<button class="settings-toggle" :class="{ \'settings-toggle--on\': filterPassword }" @click="filterPassword = !filterPassword">' +
+                      '<button class="settings-toggle" role="switch" :aria-checked="filterPassword" :aria-label="t(\'filter.password\')" :class="{ \'settings-toggle--on\': filterPassword }" @click="filterPassword = !filterPassword">' +
                         '<span class="settings-toggle__knob"></span>' +
                       '</button>' +
                     '</div>' +
@@ -1059,7 +1075,7 @@
                   '<p class="settings-hint" style="margin-bottom:12px">{{ t(\'settings_window.app_filter_desc\') }}</p>' +
                   '<div class="settings-toggle-row">' +
                     '<span class="settings-toggle-label">{{ t(\'settings_window.app_filter_enable\') }}</span>' +
-                    '<button class="settings-toggle" :class="{ \'settings-toggle--on\': appFilterEnabled }" @click="appFilterEnabled = !appFilterEnabled">' +
+                    '<button class="settings-toggle" role="switch" :aria-checked="appFilterEnabled" :aria-label="t(\'settings_window.app_filter_enable\')" :class="{ \'settings-toggle--on\': appFilterEnabled }" @click="appFilterEnabled = !appFilterEnabled">' +
                       '<span class="settings-toggle__knob"></span>' +
                     '</button>' +
                   '</div>' +
@@ -1087,7 +1103,7 @@
                   '<p class="settings-hint" style="margin-bottom:12px">{{ t(\'settings_window.security_desc\') }}</p>' +
                   '<div class="settings-toggle-row">' +
                     '<span class="settings-toggle-label">{{ t(\'settings_window.enable_encryption\') }}</span>' +
-                    '<button class="settings-toggle" :class="{ \'settings-toggle--on\': encryptionEnabled }" @click="encryptionEnabled = !encryptionEnabled">' +
+                    '<button class="settings-toggle" role="switch" :aria-checked="encryptionEnabled" :aria-label="t(\'settings_window.enable_encryption\')" :class="{ \'settings-toggle--on\': encryptionEnabled }" @click="encryptionEnabled = !encryptionEnabled">' +
                       '<span class="settings-toggle__knob"></span>' +
                     '</button>' +
                   '</div>' +
@@ -1106,25 +1122,25 @@
                   '<p class="settings-hint" style="margin-bottom:8px">{{ t(\'settings_window.notify_desc\') }}</p>' +
                   '<div class="settings-toggle-row">' +
                     '<span class="settings-toggle-label">{{ t(\'settings_window.notify_device_connect\') }}</span>' +
-                    '<button class="settings-toggle" :class="{ \'settings-toggle--on\': notifyDeviceConnect }" @click="notifyDeviceConnect = !notifyDeviceConnect">' +
+                    '<button class="settings-toggle" role="switch" :aria-checked="notifyDeviceConnect" :aria-label="t(\'settings_window.notify_device_connect\')" :class="{ \'settings-toggle--on\': notifyDeviceConnect }" @click="notifyDeviceConnect = !notifyDeviceConnect">' +
                       '<span class="settings-toggle__knob"></span>' +
                     '</button>' +
                   '</div>' +
                   '<div class="settings-toggle-row">' +
                     '<span class="settings-toggle-label">{{ t(\'settings_window.notify_transfer\') }}</span>' +
-                    '<button class="settings-toggle" :class="{ \'settings-toggle--on\': notifyTransfer }" @click="notifyTransfer = !notifyTransfer">' +
+                    '<button class="settings-toggle" role="switch" :aria-checked="notifyTransfer" :aria-label="t(\'settings_window.notify_transfer\')" :class="{ \'settings-toggle--on\': notifyTransfer }" @click="notifyTransfer = !notifyTransfer">' +
                       '<span class="settings-toggle__knob"></span>' +
                     '</button>' +
                   '</div>' +
                   '<div class="settings-toggle-row">' +
                     '<span class="settings-toggle-label">{{ t(\'settings_window.notify_pairing\') }}</span>' +
-                    '<button class="settings-toggle" :class="{ \'settings-toggle--on\': notifyPairing }" @click="notifyPairing = !notifyPairing">' +
+                    '<button class="settings-toggle" role="switch" :aria-checked="notifyPairing" :aria-label="t(\'settings_window.notify_pairing\')" :class="{ \'settings-toggle--on\': notifyPairing }" @click="notifyPairing = !notifyPairing">' +
                       '<span class="settings-toggle__knob"></span>' +
                     '</button>' +
                   '</div>' +
                   '<div class="settings-toggle-row">' +
                     '<span class="settings-toggle-label">{{ t(\'settings_window.notify_sync\') }}</span>' +
-                    '<button class="settings-toggle" :class="{ \'settings-toggle--on\': notifySync }" @click="notifySync = !notifySync">' +
+                    '<button class="settings-toggle" role="switch" :aria-checked="notifySync" :aria-label="t(\'settings_window.notify_sync\')" :class="{ \'settings-toggle--on\': notifySync }" @click="notifySync = !notifySync">' +
                       '<span class="settings-toggle__knob"></span>' +
                     '</button>' +
                   '</div>' +
@@ -1192,7 +1208,7 @@
                   '</div>' +
                   '<div class="settings-toggle-row">' +
                     '<span class="settings-toggle-label">{{ t(\'settings_window.enable_notifications\') }}</span>' +
-                    '<button class="settings-toggle" :class="{ \'settings-toggle--on\': notificationsEnabled }" @click="notificationsEnabled = !notificationsEnabled">' +
+                    '<button class="settings-toggle" role="switch" :aria-checked="notificationsEnabled" :aria-label="t(\'settings_window.enable_notifications\')" :class="{ \'settings-toggle--on\': notificationsEnabled }" @click="notificationsEnabled = !notificationsEnabled">' +
                       '<span class="settings-toggle__knob"></span>' +
                     '</button>' +
                   '</div>' +
@@ -1200,25 +1216,25 @@
                   '<h4 style="font-size:12px;color:var(--clipsync-fg-muted);margin:16px 0 8px">{{ t(\'settings_window.clipboard_behavior\') }}</h4>' +
                   '<div class="settings-toggle-row">' +
                     '<span class="settings-toggle-label">{{ t(\'settings_window.paste_to_top\') }}</span>' +
-                    '<button class="settings-toggle" :class="{ \'settings-toggle--on\': pasteToTop }" @click="pasteToTop = !pasteToTop">' +
+                    '<button class="settings-toggle" role="switch" :aria-checked="pasteToTop" :aria-label="t(\'settings_window.paste_to_top\')" :class="{ \'settings-toggle--on\': pasteToTop }" @click="pasteToTop = !pasteToTop">' +
                       '<span class="settings-toggle__knob"></span>' +
                     '</button>' +
                   '</div>' +
                   '<div class="settings-toggle-row">' +
                     '<span class="settings-toggle-label">{{ t(\'settings_window.low_memory_mode\') }}</span>' +
-                    '<button class="settings-toggle" :class="{ \'settings-toggle--on\': lowMemory }" @click="lowMemory = !lowMemory">' +
+                    '<button class="settings-toggle" role="switch" :aria-checked="lowMemory" :aria-label="t(\'settings_window.low_memory_mode\')" :class="{ \'settings-toggle--on\': lowMemory }" @click="lowMemory = !lowMemory">' +
                       '<span class="settings-toggle__knob"></span>' +
                     '</button>' +
                   '</div>' +
                   '<div class="settings-toggle-row">' +
                     '<span class="settings-toggle-label">{{ t(\'settings_window.retry_capture\') }}</span>' +
-                    '<button class="settings-toggle" :class="{ \'settings-toggle--on\': retryCapture }" @click="retryCapture = !retryCapture">' +
+                    '<button class="settings-toggle" role="switch" :aria-checked="retryCapture" :aria-label="t(\'settings_window.retry_capture\')" :class="{ \'settings-toggle--on\': retryCapture }" @click="retryCapture = !retryCapture">' +
                       '<span class="settings-toggle__knob"></span>' +
                     '</button>' +
                   '</div>' +
                   '<div class="settings-toggle-row">' +
                     '<span class="settings-toggle-label">{{ t(\'settings_window.source_tracking\') }}</span>' +
-                    '<button class="settings-toggle" :class="{ \'settings-toggle--on\': sourceTracking }" @click="sourceTracking = !sourceTracking">' +
+                    '<button class="settings-toggle" role="switch" :aria-checked="sourceTracking" :aria-label="t(\'settings_window.source_tracking\')" :class="{ \'settings-toggle--on\': sourceTracking }" @click="sourceTracking = !sourceTracking">' +
                       '<span class="settings-toggle__knob"></span>' +
                     '</button>' +
                   '</div>' +
@@ -1232,7 +1248,7 @@
 
                   '<div class="settings-toggle-row">' +
                     '<span class="settings-toggle-label">{{ t(\'hotkeys.enabled\') }}</span>' +
-                    '<button class="settings-toggle" :class="{ \'settings-toggle--on\': hotkeysEnabled }" @click="hotkeysEnabled = !hotkeysEnabled">' +
+                    '<button class="settings-toggle" role="switch" :aria-checked="hotkeysEnabled" :aria-label="t(\'hotkeys.enabled\')" :class="{ \'settings-toggle--on\': hotkeysEnabled }" @click="hotkeysEnabled = !hotkeysEnabled">' +
                       '<span class="settings-toggle__knob"></span>' +
                     '</button>' +
                   '</div>' +

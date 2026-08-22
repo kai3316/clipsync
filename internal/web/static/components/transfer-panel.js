@@ -303,19 +303,25 @@
         var self = this;
         ClipsyncAPI.cancelTransfer(id).then(function () {
           self.store.showToast(self.t('transfer.cancelled'), 1500);
-        }).catch(function () {});
+        }).catch(function () {
+          self.store.showToast(self.t('transfer.cancel_failed'), 2000);
+        });
       },
       pauseTransfer: function (id) {
         var self = this;
         ClipsyncAPI.pauseTransfer(id).then(function () {
           self.store.showToast(self.t('transfer.paused'), 1500);
-        }).catch(function () {});
+        }).catch(function () {
+          self.store.showToast(self.t('transfer.pause_failed'), 2000);
+        });
       },
       resumeTransfer: function (id) {
         var self = this;
         ClipsyncAPI.resumeTransfer(id).then(function () {
           self.store.showToast(self.t('transfer.resumed'), 1500);
-        }).catch(function () {});
+        }).catch(function () {
+          self.store.showToast(self.t('transfer.resume_failed'), 2000);
+        });
       },
       openFile: function (path) {
         var self = this;

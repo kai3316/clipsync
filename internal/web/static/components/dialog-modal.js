@@ -60,7 +60,7 @@
 
             '<!-- url_input -->' +
             '<div v-if="store.activeDialog.dialog_type === \'url_input\'" class="dialog-card__body">' +
-              '<input class="dialog-input" type="url" v-model="inputValue" ' +
+              '<input ref="urlInput" class="dialog-input" type="url" v-model="inputValue" ' +
                      'placeholder="https://..." @keyup.enter="respond(\'send\')">' +
             '</div>' +
 
@@ -141,18 +141,37 @@
           if (!dlg) {
             this.selectedPeerId = '';
             this.inputValue = '';
+            // Restore focus to whatever was focused before the dialog opened.
+            var prev = this._prevFocus;
+            this._prevFocus = null;
+            if (prev && prev.focus && document.contains(prev)) {
+              prev.focus();
+            }
             return;
           }
           // Pre-populate url_input from clipboard hint
           if (dlg.dialog_type === 'url_input') {
             this.inputValue = dlg.prefill || '';
           }
+          // Remember the previously-focused element so it can be restored
+          // on close.
+          if (this._prevFocus === null) {
+            this._prevFocus = document.activeElement;
+          }
+          var self = this;
+          this.$nextTick(function () {
+            // Autofocus the URL input so the user can type immediately.
+            if (dlg.dialog_type === 'url_input' && self.$refs.urlInput) {
+              self.$refs.urlInput.focus();
+            }
+          });
         },
       },
     },
 
     methods: {
       respond: function (action) {
+        var self = this;
         var dlg = this.store.activeDialog;
         if (!dlg) return;
 
@@ -163,12 +182,23 @@
           value = this.inputValue.trim();
         }
 
-        // Send response to server
-        if (window.ClipsyncAPI && window.ClipsyncAPI.respondDialog) {
-          ClipsyncAPI.respondDialog(dlg.dialog_id, action, value);
+        if (!window.ClipsyncAPI || !window.ClipsyncAPI.respondDialog) {
+          // No API client — just dismiss locally.
+          this.store.closeDialog();
+          return;
         }
 
-        this.store.closeDialog();
+        // Notify the server and only dismiss the dialog once the response is
+        // accepted. If the POST fails the server is still waiting on this
+        // dialog_id, so keep it open (and surface the failure) instead of
+        // letting an accepted transfer/pairing silently never happen.
+        return ClipsyncAPI.respondDialog(dlg.dialog_id, action, value)
+          .then(function () {
+            self.store.closeDialog();
+          })
+          .catch(function () {
+            self.store.showToast(self.t('dialog.failed'), 2500, 'error');
+          });
       },
 
       onOverlayClick: function () {
@@ -206,6 +236,41 @@
         if (bytes < 1073741824) return (bytes / 1048576).toFixed(1) + ' MB';
         return (bytes / 1073741824).toFixed(2) + ' GB';
       },
+    },
+
+    mounted: function () {
+      var self = this;
+      // Allow Escape to dismiss non-blocking server-pushed dialogs. Blocking
+      // dialogs (progress, confirm) must not be force-closed mid-operation.
+      this._onDialogKeydown = function (e) {
+        if (e.key !== 'Escape') return;
+        var dlg = self.store.activeDialog;
+        if (!dlg) return;
+        if (dlg.dialog_type === 'progress' || dlg.dialog_type === 'confirm') return;
+        // Dismiss through the same path as the cancel/close button so the
+        // server gets the proper response.
+        if (dlg.dialog_type === 'alert') {
+          self.respond('ok');
+        } else if (dlg.dialog_type === 'qr_code') {
+          self.respond('close');
+        } else if (dlg.dialog_type === 'transfer_request') {
+          self.respond('reject');
+        } else {
+          // pick_peer / url_input
+          self.respond('cancel');
+        }
+        // This dialog owns the Escape key — don't let the app-level handler
+        // also act on the same keypress (double response / selection clear).
+        e.stopImmediatePropagation();
+      };
+      document.addEventListener('keydown', this._onDialogKeydown);
+    },
+
+    beforeUnmount: function () {
+      if (this._onDialogKeydown) {
+        document.removeEventListener('keydown', this._onDialogKeydown);
+        this._onDialogKeydown = null;
+      }
     },
   };
 

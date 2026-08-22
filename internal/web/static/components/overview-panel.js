@@ -54,10 +54,6 @@
         return this.o.recentItems || [];
       },
 
-      bytesDisplay: function () {
-        return this._fmtBytes(this.o.transferBytes || 0);
-      },
-
       netHealthClass: function () {
         if (this.netHealth === 'ok') return 'net-health-dot--ok';
         if (this.netHealth === 'fail') return 'net-health-dot--fail';
@@ -154,15 +150,6 @@
         this._animTimers[key] = requestAnimationFrame(step);
       },
 
-      _fmtBytes: function (n) {
-        n = Number(n) || 0;
-        if (n < 1024) return n + ' B';
-        var units = ['KB', 'MB', 'GB', 'TB'];
-        var i = -1;
-        do { n /= 1024; i++; } while (n >= 1024 && i < units.length - 1);
-        return n.toFixed(n >= 100 ? 0 : 1) + ' ' + units[i];
-      },
-
       timeAgo: function (ts) {
         if (!ts) return '';
         var sec = Math.max(0, Math.floor(Date.now() / 1000 - Number(ts)));
@@ -190,13 +177,7 @@
       },
 
       typeIcon: function (type) {
-        var t = String(type || '').toUpperCase();
-        if (t.indexOf('IMAGE') !== -1) return '🖼️';
-        if (t.indexOf('HTML') !== -1) return '🌐';
-        if (t.indexOf('RTF') !== -1) return '📝';
-        if (t.indexOf('FILE') !== -1) return '📁';
-        if (t.indexOf('URL') !== -1) return '🔗';
-        return '📋';
+        return ClipsyncAPI.typeIcon(type);
       },
 
       toggleSync: function () {
@@ -243,12 +224,22 @@
 
       saveName: function () {
         var name = this.nameInput.trim();
+        var self = this;
         if (name && name !== this.store.deviceName) {
           ClipsyncAPI.updateSettings({ device_name: name })
-            .then(function () { window.__CLIPSYNC_STORE__.deviceName = name; })
-            .catch(function () {});
+            .then(function () {
+              window.__CLIPSYNC_STORE__.deviceName = name;
+              self.editingName = false;
+            })
+            .catch(function () {
+              // Keep the editor open and restore the old name so the failure
+              // isn't silently swallowed.
+              self.nameInput = self.store.deviceName;
+              self.store.showToast(self.t('dialog.failed'), 2000);
+            });
+        } else {
+          this.editingName = false;
         }
-        this.editingName = false;
       },
 
       cancelEditName: function () { this.editingName = false; },
@@ -350,19 +341,19 @@
             '<div class="overview-toggles">' +
               '<div class="overview-toggle-row">' +
                 '<span>{{ t(\'overview.sync\') }}</span>' +
-                '<button class="settings-toggle" :class="{ \'settings-toggle--on\': o.syncEnabled }" @click="toggleSync"><span class="settings-toggle__knob"></span></button>' +
+                '<button class="settings-toggle" role="switch" :aria-checked="o.syncEnabled" :aria-label="t(\'overview.sync\')" :class="{ \'settings-toggle--on\': o.syncEnabled }" @click="toggleSync"><span class="settings-toggle__knob"></span></button>' +
               '</div>' +
               '<div class="overview-toggle-row">' +
                 '<span>{{ t(\'overview.discovery\') }}</span>' +
-                '<button class="settings-toggle" :class="{ \'settings-toggle--on\': o.discovering }" @click="toggleDiscovery"><span class="settings-toggle__knob"></span></button>' +
+                '<button class="settings-toggle" role="switch" :aria-checked="o.discovering" :aria-label="t(\'overview.discovery\')" :class="{ \'settings-toggle--on\': o.discovering }" @click="toggleDiscovery"><span class="settings-toggle__knob"></span></button>' +
               '</div>' +
               '<div class="overview-toggle-row">' +
                 '<span>{{ t(\'overview.visibility\') }}</span>' +
-                '<button class="settings-toggle" :class="{ \'settings-toggle--on\': o.visible }" @click="toggleVisibility"><span class="settings-toggle__knob"></span></button>' +
+                '<button class="settings-toggle" role="switch" :aria-checked="o.visible" :aria-label="t(\'overview.visibility\')" :class="{ \'settings-toggle--on\': o.visible }" @click="toggleVisibility"><span class="settings-toggle__knob"></span></button>' +
               '</div>' +
               '<div class="overview-toggle-row">' +
                 '<span>{{ t(\'overview.web_companion\') }}</span>' +
-                '<button class="settings-toggle" :class="{ \'settings-toggle--on\': o.webEnabled }" @click="toggleWebCompanion"><span class="settings-toggle__knob"></span></button>' +
+                '<button class="settings-toggle" role="switch" :aria-checked="o.webEnabled" :aria-label="t(\'overview.web_companion\')" :class="{ \'settings-toggle--on\': o.webEnabled }" @click="toggleWebCompanion"><span class="settings-toggle__knob"></span></button>' +
               '</div>' +
             '</div>' +
           '</div>' +

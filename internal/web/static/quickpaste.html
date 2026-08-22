@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no,viewport-fit=cover">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <title>Quick Paste</title>
 <style>
 /* ═══════════════════════════════════════════════════════════════════
@@ -212,6 +212,15 @@ body::after {
   animation: qpSlideUp 0.35s cubic-bezier(0.34, 1.56, 0.64, 1) forwards;
 }
 
+/* Re-rendered items (Arrow/Enter/click) skip the entry animation so the
+   list doesn't replay the slide-up on every keystroke. Defined here, before
+   the .qp-item--selected / .qp-item--pasted rules, so those still win and
+   keep their border-glow / paste-flash animations. */
+.qp-item--no-entry {
+  opacity: 1;
+  animation: none;
+}
+
 /* Subtle inner glow on hover */
 .qp-item::after {
   content: '';
@@ -390,6 +399,9 @@ body::after {
   pointer-events: none;
   transition: opacity var(--clipsync-transition-fast);
   white-space: nowrap;
+  max-width: 88vw;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .qp-toast--visible {
@@ -488,6 +500,16 @@ body::after {
   .qp-item__text { font-size: 15px; }
   .qp-item__time { font-size: 11px; }
 }
+
+/* ── Reduced motion: freeze aurora / pulse / entry animations ─── */
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+  html { scroll-behavior: auto; }
+}
 </style>
 </head>
 <body>
@@ -496,14 +518,14 @@ body::after {
   <!-- Header -->
   <header class="qp-header">
     <div class="qp-header__left">
-      <div class="qp-header__title">&#x26A1; <span id="qpTitle">Quick Paste</span></div>
+      <div class="qp-header__title">&#x26A1; <span id="qpTitle" style="visibility:hidden">Quick Paste</span></div>
       <div class="qp-header__subtitle" id="qpSubtitle"></div>
     </div>
     <button class="qp-header__close" onclick="closeWindow()" title="Close (Esc)">&times;</button>
   </header>
 
   <!-- Items -->
-  <div class="qp-body" id="items" role="listbox" aria-label="Clipboard items">
+  <div class="qp-body" id="items" role="listbox" aria-label="Clipboard items" tabindex="0">
     <div class="qp-skeleton" style="animation-delay: 0ms"></div>
     <div class="qp-skeleton" style="animation-delay: 60ms"></div>
     <div class="qp-skeleton" style="animation-delay: 120ms"></div>
@@ -532,6 +554,7 @@ body::after {
   var IS_TOUCH = ('ontouchstart' in window) ||
     (navigator.maxTouchPoints && navigator.maxTouchPoints > 0);
   var IS_ZH = (navigator.language || '').toLowerCase().indexOf('zh') === 0;
+  document.documentElement.lang = IS_ZH ? 'zh-CN' : 'en';
 
   /* ═══════════════════════════════════════════════════════════════
      State
@@ -552,6 +575,9 @@ body::after {
 
   var itemsEl = document.getElementById('items');
   var toastEl = document.getElementById('toast');
+  // First items render plays the staggered slide-up; later re-renders
+  // (Arrow/Enter/click) must not replay it, or the list flickers.
+  var itemsRendered = false;
 
   /* ═══════════════════════════════════════════════════════════════
      API helpers
@@ -581,6 +607,10 @@ body::after {
           state.selected = 0;
         }
         render();
+        // Put keyboard focus on the listbox so Arrow/Enter work immediately.
+        if (state.items.length > 0 && !IS_TOUCH) {
+          itemsEl.focus();
+        }
       })
       .catch(function (err) {
         state.loading = false;
@@ -716,11 +746,11 @@ body::after {
     if (!ts) { return ''; }
     var now = Date.now() / 1000;
     var diff = now - ts;
-    if (diff < 10)   { return 'just now'; }
-    if (diff < 60)   { return Math.floor(diff) + 's ago'; }
-    if (diff < 3600) { return Math.floor(diff / 60) + 'm ago'; }
-    if (diff < 86400) { return Math.floor(diff / 3600) + 'h ago'; }
-    if (diff < 604800) { return Math.floor(diff / 86400) + 'd ago'; }
+    if (diff < 10)   { return IS_ZH ? '刚刚' : 'just now'; }
+    if (diff < 60)   { return Math.floor(diff) + (IS_ZH ? '秒前' : 's ago'); }
+    if (diff < 3600) { return Math.floor(diff / 60) + (IS_ZH ? '分钟前' : 'm ago'); }
+    if (diff < 86400) { return Math.floor(diff / 3600) + (IS_ZH ? '小时前' : 'h ago'); }
+    if (diff < 604800) { return Math.floor(diff / 86400) + (IS_ZH ? '天前' : 'd ago'); }
     var d = new Date(ts * 1000);
     return d.toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
   }
@@ -730,6 +760,9 @@ body::after {
   }
 
   function render() {
+    // No active option after a re-render until the items loop restores it.
+    itemsEl.removeAttribute('aria-activedescendant');
+
     // ── Loading ──────────────────────────────────────────────────
     if (state.loading) {
       itemsEl.innerHTML = '';
@@ -772,9 +805,16 @@ body::after {
         var item = state.items[index];
         var el = document.createElement('div');
         el.className = 'qp-item';
+        el.setAttribute('id', 'qp-item-' + index);
         el.setAttribute('role', 'option');
         el.setAttribute('aria-selected', index === state.selected ? 'true' : 'false');
-        el.style.animationDelay = (index * 30) + 'ms';
+        // Replay the staggered entry animation only on the first render;
+        // re-renders (Arrow/Enter/click) would otherwise flicker every item.
+        if (itemsRendered) {
+          el.classList.add('qp-item--no-entry');
+        } else {
+          el.style.animationDelay = (index * 30) + 'ms';
+        }
 
         if (index === state.selected) {
           el.classList.add('qp-item--selected');
@@ -791,7 +831,7 @@ body::after {
 
         var icon = getTypeIcon(item.content_type);
         var number = index + 1;
-        var preview = item.text_preview || item.content_type || '(empty)';
+        var preview = item.text_preview || item.content_type || (IS_ZH ? '(空)' : '(empty)');
         var time = getRelativeTime(item.timestamp);
 
         el.innerHTML =
@@ -804,6 +844,10 @@ body::after {
 
         itemsEl.appendChild(el);
       })(i2);
+    }
+    itemsRendered = true;
+    if (state.selected >= 0) {
+      itemsEl.setAttribute('aria-activedescendant', 'qp-item-' + state.selected);
     }
   }
 
@@ -897,6 +941,7 @@ body::after {
   var titleEl = document.getElementById('qpTitle');
   if (titleEl) {
     titleEl.textContent = IS_ZH ? '快速粘贴' : 'Quick Paste';
+    titleEl.style.visibility = 'visible';
   }
   if (subtitleEl) {
     subtitleEl.textContent = IS_TOUCH

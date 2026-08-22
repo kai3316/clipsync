@@ -74,12 +74,7 @@
 
     computed: {
       typeIcon: function () {
-        var ct = (this.item.content_type || '').toUpperCase();
-        if (ct === 'IMAGE' || ct === 'IMAGE_EMF') return '🖼';
-        if (ct === 'FILE') return '📄';
-        if (ct === 'HTML') return '🌐';
-        if (ct === 'RTF') return '📋';
-        return '📝';
+        return ClipsyncAPI.typeIcon(this.item.content_type);
       },
 
       typeLabel: function () {
