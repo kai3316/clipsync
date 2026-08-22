@@ -7,21 +7,20 @@ exchanging clipboard content through the full pipeline:
 Covers every platform pair: Win↔Mac, Win↔Linux, Mac↔Linux.
 """
 
-import sys
 import os
+import sys
 import time
 
 import pytest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 from internal.clipboard.format import ClipboardContent, ContentType, SyncMessage
-from internal.protocol.codec import encode_message, decode_message
+from internal.protocol.codec import decode_message, encode_message
 from internal.security.pairing import PairingManager
 from internal.sync.manager import SyncManager
-
 
 # ── Test infrastructure: two-node setup ──────────────────────────────────
 
@@ -423,7 +422,6 @@ class TestPairingExchange:
         bob_original = PairingManager("bob", "Bob")
         bob_impostor = PairingManager("bob", "Bob")  # same ID, different key
 
-        alice_id = alice.load_or_create_identity("", "")
         bob_original_id = bob_original.load_or_create_identity("", "")
         bob_fake_id = bob_impostor.load_or_create_identity("", "")
 
@@ -484,7 +482,7 @@ class TestWireFormatCompatibility:
         """All metadata in the wire format must be ASCII — zero-byte payload is fine."""
         msg = SyncMessage(
             content=ClipboardContent(types={
-                ContentType.TEXT: "你好".encode("utf-8"),  # binary payload
+                ContentType.TEXT: "你好".encode(),  # binary payload
             }),
             msg_id="test123",
             source_device="test-device",

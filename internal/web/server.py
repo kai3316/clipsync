@@ -13,13 +13,13 @@ import json
 import logging
 import mimetypes
 import os
+import posixpath
 import socket
 import sys
-import time
-import urllib.parse
-from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
-from io import BytesIO
 import threading
+import urllib.parse
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from io import BytesIO
 
 logger = logging.getLogger(__name__)
 
@@ -27,6 +27,23 @@ logger = logging.getLogger(__name__)
 # every static asset request; re-reading and re-parsing the locale JSON file
 # each time is wasteful.
 _i18n_cache: dict[str, str] = {}
+
+
+def _escape_script_json(json_text: str) -> str:
+    """Escape ``<``, ``>``, ``&`` in an already-JSON-encoded string.
+
+    json.dumps leaves those three characters as-is, so a value containing
+    ``</script>`` would terminate the inline <script> element they are
+    interpolated into.  Re-encoding them (legal JSON escapes, transparent
+    to the browser) keeps the literal inside the script block regardless.
+    """
+    return json_text.replace("<", "\\u003c").replace(">", "\\u003e").replace("&", "\\u0026")
+
+
+def _js_string(value: str) -> str:
+    """Serialize a string for safe embedding inside an inline <script>."""
+    return _escape_script_json(json.dumps(value, ensure_ascii=False))
+
 
 # ── Upload directory ─────────────────────────────────────────────
 
@@ -590,8 +607,8 @@ class WebServer:
         self._history = self._upgrade_history(clipboard_history)
 
         # Import ws module lazily to avoid circular imports
-        from internal.web.ws import WebSocketManager
         from internal.web.dialog import DialogManager
+        from internal.web.ws import WebSocketManager
 
         self._ws_manager = WebSocketManager(
             cfg=cfg,
@@ -954,7 +971,7 @@ class WebServer:
                 try:
                     if not os.path.isfile(json_path):
                         raise OSError("no locale JSON file")
-                    with open(json_path, "r", encoding="utf-8") as f:
+                    with open(json_path, encoding="utf-8") as f:
                         translations = json.load(f)
                 except (OSError, json.JSONDecodeError, UnicodeDecodeError):
                     logger.warning("Failed to load locale JSON: %s, falling back to Python dict", json_path)
@@ -972,6 +989,8 @@ class WebServer:
                 inner_self.send_header("Content-Type", "application/json; charset=utf-8")
                 inner_self.send_header("Cache-Control", "no-cache")
                 inner_self.send_header("Access-Control-Allow-Origin", "*")
+                inner_self.send_header("Referrer-Policy", "no-referrer")
+                inner_self.send_header("X-Content-Type-Options", "nosniff")
                 inner_self.end_headers()
                 try:
                     inner_self.wfile.write(json.dumps(data, ensure_ascii=False).encode("utf-8"))
@@ -982,6 +1001,8 @@ class WebServer:
                 inner_self.send_response(status)
                 inner_self.send_header("Content-Type", "text/html; charset=utf-8")
                 inner_self.send_header("Cache-Control", "no-cache")
+                inner_self.send_header("Referrer-Policy", "no-referrer")
+                inner_self.send_header("X-Content-Type-Options", "nosniff")
                 inner_self.end_headers()
                 try:
                     inner_self.wfile.write(html.encode("utf-8"))
@@ -1075,7 +1096,7 @@ class WebServer:
                 text_exts = (".html", ".js", ".css", ".json", ".svg")
                 if safe_path.endswith(text_exts) or mime.startswith("text/"):
                     try:
-                        with open(full_path, "r", encoding="utf-8") as f:
+                        with open(full_path, encoding="utf-8") as f:
                             content = f.read()
                         # Only do full interpolation for HTML files
                         is_html = safe_path.endswith(".html")
@@ -1095,7 +1116,12 @@ class WebServer:
                 # WebView would serve a 1-hour-stale copy of CSS/JS and edits
                 # would never appear after a restart.
                 inner_self.send_header("Cache-Control", "no-cache")
-                inner_self.send_header("Access-Control-Allow-Origin", "*")
+                # No ACAO:* here: these assets (index.html, JS, CSS) carry the
+                # interpolated auth token, so they must never be readable
+                # cross-origin.  Same-origin loads (webview / PWA) don't need
+                # CORS.
+                inner_self.send_header("Referrer-Policy", "no-referrer")
+                inner_self.send_header("X-Content-Type-Options", "nosniff")
                 inner_self.end_headers()
                 try:
                     inner_self.wfile.write(data)
@@ -1120,13 +1146,14 @@ class WebServer:
                 # Full interpolation only for HTML files
                 if is_html:
                     replacements = [
-                        ("__CLIPSYNC_I18N_DATA__", i18n_json),
-                        ("__CLIPSYNC_I18N_LOCALE__", locale_code_json),
-                        ("__I18N__", i18n_json),
-                        # JSON-encode so a device name containing a quote or
-                        # script tag cannot break the inline <script> literals.
-                        ("__DEVICE_ID__", json.dumps(cfg.device_id, ensure_ascii=False)),
-                        ("__DEVICE_NAME__", json.dumps(cfg.device_name, ensure_ascii=False)),
+                        # Escape <, >, & even in the already-serialized i18n
+                        # payload so no translation string can break out of the
+                        # inline <script> block.
+                        ("__CLIPSYNC_I18N_DATA__", _escape_script_json(i18n_json)),
+                        ("__CLIPSYNC_I18N_LOCALE__", _escape_script_json(locale_code_json)),
+                        ("__I18N__", _escape_script_json(i18n_json)),
+                        ("__DEVICE_ID__", _js_string(cfg.device_id)),
+                        ("__DEVICE_NAME__", _js_string(cfg.device_name)),
                     ]
                     for placeholder, value in replacements:
                         if placeholder in content:
@@ -1149,6 +1176,11 @@ class WebServer:
             def do_GET(inner_self):
                 parsed = urllib.parse.urlparse(inner_self.path)
                 path = parsed.path
+                # Collapse path aliases (`//index.html`, `/./index.html`,
+                # `/a//b`) to their canonical form so they route to the same
+                # handler as the exact path — otherwise they fall through to
+                # the CORS-enabled static path that embeds the auth token.
+                path = posixpath.normpath(path) if path else path
                 qs = parsed.query
                 query_params = urllib.parse.parse_qs(qs)
 
@@ -1246,16 +1278,16 @@ class WebServer:
                     static_index = os.path.join(static_dir, "index.html")
                     if os.path.isfile(static_index):
                         try:
-                            with open(static_index, "r", encoding="utf-8") as f:
+                            with open(static_index, encoding="utf-8") as f:
                                 html = f.read()
                             html = inner_self._interpolate_html(html)
                             inner_self._send_html(html)
                         except OSError:
                             inner_self._send_json({"error": "failed to load page"}, 500)
                     else:
-                        html = _FALLBACK_HTML.replace("__TOKEN__", cfg.web_token)
-                        html = html.replace("__DEVICE_ID__", cfg.device_id)
-                        html = html.replace("__DEVICE_NAME__", cfg.device_name)
+                        html = _FALLBACK_HTML.replace("__TOKEN__", _js_string(cfg.web_token))
+                        html = html.replace("__DEVICE_ID__", _js_string(cfg.device_id))
+                        html = html.replace("__DEVICE_NAME__", _js_string(cfg.device_name))
                         # Localize the fallback page's brand when the app is in Chinese.
                         if cfg.language == "zh-CN":
                             html = html.replace("<title>ClipSync Web</title>", "<title>剪贴同步 Web</title>")
@@ -1320,6 +1352,7 @@ class WebServer:
                         on_reset_dedup=on_reset_dedup,
                         get_certs=get_certs,
                         get_diagnostics=get_diagnostics,
+                        on_diagnostics_request=on_diagnostics_request,
                         on_update_download=on_update_download,
                     )
                     inner_self.send_response(status)
@@ -1340,6 +1373,8 @@ class WebServer:
             def do_POST(inner_self):
                 parsed = urllib.parse.urlparse(inner_self.path)
                 path = parsed.path
+                # Mirror do_GET: normalize path aliases before route matching.
+                path = posixpath.normpath(path) if path else path
                 qs = parsed.query
                 query_params = urllib.parse.parse_qs(qs)
 
@@ -1436,6 +1471,7 @@ class WebServer:
                         on_reset_dedup=on_reset_dedup,
                         get_certs=get_certs,
                         get_diagnostics=get_diagnostics,
+                        on_diagnostics_request=on_diagnostics_request,
                         on_update_download=on_update_download,
                     )
                     inner_self.send_response(status)

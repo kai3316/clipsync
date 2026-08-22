@@ -5,8 +5,8 @@ batches. A single immediate capture may miss formats that arrive later.
 This module retries capture with increasing delays to catch late-arriving data.
 """
 
-import time
 import logging
+import time
 
 from internal.clipboard.format import ContentType
 

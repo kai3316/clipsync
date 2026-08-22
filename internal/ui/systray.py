@@ -13,7 +13,7 @@ Uses pystray with Pillow for icon rendering.
 import ctypes
 import logging
 import sys
-from typing import Callable
+from collections.abc import Callable
 
 import pystray
 from PIL import Image, ImageDraw
@@ -265,8 +265,10 @@ class SystrayApp:
         if self._on_enable_toggle:
             self._on_enable_toggle(self._syncing)
         logger.info("Sync %s via tray", "enabled" if self._syncing else "paused")
-        if self._tray:
-            self._tray.update_menu()
+        # Do NOT call update_menu() here: this callback runs while the context
+        # menu is open (TrackPopupMenuEx on Windows), and update_menu() tears
+        # down the HMENU being tracked.  The checkbox is live-read via
+        # checked=lambda, so the new state renders without a rebuild.
 
     def _on_open_dashboard_click(self, icon, item):
         if self._on_open_dashboard:

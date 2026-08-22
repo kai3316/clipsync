@@ -8,13 +8,13 @@ filtering preferences, and version information.
 import logging
 import os
 import tkinter as tk
-from internal.ui.dialogs import ask_yesno, show_info, show_warning
-from typing import Callable
+from collections.abc import Callable
 
 import customtkinter as ctk
 
 from internal.clipboard.filter import ALL_CATEGORIES
 from internal.i18n import T, available_locales, set_locale
+from internal.ui.dialogs import ask_yesno, show_info, show_warning
 from internal.web.server import WebServer
 
 logger = logging.getLogger(__name__)
@@ -653,9 +653,9 @@ class SettingsWindow:
         if not self._web_qr_label:
             return
         try:
+
             import qrcode as _qrcode
-            from io import BytesIO
-            from PIL import Image, ImageTk
+            from PIL import Image
 
             token = self._web_token_var.get() if self._web_token_var else ""
             port = self._web_port_var.get() if self._web_port_var else "19991"
@@ -1129,8 +1129,8 @@ class SettingsWindow:
         return panel
 
     def _browse_receive_dir(self):
-        from tkinter import filedialog
         from pathlib import Path
+        from tkinter import filedialog
         directory = filedialog.askdirectory(
             parent=self._window,
             title=T("settings_window.receive_dir"),
@@ -1215,6 +1215,7 @@ class SettingsWindow:
     def _restart_app(self) -> None:
         import subprocess
         import sys
+
         from internal.config.config import _config_dir
         # Remove lock file so the new instance won't see "already running"
         try:
@@ -1408,9 +1409,10 @@ class SettingsWindow:
 
     def _open_data_folder(self):
         """Open the config directory in the system file explorer."""
-        from internal.config.config import _config_dir
         import platform
         import subprocess
+
+        from internal.config.config import _config_dir
         path = str(_config_dir())
         try:
             system = platform.system()

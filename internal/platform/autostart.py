@@ -12,9 +12,8 @@ Platform support:
 from __future__ import annotations
 
 import os
-import sys
 import platform as _platform
-
+import sys
 
 # ---------------------------------------------------------------------------
 # Internal helpers

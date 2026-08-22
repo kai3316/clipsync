@@ -332,10 +332,15 @@ class ClipboardHistoryDB:
             ).fetchone()[0]
             allowed_unpinned = max(0, self.MAX_ENTRIES - pinned)
             with conn:
+                # Order by timestamp (then entry_id as a tiebreaker) so the
+                # DB trims the same entries the in-memory list drops.  A
+                # paste-to-top touch() re-stamps an old entry as newest, and
+                # trimming by entry_id alone would delete that just-pasted
+                # entry from the DB while the in-memory list keeps it.
                 conn.execute(
                     "DELETE FROM history WHERE pinned = 0 AND entry_id NOT IN ("
                     "  SELECT entry_id FROM history WHERE pinned = 0 "
-                    "  ORDER BY entry_id DESC LIMIT ?)",
+                    "  ORDER BY timestamp DESC, entry_id DESC LIMIT ?)",
                     (allowed_unpinned,),
                 )
             self._secure_db_files()
@@ -460,6 +465,17 @@ class ClipboardHistoryDB:
                 return True
             return False
 
+    def delete_by_id(self, entry_id) -> bool:
+        """Delete an entry by its ``entry_id`` (type-tolerant). Returns True if deleted."""
+        with self._lock:
+            for i, entry in enumerate(self._entries):
+                if str(entry.get("entry_id")) == str(entry_id):
+                    eid = self._entries[i]["entry_id"]
+                    self._entries.pop(i)
+                    self._delete_rows([eid])
+                    return True
+            return False
+
     def pin(self, index: int) -> bool:
         """Pin an entry by display index (matching get_all() order). Pinned items stay at the top."""
         with self._lock:
@@ -487,10 +503,14 @@ class ClipboardHistoryDB:
             self._delete_all_rows()
 
     def find_by_id(self, entry_id: str) -> tuple[int, dict] | tuple[None, None]:
-        """Find an entry by its ``entry_id``. Returns (index, entry) or (None, None)."""
+        """Find an entry by its ``entry_id``. Returns (index, entry) or (None, None).
+
+        Comparison is type-tolerant: ``entry_id`` may arrive as an int (JSON
+        number from the web panel) or a str (URL query parameter).
+        """
         with self._lock:
             for i, entry in enumerate(self._entries):
-                if entry.get("entry_id") == entry_id:
+                if str(entry.get("entry_id")) == str(entry_id):
                     return i, dict(entry)
             return None, None
 
@@ -578,12 +598,14 @@ class ClipboardHistoryDB:
                 if not migrated:
                     return  # no data — DB is empty, JSON didn't exist
 
-            # Load all entries ordered by entry_id DESC (newest first)
+            # Load in display order (pinned first, then newest by timestamp)
+            # so the restored in-memory list matches get_all() and survives a
+            # paste-to-top touch() with the same semantics as the live list.
             rows = conn.execute(
                 "SELECT entry_id, timestamp, content_type, text_preview, "
                 "types, source_device, source_app, source_title, "
                 "pinned, paste_count "
-                "FROM history ORDER BY entry_id DESC"
+                "FROM history ORDER BY pinned DESC, timestamp DESC, entry_id DESC"
             ).fetchall()
 
             self._entries = []

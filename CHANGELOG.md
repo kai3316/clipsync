@@ -2,6 +2,53 @@
 
 All notable changes to ClipSync are documented in this file.
 
+## [1.0.13] — 2026-08-22
+
+### Security
+- **Fixed a cross-origin token leak in the web companion.** The auth token was embedded in every static asset and those assets were served with `Access-Control-Allow-Origin: *`, so any web page could `fetch('http://127.0.0.1:<port>//index.html')` and read the token. Path aliases (`//index.html`, `/./index.html`) are now normalized to the canonical route, token-bearing static files are no longer CORS-readable, and all responses send `Referrer-Policy: no-referrer` + `X-Content-Type-Options: nosniff`.
+- **Fixed stored XSS via the device name.** `device_name` / `device_id` are interpolated into an inline `<script>` literal, and `json.dumps` does not escape `<`, so a name containing `</script>` could execute arbitrary JS on the companion origin (exfiltrating the live token). Inline-script values are now escaped (`<` / `>` / `&`).
+- The diagnostics "request permission" route (`/api/diagnostics/request`) is wired to its callback again, so the Firewall / Local Network permission buttons work from the web companion.
+- `/api/logs` now redacts locally-sensitive strings (user home, config dir, web token) before serving them to web clients.
+- Web API routes reject non-object JSON bodies with a clean 400 instead of a 500 plus a full stack trace.
+
+### Sync & Clipboard
+- Fixed a race in the sync manager where two debounced reads could run in parallel (a rich-content capture takes ~1.4s), broadcasting stale clipboard content out of order or dropping the newest copy — reads are now serialized.
+- Windows: the clipboard reader and writer no longer race on `OpenClipboard`, so an incoming sync is no longer silently dropped mid-read; writes retry briefly, and a non-UTF-8 peer text decodes with `errors="replace"` instead of wiping the clipboard.
+- Content filtering preserves the image format hint, so a filtered BMP/TIFF copy is no longer corrupted on Linux/macOS receivers.
+- Linux: clipboard writes now check the tool's exit code and fall through to the secondary tool instead of silently "succeeding" on failure.
+- History: `find_by_id` is type-tolerant (int vs str ids), fixing `/api/history/item` always returning 404; dashboard Copy/Delete act on the entry id so a search filter can no longer target the wrong entry; paste-to-top ordering is consistent between memory and the database so a just-pasted entry is not trimmed away on restart.
+
+### File Transfer
+- A late `file_chunk_ack` (e.g. after pause/resume) is now honored while waiting for `FILE_COMPLETE`, instead of being dropped after the first 3 seconds.
+- Cancelling an incoming transfer no longer leaks the open temp handle / `.part` file, and stale `.part` files from a crash are swept on startup.
+- Received files are verified against the total bytes actually written (`received_bytes`), not just the final file size, so a hole left by a short middle chunk is now caught.
+- Release downloads stream to a `.part` file and are verified against the release size before rename, so an interrupted download never leaves a truncated installer at the final path.
+
+### UI
+- Transfers panel progress/state no longer freezes — the change-detection key now uses the real transfer fields.
+- Fixed a Windows tray crash risk: the sync toggle no longer calls `update_menu()` (DestroyMenu) while the context menu is open.
+- Dashboard `after()` timers (chunked history renderer, search debounce, copy-URL reset) are cancelled on hide/close so they can't fire against destroyed widgets.
+- Dashboard network detection (`netsh` / `powershell`, up to ~15s) now runs once in a background thread instead of freezing the UI on every window build.
+
+### First-run onboarding
+- New bilingual **Choose Language** step on the very first launch: every label and option is shown in both 简体中文 and English, so anyone can complete it regardless of which language they read. The choice is remembered and changeable anytime in Settings → Appearance.
+
+### Pairing & device lifecycle (interaction layer)
+- **Pairing is now a true two-sided handshake.** Confirmation no longer happens in a vacuum: after you confirm, your device shows "已确认 · 等待对方确认…" and tells the peer; when the peer confirms (or rejects / un-pairs), you get a notification. Every state has a clear bilingual prompt.
+- **Asymmetric confirmation handled**: one side confirming first puts the other side's card into a "对方已确认配对,请在此设备确认" prompt; both sides confirming completes the pairing; a never-confirmed request **expires after 5 minutes** with a "请求已过期" notice.
+- **Reject / unpair propagated**: rejecting a pending request tells the peer ("对方已拒绝配对"); unpairing a paired device tells it too ("对方已取消配对"), and a device that was unpaired on the far side is notified on reconnect.
+- **Device certificate changes** (reinstall / reset) now raise a friendly **重新信任 / 保持不配对** dialog instead of silently dropping the connection — both at startup (one dialog listing affected devices) and at runtime.
+- **Rich pairing card UX**: the pairing code is larger, a guidance line explains to compare the code on both devices, and a verify-the-code confirmation dialog appears before accepting. Device cards show a clear status chip (已连接 / 已配对 · 离线 / 未配对 · 已发现) on both desktop and web.
+- Backup **restore now validates every field** (types/ranges/enums) and persists immediately, so a malformed backup can no longer crash the transport on next start or silently vanish.
+
+### Privacy & LAN exposure
+- **No data reaches an unpaired peer**: the transport drops inbound app frames from unpaired peers and `broadcast()` skips them, so nothing (clipboard, history, files) is obtainable before both devices are paired.
+- **mDNS advertisement tightened**: only RFC 1918 private LAN addresses are advertised (no public / VPN / virtual-adapter IPs), capped at 10, so the device exposes minimal network topology.
+- macOS: fixed an unbounded Objective-C memory leak in the clipboard monitor's 0.4s pasteboard poll (autorelease pools around every ctypes→ObjC bridge call).
+
+### Housekeeping
+- Removed duplicate i18n dictionary keys and unused variables; applied ruff import-sorting / unused-import cleanups.
+
 ## [1.0.12] — 2026-08-22
 
 ### Fixed

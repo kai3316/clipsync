@@ -13,9 +13,9 @@ import threading
 import time
 import uuid
 from collections import deque
-from typing import Callable, Optional, Union
+from collections.abc import Callable
 
-from internal.clipboard.format import ClipboardContent, ContentType, SyncMessage
+from internal.clipboard.format import ContentType, SyncMessage
 from internal.clipboard.history import ClipboardHistory
 from internal.clipboard.history_db import ClipboardHistoryDB
 from internal.clipboard.platform import create_monitor, create_reader, create_writer
@@ -45,7 +45,7 @@ REMOTE_RATE_MAX = 5
 class SyncManager:
     def __init__(self, device_id: str, device_name: str,
                  reader=None, writer=None, monitor=None,
-                 history: Optional[Union[ClipboardHistory, ClipboardHistoryDB]] = None,
+                 history: ClipboardHistory | ClipboardHistoryDB | None = None,
                  sync_debounce: float = 0.3,
                  retry_enabled: bool = True):
         self._device_id = device_id
@@ -58,6 +58,11 @@ class SyncManager:
         self._on_send: Callable | None = None
         self._on_history_change: Callable | None = None
         self._lock = threading.Lock()
+        # Serializes _do_read_and_send executions.  A rich-content capture
+        # can take ~1.4s, during which _pending_timer is already cleared, so
+        # a second clipboard event would otherwise start a parallel read that
+        # broadcasts stale content out of order (and can drop the newest copy).
+        self._read_lock = threading.Lock()
         self._last_local_hash: str | None = None
         self._last_content_hash: str = ""
         self._dedup_ring: list[str] = []
@@ -261,7 +266,18 @@ class SyncManager:
             self._pending_timer.start()
 
     def _do_read_and_send(self):
-        """Read clipboard after debounce, then broadcast if content is new."""
+        """Read clipboard after debounce, then broadcast if content is new.
+
+        Serialized by ``_read_lock``: a capture can take ~1.4s for rich
+        content while ``_pending_timer`` is already None, so without the lock
+        a second clipboard event could start a parallel capture that
+        broadcasts stale content out of order (or drops the newest copy).
+        """
+        with self._read_lock:
+            self._do_read_and_send_locked()
+
+    def _do_read_and_send_locked(self):
+        """Capture + broadcast. Called while holding ``_read_lock``."""
         with self._lock:
             self._pending_timer = None
             if not self._enabled:

@@ -146,6 +146,7 @@ def post_transfer(body, cfg, on_forward_file=None):
         return {"ok": False, "error": "device_id is required"}, 400
 
     import os
+
     # Only allow forwarding files that live in ClipSync's own data directory —
     # a client supplied path must not make the host send arbitrary files.
     from internal.config.config import _config_dir

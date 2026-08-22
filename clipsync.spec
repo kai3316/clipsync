@@ -53,6 +53,7 @@ hiddenimports += [
     "internal.transport.discovery",
     "internal.ui.dashboard",
     "internal.ui.dialogs",
+    "internal.ui.onboarding",
     "internal.ui.settings_window",
     "internal.ui.systray",
     "internal.security.encryption",

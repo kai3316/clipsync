@@ -8,7 +8,7 @@ Linux:   pynput global hotkey listener
 import logging
 import threading
 import time
-from typing import Callable
+from collections.abc import Callable
 
 logger = logging.getLogger(__name__)
 
@@ -918,9 +918,7 @@ else:  # linux
                 converted.append("<cmd>")
             elif pl in ("`", "~", "grave"):
                 converted.append("<grave>")
-            elif pl in ("space", "tab", "enter", "escape", "backspace", "delete"):
-                converted.append(f"<{pl}>")
-            elif pl.startswith("f") and len(pl) >= 2 and pl[1:].isdigit():
+            elif pl in ("space", "tab", "enter", "escape", "backspace", "delete") or pl.startswith("f") and len(pl) >= 2 and pl[1:].isdigit():
                 converted.append(f"<{pl}>")
             elif len(part) == 1 and part.isascii():
                 converted.append(part.lower())

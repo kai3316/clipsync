@@ -2,19 +2,26 @@
 
 import base64
 import json
+import os
 import struct
 import sys
-import os
 from io import BytesIO
+
 import pytest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from internal.protocol.codec import (
-    encode_message, decode_message, MAGIC, VERSION, HEADER_SIZE,
-)
 from internal.clipboard.format import (
-    ClipboardContent, ContentType, SyncMessage,
+    ClipboardContent,
+    ContentType,
+    SyncMessage,
+)
+from internal.protocol.codec import (
+    HEADER_SIZE,
+    MAGIC,
+    VERSION,
+    decode_message,
+    encode_message,
 )
 
 
@@ -106,7 +113,7 @@ class TestEncodeDecode:
         """Chinese, emoji, and special characters should survive roundtrip."""
         msg = SyncMessage(
             content=ClipboardContent(
-                types={ContentType.TEXT: "你好世界 🌍 émoji test".encode("utf-8")},
+                types={ContentType.TEXT: "你好世界 🌍 émoji test".encode()},
             ),
             msg_id="unicode",
             source_device="test",
@@ -174,7 +181,6 @@ class TestDecodeErrors:
 
     def test_invalid_json_payload(self):
         """Manually construct frame with garbage JSON payload."""
-        import struct
         msg = SyncMessage(
             content=ClipboardContent(types={ContentType.TEXT: b"x"}),
             msg_id="t", source_device="t",

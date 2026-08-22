@@ -141,14 +141,40 @@ def download_latest_release(dest_dir: str) -> str | None:
 
         os.makedirs(dest_dir, exist_ok=True)
         dest_path = os.path.join(dest_dir, asset_name)
+        # Download to a .part file and rename on success, so an interrupted
+        # download never leaves a truncated file at the final installer path
+        # (a leftover the user could double-click as if it were a real
+        # release).
+        temp_path = dest_path + ".part"
         req = urllib.request.Request(browser_url, headers={"User-Agent": "clipsync"})
-        with urllib.request.urlopen(req, timeout=60.0) as resp:
-            with open(dest_path, "wb") as out:
-                while True:
-                    chunk = resp.read(64 * 1024)
-                    if not chunk:
-                        break
-                    out.write(chunk)
+        try:
+            with urllib.request.urlopen(req, timeout=60.0) as resp:
+                with open(temp_path, "wb") as out:
+                    while True:
+                        chunk = resp.read(64 * 1024)
+                        if not chunk:
+                            break
+                        out.write(chunk)
+            # Verify the downloaded size against the release API so a
+            # truncated-but-cleanly-EOF'd stream is rejected, not reported
+            # as a successful download.
+            asset_size = next(
+                (a.get("size") for a in assets if a.get("name") == asset_name),
+                None,
+            )
+            if asset_size:
+                actual = os.path.getsize(temp_path)
+                if actual != int(asset_size):
+                    raise RuntimeError(
+                        f"download size mismatch: expected {asset_size}, got {actual}"
+                    )
+            os.replace(temp_path, dest_path)
+        except Exception:
+            try:
+                os.remove(temp_path)
+            except OSError:
+                pass
+            raise
         logger.info("Downloaded release asset to %s", dest_path)
         return dest_path
     except Exception as exc:

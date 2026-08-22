@@ -4,7 +4,6 @@ import re
 
 from internal.clipboard.format import ClipboardContent, ContentType
 
-
 # ---------------------------------------------------------------------------
 # Compiled regex patterns, grouped by sensitivity category.
 # ---------------------------------------------------------------------------
@@ -211,4 +210,8 @@ class ContentFilter:
             types=filtered_types,
             source_device=content.source_device,
             timestamp=content.timestamp,
+            # Preserve the image format hint: without it the image bytes are
+            # re-labelled as PNG (and zlib-compressed) on the wire, so a
+            # BMP/TIFF copy gets corrupted on Linux/macOS receivers.
+            image_fmt=content.image_fmt,
         )

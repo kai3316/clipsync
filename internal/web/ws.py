@@ -178,7 +178,7 @@ class WebSocketClient:
         try:
             r, _, _ = select.select([self.sock], [], [], timeout)
             return bool(r)
-        except (select.error, ValueError):
+        except (OSError, ValueError):
             return False
 
     def _recv_exact(self, n: int) -> bytes | None:
@@ -190,7 +190,7 @@ class WebSocketClient:
                 if not chunk:
                     return None
                 buf += chunk
-            except (OSError, ConnectionError, socket.timeout):
+            except (TimeoutError, OSError, ConnectionError):
                 return None
         return buf
 

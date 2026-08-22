@@ -1,21 +1,19 @@
 """Tests for PairingManager — identity, peer management, pairing codes."""
 
-import sys
 import os
-import time
+import sys
+
 import pytest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from internal.security.pairing import (
-    PairingManager,
-    DeviceIdentity,
-    PeerIdentity,
+    MAX_PAIRING_ATTEMPTS,
+    PAIRING_CODE_LENGTH,
     CertificateChangedError,
+    PairingManager,
     fingerprint_pem,
     fingerprint_short,
-    PAIRING_CODE_LENGTH,
-    MAX_PAIRING_ATTEMPTS,
 )
 
 
@@ -169,7 +167,7 @@ class TestPairingCode:
         assert "peer-1" in peer_ids
         assert "peer-2" in peer_ids
         # Codes should be 8-digit strings
-        for pid, code, _name in pending:
+        for pid, code, _name, _status in pending:
             assert len(code) == 8
             assert code.isdigit()
 

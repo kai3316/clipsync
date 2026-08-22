@@ -8,15 +8,16 @@ import datetime
 import logging
 import platform
 import socket
+import sys
+import threading
 import time
 import tkinter as tk
-from internal.ui.dialogs import ask_string, ask_yesno, show_error, show_info
-import sys
-from typing import Callable
+from collections.abc import Callable
 
 import customtkinter as ctk
 
 from internal.i18n import T
+from internal.ui.dialogs import ask_string, ask_yesno, show_error, show_info
 
 logger = logging.getLogger(__name__)
 
@@ -333,14 +334,28 @@ class DashboardWindow:
             except tk.TclError:
                 pass
 
+    def _cancel_pending_timers(self):
+        """Cancel every scheduled after() callback before hide/close.
+
+        Timers left running after the window is destroyed fire against dead
+        widgets and raise TclError "invalid command name" (chunked history
+        renderer, search debounce, copy-URL button reset).
+        """
+        for name in (
+            "_breath_timer", "_refresh_job", "_history_search_timer",
+            "_history_chunk_timer", "_copy_url_timer",
+        ):
+            timer = getattr(self, name, None)
+            if timer is not None:
+                try:
+                    self._root.after_cancel(timer)
+                except Exception:
+                    pass
+                setattr(self, name, None)
+
     def _on_hide(self):
         self._breathing = False
-        if self._breath_timer is not None:
-            self._root.after_cancel(self._breath_timer)
-            self._breath_timer = None
-        if self._refresh_job is not None:
-            self._root.after_cancel(self._refresh_job)
-            self._refresh_job = None
+        self._cancel_pending_timers()
         if self._window is not None:
             # CTkToplevel.deiconify() after withdraw() is unreliable on
             # Linux (same root cause as the dialog deadlocks).  Destroy
@@ -358,15 +373,7 @@ class DashboardWindow:
 
     def _on_close(self):
         self._breathing = False
-        if self._breath_timer is not None:
-            self._root.after_cancel(self._breath_timer)
-            self._breath_timer = None
-        if self._refresh_job is not None:
-            self._root.after_cancel(self._refresh_job)
-            self._refresh_job = None
-        if self._history_search_timer is not None:
-            self._root.after_cancel(self._history_search_timer)
-            self._history_search_timer = None
+        self._cancel_pending_timers()
         if self._window is not None:
             self._window.destroy()
             self._window = None
@@ -578,12 +585,70 @@ class DashboardWindow:
         except Exception:
             return "127.0.0.1"
 
+    _network_info_cache: dict | None = None
+    _network_detect_started = False
+
+    @classmethod
+    def _detect_network_info(cls) -> dict:
+        """Detect current network (WiFi SSID + signal / Ethernet link speed).
+
+        Cached per-process: the probes (``netsh`` / ``powershell``) can take
+        up to ~15s and every dashboard rebuild used to re-run them on the UI
+        thread, freezing the whole app.
+        """
+        if cls._network_info_cache is not None:
+            return cls._network_info_cache
+        result = cls._detect_network_info_uncached()
+        cls._network_info_cache = result
+        return result
+
+    def _network_info(self) -> dict:
+        """Return network info for the overview panel.
+
+        If the (one-time) detection has not run yet, returns a placeholder
+        and kicks the probes off the UI thread; the labels update via
+        ``after()`` when the result arrives.
+        """
+        if DashboardWindow._network_info_cache is not None:
+            return DashboardWindow._network_info_cache
+        if not DashboardWindow._network_detect_started:
+            DashboardWindow._network_detect_started = True
+            threading.Thread(
+                target=self._network_detect_worker, daemon=True,
+                name="network-detect",
+            ).start()
+        return {"type": "unknown", "label": T("network.detecting"), "detail": ""}
+
+    def _network_detect_worker(self):
+        try:
+            result = DashboardWindow._detect_network_info_uncached()
+        except Exception:
+            result = {"type": "unknown", "label": T("network.lan"), "detail": ""}
+        DashboardWindow._network_info_cache = result
+        try:
+            self._root.after(0, self._apply_network_info)
+        except Exception:
+            pass
+
+    def _apply_network_info(self):
+        info = DashboardWindow._network_info_cache or {}
+        for attr in ("_net_label", "_net_detail_label"):
+            widget = getattr(self, attr, None)
+            if widget is None:
+                continue
+            try:
+                if widget.winfo_exists():
+                    text = info.get("label" if attr == "_net_label" else "detail", "")
+                    widget.configure(text=text)
+            except Exception:
+                pass
+
     @staticmethod
-    def _detect_network_info() -> dict:
+    def _detect_network_info_uncached() -> dict:
         """Detect current network: WiFi (SSID + signal) or Ethernet. Returns
         {'type': 'wifi'|'ethernet'|'unknown', 'label': str, 'detail': str}."""
-        import subprocess
         import re
+        import subprocess
 
         # Try WiFi detection via netsh (Windows)
         try:
@@ -640,7 +705,7 @@ class DashboardWindow:
         panel = ctk.CTkFrame(wrapper, fg_color="transparent")
         panel.pack(fill="both", expand=True)
         cfg = self._get_config()
-        net = self._detect_network_info()
+        net = self._network_info()
         local_ip = self._detect_local_ip()
 
         ctk.CTkLabel(
@@ -1002,7 +1067,6 @@ class DashboardWindow:
             peers = self._get_peers()
             connected = sum(1 for _, _, _, c, _ in peers if c)
             paired = sum(1 for _, _, p, _, _ in peers if p)
-            known = sum(1 for _, _, p, _, _ in peers if p)  # paired == known
 
             if self._stat_peers:
                 self._stat_peers.configure(text=str(connected))
@@ -1192,8 +1256,8 @@ class DashboardWindow:
                 child.destroy()
             pending = self._get_pending() if self._get_pending else []
             if pending:
-                for peer_id, code, peer_name in pending:
-                    self._create_pending_row(peer_id, code, peer_name)
+                for peer_id, code, peer_name, status in pending:
+                    self._create_pending_row(peer_id, code, peer_name, status)
             else:
                 empty = ctk.CTkLabel(
                     self._pending_frame, text="\U0001F4E8  " + T("empty.no_pending"),
@@ -1226,6 +1290,13 @@ class DashboardWindow:
         else:
             color, status = ACCENT, T("device.discovered")
 
+        if connected:
+            chip_text = T("devices.status_connected")
+        elif paired:
+            chip_text = T("devices.status_paired_offline")
+        else:
+            chip_text = T("devices.status_discovered")
+
         display_name = dev_name or dev_id[:12]
         display_id = dev_id[:12] if dev_name else dev_id[:16]
 
@@ -1248,6 +1319,15 @@ class DashboardWindow:
             r1, text=display_name,
             font=ctk.CTkFont(size=13, weight="bold"),
         ).pack(side="left")
+
+        # Status chip — muted, next to the device name
+        chip = ctk.CTkFrame(r1, fg_color=("gray90", "gray22"), corner_radius=10)
+        chip.pack(side="left", padx=(8, 0))
+        ctk.CTkLabel(
+            chip, text=chip_text,
+            font=ctk.CTkFont(size=10, weight="bold"),
+            text_color=("gray50", "gray60"),
+        ).pack(padx=8, pady=2)
 
         # Action buttons — right side of row 1
         ctk.CTkButton(
@@ -1428,7 +1508,8 @@ class DashboardWindow:
             self._speed_status.pack(anchor="w", padx=14, pady=(2, 0))
         self._on_speed_test()
 
-    def _create_pending_row(self, peer_id: str, code: str, peer_name: str):
+    def _create_pending_row(self, peer_id: str, code: str, peer_name: str,
+                            status: str = "pending"):
         row = ctk.CTkFrame(self._pending_frame, fg_color=("gray90", "gray20"),
                           corner_radius=8)
         row.pack(fill="x", pady=2)
@@ -1436,7 +1517,7 @@ class DashboardWindow:
         inner = ctk.CTkFrame(row, fg_color="transparent")
         inner.pack(fill="x", padx=12, pady=8)
 
-        # Name + buttons in one row
+        # Name + status/buttons in one row
         name_row = ctk.CTkFrame(inner, fg_color="transparent")
         name_row.pack(fill="x")
 
@@ -1445,41 +1526,86 @@ class DashboardWindow:
             font=ctk.CTkFont(size=13, weight="bold"),
         ).pack(side="left")
 
-        ctk.CTkButton(
-            name_row, text=T("ui.reject"), width=56, height=24,
-            fg_color="transparent", border_width=1,
-            text_color=("#E74C3C", "#C0392B"),
-            border_color=("#E74C3C", "#C0392B"),
-            hover_color=("#FADBD8", "#5B2C2C"),
-            font=ctk.CTkFont(size=11),
-            command=lambda pid=peer_id: self._on_reject_pairing(pid),
-        ).pack(side="right", padx=(4, 0))
-
-        ctk.CTkButton(
-            name_row, text=T("ui.confirm"), width=72, height=24,
-            fg_color=STATUS_COLOR,
-            hover_color=("#27AE60", "#1E8449"),
-            font=ctk.CTkFont(size=11),
-            command=lambda pid=peer_id, c=code: self._on_confirm_pairing(pid, c),
-        ).pack(side="right", padx=(4, 0))
+        if status == "confirmed_waiting":
+            # We confirmed locally; the peer hasn't yet.  Show the waiting
+            # state instead of the Confirm button (Reject still cancels).
+            ctk.CTkButton(
+                name_row, text=T("ui.reject"), width=56, height=24,
+                fg_color="transparent", border_width=1,
+                text_color=("#E74C3C", "#C0392B"),
+                border_color=("#E74C3C", "#C0392B"),
+                hover_color=("#FADBD8", "#5B2C2C"),
+                font=ctk.CTkFont(size=11),
+                command=lambda pid=peer_id: self._on_reject_pairing(pid),
+            ).pack(side="right", padx=(4, 0))
+            ctk.CTkLabel(
+                name_row, text="⏳  " + T("pairing.state.confirmed_waiting"),
+                font=ctk.CTkFont(size=11, weight="bold"),
+                text_color=("#B7950B", "#F1C40F"),
+            ).pack(side="right", padx=(8, 0))
+        else:
+            ctk.CTkButton(
+                name_row, text=T("ui.reject"), width=56, height=24,
+                fg_color="transparent", border_width=1,
+                text_color=("#E74C3C", "#C0392B"),
+                border_color=("#E74C3C", "#C0392B"),
+                hover_color=("#FADBD8", "#5B2C2C"),
+                font=ctk.CTkFont(size=11),
+                command=lambda pid=peer_id: self._on_reject_pairing(pid),
+            ).pack(side="right", padx=(4, 0))
+            ctk.CTkButton(
+                name_row, text=T("ui.confirm"), width=72, height=24,
+                fg_color=STATUS_COLOR,
+                hover_color=("#27AE60", "#1E8449"),
+                font=ctk.CTkFont(size=11),
+                command=lambda pid=peer_id, c=code: self._on_confirm_pairing(pid, c),
+            ).pack(side="right", padx=(4, 0))
 
         code_frame = ctk.CTkFrame(inner, fg_color=("#D6EAF8", "#1A3A4A"),
                                   corner_radius=6)
         code_frame.pack(anchor="w", pady=(4, 0))
         ctk.CTkLabel(
             code_frame, text=T("ui.pairing_code", code=code),
-            font=ctk.CTkFont(size=18, weight="bold"),
+            font=ctk.CTkFont(size=20, weight="bold"),
             text_color=ACCENT,
         ).pack(padx=12, pady=6)
+
+        # Status / guidance line: what the user should do next.
+        if status == "confirmed_waiting":
+            hint = T("pairing.state.confirmed_waiting")
+        elif status == "peer_confirmed":
+            hint = "✅  " + T("pairing.state.peer_confirmed")
+        else:
+            hint = T("pairing.guidance")
+        ctk.CTkLabel(
+            inner, text=hint,
+            font=ctk.CTkFont(size=10),
+            text_color=("gray55", "gray55"),
+            justify="left",
+        ).pack(anchor="w", pady=(4, 0))
 
     def _on_confirm_pairing(self, peer_id: str, code: str):
         if not self._on_pair:
             return
+        if not ask_yesno(self._window, T("pairing.verify_title"),
+                         T("pairing.verify_message", code=code)):
+            return  # user declined the code check — do not pair
         success = self._on_pair(peer_id, code)
         if success:
+            # Look up the peer's display name from the pending list.
+            device_name = peer_id
+            try:
+                if self._get_pending:
+                    for pid, _code, pname, _status in self._get_pending():
+                        if pid == peer_id and pname:
+                            device_name = pname
+                            break
+            except Exception:
+                pass
             if self._status_footer:
                 self._status_footer.configure(text=T("footer.paired"))
-            show_info(self._window, T("dialog.paired"), T("notify.paired_success"))
+            show_info(self._window, T("dialog.paired"),
+                      T("pairing.accepted", name=device_name))
         else:
             show_error(
                 self._window,
@@ -1542,6 +1668,8 @@ class DashboardWindow:
 
         self._history_search_var = tk.StringVar()
         self._history_search_timer: str | None = None
+        self._history_chunk_timer: str | None = None
+        self._copy_url_timer: str | None = None
         search_entry = ctk.CTkEntry(
             search_frame, textvariable=self._history_search_var,
             height=32, placeholder_text=T("ui.search"),
@@ -1630,6 +1758,16 @@ class DashboardWindow:
 
     def _render_card_chunk(self):
         """Create up to _CHUNK cards, then yield to the event loop."""
+        self._history_chunk_timer = None
+        # Guard against firing after the window was destroyed mid-chain
+        # (defense-in-depth on top of _cancel_pending_timers).
+        if self._window is None:
+            return
+        try:
+            if not self._window.winfo_exists():
+                return
+        except Exception:
+            return
         start = self._history_shown
         end = min(start + self._CHUNK, self._batch_target)
         for i in range(start, end):
@@ -1638,7 +1776,7 @@ class DashboardWindow:
         self._history_shown = end
 
         if end < self._batch_target:
-            self._root.after(1, self._render_card_chunk)
+            self._history_chunk_timer = self._root.after(1, self._render_card_chunk)
             return
 
         # Batch complete — show 'more' button if entries remain
@@ -1777,6 +1915,10 @@ class DashboardWindow:
         ).pack(side="left")
 
         if preview:
+            # Operate on the entry's id, not its render position: with a
+            # search filter active the card index is into the filtered
+            # subset and no longer matches the full history list.
+            entry_id = entry.get("entry_id")
             ctk.CTkButton(
                 r2, text=T("ui.delete"), width=56, height=24,
                 fg_color="transparent", border_width=1,
@@ -1784,18 +1926,18 @@ class DashboardWindow:
                 border_color=("#E74C3C", "#C0392B"),
                 hover_color=("#FADBD8", "#5B2C2C"),
                 font=self._card_font_btn,
-                command=lambda i=index: self._on_delete_history_item(i),
+                command=lambda eid=entry_id: self._on_delete_history_item(eid),
             ).pack(side="right", padx=(6, 0))
             ctk.CTkButton(
                 r2, text=T("ui.copy"), width=56, height=24,
                 fg_color=("#27AE60", "#2ECC71"),
                 font=self._card_font_btn,
-                command=lambda i=index: self._do_copy_history(i),
+                command=lambda eid=entry_id: self._do_copy_history(eid),
             ).pack(side="right")
 
-    def _do_copy_history(self, index: int):
+    def _do_copy_history(self, entry_id):
         if self._copy_from_history:
-            success = self._copy_from_history(index)
+            success = self._copy_from_history(entry_id)
             if self._status_footer:
                 if success:
                     self._status_footer.configure(
@@ -1823,11 +1965,11 @@ class DashboardWindow:
             self._clear_history()
             self._refresh_history_list()
 
-    def _on_delete_history_item(self, index: int):
+    def _on_delete_history_item(self, entry_id):
         if self._delete_history_item is None:
             return
         if ask_yesno(self._window, T("history.delete_title"), T("history.delete_confirm")):
-            self._delete_history_item(index)
+            self._delete_history_item(entry_id)
             # Defer rebuild so the button animation completes first
             self._root.after(50, self._refresh_history_list)
 
@@ -1979,8 +2121,21 @@ class DashboardWindow:
         transfers = self._get_transfers() if self._get_transfers else []
         history = self._get_transfer_history() if self._get_transfer_history else []
         speed = (self._get_speed_test_result() if self._get_speed_test_result else None) or {}
+        # Change-detection key must use the fields get_transfers() actually
+        # returns (transfer_id/state/progress/paused), not id/status — the
+        # old keys were always None, so progress and state transitions never
+        # triggered a re-render and the panel froze.
         state_key = (
-            tuple((t.get("id"), t.get("status")) for t in transfers),
+            tuple(
+                (
+                    t.get("transfer_id"),
+                    t.get("state"),
+                    round(t.get("progress", 0), 3),
+                    t.get("paused", False),
+                    round(t.get("speed_bytes_per_sec", 0), 1),
+                )
+                for t in transfers
+            ),
             len(history),
             speed.get("state", ""),
             speed.get("result_mbps", 0),
@@ -2390,7 +2545,17 @@ class DashboardWindow:
             self._window.clipboard_clear()
             self._window.clipboard_append(url)
             self._web_copy_btn.configure(text=T("web.copied"))
-            self._root.after(2000, lambda: self._web_copy_btn.configure(text=T("ui.copy")))
+
+            def _reset_copy_label():
+                self._copy_url_timer = None
+                if self._web_copy_btn is not None:
+                    try:
+                        if self._web_copy_btn.winfo_exists():
+                            self._web_copy_btn.configure(text=T("ui.copy"))
+                    except Exception:
+                        pass
+
+            self._copy_url_timer = self._root.after(2000, _reset_copy_label)
 
     def _refresh_web_card(self):
         if self._web_card is None:

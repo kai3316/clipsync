@@ -73,12 +73,14 @@
               '<div class="pairing-request-card__info">' +
                 '<span class="pairing-request-card__name">{{ pr.peer_name || pr.device_name || pr.peer_id }}</span>' +
                 '<span class="pairing-request-card__id">{{ pr.peer_id }}</span>' +
-                '<span class="pairing-request-card__code">{{ t(\'ui.pairing_code\', {code: pr.code}) }}</span>' +
+                '<span class="pairing-request-card__code">{{ t(\'ui.pairing_code_label\') }} <strong>{{ pr.code }}</strong></span>' +
+                '<span class="pairing-request-card__hint">{{ pairingHint(pr) }}</span>' +
               '</div>' +
               '<div class="pairing-request-card__actions">' +
-                '<button class="device-card__action device-card__action--accent" @click="acceptPairing(pr)" :disabled="pairingResponding === pr.peer_id">' +
+                '<button v-if="pr.status !== \'confirmed_waiting\'" class="device-card__action device-card__action--accent" @click="acceptPairing(pr)" :disabled="pairingResponding === pr.peer_id">' +
                   '{{ pairingResponding === pr.peer_id ? \'...\' : t(\'ui.confirm\') }}' +
                 '</button>' +
+                '<span v-else class="pairing-request-card__waiting">⏳ {{ t(\'pairing.state.confirmed_waiting\') }}</span>' +
                 '<button class="device-card__action device-card__action--danger" @click="rejectPairing(pr)" :disabled="pairingResponding === pr.peer_id">' +
                   '{{ t(\'ui.reject\') }}' +
                 '</button>' +
@@ -149,26 +151,38 @@
           });
       },
 
+      pairingHint: function (pr) {
+        var st = pr.status || 'pending';
+        if (st === 'confirmed_waiting') return this.t('pairing.state.confirmed_waiting');
+        if (st === 'peer_confirmed') return '✅ ' + this.t('pairing.state.peer_confirmed');
+        return this.t('devices.pairing_confirm_hint');
+      },
+
       acceptPairing: function (pr) {
-        this.pairingResponding = pr.peer_id;
         var self = this;
-        ClipsyncAPI.sendPairingResponse(pr.peer_id, 'confirm', pr.code || '')
+        this.store.confirm(
+          self.t('device.pairing_confirm_title'),
+          self.t('device.pairing_confirm_msg')
+        )
           .then(function () {
-            var idx = self.store.pairingRequests.findIndex(function (r) {
-              return r.peer_id === pr.peer_id;
-            });
-            if (idx !== -1) self.store.pairingRequests.splice(idx, 1);
-            self.store.showToast(self.t('device.pairing_confirmed'), 2000);
-            // Refresh the device list so the newly paired device shows its
-            // connected/paired state right away instead of staying stale
-            // until the next broadcast.
-            self.refresh();
+            self.pairingResponding = pr.peer_id;
+            ClipsyncAPI.sendPairingResponse(pr.peer_id, 'confirm', pr.code || '')
+              .then(function () {
+                // Do NOT splice the card here: confirmation is two-sided, so
+                // the server keeps it in "waiting for the other device" until
+                // the peer confirms.  Refresh re-renders it with the waiting
+                // state (or removes it once both sides have confirmed).
+                self.refresh();
+              })
+              .catch(function () {
+                self.store.showToast(self.t('device.pairing_failed'), 2000);
+              })
+              .finally(function () {
+                self.pairingResponding = null;
+              });
           })
           .catch(function () {
-            self.store.showToast(self.t('device.pairing_failed'), 2000);
-          })
-          .finally(function () {
-            self.pairingResponding = null;
+            // User cancelled the confirm dialog — do nothing.
           });
       },
 

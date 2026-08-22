@@ -10,7 +10,7 @@ import logging
 import os
 import tempfile
 import zipfile
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -169,7 +169,7 @@ def create_backup(
     from internal.data.export import export_history_json
 
     base = _get_backup_dir(backup_dir)
-    ts = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+    ts = datetime.now(UTC).strftime("%Y%m%d_%H%M%S")
     zip_path = base / f"clipsync_backup_{ts}.zip"
 
     with tempfile.TemporaryDirectory(prefix="clipsync_backup_") as tmp:
@@ -379,22 +379,120 @@ def list_backups(backup_dir: str | None = None) -> list[dict]:
 # Helpers
 # ---------------------------------------------------------------------------
 
+# Value sets for enum-constrained string fields.  Field names and defaults
+# mirror the Config dataclass in internal/config/config.py — keep them in
+# sync when the Config schema changes.
+_APPEARANCE_MODES = {"system", "light", "dark"}
+_LANGUAGES = {"en", "zh-CN"}
+_DEDUP_METHODS = {"sha256", "simple"}
+_APP_FILTER_MODES = {"blacklist", "whitelist"}
+_UI_BACKENDS = {"ctk", "webview"}
+_LOG_LEVELS = {"DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"}
+
+# Per-field validation rules applied during restore.  A backup's config.json
+# is untrusted input, so every field is type- and range-checked before it is
+# written onto the live Config.  A missing rule means the field is simply not
+# applied (unknown / not part of the known schema).  Rule shapes:
+#   ("int", lo, hi)      Python int (bool rejected); clamped to [lo, hi]
+#   ("float",)           int or float (bool rejected); coerced to float
+#   ("bool",)            only a Python bool
+#   ("str",)             any string
+#   ("enum", set)        string in the given set
+#   ("enum", set, True)  string normalized to upper-case, then checked
+#   ("strlist",)         list of strings, or None (the Config default for
+#                        filter_enabled_categories meaning "all enabled")
+_APPLY_SCHEMA: dict[str, tuple] = {
+    "device_name": ("str",),
+    "port": ("int", 1, 65535),
+    "service_type": ("str",),
+    "sync_enabled": ("bool",),
+    "auto_start": ("bool",),
+    "filter_enabled_categories": ("strlist",),
+    "relay_url": ("str",),
+    "history_max_entries": ("int", 1, 100000),
+    "file_receive_dir": ("str",),
+    "sync_debounce": ("float",),
+    "clipboard_poll_interval": ("float",),
+    "max_reconnect_attempts": ("int", 0, 1000),
+    "transfer_timeout": ("float",),
+    "log_level": ("enum", _LOG_LEVELS, True),
+    "notifications_enabled": ("bool",),
+    "encryption_enabled": ("bool",),
+    "appearance_mode": ("enum", _APPEARANCE_MODES),
+    "language": ("enum", _LANGUAGES),
+    "paste_to_top": ("bool",),
+    "low_memory_mode": ("bool",),
+    "retry_capture_enabled": ("bool",),
+    "dedup_method": ("enum", _DEDUP_METHODS),
+    "app_filter_enabled": ("bool",),
+    "app_filter_mode": ("enum", _APP_FILTER_MODES),
+    "app_filter_list": ("strlist",),
+    "source_tracking_enabled": ("bool",),
+    "ui_backend": ("enum", _UI_BACKENDS),
+    "ui_animation_enabled": ("bool",),
+    "sound_enabled": ("bool",),
+    "web_enabled": ("bool",),
+    "web_port": ("int", 1, 65535),
+    "web_history_limit": ("int", 1, 100000),
+}
+
+# Sentinel returned by _validate_config_value when a field must be skipped.
+_SKIP = object()
+
+
+def _validate_config_value(value: object, rule: tuple):
+    """Validate/coerce one backup config value against a schema rule.
+
+    Returns the value to apply, or ``_SKIP`` when the value is invalid and the
+    field must be left untouched.  Never raises.
+    """
+    kind = rule[0]
+    if kind == "int":
+        if not isinstance(value, int) or isinstance(value, bool):
+            return _SKIP
+        lo, hi = rule[1], rule[2]
+        return max(lo, min(hi, value))
+    if kind == "float":
+        if not isinstance(value, (int, float)) or isinstance(value, bool):
+            return _SKIP
+        return float(value)
+    if kind == "bool":
+        return value if isinstance(value, bool) else _SKIP
+    if kind == "str":
+        return value if isinstance(value, str) else _SKIP
+    if kind == "enum":
+        if not isinstance(value, str):
+            return _SKIP
+        if len(rule) > 2 and rule[2]:  # normalize (e.g. log_level -> upper)
+            value = value.strip().upper()
+        return value if value in rule[1] else _SKIP
+    if kind == "strlist":
+        if value is None:
+            return None
+        if not isinstance(value, list) or not all(isinstance(i, str) for i in value):
+            return _SKIP
+        return value
+    return _SKIP
+
 
 def _apply_config(data: dict, cfg: Config) -> None:
-    """Apply a subset of config fields from backup data."""
-    safe_fields = {
-        "device_name", "port", "service_type", "sync_enabled",
-        "auto_start", "filter_enabled_categories", "relay_url",
-        "history_max_entries", "file_receive_dir", "sync_debounce",
-        "clipboard_poll_interval", "max_reconnect_attempts",
-        "transfer_timeout", "log_level", "notifications_enabled",
-        "encryption_enabled", "appearance_mode", "language",
-        "paste_to_top", "low_memory_mode", "retry_capture_enabled",
-        "dedup_method", "app_filter_enabled", "app_filter_mode",
-        "app_filter_list", "source_tracking_enabled", "ui_backend",
-        "ui_animation_enabled", "sound_enabled", "web_enabled",
-        "web_port", "web_history_limit",
-    }
-    for key in safe_fields:
-        if key in data and hasattr(cfg, key):
-            setattr(cfg, key, data[key])
+    """Apply validated config fields from backup data.
+
+    Every field in *data* is type- and range-checked against ``_APPLY_SCHEMA``
+    before being written onto *cfg*.  Unknown fields and fields whose value has
+    the wrong type are skipped with a warning; numeric fields that are out of
+    range are clamped to the nearest boundary.  A malformed backup can
+    therefore never put the Config into an unusable state or crash a transport
+    server on the next start.
+    """
+    for key, value in data.items():
+        if key not in _APPLY_SCHEMA or not hasattr(cfg, key):
+            continue
+        validated = _validate_config_value(value, _APPLY_SCHEMA[key])
+        if validated is _SKIP:
+            logger.warning(
+                "Backup restore skipped invalid config field '%s' (%s)",
+                key, type(value).__name__,
+            )
+            continue
+        setattr(cfg, key, validated)

@@ -4,13 +4,10 @@ Simulates clipboard behavior for Windows, macOS, and Linux in-process,
 verifying that the content format pipeline works correctly for each platform.
 """
 
-import sys
 import os
-import tempfile
-import subprocess
 import struct
-from io import BytesIO
-from pathlib import Path
+import subprocess
+import sys
 
 import pytest
 
@@ -248,12 +245,12 @@ class TestCrossPlatformContentParity:
 
         # Same logical content should hash the same
         c1 = ClipboardContent(types={
-            ContentType.TEXT: "text".encode("utf-8"),
-            ContentType.HTML: "<p>html</p>".encode("utf-8"),
+            ContentType.TEXT: b"text",
+            ContentType.HTML: b"<p>html</p>",
         })
         c2 = ClipboardContent(types={
-            ContentType.HTML: "<p>html</p>".encode("utf-8"),
-            ContentType.TEXT: "text".encode("utf-8"),
+            ContentType.HTML: b"<p>html</p>",
+            ContentType.TEXT: b"text",
         })
         assert c1.hash_key() == c2.hash_key()
 

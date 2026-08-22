@@ -32,8 +32,9 @@ import os
 import threading
 import time
 import uuid
+from collections.abc import Callable
 from pathlib import Path
-from typing import Any, Callable, Dict, Optional
+from typing import Any
 
 from internal.protocol.codec import encode_binary_chunk, encode_frame
 
@@ -155,7 +156,7 @@ class FileTransferManager:
 
     CHUNK_SIZE = CHUNK_SIZE
 
-    def __init__(self, device_id: str, output_dir: Optional[str] = None,
+    def __init__(self, device_id: str, output_dir: str | None = None,
                  transfer_timeout: float = TRANSFER_TIMEOUT):
         self._device_id = device_id
 
@@ -163,6 +164,17 @@ class FileTransferManager:
             output_dir = str(Path.home() / "Downloads" / "ClipSync")
         self._output_dir = Path(output_dir)
         self._output_dir.mkdir(parents=True, exist_ok=True)
+        # Sweep orphaned .part files from a crash/kill mid-receive.  The
+        # in-memory _transfers dict is empty after a restart, so the only
+        # other cleanup path (cleanup_stale_transfers) can never reach them.
+        try:
+            for stale in self._output_dir.glob(".*.part"):
+                try:
+                    stale.unlink()
+                except OSError:
+                    logger.warning("Could not remove stale temp file: %s", stale)
+        except OSError:
+            logger.debug("Output dir not sweepable yet", exc_info=True)
         self._transfer_timeout = transfer_timeout
 
         # transfer_id -> dict (active transfers)
@@ -174,10 +186,10 @@ class FileTransferManager:
         self._lock = threading.Lock()
 
         # ---- UI callbacks ----
-        self._on_transfer_progress: Optional[Callable[[str, float], None]] = None
-        self._on_transfer_complete: Optional[Callable[[str, bool], None]] = None
-        self._on_file_received: Optional[Callable[[str, str, str], None]] = None
-        self._on_transfer_request: Optional[Callable[[str, str, int, str, Callable], None]] = None
+        self._on_transfer_progress: Callable[[str, float], None] | None = None
+        self._on_transfer_complete: Callable[[str, bool], None] | None = None
+        self._on_file_received: Callable[[str, str, str], None] | None = None
+        self._on_transfer_request: Callable[[str, str, int, str, Callable], None] | None = None
 
     # ------------------------------------------------------------------
     # Callback registration
@@ -432,7 +444,7 @@ class FileTransferManager:
     # ------------------------------------------------------------------
 
     @staticmethod
-    def _send_as_frame(payload_dict: dict[str, Any], send_fn: Optional[Callable[[bytes], None]]) -> None:
+    def _send_as_frame(payload_dict: dict[str, Any], send_fn: Callable[[bytes], None] | None) -> None:
         """JSON-encode *payload_dict*, wrap it in a binary frame, and call *send_fn*.
 
         If *send_fn* is ``None`` the frame is dropped (e.g. a web-triggered
@@ -698,10 +710,15 @@ class FileTransferManager:
             # Verify final file size matches what was advertised
             actual_size = temp_path.stat().st_size
             expected_size = transfer["file_size"]
-            if actual_size != expected_size:
+            received_bytes = transfer.get("received_bytes", 0)
+            # st_size alone can be "right" even with a hole: a short middle
+            # chunk (zero/truncated data) followed by a later chunk that seeks
+            # past it extends the file to the advertised total.  received_bytes
+            # counts actual bytes written, so it must match too.
+            if actual_size != expected_size or received_bytes != expected_size:
                 logger.error(
-                    "Size mismatch for transfer %s: expected %d, got %d",
-                    transfer_id[:8], expected_size, actual_size,
+                    "Size mismatch for transfer %s: expected %d, got %d (received_bytes=%d)",
+                    transfer_id[:8], expected_size, actual_size, received_bytes,
                 )
                 _safe_remove(temp_path)
                 with self._lock:
@@ -861,6 +878,19 @@ class FileTransferManager:
 
         with self._lock:
             transfer = self._transfers.pop(transfer_id, None)
+
+        if transfer is not None and transfer.get("type") == "incoming":
+            # Receiver side: a remote cancellation/failure must not leak the
+            # open temp handle or the .part file (previously only outgoing
+            # transfers were cleaned up, so a sender-cancel left the file on
+            # disk — and on Windows the open handle even blocks deletion).
+            temp_fh = transfer.get("temp_fh")
+            if temp_fh is not None:
+                try:
+                    temp_fh.close()
+                except Exception:
+                    pass
+            _safe_remove(self._output_dir / f".{transfer_id}.part")
 
         if transfer is not None and transfer.get("type") == "outgoing":
             success = status == "success"
@@ -1073,12 +1103,43 @@ class FileTransferManager:
             total_chunks, transfer_id[:8],
         )
 
-        # Wait for FILE_COMPLETE from the receiver (with timeout)
+        # Wait for FILE_COMPLETE from the receiver (with timeout), while
+        # honoring file_chunk_ack retransmit requests that arrive after the
+        # initial 3x1s retransmit window (e.g. the receiver was paused and is
+        # still catching up).  The receiver re-finalizes every ~30s and
+        # re-requests the missing chunks, so keep polling _retransmit_queue
+        # instead of only reading it in the fixed rounds above.
         deadline = time.time() + COMPLETION_WAIT_TIMEOUT
+        late_rounds = 0
         while time.time() < deadline:
             with self._lock:
                 if transfer_id not in self._transfers:
                     return
+                transfer = self._transfers.get(transfer_id)
+                missing = (
+                    transfer.pop("_retransmit_queue", None)
+                    if transfer is not None else None
+                )
+            if missing and late_rounds < MAX_RETRANSMIT_ROUNDS:
+                late_rounds += 1
+                logger.info(
+                    "Transfer %s late retransmit round %d: %d missing chunks",
+                    transfer_id[:8], late_rounds, len(missing),
+                )
+                for chunk_index in missing:
+                    while True:
+                        with self._lock:
+                            transfer = self._transfers.get(transfer_id)
+                            if transfer is None or transfer.get("cancelled"):
+                                return
+                            if not transfer.get("paused"):
+                                break
+                        time.sleep(0.5)
+                    _send_one_chunk(fh, chunk_index, total_chunks)
+                    with self._lock:
+                        t = self._transfers.get(transfer_id)
+                        if t:
+                            t["_last_activity"] = time.time()
             time.sleep(0.5)
 
         with self._lock:

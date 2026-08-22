@@ -79,6 +79,13 @@ FILE_TRANSFER_MSG_TYPES = frozenset({
     "speed_test_data", "speed_test_result",
 })
 
+# Pairing lifecycle messages sent over the sync transport.  These keep both
+# devices' pairing state in sync: confirmation is a two-sided commitment, so
+# each side tells the other when it confirms, rejects, or un-pairs.
+PAIRING_MSG_TYPES = frozenset({
+    "pairing_confirm", "pairing_reject", "pairing_unpair",
+})
+
 
 def encode_frame(payload_dict: dict, msg_id: str = "", source_device: str = "") -> bytes:
     """Encode a generic JSON payload dict into the binary frame format.

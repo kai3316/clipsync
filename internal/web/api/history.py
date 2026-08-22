@@ -287,8 +287,8 @@ def batch_favorite(body, history):
 
     Expects: {"entry_ids": [...], "group": ""}
     """
-    import uuid
     import time
+    import uuid
 
     from internal.web.api.favorites import _load_favorites, _save_favorites
 

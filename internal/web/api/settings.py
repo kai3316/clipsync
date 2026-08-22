@@ -8,10 +8,11 @@ All handlers return a (data_dict, status_code) tuple.
 
 import json
 import logging
-import tempfile
 import os
+import tempfile
 
-from internal.config.config import save as save_config, _config_path
+from internal.config.config import _config_path
+from internal.config.config import save as save_config
 
 logger = logging.getLogger(__name__)
 
@@ -296,7 +297,7 @@ def export_data(body, cfg, history):
         pass
 
     try:
-        from internal.data.export import export_history_json, export_history_csv
+        from internal.data.export import export_history_csv, export_history_json
         if fmt == "json":
             count = export_history_json(history, tmp_path)
         else:
@@ -348,7 +349,7 @@ def import_data(body, cfg, history):
         return {"ok": False, "error": "unsupported file format (use json or csv)"}, 400
 
     try:
-        from internal.data.export import import_history_json, import_history_csv
+        from internal.data.export import import_history_csv, import_history_json
         if ext == ".json":
             count = import_history_json(filepath, history)
         else:
@@ -400,6 +401,19 @@ def restore_backup_api(body, cfg, history):
     try:
         from internal.data.backup import restore_backup
         summary = restore_backup(backup_path, cfg, history)
+        # Persist the restored config immediately.  A restore that only mutates
+        # the in-memory Config is silently discarded if the process crashes
+        # before some unrelated save happens, and the restored values would be
+        # lost on the next start.  This handler has no encryption manager, so
+        # reuse the at-rest-private-key-preserving helper used by
+        # update_settings to avoid downgrading an encrypted key to plaintext.
+        try:
+            _persist_preserving_at_rest_private_key(cfg)
+            logger.info("Restored config persisted to disk")
+        except Exception as exc:
+            # A save failure must not fail the restore request — the in-memory
+            # restore already succeeded — but it must not pass silently either.
+            logger.error("Failed to persist restored config: %s", exc)
         return {"ok": True, "summary": summary}, 200
     except FileNotFoundError:
         return {"ok": False, "error": "backup file not found"}, 404

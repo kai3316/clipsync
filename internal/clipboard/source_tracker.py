@@ -201,7 +201,7 @@ def _get_active_app_info_linux() -> dict | None:
 
         # Read process name from /proc/PID/comm
         try:
-            proc_comm = open(f"/proc/{pid}/comm", "r").read().strip()
+            proc_comm = open(f"/proc/{pid}/comm").read().strip()
         except (OSError, FileNotFoundError):
             return None
 

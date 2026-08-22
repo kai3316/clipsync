@@ -35,9 +35,10 @@ ClipSync syncs your clipboard across devices **directly over your local network*
 ## Quick Start
 
 1. [Download](https://github.com/kai3316/clipsync/releases/latest) and run — portable, no install needed
-2. Run ClipSync on another device on the **same LAN**
-3. Confirm the 8-digit pairing code that appears on both screens
-4. Copy on one device → paste on the other. Done.
+2. Pick your interface language on first launch — the picker shows both 中文 and English
+3. Run ClipSync on another device on the **same LAN**
+4. Confirm the 8-digit pairing code that appears on both screens
+5. Copy on one device → paste on the other. Done.
 
 > **macOS:** If Gatekeeper blocks the app, run `xattr -cr clipsync.app` then right-click → Open.
 

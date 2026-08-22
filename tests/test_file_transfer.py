@@ -1,11 +1,9 @@
 """Tests for FileTransferManager — chunked transfer, state machine, edge cases."""
 
 import base64
-import json
 import os
 import sys
 import tempfile
-import threading
 import time
 from pathlib import Path
 
@@ -16,10 +14,9 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from internal.protocol.codec import decode_message, encode_frame
 from internal.sync.file_transfer import (
     CHUNK_SIZE,
-    TRANSFER_TIMEOUT,
+    FileTransferManager,
     _guess_mime_type,
     _safe_remove,
-    FileTransferManager,
 )
 
 

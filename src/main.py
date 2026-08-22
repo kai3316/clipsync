@@ -7,14 +7,15 @@ Runs as a system tray application with an optional settings GUI.
 
 import atexit
 import base64 as _b64
-import secrets
 import logging
 import os
+import secrets
 import shutil
 import sys
 import threading
 import time
 import tkinter as tk
+from pathlib import Path
 from tkinter import filedialog
 from urllib.parse import urlparse
 
@@ -24,36 +25,50 @@ if not getattr(sys, "frozen", False):
     sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from internal.clipboard.filter import ContentFilter
-from internal.clipboard.format import ClipboardContent, ContentType as _CT
+from internal.clipboard.format import ClipboardContent
+from internal.clipboard.format import ContentType as _CT
 from internal.clipboard.history import ClipboardHistory
 from internal.clipboard.history_db import ClipboardHistoryDB
 from internal.clipboard.platform import create_monitor, create_reader, create_writer
 from internal.clipboard.source_tracker import is_app_allowed
 from internal.config.config import Config, PeerInfo, _config_dir, config_lock, load, save
 from internal.i18n import T, set_locale
-from internal.version import __version__
 from internal.platform.autostart import disable_autostart, enable_autostart, is_autostart_enabled
 from internal.platform.notify import notification_mgr
-from internal.protocol.codec import FILE_TRANSFER_MSG_TYPES, encode_frame, encode_message
+from internal.protocol.codec import (
+    FILE_TRANSFER_MSG_TYPES,
+    PAIRING_MSG_TYPES,
+    encode_frame,
+    encode_message,
+)
 from internal.security.encryption import (
     EncryptionManager,
+)
+from internal.security.encryption import (
     make_password_hash as _make_password_hash,
+)
+from internal.security.encryption import (
     verify_password as _verify_password,
 )
 from internal.security.pairing import (
+    PAIRING_STATUS_PAIRED,
+    PAIRING_STATUS_PEER_CONFIRMED,
     CertificateChangedError,
     PairingManager,
+)
+from internal.security.pairing import (
     fingerprint_pem as _fingerprint_pem,
 )
 from internal.sync.file_transfer import FileTransferManager
 from internal.sync.manager import SyncManager
-from internal.system.hotkey import DEFAULT_SHORTCUTS, HotkeyManager
+from internal.system.hotkey import HotkeyManager
 from internal.transport.connection import MAX_FRAME_SIZE, PortInUseError, TransportManager
 from internal.transport.discovery import Discovery
 from internal.ui.dashboard import DashboardWindow
 from internal.ui.dialogs import ask_string, show_error, show_info, show_warning
 from internal.ui.settings_window import SettingsWindow
 from internal.ui.systray import SystrayApp
+from internal.version import __version__
 from internal.web.server import WebServer
 
 logger = logging.getLogger(__name__)
@@ -431,6 +446,13 @@ class Application:
         self._discovered_lock = threading.Lock()
         self._notified_pairings: dict[str, str] = {}
         self._auto_connect_pending: set[str] = set()
+        # peer_id -> monotonic timestamp of the last cert-change prompt, used
+        # to throttle dialogs while a peer's auto-reconnect keeps presenting a
+        # changed certificate.
+        self._cert_alert_throttle: dict[str, float] = {}
+        # peer_id -> (peer_name, new_cert_pem) for peers whose certificate
+        # changed at runtime; kept until the user decides to re-trust or not.
+        self._pending_cert_peers: dict[str, tuple[str, str]] = {}
         # transfer_id -> temp zip path, cleaned up when the transfer completes
         # (folder/multi-file sends zip into a temp archive that must not leak).
         self._zip_cleanup: dict[str, str] = {}
@@ -499,6 +521,10 @@ class Application:
     # ═══════════════════════════════════════════════════════════════
 
     def load_config(self) -> None:
+        # Remember whether this is a truly-first run BEFORE any save() below
+        # creates the config file (bootstrap writes the device identity).
+        from internal.config.config import _config_path
+        self._first_run = not _config_path().exists()
         self.cfg = load()
         set_locale(self.cfg.language)
         logger.info("=" * 72)
@@ -508,6 +534,33 @@ class Application:
         logger.info("=" * 72)
         logger.info("ClipSync starting...")
         logger.info("Device: %s (%s)", self.cfg.device_name, self.cfg.device_id)
+
+    def _show_first_run_onboarding_if_needed(self) -> None:
+        """First run only: show the bilingual language picker.
+
+        Runs after the Tk root exists but before services/UI start, so the
+        chosen language applies to everything created afterwards.  Existing
+        installs (a config file already present) never see it — only a
+        genuinely fresh launch does.
+        """
+        if not getattr(self, "_first_run", False):
+            return
+        if getattr(self.cfg, "language_chosen", False):
+            return
+        try:
+            from internal.ui.onboarding import show_language_onboarding
+            chosen = show_language_onboarding(self.root)
+        except Exception:
+            logger.exception("Failed to show first-run language onboarding")
+            return
+        if chosen in ("zh-CN", "en"):
+            self.cfg.language = chosen
+            set_locale(chosen)
+        self.cfg.language_chosen = True
+        try:
+            self._save_cfg_encrypted()
+        except Exception:
+            logger.debug("Failed to persist first-run language choice", exc_info=True)
 
     # ═══════════════════════════════════════════════════════════════
     # Phase 3: Crypto
@@ -634,7 +687,9 @@ class Application:
         )
 
         # ── Register known peers ─────────────────────────────────
-        self._cert_warnings: list[str] = []
+        # (device_id, device_name) pairs for peers whose certificate changed
+        # vs. the pinned one — surfaced to the user after startup completes.
+        self._cert_warnings: list[tuple[str, str]] = []
         for peer in cfg.peers.values():
             try:
                 self.pairing_mgr.add_peer(
@@ -642,7 +697,7 @@ class Application:
                     peer.public_key_pem, peer.paired,
                 )
             except CertificateChangedError:
-                self._cert_warnings.append(peer.device_name)
+                self._cert_warnings.append((peer.device_id, peer.device_name))
                 logger.warning("Skipping peer %s: certificate changed", peer.device_name)
             except Exception as e:
                 logger.warning("Skipping peer %s: %s", peer.device_name, e)
@@ -985,8 +1040,12 @@ class Application:
             else:
                 send_fn = self.transport_mgr.broadcast
             self.file_transfer_mgr.handle_message(msg_type, raw_payload, send_fn)
-        else:
-            self.sync_mgr.handle_remote_message(msg)
+            return
+        if msg_type in PAIRING_MSG_TYPES:
+            raw_payload = getattr(msg, "_raw_payload", {})
+            self._handle_pairing_message(msg_type, raw_payload, peer_id)
+            return
+        self.sync_mgr.handle_remote_message(msg)
 
     def _on_transfer_progress(self, transfer_id: str, progress: float) -> None:
         logger.debug("File transfer %s: %.0f%%", transfer_id[:8], progress * 100)
@@ -1512,9 +1571,10 @@ class Application:
         Runs on the Tk main thread (scheduled via ``root.after``) so the
         process can cleanly relaunch itself after deleting its own config.
         """
-        from internal.config.config import _config_dir
         import subprocess
         import sys
+
+        from internal.config.config import _config_dir
         config_dir = _config_dir()
         deleted = []
         for fname in ("config.json", "clipboard_history.json",
@@ -1680,6 +1740,9 @@ class Application:
 
         # Auto-open dashboard on startup
         self.root.after(500, self.open_dashboard)
+        # Surface any certificate-changed peers (one non-blocking dialog)
+        # once the main loop is running.
+        self.root.after(1200, self._prompt_cert_warnings_startup)
 
         if sys.platform == "darwin":
             self._start_macos_tray()
@@ -1903,9 +1966,10 @@ class Application:
 
         # ── Webview mode: push QR code to web UI ────────────────────
         if self._is_webview():
-            import qrcode
-            from io import BytesIO
             import base64
+            from io import BytesIO
+
+            import qrcode
             img = qrcode.make(url)
             img = img.convert("RGB")
             img = img.resize((220, 220))
@@ -1922,9 +1986,10 @@ class Application:
                 )
             return
 
+        from io import BytesIO
+
         import customtkinter as ctk
         import qrcode
-        from io import BytesIO
         from PIL import Image
 
         dlg = ctk.CTkToplevel(self.root)
@@ -2163,6 +2228,7 @@ class Application:
 
         # URL input dialog
         import re
+
         import customtkinter as ctk
         dlg = ctk.CTkToplevel(self.root)
         dlg.title(T("nav_url.title"))
@@ -2480,7 +2546,8 @@ class Application:
         def _send_fn(data: bytes):
             self.transport_mgr.send_to_peer(peer_id, data)
 
-        import tempfile, zipfile
+        import tempfile
+        import zipfile
         from pathlib import Path
 
         def _safe_remove(path):
@@ -2905,8 +2972,8 @@ class Application:
     def _handle_diagnostics_request(self, action: str) -> dict:
         """Open the relevant OS permission / firewall settings, or re-apply a Windows rule."""
         try:
-            import subprocess as _sp
             import platform as _platform
+            import subprocess as _sp
             if action == "firewall":
                 if _platform.system() == "Darwin":
                     # macOS has no CLI to grant the Application Firewall, and
@@ -3040,7 +3107,8 @@ class Application:
 
     def _get_overview_data(self) -> dict:
         """Return aggregated dashboard overview data for the web UI."""
-        import time as _time, platform as _platform
+        import platform as _platform
+        import time as _time
         connected = self.transport_mgr.get_connected_peers() if self.transport_mgr else []
         paired = getattr(self.pairing_mgr, 'get_paired_peers', lambda: [])() if self.pairing_mgr else []
         # Count active transfers
@@ -3273,17 +3341,6 @@ class Application:
         )
         self.dashboard_win.show()
 
-        # Show startup cert warnings
-        if self._cert_warnings:
-            names = ", ".join(self._cert_warnings[:3])
-            if len(self._cert_warnings) > 3:
-                names += f" +{len(self._cert_warnings) - 3}"
-            self.root.after(500, lambda: show_error(
-                self.dashboard_win._window,
-                T("security.cert_changed_title"),
-                T("security.cert_changed_startup", names=names),
-            ))
-
     # ═══════════════════════════════════════════════════════════════
     # Dashboard / Settings callbacks
     # ═══════════════════════════════════════════════════════════════
@@ -3427,6 +3484,7 @@ class Application:
     def _get_diagnostics(self) -> dict:
         """Return a live snapshot of core service state + actionable network checks."""
         import platform as _platform
+
         from internal.version import __version__
 
         port = int(getattr(self.cfg, "port", 0) or 0)
@@ -3689,6 +3747,7 @@ class Application:
     def _handle_update_download(self) -> dict:
         """Download the latest release into the user's Downloads folder."""
         from pathlib import Path
+
         from internal.system.updater import download_latest_release
         dest_dir = str(Path.home() / "Downloads")
         try:
@@ -3706,11 +3765,18 @@ class Application:
     def _on_pair(self, peer_id: str, code: str) -> bool:
         result = self.pairing_mgr.confirm_pairing(peer_id, code)
         if result:
-            self._notify("notify_pairing", "Pairing", T("notify.paired_success"))
+            status = self.pairing_mgr.get_pairing_status(peer_id)
+            # Two-sided handshake: tell the peer we confirmed, so its UI can
+            # move out of "pending" (and prompt the user there if needed).
+            self._send_pairing_msg(peer_id, "pairing_confirm")
+            if status == PAIRING_STATUS_PAIRED:
+                self._notify("notify_pairing", "Pairing", T("pairing.notify.completed"))
+            else:
+                self._notify("notify_pairing", "Pairing", T("pairing.state.confirmed_waiting"))
             self._save_cfg_and_peers()
             if peer_id not in self.transport_mgr.get_connected_peers():
                 self._on_connect(peer_id)
-            self._push_web("broadcast", "pairing_resolved", {"peer_id": peer_id})
+            self._push_web("broadcast", "pairing_resolved", {"peer_id": peer_id, "status": status})
             # Refresh the device list so the paired device shows its new
             # status immediately instead of waiting for the next poll cycle.
             self._push_web("broadcast_devices")
@@ -3719,11 +3785,126 @@ class Application:
     def _on_unpair(self, peer_id: str) -> None:
         self.pairing_mgr.unpair_peer(peer_id)
         self.pairing_mgr.reject_pairing(peer_id)
-        self.transport_mgr.forget_peer(peer_id)
         if peer_id in self.cfg.peers:
             self.cfg.peers[peer_id].paired = False
+        # Tell the peer we unpaired, before the connection is torn down.
+        self._send_pairing_msg(peer_id, "pairing_unpair")
+        self.transport_mgr.forget_peer(peer_id)
         self._save_cfg_encrypted()
         self._push_web("broadcast_devices")
+
+    def _send_pairing_msg(self, peer_id: str, msg_type: str) -> None:
+        """Send a pairing lifecycle message to one peer (best effort)."""
+        try:
+            self.transport_mgr.send_to_peer(peer_id, encode_frame({"msg_type": msg_type}))
+        except Exception:
+            logger.debug("Could not send %s to peer %s", msg_type, peer_id[:12], exc_info=True)
+
+    def _handle_pairing_message(self, msg_type: str, payload: dict, peer_id: str | None) -> None:
+        """A peer told us about its pairing decision. Keep both sides in sync."""
+        if not peer_id:
+            return
+        if msg_type == "pairing_confirm":
+            status = self.pairing_mgr.mark_peer_confirmed(peer_id)
+            if status == PAIRING_STATUS_PAIRED:
+                self._notify("notify_pairing", "Pairing", T("pairing.notify.completed"))
+                self._save_cfg_and_peers()
+            elif status == PAIRING_STATUS_PEER_CONFIRMED:
+                name = self._cfg_peer_name(peer_id)
+                self._notify(
+                    "notify_pairing",
+                    T("pairing.notify.peer_confirmed"),
+                    T("pairing.notify.peer_confirmed_msg", name=name),
+                )
+            self._push_web("broadcast", "pairing_resolved", {"peer_id": peer_id, "status": status})
+            self._push_web("broadcast_devices")
+        elif msg_type == "pairing_reject":
+            self.pairing_mgr.mark_peer_rejected(peer_id)
+            name = self._cfg_peer_name(peer_id)
+            self._notify(
+                "notify_pairing",
+                T("pairing.notify.peer_rejected"),
+                T("pairing.notify.peer_rejected_msg", name=name),
+            )
+            self._push_web("broadcast_devices")
+        elif msg_type == "pairing_unpair":
+            self.pairing_mgr.mark_peer_unpaired(peer_id)
+            name = self._cfg_peer_name(peer_id)
+            self._notify(
+                "notify_pairing",
+                T("pairing.notify.unpaired_by_peer"),
+                T("pairing.notify.unpaired_by_peer_msg", name=name),
+            )
+            if peer_id in self.cfg.peers:
+                self.cfg.peers[peer_id].paired = False
+            self._save_cfg_encrypted()
+            self._push_web("broadcast_devices")
+
+    def _cfg_peer_name(self, peer_id: str) -> str:
+        """Best-effort display name for a peer from config or the pairing manager."""
+        peer_cfg = self.cfg.peers.get(peer_id)
+        if peer_cfg and peer_cfg.device_name:
+            return peer_cfg.device_name
+        for p in self.pairing_mgr.get_known_peers():
+            if p.device_id == peer_id:
+                return p.device_name
+        return ""
+
+    def _on_retrust_peer(self, peer_id: str) -> None:
+        """Re-trust a device whose certificate changed (reinstall/reset).
+
+        Replaces the pinned certificate with the freshly-presented one, keeps
+        the peer paired, persists the config, and tries to reconnect.
+
+        When no new certificate is available (the startup prompt, where the
+        device hasn't connected yet), the peer is instead restored from config
+        so it stays known; a later connection re-prompts with the real cert.
+        """
+        pending = self._pending_cert_peers.pop(peer_id, None)
+        new_cert = pending[1] if pending else None
+        peer_name = pending[0] if pending else self._cfg_peer_name(peer_id)
+        try:
+            if new_cert:
+                if not self.pairing_mgr.update_peer_certificate(peer_id, new_cert):
+                    # Peer not known to the pairing manager (e.g. skipped at
+                    # startup) — (re)add it now, keeping it paired.
+                    self.pairing_mgr.add_peer(
+                        peer_id, peer_name or peer_id, new_cert, paired=True,
+                    )
+                peer_cfg = self.cfg.peers.get(peer_id)
+                if peer_cfg:
+                    peer_cfg.public_key_pem = new_cert
+                    peer_cfg.paired = True
+            else:
+                # Startup prompt: no new cert is available yet — restore the
+                # peer from config so it stays known and paired.
+                peer_cfg = self.cfg.peers.get(peer_id)
+                if peer_cfg:
+                    self.pairing_mgr.add_peer(
+                        peer_id, peer_cfg.device_name, peer_cfg.public_key_pem,
+                        paired=peer_cfg.paired,
+                    )
+                    peer_cfg.paired = True
+            self._save_cfg_and_peers()
+        except Exception as e:
+            logger.error("Failed to re-trust peer %s: %s", peer_id[:12], e)
+            return
+        logger.info("Re-trusted peer %s (%s)", peer_name or peer_id, peer_id[:12])
+        self._on_connect(peer_id)
+
+    def _on_keep_peer_unpaired(self, peer_id: str) -> None:
+        """Keep a changed-cert device unpaired instead of re-trusting it."""
+        self._pending_cert_peers.pop(peer_id, None)
+        self.pairing_mgr.unpair_peer(peer_id)
+        if peer_id in self.cfg.peers:
+            self.cfg.peers[peer_id].paired = False
+        try:
+            self.transport_mgr.disconnect_peer(peer_id, reject=True)
+        except Exception:
+            logger.debug("disconnect_peer failed for %s", peer_id[:12], exc_info=True)
+        self._save_cfg_encrypted()
+        self._push_web("broadcast_devices")
+        logger.info("Kept peer %s unpaired after certificate change", peer_id[:12])
 
     def _on_disconnect(self, peer_id: str) -> None:
         logger.info("User initiated disconnect from %s", peer_id)
@@ -3822,8 +4003,10 @@ class Application:
     def _search_history(self, query: str) -> list:
         return self.clipboard_history.search(query)
 
-    def _copy_from_history(self, index: int) -> bool:
-        entry = self.clipboard_history.get(index)
+    def _copy_from_history(self, entry_id) -> bool:
+        # Resolve by entry_id (not a position) — the dashboard may show a
+        # filtered/search subset whose indices differ from the full list.
+        _, entry = self.clipboard_history.find_by_id(entry_id)
         if entry is None or "types" not in entry:
             return False
         types: dict = {}
@@ -3856,15 +4039,16 @@ class Application:
     def _clear_history(self) -> None:
         self.clipboard_history.clear()
 
-    def _delete_history_item(self, index: int) -> bool:
-        return self.clipboard_history.delete(index)
+    def _delete_history_item(self, entry_id) -> bool:
+        return self.clipboard_history.delete_by_id(entry_id)
 
     def _clear_transfer_history(self) -> None:
         self.file_transfer_mgr.clear_history()
 
     def _open_file(self, file_path: str) -> None:
         """Open a file with the default OS application."""
-        import subprocess, sys as _sys
+        import subprocess
+        import sys as _sys
         resolved = os.path.abspath(file_path) if file_path else ""
         if not os.path.isfile(resolved):
             self._notify_error(T("ui.file_not_found_title"),
@@ -3884,7 +4068,8 @@ class Application:
 
     def _open_folder(self, file_path: str) -> None:
         """Open the containing folder in the OS file manager."""
-        import subprocess, sys as _sys
+        import subprocess
+        import sys as _sys
         resolved = os.path.abspath(file_path) if file_path else ""
         if os.path.isfile(resolved):
             folder = os.path.dirname(resolved)
@@ -3946,12 +4131,169 @@ class Application:
         else:
             self.discovery.stop_advertising()
 
-    def _on_security_alert(self, peer_name: str, expected: str, received: str) -> None:
-        """Show a security alert dialog when a peer's certificate changes."""
-        self.root.after(0, lambda: self._notify_error(
-            T("security.cert_changed_title"),
-            T("security.cert_changed_message", name=peer_name),
-        ))
+    def _on_security_alert(self, peer_name: str, peer_id: str, expected: str,
+                           received: str, new_cert_pem: str) -> None:
+        """Handle a certificate-change alert from the transport (any thread).
+
+        Records the newly-presented certificate so it can be re-trusted, and
+        schedules a Trust-again / Keep-unpaired prompt on the main thread.
+        Throttled per peer so a reconnecting device doesn't stack dialogs.
+        """
+        if not peer_id:
+            logger.warning("Cert change alert without peer_id for %s", peer_name)
+            return
+        now = time.monotonic()
+        last = self._cert_alert_throttle.get(peer_id)
+        if last is not None and now - last < 30.0:
+            logger.debug("Cert-change prompt for %s suppressed (throttled)", peer_id[:12])
+            return
+        self._cert_alert_throttle[peer_id] = now
+        if new_cert_pem:
+            self._pending_cert_peers[peer_id] = (peer_name, new_cert_pem)
+        logger.warning(
+            "Certificate changed for %s (%s) — prompting user "
+            "(expected=%s..., got=%s...)",
+            peer_name, peer_id[:12],
+            expected[:16] if expected else "n/a",
+            received[:16] if received else "n/a",
+        )
+        self.root.after(0, lambda: self._show_cert_change_dialog(peer_name, peer_id))
+
+    def _show_cert_change_dialog(self, peer_name: str, peer_id: str) -> None:
+        """Present the Trust-again / Keep-unpaired choice (main thread)."""
+        message = T("cert.changed_message", name=peer_name)
+        choice = self._ask_retrust_choice(message)
+        if choice is True:
+            self._on_retrust_peer(peer_id)
+        elif choice is False:
+            self._on_keep_peer_unpaired(peer_id)
+        else:
+            # No interactive UI available — inform via notification/toast and
+            # leave the peer's state unchanged (throttle prevents prompt spam).
+            logger.info("No UI to prompt for cert change of %s — notifying only",
+                        peer_id[:12])
+            self._notify_info(T("cert.changed_title"), message)
+
+    def _prompt_cert_warnings_startup(self) -> None:
+        """Show one dialog listing peers whose certificates changed at startup.
+
+        Scheduled after the main loop is running so it never blocks startup.
+        """
+        warnings = getattr(self, "_cert_warnings", []) or []
+        if not warnings:
+            return
+        # Consume the list so the prompt shows at most once per session.
+        warnings, self._cert_warnings = list(warnings), []
+        names = ", ".join(name for _, name in warnings[:3])
+        if len(warnings) > 3:
+            names += f" +{len(warnings) - 3}"
+        message = T("cert.changed_message", name=names)
+        choice = self._ask_retrust_choice(message)
+        if choice is True:
+            for peer_id, _name in warnings:
+                self._on_retrust_peer(peer_id)
+        elif choice is False:
+            for peer_id, _name in warnings:
+                self._on_keep_peer_unpaired(peer_id)
+        else:
+            logger.info("No UI available for the startup cert-change prompt")
+
+    def _ask_retrust_choice(self, message: str) -> bool | None:
+        """Ask Trust-again vs Keep-unpaired. True/False, or None if no UI."""
+        title = T("cert.changed_title")
+        if self._is_webview():
+            mgr = self.web_server.dialog_mgr if self.web_server else None
+            ws = mgr.ws_manager if mgr else None
+            if ws is None or ws.client_count == 0:
+                return None
+            result = self._web_dialog(
+                "confirm", title=title, message=message,
+                accept_label=T("cert.trust_again"),
+                reject_label=T("cert.keep_unpaired"),
+                timeout=120,
+            )
+            if result is None:
+                return None
+            return result.get("action") == "accept"
+        return self._ask_retrust_desktop(title, message)
+
+    def _ask_retrust_desktop(self, title: str, message: str) -> bool:
+        """Themed Trust-again / Keep-unpaired dialog for the desktop UI.
+
+        Returns True for "Trust again", False for "Keep unpaired".
+        """
+        import customtkinter as ctk
+
+        dlg = ctk.CTkToplevel(self.root)
+        dlg.title(title)
+        dlg.resizable(False, False)
+
+        w, h = 440, 230
+        if self.root.winfo_viewable():
+            pw, ph = self.root.winfo_width(), self.root.winfo_height()
+            px, py = self.root.winfo_rootx(), self.root.winfo_rooty()
+            x = px + (pw - w) // 2
+            y = py + (ph - h) // 2
+        else:
+            x = (self.root.winfo_screenwidth() - w) // 2
+            y = (self.root.winfo_screenheight() - h) // 2
+        dlg.geometry(f"{w}x{h}+{x}+{y}")
+
+        result = [True]
+
+        body = ctk.CTkFrame(dlg, fg_color="transparent")
+        body.pack(fill="both", expand=True, padx=24, pady=20)
+
+        ctk.CTkLabel(
+            body, text="⚠️", font=ctk.CTkFont(size=22),
+        ).pack(anchor="w", pady=(0, 6))
+
+        ctk.CTkLabel(
+            body, text=title,
+            font=ctk.CTkFont(size=15, weight="bold"),
+            text_color="#F39C12",
+        ).pack(anchor="w", pady=(0, 10))
+
+        ctk.CTkLabel(
+            body, text=message, justify="left",
+            font=ctk.CTkFont(size=12),
+            text_color=("gray30", "gray80"),
+            wraplength=390,
+        ).pack(anchor="w")
+
+        btn_row = ctk.CTkFrame(body, fg_color="transparent")
+        btn_row.pack(fill="x", pady=(18, 0))
+
+        def _close(value):
+            result[0] = value
+            dlg.destroy()
+
+        ctk.CTkButton(
+            btn_row, text=T("cert.keep_unpaired"), width=110, height=32,
+            fg_color="transparent", border_width=1,
+            text_color=("gray40", "gray60"),
+            border_color=("gray60", "gray50"),
+            hover_color=("gray85", "gray25"),
+            font=ctk.CTkFont(size=12),
+            command=lambda: _close(False),
+        ).pack(side="left")
+
+        ctk.CTkButton(
+            btn_row, text=T("cert.trust_again"), width=110, height=32,
+            fg_color="#F39C12",
+            font=ctk.CTkFont(size=12),
+            command=lambda: _close(True),
+        ).pack(side="right")
+
+        dlg.update()
+        dlg.transient(self.root)
+        try:
+            dlg.grab_set()
+        except Exception:
+            pass
+        dlg.protocol("WM_DELETE_WINDOW", lambda: _close(False))
+        dlg.wait_window()
+        return result[0]
 
     # ═══════════════════════════════════════════════════════════════
     # Systray toggle
@@ -3990,6 +4332,7 @@ def main():
     app._wire_callbacks()
     app._apply_config()
     app._create_ui()
+    app._show_first_run_onboarding_if_needed()
     app._start_services()
     app._start_threads()
 

@@ -1,8 +1,7 @@
 """Tests for SyncManager — dedup, loop prevention, throttle, enable/disable."""
 
-import sys
 import os
-import threading
+import sys
 import time
 
 import pytest
@@ -10,7 +9,7 @@ import pytest
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from internal.clipboard.format import ClipboardContent, ContentType, SyncMessage
-from internal.sync.manager import SyncManager, SYNC_DEBOUNCE, DEDUP_RING_SIZE
+from internal.sync.manager import DEDUP_RING_SIZE, SyncManager
 
 
 class MockClipboardMonitor:

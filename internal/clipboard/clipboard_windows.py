@@ -5,11 +5,11 @@ Event-driven monitoring via AddClipboardFormatListener — zero CPU when idle.
 
 import ctypes
 import ctypes.wintypes
+import logging
 import re
 import struct
 import threading
 import time
-import logging
 from io import BytesIO
 
 from internal.clipboard.clipboard import ClipboardMonitor, ClipboardReader, ClipboardWriter
@@ -21,6 +21,15 @@ logger = logging.getLogger(__name__)
 user32 = ctypes.windll.user32
 kernel32 = ctypes.windll.kernel32
 gdi32 = ctypes.windll.gdi32
+
+# The Win32 clipboard can be opened by only one thread at a time.  The reader
+# (debounce/timer thread) and the writer (transport recv thread) run on
+# different threads, so without this lock a read and a write that overlap drop
+# the incoming remote content (OpenClipboard fails while the other thread
+# holds it open).
+_CLIPBOARD_LOCK = threading.Lock()
+_OPEN_CLIPBOARD_RETRIES = 5
+_OPEN_CLIPBOARD_RETRY_DELAY = 0.05  # 50 ms
 
 # GDI32 EMF functions
 gdi32.SetEnhMetaFileBits.argtypes = [ctypes.c_uint, ctypes.c_char_p]
@@ -109,26 +118,29 @@ class _ClipboardReader(ClipboardReader):
     def read(self) -> ClipboardContent:
         content = ClipboardContent(timestamp=time.time())
         self._image_fmt = ""
-        if not user32.OpenClipboard(None):
-            return content
+        # Serialize with the writer so OpenClipboard never races another
+        # thread that holds the clipboard open (see _CLIPBOARD_LOCK).
+        with _CLIPBOARD_LOCK:
+            if not user32.OpenClipboard(None):
+                return content
 
-        try:
-            fmt = 0
-            while True:
-                fmt = user32.EnumClipboardFormats(fmt)
-                if fmt == 0:
-                    break
-                data = self._get_format_data(fmt)
-                if data:
-                    content_type = self._map_format(fmt)
-                    if content_type:
-                        if content_type == ContentType.TEXT and fmt == CF_TEXT and ContentType.TEXT in content.types:
-                            continue  # prefer CF_UNICODETEXT already read, skip ANSI
-                        content.types[content_type] = data
-                        if content_type == ContentType.IMAGE_PNG:
-                            content.image_fmt = self._image_fmt
-        finally:
-            user32.CloseClipboard()
+            try:
+                fmt = 0
+                while True:
+                    fmt = user32.EnumClipboardFormats(fmt)
+                    if fmt == 0:
+                        break
+                    data = self._get_format_data(fmt)
+                    if data:
+                        content_type = self._map_format(fmt)
+                        if content_type:
+                            if content_type == ContentType.TEXT and fmt == CF_TEXT and ContentType.TEXT in content.types:
+                                continue  # prefer CF_UNICODETEXT already read, skip ANSI
+                            content.types[content_type] = data
+                            if content_type == ContentType.IMAGE_PNG:
+                                content.image_fmt = self._image_fmt
+            finally:
+                user32.CloseClipboard()
 
         fmt_count = len(content.types)
         if fmt_count > 0:
@@ -351,9 +363,7 @@ class _ClipboardReader(ClipboardReader):
             return b""
 
     def _map_format(self, fmt: int) -> ContentType | None:
-        if fmt == CF_UNICODETEXT:
-            return ContentType.TEXT
-        elif fmt == CF_TEXT:
+        if fmt == CF_UNICODETEXT or fmt == CF_TEXT:
             return ContentType.TEXT
         elif fmt == CF_HTML:
             return ContentType.HTML
@@ -370,35 +380,51 @@ class _ClipboardReader(ClipboardReader):
 
 class _ClipboardWriter(ClipboardWriter):
     def write(self, content: ClipboardContent):
-        if not user32.OpenClipboard(None):
-            return
-        try:
-            user32.EmptyClipboard()
+        # Serialize with the reader (see _CLIPBOARD_LOCK) and retry briefly:
+        # the Win32 clipboard can only be opened by one thread at a time, and
+        # another app may hold it momentarily.  Silently dropping a remote
+        # copy because OpenClipboard failed would lose the synced content.
+        with _CLIPBOARD_LOCK:
+            opened = False
+            for _attempt in range(_OPEN_CLIPBOARD_RETRIES):
+                if user32.OpenClipboard(None):
+                    opened = True
+                    break
+                time.sleep(_OPEN_CLIPBOARD_RETRY_DELAY)
+            if not opened:
+                logger.warning("OpenClipboard failed after retries — dropping remote write")
+                return
+            try:
+                user32.EmptyClipboard()
 
-            # Write ALL available formats so the receiving application
-            # can choose the richest one it supports.  This fixes:
-            #   - PowerPoint shapes appearing as images (EMF preserved)
-            #   - Formatted text losing RTF/HTML
-            #   - No plain-text fallback for RTF-only paste
-            for fmt_type, data in content.types.items():
-                logger.debug("Writing %s to clipboard (%d bytes)", fmt_type.name, len(data))
-                if fmt_type == ContentType.TEXT:
-                    self._set_text(data)
-                elif fmt_type == ContentType.HTML:
-                    self._set_html(data)
-                elif fmt_type == ContentType.RTF:
-                    self._set_custom_format(CF_RTF, data)
-                elif fmt_type == ContentType.IMAGE_PNG:
-                    self._set_image(data, content.image_fmt)
-                elif fmt_type == ContentType.IMAGE_EMF:
-                    self._set_emf(data)
-                elif fmt_type == ContentType.FILE:
-                    self._set_hdrop(data)
-        finally:
-            user32.CloseClipboard()
+                # Write ALL available formats so the receiving application
+                # can choose the richest one it supports.  This fixes:
+                #   - PowerPoint shapes appearing as images (EMF preserved)
+                #   - Formatted text losing RTF/HTML
+                #   - No plain-text fallback for RTF-only paste
+                for fmt_type, data in content.types.items():
+                    logger.debug("Writing %s to clipboard (%d bytes)", fmt_type.name, len(data))
+                    if fmt_type == ContentType.TEXT:
+                        self._set_text(data)
+                    elif fmt_type == ContentType.HTML:
+                        self._set_html(data)
+                    elif fmt_type == ContentType.RTF:
+                        self._set_custom_format(CF_RTF, data)
+                    elif fmt_type == ContentType.IMAGE_PNG:
+                        self._set_image(data, content.image_fmt)
+                    elif fmt_type == ContentType.IMAGE_EMF:
+                        self._set_emf(data)
+                    elif fmt_type == ContentType.FILE:
+                        self._set_hdrop(data)
+            finally:
+                user32.CloseClipboard()
 
     def _set_text(self, data: bytes):
-        text = data.decode("utf-8")
+        # errors="replace": a peer's TEXT bytes are not guaranteed UTF-8
+        # (Linux/older macOS peers send locale-encoded text).  A strict
+        # decode here would raise after EmptyClipboard() already wiped the
+        # user's clipboard, leaving it empty.
+        text = data.decode("utf-8", errors="replace")
         wide_text = text.encode("utf-16-le") + b"\x00\x00"
         handle = kernel32.GlobalAlloc(0x0002, len(wide_text))  # GMEM_MOVEABLE
         if handle:

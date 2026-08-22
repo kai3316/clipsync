@@ -17,6 +17,21 @@ from internal.clipboard.format import ClipboardContent, ContentType
 
 logger = logging.getLogger(__name__)
 
+
+def _run_write_tool(args, data: bytes) -> bool:
+    """Run a clipboard-write subprocess; True only on a clean exit code.
+
+    xclip/wl-copy can exit non-zero (lost DISPLAY, selection grab refused,
+    no X connection) — a non-zero exit must fall through to the next tool
+    rather than being treated as a silent success.
+    """
+    try:
+        result = subprocess.run(args, input=data, timeout=2)
+        return result.returncode == 0
+    except Exception:
+        return False
+
+
 POLL_INTERVAL = 1.0
 
 # Idle polling backs off to this multiple of the active interval (min 2s)
@@ -330,11 +345,8 @@ class _ClipboardWriter(ClipboardWriter):
             else [(["xclip", "-selection", "clipboard", "-in"], "xclip"), (["wl-copy"], "wl-copy")]
         )
         for args, _name in tools:
-            try:
-                subprocess.run(args, input=data, timeout=2)
-                return  # success
-            except Exception:
-                continue
+            if _run_write_tool(args, data):
+                return
         logger.debug("Failed to write text to clipboard")
 
     def _set_html(self, data: bytes):
@@ -347,11 +359,8 @@ class _ClipboardWriter(ClipboardWriter):
             else [(["xclip", "-selection", "clipboard", "-in", "-t", "text/html"], "xclip"), (["wl-copy", "--type", "text/html"], "wl-copy")]
         )
         for args, _name in tools:
-            try:
-                subprocess.run(args, input=data, timeout=2)
+            if _run_write_tool(args, data):
                 return
-            except Exception:
-                continue
         logger.debug("Failed to write HTML to clipboard")
 
     def _set_rtf(self, data: bytes):
@@ -364,11 +373,8 @@ class _ClipboardWriter(ClipboardWriter):
             else [(["xclip", "-selection", "clipboard", "-in", "-t", "text/rtf"], "xclip"), (["wl-copy", "--type", "text/rtf"], "wl-copy")]
         )
         for args, _name in tools:
-            try:
-                subprocess.run(args, input=data, timeout=2)
+            if _run_write_tool(args, data):
                 return
-            except Exception:
-                continue
         logger.debug("Failed to write RTF to clipboard")
 
     def _set_image(self, data: bytes, image_fmt: str = ""):
@@ -393,11 +399,8 @@ class _ClipboardWriter(ClipboardWriter):
             else [(["xclip", "-selection", "clipboard", "-in", "-t", "image/png"], "xclip"), (["wl-copy", "--type", "image/png"], "wl-copy")]
         )
         for args, _name in tools:
-            try:
-                subprocess.run(args, input=png_data, timeout=2)
+            if _run_write_tool(args, png_data):
                 return
-            except Exception:
-                continue
         logger.debug("Failed to write image to clipboard")
 
     def _set_files(self, data: bytes):
@@ -429,11 +432,8 @@ class _ClipboardWriter(ClipboardWriter):
                   (["wl-copy", "--type", "text/uri-list"], "wl-copy")]
         )
         for args, _name in tools:
-            try:
-                subprocess.run(args, input=uri_list, timeout=2)
+            if _run_write_tool(args, uri_list):
                 return
-            except Exception:
-                continue
         logger.debug("Failed to write file URIs to clipboard")
 
     def _set_url(self, data: bytes):
@@ -457,11 +457,8 @@ class _ClipboardWriter(ClipboardWriter):
                   (["wl-copy", "--type", "text/uri-list"], "wl-copy")]
         )
         for args, _name in tools:
-            try:
-                subprocess.run(args, input=uri_data, timeout=2)
+            if _run_write_tool(args, uri_data):
                 return
-            except Exception:
-                continue
         logger.debug("Failed to write URL to clipboard")
 
 

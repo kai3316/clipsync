@@ -114,7 +114,7 @@ def _maybe_migrate() -> int:
         if row_count > 0:
             return 0  # DB already has data — skip migration
 
-        with open(json_path, "r", encoding="utf-8") as f:
+        with open(json_path, encoding="utf-8") as f:
             data = json.load(f)
 
         if not isinstance(data, list) or not data:

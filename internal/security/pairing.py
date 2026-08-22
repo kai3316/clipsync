@@ -22,13 +22,13 @@ import logging
 import secrets
 import threading
 import time
-from dataclasses import dataclass, field
-from typing import Callable
+from collections.abc import Callable
+from dataclasses import dataclass
 
 from cryptography import x509
-from cryptography.x509.oid import NameOID
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import ed25519
+from cryptography.x509.oid import NameOID
 
 # Pairing code: 8 digits = 100 million combinations
 PAIRING_CODE_LENGTH = 8
@@ -37,6 +37,22 @@ PAIRING_CODE_BYTES = 5
 # Rate limiting for pairing confirmation attempts
 MAX_PAIRING_ATTEMPTS = 5
 PAIRING_ATTEMPT_WINDOW = 300  # 5 minutes
+
+# A pending pairing request expires after this long (no confirmation either way)
+PAIRING_TIMEOUT = 300  # 5 minutes
+
+# Transient pairing lifecycle states (per peer).  The persistent trust flag is
+# ``PeerIdentity.paired``; these states describe the in-progress handshake.
+#   pending            — code shown, awaiting the LOCAL user's decision
+#   confirmed_waiting  — local user confirmed, awaiting the peer's confirm
+#   peer_confirmed     — peer confirmed, awaiting the local user's confirm
+#   paired             — both sides confirmed
+#   cancelled          — rejected / expired / unpaired
+PAIRING_STATUS_PENDING = "pending"
+PAIRING_STATUS_CONFIRMED_WAITING = "confirmed_waiting"
+PAIRING_STATUS_PEER_CONFIRMED = "peer_confirmed"
+PAIRING_STATUS_PAIRED = "paired"
+PAIRING_STATUS_CANCELLED = "cancelled"
 
 logger = logging.getLogger(__name__)
 
@@ -87,6 +103,8 @@ class PairingManager:
         self._identity: DeviceIdentity | None = None
         self._peers: dict[str, PeerIdentity] = {}
         self._pending_pairings: dict[str, tuple[str, float]] = {}  # peer_id -> (code, timestamp)
+        # peer_id -> transient pairing lifecycle status (see module constants).
+        self._pairing_status: dict[str, str] = {}
         # peer_id -> list of attempt timestamps. NOTE: keyed only by peer_id,
         # so an attacker who rotates device identities can reset the count per
         # new identity. Low impact (each identity still pays the 5/5min cost)
@@ -156,6 +174,30 @@ class PairingManager:
                 fingerprint=fp,
             )
 
+    def update_peer_certificate(self, device_id: str, certificate_pem: str) -> bool:
+        """Replace a paired peer's pinned certificate (re-trust after reinstall/reset).
+
+        Updates the stored certificate and fingerprint for an existing peer,
+        keeping ``paired=True``, so future connections from that peer pass the
+        pin. Returns False if the peer is not known to this manager.
+        """
+        fp = fingerprint_pem(certificate_pem)
+        with self._lock:
+            peer = self._peers.get(device_id)
+            if peer is None:
+                logger.warning(
+                    "Cannot update certificate for unknown peer %s", device_id,
+                )
+                return False
+            peer.certificate_pem = certificate_pem
+            peer.fingerprint = fp
+            peer.paired = True
+            logger.info(
+                "Updated pinned certificate for %s (%s) — new fp: %s...",
+                peer.device_name, device_id, fp[:16],
+            )
+            return True
+
     def is_peer_paired(self, device_id: str) -> bool:
         with self._lock:
             peer = self._peers.get(device_id)
@@ -188,6 +230,7 @@ class PairingManager:
         with self._lock:
             self._pending_pairings[peer_id] = (code, time.time())
             self._pairing_attempts[peer_id] = []
+            self._pairing_status[peer_id] = PAIRING_STATUS_PENDING
         logger.info("Generated pairing code for %s", peer_id)
         return code
 
@@ -213,6 +256,7 @@ class PairingManager:
 
         with self._lock:
             self._pending_pairings[peer_id] = (code, time.time())
+            self._pairing_status[peer_id] = PAIRING_STATUS_PENDING
             # Do NOT reset _pairing_attempts here: a connecting peer could
             # otherwise nullify the rate limit by reconnecting and re-generating
             # the shared code. Attempts are cleared only on a successful
@@ -248,10 +292,18 @@ class PairingManager:
             self._pairing_attempts[peer_id] = attempts
 
             if expected == code:
-                del self._pending_pairings[peer_id]
                 self._pairing_attempts.pop(peer_id, None)
                 if peer_id in self._peers:
                     self._peers[peer_id].paired = True
+                # Two-sided confirmation: keep the pending entry so the UI can
+                # show "waiting for the other device".  When the peer's
+                # pairing_confirm arrives (mark_peer_confirmed) it moves to
+                # paired.  If the peer already confirmed first, we're done.
+                if self._pairing_status.get(peer_id) == PAIRING_STATUS_PEER_CONFIRMED:
+                    self._pairing_status[peer_id] = PAIRING_STATUS_PAIRED
+                    self._pending_pairings.pop(peer_id, None)
+                else:
+                    self._pairing_status[peer_id] = PAIRING_STATUS_CONFIRMED_WAITING
                 logger.info("Pairing confirmed for %s", peer_id)
                 return True
             logger.debug("Pairing code mismatch for %s (attempt %d)", peer_id, len(attempts))
@@ -260,6 +312,7 @@ class PairingManager:
     def reject_pairing(self, peer_id: str):
         with self._lock:
             self._pending_pairings.pop(peer_id, None)
+            self._pairing_status[peer_id] = PAIRING_STATUS_CANCELLED
 
     def unpair_peer(self, peer_id: str):
         """Mark a paired peer as unpaired without removing it."""
@@ -268,6 +321,7 @@ class PairingManager:
             if peer:
                 peer.paired = False
                 logger.info("Peer unpaired: %s (%s)", peer.device_name, peer_id)
+            self._pairing_status[peer_id] = PAIRING_STATUS_CANCELLED
 
     def remove_peer(self, peer_id: str):
         """Remove a peer entirely from both known and pending lists."""
@@ -275,15 +329,71 @@ class PairingManager:
             self._peers.pop(peer_id, None)
             self._pending_pairings.pop(peer_id, None)
             self._pairing_attempts.pop(peer_id, None)
+            self._pairing_status.pop(peer_id, None)
 
-    def get_pending_pairings(self) -> list[tuple[str, str, str]]:
-        """Returns list of (peer_id, code, peer_name) for pending pairings."""
+    def get_pairing_status(self, peer_id: str) -> str:
+        """Return the transient pairing lifecycle status for a peer."""
         with self._lock:
+            return self._pairing_status.get(peer_id, PAIRING_STATUS_PENDING)
+
+    def mark_peer_confirmed(self, peer_id: str) -> str:
+        """Peer sent ``pairing_confirm``. Returns the new status.
+
+        If we already confirmed locally (``confirmed_waiting``) this completes
+        the two-sided handshake → ``paired``.  If we were still ``pending`` it
+        becomes ``peer_confirmed`` so the UI can prompt the user to confirm.
+        """
+        with self._lock:
+            current = self._pairing_status.get(peer_id, PAIRING_STATUS_PENDING)
+            if current == PAIRING_STATUS_CONFIRMED_WAITING:
+                self._pairing_status[peer_id] = PAIRING_STATUS_PAIRED
+                self._pending_pairings.pop(peer_id, None)
+                if peer_id in self._peers:
+                    self._peers[peer_id].paired = True
+                return PAIRING_STATUS_PAIRED
+            if current == PAIRING_STATUS_CANCELLED:
+                return current
+            # peer confirmed first, or we never had a status
+            self._pairing_status[peer_id] = PAIRING_STATUS_PEER_CONFIRMED
+            return PAIRING_STATUS_PEER_CONFIRMED
+
+    def mark_peer_rejected(self, peer_id: str) -> None:
+        """Peer sent ``pairing_reject`` — the pairing is cancelled."""
+        with self._lock:
+            self._pending_pairings.pop(peer_id, None)
+            self._pairing_status[peer_id] = PAIRING_STATUS_CANCELLED
+
+    def mark_peer_unpaired(self, peer_id: str) -> None:
+        """Peer sent ``pairing_unpair`` (post-pairing) — we are no longer paired."""
+        with self._lock:
+            peer = self._peers.get(peer_id)
+            if peer:
+                peer.paired = False
+            self._pending_pairings.pop(peer_id, None)
+            self._pairing_status[peer_id] = PAIRING_STATUS_CANCELLED
+
+    def get_pending_pairings(self) -> list[tuple[str, str, str, str]]:
+        """Returns list of (peer_id, code, peer_name, status) for unresolved pairings.
+
+        Entries older than ``PAIRING_TIMEOUT`` are dropped (expired).  A
+        locally-confirmed peer stays listed with status ``confirmed_waiting``
+        until the peer confirms or the request expires.
+        """
+        with self._lock:
+            now = time.time()
             result = []
-            for pid, (code, _) in self._pending_pairings.items():
+            expired = []
+            for pid, (code, ts) in self._pending_pairings.items():
+                if now - ts > PAIRING_TIMEOUT:
+                    expired.append(pid)
+                    continue
                 peer = self._peers.get(pid)
                 name = peer.device_name if peer else pid[:12]
-                result.append((pid, code, name))
+                status = self._pairing_status.get(pid, PAIRING_STATUS_PENDING)
+                result.append((pid, code, name, status))
+            for pid in expired:
+                self._pending_pairings.pop(pid, None)
+                self._pairing_status[pid] = PAIRING_STATUS_CANCELLED
             return result
 
     def get_paired_peers(self) -> list[PeerIdentity]:
@@ -310,8 +420,8 @@ class PairingManager:
             .issuer_name(issuer)
             .public_key(private_key.public_key())
             .serial_number(secrets.randbits(64))
-            .not_valid_before(datetime.datetime.now(datetime.timezone.utc))
-            .not_valid_after(datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(days=3650))
+            .not_valid_before(datetime.datetime.now(datetime.UTC))
+            .not_valid_after(datetime.datetime.now(datetime.UTC) + datetime.timedelta(days=3650))
             .add_extension(
                 x509.SubjectAlternativeName([x509.DNSName(self._device_id)]),
                 critical=False,

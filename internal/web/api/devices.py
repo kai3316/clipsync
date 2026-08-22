@@ -113,12 +113,16 @@ def get_devices(cfg, get_connected_ids, get_discovered=None,
                     "peer_id": p.get("peer_id", ""),
                     "peer_name": p.get("peer_name", p.get("device_name", "")),
                     "code": p.get("code", ""),
+                    "status": p.get("status", "pending"),
                 })
             elif isinstance(p, (tuple, list)) and len(p) >= 3:
                 pending_list.append({
                     "peer_id": p[0],
                     "code": p[1],
                     "peer_name": p[2],
+                    # transient pairing lifecycle status: pending /
+                    # confirmed_waiting / peer_confirmed / paired / cancelled
+                    "status": p[3] if len(p) > 3 else "pending",
                 })
         result["pending_pairings"] = pending_list
 

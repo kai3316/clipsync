@@ -80,6 +80,39 @@ def _init_nspasteboard():
     return _nspasteboard_objc, _nspasteboard_instance
 
 
+def _autorelease_pool_push(objc):
+    """Create and return a new NSAutoreleasePool on the calling thread.
+
+    Background threads (e.g. the clipboard poll thread) have no default
+    autorelease pool, so autoreleased objects (``+stringWithUTF8String:``,
+    ``types``, ``dataForType:``, ``valueForKey:`` ...) would otherwise leak.
+    Each ``_pb_*`` bridge call pushes a pool, does its work, then drains the
+    pool (in a finally block) so those objects are reclaimed.
+    """
+    sel_alloc = objc.sel_registerName(b"alloc")
+    sel_init = objc.sel_registerName(b"init")
+    objc.objc_msgSend.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+    objc.objc_msgSend.restype = ctypes.c_void_p
+    pool = objc.objc_msgSend(objc.objc_getClass(b"NSAutoreleasePool"), sel_alloc)
+    objc.objc_msgSend(pool, sel_init)
+    return pool
+
+
+def _autorelease_pool_drain(objc, pool):
+    """Drain an NSAutoreleasePool created by _autorelease_pool_push.
+
+    Releasing every object autoreleased into it.  Bridge errors are swallowed
+    so a failed drain can never crash the poll loop.
+    """
+    try:
+        sel_drain = objc.sel_registerName(b"drain")
+        objc.objc_msgSend.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+        objc.objc_msgSend.restype = ctypes.c_void_p
+        objc.objc_msgSend(pool, sel_drain)
+    except Exception:
+        logger.debug("NSAutoreleasePool drain failed", exc_info=True)
+
+
 def _pb_types() -> set[bytes]:
     """Return the set of UTI strings currently on the general pasteboard."""
     objc, pb = _init_nspasteboard()
@@ -87,7 +120,9 @@ def _pb_types() -> set[bytes]:
         return set()
 
     with _objc_lock:
+        pool = None
         try:
+            pool = _autorelease_pool_push(objc)
             sel_types = objc.sel_registerName(b"types")
             types_arr = objc.objc_msgSend(pb, sel_types)
             if not types_arr:
@@ -118,6 +153,9 @@ def _pb_types() -> set[bytes]:
         except Exception:
             logger.debug("_pb_types failed", exc_info=True)
             return set()
+        finally:
+            if pool is not None:
+                _autorelease_pool_drain(objc, pool)
 
 
 def _pb_data_for_type(uti: bytes) -> bytes | None:
@@ -127,7 +165,9 @@ def _pb_data_for_type(uti: bytes) -> bytes | None:
         return None
 
     with _objc_lock:
+        pool = None
         try:
+            pool = _autorelease_pool_push(objc)
             ns_uti = _nsstring(objc, uti)
             if not ns_uti:
                 return None
@@ -156,23 +196,25 @@ def _pb_data_for_type(uti: bytes) -> bytes | None:
         except Exception:
             logger.debug("_pb_data_for_type(%s) failed", uti, exc_info=True)
             return None
+        finally:
+            if pool is not None:
+                _autorelease_pool_drain(objc, pool)
 
 
 def _nsstring(objc, s: bytes):
-    """Create an NSString from a Python bytes string via ctypes.
+    """Create an autoreleased NSString from a Python bytes string via ctypes.
 
-    Caller must release the returned object when done (not needed for
-    short-lived calls — the Objective-C autorelease pool handles it).
+    Uses the class factory ``+stringWithUTF8String:`` so the returned object
+    is autoreleased and reclaimed when the NSAutoreleasePool pushed by the
+    enclosing ``_pb_*`` bridge call is drained (rather than the old
+    ``alloc``/``initWithUTF8String:`` pair, which left an un-released object
+    on every poll).
     """
-    sel_alloc = objc.sel_registerName(b"alloc")
-    sel_init = objc.sel_registerName(b"initWithUTF8String:")
+    sel_str = objc.sel_registerName(b"stringWithUTF8String:")
     ns_string_cls = objc.objc_getClass(b"NSString")
-    objc.objc_msgSend.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
-    objc.objc_msgSend.restype = ctypes.c_void_p
-    alloced = objc.objc_msgSend(ns_string_cls, sel_alloc)
     objc.objc_msgSend.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_char_p]
     objc.objc_msgSend.restype = ctypes.c_void_p
-    return objc.objc_msgSend(alloced, sel_init, s)
+    return objc.objc_msgSend(ns_string_cls, sel_str, s)
 
 
 def _pb_has_image() -> bool:
@@ -188,7 +230,9 @@ def _pb_change_count() -> int | None:
         return None
 
     with _objc_lock:
+        pool = None
         try:
+            pool = _autorelease_pool_push(objc)
             key = _nsstring(objc, b"changeCount")
             if not key:
                 return None
@@ -207,6 +251,9 @@ def _pb_change_count() -> int | None:
         except Exception:
             logger.debug("_pb_change_count failed", exc_info=True)
             return None
+        finally:
+            if pool is not None:
+                _autorelease_pool_drain(objc, pool)
 
 
 def _pb_clear_contents() -> bool:
@@ -216,7 +263,9 @@ def _pb_clear_contents() -> bool:
         return False
 
     with _objc_lock:
+        pool = None
         try:
+            pool = _autorelease_pool_push(objc)
             sel_clear = objc.sel_registerName(b"clearContents")
             objc.objc_msgSend.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
             objc.objc_msgSend.restype = ctypes.c_void_p
@@ -225,6 +274,9 @@ def _pb_clear_contents() -> bool:
         except Exception:
             logger.debug("_pb_clear_contents failed", exc_info=True)
             return False
+        finally:
+            if pool is not None:
+                _autorelease_pool_drain(objc, pool)
 
 
 def _pb_set_data_for_type(uti: bytes, data: bytes) -> bool:
@@ -234,7 +286,9 @@ def _pb_set_data_for_type(uti: bytes, data: bytes) -> bool:
         return False
 
     with _objc_lock:
+        pool = None
         try:
+            pool = _autorelease_pool_push(objc)
             ns_uti = _nsstring(objc, uti)
             if not ns_uti:
                 return False
@@ -259,6 +313,9 @@ def _pb_set_data_for_type(uti: bytes, data: bytes) -> bool:
         except Exception:
             logger.debug("_pb_set_data_for_type(%s) failed", uti, exc_info=True)
             return False
+        finally:
+            if pool is not None:
+                _autorelease_pool_drain(objc, pool)
 
 
 # ---------------------------------------------------------------------------

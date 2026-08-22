@@ -11,7 +11,7 @@ import platform
 import socket
 import subprocess
 import threading
-from typing import Callable
+from collections.abc import Callable
 
 from zeroconf import ServiceBrowser, ServiceInfo, Zeroconf
 
@@ -36,6 +36,11 @@ def _get_all_local_addresses():
     def _add(ip: str) -> None:
         ip = (ip or "").strip()
         if not ip or ip == "0.0.0.0" or ip.startswith("127.") or ip.startswith("169.254."):
+            return
+        # Privacy: only advertise RFC1918 private LAN addresses.  Public,
+        # VPN and virtual-adapter addresses are never useful for LAN discovery
+        # and would expose more of the machine's network topology than needed.
+        if not _is_private_ip(ip):
             return
         if ip not in seen:
             seen.add(ip)
@@ -66,6 +71,12 @@ def _get_all_local_addresses():
             _add(info[4][0])
     except Exception:
         pass
+
+    # Cap the advertised set: more IPs than this means unusual network
+    # topology (many adapters) — advertising them all only broadens exposure.
+    MAX_ADVERTISED_IPS = 10
+    if len(addresses) > MAX_ADVERTISED_IPS:
+        addresses = addresses[:MAX_ADVERTISED_IPS]
 
     if not addresses:
         logger.warning("Failed to enumerate local addresses")

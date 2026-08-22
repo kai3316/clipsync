@@ -9,19 +9,30 @@ import logging
 import os
 import time
 
-from internal.web.api.history import (
-    get_history, get_history_item, push_text, delete_item, toggle_pin,
-    increment_paste_count, batch_pin, batch_delete, batch_favorite,
-    paste_rich,
-)
 from internal.web.api.devices import get_devices
-from internal.web.api.transfer import get_transfers, post_transfer, get_speed_test
-from internal.web.api.favorites import get_favorites, add_favorite, delete_favorite, update_favorite
-from internal.web.api.settings import get_settings, update_settings
-from internal.web.api.settings import (
-    export_data, import_data,
-    create_backup_api, restore_backup_api, list_backups_api,
+from internal.web.api.favorites import add_favorite, delete_favorite, get_favorites, update_favorite
+from internal.web.api.history import (
+    batch_delete,
+    batch_favorite,
+    batch_pin,
+    delete_item,
+    get_history,
+    get_history_item,
+    increment_paste_count,
+    paste_rich,
+    push_text,
+    toggle_pin,
 )
+from internal.web.api.settings import (
+    create_backup_api,
+    export_data,
+    get_settings,
+    import_data,
+    list_backups_api,
+    restore_backup_api,
+    update_settings,
+)
+from internal.web.api.transfer import get_speed_test, get_transfers, post_transfer
 from internal.web.api.translate import translate_text
 
 logger = logging.getLogger(__name__)
@@ -30,6 +41,34 @@ logger = logging.getLogger(__name__)
 def _json_response(data, status=200):
     """Pack a dict into (status, content_type, body_bytes)."""
     return status, "application/json; charset=utf-8", json.dumps(data, ensure_ascii=False).encode("utf-8")
+
+
+def _redact_sensitive_line(line: str, cfg) -> str:
+    """Strip locally-sensitive strings (user home, config dir, web token)
+    from a log line before it is served to a web client.
+
+    The raw log contains absolute user paths (e.g. ``C:\\Users\\<name>
+    \\AppData\\Roaming\\ClipSync\\...``), stack traces and config values —
+    useful reconnaissance that should not leave the device.
+    """
+    redact: list[str] = []
+    home = os.path.expanduser("~")
+    if home:
+        redact.append(home)
+    try:
+        from internal.config.config import _config_dir
+        config_dir = str(_config_dir())
+        if config_dir and config_dir != home:
+            redact.append(config_dir)
+    except Exception:
+        pass
+    token = getattr(cfg, "web_token", "")
+    if token:
+        redact.append(token)
+    for r in redact:
+        if r:
+            line = line.replace(r, "[redacted]")
+    return line
 
 
 def dispatch(method, path, query_params, body, cfg, history, sync_mgr,
@@ -59,6 +98,23 @@ def dispatch(method, path, query_params, body, cfg, history, sync_mgr,
     (or a callback into the host app) returns a 500 instead of propagating
     out and killing the request thread.
     """
+    # Reject JSON bodies that are valid JSON but not an object before any
+    # handler runs: every handler calls ``data.get(...)`` immediately after
+    # ``json.loads``, so a ``null`` / array / string / number body would
+    # otherwise raise AttributeError and surface as a 500 + full traceback
+    # (client-input problem, not a server error).
+    if method in ("POST", "PUT", "PATCH") and body:
+        stripped = body.strip()
+        if stripped:
+            try:
+                parsed = json.loads(stripped.decode("utf-8"))
+            except (json.JSONDecodeError, UnicodeDecodeError):
+                pass  # malformed JSON: let the handler produce its own 400
+            else:
+                if not isinstance(parsed, dict):
+                    return _json_response(
+                        {"ok": False, "error": "invalid json body: expected object"}, 400,
+                    )
     try:
         return _dispatch(
             method, path, query_params, body, cfg, history, sync_mgr,
@@ -197,7 +253,10 @@ def _dispatch(method, path, query_params, body, cfg, history, sync_mgr,
                 log_path = _log_dir() / "clipsync.log"
                 if log_path.exists():
                     content = log_path.read_text(encoding="utf-8", errors="replace")
-                    logs = content.splitlines()[-n:]
+                    logs = [
+                        _redact_sensitive_line(line, cfg)
+                        for line in content.splitlines()[-n:]
+                    ]
             except Exception:
                 logger.exception("Failed to read log file for /api/logs")
                 logs = []

@@ -1,18 +1,21 @@
 """Tests for TransportManager and PeerConnection — init, attributes, and
 operations that do not require a live network or TLS handshake."""
 
-import sys
 import os
-import pytest
+import sys
 from pathlib import Path
+
+import pytest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from internal.transport.connection import (
-    TransportManager, PeerConnection,
-    MAX_FRAME_SIZE, FRAME_HEADER_SIZE, DATA_TIMEOUT,
+    DATA_TIMEOUT,
+    FRAME_HEADER_SIZE,
+    MAX_FRAME_SIZE,
+    PeerConnection,
+    TransportManager,
 )
-
 
 # ---------------------------------------------------------------------------
 # Mocks
@@ -26,11 +29,12 @@ class MockPairingManager:
     """
 
     def __init__(self):
-        from cryptography.hazmat.primitives.asymmetric import ed25519
-        from cryptography import x509
-        from cryptography.x509.oid import NameOID
-        from cryptography.hazmat.primitives import serialization
         import datetime
+
+        from cryptography import x509
+        from cryptography.hazmat.primitives import serialization
+        from cryptography.hazmat.primitives.asymmetric import ed25519
+        from cryptography.x509.oid import NameOID
 
         private_key = ed25519.Ed25519PrivateKey.generate()
         subject = issuer = x509.Name([
@@ -42,9 +46,9 @@ class MockPairingManager:
             .issuer_name(issuer)
             .public_key(private_key.public_key())
             .serial_number(12345)
-            .not_valid_before(datetime.datetime.now(datetime.timezone.utc))
+            .not_valid_before(datetime.datetime.now(datetime.UTC))
             .not_valid_after(
-                datetime.datetime.now(datetime.timezone.utc)
+                datetime.datetime.now(datetime.UTC)
                 + datetime.timedelta(days=365)
             )
             .sign(private_key, None)

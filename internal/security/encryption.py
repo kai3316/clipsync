@@ -11,9 +11,7 @@ additional input material to HKDF for both keys.
 import hashlib
 import hmac
 import logging
-import os
 import secrets
-import struct
 
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 

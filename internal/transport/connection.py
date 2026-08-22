@@ -18,15 +18,13 @@ class PortInUseError(OSError):
         self.port = port
         super().__init__(f"Port {port} is already in use")
 import uuid
+from collections.abc import Callable
 from pathlib import Path
-from typing import Callable
 
 from cryptography import x509
 from cryptography.x509.oid import NameOID
-from cryptography.hazmat.primitives import serialization
-from cryptography.hazmat.primitives.serialization import Encoding
 
-from internal.protocol.codec import decode_message
+from internal.protocol.codec import PAIRING_MSG_TYPES, decode_message
 from internal.security.encryption import is_encrypted
 from internal.security.pairing import CertificateChangedError, PairingManager, fingerprint_pem
 
@@ -256,12 +254,17 @@ class PeerConnection:
                     # app frames exist. Dropping them stops unpaired LAN peers
                     # from injecting clipboard / nav_url / file-dialog content.
                     if self._pairing_mgr is not None and not self._pairing_mgr.is_peer_paired(self.device_id):
-                        logger.warning(
-                            "[%s] dropping %s frame from unpaired peer (device_id=%s)",
-                            self.device_name, getattr(msg, "msg_type", "clipboard"),
-                            self.device_id[:12],
-                        )
-                        continue
+                        # Pairing lifecycle messages must pass through so a peer
+                        # can confirm / reject / unpair even before it is paired
+                        # — that is exactly how the two-sided handshake completes.
+                        # Every other app frame from an unpaired peer is dropped.
+                        if getattr(msg, "msg_type", "clipboard") not in PAIRING_MSG_TYPES:
+                            logger.warning(
+                                "[%s] dropping %s frame from unpaired peer (device_id=%s)",
+                                self.device_name, getattr(msg, "msg_type", "clipboard"),
+                                self.device_id[:12],
+                            )
+                            continue
                     # Pass this connection's peer id so handlers can respond to
                     # the sender (e.g. file-transfer acks/chunks) instead of
                     # broadcasting to every peer.
@@ -290,7 +293,7 @@ class PeerConnection:
                     return None
                 buf.extend(chunk)
                 self._last_recv_time = time.monotonic()
-            except socket.timeout:
+            except TimeoutError:
                 if not self._running:
                     return None
                 continue
@@ -351,7 +354,9 @@ class TransportManager:
     def set_on_security_alert(self, callback: Callable):
         """Set a callback for security events (e.g. certificate changed).
 
-        Called with (peer_name, expected_fingerprint, received_fingerprint).
+        Called with (peer_name, peer_id, expected_fingerprint,
+        received_fingerprint, new_cert_pem).  ``new_cert_pem`` is the
+        certificate that triggered the alert (empty if unknown).
         """
         self._on_security_alert = callback
 
@@ -605,6 +610,9 @@ class TransportManager:
 
         def _connect():
             sock = None
+            ssl_sock = None
+            peer_cert_pem = ""
+            real_peer_id = ""
             try:
                 logger.info("[%s] TCP connecting to %s:%d", peer_name, address, port)
                 sock = socket.create_connection((address, port), timeout=10)
@@ -789,7 +797,14 @@ class TransportManager:
                     received_fp[:16] if received_fp else "n/a",
                 )
                 if self._on_security_alert:
-                    self._on_security_alert(peer_name, expected_fp, received_fp)
+                    self._on_security_alert(
+                        peer_name, real_peer_id, expected_fp, received_fp, peer_cert_pem,
+                    )
+                if ssl_sock:
+                    try:
+                        ssl_sock.close()
+                    except Exception:
+                        pass
                 if sock:
                     try:
                         sock.close()
@@ -797,6 +812,11 @@ class TransportManager:
                         pass
             except Exception as e:
                 logger.warning("[%s] connect failed: %s", peer_name, e)
+                if ssl_sock:
+                    try:
+                        ssl_sock.close()
+                    except Exception:
+                        pass
                 if sock:
                     try:
                         sock.close()
@@ -1148,6 +1168,7 @@ class TransportManager:
     def _accept_loop(self, ssl_context: ssl.SSLContext):
         while self._running:
             client_sock = None
+            ssl_sock = None
             try:
                 client_sock, addr = self._server_sock.accept()
                 logger.info("TCP accepted from %s:%d", addr[0], addr[1])
@@ -1231,6 +1252,7 @@ class TransportManager:
                 # Prevent the outer except handler from closing client_sock
                 # now that PeerConnection owns the ssl_sock (which wraps it).
                 client_sock = None
+                ssl_sock = None
 
                 # Socket shutdown/close and health checks do I/O — collect the
                 # connections to stop under the lock, then stop them outside it.
@@ -1326,7 +1348,7 @@ class TransportManager:
 
                 logger.info("Accepted connection from %s:%d [%s]", addr[0], addr[1], peer_id[:12] if peer_id else "N/A")
 
-            except socket.timeout:
+            except TimeoutError:
                 continue
             except CertificateChangedError:
                 # Expected = the stored fingerprint of the previously paired
@@ -1341,7 +1363,17 @@ class TransportManager:
                     received_fp[:16] if received_fp else "n/a",
                 )
                 if self._on_security_alert:
-                    self._on_security_alert(peer_name or "unknown", expected_fp, received_fp)
+                    self._on_security_alert(
+                        peer_name or "unknown", peer_id, expected_fp, received_fp, peer_cert_pem,
+                    )
+                # Close both the SSL wrapper and the raw socket so no
+                # half-open connection is left behind. The accept loop then
+                # continues to the next incoming connection.
+                if ssl_sock:
+                    try:
+                        ssl_sock.close()
+                    except Exception:
+                        pass
                 if client_sock:
                     try:
                         client_sock.close()
@@ -1350,6 +1382,11 @@ class TransportManager:
             except Exception as e:
                 if self._running:
                     logger.warning("Accept error: %s: %s", type(e).__name__, e, exc_info=True)
+                if ssl_sock:
+                    try:
+                        ssl_sock.close()
+                    except Exception:
+                        pass
                 if client_sock:
                     try:
                         client_sock.close()

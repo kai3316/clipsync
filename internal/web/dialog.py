@@ -21,7 +21,6 @@ Set it via ``dialog_mgr.ws_manager = ...`` after both are created.
 
 import logging
 import threading
-import time
 import uuid
 
 logger = logging.getLogger(__name__)

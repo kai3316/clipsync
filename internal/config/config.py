@@ -79,6 +79,7 @@ class Config:
     # UI preferences
     appearance_mode: str = "system"     # "system", "light", "dark"
     language: str = "zh-CN"             # locale code: "en", "zh-CN" (default Chinese)
+    language_chosen: bool = False       # True once the user picked a language (first-run onboarding)
     # Clipboard behavior
     paste_to_top: bool = True           # move pasted item to top
     low_memory_mode: bool = False       # reduce polling frequency / disable previews
@@ -212,6 +213,7 @@ def load() -> Config:
                 "encryption_password_hash",
                 "appearance_mode",
                 "language",
+                "language_chosen",
                 "paste_to_top", "low_memory_mode", "retry_capture_enabled",
                 "dedup_method", "app_filter_enabled", "app_filter_mode",
                 "app_filter_list", "source_tracking_enabled",
@@ -303,6 +305,7 @@ def save(cfg: Config, enc_mgr: "EncryptionManager | None" = None):
             "encryption_password_hash": cfg.encryption_password_hash,
             "appearance_mode": cfg.appearance_mode,
             "language": cfg.language,
+            "language_chosen": cfg.language_chosen,
             "paste_to_top": cfg.paste_to_top,
             "low_memory_mode": cfg.low_memory_mode,
             "retry_capture_enabled": cfg.retry_capture_enabled,
