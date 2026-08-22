@@ -381,7 +381,21 @@ var ClipsyncWS = (function () {
           // declined, session closed, ...). Replace the list and recompute the
           // total unread for the sidebar badge.
           if (data && data.sessions && Array.isArray(data.sessions)) {
-            store.replaceChatSessions(data.sessions);
+            var sessList = data.sessions.slice();
+            // The backend may still report unread for the session the user is
+            // actively viewing (mark-read is fire-and-forget). Letting the
+            // authoritative list clobber it back to non-zero would flash the
+            // badge and trigger a redundant full refetch — force the active
+            // session's unread to 0 and keep every other session's count.
+            if (store.activeChatSession) {
+              for (var ci = 0; ci < sessList.length; ci++) {
+                if (sessList[ci] && sessList[ci].session_id === store.activeChatSession) {
+                  sessList[ci] = Object.assign({}, sessList[ci], { unread: 0 });
+                  break;
+                }
+              }
+            }
+            store.replaceChatSessions(sessList);
           }
           break;
 

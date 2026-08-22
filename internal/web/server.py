@@ -1498,16 +1498,22 @@ class WebServer:
                         if not saved_path:
                             inner_self._send_json({"error": "not found"}, 404)
                             return
-                        # Defense-in-depth: confine against the receive root
-                        # (the same dir phone uploads and clipboard file
-                        # transfers use) so a token holder can never stream a
+                        # Defense-in-depth: confine against the ChatManager's
+                        # actual receive dir — chat files land there, and it
+                        # follows live receive-dir changes independently of the
+                        # web upload dir — so a token holder can never stream a
                         # file from elsewhere on the host.
                         from internal.web.api.security import confine_path
-                        safe = confine_path(saved_path, _get_upload_dir(cfg))
+                        safe = None
+                        chat_receive_root = getattr(chat_mgr, "_receive_dir", None)
+                        if chat_receive_root is not None:
+                            safe = confine_path(saved_path, chat_receive_root)
+                        if safe is None:
+                            # Fall back to the web upload root(s) for older
+                            # files received before the last receive-dir change
+                            # (still confined to that root).
+                            safe = confine_path(saved_path, _get_upload_dir(cfg))
                         if safe is None and upload_dir:
-                            # A live receive-dir change can leave older chat
-                            # files under the previously-configured root —
-                            # accept those too (still confined to that root).
                             safe = confine_path(saved_path, upload_dir)
                         if safe is None:
                             inner_self._send_json({"error": "invalid filename"}, 400)
@@ -1637,21 +1643,40 @@ class WebServer:
                     target_field = fields.get("device_id")
                     if target_field:
                         target_device = target_field[1].decode("utf-8", errors="replace")
+                    # purpose=chat: a nearby-chat file send.  Stage the file in
+                    # a temp dir (never the received-files dir) and skip the
+                    # receive notification / sound / Files record so a chat
+                    # attachment does not masquerade as an inbound transfer.
+                    purpose = ""
+                    purpose_field = fields.get("purpose")
+                    if purpose_field:
+                        purpose = purpose_field[1].decode("utf-8", errors="replace").strip()
+                    if not purpose:
+                        purpose = (query_params.get("purpose", [""])[0] or "").strip()
+                    is_chat_upload = purpose == "chat"
+                    if is_chat_upload:
+                        upload_target = api_routes._chat_tmp_dir()
+                    else:
+                        upload_target = request_upload_dir
                     # Sanitize filename
                     safe_name = os.path.basename(fname).replace("\\", "_").replace("/", "_")
                     if not safe_name:
                         safe_name = "uploaded_file"
-                    dest = os.path.join(request_upload_dir, safe_name)
+                    dest = os.path.join(upload_target, safe_name)
                     # Avoid overwriting
                     base, ext = os.path.splitext(safe_name)
                     counter = 1
                     while os.path.exists(dest):
-                        dest = os.path.join(request_upload_dir, f"{base} ({counter}){ext}")
+                        dest = os.path.join(upload_target, f"{base} ({counter}){ext}")
                         counter += 1
                     with open(dest, "wb") as f:
                         f.write(fdata)
                     logger.info("Web upload: %s (%d bytes) -> %s", safe_name, len(fdata), dest)
-                    if target_device and target_device != cfg.device_id and on_forward_file:
+                    if is_chat_upload:
+                        # A chat staging upload must not trigger the received-
+                        # file notification / sound / Files record.
+                        pass
+                    elif target_device and target_device != cfg.device_id and on_forward_file:
                         # The forward callback returns False when the target
                         # peer is not connected; surface that instead of
                         # reporting a success the file never reached.
@@ -1679,7 +1704,16 @@ class WebServer:
                                 on_web_upload(os.path.basename(dest), len(fdata), dest)
                         except Exception:
                             logger.debug("on_web_upload callback failed", exc_info=True)
-                    inner_self._send_json({"ok": True, "name": os.path.basename(dest), "size": len(fdata)})
+                    if is_chat_upload:
+                        # The temp path is handed straight to /api/chat/file.
+                        inner_self._send_json({
+                            "ok": True,
+                            "name": os.path.basename(dest),
+                            "size": len(fdata),
+                            "path": str(dest),
+                        })
+                    else:
+                        inner_self._send_json({"ok": True, "name": os.path.basename(dest), "size": len(fdata)})
                     return
 
                 # ── Delegate other API routes ────────────────────

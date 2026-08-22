@@ -479,3 +479,184 @@ def test_dispatch_post_chat_file_rejects_traversal(tmp_path):
     )
     assert status == 400
     assert json.loads(body)["ok"] is False
+
+
+# ── Regression tests for the web-chat audit fixes ────────────────────
+
+def test_send_text_failure_reported_as_ok_false():
+    """#1: a failed send_text surfaces {ok: false} so the frontend keeps the
+    draft instead of clearing it and pretending the message went out."""
+
+    class FailingText:
+        def get_sessions(self):
+            return [{"session_id": "s1", "peer_id": "peer-1"}]
+
+        def send_text(self, session_id, text, send_fn):
+            return False
+
+    data, status = chat_api.send_text(
+        FailingText(), _body({"session_id": "s1", "text": "hi"}), _send_fn_for,
+    )
+    assert status == 200
+    assert data["ok"] is False
+
+
+def test_invite_web_host_refused_dict():
+    """#6: the web host distinguishes a refused invite from a connecting one."""
+    cm = FakeChatManager()
+    data, status = chat_api.invite(
+        cm, _body({"peer_id": "peer-1"}),
+        lambda peer_id, peer_name: {"ok": False, "error": "peer_unreachable"},
+    )
+    assert status == 400
+    assert data["ok"] is False
+    assert data["error"] == "peer_unreachable"
+
+
+def test_invite_web_host_connecting_dict():
+    cm = FakeChatManager()
+    data, status = chat_api.invite(
+        cm, _body({"peer_id": "peer-1"}),
+        lambda peer_id, peer_name: {"connecting": True},
+    )
+    assert status == 200
+    assert data["connecting"] is True
+    assert data["session_id"] is None
+
+
+def test_invite_web_host_session_id_dict():
+    cm = FakeChatManager()
+    data, status = chat_api.invite(
+        cm, _body({"peer_id": "peer-1"}),
+        lambda peer_id, peer_name: {"session_id": "sess-web"},
+    )
+    assert status == 200
+    assert data["session_id"] == "sess-web"
+
+
+def test_chat_manager_set_receive_dir_updates_root():
+    """#2: ChatManager.set_receive_dir is the live receive-dir hook main.py
+    now calls; assert it actually moves _receive_dir (and is idempotent)."""
+    import tempfile
+    from pathlib import Path
+    cm = ChatManager("dev", "Dev", receive_dir="")
+    try:
+        assert cm._receive_dir is None
+        with tempfile.TemporaryDirectory() as td:
+            cm.set_receive_dir(td)
+            assert cm._receive_dir == Path(td)
+        with tempfile.TemporaryDirectory() as td2:
+            cm.set_receive_dir(td2)
+            assert cm._receive_dir == Path(td2)
+    finally:
+        cm.shutdown()
+
+
+def _chat_tmp_file(name: str) -> str:
+    from internal.web.routes import _chat_tmp_dir
+    import uuid
+    return os.path.join(_chat_tmp_dir(), f"{name}-{uuid.uuid4().hex}.txt")
+
+
+def test_dispatch_post_chat_file_accepts_absolute_chat_tmp_path():
+    """#7: purpose=chat uploads pass an absolute path inside the chat temp
+    dir; the /api/chat/file route must confine and accept it."""
+    from internal.web.routes import _chat_tmp_dir
+    path = _chat_tmp_file("chat-ok")
+    try:
+        with open(path, "w", encoding="utf-8") as f:
+            f.write("hello")
+        seen = {}
+
+        class Recorder:
+            def send_file(self, session_id, file_path, send_fn):
+                seen["path"] = file_path
+                return "tid-1"
+
+        status, _ct, body = dispatch(
+            "POST", "/api/chat/file", {},
+            _body({"session_id": "s1", "file_path": path}),
+            object(), None, None,
+            **_dispatch_args(
+                chat_mgr=Recorder(),
+                chat_send_fn=lambda peer_id: lambda data: True,
+            ),
+        )
+        assert status == 200
+        assert seen["path"] == os.path.realpath(path)
+        assert json.loads(body)["transfer_id"] == "tid-1"
+    finally:
+        try:
+            os.unlink(path)
+        except OSError:
+            pass
+
+
+def test_dispatch_post_chat_file_rejects_absolute_path_outside_tmp(tmp_path):
+    """#7: an absolute path that is NOT inside the chat temp dir is refused
+    (a token holder must not send arbitrary host files via chat)."""
+    path = str(tmp_path / "evil.txt")
+    with open(path, "w", encoding="utf-8") as f:
+        f.write("evil")
+    status, _ct, body = dispatch(
+        "POST", "/api/chat/file", {},
+        _body({"session_id": "s1", "file_path": path}),
+        object(), None, None,
+        **_dispatch_args(
+            chat_mgr=FakeChatManager(),
+            chat_send_fn=lambda peer_id: lambda data: True,
+        ),
+    )
+    assert status == 400
+    assert json.loads(body)["ok"] is False
+
+
+def test_dispatch_post_chat_file_cleans_up_staging_on_send_failure():
+    """#9: a purpose=chat staging file is removed when the send cannot start,
+    so a failed chat send leaves no orphaned upload copy."""
+    path = _chat_tmp_file("chat-cleanup")
+    with open(path, "w", encoding="utf-8") as f:
+        f.write("hello")
+    assert os.path.exists(path)
+
+    class FailingRecorder:
+        def send_file(self, session_id, file_path, send_fn):
+            return None  # could not start transfer
+
+    status, _ct, body = dispatch(
+        "POST", "/api/chat/file", {},
+        _body({"session_id": "s1", "file_path": path}),
+        object(), None, None,
+        **_dispatch_args(
+            chat_mgr=FailingRecorder(),
+            chat_send_fn=lambda peer_id: lambda data: True,
+        ),
+    )
+    assert status == 400
+    assert json.loads(body)["ok"] is False
+    assert not os.path.exists(path), "staging file should be cleaned up"
+
+
+def test_dispatch_post_chat_file_keeps_received_file_on_failure(tmp_path):
+    """#9 guard: the cleanup only targets purpose=chat staging files. A failed
+    send of a legacy bare-filename (a real received file) must NOT delete it."""
+    recv = tmp_path / "real-received.txt"
+    recv.write_text("do not delete", encoding="utf-8")
+
+    class FailingRecorder:
+        def send_file(self, session_id, file_path, send_fn):
+            return None  # could not start transfer
+
+    status, _ct, body = dispatch(
+        "POST", "/api/chat/file", {},
+        _body({"session_id": "s1", "file_path": "real-received.txt"}),
+        object(), None, None,
+        **_dispatch_args(
+            chat_mgr=FailingRecorder(),
+            upload_dir=str(tmp_path),
+            chat_send_fn=lambda peer_id: lambda data: True,
+        ),
+    )
+    assert status == 400
+    assert json.loads(body)["ok"] is False
+    assert recv.exists(), "a real received file must not be cleaned up"

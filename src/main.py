@@ -1505,10 +1505,69 @@ class Application:
     def _web_chat_start_session(self, peer_id: str, peer_name: str):
         """Open a chat session for the web API (connect-first if offline).
 
-        Returns the new/existing session id, or None when a background connect
-        is in flight (the caller then waits for the ``chat_sessions`` push).
+        Returns ``{"session_id": <id>}`` when a session is live,
+        ``{"connecting": True}`` while an async connect is in flight (a
+        ``chat_sessions`` push arrives once the invited session lands), or
+        ``{"ok": False, "error": <reason>}`` when the invite was refused
+        (rate limit / slots full / peer unreachable) — so the web UI can
+        tell "waiting" apart from "failed" instead of showing "Connecting…"
+        forever.
         """
-        return self._chat_start_session(peer_id, peer_name, "")
+        try:
+            resolved = self.transport_mgr.get_resolved_hashes() or {}
+            real_id = resolved.get(peer_id, peer_id)
+        except Exception:
+            real_id = peer_id
+        try:
+            connected = set(self.transport_mgr.get_connected_peers() or [])
+        except Exception:
+            connected = set()
+        if real_id in connected or peer_id in connected:
+            sid = self.chat_mgr.start_session(
+                real_id, peer_name, "", self._chat_send_fn(real_id),
+            )
+            if sid:
+                return {"session_id": sid}
+            return {"ok": False, "error": "invite_failed"}
+        address, port = self._chat_device_address(peer_id)
+        if not address:
+            logger.warning("web chat start: no address for peer %s", peer_id[:12])
+            return {"ok": False, "error": "peer_unreachable"}
+        try:
+            self.transport_mgr.connect_to_peer(peer_id, peer_name, address, port)
+        except Exception:
+            logger.debug("web chat start: connect failed", exc_info=True)
+            return {"ok": False, "error": "connect_failed"}
+
+        def _poll():
+            deadline = time.monotonic() + 15.0
+            while time.monotonic() < deadline:
+                try:
+                    now_connected = set(self.transport_mgr.get_connected_peers() or [])
+                    now_resolved = self.transport_mgr.get_resolved_hashes() or {}
+                    real_now = now_resolved.get(peer_id, peer_id)
+                except Exception:
+                    now_connected, real_now = set(), peer_id
+                if real_now in now_connected or peer_id in now_connected:
+                    try:
+                        self.chat_mgr.start_session(
+                            real_now, peer_name, "", self._chat_send_fn(real_now),
+                        )
+                    except Exception:
+                        logger.debug("web chat start: start_session failed", exc_info=True)
+                    self._chat_event_from_worker()
+                    return
+                time.sleep(0.3)
+            try:
+                self.root.after(0, lambda: self._notify_info(
+                    T("chat.title"),
+                    T("chat.err_connect_timeout", name=peer_name),
+                ))
+            except Exception:
+                pass
+
+        threading.Thread(target=_poll, daemon=True, name="web-chat-connect").start()
+        return {"connecting": True}
 
     def _web_chat_send_fn(self, peer_id: str | None):
         """Per-peer send closure for web chat API handlers."""
@@ -1775,7 +1834,9 @@ class Application:
                 send_fn = (lambda data, pid=peer_id: self.transport_mgr.send_to_peer(pid, data))
             else:
                 send_fn = self.transport_mgr.broadcast
-            self.file_transfer_mgr.handle_message(msg_type, raw_payload, send_fn)
+            self.file_transfer_mgr.handle_message(
+                msg_type, raw_payload, send_fn, peer_id or "",
+            )
             return
         if msg_type in PAIRING_MSG_TYPES:
             raw_payload = getattr(msg, "_raw_payload", {})
@@ -2432,6 +2493,12 @@ class Application:
                     # list / download / delete still target the old startup dir.
                     if self.web_server is not None:
                         self.web_server._upload_dir = d
+                    # Nearby-chat received files follow the same receive dir;
+                    # update the ChatManager too so new chat downloads confine
+                    # against the current root (older files stay under their
+                    # original root and are still served).
+                    if getattr(self, "chat_mgr", None) is not None:
+                        self.chat_mgr.set_receive_dir(str(d))
             except Exception:
                 logger.debug("Failed to apply file_receive_dir live", exc_info=True)
 

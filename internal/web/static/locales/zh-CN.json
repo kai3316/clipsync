@@ -963,6 +963,7 @@
   "chat.status.pending": "等待中",
   "chat.status.connected": "已连接",
   "chat.status.declined": "已拒绝",
+  "chat.status.closed": "已关闭",
   "chat.status.offline": "离线",
   "chat.file.sent": "已发送",
   "chat.file.received": "已接收",

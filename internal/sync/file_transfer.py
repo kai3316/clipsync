@@ -499,6 +499,7 @@ class FileTransferManager:
         msg_type: str,
         payload: dict[str, Any],
         send_fn: Callable[[bytes], None],
+        sender_device_id: str = "",
     ) -> None:
         """Route an incoming file-transfer message to the correct handler.
 
@@ -529,7 +530,10 @@ class FileTransferManager:
         if handler is None:
             logger.debug("Unknown file transfer message type: %s", msg_type)
             return
-        handler(payload, send_fn)
+        if msg_type == "file_chunk":
+            handler(payload, send_fn, sender_device_id)
+        else:
+            handler(payload, send_fn)
 
     # ------------------------------------------------------------------
     # Internal helpers
@@ -647,7 +651,8 @@ class FileTransferManager:
             logger.info("Auto-accepting transfer %s (no UI callback registered)", transfer_id[:8])
             self.accept_transfer(transfer_id, send_fn)
 
-    def _handle_file_chunk(self, payload: dict, send_fn: Callable[[bytes], None]) -> None:
+    def _handle_file_chunk(self, payload: dict, send_fn: Callable[[bytes], None],
+                           sender_device_id: str = "") -> None:
         transfer_id = str(payload.get("transfer_id", ""))
         chunk_index = payload.get("chunk_index", 0)
         total_chunks = payload.get("total_chunks", 0)
@@ -663,6 +668,19 @@ class FileTransferManager:
             transfer = self._transfers.get(transfer_id)
             if transfer is None:
                 logger.debug("Chunk for unknown transfer: %s", transfer_id[:8])
+                return
+            # Sender verification: file_chunk frames pass the unpaired peer
+            # gate (chat file bytes ride them), so a chunk must come from the
+            # transfer's actual peer — otherwise an unpaired or newly-unpaired
+            # device that learned a transfer_id could inject bytes into a
+            # clipboard download it doesn't own.
+            expected_peer = transfer.get("peer_id")
+            if (expected_peer and sender_device_id
+                    and sender_device_id != expected_peer):
+                logger.warning(
+                    "Chunk for transfer %s from %s, expected %s — dropping",
+                    transfer_id[:8], sender_device_id[:12], expected_peer[:12],
+                )
                 return
             state = transfer.get("state")
             if state not in ("receiving", "awaiting_retransmit"):

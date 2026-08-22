@@ -12,6 +12,7 @@
 <meta name="mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <link rel="apple-touch-icon" href="/icon-192.png?token=__TOKEN__">
+<link rel="manifest" href="/manifest.json?page=mobile&token=__TOKEN__">
 <title>ClipSync</title>
 <script>
 /* The server injects the app-configured locale here (__CLIPSYNC_I18N_LOCALE__
@@ -19,6 +20,17 @@
    served without interpolation. */
 try { window.__CLIPSYNC_I18N_LOCALE__ = __CLIPSYNC_I18N_LOCALE__; }
 catch (e) { window.__CLIPSYNC_I18N_LOCALE__ = ''; }
+</script>
+<script>
+/* Register the service worker so an installed phone page keeps working when
+   offline (same as the dashboard).  Fails silently on plain-HTTP LAN access —
+   browsers refuse SW registration outside secure contexts; expected. */
+try {
+  if ('serviceWorker' in navigator) {
+    var _tok = (location.search.match(/[?&]token=([^&]+)/) || [])[1] || '';
+    navigator.serviceWorker.register('/sw.js?token=' + encodeURIComponent(_tok)).catch(function () {});
+  }
+} catch (e) {}
 </script>
 <style>
 /* ═══════════════════════════════════════════════════════════════════

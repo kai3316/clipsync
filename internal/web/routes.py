@@ -39,6 +39,20 @@ from internal.web.api.translate import translate_text
 logger = logging.getLogger(__name__)
 
 
+def _chat_tmp_dir() -> str:
+    """Return the directory purpose=chat web uploads land in (temp only).
+
+    Chat file sends stage the file here instead of the received-files dir so
+    the upload never surfaces as a received file / notification / sound.  The
+    /api/chat/file route confines absolute paths against this same root, and
+    the server's /api/upload purpose=chat branch writes into it.
+    """
+    import tempfile
+    d = os.path.join(tempfile.gettempdir(), "clipsync_chat_uploads")
+    os.makedirs(d, exist_ok=True)
+    return d
+
+
 def _json_response(data, status=200):
     """Pack a dict into (status, content_type, body_bytes)."""
     return status, "application/json; charset=utf-8", json.dumps(data, ensure_ascii=False).encode("utf-8")
@@ -763,25 +777,42 @@ def _dispatch(method, path, query_params, body, cfg, history, sync_mgr,
                 req = json.loads(body.decode("utf-8"))
             except (json.JSONDecodeError, UnicodeDecodeError):
                 req = None
+            chat_staging_path = None
             if isinstance(req, dict):
                 fpath = str(req.get("file_path") or "").strip()
                 if fpath:
                     from internal.web.api.security import confine_path
-                    # When the receive dir is user-configured, resolve it at
-                    # request time (the server's captured upload_dir goes
-                    # stale after a live setting change). When unconfigured
-                    # the default can't change, so honor the captured root.
-                    configured = getattr(cfg, "file_receive_dir", "") or ""
-                    base_dir = os.path.expanduser(configured) if configured else upload_dir
-                    safe = confine_path(os.path.join(base_dir, fpath), base_dir)
+                    if os.path.isabs(fpath):
+                        # purpose=chat uploads pass an absolute temp path that
+                        # lives in the dedicated chat temp dir.
+                        safe = confine_path(fpath, _chat_tmp_dir())
+                        chat_staging_path = str(safe) if safe is not None else None
+                    else:
+                        # Bare filename (legacy /api/upload flow) — resolve it
+                        # against the received-files dir. When the receive dir
+                        # is user-configured, resolve it at request time (the
+                        # server's captured upload_dir goes stale after a live
+                        # setting change). When unconfigured the default can't
+                        # change, so honor the captured root.
+                        configured = getattr(cfg, "file_receive_dir", "") or ""
+                        base_dir = os.path.expanduser(configured) if configured else upload_dir
+                        safe = confine_path(os.path.join(base_dir, fpath), base_dir)
                     if safe is None:
                         return _json_response(
-                            {"ok": False, "error": "path must be inside the received-files directory"},
+                            {"ok": False, "error": "path must be inside the allowed upload directory"},
                             400,
                         )
                     req["file_path"] = str(safe)
                     body = json.dumps(req).encode("utf-8")
             data, status = _chat_api.send_file(chat_mgr, body, chat_send_fn)
+            # A purpose=chat upload is staged in the temp dir; if the send
+            # could not be started, remove the staging copy so a failed chat
+            # send leaves no orphaned file.
+            if chat_staging_path and not data.get("transfer_id"):
+                try:
+                    os.unlink(chat_staging_path)
+                except OSError:
+                    pass
             return _json_response(data, status)
 
         elif path == "/api/chat/file/accept":

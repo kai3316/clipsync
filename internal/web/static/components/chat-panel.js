@@ -283,6 +283,10 @@
         this.messagesLoading = true;
         return ClipsyncAPI.chatMessages(sid)
           .then(function (res) {
+            // The user may have switched sessions while the request was in
+            // flight — never clobber the now-open conversation with a stale
+            // snapshot for the previously-active one.
+            if (sid !== self.store.activeChatSession) return;
             if (res && res.messages) {
               self.store.replaceChatMessages(res.messages);
             }
@@ -378,7 +382,11 @@
         if (!sid) return;
         this.inviteBusy = sid;
         ClipsyncAPI.chatSessionAction(sid, action)
-          .then(function () {
+          .then(function (res) {
+            if (!res || res.ok === false) {
+              self.store.showToast(self.t('chat.err_send_failed'), 2500);
+              return;
+            }
             if (action === 'decline') {
               // The invite is settled — leave the conversation; the backend
               // may drop the session or keep it in a declined state.
@@ -403,7 +411,11 @@
         var sid = this.store.activeChatSession;
         if (!sid) return;
         ClipsyncAPI.chatSessionAction(sid, 'close')
-          .then(function () {
+          .then(function (res) {
+            if (!res || res.ok === false) {
+              self.store.showToast(self.t('chat.err_send_failed'), 2500);
+              return;
+            }
             self.store.activeChatSession = '';
             self.store.chatMessages.splice(0, self.store.chatMessages.length);
             self.loadSessions();
@@ -459,10 +471,10 @@
         }
         var file = files[0];
         this.sendingFile = true;
-        // Reuse the existing /api/upload flow (the transfer panel's file
-        // picker) — it saves to the server's receive dir and returns the
-        // basename, which the chat/file endpoint resolves to a path.
-        ClipsyncAPI.uploadFile(file)
+        // purpose=chat lands the file in a temp dir on the server (never the
+        // received-files dir) and skips the receive notification/sound/Files
+        // record; the response carries the temp path to feed chatSendFile.
+        this._uploadForChat(file)
           .then(function (res) {
             var filePath = (res && (res.path || res.filepath || res.name)) || '';
             if (!filePath) {
@@ -484,6 +496,26 @@
           })
           .finally(function () {
             self.sendingFile = false;
+          });
+      },
+
+      // Upload a file strictly for chat sending. Mirrors ClipsyncAPI.uploadFile
+      // but tags the request purpose=chat so the server can tell a chat temp
+      // upload (no receive notification / sound / Files record) apart from a
+      // normal phone upload. The server answers with the absolute temp path.
+      _uploadForChat: function (file) {
+        var base = (this.store && this.store.serverUrl) || '';
+        if (base) base = base.replace(/\/+$/, '');
+        var sep = '/api/upload'.indexOf('?') !== -1 ? '&' : '?';
+        var url = base + '/api/upload' + sep +
+          'token=' + encodeURIComponent((this.store && this.store.token) || '') +
+          '&purpose=chat';
+        var formData = new FormData();
+        formData.append('file', file);
+        return fetch(url, { method: 'POST', body: formData })
+          .then(function (r) {
+            if (!r.ok) throw new Error('HTTP ' + r.status);
+            return r.json();
           });
       },
 
@@ -532,7 +564,7 @@
           pending: 'chat.status.pending',
           declined: 'chat.status.declined',
           declined_remote: 'chat.status.declined',
-          closed: 'chat.status.offline',
+          closed: 'chat.status.closed',
           offline: 'chat.status.offline',
         };
         return this.t(map[st] || 'chat.status.pending');
@@ -560,7 +592,14 @@
           sending: 'chat.file.status.sending',
           failed: 'chat.file.status.failed',
           declined: 'chat.file.status.declined',
+          rejected: 'chat.file.status.declined',
           cancelled: 'chat.file.status.cancelled',
+          cancelled_by_peer: 'chat.file.status.cancelled',
+          peer_offline: 'chat.file.status.failed',
+          error_timeout: 'chat.file.status.failed',
+          error_size_mismatch: 'chat.file.status.failed',
+          error_security: 'chat.file.status.failed',
+          error_disk: 'chat.file.status.failed',
         };
         return this.t(map[st] || 'chat.file.status.pending');
       },

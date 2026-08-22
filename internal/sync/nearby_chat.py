@@ -435,6 +435,9 @@ class ChatManager:
             if session is None or session.status != "invited":
                 return False
             session.status = "active"
+            # The user actively engaged with the invite — clear the unread
+            # marker raised when it arrived.
+            session.unread = 0
             self._touch_seen(session)
             fn = send_fn or self._latest_send_fn.get(session.peer_id)
             ok = self._send_frame(
@@ -451,6 +454,7 @@ class ChatManager:
             if session is None or session.status != "invited":
                 return False
             session.status = "closed"
+            session.unread = 0
             fn = send_fn or self._latest_send_fn.get(session.peer_id)
             self._send_frame({
                 "msg_type": "chat_decline",
@@ -927,6 +931,9 @@ class ChatManager:
             created_ts=time.time(),
             last_seen_mono=time.monotonic(),
             last_activity_ts=time.time(),
+            # A freshly-arrived invite is unread so the web badge / session
+            # row is immediately visible to the user.
+            unread=1,
         )
         old = self._sessions.get(peer_id)
         if old is not None:
@@ -1451,8 +1458,15 @@ class ChatManager:
             err_status = state.get("error_status", "")
             if state["cancel"]:
                 return
-            state["entry"].status = "done"
-            state["entry"].fraction = 1.0
+            if err_status:
+                # The receiver reported a failure (e.g. size mismatch) — the
+                # transfer did NOT succeed.  Mark the sender's entry declined
+                # so a REST refetch matches the live card (the WS maps the
+                # "rejected" code to the declined label) instead of "done".
+                state["entry"].status = "declined"
+            else:
+                state["entry"].status = "done"
+                state["entry"].fraction = 1.0
             sid, tid = state["session"].session_id, transfer_id
         if err_status:
             logger.warning("chat: receiver rejected file %s (%s)", transfer_id[:8], err_status)

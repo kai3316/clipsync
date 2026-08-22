@@ -2,6 +2,29 @@
 
 All notable changes to ClipSync are documented in this file.
 
+## [1.0.26] — 2026-08-23
+
+### Security
+- **Clipboard file-transfer chunks now verify their sender.** `file_chunk` frames pass the unpaired-peer gate (chat file bytes ride them), so a chunk that doesn't match the transfer's peer is dropped — an unpaired or newly-unpaired device that learned a transfer_id can no longer inject bytes into a clipboard download it doesn't own.
+
+### Web chat (first audit round)
+- **Failed text sends are no longer swallowed.** A send rejected by the backend (peer offline, flood control) now keeps the draft and shows "send failed" instead of silently clearing the composer while the peer never receives anything.
+- **Changing the file-receive directory no longer breaks chat-file downloads** — the chat manager's receive dir is updated too, and downloads confine against the chat dir (with a fallback to the web upload roots for older files).
+- **No more per-message full reload or unread-badge flash** — an incoming message no longer triggers a redundant REST refetch while you're looking at the conversation.
+- **File cards show real terminal states** (declined / failed / cancelled) instead of "Preparing…" or a false "Sent" — the wire statuses map to labels, and a sender whose receiver rejects the file marks it declined, not done.
+- **Fast session switching can't mix conversations** — a stale message-list response is ignored if the active session changed.
+- **Inviting an unreachable / rate-limited device gives feedback** — the API distinguishes "connecting in background" from "can't connect", and the UI shows the timeout error instead of a 2-second "Connecting…" with nothing after.
+- **Chat file sends no longer trigger a "received file" notification, sound, or a Files entry** — chat uploads go to a staging area via `purpose=chat` and are cleaned up if the send fails.
+- **Accept / decline / close / file actions surface failures** instead of silently doing nothing.
+- **Closed sessions read as "Closed"**, not "Offline"; **incoming invites raise the unread badge** so a chat request isn't missed until you open the panel.
+
+### Phone pages & dashboard
+- **Phone companion pages are installable PWAs** — `mobile.html` and `quickpaste.html` ship a manifest (`?page=` variant, distinct app identity) and register the service worker, so "Add to Home Screen" yields a standalone, offline-capable app like the dashboard.
+- **Chat sidebar unread badge memoized** — no redundant Tk repaints every fast refresh tick.
+
+### Tests
+- Web chat regressions added (send-failure, receive-dir, invite feedback, chat-upload staging + cleanup). Full suite 360 passed / 3 skipped.
+
 ## [1.0.25] — 2026-08-23
 
 ### Security & transport (regression round)

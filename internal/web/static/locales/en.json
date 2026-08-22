@@ -963,6 +963,7 @@
   "chat.status.pending": "Pending",
   "chat.status.connected": "Connected",
   "chat.status.declined": "Declined",
+  "chat.status.closed": "Closed",
   "chat.status.offline": "Offline",
   "chat.file.sent": "Sent",
   "chat.file.received": "Received",

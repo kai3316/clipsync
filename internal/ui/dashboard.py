@@ -3061,6 +3061,12 @@ class DashboardWindow:
                 )
         except Exception:
             total = 0
+        # Memoize: this runs on every fast refresh tick while any chat session
+        # is live; calling .configure() every tick even when nothing changed is
+        # pure Tk churn.
+        if total == getattr(self, "_chat_nav_badge_total", None):
+            return
+        self._chat_nav_badge_total = total
         try:
             base = T("nav.nearby_chat")
             btn.configure(text=f"{base}  ·  {total}" if total else base)
