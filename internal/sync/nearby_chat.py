@@ -1485,7 +1485,6 @@ class ChatManager:
             state = self._sends.pop(transfer_id, None)
             if state is None:
                 return
-            delivered = state.get("peer_completed", False)
             err_status = state.get("error_status", "")
             if state["cancel"]:
                 return
@@ -1503,14 +1502,11 @@ class ChatManager:
             logger.warning("chat: receiver rejected file %s (%s)", transfer_id[:8], err_status)
             self._fire("_on_file_done", sid, tid, False, err_status, "rejected")
             return
-        if not delivered:
-            # Bytes were handed to the transport but the receiver never
-            # confirmed — mark the terminal status "unconfirmed" so the UI
-            # can tell a confirmed delivery from a best-effort one.
-            logger.debug("chat: no completion ack for %s (delivery unconfirmed)", transfer_id[:8])
-            self._fire("_on_file_done", sid, tid, True, "", "unconfirmed")
-        else:
-            self._fire("_on_file_done", sid, tid, True, "", "success")
+        # The receiver may not ack within the wait window — the bytes were
+        # still handed to the transport and the entry is already "done", so
+        # report success either way.  (No separate "unconfirmed" status is
+        # surfaced; every UI renders the entry as delivered.)
+        self._fire("_on_file_done", sid, tid, True, "", "success")
 
     def _send_frame_raw(self, data: bytes, send_fn: SendFn) -> bool:
         """Send pre-encoded bytes; False when the transport refused."""
@@ -1584,6 +1580,8 @@ class ChatManager:
             now = time.monotonic()
             fired: list[tuple[str, dict]] = []
             file_done_fired: list[tuple[str, str, str]] = []
+            recv_done_fired: list[tuple[str, str, str]] = []
+            recv_sessions_changed = False
             with self._lock:
                 for session in list(self._sessions.values()):
                     # Reap long-dead sessions so the map cannot grow without
@@ -1626,21 +1624,39 @@ class ChatManager:
                             {"msg_type": "chat_ping", "session_id": session.session_id},
                             self._latest_send_fn.get(session.peer_id),
                         )
-                self._expire_stale_receives()
+                # Both sweepers only mutate state under the lock and return
+                # the callbacks to fire — the actual fires happen BELOW so a
+                # slow WS/UI callback can never freeze the chat lock.
+                recv_done_fired, recv_sessions_changed = self._expire_stale_receives(
+                    defer_fire=True,
+                )
                 file_done_fired = self._expire_stale_transfers(fired)
             for sid, entry_dict in fired:
                 self._fire("_on_message", sid, entry_dict)
             for sid, tid, status in file_done_fired:
                 self._fire("_on_file_done", sid, tid, False, "", status)
+            for sid, tid, status in recv_done_fired:
+                self._fire("_on_file_done", sid, tid, False, "", status)
+            if recv_sessions_changed:
+                self._fire("_on_sessions_changed")
 
-    def _expire_stale_receives(self) -> None:
+    def _expire_stale_receives(self, defer_fire: bool = False) -> tuple[list, bool]:
         """Drop incoming file offers the user never answered (lock held).
 
         Without this, a few ignored offers would permanently pin the
         per-session incoming-file cap, and an accepted-but-silent sender
         could leak an open temp handle for the life of the session.
+
+        Returns ``(done_fired, sessions_changed)`` where *done_fired* holds
+        ``(session_id, transfer_id, status)`` tuples for ``_on_file_done``.
+        When *defer_fire* is true the callbacks are NOT invoked inline — the
+        caller fires them after releasing the lock.  The heartbeat passes
+        ``defer_fire=True`` so a slow UI/WS callback can't freeze the chat
+        lock; direct callers (tests) keep the historical inline behavior.
         """
         now = time.time()
+        done_fired: list[tuple[str, str, str]] = []
+        sessions_changed = False
         for tid, state in list(self._receives.items()):
             entry = state["entry"]
             if entry.status == "await_accept" and now - entry.ts > self.INVITE_ACCEPT_TIMEOUT:
@@ -1657,8 +1673,15 @@ class ChatManager:
                 entry.status = "declined"
                 # Tell the UI the offer expired so the Accept/Decline card
                 # stops offering actions that can no longer succeed.
-                self._fire("_on_file_done", session.session_id, tid, False, "", "declined")
-                self._fire("_on_sessions_changed")
+                done_fired.append((session.session_id, tid, "declined"))
+                sessions_changed = True
+        if defer_fire:
+            return done_fired, sessions_changed
+        for sid, tid, status in done_fired:
+            self._fire("_on_file_done", sid, tid, False, "", status)
+        if sessions_changed:
+            self._fire("_on_sessions_changed")
+        return done_fired, sessions_changed
 
     @staticmethod
     def _transfer_stall_reference(state: dict, now_mono: float) -> float:

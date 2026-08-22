@@ -318,14 +318,15 @@ var ClipsyncWS = (function () {
               for (var hi4 = fresh.length - 1; hi4 >= 0; hi4--) {
                 store.history.unshift(fresh[hi4]);
               }
-              // The prepended items now occupy the top of the loaded list, so
-              // the "load more" cursor must advance by the same count —
-              // otherwise the next page fetch re-returns the freshly-prepended
-              // items and duplicates them.
-              store.historyOffset += fresh.length;
-              // Keep the pagination cursor — the user's loaded pages are
-              // preserved. Refresh "has more" from the broadcast total when
-              // present so Load-more stays accurate after new items arrive.
+              // The prepended items now occupy the top of the loaded list.
+              // Recompute the "load more" cursor from the list length instead
+              // of a "+fresh.length" delta: dedupe may have discarded incoming
+              // duplicates, so the delta would overshoot the real count and
+              // the next fetch would skip entries (mirrors app.js and
+              // mobile.html).
+              store.historyOffset = store.history.length;
+              // Refresh "has more" from the broadcast total when present so
+              // Load-more stays accurate after new items arrive.
               if (data.total != null) {
                 store.historyHasMore = store.history.length < data.total;
               }

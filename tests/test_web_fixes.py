@@ -464,18 +464,117 @@ def _read_repo_file(rel: str) -> str:
 
 
 def test_quickpaste_close_no_longer_gated_on_opener():
-    """#1: the desktop popup's close paths are gated on touch, not
-    window.opener — it is opened via webbrowser.open_new which has no opener.
-    The inline onclick that referenced an IIFE-local closeWindow() is gone."""
+    """#1: the desktop popup's close paths are gated on the auto_close query
+    flag, not on a touch heuristic or window.opener — it is opened via
+    webbrowser.open_new which has no opener, and a touch-screen laptop reports
+    maxTouchPoints>0 so the old touch gate would leave it open forever."""
     html = _read_repo_file("internal/web/static/quickpaste.html")
     assert 'onclick="closeWindow()"' not in html, (
         "inline onclick would ReferenceError against the IIFE-local function"
     )
     assert "closeBtn.addEventListener('click'" in html
-    assert "if (IS_TOUCH) { return; }" in html
+    assert "var AUTO_CLOSE = params.get('auto_close') === '1'" in html
+    assert "if (!AUTO_CLOSE) { return; }" in html
+    # The touch heuristic is gone entirely — auto_close decides every close path.
+    assert "IS_TOUCH" not in html
     # No close path may still be gated on window.opener (it only appears in
     # comments explaining the webbrowser.open_new no-opener behavior).
     assert "if (window.opener)" not in html
+
+
+def test_main_passes_auto_close_to_quickpaste():
+    """#1: main.py opens the Quick Paste popup with auto_close=1 so the page
+    enables the close affordances; a user-opened tab (no flag) keeps the X
+    hidden because a plain tab cannot window.close() itself."""
+    src = _read_repo_file("src/main.py")
+    assert "&auto_close=1" in src
+    assert "webbrowser.open_new(url)" in src
+
+
+def test_history_merge_cursor_recomputed_from_length():
+    """#2: after an upsert/prepend merge of a page-1 snapshot, the load-more
+    cursor is recomputed as store.history.length instead of a "+fresh.length"
+    delta — dedupe may have discarded incoming duplicates so the delta would
+    overshoot and the next fetch would skip entries."""
+    for rel in ("internal/web/static/js/app.js", "internal/web/static/js/ws.js"):
+        js = _read_repo_file(rel)
+        assert "store.historyOffset = store.history.length;" in js, rel
+        assert "store.historyOffset += fresh.length;" not in js, rel
+
+
+def test_mobile_merge_prunes_missing_entries():
+    """#3: the mobile poll merge drops local entries the page-1 snapshot no
+    longer reports (desktop deletions) so ghost rows don't linger forever,
+    while the load-more (offset>0) path stays a pure append merge."""
+    html = _read_repo_file("internal/web/static/mobile.html")
+    assert "function mergeHistoryPage(items, pruneMissing)" in html
+    assert "mergeHistoryPage(items, true)" in html
+    assert "!snapshotIds[cur.entry_id]" in html
+    # The append/load-more path still uses the seen-set pure merge.
+    assert "var seen = {};" in html
+
+
+def test_dispatch_delete_file_preserves_leading_trailing_spaces(tmp_path):
+    """#5: DELETE /api/files must match GET's raw filename semantics.  A file
+    whose name has leading/trailing spaces (legal on macOS/Linux) is deleted
+    by its exact name — stripping the name would fail to match or hit a
+    different file."""
+    uploads = tmp_path / "uploads"
+    uploads.mkdir()
+    for name in (" lead.jpg", "trail .jpg"):
+        f = uploads / name
+        f.write_bytes(b"jpg-bytes")
+        status, _ct, body_b = _dispatch_delete(
+            "/api/files", _body({"name": name}), str(uploads),
+        )
+        assert status == 200
+        assert json.loads(body_b)["ok"] is True
+        assert not f.exists(), f"{name!r} should be deleted by its exact name"
+
+
+def test_chat_file_sender_reports_success_not_unconfirmed():
+    """#4: the sender no longer fires a half-baked 'unconfirmed' terminal
+    status (no UI consumes it) — the entry is 'done' and the done callback
+    reports 'success' either way."""
+    src = _read_repo_file("internal/sync/nearby_chat.py")
+    assert 'self._fire("_on_file_done", sid, tid, True, "", "unconfirmed")' not in src
+    assert 'self._fire("_on_file_done", sid, tid, True, "", "success")' in src
+
+
+def test_chat_expire_stale_receives_defers_fire_outside_lock():
+    """#8: _expire_stale_receives collects the done callbacks and only fires
+    them when the caller requests inline firing — the heartbeat passes
+    defer_fire=True so a slow WS/UI callback can't freeze the chat lock."""
+    from internal.sync.nearby_chat import ChatManager
+    mgr = ChatManager("x", "X")
+    try:
+        mgr.handle_message(
+            "chat_invite",
+            {"session_id": "f" * 16, "from_name": "A", "fingerprint_short": "A1"},
+            "peer-a", "A1", None,
+        )
+        sid = mgr.get_sessions()[0]["session_id"]
+        mgr.accept_invitation(sid, None)
+        done_events = []
+        mgr.set_on_file_done(
+            lambda s, tid, ok, path, st: done_events.append((tid, ok, st)),
+        )
+        mgr.handle_message(
+            "chat_file_offer",
+            {"session_id": sid, "transfer_id": "b" * 32,
+             "file_name": "x.bin", "file_size": 100, "mime": ""},
+            "peer-a", "A1", None,
+        )
+        mgr._receives["b" * 32]["entry"].ts -= (
+            ChatManager.INVITE_ACCEPT_TIMEOUT + 10
+        )
+        with mgr._lock:
+            done, changed = mgr._expire_stale_receives(defer_fire=True)
+        assert done == [(sid, "b" * 32, "declined")]
+        assert changed is True
+        assert done_events == [], "deferred mode must not fire callbacks inline"
+    finally:
+        mgr.shutdown()
 
 
 def test_dashboard_history_reconnect_merge_present():

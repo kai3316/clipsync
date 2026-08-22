@@ -349,12 +349,15 @@
               }
             }
             // Prepend genuinely-new items, preserving snapshot (newest-first)
-            // order, and advance the "load more" cursor by the same count so
-            // the next page fetch does not re-return them.
+            // order.  Recompute the "load more" cursor from the loaded list
+            // length instead of a "+fresh.length" delta: dedupe may have
+            // discarded incoming duplicates, so the delta would overshoot the
+            // real count and the next fetch would skip entries (mirrors
+            // ws.js and mobile.html).
             for (var k = fresh.length - 1; k >= 0; k--) {
               store.history.unshift(fresh[k]);
             }
-            store.historyOffset += fresh.length;
+            store.historyOffset = store.history.length;
             if (res && res.total != null) {
               store.historyHasMore = store.history.length < res.total;
             }

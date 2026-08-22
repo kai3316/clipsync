@@ -2,6 +2,25 @@
 
 All notable changes to ClipSync are documented in this file.
 
+## [1.0.29] — 2026-08-23
+
+### Quick Paste
+- **Popup closing is keyed to how the page was opened, not the hardware.** The v1.0.28 fix gated close behaviour on `IS_TOUCH`, which is true on any touch-capable laptop even when using a mouse — so the popup still refused to close there. The host now opens Quick Paste with `?auto_close=1`, and auto-close / Esc / the X button are enabled only for script-opened popups. A plain browser tab (bookmark, copied link) keeps the X hidden instead of showing a button that can't close.
+
+### History (pagination consistency)
+- **Live-inserted entries no longer skip history.** The merge path advanced the pagination cursor by the number of freshly-inserted rows, which overruns the real position when de-duplication drops duplicates — later "load more" pages then silently skipped entries. The cursor is now recomputed from the list length (dashboard and phone).
+- **Phone background polling prunes deleted entries.** Once a phone had scrolled past the first page, the merge kept every row that wasn't in the fresh snapshot — deleted clips lingered as ghosts forever. The page-1 poll now reconciles (removes missing ids, empties on clear).
+
+### Misc
+- Reverted an incomplete "unconfirmed delivery" chat-file status that nothing rendered; file sends report plain success again.
+- `DELETE /api/files` matches filenames exactly (no trimming), so a name with leading/trailing spaces can't delete a different file or become undeletable.
+- `web_history_limit` help text now says 1–500 (matching the accepted range and the 30 default) instead of 1–20.
+- The chat stale-receive sweeper fires its callbacks outside the lock, like its sibling sweeper, so a slow WebSocket can't freeze the chat state.
+- Phone delete-file and send share one error-handling helper (consistent 403 → re-scan-QR messaging).
+
+### Tests
+- New regressions: auto-close URL, cursor recompute, mobile prune, exact-filename delete, chat-file success status, deferred lock-out callbacks. Full suite 392 passed / 3 skipped.
+
 ## [1.0.28] — 2026-08-23
 
 ### Quick Paste

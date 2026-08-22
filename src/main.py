@@ -1673,7 +1673,17 @@ class Application:
         host = f"http://127.0.0.1:{port}"
         # URL-encode the token (and the host query value) so a token containing
         # '/', '+', '=' etc. cannot break the URL's query string.
-        url = f"{host}/quickpaste.html?token={quote(token, safe='')}&host={quote(host, safe='')}"
+        # The popup is opened with webbrowser.open_new (a plain tab, no
+        # window.opener).  Flag it with auto_close=1 so the page enables the
+        # auto-close / Esc / X affordances ONLY for this popup — a user-opened
+        # tab (no auto_close) keeps them hidden because a plain tab cannot
+        # window.close() itself (the X would be a dead button).  This also
+        # decouples the popup behavior from the device's touch capability, so
+        # a touch-screen Windows laptop still auto-closes.
+        url = (
+            f"{host}/quickpaste.html?token={quote(token, safe='')}"
+            f"&host={quote(host, safe='')}&auto_close=1"
+        )
 
         # Never log the token in the URL (the file handler logs at DEBUG).
         logger.debug("Opening Quick Paste: %s", url.split("?")[0])

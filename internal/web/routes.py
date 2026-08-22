@@ -957,7 +957,12 @@ def _dispatch(method, path, query_params, body, cfg, history, sync_mgr,
                 req = json.loads(body.decode("utf-8"))
             except (json.JSONDecodeError, UnicodeDecodeError):
                 return _json_response({"ok": False, "error": "invalid json"}, 400)
-            fname = str(req.get("name") or "").strip() if isinstance(req, dict) else ""
+            # Do NOT strip the name: GET /api/files returns the raw directory
+            # entry, so a file whose name has leading/trailing spaces (legal on
+            # macOS/Linux) must be deleted by that exact name — stripping would
+            # either fail to match it or delete a different file.  basename +
+            # confine_path still neutralize any directory components.
+            fname = str(req.get("name") or "") if isinstance(req, dict) else ""
             if not fname:
                 return _json_response({"ok": False, "error": "filename required"}, 400)
             from internal.web.api.security import confine_path

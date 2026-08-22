@@ -594,9 +594,12 @@ body::after {
   // host= for backwards compatibility; a phone scans the QR without it.
   var HOST = (params.get('host') || window.location.origin).replace(/\/+$/, '');
 
-  // Touch vs keyboard determines the hints and whether the popup auto-closes.
-  var IS_TOUCH = ('ontouchstart' in window) ||
-    (navigator.maxTouchPoints && navigator.maxTouchPoints > 0);
+  // Whether this tab was opened as the desktop popup.  main.py opens it via
+  // webbrowser.open_new and passes auto_close=1; that flag — NOT a touch
+  // heuristic — decides whether the popup auto-closes / shows the X / accepts
+  // Esc.  A touch-screen laptop reports maxTouchPoints>0, so gating on touch
+  // would leave the popup open forever for those users.
+  var AUTO_CLOSE = params.get('auto_close') === '1';
   // The server knows the app's configured language and injects it as
   // window.__CLIPSYNC_I18N_LOCALE__; prefer that over the device's own
   // navigator.language so this page matches the desktop app's language.
@@ -683,7 +686,7 @@ body::after {
         }
         render();
         // Put keyboard focus on the listbox so Arrow/Enter work immediately.
-        if (state.items.length > 0 && !IS_TOUCH) {
+        if (state.items.length > 0 && AUTO_CLOSE) {
           itemsEl.focus();
         }
       })
@@ -751,11 +754,11 @@ body::after {
         .then(function (data) {
           if (data.ok) {
             showToast(IS_ZH ? '已发送到电脑' : 'Sent to computer');
-            // Desktop popup closes after a beat so the user sees feedback; a
-            // phone tab stays open so more items can be pasted in a row.  The
-            // popup is opened via webbrowser.open_new (no window.opener), so
-            // gate on touch instead of opener.
-            if (!IS_TOUCH) {
+            // The desktop popup closes after a beat so the user sees feedback;
+            // a plain tab (no auto_close) stays open so more items can be
+            // pasted in a row.  The popup is opened via webbrowser.open_new
+            // (no window.opener), so gate on the auto_close flag instead.
+            if (AUTO_CLOSE) {
               setTimeout(function () { closeWindow(); }, 350);
             }
           } else {
@@ -816,11 +819,11 @@ body::after {
 
   function closeWindow() {
     // The desktop popup is opened via webbrowser.open_new (no window.opener),
-    // so the old opener gate would silently disable every close path.  Close
-    // on every non-touch device; a phone tab stays open so more items can be
-    // pasted in a row.  window.close() is a silent no-op in a plain tab, which
-    // is fine — the Esc/X affordances simply won't close an un-closable tab.
-    if (IS_TOUCH) { return; }
+    // so the old opener gate would silently disable every close path.  Only
+    // the auto_close popup (main.py) attempts to close; window.close() is a
+    // silent no-op in a plain tab, so a non-auto_close tab keeps the Esc/X
+    // affordances hidden (they would be dead buttons).
+    if (!AUTO_CLOSE) { return; }
     try { window.close(); } catch (e) { /* ignore */ }
   }
 
@@ -1036,8 +1039,9 @@ body::after {
      Init — header text, window size, then fetch history
      ═══════════════════════════════════════════════════════════════ */
 
-  // Adapt the header hints to the device: a phone scans the QR and taps
-  // items; the desktop popup is keyboard-driven.
+  // Adapt the header hints to how the tab was opened: the desktop popup
+  // (auto_close=1) is keyboard-driven; a plain tab (auto_close absent — e.g.
+  // someone opened the URL manually) keeps the simple tap hint.
   var subtitleEl = document.getElementById('qpSubtitle');
   var titleEl = document.getElementById('qpTitle');
   if (titleEl) {
@@ -1046,8 +1050,8 @@ body::after {
   }
   // Localize the hardcoded HTML strings now that the locale is known, and
   // bind the X button.  The desktop popup opens via webbrowser.open_new (no
-  // window.opener), so show the button on every non-touch device — only a
-  // phone tab (which stays open to paste multiple items) hides it.
+  // window.opener) with auto_close=1, so show the button only for it — a
+  // plain tab hides it because window.close() is a silent no-op there.
   var closeBtn = document.getElementById('qpCloseBtn');
   if (closeBtn) {
     closeBtn.title = IS_ZH ? '关闭 (Esc)' : 'Close (Esc)';
@@ -1055,20 +1059,20 @@ body::after {
       e.preventDefault();
       closeWindow();
     });
-    if (IS_TOUCH) {
+    if (!AUTO_CLOSE) {
       closeBtn.style.display = 'none';
     }
   }
   itemsEl.setAttribute('aria-label', IS_ZH ? '剪贴板条目' : 'Clipboard items');
   if (subtitleEl) {
-    subtitleEl.textContent = IS_TOUCH
-      ? (IS_ZH ? '点击条目即可发送到电脑' : 'Tap an item to paste to this computer')
-      : (IS_ZH ? '按 1-9 粘贴 · ↑↓ 选择 · Esc 关闭' : 'Press 1–9 to paste · ↑↓ to navigate · Esc to close');
+    subtitleEl.textContent = AUTO_CLOSE
+      ? (IS_ZH ? '按 1-9 粘贴 · ↑↓ 选择 · Esc 关闭' : 'Press 1–9 to paste · ↑↓ to navigate · Esc to close')
+      : (IS_ZH ? '点击条目即可发送到电脑' : 'Tap an item to paste to this computer');
   }
 
-  // Ask the browser for a small floating-window size. Works when opened as a
-  // desktop popup (window.open); phones ignore resizeTo so skip it there.
-  if (!IS_TOUCH) {
+  // Ask the browser for a small floating-window size. Only the desktop popup
+  // does this; plain tabs ignore resizeTo so skip them.
+  if (AUTO_CLOSE) {
     try {
       window.resizeTo(400, 540);
       window.moveTo(

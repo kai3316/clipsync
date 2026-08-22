@@ -844,6 +844,18 @@ body::before {
     });
   }
 
+  // fetch helper that always resolves to {status, data} so callers can inspect
+  // the HTTP status (403 = stale token) alongside the parsed body — shared by
+  // the send flow and file delete so both treat 403 identically.  getJson
+  // (used by the polling refresh paths) keeps its own error-throwing behavior.
+  function apiFetch(path, opts) {
+    return fetchWithTimeout(apiUrl(path), opts).then(function (r) {
+      return r.json().then(function (data) {
+        return { status: r.status, data: data };
+      });
+    });
+  }
+
   /* ── Toast ─────────────────────────────────────────────────── */
 
   function showToast(msg, isError) {
@@ -889,14 +901,31 @@ body::before {
   var historyOffset = 0;
   var historyHasMore = true;
 
-  // Upsert a page-1 snapshot into the already-loaded list (dedupe by entry_id,
-  // prepend genuinely-new entries) so a background poll refresh never collapses
-  // pages the user has already loaded via "scroll to load more".
-  function mergeHistoryPage(items) {
+  // Reconcile a page-1 snapshot into the already-loaded list (dedupe by
+  // entry_id, prepend genuinely-new entries) so a background poll refresh
+  // never collapses pages the user has already loaded via "scroll to load
+  // more".  When *pruneMissing* is true — a page-1 (offset=0) poll — entries
+  // the snapshot no longer reports are dropped FIRST, so items deleted on the
+  // desktop can't linger as ghost rows forever.  The load-more path (offset>0)
+  // never prunes; it stays a pure append merge.
+  function mergeHistoryPage(items, pruneMissing) {
+    var snapshotIds = {};
+    for (var si = 0; si < items.length; si++) {
+      var sit = items[si];
+      if (sit && sit.entry_id !== undefined) snapshotIds[sit.entry_id] = true;
+    }
+    if (pruneMissing) {
+      for (var pr = historyItems.length - 1; pr >= 0; pr--) {
+        var cur = historyItems[pr];
+        if (cur && cur.entry_id !== undefined && !snapshotIds[cur.entry_id]) {
+          historyItems.splice(pr, 1);
+        }
+      }
+    }
     var idxById = {};
     for (var i = 0; i < historyItems.length; i++) {
-      var cur = historyItems[i];
-      if (cur && cur.entry_id !== undefined) idxById[cur.entry_id] = i;
+      var cur2 = historyItems[i];
+      if (cur2 && cur2.entry_id !== undefined) idxById[cur2.entry_id] = i;
     }
     var fresh = [];
     for (var j = 0; j < items.length; j++) {
@@ -957,9 +986,12 @@ body::before {
           }
           historyHasMore = (total != null) ? (historyItems.length < total) : (added > 0);
         } else if (historyItems.length > 30) {
-          // Refresh of page 1 while more pages are loaded — merge in place so
-          // the user's loaded pages survive a background poll.
-          mergeHistoryPage(items);
+          // Refresh of page 1 (offset=0) while more pages are loaded — prune
+          // entries the server no longer reports (desktop deletions) then
+          // merge the snapshot in place so the user's loaded pages survive a
+          // background poll.  A cleared history arrives as an empty snapshot,
+          // which prunes everything and empties the list.
+          mergeHistoryPage(items, true);
           historyHasMore = (total != null) ? (historyItems.length < total) : historyHasMore;
         } else {
           historyItems = items.slice();
@@ -1137,21 +1169,15 @@ body::before {
     var text = sendText.value.trim();
     if (!text) { showToast(T.sendEmpty, true); return; }
     sendBtn.disabled = true;
-    fetchWithTimeout(apiUrl('/api/push'), {
+    apiFetch('/api/push', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ text: text }),
     })
-      .then(function (r) {
-        // Carry the HTTP status alongside the parsed body so a 403 (stale
-        // token) surfaces as the localized token-expired message instead of
-        // the server's English error string.
-        return r.json().then(function (data) {
-          return { status: r.status, data: data };
-        });
-      })
       .then(function (res) {
         sendBtn.disabled = false;
+        // A 403 (stale token) surfaces as the localized token-expired message
+        // instead of the server's English error string.
         if (res.status === 403) {
           showToast(T.tokenExpired, true);
           return;
@@ -1334,14 +1360,11 @@ body::before {
   function deleteFile(name) {
     var label = '“' + name + '”';
     if (!window.confirm(ZH ? '删除文件 ' + label + '？' : 'Delete file ' + label + '?')) return;
-    fetchWithTimeout(apiUrl('/api/files'), {
+    apiFetch('/api/files', {
       method: 'DELETE',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ name: name }),
     })
-      .then(function (r) {
-        return r.json().then(function (data) { return { status: r.status, data: data }; });
-      })
       .then(function (res) {
         if (res.status === 403) { notifyTokenExpired(); return; }
         if (res.data && res.data.ok) {

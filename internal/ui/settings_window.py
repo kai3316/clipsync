@@ -899,7 +899,9 @@ class SettingsWindow:
 
         try:
             limit = int(self._web_history_limit_var.get()) if self._web_history_limit_var else 5
-            if not 1 <= limit <= 20:
+            # Match the server API's accepted range (1-500); the previous
+            # 1-20 cap couldn't even save the default of 30.
+            if not 1 <= limit <= 500:
                 raise ValueError
         except ValueError:
             show_warning(self._window, T("dialog.invalid"), T("settings_window.val_web_history_limit"))
