@@ -690,6 +690,7 @@ class DashboardWindow:
             except Exception:
                 pass
         self._cancel_refresh_job()
+        self._refresh_chat_nav_badge()
         self._refresh_overview()
         if self._current_panel == "devices":
             self._refresh_devices()
@@ -790,6 +791,10 @@ class DashboardWindow:
         self._panels["history"] = self._build_history_panel()
         self._panels["transfers"] = self._build_transfers_panel()
         self._panels["chat"] = self._build_chat_panel()
+        # The chat panel is re-created from scratch here (fresh empty scroll
+        # frames); a stale state key from a previous window life would make
+        # _refresh_chat early-return and leave the panel blank.
+        self._chat_state_key = None
 
         # ── Footer ──────────────────────────────────────────────────
         footer = ctk.CTkFrame(outer, height=46, corner_radius=0,
@@ -3041,6 +3046,27 @@ class DashboardWindow:
             except Exception:
                 logger.debug("chat mark_session_read failed", exc_info=True)
 
+    def _refresh_chat_nav_badge(self) -> None:
+        """Show total unread on the sidebar "Nearby Chat" button so incoming
+        messages are visible even when the chat panel is not on screen."""
+        btn = self._sidebar_buttons.get("chat")
+        if btn is None:
+            return
+        total = 0
+        try:
+            if self._get_chat_sessions:
+                total = sum(
+                    int(s.get("unread", 0) or 0)
+                    for s in self._get_chat_sessions()
+                )
+        except Exception:
+            total = 0
+        try:
+            base = T("nav.nearby_chat")
+            btn.configure(text=f"{base}  ·  {total}" if total else base)
+        except Exception:
+            pass
+
     def _chat_show_hint(self, msg: str, duration_ms: int = 4000) -> None:
         if self._chat_hint_label is None:
             return
@@ -3174,6 +3200,13 @@ class DashboardWindow:
             (s for s in sessions if s.get("session_id") == selected), None,
         )
         self._chat_build_conversation(selected_session, messages)
+        # The selected conversation is on screen — clear its unread badge.
+        # mark_session_read only fires when unread > 0, so re-running this on
+        # every refresh cannot cause a refresh loop.
+        if selected_session is not None and selected_session.get("status") in (
+            "active", "invited",
+        ):
+            self._chat_mark_selected_read()
 
     def _chat_device_row(self, dev: dict) -> None:
         peer_id = dev.get("peer_id", "")
@@ -3355,11 +3388,26 @@ class DashboardWindow:
                 else:
                     self._chat_text_bubble(scroll, entry)
 
-        # Scroll to the newest message.
+        # Scroll to the newest message.  CTkScrollableFrame only recomputes its
+        # scrollregion from the inner frame's <Configure> event on idle, so a
+        # direct yview_moveto(1.0) right after (re)creating the children lands
+        # at the TOP — defer until the layout pass has run.
         try:
-            scroll._parent_canvas.yview_moveto(1.0)
+            canvas = scroll._parent_canvas
+            scroll.after_idle(lambda: canvas.yview_moveto(1.0))
         except Exception:
             pass
+
+    @staticmethod
+    def _chat_time_str(ts: float) -> str:
+        """Format a message timestamp: HH:MM today, MM-DD HH:MM otherwise."""
+        try:
+            dt = datetime.datetime.fromtimestamp(ts)
+        except (ValueError, OSError, OverflowError):
+            return ""
+        if dt.date() == datetime.datetime.now().date():
+            return dt.strftime("%H:%M")
+        return dt.strftime("%m-%d %H:%M")
 
     def _chat_text_bubble(self, parent, entry: dict) -> None:
         outgoing = bool(entry.get("outgoing"))
@@ -3374,7 +3422,12 @@ class DashboardWindow:
             bubble, text=text, wraplength=500, justify="left",
             font=ctk.CTkFont(size=13),
             text_color=("#FFFFFF", "#EAF0FA") if outgoing else ("gray15", "gray85"),
-        ).pack(padx=10, pady=6)
+        ).pack(padx=10, pady=(6, 0))
+        ctk.CTkLabel(
+            bubble, text=self._chat_time_str(entry.get("ts", 0.0)),
+            font=ctk.CTkFont(size=9),
+            text_color=("gray40", "gray70"),
+        ).pack(anchor="e", padx=10, pady=(0, 4))
 
     def _chat_system_entry(self, parent, entry: dict) -> None:
         key = entry.get("text_key", "")
@@ -3414,7 +3467,14 @@ class DashboardWindow:
 
         direction = T("chat.file.sent") if outgoing else T("chat.file.received")
         try:
-            status_text = T(f"chat.file.status.{self._chat_file_status_key(status)}")
+            if not outgoing and status == "sending":
+                # An incoming transfer in flight is "Receiving", not "Sending"
+                # — label it from the local perspective.
+                status_text = T("chat.file.receiving")
+            else:
+                status_text = T(
+                    f"chat.file.status.{self._chat_file_status_key(status)}"
+                )
         except Exception:
             status_text = status
         ctk.CTkLabel(
@@ -3449,7 +3509,10 @@ class DashboardWindow:
                 font=ctk.CTkFont(size=11),
                 command=lambda: self._chat_do_decline_file(session_id, transfer_id),
             ).pack(side="left", padx=2)
-        elif outgoing and status in ("await_accept", "sending") and session_id:
+        elif status in ("await_accept", "sending") and session_id:
+            # Cancel is available on BOTH sides of an in-flight transfer —
+            # the receiving side previously had no way to abort a large
+            # incoming file except closing the whole session.
             ctk.CTkButton(
                 btns, text=T("chat.cancel"), width=64, height=24,
                 fg_color="transparent", border_width=1,
@@ -3569,7 +3632,10 @@ class DashboardWindow:
             logger.debug("chat send_file raised", exc_info=True)
             tid = None
         if not tid:
-            self._chat_show_hint(T("chat.err_file_too_large"))
+            # The size cap was already checked above — reaching here means
+            # the offer failed for another reason (session not active, peer
+            # unreachable, transfer refused); don't mislabel it as too-large.
+            self._chat_show_hint(T("chat.err_send_failed"))
 
     def _chat_on_close(self) -> None:
         sid = self._chat_selected_session_id

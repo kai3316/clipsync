@@ -1034,14 +1034,24 @@ class Application:
         cm.set_on_file_done(lambda *a: self._chat_event_from_worker())
 
     def _chat_event_from_worker(self, *args) -> None:
-        """Chat state changed on a worker thread — hop to the Tk thread."""
+        """Chat state changed on a worker thread — hop to the Tk thread.
+
+        Coalesced: file progress fires once per 256 KB chunk; without a
+        pending guard a large transfer would enqueue thousands of after(0)
+        callbacks, each triggering a full conversation rebuild.
+        """
+        if getattr(self, "_chat_refresh_pending", False):
+            return
+        self._chat_refresh_pending = True
         try:
             self.root.after(0, self._chat_event_on_main)
         except Exception:
+            self._chat_refresh_pending = False
             logger.debug("chat event marshal failed", exc_info=True)
 
     def _chat_event_on_main(self) -> None:
         """Push a chat refresh into the dashboard (Tk main thread only)."""
+        self._chat_refresh_pending = False
         if getattr(self, "dashboard_win", None) is not None:
             try:
                 self.dashboard_win._refresh_chat()
