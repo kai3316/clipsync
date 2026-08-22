@@ -304,6 +304,10 @@
               store.history[idx].pinned = !!res.pinned;
             }
             store.showToast(res.pinned ? self.t('history.pinned_toast') : self.t('history.unpinned_toast'), 1200);
+          } else {
+            // The backend explicitly refused (or returned an empty payload) —
+            // surface it instead of silently swallowing the failure.
+            store.showToast(self.t('history.pin_failed'), 2000);
           }
           self.closeMenu();
         }).catch(function (e) {
@@ -432,7 +436,8 @@
         var detail = this.t('context.detail', {
           type: item.content_type || 'unknown',
           source: item.source_name || 'unknown',
-          id: item.entry_id || 'N/A',
+          // entry_id 0 is a valid id — only a genuinely missing id shows "N/A".
+          id: (item.entry_id === undefined || item.entry_id === null) ? 'N/A' : item.entry_id,
         });
         this.store.showToast(detail, 3000);
         this.closeMenu();

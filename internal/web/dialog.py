@@ -68,12 +68,17 @@ class DialogManager:
         """
         dialog_id = uuid.uuid4().hex[:12]
         event = threading.Event()
+        shown_event = threading.Event()
         response_holder = {}
 
         with self._lock:
             self._pending[dialog_id] = {
                 "event": event,
                 "response": response_holder,
+                # Set when the dialog is actually shown to a client — either
+                # immediately (broadcast below succeeded) or later when a
+                # client attaches and flush_pending delivers the queued copy.
+                "shown_event": shown_event,
             }
 
         data = {
@@ -85,32 +90,55 @@ class DialogManager:
         }
 
         sent = self._broadcast("show_dialog", data)
-        if not sent:
+        if sent:
+            delivered = True
+        else:
             # No client connected — hold the dialog as pending so it is shown
             # when a client attaches instead of being silently rejected (e.g.
             # an incoming file transfer arriving while the web UI is closed).
             with self._lock:
                 self._queued_dialogs.append(data)
+            # Wait for the dialog to actually be delivered within the creation
+            # budget; if no client ever attaches, this expires and the dialog
+            # is treated as timed out.
+            delivered = shown_event.wait(timeout=timeout)
 
-        if event.wait(timeout=timeout):
-            with self._lock:
-                self._pending.pop(dialog_id, None)
-                self._queued_dialogs[:] = [
-                    q for q in self._queued_dialogs
-                    if q.get("dialog_id") != dialog_id
-                ]
-            return response_holder
-        else:
-            # Timeout — send close and clean up
-            self._broadcast("close_dialog", {"dialog_id": dialog_id})
-            with self._lock:
-                self._pending.pop(dialog_id, None)
-                self._queued_dialogs[:] = [
-                    q for q in self._queued_dialogs
-                    if q.get("dialog_id") != dialog_id
-                ]
-            logger.warning("Dialog %s timed out after %.0fs", dialog_id, timeout)
-            return None
+        if delivered:
+            # Response budget starts from when the dialog was actually shown —
+            # NOT from when it was created.  A dialog queued for 100s while no
+            # client was connected must still give the user a full window once
+            # it finally appears, otherwise it would flash and time out before
+            # they could read it.
+            if event.wait(timeout=timeout):
+                with self._lock:
+                    self._pending.pop(dialog_id, None)
+                    self._queued_dialogs[:] = [
+                        q for q in self._queued_dialogs
+                        if q.get("dialog_id") != dialog_id
+                    ]
+                return response_holder
+            else:
+                # Response timed out — send close and clean up
+                self._broadcast("close_dialog", {"dialog_id": dialog_id})
+                with self._lock:
+                    self._pending.pop(dialog_id, None)
+                    self._queued_dialogs[:] = [
+                        q for q in self._queued_dialogs
+                        if q.get("dialog_id") != dialog_id
+                    ]
+                logger.warning("Dialog %s timed out after %.0fs", dialog_id, timeout)
+                return None
+
+        # Never shown within the budget — nothing is on screen to close.
+        with self._lock:
+            self._pending.pop(dialog_id, None)
+            self._queued_dialogs[:] = [
+                q for q in self._queued_dialogs
+                if q.get("dialog_id") != dialog_id
+            ]
+        logger.warning("Dialog %s timed out after %.0fs (never shown)",
+                       dialog_id, timeout)
+        return None
 
     def update_progress(self, dialog_id: str, progress: float,
                         progress_text: str = "") -> None:
@@ -178,7 +206,9 @@ class DialogManager:
         Called when a new WebSocket client attaches (wired via
         ``WebSocketManager.on_client_attached``) so dialogs that arrived
         "blind" — e.g. an incoming file transfer — are shown to the client
-        instead of being silently rejected.
+        instead of being silently rejected.  Each delivered dialog is marked
+        "shown" so the blocking ``show()`` call starts its response budget
+        from the moment the user can actually see it.
         """
         if self._ws_manager is None:
             return
@@ -186,7 +216,29 @@ class DialogManager:
             queued = list(self._queued_dialogs)
             self._queued_dialogs.clear()
         for data in queued:
-            self._ws_manager.broadcast("show_dialog", data)
+            # Strip internal bookkeeping keys (underscore-prefixed) from the
+            # wire so they never leak to the client.
+            clean = {k: v for k, v in data.items() if not k.startswith("_")}
+            delivered = self._ws_manager.broadcast("show_dialog", clean)
+            if delivered:
+                self._mark_shown(data.get("dialog_id"))
+            else:
+                # No client actually received it (a send failed on a dead
+                # connection) — put it back so the next attach retries instead
+                # of silently dropping the dialog.
+                with self._lock:
+                    self._queued_dialogs.append(data)
+
+    def _mark_shown(self, dialog_id) -> None:
+        """Notify a waiting ``show()`` that its dialog was delivered."""
+        if not dialog_id:
+            return
+        with self._lock:
+            pending = self._pending.get(dialog_id)
+            if pending is not None:
+                shown = pending.get("shown_event")
+                if shown is not None:
+                    shown.set()
 
     # ── Response handler (called from API route) ────────────────────
 
@@ -208,12 +260,18 @@ class DialogManager:
     # ── Internal ────────────────────────────────────────────────────
 
     def _broadcast(self, msg_type: str, data: dict) -> bool:
-        """Send a message to all WebSocket clients. Returns True if any
-        clients are connected.
+        """Send a message to all WebSocket clients.
+
+        Returns True only if the message was actually delivered to at least
+        one client.  A registered-but-dead client (send failed / connection
+        dropped) does NOT count as delivered — the caller must treat it as
+        "no one saw it" and queue the dialog for the next attach.
         """
         if self._ws_manager is None:
             return False
-        if self._ws_manager.client_count == 0:
+        try:
+            delivered = self._ws_manager.broadcast(msg_type, data)
+        except Exception:
+            logger.debug("WS broadcast failed", exc_info=True)
             return False
-        self._ws_manager.broadcast(msg_type, data)
-        return True
+        return delivered > 0

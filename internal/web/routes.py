@@ -58,6 +58,77 @@ def _json_response(data, status=200):
     return status, "application/json; charset=utf-8", json.dumps(data, ensure_ascii=False).encode("utf-8")
 
 
+def _ws_manager_for(dialog_mgr):
+    """Resolve the WebSocket manager for broadcasting.
+
+    ``dispatch`` receives the ``dialog_mgr`` (never the ws manager itself);
+    DialogManager holds a reference to the WebSocketManager, so reach it
+    through there.  Returns None when unavailable so the broadcast is a no-op.
+    """
+    if dialog_mgr is None:
+        return None
+    try:
+        return dialog_mgr.ws_manager
+    except Exception:
+        return None
+
+
+def _deleted_entry_ids(body):
+    """Best-effort entry_ids a delete / batch-delete body targeted.
+
+    The web UI always deletes by ``entry_id`` (api.js deleteItem/batchDelete),
+    so those resolve directly.  The legacy index path cannot be resolved after
+    the deletion has already shifted the list, so return [] and let the caller
+    fall back to a full-history broadcast.
+    """
+    try:
+        data = json.loads(body.decode("utf-8"))
+    except (json.JSONDecodeError, UnicodeDecodeError, TypeError):
+        return []
+    if not isinstance(data, dict):
+        return []
+    eid = data.get("entry_id")
+    if eid is not None:
+        return [eid]
+    ids = data.get("entry_ids")
+    if isinstance(ids, list) and ids:
+        return ids
+    return []
+
+
+def _broadcast_history_updated(dialog_mgr) -> None:
+    """Broadcast the current full history snapshot to all WS clients."""
+    mgr = _ws_manager_for(dialog_mgr)
+    if mgr is None:
+        return
+    try:
+        mgr.broadcast_history()
+    except Exception:
+        logger.debug("history broadcast failed", exc_info=True)
+
+
+def _broadcast_history_deleted(dialog_mgr, entry_ids) -> None:
+    """Broadcast a history_item_deleted event for the given entry_ids."""
+    mgr = _ws_manager_for(dialog_mgr)
+    if mgr is None:
+        return
+    try:
+        mgr.broadcast_history_deleted(entry_ids)
+    except Exception:
+        logger.debug("history delete broadcast failed", exc_info=True)
+
+
+def _broadcast_history_clear(dialog_mgr) -> None:
+    """Broadcast a history_clear event (whole list wiped)."""
+    mgr = _ws_manager_for(dialog_mgr)
+    if mgr is None:
+        return
+    try:
+        mgr.broadcast_history_clear()
+    except Exception:
+        logger.debug("history clear broadcast failed", exc_info=True)
+
+
 def _redact_sensitive_line(line: str, cfg) -> str:
     """Strip locally-sensitive strings (user home, config dir, web token)
     from a log line before it is served to a web client.
@@ -345,10 +416,22 @@ def _dispatch(method, path, query_params, body, cfg, history, sync_mgr,
 
         elif path == "/api/delete":
             data, status = delete_item(body, history)
+            # Broadcast the deletion so every client's list stays in sync —
+            # the client-side history_updated merge can't express deletions.
+            if data.get("ok"):
+                ids = _deleted_entry_ids(body)
+                if ids:
+                    _broadcast_history_deleted(dialog_mgr, ids)
+                else:
+                    _broadcast_history_updated(dialog_mgr)
             return _json_response(data, status)
 
         elif path == "/api/pin":
             data, status = toggle_pin(body, history)
+            # A pin toggles an existing row's pinned flag — a full-history
+            # snapshot lets every client update it in place (upsert path).
+            if data.get("ok"):
+                _broadcast_history_updated(dialog_mgr)
             return _json_response(data, status)
 
         elif path == "/api/paste":
@@ -361,10 +444,21 @@ def _dispatch(method, path, query_params, body, cfg, history, sync_mgr,
 
         elif path == "/api/batch-pin":
             data, status = batch_pin(body, history)
+            # Same sync requirement as single pin: refresh every client's
+            # pinned flags from the authoritative snapshot.
+            if data.get("ok"):
+                _broadcast_history_updated(dialog_mgr)
             return _json_response(data, status)
 
         elif path == "/api/batch-delete":
             data, status = batch_delete(body, history)
+            # Broadcast the removed entry_ids so every client drops them.
+            if data.get("ok"):
+                ids = _deleted_entry_ids(body)
+                if ids:
+                    _broadcast_history_deleted(dialog_mgr, ids)
+                else:
+                    _broadcast_history_updated(dialog_mgr)
             return _json_response(data, status)
 
         elif path == "/api/batch-favorite":
@@ -697,6 +791,9 @@ def _dispatch(method, path, query_params, body, cfg, history, sync_mgr,
                 history.clear()
             except Exception as e:
                 return _json_response({"ok": False, "error": str(e)}, 500)
+            # Tell every client to wipe its local list too — otherwise only
+            # the requesting tab empties and the others keep stale entries.
+            _broadcast_history_clear(dialog_mgr)
             return _json_response({"ok": True, "count": count})
 
         elif path == "/api/window":

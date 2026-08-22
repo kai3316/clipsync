@@ -240,15 +240,27 @@ var ClipsyncAPI = (function () {
         formData.append('device_id', deviceId);
       }
 
-      return fetch(url, {
-        method: 'POST',
-        body: formData,
-      })
+      var options = { method: 'POST', body: formData };
+      // Mirror the generic _fetch timeout: a stalled upload (phone asleep,
+      // network drop) must not hang the send dialog forever.
+      var controller = null;
+      var timeoutId = null;
+      if (typeof AbortController !== 'undefined') {
+        controller = new AbortController();
+        options.signal = controller.signal;
+        timeoutId = setTimeout(function () {
+          controller.abort();
+        }, 15000);
+      }
+
+      return fetch(url, options)
         .then(function (r) {
+          clearTimeout(timeoutId);
           if (!r.ok) throw new Error('HTTP ' + r.status);
           return r.json();
         })
         .catch(function (e) {
+          clearTimeout(timeoutId);
           console.error('[ClipsyncAPI] Upload failed:', e);
           throw e;
         });
@@ -751,12 +763,18 @@ var ClipsyncAPI = (function () {
         options.body = JSON.stringify(body);
       }
 
-      // AbortController for timeout
-      var controller = new AbortController();
-      options.signal = controller.signal;
-      var timeoutId = setTimeout(function () {
-        controller.abort();
-      }, timeoutMs || 15000);
+      // AbortController for timeout — feature-detect so an old webview that
+      // predates AbortController still issues the request (just without the
+      // abort/timeout guard) instead of crashing on the constructor.
+      var controller = null;
+      var timeoutId = null;
+      if (typeof AbortController !== 'undefined') {
+        controller = new AbortController();
+        options.signal = controller.signal;
+        timeoutId = setTimeout(function () {
+          controller.abort();
+        }, timeoutMs || 15000);
+      }
 
       return fetch(url, options)
         .then(function (response) {
@@ -775,6 +793,12 @@ var ClipsyncAPI = (function () {
             // If JSON parsing failed but response was OK, it's a real error
             if (parseErr instanceof SyntaxError && response.ok) {
               return {}; // Empty response, treat as success
+            }
+            // The timeout fired mid-body-read: fetch rejected with an
+            // AbortError. Let the outer catch report it as a timeout instead
+            // of fabricating an "HTTP 200" error from an aborted response.
+            if (parseErr && parseErr.name === 'AbortError') {
+              throw parseErr;
             }
             if (parseErr.status !== undefined) {
               throw parseErr; // Already our error, re-throw

@@ -34,6 +34,11 @@ class WebSocketClient:
         self.addr = addr
         self._lock = threading.Lock()
         self._closed = False
+        # Monotonic timestamp of the last successfully-received frame. The
+        # keepalive thread pings clients and drops any that go quiet for
+        # several intervals (phone asleep, cable pulled) so a zombie
+        # connection is not reported as "connected" forever.
+        self.last_recv = time.monotonic()
         # A stalled client (phone asleep, cable pulled) must not block a
         # broadcast forever: bound every send/recv on this socket so
         # sendall() raises instead of blocking indefinitely.  This also
@@ -68,6 +73,20 @@ class WebSocketClient:
             self._closed = True
             return False
 
+    def send_ping(self) -> bool:
+        """Send a WebSocket ping (keepalive) frame. Returns True on success.
+
+        The browser's WebSocket implementation answers automatically with a
+        pong, which the next ``recv_frame`` consumes and records as liveness.
+        """
+        try:
+            self._send_frame(_OP_PING, b"")
+            return True
+        except (OSError, ConnectionError) as e:
+            logger.debug("WS ping send error (%s): %s", self.addr[0], e)
+            self._closed = True
+            return False
+
     def recv_frame(self, timeout: float = 0.05) -> bytes | None:
         """Receive one complete frame payload (unmasked text data).
         Returns None if no data or connection closed.
@@ -85,6 +104,10 @@ class WebSocketClient:
             opcode = first_byte & 0x0F
             masked = (second_byte & 0x80) != 0
             payload_len = second_byte & 0x7F
+            # Any successfully-read frame proves the connection is alive —
+            # browsers auto-answer our ping with a pong, which lands here and
+            # refreshes last_recv even though we discard the payload.
+            self.last_recv = time.monotonic()
 
             # Handle extended payload length
             if payload_len == 126:
@@ -233,6 +256,14 @@ class WebSocketManager:
         self._on_client_attached = on_client_attached
         self._clients: list[WebSocketClient] = []
         self._lock = threading.Lock()
+        # Keepalive: browsers cannot send control frames, so the server must
+        # ping and drop clients that stop answering (phone asleep, network
+        # drop) — otherwise they linger as "connected" zombies forever.
+        self._hb_stop = threading.Event()
+        self._hb_thread = threading.Thread(
+            target=self._heartbeat_loop, daemon=True, name="ws-heartbeat",
+        )
+        self._hb_thread.start()
 
     @property
     def on_client_attached(self):
@@ -311,11 +342,17 @@ class WebSocketManager:
         hist_data, _ = get_history(self._history, self._cfg)
         client.send_json({"type": "history_updated", "data": hist_data})
 
-    def broadcast(self, message_type: str, data: dict | None = None):
+    def broadcast(self, message_type: str, data: dict | None = None) -> int:
         """Send a JSON message to all connected clients.
 
         message_type: one of 'devices_updated', 'history_updated',
                       'transfer_progress', 'clipboard_changed'
+
+        Returns the number of clients the message was actually delivered to
+        (0 when no client was connected or every send failed).  Callers such
+        as DialogManager use this to distinguish "delivered" from merely
+        "has a registered client", so a dead connection is not treated as a
+        delivered dialog.
         """
         message = {
             "type": message_type,
@@ -332,11 +369,14 @@ class WebSocketManager:
         with self._lock:
             clients = list(self._clients)
         dead: list[WebSocketClient] = []
+        delivered = 0
         for client in clients:
             if client.closed:
                 dead.append(client)
                 continue
-            if not client.send_bytes(payload):
+            if client.send_bytes(payload):
+                delivered += 1
+            else:
                 dead.append(client)
         # Clean up dead clients.  Close them outside the lock — close() sends
         # a WS close frame (blocking socket I/O) which would stall the manager
@@ -351,6 +391,7 @@ class WebSocketManager:
                     client.close()
                 except Exception:
                     pass
+        return delivered
 
     def remove_client(self, client: WebSocketClient) -> None:
         """Remove a client from the managed list."""
@@ -360,11 +401,85 @@ class WebSocketManager:
                 logger.info("WS client removed: %s:%d (%d clients)",
                             client.addr[0], client.addr[1], len(self._clients))
 
+    def _ping_and_collect_stale(self, now: float | None = None) -> list:
+        """Ping every live client and return the ones to drop.
+
+        A client is stale when its connection is already closed, when sending
+        the ping fails (dead socket), or when it has not delivered any frame
+        (including the auto-pong) for more than ``PING_INTERVAL * MISSED_LIMIT``
+        seconds.  Extracted from the heartbeat loop so the drop decision is
+        unit-testable without waiting on real timers.
+        """
+        now = time.monotonic() if now is None else now
+        ping_interval = 30.0
+        missed_limit = 3  # ~90s of silence before dropping a client
+        with self._lock:
+            clients = list(self._clients)
+        stale: list[WebSocketClient] = []
+        for client in clients:
+            if client.closed:
+                stale.append(client)
+                continue
+            try:
+                client.send_ping()
+            except Exception:
+                stale.append(client)
+                continue
+            if now - client.last_recv > ping_interval * missed_limit:
+                logger.debug("WS keepalive: dropping stalled client %s:%d",
+                             client.addr[0], client.addr[1])
+                stale.append(client)
+        return stale
+
+    def _drop_clients(self, stale: list) -> None:
+        """Remove and close the given clients."""
+        if not stale:
+            return
+        with self._lock:
+            for client in stale:
+                if client in self._clients:
+                    self._clients.remove(client)
+        for client in stale:
+            try:
+                client.close()
+            except Exception:
+                pass
+
+    def _heartbeat_loop(self) -> None:
+        """Keepalive loop: ping every client and drop stale ones.
+
+        Runs on a daemon thread for the manager's lifetime.  Every 30s each
+        live client is sent a WS ping frame (the browser auto-answers with a
+        pong, which ``recv_frame`` records as liveness).  A client that goes
+        ~90s without any received frame is dead and is removed so the UI stops
+        reporting it as connected.
+        """
+        ping_interval = 30.0
+        while not self._hb_stop.wait(ping_interval):
+            self._drop_clients(self._ping_and_collect_stale())
+
     def broadcast_history(self):
         """Convenience: broadcast full history to all clients."""
         from internal.web.api.history import get_history
         hist_data, _ = get_history(self._history, self._cfg)
         self.broadcast("history_updated", hist_data)
+
+    def broadcast_history_deleted(self, entry_ids, total: int | None = None):
+        """Convenience: tell clients specific history entries were removed.
+
+        The ``history_updated`` merge on the client can only upsert/prepend —
+        it cannot express a deletion.  A delete / batch-delete therefore sends
+        this event so every client removes the entries (and the ones that
+        issued the request don't race their own local splice).
+        """
+        self.broadcast("history_item_deleted", {
+            "entry_ids": list(entry_ids or []),
+            "total": total,
+        })
+
+    def broadcast_history_clear(self):
+        """Convenience: tell clients the entire history was wiped."""
+        self.broadcast("history_clear", {})
 
     def broadcast_devices(self):
         """Convenience: broadcast device list to all clients."""
@@ -434,6 +549,8 @@ class WebSocketManager:
 
     def shutdown(self):
         """Close all connections and clear client list."""
+        # Stop the keepalive thread first so it can't race the teardown.
+        self._hb_stop.set()
         # Snapshot the list and clear under the lock, then close each client
         # outside it: close() sends a WS close frame (blocking socket I/O) and
         # must not stall the manager lock.

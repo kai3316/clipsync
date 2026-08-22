@@ -196,6 +196,7 @@
        Dialog system (server-pushed modals)
        ═══════════════════════════════════════════════════════════════ */
     activeDialog: null,         // { dialog_id, dialog_type, title, message, ... }
+    dialogQueue: [],            // server-pushed dialogs waiting for the active one to close
 
     /* ═══════════════════════════════════════════════════════════════
        Client-side dialogs (confirm / prompt / alert)
@@ -494,14 +495,51 @@
       // doesn't hang forever under a hidden overlay (mirrors how confirm()/
       // prompt() close prior client dialogs).
       this.closeClientDialog();
+      // Only one server dialog can be visible at a time. If one is already
+      // up, queue the newcomer so it is shown after the current one closes
+      // instead of silently clobbering it — a clobbered dialog would sit in
+      // dialog.py's event.wait(120) with no on-screen UI and time out.
+      if (this.activeDialog) {
+        this.dialogQueue.push(dlg);
+        return;
+      }
       this.activeDialog = dlg;
     },
 
     /**
-     * Close the active dialog modal and clear its state.
+     * Close the active dialog modal and promote the next queued dialog.
+     * @param {string} [dialogId] - Optional id. When given and it is NOT the
+     *   active dialog, the server force-closed a queued dialog — that entry is
+     *   removed from the queue and the visible dialog stays up.
      */
-    closeDialog: function () {
+    closeDialog: function (dialogId) {
+      // A specific dialog was requested and it isn't the one on screen —
+      // the server force-closed a queued dialog. Drop it and keep the
+      // visible one up.
+      if (dialogId !== undefined && dialogId !== null &&
+          this.activeDialog && this.activeDialog.dialog_id !== dialogId) {
+        this._removeQueuedDialog(dialogId);
+        return;
+      }
       this.activeDialog = null;
+      // Promote the next queued dialog (if any) so it becomes visible.
+      if (this.dialogQueue.length > 0) {
+        this.activeDialog = this.dialogQueue.shift();
+      }
+    },
+
+    /**
+     * Remove a queued (not-yet-shown) dialog by id. No-op when absent.
+     * @param {string} dialogId
+     */
+    _removeQueuedDialog: function (dialogId) {
+      if (dialogId === undefined || dialogId === null) return;
+      for (var i = 0; i < this.dialogQueue.length; i++) {
+        if (this.dialogQueue[i] && this.dialogQueue[i].dialog_id === dialogId) {
+          this.dialogQueue.splice(i, 1);
+          return;
+        }
+      }
     },
 
     /**

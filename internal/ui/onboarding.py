@@ -125,19 +125,32 @@ def show_language_onboarding(parent) -> str | None:
         except Exception:
             pass
 
+    def _find_card(widget):
+        """Walk up from the focused widget to the nearest card frame.
+
+        Tab/Shift+Tab are bound on each card, but focus can land on a child
+        label inside the card (labels are focusable via cursor=hand2) — so
+        ``event.widget`` is often the label, not the card.  Walk the widget
+        hierarchy until we find a card (or run out of parents).
+        """
+        while widget is not None:
+            try:
+                if widget in cards:
+                    return widget
+            except Exception:
+                return None
+            widget = getattr(widget, "master", None)
+        return None
+
     def _on_tab(event):
-        try:
-            cur = cards.index(event.widget) if event.widget in cards else -1
-        except Exception:
-            cur = -1
+        card = _find_card(event.widget)
+        cur = cards.index(card) if card is not None else -1
         _focus(cur + 1)
         return "break"
 
     def _on_shift_tab(event):
-        try:
-            cur = cards.index(event.widget) if event.widget in cards else -1
-        except Exception:
-            cur = 0
+        card = _find_card(event.widget)
+        cur = cards.index(card) if card is not None else 0
         _focus(cur - 1)
         return "break"
 

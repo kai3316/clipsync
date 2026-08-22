@@ -2,6 +2,27 @@
 
 All notable changes to ClipSync are documented in this file.
 
+## [1.0.27] — 2026-08-23
+
+### Web companion (convergence round)
+- **Concurrent dialogs no longer overwrite each other.** Two server-pushed dialogs arriving together (a file transfer request next to a pairing prompt) used to fight over one slot — the first silently timed out after 2 minutes. Dialogs now queue client-side and pop one at a time.
+- **Delete / pin / clear now reach every web client.** A history deletion, pin, or clear performed on one client (dashboard, phone) previously left other connected clients showing stale rows until a manual refresh. New `history_item_deleted` / `history_clear` WebSocket events keep every client in sync.
+- **WebSocket heartbeats.** The server now pings clients and drops any that have been silent for ~90s, so a phone that went to sleep or lost its network no longer leaves a zombie "connected" entry inflating the device list and eating a slot.
+
+### Web & API polish
+- History pagination offset tracks live-inserted entries (no more drifting "load more" cursor after real-time pushes).
+- Pin toggles surface failures; details view shows `entry_id` 0 correctly (no more "N/A" on the first clip).
+- `AbortController` feature-detected (no crash on ancient WebViews); `uploadFile` gets the same timeout as other API calls; an abort during response parsing is reported as a timeout, not a phantom "HTTP 200".
+- Dialog delivery is judged by actual sends, and a dialog queued while no client was attached gets a full response window from the moment it appears.
+- Overview refresh is debounced (500 ms) — rapid copying no longer fires a full HTTP overview fetch per keystroke.
+
+### Desktop
+- **Windows webview shutdown cleans up child processes** (`taskkill /T /F`) instead of leaving GPU/renderer stragglers behind.
+- First-run onboarding Tab/Shift+Tab navigation works even when focus is inside a card's label.
+
+### Tests
+- 14 new web regressions (dialog queue, delete/pin/clear broadcast, WS heartbeat + stale-client drop, dialog delivery/queue timing). Full suite 374 passed / 3 skipped.
+
 ## [1.0.26] — 2026-08-23
 
 ### Security

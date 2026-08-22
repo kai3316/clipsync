@@ -24,6 +24,23 @@ var ClipsyncWS = (function () {
   var _token = '';
   var _intentionalClose = false;
 
+  // Debounced overview refresh. history_updated / history_item_deleted /
+  // history_clear can arrive in bursts (a multi-clip paste, a batch delete),
+  // and every one would otherwise fire a redundant GET /api/overview. Merge
+  // them into a single refresh 500ms after the last event.
+  var _overviewTimer = null;
+
+  function _scheduleOverviewRefresh() {
+    if (_overviewTimer) {
+      clearTimeout(_overviewTimer);
+    }
+    _overviewTimer = setTimeout(function () {
+      _overviewTimer = null;
+      var store = window.__CLIPSYNC_STORE__;
+      if (store) store.fetchOverview();
+    }, 500);
+  }
+
   /* ═══════════════════════════════════════════════════════════════
      Public API
      ═══════════════════════════════════════════════════════════════ */
@@ -301,6 +318,11 @@ var ClipsyncWS = (function () {
               for (var hi4 = fresh.length - 1; hi4 >= 0; hi4--) {
                 store.history.unshift(fresh[hi4]);
               }
+              // The prepended items now occupy the top of the loaded list, so
+              // the "load more" cursor must advance by the same count —
+              // otherwise the next page fetch re-returns the freshly-prepended
+              // items and duplicates them.
+              store.historyOffset += fresh.length;
               // Keep the pagination cursor — the user's loaded pages are
               // preserved. Refresh "has more" from the broadcast total when
               // present so Load-more stays accurate after new items arrive.
@@ -312,7 +334,55 @@ var ClipsyncWS = (function () {
           // A clipboard change also means the overview's recent-activity feed
           // and stats changed — refresh it so the feed stays live without
           // waiting for the 5s poll.
-          store.fetchOverview();
+          _scheduleOverviewRefresh();
+          break;
+
+        case 'history_item_deleted':
+          // Broadcast after a delete / batch-delete so every client removes
+          // the entries instead of only the one that issued the request
+          // (the history_updated upsert merge can't express deletions).
+          if (data && Array.isArray(data.entry_ids)) {
+            var delSet = {};
+            for (var di = 0; di < data.entry_ids.length; di++) {
+              delSet[data.entry_ids[di]] = true;
+            }
+            var removedCount = 0;
+            for (var hiDel = store.history.length - 1; hiDel >= 0; hiDel--) {
+              var histItem = store.history[hiDel];
+              if (histItem && histItem.entry_id !== undefined &&
+                  delSet[histItem.entry_id]) {
+                store.history.splice(hiDel, 1);
+                removedCount++;
+              }
+            }
+            // Deselect any removed entries so the multi-select bar doesn't
+            // count deleted items.
+            var keptIds = [];
+            store.selectedIds.forEach(function (sid) {
+              if (!delSet[sid]) keptIds.push(sid);
+            });
+            store.selectedIds = new Set(keptIds);
+            // Removed items no longer occupy the loaded list, so the
+            // pagination cursor must shrink by the same count (mirrors the
+            // local delete path's historyOffset--).
+            if (removedCount > 0) {
+              store.historyOffset = Math.max(0, store.historyOffset - removedCount);
+            }
+            if (data.total != null) {
+              store.historyHasMore = store.history.length < data.total;
+            }
+          }
+          _scheduleOverviewRefresh();
+          break;
+
+        case 'history_clear':
+          // History was wiped on another client — reset the whole list and
+          // the pagination cursor so "Load more" can't skip shifted items.
+          store.history.splice(0, store.history.length);
+          store.historyOffset = 0;
+          store.historyHasMore = false;
+          store.selectedIds = new Set();
+          _scheduleOverviewRefresh();
           break;
 
         case 'transfer_progress':
@@ -504,15 +574,30 @@ var ClipsyncWS = (function () {
           break;
 
         case 'close_dialog':
-          if (store.activeDialog && (!data || !data.dialog_id || data.dialog_id === store.activeDialog.dialog_id)) {
+          // Pass the id through so the store can also drop a force-closed
+          // dialog that was still queued (not yet on screen).
+          if (data && data.dialog_id) {
+            store.closeDialog(data.dialog_id);
+          } else {
             store.closeDialog();
           }
           break;
 
         case 'update_dialog':
-          // Update progress / text on an active dialog
-          if (store.activeDialog && data && data.dialog_id === store.activeDialog.dialog_id) {
-            Object.assign(store.activeDialog, data);
+          // Update progress / text on the active dialog, and patch any queued
+          // dialog with the same id in place so it shows current state once
+          // promoted to the front.
+          if (data && data.dialog_id) {
+            if (store.activeDialog && data.dialog_id === store.activeDialog.dialog_id) {
+              Object.assign(store.activeDialog, data);
+            } else {
+              for (var qDi = 0; qDi < store.dialogQueue.length; qDi++) {
+                if (store.dialogQueue[qDi] && store.dialogQueue[qDi].dialog_id === data.dialog_id) {
+                  Object.assign(store.dialogQueue[qDi], data);
+                  break;
+                }
+              }
+            }
           }
           break;
 

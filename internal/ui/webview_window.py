@@ -165,12 +165,24 @@ class WebViewWindow:
             logger.info("WebViewWindow: terminating browser process (PID %d)",
                         proc.pid)
             try:
-                proc.terminate()
-                try:
-                    proc.wait(timeout=3)
-                except subprocess.TimeoutExpired:
-                    proc.kill()
-                    proc.wait(timeout=2)
+                if platform.system() == "Windows":
+                    # Browsers fork a whole tree (GPU, renderer, crashpad,
+                    # ...). taskkill /T /F kills the tree so no orphan child
+                    # survives after the main process is gone. run without a
+                    # shell — never route the PID through a shell string.
+                    subprocess.run(
+                        ["taskkill", "/PID", str(proc.pid), "/T", "/F"],
+                        stdout=subprocess.DEVNULL,
+                        stderr=subprocess.DEVNULL,
+                        timeout=10,
+                    )
+                else:
+                    proc.terminate()
+                    try:
+                        proc.wait(timeout=3)
+                    except subprocess.TimeoutExpired:
+                        proc.kill()
+                        proc.wait(timeout=2)
             except Exception:
                 logger.debug("WebViewWindow: failed to terminate browser process",
                              exc_info=True)
