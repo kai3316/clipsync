@@ -29,7 +29,7 @@
 
 ```
 clipsync/
-├── cmd/
+├── src/
 │   └── main.py                       # 入口，组装所有模块
 ├── internal/
 │   ├── clipboard/
@@ -226,16 +226,16 @@ clipsync/
 # 安装依赖
 pip install -r requirements.txt
 
-# 运行
-python cmd/main.py
+# 运行（仓库根目录的 main.py 是转发入口）
+python src/main.py
 
 # 系统托盘右键 → Settings... 打开图形设置界面
 ```
 
 三平台运行要求：
-- **Windows**：Python 3.10+，无需额外系统依赖
-- **macOS**：Python 3.10+，首次运行需授予辅助功能权限
-- **Linux**：Python 3.10+，需安装 `xclip`（X11）或 `wl-clipboard`（Wayland）
+- **Windows**：Python 3.12+，无需额外系统依赖
+- **macOS**：Python 3.12+，首次运行需授予辅助功能权限
+- **Linux**：Python 3.12+，需安装 `xclip`（X11）或 `wl-clipboard`（Wayland）
 
 ---
 

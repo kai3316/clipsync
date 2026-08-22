@@ -182,6 +182,7 @@ class ChatManager:
     CHUNK_SIZE = 256 * 1024
     INVITE_ACCEPT_TIMEOUT = 300.0     # sender waits this long for chat_file_accept
     COMPLETION_WAIT_TIMEOUT = 60.0
+    TRANSFER_STALL_TIMEOUT = 600.0    # no chunk progress this long => fail + remove .part
     MAX_CONCURRENT_INCOMING_FILES = 3
     MAX_CONCURRENT_OUTGOING_FILES = 3
     # ---- liveness ------------------------------------------------------------
@@ -189,6 +190,7 @@ class ChatManager:
     OFFLINE_AFTER = 150.0             # silent for ~3 intervals => show offline
 
     MESSAGE_HISTORY_MAX = 500         # entries kept per session (oldest trimmed)
+    SEND_FN_CACHE_MAX = 32            # most-recent peers kept in _latest_send_fn
 
     def __init__(self, device_id: str, device_name: str, receive_dir: str = ""):
         self._device_id = device_id
@@ -200,7 +202,8 @@ class ChatManager:
         self._session_by_sid: dict[str, ChatSession] = {}
         self._invite_times_in: dict[str, deque] = {}         # peer_id -> mono timestamps
         self._invite_times_out: dict[str, deque] = {}
-        self._text_times: dict[str, deque] = {}              # session_id -> mono timestamps
+        self._text_times_out: dict[str, deque] = {}          # session_id -> outgoing mono timestamps
+        self._text_times_in: dict[str, deque] = {}           # session_id -> incoming mono timestamps
         self._receives: dict[str, dict] = {}                 # transfer_id -> receive state
         self._sends: dict[str, dict] = {}                    # transfer_id -> send state
         self._latest_send_fn: dict[str, SendFn] = {}         # peer_id -> newest send_fn
@@ -322,6 +325,45 @@ class ChatManager:
         while dq and now - dq[0] > window:
             dq.popleft()
 
+    def _remember_send_fn(self, peer_id: str, send_fn: SendFn) -> None:
+        """Cache the newest working send_fn per peer, capped to SEND_FN_CACHE_MAX."""
+        if send_fn is None:
+            return
+        self._latest_send_fn[peer_id] = send_fn
+        if len(self._latest_send_fn) > self.SEND_FN_CACHE_MAX:
+            # Insertion-ordered dict: evict the least-recently-inserted peer.
+            self._latest_send_fn.pop(next(iter(self._latest_send_fn)), None)
+
+    def _cleanup_rate_buckets_locked(self, peer_id: str, session_id: str) -> None:
+        """Drop rate-limit buckets that can no longer accumulate (lock held).
+
+        Invite buckets are keyed by peer_id and only removed once the deque is
+        empty after pruning (the peer may still knock again).  Text buckets are
+        keyed by session_id, which is never reused, so they are removed outright.
+        Without this the invite/text dicts grow without bound as every past peer
+        (including each ``__anon__`` connection) and every closed session leaves
+        a permanent entry.
+        """
+        for bucket in (self._invite_times_in, self._invite_times_out):
+            dq = bucket.get(peer_id)
+            if dq is not None:
+                self._prune_times(dq, time.monotonic(), self.INVITE_RATE_WINDOW)
+                if not dq:
+                    bucket.pop(peer_id, None)
+        for bucket in (self._text_times_out, self._text_times_in):
+            bucket.pop(session_id, None)
+
+    def _session_has_active_transfer(self, session: ChatSession) -> bool:
+        """True when *session* has a send or receive still in flight."""
+        terminal = ("done", "failed", "declined", "cancelled")
+        for state in self._sends.values():
+            if state["session"] is session and state["entry"].status not in terminal:
+                return True
+        for state in self._receives.values():
+            if state["session"] is session and state["entry"].status not in terminal:
+                return True
+        return False
+
     # ------------------------------------------------------------------
     # Outgoing actions (UI threads)
     # ------------------------------------------------------------------
@@ -342,7 +384,7 @@ class ChatManager:
         with self._lock:
             existing = self._sessions.get(peer_id)
             if existing is not None and existing.status in ("inviting", "invited", "active"):
-                self._latest_send_fn[peer_id] = send_fn
+                self._remember_send_fn(peer_id, send_fn)
                 return existing.session_id
             out = self._invite_times_out.setdefault(peer_id, deque())
             self._prune_times(out, now, self.INVITE_RATE_WINDOW)
@@ -365,7 +407,7 @@ class ChatManager:
             )
             self._sessions[peer_id] = session
             self._session_by_sid[session.session_id] = session
-            self._latest_send_fn[peer_id] = send_fn
+            self._remember_send_fn(peer_id, send_fn)
             sent = self._send_frame({
                 "msg_type": "chat_invite",
                 "session_id": session.session_id,
@@ -390,8 +432,8 @@ class ChatManager:
             ok = self._send_frame(
                 {"msg_type": "chat_accept", "session_id": session.session_id}, fn,
             )
-            if ok and fn is not None:
-                self._latest_send_fn[session.peer_id] = fn
+            if ok:
+                self._remember_send_fn(session.peer_id, fn)
         self._fire("_on_sessions_changed")
         return ok
 
@@ -418,6 +460,10 @@ class ChatManager:
             was_active = session.status == "active"
             session.status = "closed"
             self._fail_transfers_for_session(session, "cancelled")
+            # A closed session id is never reused; drop its text buckets so
+            # the rate-limit dicts cannot grow without bound.
+            self._text_times_out.pop(session.session_id, None)
+            self._text_times_in.pop(session.session_id, None)
             if notify_peer and was_active:
                 self._send_frame(
                     {"msg_type": "chat_close", "session_id": session.session_id},
@@ -435,7 +481,9 @@ class ChatManager:
             session = self._session_by_sid.get(session_id)
             if session is None or session.status != "active" or not session.online:
                 return False
-            dq = self._text_times.setdefault(session.session_id, deque())
+            # Outgoing texts have their own budget so a peer flooding us with
+            # incoming texts cannot silently halve what we may send back.
+            dq = self._text_times_out.setdefault(session.session_id, deque())
             self._prune_times(dq, now, self.TEXT_RATE_WINDOW)
             if len(dq) >= self.TEXT_RATE_LIMIT:
                 logger.info("chat: text flood control engaged for session %s", session_id[:8])
@@ -453,11 +501,16 @@ class ChatManager:
                 "text": text,
                 "ts": entry.ts,
             }, fn)
+            if not ok:
+                # A failed send must not permanently consume a rate-limit slot:
+                # roll back the timestamp we just charged.
+                if dq and dq[-1] == now:
+                    dq.pop()
             # Surface delivery failure in the transcript instead of silently
             # showing a message that never reached the peer.
             entry.status = "done" if ok else "failed"
-            if ok and fn is not None:
-                self._latest_send_fn[session.peer_id] = fn
+            if ok:
+                self._remember_send_fn(session.peer_id, fn)
         self._fire("_on_message", session_id, entry.to_dict())
         self._fire("_on_sessions_changed")
         return ok
@@ -510,6 +563,7 @@ class ChatManager:
                 "cancel": False,
                 "_done_fired": False,
                 "send_fn": fn,
+                "last_progress_mono": time.monotonic(),
             }
             self._sends[transfer_id] = state
             ok = self._send_frame({
@@ -524,7 +578,7 @@ class ChatManager:
                 self._sends.pop(transfer_id, None)
                 entry.status = "failed"
                 return None
-            self._latest_send_fn[session.peer_id] = fn
+            self._remember_send_fn(session.peer_id, fn)
             threading.Thread(
                 target=self._file_sender, args=(transfer_id,),
                 daemon=True, name=f"chat-send-{transfer_id[:8]}",
@@ -577,13 +631,14 @@ class ChatManager:
             state["received_bytes"] = 0
             state["chunks_remaining"] = set(range(state["total_chunks"]))
             state["entry"].status = "sending"
+            state["last_progress_mono"] = time.monotonic()
             ok = self._send_frame({
                 "msg_type": "chat_file_accept",
                 "session_id": session_id,
                 "transfer_id": transfer_id,
             }, fn)
-            if ok and fn is not None:
-                self._latest_send_fn[session.peer_id] = fn
+            if ok:
+                self._remember_send_fn(session.peer_id, fn)
         self._fire("_on_sessions_changed")
         return ok
 
@@ -845,8 +900,7 @@ class ChatManager:
             self._drop_session_locked(old)
         self._sessions[peer_id] = session
         self._session_by_sid[sid] = session
-        if send_fn is not None:
-            self._latest_send_fn[peer_id] = send_fn
+        self._remember_send_fn(peer_id, send_fn)
         return session
 
     def _activate_locked(self, session: ChatSession) -> None:
@@ -865,6 +919,7 @@ class ChatManager:
         self._sessions.pop(session.peer_id, None)
         if self._session_by_sid.get(session.session_id) is session:
             self._session_by_sid.pop(session.session_id, None)
+        self._cleanup_rate_buckets_locked(session.peer_id, session.session_id)
 
     def _handle_chat_accept(self, payload, sender_id, fp_short) -> None:
         with self._lock:
@@ -930,7 +985,7 @@ class ChatManager:
             if session is None or session.status != "active":
                 logger.debug("chat: text from %s without active session -- dropped", sender_id[:12])
                 return
-            dq = self._text_times.setdefault(session.session_id, deque())
+            dq = self._text_times_in.setdefault(session.session_id, deque())
             self._prune_times(dq, now, self.TEXT_RATE_WINDOW)
             if len(dq) >= self.TEXT_RATE_LIMIT:
                 logger.warning("chat: text flood from %s -- dropping", sender_id[:12])
@@ -1030,6 +1085,7 @@ class ChatManager:
                 "chunks_remaining": set(),
                 "cancel": False,
                 "_done_fired": False,
+                "last_progress_mono": time.monotonic(),
             }
             sid = session.session_id
         self._fire("_on_message", sid, entry.to_dict())
@@ -1045,6 +1101,7 @@ class ChatManager:
                 return
             state["entry"].status = "sending"
             state["accept_event"].set()
+            state["last_progress_mono"] = time.monotonic()
         self._fire("_on_sessions_changed")
 
     def _handle_file_reject(self, payload, sender_id) -> None:
@@ -1170,6 +1227,7 @@ class ChatManager:
                 return True
             state["received_bytes"] += len(data)
             state["chunks_remaining"].discard(index)
+            state["last_progress_mono"] = time.monotonic()
             entry = state["entry"]
             entry.fraction = min(1.0, state["received_bytes"] / max(1, state["file_size"]))
             sid, tid, fraction = state["session"].session_id, transfer_id, entry.fraction
@@ -1325,6 +1383,7 @@ class ChatManager:
                         state = self._sends.get(transfer_id)
                         if state is not None:
                             state["entry"].fraction = fraction
+                            state["last_progress_mono"] = time.monotonic()
                     self._fire("_on_file_progress", session.session_id, transfer_id, fraction)
         except OSError:
             logger.error("chat: read failed for %s", path, exc_info=True)
@@ -1435,6 +1494,7 @@ class ChatManager:
         while not self._heartbeat_stop.wait(timeout=self.PING_INTERVAL / 2):
             now = time.monotonic()
             fired: list[tuple[str, dict]] = []
+            file_done_fired: list[tuple[str, str, str]] = []
             with self._lock:
                 for session in list(self._sessions.values()):
                     # Reap long-dead sessions so the map cannot grow without
@@ -1443,6 +1503,7 @@ class ChatManager:
                             and time.time() - session.last_activity_ts > 3600.0:
                         self._sessions.pop(session.peer_id, None)
                         self._session_by_sid.pop(session.session_id, None)
+                        self._cleanup_rate_buckets_locked(session.peer_id, session.session_id)
                         continue
                     if session.status in ("inviting", "invited"):
                         if now - session.last_seen_mono > self.INVITE_ACCEPT_TIMEOUT:
@@ -1453,15 +1514,21 @@ class ChatManager:
                         continue
                     # Offline edge detection
                     if session.online and now - session.last_seen_mono > self.OFFLINE_AFTER:
-                        session.online = False
-                        session.offline_announced = True
-                        self._append_entry(session, ChatEntry(
-                            entry_id=uuid.uuid4().hex[:16], kind="system", outgoing=False,
-                            ts=time.time(), text_key="chat.system.peer_offline",
-                        ))
-                        fired.append((session.session_id, session.entries[-1].to_dict()))
-                        self._fail_transfers_for_session(session, "peer_offline")
-                        continue
+                        # A session with an in-flight transfer is still alive:
+                        # on a slow link (TCP retransmits) a big file can take
+                        # far longer than OFFLINE_AFTER without a ping.  Only
+                        # declare the peer offline -- and kill its transfers --
+                        # once no transfer is actively moving.
+                        if not self._session_has_active_transfer(session):
+                            session.online = False
+                            session.offline_announced = True
+                            self._append_entry(session, ChatEntry(
+                                entry_id=uuid.uuid4().hex[:16], kind="system", outgoing=False,
+                                ts=time.time(), text_key="chat.system.peer_offline",
+                            ))
+                            fired.append((session.session_id, session.entries[-1].to_dict()))
+                            self._fail_transfers_for_session(session, "peer_offline")
+                            continue
                     if session.offline_announced and not session.online:
                         continue
                     if now - session.last_ping_mono >= self.PING_INTERVAL:
@@ -1471,8 +1538,11 @@ class ChatManager:
                             self._latest_send_fn.get(session.peer_id),
                         )
                 self._expire_stale_receives()
+                file_done_fired = self._expire_stale_transfers(fired)
             for sid, entry_dict in fired:
                 self._fire("_on_message", sid, entry_dict)
+            for sid, tid, status in file_done_fired:
+                self._fire("_on_file_done", sid, tid, False, "", status)
 
     def _expire_stale_receives(self) -> None:
         """Drop incoming file offers the user never answered (lock held).
@@ -1495,3 +1565,74 @@ class ChatManager:
                 _safe_remove(state.get("temp_path"))
                 self._receives.pop(tid, None)
                 entry.status = "declined"
+
+    @staticmethod
+    def _transfer_stall_reference(state: dict, now_mono: float) -> float:
+        """Monotonic reference for stall detection (lock held).
+
+        Uses the explicit per-chunk progress marker when present; otherwise
+        falls back to the entry's wall-clock creation time (i.e. the transfer
+        has not moved since it was created).
+        """
+        last = state.get("last_progress_mono")
+        if last:
+            return last
+        return state["entry"].ts - (time.time() - now_mono)
+
+    def _expire_stale_transfers(self, fired: list[tuple[str, dict]]) -> list[tuple[str, str, str]]:
+        """Fail transfers that have made no progress for too long (lock held).
+
+        A peer that crashes (or whose TCP disconnect never surfaces as a
+        callback) can strand a half-written ``.chat<id>.part`` on the receiver
+        and pin an in-flight slot on the sender forever -- the heartbeat only
+        used to sweep ``_sessions``, never the transfer maps.  Any transfer
+        with no progress for ``TRANSFER_STALL_TIMEOUT`` is failed, its temp
+        file removed, and the UI notified with an appended system entry (added
+        to *fired*) plus a returned ``_on_file_done`` call for the caller to
+        fire outside the lock.
+        """
+        now = time.monotonic()
+        done_fired: list[tuple[str, str, str]] = []
+        terminal = ("done", "failed", "declined", "cancelled")
+        for tid, state in list(self._sends.items()):
+            if now - self._transfer_stall_reference(state, now) <= self.TRANSFER_STALL_TIMEOUT:
+                continue
+            self._sends.pop(tid, None)
+            state["cancel"] = True
+            state["accept_event"].set()
+            state["complete_event"].set()
+            entry = state["entry"]
+            if entry.status in terminal:
+                continue
+            entry.status = "failed"
+            session = state["session"]
+            self._append_entry(session, ChatEntry(
+                entry_id=uuid.uuid4().hex[:16], kind="system", outgoing=False,
+                ts=time.time(), text_key="chat.system.peer_offline",
+            ))
+            fired.append((session.session_id, session.entries[-1].to_dict()))
+            done_fired.append((session.session_id, tid, "error_timeout"))
+        for tid, state in list(self._receives.items()):
+            if now - self._transfer_stall_reference(state, now) <= self.TRANSFER_STALL_TIMEOUT:
+                continue
+            self._receives.pop(tid, None)
+            fh = state.get("fh")
+            if fh is not None:
+                try:
+                    fh.close()
+                except OSError:
+                    pass
+                state["fh"] = None
+            _safe_remove(state.get("temp_path"))
+            entry = state["entry"]
+            if entry.status in terminal:
+                continue
+            entry.status = "failed"
+            session = state["session"]
+            self._append_entry(session, ChatEntry(
+                entry_id=uuid.uuid4().hex[:16], kind="system", outgoing=False,
+                ts=time.time(), text_key="chat.system.peer_offline",
+            ))
+            fired.append((session.session_id, session.entries[-1].to_dict()))
+            done_fired.append((session.session_id, tid, "error_timeout"))
+        return done_fired

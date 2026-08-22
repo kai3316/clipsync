@@ -162,6 +162,16 @@ class TestTransportManagerOperations:
         self.pairing_mgr = MockPairingManager()
         self.tm = TransportManager("dev-1", "Device 1", 9999, self.pairing_mgr)
 
+    def test_send_to_peer_unknown_peer_returns_false(self):
+        # Regression: nearby chat's _send_frame treats a non-True result as
+        # "nothing delivered", so the transport MUST return a real bool — a
+        # bare `return` (None) made every chat send look like a failure in
+        # the real app while the unit tests' bool-returning stubs hid it.
+        assert self.tm.send_to_peer("nobody", b"data") is False
+
+    def test_broadcast_with_no_peers_returns_false(self):
+        assert self.tm.broadcast(b"data") is False
+
     def test_set_on_peer_message_sets_callback(self):
         def cb(msg):
             pass

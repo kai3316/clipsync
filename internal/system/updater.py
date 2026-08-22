@@ -50,20 +50,31 @@ def _is_newer(latest: str, current: str) -> bool:
 
 
 def _fetch_latest_release(timeout: float = 6.0) -> dict | None:
-    """Fetch the latest GitHub release JSON, or None on any failure."""
-    try:
-        req = urllib.request.Request(
-            _LATEST_URL,
-            headers={
-                "Accept": "application/vnd.github+json",
-                "User-Agent": "clipsync",
-            },
-        )
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            return json.loads(resp.read().decode("utf-8"))
-    except Exception as exc:
-        logger.debug("Update check failed: %s", exc)
-        return None
+    """Fetch the latest GitHub release JSON, or None on any failure.
+
+    Retried a couple of times with a short backoff so a single transient
+    network blip (Wi-Fi dropout, DNS hiccup) doesn't surface as a hard
+    "check failed" to a user who just clicked the tray item.
+    """
+    last_exc: Exception | None = None
+    for attempt in range(3):
+        try:
+            req = urllib.request.Request(
+                _LATEST_URL,
+                headers={
+                    "Accept": "application/vnd.github+json",
+                    "User-Agent": "clipsync",
+                },
+            )
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                return json.loads(resp.read().decode("utf-8"))
+        except Exception as exc:
+            last_exc = exc
+            if attempt < 2:
+                import time as _time
+                _time.sleep(0.5 * (attempt + 1))
+    logger.debug("Update check failed after 3 attempts: %s", last_exc)
+    return None
 
 
 def check_for_update(timeout: float = 6.0) -> dict:

@@ -102,6 +102,14 @@ Clips are deduplicated by content hash, not timestamp. Rapid alternating copies 
 - Upload and download files between phone and desktop
 - Token-based authentication (auto-generated or custom)
 
+### Nearby Chat
+
+- **No pairing required** — chat directly with discovered-but-unpaired devices on the LAN
+- **Strict two-sided consent** — nothing flows until the other user explicitly accepts; unaccepted invites reveal no content
+- Unpaired devices show a short certificate fingerprint for out-of-band verification; paired devices accept automatically
+- Send text and files (chunked over the existing transfer channel) with automatic reconnect
+- Invites / text / files are rate- and concurrency-limited; file names sanitized + path-traversal blocked
+
 ### Security
 
 - **TLS 1.3** — all transport encrypted with per-device Ed25519 certificates
@@ -113,13 +121,13 @@ Clips are deduplicated by content hash, not timestamp. Rapid alternating copies 
 
 ### Content Filtering
 
-Regex-based filters to warn or block before sending sensitive data:
+Regex-based filters that replace matches with `[FILTERED]` before syncing, and annotate them in history:
 - Credit card numbers
 - SSN / social security numbers
 - API keys and tokens
-- Email addresses
-- Phone numbers
-- Custom patterns
+- Private keys
+- Passwords
+- Email addresses (opt-in, OFF by default — keeps ordinary addresses in everyday text from being mangled)
 
 ### System Tray
 
@@ -222,10 +230,17 @@ internal/
     clipboard_darwin.py       #   macOS pbpaste/pbcopy + osascript
     clipboard_linux.py        #   Linux xclip / wl-clipboard
     format.py                 #   ClipboardContent dataclass + ContentType enum
-    history.py                #   Encrypted clipboard history store
+    history_db.py             #   SQLite clipboard history store (encrypted) + corruption self-heal
+    history.py                #   Legacy JSON history implementation (compat layer)
+    dedup.py                  #   Dedup hashing
+    retry.py                  #   Multi-round stabilization capture
+    source_tracker.py         #   Source-app tracking + app filter
     filter.py                 #   Regex-based content filtering
   config/
     config.py                 #   JSON config + encryption + atomic save
+  data/
+    backup.py                 #   Backup / restore (incl. paired devices)
+    export.py                 #   History export / import (JSON/CSV)
   i18n/
     __init__.py               #   EN / ZH translation tables
   platform/
@@ -239,17 +254,25 @@ internal/
   sync/
     manager.py                #   SyncManager: clipboard change → encode → broadcast
     file_transfer.py          #   Chunked file transfer with ACK retransmit
+    nearby_chat.py            #   Nearby chat: no pairing, two-sided consent, text/files
+  system/
+    hotkey.py                 #   Global hotkeys
+    updater.py                #   Update check + download
   transport/
     connection.py             #   TransportManager + PeerConnection (TLS 1.3 sockets)
     discovery.py              #   mDNS service advertisement + browsing
   ui/
-    dashboard.py              #   Main window: Overview, Devices, History, Transfers
+    dashboard.py              #   Main window: Overview, Devices, History, Transfers, Nearby Chat
     settings_window.py        #   Settings: Network, Appearance, Web Companion, Filter, Security, Advanced, Logs, About
     dialogs.py                #   Reusable dialogs (ask_string, ask_yesno, show_info, show_error)
     systray.py                #   Cross-platform system tray icon + menu
   web/
-    server.py                 #   HTTP server: QR endpoint, history API, file upload/download, PWA manifest
-tests/                        #   218 tests covering clipboard, codec, config, pairing, sync, file transfer, cross-platform
+    server.py                 #   HTTP server + auth gating
+    routes.py                 #   API route dispatch
+    ws.py                     #   WebSocket live push
+    api/                      #   devices/history/favorites/transfer/settings/translate/security
+    static/                   #   Web dashboard, phone pages, PWA assets
+tests/                        #   308 tests covering clipboard, codec, config, pairing, sync, file transfer, chat, cross-platform
 ```
 
 ### Data Flow

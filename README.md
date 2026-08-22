@@ -102,6 +102,14 @@ ClipSync 通过**局域网直连**同步剪贴板 — 无需账号、无需云�
 - 手机与电脑间上传下载文件
 - Token 认证（自动生成或自定义）
 
+### 附近聊天
+
+- **无需配对** — 与同一局域网内已发现但未配对的设备直接通信
+- **严格的双向同意** — 对方必须显式接受邀请才能开始；未接受前不泄露任何内容
+- 未配对设备弹窗展示短证书指纹供线下核对；已配对设备自动接受
+- 收发文字与文件（复用分块传输通道），断线自动重连
+- 邀请/文字/文件均有速率与并发上限，文件名消毒 + 路径穿越拦截
+
 ### 安全机制
 
 - **TLS 1.3** — 所有传输层加密，每设备独立 Ed25519 证书
@@ -113,13 +121,13 @@ ClipSync 通过**局域网直连**同步剪贴板 — 无需账号、无需云�
 
 ### 内容过滤
 
-基于正则的敏感内容过滤，发送前警告或阻止：
+基于正则的敏感内容过滤，发送前以 `[FILTERED]` 替换后同步，并在历史中标注：
 - 信用卡号
 - 身份证号 / 社保号
-- API 密钥和 Token
-- 邮箱地址
-- 手机号码
-- 自定义正则
+- API 密钥与 Token
+- 私钥
+- 密码
+- 邮箱地址（**默认关闭**，可在设置中显式开启 —— 避免误伤日常文本中的普通邮箱）
 
 ### 系统托盘
 
@@ -222,10 +230,17 @@ internal/
     clipboard_darwin.py       #   macOS pbpaste/pbcopy + osascript
     clipboard_linux.py        #   Linux xclip / wl-clipboard
     format.py                 #   ClipboardContent 数据类 + ContentType 枚举
-    history.py                #   加密剪贴板历史存储
+    history_db.py             #   SQLite 剪贴板历史存储（加密）+ 损坏自愈
+    history.py                #   旧 JSON 历史实现（兼容层）
+    dedup.py                  #   去重哈希
+    retry.py                  #   多轮稳定捕获
+    source_tracker.py         #   来源应用跟踪 + 应用过滤
     filter.py                 #   基于正则的内容过滤
   config/
     config.py                 #   JSON 配置 + 加密 + 原子写入
+  data/
+    backup.py                 #   备份 / 恢复（含配对设备）
+    export.py                 #   历史导出 / 导入 (JSON/CSV)
   i18n/
     __init__.py               #   中英文翻译表
   platform/
@@ -239,17 +254,25 @@ internal/
   sync/
     manager.py                #   SyncManager: 剪贴板变更 → 编码 → 广播
     file_transfer.py          #   分块文件传输 + ACK 重传
+    nearby_chat.py            #   附近聊天：免配对、双向同意、文字/文件
+  system/
+    hotkey.py                 #   全局热键
+    updater.py                #   自动更新检查 + 下载
   transport/
     connection.py             #   TransportManager + PeerConnection (TLS 1.3)
     discovery.py              #   mDNS 服务宣告 + 浏览
   ui/
-    dashboard.py              #   主窗口：概览、设备、历史、传输
+    dashboard.py              #   主窗口：概览、设备、历史、传输、附近聊天
     settings_window.py        #   设置：网络、外观、Web 伴侣、过滤、安全、高级、日志、关于
     dialogs.py                #   通用对话框 (输入、确认、信息、错误)
     systray.py                #   跨平台系统托盘图标 + 菜单
   web/
-    server.py                 #   HTTP 服务器：二维码 API、历史 API、文件上传下载、PWA manifest
-tests/                        #   218 个测试覆盖剪贴板、编解码、配置、配对、同步、文件传输、跨平台
+    server.py                 #   HTTP 服务器 + 鉴权门禁
+    routes.py                 #   API 路由分发
+    ws.py                     #   WebSocket 实时推送
+    api/                      #   devices/history/favorites/transfer/settings/translate/security
+    static/                   #   Web 控制面板、手机页、PWA 资源
+tests/                        #   308 个测试覆盖剪贴板、编解码、配置、配对、同步、文件传输、聊天、跨平台
 ```
 
 ### 数据流

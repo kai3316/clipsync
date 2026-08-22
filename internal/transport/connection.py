@@ -318,6 +318,18 @@ class PeerConnection:
                     # app frames exist. Dropping them stops unpaired LAN peers
                     # from injecting clipboard / nav_url / file-dialog content.
                     if self._pairing_mgr is not None and not self._pairing_mgr.is_peer_paired(self.device_id):
+                        # Anonymous connections never sent an identity frame —
+                        # no pairing and no chat (both require a real
+                        # certificate identity).  Dropping every app frame here
+                        # stops a flood of fresh TLS connections from spamming
+                        # chat invites, each with a fresh per-connection rate
+                        # budget.
+                        if self.device_id.startswith("__anon__"):
+                            logger.debug(
+                                "[%s] dropping app frame from anonymous connection",
+                                self.device_name,
+                            )
+                            continue
                         # Pairing lifecycle messages must pass through so a peer
                         # can confirm / reject / unpair even before it is paired
                         # — that is exactly how the two-sided handshake completes.
@@ -949,7 +961,15 @@ class TransportManager:
 
         threading.Thread(target=_connect, daemon=True).start()
 
-    def broadcast(self, data: bytes):
+    def broadcast(self, data: bytes) -> bool:
+        """Send *data* to every paired peer.  Returns True if at least one
+        peer received the frame.
+
+        Callers that need to know whether the data actually went out (chat's
+        ``send_text`` treats a False as "nothing was delivered") rely on this
+        return value — it must be a real bool, not None.
+        """
+        delivered = False
         with self._lock:
             peers = list(self._peers.values())
         for conn in peers:
@@ -961,15 +981,19 @@ class TransportManager:
                     "[%s] broadcast: skipping unpaired peer", conn.device_id[:12],
                 )
                 continue
-            conn.send(data)
+            if conn.send(data):
+                delivered = True
+        return delivered
 
-    def send_to_peer(self, peer_id: str, data: bytes):
+    def send_to_peer(self, peer_id: str, data: bytes) -> bool:
+        """Send *data* to one peer.  Returns True on delivery, False when the
+        peer is not connected or the send failed."""
         with self._lock:
             conn = self._peers.get(peer_id)
         if conn is None:
             logger.warning("send_to_peer: peer %s not found", peer_id[:12])
-            return
-        conn.send(data)
+            return False
+        return conn.send(data)
 
     def get_connected_peers_with_names(self) -> list[tuple[str, str]]:
         """Return list of (peer_id, device_name) for all connected peers."""

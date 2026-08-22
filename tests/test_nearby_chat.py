@@ -588,3 +588,104 @@ class TestOfflineSendGuard:
         )
         assert self.pair.b.get_sessions()[0]["online"] is True
         assert self.pair.b.send_text(self.sid, "hi again", self.pair.send_from_b) is True
+
+
+class TestStalledTransferSweep:
+    """#2: transfers that stop making progress must be failed and their
+    ``.part`` temp files removed instead of leaking forever."""
+
+    def _active_session(self, mgr):
+        mgr.handle_message(
+            "chat_invite",
+            {"session_id": "f" * 16, "from_name": "A", "fingerprint_short": "A1"},
+            "peer-a", "A1", None,
+        )
+        sid = mgr.get_sessions()[0]["session_id"]
+        mgr.accept_invitation(sid, None)
+        return sid
+
+    def test_stalled_receive_is_failed_and_temp_file_removed(self):
+        import tempfile
+        mgr = ChatManager("x", "X")
+        tmp = tempfile.TemporaryDirectory()
+        tid = "b" * 32
+        try:
+            mgr.set_receive_dir(tmp.name)
+            sid = self._active_session(mgr)
+            mgr.handle_message(
+                "chat_file_offer",
+                {"session_id": sid, "transfer_id": tid,
+                 "file_name": "x.bin", "file_size": 100, "mime": ""},
+                "peer-a", "A1", None,
+            )
+            # Accepting opens the temp file; the wire ack itself is not needed.
+            mgr.accept_file(sid, tid, None)
+            temp_path = mgr._receives[tid]["temp_path"]
+            assert temp_path is not None and temp_path.exists()
+            # Age the receive past the stall timeout so the sweep fails it.
+            mgr._receives[tid]["last_progress_mono"] = (
+                time.monotonic() - (ChatManager.TRANSFER_STALL_TIMEOUT + 10)
+            )
+            fired: list = []
+            with mgr._lock:
+                done = mgr._expire_stale_transfers(fired)
+            assert tid not in mgr._receives
+            assert not temp_path.exists()
+            assert mgr.get_messages(sid)[-1]["kind"] == "system"
+            assert any(d[0] == sid and d[1] == tid for d in done)
+            assert any(m[0] == sid for m in fired)
+        finally:
+            mgr.shutdown()
+            tmp.cleanup()
+
+
+class TestTextRateBudget:
+    """#4: text flood budgets are per-direction and failed sends don't burn slots."""
+
+    def _active_session(self, mgr):
+        mgr.handle_message(
+            "chat_invite",
+            {"session_id": "f" * 16, "from_name": "A", "fingerprint_short": "A1"},
+            "peer-a", "A1", None,
+        )
+        sid = mgr.get_sessions()[0]["session_id"]
+        mgr.accept_invitation(sid, None)
+        return sid
+
+    def test_incoming_flood_does_not_consume_outgoing_budget(self):
+        mgr = ChatManager("x", "X")
+        try:
+            sid = self._active_session(mgr)
+            # Flood the INCOMING budget up to its cap.
+            for i in range(ChatManager.TEXT_RATE_LIMIT):
+                mgr.handle_message(
+                    "chat_text",
+                    {"session_id": sid, "text": f"in-{i}", "ts": time.time()},
+                    "peer-a", "A1", None,
+                )
+            # The 31st incoming text is consumed by the router but dropped.
+            mgr.handle_message(
+                "chat_text",
+                {"session_id": sid, "text": "flooded-out", "ts": time.time()},
+                "peer-a", "A1", None,
+            )
+            assert not any(e["text"] == "flooded-out" for e in mgr.get_messages(sid))
+            # The OUTGOING budget is untouched, so our own send still works.
+            assert mgr.send_text(sid, "still here", lambda data: True) is True
+            assert any(e["text"] == "still here" for e in mgr.get_messages(sid))
+        finally:
+            mgr.shutdown()
+
+    def test_failed_send_rolls_back_rate_limit_slot(self):
+        mgr = ChatManager("x", "X")
+        try:
+            sid = self._active_session(mgr)
+            drop = lambda data: False  # noqa: E731
+            # Send TEXT_RATE_LIMIT + 1 texts that all fail to transmit.  Without
+            # the rollback the first 30 failures would exhaust the whole budget.
+            for i in range(ChatManager.TEXT_RATE_LIMIT + 1):
+                assert mgr.send_text(sid, f"fail-{i}", drop) is False
+            # The failed sends must not have burned any outgoing slots.
+            assert mgr.send_text(sid, "real", lambda data: True) is True
+        finally:
+            mgr.shutdown()

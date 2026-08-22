@@ -146,10 +146,19 @@ class NotificationManager:
                 )
                 return
             try:
-                subprocess.run(
+                result = subprocess.run(
                     ["notify-send", title, message],
                     capture_output=True, timeout=5,
                 )
+                if result.returncode != 0:
+                    # notify-send exists but no notification daemon is running
+                    # — it exits nonzero with the reason on stderr.  v1.0.21
+                    # promised failures are logged; keep that contract here.
+                    logger.warning(
+                        "notify-send exited %d: %s",
+                        result.returncode,
+                        (result.stderr or b"").decode("utf-8", errors="replace").strip()[:200],
+                    )
             except Exception as exc:
                 logger.warning("notify-send failed: %s", exc)
 

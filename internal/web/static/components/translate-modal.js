@@ -71,6 +71,11 @@
             if (res && res.ok) {
               self.translated = res.translated || '';
               tm.translated = self.translated;
+              if (res.truncated) {
+                // MyMemory caps requests at ~500 bytes; the backend flagged
+                // that the clip was cut before translating.
+                self.store.showToast(self.t('translate.truncated'), 3000);
+              }
             } else {
               self.error = (res && res.error) || self.t('translate.failed');
             }

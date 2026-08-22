@@ -176,8 +176,11 @@ def _translate_mymemory(text: str, target_lang: str, source_lang: str) -> dict:
         source_lang = _detect_source_lang(text)
 
     # MyMemory caps a single query at ~500 bytes; trim on a UTF-8 byte
-    # boundary so CJK text (3 bytes/char) doesn't get rejected.
-    text = text.encode("utf-8")[:450].decode("utf-8", errors="ignore").strip()
+    # boundary so CJK text (3 bytes/char) doesn't get rejected.  Flag the
+    # cut so the UI can tell the user instead of silently half-translating.
+    input_bytes = text.encode("utf-8")
+    text = input_bytes[:450].decode("utf-8", errors="ignore").strip()
+    truncated = len(input_bytes) > 450
 
     src = _MYMMEMORY_LANGMAP.get(source_lang, source_lang)
     tgt = _MYMMEMORY_LANGMAP.get(target_lang, target_lang)
@@ -212,6 +215,7 @@ def _translate_mymemory(text: str, target_lang: str, source_lang: str) -> dict:
             "translated": translated,
             "source_lang": source_lang,
             "target_lang": target_lang,
+            "truncated": truncated,
         }
 
     except urllib.error.HTTPError as e:

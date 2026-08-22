@@ -166,8 +166,25 @@ def _disable_macos():
 
 
 def _is_enabled_macos():
-    """Return ``True`` if the LaunchAgent plist exists."""
-    return os.path.isfile(_plist_path())
+    """Return ``True`` if the LaunchAgent plist exists and still points at a
+    real binary.
+
+    A portable app that was moved after registration would otherwise show the
+    toggle as enabled while launchd silently fails at login.
+    """
+    path = _plist_path()
+    if not os.path.isfile(path):
+        return False
+    try:
+        import plistlib
+        with open(path, "rb") as fh:
+            pl = plistlib.load(fh)
+        prog = pl.get("Program", "")
+        return bool(prog) and os.path.exists(prog)
+    except Exception:
+        # Unreadable plist — err toward "enabled"; launchd's own failure is
+        # the real signal and the user may be mid-reinstall.
+        return True
 
 
 def _xml_escape(text: str) -> str:

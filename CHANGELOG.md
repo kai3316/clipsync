@@ -2,6 +2,23 @@
 
 All notable changes to ClipSync are documented in this file.
 
+## [1.0.24] — 2026-08-23
+
+### Nearby chat (deep-audit round)
+- **Chat sends actually work again.** The transport's `send_to_peer`/`broadcast` returned `None` (fire-and-forget), which the chat layer read as "nothing delivered" — every text message showed as failed and file transfers could not start at all. The transport now returns a real bool: delivered vs. peer-not-connected vs. send-failed, so nothing is falsely marked sent and real failures are surfaced.
+- **Session ids stay in sync after a peer restarts its session** — a re-invite carrying a new session id is adopted instead of leaving both sides "active" with mismatched ids and silently dropping every later message.
+- **Anonymous connections can no longer spam chat invites.** The transport gate drops all application frames from identity-less `__anon__` connections, closing the flood-by-new-TLS-connection dialog/notification DoS (each fresh connection used to get a fresh invite-rate budget).
+- **Incoming chat text is sanitized** (control / bidi-override characters stripped) before it reaches OS notifications and session previews — the invite-string sanitization now covers the message body too.
+- **Rate-limit bookkeeping no longer grows without bound**; text flood control is now per-direction (a peer flooding in no longer halves your send budget) and failed sends roll their quota back.
+- **Stalled file transfers are swept after 10 minutes** — the state entry and the half-written `.part` temp file are cleaned up; offline detection no longer kills a session mid-transfer on a slow (TCP-retransmit) link.
+
+### Platform & tooling
+- **Updater retries transient network failures** (3 attempts with backoff) instead of failing on one blip.
+- **`notify-send` failures are logged** (return code checked, stderr captured) — honouring the v1.0.21 "notification failures are logged" contract.
+- **macOS autostart toggle verifies the plist still points at a real binary** — a relocated portable app no longer shows a dead "enabled" state.
+- **PyInstaller spec's hidden-import fallback** now includes the chat, updater and history-db modules.
+- **Docs**: README (zh + en) — new "Nearby Chat" section, corrected architecture tree and content-filter docs, test count updated; PLAN.md entry path (`src/main.py`) and Python 3.12 requirement corrected.
+
 ## [1.0.23] — 2026-08-23
 
 ### Core reliability
