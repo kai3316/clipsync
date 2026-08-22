@@ -265,13 +265,21 @@
       saveNetwork: function () {
         var self = this;
         self.networkSaving = true;
+        var cache = self.store.settingsCache || {};
+        // The TCP sync port only applies at startup — when it was changed,
+        // surface a restart-required note (like the web-port save does).
+        var portChanged = String(cache.port) !== String(self.port);
         ClipsyncAPI.updateSettings({
           port: parseInt(self.port, 10) || 53317,
           relay_url: self.relayUrl,
           service_type: (self.serviceType || '_clipsync._tcp.local.').trim(),
         }).then(function (res) {
           if (res && res.updated) self.store.mergeSettings(res.updated);
-          self.store.showToast(self.t('settings_window.network_saved'), 3000);
+          var msg = self.t('settings_window.network_saved');
+          if (portChanged) {
+            msg += ' ' + self.t('settings_window.web_restart_note_short');
+          }
+          self.store.showToast(msg, portChanged ? 4000 : 3000);
         }).catch(function () {
           self.store.showToast(self.t('settings.save_network_failed'), 2000);
         }).finally(function () {

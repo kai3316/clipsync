@@ -324,6 +324,10 @@ class FileTransferManager:
                     {"msg_type": "file_reject", "transfer_id": transfer_id},
                     send_fn,
                 )
+                # Surface the failure locally so the receiver isn't left with
+                # a silent rejection (the sender just gets a file_reject).
+                if self._on_transfer_complete is not None:
+                    self._on_transfer_complete(transfer_id, False)
                 return
 
         self._send_as_frame(
@@ -1249,6 +1253,7 @@ class FileTransferManager:
             "file_size": transfer.get("file_size", 0),
             "direction": "up" if transfer.get("type") == "outgoing" else "down",
             "success": success,
+            "cancelled": bool(transfer.get("cancelled")),
             "state": transfer.get("state", "unknown"),
             "source_path": transfer.get("file_path", ""),
             "saved_path": saved_path,
@@ -1263,13 +1268,30 @@ class FileTransferManager:
     # Speed Test
     # ------------------------------------------------------------------
 
-    def start_speed_test(self, broadcast_fn: Callable[[bytes], None]) -> str | None:
+    def start_speed_test(self, broadcast_fn: Callable[[bytes], None],
+                         has_peers_fn: Callable[[], bool] | None = None) -> str | None:
         """Start a speed test to measure network throughput between peers.
 
         Sends a burst of dummy data and measures the time until the peer
         echoes back a result. Returns a transfer_id for tracking, or None
         if no peer is connected.
+
+        ``has_peers_fn`` (optional) is called to confirm at least one peer is
+        reachable.  With zero connected peers ``broadcast_fn`` no-ops and the
+        test would "finish" in microseconds and report an absurd throughput,
+        so the caller is expected to supply it and the test is refused when it
+        reports no peers.
         """
+        if has_peers_fn is not None:
+            try:
+                if not has_peers_fn():
+                    logger.info("Speed test not started: no connected peers")
+                    with self._lock:
+                        self._speed_test = None
+                    return None
+            except Exception:
+                logger.debug("has_peers_fn failed during speed test start", exc_info=True)
+
         test_id = uuid.uuid4().hex
         start_time = time.time()
         with self._lock:

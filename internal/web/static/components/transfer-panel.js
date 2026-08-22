@@ -17,6 +17,7 @@
         targetDevice: '',       // selected target device id (empty = none selected)
         sending: false,
         phoneQrSending: false,
+        peerOffline: false,     // true when the selected target disconnected during a send
       };
     },
 
@@ -50,11 +51,23 @@
       },
     },
 
-    // Watch targetDevice to default to first online device
+    // Watch onlineDevices to default to first online device and to drop a
+    // stale targetDevice as soon as the selected peer disconnects.
     created: function () {
       var self = this;
       this._unwatch = this.$watch('onlineDevices', function (devs) {
+        var ids = devs.map(function (d) { return d.device_id; });
+        if (self.targetDevice && ids.indexOf(self.targetDevice) === -1) {
+          // The selected peer went offline — clear it so the send buttons
+          // disable rather than aim at a stale target. If a send was in
+          // flight, surface a small "peer offline" hint.
+          if (self.sending) {
+            self.peerOffline = true;
+          }
+          self.targetDevice = '';
+        }
         if (!self.targetDevice && devs.length > 0) {
+          self.peerOffline = false;
           self.targetDevice = devs[0].device_id;
         }
       }, { immediate: true });
@@ -77,7 +90,7 @@
         <div class="transfer-speed-body"
              v-if="speedTest.running || speedTest.progress > 0 || speedTest.resultMbps !== null">
           <div class="transfer-speed-result" v-if="speedTest.resultMbps !== null">
-            <span class="transfer-speed-value">{{ speedTest.resultMbps.toFixed(1) }}<span class="transfer-speed-unit">Mbps</span></span>
+            <span class="transfer-speed-value">{{ speedTest.resultMbps.toFixed(1) }}<span class="transfer-speed-unit">MB/s</span></span>
             <span class="badge" :class="speedQualityClass">{{ speedQualityLabel }}</span>
           </div>
           <div class="transfer-speed-progress" v-if="speedTest.running || speedTest.progress > 0">
@@ -103,6 +116,7 @@
           </select>
         </div>
         <div v-else class="transfer-empty-hint">{{ t('transfer.no_online_devices') }}</div>
+        <div v-if="peerOffline" class="transfer-empty-hint" style="margin-top:6px">{{ t('transfer.peer_offline') }}</div>
 
         <div class="transfer-send-actions">
           <button class="transfer-send-btn transfer-send-btn--file"
@@ -217,8 +231,8 @@
               <div class="transfer-history-item__meta">
                 <span
                   class="transfer-history-item__status"
-                  :class="tr.status === 'completed' ? 'transfer-history-item__status--ok' : 'transfer-history-item__status--err'"
-                >{{ tr.status === 'completed' ? t('transfer.status_completed') : t('transfer.status_failed') }}</span>
+                  :class="transferStatusClass(tr)"
+                >{{ transferStatusLabel(tr) }}</span>
                 <span v-if="tr.size" class="transfer-history-item__size">{{ formatSize(tr.size) }}</span>
                 <span v-if="tr.timestamp" class="transfer-history-item__time">{{ formatTimestamp(tr.timestamp) }}</span>
               </div>
@@ -291,16 +305,28 @@
             if (errors.length === 0) {
               self.store.showToast(self.t('transfer.sent_files', { count: uploaded }), 2000);
             } else {
-              self.store.showToast(self.t('transfer.sent_partial', { uploaded: uploaded, total: total, failed: errors.length }), 2000);
+              var msg = self.t('transfer.sent_partial', { uploaded: uploaded, total: total, failed: errors.length });
+              var reason = errors[0].reason;
+              if (reason) {
+                msg += ' — ' + reason;
+              }
+              self.store.showToast(msg, 3000);
             }
             return;
           }
           var file = files[idx];
-          ClipsyncAPI.uploadFile(file, deviceId).then(function () {
-            uploaded++;
+          ClipsyncAPI.uploadFile(file, deviceId).then(function (res) {
+            if (res && res.ok === false) {
+              // HTTP 200 with {ok:false, error} — the backend surfaces the
+              // real reason (peer offline, file too large, ...).
+              errors.push({ name: file.name, reason: (res.error || '') });
+            } else {
+              uploaded++;
+            }
             uploadNext(idx + 1);
-          }).catch(function () {
-            errors.push(file.name);
+          }).catch(function (e) {
+            var reason = (e && (e.message || e.error)) || '';
+            errors.push({ name: file.name, reason: reason });
             uploadNext(idx + 1);
           });
         }
@@ -328,10 +354,49 @@
         var mins = String(d.getMinutes()).padStart(2, '0');
         return month + '/' + day + ' ' + hours + ':' + mins;
       },
+      isCancelledTransfer: function (tr) {
+        return !!(tr && (tr.status === 'cancelled' || tr.cancelled));
+      },
+      transferStatusLabel: function (tr) {
+        if (tr.status === 'completed') return this.t('transfer.status_completed');
+        if (this.isCancelledTransfer(tr)) return this.t('transfer.status_cancelled');
+        return this.t('transfer.status_failed');
+      },
+      transferStatusClass: function (tr) {
+        if (tr.status === 'completed') return 'transfer-history-item__status--ok';
+        if (this.isCancelledTransfer(tr)) return 'transfer-history-item__status--active';
+        return 'transfer-history-item__status--err';
+      },
+      // Reconcile the active/history transfer lists with the server after a
+      // control action (pause/resume/cancel) so the UI reflects the backend.
+      _refreshTransfers: function () {
+        var self = this;
+        return ClipsyncAPI.getTransfers().then(function (res) {
+          if (res && res.active) {
+            self.store.activeTransfers.splice(0, self.store.activeTransfers.length);
+            for (var i = 0; i < res.active.length; i++) {
+              self.store.activeTransfers.push(res.active[i]);
+            }
+          }
+          if (res && res.history) {
+            self.store.transferHistory.splice(0, self.store.transferHistory.length);
+            for (var j = 0; j < res.history.length; j++) {
+              self.store.transferHistory.push(res.history[j]);
+            }
+          }
+          return res;
+        });
+      },
       cancelTransfer: function (id) {
         var self = this;
         ClipsyncAPI.cancelTransfer(id).then(function () {
+          // Optimistically drop the row, then reconcile with the server.
+          var idx = self.store.activeTransfers.findIndex(function (t) { return t.id === id; });
+          if (idx !== -1) {
+            self.store.activeTransfers.splice(idx, 1);
+          }
           self.store.showToast(self.t('transfer.cancelled'), 1500);
+          self._refreshTransfers().catch(function () {});
         }).catch(function () {
           self.store.showToast(self.t('transfer.cancel_failed'), 2000);
         });
@@ -339,7 +404,12 @@
       pauseTransfer: function (id) {
         var self = this;
         ClipsyncAPI.pauseTransfer(id).then(function () {
+          var idx = self.store.activeTransfers.findIndex(function (t) { return t.id === id; });
+          if (idx !== -1) {
+            self.store.activeTransfers[idx].status = 'paused';
+          }
           self.store.showToast(self.t('transfer.paused'), 1500);
+          self._refreshTransfers().catch(function () {});
         }).catch(function () {
           self.store.showToast(self.t('transfer.pause_failed'), 2000);
         });
@@ -347,7 +417,12 @@
       resumeTransfer: function (id) {
         var self = this;
         ClipsyncAPI.resumeTransfer(id).then(function () {
+          var idx = self.store.activeTransfers.findIndex(function (t) { return t.id === id; });
+          if (idx !== -1) {
+            self.store.activeTransfers[idx].status = 'sending';
+          }
           self.store.showToast(self.t('transfer.resumed'), 1500);
+          self._refreshTransfers().catch(function () {});
         }).catch(function () {
           self.store.showToast(self.t('transfer.resume_failed'), 2000);
         });

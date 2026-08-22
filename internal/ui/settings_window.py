@@ -40,6 +40,7 @@ class SettingsWindow:
         set_filter_categories: Callable | None = None,
         get_log_text: Callable | None = None,
         on_quit: Callable | None = None,
+        set_skip_save_on_shutdown: Callable[[bool], None] | None = None,
     ):
         self._root = root
         self._get_config = get_config
@@ -50,6 +51,10 @@ class SettingsWindow:
         self._set_filter_categories = set_filter_categories
         self._get_log_text = get_log_text
         self._on_quit = on_quit
+        # Lets the host application suppress its config re-save during
+        # shutdown() after a restart / factory reset (otherwise shutdown
+        # would recreate config.json with the old settings).
+        self._set_skip_save_on_shutdown = set_skip_save_on_shutdown
 
         self._window: ctk.CTkToplevel | None = None
         self._dark_mode = get_config().appearance_mode == "dark"
@@ -1267,7 +1272,21 @@ class SettingsWindow:
             subprocess.Popen(args)
         except Exception:
             pass
-        self._window.destroy()
+        # Tell the host not to re-save config on shutdown — after a factory
+        # reset shutdown() would otherwise recreate config.json with the old
+        # device identity/peers, silently undoing the reset.
+        if self._set_skip_save_on_shutdown is not None:
+            try:
+                self._set_skip_save_on_shutdown(True)
+            except Exception:
+                logger.debug("Could not set skip-save-on-shutdown", exc_info=True)
+        # Quit the Tk mainloop first, then exit — mirroring main.py's
+        # _exit_process. sys.exit() straight from a Tk callback otherwise
+        # surfaces a noisy _tkinter.TclError traceback.
+        try:
+            self._root.quit()
+        except Exception:
+            logger.debug("Could not quit Tk root cleanly", exc_info=True)
         sys.exit(0)
 
     def _on_quit_from_settings(self) -> None:

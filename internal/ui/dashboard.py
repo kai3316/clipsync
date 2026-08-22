@@ -1529,10 +1529,21 @@ class DashboardWindow:
         if self._speed_progress:
             self._speed_progress.pack(fill="x", padx=14, pady=(4, 0))
             self._speed_progress.set(0)
+        # start_speed_test returns None when no peer is connected; refusing to
+        # start avoids an absurd "fast" result from a broadcast that no-ops.
+        if not self._on_speed_test():
+            if self._speed_progress:
+                self._speed_progress.pack_forget()
+            if self._speed_status:
+                self._speed_status.configure(
+                    text=T("transfer.speed_test.no_peer"),
+                    text_color=("#E74C3C", "#C0392B"),
+                )
+                self._speed_status.pack(anchor="w", padx=14, pady=(2, 0))
+            return
         if self._speed_status:
             self._speed_status.configure(text=T("transfer.speed_test.running"))
             self._speed_status.pack(anchor="w", padx=14, pady=(2, 0))
-        self._on_speed_test()
 
     def _create_pending_row(self, peer_id: str, code: str, peer_name: str,
                             status: str = "pending"):
@@ -2251,7 +2262,7 @@ class DashboardWindow:
                         q_color = ("#E74C3C", "#C0392B")
                     if self._speed_value:
                         self._speed_value.configure(
-                            text=f"{mbps:.1f} Mbps",
+                            text=f"{mbps:.1f} MB/s",
                             text_color=("#27AE60", "#2ECC71"),
                         )
                     if self._speed_quality:

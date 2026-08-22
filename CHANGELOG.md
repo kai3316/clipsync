@@ -2,6 +2,27 @@
 
 All notable changes to ClipSync are documented in this file.
 
+## [1.0.17] — 2026-08-22
+
+### File transfer & speed test
+- **Web pause/resume/cancel now actually reach the peer** — they previously dropped the control frame, so a web-paused transfer made the sender keep sending and then fail after 60s.
+- **Speed test refuses to run with no connected peer** (previously reported a bogus "fast" result), and the desktop panel's speed unit is corrected to **MB/s** (was labeled Mbps, an 8× underestimate).
+- **Receiver-side failures** (disk full / unwritable receive dir) now surface a notification instead of silently vanishing.
+- Transfer completion notifications are **direction-aware**: the receiver is no longer told "File sent successfully", and a failed incoming transfer reports "File receive failed".
+- **Sending to a peer that just went offline now fails loudly** (was a silent "success" with the file left on the sender).
+- **Cancelled transfers are distinguished from failures** in transfer history (web + desktop), not lumped into "Failed".
+- The incoming-transfer dialog shows the **sender's device name** instead of no identity.
+- Phone/web uploads **honor the configured receive directory** and return a clear "file too large (max 128 MB)" instead of the cryptic "no file field".
+
+### Desktop chrome
+- Settings → Danger Zone **"Factory Reset" now actually wipes the data** — the exiting process previously re-created the config it had just deleted.
+- Web **"Restart App" no longer intermittently quits with "another instance is already running"** (the single-instance lock is released before the new instance spawns).
+- The tray **"Show Dashboard" reopens immediately** after closing the window (previously dead for up to 8 seconds), so tray QR/Send-URL actions aren't dropped.
+- The per-event **transfer notification toggle now gates send confirmations** (was bypassed by direct calls).
+- Dismissing the **startup encryption-password prompt exits cleanly with a message** instead of continuing with broken encryption.
+- Settings "Restart App"/factory reset no longer print a Tk traceback; **TCP sync-port saves now show a restart-required note**.
+- Web transfer **pause/resume/cancel button state reflects reality** (optimistic update + server reconcile), upload errors surface their real reason, and a stale target device is cleared when the peer goes offline.
+
 ## [1.0.16] — 2026-08-22
 
 ### Fixed (regressions found by the v1.0.15 self-review)

@@ -21,6 +21,8 @@ import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from io import BytesIO
 
+from internal.i18n import T
+
 logger = logging.getLogger(__name__)
 
 # Compiled i18n JSON cache, keyed by locale code.  _interpolate_html runs on
@@ -47,8 +49,21 @@ def _js_string(value: str) -> str:
 
 # ── Upload directory ─────────────────────────────────────────────
 
-def _get_upload_dir() -> str:
-    d = os.path.join(os.path.expanduser("~"), "Downloads", "ClipSync")
+def _get_upload_dir(cfg=None) -> str:
+    """Return the directory phone uploads are saved to.
+
+    Follows the configured ``file_receive_dir`` when set (the same directory
+    P2P file transfers use) and otherwise falls back to ``~/Downloads/ClipSync``.
+    Resolved at request time so a receive-dir change moves phone uploads too.
+    """
+    if cfg is not None:
+        configured = getattr(cfg, "file_receive_dir", "") or ""
+        if configured:
+            d = os.path.expanduser(configured)
+        else:
+            d = os.path.join(os.path.expanduser("~"), "Downloads", "ClipSync")
+    else:
+        d = os.path.join(os.path.expanduser("~"), "Downloads", "ClipSync")
     os.makedirs(d, exist_ok=True)
     return d
 
@@ -600,7 +615,7 @@ class WebServer:
         # Pre-generate PWA icons
         self._icon_192 = _make_icon(192)
         self._icon_512 = _make_icon(512)
-        self._upload_dir = _get_upload_dir()
+        self._upload_dir = _get_upload_dir(self._cfg)
         self._static_dir = _get_static_dir()
 
         # ── Upgrade history to SQLite-backed storage if needed ───
@@ -1391,9 +1406,32 @@ class WebServer:
 
                 # ── File upload: handled directly (multipart) ────
                 if path == "/api/upload":
+                    # Resolve the receive dir at request time so phone uploads
+                    # follow the configured file_receive_dir.  Use a distinct
+                    # local name so the closure `upload_dir` (used by the other
+                    # /api routes below) is not shadowed into an unbound local.
+                    request_upload_dir = _get_upload_dir(cfg)
                     content_type = inner_self.headers.get("Content-Type", "")
                     if "multipart" not in content_type:
                         inner_self._send_json({"ok": False, "error": "expect multipart/form-data"}, 400)
+                        return
+                    # _read_request_body returns b"" for bodies over the cap,
+                    # which would surface as a confusing "no file field".  Check
+                    # the declared size first and reject it explicitly.
+                    try:
+                        content_length = int(inner_self.headers.get("Content-Length") or 0)
+                    except (ValueError, TypeError):
+                        content_length = 0
+                    if content_length > _MAX_BODY_BYTES:
+                        # Body not consumed — close the connection rather than
+                        # leave unread bytes for the next request on this socket.
+                        inner_self.close_connection = True
+                        inner_self._send_json(
+                            {"ok": False,
+                             "error": T("web.upload_too_large",
+                                        limit=_MAX_BODY_BYTES // (1024 * 1024))},
+                            200,
+                        )
                         return
                     fields = _parse_multipart(body, content_type)
                     file_field = fields.get("file")
@@ -1411,18 +1449,36 @@ class WebServer:
                     safe_name = os.path.basename(fname).replace("\\", "_").replace("/", "_")
                     if not safe_name:
                         safe_name = "uploaded_file"
-                    dest = os.path.join(upload_dir, safe_name)
+                    dest = os.path.join(request_upload_dir, safe_name)
                     # Avoid overwriting
                     base, ext = os.path.splitext(safe_name)
                     counter = 1
                     while os.path.exists(dest):
-                        dest = os.path.join(upload_dir, f"{base} ({counter}){ext}")
+                        dest = os.path.join(request_upload_dir, f"{base} ({counter}){ext}")
                         counter += 1
                     with open(dest, "wb") as f:
                         f.write(fdata)
                     logger.info("Web upload: %s (%d bytes) -> %s", safe_name, len(fdata), dest)
                     if target_device and target_device != cfg.device_id and on_forward_file:
-                        on_forward_file(dest, target_device)
+                        # The forward callback returns False when the target
+                        # peer is not connected; surface that instead of
+                        # reporting a success the file never reached.
+                        try:
+                            forwarded = on_forward_file(dest, target_device)
+                        except Exception:
+                            logger.debug("on_forward_file callback failed", exc_info=True)
+                            forwarded = False
+                        if not forwarded:
+                            # The upload never reached its target — don't leave
+                            # a stray file the user didn't ask to keep locally.
+                            try:
+                                os.unlink(dest)
+                            except OSError:
+                                pass
+                            inner_self._send_json(
+                                {"ok": False, "error": T("web.upload_peer_offline")}, 200,
+                            )
+                            return
                     else:
                         # Arrived locally: record it as a received file and let
                         # the app notify + play a sound.

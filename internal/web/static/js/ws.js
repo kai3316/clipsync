@@ -333,27 +333,43 @@ var ClipsyncWS = (function () {
             } else {
               // Fill the fields the transfer UI expects so the entry does not
               // render with undefined filename/size until the next refetch.
+              // The template keys on direction 'up'/'down', but WS payloads
+              // may carry the manager's 'outgoing'/'incoming' — map them so a
+              // send shows the up arrow instead of rendering as a download.
+              var dir = (scaled.direction === 'up' || scaled.direction === 'outgoing') ? 'up'
+                : 'down';  // 'incoming' and unknown values default to a download.
+              var name = scaled.filename || scaled.file_name || '';
               store.activeTransfers.push(Object.assign({
-                filename: '',
+                filename: name,
                 size: 0,
-                direction: 'outgoing',
+                direction: dir,
                 speed: 0,
                 eta: 0,
-              }, scaled));
+              }, scaled, {
+                direction: dir,   // never let the raw payload override the mapping
+                filename: name,   // keep the display-name fallback stable
+              }));
             }
           }
           break;
 
         case 'transfer_complete':
-          // Move from active to history
+          // Move from active to history. The broadcast carries `success` and
+          // (for cancels) `cancelled`, so stamp a truthful status instead of
+          // assuming every completion is a success — otherwise cancelled
+          // transfers briefly read as "Completed" until the next refetch.
           if (data && data.id !== undefined) {
             var idx = store.activeTransfers.findIndex(function (t) {
               return t.id === data.id;
             });
             if (idx !== -1) {
-              // Mark completed so the history row shows the correct state —
-              // the active entry's status was still "transferring"/"paused".
-              store.activeTransfers[idx].status = 'completed';
+              var fin = 'completed';
+              if (data.cancelled) {
+                fin = 'cancelled';
+              } else if (data.success === false) {
+                fin = 'failed';
+              }
+              store.activeTransfers[idx].status = fin;
               store.transferHistory.unshift(store.activeTransfers[idx]);
               store.activeTransfers.splice(idx, 1);
             }

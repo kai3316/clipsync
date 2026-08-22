@@ -37,9 +37,9 @@
                   '<span class="dialog-transfer-info__label">{{ t(\'dialog.size_label\') }}</span>' +
                   '<span class="dialog-transfer-info__value">{{ formatSize(store.activeDialog.file_size) }}</span>' +
                 '</div>' +
-                '<div class="dialog-transfer-info__row" v-if="store.activeDialog.sender">' +
+                '<div class="dialog-transfer-info__row" v-if="dialogSender">' +
                   '<span class="dialog-transfer-info__label">{{ t(\'dialog.from_label\') }}</span>' +
-                  '<span class="dialog-transfer-info__value">{{ store.activeDialog.sender }}</span>' +
+                  '<span class="dialog-transfer-info__value">{{ dialogSender }}</span>' +
                 '</div>' +
               '</div>' +
             '</div>' +
@@ -135,6 +135,17 @@
         // Escape/overlay-click/button-press can't double-submit the dialog_id.
         _responding: false,
       };
+    },
+
+    computed: {
+      // Normalize the incoming sender name. The transfer_request dialog may
+      // pass it as `sender`, `sender_name`, or `peer_name` depending on the
+      // backend version — accept any so the "From" row always renders.
+      dialogSender: function () {
+        var d = this.store.activeDialog;
+        if (!d) return '';
+        return d.sender || d.sender_name || d.peer_name || '';
+      },
     },
 
     watch: {

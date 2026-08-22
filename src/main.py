@@ -459,6 +459,14 @@ class Application:
         # transfer_id -> (last_ws_push_time, last_ws_progress) for throttling
         # per-chunk WebSocket progress broadcasts.
         self._last_transfer_progress: dict[str, tuple[float, float]] = {}
+        # transfer_id -> "incoming"/"outgoing", so _on_transfer_complete can
+        # pick the correct notification direction (a receiver must never see
+        # "File sent successfully" for a download, nor vice-versa).
+        self._transfer_directions: dict[str, str] = {}
+        # True once a webview dashboard open actually attached a WS client.
+        # Used to keep the "recently opened" guard from blocking a re-open
+        # after the window was closed (client disconnected) within 8s.
+        self._webview_client_seen = False
 
         # ── macOS multiprocessing state ─────────────────────────────
         self._parent_conn = None
@@ -625,6 +633,20 @@ class Application:
                 finally:
                     tmp_root2.destroy()
                 sys.exit(1)
+            else:
+                # Dismissed (None) — continuing with an empty key would leave
+                # the private key undecryptable and silently break encryption.
+                tmp_root3 = tk.Tk()
+                tmp_root3.withdraw()
+                try:
+                    show_error(
+                        tmp_root3,
+                        T("encryption.password_title"),
+                        T("encryption.password_required_msg"),
+                    )
+                finally:
+                    tmp_root3.destroy()
+                sys.exit(1)
 
         logger.info(
             "Encryption config: enabled=%s, password=%s",
@@ -775,21 +797,41 @@ class Application:
             self.transport_mgr.send_to_peer(device_id, data)
             logger.info("Web nav forwarded to peer %s: %s", device_id[:12], url[:80])
 
-        def _on_web_forward_file(file_path: str, device_id: str):
+        def _on_web_forward_file(file_path: str, device_id: str) -> bool:
+            # The target must actually be connected: send_to_peer silently
+            # no-ops for a gone peer, which would make the /api/upload handler
+            # report success while the file went nowhere.  Return False so the
+            # handler can surface a "target not connected" error.
+            try:
+                if device_id not in (self.transport_mgr.get_connected_peers() or []):
+                    logger.warning("Web forward target %s is not connected", device_id[:12])
+                    return False
+            except Exception:
+                logger.debug("get_connected_peers failed during web forward", exc_info=True)
+                return False
+
             def _send_fn(data: bytes):
                 self.transport_mgr.send_to_peer(device_id, data)
             try:
-                self.file_transfer_mgr.send_file(file_path, _send_fn)
+                transfer_id = self.file_transfer_mgr.send_file(file_path, _send_fn)
+                if transfer_id:
+                    self._transfer_directions[transfer_id] = "outgoing"
                 logger.info("Web upload forwarded to peer %s: %s",
                             device_id[:12], os.path.basename(file_path))
+                return True
             except Exception as e:
                 logger.error("Failed to forward uploaded file: %s", e)
+                return False
 
         def _on_web_window_close():
             """Close the webview browser window without killing the app."""
             if self.webview_win is not None:
                 self.webview_win.stop()
                 self.webview_win = None
+            # A fresh open is a fresh chance for a client to attach; the
+            # "recently opened" duplicate-window guard only applies while a
+            # client actually loaded (see _open_webview_dashboard).
+            self._webview_client_seen = False
 
         self.web_server = WebServer(
             cfg, self.clipboard_history, self.sync_mgr,
@@ -805,6 +847,7 @@ class Application:
             ) if self.file_transfer_mgr else ([], []),
             on_speed_test_start=lambda: self.file_transfer_mgr.start_speed_test(
                 self.transport_mgr.broadcast,
+                has_peers_fn=lambda: bool(self.transport_mgr.get_connected_peers()),
             ) if self.file_transfer_mgr else False,
             on_speed_test_poll=lambda: self.file_transfer_mgr.get_speed_test() if self.file_transfer_mgr else {},
             on_window_close=_on_web_window_close,
@@ -1069,10 +1112,19 @@ class Application:
     def _on_transfer_complete(self, transfer_id: str, success: bool) -> None:
         logger.info("File transfer %s: %s",
                     transfer_id[:8], "complete" if success else "failed")
-        if success:
-            self._notify("notify_transfer", T("ui.file_transfer"), T("transfer.send_success"))
+        # Send confirmations are only meaningful for OUTGOING transfers.  The
+        # receiver of an incoming file already gets "File received" from
+        # _on_file_received; a failed download must not be reported as if this
+        # device were the sender ("File transfer failed").
+        direction = self._transfer_directions.pop(transfer_id, "outgoing")
+        if direction == "outgoing":
+            if success:
+                self._notify("notify_transfer", T("ui.file_transfer"), T("transfer.send_success"))
+            else:
+                self._notify("notify_transfer", T("ui.file_transfer"), T("transfer.send_failed"))
         else:
-            self._notify("notify_transfer", T("ui.file_transfer"), T("transfer.send_failed"))
+            if not success:
+                self._notify("notify_transfer", T("ui.file_transfer"), T("transfer.receive_failed"))
         self._last_transfer_progress.pop(transfer_id, None)
         # Remove any temp zip archive created for a folder/multi-file send.
         tmp = self._zip_cleanup.pop(transfer_id, None)
@@ -1121,10 +1173,35 @@ class Application:
     def _on_transfer_request(self, transfer_id: str, file_name: str, file_size: int,
                              mime_type: str, send_fn) -> None:
         logger.info("File request: %s (%d bytes, %s)", file_name, file_size, mime_type)
+        self._transfer_directions[transfer_id] = "incoming"
         self._notify("notify_transfer", T("transfer.incoming"),
                      T("transfer.incoming_title"))
         self.root.after(0, lambda: self._show_transfer_request_dialog(
             transfer_id, file_name, file_size, mime_type, send_fn))
+
+    def _sender_name_for_send_fn(self, send_fn) -> str:
+        """Best-effort resolve the sending peer's display name from a send_fn.
+
+        The P2P send_fn is a closure capturing the peer id as its first
+        default argument; broadcast send_fns (relay path) carry no peer
+        identity and return an empty string.
+        """
+        try:
+            defaults = getattr(send_fn, "__defaults__", None)
+            if not defaults:
+                return ""
+            peer_id = defaults[0]
+            if not peer_id:
+                return ""
+            for pid, name in self.transport_mgr.get_connected_peers_with_names():
+                if pid == peer_id:
+                    return name
+            for peer in self.pairing_mgr.get_known_peers():
+                if peer.device_id == peer_id:
+                    return peer.device_name
+        except Exception:
+            logger.debug("Could not resolve sender name from send_fn", exc_info=True)
+        return ""
 
     def _show_transfer_request_dialog(self, transfer_id, file_name, file_size,
                                        mime_type, send_fn):
@@ -1136,7 +1213,7 @@ class Application:
                 message=T("transfer.incoming_title"),
                 file_name=file_name,
                 file_size=file_size,
-                sender="",
+                sender=self._sender_name_for_send_fn(send_fn),
             )
             if result and result.get("action") == "accept":
                 self.file_transfer_mgr.accept_transfer(transfer_id, send_fn)
@@ -1609,8 +1686,14 @@ class Application:
             (config_dir / ".lock").unlink()
         except OSError:
             pass
+        # Frozen (PyInstaller) builds: sys.argv[0] == sys.executable, so keep
+        # only sys.argv[1:] to avoid a stray duplicate exe argument.
+        if getattr(sys, "frozen", False):
+            args = [sys.executable] + sys.argv[1:]
+        else:
+            args = [sys.executable] + sys.argv
         try:
-            subprocess.Popen([sys.executable] + sys.argv)
+            subprocess.Popen(args)
         except Exception:
             logger.warning("Factory reset: failed to spawn new process", exc_info=True)
         # Do NOT re-save the deleted config during shutdown — shutdown() would
@@ -1628,8 +1711,21 @@ class Application:
         window while the app kept running with the old ui_backend.
         """
         import subprocess
+        # Unlink the single-instance lock BEFORE spawning: the new process may
+        # read it while this PID is still alive and bail with "already running".
         try:
-            subprocess.Popen([sys.executable] + sys.argv)
+            (_config_dir() / ".lock").unlink()
+        except OSError:
+            pass
+        # In a frozen (PyInstaller) build sys.argv[0] equals sys.executable, so
+        # sys.argv[1:] avoids a stray duplicate exe argument; from source argv[0]
+        # is the script path and must be kept.
+        if getattr(sys, "frozen", False):
+            args = [sys.executable] + sys.argv[1:]
+        else:
+            args = [sys.executable] + sys.argv
+        try:
+            subprocess.Popen(args)
         except Exception:
             logger.warning("Restart: failed to spawn new process", exc_info=True)
             return
@@ -2547,9 +2643,11 @@ class Application:
 
         try:
             transfer_id = self.file_transfer_mgr.send_file(file_path, _send_fn)
+            if transfer_id:
+                self._transfer_directions[transfer_id] = "outgoing"
             logger.info("File transfer initiated: %s", transfer_id[:8])
-            notification_mgr.show(T("ui.file_transfer"),
-                                  T("transfer.sending_file", name=os.path.basename(file_path)))
+            self._notify("notify_transfer", T("ui.file_transfer"),
+                         T("transfer.sending_file", name=os.path.basename(file_path)))
         except FileNotFoundError:
             self._notify_error(T("ui.error_title"), f"{T('ui.file_not_found_msg')}{file_path}")
         except PermissionError:
@@ -2660,6 +2758,7 @@ class Application:
                     )
                     logger.info("Zip transfer initiated: %s (%d files)", transfer_id[:8], total_files)
                     if transfer_id:
+                        self._transfer_directions[transfer_id] = "outgoing"
                         # Unlink the temp archive when the transfer finishes
                         # (handled in _on_transfer_complete) so folder sends
                         # don't leak zip copies in the system temp dir.
@@ -2837,6 +2936,7 @@ class Application:
                 )
                 logger.info("Zip transfer initiated: %s (%d files)", transfer_id[:8], total_files)
                 if transfer_id:
+                    self._transfer_directions[transfer_id] = "outgoing"
                     # Unlink the temp archive when the transfer finishes
                     # (see _on_transfer_complete) so folder sends don't leak.
                     self._zip_cleanup[transfer_id] = str(tmp_path)
@@ -2844,8 +2944,8 @@ class Application:
                     _safe_remove(tmp_path)
                 self.root.after(0, lambda: (
                     dlg.destroy(),
-                    notification_mgr.show(
-                        "File Transfer", T("transfer.sending_file", name=zip_name)),
+                    self._notify("notify_transfer", T("ui.file_transfer"),
+                                 T("transfer.sending_file", name=zip_name)),
                 ))
             except FileNotFoundError:
                 _safe_remove(tmp_path)
@@ -2895,6 +2995,9 @@ class Application:
             ),
             get_log_text=lambda: _get_log_path().read_text(encoding="utf-8")
             if _get_log_path().exists() else "No log file yet.",
+            set_skip_save_on_shutdown=lambda v: setattr(
+                self, "_skip_save_on_shutdown", v,
+            ),
         )
         self.settings_win.show()
 
@@ -3246,12 +3349,20 @@ class Application:
         try:
             if not self.file_transfer_mgr:
                 return False
+            # Resolve the send function so pause/resume/cancel actually reach
+            # the peer.  A None send_fn would drop every frame in
+            # _send_as_frame, so the sender never saw file_pause /
+            # file_complete(cancelled) and the transfer would hang/fail.
+            send_fn = (
+                self.file_transfer_mgr.get_transfer_send_fn(transfer_id)
+                or self.transport_mgr.broadcast
+            )
             if action == 'cancel':
-                self.file_transfer_mgr.cancel_transfer(transfer_id, None)
+                self.file_transfer_mgr.cancel_transfer(transfer_id, send_fn)
             elif action == 'pause':
-                self.file_transfer_mgr.pause_transfer(transfer_id, None)
+                self.file_transfer_mgr.pause_transfer(transfer_id, send_fn)
             elif action == 'resume':
-                self.file_transfer_mgr.resume_transfer(transfer_id, None)
+                self.file_transfer_mgr.resume_transfer(transfer_id, send_fn)
             else:
                 return False
             return True
@@ -3286,11 +3397,17 @@ class Application:
                 # client_count is a property (int), not a method — read it
                 # directly; the attribute default is an int too.
                 ws_live = getattr(self.web_server.ws_manager, "client_count", 0)
+            if ws_live > 0:
+                self._webview_client_seen = True
             # Grace period after opening: the SPA takes a moment to load and
             # attach its WS client, so rapid repeated clicks during that window
-            # must not spawn duplicate browser windows.
+            # must not spawn duplicate browser windows.  Once a client actually
+            # loaded, "recently opened" no longer implies the window is up —
+            # the user may have closed it (the WS client disconnected), so the
+            # tray "Show Dashboard" action must re-open it rather than stay
+            # dead for the whole grace period.
             recently_opened = (time.monotonic() - self._webview_opened_at) < 8.0
-            if ws_live > 0 or recently_opened:
+            if ws_live > 0 or (recently_opened and not self._webview_client_seen):
                 logger.debug("Dashboard already open (ws_clients=%d)", ws_live)
                 return
 
@@ -3301,6 +3418,7 @@ class Application:
         self.webview_win = WebViewWindow(url=url, title=T("ui.app_name"), width=960, height=720)
         self.webview_win.start()
         self._webview_opened_at = time.monotonic()
+        self._webview_client_seen = False
         # Never log the URL with its ?token= query — it would leak the web token
         # into a (previously world-readable) log file.
         logger.info("WebView dashboard opened: %s", url.split("?")[0])
@@ -3353,6 +3471,7 @@ class Application:
             get_transfer_history=lambda: self.file_transfer_mgr.get_history(),
             on_speed_test=lambda: self.file_transfer_mgr.start_speed_test(
                 self.transport_mgr.broadcast,
+                has_peers_fn=lambda: bool(self.transport_mgr.get_connected_peers()),
             ),
             get_speed_test_result=lambda: self.file_transfer_mgr.get_speed_test(),
             clear_transfer_history=self._clear_transfer_history,
@@ -4139,9 +4258,11 @@ class Application:
 
         try:
             transfer_id = self.file_transfer_mgr.send_file(file_path, _send_fn)
+            if transfer_id:
+                self._transfer_directions[transfer_id] = "outgoing"
             logger.info("Retried file transfer: %s (%s)", file_path, transfer_id[:8])
-            notification_mgr.show(T("ui.file_transfer"),
-                                  T("transfer.sending_file", name=os.path.basename(file_path)))
+            self._notify("notify_transfer", T("ui.file_transfer"),
+                         T("transfer.sending_file", name=os.path.basename(file_path)))
         except OSError as e:
             logger.error("Failed to retry sending file %s: %s", file_path, e)
 

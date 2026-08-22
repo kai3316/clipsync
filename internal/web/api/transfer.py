@@ -43,7 +43,7 @@ def _map_history(t: dict) -> dict:
         "id": t.get("transfer_id", ""),
         "filename": t.get("file_name", "Unknown file"),
         "size": t.get("file_size", 0),
-        "status": "completed" if t.get("success") else "failed",
+        "status": "cancelled" if t.get("cancelled") else ("completed" if t.get("success") else "failed"),
         "path": t.get("saved_path") or t.get("source_path") or "",
         "direction": t.get("direction", "down"),
         "timestamp": t.get("timestamp", 0),
