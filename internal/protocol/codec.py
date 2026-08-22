@@ -1,7 +1,7 @@
 """Binary frame encoder/decoder for clipboard sync protocol.
 
 Frame format (TLV + header):
-  [2 bytes] magic: 0x4342 ("CB")
+  [2 bytes] magic: 0x4353 ("CS" — ClipSync; binary frames use 0x4253 "BS")
   [1 byte]  version
   [4 bytes] payload length L
   [4 bytes] message_id length N
@@ -84,6 +84,17 @@ FILE_TRANSFER_MSG_TYPES = frozenset({
 # each side tells the other when it confirms, rejects, or un-pairs.
 PAIRING_MSG_TYPES = frozenset({
     "pairing_confirm", "pairing_reject", "pairing_unpair",
+})
+
+# Nearby-chat messages for consent-gated communication with UNPAIRED devices
+# discovered on the LAN.  These are the only frames (besides pairing) that the
+# transport gate lets through from unpaired peers; every other type still
+# requires an established (paired) trust relationship.
+CHAT_MSG_TYPES = frozenset({
+    "chat_invite", "chat_accept", "chat_decline", "chat_close",
+    "chat_text", "chat_ping", "chat_pong",
+    "chat_file_offer", "chat_file_accept", "chat_file_reject",
+    "chat_file_cancel", "chat_file_complete",
 })
 
 
@@ -275,7 +286,14 @@ def decode_message(data: bytes) -> SyncMessage | None:
 
     try:
         payload = json.loads(payload_bytes.decode("utf-8"))
-    except (json.JSONDecodeError, UnicodeDecodeError, ValueError):
+    except (json.JSONDecodeError, UnicodeDecodeError, ValueError, RecursionError):
+        return None
+
+    # A syntactically valid JSON payload that isn't an object (list, string,
+    # number, null) would blow up the .get() calls below — treat it as a bad
+    # frame instead of letting it tear down the whole receive loop.
+    if not isinstance(payload, dict):
+        logger.debug("Frame payload is JSON but not an object (%s)", type(payload).__name__)
         return None
 
     # --- Extract message type and image format (backward-compatible) ---
@@ -287,7 +305,13 @@ def decode_message(data: bytes) -> SyncMessage | None:
         image_fmt=image_fmt,
     )
 
-    for name, b64_data in payload.get("types", {}).items():
+    # A malformed "types" (list, string, number) has no .items() — treat it
+    # as "no types" instead of raising into the receive loop.
+    raw_types = payload.get("types", {})
+    if not isinstance(raw_types, dict):
+        logger.debug("Frame 'types' is %s, expected an object", type(raw_types).__name__)
+        raw_types = {}
+    for name, b64_data in raw_types.items():
         content_type = _NAME_TYPE_MAP.get(name)
         if content_type:
             try:

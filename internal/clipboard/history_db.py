@@ -160,7 +160,8 @@ class ClipboardHistoryDB:
             source_title TEXT   NOT NULL DEFAULT '',
             pinned       INTEGER NOT NULL DEFAULT 0,
             paste_count  INTEGER NOT NULL DEFAULT 0,
-            status      TEXT    NOT NULL DEFAULT ''
+            status      TEXT    NOT NULL DEFAULT '',
+            image_fmt   TEXT    NOT NULL DEFAULT ''
         );
     """
 
@@ -185,13 +186,17 @@ class ClipboardHistoryDB:
 
         self._ensure_db_dir()
         # Open one long-lived connection (applies PRAGMAs once, secures
-        # file permissions) and make sure the schema exists.
+        # file permissions) and make sure the schema exists.  A corrupt DB
+        # file ("file is not a database", truncated by a full disk, …) must
+        # not silently downgrade the app to memory-only history forever —
+        # quarantine the broken file and start fresh instead.
         try:
             self._get_conn()
             if self._conn is not None:
                 self._init_schema(self._conn)
         except Exception as exc:
             logger.warning("Failed to initialize history DB: %s", exc)
+            self._quarantine_corrupt_db()
         self._load()
 
     # ------------------------------------------------------------------
@@ -200,6 +205,35 @@ class ClipboardHistoryDB:
 
     def _ensure_db_dir(self) -> None:
         self._db_path.parent.mkdir(parents=True, exist_ok=True)
+
+    def _quarantine_corrupt_db(self) -> None:
+        """Move an unreadable DB file aside and retry opening it once.
+
+        Without this, a corrupt clipboard_history.db leaves ``_conn`` as
+        None forever: every write then fails (logged per copy) and the whole
+        history silently evaporates on the next restart.  The broken file is
+        preserved as ``<name>.corrupt-<timestamp>`` for inspection.
+        """
+        stamp = time.strftime("%Y%m%d-%H%M%S")
+        for suffix in ("-wal", "-shm", ""):
+            src = Path(str(self._db_path) + suffix)
+            if src.exists():
+                try:
+                    src.rename(Path(str(self._db_path) + f".corrupt-{stamp}{suffix}"))
+                except OSError:
+                    logger.warning("Could not quarantine corrupt DB file %s", src)
+                    return
+        try:
+            conn = sqlite3.connect(str(self._db_path), check_same_thread=False)
+            self._apply_pragmas(conn)
+            self._init_schema(conn)
+            self._conn = conn
+            logger.warning(
+                "History DB was corrupt and has been quarantined; "
+                "starting a fresh database"
+            )
+        except Exception as exc:
+            logger.error("Fresh history DB also failed to initialize: %s", exc)
 
     @staticmethod
     def _apply_pragmas(conn: sqlite3.Connection) -> None:
@@ -244,6 +278,10 @@ class ClipboardHistoryDB:
                 conn.execute(
                     "ALTER TABLE history ADD COLUMN status TEXT NOT NULL DEFAULT ''"
                 )
+            if "image_fmt" not in cols:
+                conn.execute(
+                    "ALTER TABLE history ADD COLUMN image_fmt TEXT NOT NULL DEFAULT ''"
+                )
         except Exception as exc:
             logger.warning("Failed to migrate history schema: %s", exc)
 
@@ -276,6 +314,7 @@ class ClipboardHistoryDB:
             1 if e.get("pinned") else 0,
             e.get("paste_count", 0),
             e.get("status", ""),
+            e.get("image_fmt", ""),
         )
 
     def _insert_row(self, entry: dict) -> None:
@@ -286,8 +325,8 @@ class ClipboardHistoryDB:
                 conn.execute(
                     "INSERT INTO history "
                     "(entry_id, timestamp, content_type, text_preview, types, "
-                    "source_device, source_app, source_title, pinned, paste_count, status) "
-                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    "source_device, source_app, source_title, pinned, paste_count, status, image_fmt) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                     self._entry_row(entry),
                 )
             self._secure_db_files()
@@ -416,6 +455,9 @@ class ClipboardHistoryDB:
                 "pinned": False,
                 "entry_id": self._next_id,
                 "paste_count": 0,
+                # Wire-level image format hint ("png"/"bmp"/"tiff") so
+                # clients can pick the right MIME for the stored bytes.
+                "image_fmt": content.image_fmt or "",
             }
             self._next_id += 1
 
@@ -429,7 +471,20 @@ class ClipboardHistoryDB:
                 pinned = [e for e in self._entries if e.get("pinned")]
                 unpinned = [e for e in self._entries if not e.get("pinned")]
                 allowed_unpinned = max(0, self.MAX_ENTRIES - len(pinned))
-                self._entries = pinned + unpinned[:allowed_unpinned]
+                # Pick survivors with the same key the DB trim uses
+                # (timestamp DESC, entry_id DESC) so both sides drop the
+                # same entries even when remote timestamps (sender clock)
+                # skew arrival order.  Kept entries stay in their existing
+                # display positions.
+                keep_ids = {
+                    id(e) for e in sorted(
+                        unpinned,
+                        key=lambda e: (e.get("timestamp") or 0.0,
+                                       e.get("entry_id") or 0),
+                        reverse=True,
+                    )[:allowed_unpinned]
+                }
+                self._entries = pinned + [e for e in unpinned if id(e) in keep_ids]
                 self._trim_db()
 
     def get_all(self) -> list[dict]:
@@ -624,7 +679,7 @@ class ClipboardHistoryDB:
             rows = conn.execute(
                 "SELECT entry_id, timestamp, content_type, text_preview, "
                 "types, source_device, source_app, source_title, "
-                "pinned, paste_count, status "
+                "pinned, paste_count, status, image_fmt "
                 "FROM history ORDER BY pinned DESC, timestamp DESC, entry_id DESC"
             ).fetchall()
 
@@ -642,6 +697,7 @@ class ClipboardHistoryDB:
                     "pinned": bool(row[8]),
                     "paste_count": row[9] if row[9] else 0,
                     "status": row[10] if len(row) > 10 else "",
+                    "image_fmt": row[11] if len(row) > 11 else "",
                 }
                 self._entries.append(entry)
 
@@ -682,8 +738,8 @@ class ClipboardHistoryDB:
                 conn.executemany(
                     "INSERT INTO history "
                     "(entry_id, timestamp, content_type, text_preview, types, "
-                    "source_device, source_app, source_title, pinned, paste_count, status) "
-                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    "source_device, source_app, source_title, pinned, paste_count, status, image_fmt) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                     (self._entry_row(e) for e in self._entries),
                 )
             self._secure_db_files()
@@ -754,8 +810,8 @@ class ClipboardHistoryDB:
             conn.executemany(
                 "INSERT INTO history "
                 "(entry_id, timestamp, content_type, text_preview, types, "
-                "source_device, source_app, source_title, pinned, paste_count, status) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "source_device, source_app, source_title, pinned, paste_count, status, image_fmt) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     (
                         e.get("entry_id", 0),
@@ -769,6 +825,7 @@ class ClipboardHistoryDB:
                         1 if e.get("pinned") else 0,
                         e.get("paste_count", 0),
                         e.get("status", ""),
+                        e.get("image_fmt", ""),
                     )
                     for e in entries
                 ),

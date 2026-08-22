@@ -149,9 +149,17 @@
       // otherwise a teardown/remount would stack duplicate listeners and each
       // event would fire N times.
       this._wsHandlers = {
-        transferComplete: function () {
+        transferComplete: function (data) {
           self.loadTransfers().catch(function () {});
-          store.showToast(self.t('transfer.complete_toast'), 2000);
+          // ws.js already stamps a truthful status from the payload — toast
+          // must agree, not celebrate a failed/cancelled transfer.
+          var toastKey = 'transfer.complete_toast';
+          if (data && data.cancelled) {
+            toastKey = 'transfer.cancelled';
+          } else if (data && data.success === false) {
+            toastKey = 'transfer.failed_toast';
+          }
+          store.showToast(self.t(toastKey), 2000);
         },
         pairingRequest: function (data) {
           if (data && data.peer_id) {

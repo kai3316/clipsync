@@ -170,6 +170,16 @@ def _is_private_ip(ip: str) -> bool:
     return a == 10 or (a == 192 and b == 168) or (a == 172 and 16 <= b <= 31)
 
 
+def _sanitize_peer_str(value: str, max_len: int = 64) -> str:
+    """Strip control characters and cap length of peer-supplied strings.
+
+    mDNS instance names are attacker-controlled on a LAN and flow into log
+    lines, OS notifications and UI lists — keep them to sane printable text.
+    """
+    cleaned = "".join(ch for ch in value if ch.isprintable())
+    return cleaned[:max_len]
+
+
 def _pick_best_address(candidates: list[str], our_ip: str) -> str:
     """Choose the remote address most likely reachable on the LAN.
 
@@ -205,7 +215,13 @@ class Discovery:
         self._device_id = device_id
         self._device_name = device_name
         self._device_id_hash = self._hash_device_id(device_id)
-        self._display_name = device_name[:8] if device_name else "ClipSync"
+        # Truncate the visible part (the real hostname is deliberately NOT
+        # broadcast in plaintext on the LAN) and suffix a short id-hash so
+        # two devices whose names share their first 8 characters register
+        # distinct, non-colliding instances instead of fighting over one
+        # mDNS name and resolving to each other.
+        base = device_name[:8] if device_name else "ClipSync"
+        self._display_name = f"{base}-{self._device_id_hash[:4]}"
         self._port = port
         self._service_type = service_type
         self._zc: Zeroconf | None = None
@@ -273,7 +289,23 @@ class Discovery:
             self._zc.register_service(self._service_info)
             logger.info("Registered mDNS service on port %d", self._port)
         except Exception as e:
-            logger.warning("Failed to register mDNS: %s", e)
+            # A registration failure must not leave us undiscoverable —
+            # retry once under a name with an extra distinguishing suffix
+            # instead of only logging and giving up.
+            logger.warning("mDNS registration failed (%s) — retrying with altered name", e)
+            try:
+                retry_info = ServiceInfo(
+                    type_=self._service_type,
+                    name=f"{self._display_name}-x.{self._service_type}",
+                    addresses=advertised,
+                    port=self._port,
+                    properties=props,
+                )
+                self._zc.register_service(retry_info)
+                self._service_info = retry_info
+                logger.info("Registered mDNS service on retry name")
+            except Exception as e2:
+                logger.warning("mDNS retry registration also failed: %s", e2)
 
         # Browse for peers
         self._browser = ServiceBrowser(
@@ -434,7 +466,7 @@ class Discovery:
         # Derive a privacy-safe display name from the service name.
         # The service name is e.g. "<display_name>._clipsync._tcp.local."
         try:
-            peer_display = name.split(".")[0]
+            peer_display = _sanitize_peer_str(name.split(".")[0])
         except (IndexError, TypeError):
             peer_display = peer_id_hash
 
@@ -479,6 +511,16 @@ class Discovery:
         with self._lock:
             peer_id = self._service_to_peer.pop(name, None)
             if peer_id is None:
+                return
+            # A peer that renamed itself produces Removed(old-name) possibly
+            # after Added(new-name): only declare it lost if no OTHER service
+            # name still maps to it, otherwise a rename makes the device
+            # "ghost offline" until the app restarts.
+            if any(p == peer_id for p in self._service_to_peer.values()):
+                logger.debug(
+                    "Service %s removed but peer %s still advertised under "
+                    "another name — not reporting loss", name, peer_id[:12],
+                )
                 return
             if peer_id in self._known_peers:
                 del self._known_peers[peer_id]

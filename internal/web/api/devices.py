@@ -66,11 +66,27 @@ def get_devices(cfg, get_connected_ids, get_discovered=None,
             seen_ids.update(rev_resolved.get(real_id, ()))
 
     def _name_matches_known(disc_name: str) -> bool:
-        """True when a discovered name matches a known device by exact match
-        or by name prefix (discovered names are truncated to 8 chars)."""
+        """True when a discovered name looks like the same device as a known one.
+
+        mDNS instance names are truncated, so a discovered name may be a
+        *prefix* of a known full name — only that direction counts.  The
+        reverse (discovered starts with known) swallowed genuinely new
+        devices whose name merely extends a shorter known name ("MacBook"
+        hid a real "MacBook-Pro-2").
+        """
         dl = disc_name.lower()
+        # The mDNS instance name now carries a unique "-<hash4>" suffix
+        # (discovery registers "<8-char base>-<hash4>"); strip it before
+        # matching so a suffixed advertisement still dedups against the
+        # known full name, while the suffix keeps real instances unique.
+        if len(dl) > 5 and dl[-5] == "-" and all(c in "0123456789abcdef" for c in dl[-4:]):
+            dl = dl[:-5]
         for kn in known_names:
-            if dl == kn or dl.startswith(kn) or kn.startswith(dl):
+            if dl == kn:
+                return True
+            # A truncated discovery name that is a prefix of a known full
+            # name is the same device.
+            if len(dl) >= 8 and kn.startswith(dl):
                 return True
         return False
 

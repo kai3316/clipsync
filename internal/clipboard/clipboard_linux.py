@@ -290,6 +290,12 @@ class _ClipboardReader(ClipboardReader):
                         if line and not line.startswith("#"):
                             from urllib.parse import unquote, urlparse
                             parsed = urlparse(line)
+                            # Only local files belong in a FILE entry — an
+                            # https:// URI has a non-empty "path" too, and
+                            # treating it as one produces a ghost file
+                            # reference on the receiving platform.
+                            if parsed.scheme not in ("", "file"):
+                                continue
                             if parsed.path:
                                 paths.append(unquote(parsed.path))
                     if paths:

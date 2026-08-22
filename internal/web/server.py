@@ -1683,6 +1683,11 @@ class WebServer:
                 qs = parsed.query
                 query_params = urllib.parse.parse_qs(qs)
 
+                # Companion off → local dashboard only (mirror do_POST).
+                if not inner_self._companion_client_ok():
+                    inner_self._send_json({"error": "remote access disabled"}, 403)
+                    return
+
                 if not inner_self._token_ok():
                     inner_self._send_json({"error": "invalid token"}, 403)
                     return
@@ -1732,6 +1737,11 @@ class WebServer:
                 path = parsed.path
                 qs = parsed.query
                 query_params = urllib.parse.parse_qs(qs)
+
+                # Companion off → local dashboard only (mirror do_POST).
+                if not inner_self._companion_client_ok():
+                    inner_self._send_json({"error": "remote access disabled"}, 403)
+                    return
 
                 if not inner_self._token_ok():
                     inner_self._send_json({"error": "invalid token"}, 403)

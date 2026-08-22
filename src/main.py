@@ -36,6 +36,7 @@ from internal.i18n import T, set_locale
 from internal.platform.autostart import disable_autostart, enable_autostart, is_autostart_enabled
 from internal.platform.notify import notification_mgr
 from internal.protocol.codec import (
+    CHAT_MSG_TYPES,
     FILE_TRANSFER_MSG_TYPES,
     PAIRING_MSG_TYPES,
     encode_frame,
@@ -61,11 +62,12 @@ from internal.security.pairing import (
 )
 from internal.sync.file_transfer import FileTransferManager
 from internal.sync.manager import SyncManager
+from internal.sync.nearby_chat import ChatManager
 from internal.system.hotkey import HotkeyManager
 from internal.transport.connection import MAX_FRAME_SIZE, PortInUseError, TransportManager
 from internal.transport.discovery import Discovery
 from internal.ui.dashboard import DashboardWindow
-from internal.ui.dialogs import ask_string, show_error, show_info, show_warning
+from internal.ui.dialogs import ask_string, ask_yesno, show_error, show_info, show_warning
 from internal.ui.settings_window import SettingsWindow
 from internal.ui.systray import SystrayApp
 from internal.version import __version__
@@ -854,6 +856,24 @@ class Application:
             transfer_timeout=cfg.transfer_timeout,
         )
 
+        # ── Nearby Chat ─────────────────────────────────────────
+        # Chat files reuse the same receive dir clipboard file transfers use
+        # (config override, else the platform default).
+        chat_receive_dir = (
+            cfg.file_receive_dir
+            if cfg.file_receive_dir
+            else str(Path.home() / "Downloads" / "ClipSync")
+        )
+        self.chat_mgr = ChatManager(
+            cfg.device_id, cfg.device_name, receive_dir=chat_receive_dir,
+        )
+        try:
+            self.chat_mgr.set_own_fingerprint(
+                self.pairing_mgr.get_identity().fingerprint,
+            )
+        except Exception:
+            logger.debug("Could not set own chat fingerprint", exc_info=True)
+
         # ── Discovery ───────────────────────────────────────────
         self.discovery = Discovery(
             cfg.device_id, cfg.device_name, cfg.port, cfg.service_type,
@@ -985,6 +1005,9 @@ class Application:
         # ── Discovery callbacks ─────────────────────────────────
         self.discovery.set_callbacks(self._on_peer_found, self._on_peer_lost)
 
+        # ── Nearby chat callbacks ───────────────────────────────
+        self._wire_chat_callbacks()
+
         # ── Security alerts ──────────────────────────────────────
         self.transport_mgr.set_on_security_alert(self._on_security_alert)
 
@@ -993,6 +1016,410 @@ class Application:
 
         # ── Hotkey callbacks ──────────────────────────────────────
         self._wire_hotkeys()
+
+    def _wire_chat_callbacks(self) -> None:
+        """Register Nearby-chat manager callbacks (fired on worker threads).
+
+        Every callback only marshals state onto the Tk main thread; the
+        ChatManager docs require UI work to happen there.
+        """
+        cm = self.chat_mgr
+        if cm is None:
+            return
+        cm.set_on_incoming_invite(self._on_chat_incoming_invite)
+        cm.set_on_invite_response(self._on_chat_invite_response)
+        cm.set_on_sessions_changed(self._chat_event_from_worker)
+        cm.set_on_message(self._on_chat_message)
+        cm.set_on_file_progress(lambda *a: self._chat_event_from_worker())
+        cm.set_on_file_done(lambda *a: self._chat_event_from_worker())
+
+    def _chat_event_from_worker(self, *args) -> None:
+        """Chat state changed on a worker thread — hop to the Tk thread."""
+        try:
+            self.root.after(0, self._chat_event_on_main)
+        except Exception:
+            logger.debug("chat event marshal failed", exc_info=True)
+
+    def _chat_event_on_main(self) -> None:
+        """Push a chat refresh into the dashboard (Tk main thread only)."""
+        if getattr(self, "dashboard_win", None) is not None:
+            try:
+                self.dashboard_win._refresh_chat()
+            except Exception:
+                logger.debug("dashboard chat refresh failed", exc_info=True)
+
+    def _dashboard_visible(self) -> bool:
+        win = getattr(getattr(self, "dashboard_win", None), "_window", None)
+        if win is None:
+            return False
+        try:
+            return bool(win.winfo_viewable())
+        except Exception:
+            return False
+
+    # ── Chat: incoming invitation + messages ─────────────────────
+
+    def _on_chat_incoming_invite(self, invite: dict) -> None:
+        try:
+            self.root.after(0, lambda: self._chat_handle_incoming_invite(invite))
+        except Exception:
+            logger.debug("chat invite marshal failed", exc_info=True)
+
+    def _chat_handle_incoming_invite(self, invite: dict) -> None:
+        sid = invite.get("session_id", "")
+        peer_name = invite.get("peer_name", "") or "?"
+        fp = invite.get("fingerprint_short", "") or ""
+        greeting = invite.get("greeting", "") or ""
+        if not sid:
+            return
+        # Paired peers are already trusted end-to-end (cert-pinned TLS), so
+        # skip the invite dialog for them — chatting with a known device is
+        # as frictionless as clipboard sync itself.  Unpaired strangers still
+        # always ask for explicit consent.
+        peer_id = invite.get("peer_id", "")
+        try:
+            if peer_id and self.pairing_mgr is not None \
+                    and self.pairing_mgr.is_peer_paired(peer_id):
+                self._chat_respond_invite(sid, True)
+                return
+        except Exception:
+            logger.debug("chat auto-accept check failed", exc_info=True)
+        title = T("chat.notify_invite_title")
+        message = T("chat.invite_banner_title", name=peer_name)
+        if fp:
+            message += "\n" + T("chat.invite_fingerprint", fingerprint=fp)
+        if greeting:
+            message += "\n" + T("chat.invite_greeting", greeting=greeting)
+        message += "\n" + T("chat.invite_prompt")
+        if self._is_webview():
+            def _on_result(result):
+                accepted = bool(
+                    result is not None and result.get("action") == "accept"
+                )
+                self._chat_respond_invite(sid, accepted)
+            try:
+                self._web_dialog_async(
+                    "confirm", _on_result, title=title, message=message,
+                    accept_label=T("chat.accept"), reject_label=T("chat.decline"),
+                    timeout=120,
+                )
+            except Exception:
+                logger.debug("web invite dialog failed", exc_info=True)
+            return
+        if self._dashboard_visible():
+            try:
+                accepted = ask_yesno(self.root, title, message)
+            except Exception:
+                accepted = False
+            self._chat_respond_invite(sid, accepted)
+        else:
+            # Window hidden: surface an OS notification; the invite stays
+            # pending in the dashboard where the user can act on it later.
+            try:
+                notification_mgr.show(
+                    title,
+                    T("chat.notify_invite_msg", name=peer_name, fingerprint=fp or "—"),
+                )
+            except Exception:
+                logger.debug("chat invite notification failed", exc_info=True)
+            self._chat_event_on_main()
+
+    def _chat_respond_invite(self, sid: str, accepted: bool) -> None:
+        peer_id = self._chat_peer_id_for_sid(sid)
+        send_fn = self._chat_send_fn(peer_id)
+        try:
+            if accepted:
+                self.chat_mgr.accept_invitation(sid, send_fn)
+            else:
+                self.chat_mgr.decline_invitation(sid, send_fn)
+        except Exception:
+            logger.debug("chat invite response failed", exc_info=True)
+        self._chat_event_on_main()
+
+    def _on_chat_invite_response(self, session_id: str, peer_id: str,
+                                 accepted: bool) -> None:
+        # Answer to OUR invitation — nothing special to show right now; just
+        # refresh the dashboard so the session status updates.
+        self._chat_event_from_worker()
+
+    def _on_chat_message(self, session_id: str, entry_dict: dict) -> None:
+        try:
+            self.root.after(
+                0, lambda: self._chat_message_on_main(session_id, entry_dict),
+            )
+        except Exception:
+            logger.debug("chat message marshal failed", exc_info=True)
+
+    def _chat_message_on_main(self, session_id: str, entry_dict: dict) -> None:
+        try:
+            kind = entry_dict.get("kind")
+            outgoing = entry_dict.get("outgoing")
+            if kind == "text" and not outgoing and not self._dashboard_visible():
+                peer_name = self._chat_peer_name_for_sid(session_id) or "?"
+                text = (entry_dict.get("text") or "")[:120]
+                notification_mgr.show(
+                    T("chat.notify_message_title"),
+                    T("chat.notify_message_msg", name=peer_name, text=text),
+                )
+        except Exception:
+            logger.debug("chat message notification failed", exc_info=True)
+        self._chat_event_on_main()
+
+    def _chat_peer_id_for_sid(self, sid: str) -> str | None:
+        try:
+            for s in self.chat_mgr.get_sessions():
+                if s.get("session_id") == sid:
+                    return s.get("peer_id")
+        except Exception:
+            return None
+        return None
+
+    def _chat_peer_name_for_sid(self, sid: str) -> str | None:
+        try:
+            for s in self.chat_mgr.get_sessions():
+                if s.get("session_id") == sid:
+                    return s.get("peer_name") or s.get("peer_id")
+        except Exception:
+            return None
+        return None
+
+    def _chat_send_fn(self, peer_id: str | None):
+        """Build a send closure bound to *peer_id* (broadcast when unknown)."""
+        if not peer_id:
+            return self.transport_mgr.broadcast
+        return (lambda data, pid=peer_id: self.transport_mgr.send_to_peer(pid, data))
+
+    # ── Chat: dashboard passthroughs ─────────────────────────────
+
+    def _get_chat_devices(self) -> list[dict]:
+        """Merge PAIRED peers (always shown) with UNPAIRED discovered peers."""
+        devices: list[dict] = []
+        seen: set[str] = set()
+        try:
+            connected = set(self.transport_mgr.get_connected_peers() or [])
+            resolved = self.transport_mgr.get_resolved_hashes() or {}
+        except Exception:
+            connected, resolved = set(), {}
+        # Paired peers are REQUIRED in the list even when offline.
+        try:
+            for peer in self.pairing_mgr.get_known_peers():
+                if not getattr(peer, "paired", False):
+                    continue
+                pid = peer.device_id
+                if pid == self.cfg.device_id:
+                    continue
+                address, port = self._chat_device_address(pid)
+                fp = ""
+                if pid in connected:
+                    try:
+                        fp = ChatManager.shorten_fingerprint(
+                            self.transport_mgr.get_peer_fingerprint(pid),
+                        )
+                    except Exception:
+                        fp = ""
+                devices.append({
+                    "peer_id": pid,
+                    "name": peer.device_name or pid,
+                    "address": address,
+                    "port": port,
+                    "paired": True,
+                    "fingerprint_short": fp,
+                })
+                seen.add(pid)
+        except Exception:
+            logger.debug("chat devices: pairing list failed", exc_info=True)
+        # Unpaired discovered peers (hashed mDNS ids).
+        try:
+            for pid, info in self._snapshot_discovered_peers().items():
+                real = resolved.get(pid, pid)
+                if real == self.cfg.device_id or real in seen:
+                    continue
+                devices.append({
+                    "peer_id": pid,
+                    "name": info.get("name", pid),
+                    "address": info.get("address", ""),
+                    "port": info.get("port", 0),
+                    "paired": False,
+                    "fingerprint_short": "",
+                })
+                seen.add(pid)
+        except Exception:
+            logger.debug("chat devices: discovery list failed", exc_info=True)
+        devices.sort(
+            key=lambda d: (not d.get("paired"), (d.get("name") or "").lower()),
+        )
+        return devices
+
+    def _chat_device_address(self, peer_id: str) -> tuple[str, int]:
+        """Resolve the best-known (address, port) for a peer (any id form)."""
+        try:
+            hashed = Discovery._hash_device_id(peer_id)
+        except Exception:
+            hashed = peer_id
+        with self._discovered_lock:
+            info = (self._discovered_peers.get(peer_id)
+                    or self._discovered_peers.get(hashed))
+        if info:
+            return info["address"], info["port"]
+        try:
+            saved = self.transport_mgr.get_saved_address(peer_id)
+        except Exception:
+            saved = None
+        if saved:
+            return saved[1], saved[2]
+        peer_cfg = self.cfg.peers.get(peer_id)
+        if peer_cfg and peer_cfg.last_ip:
+            return peer_cfg.last_ip, peer_cfg.last_port or self.cfg.port
+        return "", 0
+
+    def _chat_start_session(self, peer_id: str, peer_name: str,
+                            fingerprint_short: str) -> str | None:
+        """Open a chat session, connecting first if the peer is offline."""
+        try:
+            resolved = self.transport_mgr.get_resolved_hashes() or {}
+            real_id = resolved.get(peer_id, peer_id)
+        except Exception:
+            real_id = peer_id
+        try:
+            connected = set(self.transport_mgr.get_connected_peers() or [])
+        except Exception:
+            connected = set()
+        if real_id in connected or peer_id in connected:
+            return self.chat_mgr.start_session(
+                real_id, peer_name, fingerprint_short or "",
+                self._chat_send_fn(real_id),
+            )
+        address, port = self._chat_device_address(peer_id)
+        if not address:
+            logger.warning("chat start: no address for peer %s", peer_id[:12])
+            try:
+                self.root.after(0, lambda: self._notify_info(
+                    T("chat.title"),
+                    T("chat.err_connect_timeout", name=peer_name),
+                ))
+            except Exception:
+                pass
+            return None
+        try:
+            self.transport_mgr.connect_to_peer(peer_id, peer_name, address, port)
+        except Exception as e:
+            logger.debug("chat start: connect failed: %s", e)
+            return None
+
+        def _poll():
+            deadline = time.monotonic() + 15.0
+            while time.monotonic() < deadline:
+                try:
+                    now_connected = set(self.transport_mgr.get_connected_peers() or [])
+                    now_resolved = self.transport_mgr.get_resolved_hashes() or {}
+                    real_now = now_resolved.get(peer_id, peer_id)
+                except Exception:
+                    now_connected, real_now = set(), peer_id
+                if real_now in now_connected or peer_id in now_connected:
+                    try:
+                        self.chat_mgr.start_session(
+                            real_now, peer_name, fingerprint_short or "",
+                            self._chat_send_fn(real_now),
+                        )
+                    except Exception:
+                        logger.debug("chat start: start_session failed", exc_info=True)
+                    self._chat_event_from_worker()
+                    return
+                time.sleep(0.3)
+            try:
+                self.root.after(0, lambda: self._notify_info(
+                    T("chat.title"),
+                    T("chat.err_connect_timeout", name=peer_name),
+                ))
+            except Exception:
+                pass
+
+        threading.Thread(target=_poll, daemon=True, name="chat-connect").start()
+        return None
+
+    def _chat_get_sessions(self) -> list[dict]:
+        try:
+            return self.chat_mgr.get_sessions()
+        except Exception:
+            return []
+
+    def _chat_get_messages(self, session_id: str) -> list[dict]:
+        try:
+            return self.chat_mgr.get_messages(session_id)
+        except Exception:
+            return []
+
+    def _chat_mark_read(self, session_id: str) -> None:
+        try:
+            self.chat_mgr.mark_session_read(session_id)
+        except Exception:
+            pass
+
+    def _chat_send_text(self, session_id: str, text: str) -> bool:
+        try:
+            return self.chat_mgr.send_text(
+                session_id, text,
+                self._chat_send_fn(self._chat_peer_id_for_sid(session_id)),
+            )
+        except Exception:
+            return False
+
+    def _chat_send_file(self, session_id: str, file_path: str):
+        try:
+            return self.chat_mgr.send_file(
+                session_id, file_path,
+                self._chat_send_fn(self._chat_peer_id_for_sid(session_id)),
+            )
+        except Exception:
+            return None
+
+    def _chat_accept_invite(self, session_id: str) -> bool:
+        try:
+            return self.chat_mgr.accept_invitation(
+                session_id,
+                self._chat_send_fn(self._chat_peer_id_for_sid(session_id)),
+            )
+        except Exception:
+            return False
+
+    def _chat_decline_invite(self, session_id: str) -> bool:
+        try:
+            return self.chat_mgr.decline_invitation(
+                session_id,
+                self._chat_send_fn(self._chat_peer_id_for_sid(session_id)),
+            )
+        except Exception:
+            return False
+
+    def _chat_close_session(self, session_id: str) -> bool:
+        try:
+            return self.chat_mgr.close_session(session_id)
+        except Exception:
+            return False
+
+    def _chat_cancel_file(self, session_id: str, entry_id: str) -> bool:
+        try:
+            return self.chat_mgr.cancel_file(session_id, entry_id)
+        except Exception:
+            return False
+
+    def _chat_accept_file(self, session_id: str, transfer_id: str) -> bool:
+        try:
+            return self.chat_mgr.accept_file(
+                session_id, transfer_id,
+                self._chat_send_fn(self._chat_peer_id_for_sid(session_id)),
+            )
+        except Exception:
+            return False
+
+    def _chat_decline_file(self, session_id: str, transfer_id: str) -> bool:
+        try:
+            return self.chat_mgr.decline_file(
+                session_id, transfer_id,
+                self._chat_send_fn(self._chat_peer_id_for_sid(session_id)),
+            )
+        except Exception:
+            return False
 
     def _wire_hotkeys(self) -> None:
         """Register global hotkey callbacks from config and start the listener."""
@@ -1216,6 +1643,37 @@ class Application:
             else:
                 logger.warning("Ignoring unsafe nav_url from peer: %s", url[:80])
             return
+        # Nearby-chat JSON frames take precedence: they are consent-gated and
+        # must never be routed into clipboard sync or file transfers.
+        if msg_type in CHAT_MSG_TYPES:
+            raw_payload = getattr(msg, "_raw_payload", {})
+            if peer_id:
+                send_fn = (lambda data, pid=peer_id: self.transport_mgr.send_to_peer(pid, data))
+            else:
+                send_fn = self.transport_mgr.broadcast
+            try:
+                fp_short = ChatManager.shorten_fingerprint(
+                    self.transport_mgr.get_peer_fingerprint(peer_id or ""),
+                )
+            except Exception:
+                fp_short = ""
+            self.chat_mgr.handle_message(
+                msg_type, raw_payload, peer_id or "", fp_short, send_fn,
+            )
+            return
+        # Binary chunks: offer them to the chat layer first; only fall through
+        # to clipboard file transfers when the chat layer did not claim them.
+        if msg_type == "file_chunk":
+            raw_payload = getattr(msg, "_raw_payload", {})
+            if peer_id:
+                send_fn = (lambda data, pid=peer_id: self.transport_mgr.send_to_peer(pid, data))
+            else:
+                send_fn = self.transport_mgr.broadcast
+            try:
+                if self.chat_mgr.handle_binary_chunk(raw_payload, peer_id or "", send_fn):
+                    return
+            except Exception:
+                logger.debug("chat handle_binary_chunk raised", exc_info=True)
         if msg_type in FILE_TRANSFER_MSG_TYPES:
             raw_payload = getattr(msg, "_raw_payload", {})
             # Respond only to the sending peer (acks, rejections, progress,
@@ -1405,22 +1863,29 @@ class Application:
                                        mime_type, send_fn, sender_name: str = ""):
         # ── Webview mode: push dialog to web UI ────────────────────
         if self._is_webview():
-            result = self._web_dialog(
+            # The dialog round-trip waits up to two minutes for a human;
+            # run it on a worker thread so the Tk main loop (hotkeys, tray
+            # polling, timers) never stalls.  Only the result handling hops
+            # back onto the main thread.
+            def _on_result(result):
+                if result and result.get("action") == "accept":
+                    if self.file_transfer_mgr.is_transfer_available(transfer_id):
+                        self.file_transfer_mgr.accept_transfer(transfer_id, send_fn)
+                    else:
+                        self._notify_info(T("transfer.incoming"),
+                                          T("transfer.no_longer_available"))
+                else:
+                    self._reject_incoming_transfer(transfer_id, send_fn)
+
+            self._web_dialog_async(
                 "transfer_request",
+                _on_result,
                 title=T("transfer.incoming"),
                 message=T("transfer.incoming_title"),
                 file_name=file_name,
                 file_size=file_size,
                 sender=sender_name or self._sender_name_for_send_fn(send_fn),
             )
-            if result and result.get("action") == "accept":
-                if self.file_transfer_mgr.is_transfer_available(transfer_id):
-                    self.file_transfer_mgr.accept_transfer(transfer_id, send_fn)
-                else:
-                    self._notify_info(T("transfer.incoming"),
-                                      T("transfer.no_longer_available"))
-            else:
-                self._reject_incoming_transfer(transfer_id, send_fn)
             return
 
         def _accept(manager, dlg):
@@ -1618,17 +2083,25 @@ class Application:
         # full 60-120s timeout.  Discovery reports the *hashed* id here, while
         # transfers are keyed by the real device id — resolve the hash first
         # (same lookup _maybe_auto_connect uses) or the fast-fail matches nothing.
+        real_id = None
+        try:
+            if self.pairing_mgr is not None:
+                for peer in self.pairing_mgr.get_known_peers():
+                    if Discovery._hash_device_id(peer.device_id) == peer_id:
+                        real_id = peer.device_id
+                        break
+        except Exception:
+            logger.debug("Failed to resolve hashed peer id", exc_info=True)
+        resolved_id = real_id or peer_id
         if self.file_transfer_mgr is not None:
-            real_id = None
+            self.file_transfer_mgr.fail_peer_transfers(resolved_id)
+        # Nearby chat sessions are keyed by the real device id (extracted
+        # from the peer cert), so mark the resolved id disconnected too.
+        if getattr(self, "chat_mgr", None) is not None:
             try:
-                if self.pairing_mgr is not None:
-                    for peer in self.pairing_mgr.get_known_peers():
-                        if Discovery._hash_device_id(peer.device_id) == peer_id:
-                            real_id = peer.device_id
-                            break
+                self.chat_mgr.mark_peer_disconnected(resolved_id)
             except Exception:
-                logger.debug("Failed to resolve hashed peer id", exc_info=True)
-            self.file_transfer_mgr.fail_peer_transfers(real_id or peer_id)
+                logger.debug("chat mark_peer_disconnected failed", exc_info=True)
 
     def _snapshot_discovered_peers(self) -> dict:
         """Return a thread-safe snapshot of the discovered peers dict.
@@ -2431,6 +2904,11 @@ class Application:
         self._stop_updater.set()
         logger.info("Shutting down...")
         self.sync_mgr.stop()
+        if getattr(self, "chat_mgr", None) is not None:
+            try:
+                self.chat_mgr.shutdown()
+            except Exception:
+                logger.debug("chat shutdown failed", exc_info=True)
         self.discovery.stop()
         self.transport_mgr.stop_server()
         if self.webview_win is not None:
@@ -2502,6 +2980,29 @@ class Application:
     # ═══════════════════════════════════════════════════════════════
     # UI action handlers
     # ═══════════════════════════════════════════════════════════════
+
+    def _track_modal_dialog(self, dlg) -> None:
+        """Register a fire-and-forget modal popup (no ``wait_window``).
+
+        These dialogs return to the caller immediately, so nothing releases
+        their window-manager grab when they close through an unusual path —
+        leaving every other window unclickable.  Binding ``<Destroy>`` makes
+        sure the grab is dropped and the GC-guard reference cleared however
+        the dialog goes away.
+        """
+        def _on_destroy(event):
+            if event.widget is not dlg:
+                return  # child widgets destroy first; only react to the dialog
+            try:
+                dlg.grab_release()
+            except Exception:
+                pass
+            if getattr(self, "_active_dialog", None) is dlg:
+                self._active_dialog = None
+
+        dlg.bind("<Destroy>", _on_destroy)
+        # Keep a reference to prevent premature garbage collection on macOS
+        self._active_dialog = dlg
 
     def _show_web_qr(self) -> None:
         """Show a popup window with the web companion QR code."""
@@ -2623,7 +3124,7 @@ class Application:
             dlg.grab_set()
         except Exception:
             pass
-        self._active_dialog = dlg
+        self._track_modal_dialog(dlg)
 
     def _on_web_action(self, action: dict) -> None:
         """Handle web server control actions from dashboard / settings."""
@@ -2803,18 +3304,24 @@ class Application:
 
         # ── Webview mode: push URL input dialog to web UI ──────────
         if self._is_webview():
-            def _show_url_input():
-                result = self._web_dialog(
-                    "url_input",
-                    title=T("nav_url.title"),
-                    message=T("nav_url.prompt"),
-                    prefill=prefill,
-                )
+            def _on_url_result(result):
                 if result is None or result.get("action") != "send":
                     return
                 url = (result.get("value") or "").strip()
                 if url:
                     self._send_url_to_peer(url)
+
+            def _show_url_input():
+                # The dialog round-trip waits up to two minutes for a human;
+                # run it on a worker thread so the Tk main loop (hotkeys,
+                # tray polling, timers) never stalls.  Only the result
+                # handling hops back onto the main thread.
+                self._web_dialog_async(
+                    "url_input", _on_url_result,
+                    title=T("nav_url.title"),
+                    message=T("nav_url.prompt"),
+                    prefill=prefill,
+                )
             self._run_when_webview_ready(_show_url_input)
             return
 
@@ -2886,48 +3393,77 @@ class Application:
         except Exception:
             pass
         dlg.bind("<Return>", lambda e: _send())
-        self._active_dialog = dlg
+        self._track_modal_dialog(dlg)
 
     def _send_url_to_peer(self, url: str) -> None:
         """Pick a peer and send the URL (deferred from dialog callback)."""
-        peer_id = self._pick_peer()
-        if peer_id is None:
+        def _deliver(peer_id):
+            if peer_id is None:
+                return
+            data = encode_frame({"msg_type": "nav_url", "url": url},
+                                source_device=self.cfg.device_id)
+            self.transport_mgr.send_to_peer(peer_id, data)
+            logger.info("Sent URL to peer %s: %s", peer_id[:12], url[:80])
+            notification_mgr.show(T("nav_url.title"), url[:120])
+
+        self._pick_peer_then(_deliver)
+
+    def _pick_peer_then(self, on_picked) -> None:
+        """Resolve a target peer and continue via ``on_picked(peer_id|None)``.
+
+        The callback always runs on the main thread.  Classic mode keeps the
+        modal dialog's ``wait_window()`` nested event loop (safe to block in);
+        webview mode has no such loop, so its round-trip runs on a worker
+        thread — a plain wait there would stall hotkeys / tray / timers for
+        up to two minutes.
+        """
+        if not self._is_webview():
+            on_picked(self._pick_peer())
             return
-        data = encode_frame({"msg_type": "nav_url", "url": url},
-                            source_device=self.cfg.device_id)
-        self.transport_mgr.send_to_peer(peer_id, data)
-        logger.info("Sent URL to peer %s: %s", peer_id[:12], url[:80])
-        notification_mgr.show(T("nav_url.title"), url[:120])
+
+        peers = self.transport_mgr.get_connected_peers_with_names()
+        if not peers:
+            self._web_toast(T("transfer.no_peers"))
+            on_picked(None)
+            return
+        if len(peers) == 1:
+            on_picked(peers[0][0])
+            return
+
+        peer_list = [{"device_id": pid, "device_name": pname} for pid, pname in peers]
+
+        def _on_result(result):
+            if result and result.get("action") == "select":
+                on_picked(result.get("value"))
+            else:
+                on_picked(None)
+
+        self._web_dialog_async(
+            "pick_peer", _on_result,
+            title=T("transfer.select_peer"),
+            peers=peer_list,
+        )
 
     def _pick_peer(self) -> str | None:
-        """Show a dialog to select which peer to send to.
+        """Show a modal dialog to select which peer to send to (classic UI).
 
         Returns peer_id or None if cancelled. If only one peer is connected,
         returns it without showing a dialog.
+
+        Classic mode only: this blocks in ``wait_window()`` until the user
+        answers (a nested Tk event loop, so timers keep running).  Webview
+        mode must go through :meth:`_pick_peer_then`, which resolves the
+        target off the main thread.
         """
         peers = self.transport_mgr.get_connected_peers_with_names()
         if not peers:
-            if self._is_webview():
-                self._web_toast(T("transfer.no_peers"))
-            elif self.cfg.web_enabled:
+            if self.cfg.web_enabled:
                 self._pick_peer_phone_guide()
             else:
                 show_error(self.root, T("transfer.error"), T("transfer.no_peers"))
             return None
         if len(peers) == 1:
             return peers[0][0]
-
-        # ── Webview mode: push dialog to web UI ────────────────────
-        if self._is_webview():
-            peer_list = [{"device_id": pid, "device_name": pname} for pid, pname in peers]
-            result = self._web_dialog(
-                "pick_peer",
-                title=T("transfer.select_peer"),
-                peers=peer_list,
-            )
-            if result and result.get("action") == "select":
-                return result.get("value")
-            return None
 
         # Multiple peers — show selection dialog
         import platform as _platform
@@ -3099,14 +3635,20 @@ class Application:
             dlg.focus_force()
         except Exception:
             pass
-        self._active_dialog = dlg
+        self._track_modal_dialog(dlg)
 
     def _send_single_path(self, file_path: str) -> None:
         """Send a single file directly (no zipping)."""
-        peer_id = self._pick_peer()
-        if peer_id is None:
-            return
 
+        def _send(peer_id):
+            if peer_id is None:
+                return
+            self._transmit_file_to_peer(peer_id, file_path)
+
+        self._pick_peer_then(_send)
+
+    def _transmit_file_to_peer(self, peer_id: str, file_path: str) -> None:
+        """Send one file to an already-resolved peer."""
         def _send_fn(data: bytes):
             self.transport_mgr.send_to_peer(peer_id, data)
 
@@ -3133,7 +3675,10 @@ class Application:
         cancel if needed.  Zipping runs in a background thread to keep
         the UI responsive.
         """
-        peer_id = self._pick_peer()
+        self._pick_peer_then(lambda peer_id: self._zip_and_send_to_peer(peer_id, paths))
+
+    def _zip_and_send_to_peer(self, peer_id: str | None, paths: list[str]) -> None:
+        """Zip and send *paths* to an already-resolved peer."""
         if peer_id is None:
             return
 
@@ -3512,14 +4057,37 @@ class Application:
     def _web_dialog(self, dialog_type: str, **kwargs):
         """Show a dialog via the web UI and return the response (blocking).
 
-        Only called from background threads or when the tk event loop
-        can tolerate brief blocking (webview mode has no interactive
-        CTk windows, so blocking the main thread is safe).
+        Blocks for up to ``timeout`` seconds waiting for a human response.
+        NEVER call this from the Tk main thread — the wait is a plain
+        event-wait that does not pump the Tk event loop, so hotkeys, tray
+        polling and every ``after()`` timer would freeze until the user
+        answers.  Use :meth:`_web_dialog_async` on the main thread instead,
+        or call this directly from a background thread.
         """
         mgr = self.web_server.dialog_mgr if self.web_server else None
         if mgr is None:
             return None
         return mgr.show(dialog_type, **kwargs)
+
+    def _web_dialog_async(self, dialog_type: str, on_result, **kwargs) -> None:
+        """Run a blocking web-dialog round-trip on a worker thread.
+
+        ``on_result(result)`` is invoked on the Tk main thread with the
+        response dict, or None on timeout / no connected clients.  The dialog
+        itself waits up to two minutes for a human response; running that
+        wait on a worker keeps the main loop responsive, and only the result
+        handling (which may touch widgets) hops back onto the main thread.
+        """
+        def _worker():
+            result = self._web_dialog(dialog_type, **kwargs)
+            try:
+                self.root.after(0, lambda: on_result(result))
+            except Exception:
+                logger.debug("web-dialog callback scheduling failed", exc_info=True)
+
+        threading.Thread(
+            target=_worker, daemon=True, name=f"web-dialog-{dialog_type}",
+        ).start()
 
     def _web_toast(self, message: str, duration: int = 3000) -> None:
         """Push a non-blocking toast notification to the web UI."""
@@ -3996,6 +4564,21 @@ class Application:
             on_retry_transfer=self._retry_file_transfer,
             on_edit_note=self._on_edit_note,
             on_web_action=self._on_web_action,
+            # Nearby chat
+            get_chat_devices=self._get_chat_devices,
+            chat_start_session=self._chat_start_session,
+            get_chat_sessions=self._chat_get_sessions,
+            get_chat_messages=self._chat_get_messages,
+            mark_session_read=self._chat_mark_read,
+            chat_send_text=self._chat_send_text,
+            chat_send_file=self._chat_send_file,
+            chat_accept_invite=self._chat_accept_invite,
+            chat_decline_invite=self._chat_decline_invite,
+            chat_close_session=self._chat_close_session,
+            chat_cancel_file=self._chat_cancel_file,
+            chat_accept_file=self._chat_accept_file,
+            chat_decline_file=self._chat_decline_file,
+            on_chat_event=self._chat_event_on_main,
         )
         self.dashboard_win.show()
 
@@ -4068,6 +4651,11 @@ class Application:
 
         def _name_matches_known(disc_name: str) -> bool:
             dl = disc_name.lower()
+            # Strip the unique "-<hash4>" suffix the mDNS instance name now
+            # carries so a suffixed advertisement still matches the known
+            # full name by its truncated prefix.
+            if len(dl) > 5 and dl[-5] == "-" and all(c in "0123456789abcdef" for c in dl[-4:]):
+                dl = dl[:-5]
             for kn in known_names:
                 if dl == kn or dl.startswith(kn) or kn.startswith(dl):
                     return True
@@ -4476,6 +5064,8 @@ class Application:
     def _on_unpair(self, peer_id: str) -> None:
         self.pairing_mgr.unpair_peer(peer_id)
         self.pairing_mgr.reject_pairing(peer_id)
+        # An unpaired peer is no longer trusted — close any live chat.
+        self._close_chat_for_peer(peer_id)
         if peer_id in self.cfg.peers:
             self.cfg.peers[peer_id].paired = False
         # Tell the peer we unpaired, before the connection is torn down.
@@ -4490,6 +5080,20 @@ class Application:
             self.transport_mgr.send_to_peer(peer_id, encode_frame({"msg_type": msg_type}))
         except Exception:
             logger.debug("Could not send %s to peer %s", msg_type, peer_id[:12], exc_info=True)
+
+    def _close_chat_for_peer(self, peer_id: str) -> None:
+        """End any nearby-chat session with *peer_id* (e.g. after unpair)."""
+        cm = getattr(self, "chat_mgr", None)
+        if cm is None:
+            return
+        try:
+            for sess in cm.get_sessions():
+                if sess.get("peer_id") == peer_id and sess["status"] in (
+                    "inviting", "invited", "active",
+                ):
+                    cm.close_session(sess["session_id"], notify_peer=False)
+        except Exception:
+            logger.debug("close chat for peer failed", exc_info=True)
 
     def _handle_pairing_message(self, msg_type: str, payload: dict, peer_id: str | None) -> None:
         """A peer told us about its pairing decision. Keep both sides in sync."""
@@ -4520,6 +5124,8 @@ class Application:
             self._push_web("broadcast_devices")
         elif msg_type == "pairing_unpair":
             self.pairing_mgr.mark_peer_unpaired(peer_id)
+            # The peer dropped the trust relationship; end the chat too.
+            self._close_chat_for_peer(peer_id)
             name = self._cfg_peer_name(peer_id)
             self._notify(
                 "notify_pairing",
@@ -4604,6 +5210,11 @@ class Application:
         # to that peer — fail it now rather than after a long timeout.
         if self.file_transfer_mgr is not None:
             self.file_transfer_mgr.fail_peer_transfers(peer_id)
+        if getattr(self, "chat_mgr", None) is not None:
+            try:
+                self.chat_mgr.mark_peer_disconnected(peer_id)
+            except Exception:
+                logger.debug("chat mark_peer_disconnected failed", exc_info=True)
 
     def _on_connect(self, peer_id: str) -> bool:
         info = None
@@ -4795,22 +5406,25 @@ class Application:
 
     def _retry_file_transfer(self, file_path: str) -> None:
         """Retry sending a file that previously failed."""
-        peer_id = self._pick_peer()
-        if peer_id is None:
-            return
 
-        def _send_fn(data: bytes):
-            self.transport_mgr.send_to_peer(peer_id, data)
+        def _send(peer_id):
+            if peer_id is None:
+                return
 
-        try:
-            transfer_id = self.file_transfer_mgr.send_file(file_path, _send_fn)
-            if transfer_id:
-                self._transfer_directions[transfer_id] = "outgoing"
-            logger.info("Retried file transfer: %s (%s)", file_path, transfer_id[:8])
-            self._notify("notify_transfer", T("ui.file_transfer"),
-                         T("transfer.sending_file", name=os.path.basename(file_path)))
-        except OSError as e:
-            logger.error("Failed to retry sending file %s: %s", file_path, e)
+            def _send_fn(data: bytes):
+                self.transport_mgr.send_to_peer(peer_id, data)
+
+            try:
+                transfer_id = self.file_transfer_mgr.send_file(file_path, _send_fn)
+                if transfer_id:
+                    self._transfer_directions[transfer_id] = "outgoing"
+                logger.info("Retried file transfer: %s (%s)", file_path, transfer_id[:8])
+                self._notify("notify_transfer", T("ui.file_transfer"),
+                             T("transfer.sending_file", name=os.path.basename(file_path)))
+            except OSError as e:
+                logger.error("Failed to retry sending file %s: %s", file_path, e)
+
+        self._pick_peer_then(_send)
 
     # ═══════════════════════════════════════════════════════════════
     # Discovery / visibility toggles
@@ -4859,17 +5473,21 @@ class Application:
     def _show_cert_change_dialog(self, peer_name: str, peer_id: str) -> None:
         """Present the Trust-again / Keep-unpaired choice (main thread)."""
         message = T("cert.changed_message", name=peer_name)
-        choice = self._ask_retrust_choice(message)
-        if choice is True:
-            self._on_retrust_peer(peer_id)
-        elif choice is False:
-            self._on_keep_peer_unpaired(peer_id)
-        else:
-            # No interactive UI available — inform via notification/toast and
-            # leave the peer's state unchanged (throttle prevents prompt spam).
-            logger.info("No UI to prompt for cert change of %s — notifying only",
-                        peer_id[:12])
-            self._notify_info(T("cert.changed_title"), message)
+
+        def _apply(choice):
+            if choice is True:
+                self._on_retrust_peer(peer_id)
+            elif choice is False:
+                self._on_keep_peer_unpaired(peer_id)
+            else:
+                # No interactive UI available — inform via notification/toast
+                # and leave the peer's state unchanged (throttle prevents
+                # prompt spam).
+                logger.info("No UI to prompt for cert change of %s — notifying only",
+                            peer_id[:12])
+                self._notify_info(T("cert.changed_title"), message)
+
+        self._ask_retrust_choice(message, _apply)
 
     def _prompt_cert_warnings_startup(self) -> None:
         """Show one dialog listing peers whose certificates changed at startup.
@@ -4885,34 +5503,49 @@ class Application:
         if len(warnings) > 3:
             names += f" +{len(warnings) - 3}"
         message = T("cert.changed_message", name=names)
-        choice = self._ask_retrust_choice(message)
-        if choice is True:
-            for peer_id, _name in warnings:
-                self._on_retrust_peer(peer_id)
-        elif choice is False:
-            for peer_id, _name in warnings:
-                self._on_keep_peer_unpaired(peer_id)
-        else:
-            logger.info("No UI available for the startup cert-change prompt")
 
-    def _ask_retrust_choice(self, message: str) -> bool | None:
-        """Ask Trust-again vs Keep-unpaired. True/False, or None if no UI."""
+        def _apply(choice):
+            if choice is True:
+                for peer_id, _name in warnings:
+                    self._on_retrust_peer(peer_id)
+            elif choice is False:
+                for peer_id, _name in warnings:
+                    self._on_keep_peer_unpaired(peer_id)
+            else:
+                logger.info("No UI available for the startup cert-change prompt")
+
+        self._ask_retrust_choice(message, _apply)
+
+    def _ask_retrust_choice(self, message: str, on_choice) -> None:
+        """Ask Trust-again vs Keep-unpaired, without blocking the main thread.
+
+        ``on_choice(True|False|None)`` runs on the main thread.  True/False is
+        the user's answer; None means no UI was available (or the web dialog
+        timed out / had no client attached).
+        """
         title = T("cert.changed_title")
         if self._is_webview():
             mgr = self.web_server.dialog_mgr if self.web_server else None
             ws = mgr.ws_manager if mgr else None
             if ws is None or ws.client_count == 0:
-                return None
-            result = self._web_dialog(
-                "confirm", title=title, message=message,
+                on_choice(None)
+                return
+
+            def _on_result(result):
+                on_choice(None if result is None
+                          else result.get("action") == "accept")
+
+            # The confirm dialog waits up to two minutes for a human; run it
+            # on a worker so the Tk main loop keeps servicing hotkeys, tray
+            # polling and timers while the dialog is open.
+            self._web_dialog_async(
+                "confirm", _on_result, title=title, message=message,
                 accept_label=T("cert.trust_again"),
                 reject_label=T("cert.keep_unpaired"),
                 timeout=120,
             )
-            if result is None:
-                return None
-            return result.get("action") == "accept"
-        return self._ask_retrust_desktop(title, message)
+            return
+        on_choice(self._ask_retrust_desktop(title, message))
 
     def _ask_retrust_desktop(self, title: str, message: str) -> bool:
         """Themed Trust-again / Keep-unpaired dialog for the desktop UI.

@@ -908,12 +908,17 @@ body::before {
     return item.text_preview || '';
   }
 
-  // The backend stores PNG bytes under the "IMAGE" type and EMF under
-  // "IMAGE_EMF" — decode to a data URL so the phone can display image clips
-  // instead of "(empty)".
-  function imageDataUrl(types) {
-    if (!types) return '';
-    if (types.IMAGE) return 'data:image/png;base64,' + types.IMAGE;
+  // The backend stores image bytes under the "IMAGE" type (EMF under
+  // "IMAGE_EMF"); item.image_fmt says how they were encoded. Pick the
+  // matching MIME so BMP/TIFF clips render instead of breaking — the
+  // bytes are NOT re-encoded server-side.
+  function imageDataUrl(item) {
+    var types = item.types || {};
+    var fmt = item.image_fmt || '';
+    var mime = fmt === 'bmp' ? 'image/bmp'
+             : fmt === 'tiff' ? 'image/tiff'
+             : 'image/png';
+    if (types.IMAGE) return 'data:' + mime + ';base64,' + types.IMAGE;
     if (types.IMAGE_EMF) return 'data:image/x-emf;base64,' + types.IMAGE_EMF;
     return '';
   }
@@ -928,8 +933,7 @@ body::before {
   }
 
   function setModalContent(item) {
-    var types = item.types || {};
-    var imgUrl = imageDataUrl(types);
+    var imgUrl = imageDataUrl(item);
     if (imgUrl) {
       showImageModal(imgUrl);
     } else {

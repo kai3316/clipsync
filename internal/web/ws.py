@@ -274,10 +274,16 @@ class WebSocketManager:
             return None
 
         client = WebSocketClient(sock, addr)
+        # Send the snapshot BEFORE adding the client to the broadcast list.
+        # The snapshot send holds the client's per-client send lock, so any
+        # broadcast that includes this client (only possible after the
+        # append below) queues behind the snapshot and cannot be clobbered
+        # by it.  The old order (append → snapshot) let a broadcast that
+        # raced the handshake arrive first and then be overwritten by the
+        # stale snapshot's wholesale replace.
+        self._send_snapshot(client)
         with self._lock:
             self._clients.append(client)
-
-        self._send_snapshot(client)
         # Flush any dialogs that were queued while no client was connected so
         # an incoming transfer that arrived "blind" is shown to this client
         # instead of being silently rejected (see DialogManager.flush_pending).

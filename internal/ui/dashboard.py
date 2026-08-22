@@ -176,6 +176,31 @@ def _add_tooltip(widget, text):
         pass
 
 
+def human_size(num_bytes: int) -> str:
+    """Format a byte count as a compact human string (B / KB / MB / GB)."""
+    size = float(num_bytes or 0)
+    if size < 1024:
+        return f"{int(size)} B"
+    for unit in ("KB", "MB", "GB"):
+        size /= 1024.0
+        if size < 1024.0 or unit == "GB":
+            return f"{size:.1f} {unit}"
+    return f"{size:.1f} GB"
+
+
+def _chat_status_key(status: str, online: bool = True) -> str:
+    """Map a ChatManager session status + liveness to an i18n chip key."""
+    if status == "inviting":
+        return "chat.status.inviting"
+    if status == "invited":
+        return "chat.status.pending"
+    if status == "active":
+        return "chat.status.connected" if online else "chat.status.offline"
+    if status == "declined_remote":
+        return "chat.status.declined"
+    return "chat.status.closed"
+
+
 class DashboardWindow:
     """Main application window with sidebar + panels."""
 
@@ -241,6 +266,21 @@ class DashboardWindow:
         on_web_action: Callable | None = None,
         # Lifecycle: quit the whole app (⌘Q / Ctrl+Q)
         on_quit: Callable | None = None,
+        # Nearby chat
+        get_chat_devices: Callable | None = None,
+        chat_start_session: Callable | None = None,
+        get_chat_sessions: Callable | None = None,
+        get_chat_messages: Callable | None = None,
+        mark_session_read: Callable | None = None,
+        chat_send_text: Callable | None = None,
+        chat_send_file: Callable | None = None,
+        chat_accept_invite: Callable | None = None,
+        chat_decline_invite: Callable | None = None,
+        chat_close_session: Callable | None = None,
+        chat_cancel_file: Callable | None = None,
+        chat_accept_file: Callable | None = None,
+        chat_decline_file: Callable | None = None,
+        on_chat_event: Callable | None = None,
     ):
         self._root = root
         self._get_config = get_config
@@ -283,6 +323,21 @@ class DashboardWindow:
         self._on_edit_note = on_edit_note
         self._on_web_action = on_web_action
         self._on_quit = on_quit
+        # Nearby chat
+        self._get_chat_devices = get_chat_devices
+        self._chat_start_session = chat_start_session
+        self._get_chat_sessions = get_chat_sessions
+        self._get_chat_messages = get_chat_messages
+        self._mark_chat_session_read = mark_session_read
+        self._chat_send_text = chat_send_text
+        self._chat_send_file = chat_send_file
+        self._chat_accept_invite = chat_accept_invite
+        self._chat_decline_invite = chat_decline_invite
+        self._chat_close_session = chat_close_session
+        self._chat_cancel_file = chat_cancel_file
+        self._chat_accept_file = chat_accept_file
+        self._chat_decline_file = chat_decline_file
+        self._on_chat_event = on_chat_event
 
         self._window: ctk.CTkToplevel | None = None
         self._dark_mode = _is_dark_mode(get_config().appearance_mode)
@@ -290,6 +345,20 @@ class DashboardWindow:
         self._refresh_job: str | None = None
         self._fast_refresh = False  # poll at 800ms while transfers are live
         self._breathing = False
+
+        # Nearby chat state
+        self._chat_selected_session_id: str | None = None
+        self._chat_state_key: tuple | None = None
+        self._chat_devices_scroll: ctk.CTkScrollableFrame | None = None
+        self._chat_convo_scroll: ctk.CTkScrollableFrame | None = None
+        self._chat_convo_frame: ctk.CTkFrame | None = None
+        self._chat_header_label: ctk.CTkLabel | None = None
+        self._chat_close_btn: ctk.CTkButton | None = None
+        self._chat_input: ctk.CTkEntry | None = None
+        self._chat_send_btn: ctk.CTkButton | None = None
+        self._chat_attach_btn: ctk.CTkButton | None = None
+        self._chat_hint_label: ctk.CTkLabel | None = None
+        self._chat_hint_job: str | None = None
         self._breath_timer: str | None = None
 
         # Edge snapping state
@@ -611,6 +680,15 @@ class DashboardWindow:
             self._refresh_job = None
 
     def _schedule_refresh(self):
+        # Force an immediate chat refresh when the host pushed a chat event
+        # (incoming message / invite / file progress).  This keeps unread
+        # badges and the device list fresh even while the chat panel is not
+        # the visible one.
+        if getattr(self, "_on_chat_event", None) is not None:
+            try:
+                self._on_chat_event()
+            except Exception:
+                pass
         self._cancel_refresh_job()
         self._refresh_overview()
         if self._current_panel == "devices":
@@ -627,6 +705,8 @@ class DashboardWindow:
                         self._refresh_history_list()
                 except Exception:
                     pass
+        elif self._current_panel == "chat":
+            self._refresh_chat()
         if self._window is not None:
             try:
                 # A hidden/withdrawn window must not keep polling.
@@ -638,10 +718,17 @@ class DashboardWindow:
             # progress bars / state labels update smoothly; settle back to the
             # slow 5 s cadence once everything is idle.  Only applies while the
             # transfers panel is on screen (that's where _fast_refresh is set).
+            # Chat also gets the fast cadence while the panel is open, or while
+            # any live session exists (so unread badges / invites stay fresh).
+            chat_live = self._chat_has_live_sessions()
             delay = (
                 800
-                if getattr(self, "_fast_refresh", False)
-                and self._current_panel == "transfers"
+                if (
+                    (getattr(self, "_fast_refresh", False)
+                     and self._current_panel == "transfers")
+                    or self._current_panel == "chat"
+                    or chat_live
+                )
                 else 5000
             )
             self._refresh_job = self._root.after(delay, self._schedule_refresh)
@@ -702,6 +789,7 @@ class DashboardWindow:
         self._panels["devices"] = self._build_devices_panel()
         self._panels["history"] = self._build_history_panel()
         self._panels["transfers"] = self._build_transfers_panel()
+        self._panels["chat"] = self._build_chat_panel()
 
         # ── Footer ──────────────────────────────────────────────────
         footer = ctk.CTkFrame(outer, height=46, corner_radius=0,
@@ -745,6 +833,7 @@ class DashboardWindow:
             ("devices",        T("nav.devices")),
             ("history",        T("nav.history")),
             ("transfers",      T("nav.transfers")),
+            ("chat",           T("nav.nearby_chat")),
         ]
 
         for key, label in nav:
@@ -819,6 +908,9 @@ class DashboardWindow:
             self._refresh_history_list()
         elif key == "overview":
             self._refresh_overview()
+        elif key == "chat":
+            self._chat_mark_selected_read()
+            self._refresh_chat()
 
     # ═══════════════════════════════════════════════════════════════
     # Panel: Overview
@@ -838,6 +930,11 @@ class DashboardWindow:
 
     _network_info_cache: dict | None = None
     _network_detect_started = False
+
+    # Cached LAN IP for the web companion card.  Resolved off the UI thread
+    # so the 5s periodic refresh never runs getaddrinfo on the main thread.
+    # Structure: {"ip": str, "fetched_at": float, "started": bool}.
+    _lan_ip_cache: dict = {}
 
     @classmethod
     def _detect_network_info(cls) -> dict:
@@ -2805,6 +2902,734 @@ class DashboardWindow:
             return f"{size / (1024 * 1024 * 1024):.1f} GB"
 
     # ═══════════════════════════════════════════════════════════════
+    # Panel: Nearby Chat
+    # ═══════════════════════════════════════════════════════════════
+
+    @staticmethod
+    def _chat_file_status_key(status: str) -> str:
+        """Map a chat file-entry status to the ``chat.file.status.*`` suffix."""
+        return status or "pending"
+
+    @staticmethod
+    def _chat_status_color(status: str, online: bool = True):
+        if status == "inviting":
+            return PAIRING_COLOR
+        if status == "invited":
+            return WARN_COLOR
+        if status == "active":
+            return STATUS_COLOR if online else OFFLINE_COLOR
+        return OFFLINE_COLOR
+
+    def _build_chat_panel(self):
+        panel = ctk.CTkFrame(self._content_frame, fg_color="transparent")
+
+        ctk.CTkLabel(
+            panel, text=T("chat.title"),
+            font=ctk.CTkFont(size=18, weight="bold"),
+        ).pack(anchor="w", pady=(0, 4))
+        ctk.CTkLabel(
+            panel, text=T("chat.subtitle"),
+            font=ctk.CTkFont(size=11),
+            text_color=("gray50", "gray60"),
+        ).pack(anchor="w", pady=(0, 12))
+
+        body = ctk.CTkFrame(panel, fg_color="transparent")
+        body.pack(fill="both", expand=True)
+
+        # ── Left column: devices + sessions ─────────────────────
+        left = ctk.CTkFrame(body, width=260, corner_radius=12,
+                            fg_color=("gray95", "gray17"))
+        left.pack(side="left", fill="y", padx=(0, 8))
+        left.pack_propagate(False)
+
+        ctk.CTkLabel(
+            left, text="\U0001F4AC  " + T("chat.devices_header"),
+            font=ctk.CTkFont(size=12, weight="bold"),
+        ).pack(anchor="w", padx=12, pady=(12, 4))
+
+        self._chat_devices_scroll = ctk.CTkScrollableFrame(
+            left, fg_color="transparent",
+        )
+        self._chat_devices_scroll.pack(fill="both", expand=True, padx=6, pady=(0, 10))
+
+        # ── Right column: conversation ──────────────────────────
+        right = ctk.CTkFrame(body, corner_radius=12,
+                             fg_color=("gray95", "gray17"))
+        right.pack(side="left", fill="both", expand=True)
+
+        header_row = ctk.CTkFrame(right, fg_color="transparent")
+        header_row.pack(fill="x", padx=12, pady=(10, 2))
+
+        self._chat_header_label = ctk.CTkLabel(
+            header_row, text=T("chat.empty_no_session"),
+            font=ctk.CTkFont(size=14, weight="bold"),
+        )
+        self._chat_header_label.pack(side="left")
+
+        self._chat_close_btn = ctk.CTkButton(
+            header_row, text=T("chat.close"), width=92, height=26,
+            fg_color="transparent", border_width=1,
+            text_color=("gray40", "gray70"),
+            border_color=("gray60", "gray50"),
+            hover_color=("gray85", "gray25"),
+            font=ctk.CTkFont(size=12),
+            command=self._chat_on_close,
+        )
+        self._chat_close_btn.pack(side="right")
+        self._chat_close_btn.pack_forget()
+
+        self._chat_convo_frame = ctk.CTkFrame(right, fg_color="transparent")
+        self._chat_convo_frame.pack(fill="both", expand=True, padx=6, pady=(0, 0))
+
+        self._chat_convo_scroll = ctk.CTkScrollableFrame(
+            self._chat_convo_frame, fg_color="transparent",
+        )
+        self._chat_convo_scroll.pack(fill="both", expand=True)
+
+        # Hint / status line
+        self._chat_hint_label = ctk.CTkLabel(
+            right, text="", font=ctk.CTkFont(size=11),
+            text_color=("gray50", "gray60"),
+        )
+        self._chat_hint_label.pack(fill="x", padx=12, pady=(0, 0))
+
+        # Input row (built once so typing survives refreshes)
+        input_row = ctk.CTkFrame(right, fg_color="transparent")
+        input_row.pack(fill="x", padx=12, pady=(4, 12))
+
+        self._chat_input = ctk.CTkEntry(
+            input_row, placeholder_text=T("chat.input_placeholder"),
+        )
+        self._chat_input.pack(side="left", fill="x", expand=True, padx=(0, 6))
+        self._chat_input.bind("<Return>", lambda _e: self._chat_on_send())
+
+        self._chat_attach_btn = ctk.CTkButton(
+            input_row, text="\U0001F4CE", width=38, height=32,
+            fg_color=("gray88", "gray22"),
+            text_color=("gray25", "gray80"),
+            hover_color=("gray78", "gray32"),
+            command=self._chat_on_attach,
+        )
+        self._chat_attach_btn.pack(side="left", padx=(0, 4))
+        _add_tooltip(self._chat_attach_btn, T("chat.attach"))
+
+        self._chat_send_btn = ctk.CTkButton(
+            input_row, text=T("chat.send"), width=68, height=32,
+            fg_color=ACCENT, hover_color=("#0EA5C4", "#4CE0F5"),
+            command=self._chat_on_send,
+        )
+        self._chat_send_btn.pack(side="left")
+
+        return panel
+
+    def _chat_has_live_sessions(self) -> bool:
+        if not self._get_chat_sessions:
+            return False
+        try:
+            return any(
+                s.get("status") in ("inviting", "invited", "active")
+                for s in self._get_chat_sessions()
+            )
+        except Exception:
+            return False
+
+    def _chat_mark_selected_read(self) -> None:
+        sid = self._chat_selected_session_id
+        if sid and self._mark_chat_session_read:
+            try:
+                self._mark_chat_session_read(sid)
+            except Exception:
+                logger.debug("chat mark_session_read failed", exc_info=True)
+
+    def _chat_show_hint(self, msg: str, duration_ms: int = 4000) -> None:
+        if self._chat_hint_label is None:
+            return
+        try:
+            self._chat_hint_label.configure(text=msg)
+        except Exception:
+            return
+        if self._chat_hint_job is not None:
+            try:
+                self._root.after_cancel(self._chat_hint_job)
+            except Exception:
+                pass
+            self._chat_hint_job = None
+        self._chat_hint_job = self._root.after(
+            duration_ms, self._chat_clear_hint,
+        )
+
+    def _chat_clear_hint(self) -> None:
+        self._chat_hint_job = None
+        if self._chat_hint_label is not None:
+            try:
+                self._chat_hint_label.configure(text="")
+            except Exception:
+                pass
+
+    def _chat_select_session(self, session_id: str) -> None:
+        if not session_id:
+            return
+        if session_id == self._chat_selected_session_id:
+            return
+        self._chat_selected_session_id = session_id
+        self._chat_state_key = None  # force rebuild
+        self._chat_mark_selected_read()
+        self._refresh_chat()
+
+    def _chat_start_with_device(self, dev: dict) -> None:
+        peer_id = (dev or {}).get("peer_id", "")
+        name = (dev or {}).get("name", "") or peer_id
+        fp = (dev or {}).get("fingerprint_short", "") or ""
+        if not peer_id or not self._chat_start_session:
+            return
+        try:
+            sid = self._chat_start_session(peer_id, name, fp)
+        except Exception:
+            logger.debug("chat_start_session raised", exc_info=True)
+            self._chat_show_hint(T("chat.err_connect_timeout", name=name))
+            return
+        if sid:
+            self._chat_selected_session_id = sid
+            self._chat_state_key = None
+            self._chat_mark_selected_read()
+            self._refresh_chat()
+        else:
+            # Connect is in flight (async); the session appears once the host
+            # succeeds and pushes a chat event.
+            self._chat_show_hint(T("chat.connecting", name=name))
+
+    def _refresh_chat(self) -> None:
+        if getattr(self, "_chat_devices_scroll", None) is None:
+            return
+        devices: list[dict] = []
+        sessions: list[dict] = []
+        messages: list[dict] = []
+        selected = self._chat_selected_session_id
+        try:
+            if self._get_chat_devices:
+                devices = self._get_chat_devices()
+            if self._get_chat_sessions:
+                sessions = self._get_chat_sessions()
+            if selected and self._get_chat_messages:
+                messages = self._get_chat_messages(selected)
+        except Exception:
+            logger.debug("chat refresh data failed", exc_info=True)
+            return
+
+        # Hash-based change detection: skip the rebuild when nothing changed.
+        state_key = (
+            selected,
+            tuple(sorted(
+                (d.get("peer_id"), d.get("name"), d.get("address"),
+                 d.get("port"), d.get("paired")) for d in devices
+            )),
+            tuple(sorted(
+                (s.get("session_id"), s.get("peer_name"), s.get("status"),
+                 s.get("online"), s.get("unread"), s.get("last_preview"),
+                 s.get("fingerprint_short")) for s in sessions
+            )),
+            tuple(
+                (e.get("entry_id"), e.get("kind"), e.get("outgoing"),
+                 e.get("text"), e.get("text_key"), e.get("file_name"),
+                 e.get("file_size"), e.get("status"),
+                 round(e.get("fraction", 0.0), 3), e.get("saved_path"))
+                for e in messages[-200:]
+            ),
+        )
+        if state_key == getattr(self, "_chat_state_key", None):
+            return
+        self._chat_state_key = state_key
+
+        # Left column: devices + sessions
+        scroll = self._chat_devices_scroll
+        for child in scroll.winfo_children():
+            child.destroy()
+
+        if not devices and not sessions:
+            ctk.CTkLabel(
+                scroll, text=T("chat.empty_no_devices"),
+                font=ctk.CTkFont(size=11),
+                text_color=("gray50", "gray60"),
+                justify="left",
+            ).pack(anchor="w", fill="x", padx=6, pady=10)
+        else:
+            for dev in devices:
+                self._chat_device_row(dev)
+            ctk.CTkLabel(
+                scroll, text=T("chat.sessions_header"),
+                font=ctk.CTkFont(size=12, weight="bold"),
+                text_color=("gray40", "gray70"),
+            ).pack(anchor="w", padx=6, pady=(12, 2))
+            if not sessions:
+                ctk.CTkLabel(
+                    scroll, text=T("chat.empty_no_session"),
+                    font=ctk.CTkFont(size=11),
+                    text_color=("gray50", "gray60"),
+                ).pack(anchor="w", padx=6, pady=4)
+            for sess in sessions:
+                self._chat_session_row(sess)
+
+        # Right column: conversation
+        selected_session = next(
+            (s for s in sessions if s.get("session_id") == selected), None,
+        )
+        self._chat_build_conversation(selected_session, messages)
+
+    def _chat_device_row(self, dev: dict) -> None:
+        peer_id = dev.get("peer_id", "")
+        name = dev.get("name", "") or peer_id[:12]
+        paired = bool(dev.get("paired"))
+        row = ctk.CTkFrame(self._chat_devices_scroll, fg_color=("gray90", "gray18"),
+                           corner_radius=8)
+        row.pack(fill="x", pady=2, padx=2)
+
+        inner = ctk.CTkFrame(row, fg_color="transparent")
+        inner.pack(fill="x", padx=10, pady=6)
+
+        dot = ctk.CTkFrame(inner, width=9, height=9, corner_radius=5,
+                           fg_color=ACCENT if not paired else STATUS_COLOR)
+        dot.pack(side="left", padx=(0, 6))
+
+        text_col = ctk.CTkFrame(inner, fg_color="transparent")
+        text_col.pack(side="left", fill="x", expand=True)
+
+        ctk.CTkLabel(
+            text_col, text=name, anchor="w",
+            font=ctk.CTkFont(size=12, weight="bold"),
+        ).pack(fill="x")
+        ctk.CTkLabel(
+            text_col,
+            text=T("chat.paired_tag") if paired else T("chat.unpaired_tag"),
+            anchor="w", font=ctk.CTkFont(size=10),
+            text_color=("gray50", "gray60"),
+        ).pack(fill="x")
+
+        btn = ctk.CTkButton(
+            inner, text=T("chat.start"), width=52, height=24,
+            fg_color=ACCENT, hover_color=("#0EA5C4", "#4CE0F5"),
+            font=ctk.CTkFont(size=11),
+            command=lambda d=dev: self._chat_start_with_device(d),
+        )
+        btn.pack(side="right", padx=(6, 0))
+
+    def _chat_session_row(self, sess: dict) -> None:
+        session_id = sess.get("session_id", "")
+        peer_name = sess.get("peer_name", "") or sess.get("peer_id", "")[:12]
+        status = sess.get("status", "closed")
+        online = bool(sess.get("online", True))
+        unread = int(sess.get("unread", 0) or 0)
+        preview = sess.get("last_preview", "") or ""
+        fp = sess.get("fingerprint_short", "") or ""
+
+        selected = session_id == self._chat_selected_session_id
+        row = ctk.CTkFrame(
+            self._chat_devices_scroll,
+            fg_color=("#0891B2", "#0E1328") if selected else ("gray90", "gray18"),
+            corner_radius=8,
+        )
+        row.pack(fill="x", pady=2, padx=2)
+
+        inner = ctk.CTkFrame(row, fg_color="transparent")
+        inner.pack(fill="x", padx=10, pady=6)
+
+        top = ctk.CTkFrame(inner, fg_color="transparent")
+        top.pack(fill="x")
+
+        ctk.CTkLabel(
+            top, text=peer_name, anchor="w",
+            font=ctk.CTkFont(size=12, weight="bold"),
+        ).pack(side="left")
+
+        if unread > 0:
+            ctk.CTkLabel(
+                top, text=f"● {unread}", anchor="w",
+                font=ctk.CTkFont(size=11, weight="bold"),
+                text_color=ACCENT,
+            ).pack(side="right", padx=(4, 0))
+
+        chip = ctk.CTkFrame(inner, corner_radius=6,
+                            fg_color=self._chat_status_color(status, online))
+        chip.pack(anchor="w", pady=(3, 0))
+        ctk.CTkLabel(
+            chip, text=T(_chat_status_key(status, online)),
+            font=ctk.CTkFont(size=9),
+            text_color=("#FFFFFF", "#FFFFFF"),
+        ).pack(padx=6, pady=1)
+
+        if preview:
+            ctk.CTkLabel(
+                inner, text=preview[:60], anchor="w",
+                font=ctk.CTkFont(size=10),
+                text_color=("gray45", "gray65"),
+            ).pack(anchor="w", pady=(3, 0))
+        if fp:
+            ctk.CTkLabel(
+                inner, text=fp[:12], anchor="w",
+                font=ctk.CTkFont(size=9),
+                text_color=("gray55", "gray55"),
+            ).pack(anchor="w")
+
+        def _select(_e=None, sid=session_id):
+            self._chat_select_session(sid)
+
+        # Make the whole row clickable.
+        row.bind("<Button-1>", _select)
+        for widget in (inner, top, chip):
+            widget.bind("<Button-1>", _select)
+            for child in widget.winfo_children():
+                child.bind("<Button-1>", _select)
+
+    def _chat_build_conversation(self, session: dict | None,
+                                 messages: list[dict]) -> None:
+        scroll = self._chat_convo_scroll
+        if scroll is None:
+            return
+        for child in scroll.winfo_children():
+            child.destroy()
+
+        # Header
+        if session is not None:
+            peer_name = session.get("peer_name", "") or session.get("peer_id", "")[:12]
+            status = session.get("status", "closed")
+            online = bool(session.get("online", True))
+            suffix = T(_chat_status_key(status, online))
+            try:
+                self._chat_header_label.configure(text=f"{peer_name}  ·  {suffix}")
+            except Exception:
+                pass
+            try:
+                self._chat_close_btn.pack(side="right")
+            except Exception:
+                pass
+        else:
+            try:
+                self._chat_header_label.configure(text=T("chat.empty_no_session"))
+            except Exception:
+                pass
+            try:
+                self._chat_close_btn.pack_forget()
+            except Exception:
+                pass
+
+        # Enable/disable the input row
+        can_send = bool(session is not None and session.get("status") == "active")
+        for w in (self._chat_input, self._chat_send_btn, self._chat_attach_btn):
+            if w is not None:
+                try:
+                    w.configure(state="normal" if can_send else "disabled")
+                except Exception:
+                    pass
+
+        if session is None:
+            ctk.CTkLabel(
+                scroll, text="\U0001F4AC  " + T("chat.empty_no_session"),
+                font=ctk.CTkFont(size=13),
+                text_color=("gray50", "gray60"),
+            ).pack(anchor="center", pady=40)
+            return
+
+        session_id = session.get("session_id", "")
+
+        # Invite banner when a session is waiting on us
+        if session.get("status") == "invited":
+            self._chat_invite_banner(scroll, session, session_id)
+
+        # Transcript (last 200 entries)
+        if not messages:
+            ctk.CTkLabel(
+                scroll, text="…",
+                font=ctk.CTkFont(size=12),
+                text_color=("gray50", "gray60"),
+            ).pack(anchor="w", pady=8)
+        else:
+            for entry in messages[-200:]:
+                kind = entry.get("kind")
+                if kind == "system":
+                    self._chat_system_entry(scroll, entry)
+                elif kind == "file":
+                    self._chat_file_card(scroll, entry, session_id)
+                else:
+                    self._chat_text_bubble(scroll, entry)
+
+        # Scroll to the newest message.
+        try:
+            scroll._parent_canvas.yview_moveto(1.0)
+        except Exception:
+            pass
+
+    def _chat_text_bubble(self, parent, entry: dict) -> None:
+        outgoing = bool(entry.get("outgoing"))
+        text = entry.get("text", "") or ""
+        bubble = ctk.CTkFrame(
+            parent,
+            fg_color=("#0891B2", "#0E1328") if outgoing else ("gray90", "gray18"),
+            corner_radius=12,
+        )
+        bubble.pack(anchor="e" if outgoing else "w", pady=2, padx=8)
+        ctk.CTkLabel(
+            bubble, text=text, wraplength=500, justify="left",
+            font=ctk.CTkFont(size=13),
+            text_color=("#FFFFFF", "#EAF0FA") if outgoing else ("gray15", "gray85"),
+        ).pack(padx=10, pady=6)
+
+    def _chat_system_entry(self, parent, entry: dict) -> None:
+        key = entry.get("text_key", "")
+        try:
+            text = T(key, **entry.get("fmt", {})) if key else entry.get("text", "")
+        except Exception:
+            text = entry.get("text", "") or key
+        ctk.CTkLabel(
+            parent, text=text,
+            font=ctk.CTkFont(size=11, slant="italic"),
+            text_color=("gray50", "gray60"),
+        ).pack(anchor="center", pady=4, padx=20)
+
+    def _chat_file_card(self, parent, entry: dict, session_id: str) -> None:
+        outgoing = bool(entry.get("outgoing"))
+        name = entry.get("file_name", "") or "file"
+        size = human_size(entry.get("file_size", 0))
+        status = entry.get("status", "pending")
+        fraction = float(entry.get("fraction", 0.0) or 0.0)
+        saved_path = entry.get("saved_path", "") or ""
+        transfer_id = entry.get("transfer_id", "") or entry.get("entry_id", "")
+
+        card = ctk.CTkFrame(parent, fg_color=("gray90", "gray18"), corner_radius=10)
+        card.pack(anchor="w" if not outgoing else "e", fill="x", pady=3, padx=8)
+
+        header = ctk.CTkFrame(card, fg_color="transparent")
+        header.pack(fill="x", padx=10, pady=(8, 2))
+        ctk.CTkLabel(
+            header, text="\U0001F4C4  " + name,
+            anchor="w", font=ctk.CTkFont(size=13),
+        ).pack(side="left")
+        ctk.CTkLabel(
+            header, text=f"({size})",
+            anchor="w", font=ctk.CTkFont(size=11),
+            text_color=("gray50", "gray60"),
+        ).pack(side="left", padx=(6, 0))
+
+        direction = T("chat.file.sent") if outgoing else T("chat.file.received")
+        try:
+            status_text = T(f"chat.file.status.{self._chat_file_status_key(status)}")
+        except Exception:
+            status_text = status
+        ctk.CTkLabel(
+            card, text=f"{direction}  ·  {status_text}",
+            anchor="w", font=ctk.CTkFont(size=11),
+            text_color=("gray50", "gray60"),
+        ).pack(fill="x", padx=10)
+
+        # Progress bar while in flight
+        if status in ("await_accept", "sending"):
+            bar = ctk.CTkProgressBar(card, height=6)
+            bar.set(max(0.0, min(1.0, fraction)))
+            bar.pack(fill="x", padx=10, pady=4)
+
+        # Action buttons
+        btns = ctk.CTkFrame(card, fg_color="transparent")
+        btns.pack(fill="x", padx=8, pady=(2, 8))
+
+        if not outgoing and status == "await_accept" and session_id:
+            ctk.CTkButton(
+                btns, text=T("chat.accept"), width=64, height=24,
+                fg_color=ACCENT, hover_color=("#0EA5C4", "#4CE0F5"),
+                font=ctk.CTkFont(size=11),
+                command=lambda: self._chat_do_accept_file(session_id, transfer_id),
+            ).pack(side="left", padx=2)
+            ctk.CTkButton(
+                btns, text=T("chat.decline"), width=64, height=24,
+                fg_color="transparent", border_width=1,
+                text_color=("#E74C3C", "#C0392B"),
+                border_color=("#E74C3C", "#C0392B"),
+                hover_color=("#FADBD8", "#5B2C2C"),
+                font=ctk.CTkFont(size=11),
+                command=lambda: self._chat_do_decline_file(session_id, transfer_id),
+            ).pack(side="left", padx=2)
+        elif outgoing and status in ("await_accept", "sending") and session_id:
+            ctk.CTkButton(
+                btns, text=T("chat.cancel"), width=64, height=24,
+                fg_color="transparent", border_width=1,
+                text_color=("gray40", "gray70"),
+                border_color=("gray60", "gray50"),
+                hover_color=("gray85", "gray25"),
+                font=ctk.CTkFont(size=11),
+                command=lambda: self._chat_do_cancel_file(session_id, transfer_id),
+            ).pack(side="left", padx=2)
+        if status == "done" and saved_path:
+            ctk.CTkButton(
+                btns, text=T("chat.open_folder"), width=88, height=24,
+                fg_color=("gray85", "gray25"),
+                text_color=("gray20", "gray80"),
+                hover_color=("gray75", "gray35"),
+                font=ctk.CTkFont(size=11),
+                command=lambda p=saved_path: self._chat_open_saved_path(p),
+            ).pack(side="left", padx=2)
+
+    def _chat_invite_banner(self, parent, session: dict, session_id: str) -> None:
+        name = session.get("peer_name", "") or session.get("peer_id", "")[:12]
+        fp = session.get("fingerprint_short", "") or ""
+        banner = ctk.CTkFrame(parent, fg_color=("#FEF3C7", "#3A2E10"),
+                              corner_radius=10)
+        banner.pack(fill="x", padx=8, pady=6)
+
+        ctk.CTkLabel(
+            banner, text=T("chat.invite_banner_title", name=name),
+            anchor="w", font=ctk.CTkFont(size=13, weight="bold"),
+        ).pack(fill="x", padx=12, pady=(10, 2))
+        if fp:
+            ctk.CTkLabel(
+                banner, text=T("chat.invite_fingerprint", fingerprint=fp),
+                anchor="w", font=ctk.CTkFont(size=11),
+                text_color=("gray50", "gray60"),
+            ).pack(fill="x", padx=12)
+        ctk.CTkLabel(
+            banner, text=T("chat.invite_prompt"),
+            anchor="w", font=ctk.CTkFont(size=11),
+            text_color=("gray50", "gray60"),
+        ).pack(fill="x", padx=12, pady=(0, 6))
+
+        btns = ctk.CTkFrame(banner, fg_color="transparent")
+        btns.pack(fill="x", padx=10, pady=(0, 10))
+        ctk.CTkButton(
+            btns, text=T("chat.accept"), width=72, height=26,
+            fg_color=ACCENT, hover_color=("#0EA5C4", "#4CE0F5"),
+            command=lambda: self._chat_do_accept_invite(session_id),
+        ).pack(side="left", padx=2)
+        ctk.CTkButton(
+            btns, text=T("chat.decline"), width=72, height=26,
+            fg_color="transparent", border_width=1,
+            text_color=("#E74C3C", "#C0392B"),
+            border_color=("#E74C3C", "#C0392B"),
+            hover_color=("#FADBD8", "#5B2C2C"),
+            command=lambda: self._chat_do_decline_invite(session_id),
+        ).pack(side="left", padx=2)
+
+    # ── Chat actions ──────────────────────────────────────────────
+
+    def _chat_on_send(self) -> None:
+        if self._chat_input is None:
+            return
+        text = (self._chat_input.get() or "").strip()
+        sid = self._chat_selected_session_id
+        if not text or not sid or not self._chat_send_text:
+            return
+        try:
+            from internal.sync.nearby_chat import ChatManager as _CM
+            if len(text) > _CM.MAX_TEXT_LEN:
+                self._chat_show_hint(T("chat.err_message_too_long"))
+                return
+        except Exception:
+            pass
+        self._chat_input.delete(0, "end")
+        try:
+            ok = self._chat_send_text(sid, text)
+        except Exception:
+            logger.debug("chat send_text raised", exc_info=True)
+            ok = False
+        if not ok:
+            self._chat_show_hint(T("chat.err_message_too_long"))
+
+    def _chat_on_attach(self) -> None:
+        sid = self._chat_selected_session_id
+        if not sid or not self._chat_send_file:
+            return
+        try:
+            import tkinter.filedialog as _filedialog
+            path = _filedialog.askopenfilename(parent=self._window)
+        except Exception:
+            logger.debug("filedialog failed", exc_info=True)
+            return
+        if not path:
+            return
+        try:
+            import os as _os
+            from internal.sync.file_transfer import MAX_FILE_SIZE as _MAX
+            if _os.path.getsize(path) > _MAX:
+                self._chat_show_hint(T("chat.err_file_too_large"))
+                return
+        except OSError:
+            pass
+        except Exception:
+            logger.debug("file size check failed", exc_info=True)
+        try:
+            tid = self._chat_send_file(sid, path)
+        except Exception:
+            logger.debug("chat send_file raised", exc_info=True)
+            tid = None
+        if not tid:
+            self._chat_show_hint(T("chat.err_file_too_large"))
+
+    def _chat_on_close(self) -> None:
+        sid = self._chat_selected_session_id
+        if not sid:
+            return
+        if self._chat_close_session:
+            try:
+                self._chat_close_session(sid)
+            except Exception:
+                logger.debug("chat close_session raised", exc_info=True)
+        self._chat_selected_session_id = None
+        self._chat_state_key = None
+        self._refresh_chat()
+
+    def _chat_do_accept_invite(self, session_id: str) -> None:
+        if self._chat_accept_invite:
+            try:
+                self._chat_accept_invite(session_id)
+            except Exception:
+                logger.debug("chat accept_invite raised", exc_info=True)
+        self._chat_mark_selected_read()
+        self._refresh_chat()
+
+    def _chat_do_decline_invite(self, session_id: str) -> None:
+        if self._chat_decline_invite:
+            try:
+                self._chat_decline_invite(session_id)
+            except Exception:
+                logger.debug("chat decline_invite raised", exc_info=True)
+        self._refresh_chat()
+
+    def _chat_do_accept_file(self, session_id: str, transfer_id: str) -> None:
+        if self._chat_accept_file:
+            try:
+                self._chat_accept_file(session_id, transfer_id)
+            except Exception:
+                logger.debug("chat accept_file raised", exc_info=True)
+
+    def _chat_do_decline_file(self, session_id: str, transfer_id: str) -> None:
+        if self._chat_decline_file:
+            try:
+                self._chat_decline_file(session_id, transfer_id)
+            except Exception:
+                logger.debug("chat decline_file raised", exc_info=True)
+
+    def _chat_do_cancel_file(self, session_id: str, transfer_id: str) -> None:
+        if self._chat_cancel_file:
+            try:
+                self._chat_cancel_file(session_id, transfer_id)
+            except Exception:
+                logger.debug("chat cancel_file raised", exc_info=True)
+
+    def _chat_open_saved_path(self, path: str) -> None:
+        if not path:
+            return
+        import os as _os
+        import subprocess as _subprocess
+        try:
+            if sys.platform == "win32":
+                _os.startfile(path)  # type: ignore[attr-defined]
+            elif sys.platform == "darwin":
+                _subprocess.Popen(["open", path])
+            else:
+                _subprocess.Popen(["xdg-open", path])
+        except Exception:
+            logger.debug("Could not open chat file %s", path, exc_info=True)
+            try:
+                show_info(self._window, T("chat.title"), T("ui.open_failed_msg", path=path))
+            except Exception:
+                pass
+
+    # ═══════════════════════════════════════════════════════════════
     # Toggle handlers
     # ═══════════════════════════════════════════════════════════════
 
@@ -2926,6 +3751,59 @@ class DashboardWindow:
 
             self._copy_url_timer = self._root.after(2000, _reset_copy_label)
 
+    def _web_lan_ip(self) -> str:
+        """Return the cached web-card LAN IP, or ``''`` when stale/unknown."""
+        info = DashboardWindow._lan_ip_cache
+        if info and time.time() - info.get("fetched_at", 0) < 30.0:
+            return info["ip"]
+        return ""
+
+    def _ensure_web_lan_ip(self) -> None:
+        """Kick a background LAN-IP lookup when the cached value is stale.
+
+        Mirrors the ``_network_detect_worker`` pattern: probe off the UI
+        thread, backfill via ``root.after`` so widgets are only ever touched
+        on the main thread.  A 30s TTL means the 5s periodic refresh reuses
+        the cached IP instead of calling getaddrinfo on every tick.
+        """
+        now = time.time()
+        info = DashboardWindow._lan_ip_cache
+        if info and now - info.get("fetched_at", 0) < 30.0:
+            return  # fresh enough
+        if info and info.get("started"):
+            return  # a lookup is already in flight
+        info = dict(info or {})
+        info["started"] = True
+        DashboardWindow._lan_ip_cache = info
+
+        def _worker():
+            try:
+                from internal.web.server import WebServer
+                ip = WebServer._get_lan_ip()
+            except Exception:
+                ip = "127.0.0.1"
+            DashboardWindow._lan_ip_cache = {
+                "ip": ip, "fetched_at": time.time(), "started": False,
+            }
+            try:
+                self._root.after(0, self._apply_web_lan_ip)
+            except Exception:
+                pass
+
+        threading.Thread(target=_worker, daemon=True, name="web-lan-ip").start()
+
+    def _apply_web_lan_ip(self) -> None:
+        """Repaint the web card once a fresh LAN IP arrives (main thread).
+
+        Runs via ``root.after`` from a worker, so it can fire after the
+        dashboard window was destroyed — guard every widget touch.
+        """
+        try:
+            self._refresh_web_card()
+        except Exception:
+            logger.debug("Could not repaint web card with fresh LAN IP",
+                         exc_info=True)
+
     def _refresh_web_card(self):
         if self._web_card is None:
             return
@@ -2939,18 +3817,28 @@ class DashboardWindow:
             self._web_card.pack(fill="x", pady=(8, 10),
                                 before=self._activity_card)
 
-        from internal.web.server import WebServer
-        ip = WebServer._get_lan_ip()
         token = cfg.web_token or ""
         port = cfg.web_port
+        ip = self._web_lan_ip()
+        self._ensure_web_lan_ip()
+        if not ip:
+            # First lookup still in flight — keep the last known URL (or a
+            # neutral placeholder) and let _apply_web_lan_ip repaint the card
+            # once a real IP is known.
+            ip = getattr(self, "_web_last_ip", "")
+            if not ip:
+                self._web_url_label.configure(text=T("network.detecting"))
+                return
+        self._web_last_ip = ip
+
         url = f"http://{ip}:{port}?token={token}" if token else f"http://{ip}:{port}"
         display_url = url if len(url) <= 60 else url[:57] + "..."
         self._web_url_label.configure(text=display_url)
 
         # The QR image is expensive to regenerate (qrcode.make + LANCZOS
         # resize) — cache it and only rebuild when the token / IP / port
-        # actually changes. The LAN-IP lookup (getaddrinfo) still runs each
-        # slow refresh so IP changes are picked up, but never per-frame.
+        # actually changes.  The LAN-IP lookup (getaddrinfo) runs in the
+        # background (30 s TTL) so the UI thread never does DNS work.
         qr_key = (ip, token, port)
         if token:
             if qr_key != getattr(self, '_web_qr_key', None) or self._web_qr_image is None:

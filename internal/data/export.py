@@ -15,12 +15,38 @@ from typing import Union
 
 from internal.clipboard.history import ClipboardHistory
 from internal.clipboard.history_db import ClipboardHistoryDB
+from internal.i18n import T
 
 logger = logging.getLogger(__name__)
 
 _DEDUP_WINDOW = 5.0  # seconds
 
 _HistoryType = Union[ClipboardHistory, ClipboardHistoryDB]
+
+
+def _coerce_csv_float(value, default: float) -> float:
+    """Coerce a CSV cell to float.
+
+    An empty or missing cell falls back to *default*; a present but
+    non-numeric cell raises ValueError carrying the localized
+    invalid-content message instead of a bare ``could not convert`` error.
+    """
+    if value is None or (isinstance(value, str) and not value.strip()):
+        return default
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        raise ValueError(T("web.import_invalid_content")) from None
+
+
+def _coerce_csv_int(value, default: int) -> int:
+    """Coerce a CSV cell to int (same rules as :func:`_coerce_csv_float`)."""
+    if value is None or (isinstance(value, str) and not value.strip()):
+        return default
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        raise ValueError(T("web.import_invalid_content")) from None
 
 
 def _decode_types(entry: dict) -> dict:
@@ -61,7 +87,19 @@ def export_history_json(history: _HistoryType, filepath: str) -> int:
 
     out = Path(filepath)
     out.parent.mkdir(parents=True, exist_ok=True)
-    out.write_text(json.dumps(export_list, indent=2, ensure_ascii=False), encoding="utf-8")
+    payload = json.dumps(export_list, indent=2, ensure_ascii=False)
+    # Write to <name>.part and rename, so an interrupted export never leaves
+    # a truncated file at the final path that looks like a successful export.
+    part = out.with_name(out.name + ".part")
+    try:
+        part.write_text(payload, encoding="utf-8")
+        os.replace(part, out)
+    except Exception:
+        try:
+            part.unlink(missing_ok=True)
+        except OSError:
+            pass
+        raise
     # Clipboard content is sensitive; don't leave the export world-readable.
     try:
         os.chmod(out, 0o600)
@@ -136,23 +174,34 @@ def export_history_csv(history: _HistoryType, filepath: str) -> int:
     out = Path(filepath)
     out.parent.mkdir(parents=True, exist_ok=True)
 
-    with out.open("w", encoding="utf-8", newline="") as f:
-        writer = csv.DictWriter(
-            f,
-            fieldnames=["timestamp", "content_type", "text_preview",
-                        "source_device", "pinned", "paste_count"],
-            extrasaction="ignore",
-        )
-        writer.writeheader()
-        for entry in entries:
-            writer.writerow({
-                "timestamp": entry.get("timestamp", 0),
-                "content_type": entry.get("content_type", ""),
-                "text_preview": entry.get("text_preview", ""),
-                "source_device": entry.get("source_device", ""),
-                "pinned": entry.get("pinned", False),
-                "paste_count": entry.get("paste_count", 0),
-            })
+    # Write to <name>.part and rename: an interrupted CSV export must not
+    # leave a truncated file at the final path.
+    part = out.with_name(out.name + ".part")
+    try:
+        with part.open("w", encoding="utf-8", newline="") as f:
+            writer = csv.DictWriter(
+                f,
+                fieldnames=["timestamp", "content_type", "text_preview",
+                            "source_device", "pinned", "paste_count"],
+                extrasaction="ignore",
+            )
+            writer.writeheader()
+            for entry in entries:
+                writer.writerow({
+                    "timestamp": entry.get("timestamp", 0),
+                    "content_type": entry.get("content_type", ""),
+                    "text_preview": entry.get("text_preview", ""),
+                    "source_device": entry.get("source_device", ""),
+                    "pinned": entry.get("pinned", False),
+                    "paste_count": entry.get("paste_count", 0),
+                })
+        os.replace(part, out)
+    except Exception:
+        try:
+            part.unlink(missing_ok=True)
+        except OSError:
+            pass
+        raise
 
     # Clipboard content is sensitive; don't leave the export world-readable.
     try:
@@ -183,13 +232,13 @@ def import_history_csv(filepath: str, history: _HistoryType) -> int:
             if _is_duplicate(row, existing):
                 continue
             entry = {
-                "timestamp": float(row.get("timestamp", time.time())),
+                "timestamp": _coerce_csv_float(row.get("timestamp"), time.time()),
                 "content_type": row.get("content_type", "TEXT"),
                 "text_preview": row.get("text_preview", ""),
                 "types": {},
                 "source_device": row.get("source_device", ""),
                 "pinned": (row.get("pinned", "false").lower() == "true"),
-                "paste_count": int(row.get("paste_count", 0)),
+                "paste_count": _coerce_csv_int(row.get("paste_count"), 0),
             }
             with history._lock:
                 entry["entry_id"] = history._next_id

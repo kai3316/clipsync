@@ -6,6 +6,7 @@ fallback (used when a key is missing in the active locale).
 """
 
 import logging
+import sys
 from typing import Any
 
 from internal.version import __version__
@@ -134,7 +135,7 @@ _EN: dict[str, str] = {
     "ui.web_start_failed": "Failed to start Remote access on port {port}.\n\nAnother process may already be using this port, or the server failed to bind.\n\nTried ports: {lo} - {hi}",
     "ui.clipboard_unavailable": "Clipboard Unavailable",
     "ui.port_in_use": "Port Already in Use",
-    "ui.port_in_use_msg": "Port {port} is already in use by another process.\n\nThis usually means another instance is still running.\n\nRun this command to find and stop it:\n  lsof -i :{port}  &&  kill -9 <PID>\n\nClipSync will now exit.",
+    "ui.port_in_use_msg": "Port {port} is already in use by another process.\n\nThis usually means another instance is still running.\n\nRun this command to find and stop it:\n  {find_cmd}\n\nClipSync will now exit.",
     "ui.already_running": "Another instance is already running.",
     "ui.send_failed_msg": "Failed to send file:\n",
     "ui.export_failed_msg": "Failed to export log:\n",
@@ -407,6 +408,8 @@ _EN: dict[str, str] = {
     "tray.no_devices": "(no devices connected)",
     "tray.about_message": "ClipSync — Cross-platform clipboard sharing\nShare your clipboard between Windows and Mac in real time.",
     "tray.about_title": "About ClipSync",
+    "tray.failed_title": "System Tray Unavailable",
+    "tray.failed_msg": "The system tray could not be started, so the dashboard is the only interface. Re-run ClipSync to try the tray again.",
     # Settings window
     "settings_window.title": "ClipSync Settings",
     "settings_window.network_title": "Network Settings",
@@ -738,6 +741,56 @@ _EN: dict[str, str] = {
     "sync.paused": "Sync Paused",
     "ui.loading": "Loading...",
     "ui.load_failed": "Failed to load data",
+    # Nearby chat
+    "nav.nearby_chat": "\U0001F4AC  Nearby Chat",
+    "chat.title": "Nearby Chat",
+    "chat.subtitle": "Chat with devices on your LAN — paired or not.",
+    "chat.devices_header": "Devices",
+    "chat.sessions_header": "Sessions",
+    "chat.paired_tag": "Paired",
+    "chat.unpaired_tag": "Unpaired",
+    "chat.empty_no_devices": "No nearby devices found.\nEnable discovery and make sure devices share the same network.",
+    "chat.empty_no_session": "Select a device or a session to start chatting.",
+    "chat.status.inviting": "Inviting…",
+    "chat.status.pending": "Pending",
+    "chat.status.connected": "Connected",
+    "chat.status.declined": "Declined",
+    "chat.status.offline": "Offline",
+    "chat.status.closed": "Closed",
+    "chat.invite_banner_title": "{name} invited you to chat",
+    "chat.invite_fingerprint": "Fingerprint: {fingerprint}",
+    "chat.invite_prompt": "Accept to start chatting (compare the fingerprint first).",
+    "chat.invite_greeting": "Greeting: {greeting}",
+    "chat.accept": "Accept",
+    "chat.decline": "Decline",
+    "chat.send": "Send",
+    "chat.attach": "Attach file",
+    "chat.cancel": "Cancel",
+    "chat.open_folder": "Open folder",
+    "chat.start": "Chat",
+    "chat.close": "Close chat",
+    "chat.connecting": "Connecting to {name}…",
+    "chat.input_placeholder": "Type a message and press Enter…",
+    "chat.file.sent": "Sent",
+    "chat.file.received": "Received",
+    "chat.file.status.pending": "Pending",
+    "chat.file.status.await_accept": "Waiting for the other side…",
+    "chat.file.status.sending": "Sending…",
+    "chat.file.status.done": "Done",
+    "chat.file.status.failed": "Failed",
+    "chat.file.status.declined": "Declined",
+    "chat.file.status.cancelled": "Cancelled",
+    "chat.system.peer_offline": "Peer went offline.",
+    "chat.system.session_closed_by_peer": "The peer closed this session.",
+    "chat.system.file_declined": "{name} was declined.",
+    "chat.system.file_cancelled": "{name} was cancelled.",
+    "chat.err_connect_timeout": "Could not connect to {name}. The device may be offline.",
+    "chat.err_file_too_large": "This file is too large to send via chat.",
+    "chat.err_message_too_long": "Message is too long.",
+    "chat.notify_invite_title": "Chat Invitation",
+    "chat.notify_invite_msg": "{name} ({fingerprint}) invites you to chat.",
+    "chat.notify_message_title": "Nearby Chat",
+    "chat.notify_message_msg": "{name}: {text}",
 }
 
 _ZH: dict[str, str] = {
@@ -850,7 +903,7 @@ _ZH: dict[str, str] = {
     "ui.web_start_failed": "无法在端口 {port} 启动 远程访问。\n\n可能另一个进程已占用该端口，或服务器绑定失败。\n\n尝试过的端口：{lo} - {hi}",
     "ui.clipboard_unavailable": "剪贴板不可用",
     "ui.port_in_use": "端口已被占用",
-    "ui.port_in_use_msg": "端口 {port} 已被另一个进程占用。\n\n这通常意味着另一个实例正在运行。\n\n运行以下命令查找并停止它：\n  lsof -i :{port}  &&  kill -9 <PID>\n\nClipSync 即将退出。",
+    "ui.port_in_use_msg": "端口 {port} 已被另一个进程占用。\n\n这通常意味着另一个实例正在运行。\n\n运行以下命令查找并停止它：\n  {find_cmd}\n\nClipSync 即将退出。",
     "ui.already_running": "另一个实例已在运行。",
     "ui.send_failed_msg": "发送文件失败：\n",
     "ui.export_failed_msg": "导出日志失败：\n",
@@ -1108,6 +1161,8 @@ _ZH: dict[str, str] = {
     "tray.no_devices": "（无已连接设备）",
     "tray.about_message": "ClipSync — 跨平台剪贴板共享\n在 Windows 和 Mac 之间实时共享剪贴板。",
     "tray.about_title": "关于 ClipSync",
+    "tray.failed_title": "系统托盘不可用",
+    "tray.failed_msg": "系统托盘无法启动，面板将是唯一界面。请重新运行 ClipSync 以再次尝试托盘。",
     "settings_window.title": "ClipSync 设置",
     "settings_window.network_title": "网络设置",
     "settings_window.save_network": "保存网络设置",
@@ -1438,6 +1493,56 @@ _ZH: dict[str, str] = {
     "sync.paused": "同步暂停",
     "ui.loading": "加载中...",
     "ui.load_failed": "加载数据失败",
+    # 附近聊天
+    "nav.nearby_chat": "\U0001F4AC  附近聊天",
+    "chat.title": "附近聊天",
+    "chat.subtitle": "与局域网中的设备聊天——无论是否已配对。",
+    "chat.devices_header": "附近设备",
+    "chat.sessions_header": "会话",
+    "chat.paired_tag": "已配对",
+    "chat.unpaired_tag": "未配对",
+    "chat.empty_no_devices": "未发现附近设备。\n请开启设备发现，并确保设备在同一网络。",
+    "chat.empty_no_session": "选择设备或会话开始聊天。",
+    "chat.status.inviting": "邀请中…",
+    "chat.status.pending": "待确认",
+    "chat.status.connected": "聊天中",
+    "chat.status.declined": "已拒绝",
+    "chat.status.offline": "离线",
+    "chat.status.closed": "已关闭",
+    "chat.invite_banner_title": "{name} 邀请你聊天",
+    "chat.invite_fingerprint": "指纹：{fingerprint}",
+    "chat.invite_prompt": "接受以开始聊天（请先核对指纹）。",
+    "chat.invite_greeting": "问候：{greeting}",
+    "chat.accept": "接受",
+    "chat.decline": "拒绝",
+    "chat.send": "发送",
+    "chat.attach": "发送文件",
+    "chat.cancel": "取消",
+    "chat.open_folder": "打开位置",
+    "chat.start": "聊天",
+    "chat.close": "关闭聊天",
+    "chat.connecting": "正在连接 {name}…",
+    "chat.input_placeholder": "输入消息，按 Enter 发送…",
+    "chat.file.sent": "已发送",
+    "chat.file.received": "已接收",
+    "chat.file.status.pending": "待处理",
+    "chat.file.status.await_accept": "等待对方接受…",
+    "chat.file.status.sending": "发送中…",
+    "chat.file.status.done": "已完成",
+    "chat.file.status.failed": "失败",
+    "chat.file.status.declined": "已拒绝",
+    "chat.file.status.cancelled": "已取消",
+    "chat.system.peer_offline": "对方已离线。",
+    "chat.system.session_closed_by_peer": "对方已关闭会话。",
+    "chat.system.file_declined": "{name} 已被拒绝。",
+    "chat.system.file_cancelled": "{name} 已取消。",
+    "chat.err_connect_timeout": "无法连接到 {name}，设备可能已离线。",
+    "chat.err_file_too_large": "文件过大，无法通过聊天发送。",
+    "chat.err_message_too_long": "消息过长。",
+    "chat.notify_invite_title": "聊天邀请",
+    "chat.notify_invite_msg": "{name}（{fingerprint}）邀请你聊天。",
+    "chat.notify_message_title": "附近聊天",
+    "chat.notify_message_msg": "{name}：{text}",
 }
 
 LOCALES: dict[str, dict[str, str]] = {
@@ -1446,6 +1551,18 @@ LOCALES: dict[str, dict[str, str]] = {
 }
 
 DEFAULT_LOCALE = "en"
+
+
+def _port_in_use_command(port) -> str:
+    """Return the platform-appropriate command to find/kill the process on a port.
+
+    The generic Unix ``lsof`` recipe is meaningless to a Windows user, so the
+    ``ui.port_in_use_msg`` message substitutes the matching native command.
+    """
+    if sys.platform.startswith("win"):
+        return f"netstat -ano | findstr :{port}"
+    return f"lsof -i :{port}  &&  kill -9 <PID>"
+
 
 # ---------------------------------------------------------------------------
 # Public API
@@ -1490,6 +1607,12 @@ class LocaleManager:
         text = table.get(key)
         if text is None:
             text = _EN.get(key, key)
+        if key == "ui.port_in_use_msg" and "find_cmd" not in fmt:
+            # The port-in-use hint must teach the user the native command for
+            # their platform (lsof on Unix, netstat on Windows), not a fixed
+            # string baked into the locale table.
+            fmt = dict(fmt)
+            fmt["find_cmd"] = _port_in_use_command(fmt.get("port", ""))
         if fmt:
             try:
                 text = text.format(**fmt)

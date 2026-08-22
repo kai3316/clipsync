@@ -266,10 +266,8 @@ class SystrayApp:
             logger.exception("System tray failed to start or crashed")
             try:
                 notification_mgr.show(
-                    "ClipSync",
-                    "The system tray could not be started, so the dashboard "
-                    "is the only interface. Re-run ClipSync to try the tray "
-                    "again.",
+                    T("tray.failed_title"),
+                    T("tray.failed_msg"),
                 )
             except Exception:
                 logger.debug("Tray-failure notification could not be shown",

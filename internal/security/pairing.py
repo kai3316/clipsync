@@ -280,6 +280,13 @@ class PairingManager:
             expected, _timestamp = pending
             now = time.time()
 
+            # An expired request can still be showing in the UI, but its code
+            # must no longer be confirmable — mirror get_pending_pairings().
+            if now - _timestamp > PAIRING_TIMEOUT:
+                self._pending_pairings.pop(peer_id, None)
+                logger.info("Pairing request for %s expired before confirmation", peer_id)
+                return False
+
             # Sliding window rate limit: drop attempts older than the window
             attempts = self._pairing_attempts.get(peer_id, [])
             attempts = [t for t in attempts if now - t < PAIRING_ATTEMPT_WINDOW]

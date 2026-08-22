@@ -2,6 +2,50 @@
 
 All notable changes to ClipSync are documented in this file.
 
+## [1.0.23] — 2026-08-23
+
+### Core reliability
+- **Re-copying recent content no longer gets silently swallowed.** The dedup ring is now time-bounded (90s TTL): past the window, a repeated hash is treated as a deliberate new copy and goes into history and broadcasts again.
+- **Pause-sync race closed.** A capture already in flight when the user pauses no longer reaches history or the network — two post-capture re-checks honour the pause before any write or broadcast.
+- **Bare email addresses are no longer redacted by default.** The sensitive-content filter treated any email as a credential and replaced it with `[FILTERED]`, corrupting ordinary clips (signatures, pasted correspondence) on the receiving side. Emails are now an opt-in "email" category; real credential patterns (tokens, passwords, keys) stay default-on.
+- **Corrupt history database self-heals.** A broken `clipboard_history.db` is quarantined (`*.corrupt-<ts>`) and a fresh database started, instead of silently degrading to memory-only history that vanishes on restart.
+
+### Transport & protocol
+- **Rejection probe no longer breaks the frame stream or stalls 2s.** The post-handshake check now uses a brief timed probe and replays any bytes that weren't actually the reject marker — outbound connects no longer pay a flat 2s and no longer eat the first application frame ("connected then instantly dropped").
+- **Anonymous TLS connections are reaped after 60s.** A LAN device that completes TLS but never sends an identity frame can no longer hold threads/fds forever and block legitimate pairing.
+- **App-layer encryption fails closed.** When encryption is enabled, unencrypted frames are dropped instead of passed through, and repeated decrypt failures close the connection so reconnect rebuilds key state.
+- **mDNS instance names are unique.** A short id-hash suffix prevents two devices sharing an 8-char prefix from colliding on one mDNS name; registration failure now retries under an altered name.
+- **Peer-supplied names are sanitized** (control chars stripped, 64-char cap) before reaching logs, notifications or the UI.
+- **Decoder no longer crashes the receive loop** on valid-but-non-object JSON payloads or deeply nested frames.
+- **Device rename no longer reports a ghost offline;** `confirm_pairing` enforces pairing-code expiry; `forget_peer` stops every matching connection, not just the last; a `FILE_COMPLETE` wait timeout is reported as `error_timeout` instead of a misleading "peer offline".
+
+### Web & mobile
+- **Regenerating the web token no longer lands the dashboard on the "link expired" dead end** — the new token is echoed to the authenticated caller so the page can rewrite its URL before reloading.
+- **Multi-select "Add to favorites" keeps the full clip** (was silently truncated to a 200-char preview) and inserts incrementally instead of delete-and-reinsert-whole-table (which could roll back favorites edited elsewhere mid-batch).
+- **Settings API validates numeric ranges server-side** (port 1024–65535, history limits, debounce, …) so a bad LAN request can't leave the network layer unable to start.
+- **WebSocket handshake sends the snapshot before subscribing** — a racing broadcast can no longer be clobbered by the stale snapshot's wholesale replace.
+- **Transfer history shows specific failure reasons** (`error_timeout` / `error_internal`) and the completion toast no longer celebrates failed or cancelled transfers.
+- **Mobile history renders BMP/TIFF image clips with the correct MIME** instead of breaking as `image/png`.
+- **"Remote access" off now gates DELETE/PATCH too** (it previously only guarded GET/POST), so LAN clients really are cut off.
+- **Dashboard inline language follows the app locale**, not the browser's.
+- **Discovery no longer hides a genuinely new device** whose name merely extends a shorter known name.
+
+### Desktop UX
+- **Webview transfer/retrust/peer-pick dialogs no longer block the Tk main thread for up to 120s** — they run off the worker thread and marshal results back via `after(0, …)`; the send-URL flow had a fourth instance of the same bug.
+- **A corrupt config file is archived** (`config.json.corrupt-<ts>`) and fields validated instead of silently resetting device identity and overwriting the file; hotkey parsing defends against non-string values.
+- **macOS hotkeys require an exact modifier match** — no more accidental paste when an extra modifier is held.
+- **Backups restore paired peers** (public keys re-exchanged on reconnect); **export and backup writes are atomic** (`.part` + replace); backups validate `history.json` before packaging.
+- **Dashboard LAN-IP lookup moved off the UI thread** (30s cache) — the periodic 5s stutter is gone.
+- **QR / phone-guide dialogs release their grab on close**, so other windows stay clickable.
+- **"Port in use" shows the right command per platform** (`netstat -ano | findstr :{port}` on Windows, `lsof` elsewhere).
+- **CSV import tolerates empty/non-numeric cells**; the language dropdown shows names (English / 简体中文); Linux sound fallback honours exit codes; the tray-startup-failure notice is localized.
+
+### Nearby Chat（附近聊天）
+- **全新「附近聊天」功能：与同一局域网内的设备直接通信，无需预先配对。** 在主页左侧边栏新增「💬 附近聊天」入口（沿用现有核心功能风格），可对已发现但未配对的设备发起聊天、收发文字与文件；已配对设备同样支持聊天，并断线自动重连。
+- **严格的双向同意模型，未接受邀请不泄露任何内容。** 对方必须显式接受邀请后才能开始；未配对设备弹窗展示短证书指纹供线下核对，已配对设备自动接受；邀请按设备限速（5 次/5 分钟）且同时最多 3 个待处理邀请，文字按会话防洪（30 条/10 秒）。
+- **文件传输复用现有分块通道**（256KB 分块、2GiB 上限），每个收件文件单独确认；文件名消毒、路径穿越拦截、重名自动改名、磁盘写入字节与预期大小双重校验。
+- **会话全生命周期护栏：** 心跳保活 + 离线检测（45s ping / 150s 静默判离线）、互邀确定性收敛、并发上限、死会话自动清扫、取消配对即关闭会话；断线/失败状态在会话中可见，不再静默丢失。
+
 ## [1.0.22] — 2026-08-23
 
 ### Fixed

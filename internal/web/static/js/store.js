@@ -45,10 +45,17 @@
       }).length;
     }),
 
-    // True when the browser UI language is Chinese. Used for the few inline
-    // bilingual strings that have no locale entry (e.g. wizard "Next").
+    // True when the app's configured language is Chinese. Used for the few
+    // inline bilingual strings that have no locale entry (e.g. wizard "Next").
+    // Follows the server-injected locale (like the phone pages do), not the
+    // browser's — otherwise an English app on a Chinese system mixes
+    // languages mid-sentence.
     isZh: computed(function () {
-      return (navigator.language || '').toLowerCase().indexOf('zh') === 0;
+      var locale = String(window.__I18N_LOCALE__ || '').toLowerCase();
+      if (!locale) {
+        locale = (navigator.language || '').toLowerCase();
+      }
+      return locale.indexOf('zh') === 0;
     }),
 
     // The phone-connect URL shown on onboarding step 3:

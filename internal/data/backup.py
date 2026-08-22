@@ -14,7 +14,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from internal.config.config import Config
+from internal.config.config import Config, PeerInfo
 
 if TYPE_CHECKING:
     from internal.clipboard.history import ClipboardHistory
@@ -227,6 +227,15 @@ def create_backup(
         # --- history.json ---
         hist_path = str(tmpdir / "history.json")
         export_history_json(history, hist_path)
+        # A backup must never ship a truncated/unparseable history.json — an
+        # interrupted or buggy export would otherwise produce an archive whose
+        # history silently fails to restore.  Verify it round-trips before
+        # packaging and abort the backup otherwise.
+        try:
+            json.loads(Path(hist_path).read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError) as exc:
+            logger.error("Backup aborted: history export is not valid JSON: %s", exc)
+            raise
 
         # --- favorites.json ---
         # Try SQLite export first, fall back to copying legacy JSON file
@@ -240,9 +249,21 @@ def create_backup(
                 shutil.copy2(str(leg_path), str(fav_json_path))
 
         # --- Create zip ---
-        with zipfile.ZipFile(str(zip_path), "w", zipfile.ZIP_DEFLATED) as zf:
-            for child in tmpdir.iterdir():
-                zf.write(str(child), arcname=child.name)
+        # Write to <name>.part then rename, so an interrupted backup never
+        # leaves a truncated zip at the final path that list_backups would
+        # present as a real, restorable backup.
+        zip_part = zip_path.with_name(zip_path.name + ".part")
+        try:
+            with zipfile.ZipFile(str(zip_part), "w", zipfile.ZIP_DEFLATED) as zf:
+                for child in tmpdir.iterdir():
+                    zf.write(str(child), arcname=child.name)
+            os.replace(zip_part, zip_path)
+        except Exception:
+            try:
+                zip_part.unlink(missing_ok=True)
+            except OSError:
+                pass
+            raise
 
     # The archive contains plaintext clipboard history and config data; keep
     # it private (not world-readable).
@@ -436,6 +457,10 @@ _APPLY_SCHEMA: dict[str, tuple] = {
     "web_history_limit": ("int", 1, 100000),
 }
 
+# "peers" is handled separately (structured list-of-dicts, merged into
+# cfg.peers) rather than through the scalar setattr path above.
+_PEER_SCHEMA_KEY = "peers"
+
 # Sentinel returned by _validate_config_value when a field must be skipped.
 _SKIP = object()
 
@@ -475,17 +500,83 @@ def _validate_config_value(value: object, rule: tuple):
     return _SKIP
 
 
+def _validate_peer_entries(value: object) -> list[dict] | None:
+    """Structurally validate the peers list from a backup.
+
+    Returns a list of clean peer dicts, or None when *value* is not a list at
+    all.  Individual malformed entries are dropped; ``public_key_pem`` is
+    deliberately NOT carried over — pinned keys are re-exchanged on reconnect,
+    and importing a stale pin would only produce cert-mismatch lockouts.
+    """
+    if not isinstance(value, list):
+        return None
+    peers: list[dict] = []
+    seen: set[str] = set()
+    for entry in value:
+        if not isinstance(entry, dict):
+            logger.warning("Backup restore skipped non-object peer entry")
+            continue
+        device_id = entry.get("device_id")
+        device_name = entry.get("device_name")
+        if not isinstance(device_id, str) or not device_id:
+            logger.warning("Backup restore skipped peer with invalid device_id")
+            continue
+        if not isinstance(device_name, str):
+            logger.warning(
+                "Backup restore skipped peer %s with invalid device_name",
+                device_id,
+            )
+            continue
+        paired = entry.get("paired", False)
+        if not isinstance(paired, bool):
+            paired = False
+        notes = entry.get("notes", "")
+        if not isinstance(notes, str):
+            notes = ""
+        if device_id in seen:
+            continue
+        seen.add(device_id)
+        peers.append({
+            "device_id": device_id,
+            "device_name": device_name,
+            "paired": paired,
+            "notes": notes,
+        })
+    return peers
+
+
 def _apply_config(data: dict, cfg: Config) -> None:
     """Apply validated config fields from backup data.
 
     Every field in *data* is type- and range-checked against ``_APPLY_SCHEMA``
-    before being written onto *cfg*.  Unknown fields and fields whose value has
-    the wrong type are skipped with a warning; numeric fields that are out of
-    range are clamped to the nearest boundary.  A malformed backup can
-    therefore never put the Config into an unusable state or crash a transport
-    server on the next start.
+    before being written onto *cfg*.  The ``peers`` list is structurally
+    validated and merged into ``cfg.peers`` (existing entries are refreshed,
+    new ones added).  Unknown fields and fields whose value has the wrong type
+    are skipped with a warning; numeric fields that are out of range are
+    clamped to the nearest boundary.  A malformed backup can therefore never
+    put the Config into an unusable state or crash a transport server on the
+    next start.
     """
     for key, value in data.items():
+        if key == _PEER_SCHEMA_KEY:
+            peers = _validate_peer_entries(value)
+            if peers is None:
+                logger.warning(
+                    "Backup restore skipped invalid peers payload (%s)",
+                    type(value).__name__,
+                )
+                continue
+            for p in peers:
+                existing = cfg.peers.get(p["device_id"])
+                if existing is not None:
+                    existing.device_name = p["device_name"]
+                    existing.paired = p["paired"]
+                    # Keep a user-assigned note unless the backup carries one.
+                    if p["notes"]:
+                        existing.notes = p["notes"]
+                else:
+                    cfg.peers[p["device_id"]] = PeerInfo(**p)
+            continue
         if key not in _APPLY_SCHEMA or not hasattr(cfg, key):
             continue
         validated = _validate_config_value(value, _APPLY_SCHEMA[key])

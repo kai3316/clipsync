@@ -38,6 +38,26 @@ def _strip_ascii_ellipsis(text: str) -> str:
     return text
 
 
+# Friendly names shown in the language dropdown.  The config still stores the
+# locale code ("en", "zh-CN"); only the displayed label is human-readable.
+_LANGUAGE_DISPLAY_NAMES: dict[str, str] = {
+    "en": "English",
+    "zh-CN": "简体中文",
+}
+
+
+def _language_display_map() -> dict[str, str]:
+    """Map each available locale code to its display name.
+
+    Unknown locales (if any are added later) fall back to their raw code so
+    the dropdown never shows an empty/incorrect label.
+    """
+    return {
+        code: _LANGUAGE_DISPLAY_NAMES.get(code, code)
+        for code in available_locales()
+    }
+
+
 # ── Window-geometry persistence ───────────────────────────────────────
 # The settings window is DESTROYED on every close on every platform, so its
 # size/position is otherwise lost each time.  These best-effort helpers store
@@ -1242,14 +1262,17 @@ class SettingsWindow:
             width=120, height=32,
         ).pack(side="right")
 
-        # Language selector
+        # Language selector — shows friendly display names ("English",
+        # "简体中文") while the config stores the locale code ("en", "zh-CN").
         r = _row(card4)
         ctk.CTkLabel(r, text=T("settings.language"), anchor="w",
                      font=ctk.CTkFont(size=12)).pack(side="left")
-        self._language_var = tk.StringVar(value=cfg.language)
+        _lang_display = _language_display_map()
+        self._language_var = tk.StringVar(
+            value=_lang_display.get(cfg.language, cfg.language))
         ctk.CTkOptionMenu(
             r, variable=self._language_var,
-            values=available_locales(),
+            values=list(_lang_display.values()),
             width=120, height=32,
         ).pack(side="right")
 
@@ -1379,7 +1402,11 @@ class SettingsWindow:
         cfg.max_reconnect_attempts = max_reconnect
         cfg.transfer_timeout = timeout
         cfg.log_level = self._log_level_var.get()
-        cfg.language = self._language_var.get()
+        # The dropdown holds a display name; translate it back to a locale code.
+        _lang_display = _language_display_map()
+        _code_by_name = {name: code for code, name in _lang_display.items()}
+        chosen = self._language_var.get()
+        cfg.language = _code_by_name.get(chosen, chosen)
         cfg.notifications_enabled = self._notifications_var.get()
         # Apply the notification toggle live — no restart required.
         notification_mgr.enabled = cfg.notifications_enabled

@@ -43,10 +43,19 @@ def capture_with_retry(reader, max_rounds: int = 7):
     or two (so we stop early instead of spawning 7 subprocess-heavy
     reads for every text copy), while images and rich formats get the
     full retry window because apps write those in multiple batches.
+
+    Stability is judged by full-content hash, but hashing is skipped on
+    any round whose total payload size differs from the previous round:
+    different sizes cannot hash equal, so the (potentially multi-MB)
+    hash is deferred until the size settles.  The previous snapshot is
+    hashed lazily, once, when the first size-stable round needs it —
+    stabilization is detected on exactly the same round as with
+    hash-every-round, just without the redundant hashes.
     """
     max_rounds = min(max_rounds, len(RETRY_DELAYS_MS))
     content = None
     prev_hash = None
+    prev_size = -1
     for i in range(max_rounds):
         delay_ms = RETRY_DELAYS_MS[i]
         if delay_ms > 0:
@@ -57,12 +66,21 @@ def capture_with_retry(reader, max_rounds: int = 7):
             # Empty read — keep retrying for the current round budget.
             continue
 
-        from internal.clipboard.dedup import content_hash
-        new_hash = content_hash(new_content)
+        # Cheap pre-check: a size change proves the content changed, so
+        # skip the expensive hash entirely for that round.
+        new_size = sum(len(data) for data in new_content.types.values())
+        if new_size == prev_size:
+            from internal.clipboard.dedup import content_hash
+            if prev_hash is None and content is not None:
+                prev_hash = content_hash(content)  # deferred from an earlier round
+            new_hash = content_hash(new_content)
+        else:
+            new_hash = None
+        prev_size = new_size
 
         if not _is_rich(new_content):
             # Text-only content: stop after a quick stability check.
-            if content is not None and new_hash == prev_hash:
+            if new_hash is not None and content is not None and new_hash == prev_hash:
                 logger.debug("Clipboard text stabilized after %d round(s)", i + 1)
                 return content
             if i + 1 >= _TEXT_ONLY_ROUNDS:
@@ -72,7 +90,7 @@ def capture_with_retry(reader, max_rounds: int = 7):
             continue
 
         # Rich content: keep retrying until it stabilizes.
-        if new_hash == prev_hash and content is not None:
+        if new_hash is not None and content is not None and new_hash == prev_hash:
             logger.debug("Clipboard content stabilized after %d round(s)", i + 1)
             return content
 

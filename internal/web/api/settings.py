@@ -65,6 +65,22 @@ _SAFE_FIELDS = {
     "hotkeys_enabled",
 }
 
+# Numeric fields the API accepts, with inclusive (lo, hi) bounds.  The web
+# frontend validates its own forms, but this endpoint is reachable from any
+# LAN client holding the token — a nonsense value (web_port = 1,
+# sync_debounce = 99) gets persisted and can leave the network layer
+# unable to start after a restart, so validate on the server too.
+_RANGE_LIMITS = {
+    "web_port": (1024, 65535),
+    "port": (1024, 65535),
+    "web_history_limit": (1, 500),
+    "history_max_entries": (10, 10000),
+    "sync_debounce": (0.05, 10.0),
+    "clipboard_poll_interval": (0.1, 60.0),
+    "max_reconnect_attempts": (0, 100),
+    "transfer_timeout": (5, 3600),
+}
+
 # Fields that the client is allowed to modify
 _MUTABLE_FIELDS = {
     "device_name",
@@ -125,13 +141,18 @@ _SPECIAL_ACTIONS = {
 }
 
 # Keys the host application may return from ``on_settings_change`` that are
-# safe to echo back to the web client.  Secrets — notably ``token`` — are
-# deliberately absent, so a regenerate/clear action can never leak a
-# credential through this API (see the module docstring).
+# safe to echo back to the web client.  Secrets — notably the encryption
+# password and its verification hash — are deliberately absent.
+# ``web_token`` IS included deliberately: only an authenticated caller can
+# reach this endpoint, and after a regenerate the dashboard needs the new
+# token to rewrite its own URL before reloading — without it the page
+# reloads against the old (now invalid) token and lands on the
+# "link expired" dead end instead of staying usable.
 _SAFE_RESPONSE_KEYS = {
     "password_set",
     "ok",
     "token_updated",
+    "web_token",
     "translate_key_set",
 }
 
@@ -232,6 +253,18 @@ def update_settings(body, cfg, on_settings_change=None, enc_mgr=None):
                     field, type(old_val).__name__, type(new_val).__name__,
                 )
                 continue
+            limits = _RANGE_LIMITS.get(field)
+            if limits is not None:
+                try:
+                    in_range = limits[0] <= float(new_val) <= limits[1]
+                except (TypeError, ValueError):
+                    in_range = False
+                if not in_range:
+                    logger.warning(
+                        "Settings update rejected for %s: value %r outside "
+                        "%s..%s", field, new_val, limits[0], limits[1],
+                    )
+                    continue
             setattr(cfg, field, new_val)
             updated[field] = new_val
             logger.info("Settings updated: %s = %s", field, new_val)

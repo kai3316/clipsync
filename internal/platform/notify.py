@@ -176,12 +176,16 @@ class NotificationManager:
                     capture_output=True, timeout=5)
             else:
                 # Linux: try the freedesktop complete sound via a few tools.
+                # Only stop at the first tool that actually succeeds — a tool
+                # may exist yet fail (missing sound file, no audio server), in
+                # which case the next one should get a chance.
                 for cmd in (["paplay", "/usr/share/sounds/freedesktop/stereo/complete.oga"],
                             ["canberra-gtk-play", "-i", "complete"],
                             ["aplay", "/usr/share/sounds/alsa/Front_Center.wav"]):
                     try:
-                        subprocess.run(cmd, capture_output=True, timeout=5)
-                        break
+                        r = subprocess.run(cmd, capture_output=True, timeout=5)
+                        if r.returncode == 0:
+                            break
                     except Exception:
                         continue
         except Exception:

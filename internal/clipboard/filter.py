@@ -112,16 +112,23 @@ class ContentFilter:
             ("credit_card", _CREDIT_CARD_RE),
             ("ssn", _SSN_RE),
             ("api_key", _API_KEY_RE),
-            ("api_key", _EMAIL_RE),  # bare emails grouped under credentials
+            # Bare emails are their own opt-in category, NOT part of the
+            # default set: everyday text (signatures, pasted correspondence)
+            # is full of addresses, and redacting them by default corrupted
+            # far more legitimate clips on the receiving end than it
+            # protected anything.  Enable "email" explicitly to opt in.
+            ("email", _EMAIL_RE),
             ("private_key", _PRIVATE_KEY_RE),
             ("password", _PASSWORD_RE),
         ]
         # Redaction is ON by default: None (unconfigured) enables every
-        # category, so fresh installs filter sensitive content out of the box.
-        # A non-empty list enables just that subset; an EMPTY list means the
-        # user explicitly disabled redaction (distinct from the None default).
+        # category except the opt-in "email" one, so fresh installs filter
+        # genuinely sensitive content out of the box.  A non-empty list
+        # enables just that subset; an EMPTY list means the user explicitly
+        # disabled redaction (distinct from the None default).
         if enabled_categories is None:
-            self._enabled = list(dict.fromkeys(c for c, _ in self._all_patterns))
+            self._enabled = [c for c in dict.fromkeys(c for c, _ in self._all_patterns)
+                             if c != "email"]
         else:
             self._enabled = list(enabled_categories)
 
@@ -132,8 +139,9 @@ class ContentFilter:
     @enabled_categories.setter
     def enabled_categories(self, categories: list[str] | None) -> None:
         if categories is None:
-            # Not configured → all categories enabled (default).
-            self._enabled = list(dict.fromkeys(c for c, _ in self._all_patterns))
+            # Not configured → every category except opt-in "email" (default).
+            self._enabled = [c for c in dict.fromkeys(c for c, _ in self._all_patterns)
+                             if c != "email"]
         else:
             self._enabled = list(categories)
 

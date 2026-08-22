@@ -702,6 +702,25 @@ class _ClipboardReader(ClipboardReader):
 # Clipboard writer
 # ---------------------------------------------------------------------------
 
+# Peer-controlled strings (URLs, file paths) must never be interpolated into
+# osascript source: a crafted value could close the string literal and run
+# arbitrary AppleScript.  They travel through the process argv into the
+# script's 'on run argv' handler instead.  Each argv value carries a marker
+# prefix that the AppleScript strips again, so a value beginning with "-"
+# can never be parsed as an osascript option.
+_ARGV_MARK = "#"
+
+
+def _osascript_argv_cmd(script: str, *values: str) -> list[str]:
+    """Build an ``osascript`` command that passes *values* via 'on run argv'.
+
+    The script source is static; every peer-supplied value rides in the
+    trailing arguments (AppleScript sees them as the ``argv`` list) and is
+    never concatenated into the source.
+    """
+    return ["osascript", "-e", script, *(_ARGV_MARK + v for v in values)]
+
+
 class _ClipboardWriter(ClipboardWriter):
     def write(self, content: ClipboardContent):
         # Try atomic multi-format write via ctypes NSPasteboard bridge.
@@ -906,6 +925,11 @@ class _ClipboardWriter(ClipboardWriter):
         Expects newline-separated UTF-8 paths. Writes both
         public.file-url and the legacy NSFilenamesPboardType so
         Finder and older apps can pick up the file references.
+
+        Paths are passed as osascript argv (see _osascript_argv_cmd),
+        never interpolated into the script source -- a hostile filename
+        containing quotes could otherwise inject AppleScript, and even a
+        benign filename with a quote character would break the write.
         """
         try:
             paths = [p.strip() for p in data.decode("utf-8").split("\n") if p.strip()]
@@ -914,27 +938,40 @@ class _ClipboardWriter(ClipboardWriter):
         if not paths:
             return
 
-        # Use osascript to create a file URL list on the pasteboard
-        path_list = ", ".join(f'"{p}"' for p in paths)
+        # 'on run argv' receives the trailing command-line values as a
+        # list of strings; strip the marker added by _osascript_argv_cmd
+        # from each entry to recover the original path.
         script = (
-            f'set theFiles to {{{path_list}}}\n'
+            'on run argv\n'
+            'if class of argv is not list then set argv to {argv}\n'
+            'set theFiles to {}\n'
+            'repeat with rawPath in argv\n'
+            '    set end of theFiles to text 2 thru -1 of (rawPath as text)\n'
+            'end repeat\n'
             'set pb to current application\'s NSPasteboard\'s generalPasteboard()\n'
             'pb\'s clearContents()\n'
             'repeat with f in theFiles\n'
             '    set fileURL to current application\'s NSURL\'s fileURLWithPath:f\n'
             '    pb\'s writeObjects:{fileURL}\n'
             'end repeat\n'
+            'end run'
         )
         try:
             subprocess.run(
-                ["osascript", "-e", script],
+                _osascript_argv_cmd(script, *paths),
                 capture_output=True, timeout=3,
             )
         except Exception:
             logger.debug("osascript file write failed", exc_info=True)
 
     def _set_url(self, data: bytes):
-        """Write a URL to the pasteboard as public.url."""
+        """Write a URL to the pasteboard as public.url.
+
+        The URL is passed as osascript argv (see _osascript_argv_cmd),
+        never interpolated into the script source -- a hostile URL could
+        otherwise inject AppleScript, and one containing a quote would
+        break the write.
+        """
         try:
             url = data.decode("utf-8").strip()
             if not url:
@@ -942,16 +979,22 @@ class _ClipboardWriter(ClipboardWriter):
         except Exception:
             return
 
-        # Use osascript to set both public.url and public.utf8-plain-text
+        # Use osascript to set both public.url and public.utf8-plain-text.
+        # 'on run argv' receives the trailing command-line value as a list
+        # of strings; strip the marker added by _osascript_argv_cmd from it.
         script = (
-            f'set the clipboard to "{url}"\n'
-            f'set pb to current application\'s NSPasteboard\'s generalPasteboard()\n'
-            f'set nsStr to current application\'s NSString\'s stringWithString:"{url}"\n'
-            f'pb\'s setString:nsStr forType:"public.url"\n'
+            'on run argv\n'
+            'if class of argv is not list then set argv to {argv}\n'
+            'set theURL to text 2 thru -1 of ((item 1 of argv) as text)\n'
+            'set the clipboard to theURL\n'
+            'set pb to current application\'s NSPasteboard\'s generalPasteboard()\n'
+            'set nsStr to current application\'s NSString\'s stringWithString:theURL\n'
+            'pb\'s setString:nsStr forType:"public.url"\n'
+            'end run'
         )
         try:
             subprocess.run(
-                ["osascript", "-e", script],
+                _osascript_argv_cmd(script, url),
                 capture_output=True, timeout=3,
             )
         except Exception:
@@ -1067,7 +1110,11 @@ class DarwinClipboardMonitor(ClipboardMonitor):
                 raw = _pb_data_for_type(b"public.tiff") or _pb_data_for_type(b"public.png")
                 if raw:
                     return hashlib.sha256(raw).hexdigest()
-                return hashlib.sha256(str(time.time()).encode()).hexdigest()
+                # Image flagged present but bytes unreadable (some HEIC /
+                # custom pasteboards): return a stable sentinel instead of a
+                # time-based hash, which would re-fire the change callback on
+                # every poll and keep the capture pipeline spinning.
+                return "unreadable-image"
         except Exception:
             pass
         return ""

@@ -319,6 +319,14 @@ class HotkeyManager:
             "Alt+Space"        -> (MOD_ALT, VK_SPACE)
             "Ctrl+Shift+Space" -> (MOD_CONTROL | MOD_SHIFT, VK_SPACE)
         """
+        # Config files are untrusted input: a non-string shortcut (e.g. a
+        # hand-edited config.json with `"hotkeys": {"paste_1": 1}`) must be
+        # rejected here so the hotkey is simply not registered instead of
+        # raising AttributeError inside the caller's loop.
+        if not isinstance(shortcut, str):
+            raise ValueError(
+                f"Shortcut must be a string, got {type(shortcut).__name__}"
+            )
         parts = [p.strip() for p in shortcut.split("+")]
         if len(parts) < 2:
             raise ValueError("Shortcut must have at least one modifier and one key")
@@ -707,6 +715,18 @@ elif _platform() == "macos":
         #   kCGEventFlagMaskCommand   = 0x00000010
         #   kCGEventFlagMaskAlternate = 0x00080000
 
+        # Flags that ride along on ordinary key events but are not one of the
+        # named modifiers a shortcut can require.  They must be stripped
+        # before comparing, so the comparison can demand an exact match.
+        _kCGEventFlagMaskNonCoalesced = 0x00000100
+        _kCGEventFlagMaskAlphaShift = 0x00010000  # CapsLock "alpha shift" lock
+        _kCGEventFlagMaskNumericPad = 0x00200000
+        _kCGEventFlagMaskIrrelevant = (
+            _kCGEventFlagMaskNonCoalesced
+            | _kCGEventFlagMaskAlphaShift
+            | _kCGEventFlagMaskNumericPad
+        )
+
         def _to_mac_cg_flags(internal_mods: int) -> int:
             """Translate internal modifier flags to CGEventFlags."""
             result = 0
@@ -795,15 +815,19 @@ elif _platform() == "macos":
 
             keycode = _cg.CGEventGetIntegerValueField(event, _kCGKeyboardEventKeycode)
             flags = _cg.CGEventGetFlags(event)
+            # Strip the non-modifier ride-along bits, then demand an exact
+            # match against the registered modifiers.  A subset check would
+            # fire Ctrl+V even when the user pressed Cmd+Ctrl+V — silently
+            # rewriting the clipboard while they meant some other app's
+            # shortcut.
+            clean_flags = flags & ~_kCGEventFlagMaskIrrelevant
 
             with mgr._lock:
                 hotkeys_snapshot = dict(mgr._hotkeys)
 
             for hotkey_id, (internal_mods, vk_code, _cb) in hotkeys_snapshot.items():
                 expected_flags = _to_mac_cg_flags(internal_mods)
-                # All required modifier flags must be present.
-                # Extra flags (CapsLock, NumLock) are ignored.
-                if (flags & expected_flags) == expected_flags and keycode == vk_code:
+                if clean_flags == expected_flags and keycode == vk_code:
                     mgr._fire(hotkey_id)
                     break  # Only fire the first matching hotkey
 

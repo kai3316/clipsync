@@ -62,6 +62,9 @@ def get_history(history, cfg, limit_str=None, offset_str=None):
         result.append({
             "timestamp": entry.get("timestamp"),
             "content_type": entry.get("content_type", "TEXT"),
+            # Wire-level image format hint ("png"/"bmp"/"tiff"); clients
+            # use it to pick the right MIME when rendering IMAGE entries.
+            "image_fmt": entry.get("image_fmt", ""),
             "text_preview": entry.get("text_preview", ""),
             "source_device": sid,
             "source_name": device_names.get(sid, sid),
@@ -97,6 +100,9 @@ def get_history_item(query_params, history, cfg):
     result = {
         "timestamp": entry.get("timestamp"),
         "content_type": entry.get("content_type", "TEXT"),
+        # Wire-level image format hint ("png"/"bmp"/"tiff"); clients
+        # use it to pick the right MIME when rendering IMAGE entries.
+        "image_fmt": entry.get("image_fmt", ""),
         "text_preview": entry.get("text_preview", ""),
         "types": entry.get("types", {}),
         "source_device": sid,
@@ -286,11 +292,17 @@ def batch_favorite(body, history):
     """Add multiple history entries to favorites at once.
 
     Expects: {"entry_ids": [...], "group": ""}
+
+    Inserts each favorite incrementally (mirroring add_favorite) instead of
+    load-modify-save: the old path snapshotted the table, then deleted and
+    re-inserted everything — a favorite added or edited by another tab or
+    the desktop UI during the batch was silently rolled back.
     """
+    import base64
     import time
     import uuid
 
-    from internal.web.api.favorites import _load_favorites, _save_favorites
+    from internal.web.api.favorites import _ensure_db, _get_conn, _maybe_migrate
 
     try:
         data = json.loads(body.decode("utf-8"))
@@ -303,25 +315,53 @@ def batch_favorite(body, history):
 
     group = data.get("group", "").strip()
 
-    favorites = _load_favorites()
-    count = 0
-    for entry_id in entry_ids:
-        _, entry = history.find_by_id(entry_id)
-        if entry is not None:
-            preview = entry.get("text_preview", "")
-            fav_entry = {
-                "id": uuid.uuid4().hex[:12],
-                "title": preview[:50] if preview else "(empty)",
-                "content": preview if preview else "",
-                "group": group,
-                "created": time.time(),
-            }
-            favorites.insert(0, fav_entry)
-            count += 1
+    _ensure_db()
+    _maybe_migrate()
 
-    _save_favorites(favorites)
-    logger.info("Batch favorite: added %d items", count)
-    return {"ok": True, "count": count}, 200
+    conn = _get_conn()
+    added = []
+    try:
+        # Append after the current max position so batch insertion preserves
+        # selection order and never fights drag-reorder positions.
+        row = conn.execute(
+            "SELECT COALESCE(MAX(position), -1) FROM favorites"
+        ).fetchone()
+        next_position = (row[0] + 1) if row else 0
+        for entry_id in entry_ids:
+            _, entry = history.find_by_id(entry_id)
+            if entry is None:
+                continue
+            # Store the FULL text, not the 200-char preview: text_preview is
+            # truncated at ingest, and silently favouriting a cut-down clip
+            # lost content the user expected to keep.
+            types = entry.get("types") or {}
+            text_b64 = types.get("TEXT", "") or ""
+            full_text = ""
+            if text_b64:
+                try:
+                    full_text = base64.b64decode(text_b64).decode("utf-8", errors="replace")
+                except Exception:
+                    full_text = ""
+            content = full_text or entry.get("text_preview", "") or ""
+            preview = full_text or entry.get("text_preview", "")
+            title = (preview[:50] if preview else "(empty)")
+            fav_id = uuid.uuid4().hex[:12]
+            conn.execute(
+                "INSERT INTO favorites (id, title, content, \"group\", position, created) "
+                "VALUES (?, ?, ?, ?, ?, ?)",
+                (fav_id, title, content, group, next_position, time.time()),
+            )
+            next_position += 1
+            added.append(fav_id)
+        conn.commit()
+    except Exception as exc:
+        logger.error("Batch favorite failed: %s", exc)
+        return {"ok": False, "error": "database error"}, 500
+    finally:
+        conn.close()
+
+    logger.info("Batch favorite: added %d items", len(added))
+    return {"ok": True, "count": len(added)}, 200
 
 
 def paste_rich(body, history, on_reset_dedup=None):

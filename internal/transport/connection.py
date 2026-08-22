@@ -24,7 +24,7 @@ from pathlib import Path
 from cryptography import x509
 from cryptography.x509.oid import NameOID
 
-from internal.protocol.codec import PAIRING_MSG_TYPES, decode_message
+from internal.protocol.codec import CHAT_MSG_TYPES, PAIRING_MSG_TYPES, decode_message
 from internal.security.encryption import is_encrypted
 from internal.security.pairing import CertificateChangedError, PairingManager, fingerprint_pem
 
@@ -41,6 +41,13 @@ KEEPALIVE_IDLE = 30  # TCP keepalive: idle seconds before probes start
 KEEPALIVE_INTERVAL = 10  # TCP keepalive: seconds between probes
 KEEPALIVE_COUNT = 6  # TCP keepalive: failed probes before declaring the connection dead
 
+# Total lifetime for unauthenticated ("anonymous") incoming connections.
+# They never sent an identity frame, so they can never carry sync traffic —
+# without this cap a LAN device could hold threads/file-descriptors hostage
+# with silent TLS connections (they pass health checks: healthy TCP keeps
+# SO_ERROR clear).
+ANON_CONN_MAX_LIFE = 60
+
 # Rejection frame sent after identity exchange when the accepting side
 # refuses the connection (peer in _rejected_peer_ids).  The connecting
 # side reads this before creating a PeerConnection and knows not to
@@ -48,11 +55,23 @@ KEEPALIVE_COUNT = 6  # TCP keepalive: failed probes before declaring the connect
 _REJECT_MARKER = b"\xff\xff\xff\xffRJCT"
 
 
+def _sanitize_peer_str(value: str, max_len: int = 64) -> str:
+    """Strip control characters and cap length of peer-supplied strings.
+
+    Names from mDNS instance names and certificate CN/OU fields are fully
+    attacker-controlled on a LAN and flow into log lines, OS notifications
+    and UI lists — keep them to sane printable text.
+    """
+    cleaned = "".join(ch for ch in value if ch.isprintable())
+    return cleaned[:max_len]
+
+
 class PeerConnection:
     """Represents a TLS connection to a single peer."""
 
     def __init__(self, device_id: str, device_name: str, sock: socket.socket,
-                 peer_fingerprint: str = "", enc_mgr=None, pairing_mgr=None):
+                 peer_fingerprint: str = "", enc_mgr=None, pairing_mgr=None,
+                 pending_recv: bytes = b""):
         self.device_id = device_id
         self.device_name = device_name
         self._sock = sock
@@ -66,7 +85,18 @@ class PeerConnection:
         self._enc_mgr = enc_mgr
         self._pairing_mgr = pairing_mgr
         self._last_recv_time = time.monotonic()
+        self.created_at = time.monotonic()
+        self._rejected_by_peer = False
         self._auth_failures = 0
+        # Consecutive frames that arrived in an unexpected form while app-layer
+        # encryption is enabled (undecryptable or plaintext) — enough of them
+        # means the session's key state is broken, so the connection is closed
+        # and the normal reconnect machinery takes over.
+        self._frame_failures = 0
+        # Bytes consumed by the post-handshake rejection probe that turned
+        # out not to be a rejection marker — replayed by _recv_exact so the
+        # first application frame stays intact.
+        self._pending_recv = pending_recv
         self._enable_keepalive()
 
     def set_on_message(self, callback: Callable):
@@ -117,7 +147,7 @@ class PeerConnection:
         try:
             if self._enc_mgr and self._peer_fingerprint:
                 data = self._enc_mgr.encrypt_frame(data, self._peer_fingerprint)
-                logger.info(
+                logger.debug(
                     "[%s] App-layer encrypted frame payload (%d bytes on wire)",
                     self.device_name, len(data),
                 )
@@ -203,6 +233,16 @@ class PeerConnection:
                     break
                 frame_len = struct.unpack(">I", header)[0]
                 if frame_len == 0 or frame_len > MAX_FRAME_SIZE:
+                    # A rejected peer's marker can arrive after the short
+                    # handshake probe gave up (congested LAN).  Recognize it
+                    # here so the disconnect path clears the saved address
+                    # instead of reconnecting into an endless reject loop.
+                    if frame_len == 0xFFFFFFFF:
+                        tail = self._recv_exact(len(b"RJCT"))
+                        if tail == b"RJCT":
+                            self._rejected_by_peer = True
+                            end_reason = "rejected by peer"
+                            break
                     end_reason = f"invalid frame size: {frame_len}"
                     break
 
@@ -220,14 +260,22 @@ class PeerConnection:
                             self.device_name, len(pt),
                         )
                         payload = pt
+                        self._frame_failures = 0
                     elif is_encrypted(payload):
                         # Auth tag mismatch — fail closed: skip the frame instead
                         # of feeding the encrypted bytes to decode_message.
                         self._auth_failures += 1
+                        self._frame_failures += 1
                         logger.warning(
                             "[%s] App-layer decrypt FAILED — auth tag mismatch! "
                             "Possible tampering or wrong password.", self.device_name,
                         )
+                        if self._frame_failures >= 5:
+                            end_reason = (
+                                "repeated app-layer decrypt failures "
+                                "(wrong key state or tampering)"
+                            )
+                            break
                         if self._auth_failures >= 3:
                             logger.error(
                                 "[%s] repeated auth failures (%d) — peer may be "
@@ -236,10 +284,22 @@ class PeerConnection:
                             )
                         continue
                     else:
+                        # Encrypted mode + plaintext frame: fail closed.  A peer
+                        # that suddenly sends unencrypted frames either lost its
+                        # key state (e.g. re-paired on one side only) or the
+                        # stream is being tampered with — acting on that data
+                        # would be unsafe, and enough of them means the session
+                        # is broken, so close it and let reconnect rebuild state.
+                        self._frame_failures += 1
                         logger.warning(
-                            "[%s] Received unencrypted frame (%d bytes) — passing through",
-                            self.device_name, len(payload),
+                            "[%s] Dropped unencrypted frame (%d bytes) while "
+                            "encryption is enabled (%d consecutive)",
+                            self.device_name, len(payload), self._frame_failures,
                         )
+                        if self._frame_failures >= 5:
+                            end_reason = "repeated unexpected unencrypted frames"
+                            break
+                        continue
                 else:
                     logger.debug(
                         "[%s] Received frame (%d bytes) — no enc_mgr, passing through",
@@ -257,8 +317,14 @@ class PeerConnection:
                         # Pairing lifecycle messages must pass through so a peer
                         # can confirm / reject / unpair even before it is paired
                         # — that is exactly how the two-sided handshake completes.
-                        # Every other app frame from an unpaired peer is dropped.
-                        if getattr(msg, "msg_type", "clipboard") not in PAIRING_MSG_TYPES:
+                        # Nearby-chat messages also pass: they are consent-gated
+                        # at the application layer (the receiving user must
+                        # explicitly accept each chat invitation before any
+                        # content flows). Every other app frame from an unpaired
+                        # peer is dropped.
+                        if getattr(msg, "msg_type", "clipboard") not in (
+                            PAIRING_MSG_TYPES | CHAT_MSG_TYPES
+                        ):
                             logger.warning(
                                 "[%s] dropping %s frame from unpaired peer (device_id=%s)",
                                 self.device_name, getattr(msg, "msg_type", "clipboard"),
@@ -285,6 +351,13 @@ class PeerConnection:
 
     def _recv_exact(self, n: int) -> bytes | None:
         buf = bytearray()
+        # Replay any bytes the rejection probe pushed back before touching
+        # the socket again.
+        if self._pending_recv:
+            take = min(n - len(buf), len(self._pending_recv))
+            buf.extend(self._pending_recv[:take])
+            self._pending_recv = self._pending_recv[take:]
+            self._last_recv_time = time.monotonic()
         while len(buf) < n:
             try:
                 chunk = self._sock.recv(n - len(buf))
@@ -498,26 +571,59 @@ class TransportManager:
         except Exception:
             pass
 
-    @staticmethod
-    def _check_rejection(sock: ssl.SSLSocket, timeout: float = 2.0) -> bool:
-        """Check if the server sent a rejection marker after identity exchange.
+    def _check_rejection(self, sock: ssl.SSLSocket, timeout: float = 0.25,
+                         max_wait: float = 1.0) -> tuple[bool, bytes]:
+        """Check whether the server sent the application-level rejection
+        marker right after its identity frame.
 
-        Returns True if the peer rejected this connection.
+        Returns ``(rejected, leftover_bytes)`` where *leftover_bytes* holds
+        anything read during the probe that was NOT part of a rejection —
+        the caller must hand it to the new PeerConnection so the first
+        application frame stays intact.
+
+        The marker only ever arrives on the active-rejection path, so the
+        common case is *no bytes at all*: the probe must be brief (the old
+        implementation blocked a flat 2 s on every outbound connect) and
+        must not consume stream bytes.  A frame header starts with a zero
+        length byte while the marker starts with ``\\xff``, so a partial
+        marker can never be mistaken for frame data and vice versa.
         """
         prev_timeout = sock.gettimeout()
-        sock.settimeout(timeout)
+        deadline = time.monotonic() + max_wait
+        data = b""
         try:
-            data = b""
             while len(data) < len(_REJECT_MARKER):
-                chunk = sock.recv(len(_REJECT_MARKER) - len(data))
-                if not chunk:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
                     break
+                try:
+                    sock.settimeout(min(timeout, remaining))
+                    chunk = sock.recv(len(_REJECT_MARKER) - len(data))
+                except TimeoutError:
+                    if data and _REJECT_MARKER.startswith(data):
+                        continue  # possible torn marker — keep probing
+                    break
+                if not chunk:
+                    break  # remote closed mid-probe
                 data += chunk
-            return data == _REJECT_MARKER
+                if data == _REJECT_MARKER:
+                    return True, b""
+                if not _REJECT_MARKER.startswith(data):
+                    break  # application data — definitely not a rejection
         except Exception:
-            return False
+            pass
         finally:
-            sock.settimeout(prev_timeout)
+            try:
+                sock.settimeout(prev_timeout)
+            except Exception:
+                pass
+        if data and _REJECT_MARKER.startswith(data):
+            # A torn marker after the whole wait budget is unusable as frame
+            # data either way; drop it rather than desync the frame stream.
+            logger.debug("[%s] discarding %d-byte partial reject marker",
+                         self._device_name, len(data))
+            return False, b""
+        return False, data
 
     def start_server(self):
         self._cleanup_stale_scratch()
@@ -642,8 +748,12 @@ class TransportManager:
 
                 # Check if the server rejected us at the application level
                 # (e.g. we were forgotten by this peer).  The server sends
-                # a rejection marker after its identity frame.
-                if self._check_rejection(ssl_sock):
+                # a rejection marker after its identity frame.  The probe is
+                # brief when there is no rejection; anything it consumes that
+                # isn't the marker is replayed into the connection below so
+                # the first application frame stays intact.
+                rejected, probe_leftover = self._check_rejection(ssl_sock)
+                if rejected:
                     logger.info(
                         "[%s] peer explicitly rejected this connection — "
                         "clearing saved address to prevent auto-reconnect",
@@ -663,7 +773,7 @@ class TransportManager:
                     try:
                         cn_attrs = peer_cert.subject.get_attributes_for_oid(NameOID.COMMON_NAME)
                         if cn_attrs:
-                            real_peer_id = cn_attrs[0].value
+                            real_peer_id = _sanitize_peer_str(cn_attrs[0].value)
                     except Exception:
                         pass
 
@@ -691,7 +801,8 @@ class TransportManager:
 
                 conn = PeerConnection(real_peer_id, peer_name, ssl_sock,
                                       peer_fingerprint=peer_fp, enc_mgr=self._enc_mgr,
-                                      pairing_mgr=self._pairing_mgr)
+                                      pairing_mgr=self._pairing_mgr,
+                                      pending_recv=probe_leftover)
                 conn.set_on_message(self._on_peer_message)
                 conn.set_on_disconnect(self._on_peer_disconnected)
                 conn.start()
@@ -923,30 +1034,51 @@ class TransportManager:
                         ids_to_reject.add(pid)
 
             # Purge every collected ID from all tracking structures
-            timer_to_cancel = None
-            conn_to_stop = None
+            timers_to_cancel = []
+            conns_to_stop = []
             for pid in ids_to_reject:
                 self._rejected_peer_ids.add(pid)
                 self._peer_addresses.pop(pid, None)
                 self._reconnect_attempts.pop(pid, None)
                 t = self._reconnect_timers.pop(pid, None)
                 if t:
-                    timer_to_cancel = t
+                    timers_to_cancel.append(t)
                 c = self._peers.pop(pid, None)
                 if c:
-                    conn_to_stop = c
+                    conns_to_stop.append(c)
                 self._hash_to_real_id.pop(pid, None)
 
-        if timer_to_cancel:
-            timer_to_cancel.cancel()
-        if conn_to_stop:
-            logger.info("[%s] forget: manual disconnect", peer_id[:12])
-            conn_to_stop.set_on_disconnect(None)
-            conn_to_stop.stop()
+        for t in timers_to_cancel:
+            t.cancel()
+        if conns_to_stop:
+            logger.info("[%s] forget: manual disconnect (%d connection(s))",
+                        peer_id[:12], len(conns_to_stop))
+            for conn_to_stop in conns_to_stop:
+                conn_to_stop.set_on_disconnect(None)
+                conn_to_stop.stop()
 
     def get_connected_peers(self) -> list[str]:
         with self._lock:
             return list(self._peers.keys())
+
+    def get_peer_fingerprint(self, peer_id: str) -> str:
+        """Return the full fingerprint of a connected peer, or '' if unknown.
+
+        The fingerprint is captured from the peer's certificate during the
+        TLS identity exchange; the nearby-chat UI surfaces its short form so
+        users can visually confirm who they are talking to.
+        """
+        with self._lock:
+            conn = self._peers.get(peer_id)
+            if conn is not None:
+                return conn.peer_fingerprint or ""
+            # Discovery uses hashed ids; resolve to the real id first.
+            real_id = self._hash_to_real_id.get(peer_id)
+            if real_id:
+                conn = self._peers.get(real_id)
+                if conn is not None:
+                    return conn.peer_fingerprint or ""
+        return ""
 
     def get_resolved_hashes(self) -> dict[str, str]:
         """Return mapping of hashed mDNS peer_id → real device_id.
@@ -1009,6 +1141,20 @@ class TransportManager:
                     peer_id[:12], hex(id(conn)) if conn else "N/A",
                 )
                 del self._peers[peer_id]
+        # A peer that explicitly rejected this connection (forgotten/removed)
+        # must not be reconnected to — clear the saved address and stop the
+        # connect/reject/reconnect loop.
+        if conn is not None and getattr(conn, "_rejected_by_peer", False):
+            logger.info(
+                "[%s] peer rejected this connection — clearing saved address, "
+                "no auto-reconnect",
+                peer_id[:12],
+            )
+            with self._lock:
+                self._peer_addresses.pop(peer_id, None)
+                self._reconnect_attempts.pop(peer_id, None)
+                self._rejected_peer_ids.add(peer_id)
+            return
         # Only auto-reconnect to paired peers. Unpaired connections
         # (during pairing) should be user-initiated to avoid a
         # bidirectional reconnect race that tears down connections
@@ -1124,6 +1270,24 @@ class TransportManager:
                 with self._lock:
                     peers = list(self._peers.items())
                 for peer_id, conn in peers:
+                    # Unauthenticated ("anonymous") connections must not live
+                    # forever: they never sent an identity frame, so they can
+                    # never carry sync traffic — reap them once past their
+                    # lifetime so silent TLS connections can't exhaust
+                    # threads/fds and block legitimate peers.
+                    if peer_id.startswith("__anon__"):
+                        if time.monotonic() - conn.created_at > ANON_CONN_MAX_LIFE:
+                            logger.info(
+                                "[__anon__] connection from %s exceeded %ds "
+                                "lifetime without identity — closing",
+                                peer_id[len("__anon__"):][:21], int(ANON_CONN_MAX_LIFE),
+                            )
+                            conn.set_on_disconnect(None)
+                            conn.stop()
+                            with self._lock:
+                                if self._peers.get(peer_id) is conn:
+                                    self._peers.pop(peer_id, None)
+                        continue
                     if not conn.health_check():
                         logger.warning(
                             "[%s] health check FAILED — disconnecting", peer_id[:12],
@@ -1198,14 +1362,14 @@ class TransportManager:
                     try:
                         cn_attrs = peer_cert.subject.get_attributes_for_oid(NameOID.COMMON_NAME)
                         if cn_attrs:
-                            peer_id = cn_attrs[0].value
+                            peer_id = _sanitize_peer_str(cn_attrs[0].value)
                     except Exception:
                         pass
 
                     try:
                         ou_attrs = peer_cert.subject.get_attributes_for_oid(NameOID.ORGANIZATIONAL_UNIT_NAME)
                         if ou_attrs:
-                            peer_name = ou_attrs[0].value
+                            peer_name = _sanitize_peer_str(ou_attrs[0].value)
                     except Exception:
                         pass
 

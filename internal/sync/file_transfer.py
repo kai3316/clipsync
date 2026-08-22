@@ -1301,8 +1301,11 @@ class FileTransferManager:
             logger.warning(
                 "File transfer %s timed out waiting for FILE_COMPLETE", transfer_id[:8],
             )
+            # This is a timeout, not a dropped connection -- report it with
+            # the timeout reason so the UI shows "timed out" instead of
+            # claiming the peer went offline.
             if self._on_transfer_complete is not None:
-                self._on_transfer_complete(transfer_id, False, False, "peer_offline")
+                self._on_transfer_complete(transfer_id, False, False, "error_timeout")
 
     # ------------------------------------------------------------------
     # Query

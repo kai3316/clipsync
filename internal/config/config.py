@@ -13,6 +13,7 @@ import tempfile
 import threading
 import uuid
 from dataclasses import dataclass, field
+from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -186,6 +187,126 @@ def _cleanup_stale_temps():
         pass
 
 
+# Per-field type rules applied when loading config.json.  A hand-edited or
+# partially corrupted file must degrade field-by-field (skip the bad value,
+# keep the default) instead of resetting the whole identity because one value
+# has the wrong type.  Rule shapes mirror backup.py's _APPLY_SCHEMA:
+#   "str"      any string
+#   "bool"     only a Python bool
+#   "int"      Python int (bool rejected)
+#   "float"    int or float (bool rejected), coerced to float
+#   "strlist"  list of strings, or None (the filter_enabled_categories
+#              sentinel meaning "all enabled")
+#   "hotkeys"  dict mapping shortcut-id strings to shortcut strings
+_FIELD_RULES: dict[str, tuple] = {
+    "device_id": ("str",),
+    "device_name": ("str",),
+    "port": ("int",),
+    "service_type": ("str",),
+    "sync_enabled": ("bool",),
+    "auto_start": ("bool",),
+    "filter_enabled_categories": ("strlist",),
+    "relay_url": ("str",),
+    "private_key_pem": ("str",),
+    "certificate_pem": ("str",),
+    "history_max_entries": ("int",),
+    "file_receive_dir": ("str",),
+    "sync_debounce": ("float",),
+    "clipboard_poll_interval": ("float",),
+    "max_reconnect_attempts": ("int",),
+    "transfer_timeout": ("float",),
+    "log_level": ("str",),
+    "notifications_enabled": ("bool",),
+    "notify_device_connect": ("bool",),
+    "notify_transfer": ("bool",),
+    "notify_pairing": ("bool",),
+    "notify_sync": ("bool",),
+    "encryption_enabled": ("bool",),
+    "encryption_password_hash": ("str",),
+    "appearance_mode": ("str",),
+    "language": ("str",),
+    "language_chosen": ("bool",),
+    "paste_to_top": ("bool",),
+    "low_memory_mode": ("bool",),
+    "retry_capture_enabled": ("bool",),
+    "dedup_method": ("str",),
+    "app_filter_enabled": ("bool",),
+    "app_filter_mode": ("str",),
+    "app_filter_list": ("strlist",),
+    "source_tracking_enabled": ("bool",),
+    "ui_backend": ("str",),
+    "ui_animation_enabled": ("bool",),
+    "sound_enabled": ("bool",),
+    "favorites_path": ("str",),
+    "data_dir": ("str",),
+    "web_enabled": ("bool",),
+    "web_port": ("int",),
+    "web_token": ("str",),
+    "web_history_limit": ("int",),
+    "translate_url": ("str",),
+    "translate_api_key": ("str",),
+    "hotkeys": ("hotkeys",),
+    "hotkeys_enabled": ("bool",),
+}
+
+# Sentinel returned by _validate_field when a value must be skipped.
+_SKIP_FIELD = object()
+
+
+def _validate_field(key: str, value: object):
+    """Return the validated value for *key*, or ``_SKIP_FIELD``.
+
+    Never raises; an invalid value simply leaves the Config default in place.
+    """
+    rule = _FIELD_RULES.get(key)
+    if rule is None:
+        return value  # not in the schema — caller's explicit list governs
+    kind = rule[0]
+    if kind == "str":
+        return value if isinstance(value, str) else _SKIP_FIELD
+    if kind == "bool":
+        return value if isinstance(value, bool) else _SKIP_FIELD
+    if kind == "int":
+        if not isinstance(value, int) or isinstance(value, bool):
+            return _SKIP_FIELD
+        return value
+    if kind == "float":
+        if not isinstance(value, (int, float)) or isinstance(value, bool):
+            return _SKIP_FIELD
+        return float(value)
+    if kind == "strlist":
+        if value is None:
+            return None
+        if not isinstance(value, list) or not all(isinstance(i, str) for i in value):
+            return _SKIP_FIELD
+        return value
+    if kind == "hotkeys":
+        if not isinstance(value, dict):
+            return _SKIP_FIELD
+        if not all(isinstance(k, str) and isinstance(v, str)
+                   for k, v in value.items()):
+            return _SKIP_FIELD
+        return value
+    return _SKIP_FIELD
+
+
+def _archive_corrupt_config(path: Path) -> None:
+    """Preserve an unreadable config.json before degrading to defaults.
+
+    A fresh Config has a brand-new device id / private key / empty pairing
+    table, and the next save() overwrites the file — without this rename the
+    old identity would be gone for good.  The archived copy gives the user a
+    chance to recover it manually.
+    """
+    try:
+        stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        archived = path.with_name(f"{path.name}.corrupt-{stamp}")
+        os.replace(path, archived)
+        logger.warning("Unreadable config preserved as %s", archived.name)
+    except OSError:
+        logger.debug("Could not archive corrupt config", exc_info=True)
+
+
 def load() -> Config:
     with config_lock:
         _cleanup_stale_temps()
@@ -195,6 +316,14 @@ def load() -> Config:
                 data = json.loads(path.read_text(encoding="utf-8"))
             except (json.JSONDecodeError, OSError, ValueError):
                 logger.warning("Failed to parse config, using defaults", exc_info=True)
+                _archive_corrupt_config(path)
+                return Config()
+            if not isinstance(data, dict):
+                logger.warning(
+                    "Config root is %s instead of an object, using defaults",
+                    type(data).__name__,
+                )
+                _archive_corrupt_config(path)
                 return Config()
             cfg = Config()
             for key in (
@@ -225,7 +354,14 @@ def load() -> Config:
                 "hotkeys", "hotkeys_enabled",
             ):
                 if key in data:
-                    setattr(cfg, key, data[key])
+                    value = _validate_field(key, data[key])
+                    if value is _SKIP_FIELD:
+                        logger.warning(
+                            "Config field '%s' has invalid type %s — keeping default",
+                            key, type(data[key]).__name__,
+                        )
+                        continue
+                    setattr(cfg, key, value)
             # Migrate from old plaintext password (now stored on next save as hash)
             if "encryption_password" in data and data["encryption_password"]:
                 cfg.encryption_password = data["encryption_password"]
@@ -249,18 +385,41 @@ def load() -> Config:
                     for pid, pinfo in peers_data.items()
                     if isinstance(pinfo, dict)
                 ]
+            if not isinstance(peers_data, list):
+                logger.warning(
+                    "Config 'peers' has invalid type %s — ignoring peers",
+                    type(peers_data).__name__,
+                )
+                peers_data = []
             for peer_data in peers_data:
-                try:
-                    peer = PeerInfo(
-                        device_id=peer_data["device_id"],
-                        device_name=peer_data["device_name"],
-                        public_key_pem=peer_data.get("public_key_pem", ""),
-                        paired=peer_data.get("paired", False),
-                        notes=peer_data.get("notes", ""),
-                    )
-                    cfg.peers[peer.device_id] = peer
-                except (KeyError, TypeError):
+                if not isinstance(peer_data, dict):
                     continue
+                device_id = peer_data.get("device_id")
+                device_name = peer_data.get("device_name")
+                if not isinstance(device_id, str) or not device_id:
+                    logger.warning("Skipping peer with invalid device_id: %r",
+                                   device_id)
+                    continue
+                if not isinstance(device_name, str):
+                    logger.warning("Skipping peer %s with invalid device_name",
+                                   device_id)
+                    continue
+                public_key_pem = peer_data.get("public_key_pem", "")
+                paired = peer_data.get("paired", False)
+                notes = peer_data.get("notes", "")
+                if not isinstance(public_key_pem, str):
+                    public_key_pem = ""
+                if not isinstance(paired, bool):
+                    paired = False
+                if not isinstance(notes, str):
+                    notes = ""
+                cfg.peers[device_id] = PeerInfo(
+                    device_id=device_id,
+                    device_name=device_name,
+                    public_key_pem=public_key_pem,
+                    paired=paired,
+                    notes=notes,
+                )
             return cfg
         return Config()
 

@@ -30,6 +30,11 @@ logger = logging.getLogger(__name__)
 SYNC_DEBOUNCE = 0.5
 # Hash ring size for recently-synced content dedup
 DEDUP_RING_SIZE = 64
+# How long (seconds) a hash keeps suppressing re-captures.  The ring exists
+# to stop sync loops (a broadcast reflecting back, a debounce re-read), not
+# to remember history: past this window a repeated hash is treated as a
+# deliberate new copy and flows into history/broadcast normally.
+DEDUP_RING_TTL = 90.0
 # A local clipboard change within this window (s) counts as "newer" than an
 # incoming remote message, so near-simultaneous copies resolve by copy time
 # rather than by arrival order (crossed writes).
@@ -65,7 +70,7 @@ class SyncManager:
         self._read_lock = threading.Lock()
         self._last_local_hash: str | None = None
         self._last_content_hash: str = ""
-        self._dedup_ring: list[str] = []
+        self._dedup_ring: list[tuple[str, float]] = []  # (hash, monotonic_ts)
         self._sync_debounce = sync_debounce
         self._pending_timer: threading.Timer | None = None
         # Platform monitors (macOS/Linux) store their poll interval on the
@@ -187,8 +192,8 @@ class SyncManager:
             if content_hash == self._last_local_hash:
                 return
 
-            # Skip if recently processed
-            if content_hash in self._dedup_ring:
+            # Skip if recently processed (loop prevention, TTL-bounded)
+            if self._dedup_seen(content_hash):
                 return
 
             # Receive-side rate limit: a peer must not be able to flood the
@@ -201,9 +206,7 @@ class SyncManager:
             if len(self._remote_apply_times) >= REMOTE_RATE_MAX:
                 return
 
-            self._dedup_ring.append(content_hash)
-            if len(self._dedup_ring) > DEDUP_RING_SIZE:
-                self._dedup_ring = self._dedup_ring[-DEDUP_RING_SIZE:]
+            self._dedup_ring_remember(content_hash)
 
             # Set _last_local_hash/_last_content_hash so the clipboard monitor
             # ignores the write we're about to make (prevents re-broadcasting
@@ -300,6 +303,21 @@ class SyncManager:
         with self._read_lock:
             self._do_read_and_send_locked()
 
+    def _dedup_seen(self, content_hash: str) -> bool:
+        """TTL-bounded ring lookup: True if *content_hash* was processed
+        within ``DEDUP_RING_TTL``.  Expired entries are pruned here so the
+        ring stays bounded in time, not only in count."""
+        now = time.monotonic()
+        self._dedup_ring = [(h, ts) for h, ts in self._dedup_ring
+                            if now - ts <= DEDUP_RING_TTL]
+        return any(h == content_hash for h, _ in self._dedup_ring)
+
+    def _dedup_ring_remember(self, content_hash: str) -> None:
+        """Record a hash in the dedup ring together with its capture time."""
+        self._dedup_ring.append((content_hash, time.monotonic()))
+        if len(self._dedup_ring) > DEDUP_RING_SIZE:
+            self._dedup_ring = self._dedup_ring[-DEDUP_RING_SIZE:]
+
     def _do_read_and_send_locked(self):
         """Capture + broadcast. Called while holding ``_read_lock``."""
         with self._lock:
@@ -339,6 +357,10 @@ class SyncManager:
         content_hash = content.hash_key()
 
         with self._lock:
+            # A pause requested mid-capture takes effect here: nothing below
+            # may enter history or reach the network once the user paused.
+            if not self._enabled:
+                return
             # Catches duplicate captures (same content re-read after debounce)
             if content_hash == self._last_content_hash:
                 return
@@ -353,9 +375,7 @@ class SyncManager:
             self._last_content_hash = content_hash
             self._last_local_hash = content_hash
 
-            self._dedup_ring.append(content_hash)
-            if len(self._dedup_ring) > DEDUP_RING_SIZE:
-                self._dedup_ring = self._dedup_ring[-DEDUP_RING_SIZE:]
+            self._dedup_ring_remember(content_hash)
 
         # Record in clipboard history — once per action
         if self._history is not None:
@@ -380,6 +400,13 @@ class SyncManager:
         if not has_syncable_types(content):
             logger.debug("Clipboard content has no syncable formats — not broadcasting")
             return
+
+        # Final pause check: the dedup block released the lock a moment ago;
+        # honour a pause that landed since then before going to the network.
+        with self._lock:
+            if not self._enabled:
+                logger.debug("Sync paused during send prep — dropping local capture")
+                return
 
         if self._on_send:
             self._on_send(msg)

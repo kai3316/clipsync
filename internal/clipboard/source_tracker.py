@@ -81,6 +81,11 @@ def is_app_allowed(app_info: dict | None, cfg) -> bool:
         return fnmatch.fnmatch(process, pattern)
 
     if cfg.app_filter_mode == "whitelist":
+        # An empty whitelist would match nothing and silently block every
+        # capture — treat it as "not configured yet" and allow, consistent
+        # with the unknown-app policy above.
+        if not app_filter_list:
+            return True
         return any(_matches(p) for p in app_filter_list)
 
     # blacklist mode (default)

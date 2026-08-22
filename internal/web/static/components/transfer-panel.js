@@ -414,6 +414,8 @@
           error_security: 'transfer.err_security',
           peer_offline: 'transfer.err_peer_offline',
           timeout: 'transfer.err_timeout',
+          error_timeout: 'transfer.err_timeout',
+          error_internal: 'transfer.err_internal',
         };
         return map[reason] || '';
       },
