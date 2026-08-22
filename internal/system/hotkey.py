@@ -183,6 +183,16 @@ class HotkeyManager:
     def running(self) -> bool:
         return self._running
 
+    def is_trusted(self) -> bool:
+        """Return True when the platform input/accessibility permission is granted.
+
+        The macOS override queries ``AXIsProcessTrusted`` — a CGEvent tap can
+        be *created* yet never fire when the app lacks Accessibility
+        permission, so ``running`` alone is not enough to know the hotkeys
+        actually work.  Non-macOS platforms always return True.
+        """
+        return True
+
     def register(self, hotkey_id: str, shortcut: str, callback: Callable) -> bool:
         """Register a global hotkey.
 
@@ -878,9 +888,36 @@ elif _platform() == "macos":
 
         self._mac_source = None
 
+    def _macos_is_trusted(self: HotkeyManager) -> bool:
+        """Return True when this process is trusted for Accessibility input.
+
+        ``AXIsProcessTrusted()`` from ApplicationServices answers the question
+        that a CGEvent tap cannot: whether the app is listed in System Settings
+        > Privacy & Security > Accessibility.  Guarded so any failure (missing
+        framework, wrong API) falls back to True — non-macOS callers always use
+        the base-class True and are unaffected.
+        """
+        try:
+            import ctypes
+            import ctypes.util
+
+            lib = ctypes.util.find_library("ApplicationServices")
+            if lib is None:
+                logger.debug("ApplicationServices not found; hotkey trust unknown")
+                return True
+            services = ctypes.cdll.LoadLibrary(lib)
+            services.AXIsProcessTrusted.restype = ctypes.c_bool
+            services.AXIsProcessTrusted.argtypes = []
+            return bool(services.AXIsProcessTrusted())
+        except Exception:
+            logger.debug("AXIsProcessTrusted check failed; assuming trusted",
+                         exc_info=True)
+            return True
+
     # Attach macOS methods
     HotkeyManager._run_macos = _run_macos  # type: ignore[attr-defined]
     HotkeyManager._mac_stop = _mac_stop  # type: ignore[attr-defined]
+    HotkeyManager.is_trusted = _macos_is_trusted  # type: ignore[assignment]
 
 
 # ══════════════════════════════════════════════════════════════════════

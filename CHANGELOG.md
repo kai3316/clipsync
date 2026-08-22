@@ -2,6 +2,34 @@
 
 All notable changes to ClipSync are documented in this file.
 
+## [1.0.21] — 2026-08-23
+
+### macOS & Linux platform (Round 3)
+- **macOS tray menu is live again.** The tray runs in a subprocess whose menu used to be frozen — the peer list always showed "No devices" and the Web-QR item never appeared. The parent now pushes peers/web/sync state over the pipe and the child rebuilds its menu.
+- **macOS can no longer go headless.** If the tray subprocess dies, it's now restarted automatically (with backoff) instead of leaving the app with no Dock icon, no tray, and no way to quit. A `_shutting_down` guard prevents a stray restart during quit.
+- **`_hide_dock` uses the correct activation policy (Accessory, not Prohibited)** so CTk dialogs (settings, retrust, QR) can come to the front on macOS.
+- **HiDPI / fractional scaling support** on Linux & Windows: the UI now detects the display scale and applies CTk widget/window scaling (clamped 1.0–2.5), so a 2x or GNOME-fractional display no longer renders the desktop at half size.
+- **Dashboard & settings remember their window geometry** across hides and restarts (sidecar JSON per window), so Linux no longer loses position on every tray reopen.
+- **Linux clipboard-tool check is backend-aware**: Wayland requires `wl-copy`/`wl-paste`, X11 requires `xclip` — the startup warning now names exactly which tool is missing instead of silently failing.
+- **Linux `.desktop` autostart Exec is XDG-spec-quoted** (double quotes, not shlex single quotes) so a path with spaces or metacharacters actually launches.
+- **Hotkey Accessibility detection is direct**: macOS `AXIsProcessTrusted` is probed so the "enable Accessibility" prompt fires even when the event tap is created but not trusted; the failure now also surfaces as a desktop notification.
+- **Linux tray has a fallback**: if the AppIndicator backend can't start, the app logs and notifies instead of dying silently; notification failures (no daemon / no notify-send) are logged instead of swallowed.
+
+### Transfer flow
+- **"Finalizing on the receiving device…" state** replaces the confusing "Sending… 100%" while the receiver writes the file to disk; the web panel shows it with a spinner.
+- **Sending to a peer that drops now fails fast with "peer went offline"** instead of hanging 120s in "awaiting-ack" — the disconnect path resolves the hashed discovery id to the real device id (the earlier wiring passed the hash and matched nothing) and fails matching transfers immediately.
+- **`awaiting_ack` / `finalizing` transfers are cancellable in the classic dashboard** (previously no cancel button).
+- **Copying with no peer connected gives a desktop notification in classic mode** instead of only a web toast that silently dropped when no web client was attached.
+- **Sensitive-content filtering is no longer silent**: the sender gets a throttled "Sensitive content was not synced" notice, and history/favorites items containing `[FILTERED]` show an explanatory note ("Some sensitive content was replaced with [FILTERED]").
+- **Clipboard write failures surface** a "Clipboard write failed" notification instead of being swallowed.
+- **Transfer sounds respect the notifications master switch** (no more dings with notifications off).
+- **Web transfer history shows the specific failure reason** (disk full, size mismatch, timeout, peer offline, rejected, cancelled) instead of a generic "Failed".
+- **Classic dashboard polls faster (800ms) during active transfers** so progress advances smoothly instead of lurching every 5s.
+
+### Robustness (regressions found in self-review, fixed)
+- macOS tray pipe sends are now serialized under a lock — the state-sync writer and the notification sender share one pipe and could otherwise interleave frames (desync, or a blocked send freezing the UI).
+- The macOS notification pipe-sender thread is stopped before a tray restart instead of leaking and competing for the pipe.
+
 ## [1.0.20] — 2026-08-23
 
 ### Interaction & accessibility (Round 2)

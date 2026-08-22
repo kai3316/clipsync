@@ -704,6 +704,18 @@
        ═══════════════════════════════════════════════════════════════ */
 
     /**
+     * Check whether a text string was redacted by the sensitive-content
+     * filter. The backend replaces sensitive content with the literal marker
+     * "[FILTERED]" (FILTERED_MARKER); history/favorites items whose text
+     * contains it should surface a small explanatory note to the receiver.
+     * @param {string} text - The item text (text_preview, content, ...)
+     * @returns {boolean}
+     */
+    isFilteredText: function (text) {
+      return typeof text === 'string' && text.indexOf('[FILTERED]') !== -1;
+    },
+
+    /**
      * Get filtered + searched + sorted history list.
      * Returns a reactive computed-compatible plain array.
      * Usage in a component: call store.filteredHistory() in a computed.

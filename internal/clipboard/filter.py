@@ -84,6 +84,21 @@ CATEGORY_LABELS: dict[str, str] = {
     "password": "Password-like patterns (password=...)",
 }
 
+# The literal placeholder that replaces redacted sensitive content in
+# synced clipboard text.  Keep the string in sync with the sub pattern in
+# ``ContentFilter.filter_content`` below.
+FILTERED_MARKER = "[FILTERED]"
+
+
+def is_filtered_text(text: str) -> bool:
+    """Return True if *text* contains the ``[FILTERED]`` marker.
+
+    Lets the UI explain a redacted clip to the user ("some sensitive content
+    was replaced") instead of showing a bare marker with no context.  Both the
+    desktop and web views can call this before rendering a received clip.
+    """
+    return bool(text) and FILTERED_MARKER in text
+
 
 class ContentFilter:
     """Detect and optionally strip sensitive content from clipboard data.
@@ -199,7 +214,7 @@ class ContentFilter:
                 continue
             text = self._bytes_to_str(data)
             for _category, pattern in self._active_patterns():
-                text = pattern.sub("[FILTERED]", text)
+                text = pattern.sub(FILTERED_MARKER, text)
             filtered_types[ct] = text.encode("utf-8")
 
         for ct, data in content.types.items():

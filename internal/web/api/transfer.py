@@ -39,11 +39,17 @@ def _map_active(t: dict) -> dict:
 
 def _map_history(t: dict) -> dict:
     """Map a FileTransferManager history dict to the web UI shape."""
+    reason = t.get("status", "")
     return {
         "id": t.get("transfer_id", ""),
         "filename": t.get("file_name", "Unknown file"),
         "size": t.get("file_size", 0),
+        # Keep the generic bucket for styling, plus the specific reason
+        # (error_disk, error_size_mismatch, error_missing_chunks, error_security,
+        # rejected, peer_offline, timeout, cancelled) so the UI can render the
+        # exact failure cause instead of a generic "Failed".
         "status": "cancelled" if t.get("cancelled") else ("completed" if t.get("success") else "failed"),
+        "reason": reason,
         "path": t.get("saved_path") or t.get("source_path") or "",
         "direction": t.get("direction", "down"),
         "timestamp": t.get("timestamp", 0),

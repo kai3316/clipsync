@@ -192,11 +192,26 @@ def _desktop_path():
     )
 
 
+def _xdg_quote(token: str) -> str:
+    """Quote one token for a .desktop ``Exec=`` value per the Desktop Entry
+    Spec.  Unlike ``shlex.quote`` (which uses single quotes), the Exec key only
+    recognizes double quotes — single quotes are literal characters.  Special
+    characters are escaped so a path with spaces or shell metacharacters is
+    parsed back into the correct argv by the desktop environment.
+    """
+    escaped = (
+        token.replace("\\", "\\\\")
+        .replace('"', '\\"')
+        .replace("`", "\\`")
+        .replace("$", "\\$")
+    )
+    return f'"{escaped}"'
+
+
 def _enable_linux():
     """Create an XDG autostart .desktop entry."""
     exe, args = _get_executable_info()
-    # The Exec key expects a single command string
-    command = " ".join([exe] + args)
+    command = " ".join(_xdg_quote(p) for p in ([exe] + args))
 
     desktop_entry = f"""[Desktop Entry]
 Type=Application

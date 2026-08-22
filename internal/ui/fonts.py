@@ -13,11 +13,14 @@ URL rows) and every other CTkFont keyword.
 
 from __future__ import annotations
 
+import logging
 import os
 import sys
 from functools import lru_cache
 
 import customtkinter as ctk
+
+logger = logging.getLogger(__name__)
 
 # Preferred UI font families per platform, best-first.  The first family that
 # is actually installed on the machine wins (checked via tkinter.font.families
@@ -201,3 +204,109 @@ def install_platform_font_patch() -> None:
         # A customtkinter version that renames/moves CTkFont must not break
         # startup — the UI just falls back to its stock "Roboto" default.
         _install_done = True
+
+
+# ── HiDPI / fractional-scaling detection ──────────────────────────────
+
+# Tk reports `tk scaling` in pixels-per-point; the 96-dpi reference is
+# 1.3333 (96/72).  A scale factor is this value divided by 1.3333.
+_TK_SCALING_96DPI = 1.3333333333333333
+
+# Safe band for CTk widget/window scaling — never scale below 1x and never
+# above 2.5x (a broken detection returning a huge value must not explode UI).
+SCALE_MIN = 1.0
+SCALE_MAX = 2.5
+
+
+def _windows_scale(root) -> float:
+    """Return the display scale factor from the Windows DPI APIs."""
+    try:
+        import ctypes
+
+        dpi = 96.0
+        try:
+            # GetDpiForWindow is the modern per-window DPI API (Win10 1607+).
+            dpi = float(ctypes.windll.user32.GetDpiForWindow(int(root.winfo_id())))
+        except Exception:
+            # Fall back to the nearest monitor's effective DPI.
+            try:
+                monitor = ctypes.windll.user32.MonitorFromWindow(
+                    int(root.winfo_id()), 2)  # MONITOR_DEFAULTTONEAREST
+                if monitor:
+                    shcore = ctypes.windll.shcore
+                    dpi_x = ctypes.c_uint()
+                    dpi_y = ctypes.c_uint()
+                    if shcore.GetDpiForMonitor(monitor, 0,
+                                               ctypes.byref(dpi_x),
+                                               ctypes.byref(dpi_y)) == 0:
+                        dpi = float(dpi_x.value)
+            except Exception:
+                pass
+        if dpi <= 0:
+            return 1.0
+        return dpi / 96.0
+    except Exception:
+        return 1.0
+
+
+def _linux_scale(root) -> float:
+    """Return the display scale factor from Tk's reported scaling."""
+    try:
+        scaling = float(root.tk.call("tk", "scaling"))
+    except Exception:
+        return 1.0
+    if scaling <= 0:
+        return 1.0
+    return scaling / _TK_SCALING_96DPI
+
+
+def compute_ui_scale(root) -> float:
+    """Return a UI scaling factor for HiDPI / fractional-scaling displays.
+
+    - Windows: read the per-window DPI via ``GetDpiForWindow`` (falling back
+      to ``GetDpiForMonitor``).
+    - Linux: compare ``tk scaling`` to the 96-dpi reference (1.333).
+    - macOS: Tk handles Retina natively — returns 1.0 (no forced scaling).
+
+    The result is clamped to the safe band and returned as a plain float;
+    a detection failure returns 1.0 so callers can treat this as a no-op.
+    """
+    try:
+        if sys.platform == "win32":
+            scale = _windows_scale(root)
+        elif sys.platform.startswith("linux"):
+            scale = _linux_scale(root)
+        else:
+            scale = 1.0
+    except Exception:
+        logger.debug("UI scale detection failed; using 1.0", exc_info=True)
+        scale = 1.0
+    try:
+        scale = float(scale)
+    except (TypeError, ValueError):
+        return 1.0
+    if scale <= 0 or scale != scale:  # guard 0/negative/NaN
+        return 1.0
+    return max(SCALE_MIN, min(scale, SCALE_MAX))
+
+
+def apply_ui_scaling(root) -> float:
+    """Detect the display scale and apply it to CustomTkinter.
+
+    Calls ``ctk.set_widget_scaling`` / ``ctk.set_window_scaling`` when the
+    factor differs meaningfully from 1.0.  Never raises: a detection failure
+    or an import error leaves the UI at the default 1x scale.  Returns the
+    applied factor (1.0 when nothing was applied) so callers can scale their
+    own geometry defaults to match.
+    """
+    scale = compute_ui_scale(root)
+    if abs(scale - 1.0) < 0.05:
+        return 1.0
+    try:
+        ctk.set_widget_scaling(scale)
+        ctk.set_window_scaling(scale)
+        logger.info("Applied UI scaling %.2f", scale)
+        return scale
+    except Exception:
+        logger.debug("Failed to apply UI scaling %.2f", scale, exc_info=True)
+        return 1.0

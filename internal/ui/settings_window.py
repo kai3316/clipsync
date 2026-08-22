@@ -38,6 +38,68 @@ def _strip_ascii_ellipsis(text: str) -> str:
     return text
 
 
+# ── Window-geometry persistence ───────────────────────────────────────
+# The settings window is DESTROYED on every close on every platform, so its
+# size/position is otherwise lost each time.  These best-effort helpers store
+# the geometry in a small sidecar JSON next to the config so a reopen (or a
+# restart) shows the window where the user left it.  All I/O is guarded.
+
+def _settings_state_path() -> str:
+    try:
+        from internal.config.config import _config_dir
+        return str(_config_dir() / "settings_geometry.json")
+    except Exception:
+        return ""
+
+
+def _save_settings_geometry(geom: str) -> None:
+    if not geom:
+        return
+    path = _settings_state_path()
+    if not path:
+        return
+    try:
+        import json
+        import os
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump({"settings_geometry": geom}, f)
+    except Exception:
+        logger.debug("Could not persist settings geometry", exc_info=True)
+
+
+def _load_settings_geometry() -> str | None:
+    path = _settings_state_path()
+    if not path:
+        return None
+    try:
+        import json
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        geom = data.get("settings_geometry") if isinstance(data, dict) else None
+        return geom if isinstance(geom, str) else None
+    except Exception:
+        return None
+
+
+def _settings_geometry_on_screen(geom: str, sw: int, sh: int) -> bool:
+    """Return True if the saved geometry is at least partially on-screen."""
+    import re
+    m = re.match(r"^(\d+)x(\d+)([+-]\d+)([+-]\d+)$", geom)
+    if not m:
+        return False
+    try:
+        w, h = int(m.group(1)), int(m.group(2))
+        x, y = int(m.group(3)), int(m.group(4))
+    except ValueError:
+        return False
+    if w <= 0 or h <= 0:
+        return False
+    if x + w <= 0 or y + h <= 0 or x >= sw or y >= sh:
+        return False
+    return True
+
+
 class SettingsWindow:
     """Settings window with sidebar navigation — separate from the main dashboard."""
 
@@ -160,8 +222,30 @@ class SettingsWindow:
         self._window.update_idletasks()
         sw = self._window.winfo_screenwidth()
         sh = self._window.winfo_screenheight()
-        w, h = 740, 620
-        self._window.geometry(f"{w}x{h}+{(sw-w)//2}+{(sh-h)//2}")
+
+        # Restore the user's last window geometry, falling back to a centered
+        # HiDPI-scaled default.
+        saved = _load_settings_geometry()
+        if saved and _settings_geometry_on_screen(saved, sw, sh):
+            try:
+                self._window.geometry(saved)
+            except tk.TclError:
+                saved = None
+        if not saved:
+            scale = 1.0
+            try:
+                from internal.ui.fonts import compute_ui_scale
+                scale = compute_ui_scale(self._root) or 1.0
+            except Exception:
+                pass
+            # Pass the LOGICAL size — CTk's set_window_scaling converts it to
+            # physical pixels — but center using the PHYSICAL size.
+            lw, lh = 740, 620
+            pw = max(680, int(lw * scale))
+            ph = max(560, int(lh * scale))
+            x = max(0, (sw - pw) // 2)
+            y = max(0, (sh - ph) // 2)
+            self._window.geometry(f"{lw}x{lh}+{x}+{y}")
 
         self._build_ui()
         self._switch_panel("network")
@@ -174,6 +258,16 @@ class SettingsWindow:
 
     def _on_close(self):
         if self._window is not None:
+            # Persist geometry before destroying so a reopen (or restart)
+            # shows the window where the user left it.  Use CTk's getter
+            # (reverse-scaled LOGICAL geometry) so restoring through
+            # CTkToplevel.geometry() doesn't double-apply set_window_scaling.
+            try:
+                geom = self._window.geometry()
+                if geom:
+                    _save_settings_geometry(geom)
+            except Exception:
+                logger.debug("Could not capture settings geometry", exc_info=True)
             self._window.destroy()
             self._window = None
             self._sidebar_buttons.clear()

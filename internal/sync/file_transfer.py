@@ -305,6 +305,10 @@ class FileTransferManager:
                 "_last_progress": 0.0,
                 "_bytes_sent": 0,
                 "_send_fn": broadcast_fn,
+                # Best-effort target peer so fail_peer_transfers() can fail
+                # this transfer fast when that peer disconnects.  Extracted
+                # from the send_fn closure; empty when targeting a broadcast.
+                "peer_id": self._send_fn_peer_id(broadcast_fn) or "",
             }
 
         self._send_as_frame(
@@ -442,6 +446,54 @@ class FileTransferManager:
         )
         logger.info("Rejected file transfer: %s", transfer_id[:8])
 
+    def _transfer_targets_peer(self, transfer: dict, peer_id: str) -> bool:
+        """Return True if an outgoing transfer is destined for *peer_id*."""
+        stored = transfer.get("peer_id")
+        if stored:
+            return stored == peer_id
+        # Fallback for transfers created before peer_id was stored (or for
+        # send_fns whose target couldn't be introspected at creation time).
+        send_fn = transfer.get("_send_fn")
+        return self._send_fn_peer_id(send_fn) == peer_id
+
+    def fail_peer_transfers(self, peer_id: str) -> None:
+        """Fail pending outgoing transfers targeted at *peer_id*.
+
+        Called when a peer disconnects so a send stuck in ``awaiting_ack``
+        (waiting for FILE_ACK) or ``sending``/``finalizing`` (waiting for
+        FILE_COMPLETE) fails immediately with ``"peer_offline"`` instead of
+        hanging for the full TRANSFER_TIMEOUT / COMPLETION_WAIT_TIMEOUT.
+
+        Each matching transfer is recorded in history as failed, removed from
+        the active set, and its completion callback fired at most once (via
+        :meth:`_fire_complete_once`).  The sender thread polls for a removed
+        transfer and returns on its next wake-up, so it stops on its own.
+        """
+        with self._lock:
+            matched = [
+                tid for tid, t in self._transfers.items()
+                if t.get("type") == "outgoing"
+                and self._transfer_targets_peer(t, peer_id)
+            ]
+        for tid in matched:
+            with self._lock:
+                transfer = self._transfers.get(tid)
+                if transfer is None:
+                    continue
+                transfer["_last_activity"] = time.time()
+            # Do the locking work OUTSIDE the lock above: _add_to_history and
+            # _fire_complete_once each acquire the lock themselves, and
+            # threading.Lock is not re-entrant.  Fire while the transfer is
+            # still registered so the once-guard can stamp _complete_fired.
+            self._add_to_history(transfer, False, status="peer_offline")
+            self._fire_complete_once(tid, False, False, "peer_offline")
+            with self._lock:
+                self._transfers.pop(tid, None)
+            logger.info(
+                "Failed pending transfer %s to offline peer %s",
+                tid[:8], peer_id[:12],
+            )
+
     def handle_message(
         self,
         msg_type: str,
@@ -496,6 +548,41 @@ class FileTransferManager:
             return
         data = encode_frame(payload_dict)
         send_fn(data)
+
+    @staticmethod
+    def _send_fn_peer_id(send_fn: Callable[[bytes], None] | None) -> str | None:
+        """Best-effort recover the peer id a send_fn targets, or None.
+
+        Outgoing file-transfer send_fns are closures that capture the
+        destination peer id either as a default argument::
+
+            lambda data, pid=<peer_id>: transport.send_to_peer(pid, data)
+
+        or as a closure cell::
+
+            def _send_fn(data):
+                transport.send_to_peer(peer_id, data)
+
+        A plain ``transport.broadcast`` (multi-peer / relay) has neither and
+        returns None.  This lets ``fail_peer_transfers`` fail transfers that
+        were destined for a specific disconnected peer.
+        """
+        if send_fn is None:
+            return None
+        try:
+            defaults = getattr(send_fn, "__defaults__", None)
+            if defaults and isinstance(defaults[0], str) and len(defaults[0]) >= 8:
+                return defaults[0]
+        except Exception:
+            pass
+        try:
+            for cell in (getattr(send_fn, "__closure__", None) or ()):
+                val = cell.cell_contents
+                if isinstance(val, str) and len(val) >= 8:
+                    return val
+        except Exception:
+            pass
+        return None
 
     # ------------------------------------------------------------------
     # Message handlers (receiver side)
@@ -1136,16 +1223,38 @@ class FileTransferManager:
                 "Failed sending chunks for transfer %s (%s): %s",
                 transfer_id[:8], file_name, exc,
             )
+            # Fire while the transfer is still registered so the once-guard
+            # can stamp _complete_fired; a concurrent fail_peer_transfers() or
+            # cancel_transfer() that already fired it will be skipped here.
+            self._fire_complete_once(transfer_id, False, False, "error_internal")
             with self._lock:
                 self._transfers.pop(transfer_id, None)
-            if self._on_transfer_complete is not None:
-                self._on_transfer_complete(transfer_id, False, False, "error_internal")
             return
 
         logger.info(
             "All %d chunks sent for transfer %s -- waiting for FILE_COMPLETE",
             total_chunks, transfer_id[:8],
         )
+
+        # Every chunk is on the wire, but the transfer is NOT done from the
+        # user's perspective: the receiver still has to verify, request any
+        # missing chunks, and rename the file into place before it sends
+        # FILE_COMPLETE.  Show a distinct "finalizing on the receiving
+        # device" state instead of a stuck "Sending... 100%".
+        with self._lock:
+            transfer = self._transfers.get(transfer_id)
+            if transfer is not None:
+                transfer["state"] = "finalizing"
+                transfer["_finalizing"] = True
+                transfer["_last_progress"] = 1.0
+        # Re-fire progress at 100% now that the state is "finalizing" so the
+        # UI/web (which reads the state from the transfer) re-renders the row
+        # with the new label rather than leaving it stuck at "Sending... 100%".
+        if self._on_transfer_progress is not None:
+            try:
+                self._on_transfer_progress(transfer_id, 1.0)
+            except Exception:
+                logger.debug("finalizing progress callback failed", exc_info=True)
 
         # Wait for FILE_COMPLETE from the receiver (with timeout), while
         # honoring file_chunk_ack retransmit requests that arrive after the

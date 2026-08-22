@@ -79,6 +79,9 @@ class SyncManager:
         # Set via set_app_filter(); used to drop clipboard content that
         # originates from disallowed applications.
         self._app_filter_fn: Callable[[dict | None], bool] | None = None
+        # Optional callback invoked when writing remote content to the local
+        # clipboard fails.  Set via set_on_write_error().
+        self._on_write_error: Callable[[], None] | None = None
 
     @property
     def on_send(self) -> Callable | None:
@@ -110,6 +113,18 @@ class SyncManager:
         given source app (dict or None) should be captured.  None disables
         the filter (everything allowed)."""
         self._app_filter_fn = fn
+
+    def set_on_write_error(self, callback: Callable[[], None] | None):
+        """Set a callback invoked when writing remote clipboard content to
+        the local clipboard fails.
+
+        The callback takes no arguments and is responsible for surfacing the
+        failure to the user (e.g. a desktop notification).  Passing ``None``
+        disables the callback.  The sync loop still swallows the underlying
+        error either way, so a clipboard-writer failure never crashes the
+        receive path.
+        """
+        self._on_write_error = callback
 
     def _notify_history_change(self) -> None:
         """Invoke the optional history-change callback (e.g. to push a
@@ -232,6 +247,15 @@ class SyncManager:
             self._writer.write(content)
         except Exception:
             logger.exception("Failed to write remote clipboard content")
+            # Surface the failure (desktop notification) without letting it
+            # crash the sync loop — a transient clipboard-busy error on the
+            # receiver should not kill the peer connection.
+            cb = self._on_write_error
+            if cb is not None:
+                try:
+                    cb()
+                except Exception:
+                    logger.debug("on_write_error callback failed", exc_info=True)
 
     def _on_clipboard_change(self):
         """Called by the clipboard monitor when local clipboard changes.

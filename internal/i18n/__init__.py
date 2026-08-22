@@ -19,6 +19,8 @@ logger = logging.getLogger(__name__)
 _EN: dict[str, str] = {
     # Clipboard sync notifications
     "sync.oversize": "Clipboard content too large ({size:.1f} MB), sync skipped",
+    "sync.write_failed_title": "Clipboard write failed",
+    "sync.write_failed_msg": "The received clipboard content could not be written to the system clipboard",
     # History cards
     "history.source.remote": "Synced from {name}",
     "history.source.local": "This device",
@@ -86,6 +88,9 @@ _EN: dict[str, str] = {
     "transfer.state.cancelled": "Cancelled",
     "transfer.state.paused": "Paused",
     "transfer.state.awaiting_retransmit": "Retransmitting...",
+    "transfer.state.finalizing": "Finalizing on the receiving device…",
+    "transfer.state.awaiting_ack": "Waiting for the peer to accept…",
+    "transfer.send_finalizing": "Finalizing transfer…",
     "transfer.completed": "{count} completed",
     "transfer.ok": "{count} ok",
     "transfer.fail": "{count} fail",
@@ -564,6 +569,9 @@ _EN: dict[str, str] = {
     "filter.api_key": "API keys & tokens (sk-*, Bearer, key-*)",
     "filter.private_key": "Private key blocks (PEM)",
     "filter.password": "Password-like patterns (password=...)",
+    # Sensitive-content filter feedback
+    "filter.sender_blocked": "Sensitive content was not synced",
+    "filter.receiver_note": "Some sensitive content was replaced with [FILTERED]",
 
     # ── Webview UI specific ────────────────────────────────────────
     # History item
@@ -734,6 +742,8 @@ _EN: dict[str, str] = {
 
 _ZH: dict[str, str] = {
     "sync.oversize": "剪贴板内容过大（{size:.1f} MB），跳过同步",
+    "sync.write_failed_title": "写入剪贴板失败",
+    "sync.write_failed_msg": "收到的剪贴板内容未能写入系统剪贴板",
     "history.source.remote": "从 {name} 同步",
     "history.source.local": "本机",
     "history.just_now": "刚刚",
@@ -796,6 +806,9 @@ _ZH: dict[str, str] = {
     "transfer.state.cancelled": "已取消",
     "transfer.state.paused": "已暂停",
     "transfer.state.awaiting_retransmit": "重传中...",
+    "transfer.state.finalizing": "正在写入对方设备…",
+    "transfer.state.awaiting_ack": "等待对方接受…",
+    "transfer.send_finalizing": "正在完成传输…",
     "transfer.completed": "已完成 {count} 个",
     "transfer.ok": "{count} 成功",
     "transfer.fail": "{count} 失败",
@@ -1257,6 +1270,9 @@ _ZH: dict[str, str] = {
     "filter.api_key": "API 密钥和令牌 (sk-*, Bearer, key-*)",
     "filter.private_key": "私钥块 (PEM)",
     "filter.password": "密码类模式 (password=...)",
+    # Sensitive-content filter feedback
+    "filter.sender_blocked": "敏感内容未同步",
+    "filter.receiver_note": "部分敏感内容已被替换为 [FILTERED]",
 
     # ── Webview UI specific ────────────────────────────────────────
     "history.empty_preview": "（空）",

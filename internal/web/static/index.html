@@ -955,6 +955,15 @@
       overflow: hidden;
     }
 
+    /* Note shown when a clip's text contains the [FILTERED] marker — explains
+       that the peer's sensitive content was redacted, not corrupted. */
+    .history-item__filtered-note {
+      margin-top: 4px;
+      font-size: 11px;
+      line-height: 1.4;
+      color: var(--clipsync-warning-text);
+    }
+
     .history-item__meta {
       display: flex;
       align-items: center;

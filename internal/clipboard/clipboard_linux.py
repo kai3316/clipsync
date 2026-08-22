@@ -99,13 +99,22 @@ def _has_wl_copy() -> bool:
 
 
 def _can_read() -> bool:
-    """Check if any clipboard tool is available."""
-    return _has_xclip() or _has_wl_copy()
+    """Check if a clipboard tool for the ACTIVE display backend is available.
+
+    Backend-blind: on Wayland only wl-copy/wl-paste work (xclip has no
+    X connection), and on X11 only xclip/xsel do (wl-paste needs a Wayland
+    compositor).  Checking the wrong tool silently disables the clipboard.
+    """
+    if _BACKEND == "wayland":
+        return _has_wl_copy()  # wl-copy and wl-paste ship in the same package
+    return _has_xclip()
 
 
 def _can_write() -> bool:
-    """Check if any clipboard tool is available."""
-    return _has_xclip() or _has_wl_copy()
+    """Check if a clipboard tool for the ACTIVE display backend is available."""
+    if _BACKEND == "wayland":
+        return _has_wl_copy()
+    return _has_xclip()
 
 
 _clipboard_warned = False
@@ -114,9 +123,11 @@ _clipboard_warned = False
 def _warn_no_clipboard() -> None:
     global _clipboard_warned
     if not _clipboard_warned:
+        tool = "wl-clipboard (wl-copy/wl-paste)" if _BACKEND == "wayland" else "xclip"
         logger.warning(
-            "No clipboard tool found (xclip or wl-clipboard). "
-            "Clipboard read/write is disabled. Install xclip (X11) or wl-clipboard (Wayland)."
+            "No clipboard tool found for %s backend (%s). "
+            "Clipboard read/write is disabled. Install %s.",
+            _BACKEND, tool, tool,
         )
         _clipboard_warned = True
 
@@ -628,14 +639,24 @@ def check_clipboard_tools() -> str | None:
     if _startup_warning_shown:
         return None
     _startup_warning_shown = True
-    if not _can_read():
+    if _can_read():
+        return None
+    if _BACKEND == "wayland":
         return (
-            "No clipboard tool found (xclip or wl-clipboard).\n\n"
-            "Clipboard sync will not work until you install one:\n\n"
-            "  sudo apt install xclip         (X11)\n"
-            "  sudo apt install wl-clipboard  (Wayland)"
+            "Clipboard sync needs wl-clipboard on Wayland (X11's xclip "
+            "cannot talk to a Wayland compositor).\n\n"
+            "Install it with one of:\n\n"
+            "  sudo apt install wl-clipboard     (Debian/Ubuntu)\n"
+            "  sudo dnf install wl-clipboard     (Fedora)\n"
+            "  sudo pacman -S wl-clipboard       (Arch)"
         )
-    return None
+    return (
+        "Clipboard sync needs xclip on X11.\n\n"
+        "Install it with one of:\n\n"
+        "  sudo apt install xclip     (Debian/Ubuntu)\n"
+        "  sudo dnf install xclip     (Fedora)\n"
+        "  sudo pacman -S xclip       (Arch)"
+    )
 
 
 def create_monitor(poll_interval: float = POLL_INTERVAL) -> ClipboardMonitor:

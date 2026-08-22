@@ -49,6 +49,9 @@
       </div>
       <div class="history-item__body">
         <div class="history-item__text selectable">{{ item.text_preview || t('history.empty_preview') }}</div>
+        <div v-if="store.isFilteredText(item.text_preview)" class="history-item__filtered-note">
+          {{ t('filter.receiver_note') }}
+        </div>
         <div class="history-item__meta">
           <span class="history-item__time">{{ relativeTime }}</span>
           <span class="history-item__type">{{ typeLabel }}</span>

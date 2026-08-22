@@ -179,8 +179,16 @@
           <div class="transfer-history-item__body">
             <div class="transfer-history-item__name">{{ tr.filename || t('transfer.unknown_file') }}</div>
             <div class="transfer-history-item__meta">
-              <span class="transfer-history-item__status transfer-history-item__status--active">
-                {{ tr.status === 'paused' ? t('transfer.state.paused') : (tr.progress || 0) + '%' }}
+              <span
+                class="transfer-history-item__status transfer-history-item__status--active"
+                :class="{ 'transfer-history-item__status--busy': isFinalizingTransfer(tr) }"
+              >
+                <span
+                  v-if="isFinalizingTransfer(tr)"
+                  class="transfer-history-item__spinner"
+                  style="display:inline-block;width:10px;height:10px;border:2px solid var(--clipsync-border);border-top-color:var(--clipsync-accent);border-radius:50%;animation:spin 0.7s linear infinite;vertical-align:-1px;margin-right:5px;box-sizing:border-box"
+                ></span>
+                {{ transferActiveStatusLabel(tr) }}
               </span>
               <span v-if="tr.size">{{ formatSize(tr.size) }}</span>
               <span v-if="tr.speed">{{ formatSpeed(tr.speed) }}</span>
@@ -366,14 +374,64 @@
       isCancelledTransfer: function (tr) {
         return !!(tr && (tr.status === 'cancelled' || tr.cancelled));
       },
+
+      // ── Active-transfer status ──────────────────────────────────
+      // The web API maps the transfer manager's `state` into `status` (and may
+      // also expose `state` directly), so read either field defensively.
+      _hasTransferState: function (tr, val) {
+        return !!(tr && (tr.state === val || tr.status === val));
+      },
+      isFinalizingTransfer: function (tr) {
+        return this._hasTransferState(tr, 'finalizing');
+      },
+      transferActiveStatusLabel: function (tr) {
+        // `paused` is authoritative on `status` — the API maps paused to it.
+        if (tr.status === 'paused') return this.t('transfer.state.paused');
+        if (this._hasTransferState(tr, 'finalizing')) return this.t('transfer.state.finalizing');
+        if (this._hasTransferState(tr, 'awaiting_ack')) return this.t('transfer.state.awaiting_ack');
+        return (tr.progress || 0) + '%';
+      },
+
+      // ── History status ──────────────────────────────────────────
+      // The backend persists a specific reason in the history row's `status`
+      // (error_disk, timeout, rejected, ...). When `status` is only a generic
+      // bucket ("completed"/"failed"), fall back to a dedicated `reason` field
+      // if the API provides one.
+      _transferReason: function (tr) {
+        if (!tr) return '';
+        var s = tr.status || '';
+        var generic = { completed: 1, failed: 1, '': 1 };
+        var reason = generic[s] ? (tr.reason || '') : s;
+        return reason || '';
+      },
+      _transferReasonLabelKey: function (reason) {
+        var map = {
+          cancelled: 'transfer.cancelled',
+          rejected: 'transfer.rejected',
+          error_disk: 'transfer.err_disk',
+          error_size_mismatch: 'transfer.err_size_mismatch',
+          error_missing_chunks: 'transfer.err_missing_chunks',
+          error_security: 'transfer.err_security',
+          peer_offline: 'transfer.err_peer_offline',
+          timeout: 'transfer.err_timeout',
+        };
+        return map[reason] || '';
+      },
       transferStatusLabel: function (tr) {
         if (tr.status === 'completed') return this.t('transfer.status_completed');
+        var labelKey = this._transferReasonLabelKey(this._transferReason(tr));
+        if (labelKey) return this.t(labelKey);
         if (this.isCancelledTransfer(tr)) return this.t('transfer.status_cancelled');
         return this.t('transfer.status_failed');
       },
       transferStatusClass: function (tr) {
         if (tr.status === 'completed') return 'transfer-history-item__status--ok';
-        if (this.isCancelledTransfer(tr)) return 'transfer-history-item__status--active';
+        // Cancelled stays neutral (accent); every specific failure reason is
+        // shown as an error badge.
+        var reason = this._transferReason(tr);
+        if (reason === 'cancelled' || this.isCancelledTransfer(tr)) {
+          return 'transfer-history-item__status--active';
+        }
         return 'transfer-history-item__status--err';
       },
       // Reconcile the active/history transfer lists with the server after a

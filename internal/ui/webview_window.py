@@ -124,8 +124,8 @@ class WebViewWindow:
         self,
         url: str,
         title: str = "ClipSync",
-        width: int = 900,
-        height: int = 700,
+        width: int | None = None,
+        height: int | None = None,
     ):
         if not url:
             raise ValueError("url must not be empty")
@@ -200,11 +200,16 @@ class WebViewWindow:
         browser = self._browser_name
         args_tmpl = self._browser_args
 
-        # Substitute placeholders in arg templates
-        args = [
-            a.format(url=url, width=width, height=height)
-            for a in args_tmpl
-        ]
+        # When the caller passes no width/height, omit the size flags so the
+        # browser reuses the user's last window size instead of re-forcing a
+        # fixed dashboard size on every open (macOS Chrome app-mode windows
+        # otherwise jump back to the default every time).
+        size_known = width is not None and height is not None
+        args = []
+        for a in args_tmpl:
+            if not size_known and ("{width}" in a or "{height}" in a):
+                continue
+            args.append(a.format(url=url, width=width, height=height))
 
         if system == "Darwin":
             if browser == "Safari":

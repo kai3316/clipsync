@@ -111,14 +111,22 @@ def _get_log_path() -> "Path":
 
 
 def _hide_dock():
-    """Hide the app from the macOS Dock, keeping only the menu bar icon."""
+    """Hide the app from the macOS Dock, keeping only the menu bar icon.
+
+    Uses ``NSApplicationActivationPolicyAccessory`` (1) rather than
+    ``NSApplicationActivationPolicyProhibited`` (2): Prohibited keeps the app
+    out of the Dock but also prevents it from activating its own windows, which
+    breaks CTk dialogs and the retrust prompt.  Accessory hides the Dock icon
+    while still letting the app front its windows when it needs to.
+    """
     if sys.platform != "darwin":
         return
     try:
         from rubicon.objc import ObjCClass
 
         NSApp = ObjCClass("NSApplication").sharedApplication()
-        NSApp.setActivationPolicy_(2)
+        # NSApplicationActivationPolicyAccessory == 1
+        NSApp.setActivationPolicy_(1)
         return
     except Exception:
         pass
@@ -145,7 +153,8 @@ def _hide_dock():
         proto1 = ctypes.CFUNCTYPE(
             ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_long,
         )
-        proto1(("objc_msgSend", objc))(app, sel_policy, 2)
+        # NSApplicationActivationPolicyAccessory == 1
+        proto1(("objc_msgSend", objc))(app, sel_policy, 1)
     except Exception:
         pass
 
@@ -290,6 +299,24 @@ def _pid_alive(pid: int) -> bool:
             os.kill(pid, 0)
         except (ProcessLookupError, OSError):
             return False
+        if sys.platform == "darwin":
+            # macOS has no /proc, so the cmdline check below is Linux-only.
+            # Strengthen the plain signal-0 liveness check (which can't tell
+            # a ClipSync process from an unrelated process reusing the PID)
+            # by comparing the process image name via `ps`.  Any failure errs
+            # on the safe side (True), exactly like the Linux fall-through.
+            try:
+                import subprocess
+                out = subprocess.run(
+                    ["ps", "-p", str(pid), "-o", "comm="],
+                    capture_output=True, text=True, timeout=3,
+                ).stdout or ""
+                name = out.strip().lower()
+                if not name:
+                    return True  # can't verify, err on safe side
+                return "python" in name or "clipsync" in name
+            except Exception:
+                return True  # can't verify, err on safe side
         try:
             from pathlib import Path
             cmdline = Path(f"/proc/{pid}/cmdline").read_text()
@@ -359,9 +386,30 @@ def _run_tray(device_name: str, pipe, parent_pid: int, locale: str = "en"):
             try:
                 if pipe.poll(100):
                     msg = pipe.recv()
-                    if msg[0] == "show_notification" and child_systray._tray:
+                    if not isinstance(msg, tuple) or not msg:
+                        continue
+                    _kind = msg[0]
+                    if _kind == "show_notification" and child_systray._tray:
                         try:
                             child_systray._tray.notify(msg[2], title=msg[1])
+                        except Exception:
+                            pass
+                    elif _kind == "set_peers":
+                        # Parent pushes the live peer list so the child's
+                        # menu stays in sync (the parent's own SystrayApp is
+                        # dormant and cannot update the child's menu).
+                        try:
+                            child_systray.set_peers(list(msg[1] or []))
+                        except Exception:
+                            pass
+                    elif _kind == "set_web_enabled":
+                        try:
+                            child_systray.set_web_enabled(bool(msg[1]))
+                        except Exception:
+                            pass
+                    elif _kind == "set_syncing":
+                        try:
+                            child_systray.set_syncing(bool(msg[1]))
                         except Exception:
                             pass
             except (EOFError, BrokenPipeError, OSError):
@@ -484,6 +532,14 @@ class Application:
         # ── macOS multiprocessing state ─────────────────────────────
         self._parent_conn = None
         self._tray_proc = None
+        # Tray-subprocess watchdog: if the child dies (crash / EOF) the app
+        # would become headless — no Dock icon and no tray — so we restart it
+        # up to a bounded number of times with a short backoff.
+        self._macos_tray_restarts = 0
+        self._macos_tray_max_restarts = 3
+        # Last window size used for the webview dashboard.  None = let the
+        # browser use its own last size (no forced --window-size).
+        self._webview_size: tuple | None = None
 
     # ═══════════════════════════════════════════════════════════════
     # Phase 1: Logging (static)
@@ -915,6 +971,17 @@ class Application:
         self.file_transfer_mgr.set_on_file_received(self._on_file_received)
         self.file_transfer_mgr.set_on_transfer_request(self._on_transfer_request)
 
+        # ── Sync manager callbacks ──────────────────────────────
+        # A failed remote clipboard write is otherwise silent; surface it so
+        # the user knows the received content never reached the clipboard.
+        self.sync_mgr.set_on_write_error(
+            lambda: self._notify(
+                "notify_sync",
+                T("sync.write_failed_title"),
+                T("sync.write_failed_msg"),
+            )
+        )
+
         # ── Discovery callbacks ─────────────────────────────────
         self.discovery.set_callbacks(self._on_peer_found, self._on_peer_lost)
 
@@ -963,7 +1030,10 @@ class Application:
 
         ``HotkeyManager.running`` stays True even when the platform listener
         thread dies immediately (e.g. macOS missing Accessibility permission),
-        so probe the listener thread liveness once after startup.
+        so probe the listener thread liveness once after startup.  On macOS
+        also check ``is_trusted()``: a CGEvent tap can be *created* yet never
+        fire when the app is not in the Accessibility whitelist, which the
+        liveness probe alone cannot detect.
         """
         if getattr(self, "_hotkey_failure_notified", False) or self._shutting_down:
             return
@@ -975,6 +1045,15 @@ class Application:
         if not mgr.running or not alive:
             self._hotkey_failure_notified = True
             self._notify_hotkey_failure()
+            return
+        # macOS: tap created but the process isn't Accessibility-trusted →
+        # the listener stays alive but never receives events.
+        try:
+            if not mgr.is_trusted():
+                self._hotkey_failure_notified = True
+                self._notify_hotkey_failure()
+        except Exception:
+            logger.debug("Hotkey is_trusted check failed", exc_info=True)
 
     def _notify_hotkey_failure(self) -> None:
         """Notify the user that global hotkeys are unavailable (once)."""
@@ -982,6 +1061,13 @@ class Application:
             self._notify_error(T("hotkey.failed_title"), T("hotkey.failed_msg"))
         except Exception:
             logger.debug("Could not surface hotkey failure dialog", exc_info=True)
+        # Also try a desktop notification: in webview mode _notify_error only
+        # toasts (which needs a web client), and the dialog can be suppressed —
+        # this makes the failure visible even with no client attached.
+        try:
+            notification_mgr.show(T("hotkey.failed_title"), T("hotkey.failed_msg"))
+        except Exception:
+            logger.debug("Could not surface hotkey failure notification", exc_info=True)
 
     def _open_quick_paste(self) -> None:
         """Open the Quick Paste floating window."""
@@ -1077,7 +1163,7 @@ class Application:
         self.sync_mgr.set_enabled(enabled)
         self.cfg.sync_enabled = enabled
         self._save_cfg_encrypted()
-        self.systray.set_syncing(enabled)
+        self._set_systray_syncing(enabled)
         self._notify("notify_sync", T("ui.clipboard_sync"),
                      T("notify.sync_active") if enabled else T("notify.sync_paused"))
         logger.info("Sync %s (toggle_monitor hotkey)", "enabled" if enabled else "paused")
@@ -1088,7 +1174,18 @@ class Application:
         if self.content_filter.is_active and self.content_filter.is_sensitive(msg.content):
             sensitivity = self.content_filter.describe_sensitivity(msg.content)
             logger.info("Filtering sensitive content: %s", sensitivity)
+            # Local history intentionally keeps the original clip (you should
+            # see what you copied); only what leaves this device is redacted.
+            # Tell the user the peer received [FILTERED] placeholders instead.
             msg.content = self.content_filter.filter_content(msg.content)
+            now = time.monotonic()
+            if now - getattr(self, "_last_filter_warn", 0.0) > 10.0:
+                self._last_filter_warn = now
+                if self._web_has_clients():
+                    self._web_toast(T("filter.sender_blocked"), 3000)
+                else:
+                    self._notify("notify_sync", T("ui.clipboard_sync"),
+                                 T("filter.sender_blocked"))
         data = encode_message(msg)
         if len(data) > MAX_FRAME_SIZE:
             size_mb = len(data) / (1024 * 1024)
@@ -1109,7 +1206,14 @@ class Application:
             now = time.monotonic()
             if now - getattr(self, "_last_no_peer_warn", 0.0) > 5.0:
                 self._last_no_peer_warn = now
-                self._web_toast(T("status.no_devices"), 2000)
+                if self._web_has_clients():
+                    self._web_toast(T("status.no_devices"), 2000)
+                else:
+                    # No web client attached (classic CTk mode, or a phone
+                    # hasn't connected to remote access) — a toast would reach
+                    # nobody, so fall back to a desktop notification.
+                    self._notify("notify_sync", T("ui.clipboard_sync"),
+                                 T("status.no_devices"))
 
     def _on_peer_message(self, msg, peer_id: str | None = None) -> None:
         msg_type = getattr(msg, "msg_type", "clipboard")
@@ -1153,7 +1257,18 @@ class Application:
         if progress < 1.0 and (now - last_t < 0.1 and progress - last_p < 0.01):
             return
         self._last_transfer_progress[transfer_id] = (now, progress)
-        self._push_web("broadcast_transfer_progress", transfer_id, progress)
+        # Include the live transfer state so the web panel can render
+        # "finalizing" (and other states) instead of a stuck "Sending 100%".
+        state = "transferring"
+        if self.file_transfer_mgr is not None:
+            try:
+                for t in self.file_transfer_mgr.get_transfers():
+                    if t.get("transfer_id") == transfer_id:
+                        state = t.get("state", "transferring") or "transferring"
+                        break
+            except Exception:
+                logger.debug("Could not read transfer state for web push", exc_info=True)
+        self._push_web("broadcast_transfer_progress", transfer_id, progress, state)
 
     def _reject_incoming_transfer(self, transfer_id: str, send_fn) -> None:
         """Reject an incoming transfer and forget its direction entry.
@@ -1242,12 +1357,20 @@ class Application:
             self._push_web("broadcast_transfer_complete", transfer_id, True)
 
     def _play_transfer_sound(self) -> None:
-        """Play the transfer notification sound when the user enabled sound."""
-        if getattr(self.cfg, "sound_enabled", False):
-            try:
-                notification_mgr.play_sound()
-            except Exception:
-                logger.debug("play_sound failed", exc_info=True)
+        """Play the transfer notification sound when sound is enabled.
+
+        The master ``notifications_enabled`` switch silences sound too: a user
+        who disabled all notifications shouldn't be startled by audio.  Both
+        flags must be on for the sound to play.
+        """
+        if not getattr(self.cfg, "sound_enabled", False):
+            return
+        if not self._notifications_enabled():
+            return
+        try:
+            notification_mgr.play_sound()
+        except Exception:
+            logger.debug("play_sound failed", exc_info=True)
 
     def _on_transfer_request(self, transfer_id: str, file_name: str, file_size: int,
                              mime_type: str, send_fn) -> None:
@@ -1504,6 +1627,22 @@ class Application:
             # Allow a future re-discovery to auto-connect again.
             self._auto_connect_pending.discard(peer_id)
         self.transport_mgr.disconnect_peer(peer_id)
+        # Fail any outgoing file transfers destined for this peer immediately
+        # instead of letting them hang in "awaiting_ack"/"finalizing" for the
+        # full 60-120s timeout.  Discovery reports the *hashed* id here, while
+        # transfers are keyed by the real device id — resolve the hash first
+        # (same lookup _maybe_auto_connect uses) or the fast-fail matches nothing.
+        if self.file_transfer_mgr is not None:
+            real_id = None
+            try:
+                if self.pairing_mgr is not None:
+                    for peer in self.pairing_mgr.get_known_peers():
+                        if Discovery._hash_device_id(peer.device_id) == peer_id:
+                            real_id = peer.device_id
+                            break
+            except Exception:
+                logger.debug("Failed to resolve hashed peer id", exc_info=True)
+            self.file_transfer_mgr.fail_peer_transfers(real_id or peer_id)
 
     def _snapshot_discovered_peers(self) -> dict:
         """Return a thread-safe snapshot of the discovered peers dict.
@@ -1570,6 +1709,18 @@ class Application:
     def _apply_config(self) -> None:
         cfg = self.cfg
         notification_mgr.enabled = cfg.notifications_enabled
+        # Notifications may be enabled by the user while the platform cannot
+        # deliver them (e.g. Linux without notify-send).  Surface that once —
+        # do not spam the log on every notification attempt.
+        if cfg.notifications_enabled:
+            try:
+                if not notification_mgr.is_available():
+                    logger.warning(
+                        "Notifications are enabled but this platform cannot "
+                        "deliver them (notify-send is not installed)."
+                    )
+            except Exception:
+                logger.debug("Notification availability check failed", exc_info=True)
         if cfg.log_level:
             level = getattr(logging, cfg.log_level.upper(), None)
             if level is not None:
@@ -1602,7 +1753,7 @@ class Application:
             enabled = bool(updated["sync_enabled"])
             self.sync_mgr.set_enabled(enabled)
             if self.systray is not None:
-                self.systray.set_syncing(enabled)
+                self._set_systray_syncing(enabled)
         if "filter_enabled_categories" in updated and self.content_filter is not None:
             self.content_filter.enabled_categories = updated["filter_enabled_categories"]
         if "source_tracking_enabled" in updated and getattr(self, "_monitor", None) is not None:
@@ -1945,6 +2096,18 @@ class Application:
         except Exception:
             logger.debug("Platform font setup skipped", exc_info=True)
 
+        # ── HiDPI / fractional scaling ───────────────────────────────
+        # CTk renders at 1x on HiDPI Linux/Windows displays unless widget and
+        # window scaling are raised to match the monitor DPI.  macOS is left
+        # to Tk's native Retina handling (the helper returns 1.0 there).  A
+        # detection failure is a no-op (stays at 1x).
+        try:
+            from internal.ui.fonts import apply_ui_scaling
+
+            apply_ui_scaling(self.root)
+        except Exception:
+            logger.debug("HiDPI scaling setup skipped", exc_info=True)
+
         # ── Systray ──────────────────────────────────────────────────
         self.systray = SystrayApp(
             device_name=self.cfg.device_name,
@@ -1958,7 +2121,10 @@ class Application:
             on_about=lambda: self.root.after(0, self._show_about),
             on_quit=lambda: self.root.after(0, self.shutdown),
         )
-        self.systray.set_web_enabled(self.cfg.web_enabled)
+        # Seed the parent's tray state so the initial menu matches the config
+        # (the macOS subprocess receives it via _push_tray_state once spawned).
+        self._set_systray_web_enabled(self.cfg.web_enabled)
+        self._set_systray_syncing(self.cfg.sync_enabled)
 
     # ═══════════════════════════════════════════════════════════════
     # Phase 9: Start services
@@ -2004,7 +2170,7 @@ class Application:
                 )
                 show_error(self.root, T("ui.web_companion"), msg)
                 self.cfg.web_enabled = False
-                self.systray.set_web_enabled(False)
+                self._set_systray_web_enabled(False)
                 if self.cfg.ui_backend == "webview":
                     self.cfg.ui_backend = "ctk"
                     self._save_cfg_encrypted()
@@ -2043,34 +2209,148 @@ class Application:
             tray_thread.start()
 
     def _start_macos_tray(self) -> None:
+        """Start the macOS tray subprocess and its message-poll watchdog."""
         import multiprocessing
 
         multiprocessing.freeze_support()
-        parent_conn, child_conn = multiprocessing.Pipe()
-        notification_mgr.set_pipe(parent_conn)
-        self._tray_proc = multiprocessing.Process(
-            target=_run_tray,
-            args=(self.cfg.device_name, child_conn, os.getpid(), self.cfg.language),
-            daemon=True,
+        # _spawn_macos_tray schedules the poll loop, so a restart (after the
+        # subprocess dies) resumes polling the new pipe automatically.
+        self._spawn_macos_tray()
+
+    def _spawn_macos_tray(self) -> None:
+        """Spawn the macOS tray subprocess with a fresh pipe.
+
+        Also pushes the current tray state (peers / web / syncing) so the
+        freshly-built child menu starts with the right data instead of its
+        defaults, then starts polling the new pipe.
+        """
+        import multiprocessing
+
+        try:
+            parent_conn, child_conn = multiprocessing.Pipe()
+            notification_mgr.set_pipe(parent_conn)
+            self._parent_conn = parent_conn
+            self._tray_proc = multiprocessing.Process(
+                target=_run_tray,
+                args=(self.cfg.device_name, child_conn, os.getpid(), self.cfg.language),
+                daemon=True,
+            )
+            self._tray_proc.start()
+            logger.info("macOS tray subprocess started (PID %d)", self._tray_proc.pid)
+            self._push_tray_state()
+            self.root.after(500, self._poll_macos_tray)
+        except Exception:
+            logger.exception("Failed to spawn macOS tray subprocess")
+            self._parent_conn = None
+            self._tray_proc = None
+
+    def _poll_macos_tray(self) -> None:
+        """Poll the parent→child pipe for tray actions (main thread, via after).
+
+        When the subprocess dies (EOF / broken pipe) the poll loop stops and
+        hands off to ``_on_tray_subprocess_died``, which schedules a restart;
+        the restart's ``_spawn_macos_tray`` starts a fresh poll loop.
+        """
+        if self._shutting_down:
+            return
+        try:
+            while self._parent_conn is not None and self._parent_conn.poll():
+                self._handle_tray_msg(self._parent_conn.recv())
+        except (EOFError, BrokenPipeError, ConnectionResetError, OSError):
+            # Tray subprocess is gone (EOF/broken pipe) — restart it so
+            # the app doesn't go headless (no Dock icon, no tray).
+            self._on_tray_subprocess_died()
+            return
+        except Exception:
+            # An unexpected handler error must not kill the tray channel
+            # for the rest of the session — log and keep polling.
+            logger.exception("Unhandled error in tray poll; continuing")
+        self.root.after(500, self._poll_macos_tray)
+
+    def _on_tray_subprocess_died(self) -> None:
+        """Handle a dead tray subprocess: clear state, then schedule a restart.
+
+        The app has no Dock icon and no tray once the child dies, so it becomes
+        headless.  Restart it with a short backoff, up to a bounded number of
+        attempts, and stop entirely during shutdown.
+        """
+        self._parent_conn = None
+        self._tray_proc = None
+        if self._shutting_down:
+            return
+        if self._macos_tray_restarts >= self._macos_tray_max_restarts:
+            logger.warning(
+                "macOS tray subprocess died %d time(s); not restarting again. "
+                "The app may be headless — restart ClipSync to recover the tray.",
+                self._macos_tray_restarts,
+            )
+            return
+        if self._shutting_down:
+            return
+        self._macos_tray_restarts += 1
+        logger.warning(
+            "macOS tray subprocess died; restarting (%d/%d)",
+            self._macos_tray_restarts, self._macos_tray_max_restarts,
         )
-        self._tray_proc.start()
-        self._parent_conn = parent_conn
+        try:
+            self.root.after(10000, self._spawn_macos_tray)
+        except Exception:
+            logger.debug("Could not schedule macOS tray restart", exc_info=True)
 
-        def _poll_tray():
-            if self._shutting_down:
-                return
-            try:
-                while parent_conn.poll():
-                    self._handle_tray_msg(parent_conn.recv())
-            except (EOFError, BrokenPipeError, ConnectionResetError, OSError):
-                return  # tray subprocess is gone
-            except Exception:
-                # An unexpected handler error must not kill the tray channel
-                # for the rest of the session — log and keep polling.
-                logger.exception("Unhandled error in tray poll; continuing")
-            self.root.after(500, _poll_tray)
+    def _push_tray_state(self) -> None:
+        """Push the current peers / web / syncing state to the tray subprocess.
 
-        self.root.after(500, _poll_tray)
+        On macOS the tray runs in a subprocess whose ``SystrayApp`` is a
+        separate instance from ``self.systray``; calling ``set_*`` on
+        ``self.systray`` only updates the dormant parent object.  This sends
+        the live state over the pipe so the child's menu actually rebuilds.
+        Safe to call on any platform / any time — no-op unless the macOS tray
+        subprocess is alive, and it never raises.
+        """
+        if sys.platform != "darwin":
+            return
+        conn = self._parent_conn
+        proc = self._tray_proc
+        if conn is None or proc is None or not proc.is_alive():
+            return
+        try:
+            peers = list(getattr(self.systray, "_peers", []) or [])
+            web = bool(getattr(self.systray, "_web_enabled", False))
+            syncing = bool(getattr(self.systray, "_syncing", True))
+        except Exception:
+            logger.debug("Failed to read systray state", exc_info=True)
+            return
+        try:
+            # Route through notification_mgr.send_pipe so all pipe writers share
+            # one lock — Connection.send isn't internally synchronized, and the
+            # notification sender thread writes to this same pipe concurrently.
+            notification_mgr.send_pipe(("set_peers", peers))
+            notification_mgr.send_pipe(("set_web_enabled", web))
+            notification_mgr.send_pipe(("set_syncing", syncing))
+        except Exception:
+            # A full pipe (or a subprocess that died between is_alive() and
+            # send) must never crash the main thread.
+            logger.debug("Failed to push tray state to macOS subprocess", exc_info=True)
+
+    # ── Systray state setters (route through the pipe on macOS) ──────
+    # Each keeps updating the parent's dormant SystrayApp so the parent state
+    # stays authoritative, then forwards to the subprocess on macOS.  On other
+    # platforms the direct call is unchanged.
+
+    def _set_systray_peers(self, peers: list[str]) -> None:
+        self.systray.set_peers(peers)
+        if sys.platform == "darwin":
+            self._push_tray_state()
+
+    def _set_systray_web_enabled(self, enabled: bool) -> None:
+        self.systray.set_web_enabled(enabled)
+        if sys.platform == "darwin":
+            self._push_tray_state()
+
+    def _set_systray_syncing(self, enabled: bool) -> None:
+        self.systray.set_syncing(enabled)
+        if sys.platform == "darwin":
+            self._push_tray_state()
 
     def _handle_tray_msg(self, msg: tuple) -> None:
         cmd = msg[0]
@@ -2114,7 +2394,7 @@ class Application:
                         peer_display.append(f"{info['name']}  (found)")
             if peer_display != prev_display:
                 prev_display = peer_display
-                self.root.after(0, lambda pd=list(peer_display): self.systray.set_peers(pd))
+                self.root.after(0, lambda pd=list(peer_display): self._set_systray_peers(pd))
                 self._push_web("broadcast_devices")
 
             connected_set = set(connected_ids)
@@ -2375,12 +2655,12 @@ class Application:
                     T("ui.web_start_failed2", port=self.cfg.web_port),
                 )
                 return
-            self.systray.set_web_enabled(True)
+            self._set_systray_web_enabled(True)
             logger.info("Web companion started via dashboard")
         elif act == "stop":
             if self.web_server:
                 self.web_server.stop()
-            self.systray.set_web_enabled(False)
+            self._set_systray_web_enabled(False)
             logger.info("Web companion stopped via dashboard")
         elif act == "restart":
             if self.web_server:
@@ -3261,6 +3541,23 @@ class Application:
         if mgr is not None:
             mgr.toast(message, duration)
 
+    def _web_has_clients(self) -> bool:
+        """Return True when at least one web client is attached.
+
+        A ``_web_toast`` is only visible when a web page (the webview
+        dashboard or a phone's remote-access page) is actually connected;
+        otherwise it is silently dropped and the desktop needs a real
+        notification instead.
+        """
+        try:
+            return (
+                self.web_server is not None
+                and self.web_server.ws_manager.client_count > 0
+            )
+        except Exception:
+            logger.debug("web_has_clients check failed", exc_info=True)
+            return False
+
     def _notify(self, cfg_flag: str, title: str, message: str) -> None:
         """Show a desktop notification gated by a per-type config toggle.
 
@@ -3629,10 +3926,24 @@ class Application:
             f"http://127.0.0.1:{self.cfg.web_port}"
             f"/index.html?token={quote(self.cfg.web_token or '', safe='')}"
         )
-        self.webview_win = WebViewWindow(url=url, title=T("ui.app_name"), width=960, height=720)
+        # Pass the previously-used window size (or None) so a re-open does NOT
+        # re-force the hardcoded 960x720 — the browser keeps the user's last
+        # window size when no --window-size flag is passed (macOS/Chrome).
+        size = getattr(self, "_webview_size", None)
+        self.webview_win = WebViewWindow(
+            url=url, title=T("ui.app_name"),
+            width=size[0] if size else None,
+            height=size[1] if size else None,
+        )
         self.webview_win.start()
         self._webview_opened_at = time.monotonic()
         self._webview_client_seen = False
+        # Track the requested size so subsequent opens reuse it instead of
+        # snapping back to the default.
+        try:
+            self._webview_size = (self.webview_win._width, self.webview_win._height)
+        except Exception:
+            self._webview_size = None
         # Never log the URL with its ?token= query — it would leak the web token
         # into a (previously world-readable) log file.
         logger.info("WebView dashboard opened: %s", url.split("?")[0])
@@ -3650,7 +3961,7 @@ class Application:
             on_quit=self.shutdown,
             get_sync_enabled=lambda: self.cfg.sync_enabled,
             set_sync_enabled=lambda v: (
-                self.sync_mgr.set_enabled(v), self.systray.set_syncing(v)
+                self.sync_mgr.set_enabled(v), self._set_systray_syncing(v)
             ),
             get_discovering=lambda: self.discovery.is_browsing,
             get_visible=lambda: self.discovery.is_advertising,
@@ -4303,6 +4614,10 @@ class Application:
     def _on_disconnect(self, peer_id: str) -> None:
         logger.info("User initiated disconnect from %s", peer_id)
         self.transport_mgr.disconnect_peer(peer_id, reject=True)
+        # A user-initiated disconnect also abandons any outgoing file transfer
+        # to that peer — fail it now rather than after a long timeout.
+        if self.file_transfer_mgr is not None:
+            self.file_transfer_mgr.fail_peer_transfers(peer_id)
 
     def _on_connect(self, peer_id: str) -> bool:
         info = None
@@ -4707,7 +5022,7 @@ class Application:
             actual = not enabled
         self.cfg.sync_enabled = actual
         self._save_cfg_encrypted()
-        self.systray.set_syncing(actual)
+        self._set_systray_syncing(actual)
         self._notify("notify_sync", T("ui.clipboard_sync"),
                      T("notify.sync_active") if actual else T("notify.sync_paused"))
         logger.info("Sync %s", "enabled" if actual else "paused")

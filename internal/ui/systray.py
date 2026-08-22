@@ -255,7 +255,27 @@ class SystrayApp:
             )
 
         notification_mgr.set_tray(self._tray)
-        self._tray.run()
+        try:
+            self._tray.run()
+        except Exception:
+            # The tray backend can be missing or fail to start (e.g. Linux
+            # without an AppIndicator/GTK status-notifier host).  Never crash
+            # the app — log clearly and tell the user the dashboard is the
+            # only UI, so a silently-absent tray isn't mistaken for a working
+            # one.
+            logger.exception("System tray failed to start or crashed")
+            try:
+                notification_mgr.show(
+                    "ClipSync",
+                    "The system tray could not be started, so the dashboard "
+                    "is the only interface. Re-run ClipSync to try the tray "
+                    "again.",
+                )
+            except Exception:
+                logger.debug("Tray-failure notification could not be shown",
+                             exc_info=True)
+        finally:
+            self._tray = None
 
     def stop(self):
         if self._tray:

@@ -52,6 +52,82 @@ _VISIBILITY_TOGGLE_FAILED = (
 )
 
 
+# ── Window-geometry persistence ───────────────────────────────────────
+# The dashboard window is DESTROYED on hide under Linux (withdraw is
+# unreliable there), so its position/size is lost every close.  These helpers
+# persist the geometry to a small sidecar JSON in the config directory so a
+# restart reopens the window where the user left it.  All I/O is best-effort
+# and wrapped so a read/write failure is a silent no-op.
+
+def _window_state_path() -> str:
+    try:
+        from internal.config.config import _config_dir
+        return str(_config_dir() / "dashboard_geometry.json")
+    except Exception:
+        return ""
+
+
+def _save_dashboard_geometry(geom: str) -> None:
+    if not geom:
+        return
+    path = _window_state_path()
+    if not path:
+        return
+    try:
+        import json
+        import os
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump({"dashboard_geometry": geom}, f)
+    except Exception:
+        logger.debug("Could not persist dashboard geometry", exc_info=True)
+
+
+def _load_dashboard_geometry() -> str | None:
+    path = _window_state_path()
+    if not path:
+        return None
+    try:
+        import json
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        geom = data.get("dashboard_geometry") if isinstance(data, dict) else None
+        return geom if isinstance(geom, str) else None
+    except Exception:
+        return None
+
+
+def _parse_geometry(geom: str) -> tuple[int, int, int, int] | None:
+    """Parse ``WxH+X+Y`` into (width, height, x, y) or None."""
+    import re
+    m = re.match(r"^(\d+)x(\d+)([+-]\d+)([+-]\d+)$", geom)
+    if not m:
+        return None
+    try:
+        return (int(m.group(1)), int(m.group(2)),
+                int(m.group(3)), int(m.group(4)))
+    except ValueError:
+        return None
+
+
+def _geometry_on_screen(geom: str, sw: int, sh: int) -> bool:
+    """Return True if the saved geometry is at least partially on-screen.
+
+    A monitor change (smaller display, unplugged monitor) can leave a stored
+    geometry off-screen; falling back to centered is friendlier than opening
+    an unreachable window.
+    """
+    parsed = _parse_geometry(geom)
+    if not parsed:
+        return False
+    w, h, x, y = parsed
+    if w <= 0 or h <= 0:
+        return False
+    if x + w <= 0 or y + h <= 0 or x >= sw or y >= sh:
+        return False
+    return True
+
+
 def _add_tooltip(widget, text):
     """Attach a lightweight hover tooltip to a widget (best-effort).
 
@@ -212,6 +288,7 @@ class DashboardWindow:
         self._dark_mode = _is_dark_mode(get_config().appearance_mode)
         self._current_panel = "overview"
         self._refresh_job: str | None = None
+        self._fast_refresh = False  # poll at 800ms while transfers are live
         self._breathing = False
         self._breath_timer: str | None = None
 
@@ -349,8 +426,32 @@ class DashboardWindow:
         self._window.update_idletasks()
         sw = self._window.winfo_screenwidth()
         sh = self._window.winfo_screenheight()
-        w, h = 900, 640
-        self._window.geometry(f"{w}x{h}+{(sw-w)//2}+{(sh-h)//2}")
+
+        # Restore the user's last window geometry (persisted on hide so even a
+        # Linux destroy, or a full restart, reopens where they left it).  Fall
+        # back to a HiDPI-scaled default centered on screen.
+        saved = getattr(self, "_saved_geometry", None) or _load_dashboard_geometry()
+        if saved and _geometry_on_screen(saved, sw, sh):
+            try:
+                self._window.geometry(saved)
+            except tk.TclError:
+                saved = None
+        if not saved:
+            scale = 1.0
+            try:
+                from internal.ui.fonts import compute_ui_scale
+                scale = compute_ui_scale(self._root) or 1.0
+            except Exception:
+                pass
+            # Pass the LOGICAL size — CTk's set_window_scaling converts it to
+            # physical pixels — but center using the PHYSICAL size, otherwise
+            # a HiDPI window sits off-centre.
+            lw, lh = 900, 640
+            pw = max(780, int(lw * scale))
+            ph = max(560, int(lh * scale))
+            x = max(0, (sw - pw) // 2)
+            y = max(0, (sh - ph) // 2)
+            self._window.geometry(f"{lw}x{lh}+{x}+{y}")
 
         self._build_ui()
         self._switch_panel("overview")
@@ -437,6 +538,20 @@ class DashboardWindow:
         self._breathing = False
         self._cancel_pending_timers()
         if self._window is not None:
+            # Persist geometry BEFORE destroying/withdrawing — Linux destroys
+            # the window here (deiconify after withdraw is unreliable), so
+            # without this capture every hide would drop the user's position;
+            # persisting it also lets a restart reopen where they left it.
+            # Use CTk's getter (reverse-scaled LOGICAL geometry) rather than
+            # winfo_geometry() so restoring through CTkToplevel.geometry()
+            # doesn't double-apply set_window_scaling on HiDPI displays.
+            try:
+                geom = self._window.geometry()
+                if geom:
+                    self._saved_geometry = geom
+                    _save_dashboard_geometry(geom)
+            except Exception:
+                logger.debug("Could not capture dashboard geometry", exc_info=True)
             # CTkToplevel.deiconify() after withdraw() is unreliable on
             # Linux (same root cause as the dialog deadlocks).  Destroy
             # the window instead so show() creates a fresh one.
@@ -519,7 +634,17 @@ class DashboardWindow:
                     return
             except tk.TclError:
                 return
-            self._refresh_job = self._root.after(5000, self._schedule_refresh)
+            # Poll faster while a file transfer is actively progressing so
+            # progress bars / state labels update smoothly; settle back to the
+            # slow 5 s cadence once everything is idle.  Only applies while the
+            # transfers panel is on screen (that's where _fast_refresh is set).
+            delay = (
+                800
+                if getattr(self, "_fast_refresh", False)
+                and self._current_panel == "transfers"
+                else 5000
+            )
+            self._refresh_job = self._root.after(delay, self._schedule_refresh)
 
     # ═══════════════════════════════════════════════════════════════
     # UI construction
@@ -2307,6 +2432,15 @@ class DashboardWindow:
         transfers = self._get_transfers() if self._get_transfers else []
         history = self._get_transfer_history() if self._get_transfer_history else []
         speed = (self._get_speed_test_result() if self._get_speed_test_result else None) or {}
+
+        # While a transfer is actively progressing, ask _schedule_refresh to
+        # poll at ~800 ms instead of 5 s so progress/state stay smooth.  Must
+        # be set before the change-detection early return below — otherwise a
+        # rebuild that is skipped would leave the flag stale.
+        self._fast_refresh = any(
+            t.get("state") in ("sending", "receiving", "finalizing", "awaiting_ack")
+            for t in transfers
+        )
         # Change-detection key must use the fields get_transfers() actually
         # returns (transfer_id/state/progress/paused), not id/status — the
         # old keys were always None, so progress and state transitions never
@@ -2497,7 +2631,10 @@ class DashboardWindow:
         # Action buttons (pause / resume / cancel) — right side
         paused = transfer.get("paused", False)
         tid = transfer.get("transfer_id", "")
-        if state in ("sending", "receiving", "paused"):
+        # A transfer waiting for the peer to accept (awaiting_ack) or waiting
+        # for the receiver to finalize (finalizing) can still be cancelled so
+        # the user isn't stuck watching an un-cancellable row for minutes.
+        if state in ("sending", "receiving", "paused", "awaiting_ack", "finalizing"):
             if self._on_cancel_transfer:
                 ctk.CTkButton(
                     r1, text=T("ui.cancel"), width=52, height=22,
@@ -2508,26 +2645,27 @@ class DashboardWindow:
                     font=ctk.CTkFont(size=10),
                     command=lambda t=tid: self._on_cancel_transfer(t),
                 ).pack(side="right", padx=(4, 0))
-            if self._on_resume_transfer and paused:
-                ctk.CTkButton(
-                    r1, text=T("ui.resume"), width=52, height=22,
-                    fg_color="transparent", border_width=1,
-                    text_color=("#27AE60", "#2ECC71"),
-                    border_color=("#27AE60", "#2ECC71"),
-                    hover_color=("#D5F5E3", "#1C4A2C"),
-                    font=ctk.CTkFont(size=10),
-                    command=lambda t=tid: self._on_resume_transfer(t),
-                ).pack(side="right", padx=(4, 0))
-            if self._on_pause_transfer and not paused:
-                ctk.CTkButton(
-                    r1, text=T("ui.pause"), width=52, height=22,
-                    fg_color="transparent", border_width=1,
-                    text_color=("#E67E22", "#F0A04B"),
-                    border_color=("#E67E22", "#F0A04B"),
-                    hover_color=("#FDEBD0", "#5B3A1C"),
-                    font=ctk.CTkFont(size=10),
-                    command=lambda t=tid: self._on_pause_transfer(t),
-                ).pack(side="right", padx=(4, 0))
+            if state in ("sending", "receiving", "paused"):
+                if self._on_resume_transfer and paused:
+                    ctk.CTkButton(
+                        r1, text=T("ui.resume"), width=52, height=22,
+                        fg_color="transparent", border_width=1,
+                        text_color=("#27AE60", "#2ECC71"),
+                        border_color=("#27AE60", "#2ECC71"),
+                        hover_color=("#D5F5E3", "#1C4A2C"),
+                        font=ctk.CTkFont(size=10),
+                        command=lambda t=tid: self._on_resume_transfer(t),
+                    ).pack(side="right", padx=(4, 0))
+                if self._on_pause_transfer and not paused:
+                    ctk.CTkButton(
+                        r1, text=T("ui.pause"), width=52, height=22,
+                        fg_color="transparent", border_width=1,
+                        text_color=("#E67E22", "#F0A04B"),
+                        border_color=("#E67E22", "#F0A04B"),
+                        hover_color=("#FDEBD0", "#5B3A1C"),
+                        font=ctk.CTkFont(size=10),
+                        command=lambda t=tid: self._on_pause_transfer(t),
+                    ).pack(side="right", padx=(4, 0))
 
         ctk.CTkLabel(
             r1, text=f"{arrow}  {display_name}",
@@ -2542,10 +2680,11 @@ class DashboardWindow:
 
         # Row 2: status + speed + ETA
         state_labels = {
-            "awaiting_ack": T("transfer.state.waiting_peer"),
+            "awaiting_ack": T("transfer.state.awaiting_ack"),
             "pending": T("transfer.state.waiting_acceptance"),
             "receiving": T("transfer.state.receiving"),
             "sending": T("transfer.state.sending"),
+            "finalizing": T("transfer.state.finalizing"),
             "cancelled": T("transfer.state.cancelled"),
             "paused": T("transfer.state.paused"),
             "awaiting_retransmit": T("transfer.state.awaiting_retransmit"),
