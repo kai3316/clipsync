@@ -574,7 +574,11 @@ class WebServer:
                  get_certs=None, get_diagnostics=None,
                  on_update_download=None,
                  on_diagnostics_request=None,
-                 on_web_upload=None):
+                 on_web_upload=None,
+                 chat_mgr=None,
+                 get_chat_devices=None,
+                 chat_send_fn=None,
+                 chat_start_session=None):
         self._cfg = cfg
         self._sync_mgr = sync_mgr
         self._get_connected_ids = get_connected_ids
@@ -618,6 +622,11 @@ class WebServer:
         self._on_update_download = on_update_download
         self._on_diagnostics_request = on_diagnostics_request
         self._on_web_upload = on_web_upload
+        # ── Nearby Chat ──────────────────────────────────────────
+        self._chat_mgr = chat_mgr
+        self._get_chat_devices = get_chat_devices
+        self._chat_send_fn = chat_send_fn
+        self._chat_start_session = chat_start_session
         self._httpd: ThreadingHTTPServer | None = None
         self._thread: threading.Thread | None = None
         self._firewall_ok: bool = False
@@ -887,6 +896,10 @@ class WebServer:
         get_certs = self._get_certs
         on_diagnostics_request = self._on_diagnostics_request
         on_web_upload = self._on_web_upload
+        chat_mgr = self._chat_mgr
+        get_chat_devices = self._get_chat_devices
+        chat_send_fn = self._chat_send_fn
+        chat_start_session = self._chat_start_session
         get_diagnostics = self._get_diagnostics
         on_update_download = self._on_update_download
         upload_dir = self._upload_dir
@@ -1461,6 +1474,33 @@ class WebServer:
                         inner_self._send_file(str(safe))
                         return
 
+                    if path == "/api/chat/download":
+                        # Chat file download: stream a received file whose
+                        # saved_path lives inside the chat receive dir.
+                        transfer_id = (query_params.get("transfer_id", [""])[0] or "").strip()
+                        if not transfer_id:
+                            inner_self._send_json({"error": "transfer_id required"}, 400)
+                            return
+                        if chat_mgr is None:
+                            inner_self._send_json({"error": "chat unavailable"}, 503)
+                            return
+                        from internal.web.api.chat import find_saved_path
+                        saved_path = find_saved_path(chat_mgr, transfer_id)
+                        if not saved_path:
+                            inner_self._send_json({"error": "not found"}, 404)
+                            return
+                        # Defense-in-depth: confine against the receive root
+                        # (the same dir phone uploads and clipboard file
+                        # transfers use) so a token holder can never stream a
+                        # file from elsewhere on the host.
+                        from internal.web.api.security import confine_path
+                        safe = confine_path(saved_path, _get_upload_dir(cfg))
+                        if safe is None:
+                            inner_self._send_json({"error": "invalid filename"}, 400)
+                            return
+                        inner_self._send_file(str(safe))
+                        return
+
                     # Delegate to routes module
                     status, content_type, body_bytes = api_routes.dispatch(
                         method="GET",
@@ -1496,6 +1536,10 @@ class WebServer:
                         get_diagnostics=get_diagnostics,
                         on_diagnostics_request=on_diagnostics_request,
                         on_update_download=on_update_download,
+                        chat_mgr=chat_mgr,
+                        get_chat_devices=get_chat_devices,
+                        chat_send_fn=chat_send_fn,
+                        chat_start_session=chat_start_session,
                     )
                     inner_self.send_response(status)
                     inner_self.send_header("Content-Type", content_type)
@@ -1663,6 +1707,10 @@ class WebServer:
                         get_diagnostics=get_diagnostics,
                         on_diagnostics_request=on_diagnostics_request,
                         on_update_download=on_update_download,
+                        chat_mgr=chat_mgr,
+                        get_chat_devices=get_chat_devices,
+                        chat_send_fn=chat_send_fn,
+                        chat_start_session=chat_start_session,
                     )
                     inner_self.send_response(status)
                     inner_self.send_header("Content-Type", content_type)

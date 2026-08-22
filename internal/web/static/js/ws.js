@@ -376,6 +376,102 @@ var ClipsyncWS = (function () {
           }
           break;
 
+        case 'chat_sessions':
+          // Authoritative session-list snapshot (invite created/accepted/
+          // declined, session closed, ...). Replace the list and recompute the
+          // total unread for the sidebar badge.
+          if (data && data.sessions && Array.isArray(data.sessions)) {
+            store.replaceChatSessions(data.sessions);
+          }
+          break;
+
+        case 'chat_message':
+          // A new entry in a conversation. If it belongs to the session that
+          // is currently open, push the entry in immediately (deduped, capped)
+          // so the bubble appears without a full refetch; otherwise just bump
+          // that session's unread counter.
+          if (data && data.session_id) {
+            var csIdx = store.chatSessions.findIndex(function (s) {
+              return s.session_id === data.session_id;
+            });
+            if (csIdx !== -1) {
+              var cs = store.chatSessions[csIdx];
+              if (data.session_id === store.activeChatSession) {
+                cs.unread = 0;
+                // Keep the backend's unread counter accurate while the user is
+                // actively viewing the conversation (fire-and-forget).
+                if (window.ClipsyncAPI && window.ClipsyncAPI.chatSessionAction) {
+                  window.ClipsyncAPI.chatSessionAction(data.session_id, 'read').catch(function () {});
+                }
+              } else {
+                cs.unread = (cs.unread || 0) + 1;
+              }
+              if (data.entry) {
+                if (data.entry.kind === 'text') {
+                  cs.last_preview = data.entry.text;
+                } else if (data.entry.kind === 'file') {
+                  cs.last_preview = (data.entry.outgoing ? '↑ ' : '↓ ') + (data.entry.file_name || '');
+                }
+                if (data.entry.ts) cs.last_activity_ts = data.entry.ts;
+              }
+            }
+            if (data.session_id === store.activeChatSession && data.entry) {
+              var cmEntry = data.entry;
+              var cmDup = store.chatMessages.findIndex(function (m) {
+                return m.entry_id !== undefined && m.entry_id === cmEntry.entry_id;
+              });
+              if (cmDup === -1) {
+                store.chatMessages.push(cmEntry);
+                if (store.chatMessages.length > 200) {
+                  store.chatMessages.splice(0, store.chatMessages.length - 200);
+                }
+              }
+            }
+            store.recalcChatUnread();
+          }
+          break;
+
+        case 'chat_progress':
+          // File-transfer progress (0..1 fraction). Patch the matching file
+          // card in the open conversation so the bar moves live.
+          if (data && data.session_id && data.transfer_id && typeof data.fraction === 'number') {
+            if (data.session_id === store.activeChatSession) {
+              var cpIdx = store.chatMessages.findIndex(function (m) {
+                return m.transfer_id === data.transfer_id;
+              });
+              if (cpIdx !== -1) {
+                store.chatMessages[cpIdx].fraction = data.fraction;
+                if (store.chatMessages[cpIdx].status !== 'sending') {
+                  store.chatMessages[cpIdx].status = 'sending';
+                }
+              }
+            }
+          }
+          break;
+
+        case 'chat_file_done':
+          // Terminal state for a file transfer: success + saved_path + status.
+          if (data && data.session_id && data.transfer_id) {
+            if (data.session_id === store.activeChatSession) {
+              var fdIdx = store.chatMessages.findIndex(function (m) {
+                return m.transfer_id === data.transfer_id;
+              });
+              if (fdIdx !== -1) {
+                var fd = store.chatMessages[fdIdx];
+                fd.success = data.success;
+                if (data.saved_path) fd.saved_path = data.saved_path;
+                if (data.status) {
+                  fd.status = data.status;
+                } else {
+                  // Defensive fallback when the payload omits status.
+                  fd.status = data.success ? 'done' : 'failed';
+                }
+                if (data.success) fd.fraction = 1;
+              }
+            }
+          }
+          break;
+
         case 'show_dialog':
           // Server-pushed dialog modal
           if (data && data.dialog_id) {

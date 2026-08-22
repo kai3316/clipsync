@@ -619,7 +619,10 @@ class TestStalledTransferSweep:
                 "peer-a", "A1", None,
             )
             # Accepting opens the temp file; the wire ack itself is not needed.
-            mgr.accept_file(sid, tid, None)
+            # Use a working send_fn so the accept succeeds and the receive
+            # state persists (a failed accept now rolls the state back —
+            # that's the point of the rollback fix).
+            mgr.accept_file(sid, tid, lambda data: True)
             temp_path = mgr._receives[tid]["temp_path"]
             assert temp_path is not None and temp_path.exists()
             # Age the receive past the stall timeout so the sweep fails it.

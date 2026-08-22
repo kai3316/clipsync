@@ -68,6 +68,12 @@
             count: s.activeTransfers.length,
           },
           {
+            id: 'chat',
+            label: t('nav.chat'),
+            icon: '💬',
+            count: s.chatUnread,
+          },
+          {
             id: 'favorites',
             label: t('ui.favorites'),
             icon: '⭐',

@@ -393,6 +393,40 @@ class WebSocketManager:
             "cancelled": bool(cancelled),
         })
 
+    def broadcast_chat_sessions(self, sessions=None):
+        """Convenience: broadcast the full nearby-chat session list.
+
+        ``sessions`` is the list of session dicts from ``ChatManager.get_sessions()``
+        (the web UI re-renders from the whole list on any change).
+        """
+        self.broadcast("chat_sessions", {"sessions": sessions or []})
+
+    def broadcast_chat_message(self, session_id: str, entry: dict):
+        """Convenience: broadcast one new chat message entry."""
+        self.broadcast("chat_message", {
+            "session_id": session_id,
+            "entry": entry or {},
+        })
+
+    def broadcast_chat_progress(self, session_id: str, transfer_id: str, fraction: float):
+        """Convenience: broadcast chat file-transfer progress (both directions)."""
+        self.broadcast("chat_progress", {
+            "session_id": session_id,
+            "transfer_id": transfer_id,
+            "fraction": fraction,
+        })
+
+    def broadcast_chat_file_done(self, session_id: str, transfer_id: str,
+                                 success: bool, saved_path: str, status: str):
+        """Convenience: broadcast a completed chat file transfer."""
+        self.broadcast("chat_file_done", {
+            "session_id": session_id,
+            "transfer_id": transfer_id,
+            "success": bool(success),
+            "saved_path": saved_path or "",
+            "status": status or "",
+        })
+
     @property
     def client_count(self) -> int:
         with self._lock:

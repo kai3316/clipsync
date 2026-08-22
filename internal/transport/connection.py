@@ -75,9 +75,10 @@ class PeerConnection:
 
     def __init__(self, device_id: str, device_name: str, sock: socket.socket,
                  peer_fingerprint: str = "", enc_mgr=None, pairing_mgr=None,
-                 pending_recv: bytes = b""):
+                 pending_recv: bytes = b"", is_anonymous: bool = False):
         self.device_id = device_id
         self.device_name = device_name
+        self.is_anonymous = is_anonymous
         self._sock = sock
         self._sock.settimeout(DATA_TIMEOUT)
         self._send_lock = threading.Lock()
@@ -324,7 +325,7 @@ class PeerConnection:
                         # stops a flood of fresh TLS connections from spamming
                         # chat invites, each with a fresh per-connection rate
                         # budget.
-                        if self.device_id.startswith("__anon__"):
+                        if self.is_anonymous:
                             logger.debug(
                                 "[%s] dropping app frame from anonymous connection",
                                 self.device_name,
@@ -637,11 +638,13 @@ class TransportManager:
             except Exception:
                 pass
         if data and _REJECT_MARKER.startswith(data):
-            # A torn marker after the whole wait budget is unusable as frame
-            # data either way; drop it rather than desync the frame stream.
-            logger.debug("[%s] discarding %d-byte partial reject marker",
-                         self._device_name, len(data))
-            return False, b""
+            # A torn marker (only ever a rejection: frames start with a zero
+            # length byte, the marker with \\xff).  Treat it as rejected —
+            # discarding it and reading on would hit a garbage "frame" and
+            # reconnect into an endless reject loop.
+            logger.debug("[%s] torn %d-byte reject marker after probe budget "
+                         "— treating as rejection", self._device_name, len(data))
+            return True, b""
         return False, data
 
     def start_server(self):
@@ -1174,7 +1177,10 @@ class TransportManager:
                 del self._peers[peer_id]
         # A peer that explicitly rejected this connection (forgotten/removed)
         # must not be reconnected to — clear the saved address and stop the
-        # connect/reject/reconnect loop.
+        # connect/reject/reconnect loop.  Deliberately NOT added to
+        # _rejected_peer_ids: that set is also consulted for INBOUND
+        # connections, so a forgotten peer must still be able to reach us
+        # again after the user re-pairs.
         if conn is not None and getattr(conn, "_rejected_by_peer", False):
             logger.info(
                 "[%s] peer rejected this connection — clearing saved address, "
@@ -1184,7 +1190,6 @@ class TransportManager:
             with self._lock:
                 self._peer_addresses.pop(peer_id, None)
                 self._reconnect_attempts.pop(peer_id, None)
-                self._rejected_peer_ids.add(peer_id)
             return
         # Only auto-reconnect to paired peers. Unpaired connections
         # (during pairing) should be user-initiated to avoid a
@@ -1440,7 +1445,8 @@ class TransportManager:
                 peer_fp2 = self._pairing_mgr.get_peer_fingerprint(peer_id) if peer_id else ""
                 conn = PeerConnection(display_id, peer_name or str(addr), ssl_sock,
                                       peer_fingerprint=peer_fp2, enc_mgr=self._enc_mgr,
-                                      pairing_mgr=self._pairing_mgr)
+                                      pairing_mgr=self._pairing_mgr,
+                                      is_anonymous=not bool(peer_id))
                 conn.set_on_message(self._on_peer_message)
                 conn.set_on_disconnect(self._on_peer_disconnected)
                 conn.start()

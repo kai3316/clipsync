@@ -9,6 +9,7 @@ import logging
 import os
 import time
 
+from internal.web.api import chat as _chat_api
 from internal.web.api.devices import get_devices
 from internal.web.api.favorites import add_favorite, delete_favorite, get_favorites, update_favorite
 from internal.web.api.history import (
@@ -91,7 +92,11 @@ def dispatch(method, path, query_params, body, cfg, history, sync_mgr,
              on_restart=None, on_reset_dedup=None,
              get_certs=None, get_diagnostics=None,
              on_update_download=None,
-             on_diagnostics_request=None):
+             on_diagnostics_request=None,
+             chat_mgr=None,
+             get_chat_devices=None,
+             chat_send_fn=None,
+             chat_start_session=None):
     """Route an API request to the appropriate handler, never raising.
 
     Wraps _dispatch in a safety net so an unexpected exception in a handler
@@ -126,6 +131,7 @@ def dispatch(method, path, query_params, body, cfg, history, sync_mgr,
             get_resolved_hashes, get_pending_pairings, enc_mgr,
             on_open_file, on_open_folder, on_restart, on_reset_dedup,
             get_certs, get_diagnostics, on_update_download, on_diagnostics_request,
+            chat_mgr, get_chat_devices, chat_send_fn, chat_start_session,
         )
     except Exception:
         logger.exception("Unhandled error in API route: %s %s", method, path)
@@ -152,7 +158,11 @@ def _dispatch(method, path, query_params, body, cfg, history, sync_mgr,
               on_restart=None, on_reset_dedup=None,
               get_certs=None, get_diagnostics=None,
               on_update_download=None,
-              on_diagnostics_request=None):
+              on_diagnostics_request=None,
+              chat_mgr=None,
+              get_chat_devices=None,
+              chat_send_fn=None,
+              chat_start_session=None):
     """Route an API request to the appropriate handler.
 
     All handler functions return (data_dict, status_code).
@@ -293,6 +303,24 @@ def _dispatch(method, path, query_params, body, cfg, history, sync_mgr,
         elif path == "/api/speed-test":
             data, status = get_speed_test(on_speed_test_poll)
             return _json_response(data, status)
+
+        elif path == "/api/chat/devices":
+            data, status = _chat_api.get_chat_devices(get_chat_devices)
+            return _json_response(data, status)
+
+        elif path == "/api/chat/sessions":
+            data, status = _chat_api.get_sessions(chat_mgr)
+            return _json_response(data, status)
+
+        elif path == "/api/chat/messages":
+            data, status = _chat_api.get_messages(chat_mgr, query_params)
+            return _json_response(data, status)
+
+        elif path == "/api/chat/download":
+            # Streaming file download handled directly in server.py; keep the
+            # route here so a request that reaches dispatch (rather than being
+            # intercepted for streaming) fails cleanly instead of 404ing oddly.
+            return _json_response({"error": "not found"}, 404)
 
     # ── POST routes ────────────────────────────────────────────────
 
@@ -718,6 +746,65 @@ def _dispatch(method, path, query_params, body, cfg, history, sync_mgr,
                 return _json_response({"ok": False, "error": "dialog_id and action required"}, 400)
             ok = dialog_mgr.handle_response(dialog_id, action, value)
             return _json_response({"ok": ok})
+
+        elif path == "/api/chat/invite":
+            data, status = _chat_api.invite(chat_mgr, body, chat_start_session)
+            return _json_response(data, status)
+
+        elif path == "/api/chat/text":
+            data, status = _chat_api.send_text(chat_mgr, body, chat_send_fn)
+            return _json_response(data, status)
+
+        elif path == "/api/chat/file":
+            # The web UI uploads via /api/upload, which returns a bare
+            # filename; resolve it against the received-files dir (and reject
+            # any traversal) exactly like /api/file/open does.
+            try:
+                req = json.loads(body.decode("utf-8"))
+            except (json.JSONDecodeError, UnicodeDecodeError):
+                req = None
+            if isinstance(req, dict):
+                fpath = str(req.get("file_path") or "").strip()
+                if fpath:
+                    from internal.web.api.security import confine_path
+                    safe = confine_path(os.path.join(upload_dir, fpath), upload_dir)
+                    if safe is None:
+                        return _json_response(
+                            {"ok": False, "error": "path must be inside the received-files directory"},
+                            400,
+                        )
+                    req["file_path"] = str(safe)
+                    body = json.dumps(req).encode("utf-8")
+            data, status = _chat_api.send_file(chat_mgr, body, chat_send_fn)
+            return _json_response(data, status)
+
+        elif path == "/api/chat/file/accept":
+            data, status = _chat_api.accept_file(chat_mgr, body, chat_send_fn)
+            return _json_response(data, status)
+
+        elif path == "/api/chat/file/decline":
+            data, status = _chat_api.decline_file(chat_mgr, body, chat_send_fn)
+            return _json_response(data, status)
+
+        elif path == "/api/chat/file/cancel":
+            data, status = _chat_api.cancel_file(chat_mgr, body)
+            return _json_response(data, status)
+
+        elif path == "/api/chat/accept":
+            data, status = _chat_api.accept_invite(chat_mgr, body, chat_send_fn)
+            return _json_response(data, status)
+
+        elif path == "/api/chat/decline":
+            data, status = _chat_api.decline_invite(chat_mgr, body, chat_send_fn)
+            return _json_response(data, status)
+
+        elif path == "/api/chat/close":
+            data, status = _chat_api.close_session(chat_mgr, body)
+            return _json_response(data, status)
+
+        elif path == "/api/chat/read":
+            data, status = _chat_api.mark_read(chat_mgr, body)
+            return _json_response(data, status)
 
     # ── DELETE routes ──────────────────────────────────────────────
 

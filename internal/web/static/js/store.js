@@ -92,6 +92,14 @@
     transferHistory: [],
 
     /* ═══════════════════════════════════════════════════════════════
+       Nearby Chat
+       ═══════════════════════════════════════════════════════════════ */
+    chatSessions: [],          // sessions from /api/chat/sessions + WS pushes
+    chatMessages: [],          // entries for the active session (capped at 200)
+    activeChatSession: '',     // selected session_id (empty = none selected)
+    chatUnread: 0,             // total unread across sessions (sidebar badge)
+
+    /* ═══════════════════════════════════════════════════════════════
        Overview stats (refreshed every 5s)
        ═══════════════════════════════════════════════════════════════ */
     overview: {
@@ -999,6 +1007,51 @@
       return this.devices.find(function (d) {
         return d.device_id === selfId;
       }) || null;
+    },
+
+    /* ═══════════════════════════════════════════════════════════════
+       Nearby Chat helpers
+       ═══════════════════════════════════════════════════════════════ */
+
+    /**
+     * Recompute the total unread badge from the session list.
+     * @returns {number}
+     */
+    recalcChatUnread: function () {
+      var sum = 0;
+      for (var i = 0; i < this.chatSessions.length; i++) {
+        sum += (this.chatSessions[i].unread || 0);
+      }
+      this.chatUnread = sum;
+      return sum;
+    },
+
+    /**
+     * Replace the session list wholesale (from /api/chat/sessions or a
+     * chat_sessions broadcast) and keep the unread badge in sync.
+     * @param {Array} list
+     */
+    replaceChatSessions: function (list) {
+      this.chatSessions.splice(0, this.chatSessions.length);
+      for (var i = 0; i < list.length; i++) {
+        this.chatSessions.push(list[i]);
+      }
+      this.recalcChatUnread();
+    },
+
+    /**
+     * Replace the active conversation's message list, capped at 200 entries
+     * so the DOM never grows without bound.
+     * @param {Array} list
+     */
+    replaceChatMessages: function (list) {
+      this.chatMessages.splice(0, this.chatMessages.length);
+      for (var i = 0; i < list.length; i++) {
+        this.chatMessages.push(list[i]);
+      }
+      if (this.chatMessages.length > 200) {
+        this.chatMessages.splice(0, this.chatMessages.length - 200);
+      }
     },
 
   });

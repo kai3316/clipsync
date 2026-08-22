@@ -2,6 +2,27 @@
 
 All notable changes to ClipSync are documented in this file.
 
+## [1.0.25] — 2026-08-23
+
+### Security & transport (regression round)
+- **The anonymous-connection gate actually fires now.** v1.0.24's check matched `device_id.startswith("__anon__")`, but anonymous connections carry `device_id = "unknown"` (the `__anon__{ip}:{port}` string was only the `_peers` dict key) — the gate was dead code and chat-invite floods from fresh TLS connections could still reach the UI. Anonymous connections now carry an explicit `is_anonymous` flag that the transport gate honours.
+- **A torn rejection marker is treated as a rejection** instead of being discarded (which sent the client into an invalid-frame → reconnect loop on congested LANs).
+- **A rejected peer is no longer added to the inbound-reject set** — a forgotten device can still reach you again after the user re-pairs.
+
+### Nearby chat
+- **Session-id adoption migrates the text-rate buckets** — adopting a peer's new session id no longer orphans the old buckets (memory) or resets the flood budget (abuse).
+- **`_file_sender` can't raise `NameError`** when the stale-transfer sweeper pops the send state while a blocked `sendall` returns — sid/tid are bound up front.
+- **Multi-line messages are preserved**: the incoming-text sanitizer strips control/bidi characters but keeps `\n`/`\t` (the sender's transcript and receiver's view no longer diverge).
+- **Accepting a file rolls back its receive state if the accept frame can't be sent** — no more "Receiving…" stuck for minutes with an open temp-file handle after the peer vanished.
+- **The per-peer send_fn cache evicts the least-recently-used entry**, not merely the oldest-inserted one.
+
+### Desktop
+- **macOS autostart toggle reads the key the app actually writes** (`ProgramArguments`, not `Program`) — the "enabled at login" switch no longer always shows Off. It still verifies the binary exists.
+- **The chat unread badge is only cleared while the chat panel is on screen** — switching to another panel no longer silently zeroes incoming-message indicators (which the dashboard-visible notification suppression would otherwise swallow).
+
+### Tests
+- Updated to match intended semantics (stall-sweep test uses a working accept send_fn; accept-rollback is the new contract). Full suite 351 passed / 3 skipped.
+
 ## [1.0.24] — 2026-08-23
 
 ### Nearby chat (deep-audit round)

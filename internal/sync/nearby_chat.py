@@ -326,12 +326,20 @@ class ChatManager:
             dq.popleft()
 
     def _remember_send_fn(self, peer_id: str, send_fn: SendFn) -> None:
-        """Cache the newest working send_fn per peer, capped to SEND_FN_CACHE_MAX."""
+        """Cache the newest working send_fn per peer, capped to SEND_FN_CACHE_MAX.
+
+        Pop-then-reinsert so an active chat partner is moved to the end of the
+        insertion-ordered dict: a plain assignment would keep its original
+        position, so eviction by ``next(iter(...))`` would drop the oldest
+        *inserted* peer — even one still in use — instead of the least
+        recently *used*.
+        """
         if send_fn is None:
             return
+        self._latest_send_fn.pop(peer_id, None)
         self._latest_send_fn[peer_id] = send_fn
         if len(self._latest_send_fn) > self.SEND_FN_CACHE_MAX:
-            # Insertion-ordered dict: evict the least-recently-inserted peer.
+            # Insertion-ordered dict: the front is the least-recently-used peer.
             self._latest_send_fn.pop(next(iter(self._latest_send_fn)), None)
 
     def _cleanup_rate_buckets_locked(self, peer_id: str, session_id: str) -> None:
@@ -639,6 +647,21 @@ class ChatManager:
             }, fn)
             if ok:
                 self._remember_send_fn(session.peer_id, fn)
+            else:
+                # The accept frame never reached the sender — roll back the
+                # receive state we just created instead of leaving the write
+                # handle open and the entry stuck at "sending" until the
+                # stale-transfer sweeper reclaims it minutes later.
+                fh = state.get("fh")
+                if fh is not None:
+                    try:
+                        fh.close()
+                    except OSError:
+                        pass
+                    state["fh"] = None
+                self._receives.pop(transfer_id, None)
+                _safe_remove(state.get("temp_path"))
+                state["entry"].status = "failed"
         self._fire("_on_sessions_changed")
         return ok
 
@@ -856,9 +879,19 @@ class ChatManager:
                 # "active" with mismatched ids and every later message is
                 # dropped as an unknown session.
                 if mine.session_id != sid:
-                    self._session_by_sid.pop(mine.session_id, None)
+                    old_sid = mine.session_id
+                    self._session_by_sid.pop(old_sid, None)
                     self._session_by_sid[sid] = mine
                     mine.session_id = sid
+                    # Carry the text-rate buckets to the new sid: adoption
+                    # must not reset the flood budget (or let an attacker
+                    # reset it by re-inviting) and must not orphan the old
+                    # buckets (unbounded growth).
+                    for bucket_name in ("_text_times_out", "_text_times_in"):
+                        bucket_map = getattr(self, bucket_name)
+                        old_bucket = bucket_map.pop(old_sid, None)
+                        if old_bucket:
+                            bucket_map[sid] = old_bucket
                 # Reaffirm so their client converges too.
                 self._send_frame({"msg_type": "chat_accept", "session_id": sid}, send_fn)
                 self._touch_seen(mine)
@@ -975,9 +1008,11 @@ class ChatManager:
             return
         # Strip control characters like the invite strings — this text reaches
         # OS notifications and the session preview, so a peer could otherwise
-        # inject bidi-override / ESC tricks into what the user reads.
-        text = "".join(ch for ch in text if ch.isprintable())
-        if not text:
+        # inject bidi-override / ESC tricks into what the user reads.  Unlike
+        # the invite fields, line breaks are legitimate message content and
+        # must survive (multi-line clips, indentation).
+        text = "".join(ch for ch in text if ch.isprintable() or ch in "\n\r\t")
+        if not text.strip():
             logger.debug("chat: dropping control-char-only text from %s", sender_id[:12])
             return
         with self._lock:
@@ -1359,6 +1394,10 @@ class ChatManager:
             total_chunks = state["total_chunks"]
             send_fn = state["send_fn"]
             session = state["session"]
+            # Bind early: the failure paths below use these, and the stall
+            # sweeper may have already popped the send state, so the inner
+            # `state["session"].session_id` rebinds would NameError on sid.
+            sid, tid = session.session_id, transfer_id
         try:
             with open(path, "rb") as fh:
                 for index in range(total_chunks):

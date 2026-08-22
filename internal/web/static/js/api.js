@@ -597,6 +597,117 @@ var ClipsyncAPI = (function () {
     },
 
     /* ═══════════════════════════════════════════════════════════════
+       Nearby Chat endpoints
+       ═══════════════════════════════════════════════════════════════ */
+
+    /**
+     * List devices that can start a nearby chat session.
+     * @returns {Promise<{devices: Array}>}
+     */
+    chatDevices: function () {
+      return this._fetch('GET', '/api/chat/devices');
+    },
+
+    /**
+     * List chat sessions.
+     * @returns {Promise<{sessions: Array}>}
+     */
+    chatSessions: function () {
+      return this._fetch('GET', '/api/chat/sessions');
+    },
+
+    /**
+     * Get messages for a chat session.
+     * @param {string} sessionId
+     * @returns {Promise<{messages: Array}>}
+     */
+    chatMessages: function (sessionId) {
+      return this._fetch('GET', '/api/chat/messages?session_id=' + encodeURIComponent(sessionId));
+    },
+
+    /**
+     * Invite a peer to a chat session.
+     * @param {string} peerId
+     * @param {string} peerName
+     * @returns {Promise<{session_id: string|null, connecting?: boolean}>}
+     */
+    chatInvite: function (peerId, peerName) {
+      return this._fetch('POST', '/api/chat/invite', {
+        peer_id: peerId,
+        peer_name: peerName || '',
+      });
+    },
+
+    /**
+     * Send a text message in a chat session.
+     * @param {string} sessionId
+     * @param {string} text
+     * @returns {Promise<{ok: boolean}>}
+     */
+    chatSendText: function (sessionId, text) {
+      return this._fetch('POST', '/api/chat/text', {
+        session_id: sessionId,
+        text: text,
+      });
+    },
+
+    /**
+     * Send a file in a chat session. `filePath` is the server-side path or
+     * basename (returned by uploadFile) — the backend resolves it against the
+     * receive directory.
+     * @param {string} sessionId
+     * @param {string} filePath
+     * @returns {Promise<{transfer_id: string}>}
+     */
+    chatSendFile: function (sessionId, filePath) {
+      return this._fetch('POST', '/api/chat/file', {
+        session_id: sessionId,
+        file_path: filePath,
+      });
+    },
+
+    /**
+     * Accept / decline / cancel a file transfer.
+     * @param {string} sessionId
+     * @param {string} transferId
+     * @param {'accept'|'decline'|'cancel'} action
+     * @returns {Promise<{ok: boolean}>}
+     */
+    chatFileAction: function (sessionId, transferId, action) {
+      return this._fetch('POST', '/api/chat/file/' + action, {
+        session_id: sessionId,
+        transfer_id: transferId,
+      });
+    },
+
+    /**
+     * Session-level action: accept an incoming invite, decline it, close the
+     * session, or mark it read.
+     * @param {string} sessionId
+     * @param {'accept'|'decline'|'close'|'read'} action
+     * @returns {Promise<{ok: boolean}>}
+     */
+    chatSessionAction: function (sessionId, action) {
+      return this._fetch('POST', '/api/chat/' + action, {
+        session_id: sessionId,
+      });
+    },
+
+    /**
+     * Build the authenticated URL for downloading a received chat file.
+     * (The endpoint returns the saved file binary, so it can't go through
+     * the JSON `_fetch` wrapper — the caller uses it as a link target.)
+     * @param {string} transferId
+     * @returns {string}
+     */
+    chatDownloadUrl: function (transferId) {
+      var sep = '/api/chat/download'.indexOf('?') !== -1 ? '&' : '?';
+      return _baseUrl + '/api/chat/download' + sep +
+        'transfer_id=' + encodeURIComponent(transferId) +
+        '&token=' + encodeURIComponent(_token);
+    },
+
+    /* ═══════════════════════════════════════════════════════════════
        Window control (for frameless title bar)
        ═══════════════════════════════════════════════════════════════ */
 

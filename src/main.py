@@ -957,6 +957,11 @@ class Application:
             on_update_download=self._handle_update_download,
             on_diagnostics_request=self._handle_diagnostics_request,
             on_web_upload=self._on_web_upload,
+            # Nearby Chat (web/PWA surface)
+            chat_mgr=self.chat_mgr,
+            get_chat_devices=self._web_chat_devices,
+            chat_send_fn=self._web_chat_send_fn,
+            chat_start_session=self._web_chat_start_session,
         )
 
         # ── Live history push to web clients ────────────────────────
@@ -1020,18 +1025,54 @@ class Application:
     def _wire_chat_callbacks(self) -> None:
         """Register Nearby-chat manager callbacks (fired on worker threads).
 
-        Every callback only marshals state onto the Tk main thread; the
-        ChatManager docs require UI work to happen there.
+        Every callback marshals state onto the Tk main thread for the desktop
+        UI AND pushes real-time updates to web clients.  The ChatManager docs
+        require UI work to happen on the Tk main thread; the WebSocketManager
+        broadcast is thread-safe, so the web push happens directly here.
         """
         cm = self.chat_mgr
         if cm is None:
             return
         cm.set_on_incoming_invite(self._on_chat_incoming_invite)
         cm.set_on_invite_response(self._on_chat_invite_response)
-        cm.set_on_sessions_changed(self._chat_event_from_worker)
+        cm.set_on_sessions_changed(self._chat_sessions_changed)
         cm.set_on_message(self._on_chat_message)
-        cm.set_on_file_progress(lambda *a: self._chat_event_from_worker())
-        cm.set_on_file_done(lambda *a: self._chat_event_from_worker())
+        cm.set_on_file_progress(self._chat_file_progress)
+        cm.set_on_file_done(self._chat_file_done)
+
+    def _push_web_chat_sessions(self) -> None:
+        """Push the full chat session list to web clients (thread-safe).
+
+        Called from chat worker-thread callbacks and from the invite dialog
+        path so the web chat tab always reflects the current sessions.
+        """
+        try:
+            sessions = self.chat_mgr.get_sessions() \
+                if getattr(self, "chat_mgr", None) is not None else []
+            self._push_web("broadcast_chat_sessions", sessions)
+        except Exception:
+            logger.debug("Failed to push chat sessions to web", exc_info=True)
+
+    def _chat_sessions_changed(self, *args) -> None:
+        """Sessions changed on a worker thread: refresh desktop + push to web."""
+        self._push_web_chat_sessions()
+        self._chat_event_from_worker()
+
+    def _chat_file_progress(self, session_id: str, transfer_id: str,
+                            fraction: float) -> None:
+        """File progress on a worker thread: push to web + refresh desktop."""
+        self._push_web("broadcast_chat_progress", session_id, transfer_id, fraction)
+        self._chat_event_from_worker()
+
+    def _chat_file_done(self, session_id: str, transfer_id: str, success: bool,
+                        saved_path: str, status: str) -> None:
+        """File done on a worker thread: push to web + refresh desktop."""
+        self._push_web(
+            "broadcast_chat_file_done", session_id, transfer_id, success,
+            saved_path or "", status or "",
+        )
+        self._push_web_chat_sessions()
+        self._chat_event_from_worker()
 
     def _chat_event_from_worker(self, *args) -> None:
         """Chat state changed on a worker thread — hop to the Tk thread.
@@ -1115,6 +1156,9 @@ class Application:
                 )
             except Exception:
                 logger.debug("web invite dialog failed", exc_info=True)
+            # The chat tab needs the pending invite right away even though the
+            # consent dialog is handled out-of-band.
+            self._push_web_chat_sessions()
             return
         if self._dashboard_visible():
             try:
@@ -1153,6 +1197,10 @@ class Application:
         self._chat_event_from_worker()
 
     def _on_chat_message(self, session_id: str, entry_dict: dict) -> None:
+        # Web push is thread-safe (WebSocketManager.broadcast takes a manager
+        # lock) and fires directly from the chat worker thread.
+        self._push_web("broadcast_chat_message", session_id, entry_dict)
+        self._push_web_chat_sessions()
         try:
             self.root.after(
                 0, lambda: self._chat_message_on_main(session_id, entry_dict),
@@ -1444,6 +1492,27 @@ class Application:
             )
         except Exception:
             return False
+
+    # ── Chat: web API callbacks ──────────────────────────────────
+    # Thin wrappers the web backend (internal/web/api/chat.py) uses so it can
+    # reuse the exact desktop device-merge, connect-first and per-peer send_fn
+    # logic without duplicating it.
+
+    def _web_chat_devices(self) -> list[dict]:
+        """Chat device list for the web API (same merge as desktop)."""
+        return self._get_chat_devices()
+
+    def _web_chat_start_session(self, peer_id: str, peer_name: str):
+        """Open a chat session for the web API (connect-first if offline).
+
+        Returns the new/existing session id, or None when a background connect
+        is in flight (the caller then waits for the ``chat_sessions`` push).
+        """
+        return self._chat_start_session(peer_id, peer_name, "")
+
+    def _web_chat_send_fn(self, peer_id: str | None):
+        """Per-peer send closure for web chat API handlers."""
+        return self._chat_send_fn(peer_id)
 
     def _wire_hotkeys(self) -> None:
         """Register global hotkey callbacks from config and start the listener."""

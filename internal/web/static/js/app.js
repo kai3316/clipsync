@@ -250,6 +250,7 @@
             this.loadDevices(),
             this.loadFavorites(),
             this.loadTransfers(),
+            this.loadChat(),
           ];
 
           // History reads `settingsCache.web_history_limit`, so it must wait
@@ -375,6 +376,35 @@
             }
           }
           return res;
+        });
+      },
+
+      /**
+       * Load nearby-chat sessions (and the open conversation's messages) so
+       * the chat tab badge and session list are fresh on startup/reconnect.
+       * Catches internally — chat is never a blocker for the rest of the app.
+       * @returns {Promise<void>}
+       */
+      loadChat: function () {
+        var self = this;
+        return ClipsyncAPI.chatSessions().then(function (res) {
+          if (res && res.sessions) {
+            store.replaceChatSessions(res.sessions);
+          }
+          // If a conversation is already open, refresh its messages too so a
+          // reconnect doesn't leave the chat pane on stale entries.
+          if (store.activeChatSession) {
+            return ClipsyncAPI.chatMessages(store.activeChatSession).then(function (mres) {
+              if (mres && mres.messages) {
+                store.replaceChatMessages(mres.messages);
+              }
+            }).catch(function (e) {
+              // Keep the existing messages on a transient failure.
+              console.error('[ClipSync] Failed to refresh chat messages:', e);
+            });
+          }
+        }).catch(function (e) {
+          console.error('[ClipSync] Failed to load chat sessions:', e);
         });
       },
 

@@ -3200,12 +3200,16 @@ class DashboardWindow:
             (s for s in sessions if s.get("session_id") == selected), None,
         )
         self._chat_build_conversation(selected_session, messages)
-        # The selected conversation is on screen — clear its unread badge.
+        # Clear the selected conversation's unread badge ONLY when the chat
+        # panel is actually on screen — _refresh_chat also runs from chat
+        # events while the user is on another panel, and zeroing it there
+        # (while OS notifications are suppressed because the dashboard is
+        # visible) would swallow incoming-message indicators entirely.
         # mark_session_read only fires when unread > 0, so re-running this on
         # every refresh cannot cause a refresh loop.
-        if selected_session is not None and selected_session.get("status") in (
-            "active", "invited",
-        ):
+        if (selected_session is not None
+                and selected_session.get("status") in ("active", "invited")
+                and self._current_panel == "chat"):
             self._chat_mark_selected_read()
 
     def _chat_device_row(self, dev: dict) -> None:
