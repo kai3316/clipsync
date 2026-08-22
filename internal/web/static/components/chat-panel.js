@@ -54,7 +54,7 @@
 
       // Incoming invitation awaiting accept/decline — show the invite banner.
       isInvitedSession: function () {
-        var s = this.activeSession;
+        var s = this.activeSession();
         return !!(s && s.status === 'invited');
       },
 
@@ -191,7 +191,7 @@
               '<div v-else-if="store.chatMessages.length === 0" class="chat-conv-empty">{{ t(\'chat.invite_greeting\') }}</div>' +
               '<template v-else>' +
                 '<div v-for="m in store.chatMessages" :key="m.entry_id" class="chat-msg-row">' +
-                  '<div v-if="m.kind === \'system\'" class="chat-system">{{ t(m.text_key || m.text || \'\', m.fmt) }}</div>' +
+                  '<div v-if="m.kind === \'system\'" class="chat-system">{{ systemText(m) }}</div>' +
 
                   '<div v-else-if="m.kind === \'text\'" class="chat-bubble"' +
                     ' :class="m.outgoing ? \'chat-bubble--out\' : \'chat-bubble--in\'">' +
@@ -356,6 +356,11 @@
               // The peer is connecting — the session will arrive via a
               // chat_sessions push. Surface a short "connecting" notice.
               self.store.showToast(self.t('chat.connecting'), 2000);
+            } else if (res && res.ok === false) {
+              // Refused invite (rate limit / slots full / peer unreachable) —
+              // NOT a connecting wait; name the failure so the user can retry
+              // meaningfully instead of staring at a phantom "Connecting…".
+              self.store.showToast(self.t('chat.err_invite_failed'), 2500);
             }
           })
           .catch(function (e) {
@@ -416,7 +421,13 @@
         if (!text || !this.store.activeChatSession) return;
         this.sendingText = true;
         ClipsyncAPI.chatSendText(this.store.activeChatSession, text)
-          .then(function () {
+          .then(function (res) {
+            if (res && res.ok === false) {
+              // Session inactive / offline / flood control — the text was not
+              // sent; keep the draft and say why instead of clearing it.
+              self.store.showToast(self.t('chat.err_send_failed'), 2500);
+              return;
+            }
             self.composing = '';
             // The backend echoes the entry via chat_message; refetch to be safe.
             self.loadMessages();
@@ -459,8 +470,12 @@
             }
             return ClipsyncAPI.chatSendFile(sid, filePath);
           })
-          .then(function () {
+          .then(function (res) {
             e.target.value = '';
+            if (res && res.ok === false) {
+              self.store.showToast(self.t('chat.err_send_failed'), 2500);
+              return;
+            }
             self.loadMessages();
           })
           .catch(function (err) {
@@ -478,7 +493,11 @@
         if (!sid || !entry || !entry.transfer_id) return;
         this.fileBusy = entry.transfer_id;
         ClipsyncAPI.chatFileAction(sid, entry.transfer_id, action)
-          .then(function () {
+          .then(function (res) {
+            if (res && res.ok === false) {
+              self.store.showToast(self.t('chat.err_send_failed'), 2500);
+              return;
+            }
             // Refetch so the card reflects the authoritative status change.
             self.loadMessages();
           })
@@ -544,6 +563,20 @@
           cancelled: 'chat.file.status.cancelled',
         };
         return this.t(map[st] || 'chat.file.status.pending');
+      },
+
+      systemText: function (entry) {
+        // The service emits peer_offline / session_closed entries with an
+        // EMPTY fmt, but their templates use {name} — substitute the active
+        // conversation's peer name so users don't see a literal "{name}".
+        var fmt = (entry && entry.fmt) || {};
+        if (!fmt.name) {
+          var sess = this.activeSession();
+          if (sess && sess.peer_name) {
+            fmt = Object.assign({}, fmt, { name: sess.peer_name });
+          }
+        }
+        return this.t((entry && entry.text_key) || (entry && entry.text) || '', fmt);
       },
 
       formatSize: function (bytes) {

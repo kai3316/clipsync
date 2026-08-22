@@ -1404,12 +1404,21 @@ class WebServer:
                     # the OS updates the existing PWA instead of installing a
                     # duplicate launcher icon.  The maskable-purpose entries
                     # stop Android launchers cropping the icon.
+                    #
+                    # ``?page=mobile`` / ``?page=quickpaste`` produce a variant
+                    # whose start_url / id point at that page, so the phone
+                    # companion pages install as their own standalone apps.
+                    page = ""
+                    _page_q = query_params.get("page")
+                    if isinstance(_page_q, list) and _page_q and _page_q[0] in ("mobile", "quickpaste"):
+                        page = _page_q[0]
+                    start_path = f"/{page}.html" if page else "/"
                     manifest = {
                         "name": "ClipSync Web",
                         "short_name": "ClipSync",
-                        "id": "/",
+                        "id": start_path,
                         "scope": "/",
-                        "start_url": f"/?token={cfg.web_token}",
+                        "start_url": f"{start_path}?token={cfg.web_token}",
                         "display": "standalone",
                         "background_color": "#0A0E1E",
                         "theme_color": "#05060D",
@@ -1495,6 +1504,11 @@ class WebServer:
                         # file from elsewhere on the host.
                         from internal.web.api.security import confine_path
                         safe = confine_path(saved_path, _get_upload_dir(cfg))
+                        if safe is None and upload_dir:
+                            # A live receive-dir change can leave older chat
+                            # files under the previously-configured root —
+                            # accept those too (still confined to that root).
+                            safe = confine_path(saved_path, upload_dir)
                         if safe is None:
                             inner_self._send_json({"error": "invalid filename"}, 400)
                             return

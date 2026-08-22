@@ -767,7 +767,13 @@ def _dispatch(method, path, query_params, body, cfg, history, sync_mgr,
                 fpath = str(req.get("file_path") or "").strip()
                 if fpath:
                     from internal.web.api.security import confine_path
-                    safe = confine_path(os.path.join(upload_dir, fpath), upload_dir)
+                    # When the receive dir is user-configured, resolve it at
+                    # request time (the server's captured upload_dir goes
+                    # stale after a live setting change). When unconfigured
+                    # the default can't change, so honor the captured root.
+                    configured = getattr(cfg, "file_receive_dir", "") or ""
+                    base_dir = os.path.expanduser(configured) if configured else upload_dir
+                    safe = confine_path(os.path.join(base_dir, fpath), base_dir)
                     if safe is None:
                         return _json_response(
                             {"ok": False, "error": "path must be inside the received-files directory"},

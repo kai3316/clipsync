@@ -403,7 +403,10 @@ var ClipsyncWS = (function () {
                 if (window.ClipsyncAPI && window.ClipsyncAPI.chatSessionAction) {
                   window.ClipsyncAPI.chatSessionAction(data.session_id, 'read').catch(function () {});
                 }
-              } else {
+              } else if (data.entry && !data.entry.outgoing) {
+                // Only incoming messages bump unread — the backend never
+                // counts your own echoed outgoing entry (send_text/send_file
+                // fire _on_message too), so the badge must not either.
                 cs.unread = (cs.unread || 0) + 1;
               }
               if (data.entry) {
@@ -460,13 +463,20 @@ var ClipsyncWS = (function () {
                 var fd = store.chatMessages[fdIdx];
                 fd.success = data.success;
                 if (data.saved_path) fd.saved_path = data.saved_path;
-                if (data.status) {
-                  fd.status = data.status;
+                // The service reports success as "success" and failures as
+                // "rejected"/"cancelled_by_peer"/"error_size_mismatch"/
+                // "peer_offline"/…; the file card only understands the small
+                // vocabulary below, so map instead of copying verbatim.
+                if (data.success) {
+                  fd.status = 'done';
+                  fd.fraction = 1;
+                } else if (data.status === 'cancelled' || data.status === 'cancelled_by_peer') {
+                  fd.status = 'cancelled';
+                } else if (data.status === 'declined' || data.status === 'rejected') {
+                  fd.status = 'declined';
                 } else {
-                  // Defensive fallback when the payload omits status.
-                  fd.status = data.success ? 'done' : 'failed';
+                  fd.status = 'failed';
                 }
-                if (data.success) fd.fraction = 1;
               }
             }
           }

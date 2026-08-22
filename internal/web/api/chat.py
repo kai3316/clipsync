@@ -156,12 +156,21 @@ def invite(chat_mgr, body, chat_start_session):
     if chat_start_session is None:
         return _UNAVAILABLE, 503
     try:
-        sid = chat_start_session(peer_id, peer_name)
+        result = chat_start_session(peer_id, peer_name)
     except Exception:
         logger.exception("chat: chat_start_session callback failed")
         return {"ok": False, "error": "start failed"}, 500
-    if sid:
-        return {"session_id": sid}, 200
+    # The web host returns a rich result so "still connecting" (poll the
+    # upcoming chat_sessions push) is distinguishable from a refused invite.
+    if isinstance(result, dict):
+        if result.get("session_id"):
+            return {"session_id": result["session_id"]}, 200
+        if result.get("connecting"):
+            return {"connecting": True, "session_id": None}, 200
+        return {"ok": False, "error": result.get("error", "invite_failed")}, 400
+    if result:
+        return {"session_id": result}, 200
+    # Legacy callbacks return bare None for both cases; assume connecting.
     return {"connecting": True, "session_id": None}, 200
 
 
