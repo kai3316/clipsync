@@ -2,6 +2,17 @@
 
 All notable changes to ClipSync are documented in this file.
 
+## [1.0.43] — 2026-08-23
+
+### History (null safety & change detection)
+- **`_rowDiffer` now compares every key** (for-in, like the merge path) instead of a hard-coded field list — a new field added by the server can't silently fall outside the reconcile guard.
+- **`replaceHistory` skips the rebuild when the snapshot is unchanged** — no more reactive list churn on identical reconnects; it still bumps the guard only on real changes.
+- **Every load-more / calibration append now skips malformed null rows** — desktop load-more, the WebSocket wholesale path's cursor, and the phone calibration write-back all guard nulls, and the cursor uses the raw (post-null) length so a filtered null slot is never re-fetched.
+- The `removeHistoryItems` docstring is back where it belongs (it had been orphaned onto the compare helper).
+
+### Tests
+- The wholesale change-detection guard is strengthened to assert the helper's actual behavior (no bump on unchanged, bump + rebuild on change). Full suite 433 passed / 3 skipped.
+
 ## [1.0.42] — 2026-08-23
 
 ### History (write-path consolidation)

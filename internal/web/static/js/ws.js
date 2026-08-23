@@ -299,7 +299,11 @@ var ClipsyncWS = (function () {
               // guard only for real changes (an identical re-broadcast is a
               // display refresh and does NOT bump).
               store.replaceHistory(incoming);
-              store.historyOffset = store.history.length;
+              // Use the RAW incoming length for the cursor: if a malformed
+              // null row was filtered out, the raw count points past the null
+              // slot so the next Load More doesn't re-fetch it (and matches the
+              // app.js page-1 path's cursor, which also uses the raw length).
+              store.historyOffset = incoming.length;
               store.historyHasMore = (data.total != null) ? (store.historyOffset < data.total) : false;
             } else {
               // Upsert/prepend the page-1 snapshot via the shared helper — it

@@ -1055,30 +1055,19 @@
       return matched;
     },
 
-    /**
-     * Remove history entries by entry_id (in place, one splice per row so the
-     * reactive list updates).  Bumps historyMutationTick once when at least
-     * one row was removed, and prunes removed ids from selectedIds.  Returns
-     * the number of rows removed so callers can shrink the pagination cursor.
-     * @param {Array<string|number>} ids
-     * @returns {number} count of rows removed
-     */
-    // Compare two row dicts on every user-visible field.  Explicit field list
-    // (not JSON.stringify — key-order sensitive) so a change in ANY rendered
-    // or sortable field counts as a mutation.
+    // Compare two row dicts on every key (for-in, mirroring mergeHistoryFresh's
+    // change detection) — a change in ANY field, current or future, counts as a
+    // mutation.  An explicit field list would silently diverge from the server
+    // serializer the day a new field is added.
     _rowDiffer: function (a, b) {
       if (!a || !b) return true;
-      return a.entry_id !== b.entry_id ||
-             a.pinned !== b.pinned ||
-             a.text_preview !== b.text_preview ||
-             a.content_type !== b.content_type ||
-             a.timestamp !== b.timestamp ||
-             a.source_device !== b.source_device ||
-             a.source_name !== b.source_name ||
-             a.paste_count !== b.paste_count ||
-             a.image_fmt !== b.image_fmt ||
-             a.source_app !== b.source_app ||
-             a.source_title !== b.source_title;
+      for (var k in a) {
+        if (a.hasOwnProperty(k) && a[k] !== b[k]) return true;
+      }
+      for (var k2 in b) {
+        if (b.hasOwnProperty(k2) && b[k2] !== a[k2]) return true;
+      }
+      return false;
     },
 
     // Replace the whole history list with an authoritative snapshot (page-1
@@ -1086,7 +1075,8 @@
     // malformed null rows — a null stored here would crash the renderer — and
     // bumps the reconcile guard only when the list actually changed.  Returns
     // whether the list changed.  The change detection is idempotent even when
-    // null rows were skipped (it compares the CLEANED list, not raw lengths).
+    // null rows were skipped (it compares the CLEANED list, not raw lengths);
+    // an identical snapshot skips the rebuild entirely (no reactive churn).
     replaceHistory: function (items) {
       var cleaned = [];
       for (var ri = 0; ri < items.length; ri++) {
@@ -1102,16 +1092,25 @@
           }
         }
       }
+      if (!changed) {
+        return false;
+      }
       this.history.splice(0, this.history.length);
       for (var pi = 0; pi < cleaned.length; pi++) {
         this.history.push(cleaned[pi]);
       }
-      if (changed) {
-        this.historyMutationTick += 1;
-      }
-      return changed;
+      this.historyMutationTick += 1;
+      return true;
     },
 
+    /**
+     * Remove history entries by entry_id (in place, one splice per row so the
+     * reactive list updates).  Bumps historyMutationTick once when at least
+     * one row was removed, and prunes removed ids from selectedIds.  Returns
+     * the number of rows removed so callers can shrink the pagination cursor.
+     * @param {Array<string|number>} ids
+     * @returns {number} count of rows removed
+     */
     removeHistoryItems: function (ids) {
       if (!ids || !ids.length) return 0;
       var delSet = {};

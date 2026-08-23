@@ -1031,7 +1031,10 @@ body::before {
                 _lastCalibMobile = Date.now();
                 var calItems = (calData.items || []).slice(0, total);
                 historyItems.splice(0, historyItems.length);
-                for (var c = 0; c < calItems.length; c++) historyItems.push(calItems[c]);
+                for (var c = 0; c < calItems.length; c++) {
+                  if (calItems[c] == null) continue;  // never store a malformed row
+                  historyItems.push(calItems[c]);
+                }
                 historyHasMore = (calData.total != null) ? (historyItems.length < calData.total) : false;
                 historyOffset = historyItems.length;
                 renderHistory();

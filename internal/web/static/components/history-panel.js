@@ -300,6 +300,7 @@
               if (existingId !== undefined) seen.add(existingId);
             }
             for (var i = 0; i < items.length; i++) {
+              if (items[i] == null) { continue; }  // never append a malformed row
               var id = items[i].entry_id;
               if (id === undefined || !seen.has(id)) {
                 self.store.history.push(items[i]);

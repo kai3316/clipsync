@@ -1170,10 +1170,18 @@ def test_ws_history_updated_bumps_tick_on_new_data():
     # bump so an in-flight calibration can't resurrect rows).
     assert "store.historyMutationTick += 1;" in ws
     # The shared replace helper owns change detection (field-differ), filters
-    # malformed null rows, and bumps only on real changes.
+    # malformed null rows, and bumps only on real changes: an unchanged snapshot
+    # early-returns WITHOUT rebuilding or bumping, a changed one rebuilds and
+    # bumps.
     store = _read_repo_file("internal/web/static/js/store.js")
     assert "replaceHistory: function (items)" in store
     assert "_rowDiffer: function (a, b)" in store
+    rh_block = store[store.index("replaceHistory: function (items)"):
+                     store.index("removeHistoryItems: function (ids)")]
+    assert "if (!changed) {\n        return false;\n      }" in rh_block
+    assert "this.historyMutationTick += 1;" in rh_block
+    assert "if (items[ri] == null) continue;" in rh_block
+    # The merge helper's change detection is also in place.
     assert "incChanged = true;" in store
 
 
