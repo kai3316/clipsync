@@ -1299,6 +1299,20 @@ class WebServer:
                 # already URL-safe and pass through unchanged).
                 content = content.replace("__TOKEN__", urllib.parse.quote(cfg.web_token, safe=""))
 
+                # One-shot factory-reset marker: the host writes it before
+                # restarting so the frontend can clear its browser-side
+                # localStorage (the reset's file deletion can't reach it).
+                # Injected exactly once, then the marker is removed.
+                reset_flag = "false"
+                try:
+                    from internal.config.config import _config_dir
+                    marker = _config_dir() / "factory_reset_pending"
+                    if marker.exists():
+                        reset_flag = "true"
+                        marker.unlink()
+                except Exception:
+                    pass
+
                 # Full interpolation only for HTML files
                 if is_html:
                     replacements = [
@@ -1318,6 +1332,7 @@ class WebServer:
                         # picker but no wizard.  When the config looks fresh
                         # (no language chosen yet), re-surface the web wizard.
                         ("__FRESH__", "true" if not getattr(cfg, "language_chosen", False) else "false"),
+                        ("__RESET__", reset_flag),
                     ]
                     for placeholder, value in replacements:
                         if placeholder in content:

@@ -325,6 +325,7 @@
     "App-layer encryption between paired devices (on top of TLS 1.3)"
   ],
   "settings_window.enable_encryption": "Enable encryption (all three features)",
+  "settings_window.encryption_title": "Encryption",
   "settings_window.password_hint": "Set the same password on both devices for stronger\napp-layer encryption. Leave blank to auto-derive\nkeys from device certificates.",
   "settings_window.encryption_hint": "Transfers are always encrypted in transit with TLS 1.3. This optional pre-shared password adds a second layer: even a paired device must know it to decrypt your content.",
   "settings_window.auto_start_hint": "Start ClipSync automatically when you log in to this computer.",

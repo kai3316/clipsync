@@ -44,6 +44,18 @@
     mounted: function () {
       var self = this;
 
+      // Force the intended opening size once per fresh session.  Chromium has
+      // a quirk where --window-size's width applies but the height is
+      // overridden by the browser's saved window bounds; resizeTo pins both.
+      // The sessionStorage guard means only the first load of a new window
+      // resizes — a reload afterwards respects the user's own resize.
+      try {
+        if (!sessionStorage.getItem('clipsync_size_applied')) {
+          window.resizeTo(1152, 648);
+          sessionStorage.setItem('clipsync_size_applied', '1');
+        }
+      } catch (e) { /* ignore — normal tabs / blocked resize */ }
+
       // Track layout width for sidebar vs horizontal tabs
       var mq = window.matchMedia('(min-width: 768px)');
       this.isWideLayout = mq.matches;
@@ -103,6 +115,16 @@
       // does not.
       var isLocalHost = /^(localhost|127\.0\.0\.1)$/.test(window.location.hostname || '');
       var isDesktop = isLocalHost || (window.matchMedia && window.matchMedia('(pointer: fine)').matches);
+      // A factory reset can't reach browser localStorage — the host's one-shot
+      // marker turns into this flag, so wipe stale per-browser UI state (group
+      // registry, chat mutes, theme, onboarding) for a true clean slate.
+      if (window.__CLIPSYNC_RESET__) {
+        try {
+          ['clipsync_groups', 'clipsync_chat_mutes', 'clipsync_theme',
+           'clipsync_onboarded', 'clipsync_ui_backend', 'clipsync_sound']
+            .forEach(function (k) { localStorage.removeItem(k); });
+        } catch (e) { /* ignore */ }
+      }
       // A factory/config reset clears the desktop language flag but not this
       // browser's clipsync_onboarded localStorage — the two onboarding systems
       // would disagree and the web wizard never re-appears.  When the server
@@ -403,6 +425,13 @@
           store.favorites.splice(0, store.favorites.length);
           for (var i = 0; i < favs.length; i++) {
             store.favorites.push(favs[i]);
+          }
+          // A reset/deleted data folder leaves zero favorites but a stale
+          // clipsync_groups localStorage registry (groups are per-browser).
+          // Clear the registry so ghost groups can't resurrect in the sidebar.
+          if (favs.length === 0 && store.groupNames.length > 0) {
+            store.groupNames = [];
+            store.persistGroups();
           }
           return favs;
         });

@@ -3158,8 +3158,13 @@ class Application:
         from internal.config.config import _config_dir
         config_dir = _config_dir()
         deleted = []
+        # favorites.json is the legacy favorites store: the web API migrates it
+        # into an empty favorites.db, so deleting only the DB would let a stale
+        # legacy file resurrect every favorite (and its groups) on the next
+        # launch.  Delete it here too for a truly clean slate.
         for fname in ("config.json", "clipboard_history.json",
-                      "clipboard_history.db", "favorites.db", "clipsync.log"):
+                      "clipboard_history.db", "favorites.db",
+                      "favorites.json", "clipsync.log"):
             fpath = config_dir / fname
             try:
                 if fpath.exists():
@@ -3174,6 +3179,16 @@ class Application:
                 except OSError:
                     pass
         logger.info("Factory reset: deleted %s; restarting", deleted or "no files")
+
+        # Browser-side state (webview localStorage: group registry, mutes,
+        # theme, onboarding flag) lives outside the config dir and cannot be
+        # deleted here.  Write a one-shot marker the web server turns into
+        # __CLIPSYNC_RESET__ on the next page load, so the frontend clears its
+        # stale localStorage too.
+        try:
+            (config_dir / "factory_reset_pending").write_text("1", encoding="utf-8")
+        except OSError:
+            logger.debug("Factory reset: could not write reset marker", exc_info=True)
 
         # Remove the single-instance lock so the new process can start,
         # spawn a fresh instance, then exit this one without re-saving config.

@@ -4859,6 +4859,14 @@
       margin: 0 0 var(--clipsync-space-3) 0;
     }
 
+    /* Sub-block header inside a settings section — separates the distinct
+       functions (e.g. encryption / notifications / certificates in Security)
+       so related settings read as their own group instead of a blob. */
+    .settings-section__title--sub {
+      padding-top: 16px;
+      border-top: 1px solid var(--clipsync-border);
+    }
+
     .settings-section__subtitle {
       font-size: 0.8rem;
       font-weight: 600;
@@ -5824,7 +5832,7 @@
   <script src="js/i18n.js?token=__TOKEN__"></script>
   <script>window.__I18N_JSON__ = __CLIPSYNC_I18N_DATA__; window.__I18N_LOCALE__ = __CLIPSYNC_I18N_LOCALE__; document.documentElement.lang = window.__I18N_LOCALE__ || 'en';</script>
   <script>window.__CLIPSYNC_DEVICE_ID__ = __DEVICE_ID__; window.__CLIPSYNC_DEVICE_NAME__ = __DEVICE_NAME__;</script>
-  <script>window.__CLIPSYNC_FRESH__ = __FRESH__;</script>
+  <script>window.__CLIPSYNC_FRESH__ = __FRESH__; window.__CLIPSYNC_RESET__ = __RESET__;</script>
   <!-- ClipSync JS -->
   <script src="js/store.js?token=__TOKEN__"></script>
   <script src="js/api.js?token=__TOKEN__"></script>

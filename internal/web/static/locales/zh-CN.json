@@ -325,6 +325,7 @@
     "配对设备之间的应用层加密（TLS 1.3 之上）"
   ],
   "settings_window.enable_encryption": "启用加密（所有三项功能）",
+  "settings_window.encryption_title": "加密",
   "settings_window.password_hint": "在两台设备上设置相同密码以增强\n应用层加密。留空则自动从\n设备证书派生密钥。",
   "settings_window.encryption_hint": "传输始终通过 TLS 1.3 加密。这个可选的预共享密码再叠加一层:即使设备已配对,也必须知道密码才能解密你的内容。",
   "settings_window.auto_start_hint": "登录此电脑时自动启动 ClipSync。",

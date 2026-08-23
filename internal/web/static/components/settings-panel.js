@@ -1329,6 +1329,9 @@
                 '<section v-if="activeSection === \'security\'" class="settings-section">' +
                   '<h3 class="settings-section__title">{{ t(\'security.title\') }}</h3>' +
                   '<p class="settings-hint" style="margin-bottom:12px">{{ t(\'settings_window.security_desc\') }}</p>' +
+
+                  '<!-- Block 1/3: Encryption -->' +
+                  '<h3 class="settings-section__title settings-section__title--sub">{{ t(\'settings_window.encryption_title\') }}</h3>' +
                   '<div class="settings-toggle-row">' +
                     '<span class="settings-toggle-label">{{ t(\'settings_window.enable_encryption\') }}</span>' +
                     '<button class="settings-toggle" role="switch" :aria-checked="encryptionEnabled" :aria-label="t(\'settings_window.enable_encryption\')" :class="{ \'settings-toggle--on\': encryptionEnabled }" @click="encryptionEnabled = !encryptionEnabled">' +
@@ -1347,7 +1350,8 @@
                     '<p class="settings-hint" style="margin-top:8px">{{ t(\'settings_window.encryption_hint\') }}</p>' +
                   '</div>' +
 
-                  '<h4 style="font-size:12px;color:var(--clipsync-fg-muted);margin:16px 0 4px">{{ t(\'settings_window.notify_title\') }}</h4>' +
+                  '<!-- Block 2/3: Notifications -->' +
+                  '<h3 class="settings-section__title settings-section__title--sub" style="margin-top:28px">{{ t(\'settings_window.notify_title\') }}</h3>' +
                   '<p class="settings-hint" style="margin-bottom:8px">{{ t(\'settings_window.notify_desc\') }}</p>' +
                   '<div class="settings-toggle-row">' +
                     '<span class="settings-toggle-label"><strong>{{ t(\'settings.sound\') }}</strong></span>' +
@@ -1381,8 +1385,9 @@
                     '</button>' +
                   '</div>' +
 
-                  '<div style="display:flex;align-items:center;justify-content:space-between;margin:16px 0 4px">' +
-                    '<h4 style="font-size:12px;color:var(--clipsync-fg-muted);margin:0">{{ t(\'settings_window.certs_title\') }}</h4>' +
+                  '<!-- Block 3/3: Certificates -->' +
+                  '<div style="display:flex;align-items:center;justify-content:space-between;margin-top:28px">' +
+                    '<h3 class="settings-section__title settings-section__title--sub" style="margin:0">{{ t(\'settings_window.certs_title\') }}</h3>' +
                     '<button class="settings-btn settings-btn--sm" @click="loadCerts" :disabled="certsLoading">{{ t(\'ui.refresh\') }}</button>' +
                   '</div>' +
                   '<div v-if="certsLoading" class="settings-hint" style="padding:8px 0">{{ t(\'ui.loading\') }}</div>' +

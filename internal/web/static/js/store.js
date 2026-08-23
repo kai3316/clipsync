@@ -1265,10 +1265,18 @@
         var g = this.favorites[i].group || 'Ungrouped';
         groups[g] = (groups[g] || 0) + 1;
       }
-      for (var j = 0; j < this.groupNames.length; j++) {
-        var name = this.groupNames[j];
-        if (name && groups[name] === undefined) {
-          groups[name] = 0;
+      // Registry-only groups (created on the sidebar, possibly now empty) stay
+      // visible so a user who emptied a group doesn't lose it — BUT only when
+      // there ARE favorites.  After a factory reset / data-folder wipe the
+      // backend has zero favorites while this browser's clipsync_groups
+      // localStorage may still list stale groups; showing them would resurrect
+      // "111"-style ghosts the reset was supposed to clear.
+      if (this.favorites.length > 0) {
+        for (var j = 0; j < this.groupNames.length; j++) {
+          var name = this.groupNames[j];
+          if (name && groups[name] === undefined) {
+            groups[name] = 0;
+          }
         }
       }
       return groups;
