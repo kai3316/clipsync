@@ -170,7 +170,7 @@ _EN: dict[str, str] = {
     "encryption.wrong_password_msg": "The encryption password you entered is incorrect.\n\nClipSync cannot start without the correct password because your device identity (private key) is encrypted with it.\n\nThe application will now exit.",
     "encryption.password_required_msg": "The encryption password is required to start ClipSync.\n\nYour device identity (private key) is encrypted with it.\n\nThe application will now exit.",
     "notify.sync_skipped": "Sync Skipped",
-    "notify.oversize": "Clipboard content too large to sync: %.1f MB (limit: %d MB)",
+    "notify.oversize": "Clipboard content too large to sync: {size:.1f} MB (limit: {limit} MB)",
 
     # UI labels
     "ui.app_name": "ClipSync",
@@ -946,7 +946,7 @@ _ZH: dict[str, str] = {
     "encryption.wrong_password_msg": "你输入的加密密码不正确。\n\n没有正确的密码，ClipSync 无法启动，因为你的设备身份（私钥）是用它加密的。\n\n应用即将退出。",
     "encryption.password_required_msg": "启动 ClipSync 需要加密密码。\n\n你的设备身份（私钥）是用它加密的。\n\n应用即将退出。",
     "notify.sync_skipped": "已跳过同步",
-    "notify.oversize": "剪贴板内容过大无法同步：%.1f MB（上限：%d MB）",
+    "notify.oversize": "剪贴板内容过大无法同步：{size:.1f} MB（上限：{limit} MB）",
 
     "ui.app_name": "剪贴同步",
     "ui.app_title": "\U0001F4CB  剪贴同步",

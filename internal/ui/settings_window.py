@@ -204,7 +204,7 @@ class SettingsWindow:
                 self._window.focus_force()
                 self._window.update_idletasks()
                 self._window.attributes("-topmost", True)
-                self._window.after(200, lambda: self._window.attributes("-topmost", False))
+                self._window.after(200, lambda w=self._window: w.attributes("-topmost", False))
                 if self._window.winfo_viewable():
                     self._switch_panel(self._current_panel)
                     return
@@ -767,7 +767,8 @@ class SettingsWindow:
         self._web_ip_label = ctk.CTkLabel(
             card2, text=WebServer._get_lan_ip(),
             font=ctk.CTkFont(size=12, weight="bold"),
-        ).pack(anchor="w", padx=16, pady=(0, 8))
+        )
+        self._web_ip_label.pack(anchor="w", padx=16, pady=(0, 8))
 
         # ── QR Code ───────────────────────────────────────────
         ctk.CTkLabel(

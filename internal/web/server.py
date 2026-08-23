@@ -533,7 +533,8 @@ def _build_file_response(filepath: str, mime: str = "application/octet-stream"):
     fname = os.path.basename(filepath)
     try:
         fname.encode("latin-1")
-        disp = f'attachment; filename="{fname}"'
+        safe = fname.replace('"', "").replace("\r", "").replace("\n", "")
+        disp = f'attachment; filename="{safe}"'
     except UnicodeEncodeError:
         encoded = urllib.parse.quote(fname, safe="")
         disp = f"attachment; filename=\"download\"; filename*=UTF-8''{encoded}"
@@ -908,7 +909,8 @@ class WebServer:
         on_quickpaste_done = self._on_quickpaste_done
         get_diagnostics = self._get_diagnostics
         on_update_download = self._on_update_download
-        upload_dir = self._upload_dir
+        upload_dir = self._upload_dir  # startup dir (chat-download fallback)
+        _server = self  # live _upload_dir is mutated by the settings apply path
         static_dir = self._static_dir
         icon_192 = self._icon_192
         icon_512 = self._icon_512
@@ -1482,7 +1484,7 @@ class WebServer:
                         # Defense-in-depth: resolve and re-confine against the
                         # upload dir (also guards symlinks inside it).
                         from internal.web.api.security import confine_path
-                        safe = confine_path(os.path.join(upload_dir, fname), upload_dir)
+                        safe = confine_path(os.path.join(_server._upload_dir, fname), _server._upload_dir)
                         if safe is None:
                             inner_self._send_json({"error": "invalid filename"}, 400)
                             return
@@ -1540,7 +1542,7 @@ class WebServer:
                         get_discovered=get_discovered_peers,
                         on_nav_url=on_nav_url,
                         on_forward_file=on_forward_file,
-                        upload_dir=upload_dir,
+                        upload_dir=_server._upload_dir,
                         dialog_mgr=self._dialog_mgr,
                         get_overview_data=get_overview_data,
                         on_device_action=on_device_action,
@@ -1736,7 +1738,7 @@ class WebServer:
                         get_discovered=get_discovered_peers,
                         on_nav_url=on_nav_url,
                         on_forward_file=on_forward_file,
-                        upload_dir=upload_dir,
+                        upload_dir=_server._upload_dir,
                         dialog_mgr=self._dialog_mgr,
                         get_overview_data=get_overview_data,
                         on_device_action=on_device_action,
@@ -1810,7 +1812,7 @@ class WebServer:
                         get_discovered=get_discovered_peers,
                         on_nav_url=on_nav_url,
                         on_forward_file=on_forward_file,
-                        upload_dir=upload_dir,
+                        upload_dir=_server._upload_dir,
                         dialog_mgr=self._dialog_mgr,
                         get_overview_data=get_overview_data,
                         on_device_action=on_device_action,
@@ -1865,7 +1867,7 @@ class WebServer:
                         get_discovered=get_discovered_peers,
                         on_nav_url=on_nav_url,
                         on_forward_file=on_forward_file,
-                        upload_dir=upload_dir,
+                        upload_dir=_server._upload_dir,
                         dialog_mgr=self._dialog_mgr,
                         get_overview_data=get_overview_data,
                         on_device_action=on_device_action,

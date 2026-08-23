@@ -57,11 +57,13 @@ def _export_favorites_to_json(filepath: Path) -> bool:
         return False
     try:
         conn = sqlite3.connect(str(db_path))
-        rows = conn.execute(
-            "SELECT id, title, content, \"group\", position, created, updated "
-            "FROM favorites ORDER BY created DESC"
-        ).fetchall()
-        conn.close()
+        try:
+            rows = conn.execute(
+                "SELECT id, title, content, \"group\", position, created, updated "
+                "FROM favorites ORDER BY created DESC"
+            ).fetchall()
+        finally:
+            conn.close()
     except Exception:
         return False
 
