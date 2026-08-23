@@ -1120,9 +1120,11 @@ def test_calibrate_history_timeout_unwedges_lock():
     calibration fetch that never settles (old webview without AbortController)
     can't wedge the lock permanently — it clears after CALIBRATION_TIMEOUT_MS,
     generation-guarded so a superseded fetch can't clear a newer calibration's
-    lock or write back.  The timeout is itself a terminal state: it advances
-    the generation so the late response can no longer pass the gen guard and
-    write back the old snapshot, clears the lock, and consumes the budget."""
+    lock or write back.  The timeout is the one terminal state that does NOT
+    advance the generation: it unwedges the lock and consumes the budget so
+    the next poll can retry, while a slow-but-valid response that settles later
+    still passes the gen guard and writes back (staleness vs. newer data is the
+    mutation tick's job, not the timer's)."""
     store = _read_repo_file("internal/web/static/js/store.js")
     assert "var CALIBRATION_TIMEOUT_MS = 16000;" in store
     assert "clearTimeout(calibTimer);" in store

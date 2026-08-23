@@ -2,6 +2,16 @@
 
 All notable changes to ClipSync are documented in this file.
 
+## [1.0.39] — 2026-08-23
+
+### History (pin helpers — polish)
+- **The page-1 wholesale reload only bumps the reconcile guard when the snapshot actually changed** — a reconnect that applied an identical list no longer invalidates an in-flight calibration or burns its throttle budget (aligned with the WebSocket merge path).
+- `setPinned` / `setPinnedBatch` get proper docs, and batch-pin now uses a hash-set membership test (O(n+m)) with a null/empty guard, matching `removeHistoryItems`.
+- The stale test docstring describing the calibration timeout as advancing the generation now matches the corrected contract.
+
+### Tests
+- Full suite 433 passed / 3 skipped.
+
 ## [1.0.38] — 2026-08-23
 
 ### History (pin reconcile — consolidated)

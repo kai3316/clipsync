@@ -357,14 +357,32 @@
               store.historyHasMore = store.history.length < res.total;
             }
           } else {
+            // Detect whether the page-1 snapshot actually changed before
+            // replacing, so a reconnect that applied an identical page-1 list
+            // doesn't spuriously invalidate an in-flight calibration and burn
+            // its throttle budget.  The list is small here (<= web_history_limit),
+            // so a per-row compare is cheap; a real change (a pin toggle applied
+            // elsewhere, a clip edited on another device) still bumps the guard.
+            var changed = items.length !== store.history.length;
+            if (!changed) {
+              for (var ci = 0; ci < items.length; ci++) {
+                var curRow = store.history[ci];
+                var incRow = items[ci];
+                if (!curRow || curRow.entry_id !== incRow.entry_id ||
+                    curRow.pinned !== incRow.pinned ||
+                    curRow.text_preview !== incRow.text_preview) {
+                  changed = true;
+                  break;
+                }
+              }
+            }
             store.history.splice(0, store.history.length);
             for (var i = 0; i < items.length; i++) {
               store.history.push(items[i]);
             }
-            // A wholesale page-1 replace is a mutation (it may carry pin
-            // changes applied elsewhere) — bump the reconcile guard so an
-            // in-flight calibration can't write back over it.
-            store.historyMutationTick += 1;
+            if (changed) {
+              store.historyMutationTick += 1;
+            }
             store.historyHasMore = (res && res.total != null) ? (res.offset + items.length < res.total) : false;
             store.historyOffset = items.length;
           }

@@ -1011,18 +1011,15 @@
      */
 
     /**
-     * Remove history entries by entry_id (in place, one splice per row so the
-     * reactive list updates).  Bumps historyMutationTick once when at least
-     * one row was removed, and prunes removed ids from selectedIds.  Returns
-     * the number of rows removed so callers can shrink the pagination cursor.
-     * @param {Array<string|number>} ids
-     * @returns {number} count of rows removed
+     * Set a single row's pinned flag (re-finding by id — a pinned row reorders
+     * to the top while the request is in flight) and bump the reconcile guard.
+     * The bump is UNCONDITIONAL: the server committed a pin change, so any
+     * in-flight calibration whose snapshot predates it must not write back —
+     * even when the toggled row left the loaded window during the round-trip
+     * (unpin of a boundary row drops it from page 1, and findIndex misses).
+     * @param {number} eid
+     * @param {boolean} pinned
      */
-    // Set a single row's pinned flag (re-finding by id) and bump the reconcile
-    // guard.  The bump is UNCONDITIONAL: the server committed a pin change, so
-    // any in-flight calibration whose snapshot predates it must not write back
-    // — even when the toggled row left the loaded window during the round-trip
-    // (unpin of a boundary row drops it from page 1, and findIndex misses).
     setPinned: function (eid, pinned) {
       var liveIdx = this.history.findIndex(function (h) {
         return h.entry_id === eid;
@@ -1033,19 +1030,38 @@
       this.historyMutationTick += 1;
     },
 
-    // Batch equivalent of setPinned — same unconditional guard bump.
+    /**
+     * Batch equivalent of setPinned — same unconditional guard bump.  Uses a
+     * hash set for the id-membership test (O(n+m), matching removeHistoryItems).
+     * @param {Array<number>} ids
+     * @param {boolean} pinned
+     * @returns {number} count of loaded rows the flag was applied to
+     */
     setPinnedBatch: function (ids, pinned) {
-      var hit = false;
+      if (!ids || !ids.length) return 0;
+      var idSet = {};
+      for (var si = 0; si < ids.length; si++) {
+        idSet[ids[si]] = true;
+      }
+      var matched = 0;
       for (var bi = 0; bi < this.history.length; bi++) {
-        if (ids.indexOf(this.history[bi].entry_id) !== -1) {
+        if (idSet[this.history[bi].entry_id]) {
           this.history[bi].pinned = !!pinned;
-          hit = true;
+          matched++;
         }
       }
       this.historyMutationTick += 1;
-      return hit;
+      return matched;
     },
 
+    /**
+     * Remove history entries by entry_id (in place, one splice per row so the
+     * reactive list updates).  Bumps historyMutationTick once when at least
+     * one row was removed, and prunes removed ids from selectedIds.  Returns
+     * the number of rows removed so callers can shrink the pagination cursor.
+     * @param {Array<string|number>} ids
+     * @returns {number} count of rows removed
+     */
     removeHistoryItems: function (ids) {
       if (!ids || !ids.length) return 0;
       var delSet = {};
