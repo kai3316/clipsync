@@ -829,7 +829,13 @@ class SettingsWindow:
             token = self._web_token_var.get() if self._web_token_var else ""
             port = self._web_port_var.get() if self._web_port_var else "19991"
             ip = WebServer._get_lan_ip()
-            url = f"http://{ip}:{port}?token={token}" if token else f"http://{ip}:{port}"
+            # A phone scans this QR, so point at the lightweight phone companion
+            # page — consistent with the desktop overview card and the tray
+            # "Web QR" dialog, instead of the full desktop dashboard.
+            url = (
+                f"http://{ip}:{port}/mobile.html?token={token}"
+                if token else f"http://{ip}:{port}/mobile.html"
+            )
 
             if self._web_url_label:
                 display_url = url if len(url) <= 60 else url[:57] + "..."

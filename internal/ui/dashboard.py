@@ -3927,7 +3927,13 @@ class DashboardWindow:
                 return
         self._web_last_ip = ip
 
-        url = f"http://{ip}:{port}?token={token}" if token else f"http://{ip}:{port}"
+        # A phone scans this QR, so point at the lightweight phone companion
+        # page (history / send / files) — consistent with the tray "Web QR"
+        # dialog and the web UI's own QR cards, instead of the full dashboard.
+        url = (
+            f"http://{ip}:{port}/mobile.html?token={token}"
+            if token else f"http://{ip}:{port}/mobile.html"
+        )
         display_url = url if len(url) <= 60 else url[:57] + "..."
         self._web_url_label.configure(text=display_url)
 
