@@ -566,6 +566,9 @@ _EN: dict[str, str] = {
     "settings.save_translation_failed": "Failed to save translation settings",
     "tray.show_web_qr": "Show Web QR Code",
     "web.qr_title": "Scan to Connect",
+    "web.send_file_to_phone": "Send file to phone",
+    "web.send_file_to_phone_msg": "Sent to phone: {name}. Open the Files tab on your phone's web page to download it.",
+    "web.send_file_to_phone_fail": "Could not copy the file to the phone-visible folder.",
     # Filter categories
     "filter.credit_card": "Credit card numbers",
     "filter.ssn": "Social Security numbers (XXX-XX-XXXX)",
@@ -1321,6 +1324,9 @@ _ZH: dict[str, str] = {
     "settings.save_translation_failed": "保存翻译设置失败",
     "tray.show_web_qr": "显示 Web 二维码",
     "web.qr_title": "扫码连接",
+    "web.send_file_to_phone": "发送文件到手机",
+    "web.send_file_to_phone_msg": "已发送到手机：{name}。请在手机网页的「文件」页中下载。",
+    "web.send_file_to_phone_fail": "无法将文件复制到手机可见的文件夹。",
     # Filter categories
     "filter.credit_card": "信用卡号码",
     "filter.ssn": "社保号码 (XXX-XX-XXXX)",

@@ -3689,7 +3689,7 @@ class Application:
         dlg.title(T("web.qr_title"))
         dlg.resizable(False, False)
 
-        w, h = 320, 430
+        w, h = 320, 485
         if self.root.winfo_viewable():
             rw, rh = self.root.winfo_width(), self.root.winfo_height()
             rx, ry = self.root.winfo_rootx(), self.root.winfo_rooty()
@@ -3744,6 +3744,17 @@ class Application:
         )
         copy_btn.pack(side="right", padx=(0, 6))
 
+        # Send a local file straight to the phone: it lands in the web-shared
+        # directory the phone page lists, so the phone downloads it from its
+        # Files tab within ~5s — no pairing required.
+        ctk.CTkButton(
+            body, text=T("web.send_file_to_phone"), width=190, height=34,
+            font=ctk.CTkFont(size=12),
+            fg_color=("#0891B2", "#0E1328"),
+            hover_color=("#0EA5C4", "#1A2542"),
+            command=lambda: self._send_file_to_phone(dlg),
+        ).pack(pady=(0, 8))
+
         ctk.CTkButton(
             body, text=T("ui.close"), width=100, height=38,
             font=ctk.CTkFont(size=13),
@@ -3759,6 +3770,48 @@ class Application:
         except Exception:
             pass
         self._track_modal_dialog(dlg)
+
+    def _send_file_to_phone(self, parent=None) -> None:
+        """Send a local file to the phone companion page for download.
+
+        Copies the chosen file into the web-shared directory the phone page
+        lists (``/api/files``) and downloads from (``/api/download``).  No
+        pairing is involved: the phone sees the file on its next ~5 s poll of
+        the Files tab, and can download it straight to the device.
+        """
+        try:
+            import tkinter.filedialog
+            path = tkinter.filedialog.askopenfilename(parent=parent)
+        except Exception:
+            logger.debug("send-to-phone file dialog failed", exc_info=True)
+            return
+        if not path:
+            return
+        try:
+            import shutil
+            from internal.sync.file_transfer import _sanitize_file_name
+            from internal.web.server import _get_upload_dir
+            dest_dir = _get_upload_dir(self.cfg)
+            name = _sanitize_file_name(os.path.basename(path))
+            dest = os.path.join(dest_dir, name)
+            stem, ext = os.path.splitext(name)
+            counter = 1
+            while os.path.exists(dest):
+                dest = os.path.join(dest_dir, f"{stem} ({counter}){ext}")
+                counter += 1
+            shutil.copy2(path, dest)
+            self._notify_info(
+                T("web.send_file_to_phone"),
+                T("web.send_file_to_phone_msg", name=os.path.basename(dest)),
+            )
+        except Exception:
+            logger.warning("send-to-phone copy failed", exc_info=True)
+            try:
+                self._notify_error(
+                    T("web.send_file_to_phone"), T("web.send_file_to_phone_fail"),
+                )
+            except Exception:
+                pass
 
     def _on_web_action(self, action: dict) -> None:
         """Handle web server control actions from dashboard / settings."""
