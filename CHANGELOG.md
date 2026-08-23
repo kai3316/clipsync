@@ -2,6 +2,16 @@
 
 All notable changes to ClipSync are documented in this file.
 
+## [1.0.49] — 2026-08-23
+
+### Mobile companion (phone page)
+- **The phone page grows from 3 to 7 tabs** (scrollable tab bar) — it is no longer just history/send/files:
+  - **💬 聊天**: a remote UI for the desktop's nearby-chat — browse devices, start conversations, exchange text messages, accept/decline incoming files, all live-polled every 5 s just like the other tabs.
+  - **📤 传输管理**: watch the desktop's active P2P transfers with progress/speed/ETA, accept or reject incoming requests right from the phone (new `POST /api/transfer/accept|reject`), and cancel/pause/resume; completed transfers list with specific failure reasons.
+  - **⭐ 收藏**: browse desktop favorites, tap to copy one to the desktop clipboard, or delete it.
+  - **⚙ 设置**: device name, web address, language, a dark/light theme toggle for the page, and a link to the full web dashboard. `/api/status` now reports the app version too.
+- **Desktop**: the phone-companion QR dialog gains a **「发送文件到手机」** button — pick a local file and it lands in the phone-visible folder, so the phone can download it from its Files tab (~5 s) without pairing.
+
 ## [1.0.48] — 2026-08-23
 
 ### Desktop
