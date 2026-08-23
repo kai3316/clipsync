@@ -1302,6 +1302,7 @@ class Application:
                     "peer_id": real, "name": real, "paired": False,
                     "pairing": False, "connected": False,
                     "address": "", "port": 0, "fingerprint_short": "",
+                    "session": "",
                 }
                 devices[real] = d
                 h = _hash(real)
@@ -1362,6 +1363,20 @@ class Application:
                 seen_hashes.add(hash_id)
         except Exception:
             logger.debug("get_device_states: discovery list failed", exc_info=True)
+
+        # 5. Attach the chat-session status (if any) so device + session state
+        #    live in one view.  Sessions are keyed by the canonical real id.
+        try:
+            if self.chat_mgr is not None:
+                for s in self.chat_mgr.get_sessions():
+                    pid = s.get("peer_id", "")
+                    real = resolved.get(pid, pid)
+                    d = _ensure(real)
+                    if not d["name"] or d["name"] == d["peer_id"]:
+                        d["name"] = s.get("peer_name") or d["name"]
+                    d["session"] = s.get("status", "")
+        except Exception:
+            logger.debug("get_device_states: session list failed", exc_info=True)
 
         # Fill address/port + fingerprint for peers without a discovered entry.
         for real, d in devices.items():
