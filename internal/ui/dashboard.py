@@ -1990,9 +1990,16 @@ class DashboardWindow:
     def _on_confirm_pairing(self, peer_id: str, code: str):
         if not self._on_pair:
             return
-        if not ask_yesno(self._window, T("pairing.verify_title"),
-                         T("pairing.verify_message", code=code)):
-            return  # user declined the code check — do not pair
+        # Require the user to actually enter the code shown on the other device
+        # (not just click "match"), so the pairing-code check is meaningful.
+        entered = ask_string(self._window, T("pairing.verify_title"),
+                             T("pairing.verify_input_prompt"))
+        if entered is None:
+            return  # cancelled
+        if entered.strip() != code:
+            show_error(self._window, T("pairing.verify_title"),
+                       T("pairing.code_mismatch"))
+            return
         success = self._on_pair(peer_id, code)
         if success:
             # Look up the peer's display name from the pending list.

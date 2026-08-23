@@ -98,11 +98,12 @@ def _compute_frame_key(my_fingerprint: str, peer_fingerprint: str, password: str
     Both peers compute the same key by sorting fingerprints before hashing.
 
     Known limitation: without a password the key material is derived solely
-    from certificate fingerprints, which are handed to any connecting peer
-    in plaintext during identity exchange — so in that mode this layer
-    provides integrity/binding but NOT confidentiality against a LAN
-    observer.  Setting an encryption password folds a shared secret into
-    the key and closes that gap.
+    from certificate fingerprints, which are handed to any connecting peer in
+    plaintext during identity exchange — so in that mode this layer is
+    redundant with the TLS transport and adds no independent confidentiality
+    or integrity against an attacker who can observe or replay that exchange.
+    Setting an encryption password folds a shared secret into the key and
+    provides defense-in-depth on top of TLS.
     """
     fps = sorted([my_fingerprint, peer_fingerprint])
     ikm = (fps[0] + fps[1]).encode("ascii")

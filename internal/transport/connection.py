@@ -21,6 +21,7 @@ from collections.abc import Callable
 from pathlib import Path
 
 from cryptography import x509
+from cryptography.hazmat.primitives import serialization
 from cryptography.x509.oid import NameOID
 
 from internal.protocol.codec import (
@@ -785,6 +786,18 @@ class TransportManager:
                     peer_cert_pem = server_cert_data.decode("ascii")
                     peer_cert = x509.load_pem_x509_certificate(peer_cert_pem.encode())
 
+                    # Bind the TLS-presented cert to the app-layer identity cert:
+                    # they must be the same, else the peer is two principals.
+                    tls_der = ssl_sock.getpeercert(binary_form=True)
+                    if (tls_der is not None
+                            and tls_der != peer_cert.public_bytes(serialization.Encoding.DER)):
+                        logger.warning(
+                            "[%s] TLS cert differs from identity cert — refusing",
+                            peer_name,
+                        )
+                        ssl_sock.close()
+                        return
+
                     try:
                         cn_attrs = peer_cert.subject.get_attributes_for_oid(NameOID.COMMON_NAME)
                         if cn_attrs:
@@ -1387,6 +1400,19 @@ class TransportManager:
                 if client_cert_data:
                     peer_cert_pem = client_cert_data.decode("ascii")
                     peer_cert = x509.load_pem_x509_certificate(peer_cert_pem.encode())
+
+                    # Bind the TLS-presented cert to the app-layer identity cert
+                    # (defense-in-depth against a relay/MITM).
+                    tls_der = ssl_sock.getpeercert(binary_form=True)
+                    if (tls_der is not None
+                            and tls_der != peer_cert.public_bytes(serialization.Encoding.DER)):
+                        logger.warning(
+                            "TLS cert differs from identity cert from %s:%d — refusing",
+                            addr[0], addr[1],
+                        )
+                        self._send_rejection(ssl_sock)
+                        ssl_sock.close()
+                        continue
 
                     try:
                         cn_attrs = peer_cert.subject.get_attributes_for_oid(NameOID.COMMON_NAME)
