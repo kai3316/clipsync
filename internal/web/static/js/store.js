@@ -907,10 +907,13 @@
       }
       this._historyCalibrating = true;
       var startTick = this.historyMutationTick;
-      // Generation counter: every terminal state (success write-back, failure,
-      // timeout, raced abandon) advances the generation, so a late response
-      // from a settled calibration can never clear a newer calibration's lock
-      // or write back — late responses are always discarded.
+      // Generation counter: success write-back, failure and raced abandon
+      // advance the generation, so their late responses can never clear a
+      // newer calibration's lock or write back.  The TIMEOUT is the deliberate
+      // exception — it unwedges the lock and consumes the budget but does NOT
+      // advance the gen, so a slow-but-valid response that settles after the
+      // timeout still passes this guard and writes back (staleness vs. newer
+      // data is the mutation tick's job, not the timer's).
       var calibGen = (this._calibrationGen || 0) + 1;
       this._calibrationGen = calibGen;
       // Timeout fallback: an old webview without AbortController can leave the

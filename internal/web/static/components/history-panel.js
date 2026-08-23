@@ -408,6 +408,11 @@
                 store.history[i].pinned = newPinned;
               }
             }
+            // Batch pin mutates rows in place — bump the reconcile guard so an
+            // in-flight calibration can't write back a stale pre-pin snapshot.
+            if (selectedIds.length) {
+              store.historyMutationTick += 1;
+            }
             store.showToast(
               self.t(newPinned ? 'history.batch_pinned' : 'history.batch_unpinned', { count: res.count }),
               2000
@@ -468,10 +473,13 @@
               // the mutation tick so an in-flight calibration (store.js)
               // abandons its write-back instead of resurrecting the deleted
               // rows (mirrors the ws.js history_item_deleted handler).
-              store.removeHistoryItems(selectedIds);
+              // The helper returns how many rows it actually removed — a WS
+              // history_item_deleted broadcast may have already removed them
+              // (and shrunk the cursor), so decrement only by the real count.
+              var removedCount = store.removeHistoryItems(selectedIds);
               // The pagination cursor must shrink with the array, otherwise a
               // subsequent "Load more" skips the N items just after the hole.
-              store.historyOffset = Math.max(0, store.historyOffset - selectedIds.length);
+              store.historyOffset = Math.max(0, store.historyOffset - removedCount);
 
               store.clearSelection();
               store.showToast(self.t('history.deleted_count', { count: (res.count || selectedIds.length) }), 2000);

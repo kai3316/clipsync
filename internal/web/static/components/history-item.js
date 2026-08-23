@@ -258,8 +258,14 @@
         var self = this;
         ClipsyncAPI.togglePin(eid).then(function (res) {
           if (res && res.ok !== false) {
-            if (idx !== -1) {
-              store.history[idx].pinned = !!res.pinned;
+            // Re-find by id rather than the captured idx: a pinned row jumps to
+            // the top when the server broadcast's wholesale replace lands, so
+            // the stale idx could write the pin onto a different row.
+            var liveIdx = store.history.findIndex(function (h) {
+              return h.entry_id === eid;
+            });
+            if (liveIdx !== -1) {
+              store.history[liveIdx].pinned = !!res.pinned;
               // A pin toggle mutates a row in place — bump the reconcile guard
               // so an in-flight calibration can't write back a stale snapshot
               // that reverts it (same-id pin changes don't always reach the

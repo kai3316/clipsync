@@ -2,6 +2,17 @@
 
 All notable changes to ClipSync are documented in this file.
 
+## [1.0.37] — 2026-08-23
+
+### History (pin/delete race fixes)
+- **Toggling pin no longer writes to the wrong row.** A pinned item jumps to the top when the server broadcast's wholesale replace lands before the HTTP response — the response now re-finds the row by `entry_id` instead of using a stale captured index, so an unrelated item can't silently get pinned.
+- **The reconcile guard now covers every pin path**: single-pin (history item + context menu) and batch-pin all bump the mutation tick, so an in-flight calibration can't revert a just-applied pin.
+- **Batch delete shrinks the pagination cursor by the rows actually removed**, not the pre-confirm selection size — a WS broadcast that already removed (and shrunk) the rows no longer over-shrinks the cursor.
+- Dead index computations removed from the context-menu delete and pin paths; the calibration comment block now matches the timeout contract.
+
+### Tests
+- Full suite 433 passed / 3 skipped.
+
 ## [1.0.36] — 2026-08-23
 
 ### History (reconcile)

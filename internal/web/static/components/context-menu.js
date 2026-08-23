@@ -293,15 +293,20 @@
         var store = this.store;
         var eid = item.entry_id;
         if (eid === undefined || eid === null) { this.closeMenu(); return; }
-        var idx = store.history.findIndex(function (h) {
-          return h.entry_id === eid;
-        });
 
         var self = this;
         ClipsyncAPI.togglePin(eid).then(function (res) {
           if (res && res.ok !== false) {
-            if (idx !== -1) {
-              store.history[idx].pinned = !!res.pinned;
+            // Re-find by id: the list may have reordered (pinned-first) since
+            // the request started, and the server broadcast may already have
+            // applied the change — write only onto the matching row and bump
+            // the reconcile guard like the history-item togglePin path.
+            var liveIdx = store.history.findIndex(function (h) {
+              return h.entry_id === eid;
+            });
+            if (liveIdx !== -1) {
+              store.history[liveIdx].pinned = !!res.pinned;
+              store.historyMutationTick += 1;
             }
             store.showToast(res.pinned ? self.t('history.pinned_toast') : self.t('history.unpinned_toast'), 1200);
           } else {
@@ -401,9 +406,6 @@
         var store = this.store;
         var eid = item.entry_id;
         if (eid === undefined || eid === null) { this.closeMenu(); return; }
-        var idx = store.history.findIndex(function (h) {
-          return h.entry_id === eid;
-        });
 
         var self = this;
         // Close the menu before showing the confirm so the menu never sits
