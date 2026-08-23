@@ -482,10 +482,13 @@ var ClipsyncWS = (function () {
                 if (window.ClipsyncAPI && window.ClipsyncAPI.chatSessionAction) {
                   window.ClipsyncAPI.chatSessionAction(data.session_id, 'read').catch(function () {});
                 }
-              } else if (data.entry && !data.entry.outgoing) {
+              } else if (data.entry && !data.entry.outgoing &&
+                         !store.isChatMuted(cs.peer_id)) {
                 // Only incoming messages bump unread — the backend never
                 // counts your own echoed outgoing entry (send_text/send_file
-                // fire _on_message too), so the badge must not either.
+                // fire _on_message too), so the badge must not either.  A
+                // muted peer never bumps the badge, so a silent device stays
+                // silent (recalcChatUnread also excludes muted peers).
                 cs.unread = (cs.unread || 0) + 1;
               }
               if (data.entry) {

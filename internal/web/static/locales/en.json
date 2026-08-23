@@ -985,5 +985,9 @@
   "chat.invite_banner_title": "Incoming chat request",
   "chat.invite_fingerprint": "Fingerprint",
   "chat.invite_greeting": "Say hello to start the conversation.",
-  "chat.invite_prompt": "Choose a device on the left, or open an existing session to start chatting."
+  "chat.invite_prompt": "Choose a device on the left, or open an existing session to start chatting.",
+  "chat.mute": "Mute notifications for this device",
+  "chat.unmute": "Unmute notifications for this device",
+  "chat.muted_peer": "Notifications muted for this device",
+  "chat.unmuted_peer": "Notifications enabled for this device"
 }

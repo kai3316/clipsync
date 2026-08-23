@@ -54,7 +54,7 @@
 
       // Incoming invitation awaiting accept/decline — show the invite banner.
       isInvitedSession: function () {
-        var s = this.activeSession();
+        var s = this.activeSession;
         return !!(s && s.status === 'invited');
       },
 
@@ -156,6 +156,9 @@
                   '<span v-if="(s.unread || 0) > 0" class="chat-session-row__badge">{{ s.unread }}</span>' +
                 '</div>' +
               '</div>' +
+              '<button class="chat-session-row__mute" :class="{ \'chat-session-row__mute--on\': isMuted(s) }"' +
+                ' :title="isMuted(s) ? t(\'chat.unmute\') : t(\'chat.mute\')"' +
+                ' @click.stop="toggleMute(s)">{{ isMuted(s) ? \'🔕\' : \'🔔\' }}</button>' +
             '</div>' +
           '</div>' +
         '</div>' +
@@ -324,6 +327,21 @@
         return ClipsyncAPI.chatSessionAction(sid, 'read').catch(function (e) {
           console.error('[ClipSync] Failed to mark chat read:', e);
         });
+      },
+
+      // Whether a session's peer is muted (no unread badge / notifications).
+      isMuted: function (session) {
+        return !!(session && this.store.isChatMuted(session.peer_id));
+      },
+
+      // Toggle mute for a session's peer from the row bell, with a toast.
+      toggleMute: function (session) {
+        if (!session || !session.peer_id) return;
+        var muted = this.store.toggleChatMute(session.peer_id);
+        this.store.showToast(
+          muted ? this.t('chat.muted_peer') : this.t('chat.unmuted_peer'),
+          1500
+        );
       },
 
       startChat: function (device) {
@@ -618,7 +636,7 @@
         // conversation's peer name so users don't see a literal "{name}".
         var fmt = (entry && entry.fmt) || {};
         if (!fmt.name) {
-          var sess = this.activeSession();
+          var sess = this.activeSession;
           if (sess && sess.peer_name) {
             fmt = Object.assign({}, fmt, { name: sess.peer_name });
           }

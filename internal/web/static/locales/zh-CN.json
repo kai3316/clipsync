@@ -985,5 +985,9 @@
   "chat.invite_banner_title": "收到聊天请求",
   "chat.invite_fingerprint": "指纹",
   "chat.invite_greeting": "打个招呼,开始聊天吧。",
-  "chat.invite_prompt": "在左侧选择一台设备,或打开一个已有会话开始聊天。"
+  "chat.invite_prompt": "在左侧选择一台设备,或打开一个已有会话开始聊天。",
+  "chat.mute": "静音此设备的通知",
+  "chat.unmute": "取消此设备的静音",
+  "chat.muted_peer": "已静音此设备的消息通知",
+  "chat.unmuted_peer": "已恢复此设备的消息通知"
 }

@@ -121,6 +121,7 @@
     chatMessages: [],          // entries for the active session (capped at 200)
     activeChatSession: '',     // selected session_id (empty = none selected)
     chatUnread: 0,             // total unread across sessions (sidebar badge)
+    mutedChatPeers: new Set(), // peer_ids muted in the chat UI (no unread badge)
 
     /* ═══════════════════════════════════════════════════════════════
        Overview stats (refreshed every 5s)
@@ -250,6 +251,7 @@
       this.loadTheme();
       this.loadOnboarding();
       this.loadGroups();
+      this.loadChatMutes();
     },
 
     /**
@@ -1447,16 +1449,86 @@
        ═══════════════════════════════════════════════════════════════ */
 
     /**
-     * Recompute the total unread badge from the session list.
+     * Recompute the total unread badge from the session list.  Muted peers'
+     * unread is excluded so a silent device never inflates the sidebar badge.
      * @returns {number}
      */
     recalcChatUnread: function () {
       var sum = 0;
       for (var i = 0; i < this.chatSessions.length; i++) {
-        sum += (this.chatSessions[i].unread || 0);
+        var s = this.chatSessions[i];
+        if (this.isChatMuted(s.peer_id)) continue;
+        sum += (s.unread || 0);
       }
       this.chatUnread = sum;
       return sum;
+    },
+
+    /**
+     * Load the persisted muted-peer ids from localStorage.
+     */
+    loadChatMutes: function () {
+      var saved = null;
+      try { saved = localStorage.getItem('clipsync_chat_mutes'); } catch (e) { /* ignore */ }
+      this.mutedChatPeers = new Set();
+      if (saved) {
+        try {
+          var parsed = JSON.parse(saved);
+          if (Array.isArray(parsed)) {
+            for (var mi = 0; mi < parsed.length; mi++) {
+              if (parsed[mi] && typeof parsed[mi] === 'string') {
+                this.mutedChatPeers.add(parsed[mi]);
+              }
+            }
+          }
+        } catch (e) { /* ignore */ }
+      }
+    },
+
+    /**
+     * Persist the muted-peer set to localStorage.
+     */
+    persistChatMutes: function () {
+      try {
+        var list = [];
+        this.mutedChatPeers.forEach(function (p) { list.push(p); });
+        localStorage.setItem('clipsync_chat_mutes', JSON.stringify(list));
+      } catch (e) { /* ignore */ }
+    },
+
+    /**
+     * Whether *peer_id*'s messages are muted (no unread badge / notification).
+     * @param {string} peerId
+     * @returns {boolean}
+     */
+    isChatMuted: function (peerId) {
+      return !!peerId && this.mutedChatPeers.has(peerId);
+    },
+
+    /**
+     * Toggle mute for a peer.  Mutting also clears any unread badge that
+     * session already carries, so silencing a device takes effect immediately.
+     * @param {string} peerId
+     * @returns {boolean} the new muted state
+     */
+    toggleChatMute: function (peerId) {
+      if (!peerId) return false;
+      var muted = this.mutedChatPeers.has(peerId);
+      if (muted) {
+        this.mutedChatPeers.delete(peerId);
+      } else {
+        this.mutedChatPeers.add(peerId);
+        for (var i = 0; i < this.chatSessions.length; i++) {
+          if (this.chatSessions[i].peer_id === peerId) {
+            this.chatSessions[i].unread = 0;
+          }
+        }
+      }
+      // Replace the Set so the mute button state re-renders reactively.
+      this.mutedChatPeers = new Set(this.mutedChatPeers);
+      this.persistChatMutes();
+      this.recalcChatUnread();
+      return !muted;
     },
 
     /**
