@@ -42,7 +42,7 @@ _API_KEY_RE = re.compile(
     # JWT / session tokens (three base64url segments)
     r'|eyJ[a-zA-Z0-9_\-]{8,}\.[a-zA-Z0-9_\-]{8,}\.[a-zA-Z0-9_\-]{8,}'
     # name=value / name:value secret assignments
-    r'|(?:api[_-]?key|access[_-]?key|auth[_-]?token|client[_-]?secret|secret|token|key)\s*[=:]\s*["\']?\s*[a-zA-Z0-9_\-\.]{16,}["\']?'
+    r'|(?:api[_-]?key|access[_-]?key|auth[_-]?token|client[_-]?secret|\bsecret|\btoken|\bkey)\s*[=:]\s*["\']?\s*[a-zA-Z0-9_\-\.]{16,}["\']?'
     # Authorization / Bearer headers
     r'|authorization\s*[=:]\s*(?:Bearer\s+)?[a-zA-Z0-9_\-\.]{16,}'
     r'|Bearer\s+[a-zA-Z0-9_\-\.]{16,}'
@@ -88,6 +88,25 @@ CATEGORY_LABELS: dict[str, str] = {
 # synced clipboard text.  Keep the string in sync with the sub pattern in
 # ``ContentFilter.filter_content`` below.
 FILTERED_MARKER = "[FILTERED]"
+
+
+def _luhn_valid(number: str) -> bool:
+    """Return True if *number* passes the Luhn checksum.
+
+    A credit-card-shaped digit string is only a real card if it also passes
+    Luhn — a 16-digit order/invoice number must not be redacted as a card.
+    """
+    digits = [int(c) for c in number if c.isdigit()]
+    if len(digits) < 13:
+        return False
+    total = 0
+    for i, d in enumerate(reversed(digits)):
+        if i % 2 == 1:
+            d *= 2
+            if d > 9:
+                d -= 9
+        total += d
+    return total % 10 == 0
 
 
 def is_filtered_text(text: str) -> bool:
@@ -187,7 +206,10 @@ class ContentFilter:
                 continue
             text = self._bytes_to_str(data)
             for _category, pattern in self._active_patterns():
-                if pattern.search(text):
+                if _category == "credit_card":
+                    if any(_luhn_valid(m.group(0)) for m in pattern.finditer(text)):
+                        return True
+                elif pattern.search(text):
                     return True
         return False
 
@@ -200,7 +222,12 @@ class ContentFilter:
                 continue
             text = self._bytes_to_str(data)
             for category, pattern in self._active_patterns():
-                if category not in matched and pattern.search(text):
+                if category in matched:
+                    continue
+                if category == "credit_card":
+                    if any(_luhn_valid(m.group(0)) for m in pattern.finditer(text)):
+                        matched.append(category)
+                elif pattern.search(text):
                     matched.append(category)
         return matched
 
@@ -222,7 +249,13 @@ class ContentFilter:
                 continue
             text = self._bytes_to_str(data)
             for _category, pattern in self._active_patterns():
-                text = pattern.sub(FILTERED_MARKER, text)
+                if _category == "credit_card":
+                    text = pattern.sub(
+                        lambda m: FILTERED_MARKER if _luhn_valid(m.group(0)) else m.group(0),
+                        text,
+                    )
+                else:
+                    text = pattern.sub(FILTERED_MARKER, text)
             filtered_types[ct] = text.encode("utf-8")
 
         for ct, data in content.types.items():
