@@ -7,6 +7,19 @@ All notable changes to ClipSync are documented in this file.
 ### Desktop (Windows)
 - **No more black console box flashing on startup.** The packaged Windows build (a `console=False` one-file exe) still spawned the console-mode `powershell.exe` while enumerating network-interface priorities at launch, and `taskkill.exe` when tearing down the web window / Quick Paste popups — each spawn briefly flashed a black console window before the app opened. Those spawns now pass `CREATE_NO_WINDOW`, matching the existing `netsh` firewall calls, so the exe stays fully silent on startup and shutdown.
 
+## [1.0.52] — 2026-08-23
+
+### Chat & devices
+- **Unified device/session state.** Devices are reported through one deduplicated view (`get_device_states`) with explicit paired/pairing/connected state, keyed by canonical device id — so a device no longer appears twice, and "pairing" is no longer shown as "connected".
+- **Chat conversations no longer vanish.** A session id adopted to a new id (mutual invite / peer restart) no longer blanks the conversation; the UI falls back to the peer id.
+
+### Clipboard & filtering
+- **Windows clipboard robustness.** Retry `OpenClipboard` on the read side, and fix the ANSI file-list reader reading one byte out of bounds.
+- **Single-character copies are no longer dropped** (only whitespace-only noise is skipped).
+- **Redaction is less aggressive.** Credit-card digits now require a Luhn checksum, and bare `secret`/`token`/`key` are word-bounded.
+- **Clipboard from an unknown app is allowed** (the app-filter whitelist no longer blocks it).
+- `source_title`/`source_app` are now encrypted at rest.
+
 ## [1.0.51] — 2026-08-23
 
 ### Auto-update
