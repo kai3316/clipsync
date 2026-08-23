@@ -74,6 +74,11 @@ def is_app_allowed(app_info: dict | None, cfg) -> bool:
         return True
 
     process = (app_info.get("process") or "").lower()
+    if not process:
+        # Process name unknown (e.g. OpenProcess failed on Windows) — allow by
+        # default, matching the "can't determine the app" policy above. Without
+        # this, whitelist mode would block the capture since "" matches nothing.
+        return True
     app_filter_list = [p.lower() for p in cfg.app_filter_list]
 
     def _matches(pattern: str) -> bool:
