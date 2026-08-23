@@ -285,7 +285,12 @@ def _dispatch(method, path, query_params, body, cfg, history, sync_mgr,
             return _json_response(data, status)
 
         elif path == "/api/status":
-            return _json_response({"ok": True, "device": cfg.device_name})
+            from internal.version import __version__
+            return _json_response({
+                "ok": True,
+                "device": cfg.device_name,
+                "version": __version__,
+            })
 
         elif path == "/api/files":
             files = []
@@ -789,6 +794,34 @@ def _dispatch(method, path, query_params, body, cfg, history, sync_mgr,
             if not transfer_id:
                 return _json_response({"ok": False, "error": "transfer_id required"}, 400)
             ok = on_transfer_action("resume", transfer_id)
+            return _json_response({"ok": ok})
+
+        elif path == "/api/transfer/accept":
+            # Accept an incoming P2P file-transfer request from the web/mobile
+            # UI (the desktop otherwise only offers a modal dialog).
+            if on_transfer_action is None:
+                return _json_response({"ok": False, "error": "not available"}, 503)
+            try:
+                req = json.loads(body.decode("utf-8"))
+            except (json.JSONDecodeError, UnicodeDecodeError):
+                return _json_response({"ok": False, "error": "invalid json"}, 400)
+            transfer_id = req.get("transfer_id", "")
+            if not transfer_id:
+                return _json_response({"ok": False, "error": "transfer_id required"}, 400)
+            ok = on_transfer_action("accept", transfer_id)
+            return _json_response({"ok": ok})
+
+        elif path == "/api/transfer/reject":
+            if on_transfer_action is None:
+                return _json_response({"ok": False, "error": "not available"}, 503)
+            try:
+                req = json.loads(body.decode("utf-8"))
+            except (json.JSONDecodeError, UnicodeDecodeError):
+                return _json_response({"ok": False, "error": "invalid json"}, 400)
+            transfer_id = req.get("transfer_id", "")
+            if not transfer_id:
+                return _json_response({"ok": False, "error": "transfer_id required"}, 400)
+            ok = on_transfer_action("reject", transfer_id)
             return _json_response({"ok": ok})
 
         elif path == "/api/history/clear":

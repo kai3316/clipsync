@@ -155,15 +155,24 @@ body::before {
   flex-shrink: 0;
   backdrop-filter: blur(14px);
   -webkit-backdrop-filter: blur(14px);
+  /* Seven tabs won't fit a phone width — keep them at a usable size and
+     scroll the bar horizontally instead of crushing them. */
+  overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
+  scrollbar-width: none;
+  flex-wrap: nowrap;
 }
 
+.tabs::-webkit-scrollbar { display: none; }
+
 .tab {
-  flex: 1;
+  flex: 1 0 auto;
+  min-width: 76px;
   display: flex;
   align-items: center;
   justify-content: center;
   gap: 6px;
-  padding: 11px 0;
+  padding: 11px 12px;
   min-height: 44px; /* ≥44px touch target */
   border-radius: 10px;
   font-size: 13px;
@@ -424,6 +433,419 @@ body::before {
 
 .upload-progress__cancel:active { border-color: var(--danger); color: var(--danger); }
 
+/* ── Light theme ────────────────────────────────────────────── */
+/* The :root variables above are the dark look (default). A phone-side
+   `body.light` class swaps only the palette tokens; the layout stays. */
+
+body.light {
+  --bg: #E9EDF5;
+  --surface: #FFFFFF;
+  --panel: #F2F5FB;
+  --panel-2: #E3E9F4;
+  --fg: #18233A;
+  --fg-muted: #46536E;
+  --fg-subtle: #72809C;
+  --accent-glow: rgba(8,145,178,0.16);
+  --accent-glow-strong: rgba(8,145,178,0.30);
+  --violet-glow: rgba(124,58,237,0.14);
+  --pink-glow: rgba(219,39,119,0.12);
+  --border: rgba(30,50,90,0.10);
+  --border-strong: rgba(30,50,90,0.18);
+}
+
+body.light .header {
+  background: linear-gradient(180deg, rgba(255,255,255,0.72), rgba(255,255,255,0.45));
+}
+
+body.light .tabs { background: rgba(255,255,255,0.72); }
+
+/* ── Chat ───────────────────────────────────────────────────── */
+
+.chat-hdr {
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--fg-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  margin: 14px 2px 8px;
+}
+
+.chat-device, .chat-session {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 12px 14px;
+  border-radius: var(--radius);
+  border: 1px solid var(--border);
+  background: linear-gradient(135deg, rgba(12,16,32,0.8), rgba(17,24,39,0.8));
+  margin-bottom: 8px;
+}
+
+body.light .chat-device,
+body.light .chat-session,
+body.light .tr-item,
+body.light .fav-item,
+body.light .set-card {
+  background: linear-gradient(135deg, rgba(255,255,255,0.92), rgba(240,244,251,0.92));
+}
+
+.chat-device { cursor: default; }
+.chat-session { cursor: pointer; transition: all var(--spring); }
+.chat-session:active { border-color: var(--accent); transform: scale(0.99); }
+
+.chat-device__info { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 3px; }
+.chat-device__name { font-size: 14px; font-weight: 600; color: var(--fg); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.chat-device__badge { font-size: 10px; font-weight: 600; color: var(--fg-subtle); }
+.chat-device__badge--on { color: var(--success); }
+
+.chat-session__dot { flex-shrink: 0; width: 8px; height: 8px; border-radius: 50%; background: var(--fg-subtle); }
+.chat-session__dot--on { background: var(--success); box-shadow: 0 0 8px rgba(0,229,153,0.5); }
+
+.chat-session__body { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 3px; }
+.chat-session__top { display: flex; align-items: center; gap: 6px; min-width: 0; }
+.chat-session__name { font-size: 14px; font-weight: 600; color: var(--fg); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.chat-session__status { flex-shrink: 0; font-size: 10px; font-weight: 600; padding: 2px 7px; border-radius: 20px; background: var(--panel); border: 1px solid var(--border); color: var(--fg-muted); }
+.chat-session__status--ok { color: var(--success); border-color: rgba(0,229,153,0.35); }
+.chat-session__status--warn { color: #FBBF24; border-color: rgba(251,191,36,0.35); }
+.chat-session__status--err { color: var(--danger); border-color: rgba(255,64,96,0.35); }
+.chat-session__preview { font-size: 12px; color: var(--fg-subtle); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.chat-session__badge { flex-shrink: 0; min-width: 18px; height: 18px; line-height: 18px; text-align: center; font-size: 11px; font-weight: 700; color: #fff; background: linear-gradient(135deg, var(--accent), var(--accent-2)); border-radius: 9px; padding: 0 5px; }
+
+.chat-btn {
+  flex-shrink: 0;
+  min-height: 36px;
+  padding: 8px 14px;
+  border: none;
+  border-radius: var(--radius-sm);
+  font-size: 13px;
+  font-weight: 700;
+  font-family: var(--font);
+  cursor: pointer;
+  transition: all var(--fast);
+  -webkit-tap-highlight-color: transparent;
+}
+.chat-btn--accent { color: #fff; background: linear-gradient(135deg, var(--accent), var(--accent-2)); }
+.chat-btn--ghost { color: var(--fg-muted); background: var(--panel); border: 1px solid var(--border); }
+.chat-btn--danger { color: #fff; background: linear-gradient(135deg, var(--danger), #ff6b6b); }
+.chat-btn:active { transform: scale(0.97); }
+.chat-btn:disabled { opacity: 0.5; }
+
+/* Conversation */
+.chat-conv__hdr { display: flex; align-items: center; gap: 8px; padding: 6px 0 10px; }
+.chat-conv__name { flex: 1; min-width: 0; font-size: 15px; font-weight: 700; color: var(--fg); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.chat-conv__status { font-size: 11px; color: var(--fg-subtle); }
+
+.chat-invite-banner {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 10px 12px;
+  border: 1px solid rgba(251,191,36,0.35);
+  background: rgba(251,191,36,0.10);
+  border-radius: var(--radius-sm);
+  margin-bottom: 10px;
+  font-size: 12px;
+  color: var(--fg);
+}
+.chat-invite-banner__name { font-weight: 700; }
+
+.chat-conv__msgs {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 4px 0 8px;
+  -webkit-user-select: text;
+  user-select: text;
+}
+
+.chat-msg-row { display: flex; flex-direction: column; }
+
+.chat-system {
+  align-self: center;
+  text-align: center;
+  font-size: 11px;
+  color: var(--fg-subtle);
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 5px 12px;
+  max-width: 88%;
+}
+
+.chat-bubble {
+  align-self: flex-start;
+  max-width: 80%;
+  padding: 10px 13px;
+  border-radius: 16px 16px 16px 4px;
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  font-size: 14px;
+  line-height: 1.45;
+  color: var(--fg);
+  word-break: break-word;
+}
+.chat-bubble--out {
+  align-self: flex-end;
+  border-radius: 16px 16px 4px 16px;
+  background: linear-gradient(135deg, var(--accent), var(--accent-2));
+  color: #fff;
+  border-color: transparent;
+}
+.chat-bubble__meta { margin-top: 3px; font-size: 10px; opacity: 0.7; text-align: right; }
+
+.chat-file {
+  align-self: flex-start;
+  max-width: 88%;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 12px;
+  border-radius: var(--radius);
+  border: 1px solid var(--border);
+  background: var(--panel);
+}
+.chat-file--out { align-self: flex-end; }
+.chat-file__icon { flex-shrink: 0; font-size: 20px; }
+.chat-file__body { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+.chat-file__name { font-size: 13px; font-weight: 600; color: var(--fg); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.chat-file__meta { font-size: 11px; color: var(--fg-subtle); }
+.chat-file__status { color: var(--fg-muted); }
+.chat-file__actions { display: flex; gap: 6px; flex-shrink: 0; flex-wrap: wrap; }
+
+.chat-action-btn {
+  min-height: 34px;
+  padding: 6px 12px;
+  border: none;
+  border-radius: var(--radius-sm);
+  font-size: 12px;
+  font-weight: 700;
+  font-family: var(--font);
+  cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
+  transition: all var(--fast);
+}
+.chat-action-btn--accept { color: #fff; background: linear-gradient(135deg, var(--accent), var(--accent-2)); }
+.chat-action-btn--decline { color: var(--fg-muted); background: var(--panel); border: 1px solid var(--border); }
+.chat-action-btn--danger { color: #fff; background: linear-gradient(135deg, var(--danger), #ff6b6b); }
+.chat-action-btn:active { transform: scale(0.97); }
+.chat-action-btn:disabled { opacity: 0.5; }
+
+.chat-composer {
+  position: sticky;
+  bottom: 0;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 0 2px;
+  background: var(--bg);
+}
+.chat-composer__input {
+  flex: 1;
+  min-width: 0;
+  min-height: 42px;
+  padding: 10px 12px;
+  background: var(--panel);
+  color: var(--fg);
+  border: 1px solid var(--border);
+  border-radius: 20px;
+  font-size: 16px;
+  font-family: var(--font);
+  outline: none;
+  -webkit-user-select: text;
+  user-select: text;
+  transition: border-color var(--fast);
+}
+.chat-composer__input:focus { border-color: var(--accent); }
+.chat-composer__send {
+  flex-shrink: 0;
+  min-height: 42px;
+  padding: 0 18px;
+  border: none;
+  border-radius: 21px;
+  font-size: 14px;
+  font-weight: 700;
+  font-family: var(--font);
+  color: #fff;
+  background: linear-gradient(135deg, var(--accent), var(--accent-2));
+  cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
+}
+.chat-composer__send:active { transform: scale(0.97); }
+
+/* ── Transfers ───────────────────────────────────────────────── */
+
+.tr-section { margin-bottom: 6px; }
+
+.tr-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 12px 14px;
+  border-radius: var(--radius);
+  border: 1px solid var(--border);
+  background: linear-gradient(135deg, rgba(12,16,32,0.8), rgba(17,24,39,0.8));
+  margin-bottom: 8px;
+}
+
+.tr-item__icon {
+  flex-shrink: 0;
+  width: 34px;
+  height: 34px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 16px;
+  font-weight: 700;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border);
+}
+.tr-item__icon--up { color: var(--accent); background: var(--accent-glow); }
+.tr-item__icon--down { color: var(--accent-2); background: var(--violet-glow); }
+
+.tr-item__body { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 4px; }
+.tr-item__name { font-size: 13px; font-weight: 600; color: var(--fg); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.tr-item__meta { font-size: 11px; color: var(--fg-subtle); font-family: var(--font-mono); }
+.tr-item__bar { height: 6px; border-radius: 3px; background: var(--panel); border: 1px solid var(--border); overflow: hidden; }
+.tr-item__fill { height: 100%; border-radius: 3px; background: linear-gradient(135deg, var(--accent), var(--accent-2)); transition: width var(--fast); }
+.tr-item__speed { font-size: 10px; color: var(--fg-subtle); font-family: var(--font-mono); }
+.tr-item__actions { display: flex; flex-direction: column; gap: 6px; flex-shrink: 0; }
+
+.tr-btn {
+  min-height: 36px;
+  padding: 7px 13px;
+  border: none;
+  border-radius: var(--radius-sm);
+  font-size: 12px;
+  font-weight: 700;
+  font-family: var(--font);
+  cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
+  transition: all var(--fast);
+}
+.tr-btn--ok { color: #fff; background: linear-gradient(135deg, var(--accent), var(--accent-2)); }
+.tr-btn--bad { color: #fff; background: linear-gradient(135deg, var(--danger), #ff6b6b); }
+.tr-btn--warn { color: var(--fg); background: var(--panel); border: 1px solid var(--border); }
+.tr-btn:active { transform: scale(0.97); }
+
+.tr-hitem {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 11px 14px;
+  border-radius: var(--radius);
+  border: 1px solid var(--border);
+  background: var(--panel);
+  margin-bottom: 8px;
+}
+.tr-hitem__icon {
+  flex-shrink: 0;
+  width: 30px;
+  height: 30px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 13px;
+  font-weight: 700;
+  border-radius: 50%;
+  border: 1px solid var(--border);
+}
+.tr-hitem__icon--ok { color: var(--success); border-color: rgba(0,229,153,0.35); }
+.tr-hitem__icon--err { color: var(--danger); border-color: rgba(255,64,96,0.35); }
+.tr-hitem__icon--warn { color: #FBBF24; border-color: rgba(251,191,36,0.35); }
+.tr-hitem__body { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 3px; }
+.tr-hitem__name { font-size: 13px; color: var(--fg); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.tr-hitem__meta { font-size: 11px; color: var(--fg-subtle); font-family: var(--font-mono); }
+
+/* ── Favorites ───────────────────────────────────────────────── */
+
+.fav-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 13px 14px;
+  border-radius: var(--radius);
+  border: 1px solid var(--border);
+  background: linear-gradient(135deg, rgba(12,16,32,0.8), rgba(17,24,39,0.8));
+  margin-bottom: 8px;
+  cursor: pointer;
+  transition: all var(--spring);
+}
+.fav-item:active { border-color: var(--accent); transform: scale(0.99); }
+
+.fav-item__icon {
+  flex-shrink: 0;
+  width: 34px;
+  height: 34px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 16px;
+  background: var(--panel);
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border);
+}
+.fav-item__body { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 3px; }
+.fav-item__title { font-size: 14px; font-weight: 600; color: var(--fg); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.fav-item__preview { font-size: 12px; color: var(--fg-muted); line-height: 1.4; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+.fav-item__meta { font-size: 10px; color: var(--fg-subtle); font-family: var(--font-mono); }
+
+/* ── Settings ────────────────────────────────────────────────── */
+
+.set-card {
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: linear-gradient(135deg, rgba(12,16,32,0.8), rgba(17,24,39,0.8));
+  padding: 4px 14px;
+  margin-bottom: 12px;
+}
+
+.set-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 13px 0;
+  border-bottom: 1px solid var(--border);
+  font-size: 14px;
+}
+.set-row:last-child { border-bottom: none; }
+.set-row__label { color: var(--fg); font-weight: 600; flex-shrink: 0; }
+.set-row__value { color: var(--fg-muted); text-align: right; min-width: 0; word-break: break-all; }
+
+.set-toggle {
+  min-height: 36px;
+  padding: 7px 16px;
+  border: none;
+  border-radius: 18px;
+  font-size: 13px;
+  font-weight: 700;
+  font-family: var(--font);
+  color: #fff;
+  background: linear-gradient(135deg, var(--accent), var(--accent-2));
+  cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
+}
+
+.set-link {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 46px;
+  margin-top: 4px;
+  border-radius: var(--radius);
+  border: 1px solid var(--border-strong);
+  background: var(--panel);
+  color: var(--accent);
+  font-size: 14px;
+  font-weight: 700;
+  font-family: var(--font);
+  text-decoration: none;
+  -webkit-tap-highlight-color: transparent;
+  transition: all var(--fast);
+}
+.set-link:active { border-color: var(--accent); }
+
 /* ── Empty / loading ────────────────────────────────────────── */
 
 .empty {
@@ -607,6 +1029,10 @@ body::before {
     <button class="tab tab--active" data-tab="history" id="tabHistory"></button>
     <button class="tab" data-tab="send" id="tabSend"></button>
     <button class="tab" data-tab="files" id="tabFiles"></button>
+    <button class="tab" data-tab="chat" id="tabChat"></button>
+    <button class="tab" data-tab="transfers" id="tabTransfers"></button>
+    <button class="tab" data-tab="favorites" id="tabFavorites"></button>
+    <button class="tab" data-tab="settings" id="tabSettings"></button>
   </nav>
 
   <main class="content">
@@ -633,6 +1059,26 @@ body::before {
         <button class="upload-progress__cancel" id="uploadCancelBtn"></button>
       </div>
       <div id="fileList"></div>
+    </section>
+
+    <!-- Chat -->
+    <section class="panel" id="panelChat">
+      <div id="chatView"></div>
+    </section>
+
+    <!-- Transfers -->
+    <section class="panel" id="panelTransfers">
+      <div id="transfersView"></div>
+    </section>
+
+    <!-- Favorites -->
+    <section class="panel" id="panelFavorites">
+      <div id="favoritesList"></div>
+    </section>
+
+    <!-- Settings -->
+    <section class="panel" id="panelSettings">
+      <div id="settingsView"></div>
     </section>
 
   </main>
@@ -708,6 +1154,95 @@ body::before {
     uploadCancel: ZH ? '取消' : 'Cancel',
     uploadCancelled: ZH ? '已取消' : 'Cancelled',
     tokenExpired: ZH ? '访问令牌已更改，请重新扫描电脑上的二维码' : 'The access token changed — re-scan the QR code on your computer',
+    tabChat: ZH ? '💬 聊天' : '💬 Chat',
+    tabTransfers: ZH ? '📤 传输' : '📤 Transfers',
+    tabFavorites: ZH ? '⭐ 收藏' : '⭐ Favorites',
+    tabSettings: ZH ? '⚙ 设置' : '⚙ Settings',
+    chatDevices: ZH ? '设备' : 'Devices',
+    chatSessions: ZH ? '会话' : 'Sessions',
+    chatStart: ZH ? '发起' : 'Start',
+    chatPaired: ZH ? '已配对' : 'Paired',
+    chatUnpaired: ZH ? '未配对' : 'Unpaired',
+    chatConnecting: ZH ? '连接中…' : 'Connecting…',
+    chatInviteFailed: ZH ? '邀请失败' : 'Invite failed',
+    chatEmptyDevices: ZH ? '没有发现附近设备' : 'No nearby devices',
+    chatEmptySessions: ZH ? '暂无会话' : 'No sessions',
+    chatBack: ZH ? '‹ 返回' : '‹ Back',
+    chatInputPlaceholder: ZH ? '输入消息…' : 'Type a message…',
+    chatSend: ZH ? '发送' : 'Send',
+    chatSendEmpty: ZH ? '请输入消息' : 'Type a message',
+    chatSendFail: ZH ? '发送失败' : 'Failed to send',
+    chatAccept: ZH ? '接受' : 'Accept',
+    chatDecline: ZH ? '拒绝' : 'Decline',
+    chatCancel: ZH ? '取消' : 'Cancel',
+    chatDownload: ZH ? '下载' : 'Download',
+    chatEmptyConv: ZH ? '打个招呼开始聊天吧' : 'Say hello to start the conversation',
+    chatOfferExpired: ZH ? '请求已过期，请让对方重新发送' : 'The request expired — please ask them to send it again',
+    chatInviteBanner: ZH ? '收到新的聊天请求' : 'Incoming chat request',
+    chatStatusInviting: ZH ? '邀请中…' : 'Inviting…',
+    chatStatusInvited: ZH ? '待接受' : 'Invited',
+    chatStatusActive: ZH ? '已连接' : 'Connected',
+    chatStatusDeclined: ZH ? '已拒绝' : 'Declined',
+    chatStatusClosed: ZH ? '已关闭' : 'Closed',
+    chatFileSent: ZH ? '已发送' : 'Sent',
+    chatFileReceived: ZH ? '已接收' : 'Received',
+    chatFileReceiving: ZH ? '接收中…' : 'Receiving…',
+    chatFilePending: ZH ? '准备中…' : 'Preparing…',
+    chatFileAwaitAccept: ZH ? '等待接受' : 'Awaiting accept',
+    chatFileSending: ZH ? '发送中…' : 'Sending…',
+    chatFileDone: ZH ? '已完成' : 'Complete',
+    chatFileFailed: ZH ? '失败' : 'Failed',
+    chatFileDeclined: ZH ? '已拒绝' : 'Declined',
+    chatFileCancelled: ZH ? '已取消' : 'Cancelled',
+    chatSystemPeerOffline: ZH ? '{name} 已离线，消息将在其恢复后送达' : '{name} went offline — messages will be delivered when they return.',
+    chatSystemClosedByPeer: ZH ? '{name} 关闭了会话' : '{name} closed the session.',
+    chatSystemFileDeclined: ZH ? '{name} 拒绝了文件' : '{name} declined the file.',
+    chatSystemFileCancelled: ZH ? '文件传输已取消' : 'The file transfer was cancelled.',
+    chatSystemUnknown: ZH ? '系统消息' : 'System message',
+    trActive: ZH ? '进行中' : 'Active',
+    trHistory: ZH ? '历史' : 'History',
+    trAccept: ZH ? '接受' : 'Accept',
+    trReject: ZH ? '拒绝' : 'Reject',
+    trCancel: ZH ? '取消' : 'Cancel',
+    trPause: ZH ? '暂停' : 'Pause',
+    trResume: ZH ? '继续' : 'Resume',
+    trEmptyActive: ZH ? '暂无进行中的传输' : 'No active transfers',
+    trEmptyHistory: ZH ? '暂无传输历史' : 'No transfer history',
+    trUnknownFile: ZH ? '未知文件' : 'Unknown file',
+    trActionFail: ZH ? '操作失败' : 'Action failed',
+    trStatePaused: ZH ? '已暂停' : 'Paused',
+    trStateFinalizing: ZH ? '完成中…' : 'Finalizing…',
+    trStateAwaitingAck: ZH ? '等待确认' : 'Awaiting ack',
+    trStateAwaiting: ZH ? '等待接受' : 'Awaiting accept',
+    trStatusCompleted: ZH ? '已完成' : 'Completed',
+    trStatusFailed: ZH ? '失败' : 'Failed',
+    trStatusCancelled: ZH ? '已取消' : 'Cancelled',
+    trReasonCancelled: ZH ? '已取消' : 'Cancelled',
+    trReasonRejected: ZH ? '已拒绝' : 'Rejected',
+    trReasonDisk: ZH ? '磁盘错误' : 'Disk error',
+    trReasonSizeMismatch: ZH ? '大小不匹配' : 'Size mismatch',
+    trReasonMissingChunks: ZH ? '缺少数据块' : 'Missing chunks',
+    trReasonSecurity: ZH ? '安全检查失败' : 'Security check failed',
+    trReasonPeerOffline: ZH ? '对方离线' : 'Peer offline',
+    trReasonTimeout: ZH ? '超时' : 'Timeout',
+    trReasonInternal: ZH ? '内部错误' : 'Internal error',
+    favEmpty: ZH ? '暂无收藏' : 'No favorites',
+    favTypeText: ZH ? '文本' : 'Text',
+    favTypeLink: ZH ? '链接' : 'Link',
+    favCopied: ZH ? '✓ 已发送到电脑' : '✓ Sent to this computer',
+    favCopyFail: ZH ? '复制失败' : 'Copy failed',
+    favDelete: ZH ? '删除' : 'Delete',
+    favDeleted: ZH ? '已删除' : 'Deleted',
+    favDeleteConfirm: ZH ? '删除这条收藏？' : 'Delete this favorite?',
+    favDeleteFail: ZH ? '删除失败' : 'Failed to delete',
+    setDeviceName: ZH ? '设备名称' : 'Device name',
+    setVersion: ZH ? '版本' : 'Version',
+    setWebAddress: ZH ? '网页地址' : 'Web address',
+    setLanguage: ZH ? '界面语言' : 'Language',
+    setTheme: ZH ? '主题' : 'Theme',
+    setThemeLight: ZH ? '浅色' : 'Light',
+    setThemeDark: ZH ? '深色' : 'Dark',
+    setFullPanel: ZH ? '打开完整面板' : 'Open full dashboard',
   };
 
   /* ── Apply strings ─────────────────────────────────────────── */
@@ -717,6 +1252,10 @@ body::before {
   document.getElementById('tabHistory').textContent = T.tabHistory;
   document.getElementById('tabSend').textContent = T.tabSend;
   document.getElementById('tabFiles').textContent = T.tabFiles;
+  document.getElementById('tabChat').textContent = T.tabChat;
+  document.getElementById('tabTransfers').textContent = T.tabTransfers;
+  document.getElementById('tabFavorites').textContent = T.tabFavorites;
+  document.getElementById('tabSettings').textContent = T.tabSettings;
   var sendText = document.getElementById('sendText');
   sendText.placeholder = T.sendPlaceholder;
   document.getElementById('sendBtn').textContent = T.sendBtn;
@@ -732,6 +1271,10 @@ body::before {
   var panels = document.querySelectorAll('.panel');
   var historyList = document.getElementById('historyList');
   var fileList = document.getElementById('fileList');
+  var chatView = document.getElementById('chatView');
+  var transfersView = document.getElementById('transfersView');
+  var favoritesList = document.getElementById('favoritesList');
+  var settingsView = document.getElementById('settingsView');
   var toastEl = document.getElementById('toast');
   var modalEl = document.getElementById('modal');
   var modalText = document.getElementById('modalText');
@@ -761,6 +1304,10 @@ body::before {
       });
       if (name === 'history') loadHistory();
       if (name === 'files') loadFiles();
+      if (name === 'chat') loadChat();
+      if (name === 'transfers') loadTransfers();
+      if (name === 'favorites') loadFavorites();
+      if (name === 'settings') loadSettings();
     });
   });
 
@@ -781,6 +1328,10 @@ body::before {
       var name = activeTabName();
       if (name === 'history') loadHistory(true);
       else if (name === 'files') loadFiles(true);
+      else if (name === 'chat') loadChat(true);
+      else if (name === 'transfers') loadTransfers(true);
+      else if (name === 'favorites') loadFavorites(true);
+      else if (name === 'settings') loadSettings(true);
     }, 5000);
   }
 
@@ -798,6 +1349,10 @@ body::before {
       var name = activeTabName();
       if (name === 'history') loadHistory(true);
       else if (name === 'files') loadFiles(true);
+      else if (name === 'chat') loadChat(true);
+      else if (name === 'transfers') loadTransfers(true);
+      else if (name === 'favorites') loadFavorites(true);
+      else if (name === 'settings') loadSettings(true);
     } else {
       stopPolling();
     }
@@ -1450,8 +2005,784 @@ body::before {
       });
   }
 
+  /* ── Shared formatting helpers ──────────────────────────────── */
+
+  function fmtSize(bytes) {
+    if (!bytes && bytes !== 0) return '';
+    if (bytes < 1024) return bytes + ' B';
+    if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + ' KB';
+    if (bytes < 1024 * 1024 * 1024) return (bytes / (1024 * 1024)).toFixed(1) + ' MB';
+    return (bytes / (1024 * 1024 * 1024)).toFixed(2) + ' GB';
+  }
+
+  function fmtSpeed(bytesPerSec) {
+    if (!bytesPerSec || bytesPerSec <= 0) return '';
+    if (bytesPerSec < 1024) return Math.round(bytesPerSec) + ' B/s';
+    if (bytesPerSec < 1024 * 1024) return (bytesPerSec / 1024).toFixed(1) + ' KB/s';
+    return (bytesPerSec / (1024 * 1024)).toFixed(1) + ' MB/s';
+  }
+
+  function pad2(n) { return (n < 10 ? '0' : '') + n; }
+
+  function fmtClock(ts) {
+    if (!ts) return '';
+    var d = new Date(ts * 1000);
+    return pad2(d.getHours()) + ':' + pad2(d.getMinutes());
+  }
+
+  /* ── Chat ──────────────────────────────────────────────────── */
+
+  var chatDevices = [];
+  var chatSessions = [];
+  var chatOpenSession = null;
+  var chatMessages = [];
+  var chatLoading = false;
+  var chatInviteBusy = '';
+  var chatLastMsgCount = 0;
+  var chatScrollBottom = false;
+  var chatConvSigPrev = '';
+
+  function chatStatusLabel(s) {
+    var map = {
+      invited: 'chatStatusInvited',
+      inviting: 'chatStatusInviting',
+      uninviting: 'chatStatusInviting',
+      active: 'chatStatusActive',
+      declined: 'chatStatusDeclined',
+      declined_remote: 'chatStatusDeclined',
+      closed: 'chatStatusClosed',
+    };
+    return T[map[s] || 'chatStatusInvited'] || '';
+  }
+
+  function chatStatusClass(s) {
+    if (s === 'active') return 'chat-session__status--ok';
+    if (s === 'invited' || s === 'inviting' || s === 'uninviting') return 'chat-session__status--warn';
+    if (s === 'declined' || s === 'declined_remote') return 'chat-session__status--err';
+    return '';
+  }
+
+  // Local key map for the server's system-message text_keys — the mobile page
+  // carries its own T dict, so translate here instead of via the dashboard i18n.
+  function chatSystemText(entry) {
+    var tk = entry && entry.text_key;
+    var tkey = '';
+    if (tk === 'chat.system.peer_offline') tkey = 'chatSystemPeerOffline';
+    else if (tk === 'chat.system.session_closed_by_peer') tkey = 'chatSystemClosedByPeer';
+    else if (tk === 'chat.system.file_declined') tkey = 'chatSystemFileDeclined';
+    else if (tk === 'chat.system.file_cancelled') tkey = 'chatSystemFileCancelled';
+    var raw = tkey ? T[tkey] : (entry ? entry.text || T.chatSystemUnknown : T.chatSystemUnknown);
+    if (!raw) return '';
+    var fmt = (entry && entry.fmt) || {};
+    var name = fmt.name || '';
+    if (!name && chatOpenSession) {
+      for (var i = 0; i < chatSessions.length; i++) {
+        if (chatSessions[i].session_id === chatOpenSession) {
+          name = chatSessions[i].peer_name || '';
+          break;
+        }
+      }
+    }
+    if (name) raw = raw.replace(/\{name\}/g, name);
+    return raw;
+  }
+
+  function chatFileStatus(m) {
+    var st = (m && m.status) || 'pending';
+    if (st === 'done') return m.outgoing ? T.chatFileSent : T.chatFileReceived;
+    if (st === 'sending' && !m.outgoing) return T.chatFileReceiving;
+    var map = {
+      pending: 'chatFilePending',
+      await_accept: 'chatFileAwaitAccept',
+      sending: 'chatFileSending',
+      failed: 'chatFileFailed',
+      declined: 'chatFileDeclined',
+      rejected: 'chatFileDeclined',
+      cancelled: 'chatFileCancelled',
+      cancelled_by_peer: 'chatFileCancelled',
+      peer_offline: 'chatFileFailed',
+      error_timeout: 'chatFileFailed',
+      error_size_mismatch: 'chatFileFailed',
+      error_security: 'chatFileFailed',
+      error_disk: 'chatFileFailed',
+    };
+    return T[map[st] || 'chatFilePending'] || '';
+  }
+
+  function chatOpenSessionObj() {
+    if (!chatOpenSession) return null;
+    for (var i = 0; i < chatSessions.length; i++) {
+      if (chatSessions[i].session_id === chatOpenSession) return chatSessions[i];
+    }
+    return null;
+  }
+
+  // A cheap signature of the open conversation so silent polls can skip the
+  // re-render (and the composer's focus) when nothing changed.
+  function chatConvSignature() {
+    var parts = [];
+    for (var i = 0; i < chatMessages.length; i++) {
+      var m = chatMessages[i];
+      parts.push(m.entry_id + ':' + (m.status || '') + ':' + (m.ts || '') + ':' + (m.saved_path || ''));
+    }
+    var sess = chatOpenSessionObj();
+    parts.push('s:' + (sess ? sess.status + ':' + (sess.unread || 0) + ':' + (sess.online ? '1' : '0') : 'none'));
+    return parts.join('|');
+  }
+
+  function chatMsgHtml(m) {
+    if (m.kind === 'system') {
+      return '<div class="chat-msg-row"><div class="chat-system">' + esc(chatSystemText(m)) + '</div></div>';
+    }
+    if (m.kind === 'text') {
+      return '<div class="chat-msg-row"><div class="chat-bubble' + (m.outgoing ? ' chat-bubble--out' : ' chat-bubble--in') + '">' +
+        '<div class="chat-bubble__text">' + esc(m.text || '') + '</div>' +
+        '<div class="chat-bubble__meta">' + esc(fmtClock(m.ts)) + '</div>' +
+      '</div></div>';
+    }
+    // File card.
+    var acts = '';
+    if (!m.outgoing && m.status === 'await_accept') {
+      acts += '<button class="chat-action-btn chat-action-btn--accept" data-file-action="accept" data-transfer-id="' + esc(m.transfer_id) + '">' + esc(T.chatAccept) + '</button>';
+      acts += '<button class="chat-action-btn chat-action-btn--decline" data-file-action="decline" data-transfer-id="' + esc(m.transfer_id) + '">' + esc(T.chatDecline) + '</button>';
+    } else if (m.status === 'sending') {
+      acts += '<button class="chat-action-btn chat-action-btn--danger" data-file-action="cancel" data-transfer-id="' + esc(m.transfer_id) + '">' + esc(T.chatCancel) + '</button>';
+    } else if (m.status === 'done' && m.saved_path) {
+      acts += '<button class="chat-action-btn chat-action-btn--accept" data-download-transfer="' + esc(m.transfer_id) + '" data-filename="' + esc(m.file_name || '') + '">' + esc(T.chatDownload) + '</button>';
+    }
+    return '<div class="chat-msg-row"><div class="chat-file' + (m.outgoing ? ' chat-file--out' : ' chat-file--in') + '">' +
+      '<div class="chat-file__icon">📄</div>' +
+      '<div class="chat-file__body">' +
+        '<div class="chat-file__name">' + esc(m.file_name || T.trUnknownFile) + '</div>' +
+        '<div class="chat-file__meta"><span>' + esc(fmtSize(m.file_size)) + '</span><span class="chat-file__status"> · ' + esc(chatFileStatus(m)) + '</span></div>' +
+      '</div>' +
+      (acts ? '<div class="chat-file__actions">' + acts + '</div>' : '') +
+    '</div></div>';
+  }
+
+  function renderChatList() {
+    var html = '';
+    html += '<div class="chat-hdr">💻 ' + esc(T.chatDevices) + '</div>';
+    if (chatDevices.length === 0) {
+      html += '<div class="empty"><div class="empty__icon">📡</div><div class="empty__text">' + esc(T.chatEmptyDevices) + '</div></div>';
+    } else {
+      for (var i = 0; i < chatDevices.length; i++) {
+        var d = chatDevices[i];
+        var busy = chatInviteBusy === d.peer_id;
+        html += '<div class="chat-device">' +
+          '<div class="chat-device__info">' +
+            '<div class="chat-device__name">' + esc(d.name || d.peer_id) + '</div>' +
+            '<div class="chat-device__badge' + (d.paired ? ' chat-device__badge--on' : '') + '">' + esc(d.paired ? T.chatPaired : T.chatUnpaired) + '</div>' +
+          '</div>' +
+          '<button class="chat-btn chat-btn--accent" data-start-peer="' + esc(d.peer_id) + '"' + (busy ? ' disabled' : '') + '>' + (busy ? '…' : esc(T.chatStart)) + '</button>' +
+        '</div>';
+      }
+    }
+    html += '<div class="chat-hdr">💬 ' + esc(T.chatSessions) + '</div>';
+    if (chatSessions.length === 0) {
+      html += '<div class="empty"><div class="empty__icon">💬</div><div class="empty__text">' + esc(T.chatEmptySessions) + '</div></div>';
+    } else {
+      for (var j = 0; j < chatSessions.length; j++) {
+        var s = chatSessions[j];
+        html += '<div class="chat-session" data-session-id="' + esc(s.session_id) + '">' +
+          '<span class="chat-session__dot' + (s.online ? ' chat-session__dot--on' : '') + '"></span>' +
+          '<div class="chat-session__body">' +
+            '<div class="chat-session__top">' +
+              '<span class="chat-session__name">' + esc(s.peer_name || s.peer_id) + '</span>' +
+              '<span class="chat-session__status ' + chatStatusClass(s.status) + '">' + esc(chatStatusLabel(s.status)) + '</span>' +
+            '</div>' +
+            '<div class="chat-session__preview">' + esc(s.last_preview || '') + '</div>' +
+          '</div>' +
+          ((s.unread || 0) > 0 ? '<span class="chat-session__badge">' + ((s.unread > 99) ? '99+' : s.unread) + '</span>' : '') +
+        '</div>';
+      }
+    }
+    chatView.innerHTML = html;
+  }
+
+  function renderChatConversation() {
+    var sess = chatOpenSessionObj();
+    var name = sess ? (sess.peer_name || sess.peer_id) : '';
+    var status = sess ? chatStatusLabel(sess.status) : '';
+    var html = '';
+    html += '<div class="chat-conv__hdr">' +
+      '<button class="chat-btn chat-btn--ghost" id="chatBackBtn">' + esc(T.chatBack) + '</button>' +
+      '<div class="chat-conv__name">' + esc(name) + '</div>' +
+      '<div class="chat-conv__status">' + esc(status) + '</div>' +
+    '</div>';
+    if (sess && sess.status === 'invited') {
+      html += '<div class="chat-invite-banner">' +
+        '<span class="chat-invite-banner__name">' + esc(name) + '</span>' +
+        '<span>' + esc(T.chatInviteBanner) + '</span>' +
+        '<button class="chat-action-btn chat-action-btn--accept" data-invite-action="accept">' + esc(T.chatAccept) + '</button>' +
+        '<button class="chat-action-btn chat-action-btn--decline" data-invite-action="decline">' + esc(T.chatDecline) + '</button>' +
+      '</div>';
+    }
+    html += '<div class="chat-conv__msgs">';
+    if (chatMessages.length === 0) {
+      html += '<div class="empty"><div class="empty__icon">💬</div><div class="empty__text">' + esc(T.chatEmptyConv) + '</div></div>';
+    } else {
+      for (var i = 0; i < chatMessages.length; i++) {
+        html += chatMsgHtml(chatMessages[i]);
+      }
+    }
+    html += '</div>';
+    html += '<div class="chat-composer">' +
+      '<input class="chat-composer__input" id="chatInput" placeholder="' + esc(T.chatInputPlaceholder) + '" maxlength="4000" autocomplete="off">' +
+      '<button class="chat-composer__send" id="chatSendBtn">' + esc(T.chatSend) + '</button>' +
+    '</div>';
+    chatView.innerHTML = html;
+    var input = document.getElementById('chatInput');
+    if (input) {
+      try { input.focus(); } catch (e) {}
+      try { input.setSelectionRange(input.value.length, input.value.length); } catch (e) {}
+    }
+    if (chatScrollBottom) {
+      chatScrollBottom = false;
+      scrollChatToBottom();
+    }
+  }
+
+  function scrollChatToBottom() {
+    contentEl.scrollTop = contentEl.scrollHeight;
+  }
+
+  function loadChat(silent) {
+    if (chatLoading) return;
+    chatLoading = true;
+    if (!silent && chatOpenSession === null && chatDevices.length === 0 && chatSessions.length === 0) {
+      chatView.innerHTML = '<div class="skeleton"></div><div class="skeleton"></div><div class="skeleton"></div>';
+    }
+    var pDev = getJson('/api/chat/devices').then(function (d) { return d.devices || []; }, function () { return []; });
+    var pSess = getJson('/api/chat/sessions').then(function (d) { return d.sessions || []; }, function () { return []; });
+    Promise.all([pDev, pSess]).then(function (out) {
+      chatDevices = out[0];
+      chatSessions = out[1];
+      if (!chatOpenSession) {
+        chatLoading = false;
+        renderChatList();
+        return;
+      }
+      var found = false;
+      for (var i = 0; i < chatSessions.length; i++) {
+        if (chatSessions[i].session_id === chatOpenSession) { found = true; break; }
+      }
+      if (!found) {
+        chatOpenSession = null;
+        chatLastMsgCount = 0;
+        chatConvSigPrev = '';
+        chatLoading = false;
+        renderChatList();
+        return;
+      }
+      getJson('/api/chat/messages?session_id=' + encodeURIComponent(chatOpenSession))
+        .then(function (d) {
+          var msgs = (d && d.messages) || [];
+          chatLoading = false;
+          if (msgs.length > chatLastMsgCount) chatScrollBottom = true;
+          chatLastMsgCount = msgs.length;
+          chatMessages = msgs;
+          var sig = chatConvSignature();
+          if (sig !== chatConvSigPrev || !silent) {
+            chatConvSigPrev = sig;
+            renderChatConversation();
+          }
+        })
+        .catch(function () {
+          chatLoading = false;
+          chatMessages = [];
+          if (!silent) renderChatConversation();
+        });
+    });
+  }
+
+  function chatOpen(sessionId) {
+    chatOpenSession = sessionId;
+    chatLastMsgCount = 0;
+    chatConvSigPrev = '';
+    chatScrollBottom = true;
+    loadChat(false);
+  }
+
+  function chatBack() {
+    chatOpenSession = null;
+    chatLastMsgCount = 0;
+    chatConvSigPrev = '';
+    renderChatList();
+  }
+
+  function chatStartInvite(peerId) {
+    var name = peerId;
+    for (var i = 0; i < chatDevices.length; i++) {
+      if (chatDevices[i].peer_id === peerId) { name = chatDevices[i].name || peerId; break; }
+    }
+    chatInviteBusy = peerId;
+    apiFetch('/api/chat/invite', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ peer_id: peerId, peer_name: name }),
+    })
+      .then(function (res) {
+        chatInviteBusy = '';
+        if (res.status === 403) { notifyTokenExpired(); return; }
+        var d = res.data || {};
+        if (d.session_id) {
+          chatOpen(d.session_id);
+        } else if (d.connecting) {
+          showToast(T.chatConnecting);
+        } else if (d.ok === false) {
+          showToast(d.error || T.chatInviteFailed, true);
+        }
+      })
+      .catch(function () {
+        chatInviteBusy = '';
+        showToast(T.chatInviteFailed + ' · ' + T.loadFailHint, true);
+      });
+  }
+
+  function chatSend() {
+    var input = document.getElementById('chatInput');
+    if (!input || !chatOpenSession) return;
+    var text = input.value.trim();
+    if (!text) { showToast(T.chatSendEmpty, true); return; }
+    apiFetch('/api/chat/text', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ session_id: chatOpenSession, text: text }),
+    })
+      .then(function (res) {
+        if (res.status === 403) { notifyTokenExpired(); return; }
+        if (res.data && res.data.ok) {
+          input.value = '';
+          chatScrollBottom = true;
+          loadChat(true);
+        } else {
+          showToast((res.data && res.data.error) || T.chatSendFail, true);
+        }
+      })
+      .catch(function () {
+        showToast(T.chatSendFail + ' · ' + T.loadFailHint, true);
+      });
+  }
+
+  function chatInviteAction(action) {
+    if (!chatOpenSession) return;
+    apiFetch('/api/chat/' + action, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ session_id: chatOpenSession }),
+    })
+      .then(function (res) {
+        if (res.status === 403) { notifyTokenExpired(); return; }
+        if (action === 'decline') {
+          chatBack();
+        } else {
+          loadChat(true);
+        }
+      })
+      .catch(function () {
+        showToast(T.chatSendFail + ' · ' + T.loadFailHint, true);
+      });
+  }
+
+  function chatFileAction(action, transferId) {
+    if (!chatOpenSession || !transferId) return;
+    apiFetch('/api/chat/file/' + action, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ session_id: chatOpenSession, transfer_id: transferId }),
+    })
+      .then(function (res) {
+        if (res.status === 403) { notifyTokenExpired(); return; }
+        if (!res.data || res.data.ok !== true) {
+          showToast((res.data && res.data.error === 'expired') ? T.chatOfferExpired : ((res.data && res.data.error) || T.chatSendFail), true);
+        }
+        chatScrollBottom = true;
+        loadChat(true);
+      })
+      .catch(function () {
+        showToast(T.chatSendFail + ' · ' + T.loadFailHint, true);
+      });
+  }
+
+  function chatDownload(transferId, filename) {
+    if (!transferId) return;
+    var a = document.createElement('a');
+    a.href = apiUrl('/api/chat/download?transfer_id=' + encodeURIComponent(transferId));
+    a.download = filename || '';
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+  }
+
+  // Delegated events for the chat view — the panel is re-rendered on every
+  // poll, so bind once on the container instead of re-binding per render.
+  chatView.addEventListener('click', function (e) {
+    var el = e.target;
+    var startBtn = el.closest ? el.closest('[data-start-peer]') : null;
+    if (startBtn) { chatStartInvite(startBtn.getAttribute('data-start-peer')); return; }
+    var sessRow = el.closest ? el.closest('[data-session-id]') : null;
+    if (sessRow && !el.closest('button')) { chatOpen(sessRow.getAttribute('data-session-id')); return; }
+    if (el.closest && el.closest('#chatBackBtn')) { chatBack(); return; }
+    if (el.closest && el.closest('#chatSendBtn')) { chatSend(); return; }
+    var invBtn = el.closest ? el.closest('[data-invite-action]') : null;
+    if (invBtn) { chatInviteAction(invBtn.getAttribute('data-invite-action')); return; }
+    var dlBtn = el.closest ? el.closest('[data-download-transfer]') : null;
+    if (dlBtn) { chatDownload(dlBtn.getAttribute('data-download-transfer'), dlBtn.getAttribute('data-filename') || ''); return; }
+    var fileBtn = el.closest ? el.closest('[data-file-action]') : null;
+    if (fileBtn) {
+      chatFileAction(fileBtn.getAttribute('data-file-action'), fileBtn.getAttribute('data-transfer-id'));
+      return;
+    }
+  });
+
+  chatView.addEventListener('keydown', function (e) {
+    if (e.key === 'Enter' && e.target && e.target.id === 'chatInput') {
+      e.preventDefault();
+      chatSend();
+    }
+  });
+
+  /* ── Transfers ──────────────────────────────────────────────── */
+
+  var transferActive = [];
+  var transferHistory = [];
+  var transfersLoading = false;
+
+  // An incoming P2P request the desktop is asking about: the manager's state
+  // is "pending" until the user accepts (then "receiving"). Also match any
+  // future wait/await/request phrasing defensively.
+  function isTransferRequest(t) {
+    var s = String(t.status || '');
+    if (s === 'pending') return true;
+    return /^(wait|await|request)/i.test(s);
+  }
+
+  function trActiveStatusLabel(t) {
+    var s = t.status || '';
+    if (s === 'paused') return T.trStatePaused;
+    if (s === 'finalizing' || t.state === 'finalizing') return T.trStateFinalizing;
+    if (s === 'awaiting_ack' || t.state === 'awaiting_ack') return T.trStateAwaitingAck;
+    if (isTransferRequest(t)) return T.trStateAwaiting;
+    return '';
+  }
+
+  function trActionButtons(t) {
+    var id = esc(t.id);
+    var b = '';
+    if (isTransferRequest(t)) {
+      b += '<button class="tr-btn tr-btn--ok" data-act="accept" data-id="' + id + '">' + esc(T.trAccept) + '</button>';
+      b += '<button class="tr-btn tr-btn--bad" data-act="reject" data-id="' + id + '">' + esc(T.trReject) + '</button>';
+    } else if (t.status === 'paused') {
+      b += '<button class="tr-btn tr-btn--ok" data-act="resume" data-id="' + id + '">' + esc(T.trResume) + '</button>';
+      b += '<button class="tr-btn tr-btn--bad" data-act="cancel" data-id="' + id + '">' + esc(T.trCancel) + '</button>';
+    } else {
+      b += '<button class="tr-btn tr-btn--warn" data-act="cancel" data-id="' + id + '">' + esc(T.trCancel) + '</button>';
+      b += '<button class="tr-btn tr-btn--ok" data-act="pause" data-id="' + id + '">' + esc(T.trPause) + '</button>';
+    }
+    return b;
+  }
+
+  function trHistoryStatusLabel(t) {
+    if (t.status === 'completed') return T.trStatusCompleted;
+    var reason = t.reason || t.status || '';
+    var map = {
+      cancelled: 'trReasonCancelled',
+      rejected: 'trReasonRejected',
+      error_disk: 'trReasonDisk',
+      error_size_mismatch: 'trReasonSizeMismatch',
+      error_missing_chunks: 'trReasonMissingChunks',
+      error_security: 'trReasonSecurity',
+      peer_offline: 'trReasonPeerOffline',
+      timeout: 'trReasonTimeout',
+      error_timeout: 'trReasonTimeout',
+      error_internal: 'trReasonInternal',
+    };
+    var k = map[reason];
+    if (k) return T[k];
+    if (t.status === 'failed') return T.trStatusFailed;
+    return T.trStatusCancelled;
+  }
+
+  function renderTransfers() {
+    var html = '';
+    html += '<div class="tr-section"><div class="chat-hdr">📡 ' + esc(T.trActive) + '</div>';
+    if (transferActive.length === 0) {
+      html += '<div class="empty"><div class="empty__icon">📤</div><div class="empty__text">' + esc(T.trEmptyActive) + '</div></div>';
+    } else {
+      for (var i = 0; i < transferActive.length; i++) {
+        var t = transferActive[i];
+        var dir = t.direction === 'up' ? '↑' : '↓';
+        var pct = Math.min(100, Math.max(0, Math.round(t.progress || 0)));
+        var meta = (t.size != null) ? esc(fmtSize(t.size)) : '';
+        var st = trActiveStatusLabel(t);
+        if (st) meta += (meta ? ' · ' : '') + esc(st);
+        var speed = fmtSpeed(t.speed);
+        if (t.eta) speed += (speed ? ' · ' : '') + '⏱ ' + esc(t.eta);
+        html += '<div class="tr-item">' +
+          '<div class="tr-item__icon tr-item__icon--' + (t.direction === 'up' ? 'up' : 'down') + '">' + dir + '</div>' +
+          '<div class="tr-item__body">' +
+            '<div class="tr-item__name">' + esc(t.filename || T.trUnknownFile) + '</div>' +
+            '<div class="tr-item__meta">' + meta + '</div>' +
+            '<div class="tr-item__bar"><div class="tr-item__fill" style="width:' + pct + '%"></div></div>' +
+            (speed ? '<div class="tr-item__speed">' + speed + '</div>' : '') +
+          '</div>' +
+          '<div class="tr-item__actions">' + trActionButtons(t) + '</div>' +
+        '</div>';
+      }
+    }
+    html += '</div>';
+    html += '<div class="tr-section"><div class="chat-hdr">📚 ' + esc(T.trHistory) + '</div>';
+    if (transferHistory.length === 0) {
+      html += '<div class="empty"><div class="empty__icon">🗂</div><div class="empty__text">' + esc(T.trEmptyHistory) + '</div></div>';
+    } else {
+      for (var j = 0; j < transferHistory.length; j++) {
+        var h = transferHistory[j];
+        var dir2 = h.direction === 'up' ? '↑' : '↓';
+        var ok = h.status === 'completed';
+        var cancelled = h.status === 'cancelled' || h.cancelled;
+        var cls = ok ? 'tr-hitem__icon--ok' : (cancelled ? 'tr-hitem__icon--warn' : 'tr-hitem__icon--err');
+        html += '<div class="tr-hitem">' +
+          '<div class="tr-hitem__icon ' + cls + '">' + (ok ? '✓' : '✕') + '</div>' +
+          '<div class="tr-hitem__body">' +
+            '<div class="tr-hitem__name">' + dir2 + ' ' + esc(h.filename || T.trUnknownFile) + '</div>' +
+            '<div class="tr-hitem__meta">' + (h.size != null ? esc(fmtSize(h.size)) + ' · ' : '') + esc(trHistoryStatusLabel(h)) + '</div>' +
+          '</div>' +
+        '</div>';
+      }
+    }
+    html += '</div>';
+    transfersView.innerHTML = html;
+  }
+
+  function loadTransfers(silent) {
+    if (transfersLoading) return;
+    transfersLoading = true;
+    if (!silent) transfersView.innerHTML = '<div class="skeleton"></div><div class="skeleton"></div>';
+    getJson('/api/transfer')
+      .then(function (data) {
+        transfersLoading = false;
+        transferActive = (data && data.active) || [];
+        transferHistory = (data && data.history) || [];
+        renderTransfers();
+      })
+      .catch(function (err) {
+        transfersLoading = false;
+        if (err && err.status === 403) notifyTokenExpired();
+        if (!silent) {
+          var msg = (err && err.status === 403) ? esc(T.tokenExpired) : esc(T.loadFail) + '<br>' + esc(T.loadFailHint);
+          transfersView.innerHTML = '<div class="empty"><div class="empty__icon">⚠️</div><div class="empty__text">' + msg + '</div></div>';
+        }
+      });
+  }
+
+  function transferAction(act, id) {
+    apiFetch('/api/transfer/' + act, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ transfer_id: id }),
+    })
+      .then(function (res) {
+        if (res.status === 403) { notifyTokenExpired(); return; }
+        if (!res.data || res.data.ok !== true) {
+          showToast((res.data && res.data.error) || T.trActionFail, true);
+        }
+        loadTransfers(true);
+      })
+      .catch(function () {
+        showToast(T.trActionFail + ' · ' + T.loadFailHint, true);
+      });
+  }
+
+  transfersView.addEventListener('click', function (e) {
+    var btn = e.target.closest ? e.target.closest('[data-act]') : null;
+    if (!btn) return;
+    transferAction(btn.getAttribute('data-act'), btn.getAttribute('data-id'));
+  });
+
+  /* ── Favorites ──────────────────────────────────────────────── */
+
+  var favoritesItems = [];
+  var favoritesLoading = false;
+
+  function favIcon(f) {
+    var content = ((f.content || '') + ' ' + (f.title || '')).trim();
+    if (/^https?:\/\//i.test(content)) return '🔗';
+    return '📋';
+  }
+
+  function favTypeLabel(f) {
+    if (/^https?:\/\//i.test((f.content || '').trim()) || /^https?:\/\//i.test((f.title || '').trim())) return T.favTypeLink;
+    return T.favTypeText;
+  }
+
+  function renderFavorites() {
+    if (favoritesItems.length === 0) {
+      favoritesList.innerHTML = '<div class="empty"><div class="empty__icon">⭐</div><div class="empty__text">' + esc(T.favEmpty) + '</div></div>';
+      return;
+    }
+    favoritesList.innerHTML = '';
+    favoritesItems.forEach(function (f) {
+      var el = document.createElement('div');
+      el.className = 'fav-item';
+      var title = (f.title || '').trim() || (f.content_preview || '');
+      var preview = (f.content || '').trim();
+      el.innerHTML =
+        '<div class="fav-item__icon">' + favIcon(f) + '</div>' +
+        '<div class="fav-item__body">' +
+          '<div class="fav-item__title">' + esc(title) + '</div>' +
+          (preview ? '<div class="fav-item__preview">' + esc(preview) + '</div>' : '') +
+          '<div class="fav-item__meta">' + esc(favTypeLabel(f)) + ' · ' + esc(relTime(f.created)) + '</div>' +
+        '</div>' +
+        '<button class="f-item__delete" title="' + esc(T.favDelete) + '">✕</button>';
+      el.addEventListener('click', function () { favCopy(f); });
+      el.querySelector('.f-item__delete').addEventListener('click', function (ev) {
+        ev.stopPropagation();
+        favDelete(f);
+      });
+      favoritesList.appendChild(el);
+    });
+  }
+
+  function loadFavorites(silent) {
+    if (favoritesLoading) return;
+    favoritesLoading = true;
+    if (!silent) favoritesList.innerHTML = '<div class="skeleton"></div><div class="skeleton"></div>';
+    getJson('/api/favorites')
+      .then(function (data) {
+        favoritesLoading = false;
+        favoritesItems = (data && data.favorites) || [];
+        renderFavorites();
+      })
+      .catch(function (err) {
+        favoritesLoading = false;
+        if (err && err.status === 403) notifyTokenExpired();
+        if (!silent) {
+          var msg = (err && err.status === 403) ? esc(T.tokenExpired) : esc(T.loadFail) + '<br>' + esc(T.loadFailHint);
+          favoritesList.innerHTML = '<div class="empty"><div class="empty__icon">⚠️</div><div class="empty__text">' + msg + '</div></div>';
+        }
+      });
+  }
+
+  // A favorite is plain text (title + content) — push it to the desktop
+  // clipboard via /api/push. paste-rich would need a history entry_id, which
+  // a favorite doesn't carry.
+  function favCopy(f) {
+    var text = ((f.title || '') + '\n' + (f.content || '')).trim();
+    if (!text) { showToast(T.favEmpty, true); return; }
+    apiFetch('/api/push', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ text: text }),
+    })
+      .then(function (res) {
+        if (res.status === 403) { notifyTokenExpired(); return; }
+        if (res.data && res.data.ok) {
+          showToast(T.favCopied);
+        } else {
+          showToast((res.data && res.data.error) || T.favCopyFail, true);
+        }
+      })
+      .catch(function () {
+        showToast(T.favCopyFail + ' · ' + T.loadFailHint, true);
+      });
+  }
+
+  function favDelete(f) {
+    if (!window.confirm(T.favDeleteConfirm)) return;
+    apiFetch('/api/favorites', {
+      method: 'DELETE',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ id: f.id }),
+    })
+      .then(function (res) {
+        if (res.status === 403) { notifyTokenExpired(); return; }
+        if (res.data && res.data.ok !== false) {
+          showToast(T.favDeleted);
+          loadFavorites(true);
+        } else {
+          showToast((res.data && res.data.error) || T.favDeleteFail, true);
+        }
+      })
+      .catch(function () {
+        showToast(T.favDeleteFail + ' · ' + T.loadFailHint, true);
+      });
+  }
+
+  /* ── Settings ───────────────────────────────────────────────── */
+
+  function isLightTheme() {
+    try { return localStorage.getItem('clipsync_mobile_theme') === 'light'; }
+    catch (e) { return false; }
+  }
+
+  function applyTheme() {
+    document.body.classList.toggle('light', isLightTheme());
+  }
+
+  function themeLabel() {
+    return isLightTheme() ? T.setThemeLight : T.setThemeDark;
+  }
+
+  function toggleTheme() {
+    var light = !isLightTheme();
+    try { localStorage.setItem('clipsync_mobile_theme', light ? 'light' : 'dark'); } catch (e) {}
+    applyTheme();
+    var toggle = document.getElementById('themeToggle');
+    if (toggle) toggle.textContent = themeLabel();
+  }
+
+  function renderSettings(deviceName, settings) {
+    var ver = (settings && (settings.version || settings.app_version)) || '';
+    var html = '';
+    html += '<div class="set-card">' +
+      '<div class="set-row"><span class="set-row__label">' + esc(T.setDeviceName) + '</span><span class="set-row__value">' + esc(deviceName || '—') + '</span></div>';
+    if (ver) {
+      html += '<div class="set-row"><span class="set-row__label">' + esc(T.setVersion) + '</span><span class="set-row__value">' + esc(ver) + '</span></div>';
+    }
+    html += '<div class="set-row"><span class="set-row__label">' + esc(T.setWebAddress) + '</span><span class="set-row__value">' + esc(window.location.origin + window.location.pathname) + '</span></div>' +
+      '<div class="set-row"><span class="set-row__label">' + esc(T.setLanguage) + '</span><span class="set-row__value">' + esc(ZH ? '中文' : 'English') + '</span></div>' +
+    '</div>';
+    html += '<div class="set-card">' +
+      '<div class="set-row"><span class="set-row__label">' + esc(T.setTheme) + '</span><button class="set-toggle" id="themeToggle">' + esc(themeLabel()) + '</button></div>' +
+    '</div>';
+    html += '<a class="set-link" href="' + esc(HOST + '/index.html?token=' + encodeURIComponent(TOKEN)) + '">' + esc(T.setFullPanel) + ' →</a>';
+    settingsView.innerHTML = html;
+    var toggle = document.getElementById('themeToggle');
+    if (toggle) toggle.addEventListener('click', toggleTheme);
+  }
+
+  function loadSettings(silent) {
+    getJson('/api/status')
+      .then(function (s) {
+        var deviceName = (s && s.device) || '';
+        getJson('/api/settings')
+          .then(function (s2) {
+            var settings = (s2 && s2.settings) || {};
+            renderSettings(deviceName || settings.device_name, settings);
+          })
+          .catch(function () {
+            renderSettings(deviceName, {});
+          });
+      })
+      .catch(function (err) {
+        if (err && err.status === 403) { notifyTokenExpired(); return; }
+        getJson('/api/settings')
+          .then(function (s2) {
+            var settings = (s2 && s2.settings) || {};
+            renderSettings(settings.device_name, settings);
+          })
+          .catch(function () {
+            if (!silent) {
+              settingsView.innerHTML = '<div class="empty"><div class="empty__icon">⚠️</div><div class="empty__text">' + esc(T.loadFail) + '<br>' + esc(T.loadFailHint) + '</div></div>';
+            }
+          });
+      });
+  }
+
   /* ── Init ──────────────────────────────────────────────────── */
 
+  applyTheme();
   loadHistory();
   startPolling();
 

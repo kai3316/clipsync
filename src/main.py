@@ -5115,6 +5115,10 @@ class Application:
                 self.file_transfer_mgr.pause_transfer(transfer_id, send_fn)
             elif action == 'resume':
                 self.file_transfer_mgr.resume_transfer(transfer_id, send_fn)
+            elif action == 'accept':
+                self.file_transfer_mgr.accept_transfer(transfer_id, send_fn)
+            elif action == 'reject':
+                self.file_transfer_mgr.reject_transfer(transfer_id, send_fn)
             else:
                 return False
             return True
