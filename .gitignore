@@ -39,3 +39,6 @@ htmlcov/
 # Environment
 .env
 .claude/
+
+# Per-run /kai round handoff (context compression)
+.kai-round.md
