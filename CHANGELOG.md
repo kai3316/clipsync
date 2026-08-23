@@ -2,6 +2,12 @@
 
 All notable changes to ClipSync are documented in this file.
 
+## [1.0.47] — 2026-08-23
+
+### Web & mobile
+- **Phone companion & Quick Paste pages no longer render blank.** The server's HTML interpolation globally replaces the `__CLIPSYNC_I18N_LOCALE__` placeholder with the locale string, but those two pages used the placeholder as a JavaScript property name (`window.__CLIPSYNC_I18N_LOCALE__`), which produced `window."zh-CN"` — a SyntaxError that aborted the page's inline script and left only the static title. They now use the non-interpolated `__I18N_LOCALE__` alias for the property (matching `index.html`), so the locale value lands without breaking the script.
+- **All phone-scan QR entry points now open the phone companion page** (`mobile.html`: history / send / files) instead of the full desktop dashboard — the desktop Overview card, the Settings web panel, the tray "Web QR" dialog and the web UI's QR cards are now consistent.
+
 ## [1.0.46] — 2026-08-23
 
 ### History (cursor convention — no remaining drift)
