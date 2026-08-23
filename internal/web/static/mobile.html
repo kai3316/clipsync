@@ -18,8 +18,8 @@
 /* The server injects the app-configured locale here (__CLIPSYNC_I18N_LOCALE__
    becomes e.g. "zh-CN"); the fallback keeps this page valid if it is ever
    served without interpolation. */
-try { window.__CLIPSYNC_I18N_LOCALE__ = __CLIPSYNC_I18N_LOCALE__; }
-catch (e) { window.__CLIPSYNC_I18N_LOCALE__ = ''; }
+try { window.__I18N_LOCALE__ = __CLIPSYNC_I18N_LOCALE__; }
+catch (e) { window.__I18N_LOCALE__ = ''; }
 </script>
 <script>
 /* Register the service worker so an installed phone page keeps working when
@@ -665,9 +665,9 @@ body::before {
   var TOKEN = params.get('token') || '';
   var HOST = window.location.origin;
   // The server knows the app's configured language and injects it as
-  // window.__CLIPSYNC_I18N_LOCALE__; prefer that over the phone's own
+  // window.__I18N_LOCALE__; prefer that over the phone's own
   // navigator.language so the phone page matches the desktop app's language.
-  var serverLocale = window.__CLIPSYNC_I18N_LOCALE__ || '';
+  var serverLocale = window.__I18N_LOCALE__ || '';
   var ZH = (serverLocale || navigator.language || '').toLowerCase().indexOf('zh') === 0;
   document.documentElement.lang = ZH ? 'zh-CN' : 'en';
 
