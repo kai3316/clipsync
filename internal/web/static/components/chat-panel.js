@@ -270,6 +270,12 @@
             if (res && res.sessions) {
               self.store.replaceChatSessions(res.sessions);
             }
+            // The response carries the authoritative per-peer mute set (the
+            // backend also suppresses the desktop notification for it), so
+            // the bell state follows the backend, not just this tab's cache.
+            if (res && Array.isArray(res.muted)) {
+              self.store.replaceChatMuted(res.muted);
+            }
           })
           .catch(function (e) {
             console.error('[ClipSync] Failed to load chat sessions:', e);

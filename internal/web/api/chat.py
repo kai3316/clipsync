@@ -89,16 +89,26 @@ def get_chat_devices(get_devices_cb):
     return {"devices": devices}, 200
 
 
-def get_sessions(chat_mgr):
-    """GET /api/chat/sessions → {sessions: [...]}."""
+def get_sessions(chat_mgr, get_chat_muted=None):
+    """GET /api/chat/sessions → {sessions: [...], muted: [...]}.
+
+    ``muted`` is the current per-peer chat mute set, so the web chat UI can
+    render the bell state from the same request that lists the sessions.
+    """
     err = _require_chat(chat_mgr)
     if err:
         return err
     try:
-        return {"sessions": chat_mgr.get_sessions() or []}, 200
+        resp = {"sessions": chat_mgr.get_sessions() or []}
+        if get_chat_muted is not None:
+            try:
+                resp["muted"] = get_chat_muted() or []
+            except Exception:
+                resp["muted"] = []
+        return resp, 200
     except Exception:
         logger.debug("chat: get_sessions failed", exc_info=True)
-        return {"sessions": []}, 200
+        return {"sessions": [], "muted": []}, 200
 
 
 def get_messages(chat_mgr, query_params):
@@ -375,3 +385,27 @@ def mark_read(chat_mgr, body):
         logger.debug("chat: mark_session_read failed", exc_info=True)
         ok = False
     return {"ok": ok}, 200
+
+
+def set_muted(set_chat_muted, body):
+    """POST /api/chat/mute {peer_id, muted} → {ok, muted: [...]}.
+
+    ``muted`` is the full updated mute set after the change.  The host
+    persists it and consults it before showing the desktop message
+    notification, so a muted peer never rings.
+    """
+    if set_chat_muted is None:
+        return _UNAVAILABLE, 503
+    data = _json_body(body)
+    if data is None:
+        return {"ok": False, "error": "invalid json"}, 400
+    peer_id = (data.get("peer_id") or "").strip()
+    if not peer_id:
+        return {"ok": False, "error": "peer_id required"}, 400
+    muted = bool(data.get("muted"))
+    try:
+        muted_list = set_chat_muted(peer_id, muted) or []
+    except Exception:
+        logger.debug("chat: set_muted callback failed", exc_info=True)
+        return {"ok": False, "error": "mute failed"}, 500
+    return {"ok": True, "muted": muted_list}, 200

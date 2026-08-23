@@ -187,6 +187,8 @@ def dispatch(method, path, query_params, body, cfg, history, sync_mgr,
              get_chat_devices=None,
              chat_send_fn=None,
              chat_start_session=None,
+             get_chat_muted=None,
+             set_chat_muted=None,
              on_quickpaste_done=None):
     """Route an API request to the appropriate handler, never raising.
 
@@ -223,7 +225,7 @@ def dispatch(method, path, query_params, body, cfg, history, sync_mgr,
             on_open_file, on_open_folder, on_restart, on_reset_dedup,
             get_certs, get_diagnostics, on_update_download, on_diagnostics_request,
             chat_mgr, get_chat_devices, chat_send_fn, chat_start_session,
-            on_quickpaste_done,
+            get_chat_muted, set_chat_muted, on_quickpaste_done,
         )
     except Exception:
         logger.exception("Unhandled error in API route: %s %s", method, path)
@@ -255,6 +257,8 @@ def _dispatch(method, path, query_params, body, cfg, history, sync_mgr,
               get_chat_devices=None,
               chat_send_fn=None,
               chat_start_session=None,
+              get_chat_muted=None,
+              set_chat_muted=None,
               on_quickpaste_done=None):
     """Route an API request to the appropriate handler.
 
@@ -416,7 +420,7 @@ def _dispatch(method, path, query_params, body, cfg, history, sync_mgr,
             return _json_response(data, status)
 
         elif path == "/api/chat/sessions":
-            data, status = _chat_api.get_sessions(chat_mgr)
+            data, status = _chat_api.get_sessions(chat_mgr, get_chat_muted)
             return _json_response(data, status)
 
         elif path == "/api/chat/messages":
@@ -1030,6 +1034,10 @@ def _dispatch(method, path, query_params, body, cfg, history, sync_mgr,
 
         elif path == "/api/chat/read":
             data, status = _chat_api.mark_read(chat_mgr, body)
+            return _json_response(data, status)
+
+        elif path == "/api/chat/mute":
+            data, status = _chat_api.set_muted(set_chat_muted, body)
             return _json_response(data, status)
 
     # ── DELETE routes ──────────────────────────────────────────────

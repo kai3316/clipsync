@@ -877,6 +877,10 @@ class Application:
         self.chat_mgr = ChatManager(
             cfg.device_id, cfg.device_name, receive_dir=chat_receive_dir,
         )
+        # Per-peer chat mutes, persisted in config.  The desktop notification
+        # path consults this so a muted device never rings; the web chat UI
+        # toggles it via POST /api/chat/mute.
+        self._chat_muted: set[str] = set(cfg.chat_muted_peers or [])
         try:
             self.chat_mgr.set_own_fingerprint(
                 self.pairing_mgr.get_identity().fingerprint,
@@ -977,6 +981,8 @@ class Application:
             get_chat_devices=self._web_chat_devices,
             chat_send_fn=self._web_chat_send_fn,
             chat_start_session=self._web_chat_start_session,
+            get_chat_muted=self._get_chat_muted,
+            set_chat_muted=self._set_chat_muted,
         )
 
         # ── Live history push to web clients ────────────────────────
@@ -1227,7 +1233,14 @@ class Application:
         try:
             kind = entry_dict.get("kind")
             outgoing = entry_dict.get("outgoing")
-            if kind == "text" and not outgoing and not self._dashboard_visible():
+            # A muted peer never rings — the web chat UI's bell toggle sets
+            # the mute (persisted in config), and this is the notification
+            # path it must suppress.  Unknown peer (None) stays unmuted so an
+            # orphaned session doesn't silently go quiet.
+            peer_id = self._chat_peer_id_for_sid(session_id) or ""
+            muted = bool(peer_id and peer_id in self._chat_muted)
+            if (kind == "text" and not outgoing and not self._dashboard_visible()
+                    and not muted):
                 peer_name = self._chat_peer_name_for_sid(session_id) or "?"
                 text = (entry_dict.get("text") or "")[:120]
                 notification_mgr.show(
@@ -1681,6 +1694,30 @@ class Application:
     def _web_chat_send_fn(self, peer_id: str | None):
         """Per-peer send closure for web chat API handlers."""
         return self._chat_send_fn(peer_id)
+
+    def _get_chat_muted(self) -> list[str]:
+        """Current muted chat peer_ids (for the web chat UI)."""
+        return sorted(self._chat_muted)
+
+    def _set_chat_muted(self, peer_id: str, muted: bool) -> list[str]:
+        """Mute/unmute a chat peer and persist the set to config.
+
+        Called from the web chat UI's bell toggle.  The set feeds both the
+        desktop notification path (``_chat_message_on_main``) and the web
+        unread badge (loaded back via GET /api/chat/sessions).
+        """
+        peer_id = (peer_id or "").strip()
+        if peer_id:
+            if muted:
+                self._chat_muted.add(peer_id)
+            else:
+                self._chat_muted.discard(peer_id)
+        try:
+            self.cfg.chat_muted_peers = sorted(self._chat_muted)
+            save(self.cfg, self._make_save_enc())
+        except Exception:
+            logger.debug("chat mute persist failed", exc_info=True)
+        return self._get_chat_muted()
 
     def _wire_hotkeys(self) -> None:
         """Register global hotkey callbacks from config and start the listener."""

@@ -706,6 +706,20 @@ var ClipsyncAPI = (function () {
     },
 
     /**
+     * Mute/unmute a chat peer (stops its desktop message notification/sound
+     * and its unread badge).  The backend persists the mute set.
+     * @param {string} peerId
+     * @param {boolean} muted
+     * @returns {Promise<{ok: boolean, muted: string[]}>}
+     */
+    chatMute: function (peerId, muted) {
+      return this._fetch('POST', '/api/chat/mute', {
+        peer_id: peerId,
+        muted: !!muted,
+      });
+    },
+
+    /**
      * Build the authenticated URL for downloading a received chat file.
      * (The endpoint returns the saved file binary, so it can't go through
      * the JSON `_fetch` wrapper — the caller uses it as a link target.)

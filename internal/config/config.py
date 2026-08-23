@@ -73,6 +73,9 @@ class Config:
     notify_transfer: bool = True
     notify_pairing: bool = True
     notify_sync: bool = True
+    # Per-peer chat message mutes (peer_ids whose incoming messages must not
+    # produce a desktop notification / sound).  Managed from the web chat UI.
+    chat_muted_peers: list[str] = field(default_factory=list)
     # Security
     encryption_enabled: bool = True
     encryption_password: str = ""       # runtime only — never persisted
@@ -221,6 +224,7 @@ _FIELD_RULES: dict[str, tuple] = {
     "notify_transfer": ("bool",),
     "notify_pairing": ("bool",),
     "notify_sync": ("bool",),
+    "chat_muted_peers": ("strlist_nonnull",),
     "encryption_enabled": ("bool",),
     "encryption_password_hash": ("str",),
     "appearance_mode": ("str",),
@@ -346,6 +350,7 @@ def load() -> Config:
                 "log_level", "notifications_enabled",
                 "notify_device_connect", "notify_transfer",
                 "notify_pairing", "notify_sync",
+                "chat_muted_peers",
                 "encryption_enabled",
                 "encryption_password_hash",
                 "appearance_mode",
@@ -477,6 +482,7 @@ def save(cfg: Config, enc_mgr: "EncryptionManager | None" = None):
             "notify_transfer": cfg.notify_transfer,
             "notify_pairing": cfg.notify_pairing,
             "notify_sync": cfg.notify_sync,
+            "chat_muted_peers": cfg.chat_muted_peers,
             "encryption_enabled": cfg.encryption_enabled,
             "encryption_password_hash": cfg.encryption_password_hash,
             "appearance_mode": cfg.appearance_mode,

@@ -1506,12 +1506,33 @@
     },
 
     /**
+     * Replace the mute set with an authoritative list (from the backend).
+     * The backend is the source of truth — it also suppresses the desktop
+     * notification for muted peers, so the badge must agree with it.
+     * @param {Array} list
+     */
+    replaceChatMuted: function (list) {
+      var next = new Set();
+      if (Array.isArray(list)) {
+        for (var i = 0; i < list.length; i++) {
+          if (list[i] && typeof list[i] === 'string') next.add(list[i]);
+        }
+      }
+      this.mutedChatPeers = next;
+      this.persistChatMutes();
+      this.recalcChatUnread();
+    },
+
+    /**
      * Toggle mute for a peer.  Mutting also clears any unread badge that
      * session already carries, so silencing a device takes effect immediately.
+     * The change is pushed to the backend (fire-and-forget) so the desktop
+     * notification/sound stops ringing for that peer too.
      * @param {string} peerId
      * @returns {boolean} the new muted state
      */
     toggleChatMute: function (peerId) {
+      var self = this;
       if (!peerId) return false;
       var muted = this.mutedChatPeers.has(peerId);
       if (muted) {
@@ -1528,6 +1549,23 @@
       this.mutedChatPeers = new Set(this.mutedChatPeers);
       this.persistChatMutes();
       this.recalcChatUnread();
+      if (window.ClipsyncAPI && window.ClipsyncAPI.chatMute) {
+        // The backend returns the authoritative mute set; on success adopt it
+        // (a concurrent toggle elsewhere wins over this local optimistic edit).
+        window.ClipsyncAPI.chatMute(peerId, !muted).then(function (res) {
+          if (res && Array.isArray(res.muted)) {
+            var next = new Set();
+            for (var mi = 0; mi < res.muted.length; mi++) {
+              if (typeof res.muted[mi] === 'string') next.add(res.muted[mi]);
+            }
+            self.mutedChatPeers = next;
+            self.persistChatMutes();
+            self.recalcChatUnread();
+          }
+        }).catch(function (e) {
+          console.error('[ClipSync] Failed to sync chat mute:', e);
+        });
+      }
       return !muted;
     },
 
