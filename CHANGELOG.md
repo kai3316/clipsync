@@ -2,6 +2,11 @@
 
 All notable changes to ClipSync are documented in this file.
 
+## [1.0.50] — 2026-08-23
+
+### Desktop (Windows)
+- **No more black console box flashing on startup.** The packaged Windows build (a `console=False` one-file exe) still spawned the console-mode `powershell.exe` while enumerating network-interface priorities at launch, and `taskkill.exe` when tearing down the web window / Quick Paste popups — each spawn briefly flashed a black console window before the app opened. Those spawns now pass `CREATE_NO_WINDOW`, matching the existing `netsh` firewall calls, so the exe stays fully silent on startup and shutdown.
+
 ## [1.0.49] — 2026-08-23
 
 ### Mobile companion (phone page)

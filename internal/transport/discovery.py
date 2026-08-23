@@ -96,6 +96,10 @@ def _get_interface_priorities():
                     "| ConvertTo-Json",
                 ],
                 capture_output=True, text=True, timeout=5,
+                # No console window: in the packaged (console=False) Windows
+                # build, spawning the console-mode powershell.exe without this
+                # flag flashes a black console box on every startup.
+                creationflags=subprocess.CREATE_NO_WINDOW,
             )
             if result.returncode != 0:
                 return priorities

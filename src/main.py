@@ -1839,6 +1839,7 @@ class Application:
                     stdout=subprocess.DEVNULL,
                     stderr=subprocess.DEVNULL,
                     timeout=5.0,
+                    creationflags=subprocess.CREATE_NO_WINDOW,
                 )
             else:
                 import signal
@@ -2035,6 +2036,7 @@ class Application:
                         ["taskkill", "/PID", str(proc.pid), "/T", "/F"],
                         stdout=subprocess.DEVNULL,
                         stderr=subprocess.DEVNULL,
+                        creationflags=subprocess.CREATE_NO_WINDOW,
                     ))
                 except Exception:
                     continue

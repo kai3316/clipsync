@@ -175,6 +175,7 @@ class WebViewWindow:
                         stdout=subprocess.DEVNULL,
                         stderr=subprocess.DEVNULL,
                         timeout=10,
+                        creationflags=subprocess.CREATE_NO_WINDOW,
                     )
                 else:
                     proc.terminate()
