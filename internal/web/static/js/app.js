@@ -329,34 +329,15 @@
           // clobbering it — otherwise a reconnect collapses their pages.  This
           // mirrors the history_updated upsert/prepend merge in ws.js.
           if (store.history.length > limit) {
-            var idxById = {};
-            for (var h = 0; h < store.history.length; h++) {
-              var cur = store.history[h];
-              if (cur && cur.entry_id !== undefined) {
-                idxById[cur.entry_id] = h;
-              }
-            }
-            var fresh = [];
-            for (var j = 0; j < items.length; j++) {
-              var inc = items[j];
-              if (!inc) continue;
-              var found = (inc.entry_id !== undefined && idxById[inc.entry_id] !== undefined) ? idxById[inc.entry_id] : -1;
-              if (found !== -1) {
-                // Update in place — keeps the item's loaded position.
-                Object.assign(store.history[found], inc);
-              } else {
-                fresh.push(inc);
-              }
-            }
-            // Prepend genuinely-new items, preserving snapshot (newest-first)
-            // order.  Recompute the "load more" cursor from the loaded list
-            // length instead of a "+fresh.length" delta: dedupe may have
-            // discarded incoming duplicates, so the delta would overshoot the
-            // real count and the next fetch would skip entries (mirrors
-            // ws.js and mobile.html).
-            for (var k = fresh.length - 1; k >= 0; k--) {
-              store.history.unshift(fresh[k]);
-            }
+            // Upsert/prepend the page-1 snapshot via the shared helper (which
+            // also bumps the mutation tick when the merge changes the list, so
+            // an in-flight calibration abandons its write-back instead of
+            // overwriting the merged state).  Recompute the "load more" cursor
+            // from the loaded list length instead of a "+fresh.length" delta:
+            // dedupe may have discarded incoming duplicates, so the delta
+            // would overshoot the real count and the next fetch would skip
+            // entries (mirrors ws.js and mobile.html).
+            store.mergeHistoryFresh(items);
             store.historyOffset = store.history.length;
             if (res && res.total != null && store.history.length > res.total) {
               // Missed history_item_deleted broadcasts leave ghost rows in the

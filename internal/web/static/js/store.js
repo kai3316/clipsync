@@ -23,14 +23,19 @@
 
   // Minimum gap between full-history calibrations (see store.calibrateHistory).
   // A calibration refetches the ENTIRE history at limit=total, so it is
-  // throttled to at most one per client per window.  The budget is only
-  // consumed when a calibration actually commits a write-back — a raced
-  // abandon or a failed fetch retries immediately on the next poll.
+  // throttled to at most one per client per window.  EVERY terminal state
+  // (success write-back, raced abandon, failure, timeout) consumes the budget —
+  // a constantly-mutating history would otherwise raced-abandon every attempt
+  // without consuming it, triggering a full download on every broadcast with
+  // no backoff.  Unified consumption caps that at one attempt per window, and
+  // ghosts heal in the first 30s silent window.
   var CALIBRATION_THROTTLE_MS = 30000;
   // Safety valve for the _historyCalibrating lock: an old webview without
   // AbortController can leave the calibration fetch pending forever, which
-  // would otherwise wedge the lock permanently.  Clear it after this window
-  // so the next poll can retry (generation-guarded — see calibrateHistory).
+  // would otherwise wedge the lock permanently.  After this window the
+  // calibration is treated as a terminal state: the generation advances (so
+  // the late fetch, if it ever settles, is gen-guarded and cannot write back),
+  // the lock clears so the next poll can retry, and the budget is consumed.
   var CALIBRATION_TIMEOUT_MS = 16000;
 
   // Local i18n helper — the store is a plain object (not a Vue component),
@@ -869,7 +874,11 @@
      * Throttle: a full download at limit=total is expensive, so at most one
      * calibration per client every CALIBRATION_THROTTLE_MS.  A call inside the
      * window still pins the cursor to total (so Load More can't skip) but
-     * skips the refetch.
+     * skips the refetch.  EVERY terminal state consumes the budget — success
+     * write-back, raced abandon, failure and timeout all stamp
+     * _lastCalibration, and all advance _calibrationGen — so a late response
+     * from a settled calibration can never write back, and a constantly
+     * mutating history cannot trigger a full download on every broadcast.
      *
      * @param {number} total - authoritative item count from the triggering
      *   response (the list only has ghosts when history.length > total).
@@ -894,37 +903,49 @@
       }
       this._historyCalibrating = true;
       var startTick = this.historyMutationTick;
-      // Generation counter: a fetch superseded by the timeout fallback (below)
-      // must not clear the lock or write back once a NEWER calibration has
-      // taken over the lock.
+      // Generation counter: every terminal state (success write-back, failure,
+      // timeout, raced abandon) advances the generation, so a late response
+      // from a settled calibration can never clear a newer calibration's lock
+      // or write back — late responses are always discarded.
       var calibGen = (this._calibrationGen || 0) + 1;
       this._calibrationGen = calibGen;
       // Timeout fallback: an old webview without AbortController can leave the
-      // fetch pending forever, which would wedge _historyCalibrating.  Clear
-      // the lock after CALIBRATION_TIMEOUT_MS (if this generation still owns
-      // it) so the next poll can retry; the in-flight fetch, if it ever
-      // settles, is generation-guarded and abandons.
+      // fetch pending forever, which would wedge _historyCalibrating.  After
+      // CALIBRATION_TIMEOUT_MS (if this generation still owns the lock) the
+      // calibration is treated as a terminal state: advance the generation so
+      // the in-flight fetch (if it ever settles) is gen-guarded and abandons,
+      // clear the lock so the next poll can retry, and consume the throttle
+      // budget like every other terminal state.
       var calibTimer = setTimeout(function () {
         if (self._calibrationGen === calibGen && self._historyCalibrating) {
+          self._calibrationGen += 1;
           self._historyCalibrating = false;
+          self._lastCalibration = Date.now();
         }
       }, CALIBRATION_TIMEOUT_MS);
       return window.ClipsyncAPI.getHistory({ limit: total, offset: 0 })
         .then(function (calRes) {
           clearTimeout(calibTimer);
           if (self._calibrationGen !== calibGen) {
-            // A newer calibration superseded this one (timeout fallback) —
-            // don't touch the lock or the list.
+            // A newer calibration superseded this one (e.g. the timeout
+            // advanced the gen) — a late response must never write back or
+            // influence the current state.  The superseding event already
+            // consumed the budget, so this is a plain abandon.
             return self.history.slice();
           }
           self._historyCalibrating = false;
           // A delete/clear/new-entry landed while the fetch was in flight — the
           // snapshot predates it and would resurrect/overwrite rows.  Drop the
-          // write-back (the delete handler already fixed the list + cursor)
-          // WITHOUT consuming the throttle budget, so the next poll retries.
+          // write-back (the delete handler already fixed the list + cursor).
+          // This is still a terminal state: advance the generation and consume
+          // the throttle budget, so a constantly-mutating history doesn't
+          // trigger a full download on every broadcast — at most one attempt
+          // per window, and ghosts heal in the first 30s silent window.
           if (self.historyMutationTick !== startTick) {
+            self._calibrationGen += 1;
             self.historyOffset = Math.min(self.history.length, total);
             self.historyHasMore = self.history.length < total;
+            self._lastCalibration = Date.now();
             return self.history.slice();
           }
           var calItems = (calRes && calRes.items) ? calRes.items : [];
@@ -935,23 +956,146 @@
           self.historyOffset = self.history.length;
           self.historyHasMore = (calRes && calRes.total != null)
             ? self.history.length < calRes.total : false;
-          // The write-back committed — only now consume the throttle budget.
+          // The write-back committed — advance the generation and consume the
+          // throttle budget (all terminal states consume it).
+          self._calibrationGen += 1;
           self._lastCalibration = Date.now();
           return calItems;
         })
         .catch(function () {
           clearTimeout(calibTimer);
           if (self._calibrationGen !== calibGen) {
+            // A newer calibration superseded this one — a late failure must
+            // not clear the lock or write back.  The superseding event already
+            // consumed the budget.
             return self.history.slice();
           }
           // Calibration failed — keep what is loaded and pin the cursor to
-          // total so Load More can't skip live entries.  The budget is NOT
-          // consumed, so the next refresh / broadcast retries immediately.
+          // total so Load More can't skip live entries.  A terminal state:
+          // advance the generation and consume the throttle budget so a
+          // persistently-failing server doesn't trigger a full download on
+          // every broadcast.
+          self._calibrationGen += 1;
           self._historyCalibrating = false;
           self.historyOffset = Math.min(self.history.length, total);
           self.historyHasMore = self.history.length < total;
+          self._lastCalibration = Date.now();
           return self.history.slice();
         });
+    },
+
+    /**
+     * Shared history-mutation helpers.  Every history change path (local
+     * delete / batch-delete / clear in history-item.js & history-panel.js, and
+     * the WS delete / clear / paged-merge handlers in ws.js, plus the page-1
+     * refresh merge in app.js) routes through these so the mutation-tick bump
+     * that guards in-flight calibrations lives in exactly one place — a future
+     * hand-written splice/unshift can't silently re-open the race.
+     *
+     * Each helper is behaviour-identical to the code it replaces EXCEPT for
+     * bumping historyMutationTick (the delete helper also prunes selectedIds of
+     * removed entries, where the old call sites did it themselves).
+     */
+
+    /**
+     * Remove history entries by entry_id (in place, one splice per row so the
+     * reactive list updates).  Bumps historyMutationTick once when at least
+     * one row was removed, and prunes removed ids from selectedIds.  Returns
+     * the number of rows removed so callers can shrink the pagination cursor.
+     * @param {Array<string|number>} ids
+     * @returns {number} count of rows removed
+     */
+    removeHistoryItems: function (ids) {
+      if (!ids || !ids.length) return 0;
+      var delSet = {};
+      for (var di = 0; di < ids.length; di++) {
+        delSet[ids[di]] = true;
+      }
+      var removedCount = 0;
+      for (var hiDel = this.history.length - 1; hiDel >= 0; hiDel--) {
+        var histItem = this.history[hiDel];
+        if (histItem && histItem.entry_id !== undefined &&
+            delSet[histItem.entry_id]) {
+          this.history.splice(hiDel, 1);
+          removedCount++;
+        }
+      }
+      if (removedCount > 0) {
+        this.historyMutationTick += 1;
+      }
+      // Prune removed ids from the multi-select set whenever ids were given,
+      // so a stale selection never counts a deleted item (the callers this
+      // helper replaces all did this — a future path can't forget).
+      var keptIds = [];
+      this.selectedIds.forEach(function (sid) {
+        if (!delSet[sid]) keptIds.push(sid);
+      });
+      this.selectedIds = new Set(keptIds);
+      return removedCount;
+    },
+
+    /**
+     * Clear the loaded history list wholesale and bump historyMutationTick
+     * (the callers reset the pagination cursor / selection as before).
+     */
+    clearHistory: function () {
+      this.history.splice(0, this.history.length);
+      this.historyMutationTick += 1;
+    },
+
+    /**
+     * Upsert/prepend a page-1 snapshot into the loaded list: matching rows are
+     * updated in place (keeps their loaded position), genuinely-new rows are
+     * prepended at the top preserving newest-first order, deduped (no
+     * duplicates).  Bumps historyMutationTick only when the merge actually
+     * changed the list — a pure display refresh (same entries, unchanged) does
+     * not.  Returns true when anything changed.
+     * @param {Array} items - the incoming page-1 snapshot
+     * @returns {boolean} true when the list changed
+     */
+    mergeHistoryFresh: function (items) {
+      if (!items || !items.length) return false;
+      var idxById = {};
+      for (var i = 0; i < this.history.length; i++) {
+        var cur = this.history[i];
+        if (cur && cur.entry_id !== undefined) idxById[cur.entry_id] = i;
+      }
+      var fresh = [];
+      var changed = false;
+      for (var j = 0; j < items.length; j++) {
+        var inc = items[j];
+        if (!inc) continue;
+        var foundIdx = (inc.entry_id !== undefined && idxById[inc.entry_id] !== undefined) ? idxById[inc.entry_id] : -1;
+        if (foundIdx !== -1) {
+          // Update in place — keeps the item's loaded position.  A changed
+          // broadcast payload is new data merged into the list; an identical
+          // payload (display refresh) is not.
+          var incChanged = false;
+          for (var fk in inc) {
+            if (inc.hasOwnProperty(fk) && inc[fk] !== this.history[foundIdx][fk]) {
+              incChanged = true;
+              break;
+            }
+          }
+          if (incChanged) {
+            Object.assign(this.history[foundIdx], inc);
+            changed = true;
+          }
+        } else {
+          fresh.push(inc);
+        }
+      }
+      // Prepend new items, preserving snapshot (newest-first) order.
+      for (var k = fresh.length - 1; k >= 0; k--) {
+        this.history.unshift(fresh[k]);
+      }
+      if (fresh.length > 0) {
+        changed = true;
+      }
+      if (changed) {
+        this.historyMutationTick += 1;
+      }
+      return changed;
     },
 
     /* ═══════════════════════════════════════════════════════════════

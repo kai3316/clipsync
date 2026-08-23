@@ -325,11 +325,11 @@
             self.clearingAll = true;
             ClipsyncAPI.clearHistory().then(function (res) {
               if (res && res.ok) {
-                self.store.history.splice(0, self.store.history.length);
-                // Bump the mutation tick so an in-flight calibration (store.js)
-                // abandons its write-back instead of re-populating the wiped
-                // list (mirrors the ws.js history_clear handler).
-                self.store.historyMutationTick += 1;
+                // Clear via the shared helper — it bumps the mutation tick so
+                // an in-flight calibration (store.js) abandons its write-back
+                // instead of re-populating the wiped list (mirrors the ws.js
+                // history_clear handler).
+                self.store.clearHistory();
                 // Reset the pagination cursor so "Load more" can't skip items
                 // that shifted into the now-empty array.
                 self.store.historyOffset = 0;
@@ -464,19 +464,11 @@
 
           ClipsyncAPI.batchDelete(selectedIds).then(function (res) {
             if (res && res.ok !== false) {
-              // Remove deleted entries from local store
-              var idSet = new Set(selectedIds);
-              var newHistory = [];
-              for (var i = 0; i < store.history.length; i++) {
-                if (!idSet.has(store.history[i].entry_id)) {
-                  newHistory.push(store.history[i]);
-                }
-              }
-              store.history = newHistory;
-              // Bump the mutation tick so an in-flight calibration (store.js)
+              // Remove the deleted entries via the shared helper — it bumps
+              // the mutation tick so an in-flight calibration (store.js)
               // abandons its write-back instead of resurrecting the deleted
               // rows (mirrors the ws.js history_item_deleted handler).
-              store.historyMutationTick += 1;
+              store.removeHistoryItems(selectedIds);
               // The pagination cursor must shrink with the array, otherwise a
               // subsequent "Load more" skips the N items just after the hole.
               store.historyOffset = Math.max(0, store.historyOffset - selectedIds.length);

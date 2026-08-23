@@ -2,6 +2,21 @@
 
 All notable changes to ClipSync are documented in this file.
 
+## [1.0.34] — 2026-08-23
+
+### History (pagination reconcile — consolidated)
+- **The mutation contract is now one place.** All history mutations flow through `store.removeHistoryItems` / `store.clearHistory` / `store.mergeHistoryFresh`, which bump the reconcile guard centrally — a future delete/clear path can no longer silently re-open the ghost-resurrection race.
+- **The reconcile back-off is consistent**: every terminal state (success, failure, timeout, race-abandon) consumes the throttle budget and advances the generation counter, so a busy clip stream can't trigger an unlimited full-history download, and a timed-out calibration's late response can never write back.
+- **In-place content updates (pin, edits) on the first page now count as mutations** too, so a reconcile can't revert a just-applied change.
+
+### Quick Paste
+- **The `--app` window paste path is guarded as well** — a successful paste sets the pasted flag before the auto-close block, so the retry-exhaustion banner never covers a confirmed paste.
+- **The abandoned-profile sweep never evicts a live popup** (process check first), keeps a partially-removed profile for a bounded retry (3 attempts), and the done-path only forgets an instance after its profile is actually removed — no more permanent partial-profile leaks or unbounded zombie entries.
+- App-shutdown profile reclaim retries once and hands the rest to the next startup.
+
+### Tests
+- 10 new/updated regressions. Full suite 433 passed / 3 skipped.
+
 ## [1.0.33] — 2026-08-23
 
 ### History (pagination reconcile)

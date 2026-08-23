@@ -276,26 +276,21 @@
         var store = this.store;
         var eid = this.item.entry_id;
         if (eid === undefined || eid === null) return;
-        var idx = store.history.findIndex(function (h) {
-          return h.entry_id === eid;
-        });
 
         var self = this;
         ClipsyncAPI.deleteItem(eid).then(function (res) {
           if (res && res.ok !== false) {
-            if (idx !== -1) {
-              store.history.splice(idx, 1);
-              // Bump the mutation tick so an in-flight calibration (store.js)
-              // abandons its write-back instead of resurrecting this row
-              // (mirrors the ws.js history_item_deleted handler).
-              store.historyMutationTick += 1;
-              // Shrink the pagination cursor with the array (matching the
-              // batch delete) so "Load more" doesn't skip the item that just
-              // shifted into the deleted slot.
+            // Removal via the shared helper — it bumps the mutation tick so an
+            // in-flight calibration (store.js) abandons its write-back instead
+            // of resurrecting this row, and prunes it from the selection
+            // (mirrors the ws.js history_item_deleted handler).
+            var removed = store.removeHistoryItems([eid]);
+            // Shrink the pagination cursor with the array (matching the batch
+            // delete) so "Load more" doesn't skip the item that just shifted
+            // into the deleted slot.
+            if (removed > 0) {
               store.historyOffset = Math.max(0, store.historyOffset - 1);
             }
-            store.selectedIds.delete(eid);
-            store.selectedIds = new Set(store.selectedIds);
             store.showToast(self.t('history.deleted_toast'), 1200);
           }
         }).catch(function (e) {

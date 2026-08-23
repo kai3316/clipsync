@@ -782,6 +782,11 @@ body::after {
         .then(function (data) {
           if (data.ok) {
             showToast(IS_ZH ? '已发送到电脑' : 'Sent to computer');
+            // The paste succeeded — mark it so the 60s safety net's exhaustion
+            // path only nudges with a toast instead of clobbering the success
+            // with a "could not auto-close" banner (mirrors the plain-tab
+            // showPastedFallback guard).
+            state.pastedOk = true;
             // The desktop popup closes after a beat so the user sees feedback;
             // a plain tab (no auto_close) stays open so more items can be
             // pasted in a row.  For the --app popup, POST /api/quickpaste/done

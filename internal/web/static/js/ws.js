@@ -285,7 +285,8 @@ var ClipsyncWS = (function () {
             // change.
             var hasLoadedMore = store.history.length > histLimit;
             // Bump the mutation tick when this broadcast actually merges NEW
-            // data (a newly-added entry or an in-place content update), so an
+            // data (a newly-added entry, a same-id content/pin/timestamp
+            // change, or an in-place update in the paged merge), so an
             // in-flight calibration (store.js) abandons its write-back instead
             // of overwriting the concurrent new item.  A pure display refresh
             // (same entries) does NOT bump.  The bump happens BEFORE the
@@ -293,22 +294,40 @@ var ClipsyncWS = (function () {
             // startTick that already includes this broadcast's merge.
             var histMutated = false;
             if (!hasLoadedMore) {
-              // Nothing loaded past the first page — replace wholesale.  Only
-              // count it as new data when an entry_id the list did not have
-              // arrives; a re-broadcast of the same page (pin reorder, etc.)
-              // is a display refresh.
-              var knownIds = {};
+              // Nothing loaded past the first page — replace wholesale.  Count
+              // it as new data when an entry_id the list did not have arrives
+              // OR a same-id row changed (content / pin / timestamp) — a pin
+              // toggle or a peer edit re-broadcasts the same entry_id with
+              // changed fields.  An identical re-broadcast of the same page is
+              // a display refresh and does NOT bump (matches the paged path's
+              // incChanged comparison).
+              var oldById = {};
               for (var hiOld = 0; hiOld < store.history.length; hiOld++) {
                 var histOld = store.history[hiOld];
                 if (histOld && histOld.entry_id !== undefined) {
-                  knownIds[histOld.entry_id] = true;
+                  oldById[histOld.entry_id] = histOld;
                 }
               }
               for (var hiInc = 0; hiInc < incoming.length; hiInc++) {
                 var histIn = incoming[hiInc];
-                if (histIn && histIn.entry_id !== undefined && !knownIds[histIn.entry_id]) {
-                  histMutated = true;
-                  break;
+                if (!histIn) continue;
+                if (histIn.entry_id !== undefined) {
+                  var oldRow = oldById[histIn.entry_id];
+                  if (!oldRow) {
+                    histMutated = true;
+                    break;
+                  }
+                  var rowChanged = false;
+                  for (var rk in histIn) {
+                    if (histIn.hasOwnProperty(rk) && histIn[rk] !== oldRow[rk]) {
+                      rowChanged = true;
+                      break;
+                    }
+                  }
+                  if (rowChanged) {
+                    histMutated = true;
+                    break;
+                  }
                 }
               }
               store.history.splice(0, store.history.length);
@@ -321,49 +340,11 @@ var ClipsyncWS = (function () {
                 store.historyMutationTick += 1;
               }
             } else {
-              // Upsert by entry_id: update matching rows in place, prepend
-              // genuinely-new rows at the top (dedupe — no duplicates).
-              var idxById = {};
-              for (var hi2 = 0; hi2 < store.history.length; hi2++) {
-                var histItem = store.history[hi2];
-                if (histItem && histItem.entry_id !== undefined) {
-                  idxById[histItem.entry_id] = hi2;
-                }
-              }
-              var fresh = [];
-              for (var hi3 = 0; hi3 < incoming.length; hi3++) {
-                var inc = incoming[hi3];
-                if (!inc) continue;
-                var foundIdx = (inc.entry_id !== undefined && idxById[inc.entry_id] !== undefined) ? idxById[inc.entry_id] : -1;
-                if (foundIdx !== -1) {
-                  // Update in place — keeps the item's loaded position.  A
-                  // changed broadcast payload is new data merged into the
-                  // list; an identical payload (display refresh) is not.
-                  var incChanged = false;
-                  for (var fk in inc) {
-                    if (inc.hasOwnProperty(fk) && inc[fk] !== store.history[foundIdx][fk]) {
-                      incChanged = true;
-                      break;
-                    }
-                  }
-                  if (incChanged) {
-                    Object.assign(store.history[foundIdx], inc);
-                    histMutated = true;
-                  }
-                } else {
-                  fresh.push(inc);
-                }
-              }
-              // Prepend new items, preserving broadcast (newest-first) order.
-              for (var hi4 = fresh.length - 1; hi4 >= 0; hi4--) {
-                store.history.unshift(fresh[hi4]);
-              }
-              if (fresh.length > 0) {
-                histMutated = true;
-              }
-              if (histMutated) {
-                store.historyMutationTick += 1;
-              }
+              // Upsert/prepend the page-1 snapshot via the shared helper — it
+              // updates matching rows in place, prepends genuinely-new rows at
+              // the top (dedupe — no duplicates), and bumps the mutation tick
+              // only when the merge actually changed the list.
+              histMutated = store.mergeHistoryFresh(incoming);
               // The prepended items now occupy the top of the loaded list.
               // Recompute the "load more" cursor from the list length instead
               // of a "+fresh.length" delta: dedupe may have discarded incoming
@@ -404,29 +385,13 @@ var ClipsyncWS = (function () {
           // the entries instead of only the one that issued the request
           // (the history_updated upsert merge can't express deletions).
           // Bump the mutation tick so an in-flight calibration (store.js)
-          // abandons its write-back instead of resurrecting these rows.
+          // abandons its write-back instead of resurrecting these rows —
+          // bumped even when the ids aren't in the local list, because the
+          // in-flight calibration's snapshot may still carry them.
           store.historyMutationTick += 1;
           if (data && Array.isArray(data.entry_ids)) {
-            var delSet = {};
-            for (var di = 0; di < data.entry_ids.length; di++) {
-              delSet[data.entry_ids[di]] = true;
-            }
-            var removedCount = 0;
-            for (var hiDel = store.history.length - 1; hiDel >= 0; hiDel--) {
-              var histItem = store.history[hiDel];
-              if (histItem && histItem.entry_id !== undefined &&
-                  delSet[histItem.entry_id]) {
-                store.history.splice(hiDel, 1);
-                removedCount++;
-              }
-            }
-            // Deselect any removed entries so the multi-select bar doesn't
-            // count deleted items.
-            var keptIds = [];
-            store.selectedIds.forEach(function (sid) {
-              if (!delSet[sid]) keptIds.push(sid);
-            });
-            store.selectedIds = new Set(keptIds);
+            // Removal via the shared helper (also prunes selectedIds).
+            var removedCount = store.removeHistoryItems(data.entry_ids);
             // Removed items no longer occupy the loaded list, so the
             // pagination cursor must shrink by the same count (mirrors the
             // local delete path's historyOffset--).
@@ -444,9 +409,9 @@ var ClipsyncWS = (function () {
           // History was wiped on another client — reset the whole list and
           // the pagination cursor so "Load more" can't skip shifted items.
           // Bump the mutation tick so an in-flight calibration abandons its
-          // write-back instead of re-populating the wiped list.
-          store.historyMutationTick += 1;
-          store.history.splice(0, store.history.length);
+          // write-back instead of re-populating the wiped list (via the shared
+          // clearHistory helper).
+          store.clearHistory();
           store.historyOffset = 0;
           store.historyHasMore = false;
           store.selectedIds = new Set();

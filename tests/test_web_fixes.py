@@ -584,11 +584,12 @@ def test_chat_expire_stale_receives_defers_fire_outside_lock():
 
 
 def test_dashboard_history_reconnect_merge_present():
-    """#9: loadHistory must not clobber already-loaded pages on a WS
-    reconnect — it merges/upserts when more than one page is loaded."""
+    """#9/#10: loadHistory must not clobber already-loaded pages on a WS
+    reconnect — it merges/upserts when more than one page is loaded, via the
+    shared mergeHistoryFresh helper."""
     js = _read_repo_file("internal/web/static/js/app.js")
     assert "store.history.length > limit" in js
-    assert "store.history.unshift(fresh" in js
+    assert "store.mergeHistoryFresh(items)" in js
     # The mounted() direct load was removed (WS 'connected' is the sole load
     # trigger) so startup no longer fetches everything twice.
     assert "this.loadData();" not in js
@@ -1079,82 +1080,99 @@ def test_routes_quickpaste_done_empty_string_instance_is_missing():
     assert calls == [None]
 
 
-def test_calibrate_history_budget_only_consumed_on_writeback():
-    """#1: the calibration throttle budget (_lastCalibration) is stamped ONLY
-    when a calibration commits a write-back (tick unchanged).  A raced abandon
-    or a failed fetch leaves it stale so the next poll retries immediately
-    instead of waiting out the 30s window."""
+def test_calibrate_history_all_terminal_states_consume_budget_and_advance_gen():
+    """Core calibration semantics (#2/#6): EVERY terminal state of a
+    calibration — success write-back, raced abandon, failure, timeout — consumes
+    the throttle budget (_lastCalibration) and advances the generation
+    (_calibrationGen).  A constantly-mutating history used to raced-abandon
+    every calibration without consuming the budget, so every broadcast
+    triggered a full limit=total download with no backoff; unified consumption
+    caps that at one attempt per window and ghosts heal in the first 30s silent
+    window.  Advancing the gen on timeout makes a late response gen-guarded (it
+    can no longer pass the guard and write back the old snapshot)."""
     store = _read_repo_file("internal/web/static/js/store.js")
-    # Exactly one budget stamp, and it lives in the success write-back path.
-    assert store.count("self._lastCalibration = Date.now();") == 1
-    # The stamp is positioned AFTER the tick race check — a raced abandon
-    # returns before it.
-    assert (
-        store.index("self._lastCalibration = Date.now();")
-        > store.index("if (self.historyMutationTick !== startTick)")
-    )
-    # The race-abandon path must NOT stamp the budget.
+    # Budget consumed in all four terminal states.
+    assert store.count("self._lastCalibration = Date.now();") >= 4
+    # Generation advances in all four terminal states.
+    assert store.count("self._calibrationGen += 1;") >= 4
+    # The raced-abandon path consumes the budget AND advances the gen.
     race_abandon = store[store.index("if (self.historyMutationTick !== startTick)"):
                          store.index("var calItems")]
-    assert "self._lastCalibration" not in race_abandon
+    assert "self._lastCalibration = Date.now();" in race_abandon
+    assert "self._calibrationGen += 1;" in race_abandon
 
 
 def test_calibrate_history_timeout_unwedges_lock():
-    """#9: the _historyCalibrating lock has a timeout fallback so a calibration
-    fetch that never settles (old webview without AbortController) can't wedge
-    the lock permanently — it clears after CALIBRATION_TIMEOUT_MS,
+    """#2/#9: the _historyCalibrating lock has a timeout fallback so a
+    calibration fetch that never settles (old webview without AbortController)
+    can't wedge the lock permanently — it clears after CALIBRATION_TIMEOUT_MS,
     generation-guarded so a superseded fetch can't clear a newer calibration's
-    lock or write back."""
+    lock or write back.  The timeout is itself a terminal state: it advances
+    the generation so the late response can no longer pass the gen guard and
+    write back the old snapshot, clears the lock, and consumes the budget."""
     store = _read_repo_file("internal/web/static/js/store.js")
     assert "var CALIBRATION_TIMEOUT_MS = 16000;" in store
     assert "clearTimeout(calibTimer);" in store
     assert "self._calibrationGen !== calibGen" in store
     assert "if (self._calibrationGen === calibGen && self._historyCalibrating)" in store
+    assert "self._calibrationGen += 1;" in store
+    assert "self._lastCalibration = Date.now();" in store
 
 
 def test_local_delete_clear_bump_mutation_tick():
-    """#2: a local delete / batch-delete / clear that splices or empties
-    store.history must bump historyMutationTick so an in-flight calibration
-    abandons its write-back instead of resurrecting the removed rows."""
+    """#2/#10: a local delete / batch-delete / clear that removes rows must
+    bump historyMutationTick (so an in-flight calibration abandons its
+    write-back instead of resurrecting them) — now via the shared helpers in
+    store.js, which bump the tick when the list actually changes."""
+    store = _read_repo_file("internal/web/static/js/store.js")
+    assert "this.historyMutationTick += 1;" in store
     item = _read_repo_file("internal/web/static/components/history-item.js")
-    assert "store.history.splice(idx, 1);" in item
-    assert "store.historyMutationTick += 1;" in item
+    assert "store.removeHistoryItems([eid])" in item
+    # The old hand-written splice + tick in the component are gone.
+    assert "store.history.splice(idx, 1);" not in item
     panel = _read_repo_file("internal/web/static/components/history-panel.js")
-    # batch delete path — bump follows the splice-out replace
-    assert "store.history = newHistory;" in panel
-    assert "store.historyMutationTick += 1;" in panel
-    # clear-all path
-    assert "self.store.historyMutationTick += 1;" in panel
+    assert "store.removeHistoryItems(selectedIds)" in panel
+    assert "self.store.clearHistory()" in panel
+    assert "store.history = newHistory;" not in panel
 
 
-def test_ws_history_updated_bumps_tick_only_on_new_data():
-    """#3: history_updated broadcasts that actually merge NEW data (a new
-    entry_id in the wholesale path, or a fresh/upserted row in the paged path)
-    bump historyMutationTick so an in-flight calibration abandons its write-back
-    instead of overwriting the concurrent new item.  A pure display refresh
-    (same entries) does not bump."""
+def test_ws_history_updated_bumps_tick_on_new_data():
+    """#1/#10: history_updated broadcasts that actually merge NEW data — a new
+    entry_id OR a same-id content/pin/timestamp change in the wholesale path, or
+    any fresh/upserted row in the paged merge — bump historyMutationTick so an
+    in-flight calibration abandons its write-back instead of overwriting the
+    concurrent new item.  A pure display refresh (same entries, unchanged) does
+    not bump."""
     ws = _read_repo_file("internal/web/static/js/ws.js")
     assert "var histMutated = false;" in ws
-    # Both merge paths bump the tick.
-    assert ws.count("store.historyMutationTick += 1;") >= 4
-    # Wholesale path detects a new entry_id; paged path detects fresh + upsert.
-    assert "!knownIds[histIn.entry_id]" in ws
-    assert "if (fresh.length > 0) {" in ws
-    assert "incChanged = true;" in ws
+    # Wholesale path indexes the current rows by id and detects both a
+    # genuinely-new entry and a same-id row change (pin toggle / peer edit).
+    assert "var oldById = {};" in ws
+    assert "if (!oldRow) {" in ws
+    assert "rowChanged = true;" in ws
+    # The paged merge delegates to the shared helper (which bumps the tick).
+    assert "store.mergeHistoryFresh(incoming)" in ws
+    # Deletes / clears still bump (the delete handler keeps its unconditional
+    # bump so an in-flight calibration can't resurrect rows).
+    assert "store.historyMutationTick += 1;" in ws
+    # The shared merge helper itself detects in-place changes.
+    store = _read_repo_file("internal/web/static/js/store.js")
+    assert "incChanged = true;" in store
 
 
 def test_mobile_calibration_throttled_and_failure_pins_min():
-    """#4/#7: mobile's full-history calibration is throttled to one per 30s
+    """#4/#7/#9: mobile's full-history calibration is throttled to one per 30s
     (_lastCalibMobile) — inside the window it only pins the cursor — and its
     failure path pins Math.min(length, total) (aligned with the shared store
-    version) instead of the ghost-inflated length."""
+    version) instead of the ghost-inflated length.  Every terminal state stamps
+    the budget (success AND failure), so a persistently-failing calibration
+    backs off instead of re-entering a full download on every poll."""
     html = _read_repo_file("internal/web/static/mobile.html")
     assert "var _lastCalibMobile = null;" in html
     assert "(_lastCalibMobile && (calibNow - _lastCalibMobile) < 30000)" in html
-    # Success stamps the budget; throttle + failure paths pin min(length,total).
-    assert "_lastCalibMobile = Date.now();" in html
+    # Success AND failure paths both stamp the budget.
+    assert html.count("_lastCalibMobile = Date.now();") >= 2
     assert html.count("historyOffset = Math.min(historyItems.length, total);") >= 2
-    assert "_lastCalibMobile = Date.now();" in html
 
 
 def test_quickpaste_safety_net_does_not_clobber_pasted_state():
@@ -1168,6 +1186,10 @@ def test_quickpaste_safety_net_does_not_clobber_pasted_state():
     assert "if (state.pastedOk) {" in html
     # The banner branch only runs when a paste did NOT succeed.
     assert html.index("if (state.pastedOk) {") < html.index("Could not auto-close")
+    # Both paste success paths set pastedOk — the --app window success path AND
+    # the plain-tab showPastedFallback — so a successful paste is never
+    # clobbered by the banner even when the --app close POST goes unconfirmed.
+    assert html.count("state.pastedOk = true;") >= 2
 
 
 def test_sweep_quick_paste_keeps_entry_when_rmtree_incomplete(monkeypatch, tmp_path):
@@ -1231,3 +1253,135 @@ def test_sweep_quick_paste_retries_rmtree_once(tmp_path, monkeypatch):
     assert state["n"] == 2, "rmtree is retried once after a failure"
     assert 1 not in app._quickpaste_instances
     assert not os.path.exists(profile_dir)
+
+
+# ── v1.0.33 adversarial-self-review fixes (#4/#5/#7/#10) ─────────────────
+
+def test_history_mutation_helpers_consolidate_sites():
+    """#10: store.js exposes the shared history-mutation helpers and every
+    hand-written splice/unshift/Object.assign history-change site in
+    history-item.js, history-panel.js, ws.js and app.js routes through them —
+    so every future history change is guaranteed to bump historyMutationTick
+    (no new holes can be opened by a future hand-written mutation)."""
+    store = _read_repo_file("internal/web/static/js/store.js")
+    assert "removeHistoryItems: function (ids)" in store
+    assert "clearHistory: function ()" in store
+    assert "mergeHistoryFresh: function (items)" in store
+
+    ws = _read_repo_file("internal/web/static/js/ws.js")
+    assert "store.removeHistoryItems(data.entry_ids)" in ws
+    assert "store.clearHistory()" in ws
+    assert "store.mergeHistoryFresh(incoming)" in ws
+
+    app = _read_repo_file("internal/web/static/js/app.js")
+    assert "store.mergeHistoryFresh(items)" in app
+    # The hand-written unshift merge is gone — the helper owns it now.
+    assert "store.history.unshift(fresh" not in app
+
+
+def test_sweep_quick_paste_never_evicts_live_popup_with_missing_profile(tmp_path):
+    """#4: a LIVE popup is never evicted, even when its profile_dir is missing
+    or doesn't exist — evicting it would orphan the running process (its done
+    POST would then find no entry to tear down).  Only DEAD processes are
+    evaluated for profile cleanup."""
+    from src.main import Application
+
+    class LiveProc:
+        pid = 444
+        def poll(self):
+            return None  # still running
+
+    app = Application.__new__(Application)
+    app._quickpaste_instances = {
+        1: {"proc": LiveProc(), "profile_dir": ""},
+        2: {"proc": LiveProc(), "profile_dir": str(tmp_path / "nonexistent")},
+    }
+    app._sweep_quick_paste_instances()
+    assert 1 in app._quickpaste_instances
+    assert 2 in app._quickpaste_instances
+
+
+def test_sweep_quick_paste_gives_up_after_retry_cap(tmp_path, monkeypatch):
+    """#7: a dead entry whose profile can NEVER be removed (a permanently-
+    locked dir) is dropped with a log after MAX_SWEEP_ATTEMPTS sweeps instead
+    of being retried forever — the residue is left for system cleanup rather
+    than repeated I/O on every sweep."""
+    from src.main import Application
+
+    profile_dir = str(tmp_path / "locked_forever")
+    os.makedirs(profile_dir, exist_ok=True)
+
+    class DeadProc:
+        pid = 999
+        def poll(self):
+            return 1  # exited
+
+    def stuck_rmtree(path, ignore_errors=False):
+        raise OSError("file still in use (permanent lock)")
+
+    app = Application.__new__(Application)
+    app._quickpaste_instances = {
+        1: {"proc": DeadProc(), "profile_dir": profile_dir},
+    }
+    monkeypatch.setattr("src.main.shutil.rmtree", stuck_rmtree)
+    for _ in range(3):
+        app._sweep_quick_paste_instances()
+    # After 3 failed sweeps the entry is dropped (bounded leak).
+    assert 1 not in app._quickpaste_instances
+    assert os.path.exists(profile_dir)
+
+
+def test_close_quick_paste_keeps_entry_when_profile_removal_fails(monkeypatch, tmp_path):
+    """#5: _close_quick_paste must NOT pop the entry before the profile is
+    removed — a partial/failed rmtree keeps the entry registered so the sweep
+    (with its retry cap) can reclaim the profile later, instead of leaking a
+    partial tree forever."""
+    import os
+
+    from src.main import Application
+
+    profile_dir = str(tmp_path / "locked_profile")
+    os.makedirs(profile_dir, exist_ok=True)
+
+    class DeadProc:
+        pid = 998
+        def poll(self):
+            return 1  # exited → no kill attempted
+
+    def stuck_rmtree(path, ignore_errors=False):
+        raise OSError("file still in use")
+
+    app = Application.__new__(Application)
+    app._quickpaste_instances = {
+        3: {"proc": DeadProc(), "profile_dir": profile_dir},
+    }
+    monkeypatch.setattr("src.main.shutil.rmtree", stuck_rmtree)
+    app._close_quick_paste(3)
+    # Entry kept so the sweep can retry the removal.
+    assert 3 in app._quickpaste_instances
+    assert os.path.exists(profile_dir)
+
+
+def test_close_quick_paste_pops_only_after_profile_removed(monkeypatch, tmp_path):
+    """#5: after a successful profile removal _close_quick_paste pops the
+    entry; a subsequent done POST for the same id is a clean no-op."""
+    from src.main import Application
+
+    profile_dir = str(tmp_path / "clean_profile")
+    os.makedirs(profile_dir, exist_ok=True)
+
+    class DeadProc:
+        pid = 997
+        def poll(self):
+            return 1  # exited → no kill attempted
+
+    app = Application.__new__(Application)
+    app._quickpaste_instances = {
+        4: {"proc": DeadProc(), "profile_dir": profile_dir},
+    }
+    app._close_quick_paste(4)
+    assert 4 not in app._quickpaste_instances
+    assert not os.path.exists(profile_dir)
+    # Second done POST for the same id is a no-op (entry already gone).
+    app._close_quick_paste(4)
+    assert app._quickpaste_instances == {}

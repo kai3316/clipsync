@@ -1873,10 +1873,12 @@ class Application:
         owns, thanks to ``start_new_session``).  The instance's private
         ``--user-data-dir`` is removed afterwards.  A plain-tab fallback has no
         process, so this is a no-op there — the page's "✓ Pasted" confirmation
-        carries it.  Idempotent: the slot is removed before terminating, so a
-        second done POST for the same id cannot double-kill.  A missing or
-        non-numeric instance id is a strict no-op (log only) — we never guess
-        which popup to close.
+        carries it.  Idempotent: the slot is removed only AFTER the process is
+        killed AND its profile is removed, so a second done POST for the same
+        id cannot double-kill; a profile that fails to remove leaves the entry
+        registered for the sweep to retry (bounded by the sweep's retry cap)
+        instead of leaking a partial tree.  A missing or non-numeric instance
+        id is a strict no-op (log only) — we never guess which popup to close.
         """
         # The page echoes its instance id back as a JSON number, but on the
         # wire it can arrive as an int or an int-like string (older pages / a
@@ -1892,18 +1894,30 @@ class Application:
         except (TypeError, ValueError):
             logger.debug("Quick Paste done POST with invalid instance id %r — ignoring", instance_id)
             return
-        entry = self._quickpaste_instances.pop(instance_id, None)
+        entry = self._quickpaste_instances.get(instance_id)
         if entry is None:
             return
         proc = entry.get("proc")
         profile_dir = entry.get("profile_dir", "")
         if proc is not None and proc.poll() is None:
             self._kill_quick_paste_proc(proc, instance_id)
+        removed_profile = True
         if profile_dir:
             try:
-                shutil.rmtree(profile_dir, ignore_errors=True)
+                shutil.rmtree(profile_dir, ignore_errors=False)
             except Exception:
-                pass
+                # Partial / failed removal — keep the entry so the sweep (with
+                # its retry cap) reclaims the profile later instead of leaking
+                # a partial tree forever.  The process is already dead / being
+                # killed, so leaving the entry registered is safe and
+                # idempotent (a second done POST for the same id retries).
+                removed_profile = False
+                logger.debug(
+                    "Quick Paste profile cleanup incomplete for instance %s — "
+                    "kept for sweep retry", instance_id, exc_info=True,
+                )
+        if removed_profile:
+            self._quickpaste_instances.pop(instance_id, None)
 
     def _sweep_quick_paste_instances(self) -> None:
         """Reclaim Quick Paste instances whose process already exited.
@@ -1913,30 +1927,44 @@ class Application:
         instance entry and private ``--user-data-dir`` profile would leak.
         Called before opening a new popup (and folded into shutdown cleanup).
         Only entries whose process has already exited are touched; live popups
-        are never disturbed here.
+        are never disturbed here — a LIVE popup is left alone whatever its
+        profile state, so a missing/absent profile never evicts a running
+        popup's entry (that would orphan the process, whose done POST would
+        then find no entry to tear down).
 
         A dead popup's profile removal can fail PART-WAY when a leftover child
         of the popup (a browser subprocess) still holds a lock on the dir.
         Those entries are KEPT for the next sweep to retry instead of being
         dropped, so a partially-deleted profile is never leaked and forgotten.
         If the popup's own process is still lingering (poll() is None), it is
-        given a best-effort kill before the retry.
+        given a best-effort kill before the retry.  A dead entry whose profile
+        still cannot be removed after MAX_SWEEP_ATTEMPTS sweeps is dropped with
+        a log — a permanently-locked profile (an orphaned child that will never
+        release the dir) must not be hammered forever; the residue is left for
+        the OS / user cleanup.
         """
+        MAX_SWEEP_ATTEMPTS = 3
         for iid, entry in list(self._quickpaste_instances.items()):
             proc = entry.get("proc")
             profile_dir = entry.get("profile_dir", "")
+            # Live popup first — never evict a running instance regardless of
+            # its profile state (a missing profile would otherwise make the
+            # check below drop the entry and orphan the live process).
+            if proc is not None and proc.poll() is None:
+                continue  # still running — leave it alone
             if not profile_dir or not os.path.exists(profile_dir):
                 # Nothing left to reclaim — drop the entry.
                 self._quickpaste_instances.pop(iid, None)
                 continue
-            if proc is not None and proc.poll() is None:
-                continue  # still running — leave it alone
             # The popup's process has exited.  Try to remove its profile; a
             # leftover child can make rmtree fail part-way.  If the popup's own
             # process is still lingering, kill it first, then retry once.  When
             # the dir still can't be fully removed, keep the entry for the next
-            # sweep instead of leaking the partial tree.
+            # sweep instead of leaking the partial tree — but only up to a cap;
+            # past it, drop the entry with a log so we stop repeating I/O on a
+            # profile that will never be released.
             removed = False
+            attempts = entry.get("sweep_attempts", 0) + 1
             for _ in range(2):
                 if proc is not None and proc.poll() is None:
                     self._kill_quick_paste_proc(proc, iid)
@@ -1947,10 +1975,20 @@ class Application:
                 except Exception:
                     removed = False
             if not removed:
-                logger.debug(
-                    "Quick Paste profile cleanup incomplete for instance %s — retrying next sweep",
-                    iid, exc_info=True,
-                )
+                entry["sweep_attempts"] = attempts
+                if attempts >= MAX_SWEEP_ATTEMPTS:
+                    logger.warning(
+                        "Quick Paste profile cleanup gave up after %d sweeps "
+                        "for instance %s (%s) — residue left for system cleanup",
+                        attempts, iid, profile_dir,
+                    )
+                    self._quickpaste_instances.pop(iid, None)
+                else:
+                    logger.debug(
+                        "Quick Paste profile cleanup incomplete for instance %s "
+                        "(attempt %d) — retrying next sweep",
+                        iid, attempts, exc_info=True,
+                    )
                 continue
             self._quickpaste_instances.pop(iid, None)
 
@@ -2025,15 +2063,36 @@ class Application:
                             proc.kill()
                         except Exception:
                             pass
-        # Reclaim each private profile (best-effort) and clear the dict.
+        # Reclaim each private profile (best-effort) and clear the dict.  A
+        # late kill can leave a leftover child still holding a lock on the
+        # profile, so retry the removal once after a short beat.  An entry
+        # whose profile still cannot be removed is KEPT (not dropped) so the
+        # next startup's sweep retries it, and logged so the residue isn't
+        # silent — the kill round already tore the process down, so the leftover
+        # lock is transient and the startup sweep will reclaim it.
         for iid in list(self._quickpaste_instances.keys()):
-            entry = self._quickpaste_instances.pop(iid, None)
+            entry = self._quickpaste_instances.get(iid)
             profile_dir = entry.get("profile_dir", "") if entry else ""
-            if profile_dir:
+            if not profile_dir:
+                self._quickpaste_instances.pop(iid, None)
+                continue
+            removed = False
+            for _ in range(2):
                 try:
-                    shutil.rmtree(profile_dir, ignore_errors=True)
+                    shutil.rmtree(profile_dir, ignore_errors=False)
+                    removed = True
+                    break
                 except Exception:
-                    pass
+                    removed = False
+                    time.sleep(0.1)
+            if removed:
+                self._quickpaste_instances.pop(iid, None)
+            else:
+                logger.warning(
+                    "Quick Paste profile cleanup failed at shutdown for "
+                    "instance %s (%s) — left for next-startup sweep",
+                    iid, profile_dir,
+                )
 
     def _paste_nth(self, n: int) -> None:
         """Paste the nth history item (1-indexed) directly to the clipboard."""

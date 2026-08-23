@@ -900,11 +900,12 @@ body::before {
   var historyLoading = false;
   var historyOffset = 0;
   var historyHasMore = true;
-  // Timestamp of the last COMPLETED full-history calibration (limit=total).
-  // A full download is expensive, so it is throttled to one per 30s per
-  // client — inside the window the cursor is pinned but no refetch happens.
-  // Only a committed write-back stamps it; a failure leaves it stale so the
-  // next poll retries immediately (mirrors store.calibrateHistory).
+  // Timestamp of the last full-history calibration (limit=total).  A full
+  // download is expensive, so it is throttled to one per 30s per client —
+  // inside the window the cursor is pinned but no refetch happens.  EVERY
+  // terminal state (success write-back and failure) stamps it, so a
+  // persistently-failing calibration backs off instead of re-entering a full
+  // download on every poll (mirrors store.calibrateHistory).
   var _lastCalibMobile = null;
 
   // Reconcile a page-1 snapshot into the already-loaded list (dedupe by
@@ -1040,8 +1041,10 @@ body::before {
                 // Calibration failed — pin the cursor to min(length, total) so
                 // Load-more can't skip live entries (mirrors the shared
                 // function's failure path) and re-render so the list reflects
-                // the current state.  The budget is NOT consumed, so the next
-                // poll retries immediately.
+                // the current state.  A terminal state: stamp the throttle
+                // budget so a persistently-failing server doesn't re-enter a
+                // full download on every poll.
+                _lastCalibMobile = Date.now();
                 historyOffset = Math.min(historyItems.length, total);
                 historyHasMore = (total != null) ? (historyItems.length < total) : historyHasMore;
                 renderHistory();
