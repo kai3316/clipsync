@@ -363,8 +363,11 @@
             // identical reconnect doesn't spuriously invalidate an in-flight
             // calibration, while a real change still does).
             store.replaceHistory(items);
-            store.historyHasMore = (res && res.total != null) ? (res.offset + items.length < res.total) : false;
-            store.historyOffset = items.length;
+            // Cursor tracks the VISIBLE list length (consistent with the WS
+            // wholesale path and the calibration write-back), so a filtered
+            // null row can't skew every subsequent cursor-shrink operation.
+            store.historyHasMore = (res && res.total != null) ? (store.history.length < res.total) : false;
+            store.historyOffset = store.history.length;
           }
           return items;
         });

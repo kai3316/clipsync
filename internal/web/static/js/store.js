@@ -1055,10 +1055,13 @@
       return matched;
     },
 
-    // Compare two row dicts on every key (for-in, mirroring mergeHistoryFresh's
-    // change detection) — a change in ANY field, current or future, counts as a
+    // Compare two row dicts on every key, BOTH directions (stronger than
+    // mergeHistoryFresh's one-directional incoming-only compare): a change in
+    // any field — current or future, added on either side — counts as a
     // mutation.  An explicit field list would silently diverge from the server
-    // serializer the day a new field is added.
+    // serializer the day a new field is added.  NB: do not store client-only
+    // enumerable fields on history rows — the two-directional compare would
+    // treat them as perpetual changes.
     _rowDiffer: function (a, b) {
       if (!a || !b) return true;
       for (var k in a) {

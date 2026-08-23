@@ -2,6 +2,15 @@
 
 All notable changes to ClipSync are documented in this file.
 
+## [1.0.44] — 2026-08-23
+
+### History (cursor convention unified)
+- **Every wholesale replace now sets the load-more cursor from the visible (post-null-filter) list length** — the invariant every cursor-shrink path (delete, clear, calibration) depends on. The page-1 reload, WebSocket wholesale path, and calibration write-back all agree; a filtered null slot (if one ever arrives from a future serializer) is simply re-requested once and deduped.
+- `_rowDiffer`'s doc now accurately describes the two-directional compare (stronger than the merge path's one-directional check) and warns against storing client-only fields on history rows.
+
+### Tests
+- Full suite 433 passed / 3 skipped.
+
 ## [1.0.43] — 2026-08-23
 
 ### History (null safety & change detection)
