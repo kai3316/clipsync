@@ -33,9 +33,10 @@
   // Safety valve for the _historyCalibrating lock: an old webview without
   // AbortController can leave the calibration fetch pending forever, which
   // would otherwise wedge the lock permanently.  After this window the
-  // calibration is treated as a terminal state: the generation advances (so
-  // the late fetch, if it ever settles, is gen-guarded and cannot write back),
-  // the lock clears so the next poll can retry, and the budget is consumed.
+  // calibration unwedges the lock and consumes the budget so the next poll can
+  // retry — but it does NOT advance the generation: a slow-but-valid response
+  // that settles later still passes the gen guard and writes back (staleness
+  // vs. newer data is the mutation tick's job, not the timer's).
   var CALIBRATION_TIMEOUT_MS = 16000;
 
   // Local i18n helper — the store is a plain object (not a Vue component),

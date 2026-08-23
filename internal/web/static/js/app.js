@@ -365,12 +365,18 @@
             // elsewhere, a clip edited on another device) still bumps the guard.
             var changed = items.length !== store.history.length;
             if (!changed) {
+              // Full-field compare (mirrors the ws.js wholesale path): a change
+              // in ANY user-visible field — paste_count, timestamp, source
+              // metadata, not just entry_id/pinned/preview — must count as a
+              // mutation so an in-flight calibration can't write back stale data.
               for (var ci = 0; ci < items.length; ci++) {
                 var curRow = store.history[ci];
                 var incRow = items[ci];
-                if (!curRow || curRow.entry_id !== incRow.entry_id ||
-                    curRow.pinned !== incRow.pinned ||
-                    curRow.text_preview !== incRow.text_preview) {
+                if (!incRow || !curRow) {
+                  changed = true;
+                  break;
+                }
+                if (JSON.stringify(curRow) !== JSON.stringify(incRow)) {
                   changed = true;
                   break;
                 }

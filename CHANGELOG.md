@@ -2,6 +2,15 @@
 
 All notable changes to ClipSync are documented in this file.
 
+## [1.0.40] — 2026-08-23
+
+### History (reconcile — change detection)
+- **The page-1 reload's change detection is now full-field** (mirroring the WebSocket merge path): a reconnect that changes paste_count, timestamp, or source metadata — not just pin/preview — bumps the reconcile guard, so an in-flight calibration can't write back stale data over fresher rows. A malformed (null) row in the response is treated as a change instead of throwing.
+- The store module header's description of the calibration timeout now matches the code and tests (it unwedges the lock without advancing the generation).
+
+### Tests
+- Full suite 433 passed / 3 skipped.
+
 ## [1.0.39] — 2026-08-23
 
 ### History (pin helpers — polish)
