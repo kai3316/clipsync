@@ -336,12 +336,13 @@ class SyncManager:
         if not content or content.is_empty():
             return
 
-        # Skip accidental clipboard noise: whitespace-only or single-
-        # character copies that terminals often emit on click/select.
+        # Skip accidental clipboard noise: whitespace-only copies that
+        # terminals often emit on click/select.  A single character is a
+        # legitimate copy (a digit or letter) and must not be dropped.
         if ContentType.TEXT in content.types:
             text = content.types[ContentType.TEXT].decode("utf-8", errors="replace")
             stripped = text.strip()
-            if len(stripped) <= 1:
+            if not stripped:
                 return
 
         # Retrieve source-app info once (captured by the monitor before the

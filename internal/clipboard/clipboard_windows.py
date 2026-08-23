@@ -122,7 +122,14 @@ class _ClipboardReader(ClipboardReader):
         # thread that holds the clipboard open (see _CLIPBOARD_LOCK).
         with _CLIPBOARD_LOCK:
             if not user32.OpenClipboard(None):
-                return content
+                # Another app may be holding the clipboard open — retry a few
+                # times before giving up (the writer side does the same).
+                for _ in range(3):
+                    time.sleep(0.05)
+                    if user32.OpenClipboard(None):
+                        break
+                else:
+                    return content
 
             try:
                 fmt = 0
@@ -347,7 +354,7 @@ class _ClipboardReader(ClipboardReader):
             else:
                 # ANSI — read until double null
                 end = file_list_start
-                while end < len(raw):
+                while end + 1 < len(raw):
                     if raw[end] == 0 and raw[end + 1] == 0:
                         break
                     end += 1

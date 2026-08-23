@@ -144,7 +144,7 @@ class ClipboardHistoryDB:
     DEDUP_WINDOW = 2.0
 
     # Fields encrypted at rest — excludes timestamp and content_type
-    _ENCRYPTED_FIELDS = ("types", "text_preview", "source_device")
+    _ENCRYPTED_FIELDS = ("types", "text_preview", "source_device", "source_title", "source_app")
 
     # ── schema ──────────────────────────────────────────────────────
 
