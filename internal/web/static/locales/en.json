@@ -423,6 +423,10 @@
   "web.push_sent": "Sent!",
   "web.copy_hint": "Tap to copy",
   "web.copied": "Copied!",
+  "web.phone_files_hint": "Scan the QR or open this URL on your phone, then use the Files tab to view and download files sent from this computer.",
+  "web.send_file_to_phone": "Send file to phone",
+  "web.send_file_to_phone_msg": "Sent to phone: {name}. Open the Files tab on your phone's web page to download it.",
+  "web.send_file_to_phone_fail": "Could not copy the file to the phone-visible folder.",
   "web.open_on_desktop": "Open on Desktop",
   "web.select_device": "Send to...",
   "web.cancel": "Cancel",
@@ -647,7 +651,7 @@
   "settings.title": "Settings",
   "settings.appearance": "Appearance",
   "settings.preferences": "Preferences",
-  "settings.sound": "Sound Effects",
+  "settings.sound": "Notification sound",
   "settings.animation": "Animations",
   "settings.ui_mode": "UI Mode",
   "settings.data": "Data Management",
@@ -989,5 +993,8 @@
   "chat.mute": "Mute notifications for this device",
   "chat.unmute": "Unmute notifications for this device",
   "chat.muted_peer": "Notifications muted for this device",
-  "chat.unmuted_peer": "Notifications enabled for this device"
+  "chat.unmuted_peer": "Notifications enabled for this device",
+  "chat.mark_read": "Mark as read",
+  "chat.close_session": "Close conversation",
+  "chat.close_confirm": "Close the conversation with {name}? The chat history stays on both devices until you re-chat."
 }

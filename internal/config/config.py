@@ -101,7 +101,11 @@ class Config:
     # UI preferences
     ui_backend: str = "webview"        # "webview" or "ctk"
     ui_animation_enabled: bool = True
-    sound_enabled: bool = False
+    # "通知提示音" — the user-facing master notification switch.  On some
+    # platforms a notification always plays a sound, so OFF means no
+    # notifications at all, not just silence.  Default ON so fresh installs
+    # keep getting notifications (see Application._notify).
+    sound_enabled: bool = True
 
     # Data management
     favorites_path: str = ""           # empty = default location

@@ -1310,6 +1310,14 @@ class WebServer:
                         ("__I18N__", _escape_script_json(i18n_json)),
                         ("__DEVICE_ID__", _js_string(cfg.device_id)),
                         ("__DEVICE_NAME__", _js_string(cfg.device_name)),
+                        # Fresh-install flag: the web onboarding wizard is gated
+                        # by a localStorage flag that a config reset can't clear,
+                        # while the desktop language picker is gated by
+                        # cfg.language_chosen — the two could disagree after a
+                        # factory reset, leaving the user with the language
+                        # picker but no wizard.  When the config looks fresh
+                        # (no language chosen yet), re-surface the web wizard.
+                        ("__FRESH__", "true" if not getattr(cfg, "language_chosen", False) else "false"),
                     ]
                     for placeholder, value in replacements:
                         if placeholder in content:

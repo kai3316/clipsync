@@ -64,9 +64,14 @@
           !this.sendingText;
       },
 
-      // Most-recently-active first.
+      // Most-recently-active first.  Closed conversations are hidden — a
+      // closed session is a finished one (right-click "close/delete"), and the
+      // backend may still echo it as "closed" on the next snapshot.
       sortedSessions: function () {
-        var list = this.store.chatSessions.slice();
+        var list = this.store.chatSessions.filter(function (s) {
+          return s && s.status !== 'closed' && s.status !== 'declined' &&
+            s.status !== 'declined_remote';
+        });
         list.sort(function (a, b) {
           return (b.last_activity_ts || 0) - (a.last_activity_ts || 0);
         });
@@ -142,7 +147,7 @@
           '<div v-else class="chat-session-list">' +
             '<div v-for="s in sortedSessions" :key="s.session_id" class="chat-session-row"' +
               ' :class="{ \'chat-session-row--active\': store.activeChatSession === s.session_id }"' +
-              ' @click="openSession(s)">' +
+              ' @click="openSession(s)" @contextmenu.prevent="openSessionMenu(s, $event)">' +
               '<span class="chat-session-row__dot"' +
                 ' :class="s.online ? \'chat-session-row__dot--on\' : \'chat-session-row__dot--off\'"></span>' +
               '<div class="chat-session-row__body">' +
@@ -348,6 +353,20 @@
           muted ? this.t('chat.muted_peer') : this.t('chat.unmuted_peer'),
           1500
         );
+      },
+
+      // Right-click a session row: open the shared context menu in
+      // chat-session mode (mute / mark-read / close-delete).
+      openSessionMenu: function (session, e) {
+        if (!session) return;
+        this.store.contextMenu = {
+          visible: true,
+          x: e.clientX,
+          y: e.clientY,
+          mode: 'chat-session',
+          target: session,
+          opener: e.currentTarget || e.target,
+        };
       },
 
       startChat: function (device) {

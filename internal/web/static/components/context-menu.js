@@ -72,6 +72,16 @@
         return cm.mode === 'device' ? cm.target : null;
       },
 
+      targetSession: function () {
+        var cm = this.store.contextMenu || {};
+        return cm.mode === 'chat-session' ? cm.target : null;
+      },
+
+      isSessionMuted: function () {
+        var s = this.targetSession;
+        return !!(s && this.store.isChatMuted(s.peer_id));
+      },
+
       isPinned: function () {
         var t = this.targetItem;
         return t && t.pinned;
@@ -522,6 +532,79 @@
           .catch(function () { self.closeMenu(); });
       },
 
+      // ── Chat session actions ────────────────────────────────────
+
+      toggleSessionMute: function () {
+        var s = this.targetSession;
+        if (!s || !s.peer_id) return;
+        var muted = this.store.toggleChatMute(s.peer_id);
+        this.store.showToast(
+          muted ? this.t('chat.muted_peer') : this.t('chat.unmuted_peer'),
+          1500
+        );
+        this.closeMenu();
+      },
+
+      markSessionRead: function () {
+        var s = this.targetSession;
+        if (!s) return;
+        var idx = this.store.chatSessions.findIndex(function (x) {
+          return x.session_id === s.session_id;
+        });
+        if (idx !== -1) {
+          this.store.chatSessions[idx].unread = 0;
+          this.store.recalcChatUnread();
+        }
+        if (window.ClipsyncAPI && window.ClipsyncAPI.chatSessionAction) {
+          window.ClipsyncAPI.chatSessionAction(s.session_id, 'read').catch(function () {});
+        }
+        this.closeMenu();
+      },
+
+      // Close (delete) a conversation: ask first, then close + drop it from
+      // the local session list so it no longer clutters the sidebar.
+      closeSession: function () {
+        var s = this.targetSession;
+        if (!s) return;
+        var sid = s.session_id;
+        var self = this;
+        this.closeMenu();
+        this.store.confirm(
+          this.t('chat.close_session'),
+          this.t('chat.close_confirm', { name: s.peer_name || '' })
+        )
+          .then(function () {
+            if (window.ClipsyncAPI && window.ClipsyncAPI.chatSessionAction) {
+              window.ClipsyncAPI.chatSessionAction(sid, 'close').then(function (res) {
+                if (res && res.ok === false) {
+                  self.store.showToast(self.t('chat.err_send_failed'), 2500);
+                  return;
+                }
+                self._dropSession(sid);
+              }).catch(function (e) {
+                console.error('[ClipSync] Failed to close chat session:', e);
+              });
+            } else {
+              self._dropSession(sid);
+            }
+          })
+          .catch(function () {});
+      },
+
+      _dropSession: function (sid) {
+        if (this.store.activeChatSession === sid) {
+          this.store.activeChatSession = '';
+          this.store.chatMessages.splice(0, this.store.chatMessages.length);
+        }
+        var idx = this.store.chatSessions.findIndex(function (x) {
+          return x.session_id === sid;
+        });
+        if (idx !== -1) {
+          this.store.chatSessions.splice(idx, 1);
+        }
+        this.store.recalcChatUnread();
+      },
+
       // ── Event handlers ────────────────────────────────────────────
 
       onDocumentClick: function (e) {
@@ -711,6 +794,23 @@
           '<div v-if="!isLocal" class="context-menu__item context-menu__item--danger" role="menuitem" tabindex="-1" :aria-disabled="!targetDevice" @click="forgetDevice">' +
             '<span class="context-menu__item-icon">🗑</span>' +
             '<span class="context-menu__item-label">{{ t(\'context.forget_device\') }}</span>' +
+          '</div>' +
+        '</template>' +
+
+        '<!-- Chat session mode -->' +
+        '<template v-if="store.contextMenu.mode === \'chat-session\'">' +
+          '<div class="context-menu__item" role="menuitem" tabindex="-1" :aria-disabled="!targetSession" @click="toggleSessionMute">' +
+            '<span class="context-menu__item-icon">{{ isSessionMuted ? \'🔔\' : \'🔕\' }}</span>' +
+            '<span class="context-menu__item-label">{{ isSessionMuted ? t(\'chat.unmute\') : t(\'chat.mute\') }}</span>' +
+          '</div>' +
+          '<div v-if="(targetSession.unread || 0) > 0" class="context-menu__item" role="menuitem" tabindex="-1" :aria-disabled="!targetSession" @click="markSessionRead">' +
+            '<span class="context-menu__item-icon">✓</span>' +
+            '<span class="context-menu__item-label">{{ t(\'chat.mark_read\') }}</span>' +
+          '</div>' +
+          '<div class="context-menu__divider divider"></div>' +
+          '<div class="context-menu__item context-menu__item--danger" role="menuitem" tabindex="-1" :aria-disabled="!targetSession" @click="closeSession">' +
+            '<span class="context-menu__item-icon">🗑</span>' +
+            '<span class="context-menu__item-label">{{ t(\'chat.close_session\') }}</span>' +
           '</div>' +
         '</template>' +
       '</div>',

@@ -321,6 +321,18 @@ class PairingManager:
             self._pending_pairings.pop(peer_id, None)
             self._pairing_status[peer_id] = PAIRING_STATUS_CANCELLED
 
+    def discard_pending_pairing(self, peer_id: str):
+        """Drop a pending pairing for *peer_id* entirely (no status change).
+
+        Used when a connection that auto-generated a shared code turned out to
+        be a consent-gated chat connection — chatting with an unpaired device
+        must not surface as a pairing request.  No-op when nothing is pending.
+        """
+        with self._lock:
+            self._pending_pairings.pop(peer_id, None)
+            self._pairing_attempts.pop(peer_id, None)
+            self._pairing_status.pop(peer_id, None)
+
     def unpair_peer(self, peer_id: str):
         """Mark a paired peer as unpaired without removing it."""
         with self._lock:

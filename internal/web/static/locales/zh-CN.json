@@ -423,6 +423,10 @@
   "web.push_sent": "已发送！",
   "web.copy_hint": "点击复制",
   "web.copied": "已复制！",
+  "web.phone_files_hint": "手机扫码或打开此地址,在「文件」页可查看和下载电脑发来的文件。",
+  "web.send_file_to_phone": "发送文件到手机",
+  "web.send_file_to_phone_msg": "已发送到手机:{name}。请在手机网页的「文件」页中下载。",
+  "web.send_file_to_phone_fail": "无法将文件复制到手机可见的文件夹。",
   "web.open_on_desktop": "在电脑上打开",
   "web.select_device": "发送到...",
   "web.cancel": "取消",
@@ -647,7 +651,7 @@
   "settings.title": "设置",
   "settings.appearance": "外观",
   "settings.preferences": "偏好设置",
-  "settings.sound": "音效",
+  "settings.sound": "通知提示音",
   "settings.animation": "动画",
   "settings.ui_mode": "界面模式",
   "settings.data": "数据管理",
@@ -989,5 +993,8 @@
   "chat.mute": "静音此设备的通知",
   "chat.unmute": "取消此设备的静音",
   "chat.muted_peer": "已静音此设备的消息通知",
-  "chat.unmuted_peer": "已恢复此设备的消息通知"
+  "chat.unmuted_peer": "已恢复此设备的消息通知",
+  "chat.mark_read": "标记为已读",
+  "chat.close_session": "关闭会话",
+  "chat.close_confirm": "关闭与 {name} 的会话?聊天记录保留在双方设备上,再次聊天可恢复。"
 }

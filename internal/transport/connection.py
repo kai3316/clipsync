@@ -698,7 +698,16 @@ class TransportManager:
             except Exception:
                 pass
 
-    def connect_to_peer(self, peer_id: str, peer_name: str, address: str, port: int):
+    def connect_to_peer(self, peer_id: str, peer_name: str, address: str, port: int,
+                        no_auto_pairing: bool = False):
+        """Connect to *peer_id* at (address, port).
+
+        *no_auto_pairing* is set by the nearby-chat flow: an unpaired peer
+        connected purely for a consent-gated chat must NOT be auto-offered a
+        shared pairing code (chat has its own invite/accept + fingerprint
+        consent).  Default connections (clipboard sync, explicit pairing) keep
+        the auto shared-code pairing offer.
+        """
         with self._lock:
             # Clear rejected status — user explicitly wants to connect now.
             # Also clear any related IDs (hashed or real) so the incoming
@@ -814,7 +823,7 @@ class TransportManager:
                         real_peer_id, peer_name, peer_cert_pem,
                         paired=was_paired,
                     )
-                    if not was_paired:
+                    if not was_paired and not no_auto_pairing:
                         try:
                             shared_code = self._pairing_mgr.generate_shared_pairing_code(real_peer_id)
                             logger.info(

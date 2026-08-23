@@ -73,6 +73,11 @@
               '<img v-if="store.activeDialog.qr_data_url" :src="store.activeDialog.qr_data_url" ' +
                    'class="dialog-qr-img" :alt="t(\'settings_window.web_qr\')">' +
               '<p class="dialog-hint" v-if="store.activeDialog.url">{{ store.activeDialog.url }}</p>' +
+              '<p class="dialog-hint" style="margin-top:8px">{{ t(\'web.phone_files_hint\') }}</p>' +
+              '<button class="dialog-btn dialog-btn--secondary" @click="pickPhoneFile">' +
+                '{{ t(\'web.send_file_to_phone\') }}' +
+              '</button>' +
+              '<input type="file" ref="phoneFileInput" style="display:none" @change="onPhoneFilePicked">' +
             '</div>' +
 
             '<!-- progress -->' +
@@ -293,6 +298,42 @@
           try { document.execCommand('copy'); } catch (e) { /* ignore */ }
           document.body.removeChild(textarea);
         }
+      },
+
+      // "发送文件到手机": pick a local file and upload it into the web-shared
+      // directory — the same place the phone companion's Files tab lists, so
+      // the phone can download it after opening the QR URL.  Mirrors the
+      // desktop CTk _send_file_to_phone path, which webview lacked.
+      pickPhoneFile: function () {
+        if (this.$refs.phoneFileInput) this.$refs.phoneFileInput.click();
+      },
+
+      onPhoneFilePicked: function (e) {
+        var files = e.target.files;
+        if (!files || files.length === 0) return;
+        var self = this;
+        var file = files[0];
+        var uploading = true;
+        var toast = function (msg, type) {
+          self.store.showToast(msg, 2200, type || 'info');
+        };
+        ClipsyncAPI.uploadFile(file)
+          .then(function (res) {
+            uploading = false;
+            if (res && res.ok === false) {
+              toast(self.t('web.send_file_to_phone_fail'), 'error');
+              return;
+            }
+            toast(self.t('web.send_file_to_phone_msg', { name: file.name }), 'success');
+          })
+          .catch(function (err) {
+            uploading = false;
+            console.error('[ClipSync] send file to phone failed:', err);
+            toast(self.t('web.send_file_to_phone_fail'), 'error');
+          })
+          .finally(function () {
+            e.target.value = '';
+          });
       },
 
       formatSize: function (bytes) {

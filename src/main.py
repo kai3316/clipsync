@@ -1149,13 +1149,29 @@ class Application:
         # as frictionless as clipboard sync itself.  Unpaired strangers still
         # always ask for explicit consent.
         peer_id = invite.get("peer_id", "")
+        # A chat invite is its own consent flow (invite/accept + fingerprint);
+        # it must NOT also force a pairing request.  The connection handshake
+        # auto-generated a shared pairing code for this unpaired peer — drop
+        # it (and the web row) so chatting alone never surfaces as "wants to
+        # pair".  Paired peers have nothing pending to drop.
         try:
             if peer_id and self.pairing_mgr is not None \
-                    and self.pairing_mgr.is_peer_paired(peer_id):
+                    and not self.pairing_mgr.is_peer_paired(peer_id):
+                self.pairing_mgr.discard_pending_pairing(peer_id)
+                self._notified_pairings.pop(peer_id, None)
+                self._pairing_req_track.pop(peer_id, None)
+                self._push_web("broadcast", "pairing_resolved", {"peer_id": peer_id})
+        except Exception:
+            logger.debug("chat invite pairing cleanup failed", exc_info=True)
+        # Trusted-LAN direct chat: the invite is an internal session handshake,
+        # not a consent gate.  Any device reachable on the network can chat
+        # immediately — no accept/decline banner, no waiting for approval.
+        try:
+            if peer_id:
                 self._chat_respond_invite(sid, True)
                 return
         except Exception:
-            logger.debug("chat auto-accept check failed", exc_info=True)
+            logger.debug("chat auto-accept failed", exc_info=True)
         title = T("chat.notify_invite_title")
         message = T("chat.invite_banner_title", name=peer_name)
         if fp:
@@ -1240,7 +1256,7 @@ class Application:
             peer_id = self._chat_peer_id_for_sid(session_id) or ""
             muted = bool(peer_id and peer_id in self._chat_muted)
             if (kind == "text" and not outgoing and not self._dashboard_visible()
-                    and not muted):
+                    and not muted and getattr(self.cfg, "sound_enabled", True)):
                 peer_name = self._chat_peer_name_for_sid(session_id) or "?"
                 text = (entry_dict.get("text") or "")[:120]
                 notification_mgr.show(
@@ -1477,7 +1493,9 @@ class Application:
                 pass
             return None
         try:
-            self.transport_mgr.connect_to_peer(peer_id, peer_name, address, port)
+            self.transport_mgr.connect_to_peer(
+                peer_id, peer_name, address, port, no_auto_pairing=True,
+            )
         except Exception as e:
             logger.debug("chat start: connect failed: %s", e)
             return None
@@ -1656,7 +1674,9 @@ class Application:
             logger.warning("web chat start: no address for peer %s", peer_id[:12])
             return {"ok": False, "error": "peer_unreachable"}
         try:
-            self.transport_mgr.connect_to_peer(peer_id, peer_name, address, port)
+            self.transport_mgr.connect_to_peer(
+                peer_id, peer_name, address, port, no_auto_pairing=True,
+            )
         except Exception:
             logger.debug("web chat start: connect failed", exc_info=True)
             return {"ok": False, "error": "connect_failed"}
@@ -4182,17 +4202,20 @@ class Application:
         return bool(getattr(notification_mgr, "enabled", True))
 
     def _show_about(self) -> None:
-        """Open the Settings window's About panel (fallback to a notification)."""
+        """Show a compact About dialog — never dump the user into the whole
+        Settings window (the tray About is a quick look, not a settings dive)."""
         try:
-            self.open_settings(tab="about")
-        except Exception:
-            logger.debug("Could not open settings for About", exc_info=True)
             from internal.version import __version__
-            notification_mgr.show(
+            show_info(
+                self.root,
                 T("tray.about_title"),
-                f"ClipSync {__version__}\n\n{T('tray.about_message')}\n"
+                f"ClipSync  {__version__}\n\n"
+                f"{T('settings_window.about_desc')}\n\n"
+                f"{T('tray.about_message')}\n"
                 "https://github.com/kai3316/clipsync",
             )
+        except Exception:
+            logger.debug("Could not show About dialog", exc_info=True)
 
     def send_file(self) -> None:
         self.root.after(0, self._do_send_file)
@@ -5051,7 +5074,14 @@ class Application:
         Returns early (no notification) when ``cfg.<cfg_flag>`` is False.
         The master ``notifications_enabled`` switch is enforced inside
         ``notification_mgr`` itself, so it applies on top of these toggles.
+
+        ``sound_enabled`` ("通知提示音") is the user-facing master: on some
+        platforms a notification always plays a sound, so the settings label
+        is "notification sound" and turning it OFF means no notifications at
+        all, not merely silence.
         """
+        if not getattr(self.cfg, "sound_enabled", True):
+            return
         if not getattr(self.cfg, cfg_flag, True):
             return
         notification_mgr.show(title, message)
@@ -5417,14 +5447,14 @@ class Application:
             f"http://127.0.0.1:{self.cfg.web_port}"
             f"/index.html?token={quote(self.cfg.web_token or '', safe='')}"
         )
-        # Pass the previously-used window size (or None) so a re-open does NOT
-        # re-force the hardcoded 960x720 — the browser keeps the user's last
-        # window size when no --window-size flag is passed (macOS/Chrome).
+        # Opening window size: 1152x648 (was the browser default ~960x720;
+        # tuned wider / shorter per request).  A previously-requested size
+        # (same process re-open) is reused.
         size = getattr(self, "_webview_size", None)
         self.webview_win = WebViewWindow(
             url=url, title=T("ui.app_name"),
-            width=size[0] if size else None,
-            height=size[1] if size else None,
+            width=size[0] if size and size[0] else 1152,
+            height=size[1] if size and size[1] else 648,
         )
         self.webview_win.start()
         self._webview_opened_at = time.monotonic()

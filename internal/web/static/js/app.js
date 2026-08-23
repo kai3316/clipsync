@@ -103,6 +103,13 @@
       // does not.
       var isLocalHost = /^(localhost|127\.0\.0\.1)$/.test(window.location.hostname || '');
       var isDesktop = isLocalHost || (window.matchMedia && window.matchMedia('(pointer: fine)').matches);
+      // A factory/config reset clears the desktop language flag but not this
+      // browser's clipsync_onboarded localStorage — the two onboarding systems
+      // would disagree and the web wizard never re-appears.  When the server
+      // says the config is fresh, re-surface the wizard despite the stale flag.
+      if (window.__CLIPSYNC_FRESH__) {
+        store.onboardingDone = false;
+      }
       if (!store.onboardingDone && store.deviceId && isDesktop) {
         store.showOnboarding = true;
       }
