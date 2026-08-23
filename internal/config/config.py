@@ -523,6 +523,8 @@ def save(cfg: Config, enc_mgr: "EncryptionManager | None" = None):
         try:
             with os.fdopen(tmp_fd, "w", encoding="utf-8") as f:
                 json.dump(data, f, indent=2, ensure_ascii=False)
+                f.flush()
+                os.fsync(f.fileno())
             os.replace(tmp_path, config_path)  # atomic on same filesystem
             # mkstemp creates the temp file with 0600; os.replace keeps that
             # inode, so the final file is already private. Re-assert it for

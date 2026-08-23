@@ -86,11 +86,13 @@ def _parse_multipart(body: bytes, content_type: str) -> dict:
     if not body.startswith(delimiter):
         return {}
     body = body[len(delimiter):]
-    # A multipart boundary is only meaningful as a standalone delimiter line
-    # ("\r\n--<boundary>").  Split on that full delimiter rather than the raw
-    # boundary bytes so file content that happens to contain the boundary
-    # sequence is not truncated or corrupted.
-    parts = body.split(b"\r\n--" + b_bytes)
+    # A multipart boundary is only meaningful as a standalone delimiter line:
+    # "\r\n--<boundary>\r\n" between parts, "\r\n--<boundary>--" at the end.
+    # Split on the full middle delimiter (not the raw boundary bytes) so file
+    # content that happens to contain the boundary sequence isn't truncated.
+    sep = b"\r\n--" + b_bytes + b"\r\n"
+    close = b"\r\n--" + b_bytes + b"--"
+    parts = body.split(sep)
     result = {}
     for part in parts:
         if not part:
@@ -98,9 +100,10 @@ def _parse_multipart(body: bytes, content_type: str) -> dict:
         # Strip only the leading CRLF left over from the preceding boundary
         # line.  Never strip trailing bytes — they belong to the file content.
         part = part.lstrip(b"\r\n")
-        # The closing boundary contributes a trailing "--" to the last part.
-        if part.endswith(b"--"):
-            part = part[:-2].rstrip(b"\r\n")
+        # The closing delimiter ends the last part; drop it and any trailing CRLF.
+        close_idx = part.rfind(close)
+        if close_idx != -1:
+            part = part[:close_idx].rstrip(b"\r\n")
         if b"\r\n\r\n" not in part:
             continue
         header_section, body_data = part.split(b"\r\n\r\n", 1)

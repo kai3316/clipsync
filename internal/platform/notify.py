@@ -78,13 +78,15 @@ class NotificationManager:
         causes this thread to drain the new queue too.
         """
         q = self._send_queue
+        pipe = self._pipe  # capture the pipe so a later set_pipe can't hijack it
         while True:
             try:
                 title, message = q.get()
                 if title is None:  # sentinel to stop the thread
                     break
                 try:
-                    self.send_pipe(("show_notification", title, message))
+                    with self._pipe_lock:
+                        pipe.send(("show_notification", title, message))
                 except Exception:
                     logger.debug("Notification via pipe failed", exc_info=True)
             except Exception:

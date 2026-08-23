@@ -360,10 +360,19 @@ def _dispatch(method, path, query_params, body, cfg, history, sync_mgr,
                 from internal.config.config import _log_dir
                 log_path = _log_dir() / "clipsync.log"
                 if log_path.exists():
-                    content = log_path.read_text(encoding="utf-8", errors="replace")
+                    # Read only the tail (last 256 KB) so an oversized log is
+                    # not fully loaded into memory.
+                    try:
+                        with open(log_path, "rb") as f:
+                            f.seek(0, 2)  # SEEK_END
+                            size = f.tell()
+                            f.seek(max(0, size - 256 * 1024))
+                            tail = f.read().decode("utf-8", errors="replace")
+                    except Exception:
+                        tail = ""
                     logs = [
                         _redact_sensitive_line(line, cfg)
-                        for line in content.splitlines()[-n:]
+                        for line in tail.splitlines()[-n:]
                     ]
             except Exception:
                 logger.exception("Failed to read log file for /api/logs")
