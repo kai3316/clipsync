@@ -179,6 +179,9 @@ class FileTransferManager:
 
         # transfer_id -> dict (active transfers)
         self._transfers: dict[str, dict[str, Any]] = {}
+        # transfer_id -> kind ("file" | "update"), set just before the received
+        # callback fires so the caller can distinguish update blobs.
+        self._received_kinds: dict[str, str] = {}
         # Completed transfers history: list of dicts (newest first)
         self._history: list[dict[str, Any]] = []
         # Speed test state
@@ -242,6 +245,11 @@ class FileTransferManager:
         saved successfully to the output directory."""
         self._on_file_received = callback
 
+    def take_received_kind(self, transfer_id: str) -> str:
+        """Pop and return the kind ("file" | "update") of a received transfer,
+        or "file" if unknown. Called from the on-file-received callback."""
+        return self._received_kinds.pop(transfer_id, "file")
+
     def set_on_transfer_request(
         self, callback: Callable[[str, str, int, str, Callable], None],
     ) -> None:
@@ -257,7 +265,8 @@ class FileTransferManager:
     # Public API
     # ------------------------------------------------------------------
 
-    def send_file(self, file_path: str, broadcast_fn: Callable[[bytes], None]) -> str:
+    def send_file(self, file_path: str, broadcast_fn: Callable[[bytes], None],
+                  kind: str = "file") -> str:
         """Start sending *file_path* to all connected peers.
 
         Parameters
@@ -293,6 +302,7 @@ class FileTransferManager:
             self._transfers[transfer_id] = {
                 "transfer_id": transfer_id,
                 "type": "outgoing",
+                "kind": kind,
                 "file_path": str(file_path),
                 "file_name": file_name,
                 "file_size": file_size,
@@ -318,6 +328,7 @@ class FileTransferManager:
                 "file_name": file_name,
                 "file_size": file_size,
                 "mime_type": mime_type,
+                "kind": kind,
             },
             broadcast_fn,
         )
@@ -605,6 +616,9 @@ class FileTransferManager:
         mime_type = payload.get("mime_type", "application/octet-stream")
         if not isinstance(mime_type, str):
             mime_type = "application/octet-stream"
+        kind = payload.get("kind", "file")
+        if kind not in ("file", "update"):
+            kind = "file"
 
         # Validate/coerce file_size -- a malformed value must not crash the
         # message handler or slip an absurd file into the pipeline.
@@ -634,6 +648,7 @@ class FileTransferManager:
             self._transfers[transfer_id] = {
                 "transfer_id": transfer_id,
                 "type": "incoming",
+                "kind": kind,
                 "peer_id": sender_device_id,
                 "file_name": file_name,
                 "file_size": file_size,
@@ -649,7 +664,11 @@ class FileTransferManager:
                 "chunks": set(range(total_chunks)),
             }
 
-        if self._on_transfer_request is not None:
+        if kind == "update":
+            # Update blob: auto-accept without a user prompt.
+            logger.info("Auto-accepting update blob transfer %s", transfer_id[:8])
+            self.accept_transfer(transfer_id, send_fn)
+        elif self._on_transfer_request is not None:
             self._on_transfer_request(transfer_id, file_name, file_size, mime_type, send_fn)
         else:
             # No UI callback registered -- auto-accept for headless operation
@@ -921,6 +940,7 @@ class FileTransferManager:
             self._add_to_history(transfer, True, saved_path=saved, status="success")
 
             if self._on_file_received is not None:
+                self._received_kinds[transfer_id] = transfer.get("kind", "file")
                 self._on_file_received(transfer_id, saved, file_name)
             if self._on_transfer_complete is not None:
                 self._on_transfer_complete(transfer_id, True, False, "success")

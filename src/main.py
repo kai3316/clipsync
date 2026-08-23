@@ -2226,6 +2226,9 @@ class Application:
             else:
                 logger.warning("Ignoring unsafe nav_url from peer: %s", url[:80])
             return
+        if msg_type == "update_request":
+            self._handle_update_request(peer_id)
+            return
         # Nearby-chat JSON frames take precedence: they are consent-gated and
         # must never be routed into clipboard sync or file transfers.
         if msg_type in CHAT_MSG_TYPES:
@@ -2359,6 +2362,10 @@ class Application:
         return T("transfer.send_failed") if direction == "outgoing" else T("transfer.receive_failed")
 
     def _on_file_received(self, transfer_id: str, saved_path: str, file_name: str) -> None:
+        if self.file_transfer_mgr.take_received_kind(transfer_id) == "update":
+            logger.info("Update blob received from peer: %s", _mask_path(saved_path))
+            self._finish_update_install(saved_path, None)
+            return
         logger.info("File received: %s -> %s",
                     _mask_file_name(file_name), _mask_path(saved_path))
         self._notify("notify_transfer", T("notify.file_received"),
@@ -3963,6 +3970,10 @@ class Application:
 
         notification_mgr.show(T("ui.app_name"), T("notify.update_downloading"))
 
+        # Ask connected peers first (M2): a peer with the cached asset responds
+        # by sending it back; the GitHub download below is the fallback.
+        self._request_update_from_peers()
+
         def _worker():
             dest_dir = tempfile.mkdtemp(prefix="clipsync_update_")
             try:
@@ -3982,6 +3993,10 @@ class Application:
             return
 
         from internal.system.applier import apply_and_restart, stage_update
+        from internal.system.updater import cache_asset
+
+        # Keep the verified asset so we can serve it to other LAN devices (M2).
+        cache_asset(path)
 
         staged = stage_update(path)
         if staged is None:
@@ -4006,6 +4021,34 @@ class Application:
                 self.root.after(0, lambda: self._offer_update_install(result))
 
         threading.Thread(target=_worker, daemon=True, name="auto-update-check").start()
+
+    def _request_update_from_peers(self) -> None:
+        """Broadcast an update_request to connected peers (M2 P2P update).
+
+        Any peer that has a cached update asset responds by sending it back
+        (kind="update"), which _on_file_received then stages + applies.
+        """
+        from internal.protocol.codec import encode_frame
+        try:
+            self.transport_mgr.broadcast(encode_frame({"msg_type": "update_request"}))
+            logger.info("Broadcast update_request to peers")
+        except Exception:
+            logger.warning("Failed to broadcast update_request", exc_info=True)
+
+    def _handle_update_request(self, peer_id: str | None) -> None:
+        """Serve our cached update asset to a peer that asked for it (M2)."""
+        if not peer_id:
+            return
+        from internal.system.updater import get_cached_asset
+        cached = get_cached_asset()
+        if not cached:
+            logger.info("Peer %s asked for an update, but none is cached", peer_id[:12])
+            return
+        send_fn = (lambda data, pid=peer_id: self.transport_mgr.send_to_peer(pid, data))
+        try:
+            self.file_transfer_mgr.send_file(cached, send_fn, kind="update")
+        except Exception:
+            logger.exception("Failed to serve cached update to peer %s", peer_id[:12])
 
     def _notifications_enabled(self) -> bool:
         """Return True if the desktop notification backend is active."""

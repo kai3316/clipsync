@@ -7,6 +7,7 @@ parse failure simply returns "no update available".
 
 import json
 import logging
+import os
 import urllib.request
 
 from internal.version import __version__
@@ -214,3 +215,33 @@ def download_latest_release(dest_dir: str) -> tuple[str | None, str | None]:
     except Exception as exc:
         logger.error("Release download failed: %s", exc)
         return None, T("web.update_download_failed", reason=exc)
+
+
+def _cache_dir() -> str:
+    """Directory where downloaded update assets are cached for P2P serving."""
+    from internal.config.config import _config_dir
+
+    return os.path.join(_config_dir(), "update_cache")
+
+
+def cache_asset(asset_path: str) -> str | None:
+    """Copy the verified *asset_path* into the update cache for later P2P
+    serving. Returns the cached path, or None on failure (never raises)."""
+    import shutil
+
+    try:
+        d = _cache_dir()
+        os.makedirs(d, exist_ok=True)
+        dest = os.path.join(d, os.path.basename(asset_path))
+        shutil.copyfile(asset_path, dest)
+        logger.info("Cached update asset at %s", dest)
+        return dest
+    except OSError as exc:
+        logger.warning("Failed to cache update asset: %s", exc)
+        return None
+
+
+def get_cached_asset() -> str | None:
+    """Return the cached update asset path for this platform, or None."""
+    p = os.path.join(_cache_dir(), _platform_asset_name())
+    return p if os.path.isfile(p) else None
