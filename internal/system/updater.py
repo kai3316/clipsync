@@ -101,23 +101,37 @@ def check_for_update(timeout: float = 6.0) -> dict:
 
 
 def _platform_asset_name() -> str:
-    """Return the release asset filename for the current platform.
+    """Return the release asset filename for the current platform + arch.
 
-    macOS → clipsync-macos.zip, Windows → clipsync-windows.zip,
+    macOS (Apple Silicon) → clipsync-macos-arm64.zip, Windows → clipsync-windows.zip,
     Linux x86_64 → clipsync-linux.tar.gz, Linux arm64 → clipsync-linux-arm64.tar.gz.
+    Intel macOS is no longer built; that branch returns a name matching no asset,
+    so the downloader reports "no release for this platform" gracefully.
     """
     import platform as _platform
 
     system = _platform.system()
     machine = (_platform.machine() or "").lower()
+    is_arm = "aarch64" in machine or "arm64" in machine
     if system == "Darwin":
-        return "clipsync-macos.zip"
+        return "clipsync-macos-arm64.zip" if is_arm else "clipsync-macos-x64.zip"
     if system == "Windows":
         return "clipsync-windows.zip"
     # Linux
-    if "aarch64" in machine or "arm64" in machine:
+    if is_arm:
         return "clipsync-linux-arm64.tar.gz"
     return "clipsync-linux.tar.gz"
+
+
+def _sha256_file(path: str) -> str:
+    """Streaming SHA-256 of *path*, returned as lowercase hex."""
+    import hashlib
+
+    digest = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(64 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 def download_latest_release(dest_dir: str) -> tuple[str | None, str | None]:
@@ -145,14 +159,15 @@ def download_latest_release(dest_dir: str) -> tuple[str | None, str | None]:
             return None, T("web.update_no_assets")
 
         asset_name = _platform_asset_name()
-        browser_url = None
+        matched = None
         for asset in assets:
             if asset.get("name") == asset_name:
-                browser_url = asset.get("browser_download_url")
+                matched = asset
                 break
-        if not browser_url:
+        if not matched or not matched.get("browser_download_url"):
             logger.warning("No download asset found for platform: %s", asset_name)
             return None, T("web.update_no_release", name=asset_name)
+        browser_url = matched["browser_download_url"]
 
         os.makedirs(dest_dir, exist_ok=True)
         dest_path = os.path.join(dest_dir, asset_name)
@@ -170,18 +185,22 @@ def download_latest_release(dest_dir: str) -> tuple[str | None, str | None]:
                         if not chunk:
                             break
                         out.write(chunk)
-            # Verify the downloaded size against the release API so a
-            # truncated-but-cleanly-EOF'd stream is rejected, not reported
-            # as a successful download.
-            asset_size = next(
-                (a.get("size") for a in assets if a.get("name") == asset_name),
-                None,
-            )
+            # Verify the downloaded size AND SHA-256 against the release API, so
+            # a truncated, corrupted, or tampered asset is rejected before it is
+            # exposed as a valid installer. The API digest is "sha256:<hex>".
+            asset_size = matched.get("size")
             if asset_size:
                 actual = os.path.getsize(temp_path)
                 if actual != int(asset_size):
                     raise RuntimeError(
                         f"download size mismatch: expected {asset_size}, got {actual}"
+                    )
+            digest = matched.get("digest") or ""
+            if digest.startswith("sha256:"):
+                actual_sha = _sha256_file(temp_path)
+                if actual_sha != digest[len("sha256:"):]:
+                    raise RuntimeError(
+                        f"download checksum mismatch: expected {digest}, got sha256:{actual_sha}"
                     )
             os.replace(temp_path, dest_path)
         except Exception:

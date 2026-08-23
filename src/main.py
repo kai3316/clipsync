@@ -6345,7 +6345,49 @@ class Application:
 # ═══════════════════════════════════════════════════════════════════════════════
 
 
+def _prewarm_codecs() -> None:
+    """Eagerly load the text codecs a one-file build imports lazily.
+
+    PyInstaller one-file builds keep the individual ``encodings.*`` codecs in
+    ``base_library.zip`` inside the ``_MEI`` extraction dir and import them on
+    first use. Under the one-file temp-dir race that dir can be deleted while
+    the process is still alive, so the first such import — e.g.
+    ``pathlib.Path.write_text(encoding="ascii")`` → ``encodings.ascii`` — dies
+    with ``FileNotFoundError: base_library.zip``. Importing them up front,
+    while ``base_library.zip`` is guaranteed intact, moves every codec load out
+    of the racy window.
+    """
+    import codecs
+    import locale
+
+    _names = {
+        "ascii", "latin-1", "utf-8", "utf-8-sig", "utf-16", "utf-16-le",
+        "utf-16-be", "utf-32", "utf-32-le", "utf-32-be",
+        "unicode_escape", "raw_unicode_escape", "hex", "base64_codec",
+        "idna", "punycode", "cp1252", "cp437",
+    }
+    # Path.read_text()/write_text() without an explicit encoding fall back to
+    # the locale's preferred encoding (e.g. cp936/gbk on zh-CN Windows), which
+    # is lazily imported from encodings.* just like "ascii". Warm it plus the
+    # stdio codecs so the next default-encoding I/O can't re-enter the racy
+    # base_library.zip import this function exists to avoid.
+    _names.add(locale.getpreferredencoding(False))
+    for _stream in (sys.stdout, sys.stderr):
+        try:
+            _enc = _stream.encoding
+        except Exception:
+            _enc = None
+        if _enc:
+            _names.add(_enc)
+    for _name in _names:
+        try:
+            codecs.lookup(_name)
+        except Exception:
+            pass
+
+
 def main():
+    _prewarm_codecs()
     Application.setup_logging()
 
     # Prevent duplicate instances (macOS tray icon bug)
@@ -6356,6 +6398,14 @@ def main():
         show_error(_r, "ClipSync", T("ui.already_running"))
         _r.destroy()
         sys.exit(1)
+
+    # Claim the single-instance lock immediately, before any heavy startup
+    # work. Writing it late (after _start_services) left a window in which a
+    # second launch also passed the stale-lock check, and two one-file
+    # instances racing their _MEI extraction dirs is what deletes a live
+    # base_library.zip in the first place.
+    _write_lock(os.getpid())
+    atexit.register(_remove_lock)
 
     app = Application()
     app.load_config()
@@ -6368,10 +6418,6 @@ def main():
     app._show_first_run_onboarding_if_needed()
     app._start_services()
     app._start_threads()
-
-    # Write lock file with main PID
-    _write_lock(os.getpid())
-    atexit.register(_remove_lock)
 
     app.run()
 

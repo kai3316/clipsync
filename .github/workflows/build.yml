@@ -22,8 +22,9 @@ jobs:
         include:
           - os: windows-latest
             artifact: clipsync-windows
+          # macOS: Apple Silicon (arm64) only — Intel Macs are not supported.
           - os: macos-latest
-            artifact: clipsync-macos
+            artifact: clipsync-macos-arm64
           - os: ubuntu-latest
             artifact: clipsync-linux
           - os: ubuntu-24.04-arm
@@ -84,7 +85,7 @@ jobs:
       - name: Package for release (macOS ditto preserves symlinks)
         if: runner.os == 'macOS'
         run: |
-          ditto -c -k --keepParent dist/clipsync.app clipsync-macos.zip
+          ditto -c -k --keepParent dist/clipsync.app ${{ matrix.artifact }}.zip
 
       - name: Package for release (Windows)
         if: runner.os == 'Windows'
@@ -100,10 +101,10 @@ jobs:
       - name: Smoke test (macOS bundle contains web UI)
         if: runner.os == 'macOS'
         run: |
-          if unzip -l clipsync-macos.zip | grep -q 'internal/web/static/index.html'; then
-            echo "OK: web UI bundled in clipsync-macos.zip"
+          if unzip -l ${{ matrix.artifact }}.zip | grep -q 'internal/web/static/index.html'; then
+            echo "OK: web UI bundled in ${{ matrix.artifact }}.zip"
           else
-            echo "::error::Web UI (internal/web/static/index.html) missing from clipsync-macos.zip"
+            echo "::error::Web UI (internal/web/static/index.html) missing from ${{ matrix.artifact }}.zip"
             exit 1
           fi
 
@@ -144,10 +145,10 @@ jobs:
           name: clipsync-windows
           path: dist
 
-      - name: Download macOS build
+      - name: Download macOS arm64 build
         uses: actions/download-artifact@v4
         with:
-          name: clipsync-macos
+          name: clipsync-macos-arm64
           path: dist
 
       - name: Download Linux build
@@ -175,14 +176,14 @@ jobs:
             --title "ClipSync $TAG" \
             --notes "Automated build for $TAG.
               - \`clipsync-windows.zip\` — Windows \`.exe\`
-              - \`clipsync-macos.zip\` — macOS \`.app\` bundle
+              - \`clipsync-macos-arm64.zip\` — macOS Apple Silicon \`.app\` bundle
               - \`clipsync-linux.tar.gz\` — Linux x86_64 binary
               - \`clipsync-linux-arm64.tar.gz\` — Linux ARM64 binary"
           # Upload only the artifacts that actually exist, so a missing matrix
           # leg doesn't fail the whole release.
           for f in \
             dist/clipsync-windows.zip \
-            dist/clipsync-macos.zip \
+            dist/clipsync-macos-arm64.zip \
             dist/clipsync-linux.tar.gz \
             dist/clipsync-linux-arm64.tar.gz
           do

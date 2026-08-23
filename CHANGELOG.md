@@ -7,6 +7,13 @@ All notable changes to ClipSync are documented in this file.
 ### Desktop (Windows)
 - **No more black console box flashing on startup.** The packaged Windows build (a `console=False` one-file exe) still spawned the console-mode `powershell.exe` while enumerating network-interface priorities at launch, and `taskkill.exe` when tearing down the web window / Quick Paste popups — each spawn briefly flashed a black console window before the app opened. Those spawns now pass `CREATE_NO_WINDOW`, matching the existing `netsh` firewall calls, so the exe stays fully silent on startup and shutdown.
 
+### Desktop
+- **Startup no longer races the one-file temp directory on the first codec import.** The single-instance lock is now claimed at the very start of `main()` instead of after `_start_services()`, closing the window where two launches could both pass the stale-lock check and race their `_MEI` extraction dirs. Common text codecs — including the locale default (`cp936`/`gbk` on zh-CN Windows) and the stdio codecs — are pre-loaded up front, so a later `write_text(encoding="ascii")` can never trigger a lazy `encodings.*` import from a deleted `base_library.zip`.
+
+### Updater & release
+- **Downloads are checksum-verified.** The release downloader now verifies the SHA-256 (from the GitHub asset `digest`) in addition to size, so a corrupted or tampered asset is rejected before it is offered as an installer.
+- **macOS ships Apple Silicon only.** The retired Intel (`macos-13`) build leg is removed; the release asset and download page are `clipsync-macos-arm64.zip` only, while Linux keeps x86_64 and ARM64.
+
 ## [1.0.49] — 2026-08-23
 
 ### Mobile companion (phone page)
