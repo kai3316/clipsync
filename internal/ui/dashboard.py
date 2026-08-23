@@ -1109,13 +1109,14 @@ class DashboardWindow:
             text_color=("gray50", "gray60"),
         )
         self._net_label.pack(anchor="w", pady=(10, 0))
-        if net["detail"]:
-            self._net_detail_label = ctk.CTkLabel(
-                s_center, text=net["detail"],
-                font=ctk.CTkFont(size=12),
-                text_color=("gray50", "gray60"),
-            )
-            self._net_detail_label.pack(anchor="w", pady=(2, 0))
+        # Always create the detail label (even when the initial placeholder is
+        # empty) so _apply_network_info can fill it once detection completes.
+        self._net_detail_label = ctk.CTkLabel(
+            s_center, text=net["detail"],
+            font=ctk.CTkFont(size=12),
+            text_color=("gray50", "gray60"),
+        )
+        self._net_detail_label.pack(anchor="w", pady=(2, 0))
 
         # Local address
         self._local_ip_label = ctk.CTkLabel(

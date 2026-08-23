@@ -1284,8 +1284,11 @@ class WebServer:
                 locale = cfg.language if cfg.language in self._available_locales() else "en"
                 locale_code_json = json.dumps(locale, ensure_ascii=False)
 
-                # Always replace token (for cache busting and auth)
-                content = content.replace("__TOKEN__", cfg.web_token)
+                # Always replace token (for cache busting and auth). URL-encode
+                # it so a user-set token with & / " / space / < / > can't break
+                # out of a query string or attribute (default tokens are
+                # already URL-safe and pass through unchanged).
+                content = content.replace("__TOKEN__", urllib.parse.quote(cfg.web_token, safe=""))
 
                 # Full interpolation only for HTML files
                 if is_html:
