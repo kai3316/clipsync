@@ -632,11 +632,12 @@ def test_history_cursor_calibrated_from_total():
     assert "store.history.splice(data.total, store.history.length - data.total);" not in ws
     assert "store.calibrateHistory(data.total)" in ws
     # The shared calibration itself still does the wholesale replace at
-    # limit=total (guarded against the delete/clear race + throttled).
+    # limit=total (guarded against the delete/clear race + throttled), routed
+    # through the shared replace helper so null rows are never stored.
     store = _read_repo_file("internal/web/static/js/store.js")
     assert "calibrateHistory: function (total) {" in store
     assert "ClipsyncAPI.getHistory({ limit: total, offset: 0 })" in store
-    assert "self.history.splice(0, self.history.length);" in store
+    assert "self.replaceHistory(calItems)" in store
     assert "historyMutationTick !== startTick" in store
 
 
@@ -1159,19 +1160,20 @@ def test_ws_history_updated_bumps_tick_on_new_data():
     concurrent new item.  A pure display refresh (same entries, unchanged) does
     not bump."""
     ws = _read_repo_file("internal/web/static/js/ws.js")
-    assert "var histMutated = false;" in ws
-    # Wholesale path indexes the current rows by id and detects both a
-    # genuinely-new entry and a same-id row change (pin toggle / peer edit).
-    assert "var oldById = {};" in ws
-    assert "if (!oldRow) {" in ws
-    assert "rowChanged = true;" in ws
-    # The paged merge delegates to the shared helper (which bumps the tick).
+    # Wholesale path delegates to the shared replace helper (which detects a
+    # genuinely-new entry OR a same-id row change on every user-visible field
+    # and bumps the tick only for real changes).
+    assert "store.replaceHistory(incoming)" in ws
+    # The paged merge delegates to the shared merge helper.
     assert "store.mergeHistoryFresh(incoming)" in ws
     # Deletes / clears still bump (the delete handler keeps its unconditional
     # bump so an in-flight calibration can't resurrect rows).
     assert "store.historyMutationTick += 1;" in ws
-    # The shared merge helper itself detects in-place changes.
+    # The shared replace helper owns change detection (field-differ), filters
+    # malformed null rows, and bumps only on real changes.
     store = _read_repo_file("internal/web/static/js/store.js")
+    assert "replaceHistory: function (items)" in store
+    assert "_rowDiffer: function (a, b)" in store
     assert "incChanged = true;" in store
 
 

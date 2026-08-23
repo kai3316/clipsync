@@ -2,6 +2,15 @@
 
 All notable changes to ClipSync are documented in this file.
 
+## [1.0.42] — 2026-08-23
+
+### History (write-path consolidation)
+- **Every history wholesale-replace now flows through one shared `store.replaceHistory`** — the page-1 reload, the WebSocket `history_updated` path, and the ghost-calibration write-back all share it. It filters malformed null rows (a null could never reach the renderer again, on ANY path), detects change across every user-visible field (key-order independent), and bumps the reconcile guard only for real changes.
+- The WebSocket wholesale path's hand-rolled change-detection loop is gone (subsumed by the helper), removing the duplicated logic and the gaps where a null row slipped through.
+
+### Tests
+- Source-guard regressions updated to the consolidated structure. Full suite 433 passed / 3 skipped.
+
 ## [1.0.41] — 2026-08-23
 
 ### History (reconcile — change detection)

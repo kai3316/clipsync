@@ -292,53 +292,15 @@ var ClipsyncWS = (function () {
             // (same entries) does NOT bump.  The bump happens BEFORE the
             // ghost-triggered calibration below so that calibration records a
             // startTick that already includes this broadcast's merge.
-            var histMutated = false;
             if (!hasLoadedMore) {
-              // Nothing loaded past the first page — replace wholesale.  Count
-              // it as new data when an entry_id the list did not have arrives
-              // OR a same-id row changed (content / pin / timestamp) — a pin
-              // toggle or a peer edit re-broadcasts the same entry_id with
-              // changed fields.  An identical re-broadcast of the same page is
-              // a display refresh and does NOT bump (matches the paged path's
-              // incChanged comparison).
-              var oldById = {};
-              for (var hiOld = 0; hiOld < store.history.length; hiOld++) {
-                var histOld = store.history[hiOld];
-                if (histOld && histOld.entry_id !== undefined) {
-                  oldById[histOld.entry_id] = histOld;
-                }
-              }
-              for (var hiInc = 0; hiInc < incoming.length; hiInc++) {
-                var histIn = incoming[hiInc];
-                if (!histIn) continue;
-                if (histIn.entry_id !== undefined) {
-                  var oldRow = oldById[histIn.entry_id];
-                  if (!oldRow) {
-                    histMutated = true;
-                    break;
-                  }
-                  var rowChanged = false;
-                  for (var rk in histIn) {
-                    if (histIn.hasOwnProperty(rk) && histIn[rk] !== oldRow[rk]) {
-                      rowChanged = true;
-                      break;
-                    }
-                  }
-                  if (rowChanged) {
-                    histMutated = true;
-                    break;
-                  }
-                }
-              }
-              store.history.splice(0, store.history.length);
-              for (var hi = 0; hi < incoming.length; hi++) {
-                store.history.push(incoming[hi]);
-              }
-              store.historyOffset = incoming.length;
+              // Nothing loaded past the first page — replace wholesale via the
+              // shared helper, which detects change on every user-visible
+              // field, filters malformed null rows, and bumps the reconcile
+              // guard only for real changes (an identical re-broadcast is a
+              // display refresh and does NOT bump).
+              store.replaceHistory(incoming);
+              store.historyOffset = store.history.length;
               store.historyHasMore = (data.total != null) ? (store.historyOffset < data.total) : false;
-              if (histMutated) {
-                store.historyMutationTick += 1;
-              }
             } else {
               // Upsert/prepend the page-1 snapshot via the shared helper — it
               // updates matching rows in place, prepends genuinely-new rows at

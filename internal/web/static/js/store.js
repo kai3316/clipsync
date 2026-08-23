@@ -963,10 +963,10 @@
             return self.history.slice();
           }
           var calItems = (calRes && calRes.items) ? calRes.items : [];
-          self.history.splice(0, self.history.length);
-          for (var c = 0; c < calItems.length; c++) {
-            self.history.push(calItems[c]);
-          }
+          // Route through the shared helper so a malformed null row in the
+          // calibration response is filtered (never stored) like every other
+          // history write path.
+          self.replaceHistory(calItems);
           self.historyOffset = self.history.length;
           self.historyHasMore = (calRes && calRes.total != null)
             ? self.history.length < calRes.total : false;
@@ -1063,6 +1063,55 @@
      * @param {Array<string|number>} ids
      * @returns {number} count of rows removed
      */
+    // Compare two row dicts on every user-visible field.  Explicit field list
+    // (not JSON.stringify — key-order sensitive) so a change in ANY rendered
+    // or sortable field counts as a mutation.
+    _rowDiffer: function (a, b) {
+      if (!a || !b) return true;
+      return a.entry_id !== b.entry_id ||
+             a.pinned !== b.pinned ||
+             a.text_preview !== b.text_preview ||
+             a.content_type !== b.content_type ||
+             a.timestamp !== b.timestamp ||
+             a.source_device !== b.source_device ||
+             a.source_name !== b.source_name ||
+             a.paste_count !== b.paste_count ||
+             a.image_fmt !== b.image_fmt ||
+             a.source_app !== b.source_app ||
+             a.source_title !== b.source_title;
+    },
+
+    // Replace the whole history list with an authoritative snapshot (page-1
+    // reload, wholesale broadcast, calibration write-back).  Filters out
+    // malformed null rows — a null stored here would crash the renderer — and
+    // bumps the reconcile guard only when the list actually changed.  Returns
+    // whether the list changed.  The change detection is idempotent even when
+    // null rows were skipped (it compares the CLEANED list, not raw lengths).
+    replaceHistory: function (items) {
+      var cleaned = [];
+      for (var ri = 0; ri < items.length; ri++) {
+        if (items[ri] == null) continue;
+        cleaned.push(items[ri]);
+      }
+      var changed = cleaned.length !== this.history.length;
+      if (!changed) {
+        for (var ci = 0; ci < cleaned.length; ci++) {
+          if (this._rowDiffer(this.history[ci], cleaned[ci])) {
+            changed = true;
+            break;
+          }
+        }
+      }
+      this.history.splice(0, this.history.length);
+      for (var pi = 0; pi < cleaned.length; pi++) {
+        this.history.push(cleaned[pi]);
+      }
+      if (changed) {
+        this.historyMutationTick += 1;
+      }
+      return changed;
+    },
+
     removeHistoryItems: function (ids) {
       if (!ids || !ids.length) return 0;
       var delSet = {};

@@ -357,50 +357,12 @@
               store.historyHasMore = store.history.length < res.total;
             }
           } else {
-            // Detect whether the page-1 snapshot actually changed before
-            // replacing, so a reconnect that applied an identical page-1 list
-            // doesn't spuriously invalidate an in-flight calibration and burn
-            // its throttle budget.  The list is small here (<= web_history_limit),
-            // so a per-row compare is cheap; a real change (a pin toggle applied
-            // elsewhere, a clip edited on another device) still bumps the guard.
-            var changed = items.length !== store.history.length;
-            if (!changed) {
-              // Explicit field compare (not JSON.stringify — key-order
-              // sensitive, and rows merged via mergeHistoryFresh can carry
-              // extra keys): a change in ANY user-visible field — paste_count,
-              // timestamp, source metadata — must count as a mutation so an
-              // in-flight calibration can't write back stale data.
-              for (var ci = 0; ci < items.length; ci++) {
-                var curRow = store.history[ci];
-                var incRow = items[ci];
-                if (!incRow || !curRow) {
-                  changed = true;
-                  break;
-                }
-                if (curRow.entry_id !== incRow.entry_id ||
-                    curRow.pinned !== incRow.pinned ||
-                    curRow.text_preview !== incRow.text_preview ||
-                    curRow.content_type !== incRow.content_type ||
-                    curRow.timestamp !== incRow.timestamp ||
-                    curRow.source_device !== incRow.source_device ||
-                    curRow.source_name !== incRow.source_name ||
-                    curRow.paste_count !== incRow.paste_count) {
-                  changed = true;
-                  break;
-                }
-              }
-            }
-            store.history.splice(0, store.history.length);
-            for (var i = 0; i < items.length; i++) {
-              // Never store a malformed null row (mirrors the ws.js wholesale
-              // path's `if (!histIn) continue;`) — a null in the response must
-              // not reach the renderer.
-              if (items[i] == null) { continue; }
-              store.history.push(items[i]);
-            }
-            if (changed) {
-              store.historyMutationTick += 1;
-            }
+            // Route through the shared helper: it filters malformed null rows,
+            // rebuilds the list, and bumps the reconcile guard only when the
+            // snapshot actually changed (explicit field compare — so an
+            // identical reconnect doesn't spuriously invalidate an in-flight
+            // calibration, while a real change still does).
+            store.replaceHistory(items);
             store.historyHasMore = (res && res.total != null) ? (res.offset + items.length < res.total) : false;
             store.historyOffset = items.length;
           }
