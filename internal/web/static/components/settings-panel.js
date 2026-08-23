@@ -58,6 +58,7 @@
 
         // Advanced
         historyMax: 200,
+        historyMaxAgeDays: 0,
         syncDebounce: 0.5,
         pollInterval: 0.5,
         receiveDir: '',
@@ -260,6 +261,7 @@
         if (s.encryption_enabled !== undefined) this.encryptionEnabled = !!s.encryption_enabled;
         if (s.password_set !== undefined) this.passwordSet = !!s.password_set;
         if (s.history_max_entries !== undefined) this.historyMax = s.history_max_entries;
+        if (s.history_max_age_days !== undefined) this.historyMaxAgeDays = s.history_max_age_days;
         if (s.sync_debounce !== undefined) this.syncDebounce = s.sync_debounce;
         if (s.clipboard_poll_interval !== undefined) this.pollInterval = s.clipboard_poll_interval;
         if (s.file_receive_dir !== undefined) this.receiveDir = s.file_receive_dir || '';
@@ -529,8 +531,13 @@
       saveAdvanced: function () {
         var self = this;
         self.advancedSaving = true;
+        // Age-based retention in days; 0 (or garbage) disables the pruning —
+        // matching the server-side range guard and the config default.
+        var maxAgeDays = parseFloat(self.historyMaxAgeDays);
+        if (isNaN(maxAgeDays) || maxAgeDays < 0) maxAgeDays = 0;
         ClipsyncAPI.updateSettings({
           history_max_entries: parseInt(self.historyMax, 10) || 200,
+          history_max_age_days: maxAgeDays,
           sync_debounce: parseFloat(self.syncDebounce) || 0.5,
           clipboard_poll_interval: parseFloat(self.pollInterval) || 0.5,
           file_receive_dir: self.receiveDir,
@@ -1061,6 +1068,7 @@
       notifyPairing: function () { this.markDirty('security'); },
       notifySync: function () { this.markDirty('security'); },
       historyMax: function () { this.markDirty('advanced'); },
+      historyMaxAgeDays: function () { this.markDirty('advanced'); },
       syncDebounce: function () { this.markDirty('advanced'); },
       pollInterval: function () { this.markDirty('advanced'); },
       receiveDir: function () { this.markDirty('advanced'); },
@@ -1417,6 +1425,11 @@
                     '<span class="settings-hint">{{ t(\'settings_window.history_max_desc\') }}</span>' +
                   '</div>' +
                   '<div class="settings-field">' +
+                    '<label class="settings-field__label">{{ t(\'settings_window.history_max_age\') }}</label>' +
+                    '<input type="number" class="settings-input" v-model="historyMaxAgeDays" min="0" max="36500" step="0.5">' +
+                    '<span class="settings-hint">{{ t(\'settings_window.history_max_age_desc\') }}</span>' +
+                  '</div>' +
+                  '<div class="settings-field">' +
                     '<label class="settings-field__label">{{ t(\'settings_window.sync_debounce\') }}</label>' +
                     '<input type="number" class="settings-input" v-model="syncDebounce" min="0.1" max="5.0" step="0.1">' +
                     '<span class="settings-hint">{{ t(\'settings_window.sync_debounce_desc\') }}</span>' +
@@ -1528,6 +1541,9 @@
                     '</button>' +
                     '<button class="settings-btn" @click="exportData(\'csv\')" :disabled="exporting">' +
                       '{{ exporting ? \'...\' : t(\'settings.export_csv\') }}' +
+                    '</button>' +
+                    '<button class="settings-btn" @click="exportData(\'markdown\')" :disabled="exporting">' +
+                      '{{ exporting ? \'...\' : t(\'settings.export_markdown\') }}' +
                     '</button>' +
                     '<button class="settings-btn" @click="importData" :disabled="importing">' +
                       '{{ importing ? \'...\' : t(\'settings.import\') }}' +

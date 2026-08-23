@@ -35,6 +35,7 @@ _SAFE_FIELDS = {
     "web_port",
     "web_history_limit",
     "history_max_entries",
+    "history_max_age_days",
     "file_receive_dir",
     "sync_debounce",
     "clipboard_poll_interval",
@@ -75,6 +76,8 @@ _RANGE_LIMITS = {
     "port": (1024, 65535),
     "web_history_limit": (1, 500),
     "history_max_entries": (10, 10000),
+    # Retention window in days; 0 disables age-based pruning entirely.
+    "history_max_age_days": (0, 36500),
     "sync_debounce": (0.05, 10.0),
     "clipboard_poll_interval": (0.1, 60.0),
     "max_reconnect_attempts": (0, 100),
@@ -97,6 +100,7 @@ _MUTABLE_FIELDS = {
     "web_port",
     "web_history_limit",
     "history_max_entries",
+    "history_max_age_days",
     "file_receive_dir",
     "sync_debounce",
     "clipboard_poll_interval",
@@ -307,9 +311,9 @@ def update_settings(body, cfg, on_settings_change=None, enc_mgr=None):
 
 
 def export_data(body, cfg, history):
-    """Export clipboard history to a persistent file (JSON or CSV).
+    """Export clipboard history to a persistent file (JSON, CSV, or Markdown).
 
-    Request body: {"format": "json" | "csv"}
+    Request body: {"format": "json" | "csv" | "markdown"}
     Writes a uniquely-named file to the user's Downloads folder (falling back
     to the app data directory) and leaves it in place so the user can open or
     move it.  Returns the durable path and filename.
@@ -320,10 +324,10 @@ def export_data(body, cfg, history):
         return {"ok": False, "error": "invalid json"}, 400
 
     fmt = data.get("format", "json").lower()
-    if fmt not in ("json", "csv"):
-        return {"ok": False, "error": "unsupported format (use json or csv)"}, 400
+    if fmt not in ("json", "csv", "markdown"):
+        return {"ok": False, "error": "unsupported format (use json, csv or markdown)"}, 400
 
-    suffix = ".json" if fmt == "json" else ".csv"
+    suffix = {"json": ".json", "csv": ".csv", "markdown": ".md"}[fmt]
     from internal.config.config import _config_dir
     from pathlib import Path
     # Downloads is where users expect exported files; if it can't be
@@ -339,9 +343,15 @@ def export_data(body, cfg, history):
     dest_path = str(dest_dir / filename)
 
     try:
-        from internal.data.export import export_history_csv, export_history_json
+        from internal.data.export import (
+            export_history_csv,
+            export_history_json,
+            export_history_markdown,
+        )
         if fmt == "json":
             count = export_history_json(history, dest_path)
+        elif fmt == "markdown":
+            count = export_history_markdown(history, dest_path)
         else:
             count = export_history_csv(history, dest_path)
         # The export functions chmod the file 0600 (plaintext clipboard

@@ -109,7 +109,10 @@
             history: o.historyCount || 0,
             today: o.historyToday || 0,
             images: o.historyImages || 0,
-            transfers: o.activeTransfers || 0,
+            // NB: fetchOverview maps the payload's active_transfers onto
+            // overview.activeTransferCount — reading o.activeTransfers here
+            // read an undefined field and pinned the card at 0 forever.
+            transfers: o.activeTransferCount || 0,
             completed: o.transferCompleted || 0,
             pinned: o.historyPinned || 0,
           };

@@ -1166,6 +1166,24 @@ class TransportManager:
                     return self._peer_addresses[h]
         return None
 
+    def get_reconnect_states(self) -> dict[str, dict]:
+        """Return per-peer auto-reconnect bookkeeping for status display.
+
+        Keyed by whichever id form reconnect scheduling used (the real device
+        id or the hashed mDNS id — callers should try both).  Each value
+        carries ``attempts`` (reconnect attempts already initiated) and
+        ``max_attempts``; a peer absent from the map is either connected,
+        never scheduled, or gave up (its saved address was cleared).
+        """
+        with self._lock:
+            return {
+                pid: {
+                    "attempts": attempts,
+                    "max_attempts": self._max_reconnect_attempts,
+                }
+                for pid, attempts in self._reconnect_attempts.items()
+            }
+
     def _on_peer_disconnected(self, peer_id: str, conn=None):
         with self._lock:
             current = self._peers.get(peer_id)

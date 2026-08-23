@@ -169,13 +169,15 @@
     theme: 'system',            // 'system' | 'light' | 'dark'
     sidebarOpen: true,
     selectedIds: new Set(),     // multi-select set of entry IDs
+    kbdIndex: -1,               // keyboard-cursor index into the visible history list (-1 = none)
     loading: false,
     initialLoad: true,          // true until first data fetch completes
     loadError: false,           // true when the initial load fails or times out
     devicesLoadFailed: false,   // true when the device-list fetch rejected
-    toastMessage: '',
-    toastVisible: false,
-    toastType: 'info',          // 'info' | 'success' | 'warning' | 'error'
+    // Stacked toasts — [{id, message, type, leaving}]. Several notifications
+    // can be visible at once; showToast caps the stack so a burst of events
+    // can't flood the screen.
+    toasts: [],
     previewItem: null,          // hover preview target (item object or null)
     previewPosition: { x: 0, y: 0 },  // mouse position for preview popover
     contextMenu: {
@@ -437,28 +439,66 @@
     },
 
     /**
-     * Show a toast notification.
+     * Show a toast notification. Toasts stack (up to MAX_TOASTS visible);
+     * each is removed after its own duration.
      * @param {string} msg - Message to display
-     * @param {number} [duration=2000] - Duration in ms
+     * @param {number} [duration=3500] - Duration in ms
+     * @param {'info'|'success'|'warning'|'error'} [type='info']
      */
     showToast: function (msg, duration, type) {
       // Default display time long enough to read a full notification; many
       // call sites pass shorter explicit values (e.g. 1500–3000ms).
       if (duration === undefined) duration = 3500;
       if (type === undefined) type = 'info';
-      // Clear any existing timer
-      if (this._toastTimer) {
-        clearTimeout(this._toastTimer);
-        this._toastTimer = null;
+      var MAX_TOASTS = 4;
+      // Cap the stack: a burst of events must not flood the screen — drop the
+      // oldest toast(s) instead of queueing unboundedly.
+      while (this.toasts.length >= MAX_TOASTS) {
+        this._dropToast(this.toasts[0].id);
       }
-      this.toastMessage = msg;
-      this.toastType = type;
-      this.toastVisible = true;
+      this._toastSeq = (this._toastSeq || 0) + 1;
+      var id = this._toastSeq;
       var self = this;
-      this._toastTimer = setTimeout(function () {
-        self.toastVisible = false;
-        self._toastTimer = null;
+      this._toastTimers = this._toastTimers || {};
+      this.toasts.push({ id: id, message: msg, type: type, leaving: false });
+      this._toastTimers[id] = setTimeout(function () {
+        delete self._toastTimers[id];
+        self._dismissToast(id);
       }, duration);
+    },
+
+    /**
+     * Start a toast's leave animation; the node is removed shortly after so
+     * the fadeOut transition in index.html stays visible.
+     * @param {number} id
+     */
+    _dismissToast: function (id) {
+      var t = null;
+      for (var i = 0; i < this.toasts.length; i++) {
+        if (this.toasts[i].id === id) { t = this.toasts[i]; break; }
+      }
+      if (!t || t.leaving) return;
+      t.leaving = true;
+      var self = this;
+      setTimeout(function () { self._dropToast(id); }, 180);
+    },
+
+    /**
+     * Remove a toast from the stack immediately (no leave animation) and
+     * cancel its timer. Safe to call for an already-removed id.
+     * @param {number} id
+     */
+    _dropToast: function (id) {
+      if (this._toastTimers && this._toastTimers[id]) {
+        clearTimeout(this._toastTimers[id]);
+        delete this._toastTimers[id];
+      }
+      for (var i = 0; i < this.toasts.length; i++) {
+        if (this.toasts[i].id === id) {
+          this.toasts.splice(i, 1);
+          return;
+        }
+      }
     },
 
     /**
@@ -1415,6 +1455,9 @@
     clearSelection: function () {
       // Replace with empty Set to trigger reactivity
       this.selectedIds = new Set();
+      // The keyboard cursor is transient list state too — a tab switch or
+      // Escape clears it along with the selection.
+      this.kbdIndex = -1;
     },
 
     /**

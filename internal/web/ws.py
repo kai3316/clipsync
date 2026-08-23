@@ -242,6 +242,7 @@ class WebSocketManager:
 
     def __init__(self, cfg, history, sync_mgr, get_connected_ids, get_discovered=None,
                  get_resolved_hashes=None, get_pending_pairings=None,
+                 get_reconnect_states=None,
                  on_client_attached=None):
         self._cfg = cfg
         self._history = history
@@ -250,6 +251,10 @@ class WebSocketManager:
         self._get_discovered = get_discovered
         self._get_resolved_hashes = get_resolved_hashes
         self._get_pending_pairings = get_pending_pairings
+        # Optional transport auto-reconnect bookkeeping source; forwarded to
+        # the device snapshot so offline peers mid-reconnect carry the
+        # reconnecting/reconnect_attempt/reconnect_max fields.
+        self._get_reconnect_states = get_reconnect_states
         # Called (with no args) after a new client finishes its handshake
         # snapshot; the DialogManager uses it to flush dialogs that were
         # queued while no client was connected.
@@ -334,6 +339,7 @@ class WebSocketManager:
             self._cfg, self._get_connected_ids, self._get_discovered,
             get_resolved_hashes=self._get_resolved_hashes,
             get_pending_pairings=self._get_pending_pairings,
+            get_reconnect_states=self._get_reconnect_states,
         )
         client.send_json({"type": "devices_updated", "data": dev_data})
 
@@ -488,6 +494,7 @@ class WebSocketManager:
             self._cfg, self._get_connected_ids, self._get_discovered,
             get_resolved_hashes=self._get_resolved_hashes,
             get_pending_pairings=self._get_pending_pairings,
+            get_reconnect_states=self._get_reconnect_states,
         )
         self.broadcast("devices_updated", dev_data)
 

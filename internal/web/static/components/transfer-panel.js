@@ -254,6 +254,13 @@
             </div>
             <div class="transfer-history-item__actions">
               <button
+                v-if="canRetry(tr)"
+                class="transfer-history-item__btn"
+                :title="t('common.retry')"
+                :aria-label="t('common.retry')"
+                @click="retryTransfer(tr.id)"
+              >&#8635;</button>
+              <button
                 v-if="tr.path && tr.direction !== 'up'"
                 class="transfer-history-item__btn"
                 :title="t('transfer.open')"
@@ -494,6 +501,25 @@
           self._refreshTransfers().catch(function () {});
         }).catch(function () {
           self.store.showToast(self.t('transfer.resume_failed'), 2000);
+        });
+      },
+      // Retry re-sends a FAILED OUTGOING transfer to its original peer — the
+      // host's retry branch resolves the history row by its original id, so
+      // only offer the button where it can actually succeed.
+      canRetry: function (tr) {
+        return !!tr && tr.id !== undefined && tr.id !== null && tr.id !== '' &&
+          tr.direction === 'up' &&
+          tr.status !== 'completed' &&
+          !this.isCancelledTransfer(tr);
+      },
+      retryTransfer: function (id) {
+        var self = this;
+        ClipsyncAPI.retryTransfer(id).then(function () {
+          // The fresh transfer shows up under Active via the reconcile below
+          // (plus the transfer_progress pushes that follow).
+          self._refreshTransfers().catch(function () {});
+        }).catch(function () {
+          self.store.showToast(self.t('dialog.failed'), 2000);
         });
       },
       openFile: function (path) {

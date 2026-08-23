@@ -73,6 +73,21 @@ DEDUP_ALGO = "sha256"
 # Config value → hashlib algorithm name ("simple" is the fast path).
 _DEDUP_ALGO_MAP = {"sha256": "sha256", "simple": "md5"}
 
+# Max age (days) for unpinned history entries; 0 disables age-based cleanup.
+# Wired from cfg.history_max_age_days at startup by the application (same
+# wiring pattern as DEDUP_ALGO above), giving history a dual limit: by
+# entry count (MAX_ENTRIES) and by age.
+MAX_AGE_DAYS = 0.0
+
+
+def set_max_age_days(days) -> None:
+    """Set the age-based cleanup limit in days.  0 or less disables it."""
+    global MAX_AGE_DAYS
+    try:
+        MAX_AGE_DAYS = max(0.0, float(days))
+    except (TypeError, ValueError):
+        MAX_AGE_DAYS = 0.0
+
 
 def _make_dedup_key(content: ClipboardContent) -> str:
     """Build a stable dedup key from the 'primary' content."""
@@ -299,6 +314,22 @@ class ClipboardHistoryDB:
             except OSError:
                 pass
 
+    @staticmethod
+    def _parse_types_json(raw) -> dict:
+        """Parse one row's ``types`` JSON column defensively.
+
+        A single corrupt row (truncated write, bit rot) must degrade to an
+        empty format map instead of raising out of the loop and aborting
+        the whole history load — that left the app with an empty in-memory
+        list while the DB kept its rows, so every later insert collided
+        with surviving primary keys and no capture persisted again.
+        """
+        try:
+            parsed = json.loads(raw) if raw else {}
+        except (json.JSONDecodeError, TypeError):
+            return {}
+        return parsed if isinstance(parsed, dict) else {}
+
     def _entry_row(self, entry: dict) -> tuple:
         """Serialize (and encrypt, if configured) one entry into a DB row."""
         e = self._encrypt_entry(entry) if self._enc_mgr else entry
@@ -376,6 +407,55 @@ class ClipboardHistoryDB:
             self._secure_db_files()
         except Exception as exc:
             logger.error("Failed to clear history table: %s", exc)
+
+    def _vacuum_db(self) -> None:
+        """Reclaim disk space after a mass deletion (Clear / factory reset).
+
+        SQLite never shrinks the file on its own, and image payloads are
+        stored inline as base64 TEXT — without this, clearing a large
+        image-heavy history left clipboard_history.db at its old size
+        forever.  VACUUM cannot run inside a transaction, so commit first;
+        checkpointing the WAL afterwards makes the space visible on disk.
+        """
+        try:
+            conn = self._get_conn()
+            conn.commit()
+            conn.execute("VACUUM")
+            conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+        except Exception as exc:
+            logger.debug("Failed to vacuum history DB: %s", exc)
+
+    def _prune_by_age(self) -> None:
+        """Delete unpinned rows older than the configured max age.
+
+        Called on startup and after each capture; a no-op unless
+        set_max_age_days() wired a positive limit.  Pinned entries are
+        never age-pruned.
+        """
+        if MAX_AGE_DAYS <= 0:
+            return
+        cutoff = time.time() - MAX_AGE_DAYS * 86400.0
+        try:
+            conn = self._get_conn()
+            old_ids = [
+                r[0] for r in conn.execute(
+                    "SELECT entry_id FROM history "
+                    "WHERE pinned = 0 AND timestamp < ?",
+                    (cutoff,),
+                ).fetchall()
+            ]
+            if not old_ids:
+                return
+            self._delete_rows(old_ids)
+            with self._lock:
+                id_keys = {str(i) for i in old_ids}
+                self._entries = [
+                    e for e in self._entries
+                    if str(e.get("entry_id")) not in id_keys
+                ]
+            logger.debug("Age-pruned %d history row(s)", len(old_ids))
+        except Exception as exc:
+            logger.debug("Age-based history prune failed: %s", exc)
 
     def _trim_db(self) -> None:
         """Delete oldest unpinned rows beyond MAX_ENTRIES (pinned preserved)."""
@@ -465,6 +545,8 @@ class ClipboardHistoryDB:
             # Incremental write: insert only this row (avoids re-encrypting
             # the whole table on every clipboard capture).
             self._insert_row(entry)
+            # Age-based cleanup (no-op unless a max-age limit is wired).
+            self._prune_by_age()
             if len(self._entries) > self.MAX_ENTRIES:
                 # Remove oldest unpinned entries beyond the limit.
                 # Keep all pinned entries; trim only unpinned ones.
@@ -576,6 +658,7 @@ class ClipboardHistoryDB:
         with self._lock:
             self._entries.clear()
             self._delete_all_rows()
+            self._vacuum_db()
 
     def find_by_id(self, entry_id: str) -> tuple[int, dict] | tuple[None, None]:
         """Find an entry by its ``entry_id``. Returns (index, entry) or (None, None).
@@ -619,13 +702,19 @@ class ClipboardHistoryDB:
         return False
 
     def batch_set_pinned(self, entry_ids: list, pinned: bool) -> int:
-        """Set pinned state on entries matching the given IDs. Returns count of entries updated."""
-        id_set = set(entry_ids)
+        """Set pinned state on entries matching the given IDs. Returns count of entries updated.
+
+        Comparison is type-tolerant (str vs int), matching find_by_id():
+        the web panel sends ids as JSON numbers while query params arrive
+        as strings, and an exact set-membership check matched neither
+        against the other.
+        """
+        id_keys = {str(i) for i in entry_ids}
         count = 0
         matched_ids: list = []
         with self._lock:
             for entry in self._entries:
-                if entry.get("entry_id") in id_set:
+                if str(entry.get("entry_id")) in id_keys:
                     entry["pinned"] = pinned
                     matched_ids.append(entry.get("entry_id"))
                     count += 1
@@ -635,15 +724,21 @@ class ClipboardHistoryDB:
         return count
 
     def batch_delete(self, entry_ids: list) -> int:
-        """Delete entries matching the given IDs. Returns count of entries deleted."""
-        id_set = set(entry_ids)
+        """Delete entries matching the given IDs. Returns count of entries deleted.
+
+        Type-tolerant id comparison — see batch_set_pinned().
+        """
+        id_keys = {str(i) for i in entry_ids}
         with self._lock:
             removed_ids = [
                 e.get("entry_id") for e in self._entries
-                if e.get("entry_id") in id_set
+                if str(e.get("entry_id")) in id_keys
             ]
             before = len(self._entries)
-            self._entries = [e for e in self._entries if e.get("entry_id") not in id_set]
+            self._entries = [
+                e for e in self._entries
+                if str(e.get("entry_id")) not in id_keys
+            ]
             removed = before - len(self._entries)
             if removed:
                 self._delete_rows(removed_ids)
@@ -690,7 +785,7 @@ class ClipboardHistoryDB:
                     "timestamp": row[1],
                     "content_type": row[2],
                     "text_preview": row[3],
-                    "types": json.loads(row[4]) if row[4] else {},
+                    "types": self._parse_types_json(row[4]),
                     "source_device": row[5],
                     "source_app": row[6],
                     "source_title": row[7],
@@ -713,6 +808,10 @@ class ClipboardHistoryDB:
                     "History load: decrypted %d entries from DB",
                     len(self._entries),
                 )
+
+            # Apply the age-based cleanup limit (no-op unless wired) once
+            # at startup so stale entries don't linger until the next copy.
+            self._prune_by_age()
 
         except Exception as exc:
             logger.warning("Failed to load history from DB: %s", exc)

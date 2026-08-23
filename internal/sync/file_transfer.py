@@ -807,6 +807,9 @@ class FileTransferManager:
             logger.error("No open temp file for transfer %s", transfer_id[:8])
             with self._lock:
                 self._transfers.pop(transfer_id, None)
+            # Record the failure so it shows up in the transfers history
+            # instead of vanishing silently.
+            self._add_to_history(transfer, False, status="error_internal")
             self._send_as_frame(
                 {"msg_type": "file_complete", "transfer_id": transfer_id, "status": "error_internal"},
                 send_fn,
@@ -844,6 +847,8 @@ class FileTransferManager:
                     _safe_remove(temp_path)
                     with self._lock:
                         self._transfers.pop(transfer_id, None)
+                    # Record the failure so it shows up in the transfers history.
+                    self._add_to_history(transfer, False, status="error_missing_chunks")
                     self._send_as_frame(
                         {"msg_type": "file_complete", "transfer_id": transfer_id, "status": "error_missing_chunks"},
                         send_fn,
@@ -900,6 +905,8 @@ class FileTransferManager:
                 _safe_remove(temp_path)
                 with self._lock:
                     self._transfers.pop(transfer_id, None)
+                # Record the failure so it shows up in the transfers history.
+                self._add_to_history(transfer, False, status="error_size_mismatch")
                 self._send_as_frame(
                     {
                         "msg_type": "file_complete",
@@ -919,6 +926,8 @@ class FileTransferManager:
                 _safe_remove(temp_path)
                 with self._lock:
                     self._transfers.pop(transfer_id, None)
+                # Record the failure so it shows up in the transfers history.
+                self._add_to_history(transfer, False, status="error_security")
                 self._send_as_frame(
                     {"msg_type": "file_complete", "transfer_id": transfer_id, "status": "error_security"},
                     send_fn,
@@ -963,6 +972,8 @@ class FileTransferManager:
             _safe_remove(temp_path)
             with self._lock:
                 self._transfers.pop(transfer_id, None)
+            # Record the failure so it shows up in the transfers history.
+            self._add_to_history(transfer, False, status="error_disk")
             self._send_as_frame(
                 {"msg_type": "file_complete", "transfer_id": transfer_id, "status": "error_disk"},
                 send_fn,
@@ -1279,7 +1290,10 @@ class FileTransferManager:
             # cancel_transfer() that already fired it will be skipped here.
             self._fire_complete_once(transfer_id, False, False, "error_internal")
             with self._lock:
-                self._transfers.pop(transfer_id, None)
+                failed = self._transfers.pop(transfer_id, None)
+            if failed is not None:
+                # Record the failure so it shows up in the transfers history.
+                self._add_to_history(failed, False, status="error_internal")
             return
 
         logger.info(
@@ -1330,20 +1344,32 @@ class FileTransferManager:
                     "Transfer %s late retransmit round %d: %d missing chunks",
                     transfer_id[:8], late_rounds, len(missing),
                 )
-                for chunk_index in missing:
-                    while True:
-                        with self._lock:
-                            transfer = self._transfers.get(transfer_id)
-                            if transfer is None or transfer.get("cancelled"):
-                                return
-                            if not transfer.get("paused"):
-                                break
-                        time.sleep(0.5)
-                    _send_one_chunk(fh, chunk_index, total_chunks)
-                    with self._lock:
-                        t = self._transfers.get(transfer_id)
-                        if t:
-                            t["_last_activity"] = time.time()
+                # Reopen the file: the original handle closed with the send
+                # block above, and reading from it raises ValueError, which
+                # killed this thread and left the transfer hanging until the
+                # stale sweeper reported a misleading timeout.
+                try:
+                    with open(file_path, "rb") as fh_late:
+                        for chunk_index in missing:
+                            while True:
+                                with self._lock:
+                                    transfer = self._transfers.get(transfer_id)
+                                    if transfer is None or transfer.get("cancelled"):
+                                        return
+                                    if not transfer.get("paused"):
+                                        break
+                                time.sleep(0.5)
+                            _send_one_chunk(fh_late, chunk_index, total_chunks)
+                            with self._lock:
+                                t = self._transfers.get(transfer_id)
+                                if t:
+                                    t["_last_activity"] = time.time()
+                except OSError as exc:
+                    logger.error(
+                        "Transfer %s: cannot re-read file for late retransmit: %s",
+                        transfer_id[:8], exc,
+                    )
+                    break  # fall through to the FILE_COMPLETE timeout path
             time.sleep(0.5)
 
         with self._lock:
@@ -1352,6 +1378,8 @@ class FileTransferManager:
             logger.warning(
                 "File transfer %s timed out waiting for FILE_COMPLETE", transfer_id[:8],
             )
+            # Record the failure so it shows up in the transfers history.
+            self._add_to_history(stale, False, status="error_timeout")
             # This is a timeout, not a dropped connection -- report it with
             # the timeout reason so the UI shows "timed out" instead of
             # claiming the peer went offline.
@@ -1490,6 +1518,9 @@ class FileTransferManager:
             "status": status,
             "state": transfer.get("state", "unknown"),
             "source_path": transfer.get("file_path", ""),
+            # Destination peer (outgoing transfers) so a failed row can be
+            # retried against the same device without re-picking one.
+            "peer_id": transfer.get("peer_id", ""),
             "saved_path": saved_path,
             "timestamp": time.time(),
         }

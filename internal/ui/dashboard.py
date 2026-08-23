@@ -487,11 +487,13 @@ class DashboardWindow:
             self._window.bind("<Control-w>", lambda _e: self._on_hide())
             self._window.bind("<Control-q>", lambda _e: self._request_quit())
 
-        # Edge snapping
+        # Edge snapping. A single binding only: CTkToplevel.bind IS the
+        # underlying Tk widget binding, so a second add="+" registration made
+        # every <Configure> event run the snap logic twice (double winfo churn,
+        # and each snap geometry() write re-triggers Configure — extra drag
+        # jank for no benefit).
         self._snap_state = {"side": None, "side2": None}
         self._window.bind("<Configure>", self._on_window_move)
-        # Also bind to the underlying Tk widget for more reliable drag detection
-        self._window.bind("<Configure>", self._on_window_move, add="+")
 
         self._window.update_idletasks()
         sw = self._window.winfo_screenwidth()

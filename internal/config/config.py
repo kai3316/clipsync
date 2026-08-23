@@ -60,6 +60,9 @@ class Config:
     certificate_pem: str = ""
     # Advanced settings
     history_max_entries: int = 50
+    # Age-based cleanup for unpinned history entries, in days (dual limit
+    # together with history_max_entries).  0 disables age-based cleanup.
+    history_max_age_days: float = 0.0
     file_receive_dir: str = ""
     sync_debounce: float = 0.3
     clipboard_poll_interval: float = 1.0
@@ -217,6 +220,7 @@ _FIELD_RULES: dict[str, tuple] = {
     "private_key_pem": ("str",),
     "certificate_pem": ("str",),
     "history_max_entries": ("int",),
+    "history_max_age_days": ("float",),
     "file_receive_dir": ("str",),
     "sync_debounce": ("float",),
     "clipboard_poll_interval": ("float",),
@@ -348,7 +352,8 @@ def load() -> Config:
                 "filter_enabled_categories",
                 "relay_url",
                 "private_key_pem", "certificate_pem",
-                "history_max_entries", "file_receive_dir",
+                "history_max_entries", "history_max_age_days",
+                "file_receive_dir",
                 "sync_debounce", "clipboard_poll_interval",
                 "max_reconnect_attempts", "transfer_timeout",
                 "log_level", "notifications_enabled",
@@ -475,6 +480,7 @@ def save(cfg: Config, enc_mgr: "EncryptionManager | None" = None):
             "private_key_pem": private_key_to_save,
             "certificate_pem": cfg.certificate_pem,
             "history_max_entries": cfg.history_max_entries,
+            "history_max_age_days": cfg.history_max_age_days,
             "file_receive_dir": cfg.file_receive_dir,
             "sync_debounce": cfg.sync_debounce,
             "clipboard_poll_interval": cfg.clipboard_poll_interval,

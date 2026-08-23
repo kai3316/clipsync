@@ -841,6 +841,9 @@ class Application:
         # Wire the dedup hash algorithm (sha256 default / simple=md5).
         from internal.clipboard import history_db as _history_db
         _history_db.DEDUP_ALGO = cfg.dedup_method or "sha256"
+        # Expire unpinned history rows older than the configured max age
+        # (0 disables the limit).
+        _history_db.set_max_age_days(cfg.history_max_age_days or 0)
 
         # ── Source tracking / app filter ────────────────────────
         # Honor the source_tracking_enabled flag: when disabled, the
@@ -939,6 +942,12 @@ class Application:
         self.web_server = WebServer(
             cfg, self.clipboard_history, self.sync_mgr,
             get_connected_ids=lambda: self.transport_mgr.get_connected_peers(),
+            # Reconnect progress for offline device cards ("reconnecting N/M");
+            # empty dict when the transport layer is gone (shutdown ordering).
+            get_reconnect_states=lambda: (
+                self.transport_mgr.get_reconnect_states()
+                if self.transport_mgr is not None else {}
+            ),
             on_nav_url=_on_web_nav_url,
             on_forward_file=_on_web_forward_file,
             get_overview_data=self._get_overview_data,
@@ -1407,6 +1416,27 @@ class Application:
         except Exception:
             logger.debug("get_device_states: session list failed", exc_info=True)
 
+        # 6. Auto-reconnect progress: expose "reconnecting (attempt N/M)" so
+        #    a paired device that dropped shows activity instead of looking
+        #    plainly offline.  Reconnect bookkeeping is keyed by whichever id
+        #    form scheduling used — try the real id, then its hash.
+        try:
+            reconnect_states = self.transport_mgr.get_reconnect_states() \
+                if self.transport_mgr is not None else {}
+        except Exception:
+            reconnect_states = {}
+        if reconnect_states:
+            for d in devices.values():
+                if d["connected"]:
+                    continue
+                st = reconnect_states.get(d["peer_id"])
+                if st is None:
+                    st = reconnect_states.get(_hash(d["peer_id"]))
+                if st is not None:
+                    d["reconnecting"] = True
+                    d["reconnect_attempt"] = int(st.get("attempts", 0))
+                    d["reconnect_max"] = int(st.get("max_attempts", 0))
+
         # Fill address/port + fingerprint for peers without a discovered entry.
         for real, d in devices.items():
             if d["connected"] and not d["fingerprint_short"]:
@@ -1799,6 +1829,24 @@ class Application:
                 self._notify_hotkey_failure()
         except Exception:
             logger.debug("Hotkey is_trusted check failed", exc_info=True)
+        # Partial failure: the OS refused specific combinations (typically
+        # already claimed by another application).  The listener is healthy,
+        # but those hotkeys silently never fire — surface them once so the
+        # user knows to pick different shortcuts in settings.
+        try:
+            failed = mgr.failed_shortcuts()
+        except Exception:
+            failed = []
+        if failed:
+            self._hotkey_failure_notified = True
+            detail = ", ".join(s for _hid, s in failed[:4])
+            try:
+                self._notify_error(
+                    T("hotkey.failed_title"),
+                    f"{T('hotkey.failed_msg')}\n{detail}",
+                )
+            except Exception:
+                logger.debug("Could not surface partial hotkey failure", exc_info=True)
 
     def _notify_hotkey_failure(self) -> None:
         """Notify the user that global hotkeys are unavailable (once)."""
@@ -2511,7 +2559,16 @@ class Application:
     def _on_file_received(self, transfer_id: str, saved_path: str, file_name: str) -> None:
         if self.file_transfer_mgr.take_received_kind(transfer_id) == "update":
             logger.info("Update blob received from peer: %s", _mask_path(saved_path))
-            self._finish_update_install(saved_path, None)
+            # Marshal onto the main thread: this callback fires on a network
+            # recv thread, and the install path tears the process down — a
+            # sys.exit() here would only kill the recv thread and leave the
+            # update half-applied until the next manual quit.
+            try:
+                self.root.after(
+                    0, lambda p=saved_path: self._finish_update_install(p, None),
+                )
+            except Exception:
+                logger.debug("Could not schedule update install", exc_info=True)
             return
         logger.info("File received: %s -> %s",
                     _mask_file_name(file_name), _mask_path(saved_path))
@@ -3052,6 +3109,13 @@ class Application:
         if "dedup_method" in updated:
             from internal.clipboard import history_db as _history_db
             _history_db.DEDUP_ALGO = updated["dedup_method"] or "sha256"
+        if "history_max_age_days" in updated and self.clipboard_history is not None:
+            try:
+                from internal.clipboard import history_db as _history_db
+                _history_db.set_max_age_days(updated.get("history_max_age_days") or 0)
+            except (TypeError, ValueError):
+                logger.debug("Invalid history_max_age_days: %s",
+                             updated.get("history_max_age_days"))
 
         if "max_reconnect_attempts" in updated and self.transport_mgr is not None:
             try:
@@ -3276,8 +3340,6 @@ class Application:
         else:
             args = [sys.executable] + sys.argv
         self._spawn_restart_process(args)
-        # The new instance owns the config now; don't re-save/rewrite it on exit.
-        self._skip_save_on_shutdown = True
         # The new instance owns the config now; don't re-save/rewrite it on exit.
         self._skip_save_on_shutdown = True
         # Do NOT sys.exit() from the web handler thread — that raises SystemExit
@@ -3636,53 +3698,60 @@ class Application:
         prev_connected: set[str] = set()
         cleanup_counter = 0
         while not self._stop_updater.is_set():
-            connected_ids = self.transport_mgr.get_connected_peers()
-            # Cache known peers once — reused for display names below
-            known_peers = self.pairing_mgr.get_known_peers()
-            peer_display = []
-            for d in self.get_device_states():
-                if d["paired"]:
-                    suffix = "connected" if d["connected"] else "offline"
-                elif d["pairing"]:
-                    suffix = "pairing…"
-                elif d["connected"]:
-                    suffix = "connected"  # consented chat, not paired
-                else:
-                    suffix = "found"
-                peer_display.append(f"{d['name']}  ({suffix})")
-            if peer_display != prev_display:
-                prev_display = peer_display
-                self.root.after(0, lambda pd=list(peer_display): self._set_systray_peers(pd))
-                self._push_web("broadcast_devices")
+            # One bad iteration (a transient service error, Tk tearing down
+            # during exit) must not kill this daemon thread silently — that
+            # would freeze the tray/device status and stop stale-transfer
+            # cleanup and auto-update checks for the rest of the session.
+            try:
+                connected_ids = self.transport_mgr.get_connected_peers()
+                # Cache known peers once — reused for display names below
+                known_peers = self.pairing_mgr.get_known_peers()
+                peer_display = []
+                for d in self.get_device_states():
+                    if d["paired"]:
+                        suffix = "connected" if d["connected"] else "offline"
+                    elif d["pairing"]:
+                        suffix = "pairing…"
+                    elif d["connected"]:
+                        suffix = "connected"  # consented chat, not paired
+                    else:
+                        suffix = "found"
+                    peer_display.append(f"{d['name']}  ({suffix})")
+                if peer_display != prev_display:
+                    prev_display = peer_display
+                    self.root.after(0, lambda pd=list(peer_display): self._set_systray_peers(pd))
+                    self._push_web("broadcast_devices")
 
-            connected_set = set(connected_ids)
-            for pid in connected_set - prev_connected:
-                found = next((p for p in known_peers if p.device_id == pid), None)
-                name = found.device_name if found else pid[:12]
-                self._notify("notify_device_connect",
-                             T("notify.device_connected_title"),
-                             T("notify.device_connected", name=name))
-            for pid in prev_connected - connected_set:
-                found = next((p for p in known_peers if p.device_id == pid), None)
-                name = found.device_name if found else pid[:12]
-                self._notify("notify_device_connect",
-                             T("notify.device_disconnected_title"),
-                             T("notify.device_disconnected", name=name))
-            prev_connected = connected_set
+                connected_set = set(connected_ids)
+                for pid in connected_set - prev_connected:
+                    found = next((p for p in known_peers if p.device_id == pid), None)
+                    name = found.device_name if found else pid[:12]
+                    self._notify("notify_device_connect",
+                                 T("notify.device_connected_title"),
+                                 T("notify.device_connected", name=name))
+                for pid in prev_connected - connected_set:
+                    found = next((p for p in known_peers if p.device_id == pid), None)
+                    name = found.device_name if found else pid[:12]
+                    self._notify("notify_device_connect",
+                                 T("notify.device_disconnected_title"),
+                                 T("notify.device_disconnected", name=name))
+                prev_connected = connected_set
 
-            cleanup_counter += 1
-            if cleanup_counter >= 10:
-                cleanup_counter = 0
-                try:
-                    self.file_transfer_mgr.cleanup_stale_transfers()
-                except Exception:
-                    pass
+                cleanup_counter += 1
+                if cleanup_counter >= 10:
+                    cleanup_counter = 0
+                    try:
+                        self.file_transfer_mgr.cleanup_stale_transfers()
+                    except Exception:
+                        pass
 
-            # Periodic auto-update check (once per ~6 hours, silent unless an
-            # update is available).
-            if time.monotonic() - self._last_auto_update_check >= 6 * 3600:
-                self._last_auto_update_check = time.monotonic()
-                self._auto_check_for_update()
+                # Periodic auto-update check (once per ~6 hours, silent unless an
+                # update is available).
+                if time.monotonic() - self._last_auto_update_check >= 6 * 3600:
+                    self._last_auto_update_check = time.monotonic()
+                    self._auto_check_for_update()
+            except Exception:
+                logger.exception("Device-status loop iteration failed")
 
             self._stop_updater.wait(3)
 
@@ -4166,7 +4235,17 @@ class Application:
             return
         if apply_and_restart(staged):
             self._skip_save_on_shutdown = True
-            sys.exit(0)
+            # Quit through the normal loop instead of sys.exit(): this runs
+            # on the Tk main thread, and SystemExit raised inside an after()
+            # callback does not reliably end the process.  _exit_process
+            # stops the mainloop, run()'s finally runs shutdown(), then
+            # main() returns and the update helper replaces the binary.
+            try:
+                self.root.after(300, self._exit_process)
+                return
+            except Exception:
+                logger.debug("Could not schedule update exit", exc_info=True)
+            self._exit_process()
         show_error(self.root, T("ui.app_name"), T("tray.update_install_failed"))
 
     def _auto_check_for_update(self) -> None:
@@ -5410,12 +5489,57 @@ class Application:
                 self.file_transfer_mgr.accept_transfer(transfer_id, send_fn)
             elif action == 'reject':
                 self.file_transfer_mgr.reject_transfer(transfer_id, send_fn)
+            elif action == 'retry':
+                # Re-send a FAILED outgoing transfer from history to its
+                # original peer (the transfers panel offers Retry on failed
+                # rows; failed rows persist in history with source + peer).
+                return self._retry_transfer_from_history(transfer_id)
             else:
                 return False
             return True
         except Exception as e:
             logger.error("Transfer action %s failed: %s", action, e)
         return False
+
+    def _retry_transfer_from_history(self, transfer_id: str) -> bool:
+        """Start a fresh transfer for a failed outgoing one (web Retry action).
+
+        Looks up the failed row in transfer history (failed transfers persist
+        there with their source path and destination peer), then re-sends the
+        file to the same peer.  Returns True when a new transfer was started.
+        """
+        if self.file_transfer_mgr is None:
+            return False
+        entry = next(
+            (e for e in self.file_transfer_mgr.get_history()
+             if e.get("transfer_id") == transfer_id),
+            None,
+        )
+        if entry is None or entry.get("direction") != "up":
+            return False
+        source_path = entry.get("source_path") or ""
+        peer_id = entry.get("peer_id") or ""
+        if not source_path or not peer_id or not os.path.isfile(source_path):
+            logger.debug(
+                "Retry transfer %s: missing source (%s) or peer (%s)",
+                transfer_id[:8], _mask_path(source_path), peer_id[:12],
+            )
+            return False
+
+        def _send_fn(data: bytes, pid=peer_id):
+            self.transport_mgr.send_to_peer(pid, data)
+
+        try:
+            new_id = self.file_transfer_mgr.send_file(source_path, _send_fn)
+        except OSError as e:
+            logger.warning("Retry transfer failed for %s: %s", source_path, e)
+            return False
+        if not new_id:
+            return False
+        self._transfer_directions[new_id] = "outgoing"
+        logger.info("Retried transfer %s as %s to peer %s",
+                    transfer_id[:8], new_id[:8], peer_id[:12])
+        return True
 
     def open_dashboard(self) -> None:
         if self._is_webview():

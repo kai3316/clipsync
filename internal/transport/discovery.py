@@ -239,6 +239,10 @@ class Discovery:
         self._known_peers: dict[str, dict] = {}  # peer_id -> info
         self._service_to_peer: dict[str, str] = {}  # service_name -> peer_id
         self._our_ip = "127.0.0.1"
+        # Network-change watcher state: the set of addresses we advertised,
+        # plus a stop signal for the light poll in _network_watch_loop.
+        self._netmon_stop = threading.Event()
+        self._advertised_ips: frozenset[str] = frozenset()
 
     def set_callbacks(self, on_found: Callable, on_lost: Callable):
         """Set callbacks for peer discovery events.
@@ -324,7 +328,47 @@ class Discovery:
         )
         logger.info("Started browsing for peers")
 
+        # Remember the advertised address set and start the watcher that
+        # re-registers when the local interfaces change (Wi-Fi <-> Ethernet,
+        # VPN toggle, DHCP renewal moving us to another subnet) — those
+        # produce no sleep/wake event, so without this the stale mDNS
+        # advertisement keeps pointing peers at a dead address.
+        self._advertised_ips = frozenset(all_ips)
+        self._netmon_stop.clear()
+        threading.Thread(
+            target=self._network_watch_loop, daemon=True, name="clipsync-netwatch",
+        ).start()
+
+    def _network_watch_loop(self):
+        """Re-advertise when the local IP set changes (no sleep involved).
+
+        Sleep/wake recovery rides the transport's wake callback; an ordinary
+        interface switch does not.  A cheap socket-level enumeration every
+        30 s notices a changed address set and rebuilds the registration with
+        the fresh addresses, so peers can find us again immediately instead
+        of only after an app restart.
+        """
+        CHECK_INTERVAL = 30.0
+        while not self._netmon_stop.wait(CHECK_INTERVAL):
+            if self._zc is None:
+                return
+            try:
+                current = frozenset(_get_all_local_addresses())
+            except Exception:
+                continue
+            if not current or current == self._advertised_ips:
+                # An empty set is a transient disconnection — keep the old
+                # registration rather than re-advertising 127.0.0.1.
+                continue
+            logger.info(
+                "Local addresses changed (%s -> %s) — re-registering mDNS",
+                sorted(self._advertised_ips), sorted(current),
+            )
+            self._advertised_ips = current
+            self._wake_recovery()
+
     def stop(self):
+        self._netmon_stop.set()
         self.stop_browsing()
         self.stop_advertising()
         if self._zc:
@@ -398,6 +442,7 @@ class Discovery:
             port=self._port,
             properties=props,
         )
+        self._advertised_ips = frozenset(all_ips)
         try:
             self._zc.register_service(self._service_info)
             logger.info("Resumed advertising this device on port %d", self._port)

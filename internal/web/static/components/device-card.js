@@ -53,6 +53,13 @@
       statusText: function () {
         if (this.isLocal) return this.t('device.this_device');
         if (this.isOnline) return this.t('device.connected');
+        // Mid-reconnect shows live attempt progress instead of a bare
+        // "Paired · offline" badge, so a dropped device looks active.
+        if (this.device.reconnecting) {
+          var n = Number(this.device.reconnect_attempt) || 0;
+          var max = Number(this.device.reconnect_max) || 0;
+          return this.t('device.reconnecting', { attempt: n, max: max });
+        }
         if (this.isPaired) return this.t('device.paired_offline');
         return this.t('device.discovered');
       },

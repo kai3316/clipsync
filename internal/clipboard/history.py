@@ -327,12 +327,18 @@ class ClipboardHistory:
             return None
 
     def batch_set_pinned(self, entry_ids: list, pinned: bool) -> int:
-        """Set pinned state on entries matching the given IDs. Returns count of entries updated."""
-        id_set = set(entry_ids)
+        """Set pinned state on entries matching the given IDs. Returns count of entries updated.
+
+        Comparison is type-tolerant (str vs int), matching find_by_id():
+        the web panel sends ids as JSON numbers while query params arrive
+        as strings, and an exact set-membership check matched neither
+        against the other.
+        """
+        id_keys = {str(i) for i in entry_ids}
         count = 0
         with self._lock:
             for entry in self._entries:
-                if entry.get("entry_id") in id_set:
+                if str(entry.get("entry_id")) in id_keys:
                     entry["pinned"] = pinned
                     count += 1
             if count:
@@ -340,11 +346,17 @@ class ClipboardHistory:
         return count
 
     def batch_delete(self, entry_ids: list) -> int:
-        """Delete entries matching the given IDs. Returns count of entries deleted."""
-        id_set = set(entry_ids)
+        """Delete entries matching the given IDs. Returns count of entries deleted.
+
+        Type-tolerant id comparison — see batch_set_pinned().
+        """
+        id_keys = {str(i) for i in entry_ids}
         with self._lock:
             before = len(self._entries)
-            self._entries = [e for e in self._entries if e.get("entry_id") not in id_set]
+            self._entries = [
+                e for e in self._entries
+                if str(e.get("entry_id")) not in id_keys
+            ]
             removed = before - len(self._entries)
             if removed:
                 self._save()

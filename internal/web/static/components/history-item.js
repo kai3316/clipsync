@@ -23,6 +23,13 @@
         type: Number,
         default: 0,
       },
+      // Position in the FLAT visible list (pinned section ++ unpinned
+      // section) — the same order store.filteredHistory() returns, so the
+      // keyboard cursor (store.kbdIndex) can highlight this row.
+      flatIndex: {
+        type: Number,
+        default: -1,
+      },
     },
 
     template: `<div
@@ -30,9 +37,11 @@
       role="button"
       tabindex="0"
       :aria-label="copyButtonTitle"
+      :data-kbd="flatIndex"
       :class="{
         'history-item--pinned': item.pinned,
-        'history-item--selected': isSelected
+        'history-item--selected': isSelected,
+        'history-item--kbd': flatIndex >= 0 && flatIndex === store.kbdIndex
       }"
       @click="onClick"
       @keydown="onKeyDown"

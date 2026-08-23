@@ -174,6 +174,9 @@ class HotkeyManager:
         self._win_id_map: dict[str, int] = {}  # string id -> RegisterHotKey int id
         self._win_id_rev: dict[int, str] = {}  # int id -> string id
         self._win_next_id: int = 1
+        # Ids whose platform-level registration the OS refused (e.g. the
+        # combination is already claimed by another application).
+        self._register_failures: set[str] = set()
 
         # macOS
         self._mac_tap: int | None = None  # CFMachPortRef
@@ -241,7 +244,22 @@ class HotkeyManager:
         with self._lock:
             self._hotkeys.pop(hotkey_id, None)
             self._shortcut_strings.pop(hotkey_id, None)
+            self._register_failures.discard(hotkey_id)
         logger.debug("Unregistered hotkey '%s'", hotkey_id)
+
+    def failed_shortcuts(self) -> list[tuple[str, str]]:
+        """Return (hotkey_id, shortcut) pairs whose platform registration failed.
+
+        A parse-invalid shortcut never reaches the platform and is reported
+        by ``reload_from_config`` instead; this covers OS-level refusals such
+        as the combination being globally claimed by another application —
+        the listener stays healthy but that one hotkey silently never fires.
+        """
+        with self._lock:
+            return [
+                (hid, self._shortcut_strings.get(hid, ""))
+                for hid in sorted(self._register_failures)
+            ]
 
     def start(self) -> None:
         """Start the hotkey listener thread."""
@@ -288,6 +306,7 @@ class HotkeyManager:
         with self._lock:
             self._hotkeys.clear()
             self._shortcut_strings.clear()
+            self._register_failures.clear()
 
         failed: list[str] = []
         for hotkey_id, shortcut in shortcuts.items():
@@ -566,6 +585,12 @@ if _platform() == "windows":
         ok = _user32.RegisterHotKey(self._win_hwnd, int_id, win_mods, vk_code)
         if not ok:
             err = _kernel32.GetLastError()
+            # Drop the dead mapping so the id can never fire, and record the
+            # refusal so the app can tell the user the shortcut is unusable
+            # (usually claimed by another application).
+            self._win_id_map.pop(hotkey_id, None)
+            self._win_id_rev.pop(int_id, None)
+            self._register_failures.add(hotkey_id)
             logger.warning(
                 "RegisterHotKey failed for '%s' (id=%d, mods=0x%x, vk=0x%x, err=%d)",
                 hotkey_id,
@@ -574,6 +599,8 @@ if _platform() == "windows":
                 vk_code,
                 err,
             )
+        else:
+            self._register_failures.discard(hotkey_id)
 
     def _win_unregister_one(self: HotkeyManager, hotkey_id: str) -> None:
         int_id = self._win_id_map.pop(hotkey_id, None)

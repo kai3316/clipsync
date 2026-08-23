@@ -2,6 +2,34 @@
 
 All notable changes to ClipSync are documented in this file.
 
+## [Unreleased]
+
+### Transfers
+- **Failed file transfers are no longer invisible.** Every failure path (disk error, peer offline, timeout, size mismatch, …) now lands in transfer history with a machine-readable reason and the target device, and failed outbound rows get a ⟳ Retry button in the web dashboard.
+- Fixed a sender-thread crash when a paused receiver resumes and late chunk retransmits hit a closed file handle (transfer stuck at "finalizing" until timeout).
+
+### Devices & connectivity
+- **Offline devices show reconnect progress** ("Reconnecting N/M") in the device panel instead of a bare offline state, across REST snapshots and WS broadcasts.
+- **Network switches self-heal**: the mDNS advertisement is rebuilt when the local address set changes (Wi-Fi ↔ wired / subnet change) — previously peers couldn't find this device until an app restart.
+
+### Clipboard & history
+- **History retention by age**: new "keep history for N days" setting (0 = unlimited); unpinned rows older than that are pruned automatically after startup and each capture.
+- **Markdown export** joins JSON/CSV in Data Management (grouped by day, atomic write). CSV exports gain `time_iso`/`source_app`/`source_title`/`byte_size` columns; old CSVs still import.
+- Exports/imports round-trip `source_app`/`source_title`; imports keep original order and protect pinned items from over-limit trimming.
+- Local clipboard capture no longer silently drops items when another app holds the clipboard briefly (read-side retry budget now matches write side).
+- A single corrupted `types` JSON row no longer aborts loading the whole history; clearing history now reclaims disk space (`VACUUM`).
+- Batch pin/delete tolerates string vs numeric ids from web clients (previously silent no-ops).
+
+### Reliability
+- P2P update install no longer runs inside the network receive thread (half-finished updates after `sys.exit` in a worker thread); exit now marshals through the Tk main loop so shutdown hooks run.
+- A transient exception can no longer permanently kill the peers-status daemon loop (tray/device state froze on first error).
+- Conflicted global hotkeys clean up their dead mappings and are reported once at startup instead of silently never firing.
+- Overview "Transfers" card always showed 0 (wrong stats field); dashboard edge-snapping ran twice per resize event.
+
+### Web UI
+- **Stackable toasts** (up to 4, with leave animations) replace overlapping notifications; pairing-reject and chat send failures surface errors instead of being swallowed.
+- **Keyboard navigation in history list**: ↑/↓ move, Enter copies the full item (rich paste incl. images), Del deletes; multi-select push-to-desktop now fetches full text instead of pushing truncated previews.
+
 ## [1.0.50] — 2026-08-23
 
 ### Desktop (Windows)

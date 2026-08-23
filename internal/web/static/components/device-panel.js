@@ -224,7 +224,11 @@
             });
             if (idx !== -1) self.store.pairingRequests.splice(idx, 1);
           })
-          .catch(function () {})
+          .catch(function () {
+            // A network failure must not look like a successful no-op — the
+            // request card would otherwise sit there forever.
+            self.store.showToast(self.t('device.pairing_failed'), 2000);
+          })
           .finally(function () {
             self.pairingResponding = null;
           });

@@ -560,6 +560,119 @@
           }
           return;
         }
+
+        // ↑/↓/Enter/Del — keyboard navigation over the visible history list,
+        // mirroring the Quick Paste popup. Only on the history tab, and only
+        // when no modal/menu owns the keys and no editable field is focused.
+        // Enter/Del are further skipped when focus sits on an interactive
+        // control (a history card handles its own Enter; a focused button
+        // owns both) so actions never fire twice.
+        var navTag = (e.target && e.target.tagName) || '';
+        var navEditable = navTag === 'INPUT' || navTag === 'TEXTAREA' ||
+          !!(e.target && e.target.isContentEditable);
+        var navBlocked = navEditable ||
+          !!store.clientDialog || !!store.activeDialog ||
+          !!(store.contextMenu && store.contextMenu.visible) ||
+          !!store.settingsPanelVisible ||
+          !!(store.translateModal && store.translateModal.visible) ||
+          !!store.showOnboarding;
+        var navKey = e.key === 'ArrowDown' || e.key === 'ArrowUp';
+        var actKey = e.key === 'Enter' || e.key === 'Delete' || e.key === 'Backspace';
+        var actOnControl = !!(e.target && e.target.closest &&
+          e.target.closest('button, a, select, [role="button"]'));
+        if ((navKey || (actKey && !actOnControl)) && !navBlocked &&
+            !e.ctrlKey && !e.metaKey && !e.altKey &&
+            store.activeTab === 'history') {
+          var kItems = store.filteredHistory();
+          var kLen = kItems.length;
+          if (kLen === 0) return;
+          if (e.key === 'ArrowDown') {
+            e.preventDefault();
+            store.kbdIndex = store.kbdIndex < 0 ? 0 : Math.min(store.kbdIndex + 1, kLen - 1);
+            this._scrollKbdItem();
+          } else if (e.key === 'ArrowUp') {
+            e.preventDefault();
+            store.kbdIndex = store.kbdIndex < 0 ? 0 : Math.max(store.kbdIndex - 1, 0);
+            this._scrollKbdItem();
+          } else if (e.key === 'Enter') {
+            if (store.kbdIndex >= 0 && store.kbdIndex < kLen) {
+              e.preventDefault();
+              this._copyKbdItem(kItems[store.kbdIndex]);
+            }
+          } else if (e.key === 'Delete' || e.key === 'Backspace') {
+            if (store.kbdIndex >= 0 && store.kbdIndex < kLen) {
+              e.preventDefault();
+              this._deleteKbdItem(kItems[store.kbdIndex]);
+            }
+          }
+        }
+      },
+
+      /**
+       * Keep the keyboard-focused history card in view after ↑/↓ moves it.
+       */
+      _scrollKbdItem: function () {
+        this.$nextTick(function () {
+          var el = document.querySelector('.history-item--kbd');
+          if (el && el.scrollIntoView) {
+            el.scrollIntoView({ block: 'nearest' });
+          }
+        });
+      },
+
+      /**
+       * Copy the keyboard-focused item to the desktop clipboard via
+       * paste-rich (so IMAGE entries work too). Mirrors history-item's
+       * copy action, including the paste-count bump and toasts.
+       * @param {Object} item
+       */
+      _copyKbdItem: function (item) {
+        var self = this;
+        if (!item || item.entry_id === undefined || item.entry_id === null) return;
+        var eid = item.entry_id;
+        ClipsyncAPI.pasteRich(eid).then(function (res) {
+          if (res && res.ok !== false) {
+            var idx = store.history.findIndex(function (h) {
+              return h.entry_id === eid;
+            });
+            if (idx !== -1) {
+              store.history[idx].paste_count = (store.history[idx].paste_count || 0) + 1;
+            }
+            store.showToast(self.t('history.copied'), 1500);
+          } else {
+            store.showToast(self.t('history.copy_failed'), 2000);
+          }
+        }).catch(function () {
+          store.showToast(self.t('history.copy_failed'), 2000);
+        });
+      },
+
+      /**
+       * Delete the keyboard-focused item. Mirrors history-item's delete:
+       * shared removal helper + pagination-cursor shrink, then keep the
+       * cursor clamped to the shorter list so continued Del presses walk
+       * down without skipping an entry.
+       * @param {Object} item
+       */
+      _deleteKbdItem: function (item) {
+        var self = this;
+        if (!item || item.entry_id === undefined || item.entry_id === null) return;
+        var eid = item.entry_id;
+        ClipsyncAPI.deleteItem(eid).then(function (res) {
+          if (res && res.ok !== false) {
+            var removed = store.removeHistoryItems([eid]);
+            if (removed > 0) {
+              store.historyOffset = Math.max(0, store.historyOffset - 1);
+            }
+            var len = store.filteredHistory().length;
+            if (len > 0 && store.kbdIndex > len - 1) {
+              store.kbdIndex = len - 1;
+            }
+            store.showToast(self.t('history.deleted_toast'), 1200);
+          }
+        }).catch(function () {
+          store.showToast(self.t('history.delete_failed'), 2000);
+        });
       },
     },
   });

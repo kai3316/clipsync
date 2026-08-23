@@ -573,6 +573,7 @@ class WebServer:
                  on_show_web_qr=None, on_send_url=None,
                  get_discovered_peers=None,
                  get_resolved_hashes=None, get_pending_pairings=None,
+                 get_reconnect_states=None,
                  enc_mgr=None, on_open_file=None, on_open_folder=None,
                  on_restart=None, on_reset_dedup=None,
                  get_certs=None, get_diagnostics=None,
@@ -592,6 +593,9 @@ class WebServer:
         self._get_discovered_peers = get_discovered_peers
         self._get_resolved_hashes = get_resolved_hashes
         self._get_pending_pairings = get_pending_pairings
+        # Auto-reconnect bookkeeping source (transport manager); optional —
+        # when unwired, /api/devices simply omits the reconnecting fields.
+        self._get_reconnect_states = get_reconnect_states
         self._enc_mgr = enc_mgr
         self._on_open_file = on_open_file
         self._on_open_folder = on_open_folder
@@ -664,6 +668,7 @@ class WebServer:
             get_discovered=get_discovered_peers,
             get_resolved_hashes=get_resolved_hashes,
             get_pending_pairings=get_pending_pairings,
+            get_reconnect_states=self._get_reconnect_states,
         )
 
         self._dialog_mgr = DialogManager()
@@ -887,6 +892,7 @@ class WebServer:
         get_discovered_peers = self._get_discovered_peers
         get_resolved_hashes = self._get_resolved_hashes
         get_pending_pairings = self._get_pending_pairings
+        get_reconnect_states = self._get_reconnect_states
         enc_mgr = self._enc_mgr
         on_open_file = self._on_open_file
         on_open_folder = self._on_open_folder
@@ -1590,6 +1596,7 @@ class WebServer:
                         on_toggle_visibility=on_toggle_visibility,
                         get_resolved_hashes=get_resolved_hashes,
                         get_pending_pairings=get_pending_pairings,
+                        get_reconnect_states=get_reconnect_states,
                         enc_mgr=enc_mgr,
                         on_open_file=on_open_file,
                         on_open_folder=on_open_folder,
@@ -1791,6 +1798,7 @@ class WebServer:
                         on_send_url=on_send_url,
                         get_resolved_hashes=get_resolved_hashes,
                         get_pending_pairings=get_pending_pairings,
+                        get_reconnect_states=get_reconnect_states,
                         enc_mgr=enc_mgr,
                         on_open_file=on_open_file,
                         on_open_folder=on_open_folder,

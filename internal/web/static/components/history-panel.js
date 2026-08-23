@@ -190,6 +190,7 @@
             :key="item.entry_id || 'p'+index"
             :item="item"
             :index="index"
+            :flat-index="index"
             class="stagger-item"
           ></history-item>
         </template>
@@ -201,6 +202,7 @@
           :key="item.entry_id || 'u'+index"
           :item="item"
           :index="index"
+          :flat-index="sections.pinned.length + index"
           class="stagger-item"
         ></history-item>
 
@@ -356,40 +358,89 @@
         var selectedIds = Array.from(store.selectedIds);
         if (selectedIds.length === 0) return;
 
-        // Collect text from selected items in display order
-        var selectedTexts = [];
+        // Collect the FULL text of each selected item in raw history order.
+        // List responses carry only a truncated ~200-char preview, so merging
+        // previews would push cut-off clips to the desktop — fetch each
+        // entry's full TEXT payload instead, falling back to the preview when
+        // the detail fetch fails or the entry vanished mid-flight.
+        var ordered = [];
         for (var i = 0; i < store.history.length; i++) {
           var h = store.history[i];
-          if (selectedIds.indexOf(h.entry_id) !== -1) {
-            var text = h.text_preview || '';
-            if (text) {
-              selectedTexts.push(text);
-            }
+          if (h && h.entry_id !== undefined &&
+              selectedIds.indexOf(h.entry_id) !== -1) {
+            ordered.push(h);
           }
         }
-
-        if (selectedTexts.length === 0) {
+        if (ordered.length === 0) {
           store.showToast(this.t('history.nothing_to_merge'), 1500);
           return;
         }
 
-        // Push the merged text through the server so it lands on the DESKTOP
-        // clipboard — the whole point of "Push to Desktop". Writing to the
-        // local browser clipboard would only put it on this phone.
-        var merged = selectedTexts.join('\n---\n');
+        // Same decoder the favorites/context-menu components use for a row's
+        // base64 TEXT payload, falling back to the given default.
+        var decodeTypesText = function (types, fallback) {
+          if (types && types.TEXT) {
+            try {
+              var bytes = Uint8Array.from(atob(types.TEXT), function (c) { return c.charCodeAt(0); });
+              var decoded = new TextDecoder('utf-8').decode(bytes);
+              if (decoded) return decoded;
+            } catch (e) { /* keep fallback */ }
+          }
+          return fallback || '';
+        };
+
         var self = this;
         this.batchBusy = true;
-        ClipsyncAPI.pushText(merged).then(function (res) {
-          self.batchBusy = false;
-          if (res && res.ok !== false) {
-            store.showToast(self.t('web.merged_pushed', { count: selectedTexts.length }), 2000);
-          } else {
-            store.showToast(self.t('history.push_failed'), 2000);
+        var texts = [];
+        var pending = ordered.length;
+
+        var finish = function () {
+          pending -= 1;
+          if (pending > 0) return;
+          var merged = texts.join('\n---\n');
+          if (!merged) {
+            self.batchBusy = false;
+            store.showToast(self.t('history.nothing_to_merge'), 1500);
+            return;
           }
-        }).catch(function () {
-          self.batchBusy = false;
-          store.showToast(self.t('history.push_failed'), 2000);
-        });
+          // Push the merged text through the server so it lands on the DESKTOP
+          // clipboard — the whole point of "Push to Desktop". Writing to the
+          // local browser clipboard would only put it on this phone.
+          ClipsyncAPI.pushText(merged).then(function (res) {
+            self.batchBusy = false;
+            if (res && res.ok !== false) {
+              store.showToast(self.t('web.merged_pushed', { count: texts.length }), 2000);
+            } else {
+              store.showToast(self.t('history.push_failed'), 2000);
+            }
+          }).catch(function () {
+            self.batchBusy = false;
+            store.showToast(self.t('history.push_failed'), 2000);
+          });
+        };
+
+        for (var j = 0; j < ordered.length; j++) {
+          (function (item) {
+            if (item.types && item.types.TEXT) {
+              var decoded = decodeTypesText(item.types, '');
+              if (decoded) texts.push(decoded);
+              finish();
+            } else if (item.entry_id !== undefined && item.entry_id !== null) {
+              ClipsyncAPI.getHistoryItem(item.entry_id).then(function (res) {
+                var detail = (res && res.item) || {};
+                var full = decodeTypesText(detail.types, '');
+                if (full) texts.push(full);
+                finish();
+              }).catch(function () {
+                if (item.text_preview) texts.push(item.text_preview);
+                finish();
+              });
+            } else {
+              if (item.text_preview) texts.push(item.text_preview);
+              finish();
+            }
+          })(ordered[j]);
+        }
       },
 
       batchPinSelected: function () {

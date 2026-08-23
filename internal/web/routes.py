@@ -178,6 +178,7 @@ def dispatch(method, path, query_params, body, cfg, history, sync_mgr,
              on_show_web_qr=None, on_send_url=None,
              get_discovered=None,
              get_resolved_hashes=None, get_pending_pairings=None,
+             get_reconnect_states=None,
              enc_mgr=None, on_open_file=None, on_open_folder=None,
              on_restart=None, on_reset_dedup=None,
              get_certs=None, get_diagnostics=None,
@@ -221,8 +222,8 @@ def dispatch(method, path, query_params, body, cfg, history, sync_mgr,
             on_get_transfers, on_speed_test_start, on_speed_test_poll,
             on_window_close, on_toggle_discovery, on_toggle_visibility,
             on_settings_change, on_show_web_qr, on_send_url, get_discovered,
-            get_resolved_hashes, get_pending_pairings, enc_mgr,
-            on_open_file, on_open_folder, on_restart, on_reset_dedup,
+            get_resolved_hashes, get_pending_pairings, get_reconnect_states,
+            enc_mgr, on_open_file, on_open_folder, on_restart, on_reset_dedup,
             get_certs, get_diagnostics, on_update_download, on_diagnostics_request,
             chat_mgr, get_chat_devices, chat_send_fn, chat_start_session,
             get_chat_muted, set_chat_muted, on_quickpaste_done,
@@ -248,6 +249,7 @@ def _dispatch(method, path, query_params, body, cfg, history, sync_mgr,
               on_show_web_qr=None, on_send_url=None,
               get_discovered=None,
               get_resolved_hashes=None, get_pending_pairings=None,
+              get_reconnect_states=None,
               enc_mgr=None, on_open_file=None, on_open_folder=None,
               on_restart=None, on_reset_dedup=None,
               get_certs=None, get_diagnostics=None,
@@ -281,6 +283,7 @@ def _dispatch(method, path, query_params, body, cfg, history, sync_mgr,
                 cfg, get_connected_ids, get_discovered,
                 get_resolved_hashes=get_resolved_hashes,
                 get_pending_pairings=get_pending_pairings,
+                get_reconnect_states=get_reconnect_states,
             )
             return _json_response(data, status)
 
@@ -835,6 +838,22 @@ def _dispatch(method, path, query_params, body, cfg, history, sync_mgr,
             if not transfer_id:
                 return _json_response({"ok": False, "error": "transfer_id required"}, 400)
             ok = on_transfer_action("reject", transfer_id)
+            return _json_response({"ok": ok})
+
+        elif path == "/api/transfer/retry":
+            # Re-send a FAILED OUTGOING transfer from history to its original
+            # peer (the transfers panel offers Retry on failed rows).  The
+            # host's retry branch resolves the row by its original transfer_id.
+            if on_transfer_action is None:
+                return _json_response({"ok": False, "error": "not available"}, 503)
+            try:
+                req = json.loads(body.decode("utf-8"))
+            except (json.JSONDecodeError, UnicodeDecodeError):
+                return _json_response({"ok": False, "error": "invalid json"}, 400)
+            transfer_id = req.get("transfer_id", "")
+            if not transfer_id:
+                return _json_response({"ok": False, "error": "transfer_id required"}, 400)
+            ok = on_transfer_action("retry", transfer_id)
             return _json_response({"ok": ok})
 
         elif path == "/api/history/clear":

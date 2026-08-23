@@ -601,6 +601,16 @@ var ClipsyncAPI = (function () {
     },
 
     /**
+     * Re-send a FAILED OUTGOING transfer from history to its original peer.
+     * The backend looks the row up by its original transfer_id.
+     * @param {string} transferId
+     * @returns {Promise<{ok: boolean}>}
+     */
+    retryTransfer: function (transferId) {
+      return this._fetch('POST', '/api/transfer/retry', { transfer_id: transferId });
+    },
+
+    /**
      * Clear all history items.
      * @returns {Promise<{ok: boolean}>}
      */

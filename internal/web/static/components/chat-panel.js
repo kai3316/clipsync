@@ -443,6 +443,7 @@
           })
           .catch(function (e) {
             console.error('[ClipSync] Failed to respond to invite:', e);
+            self.store.showToast(self.t('chat.err_send_failed'), 2500);
           })
           .finally(function () {
             self.inviteBusy = '';
@@ -464,7 +465,10 @@
             self.loadSessions();
           })
           .catch(function (e) {
+            // Keep the conversation open and say why — a silent failure would
+            // leave the user staring at a session that never goes away.
             console.error('[ClipSync] Failed to close session:', e);
+            self.store.showToast(self.t('chat.err_send_failed'), 2500);
           });
       },
 

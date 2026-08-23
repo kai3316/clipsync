@@ -122,10 +122,13 @@ class _ClipboardReader(ClipboardReader):
         # thread that holds the clipboard open (see _CLIPBOARD_LOCK).
         with _CLIPBOARD_LOCK:
             if not user32.OpenClipboard(None):
-                # Another app may be holding the clipboard open — retry a few
-                # times before giving up (the writer side does the same).
-                for _ in range(3):
-                    time.sleep(0.05)
+                # Another app may be holding the clipboard open — retry with
+                # the same budget as the writer side (_OPEN_CLIPBOARD_RETRIES
+                # attempts × _OPEN_CLIPBOARD_RETRY_DELAY).  A shorter reader
+                # window silently missed captures whenever a busy app kept
+                # the clipboard open a little longer than usual.
+                for _ in range(_OPEN_CLIPBOARD_RETRIES - 1):
+                    time.sleep(_OPEN_CLIPBOARD_RETRY_DELAY)
                     if user32.OpenClipboard(None):
                         break
                 else:

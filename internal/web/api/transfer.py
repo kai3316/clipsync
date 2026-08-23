@@ -51,6 +51,9 @@ def _map_history(t: dict) -> dict:
         "status": "cancelled" if t.get("cancelled") else ("completed" if t.get("success") else "failed"),
         "reason": reason,
         "path": t.get("saved_path") or t.get("source_path") or "",
+        # Destination/source peer — failed OUTGOING rows carry it so the UI's
+        # Retry action can be offered only where the host can actually re-send.
+        "peer_id": t.get("peer_id", "") or "",
         "direction": t.get("direction", "down"),
         "timestamp": t.get("timestamp", 0),
     }

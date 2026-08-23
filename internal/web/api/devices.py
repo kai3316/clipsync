@@ -7,7 +7,8 @@ import platform
 
 
 def get_devices(cfg, get_connected_ids, get_discovered=None,
-                get_resolved_hashes=None, get_pending_pairings=None):
+                get_resolved_hashes=None, get_pending_pairings=None,
+                get_reconnect_states=None):
     """Return list of connected devices with status.
 
     Replicates the existing GET /api/devices logic from server.py
@@ -19,6 +20,10 @@ def get_devices(cfg, get_connected_ids, get_discovered=None,
     device is not listed a second time — mirroring the desktop ``_get_peers``
     logic.  *get_pending_pairings* returns the pairing manager's pending
     requests (list of ``(peer_id, code, peer_name)`` tuples).
+    *get_reconnect_states* optionally returns the transport manager's
+    auto-reconnect bookkeeping (``{id: {attempts, max_attempts}}``, keyed by
+    either id form) so an offline paired peer mid-reconnect carries
+    ``reconnecting/reconnect_attempt/reconnect_max`` for the UI.
     """
     connected_ids = set(get_connected_ids()) if get_connected_ids else set()
     devices = [{
@@ -48,6 +53,38 @@ def get_devices(cfg, get_connected_ids, get_discovered=None,
                 "os": getattr(peer, "os", "") or None,
                 "note": getattr(peer, "notes", "") or "",
             })
+
+    # Attach auto-reconnect progress to offline known peers so the UI can
+    # show "reconnecting (attempt N/M)" instead of a bare offline badge.
+    # The bookkeeping is keyed by whichever id form reconnect scheduling
+    # used — try the real device_id first, then its hashed mDNS form
+    # (mirrors src/main.py get_device_states step 6).
+    if get_reconnect_states is not None:
+        try:
+            reconnect_states = get_reconnect_states() or {}
+        except Exception:
+            reconnect_states = {}
+        if reconnect_states:
+            def _hashed(peer_id):
+                try:
+                    from internal.transport.discovery import Discovery
+                    return Discovery._hash_device_id(peer_id)
+                except Exception:
+                    return ""
+            for dev in devices:
+                if dev.get("connected") or not dev.get("device_id"):
+                    continue
+                st = reconnect_states.get(dev["device_id"])
+                if st is None:
+                    st = reconnect_states.get(_hashed(dev["device_id"]))
+                if isinstance(st, dict) and st:
+                    dev["reconnecting"] = True
+                    try:
+                        dev["reconnect_attempt"] = int(st.get("attempts", 0) or 0)
+                        dev["reconnect_max"] = int(st.get("max_attempts", 0) or 0)
+                    except (TypeError, ValueError):
+                        dev["reconnect_attempt"] = 0
+                        dev["reconnect_max"] = 0
 
     seen_ids = {d["device_id"] for d in devices}
     known_names = {d["device_name"].lower() for d in devices}
