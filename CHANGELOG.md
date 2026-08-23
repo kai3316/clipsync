@@ -2,6 +2,11 @@
 
 All notable changes to ClipSync are documented in this file.
 
+## [1.0.48] — 2026-08-23
+
+### Desktop
+- **Factory reset / restart no longer crashes.** In a packaged (PyInstaller one-file) build the reset path spawns a fresh instance and exits; the two processes' `_MEI` temp-directory cleanups could race and delete a live extraction, failing on the next lazy import (`base_library.zip` not found) — seen right after choosing the language in the first-run dialog. The spawned instance now extracts into a private temp directory, isolated from the exiting process's cleanup.
+
 ## [1.0.47] — 2026-08-23
 
 ### Web & mobile
