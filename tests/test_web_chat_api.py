@@ -693,3 +693,35 @@ def test_accept_file_expired_offer_returns_explicit_error():
     assert status == 200
     assert data["ok"] is False
     assert data["error"] == "expired"
+
+
+def test_accept_file_none_and_false_are_distinct():
+    """#7 semantics guard: the None sentinel (offer gone → explicit "expired")
+    must stay distinct from False (offer exists but not acceptable right now →
+    plain {ok:false}).  Callers that test `== False` versus `is None` must not
+    conflate the two."""
+    seen = {}
+
+    class Probe:
+        def __init__(self, ret):
+            self.ret = ret
+
+        def accept_file(self, session_id, transfer_id, send_fn):
+            seen["ret"] = self.ret
+            return self.ret
+
+    # None → "expired" (with the error key so the frontend can toast it).
+    data, status = chat_api.accept_file(
+        Probe(None), _body({"session_id": "s1", "transfer_id": "t"}), _send_fn_for,
+    )
+    assert status == 200
+    assert data["ok"] is False
+    assert data["error"] == "expired"
+
+    # False → plain {ok:false}, no "expired" label.
+    data, status = chat_api.accept_file(
+        Probe(False), _body({"session_id": "s1", "transfer_id": "t"}), _send_fn_for,
+    )
+    assert status == 200
+    assert data["ok"] is False
+    assert "error" not in data

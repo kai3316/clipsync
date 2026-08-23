@@ -578,7 +578,8 @@ class WebServer:
                  chat_mgr=None,
                  get_chat_devices=None,
                  chat_send_fn=None,
-                 chat_start_session=None):
+                 chat_start_session=None,
+                 on_quickpaste_done=None):
         self._cfg = cfg
         self._sync_mgr = sync_mgr
         self._get_connected_ids = get_connected_ids
@@ -627,6 +628,10 @@ class WebServer:
         self._get_chat_devices = get_chat_devices
         self._chat_send_fn = chat_send_fn
         self._chat_start_session = chat_start_session
+        # ── Quick Paste close callback (POST /api/quickpaste/done) ──
+        # Passed per-WebServer (like the other dispatch callbacks) so a
+        # re-created server never holds a stale reference to a dead host.
+        self._on_quickpaste_done = on_quickpaste_done
         self._httpd: ThreadingHTTPServer | None = None
         self._thread: threading.Thread | None = None
         self._firewall_ok: bool = False
@@ -900,6 +905,7 @@ class WebServer:
         get_chat_devices = self._get_chat_devices
         chat_send_fn = self._chat_send_fn
         chat_start_session = self._chat_start_session
+        on_quickpaste_done = self._on_quickpaste_done
         get_diagnostics = self._get_diagnostics
         on_update_download = self._on_update_download
         upload_dir = self._upload_dir
@@ -1759,6 +1765,7 @@ class WebServer:
                         get_chat_devices=get_chat_devices,
                         chat_send_fn=chat_send_fn,
                         chat_start_session=chat_start_session,
+                        on_quickpaste_done=on_quickpaste_done,
                     )
                     inner_self.send_response(status)
                     inner_self.send_header("Content-Type", content_type)

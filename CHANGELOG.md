@@ -2,6 +2,24 @@
 
 All notable changes to ClipSync are documented in this file.
 
+## [1.0.31] — 2026-08-23
+
+### Quick Paste
+- **The popup close mechanism actually works now.** The v1.0.30 Chromium `--app` launch handed the URL off to an already-running browser instance (the spawned process exited, so closing it was a no-op) — and with no browser running, closing killed the whole browser. Each popup now launches its own private Chromium instance (`--user-data-dir=<temp>`), tracks it by an instance id, and closes only that instance's process tree (`taskkill /T /F` / `killpg`), cleaning up its profile. The done signal (paste, Esc, X, and a 60s safety net) carries the instance id, so an abandoned popup can never close a different one.
+- **A pasted Quick Paste becomes a terminal state** — the confirmation can't be replaced by a re-pastable live list.
+- The done callback is wired through the normal dispatch parameters instead of a module-level slot, so a stale registration can't survive an app restart.
+
+### History
+- **Ghost entries no longer evict live ones.** The previous `total`-trim assumed a deleted entry is always the oldest row, but history is pinned-first ordered — trimming the tail could drop a live clip while the ghost stayed. When the loaded list exceeds the server `total`, clients now fetch the authoritative list and replace wholesale, then recompute the cursor.
+- **Phone deletions heal again.** With no WebSocket on the phone, a deletion beyond the first page is now caught by the 5-second poll (which triggers the same authoritative reconcile when `total < loaded`).
+
+### Misc
+- Chat file-offer expiry is surfaced on the desktop too (the accept path returns the `None` sentinel, and the dashboard shows "request expired" instead of silently doing nothing).
+- `postDone` uses the page's own timeout helper instead of a bare fetch.
+
+### Tests
+- 10 new / 6 updated regressions. Full suite 413 passed / 3 skipped.
+
 ## [1.0.30] — 2026-08-23
 
 ### Quick Paste

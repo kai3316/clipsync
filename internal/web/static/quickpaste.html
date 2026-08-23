@@ -607,6 +607,10 @@ body::after {
   // webbrowser fallback (no mode=app) cannot be script-closed, so the page
   // shows a "✓ Pasted" confirmation instead of dead close buttons.
   var IS_APP_WINDOW = params.get('mode') === 'app';
+  // The --app popup's instance id, assigned by main.py on open.  POST
+  // /api/quickpaste/done echoes it back so the host tears down exactly this
+  // popup — never a newer one (and never the user's whole browser).
+  var INSTANCE_ID = params.get('instance') || '';
   // Coarse-pointer devices (phones/tablets) tap items to paste; fine-pointer
   // devices (desktops, incl. touch-screen laptops with a trackpad) get
   // keyboard navigation (Arrow/Enter/1-9).  This is deliberately independent
@@ -631,6 +635,10 @@ body::after {
     error:        null,
     pastingIndex: -1,
     toastTimer:   null,
+    // Set once the page reaches a done state (plain-tab "✓ Pasted" fallback).
+    // render() and the keydown paste paths short-circuit so the list can't be
+    // redrawn or pasted from again, and postDone() isn't re-fired.
+    terminal:     false,
   };
 
   /* ═══════════════════════════════════════════════════════════════
@@ -744,6 +752,7 @@ body::after {
   }
 
   function pasteItem(index) {
+    if (state.terminal) { return; }
     if (index < 0 || index >= state.items.length) { return; }
 
     var item = state.items[index];
@@ -842,24 +851,29 @@ body::after {
 
   // POST /api/quickpaste/done so main.py terminates the --app process (the
   // real close mechanism).  Idempotent — the paste path and the 60s safety
-  // net both call it, and only the first matters.
+  // net both call it, and only the first matters.  Carries this popup's
+  // instance id so the host closes exactly this instance (never a newer one,
+  // and never the user's whole browser); a timeout is fine because the 60s
+  // net re-covers a dropped request.
   var donePosted = false;
   function postDone() {
     if (donePosted) return;
     donePosted = true;
-    // Fire-and-forget; a dropped request is covered by the 60s safety net.
-    fetch(apiUrl('/api/quickpaste/done'), {
+    fetchWithTimeout(apiUrl('/api/quickpaste/done'), {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: '{}',
+      body: JSON.stringify({ instance: INSTANCE_ID }),
     }).catch(function () { /* ignore */ });
   }
 
   // Plain-tab fallback (no --app available): the popup cannot be
   // script-closed, so after a successful paste drop the item list and show a
   // clear done state instead of leaving dead close buttons.  Accepted
-  // degradation — the user closes the tab manually.
+  // degradation — the user closes the tab manually.  terminal=true makes the
+  // state final: render() and the keydown paste paths short-circuit so the
+  // list can't be redrawn or pasted from again, and postDone() isn't re-fired.
   function showPastedFallback() {
+    state.terminal = true;
     itemsEl.innerHTML =
       '<div class="qp-empty">' +
         '<div class="qp-empty__icon">&#x2705;</div>' +
@@ -909,6 +923,9 @@ body::after {
   }
 
   function render() {
+    // Terminal (plain-tab "✓ Pasted" fallback): freeze the done state — never
+    // redraw the item list (or a stale loading/error/empty state) over it.
+    if (state.terminal) { return; }
     // No active option after a re-render until the items loop restores it.
     itemsEl.removeAttribute('aria-activedescendant');
 
@@ -1023,6 +1040,10 @@ body::after {
       closeWindow();
       return;
     }
+
+    // Terminal (plain-tab "✓ Pasted" fallback): no more navigation or paste —
+    // only Escape (handled above) remains, and it is a harmless close attempt.
+    if (state.terminal) { return; }
 
     // ── Keyboard navigation is a fine-pointer affordance ─────────
     // A coarse-pointer (touch) page relies on tapping items — its hint reads

@@ -993,13 +993,32 @@ body::before {
           // snapshot is authoritative only for the FIRST page — pruning from
           // it would collapse the 31..N pages the user already loaded on every
           // 5s poll.  Merge in place (upsert/prepend) WITHOUT pruning; deleted
-          // entries heal via the WS history_item_deleted broadcast, the next
-          // load-more, or a full refresh.  When the snapshot carries a total,
-          // trim the tail beyond it — those are ghost rows deleted on the
-          // desktop but missed by a dropped WS broadcast.
+          // entries heal via the full calibration below, the next load-more,
+          // or a full refresh.  History is ordered pinned-DESC, timestamp-DESC,
+          // so a deleted row can sit at the TOP (pinned) or in the MIDDLE — a
+          // tail-trim would evict LIVE oldest entries and keep the ghost, and
+          // mobile has no WS broadcast to self-heal from.  When the snapshot's
+          // `total` says the loaded list has ghosts (length > total), fetch the
+          // authoritative list (limit=total returns every remaining item) and
+          // replace wholesale.
           mergeHistoryPage(items, false);
           if (total != null && historyItems.length > total) {
-            historyItems.splice(total, historyItems.length - total);
+            historyLoading = true;
+            getJson('/api/history?limit=' + total)
+              .then(function (calData) {
+                historyLoading = false;
+                var calItems = (calData.items || []).slice(0, total);
+                historyItems.splice(0, historyItems.length);
+                for (var c = 0; c < calItems.length; c++) historyItems.push(calItems[c]);
+                historyHasMore = (calData.total != null) ? (historyItems.length < calData.total) : false;
+                historyOffset = historyItems.length;
+                renderHistory();
+              })
+              .catch(function () {
+                historyLoading = false;
+                historyHasMore = (total != null) ? (historyItems.length < total) : historyHasMore;
+              });
+            return;
           }
           historyHasMore = (total != null) ? (historyItems.length < total) : historyHasMore;
         } else {

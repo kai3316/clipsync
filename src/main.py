@@ -530,9 +530,14 @@ class Application:
         # Used to keep the "recently opened" guard from blocking a re-open
         # after the window was closed (client disconnected) within 8s.
         self._webview_client_seen = False
-        # Popen handle for the Quick Paste --app window (None when opened as a
-        # plain tab via webbrowser).  POST /api/quickpaste/done terminates it.
-        self._quickpaste_proc = None
+        # Quick Paste --app window management.  Every open gets a unique
+        # instance id; the Popen and its private --user-data-dir profile are
+        # bound to that id so a done POST (which carries the id) tears down
+        # exactly the popup that issued it — never a newer one, and never the
+        # user's whole browser (a blind terminate() on a handed-off --app
+        # process would kill the browser that inherited the URL).
+        self._quickpaste_instances: dict[int, dict] = {}
+        self._quickpaste_next_id = 0
 
         # ── macOS multiprocessing state ─────────────────────────────
         self._parent_conn = None
@@ -948,6 +953,11 @@ class Application:
             on_settings_change=self._on_web_settings_change,
             on_show_web_qr=lambda: self.root.after(0, self._show_web_qr),
             on_send_url=lambda: self.root.after(0, self._do_send_url),
+            # Quick Paste done callback: POST /api/quickpaste/done (token-gated)
+            # asks the host to tear down the --app popup that posted it.  Passed
+            # per-WebServer (like every other dispatch callback) so a re-created
+            # server can never hold a stale reference to a dead host instance.
+            on_quickpaste_done=self._close_quick_paste,
             get_discovered_peers=lambda: self._snapshot_discovered_peers(),
             on_open_file=self._open_file,
             on_open_folder=self._open_folder,
@@ -966,16 +976,6 @@ class Application:
             chat_send_fn=self._web_chat_send_fn,
             chat_start_session=self._web_chat_start_session,
         )
-
-        # Register the Quick Paste done handler so POST /api/quickpaste/done
-        # (token-gated) can terminate the --app popup.  routes.py keeps a
-        # module-level registry instead of threading a new callback through the
-        # WebServer, so no server.py plumbing change is required.
-        try:
-            from internal.web import routes as _web_routes
-            _web_routes.set_quickpaste_done_handler(self._close_quick_paste)
-        except Exception:
-            logger.debug("Could not register quickpaste done handler", exc_info=True)
 
         # ── Live history push to web clients ────────────────────────
         # The sync manager records every local/remote clipboard change into
@@ -1488,7 +1488,11 @@ class Application:
         except Exception:
             return False
 
-    def _chat_accept_file(self, session_id: str, transfer_id: str) -> bool:
+    def _chat_accept_file(self, session_id: str, transfer_id: str) -> bool | None:
+        # ChatManager.accept_file returns None when the offer is already gone
+        # (swept by the stale-receive reaper) — a distinct sentinel from False
+        # (offer exists but can't be accepted right now).  Transmit it so the
+        # desktop UI can tell the user the offer expired instead of failing.
         try:
             return self.chat_mgr.accept_file(
                 session_id, transfer_id,
@@ -1691,9 +1695,16 @@ class Application:
         # tab (no auto_close) keeps them hidden.  auto_close is deliberately
         # decoupled from the device's touch capability, so a touch-screen
         # Windows laptop still auto-closes.
+        # Each open is a distinct instance so the done POST can close exactly
+        # the popup it came from.  The id travels in the URL; the page echoes
+        # it back in POST /api/quickpaste/done (paste path and 60s safety net),
+        # and _close_quick_paste(instance_id) tears down only that instance.
+        instance_id = self._quickpaste_next_id
+        self._quickpaste_next_id += 1
         url = (
             f"{host}/quickpaste.html?token={quote(token, safe='')}"
             f"&host={quote(host, safe='')}&auto_close=1"
+            f"&instance={instance_id}"
         )
 
         # Preferred open: a dedicated Chromium --app subprocess.  A plain tab
@@ -1702,32 +1713,55 @@ class Application:
         # windows ARE closeable: the page POSTs /api/quickpaste/done after a
         # paste (or a 60s safety net) and we kill the process.  mode=app tells
         # the page it was opened this way so it enables that close flow.
-        proc = self._launch_quickpaste_app_window(url + "&mode=app")
+        # NOTE: the token and instance id ride in the --app command line, which
+        # is visible only to same-user local processes — equivalent to their
+        # already being able to read config.json, so no extra mechanism is
+        # needed to protect it here.
+        proc, profile_dir = self._launch_quickpaste_app_window(
+            url + "&mode=app", instance_id,
+        )
         if proc is not None:
-            self._quickpaste_proc = proc
-            logger.debug("Opening Quick Paste in a Chromium --app window")
+            self._quickpaste_instances[instance_id] = {
+                "proc": proc,
+                "profile_dir": profile_dir,
+            }
+            logger.debug(
+                "Opening Quick Paste instance %d in a Chromium --app window",
+                instance_id,
+            )
             return
 
         # Fallback: no Chromium-family browser found.  Open a plain tab and
         # accept the degradation — the popup cannot be script-closed, so the
         # page shows a "✓ Pasted" confirmation and the user closes the tab.
+        # No process was spawned, so nothing is registered in the instance dict
+        # and the done POST for this id is a harmless no-op.
         logger.debug("Quick Paste --app unavailable; falling back to a plain tab")
         # Never log the token in the URL (the file handler logs at DEBUG).
         logger.debug("Opening Quick Paste: %s", url.split("?")[0])
         webbrowser.open_new(url)
 
-    def _launch_quickpaste_app_window(self, url: str):
-        """Launch *url* in a Chromium ``--app`` window; return the Popen or None.
+    def _launch_quickpaste_app_window(self, url: str, instance_id: int):
+        """Launch *url* in a Chromium ``--app`` window; return ``(Popen, profile_dir)``.
 
         Probes common Chromium-family executables (msedge / chrome / chromium),
         preferring PATH hits, then well-known install locations on Windows.
         ``--app`` renders the page without browser chrome and gives the page a
         real window that can be torn down by terminating the process (the done
-        handler).  Returns ``None`` when nothing usable was found so the caller
-        can fall back to ``webbrowser.open_new``.
+        handler).  Returns ``(None, None)`` when nothing usable was found so the
+        caller can fall back to ``webbrowser.open_new``.
+
+        A private ``--user-data-dir`` forces a brand-new browser instance.  A
+        bare ``--app`` URL would be handed off to an already-running browser —
+        the spawned Popen exits within ~1s after delegating, so a later
+        ``terminate()`` would be a no-op and the popup would never close; and
+        when no browser was running, the spawned process IS the whole browser,
+        so killing it would nuke the user's browsing session.  Owning a
+        dedicated profile means we own the entire process tree and can tear it
+        down without touching the user's browser.
         """
-        import shutil
         import subprocess
+        import tempfile
 
         candidates: list[str] = []
         for exe in ("msedge", "chrome", "chromium", "chromium-browser"):
@@ -1750,42 +1784,94 @@ class Application:
                     candidate = os.path.join(root, rel)
                     if os.path.isfile(candidate):
                         candidates.append(candidate)
+        if not candidates:
+            return None, None
+
+        profile_dir = tempfile.mkdtemp(prefix=f"clipsync_qp_{instance_id}_")
         for exe in candidates:
             try:
-                return subprocess.Popen(
-                    [exe, "--app=" + url, "--window-size=420,560"],
+                proc = subprocess.Popen(
+                    [
+                        exe,
+                        "--app=" + url,
+                        "--window-size=420,560",
+                        "--user-data-dir=" + profile_dir,
+                    ],
                     stdout=subprocess.DEVNULL,
                     stderr=subprocess.DEVNULL,
                 )
+                return proc, profile_dir
             except OSError:
                 continue
-        return None
-
-    def _close_quick_paste(self) -> None:
-        """Kill the Quick Paste --app window (registered as the done handler).
-
-        Called via POST /api/quickpaste/done (token-gated).  A plain-tab
-        fallback has no process, so this is a no-op there — the page's
-        window.close() attempt and the "✓ Pasted" confirmation carry it.
-        Idempotent: clears the handle before terminating so a second done
-        POST cannot kill a newer popup.
-        """
-        proc = getattr(self, "_quickpaste_proc", None)
-        self._quickpaste_proc = None
-        if proc is None:
-            return
+        # No candidate launched — drop the unused profile and report failure.
         try:
-            proc.terminate()
-        except OSError:
-            pass
-        try:
-            proc.wait(timeout=2.0)
+            shutil.rmtree(profile_dir, ignore_errors=True)
         except Exception:
+            pass
+        return None, None
+
+    def _close_quick_paste(self, instance_id=None) -> None:
+        """Kill the Quick Paste --app window for *instance_id*.
+
+        Called via POST /api/quickpaste/done (token-gated); the page carries
+        its own instance id (from ``?instance=``) in both the paste-time and
+        the 60s-safety-net POSTs, so a stale or abandoned popup can never close
+        a newer instance.  Windows tears down the whole tree with ``taskkill
+        /T /F``; other platforms SIGTERM the process group.  The instance's
+        private ``--user-data-dir`` is removed afterwards.  A plain-tab
+        fallback has no process, so this is a no-op there — the page's
+        "✓ Pasted" confirmation carries it.  Idempotent: the slot is removed
+        before terminating, so a second done POST for the same id cannot
+        double-kill.
+        """
+        import subprocess
+
+        if instance_id is None:
+            # Backward-compat fallback for a legacy done POST without an
+            # instance id: close the most recently opened popup.
+            if not self._quickpaste_instances:
+                return
+            instance_id = max(self._quickpaste_instances.keys())
+        entry = self._quickpaste_instances.pop(instance_id, None)
+        if entry is None:
+            return
+        proc = entry.get("proc")
+        profile_dir = entry.get("profile_dir", "")
+        if proc is not None and proc.poll() is None:
             try:
-                proc.kill()
-            except OSError:
+                if sys.platform == "win32":
+                    subprocess.run(
+                        ["taskkill", "/PID", str(proc.pid), "/T", "/F"],
+                        stdout=subprocess.DEVNULL,
+                        stderr=subprocess.DEVNULL,
+                        timeout=5.0,
+                    )
+                else:
+                    import signal
+                    try:
+                        os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
+                    except (OSError, ProcessLookupError, PermissionError):
+                        try:
+                            proc.terminate()
+                        except OSError:
+                            pass
+                    try:
+                        proc.wait(timeout=2.0)
+                    except Exception:
+                        try:
+                            os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+                        except Exception:
+                            pass
+            except Exception:
+                logger.debug(
+                    "Quick Paste --app window kill failed for instance %s",
+                    instance_id, exc_info=True,
+                )
+        if profile_dir:
+            try:
+                shutil.rmtree(profile_dir, ignore_errors=True)
+            except Exception:
                 pass
-            logger.debug("Quick Paste --app window did not exit cleanly")
 
     def _paste_nth(self, n: int) -> None:
         """Paste the nth history item (1-indexed) directly to the clipboard."""

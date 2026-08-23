@@ -30,6 +30,10 @@ var ClipsyncWS = (function () {
   // them into a single refresh 500ms after the last event.
   var _overviewTimer = null;
 
+  // Prevents two full-history calibrations (fired when a missed delete leaves
+  // ghosts that a tail-trim can't remove) from overlapping.
+  var _historyCalibrating = false;
+
   function _scheduleOverviewRefresh() {
     if (_overviewTimer) {
       clearTimeout(_overviewTimer);
@@ -327,15 +331,37 @@ var ClipsyncWS = (function () {
               store.historyOffset = store.history.length;
               // Refresh "has more" from the broadcast total when present so
               // Load-more stays accurate after new items arrive.  A missed
-              // history_item_deleted broadcast leaves ghost rows at the tail;
-              // the snapshot's total is authoritative, so trim past it and pin
-              // the cursor to total (mirrors the page-1 refresh in app.js).
+              // history_item_deleted broadcast leaves ghost rows in the loaded
+              // list; history is ordered pinned-DESC, timestamp-DESC, so a
+              // deleted row can sit at the TOP (pinned) or in the MIDDLE — a
+              // tail-trim would evict LIVE oldest entries and keep the ghost.
+              // When ghosts are present (length > total), run a full
+              // calibration: fetch the authoritative list and replace wholesale
+              // (mirrors the page-1 refresh in app.js).
               if (data.total != null) {
-                if (store.history.length > data.total) {
-                  store.history.splice(data.total, store.history.length - data.total);
+                if (store.history.length > data.total && !_historyCalibrating &&
+                    window.ClipsyncAPI && window.ClipsyncAPI.getHistory) {
+                  _historyCalibrating = true;
+                  window.ClipsyncAPI.getHistory({ limit: data.total, offset: 0 }).then(function (calRes) {
+                    _historyCalibrating = false;
+                    var calItems = (calRes && calRes.items) ? calRes.items : [];
+                    store.history.splice(0, store.history.length);
+                    for (var c = 0; c < calItems.length; c++) {
+                      store.history.push(calItems[c]);
+                    }
+                    store.historyOffset = store.history.length;
+                    store.historyHasMore = (calRes && calRes.total != null) ? store.history.length < calRes.total : false;
+                  }, function () {
+                    // Calibration failed — pin the cursor to total so Load More
+                    // can't skip live entries; the next broadcast retries.
+                    _historyCalibrating = false;
+                    store.historyOffset = Math.min(store.history.length, data.total);
+                    store.historyHasMore = store.history.length < data.total;
+                  });
+                } else {
+                  store.historyOffset = Math.min(store.history.length, data.total);
+                  store.historyHasMore = store.history.length < data.total;
                 }
-                store.historyOffset = Math.min(store.history.length, data.total);
-                store.historyHasMore = store.history.length < data.total;
               }
             }
           }

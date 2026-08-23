@@ -38,25 +38,10 @@ from internal.web.api.translate import translate_text
 
 logger = logging.getLogger(__name__)
 
-# Module-level registry for the host's Quick Paste close callback (see
-# ``set_quickpaste_done_handler``).  Stored at module scope instead of being
-# threaded through the per-request ``dispatch`` call so the existing WebServer
-# wiring (which server.py constructs) does not need a new callback parameter.
-_quickpaste_done_handler = None
-
-
-def set_quickpaste_done_handler(fn) -> None:
-    """Register the host's Quick Paste close callback (called on done).
-
-    main.py opens the Quick Paste popup as a Chromium ``--app`` subprocess and
-    registers this callback; the page POSTs ``/api/quickpaste/done`` after a
-    successful paste (and as a 60s safety net when the popup is abandoned).
-    The callback kills the ``--app`` process so the popup truly closes — a
-    plain-tab popup's ``window.close()`` is blocked by browsers, which was the
-    v1.0.29 gap.  Passing ``None`` clears the registration.
-    """
-    global _quickpaste_done_handler
-    _quickpaste_done_handler = fn
+# NOTE: the host's Quick Paste close callback is threaded through ``dispatch``
+# as the ``on_quickpaste_done`` parameter (like ``on_send_url`` / ``on_window_close``),
+# NOT stored at module scope — a module-level registry survives server re-creation
+# and would keep calling a stale bound method on a dead host instance.
 
 
 def _chat_tmp_dir() -> str:
@@ -201,7 +186,8 @@ def dispatch(method, path, query_params, body, cfg, history, sync_mgr,
              chat_mgr=None,
              get_chat_devices=None,
              chat_send_fn=None,
-             chat_start_session=None):
+             chat_start_session=None,
+             on_quickpaste_done=None):
     """Route an API request to the appropriate handler, never raising.
 
     Wraps _dispatch in a safety net so an unexpected exception in a handler
@@ -237,6 +223,7 @@ def dispatch(method, path, query_params, body, cfg, history, sync_mgr,
             on_open_file, on_open_folder, on_restart, on_reset_dedup,
             get_certs, get_diagnostics, on_update_download, on_diagnostics_request,
             chat_mgr, get_chat_devices, chat_send_fn, chat_start_session,
+            on_quickpaste_done,
         )
     except Exception:
         logger.exception("Unhandled error in API route: %s %s", method, path)
@@ -267,7 +254,8 @@ def _dispatch(method, path, query_params, body, cfg, history, sync_mgr,
               chat_mgr=None,
               get_chat_devices=None,
               chat_send_fn=None,
-              chat_start_session=None):
+              chat_start_session=None,
+              on_quickpaste_done=None):
     """Route an API request to the appropriate handler.
 
     All handler functions return (data_dict, status_code).
@@ -865,15 +853,24 @@ def _dispatch(method, path, query_params, body, cfg, history, sync_mgr,
 
         elif path == "/api/quickpaste/done":
             # The Quick Paste popup reports that it finished (paste succeeded,
-            # or the 60s abandonment safety net fired).  Ask the host to kill
-            # its --app window — the real close mechanism for the popup, since
-            # window.close() is blocked in a plain tab.  Token-gated by the
-            # server's /api/* POST auth gate like every other route here.
-            handler = _quickpaste_done_handler
+            # or the 60s abandonment safety net fired).  Ask the host to tear
+            # down exactly the --app instance this popup belongs to — the body
+            # carries its ``instance`` id, so a stale/abandoned popup can never
+            # close a newer instance.  This is the real close mechanism for the
+            # popup, since window.close() is blocked in a plain tab.  Token-gated
+            # by the server's /api/* POST auth gate like every other route here.
+            handler = on_quickpaste_done
             if handler is None:
                 return _json_response({"ok": False, "error": "not available"}, 503)
+            instance_id = None
             try:
-                handler()
+                payload = json.loads(body.decode("utf-8")) if body else {}
+                if isinstance(payload, dict):
+                    instance_id = payload.get("instance")
+            except (json.JSONDecodeError, UnicodeDecodeError):
+                instance_id = None
+            try:
+                handler(instance_id)
             except Exception:
                 logger.exception("quickpaste done handler failed")
                 return _json_response({"ok": False, "error": "handler failed"}, 500)

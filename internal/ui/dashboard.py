@@ -3680,9 +3680,17 @@ class DashboardWindow:
     def _chat_do_accept_file(self, session_id: str, transfer_id: str) -> None:
         if self._chat_accept_file:
             try:
-                self._chat_accept_file(session_id, transfer_id)
+                result = self._chat_accept_file(session_id, transfer_id)
             except Exception:
                 logger.debug("chat accept_file raised", exc_info=True)
+                return
+            # ChatManager.accept_file returns None — a distinct sentinel from
+            # False — when the offer is already gone (it expired under the
+            # stale-receive reaper while this Accept button was still shown).
+            # Tell the user the request lapsed instead of a generic failure.
+            if result is None:
+                self._chat_show_hint(T("pairing.state.expired"))
+                return
 
     def _chat_do_decline_file(self, session_id: str, transfer_id: str) -> None:
         if self._chat_decline_file:

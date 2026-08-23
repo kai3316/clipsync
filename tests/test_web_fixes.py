@@ -599,14 +599,17 @@ def test_dashboard_history_reconnect_merge_present():
 def test_mobile_paged_poll_does_not_prune_loaded_pages():
     """#1: a page-1 poll while more pages are loaded must NOT prune them — the
     v1.0.29 paged merge (mergeHistoryPage(items, true)) collapsed pages 31..N
-    every 5s.  The paged path is upsert/prepend-only; ghosts self-heal via the
-    WS / next load-more / full refresh, and a snapshot `total` trims only the
-    exact tail beyond it."""
+    every 5s.  The paged path is upsert/prepend-only; ghosts heal via the full
+    calibration (fetch limit=total and replace) rather than a tail-trim, because
+    history is ordered pinned-DESC/timestamp-DESC and a deleted row can sit at
+    the top (pinned) or in the middle."""
     html = _read_repo_file("internal/web/static/mobile.html")
     # Paged path calls the merge WITHOUT pruning.
     assert "mergeHistoryPage(items, false);" in html
-    # Tail-trim to the authoritative total (deleted ghosts).
-    assert "historyItems.splice(total, historyItems.length - total);" in html
+    # Ghosts (length > total) trigger a full calibration fetch + replace,
+    # never a tail-trim splice.
+    assert "getJson('/api/history?limit=' + total)" in html
+    assert "historyItems.splice(total, historyItems.length - total);" not in html
     # The not-paged path still prunes (snapshot fully authoritative).
     assert "mergeHistoryPage(items, true);" in html
     # Load-more path stays a pure append merge.
@@ -614,16 +617,18 @@ def test_mobile_paged_poll_does_not_prune_loaded_pages():
 
 
 def test_history_cursor_calibrated_from_total():
-    """#2: when the history API returns `total`, a page-1 merge trims ghost
-    rows beyond it and pins the load-more cursor to total — a missed
-    history_item_deleted broadcast would otherwise inflate the cursor and make
-    Load More skip live entries."""
+    """#2: when the history API returns `total` and the loaded list has ghosts
+    (length > total), a page-1 / WS merge does a FULL calibration — fetch the
+    authoritative list at limit=total and replace wholesale — instead of a
+    tail-trim splice.  A deleted row can be pinned (top) or mid-list, so a
+    tail-trim would evict LIVE oldest entries and keep the ghost."""
     app = _read_repo_file("internal/web/static/js/app.js")
-    assert "store.history.splice(res.total, store.history.length - res.total);" in app
-    assert "store.historyOffset = Math.min(store.history.length, res.total);" in app
+    assert "store.history.splice(res.total, store.history.length - res.total);" not in app
+    assert "ClipsyncAPI.getHistory({ limit: res.total, offset: 0 })" in app
+    assert "store.history.splice(0, store.history.length);" in app
     ws = _read_repo_file("internal/web/static/js/ws.js")
-    assert "store.history.splice(data.total, store.history.length - data.total);" in ws
-    assert "store.historyOffset = Math.min(store.history.length, data.total);" in ws
+    assert "store.history.splice(data.total, store.history.length - data.total);" not in ws
+    assert "ClipsyncAPI.getHistory({ limit: data.total, offset: 0 })" in ws
 
 
 def test_history_api_returns_total():
@@ -635,50 +640,228 @@ def test_history_api_returns_total():
     assert '"total": total' in src
 
 
-def test_routes_quickpaste_done_invokes_registered_handler():
-    """#3: POST /api/quickpaste/done invokes the registered host callback
-    (main.py's _close_quick_paste) and returns ok.  Token-gating is handled by
+def _dispatch_post_with_qp_done(body_bytes, on_quickpaste_done):
+    return dispatch(
+        "POST", "/api/quickpaste/done", {}, body_bytes,
+        cfg=object(),
+        history=None,
+        sync_mgr=None,
+        get_connected_ids=lambda: [],
+        on_nav_url=None,
+        on_forward_file=None,
+        upload_dir=".",
+        on_quickpaste_done=on_quickpaste_done,
+    )
+
+
+def test_routes_quickpaste_done_invokes_dispatch_handler():
+    """#3: POST /api/quickpaste/done invokes the dispatch-provided host callback
+    (main.py's _close_quick_paste), passing the popup's instance id from the
+    body so the host closes exactly that instance.  Token-gating is handled by
     the server's /api/* POST auth gate."""
-    from internal.web.routes import set_quickpaste_done_handler
     calls = []
-    set_quickpaste_done_handler(lambda: calls.append(1))
-    try:
-        status, _ct, body_b = _dispatch_post("/api/quickpaste/done", _body({}), None, None)
-        assert status == 200
-        assert json.loads(body_b)["ok"] is True
-        assert calls == [1]
-    finally:
-        set_quickpaste_done_handler(None)
+    status, _ct, body_b = _dispatch_post_with_qp_done(
+        _body({"instance": 7}), lambda instance_id: calls.append(instance_id),
+    )
+    assert status == 200
+    assert json.loads(body_b)["ok"] is True
+    assert calls == [7]
+
+
+def test_routes_quickpaste_done_passes_missing_instance_as_none():
+    """#3: a legacy done POST without an `instance` body value still reaches the
+    host callback (with None) instead of erroring — the host falls back to the
+    most-recent instance."""
+    calls = []
+    status, _ct, body_b = _dispatch_post_with_qp_done(
+        _body({}), lambda instance_id: calls.append(instance_id),
+    )
+    assert status == 200
+    assert json.loads(body_b)["ok"] is True
+    assert calls == [None]
 
 
 def test_routes_quickpaste_done_unavailable_without_handler():
-    from internal.web.routes import set_quickpaste_done_handler
-    set_quickpaste_done_handler(None)
-    status, _ct, body_b = _dispatch_post("/api/quickpaste/done", _body({}), None, None)
+    status, _ct, body_b = _dispatch_post_with_qp_done(_body({}), None)
     assert status == 503
     assert json.loads(body_b)["error"] == "not available"
 
 
+# ── v1.0.30 quick-paste refactor (#1 instance ids + user-data-dir + terminal) ──
+
+def test_main_quickpaste_launch_forces_private_profile():
+    """#1: the --app launch must pass a private --user-data-dir (per instance)
+    so Chromium starts a brand-new instance instead of handing the URL off to an
+    already-running browser — handoff makes the spawned Popen exit in ~1s so a
+    later terminate() is a no-op, and without a browser running the spawned
+    process IS the whole browser (a blind terminate() would kill it)."""
+    src = _read_repo_file("src/main.py")
+    assert "--user-data-dir=" in src
+    assert "tempfile.mkdtemp" in src
+    assert "prefix=f\"clipsync_qp_{instance_id}_\"" in src
+
+
+def test_main_quickpaste_close_uses_taskkill_tree_on_windows():
+    """#1: Windows teardown uses `taskkill /PID <pid> /T /F` (whole tree) so the
+    popup's private browser instance is killed without touching the user's own
+    browser; non-Windows SIGTERMs the process group.  Both live behind a guard
+    so the kill is only attempted while the process is actually running."""
+    src = _read_repo_file("src/main.py")
+    assert '"taskkill", "/PID", str(proc.pid), "/T", "/F"' in src
+    assert "os.killpg" in src
+    assert "proc.poll() is None" in src
+
+
+def test_close_quick_paste_noop_when_no_instances():
+    """#1: _close_quick_paste is a safe no-op with an empty instance dict and
+    for an unknown instance id (plain-tab fallback / legacy id)."""
+    from src.main import Application
+    app = Application.__new__(Application)
+    app._quickpaste_instances = {}
+    app._close_quick_paste(None)   # must not raise
+    app._close_quick_paste(42)     # unknown id must not raise
+    assert app._quickpaste_instances == {}
+
+
+def test_close_quick_paste_cleans_exited_instance_and_profile(tmp_path):
+    """#1: an exited instance (proc.poll() != None) is removed from the dict and
+    its private --user-data-dir profile is cleaned up; no kill is attempted."""
+    import os
+    import shutil
+
+    from src.main import Application
+    profile_dir = str(tmp_path / "clipsync_qp_profile")
+    os.makedirs(profile_dir, exist_ok=True)
+
+    class FakeProc:
+        pid = 999999
+        def poll(self):
+            return 0  # already exited
+
+    app = Application.__new__(Application)
+    app._quickpaste_instances = {
+        3: {"proc": FakeProc(), "profile_dir": profile_dir},
+    }
+    app._close_quick_paste(3)
+    assert app._quickpaste_instances == {}
+    assert not os.path.exists(profile_dir)
+
+
+def test_close_quick_paste_none_falls_back_to_most_recent(tmp_path):
+    """#1: a legacy done POST without an instance id closes the most recently
+    opened popup (max id), never an older one."""
+    from src.main import Application
+
+    class FakeProc:
+        pid = 1
+        def poll(self):
+            return 0  # already exited → no kill attempted
+
+    app = Application.__new__(Application)
+    app._quickpaste_instances = {
+        5: {"proc": FakeProc(), "profile_dir": ""},
+        9: {"proc": FakeProc(), "profile_dir": ""},
+    }
+    app._close_quick_paste(None)
+    assert 9 not in app._quickpaste_instances
+    assert 5 in app._quickpaste_instances
+
+
+def test_history_api_limit_total_returns_authoritative_list(tmp_path):
+    """#2: the frontend full-calibration depends on `limit=total` returning
+    every remaining history item — the authoritative list that replaces ghost
+    rows when the client has loaded past the true count."""
+    from internal.web.api.history import get_history
+    db = _make_db(tmp_path)
+    for i in range(5):
+        db.add(
+            ClipboardContent(types={ContentType.TEXT: ("t%d" % i).encode()},
+                             timestamp=2000.0 + i),
+            source_app=None,
+        )
+
+    class Cfg:
+        device_id = "dev1"
+        device_name = "Dev"
+        web_history_limit = 30
+        peers = {}
+
+    items = db.get_all()
+    total = len(items)
+    data, status = get_history(db, Cfg(), str(total), None)
+    assert status == 200
+    assert data["total"] == total
+    assert len(data["items"]) == total
+
+
+def test_quickpaste_terminal_state_is_final():
+    """#6: the plain-tab "✓ Pasted" fallback marks state.terminal so render()
+    and the keydown paste paths short-circuit (no redraw, no further paste, no
+    duplicate postDone), keeping the fallback a real terminal state."""
+    html = _read_repo_file("internal/web/static/quickpaste.html")
+    assert "terminal:     false," in html
+    assert "state.terminal = true;" in html
+    # render() short-circuits at the very top.
+    assert "// Terminal (plain-tab \"✓ Pasted\" fallback): freeze the done state" in html
+    # pasteItem() short-circuits before touching the list.
+    assert "function pasteItem(index) {\n    if (state.terminal) { return; }" in html
+    # keydown keeps Escape live but short-circuits the navigation/paste paths.
+    assert "// Terminal (plain-tab \"✓ Pasted\" fallback): no more navigation or paste" in html
+    assert html.count("if (state.terminal) { return; }") == 3
+
+
+def test_main_chat_accept_file_annotated_bool_or_none():
+    """#7: _chat_accept_file's annotation is `bool | None` so the None sentinel
+    (offer expired) is a documented, first-class return — never collapsed into
+    False, which means "offer exists but can't accept right now"."""
+    src = _read_repo_file("src/main.py")
+    assert (
+        "def _chat_accept_file(self, session_id: str, transfer_id: str) -> bool | None:"
+        in src
+    )
+    assert "return self.chat_mgr.accept_file(" in src
+
+
+def test_dashboard_chat_do_accept_file_handles_none_expired():
+    """#7: the desktop chat panel distinguishes the None sentinel (offer gone →
+    show "request expired") from False (generic failure) when accepting a file."""
+    src = _read_repo_file("internal/ui/dashboard.py")
+    assert "result = self._chat_accept_file(session_id, transfer_id)" in src
+    assert "if result is None:" in src
+    assert 'self._chat_show_hint(T("pairing.state.expired"))' in src
+
 def test_main_prefers_app_window_and_registers_done_handler():
     """#3: main.py opens Quick Paste as a Chromium --app subprocess (mode=app,
-    so the page enables the done-close flow) and falls back to webbrowser for
-    the plain-tab degradation.  The done handler is registered so the endpoint
-    can kill the process."""
+    so the page enables the done-close flow), pins a unique instance id into the
+    URL, forces a private --user-data-dir so the app owns the whole process
+    tree, and falls back to webbrowser for the plain-tab degradation.  The done
+    callback is wired through the WebServer constructor (dispatch-param mode,
+    like on_send_url) so a re-created server never holds a stale reference."""
     src = _read_repo_file("src/main.py")
-    assert "_launch_quickpaste_app_window(url + \"&mode=app\")" in src
-    assert '["--app=" + url' in src or '"--app=" + url' in src
+    assert "_launch_quickpaste_app_window(" in src
+    assert "url + \"&mode=app\", instance_id," in src
+    assert '"&instance=' in src
+    assert '"--user-data-dir=" + profile_dir' in src
+    assert "taskkill" in src
+    assert "os.killpg" in src
     assert "webbrowser.open_new(url)" in src
-    assert "set_quickpaste_done_handler(self._close_quick_paste)" in src
-    assert "def _close_quick_paste(self)" in src
+    assert "on_quickpaste_done=self._close_quick_paste" in src
+    assert "set_quickpaste_done_handler" not in src
+    assert "def _close_quick_paste(self" in src
+    assert "self._quickpaste_instances" in src
 
 
 def test_quickpaste_page_posts_done_and_has_safety_net():
     """#3: the page POSTs /api/quickpaste/done after a paste (and as a 60s
-    safety net), keeps window.close() as a harmless extra attempt, and shows a
-    '✓ Pasted' confirmation for the plain-tab fallback."""
+    safety net), echoes its instance id in the body, uses the fetchWithTimeout
+    helper (not a bare fetch), keeps window.close() as a harmless extra attempt,
+    and shows a '✓ Pasted' confirmation for the plain-tab fallback."""
     html = _read_repo_file("internal/web/static/quickpaste.html")
     assert "postDone()" in html
-    assert "fetch(apiUrl('/api/quickpaste/done')," in html
+    assert "fetchWithTimeout(apiUrl('/api/quickpaste/done')," in html
+    assert "fetch(apiUrl('/api/quickpaste/done')," not in html
+    assert "body: JSON.stringify({ instance: INSTANCE_ID })" in html
+    assert "var INSTANCE_ID = params.get('instance') || '';" in html
     assert "setTimeout(postDone, 60000);" in html
     assert "showPastedFallback()" in html
     assert "window.close()" in html

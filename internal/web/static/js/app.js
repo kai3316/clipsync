@@ -358,15 +358,34 @@
               store.history.unshift(fresh[k]);
             }
             store.historyOffset = store.history.length;
-            if (res && res.total != null) {
+            if (res && res.total != null && store.history.length > res.total) {
               // Missed history_item_deleted broadcasts leave ghost rows in the
               // loaded list, which would inflate the cursor and make Load More
-              // skip live items.  The page-1 snapshot's `total` is the
-              // authoritative count — trim the tail beyond it (deleted ghosts
-              // are always the oldest entries) and pin the cursor to total.
-              if (store.history.length > res.total) {
-                store.history.splice(res.total, store.history.length - res.total);
-              }
+              // skip live items.  History is ordered pinned-DESC, timestamp-DESC,
+              // so a deleted row can sit at the TOP (pinned) or in the MIDDLE —
+              // trimming the tail would evict LIVE oldest entries and keep the
+              // ghost.  Do a full calibration instead: fetch the authoritative
+              // list (limit=total returns every remaining item) and replace
+              // wholesale, then recompute the cursor from the real length.
+              return ClipsyncAPI.getHistory({ limit: res.total, offset: 0 }).then(function (calRes) {
+                var calItems = (calRes && calRes.items) ? calRes.items : [];
+                store.history.splice(0, store.history.length);
+                for (var c = 0; c < calItems.length; c++) {
+                  store.history.push(calItems[c]);
+                }
+                store.historyOffset = store.history.length;
+                store.historyHasMore = (calRes && calRes.total != null) ? store.history.length < calRes.total : false;
+                return calItems;
+              }).catch(function () {
+                // Calibration failed — keep what is loaded and pin the cursor to
+                // total so Load More can't skip live entries; the next refresh
+                // (poll / reconnect / WS broadcast) retries.
+                store.historyOffset = Math.min(store.history.length, res.total);
+                store.historyHasMore = store.history.length < res.total;
+                return store.history.slice();
+              });
+            }
+            if (res && res.total != null) {
               store.historyOffset = Math.min(store.history.length, res.total);
               store.historyHasMore = store.history.length < res.total;
             }
