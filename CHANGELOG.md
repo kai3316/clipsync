@@ -7,6 +7,14 @@ All notable changes to ClipSync are documented in this file.
 ### Desktop (Windows)
 - **No more black console box flashing on startup.** The packaged Windows build (a `console=False` one-file exe) still spawned the console-mode `powershell.exe` while enumerating network-interface priorities at launch, and `taskkill.exe` when tearing down the web window / Quick Paste popups — each spawn briefly flashed a black console window before the app opened. Those spawns now pass `CREATE_NO_WINDOW`, matching the existing `netsh` firewall calls, so the exe stays fully silent on startup and shutdown.
 
+## [1.0.51] — 2026-08-23
+
+### Auto-update
+- **One-click and LAN-distributed updates.** Periodic version check, download with SHA-256 verification, and per-platform install (Windows self-replace, Linux in-place, macOS hand-off). Devices cache the installer and serve it to lagging peers over the LAN via mDNS version advertisement + a chunked `kind="update"` transfer, falling back to GitHub.
+
+### Security
+- **Pairing requires typing the code** (no longer a single "match" click), the TLS certificate is bound to the app-layer identity certificate, and encryption labels no longer overstate at-rest protection when no password is set.
+
 ### Desktop
 - **Startup no longer races the one-file temp directory on the first codec import.** The single-instance lock is now claimed at the very start of `main()` instead of after `_start_services()`, closing the window where two launches could both pass the stale-lock check and race their `_MEI` extraction dirs. Common text codecs — including the locale default (`cp936`/`gbk` on zh-CN Windows) and the stdio codecs — are pre-loaded up front, so a later `write_text(encoding="ascii")` can never trigger a lazy `encodings.*` import from a deleted `base_library.zip`.
 
