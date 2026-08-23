@@ -2,6 +2,15 @@
 
 All notable changes to ClipSync are documented in this file.
 
+## [1.0.41] — 2026-08-23
+
+### History (reconcile — change detection)
+- **The page-1 reload change detection compares explicit fields** instead of `JSON.stringify` (which is key-order sensitive — rows merged in-place by `mergeHistoryFresh` can carry extra keys and would false-positive on every reconnect, aborting a calibration and burning its budget). Any of the user-visible fields (paste_count, timestamp, source metadata, pin, preview) still counts as a change.
+- **A malformed null row is skipped, never stored** (mirroring the WebSocket merge path) — a null in the response no longer crashes the history renderer.
+
+### Tests
+- Full suite 433 passed / 3 skipped.
+
 ## [1.0.40] — 2026-08-23
 
 ### History (reconcile — change detection)
