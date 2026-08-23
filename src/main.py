@@ -3029,16 +3029,58 @@ class Application:
             args = [sys.executable] + sys.argv[1:]
         else:
             args = [sys.executable] + sys.argv
-        try:
-            subprocess.Popen(args)
-        except Exception:
-            logger.warning("Factory reset: failed to spawn new process", exc_info=True)
+        # Spawn with an isolated temp dir so the child's onefile _MEI
+        # extraction can't be raced/removed by this process's exit cleanup.
+        self._spawn_restart_process(args)
         # Do NOT re-save the deleted config during shutdown — shutdown() would
         # otherwise recreate config.json with the OLD device identity/peers.
         self._skip_save_on_shutdown = True
         if self.root:
             self.root.quit()
         sys.exit(0)
+
+    def _spawn_restart_process(self, args: list[str]) -> None:
+        """Start a fresh ClipSync instance (factory reset / restart).
+
+        Frozen PyInstaller ONE-FILE builds extract to ``%TEMP%\\_MEI<num>`` and
+        clean up stale ``_MEI*`` dirs on startup / remove their own dir on
+        exit.  When this path spawns a child while the current process is
+        still tearing down, the two instances' ``_MEI`` cleanups can race and
+        delete a LIVE extraction; the surviving process then fails on the next
+        lazy import with ``base_library.zip`` not found (seen after factory
+        reset + language selection).  Give the child a PRIVATE temp directory
+        so its ``_MEI`` extraction never shares the ``_MEI*`` namespace with
+        this process.
+        """
+        import subprocess
+        if getattr(sys, "frozen", False):
+            import os
+            import secrets
+            import tempfile as _tf
+            child_temp = os.path.join(
+                _tf.gettempdir(), "clipsync_restart", secrets.token_hex(6),
+            )
+            try:
+                os.makedirs(child_temp, exist_ok=True)
+            except OSError:
+                child_temp = None
+            if child_temp:
+                env = dict(os.environ)
+                env["TMP"] = child_temp
+                env["TEMP"] = child_temp
+                env["TMPDIR"] = child_temp
+                try:
+                    subprocess.Popen(args, env=env)
+                except Exception:
+                    logger.warning(
+                        "Restart: failed to spawn new process (isolated temp)", exc_info=True,
+                    )
+                    subprocess.Popen(args)  # fall back to a normal spawn
+                return
+        try:
+            subprocess.Popen(args)
+        except Exception:
+            logger.warning("Restart: failed to spawn new process", exc_info=True)
 
     def _restart_app(self) -> None:
         """Spawn a fresh instance and exit this one.
@@ -3047,7 +3089,6 @@ class Application:
         switch), which in webview mode previously only closed the browser
         window while the app kept running with the old ui_backend.
         """
-        import subprocess
         # Unlink the single-instance lock BEFORE spawning: the new process may
         # read it while this PID is still alive and bail with "already running".
         try:
@@ -3061,11 +3102,9 @@ class Application:
             args = [sys.executable] + sys.argv[1:]
         else:
             args = [sys.executable] + sys.argv
-        try:
-            subprocess.Popen(args)
-        except Exception:
-            logger.warning("Restart: failed to spawn new process", exc_info=True)
-            return
+        self._spawn_restart_process(args)
+        # The new instance owns the config now; don't re-save/rewrite it on exit.
+        self._skip_save_on_shutdown = True
         # The new instance owns the config now; don't re-save/rewrite it on exit.
         self._skip_save_on_shutdown = True
         # Do NOT sys.exit() from the web handler thread — that raises SystemExit
