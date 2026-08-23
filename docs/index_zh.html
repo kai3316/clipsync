@@ -315,7 +315,7 @@
 
     .features { background: #0d0d14; }
     .feature-grid {
-      display: grid; grid-template-columns: repeat(3, 1fr); gap: 1.5rem;
+      display: grid; grid-template-columns: repeat(auto-fit, minmax(250px, 1fr)); gap: 1.5rem;
     }
     .feature-card {
       background: rgba(255,255,255,0.03); border: 1px solid rgba(255,255,255,0.06);
@@ -908,6 +908,16 @@
           <p>通过同一加密通道在已配对设备间传输文件，无大小限制。</p>
         </div>
         <div class="feature-card">
+          <div class="feature-icon green">&#128172;</div>
+          <h3>附近聊天</h3>
+          <p>无需配对即可与已发现设备互发消息与文件。严格双向同意——对方显式接受前不泄露任何内容。</p>
+        </div>
+        <div class="feature-card">
+          <div class="feature-icon blue">&#128221;</div>
+          <h3>Web 面板与快速粘贴</h3>
+          <p>实时网页面板（历史、传输、诊断、聊天），加一个热键呼出的"快速粘贴"浮窗，粘贴后自动关闭。</p>
+        </div>
+        <div class="feature-card">
           <div class="feature-icon red">&#128065;</div>
           <h3>隐私优先</h3>
           <p>数据仅限局域网内传输，永不触碰云端。剪贴板历史落盘加密。</p>
@@ -922,7 +932,7 @@
       <div class="section-header reveal">
         <div class="section-label">Web 伴侣</div>
         <h2>手机访问，无需安装</h2>
-        <p>扫码即连，在手机上查看剪贴板、推送文字、传输文件。不装 App，不注册账号。</p>
+        <p>扫码即连，在手机或任意浏览器上查看剪贴板、传输文件，甚至直接聊天。不装 App，不注册账号。</p>
       </div>
       <div class="web-features stagger-reveal" style="display:grid;grid-template-columns:repeat(4,1fr);gap:1.5rem;max-width:1000px;margin:0 auto;">
         <div class="web-feat-card" style="background:rgba(255,255,255,0.02);border:1px solid rgba(255,255,255,0.05);border-radius:16px;padding:1.75rem;text-align:center;transition:border-color 0.3s,transform 0.3s;">
@@ -933,7 +943,7 @@
         <div class="web-feat-card" style="background:rgba(255,255,255,0.02);border:1px solid rgba(255,255,255,0.05);border-radius:16px;padding:1.75rem;text-align:center;transition:border-color 0.3s,transform 0.3s;">
           <div style="font-size:2rem;margin-bottom:0.75rem;">&#128203;</div>
           <h4 style="margin-bottom:0.4rem;font-size:0.95rem;">查看与复制</h4>
-          <p style="color:#71717a;font-size:0.82rem;">浏览所有设备的剪贴板历史，点击任意记录即可复制到手机。</p>
+          <p style="color:#71717a;font-size:0.82rem;">浏览并翻页查看剪贴板历史，点击任意记录即可复制到手机，也能删除上传的文件。</p>
         </div>
         <div class="web-feat-card" style="background:rgba(255,255,255,0.02);border:1px solid rgba(255,255,255,0.05);border-radius:16px;padding:1.75rem;text-align:center;transition:border-color 0.3s,transform 0.3s;">
           <div style="font-size:2rem;margin-bottom:0.75rem;">&#128228;</div>
@@ -943,7 +953,7 @@
         <div class="web-feat-card" style="background:rgba(255,255,255,0.02);border:1px solid rgba(255,255,255,0.05);border-radius:16px;padding:1.75rem;text-align:center;transition:border-color 0.3s,transform 0.3s;">
           <div style="font-size:2rem;margin-bottom:0.75rem;">&#127760;</div>
           <h4 style="margin-bottom:0.4rem;font-size:0.95rem;">PWA 支持</h4>
-          <p style="color:#71717a;font-size:0.82rem;">添加到手机主屏幕，像原生应用一样使用，离线也能访问。</p>
+          <p style="color:#71717a;font-size:0.82rem;">主面板与各手机页均可安装为独立 PWA 应用，首次访问后离线也能使用。</p>
         </div>
       </div>
     </div>

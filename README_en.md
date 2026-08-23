@@ -108,6 +108,7 @@ Clips are deduplicated by content hash, not timestamp. Rapid alternating copies 
 - **Strict two-sided consent** — nothing flows until the other user explicitly accepts; unaccepted invites reveal no content
 - Unpaired devices show a short certificate fingerprint for out-of-band verification; paired devices accept automatically
 - Send text and files (chunked over the existing transfer channel) with automatic reconnect
+- Works from both the desktop and the web dashboard (live session list, unread badges, file send/receive)
 - Invites / text / files are rate- and concurrency-limited; file names sanitized + path-traversal blocked
 
 ### Security
@@ -272,7 +273,7 @@ internal/
     ws.py                     #   WebSocket live push
     api/                      #   devices/history/favorites/transfer/settings/translate/security
     static/                   #   Web dashboard, phone pages, PWA assets
-tests/                        #   308 tests covering clipboard, codec, config, pairing, sync, file transfer, chat, cross-platform
+tests/                        #   433 tests covering clipboard, codec, config, pairing, sync, file transfer, chat, web API, cross-platform
 ```
 
 ### Data Flow

@@ -323,7 +323,7 @@
     /* ── Feature Grid ────────────────────────────────────── */
     .features { background: #0d0d14; }
     .feature-grid {
-      display: grid; grid-template-columns: repeat(3, 1fr); gap: 1.5rem;
+      display: grid; grid-template-columns: repeat(auto-fit, minmax(250px, 1fr)); gap: 1.5rem;
     }
     .feature-card {
       background: rgba(255,255,255,0.03); border: 1px solid rgba(255,255,255,0.06);
@@ -941,6 +941,16 @@
           <p>Send files between paired devices over the same encrypted channel. No size limits.</p>
         </div>
         <div class="feature-card">
+          <div class="feature-icon green">&#128172;</div>
+          <h3>Nearby Chat</h3>
+          <p>Message and send files to discovered devices with no pairing needed. Strict two-sided consent — nothing flows until the other user accepts.</p>
+        </div>
+        <div class="feature-card">
+          <div class="feature-icon blue">&#128221;</div>
+          <h3>Web Dashboard &amp; Quick Paste</h3>
+          <p>A full real-time web panel (history, transfers, diagnostics, chat) plus a hotkey Quick Paste popup that pastes and closes itself.</p>
+        </div>
+        <div class="feature-card">
           <div class="feature-icon red">&#128065;</div>
           <h3>Privacy by Design</h3>
           <p>Everything stays on your LAN. Nothing touches the cloud. Clipboard history encrypted at rest.</p>
@@ -955,7 +965,7 @@
       <div class="section-header reveal">
         <div class="section-label">Web Companion</div>
         <h2>Mobile Access, No App Needed</h2>
-        <p>Scan a QR code and access your clipboard from any phone on the same network. No install, no account.</p>
+        <p>Scan a QR code and access your clipboard, files, and even chat from any phone or browser on the same network. No install, no account.</p>
       </div>
       <div class="web-features stagger-reveal" style="display:grid;grid-template-columns:repeat(4,1fr);gap:1.5rem;max-width:1000px;margin:0 auto;">
         <div class="web-feat-card" style="background:rgba(255,255,255,0.02);border:1px solid rgba(255,255,255,0.05);border-radius:16px;padding:1.75rem;text-align:center;transition:border-color 0.3s,transform 0.3s;">
@@ -966,7 +976,7 @@
         <div class="web-feat-card" style="background:rgba(255,255,255,0.02);border:1px solid rgba(255,255,255,0.05);border-radius:16px;padding:1.75rem;text-align:center;transition:border-color 0.3s,transform 0.3s;">
           <div style="font-size:2rem;margin-bottom:0.75rem;">&#128203;</div>
           <h4 style="margin-bottom:0.4rem;font-size:0.95rem;">View &amp; Copy</h4>
-          <p style="color:#71717a;font-size:0.82rem;">See recent clipboard history from all your devices. Tap any item to copy it to your phone.</p>
+          <p style="color:#71717a;font-size:0.82rem;">Browse and paginate through clipboard history from all your devices. Tap any item to copy it, or delete uploaded files.</p>
         </div>
         <div class="web-feat-card" style="background:rgba(255,255,255,0.02);border:1px solid rgba(255,255,255,0.05);border-radius:16px;padding:1.75rem;text-align:center;transition:border-color 0.3s,transform 0.3s;">
           <div style="font-size:2rem;margin-bottom:0.75rem;">&#128228;</div>
@@ -976,7 +986,7 @@
         <div class="web-feat-card" style="background:rgba(255,255,255,0.02);border:1px solid rgba(255,255,255,0.05);border-radius:16px;padding:1.75rem;text-align:center;transition:border-color 0.3s,transform 0.3s;">
           <div style="font-size:2rem;margin-bottom:0.75rem;">&#127760;</div>
           <h4 style="margin-bottom:0.4rem;font-size:0.95rem;">PWA Ready</h4>
-          <p style="color:#71717a;font-size:0.82rem;">Add to Home Screen on iOS/Android for a native app feel. Works offline after first visit.</p>
+          <p style="color:#71717a;font-size:0.82rem;">Installable PWAs — the dashboard and each phone page install as standalone apps and keep working offline after first visit.</p>
         </div>
       </div>
     </div>
