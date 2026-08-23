@@ -1299,6 +1299,13 @@ class Application:
                     "fingerprint_short": fp,
                 })
                 seen.add(pid)
+                # Mark this peer's hashed mDNS id too, so the discovery pass
+                # below can't add a duplicate row before the hash→real-id map
+                # is populated (a discovered-but-not-yet-connected peer).
+                try:
+                    seen.add(Discovery._hash_device_id(pid))
+                except Exception:
+                    pass
         except Exception:
             logger.debug("chat devices: pairing list failed", exc_info=True)
         # Unpaired discovered peers (hashed mDNS ids).
