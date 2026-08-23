@@ -1906,8 +1906,18 @@ class Application:
             try:
                 shutil.rmtree(profile_dir, ignore_errors=False)
             except FileNotFoundError:
-                # Already gone (external temp cleanup) — nothing to reclaim.
-                pass
+                # Either already gone (external temp cleanup) or a concurrent
+                # remover deleted partway through.  Distinguish by checking
+                # whether the path is really absent — a mid-removal raise must
+                # keep the entry so the sweep can finish the job.
+                if not os.path.exists(profile_dir):
+                    pass  # fully gone — nothing to reclaim
+                else:
+                    removed_profile = False
+                    logger.debug(
+                        "Quick Paste profile removal interrupted for instance %s "
+                        "— kept for sweep retry", instance_id,
+                    )
             except Exception:
                 # Partial / failed removal — keep the entry so the sweep (with
                 # its retry cap) reclaims the profile later instead of leaking

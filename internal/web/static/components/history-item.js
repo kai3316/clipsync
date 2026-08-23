@@ -260,6 +260,11 @@
           if (res && res.ok !== false) {
             if (idx !== -1) {
               store.history[idx].pinned = !!res.pinned;
+              // A pin toggle mutates a row in place — bump the reconcile guard
+              // so an in-flight calibration can't write back a stale snapshot
+              // that reverts it (same-id pin changes don't always reach the
+              // wholesale broadcast comparator).
+              store.historyMutationTick += 1;
             }
             store.showToast(
               res.pinned ? self.t('history.pinned_toast') : self.t('history.unpinned_toast'),

@@ -416,16 +416,14 @@
                 // Route through the store helper so the reconcile guard
                 // (historyMutationTick) is bumped like every other delete
                 // path — a bare splice here let an in-flight calibration
-                // resurrect the deleted row.
-                if (idx !== -1) {
-                  store.removeHistoryItems([eid]);
-                  // Mirror the other delete paths: shrink the "load more"
-                  // cursor so the item that shifted up into the deleted slot
-                  // is not skipped by the next fetch.
-                  store.historyOffset = Math.max(0, store.historyOffset - 1);
-                }
-                store.selectedIds.delete(eid);
-                store.selectedIds = new Set(store.selectedIds);
+                // resurrect the deleted row.  The helper also prunes eid from
+                // selectedIds and returns the number of rows actually removed.
+                var removedCount = store.removeHistoryItems([eid]);
+                // Mirror the other delete paths: shrink the "load more" cursor
+                // by the rows actually removed (a concurrent broadcast may
+                // have already removed this row — then the cursor was already
+                // shrunk and removedCount is 0).
+                store.historyOffset = Math.max(0, store.historyOffset - removedCount);
                 store.showToast(self.t('history.deleted_toast'), 1200);
               }
               self.closeMenu();

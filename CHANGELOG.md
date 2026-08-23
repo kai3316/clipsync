@@ -2,6 +2,19 @@
 
 All notable changes to ClipSync are documented in this file.
 
+## [1.0.36] — 2026-08-23
+
+### History (reconcile)
+- **Pin toggles now bump the reconcile guard.** An in-flight calibration could write back a stale snapshot that reverted a pin the user had just toggled (same-id pin changes don't always reach the broadcast comparator). Toggling pin marks the list mutated, so the calibration abandons its write-back.
+- **The calibration docblock now matches the code** (the timeout is the one terminal state that does not advance the generation; stale comments no longer claim it does).
+- **The context-menu delete is fully consolidated**: it shrinks the load-more cursor by the number of rows actually removed (not a stale pre-confirm index) and relies on the shared helper to prune the selection.
+
+### Quick Paste
+- **A mid-removal `FileNotFoundError` is no longer mistaken for "already cleaned"** — the entry is kept for the sweep to finish, while a genuinely-absent profile is still treated as cleaned.
+
+### Tests
+- Full suite 433 passed / 3 skipped.
+
 ## [1.0.35] — 2026-08-23
 
 ### History (reconcile)

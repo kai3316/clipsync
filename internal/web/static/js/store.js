@@ -874,11 +874,15 @@
      * Throttle: a full download at limit=total is expensive, so at most one
      * calibration per client every CALIBRATION_THROTTLE_MS.  A call inside the
      * window still pins the cursor to total (so Load More can't skip) but
-     * skips the refetch.  EVERY terminal state consumes the budget — success
+     * skips the refetch.  Every terminal state consumes the budget — success
      * write-back, raced abandon, failure and timeout all stamp
-     * _lastCalibration, and all advance _calibrationGen — so a late response
-     * from a settled calibration can never write back, and a constantly
-     * mutating history cannot trigger a full download on every broadcast.
+     * _lastCalibration — so a constantly mutating history cannot trigger a
+     * full download on every broadcast.  Success / raced-abandon / failure
+     * ALSO advance _calibrationGen so their late responses can never write
+     * back; the TIMEOUT is the deliberate exception (it unwedges the lock and
+     * consumes the budget but does NOT advance the gen, so a slow-but-valid
+     * response that settles later still writes back — staleness vs. newer data
+     * is the mutation tick's job, not the timer's).
      *
      * @param {number} total - authoritative item count from the triggering
      *   response (the list only has ghosts when history.length > total).
