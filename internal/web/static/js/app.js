@@ -367,23 +367,9 @@
               // ghost.  Do a full calibration instead: fetch the authoritative
               // list (limit=total returns every remaining item) and replace
               // wholesale, then recompute the cursor from the real length.
-              return ClipsyncAPI.getHistory({ limit: res.total, offset: 0 }).then(function (calRes) {
-                var calItems = (calRes && calRes.items) ? calRes.items : [];
-                store.history.splice(0, store.history.length);
-                for (var c = 0; c < calItems.length; c++) {
-                  store.history.push(calItems[c]);
-                }
-                store.historyOffset = store.history.length;
-                store.historyHasMore = (calRes && calRes.total != null) ? store.history.length < calRes.total : false;
-                return calItems;
-              }).catch(function () {
-                // Calibration failed — keep what is loaded and pin the cursor to
-                // total so Load More can't skip live entries; the next refresh
-                // (poll / reconnect / WS broadcast) retries.
-                store.historyOffset = Math.min(store.history.length, res.total);
-                store.historyHasMore = store.history.length < res.total;
-                return store.history.slice();
-              });
+              // Shared with ws.js via store.calibrateHistory() (throttled +
+              // race guarded — see store.js).
+              return store.calibrateHistory(res.total);
             }
             if (res && res.total != null) {
               store.historyOffset = Math.min(store.history.length, res.total);

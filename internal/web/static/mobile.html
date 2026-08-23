@@ -1004,6 +1004,11 @@ body::before {
           mergeHistoryPage(items, false);
           if (total != null && historyItems.length > total) {
             historyLoading = true;
+            // Full calibration: fetch the authoritative list at limit=total
+            // and replace wholesale.  Mirrors store.calibrateHistory() in
+            // app.js/ws.js — same contract (replace, recompute cursor,
+            // re-render) minus the shared-store race guard / throttle, which
+            // mobile has no infrastructure for; its 5s poll self-heals.
             getJson('/api/history?limit=' + total)
               .then(function (calData) {
                 historyLoading = false;
@@ -1016,7 +1021,13 @@ body::before {
               })
               .catch(function () {
                 historyLoading = false;
+                // Calibration failed — pin the cursor to total so Load-more
+                // can't skip live entries (mirrors the shared function's
+                // failure path) and re-render so the list reflects the current
+                // state; the next poll retries.
+                historyOffset = historyItems.length;
                 historyHasMore = (total != null) ? (historyItems.length < total) : historyHasMore;
+                renderHistory();
               });
             return;
           }

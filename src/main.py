@@ -1699,6 +1699,11 @@ class Application:
         # the popup it came from.  The id travels in the URL; the page echoes
         # it back in POST /api/quickpaste/done (paste path and 60s safety net),
         # and _close_quick_paste(instance_id) tears down only that instance.
+        # Lightweight periodic sweep: a popup that died without POSTing done
+        # (crash, OS window close, Task Manager) leaks its instance entry and
+        # private --user-data-dir profile — reclaim those before opening again.
+        self._sweep_quick_paste_instances()
+
         instance_id = self._quickpaste_next_id
         self._quickpaste_next_id += 1
         url = (
@@ -1799,6 +1804,13 @@ class Application:
                     ],
                     stdout=subprocess.DEVNULL,
                     stderr=subprocess.DEVNULL,
+                    # POSIX: run the popup in its OWN process group so
+                    # _close_quick_paste's os.killpg() signals only the popup's
+                    # tree — a shared group would let the SIGTERM reach and kill
+                    # ClipSync itself.  Windows tears the tree down by PID
+                    # (taskkill /T /F), where start_new_session is unnecessary
+                    # (and unsupported the same way).
+                    **({"start_new_session": True} if sys.platform != "win32" else {}),
                 )
                 return proc, profile_dir
             except OSError:
@@ -1817,21 +1829,31 @@ class Application:
         its own instance id (from ``?instance=``) in both the paste-time and
         the 60s-safety-net POSTs, so a stale or abandoned popup can never close
         a newer instance.  Windows tears down the whole tree with ``taskkill
-        /T /F``; other platforms SIGTERM the process group.  The instance's
-        private ``--user-data-dir`` is removed afterwards.  A plain-tab
-        fallback has no process, so this is a no-op there — the page's
-        "✓ Pasted" confirmation carries it.  Idempotent: the slot is removed
-        before terminating, so a second done POST for the same id cannot
-        double-kill.
+        /T /F``; other platforms SIGTERM the process group (which the popup
+        owns, thanks to ``start_new_session``).  The instance's private
+        ``--user-data-dir`` is removed afterwards.  A plain-tab fallback has no
+        process, so this is a no-op there — the page's "✓ Pasted" confirmation
+        carries it.  Idempotent: the slot is removed before terminating, so a
+        second done POST for the same id cannot double-kill.  A missing or
+        non-numeric instance id is a strict no-op (log only) — we never guess
+        which popup to close.
         """
         import subprocess
 
+        # The page echoes its instance id back as a JSON number, but on the
+        # wire it can arrive as an int or an int-like string (older pages / a
+        # plain-tab fallback).  Normalize to int so dict lookup matches the int
+        # keys in _quickpaste_instances.  A missing / non-numeric id is a
+        # no-op: a blind guess could close a NEWER popup that issued its own
+        # (valid) done POST.
         if instance_id is None:
-            # Backward-compat fallback for a legacy done POST without an
-            # instance id: close the most recently opened popup.
-            if not self._quickpaste_instances:
-                return
-            instance_id = max(self._quickpaste_instances.keys())
+            logger.debug("Quick Paste done POST without an instance id — ignoring")
+            return
+        try:
+            instance_id = int(str(instance_id))
+        except (TypeError, ValueError):
+            logger.debug("Quick Paste done POST with invalid instance id %r — ignoring", instance_id)
+            return
         entry = self._quickpaste_instances.pop(instance_id, None)
         if entry is None:
             return
@@ -1872,6 +1894,55 @@ class Application:
                 shutil.rmtree(profile_dir, ignore_errors=True)
             except Exception:
                 pass
+
+    def _sweep_quick_paste_instances(self) -> None:
+        """Reclaim Quick Paste instances whose process already exited.
+
+        A done POST is the normal teardown, but a popup that was killed out
+        from under us (crash, OS window close, Task Manager) never POSTs — its
+        instance entry and private ``--user-data-dir`` profile would leak.
+        Called before opening a new popup (and folded into shutdown cleanup).
+        Only entries whose process has already exited are touched; live popups
+        are never disturbed here.
+        """
+        dead_ids: list[int] = []
+        for iid, entry in list(self._quickpaste_instances.items()):
+            proc = entry.get("proc")
+            if proc is not None and proc.poll() is None:
+                continue  # still running — leave it alone
+            dead_ids.append(iid)
+            profile_dir = entry.get("profile_dir", "")
+            if profile_dir:
+                try:
+                    shutil.rmtree(profile_dir, ignore_errors=True)
+                except Exception:
+                    logger.debug(
+                        "Quick Paste profile cleanup failed for dead instance %s",
+                        iid, exc_info=True,
+                    )
+        for iid in dead_ids:
+            self._quickpaste_instances.pop(iid, None)
+        if dead_ids:
+            logger.debug("Swept %d dead Quick Paste instance(s)", len(dead_ids))
+
+    def _cleanup_quick_paste_instances(self) -> None:
+        """Tear down every live Quick Paste popup (app exit path).
+
+        A forced kill / crash / OS window close never POSTs
+        /api/quickpaste/done, so the registered instances and their private
+        ``--user-data-dir`` profiles would otherwise leak past shutdown.  Kills
+        every still-running ``--app`` process (reusing _close_quick_paste's
+        platform-appropriate teardown) and removes each profile, then clears
+        the dict.
+        """
+        for iid in list(self._quickpaste_instances.keys()):
+            try:
+                self._close_quick_paste(iid)
+            except Exception:
+                logger.debug(
+                    "Quick Paste instance %s shutdown cleanup failed",
+                    iid, exc_info=True,
+                )
 
     def _paste_nth(self, n: int) -> None:
         """Paste the nth history item (1-indexed) directly to the clipboard."""
@@ -3275,6 +3346,14 @@ class Application:
             logger.debug("Failed to broadcast close_window", exc_info=True)
         if self.web_server:
             self.web_server.stop()
+
+        # Tear down any still-running Quick Paste --app popups and their
+        # private profiles so they don't outlive the app — a killed/crashed
+        # popup never POSTs done, so its instance would leak otherwise.
+        try:
+            self._cleanup_quick_paste_instances()
+        except Exception:
+            logger.debug("Quick Paste shutdown cleanup failed", exc_info=True)
 
         if not self._skip_save_on_shutdown:
             for peer in self.pairing_mgr.get_known_peers():

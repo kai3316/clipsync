@@ -21,6 +21,11 @@
   var reactive = Vue.reactive;
   var computed = Vue.computed;
 
+  // Minimum gap between full-history calibrations (see store.calibrateHistory).
+  // A calibration refetches the ENTIRE history at limit=total, so it is
+  // throttled to at most one per client per window.
+  var CALIBRATION_THROTTLE_MS = 30000;
+
   // Local i18n helper — the store is a plain object (not a Vue component),
   // so it reaches the global translator directly. Falls back to the key when
   // i18n hasn't been initialised yet.
@@ -76,6 +81,11 @@
     historySort: 'newest',     // 'newest' | 'oldest'
     historyHasMore: false,     // true when server has more items to load
     historyOffset: 0,          // current pagination offset
+    // Monotonic counter bumped on every history delete / clear (see ws.js).
+    // A calibration in flight records its value at start and abandons its
+    // write-back if it changed — otherwise a stale snapshot would resurrect
+    // rows deleted while the fetch was in flight.
+    historyMutationTick: 0,
 
     /* ═══════════════════════════════════════════════════════════════
        Favorites
@@ -828,6 +838,86 @@
       var pinned = items.filter(function (h) { return h.pinned; });
       var unpinned = items.filter(function (h) { return !h.pinned; });
       return pinned.concat(unpinned);
+    },
+
+    /**
+     * Full-history calibration: fetch the authoritative list at limit=total
+     * and replace the loaded history wholesale.  A missed
+     * history_item_deleted broadcast leaves ghost rows in the loaded list,
+     * which inflate the "load more" cursor and make it skip live entries.
+     * History is ordered pinned-DESC, timestamp-DESC, so a deleted row can sit
+     * at the TOP (pinned) or in the MIDDLE — a tail-trim would evict LIVE
+     * oldest entries and keep the ghost; only a wholesale replace works.
+     *
+     * Shared by app.js (page-1 refresh) and ws.js (history_updated merge) so
+     * the logic lives in exactly one place (mobile.html keeps an independent
+     * copy — no shared JS infrastructure there — but mirrors this contract).
+     *
+     * Race guard: a history_item_deleted / history_clear can land while the
+     * fetch is in flight.  Its snapshot would resurrect the deleted rows on
+     * write-back, so we record historyMutationTick at start and abandon the
+     * write-back (only pin the cursor) if it changed before the response
+     * arrived.
+     *
+     * Throttle: a full download at limit=total is expensive, so at most one
+     * calibration per client every CALIBRATION_THROTTLE_MS.  A call inside the
+     * window still pins the cursor to total (so Load More can't skip) but
+     * skips the refetch.
+     *
+     * @param {number} total - authoritative item count from the triggering
+     *   response (the list only has ghosts when history.length > total).
+     * @returns {Promise<Array>} the calibrated items (or the current list when
+     *   throttled / failed / raced).
+     */
+    calibrateHistory: function (total) {
+      var self = this;
+      if (!window.ClipsyncAPI || !window.ClipsyncAPI.getHistory) {
+        // No API client — nothing to calibrate against.
+        return Promise.resolve(this.history.slice());
+      }
+      var now = Date.now();
+      if (this._historyCalibrating ||
+          (this._lastCalibration && (now - this._lastCalibration) < CALIBRATION_THROTTLE_MS)) {
+        // Already calibrating, or one ran recently — don't pile on.  Pin the
+        // cursor to total so Load More can't skip live entries; the next
+        // refresh / broadcast retries when the window elapses.
+        this.historyOffset = Math.min(this.history.length, total);
+        this.historyHasMore = this.history.length < total;
+        return Promise.resolve(this.history.slice());
+      }
+      this._historyCalibrating = true;
+      var startTick = this.historyMutationTick;
+      return window.ClipsyncAPI.getHistory({ limit: total, offset: 0 })
+        .then(function (calRes) {
+          self._historyCalibrating = false;
+          self._lastCalibration = Date.now();
+          // A delete/clear landed while the fetch was in flight — the snapshot
+          // predates it and would resurrect the removed rows.  Drop the
+          // write-back (the delete handler already fixed the list + cursor).
+          if (self.historyMutationTick !== startTick) {
+            self.historyOffset = Math.min(self.history.length, total);
+            self.historyHasMore = self.history.length < total;
+            return self.history.slice();
+          }
+          var calItems = (calRes && calRes.items) ? calRes.items : [];
+          self.history.splice(0, self.history.length);
+          for (var c = 0; c < calItems.length; c++) {
+            self.history.push(calItems[c]);
+          }
+          self.historyOffset = self.history.length;
+          self.historyHasMore = (calRes && calRes.total != null)
+            ? self.history.length < calRes.total : false;
+          return calItems;
+        })
+        .catch(function () {
+          // Calibration failed — keep what is loaded and pin the cursor to
+          // total so Load More can't skip live entries; the next refresh /
+          // broadcast retries.
+          self._historyCalibrating = false;
+          self.historyOffset = Math.min(self.history.length, total);
+          self.historyHasMore = self.history.length < total;
+          return self.history.slice();
+        });
     },
 
     /* ═══════════════════════════════════════════════════════════════

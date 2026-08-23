@@ -869,6 +869,20 @@ def _dispatch(method, path, query_params, body, cfg, history, sync_mgr,
                     instance_id = payload.get("instance")
             except (json.JSONDecodeError, UnicodeDecodeError):
                 instance_id = None
+            # The host keys _quickpaste_instances by int; the page echoes its
+            # id back as a JSON number, but an int-like string ("7") is equally
+            # valid on the wire.  Anything else (bool, float, object, garbage
+            # string) is a malformed request — reject with 400 so a bad id can
+            # never reach the host as a confusing value.  A missing instance is
+            # allowed through: the host no-ops on it (legacy clients).
+            if instance_id is not None:
+                if isinstance(instance_id, bool) or not isinstance(instance_id, (int, str)):
+                    return _json_response({"ok": False, "error": "invalid instance"}, 400)
+                if isinstance(instance_id, str):
+                    try:
+                        instance_id = int(instance_id)
+                    except ValueError:
+                        return _json_response({"ok": False, "error": "invalid instance"}, 400)
             try:
                 handler(instance_id)
             except Exception:

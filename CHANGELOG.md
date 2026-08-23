@@ -2,6 +2,22 @@
 
 All notable changes to ClipSync are documented in this file.
 
+## [1.0.32] — 2026-08-23
+
+### Quick Paste
+- **The popup closes on every platform now.** v1.0.31 stored the instance id as an int but the page sent it as a JSON string, so the close signal never matched and no popup ever closed. The id is now normalised to an int on the way in, invalid ids are rejected with a 400 (never a 500), and the regression test posts the real string form.
+- **Closing a popup on macOS/Linux no longer kills the whole app.** The Chromium child was launched in the app's own process group, so the group-signal teardown signalled ClipSync itself; it now starts in its own session.
+- **Abandoned popups are cleaned up** — dead instances and their temp profiles are swept before each new open and on app shutdown.
+- **A done signal with no/unknown instance is a no-op**, never "close the most recent popup" (a stray POST could previously kill a popup it didn't come from).
+- **Pasted-state confirmation survives a failed done POST** — the safety net retries up to 3×, then shows a persistent "close this window manually" notice instead of silently leaking.
+
+### History
+- **Ghost calibration can't resurrect deleted rows.** A deletion/clear that lands while the reconcile fetch is in flight is now respected (a mutation tick guards the write-back), the reconcile is throttled to once per 30s, and the dashboard + phone share one implementation instead of three drifting copies.
+- The phone's reconcile failure path now pins the cursor and re-renders like the dashboard.
+
+### Tests
+- 6 new regressions (string-id close, invalid-id 400, process-group isolation, instance sweep/cleanup, None no-op). Full suite 419 passed / 3 skipped.
+
 ## [1.0.31] — 2026-08-23
 
 ### Quick Paste

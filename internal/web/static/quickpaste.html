@@ -850,20 +850,30 @@ body::after {
      ═══════════════════════════════════════════════════════════════ */
 
   // POST /api/quickpaste/done so main.py terminates the --app process (the
-  // real close mechanism).  Idempotent — the paste path and the 60s safety
-  // net both call it, and only the first matters.  Carries this popup's
-  // instance id so the host closes exactly this instance (never a newer one,
-  // and never the user's whole browser); a timeout is fine because the 60s
-  // net re-covers a dropped request.
+  // real close mechanism).  donePosted is set ONLY once the server confirms
+  // receipt (2xx) — a timeout or network failure leaves it false so the 60s
+  // safety net (and its retry below) can re-fire the POST.  Carries this
+  // popup's instance id so the host closes exactly this instance (never a
+  // newer one, and never the user's whole browser).  Resolves true when the
+  // host confirmed the teardown, false otherwise (callers may retry).
   var donePosted = false;
   function postDone() {
-    if (donePosted) return;
-    donePosted = true;
-    fetchWithTimeout(apiUrl('/api/quickpaste/done'), {
+    if (donePosted) return Promise.resolve(true);
+    return fetchWithTimeout(apiUrl('/api/quickpaste/done'), {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ instance: INSTANCE_ID }),
-    }).catch(function () { /* ignore */ });
+    }).then(function (r) {
+      if (r.ok) {
+        donePosted = true;
+        return true;
+      }
+      throw new Error('HTTP ' + r.status);
+    }).catch(function () {
+      // Timeout / network / non-2xx: the host never confirmed.  donePosted
+      // stays false so the 60s safety net (or an explicit close) retries.
+      return false;
+    });
   }
 
   // Plain-tab fallback (no --app available): the popup cannot be
@@ -1171,9 +1181,34 @@ body::after {
 
   // 60s safety net: an abandoned --app popup (opened but never pasted) would
   // otherwise leak its process.  POST done after 60s so main.py kills it.
-  // postDone() is idempotent, so a paste that already fired it is a no-op.
+  // If the host never confirms (network blip / server hiccup), retry a couple
+  // of times with a short backoff, then give up and ask the user to close the
+  // window by hand rather than looping forever.  postDone() is idempotent, so
+  // a paste that already fired it (and was confirmed) is a no-op.
   if (AUTO_CLOSE) {
-    setTimeout(postDone, 60000);
+    var DONE_NET_ATTEMPTS = 3;
+    var DONE_NET_RETRY_MS = 10000;
+    var scheduleDoneNet = function (attempt) {
+      setTimeout(function () {
+        postDone().then(function (confirmed) {
+          if (confirmed) { return; }
+          if (attempt + 1 < DONE_NET_ATTEMPTS) {
+            scheduleDoneNet(attempt + 1);
+          } else {
+            // Exhausted retries — the host never confirmed the teardown.
+            // Show a persistent hint so the user closes the popup by hand.
+            state.terminal = true;
+            itemsEl.innerHTML =
+              '<div class="qp-empty">' +
+                '<div class="qp-empty__icon">&#x26A0;&#xFE0F;</div>' +
+                '<div class="qp-empty__text">' + (IS_ZH ? '无法自动关闭 — 请手动关闭此窗口' : 'Could not auto-close — please close this window') + '</div>' +
+              '</div>';
+            showToast(IS_ZH ? '关闭失败，请手动关闭窗口' : 'Auto-close failed — close the window manually', 4000, true);
+          }
+        });
+      }, attempt === 0 ? 60000 : DONE_NET_RETRY_MS);
+    };
+    scheduleDoneNet(0);
   }
 
   if (!HOST) {

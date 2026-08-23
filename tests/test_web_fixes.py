@@ -617,18 +617,26 @@ def test_mobile_paged_poll_does_not_prune_loaded_pages():
 
 
 def test_history_cursor_calibrated_from_total():
-    """#2: when the history API returns `total` and the loaded list has ghosts
-    (length > total), a page-1 / WS merge does a FULL calibration — fetch the
-    authoritative list at limit=total and replace wholesale — instead of a
+    """#2/#8: when the history API returns `total` and the loaded list has
+    ghosts (length > total), a page-1 / WS merge does a FULL calibration — fetch
+    the authoritative list at limit=total and replace wholesale — instead of a
     tail-trim splice.  A deleted row can be pinned (top) or mid-list, so a
-    tail-trim would evict LIVE oldest entries and keep the ghost."""
+    tail-trim would evict LIVE oldest entries and keep the ghost.  The shared
+    logic now lives in store.calibrateHistory() (both app.js and ws.js delegate
+    to it) so there is exactly one copy."""
     app = _read_repo_file("internal/web/static/js/app.js")
     assert "store.history.splice(res.total, store.history.length - res.total);" not in app
-    assert "ClipsyncAPI.getHistory({ limit: res.total, offset: 0 })" in app
-    assert "store.history.splice(0, store.history.length);" in app
+    assert "store.calibrateHistory(res.total)" in app
     ws = _read_repo_file("internal/web/static/js/ws.js")
     assert "store.history.splice(data.total, store.history.length - data.total);" not in ws
-    assert "ClipsyncAPI.getHistory({ limit: data.total, offset: 0 })" in ws
+    assert "store.calibrateHistory(data.total)" in ws
+    # The shared calibration itself still does the wholesale replace at
+    # limit=total (guarded against the delete/clear race + throttled).
+    store = _read_repo_file("internal/web/static/js/store.js")
+    assert "calibrateHistory: function (total) {" in store
+    assert "ClipsyncAPI.getHistory({ limit: total, offset: 0 })" in store
+    assert "self.history.splice(0, self.history.length);" in store
+    assert "historyMutationTick !== startTick" in store
 
 
 def test_history_api_returns_total():
@@ -655,13 +663,16 @@ def _dispatch_post_with_qp_done(body_bytes, on_quickpaste_done):
 
 
 def test_routes_quickpaste_done_invokes_dispatch_handler():
-    """#3: POST /api/quickpaste/done invokes the dispatch-provided host callback
-    (main.py's _close_quick_paste), passing the popup's instance id from the
-    body so the host closes exactly that instance.  Token-gating is handled by
-    the server's /api/* POST auth gate."""
+    """#3/#1: POST /api/quickpaste/done invokes the dispatch-provided host
+    callback (main.py's _close_quick_paste), passing the popup's instance id
+    from the body so the host closes exactly that instance.  The page sends the
+    id as a JSON number, but on the wire it arrives as an int-like STRING —
+    routes must normalize it to int (the host keys _quickpaste_instances by
+    int) or the done POST would never match and the popup would never close.
+    Token-gating is handled by the server's /api/* POST auth gate."""
     calls = []
     status, _ct, body_b = _dispatch_post_with_qp_done(
-        _body({"instance": 7}), lambda instance_id: calls.append(instance_id),
+        _body({"instance": "7"}), lambda instance_id: calls.append(instance_id),
     )
     assert status == 200
     assert json.loads(body_b)["ok"] is True
@@ -685,6 +696,27 @@ def test_routes_quickpaste_done_unavailable_without_handler():
     status, _ct, body_b = _dispatch_post_with_qp_done(_body({}), None)
     assert status == 503
     assert json.loads(body_b)["error"] == "not available"
+
+
+def test_routes_quickpaste_done_rejects_invalid_instance():
+    """#1: a done POST carrying a non-int / non-int-convertible instance (bool,
+    float, garbage string, object) is malformed — the route returns 400 and
+    never calls the host, so a bad id can't reach main.py as a confusing value.
+    A missing instance is allowed through (the host no-ops on it)."""
+    for bad in (
+        {"instance": True},
+        {"instance": 1.5},
+        {"instance": "abc"},
+        {"instance": {"x": 1}},
+        {"instance": ["7"]},
+    ):
+        calls = []
+        status, _ct, body_b = _dispatch_post_with_qp_done(
+            _body(bad), lambda instance_id: calls.append(instance_id),
+        )
+        assert status == 400, bad
+        assert json.loads(body_b)["error"] == "invalid instance", bad
+        assert calls == [], bad
 
 
 # ── v1.0.30 quick-paste refactor (#1 instance ids + user-data-dir + terminal) ──
@@ -747,9 +779,11 @@ def test_close_quick_paste_cleans_exited_instance_and_profile(tmp_path):
     assert not os.path.exists(profile_dir)
 
 
-def test_close_quick_paste_none_falls_back_to_most_recent(tmp_path):
-    """#1: a legacy done POST without an instance id closes the most recently
-    opened popup (max id), never an older one."""
+def test_close_quick_paste_none_is_noop_not_fallback(tmp_path):
+    """#7: a done POST without an instance id is a strict no-op — it must NOT
+    fall back to closing the most recently opened popup.  A blind guess could
+    close a NEWER popup that issued its own valid done POST (the page always
+    sends its id, so a missing id means an unknown/legacy caller)."""
     from src.main import Application
 
     class FakeProc:
@@ -763,8 +797,123 @@ def test_close_quick_paste_none_falls_back_to_most_recent(tmp_path):
         9: {"proc": FakeProc(), "profile_dir": ""},
     }
     app._close_quick_paste(None)
-    assert 9 not in app._quickpaste_instances
+    # Nothing was closed — both instances remain registered.
+    assert 9 in app._quickpaste_instances
     assert 5 in app._quickpaste_instances
+
+
+def test_close_quick_paste_normalizes_string_instance(tmp_path):
+    """#1: the done POST carries the instance id as a JSON number on the wire,
+    but a page may send an int-like STRING; _close_quick_paste normalizes it to
+    int so dict lookup matches the int keys in _quickpaste_instances — the
+    popup actually closes instead of leaking."""
+    import os
+    import shutil
+
+    from src.main import Application
+    profile_dir = str(tmp_path / "clipsync_qp_profile")
+    os.makedirs(profile_dir, exist_ok=True)
+
+    class FakeProc:
+        pid = 999998
+        def poll(self):
+            return 0  # already exited → no kill attempted
+
+    app = Application.__new__(Application)
+    app._quickpaste_instances = {
+        3: {"proc": FakeProc(), "profile_dir": profile_dir},
+    }
+    app._close_quick_paste("3")
+    assert app._quickpaste_instances == {}
+    assert not os.path.exists(profile_dir)
+
+
+def test_close_quick_paste_invalid_instance_is_noop(tmp_path):
+    """#1/#7: a non-numeric instance id (garbage string, float, dict, None) is
+    a no-op — never raises and never closes any popup."""
+    from src.main import Application
+
+    class FakeProc:
+        pid = 1
+        def poll(self):
+            return 0  # already exited → no kill attempted
+
+    app = Application.__new__(Application)
+    app._quickpaste_instances = {
+        5: {"proc": FakeProc(), "profile_dir": ""},
+    }
+    # Must not raise and must not close instance 5.
+    app._close_quick_paste("abc")
+    app._close_quick_paste(1.5)
+    app._close_quick_paste(None)
+    app._close_quick_paste(True)   # bool is an int subclass — but not a valid id
+    assert 5 in app._quickpaste_instances
+
+
+def test_sweep_quick_paste_removes_dead_instances_and_profiles(tmp_path):
+    """#6: _sweep_quick_paste_instances reclaims entries whose process already
+    exited (crash / OS window close / Task Manager never POST done) and their
+    leftover --user-data-dir profiles, while leaving live popups untouched."""
+    import os
+
+    from src.main import Application
+    dead_profile = str(tmp_path / "dead_profile")
+    live_profile = str(tmp_path / "live_profile")
+    os.makedirs(dead_profile, exist_ok=True)
+    os.makedirs(live_profile, exist_ok=True)
+
+    class DeadProc:
+        pid = 111
+        def poll(self):
+            return 1  # exited
+
+    class LiveProc:
+        pid = 222
+        def poll(self):
+            return None  # still running
+
+    app = Application.__new__(Application)
+    app._quickpaste_instances = {
+        1: {"proc": DeadProc(), "profile_dir": dead_profile},
+        2: {"proc": LiveProc(), "profile_dir": live_profile},
+    }
+    app._sweep_quick_paste_instances()
+    assert 1 not in app._quickpaste_instances
+    assert 2 in app._quickpaste_instances
+    assert not os.path.exists(dead_profile)
+    assert os.path.exists(live_profile)
+
+
+def test_cleanup_quick_paste_instances_tears_down_every_instance(monkeypatch):
+    """#6: shutdown cleanup calls _close_quick_paste for every registered
+    instance (live or dead) so no --app popup or profile leaks past app exit."""
+    from src.main import Application
+
+    class FakeProc:
+        pid = 333
+        def poll(self):
+            return None
+
+    closed = []
+    app = Application.__new__(Application)
+    app._quickpaste_instances = {
+        4: {"proc": FakeProc(), "profile_dir": ""},
+        8: {"proc": FakeProc(), "profile_dir": ""},
+    }
+    monkeypatch.setattr(app, "_close_quick_paste", lambda iid: closed.append(iid))
+    app._cleanup_quick_paste_instances()
+    assert closed == [4, 8]
+
+
+def test_main_quickpaste_launch_uses_own_process_group_on_posix():
+    """#2: non-Windows launches pass start_new_session=True so the popup owns
+    its own process group — _close_quick_paste's os.killpg() then signals only
+    the popup's tree, never ClipSync itself (a shared group would kill the
+    whole app).  Windows keeps taskkill /T /F and does not pass the POSIX-only
+    flag."""
+    src = _read_repo_file("src/main.py")
+    assert "start_new_session" in src
+    assert 'sys.platform != "win32"' in src
 
 
 def test_history_api_limit_total_returns_authoritative_list(tmp_path):
@@ -852,17 +1001,27 @@ def test_main_prefers_app_window_and_registers_done_handler():
 
 
 def test_quickpaste_page_posts_done_and_has_safety_net():
-    """#3: the page POSTs /api/quickpaste/done after a paste (and as a 60s
+    """#3/#5: the page POSTs /api/quickpaste/done after a paste (and as a 60s
     safety net), echoes its instance id in the body, uses the fetchWithTimeout
     helper (not a bare fetch), keeps window.close() as a harmless extra attempt,
-    and shows a '✓ Pasted' confirmation for the plain-tab fallback."""
+    and shows a '✓ Pasted' confirmation for the plain-tab fallback.  #5: the
+    done flag is set ONLY on server confirmation (not before the fetch), so a
+    timeout/failure leaves it false and the 60s net retries up to 3 times, then
+    shows a 'close this window' hint."""
     html = _read_repo_file("internal/web/static/quickpaste.html")
     assert "postDone()" in html
     assert "fetchWithTimeout(apiUrl('/api/quickpaste/done')," in html
     assert "fetch(apiUrl('/api/quickpaste/done')," not in html
     assert "body: JSON.stringify({ instance: INSTANCE_ID })" in html
     assert "var INSTANCE_ID = params.get('instance') || '';" in html
-    assert "setTimeout(postDone, 60000);" in html
+    # donePosted is set only inside the 2xx confirmation branch — a timeout /
+    # network failure keeps it false so the safety net retries.
+    assert "if (r.ok) {\n        donePosted = true;" in html
+    # The 60s safety net retries up to DONE_NET_ATTEMPTS, then gives up with a
+    # persistent "close this window" hint.
+    assert "DONE_NET_ATTEMPTS = 3;" in html
+    assert "scheduleDoneNet(0);" in html
+    assert "Could not auto-close" in html
     assert "showPastedFallback()" in html
     assert "window.close()" in html
 

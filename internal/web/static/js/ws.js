@@ -30,10 +30,6 @@ var ClipsyncWS = (function () {
   // them into a single refresh 500ms after the last event.
   var _overviewTimer = null;
 
-  // Prevents two full-history calibrations (fired when a missed delete leaves
-  // ghosts that a tail-trim can't remove) from overlapping.
-  var _historyCalibrating = false;
-
   function _scheduleOverviewRefresh() {
     if (_overviewTimer) {
       clearTimeout(_overviewTimer);
@@ -339,25 +335,11 @@ var ClipsyncWS = (function () {
               // calibration: fetch the authoritative list and replace wholesale
               // (mirrors the page-1 refresh in app.js).
               if (data.total != null) {
-                if (store.history.length > data.total && !_historyCalibrating &&
-                    window.ClipsyncAPI && window.ClipsyncAPI.getHistory) {
-                  _historyCalibrating = true;
-                  window.ClipsyncAPI.getHistory({ limit: data.total, offset: 0 }).then(function (calRes) {
-                    _historyCalibrating = false;
-                    var calItems = (calRes && calRes.items) ? calRes.items : [];
-                    store.history.splice(0, store.history.length);
-                    for (var c = 0; c < calItems.length; c++) {
-                      store.history.push(calItems[c]);
-                    }
-                    store.historyOffset = store.history.length;
-                    store.historyHasMore = (calRes && calRes.total != null) ? store.history.length < calRes.total : false;
-                  }, function () {
-                    // Calibration failed — pin the cursor to total so Load More
-                    // can't skip live entries; the next broadcast retries.
-                    _historyCalibrating = false;
-                    store.historyOffset = Math.min(store.history.length, data.total);
-                    store.historyHasMore = store.history.length < data.total;
-                  });
+                if (store.history.length > data.total) {
+                  // Ghost rows from a missed delete — full calibration via the
+                  // shared store.calibrateHistory() (throttled + race guarded —
+                  // see store.js; mirrors the page-1 refresh in app.js).
+                  store.calibrateHistory(data.total);
                 } else {
                   store.historyOffset = Math.min(store.history.length, data.total);
                   store.historyHasMore = store.history.length < data.total;
@@ -375,6 +357,9 @@ var ClipsyncWS = (function () {
           // Broadcast after a delete / batch-delete so every client removes
           // the entries instead of only the one that issued the request
           // (the history_updated upsert merge can't express deletions).
+          // Bump the mutation tick so an in-flight calibration (store.js)
+          // abandons its write-back instead of resurrecting these rows.
+          store.historyMutationTick += 1;
           if (data && Array.isArray(data.entry_ids)) {
             var delSet = {};
             for (var di = 0; di < data.entry_ids.length; di++) {
@@ -412,6 +397,9 @@ var ClipsyncWS = (function () {
         case 'history_clear':
           // History was wiped on another client — reset the whole list and
           // the pagination cursor so "Load more" can't skip shifted items.
+          // Bump the mutation tick so an in-flight calibration abandons its
+          // write-back instead of re-populating the wiped list.
+          store.historyMutationTick += 1;
           store.history.splice(0, store.history.length);
           store.historyOffset = 0;
           store.historyHasMore = false;
