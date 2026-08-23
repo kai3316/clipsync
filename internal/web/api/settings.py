@@ -25,6 +25,7 @@ _SAFE_FIELDS = {
     "language",
     "appearance_mode",
     "sync_enabled",
+    "plain_text_only",
     "encryption_enabled",
     "notifications_enabled",
     "notify_device_connect",
@@ -90,6 +91,7 @@ _MUTABLE_FIELDS = {
     "language",
     "appearance_mode",
     "sync_enabled",
+    "plain_text_only",
     "encryption_enabled",
     "notifications_enabled",
     "notify_device_connect",
@@ -323,7 +325,9 @@ def export_data(body, cfg, history):
     except (json.JSONDecodeError, UnicodeDecodeError):
         return {"ok": False, "error": "invalid json"}, 400
 
-    fmt = data.get("format", "json").lower()
+    # Coerce to str first: a non-string "format" (number/null) would raise
+    # AttributeError on .lower() and surface as a misleading 500.
+    fmt = str(data.get("format", "json")).lower()
     if fmt not in ("json", "csv", "markdown"):
         return {"ok": False, "error": "unsupported format (use json, csv or markdown)"}, 400
 

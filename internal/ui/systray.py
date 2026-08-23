@@ -210,9 +210,14 @@ class SystrayApp:
             menu_items.append(
                 pystray.MenuItem("📱  " + T("tray.show_web_qr"), self._on_show_web_qr_click),
             )
+        # Live connection count on the submenu header so the tray reflects
+        # device state at a glance without opening the dashboard.
+        connected_label = T("tray.connected_devices")
+        if self._peers:
+            connected_label = f"{connected_label} ({len(self._peers)})"
         menu_items.append(
             pystray.MenuItem(
-                "📶  " + T("tray.connected_devices"),
+                "📶  " + connected_label,
                 self._build_peer_menu(),
             ),
         )

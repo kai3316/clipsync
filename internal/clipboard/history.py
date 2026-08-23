@@ -309,10 +309,15 @@ class ClipboardHistory:
             self._save()
 
     def find_by_id(self, entry_id: str) -> tuple[int, dict] | tuple[None, None]:
-        """Find an entry by its ``entry_id``. Returns (index, entry) or (None, None)."""
+        """Find an entry by its ``entry_id``. Returns (index, entry) or (None, None).
+
+        Comparison is type-tolerant (str vs int), matching ClipboardHistoryDB
+        and batch_set_pinned(): ids arrive as JSON numbers from the web panel
+        and as strings from query params.
+        """
         with self._lock:
             for i, entry in enumerate(self._entries):
-                if entry.get("entry_id") == entry_id:
+                if str(entry.get("entry_id")) == str(entry_id):
                     return i, dict(entry)
             return None, None
 

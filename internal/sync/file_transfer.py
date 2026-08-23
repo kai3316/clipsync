@@ -361,6 +361,7 @@ class FileTransferManager:
         Call this from the ``on_transfer_request`` callback to indicate
         that the user wants to receive the file.
         """
+        accepted_ok = True
         with self._lock:
             transfer = self._transfers.get(transfer_id)
             if transfer is None or transfer.get("type") != "incoming":
@@ -375,17 +376,25 @@ class FileTransferManager:
             try:
                 transfer["temp_fh"] = open(str(temp_path), "wb")
             except OSError as exc:
+                accepted_ok = False
                 logger.error("Cannot create temp file for transfer %s: %s", transfer_id[:8], exc)
                 self._transfers.pop(transfer_id, None)
-                self._send_as_frame(
-                    {"msg_type": "file_reject", "transfer_id": transfer_id},
-                    send_fn,
-                )
-                # Surface the failure locally so the receiver isn't left with
-                # a silent rejection (the sender just gets a file_reject).
-                if self._on_transfer_complete is not None:
-                    self._on_transfer_complete(transfer_id, False, False, "error_disk")
-                return
+
+        if not accepted_ok:
+            # Failure handling runs OUTSIDE the manager lock: _add_to_history
+            # re-acquires it (threading.Lock is not re-entrant), so recording
+            # the failure in the transfers history must not happen while the
+            # lock above is still held.
+            self._add_to_history(transfer, False, status="error_disk")
+            self._send_as_frame(
+                {"msg_type": "file_reject", "transfer_id": transfer_id},
+                send_fn,
+            )
+            # Surface the failure locally so the receiver isn't left with
+            # a silent rejection (the sender just gets a file_reject).
+            if self._on_transfer_complete is not None:
+                self._on_transfer_complete(transfer_id, False, False, "error_disk")
+            return
 
         self._send_as_frame(
             {"msg_type": "file_ack", "transfer_id": transfer_id},
@@ -1058,6 +1067,9 @@ class FileTransferManager:
                 "File transfer %s rejected by peer (%s)",
                 transfer_id[:8], _mask_file_name(transfer.get("file_name", "?")),
             )
+            # Record the failure so it shows up in the transfers history
+            # (the web panel offers Retry on failed outgoing rows).
+            self._add_to_history(transfer, False, status="rejected")
             if self._on_transfer_complete is not None:
                 self._on_transfer_complete(transfer_id, False, False, "rejected")
 
@@ -1673,5 +1685,8 @@ class FileTransferManager:
                 "Cleaned up stale transfer %s (%s)",
                 tid[:8], _mask_file_name(transfer.get("file_name", "?")),
             )
+            # Record the failure so it shows up in the transfers history
+            # instead of vanishing silently from the Active list.
+            self._add_to_history(transfer, False, status="error_timeout")
             if self._on_transfer_complete is not None:
                 self._on_transfer_complete(tid, False, False, "error_timeout")

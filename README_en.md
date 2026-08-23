@@ -82,7 +82,7 @@ ClipSync syncs your clipboard across devices **directly over your local network*
 | Images (PNG, BMP, TIFF, DIB) | ✅ |
 | EMF (Windows metafile) | ✅ |
 
-Clips are deduplicated by content hash, not timestamp. Rapid alternating copies between devices won't cause echo loops.
+Clips are deduplicated by content hash, not timestamp. Rapid alternating copies between devices won't cause echo loops. Dropped devices reconnect automatically in the background, with live "Reconnecting N/M" progress on the device panel.
 
 ### File Transfer
 
@@ -90,6 +90,7 @@ Clips are deduplicated by content hash, not timestamp. Rapid alternating copies 
 - **Chunked protocol** — large files split into 1 MB chunks with ACK-based retransmit
 - **Folder support** — drag a folder to send it as a zip
 - **Pause/Resume** — pause mid-transfer and resume from where you left off
+- **Failures stay visible, one-click retry** — failed transfers remain in history tagged with the reason (disk full / peer offline / timeout, …); failed outbound files can be re-sent as-is
 - **Progress tracking** — per-file progress bars with speed readout (Mbps)
 - **Speed test** — measure raw LAN throughput between paired devices
 
@@ -100,6 +101,7 @@ Clips are deduplicated by content hash, not timestamp. Rapid alternating copies 
 - **PWA** — "Add to Home Screen" on iOS/Android for a native feel
 - View clipboard history, push text to desktop clipboard
 - Upload and download files between phone and desktop
+- Stackable toast notifications; keyboard navigation in the history list (↑/↓ select, Enter copy, Del delete)
 - Token-based authentication (auto-generated or custom)
 
 ### Nearby Chat
@@ -129,6 +131,12 @@ Regex-based filters that replace matches with `[FILTERED]` before syncing, and a
 - Private keys
 - Passwords
 - Email addresses (opt-in, OFF by default — keeps ordinary addresses in everyday text from being mangled)
+
+### Data Management
+
+- **Dual retention limits** — history trimmed by entry count and by age in days (configurable, 0 = keep forever); pinned items are never aged out
+- **Multi-format export** — export the full clipboard history as JSON / CSV / Markdown
+- Corrupted rows are isolated instead of breaking the whole history; clearing history reclaims disk space (VACUUM)
 
 ### System Tray
 
@@ -241,7 +249,7 @@ internal/
     config.py                 #   JSON config + encryption + atomic save
   data/
     backup.py                 #   Backup / restore (incl. paired devices)
-    export.py                 #   History export / import (JSON/CSV)
+    export.py                 #   History export / import (JSON/CSV/Markdown)
   i18n/
     __init__.py               #   EN / ZH translation tables
   platform/

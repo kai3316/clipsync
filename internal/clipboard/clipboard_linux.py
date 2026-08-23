@@ -488,6 +488,12 @@ class LinuxClipboardMonitor(ClipboardMonitor):
         self._callback = None
         self._poll_interval = poll_interval
         self._idle_poll_interval = max(poll_interval * IDLE_POLL_FACTOR, 2.0)
+        # Format probes for the no-plain-text hash branch live on the
+        # READER, not the monitor — referencing self._get_rtf & co. here
+        # raised AttributeError (swallowed by the probe try/except), so
+        # RTF / file-list / URL-only clips all hashed to the same empty
+        # value and only the first such copy was ever detected.
+        self._probes = _ClipboardReader()
 
     def start(self, callback):
         self._callback = callback
@@ -636,8 +642,8 @@ class LinuxClipboardMonitor(ClipboardMonitor):
         # list (text/uri-list), a URL, or an image. Probe each so a change in
         # any single format is detected (image-only hashes to the image).
         h = hashlib.sha256()
-        for probe in (self._get_html_primary, self._get_rtf,
-                      self._get_files, self._get_url):
+        for probe in (self._get_html_primary, self._probes._get_rtf,
+                      self._probes._get_files, self._probes._get_url):
             try:
                 data = probe()
             except Exception:

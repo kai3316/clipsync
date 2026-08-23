@@ -162,6 +162,8 @@ def import_history_json(filepath: str, history: _HistoryType) -> int:
         _insert_imported(history, entry)
         imported += 1
 
+    _finalize_import(history, imported)
+
     logger.info("Imported %d history entries from %s", imported, filepath)
     return imported
 
@@ -263,6 +265,8 @@ def import_history_csv(filepath: str, history: _HistoryType) -> int:
             }
             _insert_imported(history, entry)
             imported += 1
+
+    _finalize_import(history, imported)
 
     logger.info("Imported %d history entries from %s", imported, filepath)
     return imported
@@ -403,16 +407,30 @@ def _types_byte_size(types: dict) -> int:
 
 
 def _insert_imported(history: _HistoryType, entry: dict) -> None:
-    """Insert one imported entry at the top of *history* and persist.
+    """Insert one imported entry at the top of *history* (no persist).
 
-    Shared by the JSON and CSV import paths.  The over-limit trim mirrors
-    add() — pinned entries survive, unpinned ones beyond MAX_ENTRIES are
-    dropped — whereas the old head-slice trim could discard pinned items.
+    Shared by the JSON and CSV import paths.  Callers batch rows first and
+    persist once via :func:`_finalize_import` — persisting (a full-table
+    rewrite) after every single row made a large import quadratic.
     """
     with history._lock:
         entry["entry_id"] = history._next_id
         history._next_id += 1
         history._entries.insert(0, entry)
+
+
+def _finalize_import(history: _HistoryType, imported: int) -> None:
+    """Trim over-limit entries once and persist an imported batch.
+
+    The over-limit trim mirrors add() — pinned entries survive, unpinned
+    ones beyond MAX_ENTRIES are dropped.  Trimming once at the end yields
+    the same final state as trimming after every insert: both keep the
+    newest ``allowed`` unpinned entries in insertion order, so intermediate
+    trims only ever drop entries the final trim would drop anyway.
+    """
+    if imported <= 0:
+        return
+    with history._lock:
         if len(history._entries) > history.MAX_ENTRIES:
             pinned = [e for e in history._entries if e.get("pinned")]
             unpinned = [e for e in history._entries if not e.get("pinned")]

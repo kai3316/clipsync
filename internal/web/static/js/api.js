@@ -611,6 +611,15 @@ var ClipsyncAPI = (function () {
     },
 
     /**
+     * Cancel every ACTIVE transfer at once. The backend resolves the live
+     * list itself and reuses the per-transfer cancel path for each row.
+     * @returns {Promise<{ok: boolean, cancelled: number}>}
+     */
+    cancelAllTransfers: function () {
+      return this._fetch('POST', '/api/transfer/cancel-all', {});
+    },
+
+    /**
      * Clear all history items.
      * @returns {Promise<{ok: boolean}>}
      */

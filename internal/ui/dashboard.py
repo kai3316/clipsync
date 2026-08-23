@@ -201,6 +201,35 @@ def _chat_status_key(status: str, online: bool = True) -> str:
     return "chat.status.closed"
 
 
+class _HistoryListShim:
+    """Duck-type the ClipboardHistory model for internal.data.export.
+
+    ``export_history_json/csv/markdown`` only call ``get_all()`` on the
+    model, but the dashboard receives the entries as a plain list — adapt
+    it instead of requiring a new host callback.
+    """
+
+    def __init__(self, entries: list):
+        self._entries = list(entries)
+
+    def get_all(self) -> list:
+        return list(self._entries)
+
+
+# Machine-readable transfer-history failure statuses → i18n keys. Anything
+# unmapped (e.g. "error_internal") falls back to a generic message.
+_TRANSFER_FAIL_REASON_KEYS: dict[str, str] = {
+    "cancelled": "transfer.cancelled",
+    "error_disk": "transfer.err_disk",
+    "error_size_mismatch": "transfer.err_size_mismatch",
+    "error_missing_chunks": "transfer.err_missing_chunks",
+    "error_security": "transfer.err_security",
+    "peer_offline": "transfer.err_peer_offline",
+    "error_timeout": "transfer.err_timeout",
+    "rejected": "transfer.rejected",
+}
+
+
 class DashboardWindow:
     """Main application window with sidebar + panels."""
 
@@ -281,6 +310,9 @@ class DashboardWindow:
         chat_accept_file: Callable | None = None,
         chat_decline_file: Callable | None = None,
         on_chat_event: Callable | None = None,
+        # Auto-reconnect progress ({id: {attempts, max_attempts}}, keyed by
+        # real or hashed id) so offline paired devices show "Reconnecting N/M"
+        get_reconnect_states: Callable | None = None,
     ):
         self._root = root
         self._get_config = get_config
@@ -338,6 +370,7 @@ class DashboardWindow:
         self._chat_accept_file = chat_accept_file
         self._chat_decline_file = chat_decline_file
         self._on_chat_event = on_chat_event
+        self._get_reconnect_states = get_reconnect_states
 
         self._window: ctk.CTkToplevel | None = None
         self._dark_mode = _is_dark_mode(get_config().appearance_mode)
@@ -376,6 +409,7 @@ class DashboardWindow:
         self._sync_var: tk.BooleanVar | None = None
         self._autostart_var: tk.BooleanVar | None = None
         self._history_search_var: tk.StringVar | None = None
+        self._export_var: tk.StringVar | None = None
         self._discovery_var: tk.BooleanVar | None = None
         self._visibility_var: tk.BooleanVar | None = None
 
@@ -445,6 +479,34 @@ class DashboardWindow:
     # ═══════════════════════════════════════════════════════════════
     # Public API
     # ═══════════════════════════════════════════════════════════════
+
+    @staticmethod
+    def _hash_device_id(peer_id: str) -> str:
+        """Hash a real device id into its mDNS form (same recipe as the
+        transport layer's reconnect bookkeeping keys)."""
+        import hashlib
+        try:
+            return hashlib.sha256(peer_id.encode()).hexdigest()[:12]
+        except Exception:
+            return ""
+
+    def _reconnect_for(self, peer_id: str,
+                       states: dict) -> tuple[int, int] | None:
+        """Return (attempt, max) for a mid-reconnect peer, else None.
+
+        The bookkeeping is keyed by whichever id form scheduling used — try
+        the real id, then its hashed mDNS form.
+        """
+        st = states.get(peer_id)
+        if not isinstance(st, dict) or not st:
+            st = states.get(self._hash_device_id(peer_id))
+        if isinstance(st, dict) and st:
+            try:
+                return int(st.get("attempts", 0) or 0), int(
+                    st.get("max_attempts", 0) or 0)
+            except (TypeError, ValueError):
+                return None
+        return None
 
     def show(self):
         if self._window is not None:
@@ -596,7 +658,7 @@ class DashboardWindow:
         """
         for name in (
             "_breath_timer", "_refresh_job", "_history_search_timer",
-            "_history_chunk_timer", "_copy_url_timer",
+            "_history_chunk_timer", "_copy_url_timer", "_chat_hint_job",
         ):
             timer = getattr(self, name, None)
             if timer is not None:
@@ -796,8 +858,11 @@ class DashboardWindow:
         self._panels["chat"] = self._build_chat_panel()
         # The chat panel is re-created from scratch here (fresh empty scroll
         # frames); a stale state key from a previous window life would make
-        # _refresh_chat early-return and leave the panel blank.
+        # _refresh_chat early-return and leave the panel blank. The unread
+        # badge memo must reset too — the sidebar buttons are brand new, so a
+        # memoized "unchanged" total would skip repainting them.
         self._chat_state_key = None
+        self._chat_nav_badge_total = None
 
         # ── Footer ──────────────────────────────────────────────────
         footer = ctk.CTkFrame(outer, height=46, corner_radius=0,
@@ -1580,13 +1645,29 @@ class DashboardWindow:
         except Exception:
             peers = []
 
+        # Auto-reconnect progress for offline paired peers ("Reconnecting N/M").
+        try:
+            reconnect_states = (
+                self._get_reconnect_states() or {}
+                if self._get_reconnect_states is not None else {}
+            )
+        except Exception:
+            reconnect_states = {}
+
         # Hash-based change detection: skip rebuild if peer data hasn't changed.
         # Include the pending-pairing list so a brand-new pairing request for
         # an already-known (unpaired) peer still shows its Confirm/Reject card
-        # even though the peer list itself is unchanged.
+        # even though the peer list itself is unchanged, plus the reconnect
+        # attempt counter so "Reconnecting N/M" ticks without a peer change.
         pending = self._get_pending() if self._get_pending else []
+        # Encode a missing reconnect state as an empty tuple (not None) so
+        # sorted() never compares None against a tuple across rows.
         state_key = (
-            tuple(sorted((p[0], p[1], p[2], p[3], p[4]) for p in peers)),
+            tuple(sorted(
+                (p[0], p[1], p[2], p[3], p[4],
+                 self._reconnect_for(p[0], reconnect_states) or ())
+                for p in peers
+            )),
             tuple(sorted(pending)),
         )
         if state_key == getattr(self, '_devices_state_key', None):
@@ -1611,7 +1692,10 @@ class DashboardWindow:
             if known:
                 self._add_section_header(T("devices.known"), len(known))
                 for dev_id, dev_name, paired, connected, notes in known:
-                    self._create_device_row(dev_id, dev_name, paired, connected, notes)
+                    self._create_device_row(
+                        dev_id, dev_name, paired, connected, notes,
+                        reconn=self._reconnect_for(dev_id, reconnect_states),
+                    )
 
             if discovered:
                 self._add_section_header(T("devices.discovered_section"), len(discovered))
@@ -1648,7 +1732,8 @@ class DashboardWindow:
             text_color=("gray60", "gray50"),
         ).pack(side="left", padx=(6, 0))
 
-    def _create_device_row(self, dev_id, dev_name, paired, connected, notes=""):
+    def _create_device_row(self, dev_id, dev_name, paired, connected, notes="",
+                           reconn: tuple[int, int] | None = None):
         if connected and paired:
             color, status = STATUS_COLOR, T("device.connected")
         elif connected:
@@ -1658,8 +1743,14 @@ class DashboardWindow:
         else:
             color, status = ACCENT, T("device.discovered")
 
+        # A paired peer that dropped and is being auto-reconnected shows the
+        # live attempt counter instead of a bare offline badge.
+        reconnecting = bool(reconn) and not connected and paired
+
         if connected:
             chip_text = T("devices.status_connected")
+        elif reconnecting:
+            chip_text = T("device.reconnecting", n=reconn[0], m=reconn[1])
         elif paired:
             chip_text = T("devices.status_paired_offline")
         else:
@@ -1755,9 +1846,12 @@ class DashboardWindow:
         ).pack(side="right", padx=(8, 8))
 
         # ── Row 2: status (left) + notes (right) ─────────────────
-        detail = status
+        detail = status if not reconnecting else T(
+            "device.reconnecting", n=reconn[0], m=reconn[1])
         if connected:
             detail += "  \U0001F512  " + T("device.encrypted")
+        elif reconnecting:
+            pass  # the attempt counter already says what's happening
         elif paired:
             detail += T("device.reconnect_to_sync")
         else:
@@ -2069,6 +2163,19 @@ class DashboardWindow:
                 command=self._on_clear_history,
             )
             self._clear_history_btn.pack(side="right")
+
+        # Export menu — JSON / CSV / Markdown, mirroring the web UI's data
+        # management section. Acts as a menu-button: the label resets to its
+        # prompt text after each pick.
+        if self._get_history is not None:
+            self._export_var = tk.StringVar(value=T("ui.export_data"))
+            ctk.CTkOptionMenu(
+                header_row, variable=self._export_var,
+                values=["JSON", "CSV", "Markdown"],
+                width=110, height=28, dynamic_resizing=False,
+                font=ctk.CTkFont(size=11), dropdown_font=ctk.CTkFont(size=11),
+                command=self._on_export_history,
+            ).pack(side="right", padx=(6, 0))
 
         # Search bar
         search_frame = ctk.CTkFrame(panel, corner_radius=8, fg_color=("gray95", "gray17"))
@@ -2396,6 +2503,48 @@ class DashboardWindow:
         if ask_yesno(self._window, T("history.clear_title"), T("history.clear_confirm")):
             self._clear_history()
             self._refresh_history_list()
+
+    def _on_export_history(self, fmt: str):
+        """Export the FULL clipboard history in the chosen format (JSON /
+        CSV / Markdown), ignoring any active search filter — matching the
+        web UI's data-management exports."""
+        if self._get_history is None:
+            return
+        ext = {"JSON": "json", "CSV": "csv"}.get(fmt, "md")
+        try:
+            from tkinter import filedialog
+            dest = filedialog.asksaveasfilename(
+                parent=self._window,
+                title=T("ui.export_data"),
+                initialfile=f"clipsync_history.{ext}",
+                defaultextension=f".{ext}",
+                filetypes=[(fmt, f"*.{ext}")],
+            )
+        except Exception:
+            logger.debug("Save dialog failed for history export", exc_info=True)
+            dest = ""
+        # Reset the menu to its prompt label so it reads as an action button.
+        if self._export_var is not None:
+            self._export_var.set(T("ui.export_data"))
+        if not dest:
+            return
+        try:
+            from internal.data import export as _export
+            export_fn = {
+                "JSON": _export.export_history_json,
+                "CSV": _export.export_history_csv,
+            }.get(fmt, _export.export_history_markdown)
+            count = export_fn(_HistoryListShim(self._get_history()), dest)
+        except Exception as e:
+            logger.debug("History export failed", exc_info=True)
+            show_error(self._window, T("dialog.error"),
+                       T("ui.export_data_failed", err=e))
+            return
+        if self._status_footer:
+            self._status_footer.configure(
+                text=T("footer.exported", count=count, dest=dest),
+                text_color=("#27AE60", "#2ECC71"),
+            )
 
     def _on_delete_history_item(self, entry_id):
         if self._delete_history_item is None:
@@ -2846,6 +2995,7 @@ class DashboardWindow:
         timestamp = entry.get("timestamp", 0)
         saved_path = entry.get("saved_path", "")
         source_path = entry.get("source_path", "")
+        fail_status = entry.get("status", "")
 
         arrow = "\U0001F4E4" if direction == "up" else "\U0001F4E5"
         status_icon = "✅" if success else "❌"
@@ -2870,13 +3020,32 @@ class DashboardWindow:
         r1.pack(fill="x")
 
         resolve_path = saved_path or source_path
+        # Failed outbound rows can be re-sent from the original file, matching
+        # the web UI's ⟳ Retry (cancelled sends are retryable too).
+        can_retry = (
+            not success
+            and direction == "up"
+            and bool(source_path)
+            and self._on_retry_transfer is not None
+        )
         has_actions = (
-            (resolve_path and success and self._on_open_file and self._on_open_folder)
+            can_retry
+            or (resolve_path and success and self._on_open_file and self._on_open_folder)
             or self._delete_transfer_history_item
         )
 
         # Action buttons on the right
         if has_actions:
+            if can_retry:
+                ctk.CTkButton(
+                    r1, text="⟳  " + T("ui.retry"), width=64, height=22,
+                    fg_color="transparent", border_width=1,
+                    text_color=("#0891B2", "#4CE0F5"),
+                    border_color=("#0891B2", "#22D3EE"),
+                    hover_color=("#E6F2F7", "#161C38"),
+                    font=ctk.CTkFont(size=10),
+                    command=lambda p=source_path: self._on_retry_transfer(p),
+                ).pack(side="right", padx=(4, 0))
             if self._delete_transfer_history_item:
                 ctk.CTkButton(
                     r1, text=T("ui.delete"), width=48, height=22,
@@ -2915,6 +3084,18 @@ class DashboardWindow:
             font=ctk.CTkFont(size=10),
             text_color=("gray50", "gray60"),
         ).pack(side="right")
+
+        # Failed rows carry the localized reason (disk full, offline peer,
+        # timeout, …) so the failure is actionable without re-running it.
+        if not success:
+            reason_key = _TRANSFER_FAIL_REASON_KEYS.get(fail_status)
+            reason_text = T(reason_key) if reason_key else T("transfer.send_failed")
+            ctk.CTkLabel(
+                inner, text=f"↳  {reason_text}",
+                font=ctk.CTkFont(size=10),
+                text_color=("#E74C3C", "#C0392B"),
+                anchor="w", justify="left",
+            ).pack(fill="x", padx=(24, 0), pady=(2, 0))
 
     @staticmethod
     def _format_size(size: int) -> str:

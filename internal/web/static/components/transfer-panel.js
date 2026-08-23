@@ -18,6 +18,8 @@
         sending: false,
         phoneQrSending: false,
         peerOffline: false,     // true when the selected target disconnected during a send
+        cancellingAll: false,   // true while a "cancel all" request is in flight
+        retryBusyId: '',        // transfer_id whose Retry is in flight (double-click guard)
       };
     },
 
@@ -165,7 +167,15 @@
 
       <!-- Active transfers -->
       <div v-if="hasActiveTransfers" class="transfer-panel__section">
-        <div class="section-header">📡 {{ t('transfer.active_transfers') }}</div>
+        <div class="section-header">
+          <span>📡 {{ t('transfer.active_transfers') }}</span>
+          <button
+            class="transfer-cancel-all-btn"
+            :disabled="cancellingAll"
+            :title="t('transfer.cancel_all')"
+            @click="cancelAllTransfers"
+          >{{ cancellingAll ? '...' : t('transfer.cancel_all') }}</button>
+        </div>
         <div
           v-for="tr in store.activeTransfers"
           :key="tr.id"
@@ -258,6 +268,7 @@
                 class="transfer-history-item__btn"
                 :title="t('common.retry')"
                 :aria-label="t('common.retry')"
+                :disabled="retryBusyId === tr.id"
                 @click="retryTransfer(tr.id)"
               >&#8635;</button>
               <button
@@ -514,12 +525,37 @@
       },
       retryTransfer: function (id) {
         var self = this;
+        // Double-click guard: a second click while the re-send is starting
+        // must not fire a duplicate transfer to the same peer.
+        if (self.retryBusyId === id) return;
+        self.retryBusyId = id;
         ClipsyncAPI.retryTransfer(id).then(function () {
+          self.retryBusyId = '';
           // The fresh transfer shows up under Active via the reconcile below
           // (plus the transfer_progress pushes that follow).
           self._refreshTransfers().catch(function () {});
         }).catch(function () {
+          self.retryBusyId = '';
           self.store.showToast(self.t('dialog.failed'), 2000);
+        });
+      },
+      cancelAllTransfers: function () {
+        var self = this;
+        if (self.cancellingAll) return;
+        self.cancellingAll = true;
+        ClipsyncAPI.cancelAllTransfers().then(function (res) {
+          self.cancellingAll = false;
+          var n = res && typeof res.cancelled === 'number' ? res.cancelled : 0;
+          if (n > 0) {
+            // Optimistically drop every row, then reconcile with the server
+            // (a cancel that failed server-side reappears on refresh).
+            self.store.activeTransfers.splice(0, self.store.activeTransfers.length);
+            self.store.showToast(self.t('transfer.cancelled'), 1500);
+          }
+          self._refreshTransfers().catch(function () {});
+        }).catch(function () {
+          self.cancellingAll = false;
+          self.store.showToast(self.t('transfer.cancel_failed'), 2000);
         });
       },
       openFile: function (path) {

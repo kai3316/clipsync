@@ -73,6 +73,7 @@
         retryCapture: true,
         dedupMethod: 'sha256',
         sourceTracking: true,
+        plainTextOnly: false,
 
         // Data locations
         dataDir: '',
@@ -283,6 +284,7 @@
         if (s.retry_capture_enabled !== undefined) this.retryCapture = !!s.retry_capture_enabled;
         if (s.dedup_method !== undefined) this.dedupMethod = s.dedup_method || 'sha256';
         if (s.source_tracking_enabled !== undefined) this.sourceTracking = !!s.source_tracking_enabled;
+        if (s.plain_text_only !== undefined) this.plainTextOnly = !!s.plain_text_only;
         if (s.data_dir !== undefined) this.dataDir = s.data_dir || '';
         if (s.favorites_path !== undefined) this.favoritesPath = s.favorites_path || '';
         if (s.hotkeys) this.hotkeys = Object.assign({}, s.hotkeys);
@@ -550,6 +552,7 @@
           retry_capture_enabled: self.retryCapture,
           dedup_method: self.dedupMethod,
           source_tracking_enabled: self.sourceTracking,
+          plain_text_only: !!self.plainTextOnly,
           hotkeys: self.hotkeys,
           hotkeys_enabled: self.hotkeysEnabled,
         }).then(function (res) {
@@ -1080,6 +1083,7 @@
       lowMemory: function () { this.markDirty('advanced'); },
       retryCapture: function () { this.markDirty('advanced'); },
       sourceTracking: function () { this.markDirty('advanced'); },
+      plainTextOnly: function () { this.markDirty('advanced'); },
       dedupMethod: function () { this.markDirty('advanced'); },
       hotkeysEnabled: function () { this.markDirty('advanced'); },
       hotkeys: {
@@ -1492,6 +1496,13 @@
                       '<span class="settings-toggle__knob"></span>' +
                     '</button>' +
                   '</div>' +
+                  '<div class="settings-toggle-row">' +
+                    '<span class="settings-toggle-label">{{ t(\'settings_window.plain_text_only\') }}</span>' +
+                    '<button class="settings-toggle" role="switch" :aria-checked="plainTextOnly" :aria-label="t(\'settings_window.plain_text_only\')" :class="{ \'settings-toggle--on\': plainTextOnly }" @click="plainTextOnly = !plainTextOnly">' +
+                      '<span class="settings-toggle__knob"></span>' +
+                    '</button>' +
+                  '</div>' +
+                  '<p class="settings-hint">{{ t(\'settings_window.plain_text_only_desc\') }}</p>' +
                   '<div class="settings-field">' +
                     '<label class="settings-field__label">{{ t(\'settings_window.dedup_method\') }}</label>' +
                     '<select class="settings-select" v-model="dedupMethod">' +

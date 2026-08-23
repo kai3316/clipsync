@@ -24,6 +24,7 @@ from urllib.parse import quote, urlparse
 if not getattr(sys, "frozen", False):
     sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+from internal.clipboard.clipboard import strip_rich_formats
 from internal.clipboard.filter import ContentFilter
 from internal.clipboard.format import ClipboardContent
 from internal.clipboard.format import ContentType as _CT
@@ -2376,6 +2377,15 @@ class Application:
     # ── Callback implementations ──────────────────────────────────
 
     def _on_local_sync(self, msg) -> None:
+        # "Plain text only": strip rich-text formats from OUTGOING clips so
+        # peers always receive/paste plain text (this device's clipboard and
+        # history keep the full-fidelity copy, mirroring the sensitivity
+        # filter's local-original policy).  Stripping the message — rather
+        # than the platform write on either end — keeps message bytes and
+        # written bytes identical, so the receiver's read-back dedup cannot
+        # echo the clip back as a new capture.
+        if getattr(self.cfg, "plain_text_only", False):
+            msg.content = strip_rich_formats(msg.content)
         if self.content_filter.is_active and self.content_filter.is_sensitive(msg.content):
             sensitivity = self.content_filter.describe_sensitivity(msg.content)
             logger.info("Filtering sensitive content: %s", sensitivity)
@@ -2471,6 +2481,13 @@ class Application:
             raw_payload = getattr(msg, "_raw_payload", {})
             self._handle_pairing_message(msg_type, raw_payload, peer_id)
             return
+        # "Plain text only": enforce THIS device's preference on incoming
+        # clips too (a peer with the toggle off still sends rich text).
+        # Stripping before handle_remote_message keeps its dedup bookkeeping
+        # consistent with what actually lands on the clipboard, so the local
+        # monitor's read-back matches and nothing is re-broadcast.
+        if msg_type == "clipboard" and getattr(self.cfg, "plain_text_only", False):
+            msg.content = strip_rich_formats(msg.content)
         self.sync_mgr.handle_remote_message(msg)
 
     def _on_transfer_progress(self, transfer_id: str, progress: float) -> None:
@@ -5618,6 +5635,12 @@ class Application:
             get_config=self._get_cfg,
             save_config=self._save_cfg_and_peers,
             get_peers=self._get_peers,
+            # Reconnect progress for offline paired rows ("reconnecting N/M");
+            # empty dict when the transport layer is gone (shutdown ordering).
+            get_reconnect_states=lambda: (
+                self.transport_mgr.get_reconnect_states()
+                if self.transport_mgr is not None else {}
+            ),
             on_quit=self.shutdown,
             get_sync_enabled=lambda: self.cfg.sync_enabled,
             set_sync_enabled=lambda v: (

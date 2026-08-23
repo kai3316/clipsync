@@ -179,8 +179,10 @@ def _get_active_app_info_darwin() -> dict | None:
         if result.returncode != 0:
             return None
 
-        # Output is like "Finder, 123, " (name, pid, title separated by comma-space)
-        parts = result.stdout.decode("utf-8").strip().split(", ")
+        # Output is like "Finder, 123, " (name, pid, title separated by
+        # comma-space).  Split at most twice so a window TITLE containing
+        # ", " stays intact in parts[2] instead of being truncated.
+        parts = result.stdout.decode("utf-8").strip().split(", ", 2)
         if len(parts) < 2:
             return None
 
@@ -211,7 +213,8 @@ def _get_active_app_info_linux() -> dict | None:
 
         # Read process name from /proc/PID/comm
         try:
-            proc_comm = open(f"/proc/{pid}/comm").read().strip()
+            with open(f"/proc/{pid}/comm") as f:
+                proc_comm = f.read().strip()
         except (OSError, FileNotFoundError):
             return None
 

@@ -92,6 +92,10 @@ class Config:
     low_memory_mode: bool = False       # reduce polling frequency / disable previews
     retry_capture_enabled: bool = True  # multi-round retry capture
     dedup_method: str = "sha256"        # "sha256" or "simple"
+    # Strip rich-text formats (HTML/RTF) from every local clipboard write —
+    # remote receives and pastes land as plain text only.  Images and file
+    # lists are content, not formatting, and are kept.
+    plain_text_only: bool = False
 
     # App filter (blacklist/whitelist apps from clipboard monitoring)
     app_filter_enabled: bool = False
@@ -242,6 +246,7 @@ _FIELD_RULES: dict[str, tuple] = {
     "low_memory_mode": ("bool",),
     "retry_capture_enabled": ("bool",),
     "dedup_method": ("str",),
+    "plain_text_only": ("bool",),
     "app_filter_enabled": ("bool",),
     "app_filter_mode": ("str",),
     "app_filter_list": ("strlist_nonnull",),
@@ -366,7 +371,8 @@ def load() -> Config:
                 "language",
                 "language_chosen",
                 "paste_to_top", "low_memory_mode", "retry_capture_enabled",
-                "dedup_method", "app_filter_enabled", "app_filter_mode",
+                "dedup_method", "plain_text_only",
+                "app_filter_enabled", "app_filter_mode",
                 "app_filter_list", "source_tracking_enabled",
                 "ui_backend", "ui_animation_enabled", "sound_enabled",
                 "favorites_path", "data_dir",
@@ -502,6 +508,7 @@ def save(cfg: Config, enc_mgr: "EncryptionManager | None" = None):
             "low_memory_mode": cfg.low_memory_mode,
             "retry_capture_enabled": cfg.retry_capture_enabled,
             "dedup_method": cfg.dedup_method,
+            "plain_text_only": cfg.plain_text_only,
             "app_filter_enabled": cfg.app_filter_enabled,
             "app_filter_mode": cfg.app_filter_mode,
             "app_filter_list": cfg.app_filter_list,

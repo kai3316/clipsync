@@ -5,15 +5,19 @@ All notable changes to ClipSync are documented in this file.
 ## [Unreleased]
 
 ### Transfers
-- **Failed file transfers are no longer invisible.** Every failure path (disk error, peer offline, timeout, size mismatch, …) now lands in transfer history with a machine-readable reason and the target device, and failed outbound rows get a ⟳ Retry button in the web dashboard.
+- **Failed file transfers are no longer invisible.** Every failure path (disk error, peer offline, timeout, size mismatch, rejection, stale sweep, …) now lands in transfer history with a machine-readable reason and the target device, and failed outbound rows get a ⟳ Retry button in the web dashboard (double-click guarded).
+- **Cancel-all**: one click clears every active transfer from the Transfers panel (`POST /api/transfer/cancel-all`).
 - Fixed a sender-thread crash when a paused receiver resumes and late chunk retransmits hit a closed file handle (transfer stuck at "finalizing" until timeout).
 
 ### Devices & connectivity
-- **Offline devices show reconnect progress** ("Reconnecting N/M") in the device panel instead of a bare offline state, across REST snapshots and WS broadcasts.
+- **Offline devices show reconnect progress** ("Reconnecting N/M") in the device panel and desktop dashboard instead of a bare offline state, across REST snapshots and WS broadcasts.
 - **Network switches self-heal**: the mDNS advertisement is rebuilt when the local address set changes (Wi-Fi ↔ wired / subnet change) — previously peers couldn't find this device until an app restart.
 
 ### Clipboard & history
+- **Sync as plain text only** (new setting): strips rich formatting (HTML/RTF) from synced clips on both the sending and receiving side — other devices always paste plain text, while this machine's clipboard and history keep full fidelity. Images and file lists are content and still sync.
 - **History retention by age**: new "keep history for N days" setting (0 = unlimited); unpinned rows older than that are pruned automatically after startup and each capture.
+- Fixed Linux captures silently missing non-plain-text clipboards (RTF / file-list / URL-only): the monitor hashed through methods it didn't have, so only the first such copy was ever detected.
+- JSON/CSV import no longer rewrites the whole database per row (O(n²) on large imports); imports keep original order, protect pinned items, and round-trip `source_app`/`source_title`.
 - **Markdown export** joins JSON/CSV in Data Management (grouped by day, atomic write). CSV exports gain `time_iso`/`source_app`/`source_title`/`byte_size` columns; old CSVs still import.
 - Exports/imports round-trip `source_app`/`source_title`; imports keep original order and protect pinned items from over-limit trimming.
 - Local clipboard capture no longer silently drops items when another app holds the clipboard briefly (read-side retry budget now matches write side).
@@ -21,6 +25,8 @@ All notable changes to ClipSync are documented in this file.
 - Batch pin/delete tolerates string vs numeric ids from web clients (previously silent no-ops).
 
 ### Reliability
+- Desktop settings window reaches parity with the web UI: "history retention days" input, plain-text-only switch, Markdown in the dashboard export dropdown (JSON/CSV/Markdown), failed transfer rows show their reason with a ⟳ Retry button, and the tray shows the live connected-device count.
+- Source-app tracking fixes: leaked file handle on Linux; truncated window titles on macOS when the title contains ", ".
 - P2P update install no longer runs inside the network receive thread (half-finished updates after `sys.exit` in a worker thread); exit now marshals through the Tk main loop so shutdown hooks run.
 - A transient exception can no longer permanently kill the peers-status daemon loop (tray/device state froze on first error).
 - Conflicted global hotkeys clean up their dead mappings and are reported once at startup instead of silently never firing.

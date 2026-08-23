@@ -3,7 +3,7 @@
 import time
 from abc import ABC, abstractmethod
 
-from internal.clipboard.format import ClipboardContent
+from internal.clipboard.format import ClipboardContent, ContentType
 
 
 class ClipboardReader(ABC):
@@ -20,6 +20,57 @@ class ClipboardWriter(ABC):
     @abstractmethod
     def write(self, content: ClipboardContent):
         """Write content to the clipboard in the best available format."""
+
+
+def _html_to_plain_text(data: bytes) -> bytes:
+    """Reduce an HTML payload to its visible text (best effort)."""
+    import html as _html
+    import re
+    text = data.decode("utf-8", errors="replace")
+    # Drop style/script blocks with their content, then remaining tags.
+    text = re.sub(r"<(style|script)[^>]*>.*?</\1>", "", text,
+                  flags=re.DOTALL | re.IGNORECASE)
+    text = re.sub(r"<[^>]*>", " ", text)
+    text = _html.unescape(text)
+    return re.sub(r"[ \t]+", " ", text).strip().encode("utf-8")
+
+
+def strip_rich_formats(content: ClipboardContent) -> ClipboardContent:
+    """Return *content* reduced to its non-rich-text formats.
+
+    Backs the "plain text only" setting: HTML and RTF are dropped so peers
+    always receive/paste unformatted text.  Non-text formats survive —
+    images, EMF vectors and file lists are content, not formatting.  An
+    HTML-only clip (no TEXT payload) is converted to plain text instead of
+    being lost; an RTF-only clip (whose body would turn to brace garbage if
+    naively stripped) and any clip left empty by the removal pass through
+    unchanged.
+
+    Callers apply this to the SYNC MESSAGE, not to the platform write: the
+    receiving side hashes/stamps exactly these bytes before writing them to
+    its clipboard, so message and written content stay identical and the
+    receiver's read-back dedup cannot echo the stripped clip back.
+    """
+    types = {
+        t: d for t, d in content.types.items()
+        if t not in (ContentType.HTML, ContentType.RTF)
+    }
+    if ContentType.TEXT not in types:
+        html_data = content.types.get(ContentType.HTML)
+        if html_data is not None:
+            plain = _html_to_plain_text(html_data)
+            if plain:
+                types[ContentType.TEXT] = plain
+    if not types:
+        # Nothing left after stripping (degenerate HTML-only clip whose
+        # text extraction came up empty) — keep the original.
+        return content
+    return ClipboardContent(
+        types=types,
+        source_device=content.source_device,
+        timestamp=content.timestamp,
+        image_fmt=content.image_fmt,
+    )
 
 
 class ClipboardMonitor(ABC):

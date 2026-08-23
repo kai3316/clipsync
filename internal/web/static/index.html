@@ -171,6 +171,31 @@
       color: var(--clipsync-bg);
     }
 
+    /* Transfer panel "Cancel all" (Active transfers section header) */
+    .transfer-cancel-all-btn {
+      margin-left: var(--clipsync-space-3);
+      padding: 2px 10px;
+      font-size: 10px;
+      font-weight: 700;
+      letter-spacing: 0.04em;
+      text-transform: uppercase;
+      border: 1px solid var(--clipsync-border);
+      border-radius: 999px;
+      background: transparent;
+      color: var(--clipsync-fg-muted);
+      cursor: pointer;
+    }
+
+    .transfer-cancel-all-btn:hover {
+      color: var(--clipsync-danger);
+      border-color: var(--clipsync-danger);
+    }
+
+    .transfer-cancel-all-btn:disabled {
+      opacity: 0.6;
+      cursor: default;
+    }
+
     /* ── Favorites inline panel ──────────────────────────────────── */
 
     .favorites-panel {

@@ -856,6 +856,32 @@ def _dispatch(method, path, query_params, body, cfg, history, sync_mgr,
             ok = on_transfer_action("retry", transfer_id)
             return _json_response({"ok": ok})
 
+        elif path == "/api/transfer/cancel-all":
+            # Cancel every ACTIVE transfer at once (the transfers panel's
+            # "Cancel all" button).  The live list comes from the host's
+            # on_get_transfers callback; each row is then cancelled through
+            # the SAME per-transfer action a single-row ✕ uses, so peer
+            # notification, history rows and once-guarded callbacks are all
+            # identical to an individual cancel.
+            if on_transfer_action is None:
+                return _json_response({"ok": False, "error": "not available"}, 503)
+            ids: list = []
+            if on_get_transfers is not None:
+                try:
+                    active, _history = on_get_transfers()
+                    ids = [
+                        t.get("transfer_id", "")
+                        for t in (active or [])
+                        if isinstance(t, dict)
+                    ]
+                except Exception:
+                    logger.exception("Failed to read transfer state for cancel-all")
+                    ids = []
+            cancelled = sum(
+                1 for tid in ids if tid and on_transfer_action("cancel", tid)
+            )
+            return _json_response({"ok": True, "cancelled": cancelled})
+
         elif path == "/api/history/clear":
             try:
                 # Capture the count BEFORE clearing so the response reflects

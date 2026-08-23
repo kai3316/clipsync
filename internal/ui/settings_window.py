@@ -173,6 +173,8 @@ class SettingsWindow:
         self._filter_vars: dict[str, tk.BooleanVar] = {}
         # Advanced panel vars
         self._history_max_var: tk.StringVar | None = None
+        self._history_max_age_var: tk.StringVar | None = None
+        self._plain_text_only_var: tk.BooleanVar | None = None
         self._file_receive_dir_var: tk.StringVar | None = None
         self._sync_debounce_var: tk.StringVar | None = None
         self._poll_interval_var: tk.StringVar | None = None
@@ -1190,6 +1192,15 @@ class SettingsWindow:
         _desc(card1, T("settings_window.history_max_desc"))
 
         r = _row(card1)
+        ctk.CTkLabel(r, text=T("settings_window.history_max_age"), anchor="w",
+                     font=ctk.CTkFont(size=12)).pack(side="left")
+        self._history_max_age_var = tk.StringVar(
+            value=str(cfg.history_max_age_days))
+        ctk.CTkEntry(r, textvariable=self._history_max_age_var,
+                     width=80, height=32).pack(side="right")
+        _desc(card1, T("settings_window.history_max_age_desc"))
+
+        r = _row(card1)
         ctk.CTkLabel(r, text=T("settings_window.sync_debounce"), anchor="w",
                      font=ctk.CTkFont(size=12)).pack(side="left")
         self._sync_debounce_var = tk.StringVar(value=str(cfg.sync_debounce))
@@ -1204,6 +1215,15 @@ class SettingsWindow:
         ctk.CTkEntry(r, textvariable=self._poll_interval_var,
                      width=80, height=32).pack(side="right")
         _desc(card1, T("settings_window.poll_interval_desc"))
+
+        # Plain-text-only toggle — mirrors the clipboard panel's config flag.
+        self._plain_text_only_var = tk.BooleanVar(value=bool(cfg.plain_text_only))
+        ctk.CTkSwitch(
+            card1, text=T("settings_window.plain_text_only"),
+            variable=self._plain_text_only_var,
+            font=ctk.CTkFont(size=12),
+        ).pack(anchor="w", padx=16, pady=(8, 2))
+        _desc(card1, T("settings_window.plain_text_only_desc"))
 
         # ── Card 2: File Transfer ─────────────────────────────────
         card2 = ctk.CTkFrame(scroll, corner_radius=12)
@@ -1362,6 +1382,16 @@ class SettingsWindow:
             history_max = None
 
         try:
+            # Age-based retention in days; 0 disables it. Range matches the
+            # web settings API so both UIs accept the same values.
+            max_age_days = float(self._history_max_age_var.get())
+            if not 0 <= max_age_days <= 36500:
+                raise ValueError
+        except ValueError:
+            errors.append(T("settings_window.val_history_max_age"))
+            max_age_days = None
+
+        try:
             debounce = float(self._sync_debounce_var.get())
             if not 0.1 <= debounce <= 5.0:
                 raise ValueError
@@ -1405,6 +1435,8 @@ class SettingsWindow:
 
         cfg = self._get_config()
         cfg.history_max_entries = history_max
+        cfg.history_max_age_days = max_age_days
+        cfg.plain_text_only = self._plain_text_only_var.get()
         cfg.file_receive_dir = receive_dir
         cfg.sync_debounce = debounce
         cfg.clipboard_poll_interval = poll
