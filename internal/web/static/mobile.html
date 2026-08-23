@@ -900,6 +900,14 @@ body::before {
   var historyLoading = false;
   var historyOffset = 0;
   var historyHasMore = true;
+  // Mobile has no store object, so it keeps its own copy of the load-more
+  // cursor convention (offset = visible length pinned to total; hasMore =
+  // length < total, preserved when total is unknown).  Keep in step with
+  // store.setHistoryCursor().
+  function _setHistCursor(total) {
+    historyOffset = (total != null) ? Math.min(historyItems.length, total) : historyItems.length;
+    historyHasMore = (total != null) ? (historyItems.length < total) : historyHasMore;
+  }
   // Timestamp of the last full-history calibration (limit=total).  A full
   // download is expensive, so it is throttled to one per 30s per client —
   // inside the window the cursor is pinned but no refetch happens.  EVERY
@@ -1019,8 +1027,7 @@ body::before {
             if (_lastCalibMobile && (calibNow - _lastCalibMobile) < 30000) {
               // Throttled — just pin the cursor so Load-more can't skip live
               // entries; the next poll retries after the window elapses.
-              historyOffset = Math.min(historyItems.length, total);
-              historyHasMore = historyItems.length < total;
+              _setHistCursor(total);
               renderHistory();
               return;
             }
@@ -1035,8 +1042,7 @@ body::before {
                   if (calItems[c] == null) continue;  // never store a malformed row
                   historyItems.push(calItems[c]);
                 }
-                historyHasMore = (calData.total != null) ? (historyItems.length < calData.total) : false;
-                historyOffset = historyItems.length;
+                _setHistCursor(calData.total != null ? calData.total : null);
                 renderHistory();
               })
               .catch(function () {
@@ -1048,8 +1054,7 @@ body::before {
                 // budget so a persistently-failing server doesn't re-enter a
                 // full download on every poll.
                 _lastCalibMobile = Date.now();
-                historyOffset = Math.min(historyItems.length, total);
-                historyHasMore = (total != null) ? (historyItems.length < total) : historyHasMore;
+                _setHistCursor(total != null ? total : null);
                 renderHistory();
               });
             return;

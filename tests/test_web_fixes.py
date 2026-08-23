@@ -508,8 +508,18 @@ def test_history_merge_cursor_recomputed_from_length():
         assert "store.setHistoryCursor(" in js, rel
         assert "store.historyOffset += fresh.length;" not in js, rel
         assert "historyOffset = offset + items.length" not in js, rel
+    # The dashboard's Load More handler — the original raw-delta bug site —
+    # must also route through the shared helper.
+    panel = _read_repo_file("internal/web/static/components/history-panel.js")
+    assert "self.store.setHistoryCursor(" in panel
+    assert "offset + items.length" not in panel
+    # The calibration branches all use the shared helper, and mobile has its
+    # own local copy of the same convention.
     store = _read_repo_file("internal/web/static/js/store.js")
     assert "setHistoryCursor: function (total)" in store
+    assert "this.historyOffset = Math.min(this.history.length, total);" not in store
+    mobile = _read_repo_file("internal/web/static/mobile.html")
+    assert "function _setHistCursor(total)" in mobile
 
 
 def test_mobile_merge_prunes_missing_entries():
@@ -1201,7 +1211,10 @@ def test_mobile_calibration_throttled_and_failure_pins_min():
     assert "(_lastCalibMobile && (calibNow - _lastCalibMobile) < 30000)" in html
     # Success AND failure paths both stamp the budget.
     assert html.count("_lastCalibMobile = Date.now();") >= 2
-    assert html.count("historyOffset = Math.min(historyItems.length, total);") >= 2
+    # The cursor is aligned via the local shared-convention helper (offset =
+    # visible length pinned to total), not hand-written per site.
+    assert "function _setHistCursor(total)" in html
+    assert "historyOffset = Math.min(historyItems.length, total);" not in html
 
 
 def test_quickpaste_safety_net_does_not_clobber_pasted_state():

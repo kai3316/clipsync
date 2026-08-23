@@ -902,8 +902,7 @@
         // Already calibrating, or one ran recently — don't pile on.  Pin the
         // cursor to total so Load More can't skip live entries; the next
         // refresh / broadcast retries when the window elapses.
-        this.historyOffset = Math.min(this.history.length, total);
-        this.historyHasMore = this.history.length < total;
+        this.setHistoryCursor(total);
         return Promise.resolve(this.history.slice());
       }
       this._historyCalibrating = true;
@@ -957,8 +956,7 @@
           // per window, and ghosts heal in the first 30s silent window.
           if (self.historyMutationTick !== startTick) {
             self._calibrationGen += 1;
-            self.historyOffset = Math.min(self.history.length, total);
-            self.historyHasMore = self.history.length < total;
+            self.setHistoryCursor(total);
             self._lastCalibration = Date.now();
             return self.history.slice();
           }
@@ -989,8 +987,7 @@
           // every broadcast.
           self._calibrationGen += 1;
           self._historyCalibrating = false;
-          self.historyOffset = Math.min(self.history.length, total);
-          self.historyHasMore = self.history.length < total;
+          self.setHistoryCursor(total);
           self._lastCalibration = Date.now();
           return self.history.slice();
         });
