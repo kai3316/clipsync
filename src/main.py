@@ -1264,16 +1264,52 @@ class Application:
 
     # ── Chat: dashboard passthroughs ─────────────────────────────
 
-    def _get_chat_devices(self) -> list[dict]:
-        """Merge PAIRED peers (always shown) with UNPAIRED discovered peers."""
-        devices: list[dict] = []
-        seen: set[str] = set()
+    def get_device_states(self) -> list[dict]:
+        """Unified, deduplicated view of every known device and its state.
+
+        One entry per device, keyed by the canonical real ``device_id`` (or the
+        hashed mDNS id when the real id is still unknown).  Each entry carries
+        explicit state flags so the UI never has to stitch together the three
+        underlying sources (pairing / transport / discovery) itself:
+
+            {"peer_id", "name", "paired", "pairing", "connected",
+             "address", "port", "fingerprint_short"}
+
+        ``connected`` means a live TCP/TLS connection, which is NOT the same as
+        ``paired`` (trusted) — a device mid-pairing is connected but not paired.
+        """
+        from internal.transport.discovery import Discovery
+
         try:
             connected = set(self.transport_mgr.get_connected_peers() or [])
             resolved = self.transport_mgr.get_resolved_hashes() or {}
         except Exception:
             connected, resolved = set(), {}
-        # Paired peers are REQUIRED in the list even when offline.
+
+        def _hash(real: str) -> str:
+            try:
+                return Discovery._hash_device_id(real)
+            except Exception:
+                return ""
+
+        devices: dict[str, dict] = {}
+        seen_hashes: set[str] = set()
+
+        def _ensure(real: str) -> dict:
+            d = devices.get(real)
+            if d is None:
+                d = {
+                    "peer_id": real, "name": real, "paired": False,
+                    "pairing": False, "connected": False,
+                    "address": "", "port": 0, "fingerprint_short": "",
+                }
+                devices[real] = d
+                h = _hash(real)
+                if h:
+                    seen_hashes.add(h)
+            return d
+
+        # 1. Paired peers — canonical, always shown (even when offline).
         try:
             for peer in self.pairing_mgr.get_known_peers():
                 if not getattr(peer, "paired", False):
@@ -1281,54 +1317,86 @@ class Application:
                 pid = peer.device_id
                 if pid == self.cfg.device_id:
                     continue
-                address, port = self._chat_device_address(pid)
-                fp = ""
-                if pid in connected:
-                    try:
-                        fp = ChatManager.shorten_fingerprint(
-                            self.transport_mgr.get_peer_fingerprint(pid),
-                        )
-                    except Exception:
-                        fp = ""
-                devices.append({
-                    "peer_id": pid,
-                    "name": peer.device_name or pid,
-                    "address": address,
-                    "port": port,
-                    "paired": True,
-                    "fingerprint_short": fp,
-                })
-                seen.add(pid)
-                # Mark this peer's hashed mDNS id too, so the discovery pass
-                # below can't add a duplicate row before the hash→real-id map
-                # is populated (a discovered-but-not-yet-connected peer).
+                d = _ensure(pid)
+                d["paired"] = True
+                d["name"] = peer.device_name or pid
+                d["connected"] = pid in connected
+        except Exception:
+            logger.debug("get_device_states: pairing list failed", exc_info=True)
+
+        # 2. Pairing-in-progress peers.
+        try:
+            for item in self.pairing_mgr.get_pending_pairings() or []:
+                pid = item[0] if isinstance(item, (tuple, list)) and item else ""
+                if not pid or pid == self.cfg.device_id:
+                    continue
+                real = resolved.get(pid, pid)
+                d = _ensure(real)
+                d["pairing"] = True
+                d["connected"] = d["connected"] or (real in connected or pid in connected)
+        except Exception:
+            logger.debug("get_device_states: pending list failed", exc_info=True)
+
+        # 3. Connected (TCP) peers — resolve hashes to real ids, skip anon.
+        for pid in connected:
+            if pid.startswith("__anon__"):
+                continue
+            real = resolved.get(pid, pid)
+            if real == self.cfg.device_id:
+                continue
+            d = _ensure(real)
+            d["connected"] = True
+
+        # 4. Discovered peers (hashed mDNS ids).
+        try:
+            for hash_id, info in self._snapshot_discovered_peers().items():
+                if hash_id in seen_hashes:
+                    continue
+                real = resolved.get(hash_id, hash_id)
+                if real == self.cfg.device_id:
+                    continue
+                d = _ensure(real)
+                d["name"] = info.get("name") or d["name"]
+                d["address"] = info.get("address", "")
+                d["port"] = info.get("port", 0)
+                seen_hashes.add(hash_id)
+        except Exception:
+            logger.debug("get_device_states: discovery list failed", exc_info=True)
+
+        # Fill address/port + fingerprint for peers without a discovered entry.
+        for real, d in devices.items():
+            if d["connected"] and not d["fingerprint_short"]:
                 try:
-                    seen.add(Discovery._hash_device_id(pid))
+                    d["fingerprint_short"] = ChatManager.shorten_fingerprint(
+                        self.transport_mgr.get_peer_fingerprint(real),
+                    )
+                except Exception:
+                    d["fingerprint_short"] = ""
+            if not d["address"]:
+                try:
+                    d["address"], d["port"] = self._chat_device_address(real)
                 except Exception:
                     pass
-        except Exception:
-            logger.debug("chat devices: pairing list failed", exc_info=True)
-        # Unpaired discovered peers (hashed mDNS ids).
-        try:
-            for pid, info in self._snapshot_discovered_peers().items():
-                real = resolved.get(pid, pid)
-                if real == self.cfg.device_id or real in seen:
-                    continue
-                devices.append({
-                    "peer_id": pid,
-                    "name": info.get("name", pid),
-                    "address": info.get("address", ""),
-                    "port": info.get("port", 0),
-                    "paired": False,
-                    "fingerprint_short": "",
-                })
-                seen.add(pid)
-        except Exception:
-            logger.debug("chat devices: discovery list failed", exc_info=True)
-        devices.sort(
-            key=lambda d: (not d.get("paired"), (d.get("name") or "").lower()),
-        )
-        return devices
+
+        result = list(devices.values())
+        result.sort(key=lambda x: (
+            not x["paired"], not x["connected"], (x["name"] or "").lower(),
+        ))
+        return result
+
+    def _get_chat_devices(self) -> list[dict]:
+        """Merge PAIRED peers (always shown) with UNPAIRED discovered peers."""
+        return [
+            {
+                "peer_id": d["peer_id"],
+                "name": d["name"],
+                "address": d["address"],
+                "port": d["port"],
+                "paired": d["paired"],
+                "fingerprint_short": d["fingerprint_short"],
+            }
+            for d in self.get_device_states()
+        ]
 
     def _chat_device_address(self, peer_id: str) -> tuple[str, int]:
         """Resolve the best-known (address, port) for a peer (any id form)."""
@@ -3485,16 +3553,16 @@ class Application:
             # Cache known peers once — reused for display names below
             known_peers = self.pairing_mgr.get_known_peers()
             peer_display = []
-            seen = set()
-            for pid in connected_ids:
-                found = next((p for p in known_peers if p.device_id == pid), None)
-                name = found.device_name if found else pid
-                peer_display.append(f"{name}  (connected)")
-                seen.add(pid)
-            with self._discovered_lock:
-                for pid, info in self._discovered_peers.items():
-                    if pid not in seen:
-                        peer_display.append(f"{info['name']}  (found)")
+            for d in self.get_device_states():
+                if d["paired"]:
+                    suffix = "connected" if d["connected"] else "offline"
+                elif d["pairing"]:
+                    suffix = "pairing…"
+                elif d["connected"]:
+                    suffix = "connected"  # consented chat, not paired
+                else:
+                    suffix = "found"
+                peer_display.append(f"{d['name']}  ({suffix})")
             if peer_display != prev_display:
                 prev_display = peer_display
                 self.root.after(0, lambda pd=list(peer_display): self._set_systray_peers(pd))
