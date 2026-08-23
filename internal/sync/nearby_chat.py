@@ -925,6 +925,7 @@ class ChatManager:
                 # Reaffirm so their client converges too.
                 self._send_frame({"msg_type": "chat_accept", "session_id": sid}, send_fn)
                 self._touch_seen(mine)
+                self._fire("_on_sessions_changed")
                 return
 
             pending = sum(1 for s in self._sessions.values() if s.status == "invited")

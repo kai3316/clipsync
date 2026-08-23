@@ -348,6 +348,7 @@ class DashboardWindow:
 
         # Nearby chat state
         self._chat_selected_session_id: str | None = None
+        self._chat_selected_peer_id: str | None = None
         self._chat_state_key: tuple | None = None
         self._chat_devices_scroll: ctk.CTkScrollableFrame | None = None
         self._chat_convo_scroll: ctk.CTkScrollableFrame | None = None
@@ -3116,12 +3117,13 @@ class DashboardWindow:
             except Exception:
                 pass
 
-    def _chat_select_session(self, session_id: str) -> None:
+    def _chat_select_session(self, session_id: str, peer_id: str = "") -> None:
         if not session_id:
             return
         if session_id == self._chat_selected_session_id:
             return
         self._chat_selected_session_id = session_id
+        self._chat_selected_peer_id = peer_id or None
         self._chat_state_key = None  # force rebuild
         self._chat_mark_selected_read()
         self._refresh_chat()
@@ -3140,6 +3142,7 @@ class DashboardWindow:
             return
         if sid:
             self._chat_selected_session_id = sid
+            self._chat_selected_peer_id = peer_id
             self._chat_state_key = None
             self._chat_mark_selected_read()
             self._refresh_chat()
@@ -3219,10 +3222,25 @@ class DashboardWindow:
             for sess in sessions:
                 self._chat_session_row(sess)
 
-        # Right column: conversation
+        # Right column: conversation.  A session id can be adopted to a new id
+        # (mutual invite / peer restart), so fall back to the peer id when the
+        # stored id no longer matches — otherwise the conversation vanishes.
         selected_session = next(
             (s for s in sessions if s.get("session_id") == selected), None,
         )
+        if selected_session is None and self._chat_selected_peer_id:
+            selected_session = next(
+                (s for s in sessions
+                 if s.get("peer_id") == self._chat_selected_peer_id), None,
+            )
+            if selected_session is not None:
+                selected = selected_session.get("session_id", "")
+                self._chat_selected_session_id = selected
+                if self._get_chat_messages:
+                    try:
+                        messages = self._get_chat_messages(selected)
+                    except Exception:
+                        messages = []
         self._chat_build_conversation(selected_session, messages)
         # Clear the selected conversation's unread badge ONLY when the chat
         # panel is actually on screen — _refresh_chat also runs from chat
@@ -3330,8 +3348,8 @@ class DashboardWindow:
                 text_color=("gray55", "gray55"),
             ).pack(anchor="w")
 
-        def _select(_e=None, sid=session_id):
-            self._chat_select_session(sid)
+        def _select(_e=None, sid=session_id, pid=sess.get("peer_id", "")):
+            self._chat_select_session(sid, pid)
 
         # Make the whole row clickable.
         row.bind("<Button-1>", _select)
@@ -3675,6 +3693,7 @@ class DashboardWindow:
             except Exception:
                 logger.debug("chat close_session raised", exc_info=True)
         self._chat_selected_session_id = None
+        self._chat_selected_peer_id = None
         self._chat_state_key = None
         self._refresh_chat()
 
