@@ -490,6 +490,8 @@ class Application:
         self._shutting_down = False
         # Set by factory reset so shutdown() doesn't re-save the deleted config.
         self._skip_save_on_shutdown = False
+        # Timestamp of the last silent auto-update check (throttled to ~6h).
+        self._last_auto_update_check = 0.0
 
         # ── Shared mutable state ────────────────────────────────────
         self._discovered_peers: dict[str, dict] = {}
@@ -3507,6 +3509,12 @@ class Application:
                 except Exception:
                     pass
 
+            # Periodic auto-update check (once per ~6 hours, silent unless an
+            # update is available).
+            if time.monotonic() - self._last_auto_update_check >= 6 * 3600:
+                self._last_auto_update_check = time.monotonic()
+                self._auto_check_for_update()
+
             self._stop_updater.wait(3)
 
     # ═══════════════════════════════════════════════════════════════
@@ -3923,6 +3931,7 @@ class Application:
                         T("tray.update_available", version=result["latest"]),
                         f"ClipSync {result['latest']}\n{result.get('url', '')}",
                     )
+                    self._offer_update_install(result)
                 elif result.get("latest"):
                     _present(T("tray.up_to_date"),
                              f"ClipSync {result.get('current', '')}")
@@ -3932,6 +3941,71 @@ class Application:
             self.root.after(0, _done)
 
         threading.Thread(target=_worker, daemon=True, name="update-check").start()
+
+    def _offer_update_install(self, result: dict) -> None:
+        """Ask the user to download + install an available update."""
+        if ask_yesno(
+            self.root,
+            T("ui.app_name"),
+            T("tray.update_install_prompt", version=result.get("latest", "")),
+        ):
+            self._download_and_install_update()
+
+    def _download_and_install_update(self) -> None:
+        """Download the latest release, stage it, then apply + restart.
+
+        The download runs on a worker thread (it can take tens of seconds);
+        staging + applying run on the main thread, after which the app exits.
+        """
+        import tempfile
+
+        from internal.system.updater import download_latest_release
+
+        notification_mgr.show(T("ui.app_name"), T("notify.update_downloading"))
+
+        def _worker():
+            dest_dir = tempfile.mkdtemp(prefix="clipsync_update_")
+            try:
+                path, reason = download_latest_release(dest_dir)
+            except Exception as exc:
+                logger.exception("Update download failed")
+                path, reason = None, str(exc)
+            self.root.after(0, lambda: self._finish_update_install(path, reason))
+
+        threading.Thread(target=_worker, daemon=True, name="update-install").start()
+
+    def _finish_update_install(self, path, reason) -> None:
+        """Stage + apply a freshly downloaded asset, or surface the failure."""
+        if not path:
+            show_error(self.root, T("ui.app_name"),
+                       reason or T("tray.update_install_failed"))
+            return
+
+        from internal.system.applier import apply_and_restart, stage_update
+
+        staged = stage_update(path)
+        if staged is None:
+            show_error(self.root, T("ui.app_name"), T("tray.update_install_failed"))
+            return
+        if apply_and_restart(staged):
+            self._skip_save_on_shutdown = True
+            sys.exit(0)
+        show_error(self.root, T("ui.app_name"), T("tray.update_install_failed"))
+
+    def _auto_check_for_update(self) -> None:
+        """Silent periodic check: only surfaces a result when an update is available."""
+        from internal.system.updater import check_for_update
+
+        def _worker():
+            try:
+                result = check_for_update()
+            except Exception as exc:
+                logger.debug("Auto update check failed: %s", exc)
+                return
+            if result.get("available"):
+                self.root.after(0, lambda: self._offer_update_install(result))
+
+        threading.Thread(target=_worker, daemon=True, name="auto-update-check").start()
 
     def _notifications_enabled(self) -> bool:
         """Return True if the desktop notification backend is active."""
