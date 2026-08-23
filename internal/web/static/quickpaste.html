@@ -635,6 +635,10 @@ body::after {
     error:        null,
     pastingIndex: -1,
     toastTimer:   null,
+    // Set once a paste actually succeeded and the plain-tab "✓ Pasted"
+    // fallback is showing.  The 60s safety net must not clobber that final
+    // state with an error banner — it only nudges with a toast instead.
+    pastedOk:     false,
     // Set once the page reaches a done state (plain-tab "✓ Pasted" fallback).
     // render() and the keydown paste paths short-circuit so the list can't be
     // redrawn or pasted from again, and postDone() isn't re-fired.
@@ -883,6 +887,7 @@ body::after {
   // state final: render() and the keydown paste paths short-circuit so the
   // list can't be redrawn or pasted from again, and postDone() isn't re-fired.
   function showPastedFallback() {
+    state.pastedOk = true;
     state.terminal = true;
     itemsEl.innerHTML =
       '<div class="qp-empty">' +
@@ -1195,15 +1200,23 @@ body::after {
           if (attempt + 1 < DONE_NET_ATTEMPTS) {
             scheduleDoneNet(attempt + 1);
           } else {
-            // Exhausted retries — the host never confirmed the teardown.
-            // Show a persistent hint so the user closes the popup by hand.
-            state.terminal = true;
-            itemsEl.innerHTML =
-              '<div class="qp-empty">' +
-                '<div class="qp-empty__icon">&#x26A0;&#xFE0F;</div>' +
-                '<div class="qp-empty__text">' + (IS_ZH ? '无法自动关闭 — 请手动关闭此窗口' : 'Could not auto-close — please close this window') + '</div>' +
-              '</div>';
-            showToast(IS_ZH ? '关闭失败，请手动关闭窗口' : 'Auto-close failed — close the window manually', 4000, true);
+            // Exhausted retries — the host never confirmed the teardown.  If
+            // the paste already succeeded (the "✓ Pasted" fallback is showing)
+            // this is just a leftover close bookkeeping failure — don't clobber
+            // the success state with an error banner, only nudge the user to
+            // close the window.  If the popup was abandoned before any paste,
+            // show the persistent manual-close hint instead.
+            if (state.pastedOk) {
+              showToast(IS_ZH ? '已粘贴 — 可手动关闭此窗口' : 'Pasted — you can close this window');
+            } else {
+              state.terminal = true;
+              itemsEl.innerHTML =
+                '<div class="qp-empty">' +
+                  '<div class="qp-empty__icon">&#x26A0;&#xFE0F;</div>' +
+                  '<div class="qp-empty__text">' + (IS_ZH ? '无法自动关闭 — 请手动关闭此窗口' : 'Could not auto-close — please close this window') + '</div>' +
+                '</div>';
+              showToast(IS_ZH ? '关闭失败，请手动关闭窗口' : 'Auto-close failed — close the window manually', 4000, true);
+            }
           }
         });
       }, attempt === 0 ? 60000 : DONE_NET_RETRY_MS);

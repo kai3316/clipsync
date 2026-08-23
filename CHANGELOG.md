@@ -2,6 +2,22 @@
 
 All notable changes to ClipSync are documented in this file.
 
+## [1.0.33] — 2026-08-23
+
+### History (pagination reconcile)
+- **The ghost-calibration throttle only counts successful reconciles** — a fetch aborted by a racing deletion no longer blocks the next attempt for 30s.
+- **The mutation guard covers every delete path**, not just the WebSocket broadcasts: the dashboard's own delete/clear/batch-delete now bump the mutation tick, and a `history_updated` merge that actually adds data bumps it too. An in-flight reconcile can no longer resurrect a locally-deleted row or clobber a just-arrived clip.
+- **The reconcile lock can't wedge forever** — a fetch that never settles (old WebView without AbortController) is unwedged by a 16s fallback timer, and a superseded fetch can neither clear a newer calibration's lock nor write back.
+- **The phone's reconcile is throttled like the dashboard** (30s), so a failing calibration no longer re-downloads the entire history every 5-second poll.
+
+### Quick Paste
+- **A successful paste is never overwritten by the close-retry banner** — if the done POST keeps failing, an already-pasted popup gets a light toast, not a "could not auto-close" screen replacing the confirmation.
+- **An empty instance id is treated as "missing"** (accepted, no-op) instead of a 400, matching the intended legacy-client behaviour.
+- **App shutdown closes popups in parallel** (one shared wait round instead of serial per-popup timeouts), and the abandoned-profile sweep keeps an entry for a later retry when a lingering child still holds profile locks.
+
+### Tests
+- 9 new regressions. Full suite 428 passed / 3 skipped.
+
 ## [1.0.32] — 2026-08-23
 
 ### Quick Paste

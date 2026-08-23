@@ -284,14 +284,42 @@ var ClipsyncWS = (function () {
             // their loaded pages don't shrink on every background clipboard
             // change.
             var hasLoadedMore = store.history.length > histLimit;
+            // Bump the mutation tick when this broadcast actually merges NEW
+            // data (a newly-added entry or an in-place content update), so an
+            // in-flight calibration (store.js) abandons its write-back instead
+            // of overwriting the concurrent new item.  A pure display refresh
+            // (same entries) does NOT bump.  The bump happens BEFORE the
+            // ghost-triggered calibration below so that calibration records a
+            // startTick that already includes this broadcast's merge.
+            var histMutated = false;
             if (!hasLoadedMore) {
-              // Nothing loaded past the first page — replace wholesale.
+              // Nothing loaded past the first page — replace wholesale.  Only
+              // count it as new data when an entry_id the list did not have
+              // arrives; a re-broadcast of the same page (pin reorder, etc.)
+              // is a display refresh.
+              var knownIds = {};
+              for (var hiOld = 0; hiOld < store.history.length; hiOld++) {
+                var histOld = store.history[hiOld];
+                if (histOld && histOld.entry_id !== undefined) {
+                  knownIds[histOld.entry_id] = true;
+                }
+              }
+              for (var hiInc = 0; hiInc < incoming.length; hiInc++) {
+                var histIn = incoming[hiInc];
+                if (histIn && histIn.entry_id !== undefined && !knownIds[histIn.entry_id]) {
+                  histMutated = true;
+                  break;
+                }
+              }
               store.history.splice(0, store.history.length);
               for (var hi = 0; hi < incoming.length; hi++) {
                 store.history.push(incoming[hi]);
               }
               store.historyOffset = incoming.length;
               store.historyHasMore = (data.total != null) ? (store.historyOffset < data.total) : false;
+              if (histMutated) {
+                store.historyMutationTick += 1;
+              }
             } else {
               // Upsert by entry_id: update matching rows in place, prepend
               // genuinely-new rows at the top (dedupe — no duplicates).
@@ -308,8 +336,20 @@ var ClipsyncWS = (function () {
                 if (!inc) continue;
                 var foundIdx = (inc.entry_id !== undefined && idxById[inc.entry_id] !== undefined) ? idxById[inc.entry_id] : -1;
                 if (foundIdx !== -1) {
-                  // Update in place — keeps the item's loaded position.
-                  Object.assign(store.history[foundIdx], inc);
+                  // Update in place — keeps the item's loaded position.  A
+                  // changed broadcast payload is new data merged into the
+                  // list; an identical payload (display refresh) is not.
+                  var incChanged = false;
+                  for (var fk in inc) {
+                    if (inc.hasOwnProperty(fk) && inc[fk] !== store.history[foundIdx][fk]) {
+                      incChanged = true;
+                      break;
+                    }
+                  }
+                  if (incChanged) {
+                    Object.assign(store.history[foundIdx], inc);
+                    histMutated = true;
+                  }
                 } else {
                   fresh.push(inc);
                 }
@@ -317,6 +357,12 @@ var ClipsyncWS = (function () {
               // Prepend new items, preserving broadcast (newest-first) order.
               for (var hi4 = fresh.length - 1; hi4 >= 0; hi4--) {
                 store.history.unshift(fresh[hi4]);
+              }
+              if (fresh.length > 0) {
+                histMutated = true;
+              }
+              if (histMutated) {
+                store.historyMutationTick += 1;
               }
               // The prepended items now occupy the top of the loaded list.
               // Recompute the "load more" cursor from the list length instead

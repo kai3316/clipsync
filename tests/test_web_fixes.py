@@ -884,25 +884,53 @@ def test_sweep_quick_paste_removes_dead_instances_and_profiles(tmp_path):
     assert os.path.exists(live_profile)
 
 
-def test_cleanup_quick_paste_instances_tears_down_every_instance(monkeypatch):
-    """#6: shutdown cleanup calls _close_quick_paste for every registered
-    instance (live or dead) so no --app popup or profile leaks past app exit."""
+def test_cleanup_quick_paste_instances_kills_live_popups_in_parallel(monkeypatch, tmp_path):
+    """#6/#8: shutdown cleanup signals every live popup and reclaims profiles
+    and the dict — in PARALLEL (Windows fires one taskkill Popen per live popup
+    without waiting, then waits a single shared round) instead of serializing N
+    blocking 2–5s teardowns that would stretch exit to N× the budget."""
+    import subprocess
+
     from src.main import Application
+    profile_a = str(tmp_path / "qp_a")
+    profile_b = str(tmp_path / "qp_b")
+    os.makedirs(profile_a, exist_ok=True)
+    os.makedirs(profile_b, exist_ok=True)
 
     class FakeProc:
         pid = 333
         def poll(self):
-            return None
+            return None  # live — must be signalled
 
-    closed = []
+    spawned = []
+
+    class FakeKiller:
+        def wait(self, timeout=None):
+            return 0
+
+    def fake_popen(cmd, *args, **kwargs):
+        spawned.append(cmd)
+        return FakeKiller()
+
     app = Application.__new__(Application)
     app._quickpaste_instances = {
-        4: {"proc": FakeProc(), "profile_dir": ""},
-        8: {"proc": FakeProc(), "profile_dir": ""},
+        4: {"proc": FakeProc(), "profile_dir": profile_a},
+        8: {"proc": FakeProc(), "profile_dir": profile_b},
     }
-    monkeypatch.setattr(app, "_close_quick_paste", lambda iid: closed.append(iid))
-    app._cleanup_quick_paste_instances()
-    assert closed == [4, 8]
+    if sys.platform == "win32":
+        monkeypatch.setattr(subprocess, "Popen", fake_popen)
+        app._cleanup_quick_paste_instances()
+        assert len(spawned) == 2, "both live popups must be signalled"
+        for cmd in spawned:
+            assert cmd[0] == "taskkill" and "333" in cmd
+    else:
+        monkeypatch.setattr("src.main.os.killpg", lambda *a, **k: None)
+        monkeypatch.setattr("src.main.os.getpgid", lambda *a, **k: 999)
+        app._cleanup_quick_paste_instances()
+    # Dict cleared and every profile reclaimed after the kill round.
+    assert app._quickpaste_instances == {}
+    assert not os.path.exists(profile_a)
+    assert not os.path.exists(profile_b)
 
 
 def test_main_quickpaste_launch_uses_own_process_group_on_posix():
@@ -1033,3 +1061,173 @@ def test_chat_panel_toasts_expired_not_generic():
     js = _read_repo_file("internal/web/static/components/chat-panel.js")
     assert "res.error === 'expired'" in js
     assert "self.t('pairing.state.expired')" in js
+
+
+# ── v1.0.32 adversarial-self-review fixes (#1–#10) ─────────────────────────
+
+def test_routes_quickpaste_done_empty_string_instance_is_missing():
+    """#6: a legacy done POST carrying an EMPTY-STRING instance is treated as
+    missing (the host no-ops on a missing id) instead of 400 — "" is a legacy
+    client's way of omitting the id, and the route comment already promised
+    missing ids pass through."""
+    calls = []
+    status, _ct, body_b = _dispatch_post_with_qp_done(
+        _body({"instance": ""}), lambda instance_id: calls.append(instance_id),
+    )
+    assert status == 200
+    assert json.loads(body_b)["ok"] is True
+    assert calls == [None]
+
+
+def test_calibrate_history_budget_only_consumed_on_writeback():
+    """#1: the calibration throttle budget (_lastCalibration) is stamped ONLY
+    when a calibration commits a write-back (tick unchanged).  A raced abandon
+    or a failed fetch leaves it stale so the next poll retries immediately
+    instead of waiting out the 30s window."""
+    store = _read_repo_file("internal/web/static/js/store.js")
+    # Exactly one budget stamp, and it lives in the success write-back path.
+    assert store.count("self._lastCalibration = Date.now();") == 1
+    # The stamp is positioned AFTER the tick race check — a raced abandon
+    # returns before it.
+    assert (
+        store.index("self._lastCalibration = Date.now();")
+        > store.index("if (self.historyMutationTick !== startTick)")
+    )
+    # The race-abandon path must NOT stamp the budget.
+    race_abandon = store[store.index("if (self.historyMutationTick !== startTick)"):
+                         store.index("var calItems")]
+    assert "self._lastCalibration" not in race_abandon
+
+
+def test_calibrate_history_timeout_unwedges_lock():
+    """#9: the _historyCalibrating lock has a timeout fallback so a calibration
+    fetch that never settles (old webview without AbortController) can't wedge
+    the lock permanently — it clears after CALIBRATION_TIMEOUT_MS,
+    generation-guarded so a superseded fetch can't clear a newer calibration's
+    lock or write back."""
+    store = _read_repo_file("internal/web/static/js/store.js")
+    assert "var CALIBRATION_TIMEOUT_MS = 16000;" in store
+    assert "clearTimeout(calibTimer);" in store
+    assert "self._calibrationGen !== calibGen" in store
+    assert "if (self._calibrationGen === calibGen && self._historyCalibrating)" in store
+
+
+def test_local_delete_clear_bump_mutation_tick():
+    """#2: a local delete / batch-delete / clear that splices or empties
+    store.history must bump historyMutationTick so an in-flight calibration
+    abandons its write-back instead of resurrecting the removed rows."""
+    item = _read_repo_file("internal/web/static/components/history-item.js")
+    assert "store.history.splice(idx, 1);" in item
+    assert "store.historyMutationTick += 1;" in item
+    panel = _read_repo_file("internal/web/static/components/history-panel.js")
+    # batch delete path — bump follows the splice-out replace
+    assert "store.history = newHistory;" in panel
+    assert "store.historyMutationTick += 1;" in panel
+    # clear-all path
+    assert "self.store.historyMutationTick += 1;" in panel
+
+
+def test_ws_history_updated_bumps_tick_only_on_new_data():
+    """#3: history_updated broadcasts that actually merge NEW data (a new
+    entry_id in the wholesale path, or a fresh/upserted row in the paged path)
+    bump historyMutationTick so an in-flight calibration abandons its write-back
+    instead of overwriting the concurrent new item.  A pure display refresh
+    (same entries) does not bump."""
+    ws = _read_repo_file("internal/web/static/js/ws.js")
+    assert "var histMutated = false;" in ws
+    # Both merge paths bump the tick.
+    assert ws.count("store.historyMutationTick += 1;") >= 4
+    # Wholesale path detects a new entry_id; paged path detects fresh + upsert.
+    assert "!knownIds[histIn.entry_id]" in ws
+    assert "if (fresh.length > 0) {" in ws
+    assert "incChanged = true;" in ws
+
+
+def test_mobile_calibration_throttled_and_failure_pins_min():
+    """#4/#7: mobile's full-history calibration is throttled to one per 30s
+    (_lastCalibMobile) — inside the window it only pins the cursor — and its
+    failure path pins Math.min(length, total) (aligned with the shared store
+    version) instead of the ghost-inflated length."""
+    html = _read_repo_file("internal/web/static/mobile.html")
+    assert "var _lastCalibMobile = null;" in html
+    assert "(_lastCalibMobile && (calibNow - _lastCalibMobile) < 30000)" in html
+    # Success stamps the budget; throttle + failure paths pin min(length,total).
+    assert "_lastCalibMobile = Date.now();" in html
+    assert html.count("historyOffset = Math.min(historyItems.length, total);") >= 2
+    assert "_lastCalibMobile = Date.now();" in html
+
+
+def test_quickpaste_safety_net_does_not_clobber_pasted_state():
+    """#5: the 60s safety net must not overwrite a successful "✓ Pasted" final
+    state with the 'could not auto-close' banner — pastedOk guards it: when set
+    (a paste succeeded), the exhaustion path only toasts a light hint; otherwise
+    it shows the manual-close banner."""
+    html = _read_repo_file("internal/web/static/quickpaste.html")
+    assert "pastedOk:     false," in html
+    assert "state.pastedOk = true;" in html
+    assert "if (state.pastedOk) {" in html
+    # The banner branch only runs when a paste did NOT succeed.
+    assert html.index("if (state.pastedOk) {") < html.index("Could not auto-close")
+
+
+def test_sweep_quick_paste_keeps_entry_when_rmtree_incomplete(monkeypatch, tmp_path):
+    """#10: a dead popup whose profile dir can't be fully removed (a leftover
+    child still holds a lock) must KEEP its instance entry so the next sweep
+    retries — popping it would leak the partial profile forever."""
+    from src.main import Application
+
+    profile_dir = str(tmp_path / "locked_profile")
+    os.makedirs(profile_dir, exist_ok=True)
+
+    class DeadProc:
+        pid = 111
+        def poll(self):
+            return 1  # exited
+
+    def stuck_rmtree(path, ignore_errors=False):
+        raise OSError("file still in use (partial deletion)")
+
+    app = Application.__new__(Application)
+    app._quickpaste_instances = {
+        1: {"proc": DeadProc(), "profile_dir": profile_dir},
+    }
+    monkeypatch.setattr("src.main.shutil.rmtree", stuck_rmtree)
+    app._sweep_quick_paste_instances()
+    # rmtree failed both attempts → the entry is kept for a later retry.
+    assert 1 in app._quickpaste_instances
+    assert os.path.exists(profile_dir)
+
+
+def test_sweep_quick_paste_retries_rmtree_once(tmp_path, monkeypatch):
+    """#10: the sweep retries a failed profile removal once; a transient lock
+    that clears on retry still reclaims the entry."""
+    import shutil as _shutil
+
+    from src.main import Application
+
+    profile_dir = str(tmp_path / "flaky_profile")
+    os.makedirs(profile_dir, exist_ok=True)
+
+    class DeadProc:
+        pid = 112
+        def poll(self):
+            return 1  # exited
+
+    real_rmtree = _shutil.rmtree
+    state = {"n": 0}
+
+    def flaky_rmtree(path, ignore_errors=False):
+        state["n"] += 1
+        if state["n"] == 1:
+            raise OSError("transient lock")
+        real_rmtree(path, ignore_errors=ignore_errors)
+
+    app = Application.__new__(Application)
+    app._quickpaste_instances = {
+        1: {"proc": DeadProc(), "profile_dir": profile_dir},
+    }
+    monkeypatch.setattr("src.main.shutil.rmtree", flaky_rmtree)
+    app._sweep_quick_paste_instances()
+    assert state["n"] == 2, "rmtree is retried once after a failure"
+    assert 1 not in app._quickpaste_instances
+    assert not os.path.exists(profile_dir)

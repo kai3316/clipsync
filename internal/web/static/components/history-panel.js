@@ -326,6 +326,10 @@
             ClipsyncAPI.clearHistory().then(function (res) {
               if (res && res.ok) {
                 self.store.history.splice(0, self.store.history.length);
+                // Bump the mutation tick so an in-flight calibration (store.js)
+                // abandons its write-back instead of re-populating the wiped
+                // list (mirrors the ws.js history_clear handler).
+                self.store.historyMutationTick += 1;
                 // Reset the pagination cursor so "Load more" can't skip items
                 // that shifted into the now-empty array.
                 self.store.historyOffset = 0;
@@ -469,6 +473,10 @@
                 }
               }
               store.history = newHistory;
+              // Bump the mutation tick so an in-flight calibration (store.js)
+              // abandons its write-back instead of resurrecting the deleted
+              // rows (mirrors the ws.js history_item_deleted handler).
+              store.historyMutationTick += 1;
               // The pagination cursor must shrink with the array, otherwise a
               // subsequent "Load more" skips the N items just after the hole.
               store.historyOffset = Math.max(0, store.historyOffset - selectedIds.length);

@@ -873,8 +873,11 @@ def _dispatch(method, path, query_params, body, cfg, history, sync_mgr,
             # id back as a JSON number, but an int-like string ("7") is equally
             # valid on the wire.  Anything else (bool, float, object, garbage
             # string) is a malformed request — reject with 400 so a bad id can
-            # never reach the host as a confusing value.  A missing instance is
-            # allowed through: the host no-ops on it (legacy clients).
+            # never reach the host as a confusing value.  A missing instance —
+            # and an EMPTY-STRING instance, a legacy client's way of omitting
+            # the id — is allowed through: the host no-ops on it.
+            if instance_id == "":
+                instance_id = None
             if instance_id is not None:
                 if isinstance(instance_id, bool) or not isinstance(instance_id, (int, str)):
                     return _json_response({"ok": False, "error": "invalid instance"}, 400)

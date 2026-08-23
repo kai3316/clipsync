@@ -285,6 +285,10 @@
           if (res && res.ok !== false) {
             if (idx !== -1) {
               store.history.splice(idx, 1);
+              // Bump the mutation tick so an in-flight calibration (store.js)
+              // abandons its write-back instead of resurrecting this row
+              // (mirrors the ws.js history_item_deleted handler).
+              store.historyMutationTick += 1;
               // Shrink the pagination cursor with the array (matching the
               // batch delete) so "Load more" doesn't skip the item that just
               // shifted into the deleted slot.

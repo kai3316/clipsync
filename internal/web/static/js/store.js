@@ -23,8 +23,15 @@
 
   // Minimum gap between full-history calibrations (see store.calibrateHistory).
   // A calibration refetches the ENTIRE history at limit=total, so it is
-  // throttled to at most one per client per window.
+  // throttled to at most one per client per window.  The budget is only
+  // consumed when a calibration actually commits a write-back — a raced
+  // abandon or a failed fetch retries immediately on the next poll.
   var CALIBRATION_THROTTLE_MS = 30000;
+  // Safety valve for the _historyCalibrating lock: an old webview without
+  // AbortController can leave the calibration fetch pending forever, which
+  // would otherwise wedge the lock permanently.  Clear it after this window
+  // so the next poll can retry (generation-guarded — see calibrateHistory).
+  var CALIBRATION_TIMEOUT_MS = 16000;
 
   // Local i18n helper — the store is a plain object (not a Vue component),
   // so it reaches the global translator directly. Falls back to the key when
@@ -887,13 +894,34 @@
       }
       this._historyCalibrating = true;
       var startTick = this.historyMutationTick;
+      // Generation counter: a fetch superseded by the timeout fallback (below)
+      // must not clear the lock or write back once a NEWER calibration has
+      // taken over the lock.
+      var calibGen = (this._calibrationGen || 0) + 1;
+      this._calibrationGen = calibGen;
+      // Timeout fallback: an old webview without AbortController can leave the
+      // fetch pending forever, which would wedge _historyCalibrating.  Clear
+      // the lock after CALIBRATION_TIMEOUT_MS (if this generation still owns
+      // it) so the next poll can retry; the in-flight fetch, if it ever
+      // settles, is generation-guarded and abandons.
+      var calibTimer = setTimeout(function () {
+        if (self._calibrationGen === calibGen && self._historyCalibrating) {
+          self._historyCalibrating = false;
+        }
+      }, CALIBRATION_TIMEOUT_MS);
       return window.ClipsyncAPI.getHistory({ limit: total, offset: 0 })
         .then(function (calRes) {
+          clearTimeout(calibTimer);
+          if (self._calibrationGen !== calibGen) {
+            // A newer calibration superseded this one (timeout fallback) —
+            // don't touch the lock or the list.
+            return self.history.slice();
+          }
           self._historyCalibrating = false;
-          self._lastCalibration = Date.now();
-          // A delete/clear landed while the fetch was in flight — the snapshot
-          // predates it and would resurrect the removed rows.  Drop the
-          // write-back (the delete handler already fixed the list + cursor).
+          // A delete/clear/new-entry landed while the fetch was in flight — the
+          // snapshot predates it and would resurrect/overwrite rows.  Drop the
+          // write-back (the delete handler already fixed the list + cursor)
+          // WITHOUT consuming the throttle budget, so the next poll retries.
           if (self.historyMutationTick !== startTick) {
             self.historyOffset = Math.min(self.history.length, total);
             self.historyHasMore = self.history.length < total;
@@ -907,12 +935,18 @@
           self.historyOffset = self.history.length;
           self.historyHasMore = (calRes && calRes.total != null)
             ? self.history.length < calRes.total : false;
+          // The write-back committed — only now consume the throttle budget.
+          self._lastCalibration = Date.now();
           return calItems;
         })
         .catch(function () {
+          clearTimeout(calibTimer);
+          if (self._calibrationGen !== calibGen) {
+            return self.history.slice();
+          }
           // Calibration failed — keep what is loaded and pin the cursor to
-          // total so Load More can't skip live entries; the next refresh /
-          // broadcast retries.
+          // total so Load More can't skip live entries.  The budget is NOT
+          // consumed, so the next refresh / broadcast retries immediately.
           self._historyCalibrating = false;
           self.historyOffset = Math.min(self.history.length, total);
           self.historyHasMore = self.history.length < total;
