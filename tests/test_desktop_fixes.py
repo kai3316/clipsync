@@ -164,7 +164,11 @@ def test_hotkey_parse_shortcut_rejects_non_string():
             mgr._parse_shortcut(bad)  # type: ignore[arg-type]
     mods, vk = mgr._parse_shortcut("Ctrl+1")
     assert mods & hotkey_module.MOD_CONTROL
-    assert vk == ord("1")
+    # VK semantics are platform-specific: Windows/Linux use ord('1'), macOS
+    # uses the Carbon kVK code (kVK_ANSI_1 = 18).  Assert against the platform
+    # the manager detected rather than hardcoding the Windows value.
+    expected_vk = hotkey_module._MAC_DIGIT_VK["1"] if mgr._platform == "macos" else ord("1")
+    assert vk == expected_vk
 
 
 # ═════════════════════════════════════════════════════════════════════════

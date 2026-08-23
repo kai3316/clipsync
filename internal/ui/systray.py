@@ -15,7 +15,13 @@ import logging
 import sys
 from collections.abc import Callable
 
-import pystray
+try:
+    import pystray
+except Exception:  # noqa: BLE001 — headless CI / servers have no tray backend
+    # X11-less Linux raises DisplayNameError on ``import pystray``.  Keep the
+    # module importable so ``from src.main import Application`` works in tests
+    # and headless environments; tray methods only run when a display exists.
+    pystray = None  # type: ignore[assignment]
 from PIL import Image, ImageDraw
 
 from internal.i18n import T

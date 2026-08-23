@@ -126,8 +126,16 @@ _WINDOWS_RESERVED_NAMES = {
 
 def _sanitize_file_name(file_name: str) -> str:
     """Strip path separators, traversal components, Windows-reserved names,
-    and trailing dots/spaces from a remote file name."""
-    name = Path(file_name).name
+    and trailing dots/spaces from a remote file name.
+
+    A peer may send either separator style regardless of the host platform
+    (a Windows peer's ``..\\..\\evil.txt`` arrives verbatim on Linux), so both
+    ``/`` and ``\\`` are collapsed to ``/`` BEFORE ``Path().name`` — relying on
+    ``Path`` alone would only treat the host's own separator as a boundary and
+    let the other style smuggle traversal through.
+    """
+    name = str(file_name or "").replace("\\", "/")
+    name = Path(name).name
     name = name.lstrip(".")
     if not name:
         name = "unnamed_file"

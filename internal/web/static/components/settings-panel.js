@@ -1150,12 +1150,7 @@
                       '<span class="settings-toggle__knob"></span>' +
                     '</button>' +
                   '</div>' +
-                  '<div class="settings-toggle-row">' +
-                    '<span class="settings-toggle-label">{{ t(\'settings.sound\') }}</span>' +
-                    '<button class="settings-toggle" role="switch" :aria-checked="store.soundEnabled" :aria-label="t(\'settings.sound\')" :class="{ \'settings-toggle--on\': store.soundEnabled }" @click="toggleSound">' +
-                      '<span class="settings-toggle__knob"></span>' +
-                    '</button>' +
-                  '</div>' +
+                  '<p class="settings-hint">{{ t(\'settings_window.auto_start_hint\') }}</p>' +
                   '<div class="settings-toggle-row">' +
                     '<span class="settings-toggle-label">{{ t(\'settings.animation\') }}</span>' +
                     '<button class="settings-toggle" role="switch" :aria-checked="store.animationsEnabled" :aria-label="t(\'settings.animation\')" :class="{ \'settings-toggle--on\': store.animationsEnabled }" @click="toggleAnimation">' +
@@ -1349,10 +1344,18 @@
                     '<button v-if="passwordSet" class="settings-btn settings-btn--sm" @click="clearPassword" style="margin-top:4px">{{ t(\'settings_window.clear_password\') }}</button>' +
                     '<span class="settings-hint">{{ passwordSet ? t(\'security.password_set\') : t(\'security.no_password\') }}</span>' +
                     '<p class="settings-hint" style="margin-top:8px">{{ t(\'settings_window.password_hint\') }}</p>' +
+                    '<p class="settings-hint" style="margin-top:8px">{{ t(\'settings_window.encryption_hint\') }}</p>' +
                   '</div>' +
 
                   '<h4 style="font-size:12px;color:var(--clipsync-fg-muted);margin:16px 0 4px">{{ t(\'settings_window.notify_title\') }}</h4>' +
                   '<p class="settings-hint" style="margin-bottom:8px">{{ t(\'settings_window.notify_desc\') }}</p>' +
+                  '<div class="settings-toggle-row">' +
+                    '<span class="settings-toggle-label"><strong>{{ t(\'settings.sound\') }}</strong></span>' +
+                    '<button class="settings-toggle" role="switch" :aria-checked="store.soundEnabled" :aria-label="t(\'settings.sound\')" :class="{ \'settings-toggle--on\': store.soundEnabled }" @click="toggleSound">' +
+                      '<span class="settings-toggle__knob"></span>' +
+                    '</button>' +
+                  '</div>' +
+                  '<p class="settings-hint" style="margin-bottom:8px">{{ t(\'settings_window.sound_hint\') }}</p>' +
                   '<div class="settings-toggle-row">' +
                     '<span class="settings-toggle-label">{{ t(\'settings_window.notify_device_connect\') }}</span>' +
                     '<button class="settings-toggle" role="switch" :aria-checked="notifyDeviceConnect" :aria-label="t(\'settings_window.notify_device_connect\')" :class="{ \'settings-toggle--on\': notifyDeviceConnect }" @click="notifyDeviceConnect = !notifyDeviceConnect">' +
