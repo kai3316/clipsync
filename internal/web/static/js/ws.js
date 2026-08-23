@@ -299,12 +299,11 @@ var ClipsyncWS = (function () {
               // guard only for real changes (an identical re-broadcast is a
               // display refresh and does NOT bump).
               store.replaceHistory(incoming);
-              // Cursor tracks the VISIBLE list length — the invariant every
-              // cursor-shrink path (delete/clear, calibration) depends on.
-              // If a malformed null row is ever filtered, the slot is simply
-              // re-requested once and deduped by the next Load More; harmless.
-              store.historyOffset = store.history.length;
-              store.historyHasMore = (data.total != null) ? (store.historyOffset < data.total) : false;
+              // Cursor tracks the VISIBLE list length via the shared helper
+              // (the invariant every cursor-shrink path depends on).  If a
+              // malformed null row is ever filtered, the slot is re-requested
+              // once and deduped by the next Load More; harmless.
+              store.setHistoryCursor(data.total != null ? data.total : null);
             } else {
               // Upsert/prepend the page-1 snapshot via the shared helper — it
               // updates matching rows in place, prepends genuinely-new rows at
@@ -312,12 +311,10 @@ var ClipsyncWS = (function () {
               // only when the merge actually changed the list.
               store.mergeHistoryFresh(incoming);
               // The prepended items now occupy the top of the loaded list.
-              // Recompute the "load more" cursor from the list length instead
-              // of a "+fresh.length" delta: dedupe may have discarded incoming
-              // duplicates, so the delta would overshoot the real count and
-              // the next fetch would skip entries (mirrors app.js and
-              // mobile.html).
-              store.historyOffset = store.history.length;
+              // Align the cursor via the shared helper (list length, not a
+              // "+fresh.length" delta: dedupe may have discarded incoming
+              // duplicates, so the delta would overshoot the real count).
+              store.setHistoryCursor(data.total != null ? data.total : null);
               // Refresh "has more" from the broadcast total when present so
               // Load-more stays accurate after new items arrive.  A missed
               // history_item_deleted broadcast leaves ghost rows in the loaded
@@ -334,8 +331,7 @@ var ClipsyncWS = (function () {
                   // see store.js; mirrors the page-1 refresh in app.js).
                   store.calibrateHistory(data.total);
                 } else {
-                  store.historyOffset = Math.min(store.history.length, data.total);
-                  store.historyHasMore = store.history.length < data.total;
+                  store.setHistoryCursor(data.total);
                 }
               }
             }

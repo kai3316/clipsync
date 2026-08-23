@@ -967,9 +967,7 @@
           // calibration response is filtered (never stored) like every other
           // history write path.
           self.replaceHistory(calItems);
-          self.historyOffset = self.history.length;
-          self.historyHasMore = (calRes && calRes.total != null)
-            ? self.history.length < calRes.total : false;
+          self.setHistoryCursor(calRes && calRes.total != null ? calRes.total : null);
           // The write-back committed — advance the generation and consume the
           // throttle budget (all terminal states consume it).
           self._calibrationGen += 1;
@@ -1071,6 +1069,18 @@
         if (b.hasOwnProperty(k2) && b[k2] !== a[k2]) return true;
       }
       return false;
+    },
+
+    // Align the "load more" cursor with the VISIBLE list after any wholesale
+    // replace or append: offset = list length (pinned to total so ghost
+    // inflation can't overshoot), hasMore = length < total.  One shared
+    // convention so the raw-vs-visible cursor formula can never drift across
+    // the ~8 call sites again (it flip-flopped between v1.0.43 raw and
+    // v1.0.44 visible for exactly that reason).
+    setHistoryCursor: function (total) {
+      var len = this.history.length;
+      this.historyOffset = (total != null) ? Math.min(len, total) : len;
+      this.historyHasMore = (total != null) ? (len < total) : false;
     },
 
     // Replace the whole history list with an authoritative snapshot (page-1

@@ -338,7 +338,7 @@
             // would overshoot the real count and the next fetch would skip
             // entries (mirrors ws.js and mobile.html).
             store.mergeHistoryFresh(items);
-            store.historyOffset = store.history.length;
+            store.setHistoryCursor(res && res.total != null ? res.total : null);
             if (res && res.total != null && store.history.length > res.total) {
               // Missed history_item_deleted broadcasts leave ghost rows in the
               // loaded list, which would inflate the cursor and make Load More
@@ -353,21 +353,18 @@
               return store.calibrateHistory(res.total);
             }
             if (res && res.total != null) {
-              store.historyOffset = Math.min(store.history.length, res.total);
-              store.historyHasMore = store.history.length < res.total;
+              store.setHistoryCursor(res.total);
             }
           } else {
             // Route through the shared helper: it filters malformed null rows,
             // rebuilds the list, and bumps the reconcile guard only when the
             // snapshot actually changed (explicit field compare — so an
             // identical reconnect doesn't spuriously invalidate an in-flight
-            // calibration, while a real change still does).
+            // calibration, while a real change still does).  Cursor aligns via
+            // the shared helper too (visible length — the invariant every
+            // cursor-shrink path depends on).
             store.replaceHistory(items);
-            // Cursor tracks the VISIBLE list length (consistent with the WS
-            // wholesale path and the calibration write-back), so a filtered
-            // null row can't skew every subsequent cursor-shrink operation.
-            store.historyHasMore = (res && res.total != null) ? (store.history.length < res.total) : false;
-            store.historyOffset = store.history.length;
+            store.setHistoryCursor(res && res.total != null ? res.total : null);
           }
           return items;
         });

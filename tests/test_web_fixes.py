@@ -499,13 +499,17 @@ def test_main_passes_auto_close_to_quickpaste():
 
 def test_history_merge_cursor_recomputed_from_length():
     """#2: after an upsert/prepend merge of a page-1 snapshot, the load-more
-    cursor is recomputed as store.history.length instead of a "+fresh.length"
-    delta — dedupe may have discarded incoming duplicates so the delta would
-    overshoot and the next fetch would skip entries."""
+    cursor is aligned via the shared store.setHistoryCursor (visible list
+    length, not a "+fresh.length" delta) — dedupe may have discarded incoming
+    duplicates so a raw delta would overshoot and the next fetch would skip
+    entries.  The convention lives in ONE place so it can't drift again."""
     for rel in ("internal/web/static/js/app.js", "internal/web/static/js/ws.js"):
         js = _read_repo_file(rel)
-        assert "store.historyOffset = store.history.length;" in js, rel
+        assert "store.setHistoryCursor(" in js, rel
         assert "store.historyOffset += fresh.length;" not in js, rel
+        assert "historyOffset = offset + items.length" not in js, rel
+    store = _read_repo_file("internal/web/static/js/store.js")
+    assert "setHistoryCursor: function (total)" in store
 
 
 def test_mobile_merge_prunes_missing_entries():

@@ -307,9 +307,10 @@
                 if (id !== undefined) seen.add(id);
               }
             }
-            var newOffset = offset + items.length;
-            self.store.historyOffset = newOffset;
-            self.store.historyHasMore = (res && res.total != null) ? (newOffset < res.total) : false;
+            // Align the cursor via the shared helper: it tracks the VISIBLE
+            // list length (dedup may have discarded duplicates, and a raw
+            // "+items.length" delta would overshoot and skip live entries).
+            self.store.setHistoryCursor(res && res.total != null ? res.total : null);
             self.loadingMore = false;
           })
           .catch(function () {

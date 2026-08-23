@@ -2,6 +2,14 @@
 
 All notable changes to ClipSync are documented in this file.
 
+## [1.0.45] — 2026-08-23
+
+### History (cursor convention — single source)
+- **The load-more cursor now has one implementation.** A new `store.setHistoryCursor(total)` aligns the cursor with the visible list (offset = length, pinned to `total`, `hasMore` = length < total), and all ~8 hand-inlined sites — page-1 reload, WebSocket wholesale + paged paths, ghost calibration write-back, and the dashboard's Load More — route through it. The raw-vs-visible formula can no longer drift across sites (it flip-flopped between v1.0.43 and v1.0.44 for exactly that reason).
+
+### Tests
+- Cursor-convention guard updated to assert the shared helper. Full suite 433 passed / 3 skipped.
+
 ## [1.0.44] — 2026-08-23
 
 ### History (cursor convention unified)
