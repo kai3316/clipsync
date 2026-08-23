@@ -413,8 +413,16 @@
           .then(function () {
             ClipsyncAPI.deleteItem(eid).then(function (res) {
               if (res && res.ok !== false) {
+                // Route through the store helper so the reconcile guard
+                // (historyMutationTick) is bumped like every other delete
+                // path — a bare splice here let an in-flight calibration
+                // resurrect the deleted row.
                 if (idx !== -1) {
-                  store.history.splice(idx, 1);
+                  store.removeHistoryItems([eid]);
+                  // Mirror the other delete paths: shrink the "load more"
+                  // cursor so the item that shifted up into the deleted slot
+                  // is not skipped by the next fetch.
+                  store.historyOffset = Math.max(0, store.historyOffset - 1);
                 }
                 store.selectedIds.delete(eid);
                 store.selectedIds = new Set(store.selectedIds);

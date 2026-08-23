@@ -344,7 +344,7 @@ var ClipsyncWS = (function () {
               // updates matching rows in place, prepends genuinely-new rows at
               // the top (dedupe — no duplicates), and bumps the mutation tick
               // only when the merge actually changed the list.
-              histMutated = store.mergeHistoryFresh(incoming);
+              store.mergeHistoryFresh(incoming);
               // The prepended items now occupy the top of the loaded list.
               // Recompute the "load more" cursor from the list length instead
               // of a "+fresh.length" delta: dedupe may have discarded incoming

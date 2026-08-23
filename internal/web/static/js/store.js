@@ -918,7 +918,12 @@
       // budget like every other terminal state.
       var calibTimer = setTimeout(function () {
         if (self._calibrationGen === calibGen && self._historyCalibrating) {
-          self._calibrationGen += 1;
+          // Unwedge the lock so the next poll can retry, and consume the
+          // throttle budget.  Deliberately does NOT advance the generation:
+          // a slow-but-valid response that settles later still passes the gen
+          // guard and writes back — staleness vs. newer data is the mutation
+          // tick's job, not the timer's.  Advancing the gen here made any
+          // fetch slower than the timeout permanently unable to heal ghosts.
           self._historyCalibrating = false;
           self._lastCalibration = Date.now();
         }

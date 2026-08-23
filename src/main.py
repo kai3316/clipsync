@@ -1905,6 +1905,9 @@ class Application:
         if profile_dir:
             try:
                 shutil.rmtree(profile_dir, ignore_errors=False)
+            except FileNotFoundError:
+                # Already gone (external temp cleanup) — nothing to reclaim.
+                pass
             except Exception:
                 # Partial / failed removal — keep the entry so the sweep (with
                 # its retry cap) reclaims the profile later instead of leaking
@@ -2065,11 +2068,11 @@ class Application:
                             pass
         # Reclaim each private profile (best-effort) and clear the dict.  A
         # late kill can leave a leftover child still holding a lock on the
-        # profile, so retry the removal once after a short beat.  An entry
-        # whose profile still cannot be removed is KEPT (not dropped) so the
-        # next startup's sweep retries it, and logged so the residue isn't
-        # silent — the kill round already tore the process down, so the leftover
-        # lock is transient and the startup sweep will reclaim it.
+        # profile, so retry the removal once after a short beat (only between
+        # attempts — no pointless sleep after the final one).  The instance
+        # dict dies with this process, so a profile we can't remove is dropped
+        # with a visible warning (the OS temp cleaner will eventually reclaim
+        # it) rather than a false "retried at next startup" promise.
         for iid in list(self._quickpaste_instances.keys()):
             entry = self._quickpaste_instances.get(iid)
             profile_dir = entry.get("profile_dir", "") if entry else ""
@@ -2077,21 +2080,20 @@ class Application:
                 self._quickpaste_instances.pop(iid, None)
                 continue
             removed = False
-            for _ in range(2):
+            for attempt in range(2):
                 try:
                     shutil.rmtree(profile_dir, ignore_errors=False)
                     removed = True
                     break
                 except Exception:
                     removed = False
-                    time.sleep(0.1)
-            if removed:
-                self._quickpaste_instances.pop(iid, None)
-            else:
+                    if attempt == 0:
+                        time.sleep(0.1)
+            self._quickpaste_instances.pop(iid, None)
+            if not removed:
                 logger.warning(
-                    "Quick Paste profile cleanup failed at shutdown for "
-                    "instance %s (%s) — left for next-startup sweep",
-                    iid, profile_dir,
+                    "Quick Paste profile %s could not be removed at shutdown — "
+                    "left in place; you can delete it manually", profile_dir,
                 )
 
     def _paste_nth(self, n: int) -> None:

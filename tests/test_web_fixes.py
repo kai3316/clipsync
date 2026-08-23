@@ -1081,20 +1081,33 @@ def test_routes_quickpaste_done_empty_string_instance_is_missing():
 
 
 def test_calibrate_history_all_terminal_states_consume_budget_and_advance_gen():
-    """Core calibration semantics (#2/#6): EVERY terminal state of a
-    calibration — success write-back, raced abandon, failure, timeout — consumes
-    the throttle budget (_lastCalibration) and advances the generation
+    """Core calibration semantics (#2/#6): every terminal state of a
+    calibration — success write-back, raced abandon, failure — consumes the
+    throttle budget (_lastCalibration) and advances the generation
     (_calibrationGen).  A constantly-mutating history used to raced-abandon
     every calibration without consuming the budget, so every broadcast
     triggered a full limit=total download with no backoff; unified consumption
     caps that at one attempt per window and ghosts heal in the first 30s silent
-    window.  Advancing the gen on timeout makes a late response gen-guarded (it
-    can no longer pass the guard and write back the old snapshot)."""
+    window.
+
+    The TIMEOUT is the one exception to gen advancement: it unwedges the lock
+    and consumes the budget so the next poll retries, but must NOT advance the
+    gen — a slow-but-valid response that settles after the timeout still passes
+    the gen guard and writes back (staleness vs. newer data is the mutation
+    tick's job, not the timer's).  Advancing the gen on timeout made any fetch
+    slower than the timeout permanently unable to heal ghosts."""
     store = _read_repo_file("internal/web/static/js/store.js")
-    # Budget consumed in all four terminal states.
+    # Budget consumed in every terminal state (incl. timeout).
     assert store.count("self._lastCalibration = Date.now();") >= 4
-    # Generation advances in all four terminal states.
-    assert store.count("self._calibrationGen += 1;") >= 4
+    # Generation advances in success / raced-abandon / failure — but NOT the
+    # timeout path.
+    assert store.count("self._calibrationGen += 1;") >= 3
+    # The timeout block clears the lock + stamps budget but leaves gen alone.
+    timeout_block = store[store.index("var calibTimer = setTimeout"):
+                         store.index("return window.ClipsyncAPI.getHistory")]
+    assert "self._calibrationGen += 1;" not in timeout_block
+    assert "self._historyCalibrating = false;" in timeout_block
+    assert "self._lastCalibration = Date.now();" in timeout_block
     # The raced-abandon path consumes the budget AND advances the gen.
     race_abandon = store[store.index("if (self.historyMutationTick !== startTick)"):
                          store.index("var calItems")]

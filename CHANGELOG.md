@@ -2,6 +2,19 @@
 
 All notable changes to ClipSync are documented in this file.
 
+## [1.0.35] — 2026-08-23
+
+### History (reconcile)
+- **A slow-but-valid reconcile response is no longer discarded.** v1.0.34's 16s timeout also advanced the generation counter, so any fetch slower than the timeout was thrown away — on a slow link the ghosts could never heal. The timeout now only unwedges the lock and consumes the back-off budget; a response that settles later still passes the generation guard and writes back (staleness vs. newer data remains the mutation tick's job).
+- **The last hand-written history delete now goes through the consolidated helper** (context-menu's splice), and it shrinks the "load more" cursor like every other delete path — no more skipping the item that shifts into a deleted slot.
+
+### Quick Paste
+- **A missing profile directory is treated as already-cleaned** (no spurious "incomplete cleanup" keep-entry when an external temp cleaner already removed it).
+- **Shutdown no longer promises a retry it can't keep** — the instance dict dies with the process, so a profile that can't be removed at shutdown is dropped with a visible path warning (the OS temp cleaner will reclaim it), and the retry sleep is only between attempts.
+
+### Tests
+- Calibration-semantics regression updated to the corrected timeout contract. Full suite 433 passed / 3 skipped.
+
 ## [1.0.34] — 2026-08-23
 
 ### History (pagination reconcile — consolidated)
