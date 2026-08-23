@@ -919,10 +919,10 @@
       // Timeout fallback: an old webview without AbortController can leave the
       // fetch pending forever, which would wedge _historyCalibrating.  After
       // CALIBRATION_TIMEOUT_MS (if this generation still owns the lock) the
-      // calibration is treated as a terminal state: advance the generation so
-      // the in-flight fetch (if it ever settles) is gen-guarded and abandons,
-      // clear the lock so the next poll can retry, and consume the throttle
-      // budget like every other terminal state.
+      // calibration unwedges its lock and consumes the throttle budget so the
+      // next poll can retry — but it does NOT advance the generation (see the
+      // gen comment above): a slow-but-valid response that settles later still
+      // passes the gen guard and writes back.
       var calibTimer = setTimeout(function () {
         if (self._calibrationGen === calibGen && self._historyCalibrating) {
           // Unwedge the lock so the next poll can retry, and consume the
@@ -939,10 +939,11 @@
         .then(function (calRes) {
           clearTimeout(calibTimer);
           if (self._calibrationGen !== calibGen) {
-            // A newer calibration superseded this one (e.g. the timeout
-            // advanced the gen) — a late response must never write back or
-            // influence the current state.  The superseding event already
-            // consumed the budget, so this is a plain abandon.
+            // A newer calibration superseded this one (a new calibration
+            // started, or this one hit a terminal state that advanced the gen)
+            // — a late response must never write back or influence the current
+            // state.  The superseding event already consumed the budget, so
+            // this is a plain abandon.
             return self.history.slice();
           }
           self._historyCalibrating = false;
@@ -1017,6 +1018,34 @@
      * @param {Array<string|number>} ids
      * @returns {number} count of rows removed
      */
+    // Set a single row's pinned flag (re-finding by id) and bump the reconcile
+    // guard.  The bump is UNCONDITIONAL: the server committed a pin change, so
+    // any in-flight calibration whose snapshot predates it must not write back
+    // — even when the toggled row left the loaded window during the round-trip
+    // (unpin of a boundary row drops it from page 1, and findIndex misses).
+    setPinned: function (eid, pinned) {
+      var liveIdx = this.history.findIndex(function (h) {
+        return h.entry_id === eid;
+      });
+      if (liveIdx !== -1) {
+        this.history[liveIdx].pinned = !!pinned;
+      }
+      this.historyMutationTick += 1;
+    },
+
+    // Batch equivalent of setPinned — same unconditional guard bump.
+    setPinnedBatch: function (ids, pinned) {
+      var hit = false;
+      for (var bi = 0; bi < this.history.length; bi++) {
+        if (ids.indexOf(this.history[bi].entry_id) !== -1) {
+          this.history[bi].pinned = !!pinned;
+          hit = true;
+        }
+      }
+      this.historyMutationTick += 1;
+      return hit;
+    },
+
     removeHistoryItems: function (ids) {
       if (!ids || !ids.length) return 0;
       var delSet = {};

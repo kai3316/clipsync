@@ -2,6 +2,16 @@
 
 All notable changes to ClipSync are documented in this file.
 
+## [1.0.38] — 2026-08-23
+
+### History (pin reconcile — consolidated)
+- **Every pin path now goes through one place.** New `store.setPinned` / `setPinnedBatch` helpers re-find rows by id, apply the flag, and bump the reconcile guard **unconditionally** — the server committed a change, so an in-flight calibration's pre-change snapshot must never write back, even when the toggled row left the loaded window during the round-trip (the v1.0.37 gap).
+- Single-pin (history item + context menu), batch-pin, and the page-1 wholesale reload on reconnect all route through the guard, so no pin path can silently re-open the calibration race.
+- Stale calibration comments corrected (the timeout still does not advance the generation).
+
+### Tests
+- Full suite 433 passed / 3 skipped.
+
 ## [1.0.37] — 2026-08-23
 
 ### History (pin/delete race fixes)

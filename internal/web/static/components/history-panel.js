@@ -402,17 +402,9 @@
         ClipsyncAPI.batchPin(selectedIds, newPinned).then(function (res) {
           self.batchBusy = false;
           if (res && res.ok !== false) {
-            // Update local state
-            for (var i = 0; i < store.history.length; i++) {
-              if (selectedIds.indexOf(store.history[i].entry_id) !== -1) {
-                store.history[i].pinned = newPinned;
-              }
-            }
-            // Batch pin mutates rows in place — bump the reconcile guard so an
-            // in-flight calibration can't write back a stale pre-pin snapshot.
-            if (selectedIds.length) {
-              store.historyMutationTick += 1;
-            }
+            // Shared helper: applies to every matching loaded row and bumps the
+            // reconcile guard unconditionally (the server committed a change).
+            store.setPinnedBatch(selectedIds, newPinned);
             store.showToast(
               self.t(newPinned ? 'history.batch_pinned' : 'history.batch_unpinned', { count: res.count }),
               2000

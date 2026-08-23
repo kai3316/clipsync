@@ -361,6 +361,10 @@
             for (var i = 0; i < items.length; i++) {
               store.history.push(items[i]);
             }
+            // A wholesale page-1 replace is a mutation (it may carry pin
+            // changes applied elsewhere) — bump the reconcile guard so an
+            // in-flight calibration can't write back over it.
+            store.historyMutationTick += 1;
             store.historyHasMore = (res && res.total != null) ? (res.offset + items.length < res.total) : false;
             store.historyOffset = items.length;
           }

@@ -251,27 +251,16 @@
         var store = this.store;
         var eid = this.item.entry_id;
         if (eid === undefined || eid === null) return;
-        var idx = store.history.findIndex(function (h) {
-          return h.entry_id === eid;
-        });
 
         var self = this;
         ClipsyncAPI.togglePin(eid).then(function (res) {
           if (res && res.ok !== false) {
-            // Re-find by id rather than the captured idx: a pinned row jumps to
-            // the top when the server broadcast's wholesale replace lands, so
-            // the stale idx could write the pin onto a different row.
-            var liveIdx = store.history.findIndex(function (h) {
-              return h.entry_id === eid;
-            });
-            if (liveIdx !== -1) {
-              store.history[liveIdx].pinned = !!res.pinned;
-              // A pin toggle mutates a row in place — bump the reconcile guard
-              // so an in-flight calibration can't write back a stale snapshot
-              // that reverts it (same-id pin changes don't always reach the
-              // wholesale broadcast comparator).
-              store.historyMutationTick += 1;
-            }
+            // The shared helper re-finds by id (the row may have reordered
+            // pinned-first while the request was in flight) and bumps the
+            // reconcile guard unconditionally — the server committed a change,
+            // so an in-flight calibration's pre-change snapshot must not write
+            // back, even if the toggled row left the loaded window.
+            store.setPinned(eid, res.pinned);
             store.showToast(
               res.pinned ? self.t('history.pinned_toast') : self.t('history.unpinned_toast'),
               1200

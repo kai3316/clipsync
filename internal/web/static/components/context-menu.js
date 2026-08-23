@@ -297,17 +297,9 @@
         var self = this;
         ClipsyncAPI.togglePin(eid).then(function (res) {
           if (res && res.ok !== false) {
-            // Re-find by id: the list may have reordered (pinned-first) since
-            // the request started, and the server broadcast may already have
-            // applied the change — write only onto the matching row and bump
-            // the reconcile guard like the history-item togglePin path.
-            var liveIdx = store.history.findIndex(function (h) {
-              return h.entry_id === eid;
-            });
-            if (liveIdx !== -1) {
-              store.history[liveIdx].pinned = !!res.pinned;
-              store.historyMutationTick += 1;
-            }
+            // Shared helper: re-finds by id (pinned rows reorder to the top)
+            // and bumps the reconcile guard unconditionally.
+            store.setPinned(eid, res.pinned);
             store.showToast(res.pinned ? self.t('history.pinned_toast') : self.t('history.unpinned_toast'), 1200);
           } else {
             // The backend explicitly refused (or returned an empty payload) —
