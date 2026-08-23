@@ -15,6 +15,8 @@ from collections.abc import Callable
 
 from zeroconf import ServiceBrowser, ServiceInfo, Zeroconf
 
+from internal.version import __version__
+
 logger = logging.getLogger(__name__)
 
 
@@ -259,6 +261,9 @@ class Discovery:
         # real device identity in plaintext mDNS TXT records.
         props = {
             b"device_id_hash": self._device_id_hash.encode("utf-8"),
+            b"v": __version__.encode("utf-8"),
+            b"os": platform.system().lower().encode("utf-8"),
+            b"arch": (platform.machine() or "").lower().encode("utf-8"),
         }
 
         all_ips = _get_all_local_addresses()
@@ -372,7 +377,12 @@ class Discovery:
             return
         # Rebuild service info (IPs may have changed, and ServiceInfo
         # can't be re-registered after unregistration).
-        props = {b"device_id_hash": self._device_id_hash.encode("utf-8")}
+        props = {
+            b"device_id_hash": self._device_id_hash.encode("utf-8"),
+            b"v": __version__.encode("utf-8"),
+            b"os": platform.system().lower().encode("utf-8"),
+            b"arch": (platform.machine() or "").lower().encode("utf-8"),
+        }
         all_ips = _get_all_local_addresses()
         for i, ip in enumerate(all_ips):
             props[f"alt_ip_{i}".encode()] = ip.encode()
@@ -434,6 +444,12 @@ class Discovery:
         if peer_id_hash == self._device_id_hash:
             return
 
+        # Advertised version/platform/arch (M2 P2P update). Absent for older
+        # peers that predate these TXT fields.
+        peer_version = props.get(b"v", b"").decode("utf-8", errors="replace")
+        peer_os = props.get(b"os", b"").decode("utf-8", errors="replace")
+        peer_arch = props.get(b"arch", b"").decode("utf-8", errors="replace")
+
         # Collect every candidate address: all mDNS A/AAAA records plus the
         # alt_ip_N TXT records we advertise. mDNS may list them in any order
         # and the first is often not the one reachable on our subnet, so we
@@ -494,11 +510,17 @@ class Discovery:
                 existing["address"] = address
                 existing["port"] = port
                 existing["name"] = peer_display
+                existing["version"] = peer_version
+                existing["os"] = peer_os
+                existing["arch"] = peer_arch
             else:
                 self._known_peers[peer_id_hash] = {
                     "name": peer_display,
                     "address": address,
                     "port": port,
+                    "version": peer_version,
+                    "os": peer_os,
+                    "arch": peer_arch,
                 }
 
         logger.info(
@@ -510,6 +532,16 @@ class Discovery:
             on_found = self._on_peer_found
         if on_found:
             on_found(peer_id_hash, peer_display, address, port)
+
+    def get_peer_version_info(self, peer_id_hash: str) -> dict:
+        """Return the {version, os, arch} a peer advertises, or empty strings."""
+        with self._lock:
+            peer = self._known_peers.get(peer_id_hash) or {}
+        return {
+            "version": peer.get("version", ""),
+            "os": peer.get("os", ""),
+            "arch": peer.get("arch", ""),
+        }
 
     def _handle_service_removed(self, name):
         with self._lock:
