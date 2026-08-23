@@ -152,6 +152,7 @@ class SyncManager:
         with self._lock:
             self._last_local_hash = None
             self._last_content_hash = ""
+            self._dedup_ring.clear()
             self._monitor.suppress_until = 0.0
 
     def start(self):
@@ -369,7 +370,7 @@ class SyncManager:
                 return
             # Skip if recently seen (e.g. a remote write reflected back whose
             # read-back was not re-encoded)
-            if content_hash in self._dedup_ring:
+            if self._dedup_seen(content_hash):
                 return
 
             self._last_content_hash = content_hash

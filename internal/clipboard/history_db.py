@@ -593,7 +593,7 @@ class ClipboardHistoryDB:
         """Increment the paste count for an entry. Returns new count or None if not found."""
         with self._lock:
             for entry in self._entries:
-                if entry.get("entry_id") == entry_id:
+                if str(entry.get("entry_id")) == str(entry_id):
                     entry["paste_count"] = entry.get("paste_count", 0) + 1
                     self._update_row(entry_id, paste_count=entry["paste_count"])
                     return entry["paste_count"]
@@ -608,7 +608,7 @@ class ClipboardHistoryDB:
         now = time.time()
         with self._lock:
             for entry in self._entries:
-                if entry.get("entry_id") == entry_id:
+                if str(entry.get("entry_id")) == str(entry_id):
                     entry["timestamp"] = now
                     self._update_row(entry_id, timestamp=now)
                     # Re-sort in-memory list so the UI reflects the new order.

@@ -14,6 +14,19 @@ All notable changes to ClipSync are documented in this file.
 - **Downloads are checksum-verified.** The release downloader now verifies the SHA-256 (from the GitHub asset `digest`) in addition to size, so a corrupted or tampered asset is rejected before it is offered as an installer.
 - **macOS ships Apple Silicon only.** The retired Intel (`macos-13`) build leg is removed; the release asset and download page are `clipsync-macos-arm64.zip` only, while Linux keeps x86_64 and ARM64.
 
+### Clipboard
+- **Linux now detects non-text clipboard changes.** The listener only hashed plain text or an image, so HTML-only / RTF-only / file-list / URL copies were silently never synced. It now probes all those formats.
+- **Pasting a multi-file entry on macOS no longer drops all but the last file.** The atomic ctypes write overwrote the same pasteboard type per file; multi-file entries now fall through to the `writeObjects:` path that appends every file.
+- **Restoring an image from history keeps its format.** The desktop paste path dropped `image_fmt`, so non-PNG images (TIFF/BMP) were re-encoded as PNG and corrupted.
+
+### Sync & transfer
+- **Cancelling a transfer now actually completes it.** The completion callback fired after the transfer was removed, so it never fired — leaking the temp zip and leaving the web panel stale.
+- **Clipboard file transfers now verify the sender.** Inbound transfers never recorded their peer, so the "reject bytes from a non-owner" guard was dead code.
+- **Dedup respects its TTL and clears on restore.** The local send path never TTL-pruned (its `in` check was a no-op against the tuple ring), so a repeated copy after the window was still suppressed, and a history restore within 90 s was dropped.
+
+### Transport
+- **Connection health now detects clean remote close.** The EOF probe used `MSG_PEEK`, which `SSLSocket` rejects, so a cleanly-closed peer looked alive and could win the reconnect race over a fresh connection. A recv-loop flag now reports it correctly.
+
 ## [1.0.49] — 2026-08-23
 
 ### Mobile companion (phone page)

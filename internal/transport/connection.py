@@ -3,7 +3,6 @@
 import hashlib
 import logging
 import os
-import select
 import socket
 import ssl
 import struct
@@ -90,6 +89,7 @@ class PeerConnection:
         self._enc_mgr = enc_mgr
         self._pairing_mgr = pairing_mgr
         self._last_recv_time = time.monotonic()
+        self._remote_closed = False
         self.created_at = time.monotonic()
         self._rejected_by_peer = False
         self._auth_failures = 0
@@ -192,19 +192,11 @@ class PeerConnection:
                 return False
             if not self._running:
                 return False
-            # Non-blocking peek: if the socket is readable with no data
-            # pending, the remote has cleanly closed (EOF).
-            ready, _, _ = select.select([self._sock], [], [], 0)
-            if ready:
-                try:
-                    data = self._sock.recv(1, socket.MSG_PEEK)
-                    if data == b"":
-                        return False
-                except Exception:
-                    # SSL sockets may raise on MSG_PEEK (internal
-                    # buffering). If select() reported readable, the
-                    # connection is still alive — don't kill it.
-                    pass
+            # EOF: the recv loop sets _remote_closed when it observes an empty
+            # recv (clean FIN). SO_ERROR doesn't surface a clean close, and
+            # SSLSocket rejects MSG_PEEK, so read the flag instead.
+            if self._remote_closed:
+                return False
             return True
         except Exception:
             return False
@@ -383,6 +375,7 @@ class PeerConnection:
                 chunk = self._sock.recv(n - len(buf))
                 if not chunk:
                     logger.info("[%s] recv returned empty bytes (remote closed connection)", self.device_name)
+                    self._remote_closed = True
                     return None
                 buf.extend(chunk)
                 self._last_recv_time = time.monotonic()

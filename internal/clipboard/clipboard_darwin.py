@@ -784,13 +784,17 @@ class _ClipboardWriter(ClipboardWriter):
                 else:
                     write_ops.append((b"public.png", data))
             elif fmt_type == ContentType.FILE:
-                paths = data.decode("utf-8").split("\n")
-                for path in paths:
-                    path = path.strip()
-                    if path:
-                        from urllib.parse import quote as urllib_quote_path
-                        encoded = ("file://" + urllib_quote_path(path)).encode("utf-8")
-                        write_ops.append((b"public.file-url", encoded))
+                paths = [p.strip() for p in data.decode("utf-8").split("\n") if p.strip()]
+                if len(paths) > 1:
+                    # setData:forType: overwrites a UTI, so multiple
+                    # public.file-url writes would leave only the last file.
+                    # Fall through to the osascript writeObjects: path, which
+                    # appends every file.
+                    return False
+                if paths:
+                    from urllib.parse import quote as urllib_quote_path
+                    encoded = ("file://" + urllib_quote_path(paths[0])).encode("utf-8")
+                    write_ops.append((b"public.file-url", encoded))
             elif fmt_type == ContentType.URL:
                 write_ops.append((b"public.url", data))
             # IMAGE_EMF is Windows-only, skip.

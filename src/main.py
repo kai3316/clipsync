@@ -6020,7 +6020,7 @@ class Application:
             if ct is not None:
                 types[ct] = _b64.b64decode(b64_data)
         if types:
-            content = ClipboardContent(types=types)
+            content = ClipboardContent(types=types, image_fmt=entry.get("image_fmt") or "")
             # Clear dedup state so the monitor event from this write
             # is not suppressed — the restored content will sync to peers.
             self.sync_mgr.reset_dedup_for_restore()

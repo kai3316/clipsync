@@ -413,15 +413,18 @@ class FileTransferManager:
                     broadcast_fn,
                 )
 
+        # Once-guard: fire the terminal callback BEFORE removing the transfer —
+        # _fire_complete_once no-ops when the transfer is already gone, so the
+        # cancel path must call it while the transfer is still registered
+        # (mirrors fail_peer_transfers). The send thread may already have fired
+        # it, or may fire it a moment later when it wakes; never double-notify.
+        self._fire_complete_once(transfer_id, False, True, "cancelled")
+
         with self._lock:
             self._transfers.pop(transfer_id, None)
 
         self._add_to_history(transfer, False, status="cancelled")
         logger.info("Transfer %s cancelled by user", transfer_id[:8])
-        # Once-guard: the send thread may already have fired the terminal
-        # callback for this cancelled transfer, or may fire it a moment later
-        # when it wakes from its pause/cancel poll.  Never double-notify.
-        self._fire_complete_once(transfer_id, False, True, "cancelled")
         return True
 
     def reject_transfer(self, transfer_id: str, send_fn: Callable[[bytes], None]) -> None:
@@ -530,7 +533,7 @@ class FileTransferManager:
         if handler is None:
             logger.debug("Unknown file transfer message type: %s", msg_type)
             return
-        if msg_type == "file_chunk":
+        if msg_type in ("file_chunk", "file_request"):
             handler(payload, send_fn, sender_device_id)
         else:
             handler(payload, send_fn)
@@ -592,7 +595,8 @@ class FileTransferManager:
     # Message handlers (receiver side)
     # ------------------------------------------------------------------
 
-    def _handle_file_request(self, payload: dict, send_fn: Callable[[bytes], None]) -> None:
+    def _handle_file_request(self, payload: dict, send_fn: Callable[[bytes], None],
+                             sender_device_id: str = "") -> None:
         transfer_id = str(payload.get("transfer_id", ""))
         raw_name = payload.get("file_name")
         if not isinstance(raw_name, str) or not raw_name:
@@ -630,6 +634,7 @@ class FileTransferManager:
             self._transfers[transfer_id] = {
                 "transfer_id": transfer_id,
                 "type": "incoming",
+                "peer_id": sender_device_id,
                 "file_name": file_name,
                 "file_size": file_size,
                 "mime_type": mime_type,

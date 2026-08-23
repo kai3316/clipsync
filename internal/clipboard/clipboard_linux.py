@@ -632,7 +632,23 @@ class LinuxClipboardMonitor(ClipboardMonitor):
             h.update(b"\x00")
             h.update(html)
             return h.hexdigest()
-        return self._get_image_hash()
+        # No plain text: the clipboard may hold HTML-only, RTF-only, a file
+        # list (text/uri-list), a URL, or an image. Probe each so a change in
+        # any single format is detected (image-only hashes to the image).
+        h = hashlib.sha256()
+        for probe in (self._get_html_primary, self._get_rtf,
+                      self._get_files, self._get_url):
+            try:
+                data = probe()
+            except Exception:
+                data = b""
+            h.update(data or b"")
+            h.update(b"\x00")
+        img_hash = self._get_image_hash()
+        if img_hash:
+            h.update(b"image:")
+            h.update(img_hash.encode("ascii"))
+        return h.hexdigest()
 
 
 _startup_warning_shown = False
