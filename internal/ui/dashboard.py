@@ -2109,6 +2109,16 @@ class DashboardWindow:
         if self._history_scroll is None or self._get_history is None:
             return
 
+        # Cancel an in-flight chunked render so a stale after() chain can't
+        # overlap this fresh list (orphaning the new timer / duplicating the
+        # "show more" button).
+        if getattr(self, "_history_chunk_timer", None) is not None:
+            try:
+                self._root.after_cancel(self._history_chunk_timer)
+            except Exception:
+                pass
+            self._history_chunk_timer = None
+
         query = (self._history_search_var.get().strip()
                  if self._history_search_var else "")
 

@@ -90,18 +90,18 @@ _MAC_VK: dict[str, int] = {
     "end": 119,  # kVK_End
     "pageup": 116,  # kVK_PageUp
     "pagedown": 121,  # kVK_PageDown
-    "f1": 122,
-    "f2": 123,
-    "f3": 124,
-    "f4": 125,
-    "f5": 126,
-    "f6": 127,
-    "f7": 128,
-    "f8": 129,
-    "f9": 130,
-    "f10": 131,
-    "f11": 132,
-    "f12": 133,
+    "f1": 122,   # kVK_F1
+    "f2": 120,   # kVK_F2
+    "f3": 99,    # kVK_F3
+    "f4": 118,   # kVK_F4
+    "f5": 96,    # kVK_F5
+    "f6": 97,    # kVK_F6
+    "f7": 98,    # kVK_F7
+    "f8": 100,   # kVK_F8
+    "f9": 101,   # kVK_F9
+    "f10": 109,  # kVK_F10
+    "f11": 103,  # kVK_F11
+    "f12": 111,  # kVK_F12
 }
 
 # macOS letter keycodes (ADB layout, independent of keyboard locale)
@@ -110,6 +110,12 @@ _MAC_LETTER_VK: dict[str, int] = {
     "I": 34, "J": 38, "K": 40, "L": 37, "M": 46, "N": 45, "O": 31,
     "P": 35, "Q": 12, "R": 15, "S": 1, "T": 17, "U": 32, "V": 9,
     "W": 13, "X": 7, "Y": 16, "Z": 6,
+}
+
+# macOS digit keycodes (kVK_ANSI_* — non-contiguous, unlike the letters)
+_MAC_DIGIT_VK: dict[str, int] = {
+    "0": 29, "1": 18, "2": 19, "3": 20, "4": 21,
+    "5": 23, "6": 22, "7": 26, "8": 28, "9": 25,
 }
 
 
@@ -274,6 +280,10 @@ class HotkeyManager:
         was_running = self._running
         if was_running:
             self._platform_stop()
+            # _platform_stop signals the run loop to exit; join it so a fresh
+            # thread below doesn't race the old listener.
+            if self._thread is not None and self._thread.is_alive():
+                self._thread.join(timeout=2.0)
 
         with self._lock:
             self._hotkeys.clear()
@@ -297,7 +307,14 @@ class HotkeyManager:
             self._shortcut_strings[hotkey_id] = shortcut
 
         if was_running:
+            # Windows/macOS _platform_start is a no-op (the run loop owns the
+            # listener), so restart the listener thread instead of leaving the
+            # old one signalled-off.
             self._running = True
+            self._thread = threading.Thread(
+                target=self._run_loop, daemon=True, name="hotkey-mgr"
+            )
+            self._thread.start()
             self._platform_start()
 
         if failed:
@@ -358,17 +375,16 @@ class HotkeyManager:
         if key_lower == "~":
             key_lower = "`"
 
-        # Single ASCII character (A-Z, 0-9)
-        if len(key) == 1 and key.isascii():
+        # Single ASCII character (A-Z, 0-9); backtick/tilde fall through to the
+        # named-key tables below (ord() is not a valid VK for them).
+        if len(key) == 1 and key.isascii() and key_lower not in ("`", "~"):
             char = key.upper()
             if self._platform == "macos":
                 if char in _MAC_LETTER_VK:
                     return _MAC_LETTER_VK[char]
-                # Digits 0-9 on macOS (kVK_ANSI_0 = 29, kVK_ANSI_1 = 18, ...)
+                # Digits 0-9 on macOS (kVK_ANSI_* are non-contiguous)
                 if "0" <= char <= "9":
-                    if char == "0":
-                        return 29
-                    return 18 + (ord(char) - ord("1"))
+                    return _MAC_DIGIT_VK[char]
             # Windows / Linux fallback: use ord()
             return ord(char)
 

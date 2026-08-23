@@ -232,7 +232,7 @@ _FIELD_RULES: dict[str, tuple] = {
     "dedup_method": ("str",),
     "app_filter_enabled": ("bool",),
     "app_filter_mode": ("str",),
-    "app_filter_list": ("strlist",),
+    "app_filter_list": ("strlist_nonnull",),
     "source_tracking_enabled": ("bool",),
     "ui_backend": ("str",),
     "ui_animation_enabled": ("bool",),
@@ -277,6 +277,14 @@ def _validate_field(key: str, value: object):
     if kind == "strlist":
         if value is None:
             return None
+        if not isinstance(value, list) or not all(isinstance(i, str) for i in value):
+            return _SKIP_FIELD
+        return value
+    if kind == "strlist_nonnull":
+        # Like strlist but None is NOT a valid value — a null falls through to
+        # the field's list default (e.g. app_filter_list → []).
+        if value is None:
+            return _SKIP_FIELD
         if not isinstance(value, list) or not all(isinstance(i, str) for i in value):
             return _SKIP_FIELD
         return value
@@ -407,18 +415,26 @@ def load() -> Config:
                 public_key_pem = peer_data.get("public_key_pem", "")
                 paired = peer_data.get("paired", False)
                 notes = peer_data.get("notes", "")
+                last_ip = peer_data.get("last_ip", "")
+                last_port = peer_data.get("last_port", 0)
                 if not isinstance(public_key_pem, str):
                     public_key_pem = ""
                 if not isinstance(paired, bool):
                     paired = False
                 if not isinstance(notes, str):
                     notes = ""
+                if not isinstance(last_ip, str):
+                    last_ip = ""
+                if not isinstance(last_port, int) or isinstance(last_port, bool):
+                    last_port = 0
                 cfg.peers[device_id] = PeerInfo(
                     device_id=device_id,
                     device_name=device_name,
                     public_key_pem=public_key_pem,
                     paired=paired,
                     notes=notes,
+                    last_ip=last_ip,
+                    last_port=last_port,
                 )
             return cfg
         return Config()
@@ -438,6 +454,7 @@ def save(cfg: Config, enc_mgr: "EncryptionManager | None" = None):
             logger.debug("Config save: private_key_pem encrypted for at-rest storage")
 
         data = {
+            "config_version": cfg.config_version,
             "device_id": cfg.device_id,
             "device_name": cfg.device_name,
             "port": cfg.port,
@@ -493,6 +510,8 @@ def save(cfg: Config, enc_mgr: "EncryptionManager | None" = None):
                     "public_key_pem": p.public_key_pem,
                     "paired": p.paired,
                     "notes": p.notes,
+                    "last_ip": p.last_ip,
+                    "last_port": p.last_port,
                 }
                 for p in cfg.peers.values()
             ],

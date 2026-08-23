@@ -262,7 +262,10 @@ def _is_duplicate(item: dict, existing: list[dict]) -> bool:
     """Return True if *item* duplicates an existing entry (same preview
     within the dedup window)."""
     preview = (item.get("text_preview") or "").strip()
-    ts = float(item.get("timestamp", 0))
+    try:
+        ts = float(item.get("timestamp", 0))
+    except (TypeError, ValueError):
+        ts = 0.0
     if not preview or not ts:
         return False
     for e in existing:

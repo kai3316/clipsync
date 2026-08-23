@@ -186,7 +186,13 @@ def _dialog(parent, title, message, icon, accent_color, buttons):
 
 
 def _darken(hex_color, amount):
-    """Darken a hex color by the given amount (0-1)."""
+    """Darken a hex color by the given amount (0-1).
+
+    Non-hex (named) colors like ``"gray65"`` are returned unchanged — they
+    have no ``#RRGGBB`` form to darken.
+    """
+    if not (isinstance(hex_color, str) and hex_color.startswith("#")):
+        return hex_color
     r = int(hex_color[1:3], 16)
     g = int(hex_color[3:5], 16)
     b = int(hex_color[5:7], 16)
