@@ -4,6 +4,23 @@ All notable changes to ClipSync are documented in this file.
 
 ## [Unreleased]
 
+### Devices & connectivity
+- **One stalled device can no longer delay everyone else.** TLS handshake + identity exchange moved off the single accept thread onto a per-connection thread — previously one hung client could queue every other peer's incoming connection for up to ~25 s ("devices flicker in and out" during simultaneous reconnects).
+- **Reconnects no longer give up permanently.** After the fast-retry budget ran out (~3 minutes) the saved address was cleared and the peer was abandoned until an app restart; now it keeps the address and retries once every 30 s, so longer Wi-Fi/router outages self-heal. The reconnect indicator also stops showing attempts past its maximum.
+- **Devices behind the same NAT no longer hijack each other's identity** (e.g. phone-hotspot topologies): the incoming hash→device mapping is derived exactly from the announced id instead of guessed from the shared source IP.
+- Fixed a socket-handle leak on timed-out handshakes and a hot spin when accept kept failing.
+
+### Transfers
+- **Live speed & ETA on active transfers**: progress rows show the real current rate over a rolling window instead of an average diluted by waits — paused/awaiting states show no misleading numbers, and the value reappears within a second of resuming.
+- Duplicate/replayed `file_request` messages are now ignored (previously they created orphan `.part` handles Windows couldn't delete, reset the receive window, and popped a second accept dialog).
+
+### Backup
+- Backups now include global hotkey bindings — restoring a backup no longer silently resets custom hotkeys to defaults.
+
+### Interface
+- **Settings search box**: type a keyword to filter setting groups (match counts per group), highlight matching labels in the open panel, Enter jumps to the first match, Esc clears — works with Chinese and English text alike.
+- The history list no longer blanks out on Tk builds that reject double-`destroy()`, quickly closed settings windows no longer throw stray Tcl errors from a lingering timer, and the settings LAN-IP lookup runs off-thread with a short cache instead of stalling the window.
+
 ### Tray
 - **Pause sync for 15 minutes / 30 minutes / 1 hour from the tray.** While paused, the menu shows a live "paused · ~N min left" line plus an immediate "Resume sync" item; sync resumes automatically (with a notification) when time is up. Any manual toggle — hotkey, tray checkbox, web settings, quick controls — cancels the pending auto-resume so the two never fight.
 

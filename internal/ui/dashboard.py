@@ -2307,7 +2307,17 @@ class DashboardWindow:
         """Render the next batch of history cards, then a 'show more' button
         if entries remain.  Called initially and when the user clicks 'more'."""
         if self._history_more_btn is not None:
-            self._history_more_btn.destroy()
+            # The button may already be gone: every _refresh_history_list
+            # wipes the scroll frame's children (new capture arriving, search
+            # debounce firing) without clearing this reference.  destroy() on
+            # an already-destroyed path raises TclError on several stock
+            # Tk builds, which would abort the whole batch render and leave
+            # the panel blank -- so guard it.
+            try:
+                if self._history_more_btn.winfo_exists():
+                    self._history_more_btn.destroy()
+            except Exception:
+                pass
             self._history_more_btn = None
 
         self._batch_target = min(

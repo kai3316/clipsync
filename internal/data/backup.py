@@ -214,6 +214,15 @@ def create_backup(
             "web_enabled": cfg.web_enabled,
             "web_port": cfg.web_port,
             "web_history_limit": cfg.web_history_limit,
+            # Global-hotkey bindings: without them a backup→restore cycle
+            # silently reset every custom shortcut back to the defaults.
+            # Keep only well-formed str→str pairs (json.dumps would otherwise
+            # stringify non-string keys and bake junk into the archive).
+            "hotkeys": {
+                k: v for k, v in (cfg.hotkeys or {}).items()
+                if isinstance(k, str) and isinstance(v, str)
+            },
+            "hotkeys_enabled": bool(getattr(cfg, "hotkeys_enabled", False)),
             "peers": [
                 {
                     "device_id": p.device_id,
@@ -426,6 +435,8 @@ _LOG_LEVELS = {"DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"}
 #   ("enum", set, True)  string normalized to upper-case, then checked
 #   ("strlist",)         list of strings, or None (the Config default for
 #                        filter_enabled_categories meaning "all enabled")
+#   ("strdict",)         dict with str keys AND str values; non-str pairs are
+#                        dropped (used for the hotkey-id → shortcut map)
 _APPLY_SCHEMA: dict[str, tuple] = {
     "device_name": ("str",),
     "port": ("int", 1, 65535),
@@ -461,6 +472,8 @@ _APPLY_SCHEMA: dict[str, tuple] = {
     "web_enabled": ("bool",),
     "web_port": ("int", 1, 65535),
     "web_history_limit": ("int", 1, 100000),
+    "hotkeys": ("strdict",),
+    "hotkeys_enabled": ("bool",),
 }
 
 # "peers" is handled separately (structured list-of-dicts, merged into
@@ -503,6 +516,17 @@ def _validate_config_value(value: object, rule: tuple):
         if not isinstance(value, list) or not all(isinstance(i, str) for i in value):
             return _SKIP
         return value
+    if kind == "strdict":
+        # Hotkey bindings: keep only well-formed id → shortcut pairs so a
+        # hand-edited backup can never put a non-string into the hotkey
+        # reload path (HotkeyManager already rejects those, but the Config
+        # should stay clean too).
+        if not isinstance(value, dict):
+            return _SKIP
+        return {
+            k: v for k, v in value.items()
+            if isinstance(k, str) and isinstance(v, str)
+        }
     return _SKIP
 
 

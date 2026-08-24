@@ -32,6 +32,7 @@ import os
 import threading
 import time
 import uuid
+from collections import deque
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -63,6 +64,15 @@ COMPLETION_WAIT_TIMEOUT = 60.0         # seconds -- wait for FILE_COMPLETE after
 SPEED_TEST_CHUNKS = 20                 # number of chunks for speed test (~1.3 MB)
 MAX_HISTORY = 50                       # max completed transfers to remember
 MAX_FILE_SIZE = 2 * 1024**3            # 2 GiB -- maximum accepted file size
+
+# Real-time rate estimation: the transfer panel shows a live speed + ETA for
+# in-flight rows.  Both come from a short window of (monotonic_ts, bytes)
+# samples, so the numbers track the CURRENT link instead of averaging in the
+# accept-dialog wait, the ack round-trip and any paused stretches (the old
+# elapsed-since-start average reported e.g. 20 KB/s on a gigabit LAN simply
+# because the user clicked Accept a minute after the offer arrived).
+SPEED_WINDOW_SECONDS = 6.0             # sample span used for the estimate
+SPEED_STALE_AFTER = 4.0                # no progress this long => show 0 B/s
 
 _MIME_BY_EXT: dict[str, str] = {
     ".txt": "text/plain",
@@ -620,6 +630,50 @@ class FileTransferManager:
         return None
 
     # ------------------------------------------------------------------
+    # Real-time rate estimation
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _record_rate_sample(transfer: dict, bytes_done: int) -> None:
+        """Append a (monotonic_ts, bytes_done) sample to *transfer*'s window.
+
+        Called only on real progress (a chunk sent or written); paused /
+        awaiting / finalizing stretches naturally produce no samples, which
+        makes the rate read 0 instead of diluting toward a lifetime average.
+        """
+        samples = transfer.get("_rate_samples")
+        if samples is None:
+            samples = deque(maxlen=64)
+            transfer["_rate_samples"] = samples
+        samples.append((time.monotonic(), bytes_done))
+
+    @staticmethod
+    def _instant_speed(transfer: dict) -> float:
+        """Bytes/s over the recent progress window, or 0.0 when stalled.
+
+        The estimate uses only the newest ``SPEED_WINDOW_SECONDS`` of
+        samples; if nothing has progressed for ``SPEED_STALE_AFTER`` the
+        transfer is considered idle (paused, awaiting ack/complete, or the
+        link stalled) and the speed reads 0 so the UI stops showing a stale
+        number and a bogus ETA.
+        """
+        samples = transfer.get("_rate_samples")
+        if not samples:
+            return 0.0
+        newest_ts, newest_bytes = samples[-1]
+        if time.monotonic() - newest_ts > SPEED_STALE_AFTER:
+            return 0.0
+        base_ts, base_bytes = newest_ts, newest_bytes
+        for ts, b in reversed(samples):
+            if newest_ts - ts > SPEED_WINDOW_SECONDS:
+                break
+            base_ts, base_bytes = ts, b
+        dt = newest_ts - base_ts
+        if dt <= 0.2:
+            return 0.0  # not enough span yet for a stable reading
+        return max((newest_bytes - base_bytes) / dt, 0.0)
+
+    # ------------------------------------------------------------------
     # Message handlers (receiver side)
     # ------------------------------------------------------------------
 
@@ -662,6 +716,20 @@ class FileTransferManager:
 
         now = time.time()
         with self._lock:
+            existing = self._transfers.get(transfer_id)
+            if existing is not None and existing.get("type") == "incoming" \
+                    and existing.get("state") in (
+                        "pending", "receiving", "awaiting_retransmit"):
+                # Duplicate/replayed request for a transfer that is already
+                # registered and alive (both legs of a bidirectional-connect
+                # race can deliver the same broadcast twice).  Re-registering
+                # would orphan the open temp handle, reset the receive window
+                # to zero and pop a second accept dialog — ignore it.
+                logger.debug(
+                    "Duplicate file_request for active transfer %s -- ignored",
+                    transfer_id[:8],
+                )
+                return
             self._transfers[transfer_id] = {
                 "transfer_id": transfer_id,
                 "type": "incoming",
@@ -774,6 +842,7 @@ class FileTransferManager:
                         temp_fh.write(chunk_data)
                         missing.discard(chunk_index)
                         transfer["received_bytes"] += len(chunk_data)
+                        self._record_rate_sample(transfer, transfer["received_bytes"])
                     except (OSError, ValueError) as exc:
                         # Keep the chunk marked missing so it is re-requested.
                         logger.error(
@@ -1254,6 +1323,7 @@ class FileTransferManager:
                             t["_last_progress"] = progress
                             t["_bytes_sent"] = min(bytes_sent, t.get("file_size", bytes_sent))
                             t["_last_activity"] = time.time()
+                            self._record_rate_sample(t, t["_bytes_sent"])
                     if self._on_transfer_progress is not None:
                         self._on_transfer_progress(transfer_id, progress)
 
@@ -1422,11 +1492,12 @@ class FileTransferManager:
 
         Each dict contains:
           ``transfer_id``, ``file_name``, ``file_size``, ``direction``,
-          ``state``, ``progress`` (0.0–1.0), ``speed_bytes_per_sec``,
-          ``eta_seconds``.
+          ``state``, ``progress`` (0.0–1.0), ``speed_bytes_per_sec``
+          (instantaneous rate over the last few seconds of real progress —
+          0 while paused/awaiting/stalled), and ``eta_seconds`` derived from
+          that live rate.
         """
         result: list[dict] = []
-        now = time.time()
         with self._lock:
             for tid, t in self._transfers.items():
                 direction = "up" if t.get("type") == "outgoing" else "down"
@@ -1443,9 +1514,8 @@ class FileTransferManager:
                     # outgoing: track last known chunk progress
                     progress = t.get("_last_progress", 0.0)
                     bytes_done = int(progress * file_size) if file_size else 0
-                elapsed = now - t.get("start_time", now)
-                speed = bytes_done / elapsed if elapsed > 0.5 and bytes_done > 0 else 0.0
-                remaining = file_size - bytes_done
+                speed = FileTransferManager._instant_speed(t)
+                remaining = max(file_size - bytes_done, 0)
                 eta = remaining / speed if speed > 0 and remaining > 0 else 0.0
                 result.append({
                     "transfer_id": tid,

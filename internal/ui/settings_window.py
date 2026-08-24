@@ -194,9 +194,43 @@ class SettingsWindow:
         self._web_url_label: ctk.CTkLabel | None = None
         self._web_copy_btn: ctk.CTkButton | None = None
 
+        # Settings search (filters the sidebar by every panel's visible text)
+        self._search_var: tk.StringVar | None = None
+        self._search_job: str | None = None
+        self._search_query: str = ""
+        self._search_entry: ctk.CTkEntry | None = None
+        self._panel_texts: dict[str, list[str]] = {}
+        self._nav_base_labels: dict[str, str] = {}
+        self._nav_order: list[str] = []
+        # (widget, original_text_color) pairs recolored while a query matches
+        self._search_highlighted: list[tuple[object, object]] = []
+
     # ═══════════════════════════════════════════════════════════════
     # Public API
     # ═══════════════════════════════════════════════════════════════
+
+    def _flash_topmost(self) -> None:
+        """Raise the window above others briefly (best-effort).
+
+        The un-flash runs via ``after(200, ...)``; a user who closes the
+        window inside that window used to leave a callback touching a
+        destroyed widget (TclError noise in the Tk callback handler).
+        """
+        if self._window is None:
+            return
+        try:
+            self._window.attributes("-topmost", True)
+
+            def _unflash(w=self._window):
+                try:
+                    if w.winfo_exists():
+                        w.attributes("-topmost", False)
+                except Exception:
+                    pass
+
+            self._window.after(200, _unflash)
+        except tk.TclError:
+            pass
 
     def show(self):
         if self._window is not None:
@@ -205,8 +239,7 @@ class SettingsWindow:
                 self._window.lift()
                 self._window.focus_force()
                 self._window.update_idletasks()
-                self._window.attributes("-topmost", True)
-                self._window.after(200, lambda w=self._window: w.attributes("-topmost", False))
+                self._flash_topmost()
                 if self._window.winfo_viewable():
                     self._switch_panel(self._current_panel)
                     return
@@ -272,11 +305,7 @@ class SettingsWindow:
         self._build_ui()
         self._switch_panel("network")
 
-        try:
-            self._window.attributes("-topmost", True)
-            self._window.after(200, lambda: self._window.attributes("-topmost", False))
-        except tk.TclError:
-            pass
+        self._flash_topmost()
 
     def _on_close(self):
         if self._window is not None:
@@ -290,11 +319,20 @@ class SettingsWindow:
                     _save_settings_geometry(geom)
             except Exception:
                 logger.debug("Could not capture settings geometry", exc_info=True)
+            if self._search_job is not None:
+                try:
+                    self._root.after_cancel(self._search_job)
+                except Exception:
+                    pass
+                self._search_job = None
             self._window.destroy()
             self._window = None
             self._sidebar_buttons.clear()
             self._panels.clear()
             self._filter_vars.clear()
+            # Widget references held by the search state die with the window.
+            self._search_highlighted = []
+            self._panel_texts = {}
         if self._on_closed is not None:
             self._on_closed()
 
@@ -344,6 +382,34 @@ class SettingsWindow:
         )
         self._theme_btn.pack(side="right")
 
+        # ── Settings search ─────────────────────────────────────────
+        # Typing filters the sidebar to sections whose visible settings
+        # mention the query; Enter jumps to the first matching section and
+        # matches inside the current panel are highlighted in accent cyan.
+        search_frame = ctk.CTkFrame(h_inner, fg_color="transparent")
+        # Packed side="right" AFTER the theme button → sits to its left.
+        search_frame.pack(side="right", padx=(0, 12))
+        self._search_var = tk.StringVar()
+        self._search_entry = ctk.CTkEntry(
+            search_frame, textvariable=self._search_var,
+            width=210, height=32,
+            placeholder_text=T("settings_window.search_placeholder"),
+        )
+        self._search_entry.pack(side="left")
+        ctk.CTkButton(
+            search_frame, text="✕", width=24, height=24,
+            fg_color="transparent",
+            text_color=("gray50", "gray60"),
+            hover_color=("gray85", "gray25"),
+            font=ctk.CTkFont(size=11),
+            command=self._on_search_clear,
+        ).pack(side="left", padx=(4, 0))
+        self._search_entry.bind("<KeyRelease>", self._on_search_keyrelease)
+        self._search_entry.bind("<Return>", self._on_search_jump)
+        # Escape clears the query instead of closing the whole window —
+        # "break" stops the toplevel Escape handler from firing.
+        self._search_entry.bind("<Escape>", lambda _e: (self._on_search_clear(), "break")[1])
+
         # Body: sidebar | content
         body = ctk.CTkFrame(outer, fg_color="transparent")
         body.pack(fill="both", expand=True)
@@ -365,6 +431,10 @@ class SettingsWindow:
         self._panels["advanced"] = self._build_advanced_panel()
         self._panels["logs"] = self._build_logs_panel()
         self._panels["about"] = self._build_about_panel()
+
+        # Snapshot every panel's visible text so the search box can match
+        # against real (localized) setting labels.
+        self._collect_search_index()
 
         # Footer
         footer = ctk.CTkFrame(outer, height=44, corner_radius=0,
@@ -422,6 +492,8 @@ class SettingsWindow:
             )
             btn.pack(fill="x", pady=2)
             self._sidebar_buttons[key] = btn
+            self._nav_base_labels[key] = label
+            self._nav_order.append(key)
 
     # ═══════════════════════════════════════════════════════════════
     # Panel switching
@@ -450,6 +522,216 @@ class SettingsWindow:
         self._current_panel = key
         if key == "logs":
             self._refresh_log_text(self._log_text)
+        # An active search recolors the sidebar buttons; the switch above
+        # just reset them all to default styling, so re-apply the filter.
+        if getattr(self, "_search_query", ""):
+            self._apply_search_state(self._search_query)
+
+    # ═══════════════════════════════════════════════════════════════
+    # Settings search
+    # ═══════════════════════════════════════════════════════════════
+
+    def _collect_search_index(self) -> None:
+        """Snapshot each panel's visible text for the settings search."""
+        self._panel_texts = {}
+        for key, panel in self._panels.items():
+            self._panel_texts[key] = self._collect_widget_texts(panel)
+
+    @staticmethod
+    def _collect_widget_texts(widget) -> list[str]:
+        """Collect every descendant widget's text label (best-effort).
+
+        A widget that already exposes a ``text`` stops the descent: CTk
+        composites (CTkLabel, CTkButton, …) mirror their own text onto
+        private internal widgets, and descending into them double-counts
+        every label in the search index.
+        """
+        texts: list[str] = []
+        try:
+            children = widget.winfo_children()
+        except Exception:
+            return texts
+        for child in children:
+            yielded_text = False
+            try:
+                t = child.cget("text")
+                if isinstance(t, str) and t.strip():
+                    texts.append(t)
+                    yielded_text = True
+            except Exception:
+                pass  # widgets without a text attribute are descended into
+            if not yielded_text:
+                texts.extend(SettingsWindow._collect_widget_texts(child))
+        return texts
+
+    def _search_counts(self, query: str) -> dict[str, int]:
+        """Map panel-key → number of matching visible labels.
+
+        Matching is a case-insensitive substring over the localized text the
+        user actually sees (collected at build time), so both English and
+        Chinese queries work without any extra keyword table.
+        """
+        q = (query or "").strip().casefold()
+        if not q:
+            return {}
+        counts: dict[str, int] = {}
+        for key, texts in getattr(self, "_panel_texts", {}).items():
+            n = sum(1 for t in texts if q in t.casefold())
+            if n:
+                counts[key] = n
+        return counts
+
+    def _on_search_keyrelease(self, _event=None) -> None:
+        if self._search_job is not None:
+            try:
+                self._root.after_cancel(self._search_job)
+            except Exception:
+                pass
+            self._search_job = None
+
+        def _run():
+            self._search_job = None
+            query = self._search_var.get() if self._search_var is not None else ""
+            self._apply_search_state(query)
+
+        self._search_job = self._root.after(250, _run)
+
+    def _on_search_jump(self, _event=None) -> str:
+        """Enter: apply immediately and open the first matching section."""
+        if self._search_job is not None:
+            try:
+                self._root.after_cancel(self._search_job)
+            except Exception:
+                pass
+            self._search_job = None
+        query = self._search_var.get() if self._search_var is not None else ""
+        self._apply_search_state(query)
+        counts = self._search_counts(query)
+        for key in getattr(self, "_nav_order", []):
+            if key in counts:
+                self._switch_panel(key)
+                break
+        return "break"
+
+    def _on_search_clear(self) -> None:
+        if self._search_job is not None:
+            try:
+                self._root.after_cancel(self._search_job)
+            except Exception:
+                pass
+            self._search_job = None
+        if self._search_var is not None:
+            self._search_var.set("")
+        self._apply_search_state("")
+
+    def _apply_search_state(self, query: str) -> None:
+        """Render the sidebar badges/dimming + in-panel highlights."""
+        self._clear_search_highlight()
+        q = (query or "").strip()
+        if not q:
+            self._search_query = ""
+            self._restore_nav_labels()
+            self._set_search_status(None, "")
+            return
+        self._search_query = q
+        counts = self._search_counts(q)
+        accent = ("#0891B2", "#22D3EE")
+        dim = ("gray60", "gray45")
+        matched = set(counts)
+        for key, btn in self._sidebar_buttons.items():
+            base = self._nav_base_labels.get(key, "")
+            try:
+                if key in matched:
+                    btn.configure(
+                        text=f"{base}  ·  {counts[key]}",
+                        text_color=accent,
+                    )
+                else:
+                    btn.configure(text=base, text_color=dim)
+            except Exception:
+                pass
+        # Highlight matching labels inside the panel on screen.
+        panel = self._panels.get(self._current_panel)
+        if panel is not None:
+            self._highlight_matches_in_panel(panel, q)
+        self._set_search_status(len(counts), q)
+
+    def _highlight_matches_in_panel(self, panel, query: str) -> None:
+        """Recolor matching CTkLabels/Buttons; originals kept for restore."""
+        import customtkinter as _ctk
+
+        for w in self._iter_widget_tree(panel):
+            if not isinstance(w, (_ctk.CTkLabel, _ctk.CTkButton)):
+                continue
+            try:
+                text = w.cget("text")
+                if not isinstance(text, str):
+                    continue
+                if query.casefold() not in text.casefold():
+                    continue
+                original = w.cget("text_color")
+            except Exception:
+                continue
+            try:
+                w.configure(text_color=("#0891B2", "#22D3EE"))
+            except Exception:
+                continue
+            self._search_highlighted.append((w, original))
+
+    @staticmethod
+    def _iter_widget_tree(widget):
+        try:
+            children = widget.winfo_children()
+        except Exception:
+            return
+        for child in children:
+            yield child
+            yield from SettingsWindow._iter_widget_tree(child)
+
+    def _clear_search_highlight(self) -> None:
+        for w, original in getattr(self, "_search_highlighted", []):
+            try:
+                if w.winfo_exists():
+                    w.configure(text_color=original)
+            except Exception:
+                pass
+        self._search_highlighted = []
+
+    def _nav_default_style(self, key: str) -> dict:
+        """Default sidebar styling for *key* (mirrors _switch_panel)."""
+        if key == self._current_panel:
+            return {
+                "text": self._nav_base_labels.get(key, ""),
+                "fg_color": ("#0891B2", "#0E1328"),
+                "text_color": ("#FFFFFF", "#EAF0FA"),
+            }
+        return {
+            "text": self._nav_base_labels.get(key, ""),
+            "fg_color": "transparent",
+            "text_color": ("gray30", "gray80"),
+        }
+
+    def _restore_nav_labels(self) -> None:
+        for key, btn in self._sidebar_buttons.items():
+            try:
+                btn.configure(**self._nav_default_style(key))
+            except Exception:
+                pass
+
+    def _set_search_status(self, count: int | None, query: str) -> None:
+        if self._status_label is None:
+            return
+        try:
+            if count is None:
+                self._status_label.configure(text=T("footer.ready"))
+            elif count:
+                self._status_label.configure(text=T(
+                    "settings_window.search_matches", count=count, query=query))
+            else:
+                self._status_label.configure(text=T(
+                    "settings_window.search_no_matches", query=query))
+        except Exception:
+            pass
 
     # ═══════════════════════════════════════════════════════════════
     # Panel: Network
@@ -664,6 +946,27 @@ class SettingsWindow:
     # Panel: Web Companion
     # ═══════════════════════════════════════════════════════════════
 
+    def _web_lan_ip(self) -> str:
+        """Return the LAN IP for the web panel, cached briefly.
+
+        ``_get_lan_ip()`` runs ``getaddrinfo`` on the hostname; calling it
+        twice on every settings open (label + QR) did that work twice on
+        the UI thread, and a slow resolver stalled the window.  A 30 s TTL
+        matches the dashboard's web card.
+        """
+        import time
+
+        now = time.monotonic()
+        if (now - getattr(self, "_lan_ip_ts", 0.0)) > 30.0 or not getattr(
+            self, "_lan_ip_val", ""
+        ):
+            try:
+                self._lan_ip_val = WebServer._get_lan_ip()
+            except Exception:
+                self._lan_ip_val = "127.0.0.1"
+            self._lan_ip_ts = now
+        return self._lan_ip_val
+
     def _build_web_companion_panel(self):
         panel = ctk.CTkFrame(self._content_frame, fg_color="transparent")
         cfg = self._get_config()
@@ -767,7 +1070,7 @@ class SettingsWindow:
             font=ctk.CTkFont(size=13, weight="bold"),
         ).pack(anchor="w", padx=16, pady=(14, 4))
         self._web_ip_label = ctk.CTkLabel(
-            card2, text=WebServer._get_lan_ip(),
+            card2, text=self._web_lan_ip(),
             font=ctk.CTkFont(size=12, weight="bold"),
         )
         self._web_ip_label.pack(anchor="w", padx=16, pady=(0, 8))
@@ -831,7 +1134,7 @@ class SettingsWindow:
 
             token = self._web_token_var.get() if self._web_token_var else ""
             port = self._web_port_var.get() if self._web_port_var else "19991"
-            ip = WebServer._get_lan_ip()
+            ip = self._web_lan_ip()
             # A phone scans this QR, so point at the lightweight phone companion
             # page — consistent with the desktop overview card and the tray
             # "Web QR" dialog, instead of the full desktop dashboard.
