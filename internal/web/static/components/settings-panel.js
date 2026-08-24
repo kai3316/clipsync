@@ -28,6 +28,8 @@
       'network.relay_url', 'settings_window.relay_hint', 'network.service_type',
       'settings_window.service_type_hint', 'network.local_address',
       'settings_window.save_network',
+      'settings_window.internet_sync_title', 'network.internet_sync',
+      'settings_window.internet_sync_hint', 'settings_window.relay_brokers_label',
     ],
     web: [
       'settings_nav.web_companion', 'settings_window.web_enable',
@@ -115,6 +117,14 @@
         relayUrl: '',
         autoStart: false,
         serviceType: '',
+
+        // Internet (cross-network) sync.  The toggle saves immediately (the
+        // host live-applies it and broadcasts relay_state transitions); the
+        // broker list is staged behind the advanced fold with its own save.
+        internetSyncEnabled: false,
+        relayBrokersText: '',
+        brokersSaving: false,
+        brokersOpen: false,
 
         // Web Companion
         webEnabled: true,
@@ -272,6 +282,28 @@
           '/mobile.html?token=' + encodeURIComponent(this.store.token);
       },
 
+      // Live internet-sync state.  The WS `relay_state` event keeps
+      // store.relayState current; before the first event/fetch arrives the
+      // settings snapshot's copy is used ('' only before the very first load).
+      effectiveRelayState: function () {
+        if (this.store.relayState) return this.store.relayState;
+        var cache = this.store.settingsCache || {};
+        return cache.internet_sync_state || 'off';
+      },
+
+      relayStateKey: function () {
+        return 'relay.state.' + (this.effectiveRelayState || 'off');
+      },
+
+      relayStateColor: function () {
+        switch (this.effectiveRelayState || 'off') {
+          case 'online': return 'var(--clipsync-success)';
+          case 'connecting': return 'var(--clipsync-warning)';
+          case 'error': return 'var(--clipsync-danger)';
+          default: return 'var(--clipsync-fg-muted)';
+        }
+      },
+
       themeOptions: function () {
         return [
           { value: 'system', label: this.t('settings_window.theme_system') },
@@ -391,6 +423,8 @@
         if (s.relay_url !== undefined) this.relayUrl = s.relay_url || '';
         if (s.auto_start !== undefined) this.autoStart = !!s.auto_start;
         if (s.service_type !== undefined) this.serviceType = s.service_type || '';
+        if (s.internet_sync_enabled !== undefined) this.internetSyncEnabled = !!s.internet_sync_enabled;
+        if (s.relay_brokers !== undefined) this.relayBrokersText = (s.relay_brokers || []).join('\n');
         if (s.web_enabled !== undefined) this.webEnabled = !!s.web_enabled;
         if (s.web_port !== undefined) this.webPort = String(s.web_port);
         if (s.web_history_limit !== undefined) this.webHistoryLimit = s.web_history_limit;
@@ -470,6 +504,65 @@
         }).finally(function () {
           self.networkSaving = false;
         });
+      },
+
+      // ── Internet (cross-network) sync ────────────────────────────
+
+      toggleInternetSync: function () {
+        var self = this;
+        this.internetSyncEnabled = !this.internetSyncEnabled;
+        // Saves through the normal settings path; the host live-applies the
+        // change and broadcasts relay_state transitions, which ws.js folds
+        // into store.relayState so the status row below updates on its own.
+        ClipsyncAPI.updateSettings({ internet_sync_enabled: this.internetSyncEnabled })
+          .then(function (res) {
+            if (res && res.updated) self.store.mergeSettings(res.updated);
+          })
+          .catch(function () {
+            // Revert so the UI stays truthful to the server setting.
+            self.internetSyncEnabled = !self.internetSyncEnabled;
+            self.store.showToast(self.t('dialog.failed'), 2000);
+          });
+      },
+
+      saveRelayBrokers: function () {
+        var self = this;
+        var lines = (self.relayBrokersText || '').split('\n')
+          .map(function (s) { return s.trim(); })
+          .filter(Boolean);
+        // An empty list would silently disable internet sync with no error
+        // anywhere else in the UI — refuse it here instead.
+        if (lines.length === 0) {
+          self.store.showToast(self.t('settings.relay_brokers_empty'), 3000);
+          return;
+        }
+        var hasBad = lines.some(function (l) {
+          return l.toLowerCase().indexOf('wss://') !== 0;
+        });
+        if (hasBad) {
+          self.store.showToast(self.t('settings.relay_brokers_invalid'), 3000);
+          return;
+        }
+        // De-duplicate while preserving order so a pasted-overlapping list
+        // doesn't open redundant broker connections.
+        var seen = {};
+        var brokers = [];
+        lines.forEach(function (l) {
+          if (!seen[l]) { seen[l] = true; brokers.push(l); }
+        });
+        self.brokersSaving = true;
+        ClipsyncAPI.updateSettings({ relay_brokers: brokers })
+          .then(function (res) {
+            self.brokersSaving = false;
+            if (res && res.updated) self.store.mergeSettings(res.updated);
+            self.dirtySections['network'] = false;
+            self.relayBrokersText = brokers.join('\n');
+            self.store.showToast(self.t('settings.relay_brokers_saved'), 2500);
+          })
+          .catch(function () {
+            self.brokersSaving = false;
+            self.store.showToast(self.t('dialog.failed'), 2000);
+          });
       },
 
       saveWeb: function () {
@@ -1263,6 +1356,7 @@
       port: function () { this.markDirty('network'); },
       relayUrl: function () { this.markDirty('network'); },
       serviceType: function () { this.markDirty('network'); },
+      relayBrokersText: function () { this.markDirty('network'); },
       webEnabled: function () { this.markDirty('web'); },
       webPort: function () { this.markDirty('web'); },
       webHistoryLimit: function () { this.markDirty('web'); },
@@ -1424,6 +1518,35 @@
                   '<button class="settings-btn settings-btn--accent" @click="saveNetwork" :disabled="networkSaving" style="width:100%;margin-top:8px">' +
                     '{{ networkSaving ? \'...\' : t(\'settings_window.save_network\') }}' +
                   '</button>' +
+
+                  '<!-- Internet (cross-network) sync -->' +
+                  '<h3 class="settings-section__title settings-section__title--sub" style="margin-top:28px">{{ t(\'settings_window.internet_sync_title\') }}</h3>' +
+                  '<div class="settings-toggle-row">' +
+                    '<span class="settings-toggle-label">{{ t(\'network.internet_sync\') }}</span>' +
+                    '<button class="settings-toggle" role="switch" :aria-checked="internetSyncEnabled" :aria-label="t(\'network.internet_sync\')" :class="{ \'settings-toggle--on\': internetSyncEnabled }" @click="toggleInternetSync">' +
+                      '<span class="settings-toggle__knob"></span>' +
+                    '</button>' +
+                  '</div>' +
+                  '<p class="settings-hint" style="margin-bottom:4px">🔒 {{ t(\'settings_window.internet_sync_hint\') }}</p>' +
+                  '<div class="settings-field" style="margin-top:12px">' +
+                    '<span class="settings-field__label">{{ t(\'settings_window.internet_sync_state_label\') }}</span>' +
+                    '<span class="settings-field__value">' +
+                      '<span :style="{ display:\'inline-block\', width:\'10px\', height:\'10px\', borderRadius:\'50%\', marginRight:\'6px\', verticalAlign:\'middle\', background: relayStateColor }"></span>{{ t(relayStateKey) }}' +
+                    '</span>' +
+                  '</div>' +
+                  '<div style="margin-top:6px">' +
+                    '<button class="settings-btn settings-btn--sm" @click="brokersOpen = !brokersOpen">{{ brokersOpen ? \'▾\' : \'▸\' }} {{ t(\'settings_window.relay_brokers_toggle\') }}</button>' +
+                  '</div>' +
+                  '<template v-if="brokersOpen">' +
+                    '<div class="settings-field" style="margin-top:8px">' +
+                      '<label class="settings-field__label">{{ t(\'settings_window.relay_brokers_label\') }}</label>' +
+                      '<textarea class="settings-input" rows="4" v-model="relayBrokersText" placeholder="wss://broker.emqx.io:8884/mqtt"></textarea>' +
+                      '<span class="settings-hint">{{ t(\'settings_window.relay_brokers_hint\') }}</span>' +
+                    '</div>' +
+                    '<button class="settings-btn settings-btn--accent" @click="saveRelayBrokers" :disabled="brokersSaving" style="width:100%;margin-top:4px">' +
+                      '{{ brokersSaving ? \'...\' : t(\'settings_window.save_relay_brokers\') }}' +
+                    '</button>' +
+                  '</template>' +
                 '</section>' +
 
                 '<!-- ═══════ Web Companion ═══════ -->' +

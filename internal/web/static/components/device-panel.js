@@ -77,6 +77,8 @@
                 '<span class="pairing-request-card__name">{{ pr.peer_name || pr.device_name || pr.peer_id }}</span>' +
                 '<span class="pairing-request-card__id">{{ pr.peer_id }}</span>' +
                 '<span class="pairing-request-card__code">{{ t(\'ui.pairing_code_label\') }} <strong>{{ formattedCode(pr) }}</strong></span>' +
+                '<span v-if="pr.sas" class="pairing-request-card__code">&#128737; {{ t(\'devices.sas_label\') }} <strong style="letter-spacing:1px">{{ pr.sas }}</strong></span>' +
+                '<span v-if="pr.sas" class="pairing-request-card__hint">{{ t(\'devices.sas_verify_hint\') }}</span>' +
                 '<span class="pairing-request-card__hint">{{ pairingHint(pr) }}</span>' +
                 '<span class="pairing-request-card__hint">{{ t(\'devices.pairing_expiry_hint\') }}</span>' +
               '</div>' +

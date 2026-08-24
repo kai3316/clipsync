@@ -151,6 +151,14 @@
     pairingRequests: [],
 
     /* ═══════════════════════════════════════════════════════════════
+       Internet (cross-network) sync relay state
+       One of 'off' | 'connecting' | 'online' | 'error'.  Seeded from
+       GET /api/settings (internet_sync_state), then kept live by the WS
+       `relay_state` event (ws.js).  '' = not yet known.
+       ═══════════════════════════════════════════════════════════════ */
+    relayState: '',
+
+    /* ═══════════════════════════════════════════════════════════════
        Speed test
        ═══════════════════════════════════════════════════════════════ */
     speedTest: {

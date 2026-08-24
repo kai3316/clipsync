@@ -62,6 +62,12 @@ _SAFE_FIELDS = {
     "retry_capture_enabled",
     "dedup_method",
     "auto_update_check",
+    # Internet (cross-network) relay sync.  The secrets (relay_secret,
+    # peer_relay_secrets) are deliberately NOT exposed: they never leave the
+    # device except over the TLS LAN channel, and a token holder must not be
+    # able to read or overwrite them through this API.
+    "internet_sync_enabled",
+    "relay_brokers",
     "data_dir",
     "favorites_path",
     "hotkeys",
@@ -133,6 +139,8 @@ _MUTABLE_FIELDS = {
     "retry_capture_enabled",
     "dedup_method",
     "auto_update_check",
+    "internet_sync_enabled",
+    "relay_brokers",
     "data_dir",
     "favorites_path",
     "hotkeys",
@@ -170,8 +178,14 @@ _SAFE_RESPONSE_KEYS = {
 }
 
 
-def get_settings(cfg):
-    """Return safe-to-expose settings (exclude secrets)."""
+def get_settings(cfg, get_internet_sync_state=None):
+    """Return safe-to-expose settings (exclude secrets).
+
+    *get_internet_sync_state*, when provided, returns the live internet-sync
+    relay state (one of off/connecting/online/error) so a freshly loaded
+    dashboard shows the current state without waiting for the next WS
+    ``relay_state`` transition event.
+    """
     result = {}
     for field in _SAFE_FIELDS:
         if hasattr(cfg, field):
@@ -187,6 +201,22 @@ def get_settings(cfg):
     # Expose only *whether* a translation API key is configured, never the
     # key itself (see module docstring).
     result["translate_key_set"] = bool(getattr(cfg, "translate_api_key", ""))
+
+    # Live internet-sync state (never a secret).  When sync is disabled the
+    # state is definitively "off" — no callback needed; otherwise fall back to
+    # "connecting" when the host cannot be asked (callback absent/failed).
+    if not getattr(cfg, "internet_sync_enabled", False):
+        result["internet_sync_state"] = "off"
+    else:
+        state = ""
+        if get_internet_sync_state is not None:
+            try:
+                state = str(get_internet_sync_state() or "")
+            except Exception:
+                logger.debug("get_internet_sync_state callback failed",
+                             exc_info=True)
+        result["internet_sync_state"] = state if state in (
+            "off", "connecting", "online", "error") else "connecting"
 
     return {"settings": result}, 200
 

@@ -589,6 +589,22 @@ var ClipsyncWS = (function () {
           }
           break;
 
+        case 'relay_state':
+          // Internet-sync relay status transition (off/connecting/online/
+          // error).  Only known states are accepted so a malformed or
+          // future-format payload can't poison the settings display.
+          if (data && ['off', 'connecting', 'online', 'error'].indexOf(data.state) !== -1) {
+            store.relayState = data.state;
+            // Keep the cached copy in sync so reopening the settings panel
+            // shows the latest state even before the next settings fetch.
+            if (store.settingsCache) {
+              store.settingsCache = Object.assign({}, store.settingsCache, {
+                internet_sync_state: data.state,
+              });
+            }
+          }
+          break;
+
         case 'show_dialog':
           // Server-pushed dialog modal
           if (data && data.dialog_id) {

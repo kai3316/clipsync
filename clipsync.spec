@@ -23,6 +23,8 @@ hiddenimports = collect_submodules("internal")
 hiddenimports += [
     "zeroconf",
     "cryptography",
+    "paho.mqtt.client",
+    "websockets",
     "PIL",
     "pystray",
     "customtkinter",

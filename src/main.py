@@ -505,6 +505,10 @@ class Application:
         # timer plus the wall-clock deadline mirrored into the tray menu.
         self._pause_timer: threading.Timer | None = None
         self._pause_deadline: float | None = None
+        # Internet (cross-network) relay transport (internal/transport/
+        # relay.py), created lazily by _start_internet_sync() when the
+        # internet_sync_enabled setting is on.
+        self._relay = None
         # Timestamp of the last silent auto-update check (throttled to ~6h).
         self._last_auto_update_check = 0.0
 
@@ -997,6 +1001,7 @@ class Application:
             on_open_folder=self._open_folder,
             on_restart=self._restart_app,
             get_pending_pairings=self._get_pending,
+            get_relay_state=self._get_relay_state,
             get_resolved_hashes=lambda: self.transport_mgr.get_resolved_hashes(),
             enc_mgr=self._make_save_enc(),
             get_certs=self._get_certs,
@@ -2446,6 +2451,10 @@ class Application:
             )
             return
         self.transport_mgr.broadcast(data)
+        # Internet mode mirrors the frame to public-relay channels so paired
+        # peers outside the LAN receive it too (LAN delivery stays primary;
+        # receivers' dedup collapses double deliveries).
+        self._relay_publish_frame(data)
 
     def _on_peer_message(self, msg, peer_id: str | None = None) -> None:
         msg_type = getattr(msg, "msg_type", "clipboard")
@@ -2511,6 +2520,10 @@ class Application:
         if msg_type in PAIRING_MSG_TYPES:
             raw_payload = getattr(msg, "_raw_payload", {})
             self._handle_pairing_message(msg_type, raw_payload, peer_id)
+            return
+        if msg_type == "relay_enroll":
+            self._handle_relay_enroll(
+                getattr(msg, "_raw_payload", {}), peer_id)
             return
         # "Plain text only": enforce THIS device's preference on incoming
         # clips too (a peer with the toggle off still sends rich text).
@@ -2989,6 +3002,9 @@ class Application:
             self._pairing_notify_fallback(peer_name, code)
         self._push_web("broadcast", "pairing_request", {
             "peer_id": peer_id, "peer_name": peer_name, "code": code,
+            # SAS shown on BOTH devices during pairing — the user compares
+            # them before confirming (defeats pairing-code MITM).
+            "sas": self._pairing_sas(peer_id),
         })
         # Do NOT force-open the dashboard here: that pops a new window on
         # every pairing request even when the user is already in the web UI.
@@ -3061,6 +3077,16 @@ class Application:
             self.sync_mgr.set_enabled(enabled)
             if self.systray is not None:
                 self._set_systray_syncing(enabled)
+        if "internet_sync_enabled" in updated:
+            self._apply_internet_sync_enabled(updated["internet_sync_enabled"])
+        elif "relay_brokers" in updated and self._relay is not None:
+            # Broker list edited while the relay is live — recycle it so the
+            # new endpoints take effect immediately (no restart needed).
+            try:
+                self._relay.restart()
+            except Exception:
+                logger.debug("relay restart after broker change failed",
+                             exc_info=True)
         if "filter_enabled_categories" in updated and self.content_filter is not None:
             self.content_filter.enabled_categories = updated["filter_enabled_categories"]
         if "source_tracking_enabled" in updated and getattr(self, "_monitor", None) is not None:
@@ -3578,6 +3604,13 @@ class Application:
         # auto-update relaunch) before any UI reads the sync state — runs
         # after _create_ui/_start_services so tray + sync_mgr both exist.
         self._restore_timed_pause()
+        # Internet (cross-network) sync: bring the public-relay transport up
+        # when the setting is on (it stays fully offline otherwise).
+        if getattr(self.cfg, "internet_sync_enabled", False):
+            try:
+                self._start_internet_sync()
+            except Exception:
+                logger.debug("Internet sync startup failed", exc_info=True)
         updater = threading.Thread(target=self._update_peers_loop, daemon=True)
         updater.start()
 
@@ -3852,6 +3885,12 @@ class Application:
             return
         self._shutting_down = True
         self._stop_updater.set()
+        # Drop the public-relay link before tearing down managers: its
+        # receive callbacks route into them.
+        try:
+            self._stop_internet_sync()
+        except Exception:
+            logger.debug("Internet sync shutdown failed", exc_info=True)
         logger.info("Shutting down...")
         # Kill the timed-pause auto-resume timer first: firing into a torn-
         # down UI would only log an error, but cancelling is cleaner.
@@ -6298,9 +6337,35 @@ class Application:
         # sees the real cause instead of a generic "download failed".
         return {"ok": False, "path": "", "error": reason or "download failed"}
 
+    def _pairing_sas(self, peer_id: str) -> str:
+        """Short Authentication String shown on both ends of a pairing.
+
+        Derived from this device's and the peer's certificate fingerprints
+        (internal/security/fingerprint.py).  Empty when either fingerprint is
+        unknown — the UI then simply omits the SAS row.
+        """
+        try:
+            from internal.security.fingerprint import sas_code
+            mine = ""
+            theirs = ""
+            if self.pairing_mgr is not None:
+                mine = self.pairing_mgr.get_identity().fingerprint
+                theirs = self.pairing_mgr.get_peer_fingerprint(peer_id)
+            if mine and theirs:
+                return sas_code(mine, theirs)
+        except Exception:
+            logger.debug("SAS derivation failed for %s", (peer_id or "")[:12],
+                         exc_info=True)
+        return ""
+
     def _get_pending(self) -> list:
         pending = self.pairing_mgr.get_pending_pairings() if self.pairing_mgr else []
-        result = list(pending)
+        # Attach the pairing SAS as a 5th element so the web devices API can
+        # surface it on the confirmation card (see internal/web/api/devices.py).
+        result = [
+            tuple(p) + (self._pairing_sas(p[0]),)
+            for p in pending if isinstance(p, (tuple, list)) and p
+        ]
         # The pairing manager drops expired requests entirely, so a request that
         # times out silently vanishes from the devices refresh.  Surface an
         # "expired" row for one refresh instead (and notify once).
@@ -7026,6 +7091,183 @@ class Application:
         logger.info("Sync resumed via tray (%s)",
                     "timed pause" if had_pause else "manual")
         self._on_systray_toggle(True)
+
+    # ═══════════════════════════════════════════════════════════════
+    # Internet (cross-network) sync over public MQTT relays
+    # ═══════════════════════════════════════════════════════════════
+
+    def _ensure_relay_secret(self) -> str:
+        """This device's relay secret, generated and persisted on first use.
+
+        Never leaves the device except via the TLS-encrypted LAN channel
+        (relay_enroll), so the public broker never sees it.
+        """
+        if not self.cfg.relay_secret:
+            from internal.transport.relay import generate_relay_secret
+            self.cfg.relay_secret = generate_relay_secret()
+            try:
+                self._save_cfg_and_peers()
+            except Exception:
+                logger.debug("Failed persisting new relay secret", exc_info=True)
+        return self.cfg.relay_secret
+
+    def _relay_channels(self) -> dict[str, bytes]:
+        """{topic: key} for every paired peer whose relay secret we know.
+
+        Derivation is symmetric, so both ends compute identical topics/keys
+        from their two secrets without ever transmitting them again.
+        """
+        from internal.transport.relay import derive_key, derive_topic
+        my_secret = self._ensure_relay_secret()
+        channels: dict[str, bytes] = {}
+        for pid, peer_secret in list(self.cfg.peer_relay_secrets.items()):
+            peer = self.cfg.peers.get(pid)
+            if peer is None or not peer.paired or not peer_secret:
+                continue
+            channels[derive_topic(my_secret, peer_secret)] = derive_key(
+                my_secret, peer_secret)
+        return channels
+
+    def _on_relay_state(self, state: str) -> None:
+        logger.info("Internet sync relay state: %s", state)
+        try:
+            if getattr(self, "web_server", None) is not None:
+                self.web_server.broadcast("relay_state", {"state": state})
+        except Exception:
+            logger.debug("relay_state WS broadcast failed", exc_info=True)
+
+    def _get_relay_state(self) -> str:
+        """Current internet-sync state for late-joining web clients.
+
+        WS ``relay_state`` events only reach clients attached at transition
+        time; GET /api/settings polls this so a freshly loaded dashboard shows
+        the truth instead of assuming "off".
+        """
+        if not getattr(self.cfg, "internet_sync_enabled", False):
+            return "off"
+        relay = self._relay
+        if relay is None:
+            # Enabled but the transport is not up yet (startup ordering) —
+            # report connecting rather than a misleading "off".
+            return "connecting"
+        try:
+            return relay.state
+        except Exception:
+            return "connecting"
+
+    def _on_relay_frame(self, frame_bytes: bytes) -> None:
+        """A clipboard frame arrived through the public relay.
+
+        It is a standard ClipSync frame — decode and feed the very same
+        message router used for LAN frames.  Replies (acks etc.) ride the
+        LAN connection when the peer happens to be connected; the relay is
+        one-way clipboard content only in this MVP.
+        """
+        try:
+            from internal.protocol.codec import decode_message
+            sync_msg = decode_message(frame_bytes)
+        except Exception:
+            logger.debug("Relay frame failed to decode", exc_info=True)
+            return
+        source = getattr(sync_msg, "source_device", "") or None
+        try:
+            self._on_peer_message(sync_msg, source)
+        except Exception:
+            logger.debug("Relay frame handling failed", exc_info=True)
+
+    def _start_internet_sync(self) -> None:
+        if self._relay is not None:
+            return
+        from internal.transport.relay import RelayTransport, build_paho_client
+        transport = RelayTransport(
+            brokers=list(self.cfg.relay_brokers),
+            get_channels=self._relay_channels,
+            on_frame=self._on_relay_frame,
+            on_state=self._on_relay_state,
+            client_factory=build_paho_client,
+        )
+        self._relay = transport
+        transport.start()
+        # Enroll every paired peer so both sides learn each other's relay
+        # secret over the encrypted LAN channel (offline peers pick it up on
+        # their next enroll reply exchange once they connect).
+        for pid in list(self.cfg.peers):
+            self._send_relay_enroll(pid)
+
+    def _stop_internet_sync(self) -> None:
+        transport, self._relay = self._relay, None
+        if transport is not None:
+            transport.stop()
+
+    def _send_relay_enroll(self, peer_id: str) -> None:
+        """Offer our relay secret to a paired peer over its LAN connection.
+
+        Idempotent and cheap: the receiver stores it, then replies with its
+        own secret, so a single successful exchange teaches both sides.
+        """
+        if not self.cfg.internet_sync_enabled:
+            return
+        peer = self.cfg.peers.get(peer_id)
+        if peer is None or not peer.paired:
+            return
+        try:
+            self.transport_mgr.send_to_peer(
+                peer_id,
+                encode_frame({"msg_type": "relay_enroll",
+                              "relay_secret": self._ensure_relay_secret()}),
+            )
+        except Exception:
+            logger.debug("relay enroll to %s failed", peer_id[:12], exc_info=True)
+
+    def _handle_relay_enroll(self, payload: dict, peer_id: str | None) -> None:
+        """Store a paired peer's relay secret (sent over its TLS channel)."""
+        if not peer_id or not isinstance(payload, dict):
+            return
+        secret = payload.get("relay_secret")
+        if (not isinstance(secret, str) or len(secret) != 64
+                or any(c not in "0123456789abcdef" for c in secret)):
+            logger.debug("Ignoring invalid relay_enroll from %s",
+                         (peer_id or "")[:12])
+            return
+        known = self.cfg.peer_relay_secrets.get(peer_id)
+        if known != secret:
+            self.cfg.peer_relay_secrets[peer_id] = secret
+            try:
+                self._save_cfg_and_peers()
+            except Exception:
+                logger.debug("Failed persisting peer relay secret", exc_info=True)
+        if self._relay is not None:
+            self._relay.refresh_channels()
+        # Always answer so the other side learns OUR secret even if it knew
+        # an older one — this is what bootstraps both directions.
+        self._send_relay_enroll(peer_id)
+
+    def _relay_publish_frame(self, frame_bytes: bytes) -> None:
+        """Mirror an outbound clipboard frame to all enrolled paired peers."""
+        transport = self._relay
+        if transport is None or not self.cfg.internet_sync_enabled:
+            return
+        from internal.transport.relay import derive_key, derive_topic
+        my_secret = self._ensure_relay_secret()
+        for pid, peer_secret in list(self.cfg.peer_relay_secrets.items()):
+            peer = self.cfg.peers.get(pid)
+            if peer is None or not peer.paired or not peer_secret:
+                continue
+            topic = derive_topic(my_secret, peer_secret)
+            key = derive_key(my_secret, peer_secret)
+            try:
+                transport.publish(frame_bytes, topic, key)
+            except Exception:
+                logger.debug("relay publish to %s failed", pid[:12],
+                             exc_info=True)
+
+    def _apply_internet_sync_enabled(self, enabled: bool) -> None:
+        """Live-apply the internet_sync_enabled setting."""
+        enabled = bool(enabled)
+        if enabled:
+            self._start_internet_sync()
+        else:
+            self._stop_internet_sync()
 
     def _restore_timed_pause(self) -> None:
         """Re-arm a timed pause that a restart interrupted (phase-10 hook).

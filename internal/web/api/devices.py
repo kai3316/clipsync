@@ -167,6 +167,10 @@ def get_devices(cfg, get_connected_ids, get_discovered=None,
                     "peer_name": p.get("peer_name", p.get("device_name", "")),
                     "code": p.get("code", ""),
                     "status": p.get("status", "pending"),
+                    # Short Authentication String derived from both devices'
+                    # certificate fingerprints; empty when unknown, in which
+                    # case the UI omits the row.
+                    "sas": p.get("sas", ""),
                 })
             elif isinstance(p, (tuple, list)) and len(p) >= 3:
                 pending_list.append({
@@ -176,6 +180,9 @@ def get_devices(cfg, get_connected_ids, get_discovered=None,
                     # transient pairing lifecycle status: pending /
                     # confirmed_waiting / peer_confirmed / paired / cancelled
                     "status": p[3] if len(p) > 3 else "pending",
+                    # 5th element (optional): the pairing SAS to display on
+                    # the confirmation card for cross-device comparison.
+                    "sas": p[4] if len(p) > 4 else "",
                 })
         result["pending_pairings"] = pending_list
 

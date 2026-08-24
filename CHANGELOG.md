@@ -4,6 +4,12 @@ All notable changes to ClipSync are documented in this file.
 
 ## [Unreleased]
 
+### Internet sync (new)
+- **Sync across networks — office ↔ home — with zero cost, zero signup, and no extra software.** The new "Internet sync" setting mirrors clipboard traffic over free public MQTT relays (broker list editable, defaults to three well-known free services with automatic failover). Both ends stay end-to-end encrypted: the relay only ever sees ciphertext and an unguessable per-pair topic derived from device secrets exchanged over the encrypted LAN channel.
+- **Pairing now shows a safety code.** During pairing confirmation both devices display the same short fingerprint code (e.g. `3A2F-91C4`) — verify they match before confirming, which closes the pairing-code man-in-the-middle window that mattered little on a trusted LAN but matters on the internet.
+- Live connection status in web settings (off / connecting / online / error) pushed over WebSocket; the broker list can be edited while running and applies immediately.
+- LAN delivery stays primary: internet sync adds a mirror path for paired peers outside the network, and the existing duplicate-merge logic collapses double deliveries.
+
 ### Web dashboard
 - **Timed sync pause from the web**: the overview quick controls gain ⏸ 15 min / 30 min / 1 hour buttons with a live countdown and instant resume — same persisted deadline as the tray, so it even survives a restart.
 - **Settings search box on web**: type to filter setting groups with match counts, Enter jumps to the first hit (mirrors the desktop window, works in Chinese and English).

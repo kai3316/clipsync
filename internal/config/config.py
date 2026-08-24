@@ -161,6 +161,23 @@ class Config:
     # Global hotkeys are off by default; the user can enable them in settings.
     hotkeys_enabled: bool = False
 
+    # Internet (cross-network) sync over public MQTT-over-WebSocket relays
+    # (see internal/transport/relay.py).  Zero-cost design: the editable
+    # broker list defaults to free public services, payloads stay E2E-
+    # encrypted, and the relay only ever sees ciphertext + an unguessable
+    # topic derived from both devices' secrets.
+    internet_sync_enabled: bool = False
+    relay_brokers: list[str] = field(default_factory=lambda: [
+        "wss://broker.emqx.io:8084/mqtt",
+        "wss://broker.hivemq.com:8884/mqtt",
+        "wss://test.mosquitto.org:8081/mqtt",
+    ])
+    # This device's own relay secret — generated lazily on first use and
+    # never transmitted in the clear (enrollment rides the TLS LAN channel).
+    relay_secret: str = ""
+    # peer device_id → that peer's relay secret, learned via relay_enroll.
+    peer_relay_secrets: dict[str, str] = field(default_factory=dict)
+
     def add_peer(self, peer: PeerInfo):
         self.peers[peer.device_id] = peer
 
@@ -222,6 +239,7 @@ def _cleanup_stale_temps():
 #   "float"    int or float (bool rejected), coerced to float
 #   "strlist"  list of strings, or None (the filter_enabled_categories
 #              sentinel meaning "all enabled")
+#   "strdict"  dict mapping strings to plain strings (peer_relay_secrets)
 #   "hotkeys"  dict mapping shortcut-id strings to shortcut strings
 _FIELD_RULES: dict[str, tuple] = {
     "device_id": ("str",),
@@ -277,6 +295,10 @@ _FIELD_RULES: dict[str, tuple] = {
     "translate_api_key": ("str",),
     "hotkeys": ("hotkeys",),
     "hotkeys_enabled": ("bool",),
+    "internet_sync_enabled": ("bool",),
+    "relay_brokers": ("strlist_nonnull",),
+    "relay_secret": ("str",),
+    "peer_relay_secrets": ("strdict",),
 }
 
 # Sentinel returned by _validate_field when a value must be skipped.
@@ -319,6 +341,13 @@ def _validate_field(key: str, value: object):
             return _SKIP_FIELD
         return value
     if kind == "hotkeys":
+        if not isinstance(value, dict):
+            return _SKIP_FIELD
+        if not all(isinstance(k, str) and isinstance(v, str)
+                   for k, v in value.items()):
+            return _SKIP_FIELD
+        return value
+    if kind == "strdict":
         if not isinstance(value, dict):
             return _SKIP_FIELD
         if not all(isinstance(k, str) and isinstance(v, str)
@@ -393,6 +422,8 @@ def load() -> Config:
                 "web_token", "web_history_limit",
                 "translate_url", "translate_api_key",
                 "hotkeys", "hotkeys_enabled",
+                "internet_sync_enabled", "relay_brokers",
+                "relay_secret", "peer_relay_secrets",
             ):
                 if key in data:
                     value = _validate_field(key, data[key])
@@ -541,6 +572,10 @@ def save(cfg: Config, enc_mgr: "EncryptionManager | None" = None):
             "translate_api_key": cfg.translate_api_key,
             "hotkeys": cfg.hotkeys,
             "hotkeys_enabled": cfg.hotkeys_enabled,
+            "internet_sync_enabled": cfg.internet_sync_enabled,
+            "relay_brokers": cfg.relay_brokers,
+            "relay_secret": cfg.relay_secret,
+            "peer_relay_secrets": cfg.peer_relay_secrets,
             "peers": [
                 {
                     "device_id": p.device_id,

@@ -111,6 +111,12 @@ CHAT_MSG_TYPES = frozenset({
 # file bytes from unpaired peers.
 UNPAIRED_GATE_MSG_TYPES = PAIRING_MSG_TYPES | CHAT_MSG_TYPES | frozenset({"file_chunk"})
 
+# Internet-relay enrollment ({relay_secret}) sent to an already-paired peer
+# over its encrypted LAN connection, so both sides can derive the shared
+# public-broker topic + key (internal/transport/relay.py).  Paired-only by
+# construction — deliberately NOT in UNPAIRED_GATE_MSG_TYPES.
+RELAY_MSG_TYPES = frozenset({"relay_enroll"})
+
 
 def encode_frame(payload_dict: dict, msg_id: str = "", source_device: str = "") -> bytes:
     """Encode a generic JSON payload dict into the binary frame format.
