@@ -21,6 +21,11 @@ import time
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from internal.clipboard.dedup import (
+    adds_new_flavors,
+    labels_to_types,
+    merge_types,
+)
 from internal.clipboard.format import ClipboardContent, ContentType
 from internal.config.config import _config_dir
 
@@ -157,6 +162,12 @@ class ClipboardHistoryDB:
 
     # Minimum interval (seconds) between entries with identical primary content.
     DEDUP_WINDOW = 2.0
+
+    # Same-text captures within this window merge into the newest entry
+    # instead of stacking a second (possibly flavor-poorer) record — see
+    # ClipboardHistory.FLAVOR_MERGE_WINDOW for the rationale.  Mirrors the
+    # sync manager's DEDUP_RING_TTL (90 s).
+    FLAVOR_MERGE_WINDOW = 90.0
 
     # Fields encrypted at rest — excludes timestamp and content_type
     _ENCRYPTED_FIELDS = ("types", "text_preview", "source_device", "source_title", "source_app")
@@ -514,11 +525,33 @@ class ClipboardHistoryDB:
         captured_at = content.timestamp or now
 
         with self._lock:
-            if dedup_key == self._last_dedup_key:
-                if now - self._last_dedup_time < self.DEDUP_WINDOW:
-                    return
+            if (dedup_key == self._last_dedup_key
+                    and now - self._last_dedup_time < self.DEDUP_WINDOW):
+                # Same primary content within the tight coalesce window.
+                # A capture that adds a format the surviving entry lacks
+                # must upgrade the entry, not be dropped (that drop used to
+                # lose the rich flavor forever); a true duplicate stays dropped.
+                top = self._entries[0] if self._entries else None
+                if (top is not None
+                        and self._stored_text_key(top) == dedup_key
+                        and adds_new_flavors(top.get("types"), content.types)):
+                    self._merge_into_top(top, content, source_app, captured_at)
+                return
             self._last_dedup_key = dedup_key
             self._last_dedup_time = now
+
+            # Same-text re-copy beyond the coalesce window: merge into the
+            # newest entry (keeping its richer flavors) instead of stacking
+            # a plain-text duplicate that would bury the rich one.  Only
+            # text-body keys merge; image/file keys are byte-exact so a
+            # different hash there is genuinely different content.
+            if dedup_key.startswith("text:") and self._entries:
+                top = self._entries[0]
+                if (self._stored_text_key(top) == dedup_key
+                        and now - (top.get("timestamp") or 0.0)
+                        < self.FLAVOR_MERGE_WINDOW):
+                    self._merge_into_top(top, content, source_app, captured_at)
+                    return
 
             preview = _build_preview(content.types)
             entry: dict = {
@@ -568,6 +601,86 @@ class ClipboardHistoryDB:
                 }
                 self._entries = pinned + [e for e in unpinned if id(e) in keep_ids]
                 self._trim_db()
+
+    # ------------------------------------------------------------------
+    # Same-text flavor merge (mirrors ClipboardHistory)
+    # ------------------------------------------------------------------
+
+    def _stored_text_key(self, entry: dict) -> str:
+        """Rebuild an entry's dedup key from its stored base64 types.
+
+        Recomputing (rather than caching on the row) works for entries
+        loaded from disk and legacy records alike, with no schema change.
+        """
+        types = labels_to_types(entry.get("types"))
+        if not types:
+            return ""
+        return _make_dedup_key(ClipboardContent(types=types))
+
+    def _merge_into_top(self, entry: dict, content: ClipboardContent,
+                        source_app: dict | None, captured_at: float) -> None:
+        """Fold a same-text re-capture into *entry*, preserving flavors.
+
+        The union of formats keeps every flavor either side had (rich text
+        survives a plain re-copy); per format the newer bytes win.  The
+        merged entry is re-stamped as the most recent copy — mirroring the
+        paste-to-top semantics of re-using an item.
+        """
+        existing_ct = labels_to_types(entry.get("types"))
+        merged_ct, changed = merge_types(existing_ct, content.types)
+        if changed:
+            entry["types"] = {
+                _map_type_to_label(t): base64.b64encode(d).decode("ascii")
+                for t, d in merged_ct.items()
+            }
+            best = ClipboardContent(types=merged_ct).best_format()
+            if best is not None:
+                entry["content_type"] = _map_type_to_label(best[0])
+            entry["text_preview"] = _build_preview(merged_ct)
+        entry["source_device"] = (content.source_device
+                                  or entry.get("source_device", ""))
+        if source_app:
+            entry["source_app"] = source_app.get("name", "")
+            entry["source_title"] = source_app.get("title", "")
+        # Never move backwards: a sender's clock skew must not reorder
+        # history relative to entries captured in between.
+        entry["timestamp"] = max(captured_at, entry.get("timestamp") or 0.0)
+        try:
+            self._entries.remove(entry)
+        except ValueError:
+            pass
+        self._entries.insert(0, entry)
+        self._persist_entry_update(entry)
+
+    def _persist_entry_update(self, entry: dict) -> None:
+        """Incrementally write a merged entry's text columns back to the DB.
+
+        Text-bearing fields are encrypted through ``_encrypt_entry`` when an
+        encryption manager is configured, matching how ``_insert_row`` stores
+        them (a raw UPDATE would leave those cells as the only plaintext on
+        an otherwise-encrypted at-rest store).
+        """
+        text_fields = ("types", "text_preview",
+                       "source_device", "source_app", "source_title")
+        fields = {
+            "timestamp": entry.get("timestamp", 0.0),
+            "content_type": entry.get("content_type", ""),
+            "paste_count": entry.get("paste_count", 0),
+        }
+        if self._enc_mgr:
+            enc = self._encrypt_entry(
+                {k: (entry.get(k) or ({} if k == "types" else ""))
+                 for k in text_fields},
+            )
+        else:
+            enc = {k: (entry.get(k) or ({} if k == "types" else ""))
+                   for k in text_fields}
+        fields["text_preview"] = enc["text_preview"]
+        fields["source_device"] = enc["source_device"]
+        fields["source_app"] = enc["source_app"]
+        fields["source_title"] = enc["source_title"]
+        fields["types"] = json.dumps(enc["types"], ensure_ascii=False)
+        self._update_row(entry.get("entry_id"), **fields)
 
     def get_all(self) -> list[dict]:
         """Return all entries, pinned first, then newest first within each group."""

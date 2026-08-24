@@ -15,9 +15,11 @@ modification.
 import json
 import logging
 import os
+import re
 import sqlite3
 import time
 import uuid
+from datetime import datetime
 
 from internal.config.config import _config_dir
 
@@ -379,3 +381,123 @@ def update_favorite(body):
         return {"ok": False, "error": "database error"}, 500
     finally:
         conn.close()
+
+
+# ---------------------------------------------------------------------------
+# Export
+# ---------------------------------------------------------------------------
+
+
+def _build_favorites_export(favorites: list, fmt: str) -> str:
+    """Render the favorites list as a Markdown or plain-text document.
+
+    Markdown output is grouped by group heading with each clip's content in a
+    fenced code block (the fence grows past any backtick run inside the
+    content so the block can never be broken open).  Text output is a flat
+    readable listing.  Both keep the stored position order.
+    """
+    stamp = datetime.now().strftime("%Y-%m-%d %H:%M")
+    lines: list[str] = []
+    if fmt == "markdown":
+        fence_len = 3
+        for fav in favorites:
+            for run in re.findall(r"`+", fav.get("content", "") or ""):
+                if len(run) >= fence_len:
+                    fence_len = len(run) + 1
+        fence = "`" * fence_len
+        lines.append("# ClipSync Favorites")
+        lines.append("")
+        lines.append(f"_Exported {stamp} · {len(favorites)} items_")
+        current_group = object()  # sentinel: never equals a group name
+        for fav in favorites:
+            group = fav.get("group") or "Ungrouped"
+            if group != current_group:
+                lines.append("")
+                lines.append(f"## {group}")
+                current_group = group
+            lines.append("")
+            lines.append(f"**{fav.get('title') or '(untitled)'}**")
+            content = fav.get("content", "") or ""
+            if content:
+                lines.append("")
+                lines.append(fence)
+                lines.append(content)
+                lines.append(fence)
+        return "\n".join(lines) + "\n"
+
+    # Plain text
+    lines.append(
+        f"ClipSync Favorites — exported {stamp} ({len(favorites)} items)")
+    lines.append("=" * 48)
+    for fav in favorites:
+        lines.append("")
+        group = fav.get("group") or "(no group)"
+        lines.append(f"[{group}] {fav.get('title') or '(untitled)'}")
+        content = fav.get("content", "") or ""
+        if content:
+            lines.append(content)
+        lines.append("-" * 48)
+    return "\n".join(lines) + "\n"
+
+
+def export_favorites(body, dest_dir=None):
+    """Export ALL favorites to a Markdown or plain-text file.
+
+    Request body: {"format": "markdown" | "text"}  (default markdown).
+    Writes a timestamped file to the user's Downloads folder — the same place
+    the history export lands — falling back to the app data dir, and returns
+    the durable path plus the item count.
+    """
+    try:
+        data = json.loads(body.decode("utf-8")) if body else {}
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        return {"ok": False, "error": "invalid json"}, 400
+    if not isinstance(data, dict):
+        data = {}
+    fmt = str(data.get("format", "markdown")).lower()
+    if fmt not in ("markdown", "text"):
+        return {"ok": False,
+                "error": "unsupported format (use markdown or text)"}, 400
+
+    favorites = _load_favorites()
+
+    from pathlib import Path
+    suffix = ".md" if fmt == "markdown" else ".txt"
+    downloads = Path.home() / "Downloads"
+    target_dir = Path(dest_dir) if dest_dir else (
+        downloads if downloads.is_dir() else Path(_config_dir())
+    )
+    try:
+        target_dir.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        target_dir = Path(_config_dir())
+    ts = datetime.now().strftime("%Y%m%d-%H%M%S")
+    dest_path = str(target_dir / f"clipsync-favorites-{ts}{suffix}")
+
+    try:
+        text = _build_favorites_export(favorites, fmt)
+    except Exception as exc:  # defensive: never 500 on odd content bytes
+        logger.error("Failed to render favorites export: %s", exc)
+        return {"ok": False, "error": "export rendering failed"}, 500
+
+    try:
+        with open(dest_path, "w", encoding="utf-8") as f:
+            f.write(text)
+        # Plaintext clipboard content on disk — match the history export's
+        # owner-only permissions where the OS supports it.
+        try:
+            os.chmod(dest_path, 0o600)
+        except OSError:
+            pass
+    except OSError as exc:
+        logger.error("Failed to write favorites export: %s", exc)
+        return {"ok": False, "error": str(exc)}, 500
+
+    logger.info("Favorites export: %d items -> %s", len(favorites), dest_path)
+    return {
+        "ok": True,
+        "filepath": dest_path,
+        "filename": os.path.basename(dest_path),
+        "count": len(favorites),
+        "format": fmt,
+    }, 200

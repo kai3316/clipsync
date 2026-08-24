@@ -11,7 +11,13 @@ import time
 
 from internal.web.api import chat as _chat_api
 from internal.web.api.devices import get_devices
-from internal.web.api.favorites import add_favorite, delete_favorite, get_favorites, update_favorite
+from internal.web.api.favorites import (
+    add_favorite,
+    delete_favorite,
+    export_favorites,
+    get_favorites,
+    update_favorite,
+)
 from internal.web.api.history import (
     batch_delete,
     batch_favorite,
@@ -359,7 +365,11 @@ def _dispatch(method, path, query_params, body, cfg, history, sync_mgr,
             return _json_response({"devices": devices or []})
 
         elif path == "/api/logs":
-            lines_str = query_params.get("lines", ["200"])[0]
+            lines_str = query_params.get("lines", [None])[0]
+            if lines_str is None:
+                # ?tail= is accepted as an alias for ?lines= — same semantics
+                # (number of trailing log lines to return).
+                lines_str = query_params.get("tail", ["200"])[0]
             try:
                 n = int(lines_str)
             except (TypeError, ValueError):
@@ -559,6 +569,11 @@ def _dispatch(method, path, query_params, body, cfg, history, sync_mgr,
 
         elif path == "/api/favorites":
             data, status = add_favorite(body)
+            return _json_response(data, status)
+
+        elif path == "/api/favorites/export":
+            # One-click export of ALL favorites as a Markdown / text file.
+            data, status = export_favorites(body)
             return _json_response(data, status)
 
         elif path == "/api/transfer":

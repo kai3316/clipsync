@@ -67,6 +67,9 @@
 
         // Loading states
         addingFavorite: false,
+
+        // Export (Markdown) in-flight flag
+        exporting: false,
       };
     },
 
@@ -78,9 +81,20 @@
           <span class="favorites-panel__header-title">{{ t('favorites.title') }}</span>
           <span v-if="store.favorites.length" class="favorites-panel__header-count neon-badge">{{ store.favorites.length }}</span>
         </div>
-        <button class="favorites-panel__add-btn btn-primary" @click="openAddModal">
-          <span>+</span> {{ t('favorites.add') }}
-        </button>
+        <div style="display:flex;align-items:center;gap:8px">
+          <!-- One-click export: all favorites as a Markdown file -->
+          <button
+            v-if="store.favorites.length > 0"
+            class="btn-ghost"
+            @click="exportFavorites"
+            :disabled="exporting"
+            :title="t('favorites.export_tooltip')"
+            :aria-label="t('favorites.export_tooltip')"
+          >{{ exporting ? '...' : t('favorites.export') }}</button>
+          <button class="favorites-panel__add-btn btn-primary" @click="openAddModal">
+            <span>+</span> {{ t('favorites.add') }}
+          </button>
+        </div>
       </div>
 
       <!-- Mobile group dropdown -->
@@ -564,6 +578,34 @@
         this.store.favoriteSearch = '';
       },
 
+      /* ── Export ──────────────────────────────────────────────── */
+
+      // One-click export: ask the server to write ALL favorites (every
+      // group, stored order) to a Markdown file next to the history export.
+      exportFavorites: function () {
+        var self = this;
+        if (this.exporting) return;
+        this.exporting = true;
+        ClipsyncAPI.exportFavorites('markdown').then(function (res) {
+          self.exporting = false;
+          if (res && res.ok) {
+            self.store.showToast(
+              self.t('favorites.exported', {
+                count: res.count,
+                path: res.filepath || res.filename || '',
+              }),
+              3500
+            );
+          } else {
+            self.store.showToast(self.t('favorites.export_failed'), 2000);
+          }
+        }).catch(function (e) {
+          console.error('[ClipSync] Favorites export failed:', e);
+          self.exporting = false;
+          self.store.showToast(self.t('favorites.export_failed'), 2000);
+        });
+      },
+
       retryLoad: function () {
         if (this.$root && typeof this.$root.loadData === 'function') {
           this.$root.loadData();
@@ -885,7 +927,12 @@
           this.t('favorites.delete_group_confirm', { group: group, count: toUpdate.length })
         ).then(doDelete).catch(function () { /* cancelled */ });
       },
+    },
 
+    // Lifecycle hooks MUST sit at the component's top level — they were
+    // previously nested inside `methods`, where Vue never calls them, so the
+    // group context menu could not be dismissed by an outside click or
+    // Escape (it stayed open until another group was clicked).
     mounted: function () {
       // Close context menu on outside click
       var self = this;
@@ -917,7 +964,6 @@
         clearTimeout(this._searchDebounce);
       }
     },
-  },
 };
 
 })();

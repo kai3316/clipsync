@@ -204,7 +204,7 @@
 
                   '<div v-else-if="m.kind === \'text\'" class="chat-bubble"' +
                     ' :class="[m.outgoing ? \'chat-bubble--out\' : \'chat-bubble--in\',' +
-                    ' (m.outgoing && m.status === \'failed\') ? \'chat-bubble--failed\' : \']">' +
+                    ' (m.outgoing && m.status === \'failed\') ? \'chat-bubble--failed\' : \'\']">' +
                     '<div class="chat-bubble__text">{{ m.text }}</div>' +
                     '<div class="chat-bubble__meta">' +
                       '<template v-if="m.outgoing && m.status === \'failed\'">' +

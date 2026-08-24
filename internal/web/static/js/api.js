@@ -307,6 +307,18 @@ var ClipsyncAPI = (function () {
       return this._fetch('PATCH', '/api/favorites', payload);
     },
 
+    /**
+     * Export ALL favorites to a Markdown or plain-text file on the host
+     * (same Downloads location the history export uses).
+     * @param {string} format - "markdown" (default) or "text"
+     * @returns {Promise<{ok: boolean, filepath: string, count: number}>}
+     */
+    exportFavorites: function (format) {
+      return this._fetch('POST', '/api/favorites/export', {
+        format: format || 'markdown',
+      });
+    },
+
     /* ═══════════════════════════════════════════════════════════════
        Data export / import endpoints
        ═══════════════════════════════════════════════════════════════ */

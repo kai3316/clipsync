@@ -13,6 +13,7 @@ Uses pystray with Pillow for icon rendering.
 import ctypes
 import logging
 import sys
+import time
 from collections.abc import Callable
 
 try:
@@ -85,6 +86,8 @@ class SystrayApp:
         on_send_url: Callable | None = None,
         on_check_update: Callable | None = None,
         on_about: Callable | None = None,
+        on_pause_minutes: Callable | None = None,
+        on_resume_sync: Callable | None = None,
     ):
         self._device_name = device_name
         self._on_enable_toggle = on_enable_toggle
@@ -96,8 +99,13 @@ class SystrayApp:
         self._on_send_url = on_send_url
         self._on_check_update = on_check_update
         self._on_about_cb = on_about
+        self._on_pause_minutes = on_pause_minutes
+        self._on_resume_sync = on_resume_sync
         self._syncing = True
         self._web_enabled = False
+        # Wall-clock deadline (time.time()) of a timed "pause for N minutes",
+        # or None.  The menu renders the countdown from it at rebuild time.
+        self._pause_deadline: float | None = None
         self._tray = None
         self._icon_image = _create_icon_image()
         self._peers: list[str] = []
@@ -132,6 +140,24 @@ class SystrayApp:
 
     def set_peers(self, peers: list[str]):
         self._peers = peers
+        self._schedule_menu_rebuild()
+
+    def set_pause_deadline(self, deadline: float | None):
+        """Show (or clear) the timed-pause state in the tray menu.
+
+        *deadline* is a wall-clock ``time.time()`` timestamp of when sync
+        auto-resumes, or None.  The countdown text is rendered from it
+        whenever the menu rebuilds; thread-safe like set_syncing().
+        """
+        self._pause_deadline = deadline
+        if self._tray is None:
+            return
+        if sys.platform == "win32" and getattr(self, "_WM_UPDATE_MENU", None):
+            hwnd = getattr(self._tray, "_hwnd", None)
+            if hwnd:
+                ctypes.windll.user32.PostMessageW(
+                    hwnd, self._WM_UPDATE_MENU, 0, 0)
+                return
         self._schedule_menu_rebuild()
 
     def _schedule_menu_rebuild(self):
@@ -184,6 +210,57 @@ class SystrayApp:
         ]
         return pystray.Menu(*items)
 
+    @staticmethod
+    def pause_left_minutes(deadline: float | None, now: float | None = None) -> int | None:
+        """Whole minutes left on a timed pause (rounded up), or None.
+
+        Small remainders still show "1" so the menu never flashes
+        "0 min left" right before the auto-resume fires.
+        """
+        if deadline is None:
+            return None
+        now = time.time() if now is None else now
+        left = deadline - now
+        if left <= 0:
+            return 0
+        whole, rem = divmod(left, 60.0)
+        return max(1, int(whole) + (1 if rem else 0))
+
+    def _build_pause_items(self) -> list:
+        """Build the timed-pause menu section (submenu or live status)."""
+        if not callable(self._on_pause_minutes):
+            return []
+        minutes_left = self.pause_left_minutes(self._pause_deadline)
+        if self._pause_deadline is not None and minutes_left is not None:
+            # Timed pause active: status line + manual resume.  No trailing
+            # separator here — the section after it already opens with one.
+            return [
+                pystray.MenuItem(
+                    "⏸  " + T("tray.paused_left", minutes=max(1, minutes_left)),
+                    None, enabled=False,
+                ),
+                pystray.MenuItem(
+                    T("tray.resume_now"), self._on_resume_now_click,
+                ),
+            ]
+        def _pause_action(minutes: int):
+            # pystray validates action arity via co_argcount: exactly
+            # (icon, item), no extra defaults.
+            def _run(icon, item):
+                self._fire_pause_minutes(minutes)
+            return _run
+
+        return [
+            pystray.MenuItem(
+                "⏸  " + T("tray.pause_for"),
+                pystray.Menu(
+                    pystray.MenuItem(T("tray.pause_15m"), _pause_action(15)),
+                    pystray.MenuItem(T("tray.pause_30m"), _pause_action(30)),
+                    pystray.MenuItem(T("tray.pause_1h"), _pause_action(60)),
+                ),
+            ),
+        ]
+
     def _build_full_menu(self) -> pystray.Menu:
         """Build the complete tray menu."""
         menu_items = [
@@ -198,6 +275,9 @@ class SystrayApp:
                 self._on_toggle_sync,
                 checked=lambda item: self._syncing,
             ),
+        ]
+        menu_items.extend(self._build_pause_items())
+        menu_items.extend([
             pystray.Menu.SEPARATOR,
             pystray.MenuItem(
                 "🖥  " + T("tray.show_dashboard"), self._on_open_dashboard_click,
@@ -205,7 +285,7 @@ class SystrayApp:
             pystray.MenuItem(
                 "📤  " + T("tray.send_url"), self._on_send_url_click,
             ),
-        ]
+        ])
         if self._web_enabled:
             menu_items.append(
                 pystray.MenuItem("📱  " + T("tray.show_web_qr"), self._on_show_web_qr_click),
@@ -306,6 +386,14 @@ class SystrayApp:
         # menu is open (TrackPopupMenuEx on Windows), and update_menu() tears
         # down the HMENU being tracked.  The checkbox is live-read via
         # checked=lambda, so the new state renders without a rebuild.
+
+    def _fire_pause_minutes(self, minutes: int):
+        if self._on_pause_minutes:
+            self._on_pause_minutes(minutes)
+
+    def _on_resume_now_click(self, icon, item):
+        if self._on_resume_sync:
+            self._on_resume_sync()
 
     def _on_open_dashboard_click(self, icon, item):
         if self._on_open_dashboard:

@@ -71,8 +71,82 @@ def _get_upload_dir(cfg=None) -> str:
 
 # ── Simple multipart form parser (no external deps) ──────────────
 
+class _MultipartError(ValueError):
+    """Raised by _parse_multipart for a structurally invalid multipart body.
+
+    The /api/upload endpoint catches this and answers with an explicit 400 so
+    a truncated or malformed upload fails loudly instead of silently writing
+    a partial (corrupt) file and reporting success.
+    """
+
+
+def _parse_content_disposition(line: str):
+    """Parse a Content-Disposition header line into (name, filename).
+
+    Quote-aware: a filename containing ``;`` or ``=`` (legal on every OS) no
+    longer truncates at the first ``;`` the way the previous naive
+    ``split(";")`` parser did.  Backslash escapes inside the quoted-string are
+    honoured per RFC 6266.  Either value may be None when absent.
+    """
+    name = None
+    filename = None
+    semi0 = line.find(";")
+    pos = semi0 + 1 if semi0 != -1 else len(line)  # first param starts after "form-data"
+    n = len(line)
+    while pos < n:
+        while pos < n and line[pos] in " \t;":
+            pos += 1
+        if pos >= n:
+            break
+        eq = line.find("=", pos)
+        semi = line.find(";", pos)
+        if eq == -1 or (semi != -1 and semi < eq):
+            # A parameter without "=" ("; foo") — skip it whole.
+            pos = semi + 1 if semi != -1 else n
+            continue
+        key = line[pos:eq].strip().lower()
+        val_start = eq + 1
+        if val_start < n and line[val_start] == '"':
+            j = val_start + 1
+            chars = []
+            while j < n:
+                ch = line[j]
+                if ch == "\\" and j + 1 < n:
+                    chars.append(line[j + 1])
+                    j += 2
+                    continue
+                if ch == '"':
+                    j += 1
+                    break
+                chars.append(ch)
+                j += 1
+            value = "".join(chars)
+            pos = j
+        else:
+            semi = line.find(";", val_start)
+            if semi == -1:
+                value = line[val_start:].strip()
+                pos = n
+            else:
+                value = line[val_start:semi].strip()
+                pos = semi + 1
+        if key == "name" and name is None:
+            name = value
+        elif key == "filename" and filename is None:
+            filename = value
+    return name, filename
+
+
 def _parse_multipart(body: bytes, content_type: str) -> dict:
-    """Parse multipart/form-data. Returns {field_name: (filename, data)}."""
+    """Parse multipart/form-data. Returns {field_name: (filename, data)}.
+
+    Raises ``_MultipartError`` (a ValueError subclass) with a readable reason
+    when the body is structurally invalid — no boundary in the header, a body
+    that does not start at the boundary, a part missing its header/body
+    separator, or (the important one) a TRUNCATED body whose closing
+    ``--boundary--`` never arrived.  Parsing operates entirely on the
+    in-memory buffer, so it can never hang regardless of input.
+    """
     boundary = None
     for part in content_type.split(";"):
         part = part.strip()
@@ -80,12 +154,15 @@ def _parse_multipart(body: bytes, content_type: str) -> dict:
             boundary = part.split("=", 1)[1].strip().strip('"').strip("'")
             break
     if not boundary:
-        return {}
+        raise _MultipartError("no boundary in Content-Type header")
     b_bytes = boundary.encode("utf-8", errors="surrogateescape")
     delimiter = b"--" + b_bytes
     if not body.startswith(delimiter):
-        return {}
+        raise _MultipartError("body does not start with the multipart boundary")
     body = body[len(delimiter):]
+    if body.startswith(b"--"):
+        # Legal empty form: "--boundary--" right after the opening delimiter.
+        return {}
     # A multipart boundary is only meaningful as a standalone delimiter line:
     # "\r\n--<boundary>\r\n" between parts, "\r\n--<boundary>--" at the end.
     # Split on the full middle delimiter (not the raw boundary bytes) so file
@@ -93,36 +170,65 @@ def _parse_multipart(body: bytes, content_type: str) -> dict:
     sep = b"\r\n--" + b_bytes + b"\r\n"
     close = b"\r\n--" + b_bytes + b"--"
     parts = body.split(sep)
+
+    # Terminator check: the LAST split element must carry the closing
+    # delimiter, followed by nothing but optional whitespace/CRLF.  A body cut
+    # off mid-upload has no closing delimiter — rejecting it here prevents a
+    # corrupt partial file being written and reported as a success.
+    last = parts[-1]
+    close_idx = last.rfind(close)
+    if close_idx == -1:
+        raise _MultipartError(
+            "multipart body is truncated (closing boundary missing)")
+    epilogue = last[close_idx + len(close):]
+    if epilogue.strip(b"\r\n \t"):
+        raise _MultipartError("unexpected data after the closing boundary")
+
     result = {}
-    for part in parts:
+    for pi, part in enumerate(parts):
+        is_last = pi == len(parts) - 1
+        if is_last:
+            # Cut exactly at the closing delimiter.  The CRLF preceding it is
+            # conceptually part of the boundary (RFC 2046), so the slice keeps
+            # the file content byte-for-byte — including trailing newlines the
+            # old code stripped away with .rstrip().
+            part = part[:close_idx]
+        else:
+            # Strip exactly the CRLF terminating the first boundary line
+            # (only the very first element still carries it).  Never strip
+            # further bytes — they belong to the part's content.
+            if part.startswith(b"\r\n"):
+                part = part[2:]
         if not part:
             continue
-        # Strip only the leading CRLF left over from the preceding boundary
-        # line.  Never strip trailing bytes — they belong to the file content.
-        part = part.lstrip(b"\r\n")
-        # The closing delimiter ends the last part; drop it and any trailing CRLF.
-        close_idx = part.rfind(close)
-        if close_idx != -1:
-            part = part[:close_idx].rstrip(b"\r\n")
         if b"\r\n\r\n" not in part:
-            continue
+            # Every real client sends Content-Disposition headers; a part with
+            # no header/body separator is malformed input — fail explicitly
+            # instead of dropping unknown bytes into some other field.
+            raise _MultipartError("malformed part (missing header/body separator)")
         header_section, body_data = part.split(b"\r\n\r\n", 1)
-        headers_text = header_section.decode("utf-8", errors="replace")
         field_name = None
         filename = None
+        headers_text = header_section.decode("utf-8", errors="replace")
         for line in headers_text.split("\r\n"):
             if line.lower().startswith("content-disposition:"):
-                for disp_part in line.split(";"):
-                    disp_part = disp_part.strip()
-                    key_lower = disp_part.lower().split("=", 1)[0].strip()
-                    val = disp_part.split("=", 1)[1].strip().strip('"') if "=" in disp_part else ""
-                    if key_lower == "name":
-                        field_name = val
-                    elif key_lower == "filename":
-                        filename = val
-        if field_name and body_data:
+                field_name, filename = _parse_content_disposition(line)
+        if field_name:
             result[field_name] = (filename or "", body_data)
     return result
+
+
+def _check_declared_length(body: bytes, declared_length: int) -> str | None:
+    """Return an error message when the read body mismatches Content-Length.
+
+    ``handler.rfile.read(n)`` returns fewer bytes than requested when the
+    client disconnects mid-upload; the resulting buffer cannot be valid
+    multipart, so the caller rejects it up front instead of parsing garbage.
+    """
+    if declared_length > 0 and len(body) != declared_length:
+        return ("incomplete upload: connection closed before the "
+                "file finished sending")
+    return None
 
 
 # ── PWA icons (generated at startup) ────────────────────────────
@@ -518,7 +624,15 @@ def _read_request_body(handler) -> bytes:
         return b""
     if length <= 0 or length > _MAX_BODY_BYTES:
         return b""
-    return handler.rfile.read(length)
+    try:
+        return handler.rfile.read(length)
+    except (OSError, TimeoutError):
+        # The client stalled mid-body and the socket timeout fired.  Close the
+        # connection (unread bytes remain on it) and answer with an empty body
+        # instead of letting the timeout escape do_POST and spill a traceback
+        # through BaseServer.handle_error.
+        handler.close_connection = True
+        return b""
 
 
 # ── File download response builder ──────────────────────────────
@@ -1687,7 +1801,19 @@ class WebServer:
                             200,
                         )
                         return
-                    fields = _parse_multipart(body, content_type)
+                    # A short read means the connection dropped mid-upload —
+                    # the buffer below cannot be valid multipart, so reject it
+                    # explicitly instead of parsing garbage into a partial file.
+                    truncated = _check_declared_length(body, content_length)
+                    if truncated:
+                        inner_self.close_connection = True
+                        inner_self._send_json({"ok": False, "error": truncated}, 400)
+                        return
+                    try:
+                        fields = _parse_multipart(body, content_type)
+                    except _MultipartError as exc:
+                        inner_self._send_json({"ok": False, "error": str(exc)}, 400)
+                        return
                     file_field = fields.get("file")
                     if not file_field:
                         inner_self._send_json({"ok": False, "error": "no file field"}, 400)

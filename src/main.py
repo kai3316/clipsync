@@ -381,6 +381,8 @@ def _run_tray(device_name: str, pipe, parent_pid: int, locale: str = "en"):
         on_send_url=lambda: pipe.send(("send_url",)),
         on_check_update=lambda: pipe.send(("check_update",)),
         on_about=lambda: pipe.send(("about",)),
+        on_pause_minutes=lambda m: pipe.send(("pause_minutes", m)),
+        on_resume_sync=lambda: pipe.send(("resume_sync",)),
         on_quit=lambda: pipe.send(("quit",)),
     )
 
@@ -413,6 +415,14 @@ def _run_tray(device_name: str, pipe, parent_pid: int, locale: str = "en"):
                     elif _kind == "set_syncing":
                         try:
                             child_systray.set_syncing(bool(msg[1]))
+                        except Exception:
+                            pass
+                    elif _kind == "set_pause_deadline":
+                        try:
+                            deadline = msg[1]
+                            child_systray.set_pause_deadline(
+                                float(deadline) if deadline is not None else None,
+                            )
                         except Exception:
                             pass
             except (EOFError, BrokenPipeError, OSError):
@@ -491,6 +501,10 @@ class Application:
         self._shutting_down = False
         # Set by factory reset so shutdown() doesn't re-save the deleted config.
         self._skip_save_on_shutdown = False
+        # Timed sync pause (tray "Pause sync for N minutes"): the auto-resume
+        # timer plus the wall-clock deadline mirrored into the tray menu.
+        self._pause_timer: threading.Timer | None = None
+        self._pause_deadline: float | None = None
         # Timestamp of the last silent auto-update check (throttled to ~6h).
         self._last_auto_update_check = 0.0
 
@@ -2380,6 +2394,9 @@ class Application:
     def _toggle_monitor(self) -> None:
         """Toggle clipboard monitoring on/off via the global hotkey."""
         enabled = not self.cfg.sync_enabled
+        # An explicit toggle outranks a pending timed pause (see
+        # _on_systray_toggle).
+        self._clear_pause_state()
         self.sync_mgr.set_enabled(enabled)
         self.cfg.sync_enabled = enabled
         self._save_cfg_encrypted()
@@ -3038,6 +3055,9 @@ class Application:
             set_locale(str(updated["language"]))
         if "sync_enabled" in updated:
             enabled = bool(updated["sync_enabled"])
+            # An explicit toggle outranks a pending timed pause (see
+            # _on_systray_toggle).
+            self._clear_pause_state()
             self.sync_mgr.set_enabled(enabled)
             if self.systray is not None:
                 self._set_systray_syncing(enabled)
@@ -3471,6 +3491,8 @@ class Application:
             on_send_url=lambda: self.root.after(0, self._do_send_url),
             on_check_update=lambda: self.root.after(0, self._check_for_update),
             on_about=lambda: self.root.after(0, self._show_about),
+            on_pause_minutes=lambda m: self.root.after(0, self._pause_sync_for_minutes, m),
+            on_resume_sync=lambda: self.root.after(0, self._resume_timed_pause),
             on_quit=lambda: self.root.after(0, self.shutdown),
         )
         # Seed the parent's tray state so the initial menu matches the config
@@ -3669,6 +3691,7 @@ class Application:
             peers = list(getattr(self.systray, "_peers", []) or [])
             web = bool(getattr(self.systray, "_web_enabled", False))
             syncing = bool(getattr(self.systray, "_syncing", True))
+            pause_deadline = getattr(self.systray, "_pause_deadline", None)
         except Exception:
             logger.debug("Failed to read systray state", exc_info=True)
             return
@@ -3679,6 +3702,7 @@ class Application:
             notification_mgr.send_pipe(("set_peers", peers))
             notification_mgr.send_pipe(("set_web_enabled", web))
             notification_mgr.send_pipe(("set_syncing", syncing))
+            notification_mgr.send_pipe(("set_pause_deadline", pause_deadline))
         except Exception:
             # A full pipe (or a subprocess that died between is_alive() and
             # send) must never crash the main thread.
@@ -3708,6 +3732,10 @@ class Application:
         cmd = msg[0]
         if cmd == "toggle_sync":
             self._on_systray_toggle(msg[1])
+        elif cmd == "pause_minutes":
+            self.root.after(0, self._pause_sync_for_minutes, msg[1])
+        elif cmd == "resume_sync":
+            self.root.after(0, self._resume_timed_pause)
         elif cmd == "open_dashboard":
             self.open_dashboard()
         elif cmd == "open_settings":
@@ -3808,6 +3836,12 @@ class Application:
         self._shutting_down = True
         self._stop_updater.set()
         logger.info("Shutting down...")
+        # Kill the timed-pause auto-resume timer first: firing into a torn-
+        # down UI would only log an error, but cancelling is cleaner.
+        try:
+            self._clear_pause_state()
+        except Exception:
+            logger.debug("Pause state cleanup failed", exc_info=True)
         self.sync_mgr.stop()
         if getattr(self, "chat_mgr", None) is not None:
             try:
@@ -5752,7 +5786,8 @@ class Application:
             on_quit=self.shutdown,
             get_sync_enabled=lambda: self.cfg.sync_enabled,
             set_sync_enabled=lambda v: (
-                self.sync_mgr.set_enabled(v), self._set_systray_syncing(v)
+                self._clear_pause_state(),
+                self.sync_mgr.set_enabled(v), self._set_systray_syncing(v),
             ),
             get_discovering=lambda: self.discovery.is_browsing,
             get_visible=lambda: self.discovery.is_advertising,
@@ -6864,10 +6899,101 @@ class Application:
         return result[0]
 
     # ═══════════════════════════════════════════════════════════════
-    # Systray toggle
+    # Systray toggle + timed sync pause
     # ═══════════════════════════════════════════════════════════════
 
+    def _clear_pause_state(self) -> None:
+        """Drop any pending timed-pause bookkeeping (idempotent).
+
+        Cancels the auto-resume timer and clears the tray countdown.  Called
+        when a timed pause starts (to reset any previous one) and whenever
+        the user toggles sync by hand — an explicit toggle is authoritative,
+        and a stale timer firing later must not resurrect/kill a state the
+        user chose since.
+        """
+        timer = self._pause_timer
+        self._pause_timer = None
+        self._pause_deadline = None
+        if timer is not None:
+            timer.cancel()
+        if self.systray is not None:
+            try:
+                self.systray.set_pause_deadline(None)
+            except Exception:
+                logger.debug("Failed to clear tray pause display", exc_info=True)
+
+    def _pause_sync_for_minutes(self, minutes: int) -> None:
+        """Pause clipboard sync for *minutes*, then auto-resume.
+
+        Reuses the ordinary toggle path so cfg/tray/manager stay consistent;
+        the only extra state is the resume timer plus the tray countdown.
+        """
+        if self._shutting_down:
+            return
+        try:
+            minutes = max(1, min(int(minutes), 24 * 60))
+        except (TypeError, ValueError):
+            return
+        # Any explicit toggle below must first clear a previous pause's
+        # timer/deadline so the two never fight over the final state.
+        self._clear_pause_state()
+        if self.cfg.sync_enabled:
+            self._on_systray_toggle(False)
+        else:
+            # Already paused manually — just attach the timed resume.
+            self._set_systray_syncing(False)
+        self._pause_deadline = time.time() + minutes * 60
+        if self.systray is not None:
+            try:
+                self.systray.set_pause_deadline(self._pause_deadline)
+            except Exception:
+                logger.debug("Failed to show tray pause countdown", exc_info=True)
+        self._pause_timer = threading.Timer(
+            minutes * 60.0, self._fire_auto_resume,
+        )
+        self._pause_timer.daemon = True
+        self._pause_timer.start()
+        self._notify("notify_sync", T("ui.clipboard_sync"),
+                     T("tray.paused_left", minutes=minutes))
+        logger.info("Sync paused for %d minute(s)", minutes)
+
+    def _fire_auto_resume(self) -> None:
+        """Timer thread body: hop onto the UI thread to resume."""
+        try:
+            self.root.after(0, self._auto_resume_from_pause)
+        except Exception:
+            # Root already destroyed (app quit during the pause window).
+            logger.debug("Auto-resume scheduling failed (UI closed)",
+                         exc_info=True)
+
+    def _auto_resume_from_pause(self) -> None:
+        self._pause_timer = None
+        self._pause_deadline = None
+        if self.systray is not None:
+            try:
+                self.systray.set_pause_deadline(None)
+            except Exception:
+                logger.debug("Failed to clear tray pause display", exc_info=True)
+        if self._shutting_down or self.cfg.sync_enabled:
+            return
+        logger.info("Timed sync pause elapsed — resuming")
+        self._on_systray_toggle(True)
+
+    def _resume_timed_pause(self) -> None:
+        """Manual "Resume Sync Now" from the tray."""
+        had_pause = self._pause_deadline is not None
+        self._clear_pause_state()
+        if self.cfg.sync_enabled:
+            return  # nothing to do; state already consistent
+        logger.info("Sync resumed via tray (%s)",
+                    "timed pause" if had_pause else "manual")
+        self._on_systray_toggle(True)
+
     def _on_systray_toggle(self, enabled: bool) -> None:
+        # An explicit toggle outranks any pending timed pause: clear its
+        # timer/countdown first so it cannot fire into a state the user
+        # just chose by hand.
+        self._clear_pause_state()
         # sync_mgr is the authoritative source of truth: reconcile the tray
         # checkbox and config from its actual state so the optimistic tray
         # flip can never leave them disagreeing.

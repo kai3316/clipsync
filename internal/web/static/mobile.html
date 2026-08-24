@@ -326,6 +326,22 @@ body::before {
 }
 
 .upload-btn:active { border-color: var(--accent); color: var(--accent); }
+.fav-export {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  width: 100%;
+  padding: 12px 0;
+  margin-bottom: 10px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius);
+  background: rgba(12,16,32,0.6);
+  color: var(--fg);
+  font-size: 13px;
+  font-weight: 600;
+}
+.fav-export:active { border-color: var(--accent); color: var(--accent); }
 
 .f-item {
   display: flex;
@@ -1092,6 +1108,7 @@ body.light .set-card {
 
     <!-- Favorites -->
     <section class="panel" id="panelFavorites">
+      <button class="fav-export" id="favExportBtn" style="display:none"></button>
       <div id="favoritesList"></div>
     </section>
 
@@ -1257,6 +1274,9 @@ body.light .set-card {
     favDeleted: ZH ? '已删除' : 'Deleted',
     favDeleteConfirm: ZH ? '删除这条收藏？' : 'Delete this favorite?',
     favDeleteFail: ZH ? '删除失败' : 'Failed to delete',
+    favExport: ZH ? '⬇️ 导出全部为 Markdown' : '⬇️ Export all as Markdown',
+    favExportDone: ZH ? '✓ 已导出 {n} 条收藏' : '✓ Exported {n} favorites',
+    favExportFail: ZH ? '导出失败' : 'Export failed',
     setDeviceName: ZH ? '设备名称' : 'Device name',
     setVersion: ZH ? '版本' : 'Version',
     setWebAddress: ZH ? '网页地址' : 'Web address',
@@ -1296,6 +1316,8 @@ body.light .set-card {
   var chatView = document.getElementById('chatView');
   var transfersView = document.getElementById('transfersView');
   var favoritesList = document.getElementById('favoritesList');
+  var favExportBtn = document.getElementById('favExportBtn');
+  var favExportBusy = false;
   var settingsView = document.getElementById('settingsView');
   var toastEl = document.getElementById('toast');
   var modalEl = document.getElementById('modal');
@@ -2671,6 +2693,8 @@ body.light .set-card {
   }
 
   function renderFavorites() {
+    // The one-click export only makes sense with something to export.
+    favExportBtn.style.display = favoritesItems.length === 0 ? 'none' : 'flex';
     if (favoritesItems.length === 0) {
       favoritesList.innerHTML = '<div class="empty"><div class="empty__icon">⭐</div><div class="empty__text">' + esc(T.favEmpty) + '</div></div>';
       return;
@@ -2762,6 +2786,37 @@ body.light .set-card {
         showToast(T.favDeleteFail + ' · ' + T.loadFailHint, true);
       });
   }
+
+  // One-click export: ask the desktop to write ALL favorites to a Markdown
+  // file (same Downloads location the history export uses) and toast where
+  // it landed — handy for moving saved clips off the phone for good.
+  favExportBtn.textContent = T.favExport;
+  favExportBtn.addEventListener('click', function () {
+    if (favExportBusy) return;
+    favExportBusy = true;
+    favExportBtn.textContent = '...';
+    apiFetch('/api/favorites/export', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ format: 'markdown' }),
+    })
+      .then(function (res) {
+        if (res.status === 403) { notifyTokenExpired(); return; }
+        if (res.data && res.data.ok) {
+          showToast(T.favExportDone.replace('{n}', String((res.data && res.data.count) || 0)));
+        } else {
+          showToast((res.data && res.data.error) || T.favExportFail, true);
+        }
+      })
+      .catch(function () {
+        showToast(T.favExportFail + ' · ' + T.loadFailHint, true);
+      })
+      .then(function () {
+        // Manual reset instead of .finally (older-webview friendly).
+        favExportBusy = false;
+        favExportBtn.textContent = T.favExport;
+      });
+  });
 
   /* ── Settings ───────────────────────────────────────────────── */
 

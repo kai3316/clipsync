@@ -66,9 +66,15 @@ class NotificationManager:
         (for tray state-sync) the main thread both call ``Connection.send``,
         which is not internally synchronized — interleaved writes desync the
         receiver.  A lock around each ``send`` keeps frames intact.
+        No-op (debug-logged) if no pipe has been set with set_pipe().
         """
+        pipe = self._pipe
+        if pipe is None:
+            logger.debug("send_pipe called before set_pipe — dropping %r",
+                         msg[0] if isinstance(msg, tuple) else msg)
+            return
         with self._pipe_lock:
-            self._pipe.send(msg)
+            pipe.send(msg)
 
     def _pipe_sender(self):
         """Background thread: drain _send_queue and forward to the pipe.
@@ -93,10 +99,13 @@ class NotificationManager:
                 break
 
     def show(self, title: str, message: str):
-        """Show a desktop notification if tray is available.
+        """Show a desktop notification, via the first available channel.
 
-        On macOS the notification is queued for a background thread so
-        ``pipe.send()`` never blocks the calling thread.
+        Delivery order: the tray-subprocess pipe (macOS — queued so
+        ``pipe.send()`` never blocks the calling thread), then the
+        in-process pystray icon, then the platform fallback (Linux
+        ``notify-send``, a no-op elsewhere).  Notifications are dropped
+        only when disabled or when no channel exists at all.
         """
         if not self._enabled:
             return
@@ -114,6 +123,11 @@ class NotificationManager:
                 self._fallback_notify(title, message)
             except Exception:
                 logger.debug("Desktop notification failed", exc_info=True)
+        else:
+            # No tray icon (crashed tray, headless start) — Linux can still
+            # deliver via notify-send; other platforms have no fallback and
+            # the notification is simply dropped.
+            self._fallback_notify(title, message)
 
     def is_available(self) -> bool:
         """Return True if this platform can deliver desktop notifications.

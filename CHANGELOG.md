@@ -4,6 +4,19 @@ All notable changes to ClipSync are documented in this file.
 
 ## [Unreleased]
 
+### Tray
+- **Pause sync for 15 minutes / 30 minutes / 1 hour from the tray.** While paused, the menu shows a live "paused · ~N min left" line plus an immediate "Resume sync" item; sync resumes automatically (with a notification) when time is up. Any manual toggle — hotkey, tray checkbox, web settings, quick controls — cancels the pending auto-resume so the two never fight.
+
+### Web dashboard
+- **Export all favorites** as Markdown (grouped by folder) or plain text from the dashboard Favorites page and the mobile view; the file lands in Downloads and a toast reports count and path.
+- Fixed a JavaScript syntax error that left the desktop dashboard Chat page blank since v1.0.54.
+- The favorites context menu closes on outside click / Esc again (its lifecycle hooks had been nested inside `methods` where Vue never calls them).
+- Upload hardening: a truncated transfer can no longer be stored as a complete file, a missing closing boundary is rejected with a clear message, text files keep their trailing newline, filenames containing `;` or `=` parse correctly, zero-byte files are accepted, and aborted request bodies surface as clean errors instead of socket stack traces.
+
+### Clipboard & history
+- **Re-copying the same text no longer downgrades rich content.** Within 90 s of the original capture, a plain-text re-copy refreshes the existing history entry (clipboard formats merged) instead of stacking a duplicate plain-text entry over the rich one; conversely, HTML arriving just after the text upgrades the entry instead of being dropped as a duplicate.
+- Notifications now work without a tray icon — Linux falls back to `notify-send` instead of silently dropping them.
+
 ### Auto-update
 - **P2P-received update packages are verified before install**: SHA-256 against the official GitHub release digest plus a version check — a mismatched or stale package pushed by a peer is dropped with a notification instead of being installed; when release info is unavailable the P2P path refuses and falls back to the official download (which verifies itself).
 - **Install reentrancy guard**: a GitHub download and a P2P transfer finishing around the same time install exactly once.
