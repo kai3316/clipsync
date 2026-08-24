@@ -593,6 +593,25 @@ body.light .set-card {
   border-color: transparent;
 }
 .chat-bubble__meta { margin-top: 3px; font-size: 10px; opacity: 0.7; text-align: right; }
+/* Failed outgoing text: red edge + label so a delivery failure is visible
+   (text bubbles never rendered status before). */
+.chat-bubble--failed { border-color: var(--danger); }
+.chat-bubble__failed { color: #ff8a8f; font-weight: 700; margin-right: 5px; opacity: 1; }
+.chat-bubble__retry {
+  display: inline-block;
+  margin-right: 5px;
+  padding: 0 6px;
+  font-size: 11px;
+  line-height: 16px;
+  font-family: inherit;
+  color: inherit;
+  background: transparent;
+  border: 1px solid currentColor;
+  border-radius: 9px;
+  cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
+}
+.chat-bubble__retry:disabled { opacity: 0.45; }
 
 .chat-file {
   align-self: flex-start;
@@ -1172,6 +1191,9 @@ body.light .set-card {
     chatSend: ZH ? '发送' : 'Send',
     chatSendEmpty: ZH ? '请输入消息' : 'Type a message',
     chatSendFail: ZH ? '发送失败' : 'Failed to send',
+    chatTextFailed: ZH ? '未送达' : 'Not delivered',
+    chatResend: ZH ? '重发' : 'Resend',
+    chatResendFail: ZH ? '重发失败' : 'Resend failed',
     chatAccept: ZH ? '接受' : 'Accept',
     chatDecline: ZH ? '拒绝' : 'Decline',
     chatCancel: ZH ? '取消' : 'Cancel',
@@ -2135,9 +2157,15 @@ body.light .set-card {
       return '<div class="chat-msg-row"><div class="chat-system">' + esc(chatSystemText(m)) + '</div></div>';
     }
     if (m.kind === 'text') {
-      return '<div class="chat-msg-row"><div class="chat-bubble' + (m.outgoing ? ' chat-bubble--out' : ' chat-bubble--in') + '">' +
+      var failed = !!(m.outgoing && m.status === 'failed');
+      var meta = '';
+      if (failed) {
+        meta += '<span class="chat-bubble__failed">' + esc(T.chatTextFailed) + '</span>';
+        meta += '<button class="chat-bubble__retry" data-resend-entry="' + esc(m.entry_id) + '" title="' + esc(T.chatResend) + '">⟳</button>';
+      }
+      return '<div class="chat-msg-row"><div class="chat-bubble' + (m.outgoing ? ' chat-bubble--out' : ' chat-bubble--in') + (failed ? ' chat-bubble--failed' : '') + '">' +
         '<div class="chat-bubble__text">' + esc(m.text || '') + '</div>' +
-        '<div class="chat-bubble__meta">' + esc(fmtClock(m.ts)) + '</div>' +
+        '<div class="chat-bubble__meta">' + meta + esc(fmtClock(m.ts)) + '</div>' +
       '</div></div>';
     }
     // File card.
@@ -2385,6 +2413,26 @@ body.light .set-card {
       });
   }
 
+  function chatResend(entryId) {
+    if (!chatOpenSession || !entryId) return;
+    apiFetch('/api/chat/resend', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ session_id: chatOpenSession, entry_id: entryId }),
+    })
+      .then(function (res) {
+        if (res.status === 403) { notifyTokenExpired(); return; }
+        if (!res.data || res.data.ok !== true) {
+          showToast((res.data && res.data.error) || T.chatResendFail, true);
+        }
+        chatScrollBottom = true;
+        loadChat(true);
+      })
+      .catch(function () {
+        showToast(T.chatResendFail + ' · ' + T.loadFailHint, true);
+      });
+  }
+
   function chatFileAction(action, transferId) {
     if (!chatOpenSession || !transferId) return;
     apiFetch('/api/chat/file/' + action, {
@@ -2429,6 +2477,12 @@ body.light .set-card {
     if (invBtn) { chatInviteAction(invBtn.getAttribute('data-invite-action')); return; }
     var dlBtn = el.closest ? el.closest('[data-download-transfer]') : null;
     if (dlBtn) { chatDownload(dlBtn.getAttribute('data-download-transfer'), dlBtn.getAttribute('data-filename') || ''); return; }
+    var resendBtn = el.closest ? el.closest('[data-resend-entry]') : null;
+    if (resendBtn) {
+      resendBtn.disabled = true;
+      chatResend(resendBtn.getAttribute('data-resend-entry'));
+      return;
+    }
     var fileBtn = el.closest ? el.closest('[data-file-action]') : null;
     if (fileBtn) {
       chatFileAction(fileBtn.getAttribute('data-file-action'), fileBtn.getAttribute('data-transfer-id'));

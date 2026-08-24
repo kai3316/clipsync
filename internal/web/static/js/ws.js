@@ -510,6 +510,14 @@ var ClipsyncWS = (function () {
                 if (store.chatMessages.length > 200) {
                   store.chatMessages.splice(0, store.chatMessages.length - 200);
                 }
+              } else {
+                // Known entry re-pushed with changed state (e.g. a resent
+                // text flipping failed → done): merge instead of dropping,
+                // otherwise the bubble keeps its stale status forever.
+                var cmExisting = store.chatMessages[cmDup];
+                Object.keys(cmEntry).forEach(function (k) {
+                  cmExisting[k] = cmEntry[k];
+                });
               }
             }
             store.recalcChatUnread();

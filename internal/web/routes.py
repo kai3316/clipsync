@@ -1007,6 +1007,10 @@ def _dispatch(method, path, query_params, body, cfg, history, sync_mgr,
             data, status = _chat_api.send_text(chat_mgr, body, chat_send_fn)
             return _json_response(data, status)
 
+        elif path == "/api/chat/resend":
+            data, status = _chat_api.resend_text(chat_mgr, body, chat_send_fn)
+            return _json_response(data, status)
+
         elif path == "/api/chat/file":
             # The web UI uploads via /api/upload, which returns a bare
             # filename; resolve it against the received-files dir (and reject

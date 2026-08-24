@@ -5,10 +5,12 @@ All notable changes to ClipSync are documented in this file.
 ## [Unreleased]
 
 ### Chat & pairing reliability
+- **Failed outgoing texts get a ⟳ Resend button.** A text that failed to send now shows as a red-outlined "not delivered" bubble in the web dashboard and mobile view instead of looking like a normal message; one click re-sends it through the same rate-limited path (`POST /api/chat/resend`).
 - **Chat invites fail honestly.** An invite the transport refuses no longer leaves a phantom "inviting" conversation pinning a slot for five minutes; accepting over a broken link keeps an honest, retryable state instead of a fake active chat; shutdown no longer leaves sender threads parked for minutes.
 - Duplicate or late pairing confirmations no longer demote an already-paired device (no spurious re-confirm prompts); expired pairing requests clean up their pending state.
 - Malformed sync frames (non-string message type, NaN/garbage timestamps) are dropped at decode instead of tearing down the whole connection.
 - The Windows self-update helper gives up after 5 minutes and deletes itself instead of looping forever when antivirus quarantines the staged file.
+- All chat file-transfer completion callbacks now fire outside the manager lock (a slow UI/WS callback can no longer freeze the receive thread), and repeated WS pushes for the same chat message merge fields instead of being dropped as duplicates — so resend status updates actually reach already-open tabs.
 
 ### Hotkeys
 - **Dead hotkeys are now explained.** Shortcuts that fail to register (combo occupied by another app, invalid combination, two actions bound to the same keys) are reported by name after startup — previously completely silent. Conflicting bindings are rejected at registration time.

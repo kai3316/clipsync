@@ -397,6 +397,7 @@ class ChatManager:
         if not peer_id or send_fn is None:
             return None
         now = time.monotonic()
+        done_fired: list[tuple[str, str, str]] = []
         with self._lock:
             existing = self._sessions.get(peer_id)
             if existing is not None and existing.status in ("inviting", "invited", "active"):
@@ -439,11 +440,13 @@ class ChatManager:
                 # MAX_SESSIONS slots and show a conversation that can never
                 # start.  Also roll back the invite-rate timestamp so the user
                 # can retry immediately once connectivity is back.
-                self._drop_session_locked(session)
+                self._drop_session_locked(session, done_fired)
                 if out and out[-1] == now:
                     out.pop()
                 refused = True
                 logger.debug("chat: invite frame dropped (send_fn refused) -- session discarded")
+        for sid_d, tid_d, st_d in done_fired:
+            self._fire("_on_file_done", sid_d, tid_d, False, "", st_d)
         if refused:
             self._fire("_on_sessions_changed")
             return None
@@ -491,13 +494,14 @@ class ChatManager:
         return True
 
     def close_session(self, session_id: str, notify_peer: bool = True) -> bool:
+        done_fired: list[tuple[str, str, str]] = []
         with self._lock:
             session = self._session_by_sid.get(session_id)
             if session is None or session.status not in ("inviting", "invited", "active"):
                 return False
             was_active = session.status == "active"
             session.status = "closed"
-            self._fail_transfers_for_session(session, "cancelled")
+            self._fail_transfers_for_session(session, "cancelled", done_fired)
             # A closed session id is never reused; drop its text buckets so
             # the rate-limit dicts cannot grow without bound.
             self._text_times_out.pop(session.session_id, None)
@@ -507,6 +511,8 @@ class ChatManager:
                     {"msg_type": "chat_close", "session_id": session.session_id},
                     self._latest_send_fn.get(session.peer_id),
                 )
+        for sid_d, tid_d, st_d in done_fired:
+            self._fire("_on_file_done", sid_d, tid_d, False, "", st_d)
         self._fire("_on_sessions_changed")
         return True
 
@@ -550,6 +556,52 @@ class ChatManager:
             if ok:
                 self._remember_send_fn(session.peer_id, fn)
         self._fire("_on_message", session_id, entry.to_dict())
+        self._fire("_on_sessions_changed")
+        return ok
+
+    def resend_text(self, session_id: str, entry_id: str, send_fn: SendFn) -> bool:
+        """Re-transmit a FAILED outgoing text; flips its entry to ``done``.
+
+        Only entries that are this session's own outgoing texts with status
+        ``failed`` qualify -- anything else (unknown id, incoming text, an
+        already-sent bubble) is refused so a stale UI cannot double-send.
+        The retry is charged to the SAME flood budget as a first send and
+        rolls its slot back when the wire refuses it again.
+        """
+        now = time.monotonic()
+        with self._lock:
+            session = self._session_by_sid.get(session_id)
+            if session is None or session.status != "active" or not session.online:
+                return False
+            entry = next(
+                (e for e in session.entries if e.entry_id == entry_id), None,
+            )
+            if entry is None or entry.kind != "text" or not entry.outgoing \
+                    or entry.status != "failed":
+                return False
+            dq = self._text_times_out.setdefault(session.session_id, deque())
+            self._prune_times(dq, now, self.TEXT_RATE_WINDOW)
+            if len(dq) >= self.TEXT_RATE_LIMIT:
+                logger.info("chat: resend flood control engaged for session %s", session_id[:8])
+                return False
+            dq.append(now)
+            fn = send_fn or self._latest_send_fn.get(session.peer_id)
+            ok = self._send_frame({
+                "msg_type": "chat_text",
+                "session_id": session.session_id,
+                "text": entry.text,
+                "ts": entry.ts,
+            }, fn)
+            if not ok:
+                # Same rollback rule as send_text: a failed retry must not
+                # permanently consume a rate-limit slot.
+                if dq and dq[-1] == now:
+                    dq.pop()
+            else:
+                entry.status = "done"
+                self._remember_send_fn(session.peer_id, fn)
+            entry_dict = entry.to_dict()
+        self._fire("_on_message", session_id, entry_dict)
         self._fire("_on_sessions_changed")
         return ok
 
@@ -892,6 +944,15 @@ class ChatManager:
         if len(sid) != 16 or any(c not in "0123456789abcdef" for c in sid):
             logger.debug("chat: invite with malformed session_id from %s", sender_id[:12])
             return
+        # Every callback below fires AFTER the lock releases (defer
+        # unification): *done_fired* collects ``_on_file_done`` tuples from
+        # any session teardown this invite triggers, and the outcome flags
+        # decide which UI callbacks fire once the ``with`` block exits.
+        done_fired: list[tuple[str, str, str]] = []
+        mutual_accepted: tuple[str, str] | None = None   # our invite lost the race
+        duplicate_declined = False                       # ours won / cap auto-decline
+        reaffirm_active = False                          # already chatting; converged
+        invite: dict | None = None
         with self._lock:
             dq = self._invite_times_in.setdefault(sender_id, deque())
             self._prune_times(dq, now, self.INVITE_RATE_WINDOW)
@@ -915,23 +976,21 @@ class ChatManager:
                 # Mutual invite.  Resolve deterministically: the SMALLER
                 # session id wins, so both devices converge without a dialog.
                 if sid < mine.session_id:
-                    self._drop_session_locked(mine)
+                    self._drop_session_locked(mine, done_fired)
                     session = self._open_incoming_locked(
                         sender_id, from_name or mine.peer_name, peer_fp, sid, send_fn,
+                        done_fired,
                     )
                     self._activate_locked(session)
-                    sid_out, pid_out = session.session_id, session.peer_id
+                    mutual_accepted = (session.session_id, session.peer_id)
                 else:
                     # Ours wins; tell them to stop waiting on theirs.
                     self._send_frame({
                         "msg_type": "chat_decline", "session_id": sid, "reason": "duplicate",
                     }, send_fn)
-                    return
-                self._fire("_on_invite_response", sid_out, pid_out, True)
-                self._fire("_on_sessions_changed")
-                return
+                    duplicate_declined = True
 
-            if mine is not None and mine.status == "active":
+            elif mine is not None and mine.status == "active":
                 # Already chatting.  If this invite carries a NEW session id
                 # (the peer closed its old session without telling us, then
                 # restarted), adopt the new id — otherwise both sides stay
@@ -954,30 +1013,41 @@ class ChatManager:
                 # Reaffirm so their client converges too.
                 self._send_frame({"msg_type": "chat_accept", "session_id": sid}, send_fn)
                 self._touch_seen(mine)
-                self._fire("_on_sessions_changed")
-                return
+                reaffirm_active = True
 
-            pending = sum(1 for s in self._sessions.values() if s.status == "invited")
-            if pending >= self.PENDING_INVITE_CAP:
-                logger.info("chat: pending invite cap reached -- auto-declining %s", sender_id[:12])
-                self._send_frame({
-                    "msg_type": "chat_decline", "session_id": sid, "reason": "busy",
-                }, send_fn)
-                return
-            session = self._open_incoming_locked(
-                sender_id, from_name or sender_id[:12], peer_fp, sid, send_fn,
-            )
-            invite = {
-                "session_id": sid,
-                "peer_id": sender_id,
-                "peer_name": session.peer_name,
-                "fingerprint_short": peer_fp,
-                "greeting": greeting,
-            }
-        self._fire("_on_incoming_invite", invite)
-        self._fire("_on_sessions_changed")
+            else:
+                pending = sum(1 for s in self._sessions.values() if s.status == "invited")
+                if pending >= self.PENDING_INVITE_CAP:
+                    logger.info("chat: pending invite cap reached -- auto-declining %s", sender_id[:12])
+                    self._send_frame({
+                        "msg_type": "chat_decline", "session_id": sid, "reason": "busy",
+                    }, send_fn)
+                    duplicate_declined = True
+                else:
+                    session = self._open_incoming_locked(
+                        sender_id, from_name or sender_id[:12], peer_fp, sid, send_fn,
+                        done_fired,
+                    )
+                    invite = {
+                        "session_id": sid,
+                        "peer_id": sender_id,
+                        "peer_name": session.peer_name,
+                        "fingerprint_short": peer_fp,
+                        "greeting": greeting,
+                    }
 
-    def _open_incoming_locked(self, peer_id, peer_name, fp_short, sid, send_fn) -> ChatSession:
+        for done_sid, tid, status in done_fired:
+            self._fire("_on_file_done", done_sid, tid, False, "", status)
+        if mutual_accepted is not None:
+            self._fire("_on_invite_response", mutual_accepted[0], mutual_accepted[1], True)
+        if invite is not None:
+            self._fire("_on_incoming_invite", invite)
+        if mutual_accepted is not None or reaffirm_active or invite is not None:
+            self._fire("_on_sessions_changed")
+
+    def _open_incoming_locked(
+        self, peer_id, peer_name, fp_short, sid, send_fn, done_fired: list,
+    ) -> ChatSession:
         session = ChatSession(
             session_id=sid,
             peer_id=peer_id,
@@ -993,7 +1063,7 @@ class ChatManager:
         )
         old = self._sessions.get(peer_id)
         if old is not None:
-            self._drop_session_locked(old)
+            self._drop_session_locked(old, done_fired)
         self._sessions[peer_id] = session
         self._session_by_sid[sid] = session
         self._remember_send_fn(peer_id, send_fn)
@@ -1008,9 +1078,14 @@ class ChatManager:
             self._latest_send_fn.get(session.peer_id),
         )
 
-    def _drop_session_locked(self, session: ChatSession) -> None:
-        """Tear a session down without notifying the peer."""
-        self._fail_transfers_for_session(session, "cancelled")
+    def _drop_session_locked(self, session: ChatSession, fired: list) -> None:
+        """Tear a session down without notifying the peer (lock held).
+
+        ``_on_file_done`` callbacks for any in-flight transfers are APPENDED
+        to *fired* as ``(session_id, transfer_id, status)`` tuples -- the
+        caller must fire them after releasing the lock (defer unification).
+        """
+        self._fail_transfers_for_session(session, "cancelled", fired)
         session.status = "closed"
         self._sessions.pop(session.peer_id, None)
         if self._session_by_sid.get(session.session_id) is session:
@@ -1043,6 +1118,7 @@ class ChatManager:
         self._fire("_on_sessions_changed")
 
     def _handle_chat_close(self, payload, sender_id) -> None:
+        done_fired: list[tuple[str, str, str]] = []
         with self._lock:
             session = self._resolve_session(str(payload.get("session_id", "")), sender_id)
             if session is None:
@@ -1051,13 +1127,15 @@ class ChatManager:
             if session is None or session.status not in ("inviting", "invited", "active"):
                 return
             session.status = "closed"
-            self._fail_transfers_for_session(session, "peer_offline")
+            self._fail_transfers_for_session(session, "peer_offline", done_fired)
             self._append_entry(session, ChatEntry(
                 entry_id=uuid.uuid4().hex[:16], kind="system", outgoing=False,
                 ts=time.time(), text_key="chat.system.session_closed_by_peer",
             ))
             sid = session.session_id
             entry = session.entries[-1]
+        for sid_d, tid_d, st_d in done_fired:
+            self._fire("_on_file_done", sid_d, tid_d, False, "", st_d)
         self._fire("_on_message", sid, entry.to_dict())
         self._fire("_on_sessions_changed")
 
@@ -1566,15 +1644,24 @@ class ChatManager:
     # Liveness / teardown
     # ------------------------------------------------------------------
 
-    def _fail_transfers_for_session(self, session: ChatSession, status: str) -> None:
-        """Fail all in-flight transfers bound to *session* (lock held)."""
+    def _fail_transfers_for_session(
+        self, session: ChatSession, status: str, done_fired: list,
+    ) -> None:
+        """Fail all in-flight transfers bound to *session* (lock held).
+
+        Never fires callbacks inline: each failed transfer is APPENDED to
+        *done_fired* as a ``(session_id, transfer_id, status)`` tuple and the
+        caller fires ``_on_file_done`` after releasing the lock.  A slow WS/UI
+        callback invoked under the chat lock would freeze the recv thread and
+        every other public method behind it.
+        """
         for tid in [t for t, s in self._sends.items() if s["session"] is session]:
             state = self._sends.pop(tid)
             state["cancel"] = True
             state["accept_event"].set()
             state["complete_event"].set()
             state["entry"].status = "failed"
-            self._fire("_on_file_done", session.session_id, tid, False, "", status)
+            done_fired.append((session.session_id, tid, status))
         for tid in [t for t, s in self._receives.items() if s["session"] is session]:
             state = self._receives.pop(tid)
             fh = state.get("fh")
@@ -1585,10 +1672,11 @@ class ChatManager:
                     pass
             _safe_remove(state.get("temp_path"))
             state["entry"].status = "failed"
-            self._fire("_on_file_done", session.session_id, tid, False, "", status)
+            done_fired.append((session.session_id, tid, status))
 
     def mark_peer_disconnected(self, peer_id: str) -> None:
         """The transport lost the connection to *peer_id*."""
+        done_fired: list[tuple[str, str, str]] = []
         with self._lock:
             session = self._sessions.get(peer_id)
             if session is None:
@@ -1608,11 +1696,13 @@ class ChatManager:
                     announced = False
                     sid = session.session_id
                     entry = None
-                self._fail_transfers_for_session(session, "peer_offline")
+                self._fail_transfers_for_session(session, "peer_offline", done_fired)
             else:
                 # A pending invite/answer can no longer be delivered.
                 session.status = "closed"
                 announced, sid, entry = False, session.session_id, None
+        for sid_d, tid_d, st_d in done_fired:
+            self._fire("_on_file_done", sid_d, tid_d, False, "", st_d)
         if announced and entry is not None:
             self._fire("_on_message", sid, entry.to_dict())
         self._fire("_on_sessions_changed")
@@ -1638,7 +1728,7 @@ class ChatManager:
                         continue
                     if session.status in ("inviting", "invited"):
                         if now - session.last_seen_mono > self.INVITE_ACCEPT_TIMEOUT:
-                            self._drop_session_locked(session)
+                            self._drop_session_locked(session, file_done_fired)
                             # Fire below the lock like every other sweep --
                             # a slow WS/UI callback must not freeze the chat
                             # lock (and with it the recv thread).
@@ -1661,7 +1751,9 @@ class ChatManager:
                                 ts=time.time(), text_key="chat.system.peer_offline",
                             ))
                             fired.append((session.session_id, session.entries[-1].to_dict()))
-                            self._fail_transfers_for_session(session, "peer_offline")
+                            self._fail_transfers_for_session(
+                                session, "peer_offline", file_done_fired,
+                            )
                             continue
                     if session.offline_announced and not session.online:
                         continue
@@ -1674,10 +1766,12 @@ class ChatManager:
                 # Both sweepers only mutate state under the lock and return
                 # the callbacks to fire — the actual fires happen BELOW so a
                 # slow WS/UI callback can never freeze the chat lock.
+                # (.extend, not reassignment: the offline/reap branches above
+                # already queued their own _on_file_done tuples.)
                 recv_done_fired, recv_sessions_changed = self._expire_stale_receives(
                     defer_fire=True,
                 )
-                file_done_fired = self._expire_stale_transfers(fired)
+                file_done_fired.extend(self._expire_stale_transfers(fired))
             for sid, entry_dict in fired:
                 self._fire("_on_message", sid, entry_dict)
             for sid, tid, status in file_done_fired:

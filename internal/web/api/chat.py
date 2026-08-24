@@ -206,6 +206,34 @@ def send_text(chat_mgr, body, send_fn_for_peer):
     return {"ok": ok}, 200
 
 
+def resend_text(chat_mgr, body, send_fn_for_peer):
+    """POST /api/chat/resend {session_id, entry_id} → {ok}.
+
+    Re-send a FAILED outgoing chat text (the ⟳ button on a failed bubble).
+    ``ChatManager.resend_text`` refuses anything that is not that session's
+    own failed text (unknown id, incoming, already sent) and re-charges the
+    per-session flood budget for the attempt.
+    """
+    err = _require_chat(chat_mgr)
+    if err:
+        return err
+    data = _json_body(body)
+    if data is None:
+        return {"ok": False, "error": "invalid json"}, 400
+    missing = _require_fields(data, "session_id", "entry_id")
+    if missing:
+        return {"ok": False, "error": f"{missing} required"}, 400
+    session_id = (data.get("session_id") or "").strip()
+    entry_id = (data.get("entry_id") or "").strip()
+    send_fn = _send_fn_for(chat_mgr, session_id, send_fn_for_peer)
+    try:
+        ok = chat_mgr.resend_text(session_id, entry_id, send_fn)
+    except Exception:
+        logger.debug("chat: resend_text failed", exc_info=True)
+        ok = False
+    return {"ok": ok}, 200
+
+
 def send_file(chat_mgr, body, send_fn_for_peer):
     """POST /api/chat/file {session_id, file_path} → {transfer_id}.
 

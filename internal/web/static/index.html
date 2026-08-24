@@ -2770,6 +2770,46 @@
       border-bottom-left-radius: 4px;
     }
 
+    /* Failed outgoing text: keep the bubble shape but make the failure
+       unmissable (red edge + label) — it used to render like a normal
+       delivered bubble because text bubbles never showed status. */
+    .chat-bubble--failed {
+      border: 1px solid var(--clipsync-danger, #e5484d);
+    }
+
+    .chat-bubble__failed {
+      color: #ff8a8f;
+      font-weight: 600;
+      margin-right: 6px;
+    }
+
+    .chat-bubble__retry {
+      display: inline-block;
+      margin-right: 6px;
+      padding: 0 5px;
+      font-size: 11px;
+      line-height: 16px;
+      font-family: inherit;
+      color: inherit;
+      background: transparent;
+      border: 1px solid currentColor;
+      border-radius: 8px;
+      cursor: pointer;
+      opacity: 0.9;
+      transition: opacity var(--clipsync-fast, 120ms), transform var(--clipsync-fast, 120ms);
+    }
+
+    .chat-bubble__retry:hover {
+      opacity: 1;
+      transform: rotate(90deg);
+    }
+
+    .chat-bubble__retry:disabled {
+      opacity: 0.45;
+      cursor: default;
+      transform: none;
+    }
+
     .chat-file {
       display: flex;
       align-items: center;

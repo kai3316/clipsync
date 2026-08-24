@@ -7,7 +7,7 @@
    Wire contract (see README / backend api/chat.py):
      WS: chat_sessions, chat_message, chat_progress, chat_file_done
      GET  /api/chat/devices|sessions|messages|download
-     POST /api/chat/invite|text|file|file/{accept,decline,cancel}|
+     POST /api/chat/invite|text|resend|file|file/{accept,decline,cancel}|
              {accept,decline,close,read}
    ═══════════════════════════════════════════════════════════════════ */
 
@@ -30,6 +30,7 @@
         sendingFile: false,
         inviteBusy: '',        // peer_id of an in-flight invite
         fileBusy: '',          // transfer_id of an in-flight file action
+        resendBusy: '',        // entry_id of an in-flight text resend
       };
     },
 
@@ -202,9 +203,17 @@
                   '<div v-if="m.kind === \'system\'" class="chat-system">{{ systemText(m) }}</div>' +
 
                   '<div v-else-if="m.kind === \'text\'" class="chat-bubble"' +
-                    ' :class="m.outgoing ? \'chat-bubble--out\' : \'chat-bubble--in\'">' +
+                    ' :class="[m.outgoing ? \'chat-bubble--out\' : \'chat-bubble--in\',' +
+                    ' (m.outgoing && m.status === \'failed\') ? \'chat-bubble--failed\' : \']">' +
                     '<div class="chat-bubble__text">{{ m.text }}</div>' +
-                    '<div class="chat-bubble__meta">{{ formatTime(m.ts) }}</div>' +
+                    '<div class="chat-bubble__meta">' +
+                      '<template v-if="m.outgoing && m.status === \'failed\'">' +
+                        '<span class="chat-bubble__failed">{{ t(\'chat.text_failed\') }}</span>' +
+                        '<button class="chat-bubble__retry" :title="t(\'chat.resend\')"' +
+                          ' :disabled="resendBusy === m.entry_id" @click="resendText(m)">⟳</button>' +
+                      '</template>' +
+                      '{{ formatTime(m.ts) }}' +
+                    '</div>' +
                   '</div>' +
 
                   '<div v-else class="chat-file"' +
@@ -497,6 +506,36 @@
           })
           .finally(function () {
             self.sendingText = false;
+          });
+      },
+
+      /* ── Failed-text resend ──────────────────────────────────── */
+
+      // ⟳ on a failed outgoing bubble: re-transmit that exact entry.  The
+      // backend refuses non-failed entries, so a double-click or a stale
+      // bubble simply comes back {ok:false} without side effects.
+      resendText: function (entry) {
+        var self = this;
+        var sid = this.store.activeChatSession;
+        if (!sid || !entry || !entry.entry_id) return;
+        if (this.resendBusy === entry.entry_id) return;
+        this.resendBusy = entry.entry_id;
+        ClipsyncAPI.chatResendText(sid, entry.entry_id)
+          .then(function (res) {
+            if (!res || res.ok === false) {
+              self.store.showToast(self.t('chat.err_resend_failed'), 2500);
+            }
+            // Refetch either way: success flips the bubble to delivered,
+            // failure keeps it failed (the chat_message push is deduped by
+            // entry_id in ws.js, so the refetch is what repaints the state).
+            self.loadMessages();
+          })
+          .catch(function (e) {
+            console.error('[ClipSync] Failed to resend chat text:', e);
+            self.store.showToast(self.t('chat.err_resend_failed'), 2500);
+          })
+          .finally(function () {
+            self.resendBusy = '';
           });
       },
 

@@ -683,6 +683,19 @@ var ClipsyncAPI = (function () {
     },
 
     /**
+     * Re-send a FAILED outgoing chat text (the ⟳ button on a failed bubble).
+     * @param {string} sessionId
+     * @param {string} entryId
+     * @returns {Promise<{ok: boolean}>}
+     */
+    chatResendText: function (sessionId, entryId) {
+      return this._fetch('POST', '/api/chat/resend', {
+        session_id: sessionId,
+        entry_id: entryId,
+      });
+    },
+
+    /**
      * Send a file in a chat session. `filePath` is the server-side path or
      * basename (returned by uploadFile) — the backend resolves it against the
      * receive directory.
