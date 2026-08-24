@@ -5,6 +5,7 @@ macOS:   CGEvent via ctypes (CoreGraphics framework)
 Linux:   pynput global hotkey listener
 """
 
+import itertools
 import logging
 import threading
 import time
@@ -57,6 +58,28 @@ _WIN_VK: dict[str, int] = {
     "end": 0x23,
     "pageup": 0x21,
     "pagedown": 0x22,
+    # Punctuation / OEM keys -- lets configs use combos like "Ctrl+/".
+    "minus": 0xBD,
+    "-": 0xBD,
+    "equal": 0xBB,
+    "=": 0xBB,
+    "plus": 0xBB,
+    "comma": 0xBC,
+    ",": 0xBC,
+    "period": 0xBE,
+    ".": 0xBE,
+    "slash": 0xBF,
+    "/": 0xBF,
+    "semicolon": 0xBA,
+    ";": 0xBA,
+    "quote": 0xDE,
+    "'": 0xDE,
+    "bracketleft": 0xDB,
+    "[": 0xDB,
+    "bracketright": 0xDD,
+    "]": 0xDD,
+    "backslash": 0xDC,
+    "\\": 0xDC,
     "f1": 0x70,
     "f2": 0x71,
     "f3": 0x72,
@@ -90,6 +113,28 @@ _MAC_VK: dict[str, int] = {
     "end": 119,  # kVK_End
     "pageup": 116,  # kVK_PageUp
     "pagedown": 121,  # kVK_PageDown
+    # Punctuation (kVK_ANSI_*), matching the Windows OEM entries.
+    "minus": 27,  # kVK_ANSI_Minus
+    "-": 27,
+    "equal": 24,  # kVK_ANSI_Equal
+    "=": 24,
+    "plus": 24,
+    "comma": 43,  # kVK_ANSI_Comma
+    ",": 43,
+    "period": 47,  # kVK_ANSI_Period
+    ".": 47,
+    "slash": 44,  # kVK_ANSI_Slash
+    "/": 44,
+    "semicolon": 41,  # kVK_ANSI_Semicolon
+    ";": 41,
+    "quote": 39,  # kVK_ANSI_Quote
+    "'": 39,
+    "bracketleft": 33,  # kVK_ANSI_LeftBracket
+    "[": 33,
+    "bracketright": 30,  # kVK_ANSI_RightBracket
+    "]": 30,
+    "backslash": 42,  # kVK_ANSI_Backslash
+    "\\": 42,
     "f1": 122,   # kVK_F1
     "f2": 120,   # kVK_F2
     "f3": 99,    # kVK_F3
@@ -163,6 +208,10 @@ class HotkeyManager:
         self._hotkeys: dict[str, tuple[int, int, Callable]] = {}
         # hotkey_id -> original shortcut string (needed for Linux / pynput)
         self._shortcut_strings: dict[str, str] = {}
+        # hotkey_id -> canonical (modifiers, key) used for conflict detection,
+        # so two ids bound to the same physical combination can be rejected
+        # instead of both silently firing.
+        self._combo_index: dict[str, tuple[int, str]] = {}
         self._lock = threading.Lock()
         self._thread: threading.Thread | None = None
         self._platform = _platform()
@@ -171,12 +220,17 @@ class HotkeyManager:
         # Windows
         self._win_hwnd: int | None = None
         self._win_class_atom: int | None = None
+        self._win_class_name: str | None = None
         self._win_id_map: dict[str, int] = {}  # string id -> RegisterHotKey int id
         self._win_id_rev: dict[int, str] = {}  # int id -> string id
         self._win_next_id: int = 1
         # Ids whose platform-level registration the OS refused (e.g. the
         # combination is already claimed by another application).
         self._register_failures: set[str] = set()
+        # Shortcut string per failed id -- failed ids are never registered,
+        # so this is where their (possibly unparseable) strings are kept for
+        # user-visible reporting.
+        self._failure_strings: dict[str, str] = {}
 
         # macOS
         self._mac_tap: int | None = None  # CFMachPortRef
@@ -210,7 +264,11 @@ class HotkeyManager:
             shortcut: String like ``"Ctrl+`"``, ``"Ctrl+Shift+V"``.
             callback: Function called when hotkey is pressed (no args).
 
-        Returns ``True`` on success, ``False`` if the shortcut string is invalid.
+        Returns ``True`` on success, ``False`` if the shortcut string is
+        invalid or it collides with a *different* hotkey id already bound to
+        the same physical combination (both would fire otherwise).
+        Re-binding the same id to a new combination is always allowed and
+        releases the previous platform registration.
         Registration failures due to platform errors (e.g. shortcut already in use)
         are logged as warnings and do *not* raise exceptions.
         """
@@ -220,9 +278,28 @@ class HotkeyManager:
             logger.warning("Invalid shortcut '%s': %s", shortcut, exc)
             return False
 
+        combo = (modifiers, self._canonical_key(shortcut))
         with self._lock:
+            conflict = next(
+                (
+                    hid
+                    for hid, c in self._combo_index.items()
+                    if hid != hotkey_id and c == combo
+                ),
+                None,
+            )
+            if conflict is not None:
+                logger.warning(
+                    "Hotkey '%s' (%s) conflicts with '%s' -- rejected",
+                    hotkey_id,
+                    shortcut,
+                    conflict,
+                )
+                return False
             self._hotkeys[hotkey_id] = (modifiers, vk_code, callback)
             self._shortcut_strings[hotkey_id] = shortcut
+            self._combo_index[hotkey_id] = combo
+            self._register_failures.discard(hotkey_id)
 
         # If already running, register with the platform immediately.
         if self._running:
@@ -239,27 +316,46 @@ class HotkeyManager:
 
     def unregister(self, hotkey_id: str) -> None:
         """Remove a registered hotkey."""
-        if self._running:
-            self._platform_unregister_one(hotkey_id)
+        # Drop our bookkeeping first so platform-level rebuilds (Linux rebuilds
+        # its whole pynput map from _hotkeys) no longer see the removed id --
+        # otherwise an "unregistered" hotkey keeps firing until some later
+        # rebuild happens to run.
         with self._lock:
-            self._hotkeys.pop(hotkey_id, None)
+            existed = self._hotkeys.pop(hotkey_id, None) is not None
             self._shortcut_strings.pop(hotkey_id, None)
+            self._combo_index.pop(hotkey_id, None)
+            self._failure_strings.pop(hotkey_id, None)
             self._register_failures.discard(hotkey_id)
+        if existed and self._running:
+            self._platform_unregister_one(hotkey_id)
         logger.debug("Unregistered hotkey '%s'", hotkey_id)
 
     def failed_shortcuts(self) -> list[tuple[str, str]]:
-        """Return (hotkey_id, shortcut) pairs whose platform registration failed.
+        """Return (hotkey_id, shortcut) pairs that will never fire.
 
-        A parse-invalid shortcut never reaches the platform and is reported
-        by ``reload_from_config`` instead; this covers OS-level refusals such
-        as the combination being globally claimed by another application —
-        the listener stays healthy but that one hotkey silently never fires.
+        This is the single source of truth for user-visible failure reporting
+        and covers every rejection reason: OS-level refusals (the combination
+        is globally claimed by another application), shortcuts that could not
+        be parsed at all, in-manager conflicts between two ids, and callbacks
+        whose factory raised.  The listener itself stays healthy in all of
+        these cases; only the listed hotkeys are dead.
         """
         with self._lock:
             return [
-                (hid, self._shortcut_strings.get(hid, ""))
+                (
+                    hid,
+                    self._failure_strings.get(hid)
+                    or self._shortcut_strings.get(hid, ""),
+                )
                 for hid in sorted(self._register_failures)
             ]
+
+    @staticmethod
+    def _canonical_key(shortcut: str) -> str:
+        """Normalize the key part of a shortcut for conflict comparison."""
+        key = shortcut.split("+")[-1].strip().lower()
+        # Tilde and backtick are the same physical key.
+        return "`" if key == "~" else key
 
     def start(self) -> None:
         """Start the hotkey listener thread."""
@@ -273,7 +369,13 @@ class HotkeyManager:
         logger.info("Hotkey manager started on %s", self._platform)
 
     def stop(self) -> None:
-        """Stop the hotkey listener and clean up all OS resources."""
+        """Stop the hotkey listener and release OS resources.
+
+        Registrations are kept in memory so a later ``start()`` on the same
+        manager restores every hotkey (the settings UI toggles hotkeys off
+        and back on without rebuilding the manager).  Use ``unregister`` /
+        ``reload_from_config`` to change what is registered.
+        """
         if not self._running:
             return
         logger.info("Stopping hotkey manager ...")
@@ -281,9 +383,7 @@ class HotkeyManager:
         self._platform_stop()
         if self._thread is not None and self._thread.is_alive():
             self._thread.join(timeout=2.0)
-        with self._lock:
-            self._hotkeys.clear()
-            self._shortcut_strings.clear()
+        self._thread = None
         logger.info("Hotkey manager stopped")
 
     def reload_from_config(
@@ -294,6 +394,11 @@ class HotkeyManager:
         Args:
             shortcuts: ``dict`` mapping ``hotkey_id`` to ``shortcut_string``.
             callback_factory: ``fn(hotkey_id) -> callback``.
+
+        Skipped hotkeys (invalid string, in-manager conflict with another id,
+        or a raising ``callback_factory``) are recorded in
+        ``failed_shortcuts()`` so callers can surface them to the user; a
+        factory exception no longer aborts the whole reload.
         """
         was_running = self._running
         if was_running:
@@ -306,11 +411,23 @@ class HotkeyManager:
         with self._lock:
             self._hotkeys.clear()
             self._shortcut_strings.clear()
+            self._combo_index.clear()
+            self._failure_strings.clear()
             self._register_failures.clear()
 
         failed: list[str] = []
         for hotkey_id, shortcut in shortcuts.items():
-            cb = callback_factory(hotkey_id)
+            try:
+                cb = callback_factory(hotkey_id)
+            except Exception as exc:
+                logger.warning(
+                    "Cannot reload hotkey '%s': callback factory raised: %s",
+                    hotkey_id,
+                    exc,
+                )
+                failed.append(hotkey_id)
+                self._failure_strings[hotkey_id] = str(shortcut)
+                continue
             try:
                 modifiers, vk_code = self._parse_shortcut(shortcut)
             except ValueError as exc:
@@ -321,9 +438,33 @@ class HotkeyManager:
                     exc,
                 )
                 failed.append(hotkey_id)
+                self._failure_strings[hotkey_id] = str(shortcut)
                 continue
-            self._hotkeys[hotkey_id] = (modifiers, vk_code, cb)
-            self._shortcut_strings[hotkey_id] = shortcut
+            combo = (modifiers, self._canonical_key(shortcut))
+            with self._lock:
+                conflict = next(
+                    (hid for hid, c in self._combo_index.items() if c == combo),
+                    None,
+                )
+                if conflict is not None:
+                    logger.warning(
+                        "Hotkey '%s' (%s) conflicts with '%s' -- skipped",
+                        hotkey_id,
+                        shortcut,
+                        conflict,
+                    )
+                    failed.append(hotkey_id)
+                    self._failure_strings[hotkey_id] = shortcut
+                    continue
+                self._hotkeys[hotkey_id] = (modifiers, vk_code, cb)
+                self._shortcut_strings[hotkey_id] = shortcut
+                self._combo_index[hotkey_id] = combo
+
+        # Make every rejection visible through failed_shortcuts() -- previously
+        # parse-invalid and conflicting shortcuts were only logged and the
+        # user had no way to learn why a hotkey never fired.
+        with self._lock:
+            self._register_failures.update(failed)
 
         if was_running:
             # Windows/macOS _platform_start is a no-op (the run loop owns the
@@ -394,9 +535,10 @@ class HotkeyManager:
         if key_lower == "~":
             key_lower = "`"
 
-        # Single ASCII character (A-Z, 0-9); backtick/tilde fall through to the
-        # named-key tables below (ord() is not a valid VK for them).
-        if len(key) == 1 and key.isascii() and key_lower not in ("`", "~"):
+        # Single ASCII letter or digit; backtick/tilde and other punctuation
+        # fall through to the named-key tables below (ord() is not a valid VK
+        # for them -- e.g. ord(",")=44 is not VK_OEM_COMMA).
+        if len(key) == 1 and key.isascii() and key.isalnum():
             char = key.upper()
             if self._platform == "macos":
                 if char in _MAC_LETTER_VK:
@@ -548,6 +690,9 @@ if _platform() == "windows":
     # Module-level reference so the window procedure can reach the manager.
     _win_mgr: "HotkeyManager | None" = None
 
+    # Monotonic counter for unique-per-start window class names.
+    _win_class_counter = itertools.count(1)
+
     @_WNDPROC
     def _win_wnd_proc(
         hwnd: wintypes.HWND,
@@ -572,144 +717,196 @@ if _platform() == "windows":
     def _win_register_one(
         self: HotkeyManager, hotkey_id: str, modifiers: int, vk_code: int
     ) -> None:
-        if self._win_hwnd is None:
-            logger.warning(
-                "Cannot register hotkey '%s': window not created yet", hotkey_id
+        # All id-map mutations happen under the manager lock: register() may
+        # run on the caller thread while the listener thread reads these maps
+        # from its window procedure.
+        with self._lock:
+            if self._win_hwnd is None:
+                logger.warning(
+                    "Cannot register hotkey '%s': window not created yet", hotkey_id
+                )
+                return
+            # Re-binding an existing id must first release its previous OS
+            # registration -- otherwise the old combination stays live (both
+            # combos fire) and an OS registration leaks per rebinding.
+            stale_ids: list[int] = []
+            old_int_id = self._win_id_map.get(hotkey_id)
+            if old_int_id is not None:
+                stale_ids.append(old_int_id)
+            stale_ids.extend(
+                int_id
+                for int_id, hid in self._win_id_rev.items()
+                if hid == hotkey_id and int_id not in stale_ids
             )
-            return
-        int_id = self._win_next_id
-        self._win_next_id += 1
-        self._win_id_map[hotkey_id] = int_id
-        self._win_id_rev[int_id] = hotkey_id
-        win_mods = _to_win_mods(modifiers)
-        ok = _user32.RegisterHotKey(self._win_hwnd, int_id, win_mods, vk_code)
-        if not ok:
-            err = _kernel32.GetLastError()
-            # Drop the dead mapping so the id can never fire, and record the
-            # refusal so the app can tell the user the shortcut is unusable
-            # (usually claimed by another application).
+            for int_id in stale_ids:
+                _user32.UnregisterHotKey(self._win_hwnd, int_id)
+                self._win_id_rev.pop(int_id, None)
             self._win_id_map.pop(hotkey_id, None)
-            self._win_id_rev.pop(int_id, None)
-            self._register_failures.add(hotkey_id)
-            logger.warning(
-                "RegisterHotKey failed for '%s' (id=%d, mods=0x%x, vk=0x%x, err=%d)",
-                hotkey_id,
-                int_id,
-                win_mods,
-                vk_code,
-                err,
-            )
-        else:
-            self._register_failures.discard(hotkey_id)
+
+            int_id = self._win_next_id
+            self._win_next_id += 1
+            self._win_id_map[hotkey_id] = int_id
+            self._win_id_rev[int_id] = hotkey_id
+            win_mods = _to_win_mods(modifiers)
+            ok = _user32.RegisterHotKey(self._win_hwnd, int_id, win_mods, vk_code)
+            if not ok:
+                err = _kernel32.GetLastError()
+                # Drop the dead mapping so the id can never fire, and record the
+                # refusal so the app can tell the user the shortcut is unusable
+                # (usually claimed by another application).
+                self._win_id_map.pop(hotkey_id, None)
+                self._win_id_rev.pop(int_id, None)
+                self._register_failures.add(hotkey_id)
+                logger.warning(
+                    "RegisterHotKey failed for '%s' (id=%d, mods=0x%x, vk=0x%x, err=%d)",
+                    hotkey_id,
+                    int_id,
+                    win_mods,
+                    vk_code,
+                    err,
+                )
+            else:
+                self._register_failures.discard(hotkey_id)
 
     def _win_unregister_one(self: HotkeyManager, hotkey_id: str) -> None:
-        int_id = self._win_id_map.pop(hotkey_id, None)
-        self._win_id_rev.pop(int_id, None)
-        if int_id is not None and self._win_hwnd is not None:
-            _user32.UnregisterHotKey(self._win_hwnd, int_id)
+        with self._lock:
+            int_id = self._win_id_map.pop(hotkey_id, None)
+            self._win_id_rev.pop(int_id, None)
+            if int_id is not None and self._win_hwnd is not None:
+                _user32.UnregisterHotKey(self._win_hwnd, int_id)
+
+    def _win_teardown(self: HotkeyManager, hwnd: int | None) -> None:
+        """Release every OS resource owned by the listener thread.
+
+        Must run on the thread that created the window (DestroyWindow
+        refuses cross-thread).  Idempotent so both the normal loop exit and
+        early failure paths can call it.
+        """
+        with self._lock:
+            int_ids = list(self._win_id_map.values())
+            self._win_id_map.clear()
+            self._win_id_rev.clear()
+        for int_id in int_ids:
+            if hwnd is not None:
+                try:
+                    _user32.UnregisterHotKey(hwnd, int_id)
+                except Exception:
+                    pass
+
+        # DestroyWindow posts WM_DESTROY -> PostQuitMessage; by this point the
+        # message loop has already exited, which is fine.
+        if hwnd is not None:
+            try:
+                _user32.DestroyWindow(hwnd)
+            except Exception:
+                pass
+        self._win_hwnd = None
+
+        class_name = self._win_class_name
+        self._win_class_name = None
+        self._win_class_atom = None
+        if class_name:
+            try:
+                _user32.UnregisterClassW(
+                    ctypes.c_wchar_p(class_name),
+                    _kernel32.GetModuleHandleW(None),
+                )
+            except Exception:
+                pass
 
     def _run_windows(self: HotkeyManager) -> None:
         global _win_mgr
         _win_mgr = self
 
-        # Register window class with a unique name
-        class_name = f"ClipSyncHotkey_{id(self):x}"
-        wnd_class = _WNDCLASSW()
-        wnd_class.lpfnWndProc = _win_wnd_proc
-        wnd_class.hInstance = _kernel32.GetModuleHandleW(None)
-        wnd_class.lpszClassName = class_name
-        atom = _user32.RegisterClassW(ctypes.byref(wnd_class))
-        if not atom:
-            logger.error("RegisterClassW failed: err=%d", _kernel32.GetLastError())
-            _win_mgr = None
-            return
-        self._win_class_atom = atom
+        # Unique per start so a same-instance restart (reload_from_config) can
+        # never collide with a class the previous listener thread is still
+        # tearing down.
+        class_name = f"ClipSyncHotkey_{id(self):x}_{next(_win_class_counter)}"
+        hwnd: int | None = None
+        try:
+            wnd_class = _WNDCLASSW()
+            wnd_class.lpfnWndProc = _win_wnd_proc
+            wnd_class.hInstance = _kernel32.GetModuleHandleW(None)
+            wnd_class.lpszClassName = class_name
+            atom = _user32.RegisterClassW(ctypes.byref(wnd_class))
+            if not atom:
+                logger.error("RegisterClassW failed: err=%d", _kernel32.GetLastError())
+                return
+            self._win_class_atom = atom
+            self._win_class_name = class_name
 
-        # Create a message-only window
-        hwnd = _user32.CreateWindowExW(
-            0,
-            class_name,
-            class_name,
-            0,
-            0,
-            0,
-            0,
-            0,
-            _HWND_MESSAGE,
-            None,
-            wnd_class.hInstance,
-            None,
-        )
-        if not hwnd:
-            logger.error("CreateWindowExW failed: err=%d", _kernel32.GetLastError())
-            _user32.UnregisterClassW(class_name, wnd_class.hInstance)
-            _win_mgr = None
-            return
-        self._win_hwnd = hwnd
+            # Create a message-only window
+            hwnd = _user32.CreateWindowExW(
+                0,
+                class_name,
+                class_name,
+                0,
+                0,
+                0,
+                0,
+                0,
+                _HWND_MESSAGE,
+                None,
+                wnd_class.hInstance,
+                None,
+            )
+            if not hwnd:
+                logger.error("CreateWindowExW failed: err=%d", _kernel32.GetLastError())
+                return
+            self._win_hwnd = hwnd
 
-        # Register all currently-stored hotkeys with the new window
-        self._win_id_map.clear()
-        self._win_id_rev.clear()
-        self._win_next_id = 1
-        with self._lock:
-            for hotkey_id, (mods, vk, _cb) in list(self._hotkeys.items()):
+            # Register all currently-stored hotkeys with the new window.
+            with self._lock:
+                initial = [
+                    (hotkey_id, mods, vk)
+                    for hotkey_id, (mods, vk, _cb) in self._hotkeys.items()
+                ]
+            for hotkey_id, mods, vk in initial:
                 _win_register_one(self, hotkey_id, mods, vk)
 
-        logger.debug("Windows message-only window created (hwnd=0x%x)", hwnd)
+            logger.debug("Windows message-only window created (hwnd=0x%x)", hwnd)
 
-        # Message loop
-        msg = wintypes.MSG()
-        while self._running:
-            # PeekMessage with PM_REMOVE (1), non-blocking (0)
-            if _user32.PeekMessageW(ctypes.byref(msg), 0, 0, 0, 1):
-                if msg.message == _WM_QUIT:
-                    break
-                _user32.TranslateMessage(ctypes.byref(msg))
-                _user32.DispatchMessageW(ctypes.byref(msg))
-            else:
-                time.sleep(0.02)
+            # Message loop
+            msg = wintypes.MSG()
+            while self._running:
+                # PeekMessage with PM_REMOVE (1), non-blocking (0)
+                if _user32.PeekMessageW(ctypes.byref(msg), 0, 0, 0, 1):
+                    if msg.message == _WM_QUIT:
+                        break
+                    _user32.TranslateMessage(ctypes.byref(msg))
+                    _user32.DispatchMessageW(ctypes.byref(msg))
+                else:
+                    time.sleep(0.02)
 
-        logger.debug("Windows hotkey message loop exited")
+            logger.debug("Windows hotkey message loop exited")
+        finally:
+            # Teardown here -- on the owning thread -- guarantees the window,
+            # window class and every RegisterHotKey are released even when
+            # stop() raced window creation or the loop died on an exception.
+            # Previously a stop()/start() race leaked the registrations, which
+            # kept the combinations claimed system-wide until process exit.
+            self._win_teardown(hwnd)
+            if _win_mgr is self:
+                _win_mgr = None
 
     def _win_stop(self: HotkeyManager) -> None:
+        """Signal the listener to exit; the owning thread tears itself down."""
         global _win_mgr
-        _win_mgr = None
+        if _win_mgr is self:
+            _win_mgr = None
 
         hwnd = self._win_hwnd
-        class_atom = self._win_class_atom
-
-        # Unregister all hotkeys
-        with self._lock:
-            for int_id in list(self._win_id_map.values()):
-                if hwnd is not None:
-                    _user32.UnregisterHotKey(hwnd, int_id)
-            self._win_id_map.clear()
-            self._win_id_rev.clear()
-
-        # Destroy the window -- posts WM_DESTROY which calls PostQuitMessage
         if hwnd is not None:
+            # WM_CLOSE -> DefWindowProc -> DestroyWindow -> WM_DESTROY ->
+            # PostQuitMessage -> WM_QUIT breaks the loop.  Even when that
+            # drain lags, the loop condition sees _running == False within
+            # one poll tick and teardown runs regardless.
             _user32.PostMessageW(hwnd, _WM_CLOSE, 0, 0)
-            time.sleep(0.05)  # Give the message loop time to process WM_CLOSE
-            try:
-                _user32.DestroyWindow(hwnd)
-            except Exception:
-                pass
-            self._win_hwnd = None
-
-        # Unregister the window class
-        if class_atom is not None:
-            try:
-                _user32.UnregisterClassW(
-                    ctypes.c_wchar_p(f"ClipSyncHotkey_{id(self):x}"),
-                    _kernel32.GetModuleHandleW(None),
-                )
-            except Exception:
-                pass
-            self._win_class_atom = None
 
     # Attach Windows methods to HotkeyManager
     HotkeyManager._win_register_one = _win_register_one  # type: ignore[attr-defined]
     HotkeyManager._win_unregister_one = _win_unregister_one  # type: ignore[attr-defined]
+    HotkeyManager._win_teardown = _win_teardown  # type: ignore[attr-defined]
     HotkeyManager._run_windows = _run_windows  # type: ignore[attr-defined]
     HotkeyManager._win_stop = _win_stop  # type: ignore[attr-defined]
 
@@ -1039,7 +1236,7 @@ else:  # linux
         # Build pynput mapping: "<ctrl>+<shift>+v" -> callback
         pynput_map: dict[str, Callable] = {}
         with self._lock:
-            for hotkey_id, (_mods, _vk, cb) in self._hotkeys.items():
+            for hotkey_id, (_mods, _vk, _cb) in self._hotkeys.items():
                 shortcut = shortcuts.get(hotkey_id)
                 if shortcut is None:
                     continue
@@ -1048,7 +1245,11 @@ else:  # linux
                 except Exception:
                     logger.debug("Cannot convert shortcut '%s' to pynput format", shortcut)
                     continue
-                pynput_map[pynput_fmt] = cb
+                # Route through _fire (as Windows/macOS do) so an exception in
+                # a callback is caught and logged instead of killing the whole
+                # pynput listener thread -- which would silently disable every
+                # remaining hotkey.
+                pynput_map[pynput_fmt] = lambda hid=hotkey_id: self._fire(hid)
 
         # Stop existing listener
         old = self._linux_listener

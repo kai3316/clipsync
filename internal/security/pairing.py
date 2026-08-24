@@ -284,6 +284,9 @@ class PairingManager:
             # must no longer be confirmable — mirror get_pending_pairings().
             if now - _timestamp > PAIRING_TIMEOUT:
                 self._pending_pairings.pop(peer_id, None)
+                # Mark the lifecycle cancelled too, so a stale "pending" does
+                # not linger in _pairing_status after the request is gone.
+                self._pairing_status[peer_id] = PAIRING_STATUS_CANCELLED
                 logger.info("Pairing request for %s expired before confirmation", peer_id)
                 return False
 
@@ -364,6 +367,12 @@ class PairingManager:
         """
         with self._lock:
             current = self._pairing_status.get(peer_id, PAIRING_STATUS_PENDING)
+            if current == PAIRING_STATUS_PAIRED:
+                # Duplicate / late pairing_confirm (reconnect storms can
+                # re-deliver it): the handshake already completed — keep the
+                # paired state instead of regressing to peer_confirmed and
+                # making the UI prompt the user all over again.
+                return current
             if current == PAIRING_STATUS_CONFIRMED_WAITING:
                 self._pairing_status[peer_id] = PAIRING_STATUS_PAIRED
                 self._pending_pairings.pop(peer_id, None)

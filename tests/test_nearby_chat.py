@@ -559,7 +559,9 @@ class TestReceiveExpiry:
                 "peer-a", "A1", None,
             )
             sid = mgr.get_sessions()[0]["session_id"]
-            mgr.accept_invitation(sid, None)
+            # A working channel: since the honest-accept fix, activation only
+            # commits when the chat_accept frame actually goes out.
+            mgr.accept_invitation(sid, lambda data: True)
             mgr.handle_message(
                 "chat_file_offer",
                 {"session_id": sid, "transfer_id": "b" * 32,
@@ -617,7 +619,7 @@ class TestStalledTransferSweep:
             "peer-a", "A1", None,
         )
         sid = mgr.get_sessions()[0]["session_id"]
-        mgr.accept_invitation(sid, None)
+        mgr.accept_invitation(sid, lambda data: True)  # honest-accept fix: ack must go out
         return sid
 
     def test_stalled_receive_is_failed_and_temp_file_removed(self):
@@ -668,7 +670,7 @@ class TestTextRateBudget:
             "peer-a", "A1", None,
         )
         sid = mgr.get_sessions()[0]["session_id"]
-        mgr.accept_invitation(sid, None)
+        mgr.accept_invitation(sid, lambda data: True)  # honest-accept fix: ack must go out
         return sid
 
     def test_incoming_flood_does_not_consume_outgoing_budget(self):
@@ -720,7 +722,7 @@ class TestR6AuditRegressions:
             "peer-a", "A1", None,
         )
         sid = mgr.get_sessions()[0]["session_id"]
-        mgr.accept_invitation(sid, None)
+        mgr.accept_invitation(sid, lambda data: True)  # honest-accept fix: ack must go out
         return sid
 
     def test_offline_gate_ignores_stalled_transfer(self):

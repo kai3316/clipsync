@@ -23,7 +23,13 @@ _BROWSERS = [
     ("chrome",    ["--app={url}", "--window-size={width},{height}"], ["Windows"]),
     ("chromium",  ["--app={url}", "--window-size={width},{height}"], ["Windows"]),
     ("brave",     ["--app={url}", "--window-size={width},{height}"], ["Windows"]),
-    ("firefox",   ["--new-window", "{url}", "--width={width}", "--height={height}"], ["Windows"]),
+    # Firefox has no --app mode; --new-window opens a chrome-ful window.
+    # The legacy -width/-height options were removed from Firefox (modern
+    # builds only support --window-size for --screenshot), and even on old
+    # builds they were ignored whenever an existing Firefox instance took
+    # over the command line — so no size flags are passed at all.
+    # (Single vs double dash is equivalent in Firefox per its own docs.)
+    ("firefox",   ["--new-window", "{url}"], ["Windows"]),
     # ── macOS ─────────────────────────────────────────────────────────
     # Chrome-based browsers are launched directly via their bundle binary
     # with `--app` (see _launch_browser): `open -a ... --args --app={url}`
@@ -44,7 +50,8 @@ _BROWSERS = [
     ("chromium",          ["--app={url}", "--window-size={width},{height}"], ["Linux"]),
     ("microsoft-edge",    ["--app={url}", "--window-size={width},{height}"], ["Linux"]),
     ("brave-browser",     ["--app={url}", "--window-size={width},{height}"], ["Linux"]),
-    ("firefox",           ["--new-window", "{url}", "--width={width}", "--height={height}"], ["Linux"]),
+    # No size flags for Firefox — see the Windows entry above.
+    ("firefox",           ["--new-window", "{url}"], ["Linux"]),
 ]
 
 

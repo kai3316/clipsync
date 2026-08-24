@@ -101,13 +101,24 @@ def apply_and_restart(staged: Path) -> bool:
 def _apply_windows(staged: Path) -> bool:
     cur = _current_exe()
     bat = cur.with_name("clipsync-update.bat")
+    # Retry the replace for up to 5 minutes while the running exe exits, then
+    # give up and relaunch the CURRENT binary (better a working old version
+    # than an immortal helper looping forever -- e.g. if antivirus quarantined
+    # the staged file).  ``del "%~f0"`` removes the helper itself afterwards
+    # instead of leaving clipsync-update.bat next to the app forever.
     script = (
         "@echo off\n"
+        "set /a tries=0\n"
         ":retry\n"
         "timeout /t 1 /nobreak >nul\n"
         f'move /y "{staged}" "{cur}" >nul 2>&1\n'
-        f'if exist "{staged}" goto retry\n'
+        f'if not exist "{staged}" goto launch\n'
+        "set /a tries+=1\n"
+        "if %tries% geq 300 goto launch\n"
+        "goto retry\n"
+        ":launch\n"
         f'start "" "{cur}"\n'
+        'del "%~f0"\n'
     )
     try:
         bat.write_text(script)

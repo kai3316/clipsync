@@ -4,6 +4,19 @@ All notable changes to ClipSync are documented in this file.
 
 ## [Unreleased]
 
+### Chat & pairing reliability
+- **Chat invites fail honestly.** An invite the transport refuses no longer leaves a phantom "inviting" conversation pinning a slot for five minutes; accepting over a broken link keeps an honest, retryable state instead of a fake active chat; shutdown no longer leaves sender threads parked for minutes.
+- Duplicate or late pairing confirmations no longer demote an already-paired device (no spurious re-confirm prompts); expired pairing requests clean up their pending state.
+- Malformed sync frames (non-string message type, NaN/garbage timestamps) are dropped at decode instead of tearing down the whole connection.
+- The Windows self-update helper gives up after 5 minutes and deletes itself instead of looping forever when antivirus quarantines the staged file.
+
+### Hotkeys
+- **Dead hotkeys are now explained.** Shortcuts that fail to register (combo occupied by another app, invalid combination, two actions bound to the same keys) are reported by name after startup — previously completely silent. Conflicting bindings are rejected at registration time.
+- Toggling hotkeys off→on in settings restores them immediately (previously every hotkey silently vanished until restart); re-binding a combo releases the old OS registration instead of leaking it; teardown runs on the listener thread so combos can't stay held by a zombie window; punctuation combos like `Ctrl+/` resolve to the right key on Windows/macOS.
+
+### Interface
+- Combo boxes, dropdown menus and scrollbars now follow the app theme in light and dark mode; Firefox dashboard windows no longer pass dead size flags.
+
 ### Transfers
 - **Failed file transfers are no longer invisible.** Every failure path (disk error, peer offline, timeout, size mismatch, rejection, stale sweep, …) now lands in transfer history with a machine-readable reason and the target device, and failed outbound rows get a ⟳ Retry button in the web dashboard (double-click guarded).
 - **Cancel-all**: one click clears every active transfer from the Transfers panel (`POST /api/transfer/cancel-all`).
@@ -23,6 +36,7 @@ All notable changes to ClipSync are documented in this file.
 - Local clipboard capture no longer silently drops items when another app holds the clipboard briefly (read-side retry budget now matches write side).
 - A single corrupted `types` JSON row no longer aborts loading the whole history; clearing history now reclaims disk space (`VACUUM`).
 - Batch pin/delete tolerates string vs numeric ids from web clients (previously silent no-ops).
+- **RTF payloads are scanned for secrets too.** Card numbers, tokens or e-mails hidden in an RTF body were invisible to the TEXT/HTML-only sensitive-data scan and rode to peers unredacted; a matching RTF is now dropped instead, and an RTF-only clip still syncs as redacted plain text.
 
 ### Reliability
 - Desktop settings window reaches parity with the web UI: "history retention days" input, plain-text-only switch, Markdown in the dashboard export dropdown (JSON/CSV/Markdown), failed transfer rows show their reason with a ⟳ Retry button, and the tray shows the live connected-device count.

@@ -84,6 +84,57 @@
       "#7584A6"
     ]
   },
+  "CTkComboBox": {
+    "corner_radius": 8,
+    "border_width": 2,
+    "fg_color": [
+      "#FFFFFF",
+      "#0A0E1E"
+    ],
+    "border_color": [
+      "#B8C0D6",
+      "#2A3557"
+    ],
+    "button_color": [
+      "#EEF1F9",
+      "#0E1328"
+    ],
+    "button_hover_color": [
+      "#E4E8F2",
+      "#161C38"
+    ],
+    "text_color": [
+      "#10142A",
+      "#EAF0FA"
+    ],
+    "text_color_disabled": [
+      "gray60",
+      "gray45"
+    ]
+  },
+  "CTkOptionMenu": {
+    "corner_radius": 8,
+    "fg_color": [
+      "#FFFFFF",
+      "#0A0E1E"
+    ],
+    "button_color": [
+      "#EEF1F9",
+      "#0E1328"
+    ],
+    "button_hover_color": [
+      "#E4E8F2",
+      "#161C38"
+    ],
+    "text_color": [
+      "#10142A",
+      "#EAF0FA"
+    ],
+    "text_color_disabled": [
+      "gray60",
+      "gray45"
+    ]
+  },
   "CTkCheckBox": {
     "corner_radius": 6,
     "border_width": 3,
@@ -244,42 +295,6 @@
       "gray45"
     ]
   },
-  "CTkTabview": {
-    "corner_radius": 8,
-    "border_width": 0,
-    "fg_color": [
-      "transparent",
-      "transparent"
-    ],
-    "segmented_button_fg_color": [
-      "#EEF1F9",
-      "#0E1328"
-    ],
-    "segmented_button_selected_color": [
-      "#FFFFFF",
-      "#161C38"
-    ],
-    "segmented_button_selected_hover_color": [
-      "#F7F8FD",
-      "#1A2140"
-    ],
-    "segmented_button_unselected_color": [
-      "#EEF1F9",
-      "#0E1328"
-    ],
-    "segmented_button_unselected_hover_color": [
-      "#E4E8F2",
-      "#161C38"
-    ],
-    "text_color": [
-      "#10142A",
-      "#EAF0FA"
-    ],
-    "text_color_disabled": [
-      "gray60",
-      "gray45"
-    ]
-  },
   "CTkTextbox": {
     "corner_radius": 8,
     "border_width": 0,
@@ -308,6 +323,19 @@
     "label_fg_color": [
       "#EEF1F9",
       "#161C38"
+    ]
+  },
+  "CTkScrollbar": {
+    "corner_radius": 1000,
+    "border_spacing": 4,
+    "fg_color": "transparent",
+    "button_color": [
+      "#C4CADB",
+      "#2A3557"
+    ],
+    "button_hover_color": [
+      "#B8C0D6",
+      "#3A4670"
     ]
   },
   "DropdownMenu": {

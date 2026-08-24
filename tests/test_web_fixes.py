@@ -574,7 +574,9 @@ def test_chat_expire_stale_receives_defers_fire_outside_lock():
             "peer-a", "A1", None,
         )
         sid = mgr.get_sessions()[0]["session_id"]
-        mgr.accept_invitation(sid, None)
+        # A working channel: since the honest-accept fix, activation only
+        # commits when the chat_accept frame actually goes out.
+        mgr.accept_invitation(sid, lambda data: True)
         done_events = []
         mgr.set_on_file_done(
             lambda s, tid, ok, path, st: done_events.append((tid, ok, st)),

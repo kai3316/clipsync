@@ -431,8 +431,22 @@ class ChatManager:
                 "fingerprint_short": self.shorten_fingerprint(self._own_fp)[:32],
                 "greeting": "",
             }, send_fn)
+            refused = False
             if not sent:
-                logger.debug("chat: invite frame dropped (send_fn refused)")
+                # The transport refused the invite frame -- tear the session
+                # down NOW instead of leaving a phantom "inviting" entry pinned
+                # for INVITE_ACCEPT_TIMEOUT: it would hold one of the
+                # MAX_SESSIONS slots and show a conversation that can never
+                # start.  Also roll back the invite-rate timestamp so the user
+                # can retry immediately once connectivity is back.
+                self._drop_session_locked(session)
+                if out and out[-1] == now:
+                    out.pop()
+                refused = True
+                logger.debug("chat: invite frame dropped (send_fn refused) -- session discarded")
+        if refused:
+            self._fire("_on_sessions_changed")
+            return None
         self._fire("_on_sessions_changed")
         return session.session_id
 
@@ -442,16 +456,20 @@ class ChatManager:
             session = self._session_by_sid.get(session_id)
             if session is None or session.status != "invited":
                 return False
-            session.status = "active"
-            # The user actively engaged with the invite — clear the unread
-            # marker raised when it arrived.
-            session.unread = 0
-            self._touch_seen(session)
             fn = send_fn or self._latest_send_fn.get(session.peer_id)
             ok = self._send_frame(
                 {"msg_type": "chat_accept", "session_id": session.session_id}, fn,
             )
             if ok:
+                # Commit the activation only when the accept frame actually
+                # went out -- otherwise this side would show an active
+                # conversation while the peer sits on its own "inviting"
+                # screen until its timeout, with every message failing.
+                session.status = "active"
+                # The user actively engaged with the invite — clear the unread
+                # marker raised when it arrived.
+                session.unread = 0
+                self._touch_seen(session)
                 self._remember_send_fn(session.peer_id, fn)
         self._fire("_on_sessions_changed")
         return ok
@@ -620,6 +638,7 @@ class ChatManager:
         failure.  ``None`` stays falsy, so callers that only test truthiness
         (``if mgr.accept_file(...)``) still treat it as a failed accept.
         """
+        notify_peer_offline = False
         with self._lock:
             state = self._receives.get(transfer_id)
             if state is None:
@@ -686,12 +705,15 @@ class ChatManager:
                 _safe_remove(state.get("temp_path"))
                 state["entry"].status = "failed"
                 # The wire ack never went out — the SENDER is still waiting
-                # in "await_accept".  Fire the done callback so the UI drops
-                # the stale offer and the sender's wait times out instead of
-                # being pinned online for the whole accept window.
-                self._fire(
-                    "_on_file_done", session_id, transfer_id, False, "", "peer_offline",
-                )
+                # in "await_accept".  Fire the done callback (below, outside
+                # the lock) so the UI drops the stale offer and the sender's
+                # wait times out instead of being pinned online for the whole
+                # accept window.
+                notify_peer_offline = True
+        if notify_peer_offline:
+            self._fire(
+                "_on_file_done", session_id, transfer_id, False, "", "peer_offline",
+            )
         self._fire("_on_sessions_changed")
         return ok
 
@@ -776,6 +798,13 @@ class ChatManager:
         if self._heartbeat_thread.is_alive():
             self._heartbeat_thread.join(timeout=1.5)
         with self._lock:
+            # Wake any sender thread parked in accept/complete waits -- after
+            # the state dicts are cleared its lookups return None and the
+            # thread exits; without this it would sleep out its full timeout
+            # (up to INVITE_ACCEPT_TIMEOUT + COMPLETION_WAIT_TIMEOUT).
+            for state in self._sends.values():
+                state["accept_event"].set()
+                state["complete_event"].set()
             for state in self._receives.values():
                 fh = state.get("fh")
                 if fh is not None:
@@ -1596,6 +1625,7 @@ class ChatManager:
             file_done_fired: list[tuple[str, str, str]] = []
             recv_done_fired: list[tuple[str, str, str]] = []
             recv_sessions_changed = False
+            reap_sessions_changed = False
             with self._lock:
                 for session in list(self._sessions.values()):
                     # Reap long-dead sessions so the map cannot grow without
@@ -1609,7 +1639,10 @@ class ChatManager:
                     if session.status in ("inviting", "invited"):
                         if now - session.last_seen_mono > self.INVITE_ACCEPT_TIMEOUT:
                             self._drop_session_locked(session)
-                            self._fire("_on_sessions_changed")
+                            # Fire below the lock like every other sweep --
+                            # a slow WS/UI callback must not freeze the chat
+                            # lock (and with it the recv thread).
+                            reap_sessions_changed = True
                         continue
                     if session.status != "active":
                         continue
@@ -1651,7 +1684,7 @@ class ChatManager:
                 self._fire("_on_file_done", sid, tid, False, "", status)
             for sid, tid, status in recv_done_fired:
                 self._fire("_on_file_done", sid, tid, False, "", status)
-            if recv_sessions_changed:
+            if reap_sessions_changed or recv_sessions_changed:
                 self._fire("_on_sessions_changed")
 
     def _expire_stale_receives(self, defer_fire: bool = False) -> tuple[list, bool]:

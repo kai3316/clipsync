@@ -307,10 +307,29 @@ def decode_message(data: bytes) -> SyncMessage | None:
 
     # --- Extract message type and image format (backward-compatible) ---
     msg_type = payload.get("msg_type", "clipboard")
+    # A non-string discriminator (e.g. {"msg_type": {}}) is unhashable: every
+    # router does ``msg_type in <frozenset>``, which raises TypeError — and in
+    # the transport recv loop's catch-all that tears down the whole
+    # connection.  Drop the malformed frame instead of crashing the link.
+    if not isinstance(msg_type, str):
+        logger.debug(
+            "Frame 'msg_type' is %s, expected a string -- dropped",
+            type(msg_type).__name__,
+        )
+        return None
     image_fmt = payload.get("image_fmt", "")
+    if not isinstance(image_fmt, str):
+        image_fmt = ""
+    # Timestamp must be a finite number in a sane range -- anything else
+    # (string, null, list, NaN/Infinity literal) would poison downstream
+    # age/sort arithmetic.
+    raw_ts = payload.get("timestamp", 0.0)
+    if isinstance(raw_ts, bool) or not isinstance(raw_ts, (int, float)) \
+            or not (-1e15 < raw_ts < 1e15):
+        raw_ts = 0.0
 
     content = ClipboardContent(
-        timestamp=payload.get("timestamp", 0.0),
+        timestamp=float(raw_ts),
         image_fmt=image_fmt,
     )
 
