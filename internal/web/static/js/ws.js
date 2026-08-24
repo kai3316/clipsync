@@ -255,6 +255,23 @@ var ClipsyncWS = (function () {
           } catch (e) { /* window may not be script-openable */ }
           break;
 
+        case 'onboarding_required':
+          // A backup restore flipped the config back to "fresh install"
+          // (language_chosen=False).  __CLIPSYNC_FRESH__ was baked into this
+          // page at serve time, so without this event a running dashboard
+          // would never re-surface the wizard until a manual refresh.  Same
+          // desktop gating as app.js mounted(): the wizard renames THIS
+          // computer, which makes no sense on a phone/tablet client.
+          var obLocal = /^(localhost|127\.0\.0\.1)$/.test(window.location.hostname || '');
+          var obDesktop = obLocal ||
+            (window.matchMedia && window.matchMedia('(pointer: fine)').matches);
+          if (store.deviceId && obDesktop) {
+            store.onboardingDone = false;
+            try { localStorage.removeItem('clipsync_onboarded'); } catch (e) { /* ignore */ }
+            store.showOnboarding = true;
+          }
+          break;
+
         case 'open_settings':
           // Tray/dashboard "Settings" requested the settings panel.
           store.settingsPanelVisible = true;

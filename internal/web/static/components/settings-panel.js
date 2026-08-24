@@ -10,12 +10,105 @@
 
   window.__CLIPSYNC_COMPONENTS__ = window.__CLIPSYNC_COMPONENTS__ || {};
 
+  // Settings-search index (classic-desktop parity): every section's i18n
+  // keys, so a query typed into the header box is matched against the
+  // localized labels the user actually sees — the same visible-text matching
+  // the classic settings window uses over its widget tree. Both English and
+  // Chinese queries work because only the ACTIVE locale's strings are tested.
+  var SETTINGS_SEARCH_KEYS = {
+    appearance: [
+      'settings.appearance', 'settings_window.theme_system',
+      'settings_window.theme_light', 'settings_window.theme_dark',
+      'settings.language', 'settings.language_hint', 'settings.preferences',
+      'network.auto_start', 'settings.animation', 'settings.ui_mode',
+      'settings_window.ui_backend_hint',
+    ],
+    network: [
+      'network.connection', 'network.tcp_port', 'settings_window.port_hint',
+      'network.relay_url', 'settings_window.relay_hint', 'network.service_type',
+      'settings_window.service_type_hint', 'network.local_address',
+      'settings_window.save_network',
+    ],
+    web: [
+      'settings_nav.web_companion', 'settings_window.web_enable',
+      'settings_window.web_enable_webview_hint', 'settings_window.web_port',
+      'settings_window.web_port_hint', 'settings_window.web_history_limit',
+      'settings_window.web_history_limit_desc', 'settings_window.web_token',
+      'settings_window.web_token_regenerate', 'settings_window.web_token_clear',
+      'settings_window.web_local_url', 'settings_window.save_web',
+    ],
+    translation: [
+      'settings_window.translation_title', 'settings_window.translation_hint',
+      'settings_window.translate_url', 'settings_window.translate_api_key',
+      'settings_window.translate_key_set', 'settings_window.translate_key_not_set',
+      'settings_window.clear_translate_key', 'settings_window.save_translation',
+    ],
+    filter: [
+      'settings_window.filter_title', 'settings_window.filter_desc',
+      'settings_window.filter_categories', 'filter.credit_card', 'filter.ssn',
+      'filter.api_key', 'filter.private_key', 'filter.password',
+      'settings_window.app_filter_title', 'settings_window.app_filter_desc',
+      'settings_window.app_filter_enable', 'settings_window.app_filter_mode',
+      'settings_window.app_filter_blacklist', 'settings_window.app_filter_whitelist',
+      'settings_window.app_filter_list', 'settings_window.save_filter',
+    ],
+    security: [
+      'security.title', 'settings_window.security_desc',
+      'settings_window.encryption_title', 'settings_window.enable_encryption',
+      'security.pre_shared_password', 'security.password_set',
+      'security.no_password', 'settings_window.password_hint',
+      'settings_window.encryption_hint', 'settings_window.notify_title',
+      'settings.sound', 'settings_window.notify_device_connect',
+      'settings_window.notify_transfer', 'settings_window.notify_pairing',
+      'settings_window.notify_sync', 'settings_window.certs_title',
+      'settings_window.certs_empty', 'settings_window.save_security',
+    ],
+    advanced: [
+      'settings_window.advanced_title', 'settings_window.history_max',
+      'settings_window.history_max_age', 'settings_window.sync_debounce',
+      'settings_window.poll_interval', 'settings_window.receive_dir',
+      'settings_window.transfer_timeout', 'settings_window.max_reconnect',
+      'settings_window.log_level', 'settings_window.enable_notifications',
+      'settings_window.clipboard_behavior', 'settings_window.paste_to_top',
+      'settings_window.low_memory_mode', 'settings_window.retry_capture',
+      'settings_window.source_tracking', 'settings_window.plain_text_only',
+      'settings_window.dedup_method', 'hotkeys.enabled', 'hotkeys.title',
+      'settings_window.save_advanced',
+    ],
+    logs: [
+      'settings_window.logs_title', 'settings_window.logs_refresh',
+      'settings_window.logs_export', 'settings_window.no_logs',
+    ],
+    data: [
+      'settings.data', 'settings.export_json', 'settings.export_csv',
+      'settings.export_markdown', 'settings.import', 'settings.create_backup',
+      'settings.backup_list', 'settings.restore_backup',
+      'settings.open_data_folder', 'settings.open_backups_folder',
+      'settings.data_dir', 'settings.favorites_path', 'settings.save_data_paths',
+    ],
+    about: [
+      'settings.about', 'settings.version', 'settings.device_name',
+      'settings.device_id', 'overview.platform', 'settings_window.about_desc',
+      'settings_window.auto_update_check', 'settings_window.auto_update_check_hint',
+      'settings_window.update_check_now', 'settings_window.update_install_now',
+      'settings_window.update_download',
+    ],
+    danger: [
+      'settings_window.danger_zone', 'settings_window.danger_zone_desc',
+      'settings_window.restart_app', 'settings_window.factory_reset',
+    ],
+  };
+
   window.__CLIPSYNC_COMPONENTS__['settings-panel'] = {
     inject: ['store'],
 
     data: function () {
       return {
         activeSection: 'appearance',
+
+        // Header search box: filters/jumps between sections by matching the
+        // query against each section's localized setting labels.
+        searchQuery: '',
 
         // Network
         port: '',
@@ -207,25 +300,76 @@
         // Plain-text labels, no emoji — the settings_nav.* translations no
         // longer carry emoji prefixes, so there is no icon column here.
         var dirty = this.dirtySections;
+        var counts = this.searchMatchCounts;
+        var hasQuery = !!(this.searchQuery || '').trim();
+        var mk = function (id, label) {
+          return {
+            id: id,
+            label: label,
+            dirty: !!dirty[id],
+            count: counts[id] || 0,
+            dim: hasQuery && !counts[id],
+          };
+        };
         return [
-          { id: 'appearance',    label: this.t('settings_nav.appearance'),     dirty: false },
-          { id: 'network',       label: this.t('settings_nav.network'),        dirty: !!dirty['network'] },
-          { id: 'web',           label: this.t('settings_nav.web_companion'),  dirty: !!dirty['web'] },
-          { id: 'translation',   label: this.t('settings_nav.translation'),    dirty: !!dirty['translation'] },
-          { id: 'filter',        label: this.t('settings_nav.filter'),         dirty: !!dirty['filter'] },
-          { id: 'security',      label: this.t('settings_nav.security'),       dirty: !!dirty['security'] },
-          { id: 'advanced',      label: this.t('settings_nav.advanced'),       dirty: !!dirty['advanced'] },
-          { id: 'logs',          label: this.t('settings_nav.logs'),           dirty: false },
-          { id: 'data',          label: this.t('settings.data'),               dirty: !!dirty['data'] },
-          { id: 'about',         label: this.t('settings_nav.about'),          dirty: false },
-          { id: 'danger',        label: this.t('settings_window.danger_zone'), dirty: false },
+          mk('appearance',  this.t('settings_nav.appearance')),
+          mk('network',     this.t('settings_nav.network')),
+          mk('web',         this.t('settings_nav.web_companion')),
+          mk('translation', this.t('settings_nav.translation')),
+          mk('filter',      this.t('settings_nav.filter')),
+          mk('security',    this.t('settings_nav.security')),
+          mk('advanced',    this.t('settings_nav.advanced')),
+          mk('logs',        this.t('settings_nav.logs')),
+          mk('data',        this.t('settings.data')),
+          mk('about',       this.t('settings_nav.about')),
+          mk('danger',      this.t('settings_window.danger_zone')),
         ];
+      },
+
+      // Query → section-id map of how many of the section's visible labels
+      // contain the query (case-insensitive). Empty query → empty map.
+      searchMatchCounts: function () {
+        var q = (this.searchQuery || '').trim().toLowerCase();
+        var out = {};
+        if (!q) return out;
+        var self = this;
+        Object.keys(SETTINGS_SEARCH_KEYS).forEach(function (id) {
+          var n = 0;
+          SETTINGS_SEARCH_KEYS[id].forEach(function (key) {
+            var v = self.t(key);
+            if (typeof v === 'string' && v.toLowerCase().indexOf(q) >= 0) n++;
+          });
+          if (n > 0) out[id] = n;
+        });
+        return out;
+      },
+
+      searchNoMatches: function () {
+        var q = (this.searchQuery || '').trim();
+        return !!q && Object.keys(this.searchMatchCounts).length === 0;
       },
     },
 
     methods: {
       selectSection: function (id) {
         this.activeSection = id;
+      },
+
+      // ── Settings search (classic-desktop parity) ─────────────────
+
+      // Enter jumps to the first section whose labels match the query.
+      onSearchEnter: function () {
+        var tabs = this.sectionTabs;
+        for (var i = 0; i < tabs.length; i++) {
+          if (tabs[i].count > 0) {
+            this.selectSection(tabs[i].id);
+            return;
+          }
+        }
+      },
+
+      clearSearch: function () {
+        this.searchQuery = '';
       },
 
       // Mark a staged section as having unsaved edits (no-op while the local
@@ -1175,6 +1319,12 @@
             '<!-- Header -->' +
             '<div class="settings-dialog__header">' +
               '<h2 class="settings-dialog__title">{{ t(\'settings.title\') }}</h2>' +
+              '<input ref="searchInput" type="search" class="settings-dialog__search"' +
+                ' v-model="searchQuery"' +
+                ' :placeholder="t(\'settings.search_placeholder\')"' +
+                ' :aria-label="t(\'settings.search_placeholder\')"' +
+                ' @keydown.enter.prevent="onSearchEnter"' +
+                ' @keydown.escape.stop.prevent="clearSearch">' +
               '<button class="settings-dialog__close" @click="close" :title="t(\'ui.close\')">' +
                 '<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">' +
                   '<line x1="18" y1="6" x2="6" y2="18"></line>' +
@@ -1190,13 +1340,15 @@
               '<div class="settings-dialog__tabs">' +
                 '<button v-for="tab in sectionTabs" :key="tab.id"' +
                   ' class="settings-dialog__tab"' +
-                  ' :class="{ \'settings-dialog__tab--active\': activeSection === tab.id }"' +
+                  ' :class="{ \'settings-dialog__tab--active\': activeSection === tab.id, \'settings-dialog__tab--dim\': tab.dim }"' +
                   ' @click="selectSection(tab.id)"' +
                 '>' +
                   '<span v-if="tab.icon" class="settings-dialog__tab-icon">{{ tab.icon }}</span>' +
                   '<span class="settings-dialog__tab-label">{{ tab.label }}</span>' +
                   '<span v-if="tab.dirty" class="settings-dialog__tab-dirty" :title="t(\'common.unsaved_changes\')">●</span>' +
+                  '<span v-if="tab.count" class="settings-dialog__tab-count">{{ tab.count }}</span>' +
                 '</button>' +
+                '<p v-if="searchNoMatches" class="settings-hint" style="padding:8px 4px 0">{{ t(\'settings.search_no_matches\') }}</p>' +
               '</div>' +
 
               '<!-- Right content area -->' +

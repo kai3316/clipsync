@@ -1449,6 +1449,26 @@
       color: var(--clipsync-fg);
     }
 
+    /* Timed sync pause (tray parity): preset buttons + countdown row */
+    .overview-pause-presets {
+      display: flex;
+      gap: 6px;
+      flex-shrink: 0;
+    }
+
+    .overview-pause-btn {
+      min-width: 0;
+      flex: none;
+      padding: 4px 10px;
+      font-size: 11px;
+      border-radius: var(--clipsync-radius-sm);
+    }
+
+    .overview-pause-status {
+      color: var(--clipsync-warning);
+      font-weight: 600;
+    }
+
     .overview-device-card {
       display: flex;
       flex-direction: column;
@@ -4595,6 +4615,48 @@
       background: var(--clipsync-hover);
       color: var(--clipsync-fg);
       border-color: var(--clipsync-border-glow);
+    }
+
+    /* Header search box — filters/jumps between sections (classic parity) */
+    .settings-dialog__search {
+      margin-left: auto;
+      margin-right: 10px;
+      width: 220px;
+      height: 34px;
+      padding: 0 12px;
+      font-size: 0.8rem;
+      font-family: var(--clipsync-font);
+      color: var(--clipsync-fg);
+      background: var(--clipsync-panel-2, transparent);
+      border: 1px solid var(--clipsync-border);
+      border-radius: var(--clipsync-radius-md);
+      outline: none;
+      transition: border-color 0.15s, box-shadow 0.15s;
+    }
+
+    .settings-dialog__search:focus {
+      border-color: var(--clipsync-accent);
+      box-shadow: 0 0 10px var(--clipsync-accent-glow);
+    }
+
+    @media (max-width: 640px) {
+      .settings-dialog__search {
+        width: 140px;
+      }
+    }
+
+    .settings-dialog__tab--dim {
+      opacity: 0.35;
+    }
+
+    .settings-dialog__tab-count {
+      font-size: 10px;
+      line-height: 1;
+      color: var(--clipsync-accent-text);
+      border: 1px solid currentColor;
+      border-radius: 999px;
+      padding: 2px 6px;
+      flex-shrink: 0;
     }
 
     .settings-dialog__body {

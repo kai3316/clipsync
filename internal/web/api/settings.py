@@ -66,6 +66,11 @@ _SAFE_FIELDS = {
     "favorites_path",
     "hotkeys",
     "hotkeys_enabled",
+    # Wall-clock epoch of a pending timed sync pause (0 = none).  Read-only:
+    # the pause/resume actions go through /api/sync/pause|resume, which run
+    # their own live-apply + timer bookkeeping; a direct client write here
+    # could never arm the auto-resume timer.
+    "timed_pause_until",
 }
 
 # Numeric fields the API accepts, with inclusive (lo, hi) bounds.  The web
@@ -276,6 +281,17 @@ def update_settings(body, cfg, on_settings_change=None, enc_mgr=None):
             setattr(cfg, field, new_val)
             updated[field] = new_val
             logger.info("Settings updated: %s = %s", field, new_val)
+
+    # A language change made through the web UI is a REAL first-run choice:
+    # mark it so the desktop picker (gated by cfg.language_chosen) and the
+    # web wizard gate (__CLIPSYNC_FRESH__ = not language_chosen) stop
+    # disagreeing with the web UI's own language selector.  Without this,
+    # picking a language in the web settings left language_chosen False, the
+    # native picker re-nagged on every launch, and the config kept reading as
+    # "fresh" to every later page load.
+    if "language" in updated and not getattr(cfg, "language_chosen", False):
+        cfg.language_chosen = True
+        logger.info("language_chosen set via web language selection")
 
     # Action keys the host application handles (not plain config fields).
     special = {k: data[k] for k in _SPECIAL_ACTIONS if k in data}

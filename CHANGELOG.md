@@ -4,6 +4,12 @@ All notable changes to ClipSync are documented in this file.
 
 ## [Unreleased]
 
+### Web dashboard
+- **Timed sync pause from the web**: the overview quick controls gain ⏸ 15 min / 30 min / 1 hour buttons with a live countdown and instant resume — same persisted deadline as the tray, so it even survives a restart.
+- **Settings search box on web**: type to filter setting groups with match counts, Enter jumps to the first hit (mirrors the desktop window, works in Chinese and English).
+- **Mobile catches up with the desktop dashboard**: clipboard history gains pin / push-back-to-PC / favorite / delete / clear-all; transfers gain cancel-all and one-tap retry of failed uploads; chat gains mute-per-conversation, close conversation, and 📎 file attachments; settings gains a diagnostics scan card. All touch-friendly via bottom-sheet action menus.
+- Fixed: after restoring a backup or picking a language, the first-run wizard didn't appear until a manual refresh — restore now broadcasts the fresh-state flag over WebSocket immediately, and choosing a language in web settings properly records it.
+
 ### Chat
 - **Typing indicator**: see the other side composing in real time in the web dashboard and on mobile ("typing ●●●"). Reporting is throttled, the state self-clears 4 s after they stop (no background threads), vanishes the moment their message arrives, and old app versions simply ignore it.
 - Fixed a double-send race where quickly pressing Enter / tapping send twice created duplicate message bubbles (desktop and mobile).

@@ -834,7 +834,232 @@ body.light .set-card {
 .fav-item__preview { font-size: 12px; color: var(--fg-muted); line-height: 1.4; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
 .fav-item__meta { font-size: 10px; color: var(--fg-subtle); font-family: var(--font-mono); }
 
-/* ── Settings ────────────────────────────────────────────────── */
+/* ── History toolbar (clear all) ─────────────────────────────── */
+
+.hist-bar {
+  display: flex;
+  justify-content: flex-end;
+  margin-bottom: 8px;
+}
+
+.hist-clear {
+  min-height: 34px;
+  padding: 6px 14px;
+  border: 1px solid var(--border);
+  border-radius: 17px;
+  background: var(--panel);
+  color: var(--fg-muted);
+  font-size: 12px;
+  font-weight: 600;
+  font-family: var(--font);
+  cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
+  transition: all var(--fast);
+}
+.hist-clear:active { border-color: var(--danger); color: var(--danger); }
+
+/* ── Item modal: per-item utility row ───────────────────────── */
+
+.modal__utils {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+
+.modal__util {
+  flex: 1;
+  min-height: 42px;
+  padding: 9px 4px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--panel);
+  color: var(--fg);
+  font-size: 12px;
+  font-weight: 700;
+  font-family: var(--font);
+  cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
+  transition: all var(--fast);
+}
+.modal__util:active { border-color: var(--accent); }
+.modal__util--danger { color: var(--danger); }
+.modal__util--danger:active { border-color: var(--danger); background: rgba(255,64,96,0.08); }
+.modal__util:disabled { opacity: 0.45; }
+
+.modal__actions + .modal__actions { margin-top: 8px; }
+
+/* ── Transfers: section header row + retry ──────────────────── */
+
+.tr-hdrrow {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.tr-cancelall {
+  min-height: 34px;
+  padding: 6px 13px;
+  border: 1px solid rgba(255,64,96,0.35);
+  border-radius: 17px;
+  background: var(--panel);
+  color: var(--danger);
+  font-size: 12px;
+  font-weight: 700;
+  font-family: var(--font);
+  cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
+  transition: all var(--fast);
+}
+.tr-cancelall:active { background: rgba(255,64,96,0.10); }
+.tr-cancelall:disabled { opacity: 0.5; }
+
+.tr-hitem__retry {
+  flex-shrink: 0;
+  width: 34px;
+  height: 34px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid rgba(251,191,36,0.4);
+  border-radius: 50%;
+  background: var(--panel);
+  color: #FBBF24;
+  font-size: 15px;
+  line-height: 1;
+  cursor: pointer;
+  padding: 0;
+  font-family: var(--font);
+  -webkit-tap-highlight-color: transparent;
+  transition: all var(--fast);
+}
+.tr-hitem__retry:active { transform: scale(0.95); }
+.tr-hitem__retry:disabled { opacity: 0.5; }
+
+/* ── Chat: mute bell / close / attach ───────────────────────── */
+
+.chat-bell {
+  flex-shrink: 0;
+  width: 36px;
+  height: 36px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: none;
+  border-radius: 50%;
+  background: transparent;
+  font-size: 16px;
+  cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
+  transition: background var(--fast);
+}
+.chat-bell:active { background: var(--panel); }
+
+.chat-btn--dangerghost {
+  color: var(--danger);
+  background: transparent;
+  border: 1px solid rgba(255,64,96,0.35);
+}
+
+.chat-composer__attach {
+  flex-shrink: 0;
+  width: 42px;
+  height: 42px;
+  border: 1px solid var(--border);
+  border-radius: 50%;
+  background: var(--panel);
+  color: var(--fg);
+  font-size: 17px;
+  cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
+  transition: all var(--fast);
+}
+.chat-composer__attach:active { transform: scale(0.95); border-color: var(--accent); }
+.chat-composer__attach:disabled { opacity: 0.5; }
+
+/* ── Diagnostics card (settings tab) ────────────────────────── */
+
+.diag-intro { font-size: 12px; color: var(--fg-muted); line-height: 1.55; padding: 10px 0 6px; }
+
+.diag-run {
+  width: 100%;
+  min-height: 42px;
+  margin-bottom: 6px;
+  border: none;
+  border-radius: var(--radius-sm);
+  font-size: 14px;
+  font-weight: 700;
+  font-family: var(--font);
+  color: #fff;
+  background: linear-gradient(135deg, var(--accent), var(--accent-2));
+  cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
+}
+.diag-run:active { transform: scale(0.98); }
+.diag-run:disabled { opacity: 0.6; }
+
+.diag-check {
+  display: flex;
+  align-items: flex-start;
+  gap: 9px;
+  padding: 9px 0;
+  border-top: 1px solid var(--border);
+}
+.diag-check:first-child { border-top: none; }
+
+.diag-check__status {
+  flex-shrink: 0;
+  width: 22px;
+  height: 22px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 50%;
+  font-size: 12px;
+  font-weight: 700;
+  background: var(--panel);
+  color: var(--fg-subtle);
+}
+.diag-check__status--ok { color: var(--success); background: rgba(0,229,153,0.12); }
+.diag-check__status--bad { color: var(--danger); background: rgba(255,64,96,0.12); }
+
+.diag-check__body { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+.diag-check__label { font-size: 13px; font-weight: 600; color: var(--fg); }
+.diag-check__detail { font-size: 11px; color: var(--fg-subtle); word-break: break-word; }
+.diag-check__guidance { font-size: 11px; color: var(--fg-muted); line-height: 1.45; word-break: break-word; }
+
+.diag-fix {
+  align-self: flex-start;
+  min-height: 30px;
+  margin-top: 4px;
+  padding: 4px 12px;
+  border: 1px solid var(--border-strong);
+  border-radius: 15px;
+  background: var(--panel);
+  color: var(--accent);
+  font-size: 11px;
+  font-weight: 700;
+  font-family: var(--font);
+  cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
+}
+.diag-fix:disabled { opacity: 0.5; }
+
+.diag-summary {
+  margin-top: 8px;
+  padding: 9px 12px;
+  border-radius: var(--radius-sm);
+  font-size: 12px;
+  font-weight: 700;
+  text-align: center;
+  background: var(--panel);
+  color: var(--fg-muted);
+}
+.diag-summary--ok { color: var(--success); background: rgba(0,229,153,0.10); }
+.diag-summary--warn { color: #FBBF24; background: rgba(251,191,36,0.10); }
+.diag-summary--fail { color: var(--danger); background: rgba(255,64,96,0.10); }
+
+/* ── Settings ───────────────────────────────────────────────── */
 
 .set-card {
   border: 1px solid var(--border);
@@ -1083,6 +1308,9 @@ body.light .set-card {
 
     <!-- History -->
     <section class="panel panel--active" id="panelHistory">
+      <div class="hist-bar" id="histBar" style="display:none">
+        <button class="hist-clear" id="histClearBtn"></button>
+      </div>
       <div id="historyList"></div>
     </section>
 
@@ -1135,6 +1363,17 @@ body.light .set-card {
     <div class="modal__title" id="modalTitle"></div>
     <img class="modal__image" id="modalImage" alt="" style="display:none">
     <div class="modal__text" id="modalText"></div>
+    <!-- Per-item actions (desktop context-menu parity): pin / favorite /
+         delete on a compact row, then the full-width push-to-desktop
+         primary, then the original close/copy pair. -->
+    <div class="modal__utils" id="modalUtils">
+      <button class="modal__util" id="histPinBtn"></button>
+      <button class="modal__util" id="histFavBtn"></button>
+      <button class="modal__util modal__util--danger" id="histDelBtn"></button>
+    </div>
+    <div class="modal__actions">
+      <button class="modal__btn modal__btn--primary" id="histPushBtn"></button>
+    </div>
     <div class="modal__actions">
       <button class="modal__btn modal__btn--ghost" id="modalClose"></button>
       <button class="modal__btn modal__btn--primary" id="modalCopy"></button>
@@ -1145,6 +1384,9 @@ body.light .set-card {
 <div class="toast" id="toast"></div>
 
 <input type="file" id="fileInput" multiple style="display:none">
+<!-- Chat attachment picker — separate from the Files-tab input so an
+     in-flight chat send never disturbs the files upload queue state. -->
+<input type="file" id="chatFileInput" style="display:none">
 
 <script>
 (function () {
@@ -1295,6 +1537,61 @@ body.light .set-card {
     setThemeLight: ZH ? '浅色' : 'Light',
     setThemeDark: ZH ? '深色' : 'Dark',
     setFullPanel: ZH ? '打开完整面板' : 'Open full dashboard',
+    /* ── History item actions (desktop context-menu parity) ──── */
+    histClear: ZH ? '清空历史' : 'Clear history',
+    histClearConfirm: ZH ? '清空全部剪贴板历史？此操作不可撤销。' : 'Clear ALL clipboard history? This cannot be undone.',
+    histCleared: ZH ? '✓ 已清空' : '✓ Cleared',
+    histClearFail: ZH ? '清空失败' : 'Failed to clear',
+    histPin: ZH ? '📌 固定' : '📌 Pin',
+    histUnpin: ZH ? '📍 取消固定' : '📍 Unpin',
+    histPinnedToast: ZH ? '✓ 已固定，将置顶显示' : '✓ Pinned to top',
+    histUnpinnedToast: ZH ? '✓ 已取消固定' : '✓ Unpinned',
+    histPinFail: ZH ? '固定失败' : 'Pin failed',
+    histPush: ZH ? '📤 推送到电脑剪贴板' : '📤 Push to computer clipboard',
+    histPushOk: ZH ? '✓ 已写入电脑剪贴板' : '✓ Written to the computer clipboard',
+    histPushFail: ZH ? '推送失败' : 'Push failed',
+    histFav: ZH ? '⭐ 收藏' : '⭐ Favorite',
+    histFavOk: ZH ? '✓ 已加入收藏' : '✓ Added to favorites',
+    histFavFail: ZH ? '收藏失败' : 'Failed to add',
+    histDel: ZH ? '🗑 删除' : '🗑 Delete',
+    histDeleteConfirm: ZH ? '删除这条历史记录？' : 'Delete this history item?',
+    histDeleted: ZH ? '已删除' : 'Deleted',
+    histDelFail: ZH ? '删除失败' : 'Failed to delete',
+    /* ── Transfers: cancel all + history retry ────────────────── */
+    trCancelAll: ZH ? '取消全部' : 'Cancel all',
+    trCancelAllDone: ZH ? '✓ 已取消 {n} 个传输' : '✓ Cancelled {n} transfers',
+    trRetry: ZH ? '重试' : 'Retry',
+    trRetryFail: ZH ? '重试失败' : 'Retry failed',
+    /* ── Chat: mute / close / attach ───────────────────────────── */
+    chatMute: ZH ? '静音' : 'Mute',
+    chatUnmute: ZH ? '取消静音' : 'Unmute',
+    chatMuteFail: ZH ? '操作失败' : 'Action failed',
+    chatCloseSession: ZH ? '关闭会话' : 'Close session',
+    chatCloseConfirm: ZH ? '关闭并移除这个会话？' : 'Close and remove this conversation?',
+    chatAttach: ZH ? '发送文件' : 'Send file',
+    chatFileSentOk: ZH ? '✓ 文件已发送' : '✓ File sent',
+    chatFileSendFail: ZH ? '文件发送失败' : 'Failed to send file',
+    /* ── Diagnostics card (settings tab) ───────────────────────── */
+    diagTitle: ZH ? '🩺 诊断' : '🩺 Diagnostics',
+    diagHint: ZH ? '检查电脑端的端口、发现、网络与剪贴板状态。' : 'Check the computer\'s ports, discovery, network and clipboard health.',
+    diagRun: ZH ? '▶ 开始扫描' : '▶ Run scan',
+    diagScanning: ZH ? '扫描中…' : 'Scanning…',
+    diagScanFail: ZH ? '扫描失败' : 'Scan failed',
+    diagAllOk: ZH ? '✓ 全部正常' : '✓ All good',
+    diagWarn: ZH ? '⚠ 存在警告' : '⚠ Warnings found',
+    diagFail: ZH ? '✕ 发现问题' : '✕ Problems found',
+    diagFix: ZH ? '尝试修复' : 'Fix',
+    diagFixDone: ZH ? '已在电脑上发起修复请求' : 'Fix requested on the computer',
+    diagFixFail: ZH ? '修复请求失败' : 'Fix request failed',
+    diagServerPort: ZH ? '同步端口' : 'Sync port',
+    diagDiscovery: ZH ? '设备发现' : 'Discovery',
+    diagAdvertising: ZH ? '局域网广播' : 'Advertising',
+    diagWeb: ZH ? '网页伴生服务' : 'Web companion',
+    diagNetwork: ZH ? '网络' : 'Network',
+    diagFirewall: ZH ? '防火墙' : 'Firewall',
+    diagPermissions: ZH ? '系统权限' : 'Permissions',
+    diagMdns: ZH ? 'mDNS' : 'mDNS',
+    diagClipboardTool: ZH ? '剪贴板工具' : 'Clipboard tools',
   };
 
   /* ── Apply strings ─────────────────────────────────────────── */
@@ -1315,6 +1612,7 @@ body.light .set-card {
   document.getElementById('uploadBtn').textContent = T.uploadBtn;
   document.getElementById('modalClose').textContent = T.close;
   document.getElementById('modalCopy').textContent = T.copy;
+  document.getElementById('histClearBtn').textContent = T.histClear;
   document.title = T.title;
 
   /* ── DOM refs ──────────────────────────────────────────────── */
@@ -1322,6 +1620,8 @@ body.light .set-card {
   var tabs = document.querySelectorAll('.tab');
   var panels = document.querySelectorAll('.panel');
   var historyList = document.getElementById('historyList');
+  var histBar = document.getElementById('histBar');
+  var histClearBtn = document.getElementById('histClearBtn');
   var fileList = document.getElementById('fileList');
   var chatView = document.getElementById('chatView');
   var transfersView = document.getElementById('transfersView');
@@ -1335,7 +1635,12 @@ body.light .set-card {
   var modalTitle = document.getElementById('modalTitle');
   var modalImage = document.getElementById('modalImage');
   var modalCopyBtn = document.getElementById('modalCopy');
+  var histPinBtn = document.getElementById('histPinBtn');
+  var histFavBtn = document.getElementById('histFavBtn');
+  var histDelBtn = document.getElementById('histDelBtn');
+  var histPushBtn = document.getElementById('histPushBtn');
   var fileInput = document.getElementById('fileInput');
+  var chatFileInput = document.getElementById('chatFileInput');
   var uploadProgressWrap = document.getElementById('uploadProgressWrap');
   var uploadProgressFill = document.getElementById('uploadProgressFill');
   var uploadCancelBtn = document.getElementById('uploadCancelBtn');
@@ -1698,6 +2003,8 @@ body.light .set-card {
   }
 
   function renderHistory() {
+    // The clear-all affordance only makes sense with something to clear.
+    histBar.style.display = historyItems.length > 0 ? 'flex' : 'none';
     if (historyItems.length === 0) {
       historyList.innerHTML = '<div class="empty"><div class="empty__icon">📋</div><div class="empty__text">' + esc(T.emptyHistory) + '</div></div>';
       return;
@@ -1711,12 +2018,41 @@ body.light .set-card {
         '<div class="h-item__icon">' + typeIcon(item.content_type) + '</div>' +
         '<div class="h-item__body">' +
           '<div class="h-item__text">' + esc(item.text_preview || item.content_type || T.emptyPreview) + '</div>' +
-          '<div class="h-item__meta">' + esc(relTime(item.timestamp)) + '</div>' +
+          '<div class="h-item__meta">' + (item.pinned ? '📌 ' : '') + esc(relTime(item.timestamp)) + '</div>' +
         '</div>';
       el.addEventListener('click', function () { openItem(i); });
       historyList.appendChild(el);
     });
   }
+
+  /* ── History: clear all ────────────────────────────────────── */
+
+  var historyClearing = false;
+  histClearBtn.addEventListener('click', function () {
+    if (historyClearing || historyItems.length === 0) return;
+    if (!window.confirm(T.histClearConfirm)) return;
+    historyClearing = true;
+    apiFetch('/api/history/clear', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' })
+      .then(function (res) {
+        historyClearing = false;
+        if (res.status === 403) { notifyTokenExpired(); return; }
+        if (res.data && res.data.ok) {
+          // Wipe the local list and pagination cursor — mirrors the desktop's
+          // post-clear state so "load more" can't resurrect phantom pages.
+          historyItems.splice(0, historyItems.length);
+          historyOffset = 0;
+          historyHasMore = false;
+          renderHistory();
+          showToast(T.histCleared);
+        } else {
+          showToast((res.data && res.data.error) || T.histClearFail, true);
+        }
+      })
+      .catch(function () {
+        historyClearing = false;
+        showToast(T.histClearFail + ' · ' + T.loadFailHint, true);
+      });
+  });
 
   // Infinite scroll: load the next history page when the list scrolls to the
   // bottom.  Only fires while the history tab is active; the append keeps the
@@ -1787,11 +2123,22 @@ body.light .set-card {
     modalTitle.textContent = T.tabHistory + ' · ' + relTime(item.timestamp);
     setModalContent(item);
     modalEl.classList.add('modal-mask--show');
+    // Track which entry the modal shows by id — list indices shift between
+    // renders (poll merges, pin reordering), so actions resolve by id.
+    modalEntryId = (item.entry_id !== undefined && item.entry_id !== null) ? item.entry_id : null;
+    modalDetailItem = null;
+    updateModalUtils();
     // The list no longer carries full content — fetch it when the modal opens.
     if (item.entry_id) {
       getJson('/api/history/item?entry_id=' + encodeURIComponent(item.entry_id))
         .then(function (data) {
-          if (data && data.item) setModalContent(data.item);
+          if (data && data.item) {
+            setModalContent(data.item);
+            // Full payload arrived (with `types`) — the favorite button's
+            // text-only enablement depends on it, so re-evaluate.
+            modalDetailItem = data.item;
+            updateModalUtils();
+          }
         })
         .catch(function () { /* keep the preview */ });
     }
@@ -1800,6 +2147,8 @@ body.light .set-card {
   function closeModal() {
     modalEl.classList.remove('modal-mask--show');
     modalImage.classList.remove('modal__image--zoomed');
+    modalEntryId = null;
+    modalDetailItem = null;
   }
 
   // Tap the image to zoom in / out.
@@ -1840,6 +2189,191 @@ body.light .set-card {
     } else {
       fallback();
     }
+  });
+
+  /* ── Modal per-item actions (pin / push / favorite / delete) ── */
+
+  var modalEntryId = null;
+  var modalActionBusy = false;
+  var modalDetailItem = null;
+
+  function findHistById(eid) {
+    for (var i = 0; i < historyItems.length; i++) {
+      var it = historyItems[i];
+      if (it && it.entry_id === eid) return it;
+    }
+    return null;
+  }
+
+  // Refresh the pin/favorite/delete row for the currently-open entry.
+  // Hidden entirely for legacy rows without a stable entry_id — the server
+  // can't address them. Favorite is text-only: disabled while an image fills
+  // the modal. `types` may only exist on the detail payload, so prefer it
+  // for format checks while pinned state comes from the live list row.
+  function updateModalUtils() {
+    var item = modalEntryId !== null ? findHistById(modalEntryId) : null;
+    var has = !!item;
+    histPinBtn.style.display = has ? '' : 'none';
+    histFavBtn.style.display = has ? '' : 'none';
+    histDelBtn.style.display = has ? '' : 'none';
+    histPushBtn.style.display = has ? '' : 'none';
+    if (!has) return;
+    var detail = (modalDetailItem && modalDetailItem.entry_id === modalEntryId) ? modalDetailItem : item;
+    var types = (detail && detail.types) || {};
+    var isImageOnly = !!(types.IMAGE || types.IMAGE_EMF) && !types.TEXT;
+    histPinBtn.textContent = item.pinned ? T.histUnpin : T.histPin;
+    histFavBtn.textContent = T.histFav;
+    histDelBtn.textContent = T.histDel;
+    histPushBtn.textContent = T.histPush;
+    histFavBtn.disabled = isImageOnly;
+  }
+
+  // A guard shared by all four actions: one modal, one in-flight mutation —
+  // a double-tap must not fire two POSTs for the same entry.
+  function modalAction(fn) {
+    if (modalActionBusy || modalEntryId === null) return;
+    modalActionBusy = true;
+    fn(function done() { modalActionBusy = false; });
+  }
+
+  histPinBtn.addEventListener('click', function () {
+    modalAction(function (done) {
+      apiFetch('/api/pin', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ entry_id: modalEntryId }),
+      })
+        .then(function (res) {
+          done();
+          if (res.status === 403) { notifyTokenExpired(); return; }
+          var pinned = !!(res.data && res.data.pinned);
+          var item = findHistById(modalEntryId);
+          if (res.data && res.data.ok && item) {
+            item.pinned = pinned;
+            reorderHistoryPinnedFirst();
+            renderHistory();
+            updateModalUtils();
+            showToast(pinned ? T.histPinnedToast : T.histUnpinnedToast);
+          } else {
+            showToast(T.histPinFail, true);
+          }
+        })
+        .catch(function () {
+          done();
+          showToast(T.histPinFail + ' · ' + T.loadFailHint, true);
+        });
+    });
+  });
+
+  // Keep the local list ordered like the server returns it (pinned first,
+  // relative order preserved) so subsequent page merges and load-mores don't
+  // interleave pinned rows unpredictably.
+  function reorderHistoryPinnedFirst() {
+    var pinnedArr = [];
+    var rest = [];
+    for (var i = 0; i < historyItems.length; i++) {
+      (historyItems[i] && historyItems[i].pinned ? pinnedArr : rest).push(historyItems[i]);
+    }
+    historyItems.splice(0, historyItems.length);
+    for (var p = 0; p < pinnedArr.length; p++) historyItems.push(pinnedArr[p]);
+    for (var r = 0; r < rest.length; r++) historyItems.push(rest[r]);
+  }
+
+  // Push the FULL entry (all stored formats — text, HTML, image bytes) back
+  // onto the computer's clipboard. This is the phone's "paste into the PC"
+  // gesture and works for images too, unlike the phone-local copy button.
+  histPushBtn.addEventListener('click', function () {
+    modalAction(function (done) {
+      apiFetch('/api/paste-rich', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ entry_id: modalEntryId }),
+      })
+        .then(function (res) {
+          done();
+          if (res.status === 403) { notifyTokenExpired(); return; }
+          if (res.data && res.data.ok) {
+            showToast(T.histPushOk);
+          } else {
+            showToast((res.data && res.data.error) || T.histPushFail, true);
+          }
+        })
+        .catch(function () {
+          done();
+          showToast(T.histPushFail + ' · ' + T.loadFailHint, true);
+        });
+    });
+  });
+
+  // Save the entry's full text as a favorite (mirrors the desktop context
+  // menu: fetch the complete payload, not the truncated list preview).
+  histFavBtn.addEventListener('click', function () {
+    modalAction(function (done) {
+      var eid = modalEntryId;
+      getJson('/api/history/item?entry_id=' + encodeURIComponent(eid))
+        .then(function (data) {
+          var full = (data && data.item) || {};
+          var content = getFullText(full) || full.text_preview ||
+            (findHistById(eid) || {}).text_preview || '';
+          if (!content) throw new Error('empty');
+          var titleLine = content.split('\n')[0].trim().slice(0, 60);
+          return apiFetch('/api/favorites', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ title: titleLine, content: content, group: '' }),
+          });
+        })
+        .then(function (res) {
+          done();
+          if (res.status === 403) { notifyTokenExpired(); return; }
+          if (res.data && res.data.ok !== false) {
+            showToast(T.histFavOk);
+          } else {
+            showToast((res.data && res.data.error) || T.histFavFail, true);
+          }
+        })
+        .catch(function () {
+          done();
+          showToast(T.histFavFail + ' · ' + T.loadFailHint, true);
+        });
+    });
+  });
+
+  histDelBtn.addEventListener('click', function () {
+    modalAction(function (done) {
+      var eid = modalEntryId;
+      if (!window.confirm(T.histDeleteConfirm)) { done(); return; }
+      apiFetch('/api/delete', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ entry_id: eid }),
+      })
+        .then(function (res) {
+          done();
+          if (res.status === 403) { notifyTokenExpired(); return; }
+          if (res.data && res.data.ok) {
+            for (var i = 0; i < historyItems.length; i++) {
+              if (historyItems[i] && historyItems[i].entry_id === eid) {
+                historyItems.splice(i, 1);
+                break;
+              }
+            }
+            // Shrink the pagination cursor with the array so "load more"
+            // doesn't skip the entry that shifted into the deleted slot
+            // (same contract as store.historyOffset on the desktop).
+            historyOffset = Math.max(0, historyOffset - 1);
+            closeModal();
+            renderHistory();
+            showToast(T.histDeleted);
+          } else {
+            showToast((res.data && res.data.error) || T.histDelFail, true);
+          }
+        })
+        .catch(function () {
+          done();
+          showToast(T.histDelFail + ' · ' + T.loadFailHint, true);
+        });
+    });
   });
 
   /* ── Send ──────────────────────────────────────────────────── */
@@ -2102,6 +2636,14 @@ body.light .set-card {
   var chatTypingLastState = null;
   var chatTypingLastSent = 0;
   var chatSending = false;
+  // Per-peer mute set from GET /api/chat/sessions (`muted: [peer_id...]`) —
+  // the backend persists it and suppresses desktop notifications for muted
+  // peers, so the phone bell mirrors the same state the desktop shows.
+  var chatMutedSet = {};
+  // Chat file attachment: busy flag (rendered into the composer template so
+  // poll re-renders keep the state) + the session the picked file belongs to.
+  var chatFileBusy = false;
+  var chatFileSession = null;
 
   function chatStatusLabel(s) {
     var map = {
@@ -2265,6 +2807,14 @@ body.light .set-card {
     } else {
       for (var j = 0; j < chatSessions.length; j++) {
         var s = chatSessions[j];
+        // Mute bell (desktop chat-panel parity): toggles the persisted
+        // per-peer mute set. The delegated click handler owns it, so a tap
+        // here never opens the conversation.
+        var bell = '';
+        if (s.peer_id) {
+          var muted = !!chatMutedSet[s.peer_id];
+          bell = '<button class="chat-bell" data-mute-peer="' + esc(s.peer_id) + '" title="' + esc(muted ? T.chatUnmute : T.chatMute) + '">' + (muted ? '🔕' : '🔔') + '</button>';
+        }
         html += '<div class="chat-session" data-session-id="' + esc(s.session_id) + '">' +
           '<span class="chat-session__dot' + (s.online ? ' chat-session__dot--on' : '') + '"></span>' +
           '<div class="chat-session__body">' +
@@ -2274,6 +2824,7 @@ body.light .set-card {
             '</div>' +
             '<div class="chat-session__preview">' + esc(s.last_preview || '') + '</div>' +
           '</div>' +
+          bell +
           ((s.unread || 0) > 0 ? '<span class="chat-session__badge">' + ((s.unread > 99) ? '99+' : s.unread) + '</span>' : '') +
         '</div>';
       }
@@ -2295,6 +2846,7 @@ body.light .set-card {
       '<button class="chat-btn chat-btn--ghost" id="chatBackBtn">' + esc(T.chatBack) + '</button>' +
       '<div class="chat-conv__name">' + esc(name) + '</div>' +
       '<div class="chat-conv__status">' + esc(status) + '</div>' +
+      (sess ? '<button class="chat-btn chat-btn--dangerghost" id="chatCloseBtn" title="' + esc(T.chatCloseSession) + '">🗑</button>' : '') +
     '</div>';
     if (sess && sess.status === 'invited') {
       html += '<div class="chat-invite-banner">' +
@@ -2317,6 +2869,7 @@ body.light .set-card {
       (Date.now() < chatPeerTypingUntil ? '' : ' style="display:none"') + '>' +
       esc(T.chatTyping) + '</div>';
     html += '<div class="chat-composer">' +
+      '<button class="chat-composer__attach" id="chatAttachBtn" title="' + esc(T.chatAttach) + '"' + (chatFileBusy ? ' disabled' : '') + '>' + (chatFileBusy ? '…' : '📎') + '</button>' +
       '<input class="chat-composer__input" id="chatInput" placeholder="' + esc(T.chatInputPlaceholder) + '" maxlength="4000" autocomplete="off">' +
       '<button class="chat-composer__send" id="chatSendBtn">' + esc(T.chatSend) + '</button>' +
     '</div>';
@@ -2344,10 +2897,13 @@ body.light .set-card {
       chatView.innerHTML = '<div class="skeleton"></div><div class="skeleton"></div><div class="skeleton"></div>';
     }
     var pDev = getJson('/api/chat/devices').then(function (d) { return d.devices || []; }, function () { return []; });
-    var pSess = getJson('/api/chat/sessions').then(function (d) { return d.sessions || []; }, function () { return []; });
+    var pSess = getJson('/api/chat/sessions').then(function (d) { return d || {}; }, function () { return {}; });
     Promise.all([pDev, pSess]).then(function (out) {
       chatDevices = out[0];
-      chatSessions = out[1];
+      chatSessions = (out[1] && out[1].sessions) || [];
+      var mutedList = (out[1] && out[1].muted) || [];
+      chatMutedSet = {};
+      for (var mi = 0; mi < mutedList.length; mi++) chatMutedSet[mutedList[mi]] = true;
       refreshChatPeerTyping();
       if (!chatOpenSession) {
         chatLoading = false;
@@ -2568,15 +3124,174 @@ body.light .set-card {
     document.body.removeChild(a);
   }
 
+  // Mute/unmute a session's peer (desktop chat-panel parity). Optimistic
+  // local flip so the bell reacts instantly; the server's authoritative mute
+  // set replaces it on success, and a failure reverts it.
+  var chatMuteBusy = '';
+  function chatToggleMute(peerId) {
+    if (!peerId || chatMuteBusy === peerId) return;
+    chatMuteBusy = peerId;
+    var newMuted = !chatMutedSet[peerId];
+    chatMutedSet[peerId] = newMuted;
+    if (!chatOpenSession) renderChatList();
+    apiFetch('/api/chat/mute', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ peer_id: peerId, muted: newMuted }),
+    })
+      .then(function (res) {
+        chatMuteBusy = '';
+        if (res.status === 403) { notifyTokenExpired(); return; }
+        if (res.data && res.data.ok) {
+          var list = (res.data && res.data.muted) || [];
+          chatMutedSet = {};
+          for (var i = 0; i < list.length; i++) chatMutedSet[list[i]] = true;
+          if (!chatOpenSession) renderChatList();
+        } else {
+          chatMutedSet[peerId] = !newMuted;
+          if (!chatOpenSession) renderChatList();
+          showToast((res.data && res.data.error) || T.chatMuteFail, true);
+        }
+      })
+      .catch(function () {
+        chatMuteBusy = '';
+        chatMutedSet[peerId] = !newMuted;
+        if (!chatOpenSession) renderChatList();
+        showToast(T.chatMuteFail + ' · ' + T.loadFailHint, true);
+      });
+  }
+
+  // Close (and remove) the open conversation — desktop parity for the
+  // context-menu "close session" on a chat row.
+  var chatClosing = false;
+  function chatCloseSession() {
+    if (!chatOpenSession || chatClosing) return;
+    if (!window.confirm(T.chatCloseConfirm)) return;
+    chatClosing = true;
+    apiFetch('/api/chat/close', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ session_id: chatOpenSession }),
+    })
+      .then(function (res) {
+        chatClosing = false;
+        if (res.status === 403) { notifyTokenExpired(); return; }
+        if (res.data && res.data.ok !== false) {
+          chatBack();
+        } else {
+          showToast((res.data && res.data.error) || T.chatSendFail, true);
+        }
+      })
+      .catch(function () {
+        chatClosing = false;
+        // Keep the conversation open and say why — a silent failure would
+        // leave the user staring at a session that never goes away.
+        showToast(T.chatSendFail + ' · ' + T.loadFailHint, true);
+      });
+  }
+
+  /* ── Chat: file attachment ─────────────────────────────────── */
+
+  // Attach a phone-side file to the open conversation. Two steps, same as
+  // the desktop chat panel: upload with purpose=chat (lands in a server temp
+  // dir, no receive notification / Files record), then POST /api/chat/file
+  // with the returned absolute temp path.
+  function pickChatFile() {
+    if (chatFileBusy || !chatOpenSession) return;
+    chatFileSession = chatOpenSession;
+    chatFileInput.click();
+  }
+
+  function uploadChatAttachment(file) {
+    if (!file || !chatFileSession) return;
+    // Same pre-flight cap as the Files tab: the server buffers whole bodies
+    // up to 128 MB — reject oversized picks before burning the bandwidth.
+    if (file.size > MAX_UPLOAD_BYTES - 64 * 1024) {
+      showToast(T.uploadTooLarge, true);
+      chatFileInput.value = '';
+      return;
+    }
+    chatFileBusy = true;
+    var btn = document.getElementById('chatAttachBtn');
+    if (btn) { btn.disabled = true; btn.textContent = '…'; }
+    var sid = chatFileSession;
+    var form = new FormData();
+    form.append('file', file);
+    form.append('purpose', 'chat');
+
+    // Plain XHR rather than fetchWithTimeout: an 8s abort cap is fine for
+    // API calls but kills large uploads mid-flight.
+    var xhr = new XMLHttpRequest();
+    xhr.open('POST', apiUrl('/api/upload'));
+    xhr.onload = function () {
+      var data = null;
+      try { data = JSON.parse(xhr.responseText); } catch (e) { /* ignore */ }
+      if (!(xhr.status >= 200 && xhr.status < 300 && data && data.ok && data.path)) {
+        finishChatAttachment();
+        showToast((data && data.error) || T.chatFileSendFail, true);
+        return;
+      }
+      apiFetch('/api/chat/file', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ session_id: sid, file_path: data.path }),
+      })
+        .then(function (res) {
+          finishChatAttachment();
+          if (res.status === 403) { notifyTokenExpired(); return; }
+          if (res.data && res.data.ok) {
+            showToast(T.chatFileSentOk);
+            if (chatOpenSession === sid) {
+              chatScrollBottom = true;
+              loadChat(true);
+            }
+          } else {
+            showToast((res.data && res.data.error) || T.chatFileSendFail, true);
+          }
+        })
+        .catch(function () {
+          finishChatAttachment();
+          showToast(T.chatFileSendFail + ' · ' + T.loadFailHint, true);
+        });
+    };
+    xhr.onerror = function () {
+      finishChatAttachment();
+      showToast(T.chatFileSendFail + ' · ' + T.loadFailHint, true);
+    };
+    xhr.onabort = function () {
+      finishChatAttachment();
+    };
+    xhr.send(form);
+  }
+
+  function finishChatAttachment() {
+    chatFileBusy = false;
+    chatFileInput.value = '';
+    var btn = document.getElementById('chatAttachBtn');
+    if (btn) { btn.disabled = false; btn.textContent = '📎'; }
+  }
+
+  chatFileInput.addEventListener('change', function () {
+    var f = chatFileInput.files && chatFileInput.files[0];
+    if (!f) return;
+    uploadChatAttachment(f);
+  });
+
   // Delegated events for the chat view — the panel is re-rendered on every
   // poll, so bind once on the container instead of re-binding per render.
   chatView.addEventListener('click', function (e) {
     var el = e.target;
     var startBtn = el.closest ? el.closest('[data-start-peer]') : null;
     if (startBtn) { chatStartInvite(startBtn.getAttribute('data-start-peer')); return; }
+    // Mute bell — must be checked BEFORE the session row: the bell lives
+    // inside the row, and toggling mute must never open the conversation.
+    var muteBtn = el.closest ? el.closest('[data-mute-peer]') : null;
+    if (muteBtn) { chatToggleMute(muteBtn.getAttribute('data-mute-peer')); return; }
     var sessRow = el.closest ? el.closest('[data-session-id]') : null;
     if (sessRow && !el.closest('button')) { chatOpen(sessRow.getAttribute('data-session-id')); return; }
     if (el.closest && el.closest('#chatBackBtn')) { chatBack(); return; }
+    if (el.closest && el.closest('#chatCloseBtn')) { chatCloseSession(); return; }
+    if (el.closest && el.closest('#chatAttachBtn')) { pickChatFile(); return; }
     if (el.closest && el.closest('#chatSendBtn')) { chatSend(); return; }
     var invBtn = el.closest ? el.closest('[data-invite-action]') : null;
     if (invBtn) { chatInviteAction(invBtn.getAttribute('data-invite-action')); return; }
@@ -2613,6 +3328,8 @@ body.light .set-card {
   var transferActive = [];
   var transferHistory = [];
   var transfersLoading = false;
+  var transfersCancellingAll = false;
+  var retryBusyId = '';
 
   // An incoming P2P request the desktop is asking about: the manager's state
   // is "pending" until the user accepts (then "receiving"). Also match any
@@ -2669,9 +3386,23 @@ body.light .set-card {
     return T.trStatusCancelled;
   }
 
+  // Mirror of the desktop panel's canRetry: only failed OUTGOING rows can
+  // actually be re-sent — the host's retry branch resolves the history row
+  // by its original transfer id and re-sends to the original peer.
+  function canRetryTransfer(h) {
+    return !!h && h.id !== undefined && h.id !== null && h.id !== '' &&
+      h.direction === 'up' &&
+      h.status !== 'completed' &&
+      !(h.status === 'cancelled' || h.cancelled);
+  }
+
   function renderTransfers() {
     var html = '';
-    html += '<div class="tr-section"><div class="chat-hdr">📡 ' + esc(T.trActive) + '</div>';
+    html += '<div class="tr-section"><div class="tr-hdrrow"><div class="chat-hdr">📡 ' + esc(T.trActive) + '</div>' +
+      (transferActive.length > 0
+        ? '<button class="tr-cancelall" data-act="cancelall"' + (transfersCancellingAll ? ' disabled' : '') + '>' + esc(transfersCancellingAll ? '…' : T.trCancelAll) + '</button>'
+        : '') +
+      '</div>';
     if (transferActive.length === 0) {
       html += '<div class="empty"><div class="empty__icon">📤</div><div class="empty__text">' + esc(T.trEmptyActive) + '</div></div>';
     } else {
@@ -2707,12 +3438,19 @@ body.light .set-card {
         var ok = h.status === 'completed';
         var cancelled = h.status === 'cancelled' || h.cancelled;
         var cls = ok ? 'tr-hitem__icon--ok' : (cancelled ? 'tr-hitem__icon--warn' : 'tr-hitem__icon--err');
+        var retryBtn = '';
+        if (canRetryTransfer(h)) {
+          retryBtn = '<button class="tr-hitem__retry" data-retry-id="' + esc(h.id) + '"' +
+            (retryBusyId === h.id ? ' disabled' : '') +
+            ' title="' + esc(T.trRetry) + '">' + (retryBusyId === h.id ? '…' : '↻') + '</button>';
+        }
         html += '<div class="tr-hitem">' +
           '<div class="tr-hitem__icon ' + cls + '">' + (ok ? '✓' : '✕') + '</div>' +
           '<div class="tr-hitem__body">' +
             '<div class="tr-hitem__name">' + dir2 + ' ' + esc(h.filename || T.trUnknownFile) + '</div>' +
             '<div class="tr-hitem__meta">' + (h.size != null ? esc(fmtSize(h.size)) + ' · ' : '') + esc(trHistoryStatusLabel(h)) + '</div>' +
           '</div>' +
+          retryBtn +
         '</div>';
       }
     }
@@ -2741,6 +3479,65 @@ body.light .set-card {
       });
   }
 
+  // Cancel every ACTIVE transfer at once (desktop panel parity). The server
+  // walks its own live list and cancels each through the same per-transfer
+  // action a single-row ✕ uses; it reports how many actually cancelled.
+  function transferCancelAll() {
+    if (transfersCancellingAll) return;
+    transfersCancellingAll = true;
+    renderTransfers();
+    apiFetch('/api/transfer/cancel-all', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: '{}',
+    })
+      .then(function (res) {
+        transfersCancellingAll = false;
+        if (res.status === 403) { notifyTokenExpired(); renderTransfers(); return; }
+        if (res.data && res.data.ok) {
+          var n = (res.data && typeof res.data.cancelled === 'number') ? res.data.cancelled : 0;
+          if (n > 0) showToast(T.trCancelAllDone.replace('{n}', String(n)));
+        } else {
+          showToast((res.data && res.data.error) || T.trActionFail, true);
+        }
+        loadTransfers(true);
+      })
+      .catch(function () {
+        transfersCancellingAll = false;
+        renderTransfers();
+        showToast(T.trActionFail + ' · ' + T.loadFailHint, true);
+      });
+  }
+
+  // Re-send one FAILED OUTGOING history row to its original peer. The busy
+  // flag is per row so two different rows can retry in parallel, but a
+  // double-tap on the same row can't fire twice.
+  function transferRetry(id) {
+    if (!id || retryBusyId === id) return;
+    retryBusyId = id;
+    renderTransfers();
+    apiFetch('/api/transfer/retry', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ transfer_id: id }),
+    })
+      .then(function (res) {
+        retryBusyId = '';
+        if (res.status === 403) { notifyTokenExpired(); renderTransfers(); return; }
+        if (!res.data || res.data.ok !== true) {
+          showToast((res.data && res.data.error) || T.trRetryFail, true);
+        }
+        // On success the fresh transfer appears under Active via this
+        // refresh — that row IS the feedback, no toast needed.
+        loadTransfers(true);
+      })
+      .catch(function () {
+        retryBusyId = '';
+        renderTransfers();
+        showToast(T.trRetryFail + ' · ' + T.loadFailHint, true);
+      });
+  }
+
   function transferAction(act, id) {
     apiFetch('/api/transfer/' + act, {
       method: 'POST',
@@ -2760,9 +3557,17 @@ body.light .set-card {
   }
 
   transfersView.addEventListener('click', function (e) {
-    var btn = e.target.closest ? e.target.closest('[data-act]') : null;
+    var el = e.target;
+    var retryBtn = el.closest ? el.closest('[data-retry-id]') : null;
+    if (retryBtn) {
+      transferRetry(retryBtn.getAttribute('data-retry-id'));
+      return;
+    }
+    var btn = el.closest ? el.closest('[data-act]') : null;
     if (!btn) return;
-    transferAction(btn.getAttribute('data-act'), btn.getAttribute('data-id'));
+    var act = btn.getAttribute('data-act');
+    if (act === 'cancelall') { transferCancelAll(); return; }
+    transferAction(act, btn.getAttribute('data-id'));
   });
 
   /* ── Favorites ──────────────────────────────────────────────── */
@@ -2930,6 +3735,134 @@ body.light .set-card {
     if (toggle) toggle.textContent = themeLabel();
   }
 
+  /* ── Diagnostics card ──────────────────────────────────────── */
+
+  // Scan state lives outside the rendered HTML because loadSettings
+  // re-renders this whole view on every poll tick — the results must
+  // survive that (and do, via renderDiag() after each rebuild).
+  var diagState = { scanning: false, checks: [], revealed: 0, summary: '', requested: false };
+  var lastSettingsSig = null;
+
+  function diagLabel(id) {
+    var map = {
+      server_port: T.diagServerPort,
+      discovery: T.diagDiscovery,
+      advertising: T.diagAdvertising,
+      web_companion: T.diagWeb,
+      network: T.diagNetwork,
+      firewall: T.diagFirewall,
+      permissions: T.diagPermissions,
+      mdns: T.diagMdns,
+      clipboard_tool: T.diagClipboardTool,
+      error: T.diagTitle,
+    };
+    return map[id] || id;
+  }
+
+  function diagSummaryText(s) {
+    if (s === 'ok') return T.diagAllOk;
+    if (s === 'warn') return T.diagWarn;
+    return T.diagFail;
+  }
+
+  function renderDiag() {
+    var box = document.getElementById('diagResults');
+    if (!box) return;
+    var html = '';
+    if (diagState.checks.length === 0 && !diagState.scanning) {
+      box.innerHTML = '';
+      return;
+    }
+    for (var i = 0; i < diagState.checks.length; i++) {
+      var chk = diagState.checks[i];
+      var shown = i < diagState.revealed;
+      var statusCls = !shown ? '' : (chk.ok ? ' diag-check__status--ok' : ' diag-check__status--bad');
+      var detail = shown ? ((chk && chk.detail) || '') : '';
+      var guidance = shown ? ((chk && chk.guidance) || '') : '';
+      html += '<div class="diag-check">' +
+        '<span class="diag-check__status' + statusCls + '">' + (shown ? (chk.ok ? '✓' : '✕') : '·') + '</span>' +
+        '<div class="diag-check__body">' +
+          '<span class="diag-check__label">' + esc(diagLabel(chk.id)) + '</span>' +
+          (detail ? '<span class="diag-check__detail">' + esc(detail) + '</span>' : '') +
+          (guidance ? '<span class="diag-check__guidance">💡 ' + esc(guidance) + '</span>' : '');
+      // The desktop offers a one-tap fix for exactly these two checks —
+      // mirror it so a phone can trigger the same elevated repair flow.
+      if (shown && (chk.id === 'firewall' || chk.id === 'permissions')) {
+        html += '<button class="diag-fix" data-diag-fix="' + esc(chk.id) + '"' + (diagState.requested ? ' disabled' : '') + '>' + esc(T.diagFix) + '</button>';
+      }
+      html += '</div></div>';
+    }
+    var done = !diagState.scanning && diagState.checks.length > 0 && diagState.revealed >= diagState.checks.length;
+    if (done) {
+      html += '<div class="diag-summary diag-summary--' + esc(diagState.summary) + '">' + esc(diagSummaryText(diagState.summary)) + '</div>';
+    }
+    box.innerHTML = html;
+  }
+
+  function runDiagnostics() {
+    if (diagState.scanning) return;
+    diagState.scanning = true;
+    diagState.checks = [];
+    diagState.revealed = 0;
+    diagState.summary = '';
+    renderSettingsView();
+    getJson('/api/diagnostics')
+      .then(function (res) {
+        diagState.scanning = false;
+        diagState.checks = (res && res.checks) || [];
+        diagState.summary = (res && res.summary) || 'ok';
+        diagState.revealed = 0;
+        // Reveal each check one by one (the same scan effect as the desktop).
+        for (var i = 0; i < diagState.checks.length; i++) {
+          (function (idx) {
+            setTimeout(function () {
+              diagState.revealed = idx + 1;
+              renderSettingsView();
+            }, 350 * (idx + 1));
+          })(i);
+        }
+        if (diagState.checks.length === 0) renderSettingsView();
+      })
+      .catch(function () {
+        diagState.scanning = false;
+        diagState.checks = [{ id: 'error', ok: false, detail: '', guidance: '' }];
+        diagState.revealed = 1;
+        diagState.summary = 'fail';
+        showToast(T.diagScanFail, true);
+        renderSettingsView();
+      });
+  }
+
+  function requestDiagFix(checkId) {
+    var action = checkId === 'permissions' ? 'local_network' : (checkId === 'firewall' ? 'firewall' : null);
+    if (!action || diagState.requested) return;
+    diagState.requested = true;
+    renderDiag();
+    apiFetch('/api/diagnostics/request', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ action: action }),
+    })
+      .then(function (res) {
+        diagState.requested = false;
+        if (res.status === 403) { notifyTokenExpired(); return; }
+        if (res.data && res.data.ok === true) {
+          showToast(T.diagFixDone);
+          // An elevated netsh process may take a moment — re-scan so the fix
+          // shows up as OK (mirrors the desktop panel's timing).
+          if (action === 'firewall') setTimeout(runDiagnostics, 2500);
+        } else {
+          showToast((res.data && res.data.error) || T.diagFixFail, true);
+        }
+        renderDiag();
+      })
+      .catch(function () {
+        diagState.requested = false;
+        showToast(T.diagFixFail + ' · ' + T.loadFailHint, true);
+        renderDiag();
+      });
+  }
+
   function renderSettings(deviceName, settings) {
     var ver = (settings && (settings.version || settings.app_version)) || '';
     var html = '';
@@ -2944,11 +3877,52 @@ body.light .set-card {
     html += '<div class="set-card">' +
       '<div class="set-row"><span class="set-row__label">' + esc(T.setTheme) + '</span><button class="set-toggle" id="themeToggle">' + esc(themeLabel()) + '</button></div>' +
     '</div>';
+    // Diagnostics scan (desktop diagnostics-panel parity, compact form):
+    // answers the phone user's main question — "why isn't it syncing?"
+    html += '<div class="set-card">' +
+      '<div class="chat-hdr" style="margin-top:10px">' + esc(T.diagTitle) + '</div>' +
+      '<p class="diag-intro">' + esc(T.diagHint) + '</p>' +
+      '<button class="diag-run" id="diagRunBtn"' + (diagState.scanning ? ' disabled' : '') + '>' + esc(diagState.scanning ? T.diagScanning : T.diagRun) + '</button>' +
+      '<div id="diagResults"></div>' +
+    '</div>';
     html += '<a class="set-link" href="' + esc(HOST + '/index.html?token=' + encodeURIComponent(TOKEN)) + '">' + esc(T.setFullPanel) + ' →</a>';
     settingsView.innerHTML = html;
     var toggle = document.getElementById('themeToggle');
     if (toggle) toggle.addEventListener('click', toggleTheme);
+    var runBtn = document.getElementById('diagRunBtn');
+    if (runBtn) runBtn.addEventListener('click', runDiagnostics);
+    renderDiag();
   }
+
+  // One rebuild entry point with a change signature: the poll calls this
+  // every 5s, but rebuilding the DOM under an open scan (or just for show)
+  // resets nothing-visible-yet costs flicker — skip when nothing changed.
+  function renderSettingsView() {
+    var sig = [
+      _lastDeviceName,
+      diagState.scanning ? '1' : '0',
+      String(diagState.revealed),
+      diagState.summary,
+      String(diagState.checks.length),
+      themeLabel(),
+    ].join('|');
+    if (sig === lastSettingsSig) {
+      // Nothing structural changed; still refresh the results box in case a
+      // reveal step or fix-button disable landed between renders.
+      renderDiag();
+      return;
+    }
+    lastSettingsSig = sig;
+    _rebuildSettingsNow();
+  }
+
+  function _rebuildSettingsNow() {
+    // Resolve the currently displayed values from the last fetch.
+    renderSettings(_lastDeviceName || '—', _lastSettingsObj || {});
+  }
+
+  var _lastDeviceName = '';
+  var _lastSettingsObj = {};
 
   function loadSettings(silent) {
     getJson('/api/status')
@@ -2957,10 +3931,10 @@ body.light .set-card {
         getJson('/api/settings')
           .then(function (s2) {
             var settings = (s2 && s2.settings) || {};
-            renderSettings(deviceName || settings.device_name, settings);
+            applySettingsData(deviceName || settings.device_name, settings);
           })
           .catch(function () {
-            renderSettings(deviceName, {});
+            applySettingsData(deviceName, {});
           });
       })
       .catch(function (err) {
@@ -2968,7 +3942,7 @@ body.light .set-card {
         getJson('/api/settings')
           .then(function (s2) {
             var settings = (s2 && s2.settings) || {};
-            renderSettings(settings.device_name, settings);
+            applySettingsData(settings.device_name, settings);
           })
           .catch(function () {
             if (!silent) {
@@ -2977,6 +3951,20 @@ body.light .set-card {
           });
       });
   }
+
+  function applySettingsData(deviceName, settings) {
+    _lastDeviceName = deviceName || '';
+    _lastSettingsObj = settings || {};
+    renderSettingsView();
+  }
+
+  // Delegated: the diagnostics card is rebuilt by renders/poll ticks, so
+  // bind the fix buttons on the container instead of per render.
+  settingsView.addEventListener('click', function (e) {
+    var btn = e.target.closest ? e.target.closest('[data-diag-fix]') : null;
+    if (!btn) return;
+    requestDiagFix(btn.getAttribute('data-diag-fix'));
+  });
 
   /* ── Init ──────────────────────────────────────────────────── */
 

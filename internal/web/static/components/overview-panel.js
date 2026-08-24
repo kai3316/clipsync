@@ -26,11 +26,31 @@
         toggleBusy: {},
         // Quick-action busy flags (qr/url) to prevent double-taps.
         quickBusy: {},
+        // Timed sync pause (tray parity): busy flag + a ticking clock so the
+        // countdown re-renders without polling the server.
+        pauseBusy: false,
+        nowTick: Date.now(),
       };
     },
 
     computed: {
       o: function () { return this.store.overview; },
+
+      // Epoch ms when the pending timed pause auto-resumes (0 = none).
+      pauseUntilMs: function () {
+        var until = Number(this.store.settingsCache.timed_pause_until || 0);
+        return until > 0 ? until * 1000 : 0;
+      },
+
+      pauseLeftMs: function () {
+        return Math.max(0, this.pauseUntilMs - this.nowTick);
+      },
+
+      // Whole minutes left on the pause, rounded up; small remainders still
+      // show 1 so the label never flashes "0 min left" right before resume.
+      pauseLeftMin: function () {
+        return Math.max(1, Math.ceil(this.pauseLeftMs / 60000));
+      },
 
       uptimeDisplay: function () {
         return this.store.formatUptime(this.o.uptimeSeconds);
@@ -130,10 +150,27 @@
       this._netHealthTimer = setInterval(function () {
         self.loadNetworkHealth();
       }, 8000);
+      // Tick the timed-pause countdown locally; when it runs out, refetch
+      // settings once so syncEnabled / timed_pause_until reflect the server's
+      // auto-resume truth (the resume itself happens host-side).
+      this._pauseTickTimer = setInterval(function () {
+        self.nowTick = Date.now();
+        var until = Number(self.store.settingsCache.timed_pause_until || 0) * 1000;
+        if (until > 0 && self.nowTick >= until && !self._pauseExpiredSyncing) {
+          self._pauseExpiredSyncing = true;
+          ClipsyncAPI.getSettings().then(function (res) {
+            if (res && res.settings) self.store.mergeSettings(res.settings);
+            self._pauseExpiredSyncing = false;
+          }).catch(function () {
+            self._pauseExpiredSyncing = false;
+          });
+        }
+      }, 15000);
     },
 
     beforeUnmount: function () {
       if (this._netHealthTimer) clearInterval(this._netHealthTimer);
+      if (this._pauseTickTimer) clearInterval(this._pauseTickTimer);
     },
 
     methods: {
@@ -215,6 +252,56 @@
           .catch(function (e) {
             self._toggleSettled('sync');
             self._toastError(e);
+          });
+      },
+
+      // ── Timed sync pause (tray parity) ────────────────────────
+
+      pauseSync: function (minutes) {
+        var self = this;
+        if (this.pauseBusy) return;
+        this.pauseBusy = true;
+        ClipsyncAPI.pauseSync(minutes)
+          .then(function (res) {
+            self.pauseBusy = false;
+            if (res && res.ok) {
+              // The server already flipped sync off and armed the auto-resume
+              // timer; mirror both into the local state immediately.
+              self.store.mergeSettings({ timed_pause_until: res.until });
+              self.nowTick = Date.now();
+              self.store.overview.syncEnabled = false;
+              self.store.showToast(
+                self.t('overview.paused_toast', { minutes: minutes }), 2500);
+            } else {
+              self.store.showToast(
+                (res && res.error) || self.t('overview.pause_failed'), 2500, 'error');
+            }
+          })
+          .catch(function () {
+            self.pauseBusy = false;
+            self.store.showToast(self.t('overview.pause_failed'), 2500, 'error');
+          });
+      },
+
+      resumeSync: function () {
+        var self = this;
+        if (this.pauseBusy) return;
+        this.pauseBusy = true;
+        ClipsyncAPI.resumeSync()
+          .then(function (res) {
+            self.pauseBusy = false;
+            if (res && res.ok) {
+              self.store.mergeSettings({ timed_pause_until: 0 });
+              self.nowTick = Date.now();
+              self.store.overview.syncEnabled = true;
+              self.store.showToast(self.t('overview.resumed'), 2000);
+            } else {
+              self.store.showToast(self.t('overview.pause_failed'), 2500, 'error');
+            }
+          })
+          .catch(function () {
+            self.pauseBusy = false;
+            self.store.showToast(self.t('overview.pause_failed'), 2500, 'error');
           });
       },
 
@@ -440,6 +527,18 @@
               '<div class="overview-toggle-row">' +
                 '<span>{{ t(\'overview.sync\') }}</span>' +
                 '<button class="settings-toggle" role="switch" :aria-checked="o.syncEnabled" :aria-label="t(\'overview.sync\')" :aria-busy="toggleBusy.sync ? \'true\' : \'false\'" :disabled="toggleBusy.sync" :class="{ \'settings-toggle--on\': o.syncEnabled, \'settings-toggle--disabled\': toggleBusy.sync }" @click="toggleSync"><span class="settings-toggle__knob"></span></button>' +
+              '</div>' +
+              '<div v-if="pauseLeftMs > 0" class="overview-toggle-row overview-pause-row">' +
+                '<span class="overview-pause-status">⏸ {{ t(\'overview.paused_left\', { minutes: pauseLeftMin }) }}</span>' +
+                '<button class="overview-quick-btn overview-pause-btn" @click="resumeSync" :disabled="pauseBusy">{{ pauseBusy ? \'...\' : t(\'overview.resume_now\') }}</button>' +
+              '</div>' +
+              '<div v-else class="overview-toggle-row overview-pause-row">' +
+                '<span>{{ t(\'overview.pause_for\') }}</span>' +
+                '<span class="overview-pause-presets">' +
+                  '<button class="overview-quick-btn overview-pause-btn" @click="pauseSync(15)" :disabled="pauseBusy">{{ pauseBusy ? \'...\' : t(\'overview.pause_15m\') }}</button>' +
+                  '<button class="overview-quick-btn overview-pause-btn" @click="pauseSync(30)" :disabled="pauseBusy">{{ t(\'overview.pause_30m\') }}</button>' +
+                  '<button class="overview-quick-btn overview-pause-btn" @click="pauseSync(60)" :disabled="pauseBusy">{{ t(\'overview.pause_1h\') }}</button>' +
+                '</span>' +
               '</div>' +
               '<div class="overview-toggle-row">' +
                 '<span>{{ t(\'overview.discovery\') }}</span>' +

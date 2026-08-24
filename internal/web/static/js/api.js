@@ -397,6 +397,23 @@ var ClipsyncAPI = (function () {
     },
 
     /**
+     * Pause clipboard sync for a number of minutes (auto-resumes).
+     * @param {number} minutes - 1..1440
+     * @returns {Promise<{ok: boolean, minutes: number, until: number}>}
+     */
+    pauseSync: function (minutes) {
+      return this._fetch('POST', '/api/sync/pause', { minutes: minutes });
+    },
+
+    /**
+     * End a timed sync pause immediately.
+     * @returns {Promise<{ok: boolean, resumed: boolean}>}
+     */
+    resumeSync: function () {
+      return this._fetch('POST', '/api/sync/resume', {});
+    },
+
+    /**
      * Respond to a server-pushed dialog.
      * @param {string} dialogId  - The dialog ID to respond to
      * @param {string} action    - "accept" | "reject" | "select" | "cancel" | "close" | "send" | "ok"

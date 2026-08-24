@@ -39,6 +39,7 @@ from internal.web.api.settings import (
     restore_backup_api,
     update_settings,
 )
+from internal.web.api.sync_control import pause_sync, resume_sync
 from internal.web.api.transfer import get_speed_test, get_transfers, post_transfer
 from internal.web.api.translate import translate_text
 
@@ -711,6 +712,26 @@ def _dispatch(method, path, query_params, body, cfg, history, sync_mgr,
 
         elif path == "/api/restore":
             data, status = restore_backup_api(body, cfg, history)
+            # A restored config can flip the app back to "fresh install"
+            # (language_chosen=False in the backup).  __CLIPSYNC_FRESH__ is
+            # only interpolated at page-serve time, so a dashboard that was
+            # already open keeps its stale false and the onboarding wizard
+            # never reappears until a manual refresh.  Tell live clients to
+            # re-surface it — but ONLY when the config actually went fresh,
+            # so an ordinary same-version restore doesn't pop the wizard.
+            if (
+                status == 200
+                and isinstance(data, dict)
+                and data.get("ok")
+                and not getattr(cfg, "language_chosen", False)
+            ):
+                mgr = _ws_manager_for(dialog_mgr)
+                if mgr is not None:
+                    try:
+                        mgr.broadcast("onboarding_required")
+                    except Exception:
+                        logger.debug("onboarding_required broadcast failed",
+                                     exc_info=True)
             return _json_response(data, status)
 
         elif path == "/api/translate":
@@ -982,6 +1003,19 @@ def _dispatch(method, path, query_params, body, cfg, history, sync_mgr,
             enabled = req.get("enabled", False)
             on_toggle_visibility(enabled)
             return _json_response({"ok": True, "enabled": enabled})
+
+        elif path == "/api/sync/pause":
+            # Timed pause (web parity with the tray's 15/30/60-min menu):
+            # disables sync now and auto-resumes after N minutes.  The timer
+            # and its stale-fire guard live in api/sync_control.py; the
+            # deadline is mirrored into cfg.timed_pause_until so a restart or
+            # auto-update relaunch mid-pause re-arms it host-side.
+            data, status = pause_sync(body, cfg, on_settings_change)
+            return _json_response(data, status)
+
+        elif path == "/api/sync/resume":
+            data, status = resume_sync(body, cfg, on_settings_change)
+            return _json_response(data, status)
 
         elif path == "/api/show_qr":
             if on_show_web_qr is None:
