@@ -94,6 +94,9 @@ class FakeChatManager:
     def send_text(self, session_id, text, send_fn):
         return False
 
+    def resend_text(self, session_id, entry_id, send_fn):
+        return False
+
     def send_file(self, session_id, file_path, send_fn):
         return None
 

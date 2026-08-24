@@ -1603,6 +1603,15 @@ class Application:
         except Exception:
             return False
 
+    def _chat_resend_text(self, session_id: str, entry_id: str) -> bool:
+        try:
+            return self.chat_mgr.resend_text(
+                session_id, entry_id,
+                self._chat_send_fn(self._chat_peer_id_for_sid(session_id)),
+            )
+        except Exception:
+            return False
+
     def _chat_send_file(self, session_id: str, file_path: str):
         try:
             return self.chat_mgr.send_file(
@@ -5700,6 +5709,7 @@ class Application:
             get_chat_messages=self._chat_get_messages,
             mark_session_read=self._chat_mark_read,
             chat_send_text=self._chat_send_text,
+            chat_resend_text=self._chat_resend_text,
             chat_send_file=self._chat_send_file,
             chat_accept_invite=self._chat_accept_invite,
             chat_decline_invite=self._chat_decline_invite,

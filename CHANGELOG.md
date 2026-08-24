@@ -5,7 +5,7 @@ All notable changes to ClipSync are documented in this file.
 ## [Unreleased]
 
 ### Chat & pairing reliability
-- **Failed outgoing texts get a ⟳ Resend button.** A text that failed to send now shows as a red-outlined "not delivered" bubble in the web dashboard and mobile view instead of looking like a normal message; one click re-sends it through the same rate-limited path (`POST /api/chat/resend`).
+- **Failed outgoing texts get a ⟳ Resend button.** A text that failed to send now shows as a red-outlined "not delivered" bubble in the web dashboard and mobile view instead of looking like a normal message; one click re-sends it through the same rate-limited path (`POST /api/chat/resend`). The desktop dashboard matches: failed bubbles carry the same red "not delivered" marker and ⟳ Resend button, with an inline hint when the retry is rejected.
 - **Chat invites fail honestly.** An invite the transport refuses no longer leaves a phantom "inviting" conversation pinning a slot for five minutes; accepting over a broken link keeps an honest, retryable state instead of a fake active chat; shutdown no longer leaves sender threads parked for minutes.
 - Duplicate or late pairing confirmations no longer demote an already-paired device (no spurious re-confirm prompts); expired pairing requests clean up their pending state.
 - Malformed sync frames (non-string message type, NaN/garbage timestamps) are dropped at decode instead of tearing down the whole connection.

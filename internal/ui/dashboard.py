@@ -201,6 +201,23 @@ def _chat_status_key(status: str, online: bool = True) -> str:
     return "chat.status.closed"
 
 
+def _chat_text_resendable(entry: dict | None) -> bool:
+    """Should a transcript entry render the failed marker + ⟳ resend button?
+
+    Mirrors ``ChatManager.resend_text``'s acceptance rule so the button only
+    appears on entries the backend would actually retry: this side's outgoing
+    text bubbles whose status is exactly ``failed``.  Anything else (incoming
+    text, file cards, system notices, already-sent bubbles) renders normally.
+    """
+    if not isinstance(entry, dict):
+        return False
+    return bool(
+        entry.get("kind", "text") == "text"
+        and entry.get("outgoing")
+        and entry.get("status") == "failed"
+    )
+
+
 class _HistoryListShim:
     """Duck-type the ClipboardHistory model for internal.data.export.
 
@@ -302,6 +319,7 @@ class DashboardWindow:
         get_chat_messages: Callable | None = None,
         mark_session_read: Callable | None = None,
         chat_send_text: Callable | None = None,
+        chat_resend_text: Callable | None = None,
         chat_send_file: Callable | None = None,
         chat_accept_invite: Callable | None = None,
         chat_decline_invite: Callable | None = None,
@@ -362,6 +380,8 @@ class DashboardWindow:
         self._get_chat_messages = get_chat_messages
         self._mark_chat_session_read = mark_session_read
         self._chat_send_text = chat_send_text
+        # (session_id, entry_id) -> bool; re-transmits a failed outgoing text
+        self._chat_resend_text = chat_resend_text
         self._chat_send_file = chat_send_file
         self._chat_accept_invite = chat_accept_invite
         self._chat_decline_invite = chat_decline_invite
@@ -393,6 +413,9 @@ class DashboardWindow:
         self._chat_attach_btn: ctk.CTkButton | None = None
         self._chat_hint_label: ctk.CTkLabel | None = None
         self._chat_hint_job: str | None = None
+        # entry_id of the text bubble whose ⟳ resend is currently in flight
+        # (double-click guard; resend itself runs on the Tk thread)
+        self._chat_resend_busy_id: str | None = None
         self._breath_timer: str | None = None
 
         # Edge snapping state
@@ -3615,7 +3638,7 @@ class DashboardWindow:
                 elif kind == "file":
                     self._chat_file_card(scroll, entry, session_id)
                 else:
-                    self._chat_text_bubble(scroll, entry)
+                    self._chat_text_bubble(scroll, entry, session_id)
 
         # Scroll to the newest message.  CTkScrollableFrame only recomputes its
         # scrollregion from the inner frame's <Configure> event on idle, so a
@@ -3638,25 +3661,49 @@ class DashboardWindow:
             return dt.strftime("%H:%M")
         return dt.strftime("%m-%d %H:%M")
 
-    def _chat_text_bubble(self, parent, entry: dict) -> None:
+    def _chat_text_bubble(self, parent, entry: dict,
+                          session_id: str = "") -> None:
         outgoing = bool(entry.get("outgoing"))
+        resendable = _chat_text_resendable(entry)
         text = entry.get("text", "") or ""
-        bubble = ctk.CTkFrame(
-            parent,
+        bubble_kwargs: dict = dict(
             fg_color=("#0891B2", "#0E1328") if outgoing else ("gray90", "gray18"),
             corner_radius=12,
         )
+        if resendable:
+            # Red outline matching the web UI's chat-bubble--failed style —
+            # a failed message must not look like a normal delivered one.
+            bubble_kwargs["border_width"] = 1
+            bubble_kwargs["border_color"] = ("#E74C3C", "#C0392B")
+        bubble = ctk.CTkFrame(parent, **bubble_kwargs)
         bubble.pack(anchor="e" if outgoing else "w", pady=2, padx=8)
         ctk.CTkLabel(
             bubble, text=text, wraplength=500, justify="left",
             font=ctk.CTkFont(size=13),
             text_color=("#FFFFFF", "#EAF0FA") if outgoing else ("gray15", "gray85"),
         ).pack(padx=10, pady=(6, 0))
+
+        meta = ctk.CTkFrame(bubble, fg_color="transparent")
+        meta.pack(fill="x", padx=10, pady=(0, 4))
+        if resendable and session_id:
+            ctk.CTkLabel(
+                meta, text="⚠ " + T("chat.text_failed"),
+                font=ctk.CTkFont(size=9),
+                text_color=("#C0392B", "#E67E7E"),
+            ).pack(side="left")
+            ctk.CTkButton(
+                meta, text="⟳ " + T("chat.resend"),
+                width=64, height=20,
+                fg_color=ACCENT, hover_color=("#0EA5C4", "#4CE0F5"),
+                font=ctk.CTkFont(size=10),
+                command=lambda s=session_id: self._chat_do_resend(
+                    s, entry.get("entry_id", "")),
+            ).pack(side="left", padx=(6, 0))
         ctk.CTkLabel(
-            bubble, text=self._chat_time_str(entry.get("ts", 0.0)),
+            meta, text=self._chat_time_str(entry.get("ts", 0.0)),
             font=ctk.CTkFont(size=9),
             text_color=("gray40", "gray70"),
-        ).pack(anchor="e", padx=10, pady=(0, 4))
+        ).pack(side="right")
 
     def _chat_system_entry(self, parent, entry: dict) -> None:
         key = entry.get("text_key", "")
@@ -3832,6 +3879,40 @@ class DashboardWindow:
             self._chat_show_hint(T("chat.err_send_failed"))
             return
         self._chat_input.delete(0, "end")
+
+    def _chat_do_resend(self, session_id: str, entry_id: str) -> bool:
+        """⟳ on a failed outgoing bubble: re-transmit that exact entry.
+
+        The host callback funnels into ``ChatManager.resend_text``, which
+        refuses anything but a failed outgoing text and charges the same
+        flood budget as a first send.  On success it flips the entry to
+        ``done`` and fires ``_on_message`` / ``_on_sessions_changed`` — those
+        callbacks already drive ``_refresh_chat()``, which rebuilds the
+        transcript (the state key hashes each entry's status) so the bubble
+        updates in place.  A refusal keeps the bubble failed; a hint names
+        the failure so the click is never silently swallowed.
+        """
+        if not session_id or not entry_id:
+            return False
+        cb = self._chat_resend_text
+        if cb is None:
+            return False
+        # Re-entry guard: a resend already in flight (or a stale busy flag)
+        # must not queue a duplicate wire send for the same or another entry.
+        if self._chat_resend_busy_id:
+            return False
+        self._chat_resend_busy_id = entry_id
+        try:
+            try:
+                ok = bool(cb(session_id, entry_id))
+            except Exception:
+                logger.debug("chat resend_text raised", exc_info=True)
+                ok = False
+        finally:
+            self._chat_resend_busy_id = None
+        if not ok:
+            self._chat_show_hint(T("chat.err_resend_failed"))
+        return ok
 
     def _chat_on_attach(self) -> None:
         sid = self._chat_selected_session_id
