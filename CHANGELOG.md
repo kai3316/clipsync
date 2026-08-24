@@ -4,6 +4,16 @@ All notable changes to ClipSync are documented in this file.
 
 ## [Unreleased]
 
+### Chat
+- **Typing indicator**: see the other side composing in real time in the web dashboard and on mobile ("typing ●●●"). Reporting is throttled, the state self-clears 4 s after they stop (no background threads), vanishes the moment their message arrives, and old app versions simply ignore it.
+- Fixed a double-send race where quickly pressing Enter / tapping send twice created duplicate message bubbles (desktop and mobile).
+- On mobile, typing a draft no longer gets wiped when a background refresh re-renders the conversation mid-keystroke.
+- Malformed chat payloads (non-string text) are rejected cleanly instead of raising inside the manager.
+
+### Reliability
+- **Timed sync pause survives restarts.** Previously a restart landing inside the pause window — e.g. an auto-update reboot — left syncing permanently off with nothing to re-enable it; the deadline is now persisted and re-armed on startup (an already-expired deadline resumes syncing).
+- **Factory reset now removes SQLite WAL sidecars and corrupt-file quarantine copies** — previously "deleted" clipboard history could resurrect from the write-ahead log when the database was recreated next to its stale `-wal` file.
+
 ### Devices & connectivity
 - **One stalled device can no longer delay everyone else.** TLS handshake + identity exchange moved off the single accept thread onto a per-connection thread — previously one hung client could queue every other peer's incoming connection for up to ~25 s ("devices flicker in and out" during simultaneous reconnects).
 - **Reconnects no longer give up permanently.** After the fast-retry budget ran out (~3 minutes) the saved address was cleared and the peer was abandoned until an app restart; now it keeps the address and retries once every 30 s, so longer Wi-Fi/router outages self-heal. The reconnect indicator also stops showing attempts past its maximum.

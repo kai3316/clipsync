@@ -123,6 +123,10 @@ class ChatSession:
     entries: list[ChatEntry] = field(default_factory=list)
     last_ping_mono: float = 0.0
     offline_announced: bool = False
+    # PEER's typing indicator, receiver side: time.monotonic() deadline after
+    # which the flag self-expires (no sweeper needed — to_dict() compares
+    # lazily).  0.0 means "not typing".
+    peer_typing_until_mono: float = 0.0
 
     def last_preview(self, limit: int = 60) -> str:
         for entry in reversed(self.entries):
@@ -145,6 +149,9 @@ class ChatSession:
             "unread": self.unread,
             "online": self.online,
             "last_preview": self.last_preview(),
+            # Lazy expiry: no timer needed, the deadline simply passes.
+            # Old web frontends ignore the unknown field (backward compatible).
+            "peer_typing": self.peer_typing_until_mono > time.monotonic(),
         }
 
 
@@ -158,6 +165,10 @@ class ChatManager:
     - ``chat_accept`` / ``chat_close``  ``{session_id}``
     - ``chat_decline`` ``{session_id, reason}``
     - ``chat_text``    ``{session_id, text, ts}``
+    - ``chat_typing``  ``{session_id, typing}``  -- typing indicator; the
+      sender throttles same-state frames to one per ``TYPING_THROTTLE``
+      seconds, the receiver expires the flag ``TYPING_TIMEOUT`` after the
+      last frame (cleared early by an incoming text)
     - ``chat_ping`` / ``chat_pong``  ``{session_id}``
     - ``chat_file_offer``  ``{session_id, transfer_id, file_name, file_size, mime}``
     - ``chat_file_accept`` / ``chat_file_reject`` / ``chat_file_cancel``
@@ -188,6 +199,9 @@ class ChatManager:
     # ---- liveness ------------------------------------------------------------
     PING_INTERVAL = 45.0
     OFFLINE_AFTER = 150.0             # silent for ~3 intervals => show offline
+    # ---- typing indicator ------------------------------------------------------
+    TYPING_THROTTLE = 2.0             # same-state frames closer than this: suppressed
+    TYPING_TIMEOUT = 4.0              # receiver clears the indicator after this silence
 
     MESSAGE_HISTORY_MAX = 500         # entries kept per session (oldest trimmed)
     SEND_FN_CACHE_MAX = 32            # most-recent peers kept in _latest_send_fn
@@ -204,6 +218,7 @@ class ChatManager:
         self._invite_times_out: dict[str, deque] = {}
         self._text_times_out: dict[str, deque] = {}          # session_id -> outgoing mono timestamps
         self._text_times_in: dict[str, deque] = {}           # session_id -> incoming mono timestamps
+        self._typing_out: dict[str, tuple[bool, float]] = {}  # sid -> (last state, last send mono)
         self._receives: dict[str, dict] = {}                 # transfer_id -> receive state
         self._sends: dict[str, dict] = {}                    # transfer_id -> send state
         self._latest_send_fn: dict[str, SendFn] = {}         # peer_id -> newest send_fn
@@ -360,6 +375,8 @@ class ChatManager:
                     bucket.pop(peer_id, None)
         for bucket in (self._text_times_out, self._text_times_in):
             bucket.pop(session_id, None)
+        # Typing bookkeeping is keyed by the never-reused session id too.
+        self._typing_out.pop(session_id, None)
 
     def _session_has_active_transfer(self, session: ChatSession) -> bool:
         """True when *session* has a send or receive still MAKING PROGRESS.
@@ -501,6 +518,7 @@ class ChatManager:
                 return False
             was_active = session.status == "active"
             session.status = "closed"
+            session.peer_typing_until_mono = 0.0
             self._fail_transfers_for_session(session, "cancelled", done_fired)
             # A closed session id is never reused; drop its text buckets so
             # the rate-limit dicts cannot grow without bound.
@@ -517,7 +535,11 @@ class ChatManager:
         return True
 
     def send_text(self, session_id: str, text: str, send_fn: SendFn) -> bool:
-        text = (text or "").strip()
+        # A non-string (e.g. a number from a hand-rolled REST client) would
+        # raise on .strip(); refuse it cleanly instead.
+        if not isinstance(text, str):
+            return False
+        text = text.strip()
         if not text or len(text) > self.MAX_TEXT_LEN:
             return False
         now = time.monotonic()
@@ -558,6 +580,46 @@ class ChatManager:
         self._fire("_on_message", session_id, entry.to_dict())
         self._fire("_on_sessions_changed")
         return ok
+
+    def report_typing(self, session_id: str, typing: bool, send_fn: SendFn) -> bool:
+        """Report OUR typing state for *session_id* (sender side).
+
+        Sends ``chat_typing`` ``{session_id, typing}``.  Duplicate same-state
+        frames within :data:`TYPING_THROTTLE` seconds are suppressed so a
+        chatty input stream cannot flood the link; a state CHANGE always goes
+        out immediately (that is what makes the indicator vanish the moment
+        the user stops or clears the box).  The receiver expires the flag
+        after :data:`TYPING_TIMEOUT` of silence, so continuous typing only
+        needs a keep-alive every ~2s.
+
+        No ``_on_sessions_changed`` fires: our own UI does not display our
+        own typing.  Returns True when a frame actually went out on the wire
+        (False also covers the throttle window — callers must treat that as
+        success, not failure).
+        """
+        now = time.monotonic()
+        want = bool(typing)
+        with self._lock:
+            session = self._session_by_sid.get(session_id)
+            if session is None or session.status != "active" or not session.online:
+                return False
+            prev = self._typing_out.get(session.session_id)
+            if prev is not None and prev[0] == want \
+                    and now - prev[1] < self.TYPING_THROTTLE:
+                return False
+            fn = send_fn or self._latest_send_fn.get(session.peer_id)
+            ok = self._send_frame({
+                "msg_type": "chat_typing",
+                "session_id": session.session_id,
+                "typing": want,
+            }, fn)
+            # Remember failed attempts too: a dead transport must not turn
+            # every keystroke into an immediate retry; the next throttle
+            # window retries naturally.
+            self._typing_out[session.session_id] = (want, now)
+            if ok:
+                self._remember_send_fn(session.peer_id, fn)
+            return ok
 
     def resend_text(self, session_id: str, entry_id: str, send_fn: SendFn) -> bool:
         """Re-transmit a FAILED outgoing text; flips its entry to ``done``.
@@ -917,6 +979,8 @@ class ChatManager:
                 self._handle_chat_close(payload, sender_device_id)
             elif msg_type == "chat_text":
                 self._handle_chat_text(payload, sender_device_id)
+            elif msg_type == "chat_typing":
+                self._handle_chat_typing(payload, sender_device_id)
             elif msg_type == "chat_ping":
                 self._handle_chat_ping(payload, sender_device_id, send_fn)
             elif msg_type == "chat_pong":
@@ -1010,6 +1074,11 @@ class ChatManager:
                         old_bucket = bucket_map.pop(old_sid, None)
                         if old_bucket:
                             bucket_map[sid] = old_bucket
+                    # Same for the typing bookkeeping — keeps the throttle
+                    # continuous and avoids orphaning the old sid's entry.
+                    old_typing = self._typing_out.pop(old_sid, None)
+                    if old_typing is not None:
+                        self._typing_out[sid] = old_typing
                 # Reaffirm so their client converges too.
                 self._send_frame({"msg_type": "chat_accept", "session_id": sid}, send_fn)
                 self._touch_seen(mine)
@@ -1127,6 +1196,7 @@ class ChatManager:
             if session is None or session.status not in ("inviting", "invited", "active"):
                 return
             session.status = "closed"
+            session.peer_typing_until_mono = 0.0
             self._fail_transfers_for_session(session, "peer_offline", done_fired)
             self._append_entry(session, ChatEntry(
                 entry_id=uuid.uuid4().hex[:16], kind="system", outgoing=False,
@@ -1187,9 +1257,43 @@ class ChatManager:
             )
             self._append_entry(session, entry)
             session.unread += 1
+            # The message just arrived — whatever typing indicator was showing
+            # for this peer must vanish immediately, not after the timeout.
+            session.peer_typing_until_mono = 0.0
             sid = session.session_id
         self._fire("_on_message", sid, entry.to_dict())
         self._fire("_on_sessions_changed")
+
+    def _handle_chat_typing(self, payload, sender_id) -> None:
+        """Peer's typing indicator frame (recv thread).
+
+        Only an explicit ``typing: true`` starts the indicator; anything else
+        (false, absent, malformed) is a stop signal.  The flag self-expires
+        via the lazy deadline in ``to_dict`` so keep-alives are the only
+        traffic needed while the peer keeps typing.  ``_on_sessions_changed``
+        fires only on a VISIBLE state flip — the ~2s keep-alive stream must
+        not produce a WS push every 2s.
+        """
+        raw = payload.get("typing", False)
+        typing = raw is True
+        now_mono = time.monotonic()
+        changed = False
+        with self._lock:
+            # By-peer fallback like text/ping/close (re-invite adoption can
+            # leave the sender's id out of sync).
+            session = self._resolve_session(str(payload.get("session_id", "")), sender_id) \
+                or self._sessions.get(sender_id)
+            if session is None or session.status != "active":
+                return
+            was = session.peer_typing_until_mono > now_mono
+            if typing:
+                session.peer_typing_until_mono = time.monotonic() + self.TYPING_TIMEOUT
+            else:
+                session.peer_typing_until_mono = 0.0
+            self._touch_seen(session)
+            changed = was != typing
+        if changed:
+            self._fire("_on_sessions_changed")
 
     def _handle_chat_ping(self, payload, sender_id, send_fn) -> None:
         with self._lock:
@@ -1685,6 +1789,7 @@ class ChatManager:
                 if not session.offline_announced:
                     session.offline_announced = True
                     session.online = False
+                    session.peer_typing_until_mono = 0.0
                     self._append_entry(session, ChatEntry(
                         entry_id=uuid.uuid4().hex[:16], kind="system", outgoing=False,
                         ts=time.time(), text_key="chat.system.peer_offline",
@@ -1746,6 +1851,7 @@ class ChatManager:
                         if not self._session_has_active_transfer(session):
                             session.online = False
                             session.offline_announced = True
+                            session.peer_typing_until_mono = 0.0
                             self._append_entry(session, ChatEntry(
                                 entry_id=uuid.uuid4().hex[:16], kind="system", outgoing=False,
                                 ts=time.time(), text_key="chat.system.peer_offline",

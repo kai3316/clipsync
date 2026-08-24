@@ -6,8 +6,9 @@
 
    Wire contract (see README / backend api/chat.py):
      WS: chat_sessions, chat_message, chat_progress, chat_file_done
+         (session snapshots carry peer_typing — the peer's typing indicator)
      GET  /api/chat/devices|sessions|messages|download
-     POST /api/chat/invite|text|resend|file|file/{accept,decline,cancel}|
+     POST /api/chat/invite|text|typing|resend|file|file/{accept,decline,cancel}|
              {accept,decline,close,read}
    ═══════════════════════════════════════════════════════════════════ */
 
@@ -31,6 +32,7 @@
         inviteBusy: '',        // peer_id of an in-flight invite
         fileBusy: '',          // transfer_id of an in-flight file action
         resendBusy: '',        // entry_id of an in-flight text resend
+        peerTypingLocal: false, // locally-armed display of the peer's typing flag
       };
     },
 
@@ -65,6 +67,14 @@
           !this.sendingText;
       },
 
+      // "typing…" indicator: the server flag lazily expires after ~4s, but a
+      // silent stop produces NO further push — this local deadline (armed by
+      // the watcher) hides the row even when no new snapshot arrives.
+      showPeerTyping: function () {
+        var s = this.activeSession;
+        return !!s && s.status === 'active' && this.peerTypingLocal;
+      },
+
       // Most-recently-active first.  Closed conversations are hidden — a
       // closed session is a finished one (right-click "close/delete"), and the
       // backend may still echo it as "closed" on the next snapshot.
@@ -89,10 +99,13 @@
       // Safety net: if a chat_sessions push shows the session we're viewing
       // with unread > 0 (e.g. an incoming message that ws.js couldn't echo
       // because the pane wasn't mounted yet), refetch the conversation and
-      // mark it read.
+      // mark it read.  Also tracks the peer's typing flag from snapshots.
       'store.chatSessions': function (sessions) {
         var self = this;
-        if (!sessions || !this.store.activeChatSession) return;
+        if (!sessions || !this.store.activeChatSession) {
+          this._armPeerTyping(null);
+          return;
+        }
         var active = sessions.find(function (s) {
           return s.session_id === self.store.activeChatSession;
         });
@@ -100,16 +113,25 @@
           this.loadMessages();
           this.markRead();
         }
+        this._armPeerTyping(active || null);
       },
     },
 
     created: function () {
+      // Non-reactive typing bookkeeping (kept off data() so Vue doesn't
+      // deep-observe them): last state/timestamp WE reported, and the local
+      // display deadline timer for the peer's indicator.
+      this._typingLastState = null;
+      this._typingLastSent = 0;
+      this._peerTypingTimer = null;
+      this._injectTypingStyle();
       this.loadDevices();
       this.loadSessions();
       // A session may already be open (e.g. restored by the app entry).
       if (this.store.activeChatSession) {
         this.loadMessages();
         this.markRead();
+        this._armPeerTyping(this.activeSession);
       }
     },
 
@@ -244,13 +266,17 @@
               '</template>' +
             '</div>' +
 
+            '<div v-if="showPeerTyping" class="chat-typing">{{ t(\'chat.typing\') }}' +
+              '<span class="d">●</span><span class="d">●</span><span class="d">●</span>' +
+            '</div>' +
+
             '<div class="chat-composer">' +
               '<button class="chat-composer__attach" :title="t(\'chat.attach\')" :disabled="sendingFile" @click="pickFile">' +
                 '{{ sendingFile ? \'...\' : \'📎\' }}' +
               '</button>' +
               '<input class="chat-composer__input" type="text" v-model="composing"' +
                 ' :placeholder="t(\'chat.input_placeholder\')" :disabled="sendingText"' +
-                ' maxlength="4000" @keyup.enter="sendText">' +
+                ' maxlength="4000" @input="onComposerInput" @keyup.enter="sendText">' +
               '<button class="chat-composer__send" :disabled="!canSend" @click="sendText">{{ t(\'chat.send\') }}</button>' +
               '<input type="file" ref="fileInput" style="display:none" @change="onFilePicked">' +
             '</div>' +
@@ -327,9 +353,14 @@
 
       openSession: function (session) {
         if (!session || this.store.activeChatSession === session.session_id) return;
+        // Reset the typing bookkeeping so a report for the PREVIOUS chat is
+        // never confused with this one.
+        this._typingLastState = null;
+        this._typingLastSent = 0;
         this.store.activeChatSession = session.session_id;
         this.loadMessages();
         this.markRead();
+        this._armPeerTyping(session);
       },
 
       markRead: function () {
@@ -485,6 +516,9 @@
 
       sendText: function () {
         var self = this;
+        // Double-submit guard: two rapid Enters must not POST twice before
+        // the first response clears the draft.
+        if (this.sendingText) return;
         var text = (this.composing || '').trim();
         if (!text || !this.store.activeChatSession) return;
         this.sendingText = true;
@@ -497,6 +531,10 @@
               return;
             }
             self.composing = '';
+            // The message went out — the receiver clears our indicator when
+            // it lands, so just restart OUR bookkeeping from "not typing".
+            self._typingLastState = false;
+            self._typingLastSent = Date.now();
             // The backend echoes the entry via chat_message; refetch to be safe.
             self.loadMessages();
           })
@@ -507,6 +545,73 @@
           .finally(function () {
             self.sendingText = false;
           });
+      },
+
+      /* ── Typing indicator ────────────────────────────────────── */
+
+      // Composer input event → throttled typing report.  An emptied box
+      // reports "stopped" immediately (state changes bypass the throttle).
+      onComposerInput: function () {
+        this.sendTypingState(!!(this.composing || '').trim());
+      },
+
+      sendTypingState: function (typing) {
+        var sid = this.store.activeChatSession;
+        if (!sid) return;
+        var now = Date.now();
+        if (typing === this._typingLastState &&
+            (now - this._typingLastSent) < 2000) return;
+        this._typingLastState = typing;
+        this._typingLastSent = now;
+        // Fire-and-forget: {ok:false} also covers the server-side throttle
+        // window, so it is never a user-visible error.  Direct fetch because
+        // js/api.js has no typed wrapper for this endpoint yet.
+        var base = ((this.store && this.store.serverUrl) || '').replace(/\/+$/, '');
+        fetch(base + '/api/chat/typing?token=' +
+            encodeURIComponent((this.store && this.store.token) || ''), {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ session_id: sid, typing: !!typing }),
+        }).catch(function (e) {
+          console.debug('[ClipSync] typing report failed:', e);
+        });
+      },
+
+      // Arm/disarm the local display of the peer's flag from a snapshot.
+      // The server deadline (~4s) plus a small grace covers push latency.
+      _armPeerTyping: function (session) {
+        var self = this;
+        if (this._peerTypingTimer) {
+          clearTimeout(this._peerTypingTimer);
+          this._peerTypingTimer = null;
+        }
+        if (session && session.status === 'active' && session.peer_typing) {
+          this.peerTypingLocal = true;
+          this._peerTypingTimer = setTimeout(function () {
+            self.peerTypingLocal = false;
+            self._peerTypingTimer = null;
+          }, 4500);
+        } else {
+          this.peerTypingLocal = false;
+        }
+      },
+
+      // One-time stylesheet for the indicator row (index.html's CSS is not
+      // editable from this component).
+      _injectTypingStyle: function () {
+        if (document.getElementById('cs-chat-typing-style')) return;
+        var el = document.createElement('style');
+        el.id = 'cs-chat-typing-style';
+        el.textContent =
+          '.chat-typing{padding:2px 12px 6px;font-size:12px;color:#8a8f98;' +
+          'font-style:italic;display:flex;align-items:center;gap:4px}' +
+          '.chat-typing .d{display:inline-block;font-size:9px;line-height:1;' +
+          'animation:cs-typing-b 1.2s infinite}' +
+          '.chat-typing .d:nth-child(2){animation-delay:.2s}' +
+          '.chat-typing .d:nth-child(3){animation-delay:.4s}' +
+          '@keyframes cs-typing-b{0%,60%,100%{opacity:.25;transform:translateY(0)}' +
+          '30%{opacity:1;transform:translateY(-2px)}}';
+        document.head.appendChild(el);
       },
 
       /* ── Failed-text resend ──────────────────────────────────── */

@@ -708,6 +708,15 @@ body.light .set-card {
 }
 .chat-composer__send:active { transform: scale(0.97); }
 
+.chat-typing {
+  padding: 0 6px 6px;
+  font-size: 12px;
+  color: var(--fg-subtle);
+  font-style: italic;
+  animation: csTypingFade 1.4s ease-in-out infinite;
+}
+@keyframes csTypingFade { 0%, 100% { opacity: 0.45; } 50% { opacity: 1; } }
+
 /* ── Transfers ───────────────────────────────────────────────── */
 
 .tr-section { margin-bottom: 6px; }
@@ -1205,6 +1214,7 @@ body.light .set-card {
     chatEmptySessions: ZH ? '暂无会话' : 'No sessions',
     chatBack: ZH ? '‹ 返回' : '‹ Back',
     chatInputPlaceholder: ZH ? '输入消息…' : 'Type a message…',
+    chatTyping: ZH ? '正在输入…' : 'typing…',
     chatSend: ZH ? '发送' : 'Send',
     chatSendEmpty: ZH ? '请输入消息' : 'Type a message',
     chatSendFail: ZH ? '发送失败' : 'Failed to send',
@@ -2085,6 +2095,13 @@ body.light .set-card {
   var chatLastMsgCount = 0;
   var chatScrollBottom = false;
   var chatConvSigPrev = '';
+  // Typing indicator: peer display deadline (ms epoch) + our own report
+  // bookkeeping.  The server lazily expires its flag ~4s after the last
+  // frame; the local deadline hides the row even when no poll lands.
+  var chatPeerTypingUntil = 0;
+  var chatTypingLastState = null;
+  var chatTypingLastSent = 0;
+  var chatSending = false;
 
   function chatStatusLabel(s) {
     var map = {
@@ -2161,6 +2178,17 @@ body.light .set-card {
     return null;
   }
 
+  // Re-arm the local typing-display deadline from the latest session
+  // snapshot (server flag lazily expires ~4s after the peer's last frame).
+  function refreshChatPeerTyping() {
+    var sess = chatOpenSessionObj();
+    if (sess && sess.status === 'active' && sess.peer_typing) {
+      chatPeerTypingUntil = Date.now() + 4500;
+    } else {
+      chatPeerTypingUntil = 0;
+    }
+  }
+
   // A cheap signature of the open conversation so silent polls can skip the
   // re-render (and the composer's focus) when nothing changed.
   function chatConvSignature() {
@@ -2171,6 +2199,9 @@ body.light .set-card {
     }
     var sess = chatOpenSessionObj();
     parts.push('s:' + (sess ? sess.status + ':' + (sess.unread || 0) + ':' + (sess.online ? '1' : '0') : 'none'));
+    // The peer's typing flag participates in the signature so the indicator
+    // appears/disappears on the next poll without a forced re-render.
+    parts.push('t:' + (Date.now() < chatPeerTypingUntil ? '1' : '0'));
     return parts.join('|');
   }
 
@@ -2254,6 +2285,11 @@ body.light .set-card {
     var sess = chatOpenSessionObj();
     var name = sess ? (sess.peer_name || sess.peer_id) : '';
     var status = sess ? chatStatusLabel(sess.status) : '';
+    // Preserve the draft across re-renders: the composer input is rebuilt by
+    // this render, and a poll landing mid-typing (incoming message, status
+    // flip, typing-indicator change) must not wipe what the user has typed.
+    var prevInput = document.getElementById('chatInput');
+    var draft = prevInput ? prevInput.value : null;
     var html = '';
     html += '<div class="chat-conv__hdr">' +
       '<button class="chat-btn chat-btn--ghost" id="chatBackBtn">' + esc(T.chatBack) + '</button>' +
@@ -2277,6 +2313,9 @@ body.light .set-card {
       }
     }
     html += '</div>';
+    html += '<div class="chat-typing" id="chatTypingRow"' +
+      (Date.now() < chatPeerTypingUntil ? '' : ' style="display:none"') + '>' +
+      esc(T.chatTyping) + '</div>';
     html += '<div class="chat-composer">' +
       '<input class="chat-composer__input" id="chatInput" placeholder="' + esc(T.chatInputPlaceholder) + '" maxlength="4000" autocomplete="off">' +
       '<button class="chat-composer__send" id="chatSendBtn">' + esc(T.chatSend) + '</button>' +
@@ -2284,6 +2323,7 @@ body.light .set-card {
     chatView.innerHTML = html;
     var input = document.getElementById('chatInput');
     if (input) {
+      if (draft !== null && input.value !== draft) input.value = draft;
       try { input.focus(); } catch (e) {}
       try { input.setSelectionRange(input.value.length, input.value.length); } catch (e) {}
     }
@@ -2308,6 +2348,7 @@ body.light .set-card {
     Promise.all([pDev, pSess]).then(function (out) {
       chatDevices = out[0];
       chatSessions = out[1];
+      refreshChatPeerTyping();
       if (!chatOpenSession) {
         chatLoading = false;
         renderChatList();
@@ -2351,6 +2392,7 @@ body.light .set-card {
     chatLastMsgCount = 0;
     chatConvSigPrev = '';
     chatScrollBottom = true;
+    resetChatTypingState();
     loadChat(false);
   }
 
@@ -2358,7 +2400,38 @@ body.light .set-card {
     chatOpenSession = null;
     chatLastMsgCount = 0;
     chatConvSigPrev = '';
+    resetChatTypingState();
     renderChatList();
+  }
+
+  // Reset OUR typing-report bookkeeping (session switch / send).  The peer's
+  // indicator deadline is refreshed separately from snapshots.
+  function resetChatTypingState() {
+    chatTypingLastState = null;
+    chatTypingLastSent = 0;
+    chatPeerTypingUntil = 0;
+  }
+
+  // Throttled typing report: same state within 2s is suppressed (the server
+  // throttles too); a state CHANGE always goes out immediately, which is
+  // what makes the peer's indicator vanish the moment typing stops.
+  function chatSendTyping(typing) {
+    if (!chatOpenSession) return;
+    var now = Date.now();
+    if (typing === chatTypingLastState && (now - chatTypingLastSent) < 2000) return;
+    chatTypingLastState = !!typing;
+    chatTypingLastSent = now;
+    apiFetch('/api/chat/typing', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ session_id: chatOpenSession, typing: !!typing }),
+    }).catch(function () { /* fire-and-forget; never a user-visible error */ });
+  }
+
+  function chatReportTyping() {
+    if (!chatOpenSession) return;
+    var input = document.getElementById('chatInput');
+    chatSendTyping(!!(input && input.value.trim()));
   }
 
   function chatStartInvite(peerId) {
@@ -2393,17 +2466,26 @@ body.light .set-card {
   function chatSend() {
     var input = document.getElementById('chatInput');
     if (!input || !chatOpenSession) return;
+    // Double-submit guard: two rapid taps must not POST twice before the
+    // first response clears the input.
+    if (chatSending) return;
     var text = input.value.trim();
     if (!text) { showToast(T.chatSendEmpty, true); return; }
+    chatSending = true;
     apiFetch('/api/chat/text', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ session_id: chatOpenSession, text: text }),
     })
       .then(function (res) {
+        chatSending = false;
         if (res.status === 403) { notifyTokenExpired(); return; }
         if (res.data && res.data.ok) {
           input.value = '';
+          // The message went out — the receiver drops our indicator on
+          // arrival; restart OUR bookkeeping from "not typing".
+          chatTypingLastState = false;
+          chatTypingLastSent = Date.now();
           chatScrollBottom = true;
           loadChat(true);
         } else {
@@ -2411,6 +2493,7 @@ body.light .set-card {
         }
       })
       .catch(function () {
+        chatSending = false;
         showToast(T.chatSendFail + ' · ' + T.loadFailHint, true);
       });
   }
@@ -2517,6 +2600,12 @@ body.light .set-card {
       e.preventDefault();
       chatSend();
     }
+  });
+
+  // Typing reports — delegated like the click handler above (the composer is
+  // re-rendered on every poll, so bind once on the container).
+  chatView.addEventListener('input', function (e) {
+    if (e.target && e.target.id === 'chatInput') chatReportTyping();
   });
 
   /* ── Transfers ──────────────────────────────────────────────── */

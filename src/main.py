@@ -3279,7 +3279,16 @@ class Application:
         # legacy file resurrect every favorite (and its groups) on the next
         # launch.  Delete it here too for a truly clean slate.
         for fname in ("config.json", "clipboard_history.json",
-                      "clipboard_history.db", "favorites.db",
+                      "clipboard_history.db",
+                      # WAL sidecars MUST go with the DB: the history DB runs
+                      # in WAL mode with one long-lived connection, so both
+                      # files exist while the app is running.  Deleting only
+                      # the .db leaves the stale -wal behind; SQLite then
+                      # replays its committed frames into the fresh empty DB
+                      # on next start — resurrecting the very history the
+                      # factory reset was supposed to destroy.
+                      "clipboard_history.db-wal", "clipboard_history.db-shm",
+                      "favorites.db",
                       "favorites.json", "clipsync.log"):
             fpath = config_dir / fname
             try:
@@ -3288,7 +3297,11 @@ class Application:
                     deleted.append(fname)
             except OSError as e:
                 logger.warning("Factory reset: failed to delete %s: %s", fpath, e)
-        for pattern in (".config_tmp_*.json", ".history_tmp_*.json"):
+        for pattern in (".config_tmp_*.json", ".history_tmp_*.json",
+                        # Quarantine copies hold the OLD identity / private
+                        # key / clipboard rows — a clean slate removes them.
+                        "config.json.corrupt-*",
+                        "clipboard_history.db.corrupt-*"):
             for tmpf in list(config_dir.glob(pattern)):
                 try:
                     tmpf.unlink()
@@ -3561,6 +3574,10 @@ class Application:
     # ═══════════════════════════════════════════════════════════════
 
     def _start_threads(self) -> None:
+        # Resume a timed sync pause that a restart interrupted (e.g. an
+        # auto-update relaunch) before any UI reads the sync state — runs
+        # after _create_ui/_start_services so tray + sync_mgr both exist.
+        self._restore_timed_pause()
         updater = threading.Thread(target=self._update_peers_loop, daemon=True)
         updater.start()
 
@@ -6921,6 +6938,21 @@ class Application:
                 self.systray.set_pause_deadline(None)
             except Exception:
                 logger.debug("Failed to clear tray pause display", exc_info=True)
+        # Drop the persisted twin as well: an explicit toggle/resume must also
+        # clear the deadline ON DISK, or a restart resurrects a pause the user
+        # already ended (and a web/dashboard toggle that saved config just
+        # before reaching this method would otherwise leave the stale deadline
+        # behind).  During shutdown it is deliberately KEPT: quitting mid-pause
+        # resumes the remaining countdown on the next launch.
+        cfg = getattr(self, "cfg", None)
+        if cfg is not None and not getattr(self, "_shutting_down", False):
+            try:
+                if float(getattr(cfg, "timed_pause_until", 0.0) or 0.0):
+                    cfg.timed_pause_until = 0.0
+                    self._save_cfg_encrypted()
+            except Exception:
+                logger.debug("Failed to persist cleared pause deadline",
+                             exc_info=True)
 
     def _pause_sync_for_minutes(self, minutes: int) -> None:
         """Pause clipboard sync for *minutes*, then auto-resume.
@@ -6943,6 +6975,12 @@ class Application:
             # Already paused manually — just attach the timed resume.
             self._set_systray_syncing(False)
         self._pause_deadline = time.time() + minutes * 60
+        # Persist the deadline so a restart / auto-update relaunch inside the
+        # pause window re-arms it (_restore_timed_pause) instead of leaving the
+        # persisted sync_enabled=False stuck forever — the resume timer is
+        # runtime-only state that dies with this process.
+        self.cfg.timed_pause_until = self._pause_deadline
+        self._save_cfg_encrypted()
         if self.systray is not None:
             try:
                 self.systray.set_pause_deadline(self._pause_deadline)
@@ -6988,6 +7026,33 @@ class Application:
         logger.info("Sync resumed via tray (%s)",
                     "timed pause" if had_pause else "manual")
         self._on_systray_toggle(True)
+
+    def _restore_timed_pause(self) -> None:
+        """Re-arm a timed pause that a restart interrupted (phase-10 hook).
+
+        A pending "pause for N minutes" used to die with the process while its
+        effect (sync_enabled=False) stayed persisted — an auto-update relaunch
+        mid-pause left sync disabled forever.  The deadline is persisted in
+        the config now: restarting INSIDE the window re-arms the remaining
+        time; restarting after it expired re-enables sync.
+        """
+        try:
+            deadline = float(getattr(self.cfg, "timed_pause_until", 0.0) or 0.0)
+        except (TypeError, ValueError):
+            deadline = 0.0
+        if deadline <= 0.0:
+            return
+        self.cfg.timed_pause_until = 0.0
+        remaining = deadline - time.time()
+        if remaining <= 1.0:
+            logger.info("Timed sync pause elapsed while app was closed — resuming")
+            if not self.cfg.sync_enabled:
+                self._on_systray_toggle(True)
+            else:
+                self._save_cfg_encrypted()
+            return
+        minutes = max(1, int(remaining // 60) + (1 if remaining % 60 else 0))
+        self._pause_sync_for_minutes(minutes)
 
     def _on_systray_toggle(self, enabled: bool) -> None:
         # An explicit toggle outranks any pending timed pause: clear its

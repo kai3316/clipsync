@@ -206,6 +206,35 @@ def send_text(chat_mgr, body, send_fn_for_peer):
     return {"ok": ok}, 200
 
 
+def set_typing(chat_mgr, body, send_fn_for_peer):
+    """POST /api/chat/typing {session_id[, typing]} → {ok}.
+
+    Typing-indicator report for the composer.  ``typing`` defaults to True
+    (the endpoint means "the user is typing").  ``ok`` is False both when the
+    frame was refused AND when the sender-side throttle suppressed a
+    duplicate same-state frame within the 2s window — callers must treat
+    False as "nothing sent", never as a user-visible error.
+    """
+    err = _require_chat(chat_mgr)
+    if err:
+        return err
+    data = _json_body(body)
+    if data is None:
+        return {"ok": False, "error": "invalid json"}, 400
+    missing = _require_fields(data, "session_id")
+    if missing:
+        return {"ok": False, "error": f"{missing} required"}, 400
+    session_id = (data.get("session_id") or "").strip()
+    typing = bool(data.get("typing", True))
+    send_fn = _send_fn_for(chat_mgr, session_id, send_fn_for_peer)
+    try:
+        ok = chat_mgr.report_typing(session_id, typing, send_fn)
+    except Exception:
+        logger.debug("chat: report_typing failed", exc_info=True)
+        ok = False
+    return {"ok": ok}, 200
+
+
 def resend_text(chat_mgr, body, send_fn_for_peer):
     """POST /api/chat/resend {session_id, entry_id} → {ok}.
 

@@ -95,6 +95,11 @@ CHAT_MSG_TYPES = frozenset({
     "chat_text", "chat_ping", "chat_pong",
     "chat_file_offer", "chat_file_accept", "chat_file_reject",
     "chat_file_cancel", "chat_file_complete",
+    # Typing indicator ({session_id, typing}).  Backward compatible: older
+    # peers drop unknown msg_types at the unpaired gate (logged, connection
+    # kept) or fall through to clipboard handling where the empty "types"
+    # payload is discarded by SyncManager's content.is_empty() check.
+    "chat_typing",
 })
 
 # Frame types an UNPAIRED peer may send at the transport gate.  Chat file

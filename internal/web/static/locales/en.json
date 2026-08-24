@@ -987,6 +987,7 @@
   "chat.download": "Download",
   "chat.text_failed": "Not delivered",
   "chat.resend": "Resend",
+  "chat.typing": "typing",
   "chat.err_resend_failed": "Could not resend the message.",
   "chat.status.inviting": "Inviting…",
   "chat.status.invited": "Invited",

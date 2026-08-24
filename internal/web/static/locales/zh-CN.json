@@ -987,6 +987,7 @@
   "chat.download": "下载",
   "chat.text_failed": "未送达",
   "chat.resend": "重发",
+  "chat.typing": "正在输入",
   "chat.err_resend_failed": "消息重发失败。",
   "chat.status.inviting": "邀请中…",
   "chat.status.invited": "已邀请",

@@ -51,6 +51,12 @@ class Config:
     service_type: str = "_clipsync._tcp.local."
     peers: dict[str, PeerInfo] = field(default_factory=dict)
     sync_enabled: bool = True
+    # Wall-clock deadline (time.time()) of a timed "pause for N minutes";
+    # 0 = none.  The auto-resume timer itself is runtime-only state, so the
+    # deadline is persisted: a restart / auto-update relaunch inside the
+    # pause window re-arms it instead of leaving sync_enabled=False stuck
+    # on forever with nothing left to re-enable it.
+    timed_pause_until: float = 0.0
     auto_start: bool = False
     # None = not configured → all redaction categories enabled (default ON).
     # [] = user explicitly disabled redaction. Non-empty = that subset.
@@ -223,6 +229,7 @@ _FIELD_RULES: dict[str, tuple] = {
     "port": ("int",),
     "service_type": ("str",),
     "sync_enabled": ("bool",),
+    "timed_pause_until": ("float",),
     "auto_start": ("bool",),
     "filter_enabled_categories": ("strlist",),
     "relay_url": ("str",),
@@ -359,7 +366,7 @@ def load() -> Config:
             cfg = Config()
             for key in (
                 "device_id", "device_name", "port", "service_type",
-                "sync_enabled", "auto_start",
+                "sync_enabled", "timed_pause_until", "auto_start",
                 "filter_enabled_categories",
                 "relay_url",
                 "private_key_pem", "certificate_pem",
@@ -486,6 +493,7 @@ def save(cfg: Config, enc_mgr: "EncryptionManager | None" = None):
             "port": cfg.port,
             "service_type": cfg.service_type,
             "sync_enabled": cfg.sync_enabled,
+            "timed_pause_until": cfg.timed_pause_until,
             "auto_start": cfg.auto_start,
             "filter_enabled_categories": cfg.filter_enabled_categories,
             "relay_url": cfg.relay_url,
