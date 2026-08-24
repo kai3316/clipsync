@@ -1650,6 +1650,25 @@ class SettingsWindow:
             justify="center",
         ).pack(pady=(20, 18))
 
+        # Auto-update-check switch — persists immediately (this panel has no
+        # save button).  The periodic loop re-reads the config every tick, so
+        # flipping it takes effect at once.
+        self._auto_update_var = tk.BooleanVar(
+            value=getattr(self._get_config(), "auto_update_check", True))
+        ctk.CTkSwitch(
+            center, text=T("settings_window.auto_update_check"),
+            variable=self._auto_update_var,
+            command=self._on_toggle_auto_update,
+            font=ctk.CTkFont(size=13),
+        ).pack()
+        ctk.CTkLabel(
+            center,
+            text=T("settings_window.auto_update_check_hint"),
+            font=ctk.CTkFont(size=11),
+            justify="center",
+            text_color=("gray50", "gray60"),
+        ).pack(padx=30, pady=(2, 12))
+
         feat_card = ctk.CTkFrame(center, corner_radius=12,
                                 fg_color=("gray95", "gray17"))
         feat_card.pack(fill="x", padx=20)
@@ -1673,6 +1692,15 @@ class SettingsWindow:
         ).pack(pady=(18, 20))
 
         return panel
+
+    def _on_toggle_auto_update(self):
+        """Persist the About-panel auto-update-check switch immediately."""
+        try:
+            cfg = self._get_config()
+            cfg.auto_update_check = bool(self._auto_update_var.get())
+            self._save_config()
+        except Exception:
+            logger.debug("Could not persist auto_update_check", exc_info=True)
 
     def _open_data_folder(self):
         """Open the config directory in the system file explorer."""

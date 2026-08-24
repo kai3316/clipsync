@@ -98,16 +98,21 @@ def apply_and_restart(staged: Path) -> bool:
         return False
 
 
-def _apply_windows(staged: Path) -> bool:
-    cur = _current_exe()
-    bat = cur.with_name("clipsync-update.bat")
-    # Retry the replace for up to 5 minutes while the running exe exits, then
-    # give up and relaunch the CURRENT binary (better a working old version
-    # than an immortal helper looping forever -- e.g. if antivirus quarantined
-    # the staged file).  ``del "%~f0"`` removes the helper itself afterwards
-    # instead of leaving clipsync-update.bat next to the app forever.
-    script = (
+def _build_windows_bat(staged: Path, cur: Path) -> str:
+    """Return the helper script text for the Windows self-replace.
+
+    Kept a pure function so tests can assert on the generated steps (notably
+    the ``.old`` fallback copy) without spawning cmd.exe.  Before the replace
+    loop the helper copies the CURRENT exe to ``<exe>.old`` (copy, not move —
+    the running exe stays in place) so the user can manually roll back a bad
+    update; no automatic health check is done on it.
+    """
+    old = Path(str(cur) + ".old")
+    return (
         "@echo off\n"
+        # Fallback copy: keep the current binary as .old before anything is
+        # replaced.  A copy of the locked (running) exe is allowed.
+        f'copy /y "{cur}" "{old}" >nul 2>&1\n'
         "set /a tries=0\n"
         ":retry\n"
         "timeout /t 1 /nobreak >nul\n"
@@ -120,6 +125,17 @@ def _apply_windows(staged: Path) -> bool:
         f'start "" "{cur}"\n'
         'del "%~f0"\n'
     )
+
+
+def _apply_windows(staged: Path) -> bool:
+    cur = _current_exe()
+    bat = cur.with_name("clipsync-update.bat")
+    # Retry the replace for up to 5 minutes while the running exe exits, then
+    # give up and relaunch the CURRENT binary (better a working old version
+    # than an immortal helper looping forever -- e.g. if antivirus quarantined
+    # the staged file).  ``del "%~f0"`` removes the helper itself afterwards
+    # instead of leaving clipsync-update.bat next to the app forever.
+    script = _build_windows_bat(staged, cur)
     try:
         bat.write_text(script)
     except OSError as exc:
@@ -134,8 +150,28 @@ def _apply_windows(staged: Path) -> bool:
     return True
 
 
+def _backup_current_binary(cur: Path) -> Path | None:
+    """Copy the current Linux binary to ``<name>.old`` before replacing it.
+
+    Purely a manual-rollback convenience for the user (no automatic health
+    check reads it back).  Best-effort: a failed copy logs and returns None
+    but must never block the update itself.
+    """
+    old = cur.with_name(cur.name + ".old")
+    try:
+        shutil.copyfile(cur, old)
+        logger.info("Backed up current binary to %s", old)
+        return old
+    except OSError as exc:
+        logger.warning("Could not back up current binary to %s: %s", old, exc)
+        return None
+
+
 def _apply_linux(staged: Path) -> bool:
     cur = _current_exe()
+    # Keep the running binary as .old for manual rollback.  os.replace below
+    # swaps the directory entry, so the copy must happen first.
+    _backup_current_binary(cur)
     os.replace(staged, cur)
     os.chmod(cur, 0o755)
     subprocess.Popen([str(cur)], close_fds=True, start_new_session=True)

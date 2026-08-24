@@ -578,6 +578,7 @@ class WebServer:
                  on_restart=None, on_reset_dedup=None,
                  get_certs=None, get_diagnostics=None,
                  on_update_download=None,
+                 on_update_install=None,
                  on_diagnostics_request=None,
                  on_web_upload=None,
                  chat_mgr=None,
@@ -631,6 +632,7 @@ class WebServer:
         self._get_certs = get_certs
         self._get_diagnostics = get_diagnostics
         self._on_update_download = on_update_download
+        self._on_update_install = on_update_install
         self._on_diagnostics_request = on_diagnostics_request
         self._on_web_upload = on_web_upload
         # ── Nearby Chat ──────────────────────────────────────────
@@ -924,6 +926,7 @@ class WebServer:
         on_quickpaste_done = self._on_quickpaste_done
         get_diagnostics = self._get_diagnostics
         on_update_download = self._on_update_download
+        on_update_install = self._on_update_install
         upload_dir = self._upload_dir  # startup dir (chat-download fallback)
         _server = self  # live _upload_dir is mutated by the settings apply path
         static_dir = self._static_dir
@@ -1606,6 +1609,7 @@ class WebServer:
                         get_diagnostics=get_diagnostics,
                         on_diagnostics_request=on_diagnostics_request,
                         on_update_download=on_update_download,
+                        on_update_install=on_update_install,
                         chat_mgr=chat_mgr,
                         get_chat_devices=get_chat_devices,
                         chat_send_fn=chat_send_fn,
@@ -1808,6 +1812,7 @@ class WebServer:
                         get_diagnostics=get_diagnostics,
                         on_diagnostics_request=on_diagnostics_request,
                         on_update_download=on_update_download,
+                        on_update_install=on_update_install,
                         chat_mgr=chat_mgr,
                         get_chat_devices=get_chat_devices,
                         chat_send_fn=chat_send_fn,

@@ -132,6 +132,8 @@ _EN: dict[str, str] = {
     "notify.sync_active": "Sync Active",
     "notify.update_checking": "Checking for updates…",
     "notify.update_downloading": "Downloading update…",
+    "notify.update_rejected_hash": "Update discarded: checksum mismatch",
+    "notify.update_rejected_old": "Update discarded: not newer than the running version",
     "ui.web_start_failed2": "Failed to start on port {port}. Another process may already be using this port.",
     "ui.web_companion": "Remote access",
     "ui.web_start_failed": "Failed to start Remote access on port {port}.\n\nAnother process may already be using this port, or the server failed to bind.\n\nTried ports: {lo} - {hi}",
@@ -412,6 +414,10 @@ _EN: dict[str, str] = {
     "tray.update_install_failed": "Failed to install the update",
     "tray.up_to_date": "ClipSync is up to date",
     "tray.update_failed": "Update check failed",
+    "settings_window.auto_update_check": "Check for updates automatically",
+    "settings_window.auto_update_check_hint": (
+        "Periodically checks GitHub releases (about every 6 hours). "
+        "Off = no background update requests."),
     "tray.about": "About ClipSync",
     "tray.quit": "Quit",
     "tray.no_devices": "(no devices connected)",
@@ -926,6 +932,8 @@ _ZH: dict[str, str] = {
     "notify.sync_active": "同步中",
     "notify.update_checking": "正在检查更新…",
     "notify.update_downloading": "正在下载更新…",
+    "notify.update_rejected_hash": "已丢弃更新包：校验和不匹配",
+    "notify.update_rejected_old": "已丢弃更新包：版本不高于当前版本",
     "ui.web_start_failed2": "无法在端口 {port} 启动。可能另一个进程已占用该端口。",
     "ui.web_companion": "远程访问",
     "ui.web_start_failed": "无法在端口 {port} 启动 远程访问。\n\n可能另一个进程已占用该端口，或服务器绑定失败。\n\n尝试过的端口：{lo} - {hi}",
@@ -1191,6 +1199,9 @@ _ZH: dict[str, str] = {
     "tray.update_install_failed": "安装更新失败",
     "tray.up_to_date": "ClipSync 已是最新版本",
     "tray.update_failed": "检查更新失败",
+    "settings_window.auto_update_check": "自动检查更新",
+    "settings_window.auto_update_check_hint": (
+        "定期检查 GitHub 新版本（约每 6 小时一次）。关闭后不再发起任何后台更新请求。"),
     "tray.about": "关于 ClipSync",
     "tray.quit": "退出",
     "tray.no_devices": "（无已连接设备）",

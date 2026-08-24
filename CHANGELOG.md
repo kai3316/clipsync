@@ -4,6 +4,13 @@ All notable changes to ClipSync are documented in this file.
 
 ## [Unreleased]
 
+### Auto-update
+- **P2P-received update packages are verified before install**: SHA-256 against the official GitHub release digest plus a version check — a mismatched or stale package pushed by a peer is dropped with a notification instead of being installed; when release info is unavailable the P2P path refuses and falls back to the official download (which verifies itself).
+- **Install reentrancy guard**: a GitHub download and a P2P transfer finishing around the same time install exactly once.
+- **"Automatically check for updates" switch** (web settings and desktop About, on by default): turning it off means zero background requests.
+- **Manual rollback copy**: Windows/Linux updates keep `<exe>.old` next to the binary for manual restore.
+- **Check & install from the web dashboard**: the About panel gains "Check now" (`GET /api/update/check`) and, when a new version exists, "Download & install" (`POST /api/update/install`) through the same verified pipeline as the tray.
+
 ### Chat & pairing reliability
 - **Failed outgoing texts get a ⟳ Resend button.** A text that failed to send now shows as a red-outlined "not delivered" bubble in the web dashboard and mobile view instead of looking like a normal message; one click re-sends it through the same rate-limited path (`POST /api/chat/resend`). The desktop dashboard matches: failed bubbles carry the same red "not delivered" marker and ⟳ Resend button, with an inline hint when the retry is rejected.
 - **Chat invites fail honestly.** An invite the transport refuses no longer leaves a phantom "inviting" conversation pinning a slot for five minutes; accepting over a broken link keeps an honest, retryable state instead of a fake active chat; shutdown no longer leaves sender threads parked for minutes.

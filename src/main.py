@@ -529,6 +529,10 @@ class Application:
         self._hotkey_failure_notified = False
         # Guards re-entry into the "Check for updates" action.
         self._checking_update = False
+        # Guards the install half of auto-update: only one of the GitHub
+        # download and the P2P blob arrival may stage+apply, even when both
+        # land around the same time.  Cleared again on every failure path.
+        self._updating = False
         # True once a webview dashboard open actually attached a WS client.
         # Used to keep the "recently opened" guard from blocking a re-open
         # after the window was closed (client disconnected) within 8s.
@@ -984,6 +988,7 @@ class Application:
             get_certs=self._get_certs,
             get_diagnostics=self._get_diagnostics,
             on_update_download=self._handle_update_download,
+            on_update_install=self._handle_update_install,
             on_diagnostics_request=self._handle_diagnostics_request,
             on_web_upload=self._on_web_upload,
             # Nearby Chat (web/PWA surface)
@@ -2591,7 +2596,8 @@ class Application:
             # update half-applied until the next manual quit.
             try:
                 self.root.after(
-                    0, lambda p=saved_path: self._finish_update_install(p, None),
+                    0, lambda p=saved_path: self._finish_update_install(
+                        p, None, "p2p"),
                 )
             except Exception:
                 logger.debug("Could not schedule update install", exc_info=True)
@@ -3772,10 +3778,9 @@ class Application:
                         pass
 
                 # Periodic auto-update check (once per ~6 hours, silent unless an
-                # update is available).
-                if time.monotonic() - self._last_auto_update_check >= 6 * 3600:
-                    self._last_auto_update_check = time.monotonic()
-                    self._auto_check_for_update()
+                # update is available).  Fully gated by the auto_update_check
+                # setting: OFF means this loop never contacts the network.
+                self._maybe_auto_update_check()
             except Exception:
                 logger.exception("Device-status loop iteration failed")
 
@@ -4215,11 +4220,14 @@ class Application:
         ):
             self._download_and_install_update()
 
-    def _download_and_install_update(self) -> None:
+    def _download_and_install_update(self, from_peers: bool = True) -> None:
         """Download the latest release, stage it, then apply + restart.
 
         The download runs on a worker thread (it can take tens of seconds);
         staging + applying run on the main thread, after which the app exits.
+        *from_peers* asks connected peers for a cached copy first (M2); it is
+        disabled on the P2P-fallback re-entry so an unverifiable peer blob
+        cannot ping-pong between devices.
         """
         import tempfile
 
@@ -4227,9 +4235,10 @@ class Application:
 
         notification_mgr.show(T("ui.app_name"), T("notify.update_downloading"))
 
-        # Ask connected peers first (M2): a peer with the cached asset responds
-        # by sending it back; the GitHub download below is the fallback.
-        self._request_update_from_peers()
+        if from_peers:
+            # Ask connected peers first (M2): a peer with the cached asset responds
+            # by sending it back; the GitHub download below is the fallback.
+            self._request_update_from_peers()
 
         def _worker():
             dest_dir = tempfile.mkdtemp(prefix="clipsync_update_")
@@ -4238,25 +4247,86 @@ class Application:
             except Exception as exc:
                 logger.exception("Update download failed")
                 path, reason = None, str(exc)
-            self.root.after(0, lambda: self._finish_update_install(path, reason))
+            self.root.after(
+                0, lambda: self._finish_update_install(path, reason, "github"))
 
         threading.Thread(target=_worker, daemon=True, name="update-install").start()
 
-    def _finish_update_install(self, path, reason) -> None:
-        """Stage + apply a freshly downloaded asset, or surface the failure."""
+    def _discard_update_blob(self, path: str, verdict: str) -> None:
+        """Throw away a rejected update blob and tell the user why."""
+        try:
+            os.remove(path)
+        except OSError:
+            logger.debug("Could not remove rejected update blob %s", path,
+                         exc_info=True)
+        key = ("notify.update_rejected_hash" if verdict == "hash_mismatch"
+               else "notify.update_rejected_old")
+        logger.warning("Update blob discarded (%s): %s", verdict,
+                       _mask_path(path))
+        notification_mgr.show(T("ui.app_name"), T(key))
+
+    def _finish_update_install(self, path, reason, source: str = "github") -> None:
+        """Verify, then stage + apply an update asset — or surface the failure.
+
+        *path* is either a freshly downloaded GitHub asset (*source* "github",
+        already size- and hash-checked during download) or a P2P-received blob
+        (*source* "p2p", verified here against the GitHub release digest).
+        Re-entrant arrivals (both paths completing at once) are collapsed to
+        the first one via ``self._updating``; later ones log and skip.
+        """
+        if getattr(self, "_updating", False):
+            logger.info("Update install already in progress — skipping %s "
+                        "arrival", source)
+            return
+
         if not path:
             show_error(self.root, T("ui.app_name"),
                        reason or T("tray.update_install_failed"))
             return
 
+        from internal.system.updater import (
+            fetch_latest_asset_info,
+            verify_update_blob,
+        )
+
+        ok, verdict = False, "no_release_info"
+        release_info = None
+        try:
+            release_info = fetch_latest_asset_info()
+        except Exception as exc:  # defensive — the helper never raises
+            logger.debug("Release info lookup failed: %s", exc)
+        try:
+            ok, verdict = verify_update_blob(
+                path, release_info, __version__, source=source)
+        except Exception:
+            logger.exception("Update verification crashed")
+            verdict = "hash_mismatch"
+
+        if not ok:
+            if verdict == "no_release_info":
+                # A peer-sent blob has no authoritative reference to check
+                # against — never install it.  Fall back to the GitHub
+                # download path (without re-broadcasting to peers).
+                logger.warning("P2P update rejected: no release info available "
+                               "to verify against — falling back to GitHub")
+                self._download_and_install_update(from_peers=False)
+                return
+            self._discard_update_blob(path, verdict)
+            return
+
         from internal.system.applier import apply_and_restart, stage_update
         from internal.system.updater import cache_asset
+
+        # From here on only one install may run; every failure path clears the
+        # flag again before returning.
+        self._updating = True
 
         # Keep the verified asset so we can serve it to other LAN devices (M2).
         cache_asset(path)
 
         staged = stage_update(path)
         if staged is None:
+            self._updating = False
             show_error(self.root, T("ui.app_name"), T("tray.update_install_failed"))
             return
         if apply_and_restart(staged):
@@ -4272,7 +4342,36 @@ class Application:
             except Exception:
                 logger.debug("Could not schedule update exit", exc_info=True)
             self._exit_process()
+        self._updating = False
         show_error(self.root, T("ui.app_name"), T("tray.update_install_failed"))
+
+    def _maybe_auto_update_check(self) -> None:
+        """Fire the silent periodic check when due — never when disabled.
+
+        With ``auto_update_check`` off this must not touch the network at all
+        (not even the throttle timestamp), so toggling back ON starts a fresh
+        6h window instead of an immediate request.
+        """
+        if not getattr(self.cfg, "auto_update_check", True):
+            return
+        if time.monotonic() - self._last_auto_update_check >= 6 * 3600:
+            self._last_auto_update_check = time.monotonic()
+            self._auto_check_for_update()
+
+    def _handle_update_install(self) -> dict:
+        """POST /api/update/install: run the full tray download→apply chain.
+
+        The actual work is marshalled onto the UI thread because it ends in a
+        process exit; this handler just accepts the request.
+        """
+        if self._shutting_down or getattr(self, "_updating", False):
+            return {"ok": False, "error": "update already in progress"}
+        try:
+            self.root.after(0, self._download_and_install_update)
+            return {"ok": True}
+        except Exception:
+            logger.debug("Could not schedule web-triggered update", exc_info=True)
+            return {"ok": False, "error": "could not start update"}
 
     def _auto_check_for_update(self) -> None:
         """Silent periodic check: only surfaces a result when an update is available."""

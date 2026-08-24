@@ -98,8 +98,13 @@
         certDevices: [],
         certsLoading: false,
 
-        // Update download
+        // Update download / check
         updateDownloading: false,
+        updateChecking: false,
+        // null = not checked yet; true/false = result of the last check
+        updateAvailable: null,
+        updateLatest: '',
+        autoUpdateCheck: true,
 
         // States
         saving: false,
@@ -285,6 +290,7 @@
         if (s.dedup_method !== undefined) this.dedupMethod = s.dedup_method || 'sha256';
         if (s.source_tracking_enabled !== undefined) this.sourceTracking = !!s.source_tracking_enabled;
         if (s.plain_text_only !== undefined) this.plainTextOnly = !!s.plain_text_only;
+        if (s.auto_update_check !== undefined) this.autoUpdateCheck = !!s.auto_update_check;
         if (s.data_dir !== undefined) this.dataDir = s.data_dir || '';
         if (s.favorites_path !== undefined) this.favoritesPath = s.favorites_path || '';
         if (s.hotkeys) this.hotkeys = Object.assign({}, s.hotkeys);
@@ -474,7 +480,70 @@
         return (id && id.length > 8) ? id.slice(0, 8) : (id || '');
       },
 
-      // ── Update download ─────────────────────────────────────────
+      // ── Update check / download / install ───────────────────────
+
+      toggleAutoUpdateCheck: function () {
+        var self = this;
+        this.autoUpdateCheck = !this.autoUpdateCheck;
+        ClipsyncAPI.updateSettings({ auto_update_check: this.autoUpdateCheck })
+          .then(function (res) {
+            if (res && res.updated) self.store.mergeSettings(res.updated);
+          })
+          .catch(function () {
+            // Revert so the UI stays truthful to the server setting.
+            self.autoUpdateCheck = !self.autoUpdateCheck;
+            self.store.showToast(self.t('dialog.failed'), 2000);
+          });
+      },
+
+      checkForUpdate: function () {
+        var self = this;
+        self.updateChecking = true;
+        // The server-side check can retry against GitHub for a while; give it
+        // a generous window instead of the short default timeout.
+        ClipsyncAPI._fetch('GET', '/api/update/check', null, 30000).then(function (res) {
+          self.updateChecking = false;
+          if (res && (res.available || (res.latest && res.latest.length))) {
+            self.updateAvailable = !!res.available;
+            self.updateLatest = res.latest || '';
+            if (!res.available) {
+              self.store.showToast(self.t('settings_window.up_to_date'), 2500);
+            }
+          } else {
+            self.updateAvailable = null;
+            self.updateLatest = '';
+            self.store.showToast(self.t('settings_window.update_check_failed'), 2500);
+          }
+        }).catch(function () {
+          self.updateChecking = false;
+          self.updateAvailable = null;
+          self.store.showToast(self.t('settings_window.update_check_failed'), 2500);
+        });
+      },
+
+      installUpdate: function () {
+        var self = this;
+        self.updateDownloading = true;
+        // POST /api/update/install runs the same chain as the tray:
+        // download → verify → stage → apply → restart. The app exits and the
+        // update helper replaces the binary, so this page dies mid-request —
+        // that is expected, not an error to report.
+        ClipsyncAPI._fetch('POST', '/api/update/install', {}, 30000).then(function (res) {
+          if (res && res.ok) {
+            self.store.showToast(self.t('settings_window.update_installing'), 5000);
+          } else {
+            self.updateDownloading = false;
+            self.store.showToast(self.t('settings_window.update_failed') +
+              ((res && res.error) ? ': ' + res.error : ''), 2500);
+          }
+        }).catch(function () {
+          // A successful install restarts the host, which aborts this request
+          // — only surface a failure when the dashboard is still alive.
+          setTimeout(function () {
+            self.updateDownloading = false;
+          }, 4000);
+        });
+      },
 
       downloadUpdate: function () {
         var self = this;
@@ -1616,7 +1685,27 @@
                     '</div>' +
                   '</div>' +
                   '<p style="font-size:12px;color:var(--clipsync-fg-muted);margin-top:12px;line-height:1.6">{{ t(\'settings_window.about_desc\') }}</p>' +
-                  '<button class="settings-btn settings-btn--accent" @click="downloadUpdate" :disabled="updateDownloading" style="width:100%;margin-top:16px">' +
+
+                  '<h3 class="settings-section__title" style="margin-top:20px">{{ t(\'settings_window.auto_update_check\') }}</h3>' +
+                  '<div class="settings-toggle-row">' +
+                    '<span class="settings-toggle-label">{{ t(\'settings_window.auto_update_check\') }}</span>' +
+                    '<button class="settings-toggle" role="switch" :aria-checked="autoUpdateCheck" :aria-label="t(\'settings_window.auto_update_check\')" :class="{ \'settings-toggle--on\': autoUpdateCheck }" @click="toggleAutoUpdateCheck">' +
+                      '<span class="settings-toggle__knob"></span>' +
+                    '</button>' +
+                  '</div>' +
+                  '<p class="settings-hint">{{ t(\'settings_window.auto_update_check_hint\') }}</p>' +
+
+                  '<div style="display:flex;gap:8px;margin-top:14px">' +
+                    '<button class="settings-btn" @click="checkForUpdate" :disabled="updateChecking || updateDownloading" style="flex:1">' +
+                      '{{ updateChecking ? \'...\' : t(\'settings_window.update_check_now\') }}' +
+                    '</button>' +
+                  '</div>' +
+                  '<p v-if="updateAvailable" class="settings-hint" style="margin-top:10px;color:var(--clipsync-accent,#22D3EE)">{{ t(\'settings_window.update_available_found\', { version: updateLatest }) }}</p>' +
+
+                  '<button v-if="updateAvailable" class="settings-btn settings-btn--accent" @click="installUpdate" :disabled="updateDownloading" style="width:100%;margin-top:10px">' +
+                    '{{ updateDownloading ? \'...\' : t(\'settings_window.update_install_now\') }}' +
+                  '</button>' +
+                  '<button class="settings-btn" @click="downloadUpdate" :disabled="updateDownloading" style="width:100%;margin-top:10px">' +
                     '{{ updateDownloading ? \'...\' : t(\'settings_window.update_download\') }}' +
                   '</button>' +
                   '<p class="settings-hint" style="margin-top:8px">{{ t(\'settings_window.update_hint\') }}</p>' +

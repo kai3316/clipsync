@@ -183,6 +183,7 @@ def dispatch(method, path, query_params, body, cfg, history, sync_mgr,
              on_restart=None, on_reset_dedup=None,
              get_certs=None, get_diagnostics=None,
              on_update_download=None,
+             on_update_install=None,
              on_diagnostics_request=None,
              chat_mgr=None,
              get_chat_devices=None,
@@ -224,7 +225,8 @@ def dispatch(method, path, query_params, body, cfg, history, sync_mgr,
             on_settings_change, on_show_web_qr, on_send_url, get_discovered,
             get_resolved_hashes, get_pending_pairings, get_reconnect_states,
             enc_mgr, on_open_file, on_open_folder, on_restart, on_reset_dedup,
-            get_certs, get_diagnostics, on_update_download, on_diagnostics_request,
+            get_certs, get_diagnostics, on_update_download,
+            on_update_install, on_diagnostics_request,
             chat_mgr, get_chat_devices, chat_send_fn, chat_start_session,
             get_chat_muted, set_chat_muted, on_quickpaste_done,
         )
@@ -254,6 +256,7 @@ def _dispatch(method, path, query_params, body, cfg, history, sync_mgr,
               on_restart=None, on_reset_dedup=None,
               get_certs=None, get_diagnostics=None,
               on_update_download=None,
+              on_update_install=None,
               on_diagnostics_request=None,
               chat_mgr=None,
               get_chat_devices=None,
@@ -385,6 +388,25 @@ def _dispatch(method, path, query_params, body, cfg, history, sync_mgr,
                 logger.exception("Failed to read log file for /api/logs")
                 logs = []
             return _json_response({"logs": logs})
+
+        elif path == "/api/update/check":
+            # Manual check for a newer release (the auto_update_check setting
+            # only gates the silent periodic check, not this button).  Runs on
+            # this request's worker thread (ThreadingHTTPServer), never raises.
+            from internal.system.updater import check_for_update
+            try:
+                result = check_for_update(timeout=8.0)
+            except Exception:
+                logger.exception("GET /api/update/check failed")
+                result = {}
+            if not isinstance(result, dict):
+                result = {}
+            return _json_response({
+                "available": bool(result.get("available")),
+                "latest": result.get("latest", ""),
+                "current": result.get("current", ""),
+                "url": result.get("url", ""),
+            }, 200)
 
         elif path == "/api/diagnostics":
             if get_diagnostics is None:
@@ -623,6 +645,22 @@ def _dispatch(method, path, query_params, body, cfg, history, sync_mgr,
                 "path": result.get("path", ""),
                 "error": result.get("error"),
             }, 200)
+
+        elif path == "/api/update/install":
+            # Runs the full download→staging→apply→restart chain on the host
+            # (the same path the tray uses).  The heavy work is marshalled to
+            # the UI thread by the callback; this only accepts the request.
+            if on_update_install is None:
+                return _json_response({"ok": False, "error": "not available"}, 503)
+            try:
+                result = on_update_install()
+            except Exception:
+                logger.exception("on_update_install callback failed")
+                result = None
+            if not isinstance(result, dict):
+                return _json_response(
+                    {"ok": False, "error": "install handler failed"}, 500)
+            return _json_response(result, 200)
 
         elif path == "/api/export":
             data, status = export_data(body, cfg, history)

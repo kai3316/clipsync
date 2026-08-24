@@ -97,6 +97,11 @@ class Config:
     # lists are content, not formatting, and are kept.
     plain_text_only: bool = False
 
+    # Periodic silent update check against GitHub releases (~every 6h).  OFF
+    # means the background loop never contacts the network for update checks;
+    # manual "check for updates" stays available either way.
+    auto_update_check: bool = True
+
     # App filter (blacklist/whitelist apps from clipboard monitoring)
     app_filter_enabled: bool = False
     app_filter_mode: str = "blacklist"  # "blacklist" or "whitelist"
@@ -247,6 +252,7 @@ _FIELD_RULES: dict[str, tuple] = {
     "retry_capture_enabled": ("bool",),
     "dedup_method": ("str",),
     "plain_text_only": ("bool",),
+    "auto_update_check": ("bool",),
     "app_filter_enabled": ("bool",),
     "app_filter_mode": ("str",),
     "app_filter_list": ("strlist_nonnull",),
@@ -371,7 +377,7 @@ def load() -> Config:
                 "language",
                 "language_chosen",
                 "paste_to_top", "low_memory_mode", "retry_capture_enabled",
-                "dedup_method", "plain_text_only",
+                "dedup_method", "plain_text_only", "auto_update_check",
                 "app_filter_enabled", "app_filter_mode",
                 "app_filter_list", "source_tracking_enabled",
                 "ui_backend", "ui_animation_enabled", "sound_enabled",
@@ -509,6 +515,7 @@ def save(cfg: Config, enc_mgr: "EncryptionManager | None" = None):
             "retry_capture_enabled": cfg.retry_capture_enabled,
             "dedup_method": cfg.dedup_method,
             "plain_text_only": cfg.plain_text_only,
+            "auto_update_check": cfg.auto_update_check,
             "app_filter_enabled": cfg.app_filter_enabled,
             "app_filter_mode": cfg.app_filter_mode,
             "app_filter_list": cfg.app_filter_list,

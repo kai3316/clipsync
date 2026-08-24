@@ -124,7 +124,7 @@ def _platform_asset_name() -> str:
     return "clipsync-linux.tar.gz"
 
 
-def _sha256_file(path: str) -> str:
+def sha256_file(path: str) -> str:
     """Streaming SHA-256 of *path*, returned as lowercase hex."""
     import hashlib
 
@@ -133,6 +133,99 @@ def _sha256_file(path: str) -> str:
         for chunk in iter(lambda: f.read(64 * 1024), b""):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+# Backwards-compatible alias (the checker used to be private).
+_sha256_file = sha256_file
+
+
+def fetch_latest_asset_info(timeout: float = 10.0) -> dict | None:
+    """Return authoritative info about this platform's latest release asset.
+
+    Queries the same GitHub release API as :func:`check_for_update` and picks
+    this platform's asset.  Returns ``{"version": <tag>, "asset": <name>,
+    "sha256": <hex>}`` or None when anything is missing — notably when GitHub
+    publishes no ``sha256:`` digest for the asset (older releases), because a
+    caller cannot then tell a good blob from a bad one.
+    """
+    try:
+        data = _fetch_latest_release(timeout=timeout)
+    except Exception as exc:  # never raises for callers on the install path
+        logger.debug("fetch_latest_asset_info failed: %s", exc)
+        return None
+    if not data:
+        return None
+    tag = (data.get("tag_name") or "").strip()
+    if not tag:
+        return None
+    asset_name = _platform_asset_name()
+    for asset in data.get("assets") or []:
+        if asset.get("name") != asset_name:
+            continue
+        digest = asset.get("digest") or ""
+        if not digest.startswith("sha256:") or len(digest) <= len("sha256:"):
+            logger.info("Release %s has no sha256 digest for %s", tag, asset_name)
+            return None
+        return {
+            "version": tag,
+            "asset": asset_name,
+            "sha256": digest[len("sha256:"):].lower(),
+        }
+    logger.info("Latest release %s has no asset named %s", tag, asset_name)
+    return None
+
+
+def verify_update_blob(
+    blob_path: str,
+    release_info: dict | None,
+    current_version: str,
+    source: str = "p2p",
+) -> tuple[bool, str]:
+    """Decide whether an update blob may be installed.
+
+    *blob_path* is a received (P2P) or downloaded asset; *release_info* is what
+    :func:`fetch_latest_asset_info` returned (None = GitHub unreachable or no
+    verifiable digest).  *source* is "p2p" for a peer-sent blob or "github"
+    for a file that :func:`download_latest_release` already size- and
+    hash-checked against the release API while downloading.
+
+    Policy (correctness, not hardening): never install a package whose bytes
+    do not match the published asset, and never install one whose version is
+    not newer than the running build.  When no release info is available at
+    all, a P2P blob has nobody to answer to — reject it so the caller can fall
+    back to the GitHub path; a freshly downloaded GitHub file was already
+    verified against the API during download, so it may proceed.
+
+    Returns ``(ok, verdict)`` with verdict one of:
+      "ok"             verified and newer — safe to stage/apply
+      "no_release_info" P2P blob with no authoritative reference
+      "hash_mismatch"  bytes differ from the published asset
+      "not_newer"      release is not newer than the running version
+    """
+    if not release_info:
+        # GitHub path: download_latest_release already verified size+sha256
+        # against the release API before saving the file.
+        if source == "github":
+            return True, "ok"
+        return False, "no_release_info"
+
+    if not _is_newer(release_info.get("version", ""), current_version):
+        return False, "not_newer"
+
+    expected = release_info.get("sha256") or ""
+    if not expected:
+        # No digest to compare against — treat like missing release info.
+        if source == "github":
+            return True, "ok"
+        return False, "no_release_info"
+    try:
+        actual = sha256_file(blob_path)
+    except OSError as exc:
+        logger.warning("Cannot hash update blob %s: %s", blob_path, exc)
+        return False, "hash_mismatch"
+    if actual != expected.lower():
+        return False, "hash_mismatch"
+    return True, "ok"
 
 
 def download_latest_release(dest_dir: str) -> tuple[str | None, str | None]:
@@ -198,7 +291,7 @@ def download_latest_release(dest_dir: str) -> tuple[str | None, str | None]:
                     )
             digest = matched.get("digest") or ""
             if digest.startswith("sha256:"):
-                actual_sha = _sha256_file(temp_path)
+                actual_sha = sha256_file(temp_path)
                 if actual_sha != digest[len("sha256:"):]:
                     raise RuntimeError(
                         f"download checksum mismatch: expected {digest}, got sha256:{actual_sha}"
