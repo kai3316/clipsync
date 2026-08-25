@@ -1808,6 +1808,20 @@
       transform: translateY(-1px);
     }
 
+    /* Pause presets share both quick-btn and pause-btn classes; the generic
+       quick-btn rule (flex:1; min-width:120px, defined above) otherwise
+       squeezes the three preset buttons and wraps the "pause sync" label
+       onto two lines. Re-assert their own sizing here so the row stays one
+       line regardless of card width. */
+    .overview-pause-row > span:first-child {
+      white-space: nowrap;
+    }
+    .overview-pause-presets .overview-pause-btn {
+      flex: none;
+      min-width: 0;
+      white-space: nowrap;
+    }
+
     /* ── Recent activity feed ─────────────────────────────────── */
     .overview-activity-card {
       margin-top: var(--clipsync-space-3);
@@ -5392,7 +5406,247 @@
       color: var(--clipsync-danger-text, var(--clipsync-danger));
     }
 
+    /* ── Two-section layout: local manager + device config (round 18) ── */
+    .aiconfig-panel__sections {
+      display: flex;
+      flex-direction: column;
+      gap: var(--clipsync-space-3);
+      flex: 1;
+      min-height: 0;
+    }
+
+    .aiconfig-panel__local,
+    .aiconfig-panel__device {
+      flex: 1 1 50%;
+      min-height: 0;
+      display: flex;
+      flex-direction: column;
+      gap: var(--clipsync-space-2);
+      padding: var(--clipsync-space-3);
+      border-radius: var(--clipsync-radius-lg);
+      overflow: hidden;
+    }
+
+    .aiconfig-panel__device {
+      flex: 1 1 auto;
+    }
+
+    .aiconfig-panel__local-header,
+    .aiconfig-panel__device-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: var(--clipsync-space-2);
+      flex-shrink: 0;
+      flex-wrap: wrap;
+    }
+
+    .aiconfig-panel__local-header-left {
+      display: flex;
+      align-items: center;
+      gap: var(--clipsync-space-2);
+      min-width: 0;
+    }
+
+    .aiconfig-panel__local-title {
+      font-size: 13px;
+      font-weight: 700;
+      color: var(--clipsync-fg);
+      white-space: nowrap;
+    }
+
+    .aiconfig-panel__local-meta {
+      font-size: 11px;
+      color: var(--clipsync-fg-muted);
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
+    .aiconfig-panel__local-toolbar {
+      display: flex;
+      align-items: center;
+      gap: var(--clipsync-space-2);
+      flex-shrink: 0;
+    }
+
+    .aiconfig-panel__local-toolbar .aiconfig-panel__search {
+      flex: 0 1 220px;
+    }
+
+    .aiconfig-panel__local-tablewrap {
+      flex: 1;
+      min-height: 0;
+      overflow: auto;
+      border-radius: var(--clipsync-radius-md);
+    }
+
+    .aiconfig-panel__local-th-actions {
+      width: 84px;
+      text-align: right;
+    }
+
+    .aiconfig-panel__local-actions {
+      text-align: right;
+      white-space: nowrap;
+    }
+
+    .aiconfig-panel__icon-btn {
+      padding: 4px 7px;
+      font-size: 13px;
+      line-height: 1;
+      margin-left: 4px;
+    }
+
+    .aiconfig-panel__icon-btn--danger:hover:not(:disabled) {
+      background: var(--clipsync-danger-bg);
+      border-color: var(--clipsync-danger);
+      color: var(--clipsync-danger-text, var(--clipsync-danger));
+    }
+
+    /* Watch-paths management dialog (round 18) */
+    .aiconfig-paths__overlay {
+      position: fixed;
+      inset: 0;
+      z-index: var(--clipsync-z-modal);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: var(--clipsync-space-5);
+      background: rgba(3, 5, 12, 0.62);
+      backdrop-filter: blur(6px);
+      -webkit-backdrop-filter: blur(6px);
+    }
+
+    .aiconfig-paths {
+      width: min(520px, 100%);
+      max-height: 82vh;
+      display: flex;
+      flex-direction: column;
+      border-radius: var(--clipsync-radius-lg);
+      box-shadow: var(--clipsync-shadow-lg);
+      overflow: hidden;
+    }
+
+    .aiconfig-paths__header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: var(--clipsync-space-3);
+      padding: var(--clipsync-space-3) var(--clipsync-space-4);
+      border-bottom: 1px solid var(--clipsync-border);
+    }
+
+    .aiconfig-paths__title {
+      font-size: 14px;
+      font-weight: 700;
+      color: var(--clipsync-fg);
+    }
+
+    .aiconfig-paths__hint {
+      padding: 10px var(--clipsync-space-4);
+      font-size: 12px;
+      color: var(--clipsync-fg-muted);
+      border-bottom: 1px solid var(--clipsync-border);
+    }
+
+    .aiconfig-paths__list {
+      flex: 1;
+      min-height: 0;
+      overflow-y: auto;
+      padding: var(--clipsync-space-3) var(--clipsync-space-4);
+    }
+
+    .aiconfig-paths__row {
+      display: flex;
+      align-items: center;
+      gap: var(--clipsync-space-2);
+      margin-bottom: var(--clipsync-space-2);
+    }
+
+    .aiconfig-paths__row .settings-input {
+      flex: 1;
+      min-width: 0;
+    }
+
+    .aiconfig-paths__footer {
+      display: flex;
+      align-items: center;
+      justify-content: flex-end;
+      gap: var(--clipsync-space-2);
+      padding: var(--clipsync-space-3) var(--clipsync-space-4);
+      border-top: 1px solid var(--clipsync-border);
+    }
+
+    /* Local preview / edit card (round 18) */
+    .aiconfig-local-preview {
+      width: min(760px, 100%);
+      max-height: 82vh;
+      display: flex;
+      flex-direction: column;
+      border-radius: var(--clipsync-radius-lg);
+      box-shadow: var(--clipsync-shadow-lg);
+      overflow: hidden;
+    }
+
+    .aiconfig-local-preview__header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: var(--clipsync-space-3);
+      padding: var(--clipsync-space-3) var(--clipsync-space-4);
+      border-bottom: 1px solid var(--clipsync-border);
+    }
+
+    .aiconfig-local-preview__path {
+      min-width: 0;
+      font-family: var(--clipsync-font-mono);
+      font-size: 12px;
+      color: var(--clipsync-fg-muted);
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .aiconfig-local-preview__btns {
+      display: flex;
+      align-items: center;
+      gap: var(--clipsync-space-2);
+      flex-shrink: 0;
+    }
+
+    .aiconfig-local-preview__editor {
+      flex: 1;
+      min-height: 0;
+      margin: 0;
+      padding: var(--clipsync-space-4);
+      resize: none;
+      border: none;
+      outline: none;
+      background: transparent;
+      font-family: var(--clipsync-font-mono);
+      font-size: 12px;
+      line-height: 1.55;
+      color: var(--clipsync-fg);
+      white-space: pre;
+      overflow: auto;
+    }
+
     @media (max-width: 767px) {
+      .aiconfig-panel__sections {
+        overflow-y: auto;
+      }
+
+      .aiconfig-panel__local,
+      .aiconfig-panel__device {
+        flex: none;
+        min-height: 260px;
+      }
+
+      .aiconfig-panel__local-toolbar {
+        flex-wrap: wrap;
+      }
+
       .aiconfig-panel__body {
         flex-direction: column;
         overflow-y: auto;

@@ -4,6 +4,9 @@ All notable changes to ClipSync are documented in this file.
 
 ## [Unreleased]
 
+### AI config
+- **Local config manager — works with no paired devices.** The Config tab's new "Local config" section is a small file manager over your watch list: browse files (path/size/mtime, searchable, multi-root), preview text, **edit & save** (the original file is auto-backed up as `.bak`), **remove to a trash folder** (never hard-deleted — files land in `aiconfig_trash/` with a timestamp, recoverable manually), **open the containing folder**, and manage the watch paths themselves. Every write is path-locked to the watch roots, size-capped, and refuses binary content. The cross-device browse/pull section stays as before.
+
 ### Internet sync
 - **Delivery confirmation for relay chat.** Messages sent over the internet relay now carry a per-bubble mark — ✓ delivered / ✗ not delivered / … sending — via an end-to-end ack: the receiver replies on the same paired topic, and the sender updates the bubble. Clipboard items keep working as before; confirmation rides the same ack.
 - **Offline queue for internet clipboard.** If the relay or the peer is unreachable at send time, the clip lands in a persisted local queue (`relay_pending.json`) and is retried automatically when the relay comes back online or the peer is seen again (up to 5 attempts). The Devices page shows a small "N pending" badge per internet-paired device plus the last send result.

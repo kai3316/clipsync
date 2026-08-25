@@ -34,6 +34,9 @@ import hashlib
 import logging
 import os
 import re
+import shutil
+import subprocess
+import sys
 import threading
 import time
 from pathlib import Path
@@ -56,6 +59,14 @@ MAX_ROOTS = 50
 MAX_PATH_LEN = 512
 # Preview responses are truncated to this many bytes of text.
 PREVIEW_MAX_BYTES = 64 * 1024
+# Local-only file manager (Round 18): reads are capped at the same 64 KB as
+# previews; saves are capped at 256 KB — a generous ceiling for an AI-config
+# text file — and refuse NUL bytes (binary content).
+LOCAL_READ_MAX_BYTES = 64 * 1024
+LOCAL_SAVE_MAX_BYTES = 256 * 1024
+# Recoverable trash directory (Round 18), created under the app data dir.
+# Files are MOVED here, never physically deleted, so a mis-click is undoable.
+TRASH_DIR_NAME = "aiconfig_trash"
 # A pending pull/preview entry expires after this long; late data is dropped.
 PENDING_TTL = 60.0
 # How long preview() blocks waiting for the peer's aiconfig_data.
@@ -225,6 +236,26 @@ def resolve_safe(root: Path, rel: str) -> Path | None:
     if resolved != root_resolved and root_resolved not in resolved.parents:
         return None
     return resolved
+
+
+def open_with_default_app(path: str) -> bool:
+    """Open *path* (a file or directory) with the OS default application.
+
+    Round 18 local "open" endpoint: win32 uses ``os.startfile``, macOS uses
+    ``open``, everything else uses ``xdg-open``.  Returns True on success so
+    the REST layer can map failures to a 400.
+    """
+    try:
+        if sys.platform == "win32":
+            os.startfile(path)  # type: ignore[attr-defined]
+        elif sys.platform == "darwin":
+            subprocess.run(["open", path], check=True)
+        else:
+            subprocess.run(["xdg-open", path], check=True)
+        return True
+    except Exception as exc:
+        logger.warning("open_with_default_app(%s) failed: %s", path, exc)
+        return False
 
 
 class AIConfigManager:
@@ -515,18 +546,30 @@ class AIConfigManager:
 
     # ------------------------------------------------------------ landing
 
-    def _local_root(self, ri: int) -> Path | None:
+    def _resolve_root(self, ri: int, create: bool = False) -> Path | None:
+        """Absolute watch root for index *ri*, or None if unusable.
+
+        Read-only operations (local_read / local_trash / local_open / item)
+        pass ``create=False`` so a missing root fails cleanly; write
+        operations (local_save) pass True so the directory is made on demand.
+        """
         roots = list(getattr(self._cfg, "ai_config_paths", []))
-        if not (0 <= ri < len(roots)):
+        if isinstance(ri, bool) or not isinstance(ri, int) \
+                or not (0 <= ri < len(roots)):
             return None
         root = expand_root(roots[ri])
         if root is None:
             return None
-        try:
-            root.mkdir(parents=True, exist_ok=True)
-        except OSError:
-            return None
+        if create:
+            try:
+                root.mkdir(parents=True, exist_ok=True)
+            except OSError:
+                return None
         return root
+
+    def _local_root(self, ri: int) -> Path | None:
+        """Watch root for landing pulled files (created on demand)."""
+        return self._resolve_root(ri, create=True)
 
     def _land_file(self, ri: int, rel: str, data: bytes, mode: str,
                    peer_id: str) -> tuple[str, str | None]:
@@ -763,3 +806,182 @@ class AIConfigManager:
                 logger.debug("aiconfig watch-list persist failed",
                              exc_info=True)
         return {"ok": True, "paths": cleaned}
+
+    # ------------------------------------------------- local file manager
+
+    def _trash_base(self) -> Path:
+        """Absolute directory that holds the recoverable trash.
+
+        ``cfg.data_dir`` (a user-custom data directory) wins when set;
+        otherwise the app's default data/config directory is used.  Mirrors
+        how backups/ and the config.json itself resolve their base dir.
+        """
+        custom = str(getattr(self._cfg, "data_dir", "") or "").strip()
+        if custom:
+            return Path(custom) / TRASH_DIR_NAME
+        from internal.config.config import _config_dir
+        return _config_dir() / TRASH_DIR_NAME
+
+    def local_listing(self) -> dict:
+        """Fresh local inventory for GET /api/aiconfig/local.
+
+        Reuses the same collector as the paired-peer exchange, but shapes the
+        entries with ``rel_path`` (file-manager vocabulary) and adds a
+        per-root summary.  No pairing is required — this is purely local.
+        """
+        entries = self.collect()
+        raw_roots = list(getattr(self._cfg, "ai_config_paths", []))
+        roots = [
+            {
+                "root_index": i,
+                "path": raw,
+                "count": sum(1 for e in entries if e["root_index"] == i),
+            }
+            for i, raw in enumerate(raw_roots[:MAX_ROOTS])
+        ]
+        listing = [
+            {
+                "root_index": e["root_index"],
+                "rel_path": e["path"],
+                "size": e["size"],
+                "mtime": e["mtime"],
+                "sha256": e["sha256"],
+            }
+            for e in entries
+        ]
+        with self._lock:
+            collected_at = self._local_collected_at
+        return {"collected_at": collected_at, "roots": roots,
+                "entries": listing}
+
+    def local_read(self, ri, rel) -> dict:
+        """Read one file's text content (local only, ≤64 KB).
+
+        Returns {"ok", "content", "truncated"}; binary files (any NUL byte
+        in the leading window) are refused with error "binary".
+        """
+        root = self._resolve_root(ri)
+        if root is None:
+            return {"ok": False, "error": "no_root"}
+        target = resolve_safe(root, rel)
+        if target is None:
+            return {"ok": False, "error": "unsafe_path"}
+        if target.is_symlink() or not target.is_file():
+            return {"ok": False, "error": "not_found"}
+        try:
+            size = target.stat().st_size
+            with open(target, "rb") as f:
+                data = f.read(LOCAL_READ_MAX_BYTES)
+        except OSError:
+            return {"ok": False, "error": "io_error"}
+        if b"\x00" in data:
+            return {"ok": False, "error": "binary"}
+        return {
+            "ok": True,
+            "content": data.decode("utf-8", errors="replace"),
+            "truncated": size > LOCAL_READ_MAX_BYTES,
+        }
+
+    def local_save(self, ri, rel, content) -> dict:
+        """Write text content back to a watched file (local only).
+
+        Safety net (mirrors the spec): ① resolve_safe rejects traversal;
+        ② the pre-save original is copied to ``<rel_path>.bak`` in the same
+        directory (overwriting a stale .bak, which doubles as an
+        "edited here" marker); ③ NUL bytes are refused (text only); ④ content
+        is capped at LOCAL_SAVE_MAX_BYTES.  The write itself is atomic —
+        temp file + os.replace — and serialized under the manager lock so two
+        concurrent saves to the same file cannot interleave backup/replace.
+        """
+        if not isinstance(content, str):
+            return {"ok": False, "error": "content_required"}
+        data = content.encode("utf-8")
+        if len(data) > LOCAL_SAVE_MAX_BYTES:
+            return {"ok": False, "error": "too_large"}
+        if b"\x00" in data:
+            return {"ok": False, "error": "binary"}
+        root = self._resolve_root(ri, create=True)
+        if root is None:
+            return {"ok": False, "error": "no_root"}
+        target = resolve_safe(root, rel)
+        if target is None:
+            return {"ok": False, "error": "unsafe_path"}
+        with self._lock:
+            backup_overwrote = False
+            try:
+                if target.exists():
+                    if target.is_symlink():
+                        return {"ok": False, "error": "unsafe_path"}
+                    bak = target.with_name(target.name + ".bak")
+                    backup_overwrote = bak.exists()
+                    shutil.copy2(target, bak)
+            except OSError:
+                return {"ok": False, "error": "backup_failed"}
+            tmp = target.with_name(f".{target.name}.clipsync.tmp")
+            try:
+                target.parent.mkdir(parents=True, exist_ok=True)
+                tmp.write_bytes(data)
+                os.replace(tmp, target)
+            except OSError:
+                try:
+                    tmp.unlink(missing_ok=True)
+                except OSError:
+                    pass
+                return {"ok": False, "error": "io_error"}
+        result: dict = {"ok": True}
+        if backup_overwrote:
+            result["backup_overwrote"] = True
+        return result
+
+    def local_trash(self, ri, rel) -> dict:
+        """Move a watched file into the recoverable trash (no physical delete).
+
+        Destination is ``<data_dir>/aiconfig_trash/<original subpath>/
+        <timestamp>_<name>`` — the relative directory structure is preserved
+        so same-named files in different folders never collide, and the
+        timestamp prefix keeps trashed copies sortable.  Collisions get an
+        incremented ``-N`` suffix.  Returns {"ok", "trashed_to"}.
+        """
+        root = self._resolve_root(ri)
+        if root is None:
+            return {"ok": False, "error": "no_root"}
+        target = resolve_safe(root, rel)
+        if target is None:
+            return {"ok": False, "error": "unsafe_path"}
+        if target.is_symlink() or not target.is_file():
+            return {"ok": False, "error": "not_found"}
+        base = self._trash_base()
+        rel_dir = os.path.dirname(rel.replace("\\", "/"))
+        dest_dir = base.joinpath(*[p for p in rel_dir.split("/") if p]) \
+            if rel_dir else base
+        try:
+            dest_dir.mkdir(parents=True, exist_ok=True)
+        except OSError:
+            return {"ok": False, "error": "trash_dir_failed"}
+        stamp = time.strftime("%Y%m%d_%H%M%S")
+        stem, ext = os.path.splitext(target.name)
+        candidate = dest_dir / f"{stamp}_{target.name}"
+        n = 2
+        while candidate.exists():
+            candidate = dest_dir / f"{stamp}_{stem}-{n}{ext}"
+            n += 1
+        try:
+            shutil.move(str(target), str(candidate))
+        except OSError as exc:
+            logger.warning("aiconfig trash move failed for %s: %s", rel, exc)
+            return {"ok": False, "error": "move_failed"}
+        return {"ok": True, "trashed_to": str(candidate)}
+
+    def local_open(self, ri, rel) -> dict:
+        """Open a watched file (or directory) with the OS default app."""
+        root = self._resolve_root(ri)
+        if root is None:
+            return {"ok": False, "error": "no_root"}
+        target = resolve_safe(root, rel)
+        if target is None:
+            return {"ok": False, "error": "unsafe_path"}
+        if target.is_symlink() or not (target.is_file() or target.is_dir()):
+            return {"ok": False, "error": "not_found"}
+        if open_with_default_app(str(target)):
+            return {"ok": True}
+        return {"ok": False, "error": "open_failed"}

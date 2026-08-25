@@ -138,6 +138,24 @@
     aiConfigResults: [],
 
     /* ═══════════════════════════════════════════════════════════════
+       AI-config LOCAL manager (round 18, no pairing needed)
+       aiConfigLocal mirrors GET /api/aiconfig/local:
+       { collected_at, roots: [{root_index, path, count}], entries:
+       [{root_index, rel_path, size, mtime, sha256}] } — normalized
+       defensively in fetchAiConfigLocal().  This is a plain file manager
+       over THIS device's watch roots; it must work with zero paired
+       devices (unlike aiConfigInventory above).
+       ═══════════════════════════════════════════════════════════════ */
+    aiConfigLocal: {
+      collected_at: '',
+      roots: [],
+      entries: [],
+      loaded: false,     // true once the first local fetch settled
+      loadFailed: false, // fetch rejected AND nothing cached to show
+      refreshing: false, // true while a fresh fetch is in flight
+    },
+
+    /* ═══════════════════════════════════════════════════════════════
        Overview stats (refreshed every 5s)
        ═══════════════════════════════════════════════════════════════ */
     overview: {
@@ -1775,6 +1793,85 @@
         .finally(function () {
           self._aiConfigInFlight = false;
           self.aiConfigRefreshing = false;
+        });
+    },
+
+    /**
+     * Fetch THIS device's local AI-config inventory (watch roots + files).
+     * Independent of pairing — the local manager works with zero peers.
+     * In-flight calls are coalesced. Fully defensive: a host whose backend
+     * predates this feature answers 404 — the fetch settles with
+     * loaded=true (and loadFailed when nothing was cached) so the panel
+     * shows its empty/retry state instead of spinning forever, and any
+     * previously loaded local listing is kept rather than clobbered.
+     * @returns {Promise<boolean>} true when a snapshot was applied
+     */
+    fetchAiConfigLocal: function () {
+      var self = this;
+      if (!window.ClipsyncAPI || !window.ClipsyncAPI.getAiConfigLocal) {
+        return Promise.resolve(false);
+      }
+      if (this._aiConfigLocalInFlight) return Promise.resolve(false);
+      this._aiConfigLocalInFlight = true;
+      this.aiConfigLocal.refreshing = true;
+      return window.ClipsyncAPI.getAiConfigLocal()
+        .then(function (res) {
+          if (!res || typeof res !== 'object') {
+            self.aiConfigLocal.loaded = true;
+            self.aiConfigLocal.loadFailed = self.aiConfigLocal.entries.length === 0;
+            return false;
+          }
+          var roots = Array.isArray(res.roots) ? res.roots : [];
+          var cleanRoots = [];
+          for (var ri = 0; ri < roots.length; ri++) {
+            var r = roots[ri];
+            if (r && typeof r === 'object' &&
+                (typeof r.root_index === 'number' || r.root_index !== undefined) &&
+                typeof r.path === 'string') {
+              var rri = (typeof r.root_index === 'number') ? r.root_index
+                : parseInt(r.root_index, 10);
+              cleanRoots.push({
+                root_index: isFinite(rri) ? rri : 0,
+                path: r.path,
+                count: (typeof r.count === 'number') ? r.count : 0,
+              });
+            }
+          }
+          var raw = Array.isArray(res.entries) ? res.entries : [];
+          var cleanEntries = [];
+          for (var ei = 0; ei < raw.length; ei++) {
+            var e = raw[ei];
+            if (!e || typeof e !== 'object' || !(e.rel_path || e.path)) continue;
+            var ri2 = (typeof e.root_index === 'number') ? e.root_index
+              : parseInt(e.root_index, 10);
+            cleanEntries.push({
+              root_index: isFinite(ri2) ? ri2 : 0,
+              rel_path: String(e.rel_path || e.path),
+              sha256: e.sha256 || '',
+              size: (typeof e.size === 'number') ? e.size : Number(e.size) || 0,
+              mtime: e.mtime,
+            });
+          }
+          self.aiConfigLocal = {
+            collected_at: res.collected_at || '',
+            roots: cleanRoots,
+            entries: cleanEntries,
+            loaded: true,
+            loadFailed: false,
+            refreshing: false,
+          };
+          return true;
+        })
+        .catch(function () {
+          // 404 (older backend) / network error — surface the empty state but
+          // never wipe a local listing that was already on screen.
+          self.aiConfigLocal.loaded = true;
+          self.aiConfigLocal.loadFailed = self.aiConfigLocal.entries.length === 0;
+          return false;
+        })
+        .finally(function () {
+          self._aiConfigLocalInFlight = false;
+          self.aiConfigLocal.refreshing = false;
         });
     },
 

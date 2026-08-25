@@ -441,6 +441,80 @@ var ClipsyncAPI = (function () {
     },
 
     /* ═══════════════════════════════════════════════════════════════
+       Local AI-config manager endpoints (round 18, no pairing needed)
+       ═══════════════════════════════════════════════════════════════ */
+
+    /**
+     * This device's own AI-config inventory — watch roots + file metadata.
+     * Unlike the peer inventory this needs NO paired device: it is a plain
+     * file manager over the local watch list.
+     * @returns {Promise<{collected_at: number, roots: Array, entries: Array}>}
+     *   roots: [{root_index, path, count}]; entries: [{root_index, rel_path,
+     *   size, mtime, sha256}].
+     */
+    getAiConfigLocal: function () {
+      return this._fetch('GET', '/api/aiconfig/local');
+    },
+
+    /**
+     * Read ONE local AI-config file's text for preview (no pairing). Binary
+     * files answer {ok:false, error:'binary'} — the caller shows a "cannot
+     * preview" notice instead of crashing.
+     * @param {number} rootIndex
+     * @param {string} relPath
+     * @returns {Promise<{ok: boolean, content: string, truncated: boolean}>}
+     */
+    getAiConfigLocalItem: function (rootIndex, relPath) {
+      return this._fetch('GET',
+        '/api/aiconfig/local/item?root_index=' + encodeURIComponent(rootIndex) +
+        '&rel_path=' + encodeURIComponent(relPath));
+    },
+
+    /**
+     * Save edited content back to a LOCAL AI-config file. The backend writes
+     * a .bak copy beside it before overwriting (never a silent clobber).
+     * @param {number} rootIndex
+     * @param {string} relPath
+     * @param {string} content
+     * @returns {Promise<{ok: boolean}>}
+     */
+    saveAiConfigLocal: function (rootIndex, relPath, content) {
+      return this._fetch('POST', '/api/aiconfig/local/save', {
+        root_index: rootIndex,
+        rel_path: relPath,
+        content: content,
+      });
+    },
+
+    /**
+     * Move a LOCAL AI-config file to the OS Recycle Bin — recoverable, not a
+     * hard delete. The backend answers the trash path it moved to.
+     * @param {number} rootIndex
+     * @param {string} relPath
+     * @returns {Promise<{ok: boolean, trashed_to: string}>}
+     */
+    trashAiConfigLocal: function (rootIndex, relPath) {
+      return this._fetch('POST', '/api/aiconfig/local/trash', {
+        root_index: rootIndex,
+        rel_path: relPath,
+      });
+    },
+
+    /**
+     * Ask the server to open a LOCAL AI-config file's containing folder in the
+     * OS file manager (or the file itself when the backend chooses).
+     * @param {number} rootIndex
+     * @param {string} relPath
+     * @returns {Promise<{ok: boolean}>}
+     */
+    openAiConfigLocal: function (rootIndex, relPath) {
+      return this._fetch('POST', '/api/aiconfig/open', {
+        root_index: rootIndex,
+        rel_path: relPath,
+      });
+    },
+
+    /* ═══════════════════════════════════════════════════════════════
        Data export / import endpoints
        ═══════════════════════════════════════════════════════════════ */
 
