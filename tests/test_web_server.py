@@ -334,7 +334,14 @@ def test_dialog_flush_pending_requeues_when_not_delivered():
 def test_dialog_queued_flushed_response_window_starts_at_flush():
     """A queued dialog's response window starts when it is flushed (shown),
     not when it was created — a response arriving after the creation deadline
-    but within the post-flush window must still be accepted."""
+    but within the post-flush window must still be accepted.
+
+    Timing notes: the sleeps are sized so every critical margin is ~1s, so a
+    loaded CI runner stretching ``time.sleep`` a few tens of percent cannot
+    flake it.  With timeout=3s, queue≈2s (flush) and post-flush≈2s: the flush
+    must land before the 3s creation budget (2s slack) and the response must
+    land past that budget yet before the flush+3s window end (1s slack each).
+    """
     state = {"deliver": False}
 
     class FlakyMgr:
@@ -346,7 +353,7 @@ def test_dialog_queued_flushed_response_window_starts_at_flush():
     holder = {}
 
     def run():
-        holder["result"] = dm.show("alert", title="t", message="m", timeout=0.4)
+        holder["result"] = dm.show("alert", title="t", message="m", timeout=3.0)
 
     t = threading.Thread(target=run)
     t.start()
@@ -362,13 +369,14 @@ def test_dialog_queued_flushed_response_window_starts_at_flush():
     else:
         pytest.fail("show() never registered a pending dialog")
 
-    time.sleep(0.15)  # let the dialog sit queued (client absent)
+    time.sleep(2.0)  # let the dialog sit queued (client absent) — flush at ~2s
     state["deliver"] = True
-    dm.flush_pending()  # delivered at t≈0.15
-    time.sleep(0.3)     # t≈0.45 — past the 0.4s creation deadline
+    dm.flush_pending()  # shown at ~2s; response window = [2s, 5s]
+    time.sleep(2.0)     # handle at ~4s — past the 3s creation deadline, within
+                        # the post-flush window (proves flush-based timing).
 
     ok = dm.handle_response(dialog_id, "ok")
-    t.join(timeout=1.0)
+    t.join(timeout=6.0)
 
     assert not t.is_alive(), "show() should have returned by now"
     assert ok is True
