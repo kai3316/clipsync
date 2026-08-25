@@ -619,9 +619,9 @@
         }).catch(function () { /* cancelled */ });
       },
 
-      // Step-1 "turn on internet sync" opens Settings → Network.
+      // Step-1 "turn on internet sync" opens Settings → Remote Sync.
       openInternetSyncSettings: function () {
-        this.store.settingsRequestedSection = 'network';
+        this.store.settingsRequestedSection = 'remote';
         this.store.openSettingsPanel();
       },
 

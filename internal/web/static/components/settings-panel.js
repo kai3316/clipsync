@@ -19,22 +19,34 @@
     appearance: [
       'settings.appearance', 'settings_window.theme_system',
       'settings_window.theme_light', 'settings_window.theme_dark',
-      'settings.language', 'settings.language_hint', 'settings.preferences',
-      'network.auto_start', 'settings.animation', 'settings.ui_mode',
-      'settings_window.ui_backend_hint',
+      'settings.animation',
+    ],
+    preferences: [
+      'settings.preferences', 'settings.language', 'settings.language_hint',
+      'network.auto_start', 'settings_window.auto_start_hint',
+      'settings.ui_mode', 'settings_window.ui_backend_hint',
+      'settings.sound', 'settings_window.sound_hint',
+      'settings_window.notify_title', 'settings_window.notify_desc',
+      'settings_window.notify_device_connect', 'settings_window.notify_transfer',
+      'settings_window.notify_pairing', 'settings_window.notify_sync',
+      'settings_window.enable_notifications',
     ],
     network: [
       'network.connection', 'network.tcp_port', 'settings_window.port_hint',
-      'network.service_type',
-      'settings_window.service_type_hint', 'network.local_address',
-      'settings_window.save_network',
-      'settings_window.internet_sync_title', 'network.internet_sync',
-      'settings_window.internet_sync_hint', 'settings_window.relay_brokers_label',
-      // Round 15: pairing management moved to the Devices page; the network
-      // section keeps the toggle + status row and a pointer to the Devices tab.
-      'relay.state.initial',
-      'settings_window.netpair_error_detail',
+      'network.service_type', 'settings_window.service_type_hint',
+      'network.local_address', 'settings_window.save_network',
+    ],
+    remote: [
+      'settings_nav.remote_sync', 'settings_window.internet_sync_title',
+      'network.internet_sync', 'settings_window.internet_sync_hint',
+      'settings_window.internet_sync_state_label',
+      // Round 15: pairing management moved to the Devices page; this section
+      // keeps the toggle + status row and a pointer to the Devices tab.
+      'relay.state.initial', 'settings_window.netpair_error_detail',
       'settings_window.netpair_manage_hint', 'settings_window.netpair_manage_cta',
+      'settings_window.relay_brokers_toggle', 'settings_window.relay_brokers_label',
+      'settings_window.relay_brokers_hint', 'settings_window.save_relay_brokers',
+      'settings_window.test_relay_btn', 'settings_window.test_relay_result',
     ],
     web: [
       'settings_nav.web_companion', 'settings_window.web_enable',
@@ -64,10 +76,7 @@
       'settings_window.encryption_title', 'settings_window.enable_encryption',
       'security.pre_shared_password', 'security.password_set',
       'security.no_password', 'settings_window.password_hint',
-      'settings_window.encryption_hint', 'settings_window.notify_title',
-      'settings.sound', 'settings_window.notify_device_connect',
-      'settings_window.notify_transfer', 'settings_window.notify_pairing',
-      'settings_window.notify_sync', 'settings_window.certs_title',
+      'settings_window.encryption_hint', 'settings_window.certs_title',
       'settings_window.certs_empty', 'settings_window.save_security',
     ],
     advanced: [
@@ -75,7 +84,7 @@
       'settings_window.history_max_age', 'settings_window.sync_debounce',
       'settings_window.poll_interval', 'settings_window.receive_dir',
       'settings_window.transfer_timeout', 'settings_window.max_reconnect',
-      'settings_window.log_level', 'settings_window.enable_notifications',
+      'settings_window.log_level',
       'settings_window.clipboard_behavior', 'settings_window.paste_to_top',
       'settings_window.low_memory_mode', 'settings_window.retry_capture',
       'settings_window.source_tracking', 'settings_window.plain_text_only',
@@ -92,6 +101,9 @@
       'settings.backup_list', 'settings.restore_backup',
       'settings.open_data_folder', 'settings.open_backups_folder',
       'settings.data_dir', 'settings.favorites_path', 'settings.save_data_paths',
+      // Danger zone merged into data management.
+      'settings_window.danger_zone', 'settings_window.danger_zone_desc',
+      'settings_window.restart_app', 'settings_window.factory_reset',
     ],
     aiconfig: [
       'settings_nav.aiconfig', 'settings_window.aiconfig_desc',
@@ -384,7 +396,9 @@
         };
         return [
           mk('appearance',  this.t('settings_nav.appearance')),
+          mk('preferences', this.t('settings.preferences')),
           mk('network',     this.t('settings_nav.network')),
+          mk('remote',      this.t('settings_nav.remote_sync')),
           mk('web',         this.t('settings_nav.web_companion')),
           mk('translation', this.t('settings_nav.translation')),
           mk('filter',      this.t('settings_nav.filter')),
@@ -394,7 +408,6 @@
           mk('data',        this.t('settings.data')),
           mk('aiconfig',    this.t('settings_nav.aiconfig')),
           mk('about',       this.t('settings_nav.about')),
-          mk('danger',      this.t('settings_window.danger_zone')),
         ];
       },
 
@@ -593,7 +606,7 @@
           .then(function (res) {
             self.brokersSaving = false;
             if (res && res.updated) self.store.mergeSettings(res.updated);
-            self.dirtySections['network'] = false;
+            self.dirtySections['remote'] = false;
             self.relayBrokersText = brokers.join('\n');
             self.store.showToast(self.t('settings.relay_brokers_saved'), 2500);
           })
@@ -710,10 +723,6 @@
         self.securitySaving = true;
         var payload = {
           encryption_enabled: self.encryptionEnabled,
-          notify_device_connect: self.notifyDeviceConnect,
-          notify_transfer: self.notifyTransfer,
-          notify_pairing: self.notifyPairing,
-          notify_sync: self.notifySync,
         };
         if (self.passwordValue) {
           payload.password = self.passwordValue;
@@ -942,7 +951,6 @@
           transfer_timeout: parseInt(self.transferTimeout, 10) || 300,
           max_reconnect_attempts: parseInt(self.maxReconnect, 10) || 10,
           log_level: self.logLevel,
-          notifications_enabled: self.notificationsEnabled,
           paste_to_top: self.pasteToTop,
           low_memory_mode: self.lowMemory,
           retry_capture_enabled: self.retryCapture,
@@ -1249,6 +1257,25 @@
           });
       },
 
+      // Notification toggles (Preferences section): each saves immediately,
+      // mirroring the auto-start / sound toggles — no staged save button in
+      // this section. `field` is the local data key, `key` the settings key.
+      toggleNotify: function (field, key) {
+        var self = this;
+        this[field] = !this[field];
+        var patch = {};
+        patch[key] = this[field];
+        ClipsyncAPI.updateSettings(patch)
+          .then(function (res) {
+            if (res && res.updated) self.store.mergeSettings(res.updated);
+          })
+          .catch(function () {
+            // Revert so the UI stays truthful to the server setting.
+            self[field] = !self[field];
+            self.store.showToast(self.t('dialog.failed'), 2000);
+          });
+      },
+
       toggleAutoStart: function () {
         var self = this;
         this.autoStart = !this.autoStart;
@@ -1513,7 +1540,7 @@
       // ── Staged-section dirty tracking ────────────────────────────
       port: function () { this.markDirty('network'); },
       serviceType: function () { this.markDirty('network'); },
-      relayBrokersText: function () { this.markDirty('network'); },
+      relayBrokersText: function () { this.markDirty('remote'); },
       webEnabled: function () { this.markDirty('web'); },
       webPort: function () { this.markDirty('web'); },
       webHistoryLimit: function () { this.markDirty('web'); },
@@ -1530,10 +1557,7 @@
       appFilterList: function () { this.markDirty('filter'); },
       encryptionEnabled: function () { this.markDirty('security'); },
       passwordValue: function () { this.markDirty('security'); },
-      notifyDeviceConnect: function () { this.markDirty('security'); },
-      notifyTransfer: function () { this.markDirty('security'); },
-      notifyPairing: function () { this.markDirty('security'); },
-      notifySync: function () { this.markDirty('security'); },
+      // Notification toggles save immediately (toggleNotify) — not staged.
       historyMax: function () { this.markDirty('advanced'); },
       historyMaxAgeDays: function () { this.markDirty('advanced'); },
       syncDebounce: function () { this.markDirty('advanced'); },
@@ -1542,7 +1566,6 @@
       transferTimeout: function () { this.markDirty('advanced'); },
       maxReconnect: function () { this.markDirty('advanced'); },
       logLevel: function () { this.markDirty('advanced'); },
-      notificationsEnabled: function () { this.markDirty('advanced'); },
       pasteToTop: function () { this.markDirty('advanced'); },
       lowMemory: function () { this.markDirty('advanced'); },
       retryCapture: function () { this.markDirty('advanced'); },
@@ -1608,7 +1631,7 @@
               '<div class="settings-dialog__content">' +
                 '<p v-if="searchNoMatches" class="settings-hint" style="padding:8px 0">{{ t(\'settings.search_no_matches\') }}</p>' +
 
-                '<!-- ═══════ Appearance ═══════ -->' +
+                '<!-- ═══════ Appearance ═══════ (theme + visual only) -->' +
                 '<section v-if="activeSection === \'appearance\'" class="settings-section">' +
                   '<h3 class="settings-section__title">{{ t(\'settings.appearance\') }}</h3>' +
                   '<div class="settings-theme-row">' +
@@ -1621,15 +1644,28 @@
                     '</button>' +
                   '</div>' +
 
-                  '<h3 class="settings-section__title" style="margin-top:24px">{{ t(\'settings.language\') }}</h3>' +
+                  '<h3 class="settings-section__title settings-section__title--sub" style="margin-top:24px">{{ t(\'settings.animation\') }}</h3>' +
+                  '<div class="settings-toggle-row">' +
+                    '<span class="settings-toggle-label">{{ t(\'settings.animation\') }}</span>' +
+                    '<button class="settings-toggle" role="switch" :aria-checked="store.animationsEnabled" :aria-label="t(\'settings.animation\')" :class="{ \'settings-toggle--on\': store.animationsEnabled }" @click="toggleAnimation">' +
+                      '<span class="settings-toggle__knob"></span>' +
+                    '</button>' +
+                  '</div>' +
+                '</section>' +
+
+                '<!-- ═══════ Preferences ═══════ (language / system / notifications) -->' +
+                '<section v-if="activeSection === \'preferences\'" class="settings-section">' +
+                  '<h3 class="settings-section__title">{{ t(\'settings.preferences\') }}</h3>' +
+
+                  '<h3 class="settings-section__title settings-section__title--sub">{{ t(\'settings.language\') }}</h3>' +
                   '<select class="settings-select"' +
                     ' :value="currentLocale"' +
                     ' @change="selectLocale($event.target.value)">' +
                     '<option v-for="loc in locales" :key="loc.code" :value="loc.code">{{ loc.label }}</option>' +
                   '</select>' +
-                  '<p class="settings-hint">{{ t(\"settings.language_hint\") }}</p>' +
+                  '<p class="settings-hint">{{ t("settings.language_hint") }}</p>' +
 
-                  '<h3 class="settings-section__title" style="margin-top:24px">{{ t(\'settings.preferences\') }}</h3>' +
+                  '<h3 class="settings-section__title settings-section__title--sub" style="margin-top:24px">{{ t(\'settings_window.system_title\') }}</h3>' +
                   '<div class="settings-toggle-row">' +
                     '<span class="settings-toggle-label">{{ t(\'network.auto_start\') }}</span>' +
                     '<button class="settings-toggle" role="switch" :aria-checked="autoStart" :aria-label="t(\'network.auto_start\')" :class="{ \'settings-toggle--on\': autoStart }" @click="toggleAutoStart">' +
@@ -1638,21 +1674,56 @@
                   '</div>' +
                   '<p class="settings-hint">{{ t(\'settings_window.auto_start_hint\') }}</p>' +
                   '<div class="settings-toggle-row">' +
-                    '<span class="settings-toggle-label">{{ t(\'settings.animation\') }}</span>' +
-                    '<button class="settings-toggle" role="switch" :aria-checked="store.animationsEnabled" :aria-label="t(\'settings.animation\')" :class="{ \'settings-toggle--on\': store.animationsEnabled }" @click="toggleAnimation">' +
-                      '<span class="settings-toggle__knob"></span>' +
-                    '</button>' +
-                  '</div>' +
-                  '<div class="settings-toggle-row">' +
                     '<span class="settings-toggle-label">{{ t(\'settings.ui_mode\') }}</span>' +
                     '<button class="settings-toggle" role="switch" :aria-checked="uiBackend === \'webview\'" :aria-label="t(\'settings.ui_mode\')" :class="{ \'settings-toggle--on\': uiBackend === \'webview\' }" @click="toggleUIMode">' +
                       '<span class="settings-toggle__knob"></span>' +
                     '</button>' +
                   '</div>' +
                   '<p class="settings-hint">{{ t(\'settings_window.ui_backend_hint\') }}</p>' +
+
+                  '<!-- Notifications (moved here from Security; each toggle saves immediately) -->' +
+                  '<h3 class="settings-section__title settings-section__title--sub" style="margin-top:28px">{{ t(\'settings_window.notify_title\') }}</h3>' +
+                  '<p class="settings-hint" style="margin-bottom:8px">{{ t(\'settings_window.notify_desc\') }}</p>' +
+                  '<div class="settings-toggle-row">' +
+                    '<span class="settings-toggle-label"><strong>{{ t(\'settings.sound\') }}</strong></span>' +
+                    '<button class="settings-toggle" role="switch" :aria-checked="store.soundEnabled" :aria-label="t(\'settings.sound\')" :class="{ \'settings-toggle--on\': store.soundEnabled }" @click="toggleSound">' +
+                      '<span class="settings-toggle__knob"></span>' +
+                    '</button>' +
+                  '</div>' +
+                  '<p class="settings-hint" style="margin-bottom:8px">{{ t(\'settings_window.sound_hint\') }}</p>' +
+                  '<div class="settings-toggle-row">' +
+                    '<span class="settings-toggle-label">{{ t(\'settings_window.enable_notifications\') }}</span>' +
+                    '<button class="settings-toggle" role="switch" :aria-checked="notificationsEnabled" :aria-label="t(\'settings_window.enable_notifications\')" :class="{ \'settings-toggle--on\': notificationsEnabled }" @click="toggleNotify(\'notificationsEnabled\', \'notifications_enabled\')">' +
+                      '<span class="settings-toggle__knob"></span>' +
+                    '</button>' +
+                  '</div>' +
+                  '<div class="settings-toggle-row">' +
+                    '<span class="settings-toggle-label">{{ t(\'settings_window.notify_device_connect\') }}</span>' +
+                    '<button class="settings-toggle" role="switch" :aria-checked="notifyDeviceConnect" :aria-label="t(\'settings_window.notify_device_connect\')" :class="{ \'settings-toggle--on\': notifyDeviceConnect }" @click="toggleNotify(\'notifyDeviceConnect\', \'notify_device_connect\')">' +
+                      '<span class="settings-toggle__knob"></span>' +
+                    '</button>' +
+                  '</div>' +
+                  '<div class="settings-toggle-row">' +
+                    '<span class="settings-toggle-label">{{ t(\'settings_window.notify_transfer\') }}</span>' +
+                    '<button class="settings-toggle" role="switch" :aria-checked="notifyTransfer" :aria-label="t(\'settings_window.notify_transfer\')" :class="{ \'settings-toggle--on\': notifyTransfer }" @click="toggleNotify(\'notifyTransfer\', \'notify_transfer\')">' +
+                      '<span class="settings-toggle__knob"></span>' +
+                    '</button>' +
+                  '</div>' +
+                  '<div class="settings-toggle-row">' +
+                    '<span class="settings-toggle-label">{{ t(\'settings_window.notify_pairing\') }}</span>' +
+                    '<button class="settings-toggle" role="switch" :aria-checked="notifyPairing" :aria-label="t(\'settings_window.notify_pairing\')" :class="{ \'settings-toggle--on\': notifyPairing }" @click="toggleNotify(\'notifyPairing\', \'notify_pairing\')">' +
+                      '<span class="settings-toggle__knob"></span>' +
+                    '</button>' +
+                  '</div>' +
+                  '<div class="settings-toggle-row">' +
+                    '<span class="settings-toggle-label">{{ t(\'settings_window.notify_sync\') }}</span>' +
+                    '<button class="settings-toggle" role="switch" :aria-checked="notifySync" :aria-label="t(\'settings_window.notify_sync\')" :class="{ \'settings-toggle--on\': notifySync }" @click="toggleNotify(\'notifySync\', \'notify_sync\')">' +
+                      '<span class="settings-toggle__knob"></span>' +
+                    '</button>' +
+                  '</div>' +
                 '</section>' +
 
-                '<!-- ═══════ Network ═══════ -->' +
+                '<!-- ═══════ Network ═══════ (LAN only) -->' +
                 '<section v-if="activeSection === \'network\'" class="settings-section">' +
                   '<h3 class="settings-section__title">{{ t(\'network.connection\') }}</h3>' +
                   '<div class="settings-field">' +
@@ -1672,20 +1743,19 @@
                   '<button class="settings-btn settings-btn--accent" @click="saveNetwork" :disabled="networkSaving" style="width:100%;margin-top:8px">' +
                     '{{ networkSaving ? \'...\' : t(\'settings_window.save_network\') }}' +
                   '</button>' +
+                '</section>' +
 
-                  '<!-- Internet (cross-network) sync -->' +
-                  '<h3 class="settings-section__title settings-section__title--sub" style="margin-top:28px">{{ t(\'settings_window.internet_sync_title\') }}</h3>' +
+                '<!-- ═══════ Remote Sync ═══════ (internet / cross-network sync) -->' +
+                '<section v-if="activeSection === \'remote\'" class="settings-section">' +
+                  '<h3 class="settings-section__title">{{ t(\'settings_nav.remote_sync\') }}</h3>' +
+                  '<p class="settings-hint" style="margin-bottom:12px">{{ t(\'settings_window.internet_sync_hint\') }}</p>' +
 
-                  // Round 15: pairing management moved to the Devices page.
-                  // This section keeps only the toggle, the relay status row,
-                  // and a pointer to the Devices tab.
                   '<div class="settings-toggle-row">' +
                     '<span class="settings-toggle-label">{{ t(\'network.internet_sync\') }}</span>' +
                     '<button class="settings-toggle" role="switch" :aria-checked="internetSyncEnabled" :aria-label="t(\'network.internet_sync\')" :class="{ \'settings-toggle--on\': internetSyncEnabled }" @click="toggleInternetSync">' +
                       '<span class="settings-toggle__knob"></span>' +
                     '</button>' +
                   '</div>' +
-                  '<p class="settings-hint" style="margin-bottom:4px">{{ t(\'settings_window.internet_sync_hint\') }}</p>' +
 
                   // Status line: colored dot + state label, and an actionable
                   // reason when the relay is in the error state (never a bare
@@ -1698,6 +1768,9 @@
                       '</span>' +
                     '</div>' +
                     '<p v-if="relayStateErrorText" class="settings-hint" style="color:var(--clipsync-danger);margin-top:4px">{{ relayStateErrorText }}</p>' +
+                    // Round 15: pairing management moved to the Devices page.
+                    // This section keeps the toggle, the relay status row, and
+                    // a pointer to the Devices tab.
                     '<div class="settings-field__row" style="margin-top:8px">' +
                       '<span class="settings-hint" style="margin:0">{{ t(\'settings_window.netpair_manage_hint\') }}</span>' +
                       '<button class="settings-btn settings-btn--sm settings-btn--accent" @click="goToDevicesTab" style="margin-left:auto;flex-shrink:0">{{ t(\'settings_window.netpair_manage_cta\') }}</button>' +
@@ -1869,7 +1942,7 @@
                   '<h3 class="settings-section__title">{{ t(\'security.title\') }}</h3>' +
                   '<p class="settings-hint" style="margin-bottom:12px">{{ t(\'settings_window.security_desc\') }}</p>' +
 
-                  '<!-- Block 1/3: Encryption -->' +
+                  '<!-- Encryption -->' +
                   '<h3 class="settings-section__title settings-section__title--sub">{{ t(\'settings_window.encryption_title\') }}</h3>' +
                   '<div class="settings-toggle-row">' +
                     '<span class="settings-toggle-label">{{ t(\'settings_window.enable_encryption\') }}</span>' +
@@ -1889,42 +1962,7 @@
                     '<p class="settings-hint" style="margin-top:8px">{{ t(\'settings_window.encryption_hint\') }}</p>' +
                   '</div>' +
 
-                  '<!-- Block 2/3: Notifications -->' +
-                  '<h3 class="settings-section__title settings-section__title--sub" style="margin-top:28px">{{ t(\'settings_window.notify_title\') }}</h3>' +
-                  '<p class="settings-hint" style="margin-bottom:8px">{{ t(\'settings_window.notify_desc\') }}</p>' +
-                  '<div class="settings-toggle-row">' +
-                    '<span class="settings-toggle-label"><strong>{{ t(\'settings.sound\') }}</strong></span>' +
-                    '<button class="settings-toggle" role="switch" :aria-checked="store.soundEnabled" :aria-label="t(\'settings.sound\')" :class="{ \'settings-toggle--on\': store.soundEnabled }" @click="toggleSound">' +
-                      '<span class="settings-toggle__knob"></span>' +
-                    '</button>' +
-                  '</div>' +
-                  '<p class="settings-hint" style="margin-bottom:8px">{{ t(\'settings_window.sound_hint\') }}</p>' +
-                  '<div class="settings-toggle-row">' +
-                    '<span class="settings-toggle-label">{{ t(\'settings_window.notify_device_connect\') }}</span>' +
-                    '<button class="settings-toggle" role="switch" :aria-checked="notifyDeviceConnect" :aria-label="t(\'settings_window.notify_device_connect\')" :class="{ \'settings-toggle--on\': notifyDeviceConnect }" @click="notifyDeviceConnect = !notifyDeviceConnect">' +
-                      '<span class="settings-toggle__knob"></span>' +
-                    '</button>' +
-                  '</div>' +
-                  '<div class="settings-toggle-row">' +
-                    '<span class="settings-toggle-label">{{ t(\'settings_window.notify_transfer\') }}</span>' +
-                    '<button class="settings-toggle" role="switch" :aria-checked="notifyTransfer" :aria-label="t(\'settings_window.notify_transfer\')" :class="{ \'settings-toggle--on\': notifyTransfer }" @click="notifyTransfer = !notifyTransfer">' +
-                      '<span class="settings-toggle__knob"></span>' +
-                    '</button>' +
-                  '</div>' +
-                  '<div class="settings-toggle-row">' +
-                    '<span class="settings-toggle-label">{{ t(\'settings_window.notify_pairing\') }}</span>' +
-                    '<button class="settings-toggle" role="switch" :aria-checked="notifyPairing" :aria-label="t(\'settings_window.notify_pairing\')" :class="{ \'settings-toggle--on\': notifyPairing }" @click="notifyPairing = !notifyPairing">' +
-                      '<span class="settings-toggle__knob"></span>' +
-                    '</button>' +
-                  '</div>' +
-                  '<div class="settings-toggle-row">' +
-                    '<span class="settings-toggle-label">{{ t(\'settings_window.notify_sync\') }}</span>' +
-                    '<button class="settings-toggle" role="switch" :aria-checked="notifySync" :aria-label="t(\'settings_window.notify_sync\')" :class="{ \'settings-toggle--on\': notifySync }" @click="notifySync = !notifySync">' +
-                      '<span class="settings-toggle__knob"></span>' +
-                    '</button>' +
-                  '</div>' +
-
-                  '<!-- Block 3/3: Certificates -->' +
+                  '<!-- Trusted devices / certificates -->' +
                   '<div style="display:flex;align-items:center;justify-content:space-between;margin-top:28px">' +
                     '<h3 class="settings-section__title settings-section__title--sub" style="margin:0">{{ t(\'settings_window.certs_title\') }}</h3>' +
                     '<button class="settings-btn settings-btn--sm" @click="loadCerts" :disabled="certsLoading">{{ t(\'ui.refresh\') }}</button>' +
@@ -1990,12 +2028,6 @@
                     '<select class="settings-select" v-model="logLevel">' +
                       '<option v-for="lvl in logLevelOptions" :key="lvl" :value="lvl">{{ lvl }}</option>' +
                     '</select>' +
-                  '</div>' +
-                  '<div class="settings-toggle-row">' +
-                    '<span class="settings-toggle-label">{{ t(\'settings_window.enable_notifications\') }}</span>' +
-                    '<button class="settings-toggle" role="switch" :aria-checked="notificationsEnabled" :aria-label="t(\'settings_window.enable_notifications\')" :class="{ \'settings-toggle--on\': notificationsEnabled }" @click="notificationsEnabled = !notificationsEnabled">' +
-                      '<span class="settings-toggle__knob"></span>' +
-                    '</button>' +
                   '</div>' +
 
                   '<h4 style="font-size:12px;color:var(--clipsync-fg-muted);margin:16px 0 8px">{{ t(\'settings_window.clipboard_behavior\') }}</h4>' +
@@ -2119,6 +2151,18 @@
                   '<button class="settings-btn settings-btn--accent" @click="saveDataPaths" :disabled="dataSaving" style="width:100%;margin-top:8px">' +
                     '{{ dataSaving ? \'...\' : t(\'settings.save_data_paths\') }}' +
                   '</button>' +
+
+                  '<!-- Danger zone (merged from the old Danger tab) -->' +
+                  '<h3 class="settings-section__title settings-section__title--sub" style="margin-top:28px;color:var(--clipsync-danger)">{{ t(\'settings_window.danger_zone\') }}</h3>' +
+                  '<p class="settings-hint" style="margin-bottom:12px">{{ t(\'settings_window.danger_zone_desc\') }}</p>' +
+                  '<div style="display:flex;flex-direction:column;gap:8px">' +
+                    '<button class="settings-btn" @click="restartApp" :disabled="restarting" style="width:100%">' +
+                      '{{ restarting ? \'...\' : t(\'settings_window.restart_app\') }}' +
+                    '</button>' +
+                    '<button class="settings-btn" @click="factoryReset" :disabled="resetting" style="width:100%;border-color:var(--clipsync-danger);color:var(--clipsync-danger)">' +
+                      '{{ resetting ? \'...\' : t(\'settings_window.factory_reset\') }}' +
+                    '</button>' +
+                  '</div>' +
                 '</section>' +
 
                 '<!-- ═══════ AI Config (round 12) ═══════ -->' +
@@ -2188,20 +2232,6 @@
                     '{{ updateDownloading ? \'...\' : t(\'settings_window.update_download\') }}' +
                   '</button>' +
                   '<p class="settings-hint" style="margin-top:8px">{{ t(\'settings_window.update_hint\') }}</p>' +
-                '</section>' +
-
-                '<!-- ═══════ Danger Zone ═══════ -->' +
-                '<section v-if="activeSection === \'danger\'" class="settings-section">' +
-                  '<h3 class="settings-section__title" style="color:var(--clipsync-danger)">{{ t(\'settings_window.danger_zone\') }}</h3>' +
-                  '<p class="settings-hint" style="margin-bottom:12px">{{ t(\'settings_window.danger_zone_desc\') }}</p>' +
-                  '<div style="display:flex;flex-direction:column;gap:8px">' +
-                    '<button class="settings-btn" @click="restartApp" :disabled="restarting" style="width:100%">' +
-                      '{{ restarting ? \'...\' : t(\'settings_window.restart_app\') }}' +
-                    '</button>' +
-                    '<button class="settings-btn" @click="factoryReset" :disabled="resetting" style="width:100%;border-color:var(--clipsync-danger);color:var(--clipsync-danger)">' +
-                      '{{ resetting ? \'...\' : t(\'settings_window.factory_reset\') }}' +
-                    '</button>' +
-                  '</div>' +
                 '</section>' +
 
               '</div>' +
