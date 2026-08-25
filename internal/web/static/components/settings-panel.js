@@ -25,7 +25,7 @@
     ],
     network: [
       'network.connection', 'network.tcp_port', 'settings_window.port_hint',
-      'network.relay_url', 'settings_window.relay_hint', 'network.service_type',
+      'network.service_type',
       'settings_window.service_type_hint', 'network.local_address',
       'settings_window.save_network',
       'settings_window.internet_sync_title', 'network.internet_sync',
@@ -125,7 +125,6 @@
 
         // Network
         port: '',
-        relayUrl: '',
         autoStart: false,
         serviceType: '',
 
@@ -459,7 +458,6 @@
         this._skipDirty = true;
         var s = this.store.settingsCache || {};
         if (s.port !== undefined) this.port = String(s.port);
-        if (s.relay_url !== undefined) this.relayUrl = s.relay_url || '';
         if (s.auto_start !== undefined) this.autoStart = !!s.auto_start;
         if (s.service_type !== undefined) this.serviceType = s.service_type || '';
         if (s.internet_sync_enabled !== undefined) this.internetSyncEnabled = !!s.internet_sync_enabled;
@@ -528,7 +526,6 @@
         var portChanged = String(cache.port) !== String(self.port);
         ClipsyncAPI.updateSettings({
           port: parseInt(self.port, 10) || 53317,
-          relay_url: self.relayUrl,
           service_type: (self.serviceType || '_clipsync._tcp.local.').trim(),
         }).then(function (res) {
           if (res && res.updated) self.store.mergeSettings(res.updated);
@@ -1467,7 +1464,6 @@
 
       // ── Staged-section dirty tracking ────────────────────────────
       port: function () { this.markDirty('network'); },
-      relayUrl: function () { this.markDirty('network'); },
       serviceType: function () { this.markDirty('network'); },
       relayBrokersText: function () { this.markDirty('network'); },
       webEnabled: function () { this.markDirty('web'); },
@@ -1617,11 +1613,6 @@
                     '<label class="settings-field__label">{{ t(\'network.tcp_port\') }}</label>' +
                     '<input type="number" class="settings-input" v-model="port" min="1024" max="65535" placeholder="53317">' +
                     '<span class="settings-hint">{{ t(\'settings_window.port_hint\') }}</span>' +
-                  '</div>' +
-                  '<div class="settings-field">' +
-                    '<label class="settings-field__label">{{ t(\'network.relay_url\') }}</label>' +
-                    '<input type="text" class="settings-input" v-model="relayUrl" :placeholder="t(\'settings_window.relay_placeholder\')">' +
-                    '<span class="settings-hint">{{ t(\'settings_window.relay_hint\') }}</span>' +
                   '</div>' +
                   '<div class="settings-field">' +
                     '<label class="settings-field__label">{{ t(\'network.service_type\') }}</label>' +

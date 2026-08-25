@@ -5,6 +5,12 @@ All notable changes to ClipSync are documented in this file.
 ## [Unreleased]
 
 ### Internet sync
+- **Chat now works across the internet.** Start a conversation with an internet-paired device even when it isn't on your network — text, typing indicator and session state travel through the relay. Delivery is LAN-first, so a device reachable both ways gets each message exactly once.
+- **One device, one card, both worlds.** Chat targets and the devices panel deduplicate LAN + internet entries: a machine on both networks appears once, with a 🌐 badge and (for LAN cards) your alias shown instead of its raw name. The chat picker lists internet-only devices with their live online state.
+- Removed the dead "relay URL" field from web settings (the editable broker list is the real setting); un-pairing now broadcasts so every open tab drops the device immediately.
+- Integration audit pinned the interactions: dual-path delivery dedupes to one history entry, paused/timed-paused sync halts internet mirroring too, and internet-arrived content follows the identical notification/history path as LAN.
+
+### Internet sync
 - **Internet pairing moved into the Devices page** as a first-class device-management section (no longer buried in Settings → Network): a numbered guide, generate/copy/regenerate the pairing code, type-to-pair with inline errors, and a per-device list with **rename-to-alias** (persisted), **online / last-synced status**, and **unpair** (single-sided, LAN pairing unaffected).
 - **Internet-presence badges everywhere a device appears**: the local device shows a 🌐 "internet online" badge when the relay is up, and any LAN device that is also internet-paired carries a 🌐 badge (online/offline). One device card, both reachability indicators.
 - The relay now **unsubscribes** channels on unpair/refresh — an unpaired peer can no longer keep delivering frames because its topic stayed subscribed.

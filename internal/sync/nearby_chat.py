@@ -297,7 +297,11 @@ class ChatManager:
         if send_fn is None:
             return False
         try:
-            data = encode_frame(payload)
+            # Carry the real device id in the frame: the LAN transport infers
+            # the sender from the connection, but a relay-mirrored copy has no
+            # connection — the receiving host attributes it via
+            # ``source_device`` (Round 16 chat-over-internet).
+            data = encode_frame(payload, source_device=self._device_id)
         except Exception:
             logger.debug("chat: encode failed for %s", payload.get("msg_type"), exc_info=True)
             return False

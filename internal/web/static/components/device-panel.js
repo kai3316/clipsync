@@ -150,6 +150,7 @@
             '<span class="netpair-overview__state">{{ t(relayStateKey) }}</span>' +
             '<span class="netpair-overview__count">{{ t(\'devices.netpair_overview_paired\', { count: netpairPairedCount }) }}</span>' +
           '</div>' +
+          '<div class="netpair-privacy">🔒 {{ t(\'settings_window.internet_sync_hint\') }}</div>' +
 
           '<div v-if="netpairLoading" class="netpair-loading">{{ t(\'ui.loading\') }}</div>' +
 
@@ -267,7 +268,7 @@
             '</div>' +
             '<div v-for="dev in onlineRemoteDevices" :key="dev.device_id" class="device-internet-wrap">' +
               '<span v-if="netpairPeerFor(dev.device_id)" class="netpair-card-badge" :class="netpairPeerFor(dev.device_id).online ? \'netpair-card-badge--online\' : \'netpair-card-badge--offline\'" :title="t(\'devices.netpair_also_internet\')">🌐 {{ netpairPeerFor(dev.device_id).online ? t(\'devices.netpair_online\') : t(\'devices.netpair_offline\') }}</span>' +
-              '<device-card :device="dev"></device-card>' +
+              '<device-card :device="devWithAlias(dev)"></device-card>' +
             '</div>' +
           '</div>' +
 
@@ -279,7 +280,7 @@
             '</div>' +
             '<div v-for="dev in pairedOfflineDevices" :key="dev.device_id" class="device-internet-wrap">' +
               '<span v-if="netpairPeerFor(dev.device_id)" class="netpair-card-badge" :class="netpairPeerFor(dev.device_id).online ? \'netpair-card-badge--online\' : \'netpair-card-badge--offline\'" :title="t(\'devices.netpair_also_internet\')">🌐 {{ netpairPeerFor(dev.device_id).online ? t(\'devices.netpair_online\') : t(\'devices.netpair_offline\') }}</span>' +
-              '<device-card :device="dev"></device-card>' +
+              '<device-card :device="devWithAlias(dev)"></device-card>' +
             '</div>' +
           '</div>' +
 
@@ -291,7 +292,7 @@
             '</div>' +
             '<div v-for="dev in discoveredDevices" :key="dev.device_id" class="device-internet-wrap">' +
               '<span v-if="netpairPeerFor(dev.device_id)" class="netpair-card-badge" :class="netpairPeerFor(dev.device_id).online ? \'netpair-card-badge--online\' : \'netpair-card-badge--offline\'" :title="t(\'devices.netpair_also_internet\')">🌐 {{ netpairPeerFor(dev.device_id).online ? t(\'devices.netpair_online\') : t(\'devices.netpair_offline\') }}</span>' +
-              '<device-card :device="dev"></device-card>' +
+              '<device-card :device="devWithAlias(dev)"></device-card>' +
             '</div>' +
           '</div>' +
 
@@ -537,6 +538,16 @@
           if (String(peers[i].peer_id) === String(deviceId)) return peers[i];
         }
         return null;
+      },
+      // A LAN device that is ALSO internet-paired shows the user's alias as
+      // its card name (same name as the internet-pair list) so the two lists
+      // never disagree about what this device is called.
+      devWithAlias: function (dev) {
+        var peer = this.netpairPeerFor(dev.device_id);
+        if (!peer || !peer.alias) return dev;
+        var copy = Object.assign({}, dev);
+        copy.device_name = peer.alias;
+        return copy;
       },
 
       shortId: function (id) {

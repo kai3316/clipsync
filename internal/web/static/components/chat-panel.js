@@ -37,8 +37,57 @@
     },
 
     computed: {
+      // LAN chat targets, each augmented with `internet` when the SAME peer
+      // is also internet-paired — a dual-online device appears once (under
+      // LAN) with a 🌐 badge instead of twice.  The name prefers the internet
+      // alias (alias||name) so the target label matches the Devices page.
       deviceList: function () {
-        return this.chatDevices || [];
+        var lan = this.chatDevices || [];
+        var net = this.store.internetPairPeers || [];
+        var out = [];
+        for (var i = 0; i < lan.length; i++) {
+          var d = lan[i];
+          var netPeer = null;
+          for (var j = 0; j < net.length; j++) {
+            if (String(net[j].peer_id) === String(d.peer_id)) {
+              netPeer = net[j];
+              break;
+            }
+          }
+          out.push(Object.assign({}, d, netPeer ? {
+            internet: true,
+            internetOnline: !!netPeer.online,
+            name: netPeer.alias || d.name,
+          } : {}));
+        }
+        return out;
+      },
+
+      // Internet-ONLY chat targets: internet-paired peers that are NOT also
+      // listed by /api/chat/devices (deduped against deviceList).  Rendered
+      // under the "Internet devices" group.  A peer whose `paired` flag is
+      // explicitly false is a stale/in-progress row, not a chat target.
+      internetDeviceList: function () {
+        var lan = this.chatDevices || [];
+        var lanIds = {};
+        for (var i = 0; i < lan.length; i++) lanIds[String(lan[i].peer_id)] = true;
+        var out = [];
+        var net = this.store.internetPairPeers || [];
+        for (var j = 0; j < net.length; j++) {
+          var p = net[j];
+          if (!p || p.peer_id === undefined || p.peer_id === null) continue;
+          if (p.paired === false) continue;
+          if (lanIds[String(p.peer_id)]) continue;
+          out.push({
+            peer_id: p.peer_id,
+            name: p.alias || p.name || p.peer_id,
+            paired: true,
+            online: !!p.online,
+            internet: true,
+            isInternetOnly: true,
+          });
+        }
+        return out;
       },
 
       activeSession: function () {
@@ -127,6 +176,13 @@
       this._injectTypingStyle();
       this.loadDevices();
       this.loadSessions();
+      // Internet-paired peers live in the store (kept live by WS + the
+      // Devices page), but this panel may mount before Devices is ever
+      // opened — fetch the pairing status once so the "Internet devices"
+      // group is populated.  Fully defensive: older backend → empty list.
+      if (this.store.fetchInternetPairStatus) {
+        this.store.fetchInternetPairStatus();
+      }
       // A session may already be open (e.g. restored by the app entry).
       if (this.store.activeChatSession) {
         this.loadMessages();
@@ -143,22 +199,44 @@
           '<div v-if="devicesLoading" class="chat-skeleton">' +
             '<div class="skeleton-card animate-shimmer"></div>' +
           '</div>' +
-          '<div v-else-if="deviceList.length === 0" class="chat-side-empty">' +
-            '{{ t(\'chat.empty_no_devices\') }}' +
-          '</div>' +
-          '<div v-else class="chat-device-list">' +
-            '<div v-for="d in deviceList" :key="d.peer_id" class="chat-device-row">' +
-              '<div class="chat-device-row__info">' +
-                '<span class="chat-device-row__name">{{ d.name || d.peer_id }}</span>' +
-                '<span class="badge" :class="d.paired ? \'chat-badge--paired\' : \'chat-badge--unpaired\'">' +
-                  '{{ d.paired ? t(\'chat.paired_tag\') : t(\'chat.unpaired_tag\') }}' +
-                '</span>' +
-              '</div>' +
-              '<button class="chat-mini-btn chat-mini-btn--accent" :disabled="inviteBusy === d.peer_id" @click="startChat(d)">' +
-                '{{ inviteBusy === d.peer_id ? \'...\' : t(\'chat.start\') }}' +
-              '</button>' +
+          '<template v-else>' +
+            '<div v-if="deviceList.length === 0 && internetDeviceList.length === 0" class="chat-side-empty">' +
+              '{{ t(\'chat.empty_no_devices\') }}' +
             '</div>' +
-          '</div>' +
+            '<div v-else class="chat-device-list">' +
+              '<!-- LAN targets (a dual-online device appears here with a 🌐 badge, never twice) -->' +
+              '<div v-for="d in deviceList" :key="d.peer_id" class="chat-device-row">' +
+                '<div class="chat-device-row__info">' +
+                  '<div class="chat-device-row__top">' +
+                    '<span class="chat-device-row__name">{{ d.name || d.peer_id }}</span>' +
+                    '<span v-if="d.internet" class="badge chat-badge--internet" :title="t(\'devices.netpair_also_internet\')">🌐 {{ d.internetOnline ? t(\'devices.netpair_online\') : t(\'devices.netpair_offline\') }}</span>' +
+                  '</div>' +
+                  '<span class="badge" :class="d.paired ? \'chat-badge--paired\' : \'chat-badge--unpaired\'">' +
+                    '{{ d.paired ? t(\'chat.paired_tag\') : t(\'chat.unpaired_tag\') }}' +
+                  '</span>' +
+                '</div>' +
+                '<button class="chat-mini-btn chat-mini-btn--accent" :disabled="inviteBusy === d.peer_id" @click="startChat(d)">' +
+                  '{{ inviteBusy === d.peer_id ? \'...\' : t(\'chat.start\') }}' +
+                '</button>' +
+              '</div>' +
+              '<!-- Internet-only targets -->' +
+              '<template v-if="internetDeviceList.length > 0">' +
+                '<div class="chat-subheader">🌐 {{ t(\'chat.internet_devices_header\') }}</div>' +
+                '<div v-for="p in internetDeviceList" :key="p.peer_id" class="chat-device-row">' +
+                  '<div class="chat-device-row__info">' +
+                    '<div class="chat-device-row__top">' +
+                      '<span class="chat-device-row__dot" :class="p.online ? \'chat-session-row__dot--on\' : \'chat-session-row__dot--off\'"></span>' +
+                      '<span class="chat-device-row__name">{{ p.name || p.peer_id }}</span>' +
+                    '</div>' +
+                    '<span v-if="!p.online" class="chat-device-row__hint">{{ t(\'chat.internet_offline_hint\') }}</span>' +
+                  '</div>' +
+                  '<button class="chat-mini-btn chat-mini-btn--accent" :disabled="inviteBusy === p.peer_id" @click="startChat(p)">' +
+                    '{{ inviteBusy === p.peer_id ? \'...\' : t(\'chat.start\') }}' +
+                  '</button>' +
+                '</div>' +
+              '</template>' +
+            '</div>' +
+          '</template>' +
 
           '<div class="section-header">💬 {{ t(\'chat.sessions_header\') }}</div>' +
           '<div v-if="sessionsLoading" class="chat-skeleton">' +
@@ -172,10 +250,11 @@
               ' :class="{ \'chat-session-row--active\': store.activeChatSession === s.session_id }"' +
               ' @click="openSession(s)" @contextmenu.prevent="openSessionMenu(s, $event)">' +
               '<span class="chat-session-row__dot"' +
-                ' :class="s.online ? \'chat-session-row__dot--on\' : \'chat-session-row__dot--off\'"></span>' +
+                ' :class="sessionOnline(s) ? \'chat-session-row__dot--on\' : \'chat-session-row__dot--off\'"></span>' +
               '<div class="chat-session-row__body">' +
                 '<div class="chat-session-row__top">' +
-                  '<span class="chat-session-row__name">{{ s.peer_name || s.peer_id }}</span>' +
+                  '<span class="chat-session-row__name">{{ chatPeerName(s.peer_id, s.peer_name) }}</span>' +
+                  '<span v-if="internetPeerFor(s.peer_id)" class="chat-session-row__net" :title="t(\'devices.netpair_also_internet\')">🌐</span>' +
                   '<span class="chat-session-row__time">{{ formatTime(s.last_activity_ts) }}</span>' +
                 '</div>' +
                 '<div class="chat-session-row__bottom">' +
@@ -203,7 +282,7 @@
             '<!-- Incoming invite banner -->' +
             '<div v-if="isInvitedSession" class="chat-invite-banner">' +
               '<div class="chat-invite-banner__title">{{ t(\'chat.invite_banner_title\') }}</div>' +
-              '<div class="chat-invite-banner__peer">{{ activeSession.peer_name }}</div>' +
+              '<div class="chat-invite-banner__peer">{{ chatPeerName(activeSession.peer_id, activeSession.peer_name) }}</div>' +
               '<div class="chat-invite-banner__fp">{{ t(\'chat.invite_fingerprint\') }}: {{ activeSession.fingerprint_short }}</div>' +
               '<div class="chat-invite-banner__actions">' +
                 '<button class="chat-action-btn chat-action-btn--accept" :disabled="!!inviteBusy" @click="respondInvite(\'accept\')">{{ t(\'chat.accept\') }}</button>' +
@@ -212,7 +291,7 @@
             '</div>' +
 
             '<div class="chat-conv-header">' +
-              '<span class="chat-conv-header__name">{{ activeSession.peer_name }}</span>' +
+              '<span class="chat-conv-header__name">{{ chatPeerName(activeSession.peer_id, activeSession.peer_name) }}</span>' +
               '<span class="chat-conv-header__status">{{ sessionStatusLabel(activeSession) }}</span>' +
               '<button class="chat-mini-btn chat-mini-btn--danger" @click="closeSession">{{ t(\'chat.close\') }}</button>' +
             '</div>' +
@@ -441,8 +520,13 @@
               self.loadSessions();
             } else if (res && res.connecting) {
               // The peer is connecting — the session will arrive via a
-              // chat_sessions push. Surface a short "connecting" notice.
-              self.store.showToast(self.t('chat.connecting'), 2000);
+              // chat_sessions push. Surface a short "connecting" notice
+              // (internet-specific for peers started from the 🌐 group).
+              self.store.showToast(
+                device.internet
+                  ? self.t('chat.internet_connecting')
+                  : self.t('chat.connecting'),
+                2000);
             } else if (res && res.ok === false) {
               // Refused invite (rate limit / slots full / peer unreachable) —
               // NOT a connecting wait; name the failure so the user can retry
@@ -753,6 +837,41 @@
 
       /* ── Label helpers ───────────────────────────────────────── */
 
+      // The internet-pair peer whose id matches *peerId* (null when the peer
+      // is not internet-paired).  Mirrors device-panel's netpairPeerFor so
+      // both surfaces agree on the merged identity of a dual-online device.
+      internetPeerFor: function (peerId) {
+        var peers = this.store.internetPairPeers || [];
+        for (var i = 0; i < peers.length; i++) {
+          if (String(peers[i].peer_id) === String(peerId)) return peers[i];
+        }
+        return null;
+      },
+
+      // Session/device display name: an internet alias wins, then the
+      // reported name, then the peer id.  Keeps every chat surface (target
+      // row, session row, conversation header, invite banner) on the same
+      // "alias || name || id" label the Devices page uses.
+      chatPeerName: function (peerId, fallback) {
+        var net = this.internetPeerFor(peerId);
+        if (net) return net.alias || net.name || fallback || peerId;
+        return fallback || peerId;
+      },
+
+      // A session's effective online flag.  An internet-paired session reads
+      // its live relay state from internetPairPeers (kept live by WS) so the
+      // dot is consistent with the Devices page; the peer is reachable when
+      // EITHER the LAN channel or the relay channel is up.
+      sessionOnline: function (s) {
+        var lanOn = !!(s && s.online);
+        var netOn = false;
+        if (s && s.peer_id) {
+          var net = this.internetPeerFor(s.peer_id);
+          if (net) netOn = !!net.online;
+        }
+        return lanOn || netOn;
+      },
+
       sessionStatusLabel: function (s) {
         var st = s && s.status;
         var map = {
@@ -811,7 +930,8 @@
         if (!fmt.name) {
           var sess = this.activeSession;
           if (sess && sess.peer_name) {
-            fmt = Object.assign({}, fmt, { name: sess.peer_name });
+            fmt = Object.assign({}, fmt,
+              { name: this.chatPeerName(sess.peer_id, sess.peer_name) });
           }
         }
         return this.t((entry && entry.text_key) || (entry && entry.text) || '', fmt);

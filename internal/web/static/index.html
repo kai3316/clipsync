@@ -2496,6 +2496,7 @@
       font-size: 13px;
       font-weight: 600;
       color: var(--clipsync-fg);
+      min-width: 0;
       overflow: hidden;
       text-overflow: ellipsis;
       white-space: nowrap;
@@ -2511,6 +2512,50 @@
       background: var(--clipsync-panel-2);
       color: var(--clipsync-fg-muted);
       border: 1px solid var(--clipsync-border);
+    }
+
+    /* Internet fusion (round 16): 🌐 badge on a LAN target that is ALSO an
+       internet-paired peer, the "Internet devices" group header, the online
+       dot + offline hint on internet-only targets, and the small 🌐 marker
+       on session rows for internet peers. */
+    .chat-badge--internet {
+      color: var(--clipsync-accent);
+      background: var(--clipsync-accent-glow);
+      border-color: color-mix(in srgb, var(--clipsync-accent) 25%, transparent);
+    }
+
+    .chat-device-row__top {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      min-width: 0;
+    }
+
+    .chat-device-row__dot {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      flex-shrink: 0;
+    }
+
+    .chat-device-row__hint {
+      font-size: 11px;
+      color: var(--clipsync-fg-muted);
+    }
+
+    .chat-subheader {
+      margin-top: var(--clipsync-space-2);
+      font-size: 11px;
+      font-weight: 700;
+      color: var(--clipsync-fg-muted);
+      text-transform: uppercase;
+      letter-spacing: 0.4px;
+    }
+
+    .chat-session-row__net {
+      font-size: 11px;
+      line-height: 1;
+      flex-shrink: 0;
     }
 
     .chat-mini-btn {
@@ -5677,6 +5722,16 @@
 
     .netpair-overview__count {
       margin-left: auto;
+    }
+
+    /* One-line privacy/security note under the internet-pairing overview
+       (reuses the settings copy: "public relay servers only ever see
+       ciphertext"). Kept to a single muted line — not a FAQ. */
+    .netpair-privacy {
+      font-size: 0.78rem;
+      line-height: 1.5;
+      color: var(--clipsync-fg-muted);
+      margin: 0 0 var(--clipsync-space-2);
     }
 
     .netpair-loading {

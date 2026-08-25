@@ -1364,10 +1364,46 @@ class Application:
         return None
 
     def _chat_send_fn(self, peer_id: str | None):
-        """Build a send closure bound to *peer_id* (broadcast when unknown)."""
+        """Build a send closure bound to *peer_id* (broadcast when unknown).
+
+        The closure sends over the LAN P2P channel and, only when that fails,
+        mirrors the frame to the peer over the public relay — so chat reaches
+        internet-only paired devices (netpair pairing-code peers, or LAN-paired
+        peers that enrolled a relay secret) across networks.  LAN-first avoids
+        delivering the same frame TWICE to a dual-connected peer: chat has no
+        content dedup (unlike clipboard history), so an unconditional relay
+        mirror would append every message twice.  The closure returns whether
+        EITHER path delivered the frame — chat's ``_send_frame`` tests
+        ``result is True`` — so an internet-only peer (LAN send fails) still
+        counts as delivered.  Broadcast (unknown peer) is never relay-mirrored:
+        internet peers are always paired, so an invite to an unpaired LAN
+        device stays LAN-only.
+        """
         if not peer_id:
             return self.transport_mgr.broadcast
-        return (lambda data, pid=peer_id: self.transport_mgr.send_to_peer(pid, data))
+
+        def _send(data: bytes):
+            lan_ok = self.transport_mgr.send_to_peer(peer_id, data)
+            if lan_ok:
+                return True
+            return self._relay_publish_to_peer(data, peer_id)
+        return _send
+
+    def _peer_is_internet_reachable(self, peer_id: str) -> bool:
+        """True when *peer_id* can be reached over the public relay.
+
+        Either a confirmed pairing-code peer (``cfg.netpair_secrets``) or a
+        LAN-paired peer whose relay secret we know (``cfg.peer_relay_secrets``
+        with a paired ``cfg.peers`` entry).  ``_chat_start_session`` uses this
+        to start a chat without a LAN address; ``_relay_publish_to_peer`` is
+        the transport half (it re-derives the channel + key).
+        """
+        if peer_id in (getattr(self.cfg, "netpair_secrets", {}) or {}):
+            return True
+        if peer_id in (getattr(self.cfg, "peer_relay_secrets", {}) or {}):
+            peer = self.cfg.peers.get(peer_id)
+            return peer is not None and getattr(peer, "paired", False)
+        return False
 
     # ── Chat: dashboard passthroughs ─────────────────────────────
 
@@ -1582,6 +1618,19 @@ class Application:
             )
         address, port = self._chat_device_address(peer_id)
         if not address:
+            # Internet-only paired peer (netpair or relay-enrolled): no LAN
+            # address to connect to, but the per-peer send_fn mirrors chat
+            # frames over the public relay — start the session directly so an
+            # internet pairing code alone is enough to open a conversation.
+            if self._peer_is_internet_reachable(peer_id):
+                try:
+                    return self.chat_mgr.start_session(
+                        real_id, peer_name, fingerprint_short or "",
+                        self._chat_send_fn(real_id),
+                    )
+                except Exception:
+                    logger.debug("chat start: relay session failed", exc_info=True)
+                    return None
             logger.warning("chat start: no address for peer %s", peer_id[:12])
             try:
                 self.root.after(0, lambda: self._notify_info(
@@ -2522,10 +2571,11 @@ class Application:
         # must never be routed into clipboard sync or file transfers.
         if msg_type in CHAT_MSG_TYPES:
             raw_payload = getattr(msg, "_raw_payload", {})
-            if peer_id:
-                send_fn = (lambda data, pid=peer_id: self.transport_mgr.send_to_peer(pid, data))
-            else:
-                send_fn = self.transport_mgr.broadcast
+            # Per-peer send closure: LAN P2P + (for internet-paired peers) a
+            # relay mirror, so replies/accepts/pongs back to a remote chat
+            # partner also cross networks.  Empty peer_id (broadcast invites
+            # to unpaired LAN devices) stays a plain LAN broadcast.
+            send_fn = self._chat_send_fn(peer_id)
             try:
                 fp_short = ChatManager.shorten_fingerprint(
                     self.transport_mgr.get_peer_fingerprint(peer_id or ""),
@@ -7393,13 +7443,27 @@ class Application:
         self._send_relay_enroll(peer_id)
 
     def _relay_publish_frame(self, frame_bytes: bytes) -> None:
-        """Mirror an outbound clipboard frame to all enrolled paired peers."""
+        """Mirror an outbound clipboard frame to all enrolled paired peers.
+
+        A device that is BOTH a LAN-paired relay-enroll peer (its secret
+        learned via ``relay_enroll``) AND an internet pairing-code peer
+        (``netpair_secrets``) can be reached over two derived topics.  We
+        publish to exactly one of them — the netpair channel wins when both
+        exist — so the broker and receiver aren't handed the same frame twice
+        (the receiver's content dedup would collapse it, but the duplicate
+        transit is pure waste).  Both ends of a pairing derive the same
+        channel set, so the peer's subscription always covers whichever topic
+        we publish on.
+        """
         transport = self._relay
         if transport is None or not self.cfg.internet_sync_enabled:
             return
+        netpair_secrets = getattr(self.cfg, "netpair_secrets", {}) or {}
         from internal.transport.relay import derive_key, derive_topic
         my_secret = self._ensure_relay_secret()
         for pid, peer_secret in list(self.cfg.peer_relay_secrets.items()):
+            if pid in netpair_secrets:
+                continue  # reached via the netpair channel below — no double send
             peer = self.cfg.peers.get(pid)
             if peer is None or not peer.paired or not peer_secret:
                 continue
@@ -7425,6 +7489,65 @@ class Application:
                                   netpair_key(peer_secret))
             except Exception:
                 logger.debug("netpair publish failed", exc_info=True)
+
+    def _relay_publish_to_peer(self, frame_bytes: bytes, peer_id: str) -> bool:
+        """Mirror one chat frame to a single internet-reachable peer.
+
+        Used by ``_chat_send_fn`` so chat frames reach devices across networks.
+        The peer is keyed by its real device id, which is the dict key in
+        ``cfg.netpair_secrets`` (pairing-code pairs) or ``cfg.peer_relay_secrets``
+        (LAN-paired peers that exchanged relay secrets over the encrypted LAN
+        channel); a netpair entry wins when a peer is both (one publish, not two).
+
+        Returns True only when the frame was actually handed to the relay
+        (``_chat_send_fn`` uses it so an internet-only peer still counts as
+        delivered); anything else — relay absent / ``internet_sync_enabled`` off /
+        unknown or unpaired peer / any failure — is a silent False.
+
+        The frame must already carry ``source_device`` (chat's ``_send_frame``
+        encodes it) so the receiving side can attribute it back to this peer —
+        the relay has no connection object to infer the sender from.
+        """
+        transport = self._relay
+        if transport is None or not self.cfg.internet_sync_enabled:
+            return False
+        if not peer_id:
+            return False
+        # Chat file BYTES ride the compact ``file_chunk`` framing.  Mirroring
+        # those too would deliver each chunk TWICE (LAN + relay) to a
+        # dual-connected peer, inflating the receiver's byte counter and failing
+        # the size check in ChatManager._finalize_receive — keep binary chunks
+        # LAN-only; only text/control chat frames cross the internet.
+        try:
+            from internal.protocol.codec import decode_message
+            if getattr(decode_message(frame_bytes), "msg_type", "") == "file_chunk":
+                return False
+        except Exception:
+            logger.debug("relay publish to peer: frame decode failed",
+                         exc_info=True)
+            return False
+        from internal.transport.relay import (
+            derive_key, derive_topic, netpair_key, netpair_topic,
+        )
+        secret = (getattr(self.cfg, "netpair_secrets", {}) or {}).get(peer_id)
+        if isinstance(secret, str) and secret:
+            topic, key = netpair_topic(secret), netpair_key(secret)
+        else:
+            peer_secret = (
+                getattr(self.cfg, "peer_relay_secrets", {}) or {}).get(peer_id)
+            peer = self.cfg.peers.get(peer_id)
+            if not peer_secret or peer is None \
+                    or not getattr(peer, "paired", False):
+                return False
+            my_secret = self._ensure_relay_secret()
+            topic, key = (derive_topic(my_secret, peer_secret),
+                          derive_key(my_secret, peer_secret))
+        try:
+            return transport.publish(frame_bytes, topic, key) is True
+        except Exception:
+            logger.debug("relay publish to %s failed", str(peer_id)[:12],
+                         exc_info=True)
+            return False
 
     # ---------------------------------------------------- internet pairing
 
@@ -7563,6 +7686,15 @@ class Application:
                 self._relay.refresh_channels()
             except Exception:
                 logger.debug("netpair unpair refresh failed", exc_info=True)
+        # Keep every web tab on this device in step: the acting tab removes the
+        # row via the REST response, but sibling tabs only learn about it
+        # through a WS push (ws.js folds status:"unpaired" into the peer list).
+        try:
+            if getattr(self, "web_server", None) is not None:
+                self.web_server.broadcast(
+                    "netpair_peer", {"peer_id": peer_id, "status": "unpaired"})
+        except Exception:
+            logger.debug("netpair_peer unpair WS broadcast failed", exc_info=True)
         return {"ok": True}, 200
 
     def _send_netpair_hello(self, target_peer_id: str, secret: str) -> None:
