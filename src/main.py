@@ -3230,10 +3230,10 @@ class Application:
                 pass
 
         # AI-config sync (Round 12): the watch list changed via web settings —
-        # recollect and rebroadcast the inventory.  (update_settings only
-        # forwards fields listed in its _MUTABLE_FIELDS; until "ai_config_paths"
-        # is added there, edits arrive through POST /api/aiconfig/paths, which
-        # triggers on_watch_list_changed itself.)
+        # recollect and rebroadcast the inventory.  (The dedicated
+        # POST /api/aiconfig/paths editor also triggers on_watch_list_changed
+        # itself; this branch covers the same field arriving through the
+        # main POST /api/settings form.)
         if "ai_config_paths" in updated and self.aicfg_mgr is not None:
             try:
                 self.aicfg_mgr.on_watch_list_changed()

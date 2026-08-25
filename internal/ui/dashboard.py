@@ -1731,8 +1731,15 @@ class DashboardWindow:
                 child.destroy()
             pending = self._get_pending() if self._get_pending else []
             if pending:
-                for peer_id, code, peer_name, status in pending:
-                    self._create_pending_row(peer_id, code, peer_name, status)
+                for item in pending:
+                    peer_id = item[0]
+                    code = item[1]
+                    peer_name = item[2]
+                    status = item[3]
+                    # The 5th element is the pairing SAS (main.py _get_pending
+                    # appends it); expired rows carry only 4 elements.
+                    sas = item[4] if len(item) > 4 else ""
+                    self._create_pending_row(peer_id, code, peer_name, status, sas)
             else:
                 empty = ctk.CTkLabel(
                     self._pending_frame, text="\U0001F4E8  " + T("empty.no_pending"),
@@ -2030,7 +2037,7 @@ class DashboardWindow:
                 pass
 
     def _create_pending_row(self, peer_id: str, code: str, peer_name: str,
-                            status: str = "pending"):
+                            status: str = "pending", sas: str = ""):
         row = ctk.CTkFrame(self._pending_frame, fg_color=("gray90", "gray20"),
                           corner_radius=8)
         row.pack(fill="x", pady=2)
@@ -2092,6 +2099,24 @@ class DashboardWindow:
             font=ctk.CTkFont(size=20, weight="bold"),
             text_color=ACCENT,
         ).pack(padx=12, pady=6)
+
+        # SAS (Short Authentication String): both devices derive the same code
+        # from their certificate fingerprints, so comparing it out-of-band
+        # before confirming defeats a pairing-code MITM on a public network.
+        # main.py computes it; it is absent for expired rows (or when either
+        # fingerprint is unknown) — then simply omit the row.
+        if sas:
+            ctk.CTkLabel(
+                code_frame, text=T("devices.sas_label") + "  " + sas,
+                font=ctk.CTkFont(size=14, weight="bold"),
+                text_color=("#7D3C98", "#BB8FCE"),
+            ).pack(padx=12, pady=(0, 2))
+            ctk.CTkLabel(
+                code_frame, text=T("devices.sas_verify_hint"),
+                font=ctk.CTkFont(size=10),
+                text_color=("gray55", "gray55"),
+                justify="left",
+            ).pack(padx=12, pady=(0, 6))
 
         # Status / guidance line: what the user should do next.
         if status == "confirmed_waiting":

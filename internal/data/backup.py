@@ -187,6 +187,19 @@ def create_backup(
             "auto_start": cfg.auto_start,
             "filter_enabled_categories": cfg.filter_enabled_categories,
             "relay_url": cfg.relay_url,
+            # Internet (cross-network) relay sync + AI-config watch list: a
+            # backup→restore cycle must not silently drop these (they are
+            # re-applied through the same schema below).  The relay secret and
+            # per-peer secrets ride along so internet sync survives a restore
+            # without requiring re-enrollment over the LAN.
+            "internet_sync_enabled": cfg.internet_sync_enabled,
+            "relay_brokers": list(cfg.relay_brokers),
+            "relay_secret": cfg.relay_secret,
+            "peer_relay_secrets": {
+                k: v for k, v in (cfg.peer_relay_secrets or {}).items()
+                if isinstance(k, str) and isinstance(v, str)
+            },
+            "ai_config_paths": list(cfg.ai_config_paths),
             "history_max_entries": cfg.history_max_entries,
             "history_max_age_days": cfg.history_max_age_days,
             "file_receive_dir": cfg.file_receive_dir,
@@ -435,6 +448,9 @@ _LOG_LEVELS = {"DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"}
 #   ("enum", set, True)  string normalized to upper-case, then checked
 #   ("strlist",)         list of strings, or None (the Config default for
 #                        filter_enabled_categories meaning "all enabled")
+#   ("strlist_nonnull",) list of strings; null is rejected (falls through to
+#                        the field's list default) — used for relay_brokers /
+#                        ai_config_paths whose consumers call list() on them
 #   ("strdict",)         dict with str keys AND str values; non-str pairs are
 #                        dropped (used for the hotkey-id → shortcut map)
 _APPLY_SCHEMA: dict[str, tuple] = {
@@ -445,6 +461,14 @@ _APPLY_SCHEMA: dict[str, tuple] = {
     "auto_start": ("bool",),
     "filter_enabled_categories": ("strlist",),
     "relay_url": ("str",),
+    # Internet relay sync + AI-config watch list — round-trip with the export
+    # added above.  relay_brokers / ai_config_paths are strlist_nonnull so a
+    # hand-edited backup writing null cannot set them to None.
+    "internet_sync_enabled": ("bool",),
+    "relay_brokers": ("strlist_nonnull",),
+    "relay_secret": ("str",),
+    "peer_relay_secrets": ("strdict",),
+    "ai_config_paths": ("strlist_nonnull",),
     "history_max_entries": ("int", 1, 100000),
     "history_max_age_days": ("float",),
     "file_receive_dir": ("str",),
@@ -513,6 +537,15 @@ def _validate_config_value(value: object, rule: tuple):
     if kind == "strlist":
         if value is None:
             return None
+        if not isinstance(value, list) or not all(isinstance(i, str) for i in value):
+            return _SKIP
+        return value
+    if kind == "strlist_nonnull":
+        # Like "strlist" but a null is NOT valid — it falls through to the
+        # field's list default instead of setting cfg.relay_brokers = None
+        # (which would crash the relay startup's list() call on next start).
+        if value is None:
+            return _SKIP
         if not isinstance(value, list) or not all(isinstance(i, str) for i in value):
             return _SKIP
         return value

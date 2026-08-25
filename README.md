@@ -94,6 +94,19 @@ ClipSync 通过**局域网直连**同步剪贴板 — 无需账号、无需云�
 - **进度追踪** — 逐文件进度条，显示实时速率 (Mbps)
 - **速度测试** — 测试已配对设备间的局域网原始吞吐量
 
+### 互联网同步
+
+- **跨网络同步（办公室 ↔ 家里）** — 在设置中开启「互联网同步」，剪贴板文字/小负载即可经免费公共 MQTT/WebSocket 中继跨网同步：零注册、零成本。中继服务器列表默认三个公共 broker，可编辑，自动容灾切换。
+- **端到端加密** — 中继服务器只见密文：密钥由两端设备秘密派生，频道主题不可猜测。局域网直连仍是主路径，中继仅为已配对设备在异网时的镜像通道，双端投递靠去重收敛。
+- **配对时核对安全码** — 配对确认时两端显示同一短安全码（SAS），核对一致后再确认，补上公网下配对码被中间人截获的弱点。
+- 注意：免费公共中继属公共服务，无 SLA；大文件传输与聊天仍走局域网直连，不经过中继。
+
+### AI 配置同步
+
+- **浏览并迁移 AI 工具配置** — 新的「配置」tab 列出已配对设备监视清单中的文件（CLAUDE.md、memory、skills、.mcp.json 等，监视根目录可在设置中编辑），可预览任意文件并拉取到本机。
+- **落地三选一，绝不静默覆盖** — 每次拉取时选择：覆盖 / 另存副本 / 追加合并（md/txt 文本）。清单只含元数据（路径、哈希、大小、时间），文件内容仅在拉取时传输，走既有加密通道。
+- 注意：仅限已配对设备之间；单个文件超过 1MB 会被截断并在界面上标注。
+
 ### Web 伴侣
 
 - 内置 HTTP 服务器，局域网内任意设备可访问
@@ -103,6 +116,7 @@ ClipSync 通过**局域网直连**同步剪贴板 — 无需账号、无需云�
 - 手机与电脑间上传下载文件
 - 可堆叠 toast 通知；历史列表支持键盘导航（↑↓ 选择、Enter 复制、Del 删除）
 - Token 认证（自动生成或自定义）
+- **Web-first 方向** — 新功能只加到 Web 仪表盘；经典 Tk 桌面界面逐步弃用，仅做稳定性修复。手机页面（mobile）与桌面对齐。
 
 ### 附近聊天
 
@@ -260,16 +274,19 @@ internal/
   security/
     encryption.py             #   AES-256-GCM 落盘加密 + PBKDF2
     pairing.py                #   Ed25519 身份, TOFU 配对, 指纹验证
+    fingerprint.py            #   配对 SAS 短安全码派生
   sync/
     manager.py                #   SyncManager: 剪贴板变更 → 编码 → 广播
     file_transfer.py          #   分块文件传输 + ACK 重传
     nearby_chat.py            #   附近聊天：免配对、双向同意、文字/文件
+    ai_config.py              #   AI 配置同步：清单采集 + 选择性拉取
   system/
     hotkey.py                 #   全局热键
     updater.py                #   自动更新检查 + 下载
   transport/
     connection.py             #   TransportManager + PeerConnection (TLS 1.3)
     discovery.py              #   mDNS 服务宣告 + 浏览
+    relay.py                  #   互联网中继 (MQTT/WebSocket, E2E 加密)
   ui/
     dashboard.py              #   主窗口：概览、设备、历史、传输、附近聊天
     settings_window.py        #   设置：网络、外观、Web 伴侣、过滤、安全、高级、日志、关于
@@ -279,9 +296,9 @@ internal/
     server.py                 #   HTTP 服务器 + 鉴权门禁
     routes.py                 #   API 路由分发
     ws.py                     #   WebSocket 实时推送
-    api/                      #   devices/history/favorites/transfer/settings/translate/security
+    api/                      #   devices/history/favorites/transfer/settings/translate/security/aiconfig
     static/                   #   Web 控制面板、手机页、PWA 资源
-tests/                        #   433 个测试覆盖剪贴板、编解码、配置、配对、同步、文件传输、聊天、Web API、跨平台
+tests/                        #   949 个测试覆盖剪贴板、编解码、配置、配对、同步、文件传输、聊天、Web API、跨平台
 ```
 
 ### 数据流

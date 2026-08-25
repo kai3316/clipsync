@@ -4,6 +4,12 @@ All notable changes to ClipSync are documented in this file.
 
 ## [Unreleased]
 
+### Reliability
+- Backups now carry the internet-sync and AI-config settings too (relay brokers, secrets, watch list) — restoring a backup no longer silently drops them.
+
+### Devices & connectivity
+- The desktop pairing dialog now shows the same safety code as the web dashboard, so the match-the-code check works whichever interface you pair from.
+
 ### AI config sync (new)
 - **Browse and migrate AI tool configs across your own devices.** A new "Config" tab shows what each paired device has on its watch list (CLAUDE.md, memory notes, skills, `.mcp.json` — the list is user-editable), letting you preview any file and pull it over, choosing **overwrite / save as a copy / append to Markdown** per pull. Nothing is ever overwritten silently; append only applies to text/Markdown. Inventories carry metadata only (path, hash, size, time) — file content moves only when you request it, over the same encrypted channel you already trust.
 - Watch-list edits broadcast to paired devices automatically; inventories refresh on connect and on change.

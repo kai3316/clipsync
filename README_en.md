@@ -94,6 +94,19 @@ Clips are deduplicated by content hash, not timestamp. Rapid alternating copies 
 - **Progress tracking** — per-file progress bars with speed readout (Mbps)
 - **Speed test** — measure raw LAN throughput between paired devices
 
+### Internet Sync
+
+- **Sync across networks — office ↔ home.** Enable "Internet sync" in settings and clipboard text / small payloads are mirrored over free public MQTT-over-WebSocket relays: zero cost, zero signup. The broker list defaults to three well-known free public services and is editable, with automatic failover.
+- **End-to-end encrypted.** Relays only ever see ciphertext — the key is derived from both devices' secrets and the topic is unguessable. LAN delivery stays primary; the relay is a mirror path for paired peers outside the network, and duplicate-merge collapses double deliveries.
+- **Compare the security code when pairing.** Both devices show the same short safety code (SAS) during pairing confirmation — verify they match before confirming, which closes the pairing-code man-in-the-middle window that matters on the public internet.
+- Note: free public relays are best-effort (no SLA); large file transfers and chat stay on the LAN and don't go through the relay.
+
+### AI Config Sync
+
+- **Browse and migrate AI tool configs across your own devices.** A new "Config" tab lists what each paired device has on its watch list (CLAUDE.md, memory notes, skills, `.mcp.json`, ... — the monitored root folders are editable in settings), letting you preview any file and pull it over.
+- **Never overwritten silently.** Choose per pull: overwrite / save a copy / append to Markdown (text files only). Inventories carry metadata only (path, hash, size, time) — file content moves only when you request it, over the same encrypted channel.
+- Note: paired devices only; single files over 1 MB are truncated with a clear flag.
+
 ### Web Companion
 
 - Built-in HTTP server accessible from any device on the LAN
@@ -103,6 +116,7 @@ Clips are deduplicated by content hash, not timestamp. Rapid alternating copies 
 - Upload and download files between phone and desktop
 - Stackable toast notifications; keyboard navigation in the history list (↑/↓ select, Enter copy, Del delete)
 - Token-based authentication (auto-generated or custom)
+- **Web-first direction** — new features land in the web dashboard only; the classic Tk desktop UI is being phased out (stability fixes only). The mobile page is kept in step with the desktop dashboard.
 
 ### Nearby Chat
 
@@ -260,16 +274,19 @@ internal/
   security/
     encryption.py             #   AES-256-GCM at-rest encryption + PBKDF2
     pairing.py                #   Ed25519 identity, TOFU pairing, fingerprint verification
+    fingerprint.py            #   Pairing SAS short security-code derivation
   sync/
     manager.py                #   SyncManager: clipboard change → encode → broadcast
     file_transfer.py          #   Chunked file transfer with ACK retransmit
     nearby_chat.py            #   Nearby chat: no pairing, two-sided consent, text/files
+    ai_config.py              #   AI config sync: inventory collection + selective pull
   system/
     hotkey.py                 #   Global hotkeys
     updater.py                #   Update check + download
   transport/
     connection.py             #   TransportManager + PeerConnection (TLS 1.3 sockets)
     discovery.py              #   mDNS service advertisement + browsing
+    relay.py                  #   Internet relay (MQTT/WebSocket, E2E encrypted)
   ui/
     dashboard.py              #   Main window: Overview, Devices, History, Transfers, Nearby Chat
     settings_window.py        #   Settings: Network, Appearance, Web Companion, Filter, Security, Advanced, Logs, About
@@ -279,9 +296,9 @@ internal/
     server.py                 #   HTTP server + auth gating
     routes.py                 #   API route dispatch
     ws.py                     #   WebSocket live push
-    api/                      #   devices/history/favorites/transfer/settings/translate/security
+    api/                      #   devices/history/favorites/transfer/settings/translate/security/aiconfig
     static/                   #   Web dashboard, phone pages, PWA assets
-tests/                        #   433 tests covering clipboard, codec, config, pairing, sync, file transfer, chat, web API, cross-platform
+tests/                        #   949 tests covering clipboard, codec, config, pairing, sync, file transfer, chat, web API, cross-platform
 ```
 
 ### Data Flow
