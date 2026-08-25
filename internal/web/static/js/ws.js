@@ -640,6 +640,17 @@ var ClipsyncWS = (function () {
           }
           break;
 
+        case 'aiconfig_file':
+          // Per-file result of an AI-config pull (one event per file). Only
+          // the known status vocabulary is accepted so a malformed payload
+          // can't poison the badge list; store.applyAiConfigFileResult does
+          // the toast + rolling-list bookkeeping.
+          if (data && data.rel_path &&
+              ['saved', 'copied', 'appended', 'error'].indexOf(data.status) !== -1) {
+            store.applyAiConfigFileResult(data);
+          }
+          break;
+
         case 'toast':
           // Server-pushed toast notification
           if (data && data.message) {

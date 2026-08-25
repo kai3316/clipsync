@@ -37,6 +37,7 @@ from internal.i18n import T, set_locale
 from internal.platform.autostart import disable_autostart, enable_autostart, is_autostart_enabled
 from internal.platform.notify import notification_mgr
 from internal.protocol.codec import (
+    AICONFIG_MSG_TYPES,
     CHAT_MSG_TYPES,
     FILE_TRANSFER_MSG_TYPES,
     PAIRING_MSG_TYPES,
@@ -61,6 +62,7 @@ from internal.security.pairing import (
 from internal.security.pairing import (
     fingerprint_pem as _fingerprint_pem,
 )
+from internal.sync.ai_config import AIConfigManager
 from internal.sync.file_transfer import FileTransferManager
 from internal.sync.manager import SyncManager
 from internal.sync.nearby_chat import ChatManager
@@ -482,6 +484,7 @@ class Application:
         self.sync_mgr: SyncManager | None = None
         self.transport_mgr: TransportManager | None = None
         self.file_transfer_mgr: FileTransferManager | None = None
+        self.aicfg_mgr: AIConfigManager | None = None  # Round 12: AI-config sync
         self.discovery: Discovery | None = None
         self.web_server: WebServer | None = None
 
@@ -913,6 +916,26 @@ class Application:
             )
         except Exception:
             logger.debug("Could not set own chat fingerprint", exc_info=True)
+
+        # ── AI-config sync (Round 12) ───────────────────────────
+        # Metadata inventory + selective file pull between paired peers.
+        # Callbacks dereference live state so later transport/web-server
+        # re-creation needs no re-wiring.
+        self.aicfg_mgr = AIConfigManager(
+            self.cfg,
+            send_fn=lambda pid, frame: (
+                self.transport_mgr.send_to_peer(pid, frame)
+                if self.transport_mgr is not None else False
+            ),
+            connected_fn=lambda: (
+                self.transport_mgr.get_connected_peers()
+                if self.transport_mgr is not None else []
+            ),
+            event_fn=self._push_aiconfig_event,
+            save_fn=self._save_cfg_encrypted,
+        )
+        from internal.web.api import aiconfig as _aiconfig_api
+        _aiconfig_api.bind(self.aicfg_mgr)
 
         # ── Discovery ───────────────────────────────────────────
         self.discovery = Discovery(
@@ -2525,6 +2548,11 @@ class Application:
             self._handle_relay_enroll(
                 getattr(msg, "_raw_payload", {}), peer_id)
             return
+        # AI-config sync (Round 12): paired-only inventory / pull frames.
+        if msg_type in AICONFIG_MSG_TYPES:
+            self.aicfg_mgr.handle_message(
+                msg_type, getattr(msg, "_raw_payload", {}), peer_id or "")
+            return
         # "Plain text only": enforce THIS device's preference on incoming
         # clips too (a peer with the toggle off still sends rich text).
         # Stripping before handle_remote_message keeps its dedup bookkeeping
@@ -3201,6 +3229,17 @@ class Application:
             except (TypeError, ValueError):
                 pass
 
+        # AI-config sync (Round 12): the watch list changed via web settings —
+        # recollect and rebroadcast the inventory.  (update_settings only
+        # forwards fields listed in its _MUTABLE_FIELDS; until "ai_config_paths"
+        # is added there, edits arrive through POST /api/aiconfig/paths, which
+        # triggers on_watch_list_changed itself.)
+        if "ai_config_paths" in updated and self.aicfg_mgr is not None:
+            try:
+                self.aicfg_mgr.on_watch_list_changed()
+            except Exception:
+                logger.debug("aiconfig watch-list refresh failed", exc_info=True)
+
         if "transfer_timeout" in updated and self.file_transfer_mgr is not None:
             try:
                 self.file_transfer_mgr._transfer_timeout = max(30.0, float(updated["transfer_timeout"]))
@@ -3613,6 +3652,16 @@ class Application:
                 logger.debug("Internet sync startup failed", exc_info=True)
         updater = threading.Thread(target=self._update_peers_loop, daemon=True)
         updater.start()
+        # AI-config sync (Round 12): collect the watch-list inventory once at
+        # startup; it is broadcast to connected paired peers and re-sent on
+        # each peer connect / watch-list change.
+        if self.aicfg_mgr is not None:
+            try:
+                sent = self.aicfg_mgr.refresh_and_broadcast()
+                if sent:
+                    logger.info("AI-config inventory broadcast to %d peer(s)", sent)
+            except Exception:
+                logger.debug("Startup aiconfig inventory failed", exc_info=True)
 
         logger.info("ClipSync is ready. System tray icon should appear.")
 
@@ -3839,6 +3888,18 @@ class Application:
                     self._notify("notify_device_connect",
                                  T("notify.device_connected_title"),
                                  T("notify.device_connected", name=name))
+                    # AI-config sync: a freshly connected paired peer missed
+                    # our startup inventory broadcast — send it now (the
+                    # transport has no on-connect callback; this 3s poll loop
+                    # is the existing "peer came up" hook).
+                    peer_cfg = self.cfg.peers.get(pid)
+                    if peer_cfg is not None and peer_cfg.paired \
+                            and self.aicfg_mgr is not None:
+                        try:
+                            self.aicfg_mgr.send_inventory_to(pid)
+                        except Exception:
+                            logger.debug("aiconfig inv on connect failed",
+                                         exc_info=True)
                 for pid in prev_connected - connected_set:
                     found = next((p for p in known_peers if p.device_id == pid), None)
                     name = found.device_name if found else pid[:12]
@@ -5433,6 +5494,14 @@ class Application:
                 fn(*args)
         except Exception:
             logger.debug("Failed to push %s to web clients", method_name, exc_info=True)
+
+    def _push_aiconfig_event(self, event: dict) -> None:
+        """Push an AI-config event (e.g. aiconfig_file landing result) to
+        every connected WS client.  Fired from transport reader threads; the
+        WebSocketManager broadcast is thread-safe.  Never raises."""
+        if not isinstance(event, dict):
+            return
+        self._push_web("broadcast", "aiconfig_file", event)
 
 
 

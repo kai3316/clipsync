@@ -88,6 +88,12 @@
       'settings.open_data_folder', 'settings.open_backups_folder',
       'settings.data_dir', 'settings.favorites_path', 'settings.save_data_paths',
     ],
+    aiconfig: [
+      'settings_nav.aiconfig', 'settings_window.aiconfig_desc',
+      'settings_window.aiconfig_paths_label', 'settings_window.aiconfig_paths_hint',
+      'settings_window.aiconfig_path_placeholder', 'settings_window.aiconfig_add_path',
+      'settings_window.save_aiconfig', 'settings_window.aiconfig_save_hint',
+    ],
     about: [
       'settings.about', 'settings.version', 'settings.device_name',
       'settings.device_id', 'overview.platform', 'settings_window.about_desc',
@@ -182,6 +188,12 @@
         dataDir: '',
         favoritesPath: '',
         dataSaving: false,
+
+        // AI-config sync: root folders whose config files (CLAUDE.md, memory
+        // md, skills, ...) paired devices may browse/pull. Staged behind a
+        // save button like the other path settings.
+        aiConfigPaths: [],
+        aiConfigSaving: false,
 
         // Hotkeys
         hotkeys: {},
@@ -353,6 +365,7 @@
           mk('advanced',    this.t('settings_nav.advanced')),
           mk('logs',        this.t('settings_nav.logs')),
           mk('data',        this.t('settings.data')),
+          mk('aiconfig',    this.t('settings_nav.aiconfig')),
           mk('about',       this.t('settings_nav.about')),
           mk('danger',      this.t('settings_window.danger_zone')),
         ];
@@ -896,6 +909,69 @@
         });
       },
 
+      // ── AI-config sync (round 12) ────────────────────────────────
+
+      // The watch list lives behind its own endpoints
+      // (GET/POST /api/aiconfig/paths), NOT the generic settings API — load
+      // it when the panel or section opens, mirroring logs/certs.
+      loadAiConfigPaths: function () {
+        var self = this;
+        if (!window.ClipsyncAPI || !window.ClipsyncAPI.getAiConfigPaths) return;
+        self._aiCfgLoading = true;
+        ClipsyncAPI.getAiConfigPaths().then(function (res) {
+          self._aiCfgLoading = false;
+          var list = (res && Array.isArray(res.paths)) ? res.paths : [];
+          self._skipDirty = true;
+          self.aiConfigPaths = list.map(function (p) { return String(p == null ? '' : p); });
+          self.$nextTick(function () { self._skipDirty = false; });
+        }).catch(function () {
+          // 404 on an older host — leave whatever rows exist for editing.
+          self._aiCfgLoading = false;
+        });
+      },
+
+      addAiConfigPath: function () {
+        this.aiConfigPaths.push('');
+      },
+
+      removeAiConfigPath: function (idx) {
+        this.aiConfigPaths.splice(idx, 1);
+      },
+
+      // Save the monitored root-folder list. Mirrors the server-side
+      // normalization exactly: trim whitespace, drop blanks, exact-string
+      // dedupe, cap at 50 roots. An empty list is allowed — it simply means
+      // this device shares nothing. On success the backend recollects and
+      // re-broadcasts the inventory to paired peers on its own.
+      saveAiConfigPaths: function () {
+        var self = this;
+        var seen = {};
+        var paths = [];
+        (this.aiConfigPaths || []).forEach(function (p) {
+          var v = String(p == null ? '' : p).trim();
+          if (!v || seen[v]) return;
+          seen[v] = true;
+          if (paths.length < 50) paths.push(v);
+        });
+        self.aiConfigSaving = true;
+        ClipsyncAPI.setAiConfigPaths(paths).then(function (res) {
+          self.aiConfigSaving = false;
+          if (res && res.ok === false) {
+            self.store.showToast(self.t('settings.save_aiconfig_failed'), 2000);
+            return;
+          }
+          self._skipDirty = true;
+          self.aiConfigPaths = (res && Array.isArray(res.paths))
+            ? res.paths.slice() : paths;
+          self.$nextTick(function () { self._skipDirty = false; });
+          self.dirtySections['aiconfig'] = false;
+          self.store.showToast(self.t('settings.aiconfig_saved'), 3000);
+        }).catch(function () {
+          self.aiConfigSaving = false;
+          self.store.showToast(self.t('settings.save_aiconfig_failed'), 2000);
+        });
+      },
+
       // ── Danger zone ──────────────────────────────────────────────
 
       factoryReset: function () {
@@ -1320,6 +1396,7 @@
           // so reload the section data here too.
           if (this.activeSection === 'logs') this.loadLogs();
           if (this.activeSection === 'security') this.loadCerts();
+          if (this.activeSection === 'aiconfig') this.loadAiConfigPaths();
           var self = this;
           if (!this._prevFocus) {
             this._prevFocus = document.activeElement;
@@ -1350,6 +1427,7 @@
       activeSection: function (val) {
         if (val === 'logs') this.loadLogs();
         if (val === 'security') this.loadCerts();
+        if (val === 'aiconfig') this.loadAiConfigPaths();
       },
 
       // ── Staged-section dirty tracking ────────────────────────────
@@ -1399,6 +1477,10 @@
       },
       dataDir: function () { this.markDirty('data'); },
       favoritesPath: function () { this.markDirty('data'); },
+      aiConfigPaths: {
+        deep: true,
+        handler: function () { this.markDirty('aiconfig'); },
+      },
     },
 
     created: function () {
@@ -1936,6 +2018,27 @@
                   '<button class="settings-btn settings-btn--accent" @click="saveDataPaths" :disabled="dataSaving" style="width:100%;margin-top:8px">' +
                     '{{ dataSaving ? \'...\' : t(\'settings.save_data_paths\') }}' +
                   '</button>' +
+                '</section>' +
+
+                '<!-- ═══════ AI Config (round 12) ═══════ -->' +
+                '<section v-if="activeSection === \'aiconfig\'" class="settings-section">' +
+                  '<h3 class="settings-section__title">{{ t(\'settings_nav.aiconfig\') }}</h3>' +
+                  '<p class="settings-hint" style="margin-bottom:12px">{{ t(\'settings_window.aiconfig_desc\') }}</p>' +
+                  '<div class="settings-field">' +
+                    '<label class="settings-field__label">{{ t(\'settings_window.aiconfig_paths_label\') }}</label>' +
+                    '<div v-for="(p, idx) in aiConfigPaths" :key="\'aipath-\' + idx" class="settings-field__row">' +
+                      '<input type="text" class="settings-input" v-model="aiConfigPaths[idx]" spellcheck="false"' +
+                        ' :placeholder="t(\'settings_window.aiconfig_path_placeholder\')"' +
+                        ' :aria-label="t(\'settings_window.aiconfig_paths_label\')">' +
+                      '<button class="settings-btn settings-btn--sm" @click="removeAiConfigPath(idx)" :aria-label="t(\'ui.delete\')">✕</button>' +
+                    '</div>' +
+                    '<button class="settings-btn settings-btn--sm" @click="addAiConfigPath" style="margin-top:6px">+ {{ t(\'settings_window.aiconfig_add_path\') }}</button>' +
+                    '<span class="settings-hint">{{ t(\'settings_window.aiconfig_paths_hint\') }}</span>' +
+                  '</div>' +
+                  '<button class="settings-btn settings-btn--accent" @click="saveAiConfigPaths" :disabled="aiConfigSaving" style="width:100%;margin-top:8px">' +
+                    '{{ aiConfigSaving ? \'...\' : t(\'settings_window.save_aiconfig\') }}' +
+                  '</button>' +
+                  '<p class="settings-hint" style="margin-top:6px">{{ t(\'settings_window.aiconfig_save_hint\') }}</p>' +
                 '</section>' +
 
                 '<!-- ═══════ About ═══════ -->' +

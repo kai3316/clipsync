@@ -117,6 +117,17 @@ UNPAIRED_GATE_MSG_TYPES = PAIRING_MSG_TYPES | CHAT_MSG_TYPES | frozenset({"file_
 # construction — deliberately NOT in UNPAIRED_GATE_MSG_TYPES.
 RELAY_MSG_TYPES = frozenset({"relay_enroll"})
 
+# AI-config sync (Round 12): paired devices exchange *metadata* inventories of
+# their user-declared AI tool config files (CLAUDE.md, memory notes, skills,
+# .mcp.json, ...) via aiconfig_inv, then pull individual file contents with
+# aiconfig_req / aiconfig_data.  These frames expose real file content, so they
+# are paired-only by construction — deliberately NOT in UNPAIRED_GATE_MSG_TYPES
+# (the transport gate already drops them from unpaired peers; the app-layer
+# handler re-checks pairing as defense in depth).
+AICONFIG_MSG_TYPES = frozenset({
+    "aiconfig_inv", "aiconfig_req", "aiconfig_data",
+})
+
 
 def encode_frame(payload_dict: dict, msg_id: str = "", source_device: str = "") -> bytes:
     """Encode a generic JSON payload dict into the binary frame format.

@@ -178,6 +178,14 @@ class Config:
     # peer device_id → that peer's relay secret, learned via relay_enroll.
     peer_relay_secrets: dict[str, str] = field(default_factory=dict)
 
+    # AI-config sync (Round 12): watch-list root directories whose AI tool
+    # config files (CLAUDE.md, memory notes, skills/, .mcp.json, ...) are
+    # advertised — as metadata only (rel path + sha256 + size + mtime) — to
+    # paired peers.  "~" expands to the current user's home at collection
+    # time.  Empty list = feature off for this device (nothing is collected
+    # and no inventory is broadcast).
+    ai_config_paths: list[str] = field(default_factory=list)
+
     def add_peer(self, peer: PeerInfo):
         self.peers[peer.device_id] = peer
 
@@ -299,6 +307,7 @@ _FIELD_RULES: dict[str, tuple] = {
     "relay_brokers": ("strlist_nonnull",),
     "relay_secret": ("str",),
     "peer_relay_secrets": ("strdict",),
+    "ai_config_paths": ("strlist_nonnull",),
 }
 
 # Sentinel returned by _validate_field when a value must be skipped.
@@ -424,6 +433,7 @@ def load() -> Config:
                 "hotkeys", "hotkeys_enabled",
                 "internet_sync_enabled", "relay_brokers",
                 "relay_secret", "peer_relay_secrets",
+                "ai_config_paths",
             ):
                 if key in data:
                     value = _validate_field(key, data[key])
@@ -576,6 +586,7 @@ def save(cfg: Config, enc_mgr: "EncryptionManager | None" = None):
             "relay_brokers": cfg.relay_brokers,
             "relay_secret": cfg.relay_secret,
             "peer_relay_secrets": cfg.peer_relay_secrets,
+            "ai_config_paths": cfg.ai_config_paths,
             "peers": [
                 {
                     "device_id": p.device_id,

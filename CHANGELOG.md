@@ -4,6 +4,11 @@ All notable changes to ClipSync are documented in this file.
 
 ## [Unreleased]
 
+### AI config sync (new)
+- **Browse and migrate AI tool configs across your own devices.** A new "Config" tab shows what each paired device has on its watch list (CLAUDE.md, memory notes, skills, `.mcp.json` — the list is user-editable), letting you preview any file and pull it over, choosing **overwrite / save as a copy / append to Markdown** per pull. Nothing is ever overwritten silently; append only applies to text/Markdown. Inventories carry metadata only (path, hash, size, time) — file content moves only when you request it, over the same encrypted channel you already trust.
+- Watch-list edits broadcast to paired devices automatically; inventories refresh on connect and on change.
+- Defensive by design: requests are checked against the peer's own inventory, paths are resolved so `../` traversal can't escape a watch root, served content is hash-verified, and oversized (» 1 MB) files are truncated with a clear flag.
+
 ### Internet sync (new)
 - **Sync across networks — office ↔ home — with zero cost, zero signup, and no extra software.** The new "Internet sync" setting mirrors clipboard traffic over free public MQTT relays (broker list editable, defaults to three well-known free services with automatic failover). Both ends stay end-to-end encrypted: the relay only ever sees ciphertext and an unguessable per-pair topic derived from device secrets exchanged over the encrypted LAN channel.
 - **Pairing now shows a safety code.** During pairing confirmation both devices display the same short fingerprint code (e.g. `3A2F-91C4`) — verify they match before confirming, which closes the pairing-code man-in-the-middle window that mattered little on a trusted LAN but matters on the internet.

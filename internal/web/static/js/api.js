@@ -320,6 +320,127 @@ var ClipsyncAPI = (function () {
     },
 
     /* ═══════════════════════════════════════════════════════════════
+       AI-config sync endpoints (paired devices only)
+       ═══════════════════════════════════════════════════════════════ */
+
+    /**
+     * Get every paired peer's AI-config file inventory (metadata only).
+     * The backend caches inventories per peer; pass refresh=true to ask it
+     * to re-request fresh inventories from the peers.
+     * @param {boolean} [refresh=false]
+     * @returns {Promise<{peers: Object}>} — { pid: {name, entries[], fetched_at} }
+     */
+    getAiConfigInventory: function (refresh) {
+      return this._fetch('GET',
+        '/api/aiconfig/inventory' + (refresh ? '?refresh=1' : ''));
+    },
+
+    /**
+     * This device's AI-config watch list (GET /api/aiconfig/paths).
+     * @returns {Promise<{ok: boolean, paths: string[], summary: Object}>}
+     */
+    getAiConfigPaths: function () {
+      return this._fetch('GET', '/api/aiconfig/paths');
+    },
+
+    /**
+     * Replace this device's watch list. The backend normalizes, persists,
+     * recollects and re-broadcasts the inventory to paired peers.
+     * @param {string[]} paths - Root directories ('~' supported)
+     * @returns {Promise<{ok: boolean, paths: string[], broadcast_to: number}>}
+     */
+    setAiConfigPaths: function (paths) {
+      return this._fetch('POST', '/api/aiconfig/paths', { paths: paths });
+    },
+
+    /**
+     * Fetch one remote file's text for preview. The backend truncates at
+     * 64KB. The answer is parsed tolerantly: the documented shape is JSON
+     * `{ok, content, truncated}`; a raw text body is also accepted so an
+     * older/experimental host never breaks the preview modal.
+     * @param {string} peerId
+     * @param {number} rootIndex
+     * @param {string} relPath
+     * @returns {Promise<{content: string, truncated: boolean}>}
+     */
+    previewAiConfigFile: function (peerId, rootIndex, relPath) {
+      var sep = '/api/aiconfig/preview'.indexOf('?') !== -1 ? '&' : '?';
+      var url = _baseUrl + '/api/aiconfig/preview' + sep +
+        'token=' + encodeURIComponent(_token);
+
+      var options = {
+        method: 'POST',
+        headers: {
+          'Accept': '*/*',
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          peer_id: peerId,
+          root_index: rootIndex,
+          rel_path: relPath,
+        }),
+      };
+
+      var controller = null;
+      var timeoutId = null;
+      if (typeof AbortController !== 'undefined') {
+        controller = new AbortController();
+        options.signal = controller.signal;
+        timeoutId = setTimeout(function () {
+          controller.abort();
+        }, 15000);
+      }
+
+      return fetch(url, options)
+        .then(function (response) {
+          clearTimeout(timeoutId);
+          return response.text().then(function (bodyText) {
+            var parsed = null;
+            try { parsed = JSON.parse(bodyText); } catch (e) { parsed = null; }
+            if (!response.ok) {
+              // Structured backend errors carry a human-readable reason.
+              throw new Error(
+                (parsed && typeof parsed === 'object' && parsed.error) ||
+                ('HTTP ' + response.status));
+            }
+            if (parsed && typeof parsed === 'object') {
+              if (typeof parsed.error === 'string' && parsed.error) {
+                throw new Error(parsed.error);
+              }
+              if (typeof parsed.content === 'string') {
+                return { content: parsed.content, truncated: !!parsed.truncated };
+              }
+            }
+            // Plain-text (or unexpected-shape) body — show it verbatim and let
+            // the length heuristic drive the truncation notice.
+            return { content: bodyText, truncated: bodyText.length >= 65536 };
+          });
+        })
+        .catch(function (e) {
+          clearTimeout(timeoutId);
+          console.warn('[ClipsyncAPI] AI-config preview failed:', e);
+          throw e;
+        });
+    },
+
+    /**
+     * Ask the server to pull the selected files from a peer and land them
+     * locally. Results arrive per-file later via the WS `aiconfig_file`
+     * event — this call only confirms what was requested.
+     * @param {string} peerId
+     * @param {Array<{root_index: number, rel_path: string}>} items
+     * @param {'overwrite'|'copy'|'append'} mode
+     * @returns {Promise<{requested: number}>}
+     */
+    pullAiConfigFiles: function (peerId, items, mode) {
+      return this._fetch('POST', '/api/aiconfig/pull', {
+        peer_id: peerId,
+        items: items,
+        mode: mode,
+      });
+    },
+
+    /* ═══════════════════════════════════════════════════════════════
        Data export / import endpoints
        ═══════════════════════════════════════════════════════════════ */
 

@@ -10,6 +10,7 @@ import os
 import time
 
 from internal.web.api import chat as _chat_api
+from internal.web.api import aiconfig as _aiconfig_api  # Round 12 (self-contained; manager bound by src/main.py)
 from internal.web.api.devices import get_devices
 from internal.web.api.favorites import (
     add_favorite,
@@ -281,6 +282,13 @@ def _dispatch(method, path, query_params, body, cfg, history, sync_mgr,
     Returns (status, content_type, body_bytes).
     Returns (404, "application/json", ...) for unknown paths.
     """
+
+    # ── AI-config sync (Round 12) — one self-contained branch; the handler
+    # module owns all sub-routing and holds the manager reference bound by
+    # src/main.py, so no extra dispatch() parameters are threaded through.
+    if path.startswith("/api/aiconfig"):
+        data, status = _aiconfig_api.handle(method, path, query_params, body)
+        return _json_response(data, status)
 
     # ── GET routes ─────────────────────────────────────────────────
 

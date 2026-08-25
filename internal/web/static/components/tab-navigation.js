@@ -80,6 +80,14 @@
             count: s.favorites.length,
           },
           {
+            id: 'aiconfig',
+            label: t('ui.aiconfig'),
+            icon: '🤖',
+            count: Object.keys(
+              (s.aiConfigInventory && s.aiConfigInventory.peers) || {}
+            ).length,
+          },
+          {
             id: 'diagnostics',
             label: t('ui.diagnostics'),
             icon: '🩺',

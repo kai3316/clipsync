@@ -4927,6 +4927,410 @@
       flex-direction: column;
     }
 
+    /* ── AI-config panel (round 12) ─────────────────────────────── */
+    .aiconfig-panel {
+      display: flex;
+      flex-direction: column;
+      gap: var(--clipsync-space-2);
+      flex: 1;
+      min-height: 0;
+    }
+
+    .aiconfig-panel__body {
+      display: flex;
+      gap: var(--clipsync-space-4);
+      flex: 1;
+      min-height: 0;
+    }
+
+    /* Device list */
+    .aiconfig-panel__peers {
+      width: 200px;
+      flex-shrink: 0;
+      padding: var(--clipsync-space-3);
+      display: flex;
+      flex-direction: column;
+      gap: var(--clipsync-space-2);
+      overflow-y: auto;
+      align-self: flex-start;
+      max-height: 100%;
+    }
+
+    .aiconfig-panel__peer-btn {
+      display: flex;
+      flex-direction: column;
+      align-items: flex-start;
+      gap: 2px;
+      width: 100%;
+      padding: 8px 10px;
+      font-family: var(--clipsync-font);
+      text-align: left;
+      color: var(--clipsync-fg-muted);
+      background: transparent;
+      border: 1px solid transparent;
+      border-radius: var(--clipsync-radius-sm);
+      cursor: pointer;
+      transition: all var(--clipsync-transition-fast);
+      -webkit-user-select: none;
+      user-select: none;
+    }
+
+    .aiconfig-panel__peer-btn:hover {
+      color: var(--clipsync-fg);
+      background: var(--clipsync-hover);
+    }
+
+    .aiconfig-panel__peer-btn--active {
+      color: var(--clipsync-accent);
+      background: var(--clipsync-accent-glow);
+      border-color: var(--clipsync-border-glow);
+      box-shadow: -4px 0 12px var(--clipsync-accent-glow);
+    }
+
+    .aiconfig-panel__peer-name {
+      font-size: 13px;
+      font-weight: 600;
+      max-width: 100%;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .aiconfig-panel__peer-meta {
+      font-size: 11px;
+      color: var(--clipsync-fg-muted);
+      max-width: 100%;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    /* Files column */
+    .aiconfig-panel__files {
+      flex: 1;
+      min-width: 0;
+      min-height: 0;
+      display: flex;
+      flex-direction: column;
+      gap: var(--clipsync-space-2);
+    }
+
+    .aiconfig-panel__toolbar {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: var(--clipsync-space-2);
+      flex-shrink: 0;
+    }
+
+    .aiconfig-panel__search {
+      flex: 0 1 260px;
+      min-width: 0;
+      padding: 8px 12px;
+      font-size: 13px;
+      font-family: var(--clipsync-font);
+      color: var(--clipsync-fg);
+      background: var(--clipsync-panel);
+      border: 1.5px solid var(--clipsync-border);
+      border-radius: var(--clipsync-radius-sm);
+      outline: none;
+      transition: border-color var(--clipsync-transition-fast),
+                  box-shadow var(--clipsync-transition-fast);
+    }
+
+    .aiconfig-panel__search:focus {
+      border-color: var(--clipsync-accent);
+      box-shadow: 0 0 0 3px var(--clipsync-accent-glow);
+    }
+
+    .aiconfig-panel__selectall {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      font-size: 12px;
+      font-weight: 500;
+      color: var(--clipsync-fg-muted);
+      cursor: pointer;
+      -webkit-user-select: none;
+      user-select: none;
+      white-space: nowrap;
+    }
+
+    .aiconfig-panel__tablewrap {
+      flex: 1;
+      min-height: 0;
+      overflow: auto;
+      border-radius: var(--clipsync-radius-md);
+    }
+
+    .aiconfig-panel__table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 13px;
+    }
+
+    .aiconfig-panel__table th {
+      position: sticky;
+      top: 0;
+      z-index: 1;
+      padding: 10px 12px;
+      text-align: left;
+      font-size: 11px;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      color: var(--clipsync-fg-muted);
+      background: var(--clipsync-panel);
+      border-bottom: 1px solid var(--clipsync-border-strong);
+      white-space: nowrap;
+    }
+
+    .aiconfig-panel__table td {
+      padding: 7px 12px;
+      border-bottom: 1px solid var(--clipsync-border);
+      vertical-align: middle;
+    }
+
+    .aiconfig-panel__table tbody tr:hover {
+      background: var(--clipsync-hover);
+    }
+
+    .aiconfig-panel__th-check,
+    .aiconfig-panel__td-check {
+      width: 32px;
+      padding-right: 0 !important;
+    }
+
+    .aiconfig-panel__cell-path {
+      max-width: 380px;
+    }
+
+    .aiconfig-panel__root-chip {
+      display: inline-block;
+      flex-shrink: 0;
+      margin-right: 6px;
+      padding: 1px 6px;
+      font-size: 10px;
+      font-weight: 700;
+      border-radius: var(--clipsync-radius-full);
+      background: var(--clipsync-panel-2);
+      color: var(--clipsync-fg-muted);
+      vertical-align: middle;
+    }
+
+    .aiconfig-panel__path-btn {
+      display: inline-block;
+      max-width: 340px;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      vertical-align: middle;
+      padding: 0;
+      font-family: var(--clipsync-font-mono);
+      font-size: 12px;
+      color: var(--clipsync-fg);
+      background: none;
+      border: none;
+      cursor: pointer;
+      text-align: left;
+      transition: color var(--clipsync-transition-fast);
+    }
+
+    .aiconfig-panel__path-btn:hover {
+      color: var(--clipsync-accent);
+      text-decoration: underline;
+    }
+
+    .aiconfig-panel__cell-size,
+    .aiconfig-panel__cell-time {
+      white-space: nowrap;
+      font-size: 12px;
+      color: var(--clipsync-fg-muted);
+    }
+
+    .aiconfig-panel__none {
+      text-align: center;
+      color: var(--clipsync-fg-muted);
+      font-size: 13px;
+      padding: 24px 12px !important;
+    }
+
+    /* Per-row pull-result badge (WS aiconfig_file outcome) */
+    .aiconfig-panel__badge {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      width: 20px;
+      height: 20px;
+      border-radius: 50%;
+      font-size: 11px;
+      font-weight: 700;
+      cursor: default;
+    }
+
+    .aiconfig-panel__badge--saved {
+      color: var(--clipsync-success-text, var(--clipsync-success));
+      background: var(--clipsync-success-bg);
+    }
+
+    .aiconfig-panel__badge--copied {
+      color: var(--clipsync-cyan);
+      background: var(--clipsync-info-bg);
+    }
+
+    .aiconfig-panel__badge--appended {
+      color: var(--clipsync-purple);
+      background: var(--clipsync-violet-glow);
+    }
+
+    .aiconfig-panel__badge--error {
+      color: var(--clipsync-danger-text, var(--clipsync-danger));
+      background: var(--clipsync-danger-bg);
+    }
+
+    /* Action bar */
+    .aiconfig-panel__actions {
+      flex-shrink: 0;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: var(--clipsync-space-3);
+      padding: var(--clipsync-space-3);
+      border-radius: var(--clipsync-radius-md);
+      flex-wrap: wrap;
+    }
+
+    .aiconfig-panel__modes {
+      display: flex;
+      align-items: center;
+      gap: var(--clipsync-space-3);
+      flex-wrap: wrap;
+      min-width: 0;
+    }
+
+    .aiconfig-panel__modes-label {
+      font-size: 11px;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      color: var(--clipsync-fg-muted);
+    }
+
+    .aiconfig-panel__mode {
+      display: inline-flex;
+      align-items: center;
+      gap: 5px;
+      font-size: 13px;
+      color: var(--clipsync-fg);
+      cursor: pointer;
+      -webkit-user-select: none;
+      user-select: none;
+      white-space: nowrap;
+    }
+
+    .aiconfig-panel__mode-hint {
+      font-size: 11px;
+      color: var(--clipsync-fg-subtle);
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
+    .aiconfig-panel__pull {
+      white-space: nowrap;
+    }
+
+    /* Preview overlay */
+    .aiconfig-preview__overlay {
+      position: fixed;
+      inset: 0;
+      z-index: var(--clipsync-z-modal);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: var(--clipsync-space-6);
+      background: rgba(3, 5, 12, 0.62);
+      backdrop-filter: blur(6px);
+      -webkit-backdrop-filter: blur(6px);
+    }
+
+    .aiconfig-preview {
+      width: min(720px, 100%);
+      max-height: 82vh;
+      display: flex;
+      flex-direction: column;
+      border-radius: var(--clipsync-radius-lg);
+      box-shadow: var(--clipsync-shadow-lg);
+      overflow: hidden;
+    }
+
+    .aiconfig-preview__header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: var(--clipsync-space-3);
+      padding: var(--clipsync-space-3) var(--clipsync-space-4);
+      border-bottom: 1px solid var(--clipsync-border);
+    }
+
+    .aiconfig-preview__path {
+      min-width: 0;
+      font-family: var(--clipsync-font-mono);
+      font-size: 12px;
+      color: var(--clipsync-fg-muted);
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .aiconfig-preview__notice {
+      padding: 6px var(--clipsync-space-4);
+      font-size: 11px;
+      color: var(--clipsync-warning-text, var(--clipsync-warning));
+      background: var(--clipsync-warning-bg);
+      border-bottom: 1px solid var(--clipsync-border);
+    }
+
+    .aiconfig-preview__content {
+      margin: 0;
+      padding: var(--clipsync-space-4);
+      overflow: auto;
+      font-family: var(--clipsync-font-mono);
+      font-size: 12px;
+      line-height: 1.55;
+      color: var(--clipsync-fg);
+      white-space: pre-wrap;
+      word-break: break-word;
+    }
+
+    .aiconfig-preview__content--error {
+      color: var(--clipsync-danger-text, var(--clipsync-danger));
+    }
+
+    @media (max-width: 767px) {
+      .aiconfig-panel__body {
+        flex-direction: column;
+        overflow-y: auto;
+      }
+
+      .aiconfig-panel__peers {
+        width: 100%;
+        max-height: none;
+        flex-direction: row;
+        flex-wrap: wrap;
+        align-self: stretch;
+      }
+
+      .aiconfig-panel__peer-btn {
+        width: auto;
+      }
+
+      .aiconfig-panel__tablewrap {
+        flex: none;
+        max-height: 50vh;
+      }
+    }
+
     /* ── Overview network-health chip ───────────────────────────── */
     .net-health-chip {
       display: inline-flex;
@@ -5884,6 +6288,7 @@
               <transfer-panel v-else-if="store.activeTab === 'transfers'" key="transfers"></transfer-panel>
               <chat-panel v-else-if="store.activeTab === 'chat'" key="chat"></chat-panel>
               <favorites-panel v-else-if="store.activeTab === 'favorites'" key="favorites"></favorites-panel>
+              <aiconfig-panel v-else-if="store.activeTab === 'aiconfig'" key="aiconfig"></aiconfig-panel>
               <diagnostics-panel v-else-if="store.activeTab === 'diagnostics'" key="diagnostics"></diagnostics-panel>
             </transition>
           </main>
@@ -5906,6 +6311,7 @@
             <transfer-panel v-else-if="store.activeTab === 'transfers'" key="transfers"></transfer-panel>
             <chat-panel v-else-if="store.activeTab === 'chat'" key="chat"></chat-panel>
             <favorites-panel v-else-if="store.activeTab === 'favorites'" key="favorites"></favorites-panel>
+            <aiconfig-panel v-else-if="store.activeTab === 'aiconfig'" key="aiconfig"></aiconfig-panel>
             <diagnostics-panel v-else-if="store.activeTab === 'diagnostics'" key="diagnostics"></diagnostics-panel>
           </transition>
         </main>
@@ -6000,6 +6406,7 @@
   <script src="components/favorite-item.js?token=__TOKEN__"></script>
   <script src="components/favorites-panel.js?token=__TOKEN__"></script>
   <script src="components/diagnostics-panel.js?token=__TOKEN__"></script>
+  <script src="components/aiconfig-panel.js?token=__TOKEN__"></script>
   <script src="components/preview-popover.js?token=__TOKEN__"></script>
   <script src="components/context-menu.js?token=__TOKEN__"></script>
   <script src="components/translate-modal.js?token=__TOKEN__"></script>

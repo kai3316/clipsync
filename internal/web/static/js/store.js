@@ -124,6 +124,20 @@
     mutedChatPeers: new Set(), // peer_ids muted in the chat UI (no unread badge)
 
     /* ═══════════════════════════════════════════════════════════════
+       AI-config sync (round 12)
+       aiConfigInventory mirrors GET /api/aiconfig/inventory:
+       { peers: { pid: {name, entries[], fetchedAt} }, fetchedAt } —
+       normalized/defensively cleaned in fetchAiConfigInventory().
+       aiConfigResults is the rolling list of WS `aiconfig_file` per-file
+       pull results (newest first, capped) that the config panel badges.
+       ═══════════════════════════════════════════════════════════════ */
+    aiConfigInventory: { peers: {}, fetchedAt: '' },
+    aiConfigLoaded: false,     // true once the first inventory fetch settled
+    aiConfigLoadFailed: false, // fetch rejected AND nothing cached to show
+    aiConfigRefreshing: false, // true while a ?refresh=1 re-request runs
+    aiConfigResults: [],
+
+    /* ═══════════════════════════════════════════════════════════════
        Overview stats (refreshed every 5s)
        ═══════════════════════════════════════════════════════════════ */
     overview: {
@@ -1654,6 +1668,100 @@
       if (this.chatMessages.length > 200) {
         this.chatMessages.splice(0, this.chatMessages.length - 200);
       }
+    },
+
+    /* ═══════════════════════════════════════════════════════════════
+       AI-config sync helpers (round 12)
+       ═══════════════════════════════════════════════════════════════ */
+
+    /**
+     * Fetch every paired peer's AI-config inventory. In-flight calls are
+     * coalesced. Fully defensive: a host whose backend predates this feature
+     * answers 404 — the fetch settles with aiConfigLoaded=true so the panel
+     * shows its empty state instead of spinning forever, and any previously
+     * loaded inventory is kept rather than clobbered by the failure.
+     * @param {boolean} [refresh=false] - ask the backend to re-request fresh
+     *   inventories from the peers (?refresh=1)
+     * @returns {Promise<boolean>} true when an inventory was applied
+     */
+    fetchAiConfigInventory: function (refresh) {
+      var self = this;
+      if (!window.ClipsyncAPI || !window.ClipsyncAPI.getAiConfigInventory) {
+        return Promise.resolve(false);
+      }
+      if (this._aiConfigInFlight) return Promise.resolve(false);
+      this._aiConfigInFlight = true;
+      if (refresh) this.aiConfigRefreshing = true;
+      return window.ClipsyncAPI.getAiConfigInventory(!!refresh)
+        .then(function (res) {
+          var raw = (res && res.peers && typeof res.peers === 'object') ? res.peers : {};
+          var clean = {};
+          Object.keys(raw).forEach(function (pid) {
+            var p = raw[pid];
+            if (!p || typeof p !== 'object') return;
+            clean[pid] = {
+              name: p.name || pid,
+              // Wire entries key the path as `path`; normalize to the
+              // spec'd `rel_path` once here so every consumer (panel,
+              // badges) can rely on one name.
+              entries: (Array.isArray(p.entries) ? p.entries : []).filter(function (e) {
+                return e && typeof e === 'object' && (e.rel_path || e.path);
+              }).map(function (e) {
+                var ri = (typeof e.root_index === 'number') ? e.root_index
+                  : parseInt(e.root_index, 10);
+                return {
+                  root_index: isFinite(ri) ? ri : 0,
+                  rel_path: String(e.rel_path || e.path),
+                  sha256: e.sha256 || '',
+                  size: (typeof e.size === 'number') ? e.size : Number(e.size) || 0,
+                  mtime: e.mtime,
+                };
+              }),
+              fetchedAt: p.fetched_at || '',
+            };
+          });
+          self.aiConfigInventory = { peers: clean, fetchedAt: (res && res.fetched_at) || '' };
+          self.aiConfigLoaded = true;
+          self.aiConfigLoadFailed = false;
+          return true;
+        })
+        .catch(function () {
+          // 404 (older backend) / network error — surface the empty state but
+          // never wipe data that was already on screen.
+          self.aiConfigLoaded = true;
+          self.aiConfigLoadFailed =
+            Object.keys((self.aiConfigInventory && self.aiConfigInventory.peers) || {}).length === 0;
+          return false;
+        })
+        .finally(function () {
+          self._aiConfigInFlight = false;
+          self.aiConfigRefreshing = false;
+        });
+    },
+
+    /**
+     * Record one WS `aiconfig_file` per-file pull result: keep it in the
+     * rolling badge list and toast it. Only called by ws.js after it has
+     * validated the status vocabulary.
+     * @param {{peer_id: string, rel_path: string, status: string}} data
+     */
+    applyAiConfigFileResult: function (data) {
+      var entry = {
+        peer_id: (data.peer_id !== undefined && data.peer_id !== null) ? String(data.peer_id) : '',
+        rel_path: data.rel_path || '',
+        status: data.status,
+        ts: Date.now(),
+      };
+      this.aiConfigResults.unshift(entry);
+      if (this.aiConfigResults.length > 50) {
+        this.aiConfigResults.splice(50, this.aiConfigResults.length - 50);
+      }
+      var key = entry.status === 'error' ? 'aiconfig.result_error'
+        : entry.status === 'copied' ? 'aiconfig.result_copied'
+        : entry.status === 'appended' ? 'aiconfig.result_appended'
+        : 'aiconfig.result_saved';
+      this.showToast(t(key, { path: entry.rel_path }), 2800,
+        entry.status === 'error' ? 'error' : 'success');
     },
 
   });
