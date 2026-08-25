@@ -579,6 +579,11 @@ class Application:
         # peer_id -> {code, peer_name, first_seen} for incoming pairing requests,
         # used to surface an "expired" row instead of letting the request vanish.
         self._pairing_req_track: dict[str, dict] = {}
+        # peer_id -> threading.Timer holding a not-yet-fired pairing-code
+        # notification.  Chat connections auto-generate a shared code for an
+        # unpaired peer; the chat invite (same connection, ~1s later) cancels
+        # this timer so chatting never surfaces as a pairing request.
+        self._pairing_notify_timers: dict[str, threading.Timer] = {}
         # Set once the dashboard has been auto-opened for a silent pairing request
         # (notifications disabled), so we don't pop a window on every request.
         self._pairing_dashboard_opened = False
@@ -1278,6 +1283,13 @@ class Application:
         try:
             if peer_id and self.pairing_mgr is not None \
                     and not self.pairing_mgr.is_peer_paired(peer_id):
+                # Cancel the debounced pairing notification before it fires so
+                # the other device never SEES a pairing prompt for a chat (the
+                # code was generated at connect time, before this invite frame).
+                pending = self._pairing_notify_timers.pop(peer_id, None)
+                if pending is not None:
+                    pending.cancel()
+                self._notified_pairings.pop(peer_id, None)
                 self.pairing_mgr.discard_pending_pairing(peer_id)
                 self._notified_pairings.pop(peer_id, None)
                 self._pairing_req_track.pop(peer_id, None)
@@ -3137,11 +3149,38 @@ class Application:
         with self._discovered_lock:
             return dict(self._discovered_peers)
 
+    # Seconds an auto-generated pairing-code notification is held before it
+    # fires, so a chat invite (arriving on the same connection) can cancel it.
+    # Real pairings notify after this delay; the code is stored immediately.
+    PAIRING_NOTIFY_DEBOUNCE = 1.2
+
     def _on_new_pairing(self, peer_id: str, code: str, peer_name: str) -> None:
         prev = self._notified_pairings.get(peer_id)
         if prev == code:
             return
         self._notified_pairings[peer_id] = code
+        # Chat connections reach unpaired peers and must NOT surface a pairing
+        # prompt — chat has its own invite/accept + fingerprint consent.  The
+        # shared code is generated synchronously at connection-accept time, but
+        # a chat invite arrives on the SAME connection within ~a second, so
+        # hold the notification briefly; the chat handler cancels it before the
+        # user ever sees a pairing request.  Real pairings simply notify ~1s
+        # later (the code is already stored in the pairing manager).
+        timer = threading.Timer(
+            self.PAIRING_NOTIFY_DEBOUNCE,
+            lambda: self._pairing_flush_notify(peer_id, code, peer_name),
+        )
+        timer.daemon = True
+        self._pairing_notify_timers[peer_id] = timer
+        timer.start()
+
+    def _pairing_flush_notify(self, peer_id: str, code: str, peer_name: str) -> None:
+        """Fire the debounced pairing notification (see _on_new_pairing)."""
+        self._pairing_notify_timers.pop(peer_id, None)
+        # A chat invite (or a resolved pairing) superseded this code during the
+        # debounce window — skip the notification entirely.
+        if self._notified_pairings.get(peer_id) != code:
+            return
         # Track the request so the devices refresh can surface "expired"
         # instead of letting the row vanish silently after the 5-minute window.
         try:
@@ -3515,9 +3554,13 @@ class Application:
         # theme, onboarding flag) lives outside the config dir and cannot be
         # deleted here.  Write a one-shot marker the web server turns into
         # __CLIPSYNC_RESET__ on the next page load, so the frontend clears its
-        # stale localStorage too.
+        # stale localStorage too.  A companion "web_fresh_pending" marker
+        # re-surfaces the web onboarding wizard exactly once (kept in sync with
+        # the desktop language picker, which config deletion re-arms) — not on
+        # every subsequent refresh.
         try:
             (config_dir / "factory_reset_pending").write_text("1", encoding="utf-8")
+            (config_dir / "web_fresh_pending").write_text("1", encoding="utf-8")
         except OSError:
             logger.debug("Factory reset: could not write reset marker", exc_info=True)
 
@@ -3527,6 +3570,20 @@ class Application:
             (config_dir / ".lock").unlink()
         except OSError:
             pass
+        # Factory reset exits WITHOUT calling shutdown(), so anything shutdown
+        # would normally tear down must be cleaned here — otherwise leftover
+        # Quick Paste --app windows (and their private profiles) survive the
+        # restart and the user is met by a stale quickpaste.html popup instead
+        # of the dashboard (reported on Windows).
+        try:
+            self._cleanup_quick_paste_instances()
+        except Exception:
+            logger.debug("Factory reset: quickpaste cleanup failed", exc_info=True)
+        if self.webview_win is not None:
+            try:
+                self.webview_win.stop()
+            except Exception:
+                logger.debug("Factory reset: webview stop failed", exc_info=True)
         # Frozen (PyInstaller) builds: sys.argv[0] == sys.executable, so keep
         # only sys.argv[1:] to avoid a stray duplicate exe argument.
         if getattr(sys, "frozen", False):
@@ -3599,6 +3656,18 @@ class Application:
             (_config_dir() / ".lock").unlink()
         except OSError:
             pass
+        # A restart also skips shutdown(): tear down Quick Paste popups first
+        # so a stale quickpaste.html window isn't what the user sees after the
+        # relaunch (same leak as factory reset, just less data deleted).
+        try:
+            self._cleanup_quick_paste_instances()
+        except Exception:
+            logger.debug("Restart: quickpaste cleanup failed", exc_info=True)
+        if self.webview_win is not None:
+            try:
+                self.webview_win.stop()
+            except Exception:
+                logger.debug("Restart: webview stop failed", exc_info=True)
         # In a frozen (PyInstaller) build sys.argv[0] equals sys.executable, so
         # sys.argv[1:] avoids a stray duplicate exe argument; from source argv[0]
         # is the script path and must be kept.
@@ -4122,6 +4191,14 @@ class Application:
             self._cleanup_quick_paste_instances()
         except Exception:
             logger.debug("Quick Paste shutdown cleanup failed", exc_info=True)
+        # Cancel any debounced pairing notifications still in flight (they'd
+        # fire against a half-torn-down app otherwise).
+        for _pid, timer in list(self._pairing_notify_timers.items()):
+            try:
+                timer.cancel()
+            except Exception:
+                pass
+        self._pairing_notify_timers.clear()
 
         if not self._skip_save_on_shutdown:
             for peer in self.pairing_mgr.get_known_peers():
@@ -7920,7 +7997,10 @@ class Application:
         logger.info("Internet sync relay state: %s", state)
         try:
             if getattr(self, "web_server", None) is not None:
-                self.web_server.broadcast("relay_state", {"state": state})
+                # WebServer itself has no broadcast — the WebSocketManager does
+                # (the "relay_state WS broadcast failed" AttributeError in the
+                # logs was this call resolving to a missing method).
+                self.web_server.ws_manager.broadcast("relay_state", {"state": state})
         except Exception:
             logger.debug("relay_state WS broadcast failed", exc_info=True)
         # Round 17: coming online is a retransmission trigger — flush the

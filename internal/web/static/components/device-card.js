@@ -88,6 +88,11 @@
       actions: function () {
         if (this.isLocal) return [];
         var acts = [];
+        // Chat invite reaches online LAN peers and paired devices (incl.
+        // internet-paired ones, via the relay) — offer it for both.
+        if (this.isOnline || this.isPaired) {
+          acts.push({ key: 'chat', label: this.t('devices.chat_action'), cls: 'device-card__action--accent' });
+        }
         if (this.isOnline) {
           acts.push({ key: 'disconnect', label: this.t('device.disconnect'), cls: '' });
         } else if (this.isPaired) {
@@ -157,6 +162,27 @@
       cancelEditNote: function () {
         this.editingNote = false;
         this.noteDraft = this.device.note || '';
+      },
+
+      // 💬 Open a chat session with this device and switch to the Chat tab.
+      startChat: function () {
+        var self = this;
+        var peerId = this.device.device_id;
+        var name = this.device.device_name || this.device.name || this.device.note || peerId;
+        ClipsyncAPI.chatInvite(peerId, name).then(function (res) {
+          if (res && res.session_id) {
+            self.store.activeChatSession = res.session_id;
+          }
+          self.store.activeTab = 'chat';
+          if (!(res && res.session_id) && !(res && res.connecting)) {
+            self.store.showToast(self.t('chat.err_connect_timeout'), 2500);
+          }
+        }).catch(function () {
+          self.store.showToast(self.t('chat.err_connect_timeout'), 2500);
+        }).finally(function () {
+          self.actionLoading = false;
+          self.actionLabel = '';
+        });
       },
 
       saveNote: function () {
@@ -230,6 +256,12 @@
         };
 
         var method;
+        if (key === 'chat') {
+          // Chat invite succeeds with a session_id (or a connecting signal);
+          // switch to the Chat tab so the user lands on the conversation.
+          self.startChat();
+          return;
+        }
         if (key === 'connect') {
           runAction(ClipsyncAPI.connectDevice(peerId), function () {
             self.device.connected = true;

@@ -93,6 +93,23 @@ def generate_relay_secret() -> str:
     return _secrets.token_hex(32)
 
 
+def _ca_bundle_path() -> str | None:
+    """Path to a CA bundle usable by ``ssl``, or None to use system defaults.
+
+    macOS system Pythons (and PyInstaller-frozen builds on any OS) often lack
+    the OS trust store in OpenSSL's default search paths, so every ``wss://``
+    handshake fails with ``CERTIFICATE_VERIFY_FAILED: unable to get local
+    issuer certificate`` — the exact symptom on the macOS client.  certifi
+    ships its own ``cacert.pem`` that PyInstaller bundles automatically (its
+    hook collects the data file), so prefer it whenever it is installed.
+    """
+    try:
+        import certifi
+        return certifi.where()
+    except Exception:
+        return None
+
+
 def build_paho_client():
     """Build one paho websocket client, or None when paho is missing."""
 
@@ -104,7 +121,13 @@ def build_paho_client():
                               protocol=_mqtt.MQTTv311, transport="websockets")
     except AttributeError:  # paho 1.x
         client = _mqtt.Client(protocol=_mqtt.MQTTv311, transport="websockets")
-    client.tls_set(cert_reqs=ssl.CERT_REQUIRED)
+    ca = _ca_bundle_path()
+    if ca:
+        # certifi is available — pin the CA bundle so TLS verification has a
+        # trust store to check against on macOS / frozen builds.
+        client.tls_set(ca_certs=ca, cert_reqs=ssl.CERT_REQUIRED)
+    else:
+        client.tls_set(cert_reqs=ssl.CERT_REQUIRED)
     return client
 
 
@@ -290,7 +313,11 @@ def probe_relay_endpoint(endpoint: str, timeout: float = 4.0) -> dict:
     try:
         with socket.create_connection((host, port), timeout=timeout) as sock:
             if use_tls:
-                ctx = ssl.create_default_context()
+                # Same CA-bundle strategy as build_paho_client(): a default
+                # context on macOS / frozen builds can't find the OS trust
+                # store and would report every wss:// endpoint as unreachable.
+                ca = _ca_bundle_path()
+                ctx = ssl.create_default_context(cafile=ca) if ca else ssl.create_default_context()
                 with ctx.wrap_socket(sock, server_hostname=host):
                     pass  # handshake completed — reachable
         latency_ms = round((time.time() - started) * 1000.0, 1)

@@ -619,15 +619,18 @@ def _read_r19(*parts) -> str:
 
 
 # (label, unique template marker) for each device section, top→bottom as the
-# round-19 target order dictates. Each marker must appear exactly once in the
+# agreed target order dictates.  Each marker must appear exactly once in the
 # template (checked below) so its index is a reliable ordering signal.
+# Pairing Requests are PINNED to the top (right after Internet pairing): the
+# pairing codes are time-sensitive and must be compared on both devices, so
+# they must never sit below the device lists.
 _SECTION_MARKERS = [
     ("this_device", "devices.this_device"),
     ("netpair", "devices.netpair_title"),
+    ("pairing_requests", "devices.pairing_requests"),
     ("connected", "device.connected"),
     ("paired_offline", "device.paired_offline"),
     ("discovered", "device.discovered"),
-    ("pairing_requests", "devices.pairing_requests"),
 ]
 
 

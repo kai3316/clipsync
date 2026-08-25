@@ -62,6 +62,11 @@
     data: function () {
       return {
         localSearch: '',
+        // Expanded folder keys in the tree view: "root_index|rel_path".
+        // Folders render collapsed by default so a big skill doesn't dump
+        // every nested file onto the list (the "一个 skill 所有文件都显示了"
+        // complaint).  Folders stay open across refreshes (keyed, not index).
+        localExpanded: {},
         pathsDialog: { visible: false, paths: [], saving: false },
         localPreview: {
           visible: false,
@@ -107,6 +112,113 @@
           return String(a.rel_path || '').localeCompare(String(b.rel_path || ''));
         });
         return items;
+      },
+
+      // Nested folder/file tree built from the flat entry list.  rel_path is
+      // split on "/" so subdirectories (a skill's references/, a command's
+      // templates/) become parent nodes; the backend's is_dir entries attach
+      // the real folder metadata to those nodes.  A FILE watch root (e.g.
+      // ~/.claude/CLAUDE.md) is itself a top-level node, not a folder.
+      localTree: function () {
+        var items = this.store.aiConfigLocal.entries || [];
+        var roots = [];
+        var nodes = {};
+        for (var i = 0; i < items.length; i++) {
+          var e = items[i];
+          var rel = String(e.rel_path || '').replace(/\/+$/, '');
+          if (!rel) continue;
+          var parts = rel.split('/');
+          var node = null;
+          var parent = null;
+          for (var j = 0; j < parts.length; j++) {
+            var key = String(e.root_index) + KEY_SEP + parts.slice(0, j + 1).join('/');
+            if (j === 0) {
+              node = nodes[key];
+              if (!node) {
+                node = nodes[key] = {
+                  key: key,
+                  root_index: e.root_index,
+                  name: parts[0],
+                  path: parts[0],
+                  is_dir: parts.length > 1 || !!e.is_dir,
+                  entry: null,
+                  children: [],
+                };
+                roots.push(node);
+              }
+              parent = node;
+            } else {
+              var child = null;
+              for (var c = 0; c < parent.children.length; c++) {
+                if (parent.children[c].key === key) { child = parent.children[c]; break; }
+              }
+              if (!child) {
+                child = {
+                  key: key,
+                  root_index: e.root_index,
+                  name: parts[j],
+                  path: parts.slice(0, j + 1).join('/'),
+                  is_dir: j < parts.length - 1 || !!e.is_dir,
+                  entry: null,
+                  children: [],
+                };
+                parent.children.push(child);
+              }
+              parent = child;
+              node = child;
+            }
+          }
+          // Attach the backend entry to the node the entry names.  File
+          // entries land on their leaf node; a directory entry (rel_path with
+          // trailing slash) lands on its folder node, carrying the metadata
+          // openEntryDir/trash need.
+          if (node) {
+            node.entry = e;
+            node.is_dir = !!e.is_dir;
+          }
+        }
+        return roots;
+      },
+
+      // Rows to render: the flat search results while searching, otherwise a
+      // depth-annotated walk of the tree (folders open only when expanded).
+      localRows: function () {
+        var q = (this.localSearch || '').toLowerCase().trim();
+        var out = [];
+        if (q) {
+          var items = this.localFilteredEntries;
+          for (var i = 0; i < items.length; i++) {
+            var m = items[i];
+            out.push({
+              key: this.localKeyOf(m),
+              label: m.rel_path,
+              depth: 0,
+              isDir: !!m.is_dir,
+              entry: m,
+              node: null,
+            });
+          }
+          return out;
+        }
+        var self = this;
+        var walk = function (nodes, depth) {
+          for (var i = 0; i < nodes.length; i++) {
+            var node = nodes[i];
+            out.push({
+              key: node.key,
+              label: node.name,
+              depth: depth,
+              isDir: node.is_dir,
+              entry: node.entry,
+              node: node,
+            });
+            if (node.is_dir && self.isDirExpanded(node)) {
+              walk(node.children, depth + 1);
+            }
+          }
+        };
+        walk(this.localTree, 0);
+        return out;
       },
 
       // True when the watch list is empty / nothing was collected — the
@@ -170,6 +282,52 @@
 
       refreshLocal: function () {
         return this.store.fetchAiConfigLocal();
+      },
+
+      // ── Tree view helpers (round 19) ─────────────────────────────
+
+      isDirExpanded: function (node) {
+        return !!(node && this.localExpanded[node.key]);
+      },
+
+      toggleDir: function (node) {
+        if (!node) return;
+        if (this.localExpanded[node.key]) {
+          delete this.localExpanded[node.key];
+        } else {
+          this.localExpanded[node.key] = true;
+        }
+        // Reassign a copy so Vue 2's object-change detection picks it up.
+        this.localExpanded = Object.assign({}, this.localExpanded);
+      },
+
+      // Clicking a folder toggles its expansion; a file opens the preview.
+      // In search mode a folder has no tree node — open it in the OS file
+      // manager instead (that's what clicking a folder meant before the tree).
+      // Double-clicking a folder also opens it in the OS file manager.
+      onRowClick: function (row) {
+        if (!row) return;
+        if (row.isDir) {
+          if (row.node) { this.toggleDir(row.node); }
+          else { this.openRowDir(row); }
+        } else if (row.entry) {
+          this.openLocalPreview(row.entry);
+        }
+      },
+
+      openRowDir: function (row) {
+        if (!row || !row.isDir) return;
+        // node.entry carries the folder's own is_dir entry (trailing slash);
+        // a missing one means a stale intermediate node — build a synthetic
+        // entry so "open in OS" still resolves the folder path.
+        if (row.entry && row.entry.is_dir) {
+          this.openEntryDir(row.entry);
+        } else if (row.node) {
+          this.openEntryDir({
+            root_index: row.node.root_index,
+            rel_path: row.node.path + '/',
+          });
+        }
       },
 
       openPathsDialog: function () {
@@ -446,18 +604,21 @@
                 '</tr>' +
               '</thead>' +
               '<tbody>' +
-                '<tr v-for="e in localFilteredEntries" :key="localKeyOf(e)">' +
-                  '<td class="aiconfig-panel__cell-path">' +
-                    '<span v-if="localMultiRoot && !e.is_dir" class="aiconfig-panel__root-chip" :title="localRootLabel(e.root_index)">R{{ e.root_index }}</span>' +
-                    // Folder entries (skills / commands) open as a folder rather
-                    // than a text preview; the 📁 marks them in the list.
-                    '<button class="aiconfig-panel__path-btn selectable" :class="{ \'aiconfig-panel__path-btn--dir\': e.is_dir }" @click="openLocalPreview(e)" :title="e.is_dir ? t(\'aiconfig.local_open_dir\') : t(\'aiconfig.preview_title\')">{{ e.is_dir ? \'📁 \' : \'\' }}{{ e.rel_path }}</button>' +
+                '<tr v-for="row in localRows" :key="row.key">' +
+                  '<td class="aiconfig-panel__cell-path" :style="row.depth ? { paddingLeft: (12 + row.depth * 18) + \'px\' } : {}">' +
+                    '<span v-if="row.isDir && row.node" class="aiconfig-panel__tree-chevron" :class="{ \'aiconfig-panel__tree-chevron--open\': localExpanded[row.node.key] }" @click.stop="toggleDir(row.node)">▸</span>' +
+                    '<span v-else class="aiconfig-panel__tree-chevron aiconfig-panel__tree-chevron--spacer"></span>' +
+                    '<span v-if="localMultiRoot && !row.isDir" class="aiconfig-panel__root-chip" :title="localRootLabel(row.entry.root_index)">R{{ row.entry.root_index }}</span>' +
+                    // Folders: click to expand/collapse the tree, double-click
+                    // to open in the OS file manager (the "打开那个技能" action);
+                    // files open a text preview.  The 📁 marks folder rows.
+                    '<button class="aiconfig-panel__path-btn selectable" :class="{ \'aiconfig-panel__path-btn--dir\': row.isDir }" @click="onRowClick(row)" @dblclick.prevent="openRowDir(row)" :title="row.isDir ? t(\'aiconfig.local_open_dir\') : t(\'aiconfig.preview_title\')">{{ row.isDir ? \'📁 \' : \'\' }}{{ row.label }}</button>' +
                   '</td>' +
-                  '<td class="aiconfig-panel__cell-size">{{ e.is_dir ? \'\' : fmtSize(e.size) }}</td>' +
-                  '<td class="aiconfig-panel__cell-time">{{ fmtTime(e.mtime) }}</td>' +
+                  '<td class="aiconfig-panel__cell-size">{{ row.isDir ? \'\' : fmtSize(row.entry.size) }}</td>' +
+                  '<td class="aiconfig-panel__cell-time">{{ fmtTime(row.entry.mtime) }}</td>' +
                   '<td class="aiconfig-panel__local-actions">' +
-                    '<button class="settings-btn settings-btn--sm aiconfig-panel__icon-btn" @click="openEntryDir(e)" :title="t(\'aiconfig.local_open_dir\')">📂</button>' +
-                    '<button v-if="!e.is_dir" class="settings-btn settings-btn--sm aiconfig-panel__icon-btn aiconfig-panel__icon-btn--danger" @click="trashEntry(e)" :title="t(\'aiconfig.local_trash_title\')">🗑</button>' +
+                    '<button class="settings-btn settings-btn--sm aiconfig-panel__icon-btn" @click="openRowDir(row)" :title="t(\'aiconfig.local_open_dir\')">📂</button>' +
+                    '<button v-if="!row.isDir && row.entry" class="settings-btn settings-btn--sm aiconfig-panel__icon-btn aiconfig-panel__icon-btn--danger" @click="trashEntry(row.entry)" :title="t(\'aiconfig.local_trash_title\')">🗑</button>' +
                   '</td>' +
                 '</tr>' +
                 '<tr v-if="localFilteredEntries.length === 0">' +

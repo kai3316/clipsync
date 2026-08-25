@@ -1431,12 +1431,24 @@ class WebServer:
                 # localStorage (the reset's file deletion can't reach it).
                 # Injected exactly once, then the marker is removed.
                 reset_flag = "false"
+                fresh_flag = "false"
                 try:
                     from internal.config.config import _config_dir
                     marker = _config_dir() / "factory_reset_pending"
                     if marker.exists():
                         reset_flag = "true"
                         marker.unlink()
+                    # One-shot web-wizard re-surface.  After a factory reset the
+                    # desktop language picker (gated by cfg.language_chosen) may
+                    # still show while a browser holding a stale
+                    # clipsync_onboarded flag would otherwise not re-run the web
+                    # wizard.  Written alongside the reset marker, so the FIRST
+                    # page load after a reset re-surfaces the wizard exactly
+                    # once; afterwards the browser's own flag governs again.
+                    fresh_marker = _config_dir() / "web_fresh_pending"
+                    if fresh_marker.exists():
+                        fresh_flag = "true"
+                        fresh_marker.unlink()
                 except Exception:
                     pass
 
@@ -1451,14 +1463,18 @@ class WebServer:
                         ("__I18N__", _escape_script_json(i18n_json)),
                         ("__DEVICE_ID__", _js_string(cfg.device_id)),
                         ("__DEVICE_NAME__", _js_string(cfg.device_name)),
-                        # Fresh-install flag: the web onboarding wizard is gated
-                        # by a localStorage flag that a config reset can't clear,
-                        # while the desktop language picker is gated by
-                        # cfg.language_chosen — the two could disagree after a
-                        # factory reset, leaving the user with the language
-                        # picker but no wizard.  When the config looks fresh
-                        # (no language chosen yet), re-surface the web wizard.
-                        ("__FRESH__", "true" if not getattr(cfg, "language_chosen", False) else "false"),
+                        # Fresh-install flag (one-shot): after a factory reset
+                        # the web onboarding wizard is gated by a localStorage
+                        # flag the reset can't clear, while the desktop language
+                        # picker is gated by cfg.language_chosen — the two could
+                        # disagree, leaving the user with the language picker but
+                        # no wizard.  This is now driven by a one-shot
+                        # "web_fresh_pending" marker (written at reset time) so
+                        # it injects exactly once and never re-surfaces on every
+                        # refresh/app open (the old cfg.language_chosen proxy
+                        # stayed true forever when no language was ever picked,
+                        # so the wizard showed on EVERY load).
+                        ("__FRESH__", fresh_flag),
                         ("__RESET__", reset_flag),
                     ]
                     for placeholder, value in replacements:

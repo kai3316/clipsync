@@ -2,6 +2,17 @@
 
 All notable changes to ClipSync are documented in this file.
 
+## [1.0.75] — 2026-08-25
+
+- **Fix macOS internet sync** (relay `wss://` brokers all failed with `SSL: CERTIFICATE_VERIFY_FAILED: unable to get local issuer certificate`): macOS / frozen builds have no OS trust store in OpenSSL's default paths, so every public-broker handshake was rejected. The relay client and the connectivity-test probe now pin certifi's bundled CA bundle (`certifi` added as a dependency; PyInstaller bundles its `cacert.pem` automatically). Windows / Linux keep their system trust store.
+- **Fix "relay_state WS broadcast failed" `AttributeError`** on every internet-sync toggle: `_on_relay_state` called `web_server.broadcast(...)` (no such method); now routes through `web_server.ws_manager.broadcast(...)`.
+- **AI-config local listing is now a tree.** A skill's nested files (e.g. `R2-aeon/references/*.md`) no longer dump flat onto the list — folders collapse/expand on click (▸/▾), double-click or the 📂 button opens the folder in the OS file manager, and the search box still returns flat matches.
+- **Fix stale "quick paste" window after factory reset / restart on Windows**: reset & restart exit without `shutdown()`, so leftover Quick-Paste `--app` windows (and their private profiles) survived — after a reset the app window was a leftover `quickpaste.html` popup instead of the dashboard. Both paths now tear Quick-Paste popups and the dashboard window down before respawning.
+- **Devices page: chat actions.** Connected/paired device cards gain a 💬 聊天 button and the device right-click menu gains "打开聊天" — starts a chat session with that device and switches to the Chat tab (works for LAN and internet-paired peers).
+- **Chat no longer triggers a pairing prompt.** Starting a chat with an unpaired LAN device auto-generated a shared pairing code on the receiving side, flashing a pairing-code notification/card before the chat invite (milliseconds later) cleaned it up — "聊天还会弹配对码，很混乱". The pairing notification is now debounced ~1.2s and the chat invite cancels it before it ever shows; real pairings still notify (the code is stored immediately).
+- **Pairing codes pinned to the top of the Devices page.** The 「配对请求」 section now renders at the top (above Connected/Offline/Discovered), and the two codes — the 8-digit pairing code and the SAS fingerprint — sit side by side in prominent badges so both can be compared across devices at a glance.
+- **Onboarding guide no longer re-shows on every refresh / app open.** The web wizard's "fresh install" flag was derived from `language_chosen`, which stays False forever when no language is ever explicitly picked — so `__CLIPSYNC_FRESH__` was true on every page load and the guide reappeared constantly. It is now a one-shot marker written at factory reset and consumed once; afterwards the browser's own `clipsync_onboarded` flag governs.
+
 ## [1.0.74] — 2026-08-25
 
 - **Tray timed-pause tests skip on headless Linux** (`TestTrayPause` needs a display to build a `pystray.Icon`; CI runners have no X server). CI test gate is now green on Windows / macOS / Linux.

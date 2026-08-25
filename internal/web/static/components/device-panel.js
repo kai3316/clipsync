@@ -243,6 +243,41 @@
 
         '<template v-else>' +
 
+          '<!-- Pairing Requests — pinned to the top of the page: the codes are' +
+          'time-sensitive and both must be compared on the two devices, so they' +
+          'must not sit below the device lists. -->' +
+          '<div v-if="pairingRequests.length > 0" class="device-panel__section">' +
+            '<div class="section-header" style="color:var(--clipsync-warning)">' +
+              '🔐 {{ t(\'devices.pairing_requests\') }}' +
+              '<span class="section-header__badge">{{ pairingRequests.length }}</span>' +
+            '</div>' +
+            '<div v-for="pr in pairingRequests" :key="pr.peer_id" class="pairing-request-card">' +
+              '<div class="pairing-request-card__info">' +
+                '<span class="pairing-request-card__name">{{ pr.peer_name || pr.device_name || pr.peer_id }}</span>' +
+                '<span class="pairing-request-card__id">{{ pr.peer_id }}</span>' +
+                // Both codes side by side at the top of the card — the pairing
+                // code AND the SAS fingerprint — so the two devices can be
+                // compared at a glance.
+                '<div class="pairing-request-card__codes">' +
+                  '<span class="pairing-request-code-badge">{{ t(\'ui.pairing_code_label\') }} <strong>{{ formattedCode(pr) }}</strong></span>' +
+                  '<span v-if="pr.sas" class="pairing-request-code-badge">&#128737; {{ t(\'devices.sas_label\') }} <strong style="letter-spacing:1px">{{ pr.sas }}</strong></span>' +
+                '</div>' +
+                '<span v-if="pr.sas" class="pairing-request-card__hint">{{ t(\'devices.sas_verify_hint\') }}</span>' +
+                '<span class="pairing-request-card__hint">{{ pairingHint(pr) }}</span>' +
+                '<span class="pairing-request-card__hint">{{ t(\'devices.pairing_expiry_hint\') }}</span>' +
+              '</div>' +
+              '<div class="pairing-request-card__actions">' +
+                '<button v-if="pr.status !== \'confirmed_waiting\'" class="device-card__action device-card__action--accent" @click="acceptPairing(pr)" :disabled="pairingResponding === pr.peer_id">' +
+                  '{{ pairingResponding === pr.peer_id ? \'...\' : t(\'ui.confirm\') }}' +
+                '</button>' +
+                '<span v-else class="pairing-request-card__waiting">⏳ {{ t(\'pairing.state.confirmed_waiting\') }}</span>' +
+                '<button class="device-card__action device-card__action--danger" @click="rejectPairing(pr)" :disabled="pairingResponding === pr.peer_id">' +
+                  '{{ pairingResponding === pr.peer_id ? \'...\' : t(\'ui.reject\') }}' +
+                '</button>' +
+              '</div>' +
+            '</div>' +
+          '</div>' +
+
           '<!-- Connected -->' +
           '<div v-if="onlineRemoteDevices.length > 0" class="device-panel__section">' +
             '<div class="section-header">' +
@@ -276,34 +311,6 @@
             '<div v-for="dev in discoveredDevices" :key="dev.device_id" class="device-internet-wrap">' +
               '<span v-if="netpairPeerFor(dev.device_id)" class="netpair-card-badge" :class="netpairPeerFor(dev.device_id).online ? \'netpair-card-badge--online\' : \'netpair-card-badge--offline\'" :title="t(\'devices.netpair_also_internet\')">🌐 {{ netpairPeerFor(dev.device_id).online ? t(\'devices.netpair_online\') : t(\'devices.netpair_offline\') }}</span>' +
               '<device-card :device="devWithAlias(dev)"></device-card>' +
-            '</div>' +
-          '</div>' +
-
-          '<!-- Pairing Requests -->' +
-          '<div v-if="pairingRequests.length > 0" class="device-panel__section">' +
-            '<div class="section-header" style="color:var(--clipsync-warning)">' +
-              '🔐 {{ t(\'devices.pairing_requests\') }}' +
-              '<span class="section-header__badge">{{ pairingRequests.length }}</span>' +
-            '</div>' +
-            '<div v-for="pr in pairingRequests" :key="pr.peer_id" class="pairing-request-card">' +
-              '<div class="pairing-request-card__info">' +
-                '<span class="pairing-request-card__name">{{ pr.peer_name || pr.device_name || pr.peer_id }}</span>' +
-                '<span class="pairing-request-card__id">{{ pr.peer_id }}</span>' +
-                '<span class="pairing-request-card__code">{{ t(\'ui.pairing_code_label\') }} <strong>{{ formattedCode(pr) }}</strong></span>' +
-                '<span v-if="pr.sas" class="pairing-request-card__code">&#128737; {{ t(\'devices.sas_label\') }} <strong style="letter-spacing:1px">{{ pr.sas }}</strong></span>' +
-                '<span v-if="pr.sas" class="pairing-request-card__hint">{{ t(\'devices.sas_verify_hint\') }}</span>' +
-                '<span class="pairing-request-card__hint">{{ pairingHint(pr) }}</span>' +
-                '<span class="pairing-request-card__hint">{{ t(\'devices.pairing_expiry_hint\') }}</span>' +
-              '</div>' +
-              '<div class="pairing-request-card__actions">' +
-                '<button v-if="pr.status !== \'confirmed_waiting\'" class="device-card__action device-card__action--accent" @click="acceptPairing(pr)" :disabled="pairingResponding === pr.peer_id">' +
-                  '{{ pairingResponding === pr.peer_id ? \'...\' : t(\'ui.confirm\') }}' +
-                '</button>' +
-                '<span v-else class="pairing-request-card__waiting">⏳ {{ t(\'pairing.state.confirmed_waiting\') }}</span>' +
-                '<button class="device-card__action device-card__action--danger" @click="rejectPairing(pr)" :disabled="pairingResponding === pr.peer_id">' +
-                  '{{ pairingResponding === pr.peer_id ? \'...\' : t(\'ui.reject\') }}' +
-                '</button>' +
-              '</div>' +
             '</div>' +
           '</div>' +
 

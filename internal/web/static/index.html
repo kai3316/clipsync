@@ -857,6 +857,34 @@
       color: var(--clipsync-accent);
     }
 
+    /* The two codes (配对码 + SAS) side by side, top of the pairing card. */
+    .pairing-request-card__codes {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      margin-top: 6px;
+    }
+
+    .pairing-request-code-badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      padding: 4px 10px;
+      border-radius: var(--clipsync-radius);
+      background: var(--clipsync-panel-2);
+      border: 1px solid var(--clipsync-warning-glow);
+      font-size: 12px;
+      color: var(--clipsync-fg-muted);
+      white-space: nowrap;
+    }
+
+    .pairing-request-code-badge strong {
+      font-size: 18px;
+      letter-spacing: 0.12em;
+      color: var(--clipsync-accent);
+      font-family: var(--clipsync-font-mono);
+    }
+
     .pairing-request-card__hint {
       font-size: 11px;
       color: var(--clipsync-fg-muted);
@@ -5334,6 +5362,37 @@
     .aiconfig-panel__path-btn:hover {
       color: var(--clipsync-accent);
       text-decoration: underline;
+    }
+
+    /* Tree-view expand chevron (round 19): folder rows in the AI-config local
+       listing.  ▸ rotates to ▾ when the folder is open; spacer cells keep
+       file rows aligned. */
+    .aiconfig-panel__tree-chevron {
+      display: inline-block;
+      width: 14px;
+      margin-right: 2px;
+      font-size: 10px;
+      color: var(--clipsync-fg-muted);
+      cursor: pointer;
+      transition: transform var(--clipsync-transition-fast);
+      user-select: none;
+      vertical-align: middle;
+    }
+
+    .aiconfig-panel__tree-chevron:hover {
+      color: var(--clipsync-accent);
+    }
+
+    .aiconfig-panel__tree-chevron--open {
+      transform: rotate(90deg);
+    }
+
+    .aiconfig-panel__tree-chevron--spacer {
+      cursor: default;
+    }
+
+    .aiconfig-panel__tree-chevron--spacer:hover {
+      color: var(--clipsync-fg-muted);
     }
 
     .aiconfig-panel__cell-size,

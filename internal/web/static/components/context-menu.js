@@ -505,6 +505,23 @@
         });
       },
 
+      chatWithDevice: function () {
+        var device = this.targetDevice;
+        if (!device) return;
+        var peerId = device.device_id;
+        var name = device.device_name || device.note || device.device_id || '';
+        var self = this;
+        this.closeMenu();
+        ClipsyncAPI.chatInvite(peerId, name).then(function (res) {
+          if (res && res.session_id) {
+            self.store.activeChatSession = res.session_id;
+          }
+          self.store.activeTab = 'chat';
+        }).catch(function () {
+          self.store.showToast(self.t('chat.err_connect_timeout'), 2500);
+        });
+      },
+
       renameDevice: function () {
         var device = this.targetDevice;
         if (!device) return;
@@ -814,6 +831,10 @@
           '<div v-if="!isLocal" class="context-menu__item" role="menuitem" tabindex="-1" :aria-disabled="!targetDevice" @click="toggleConnect">' +
             '<span class="context-menu__item-icon">🔗</span>' +
             '<span class="context-menu__item-label">{{ isConnected ? t(\'ui.disconnect\') : t(\'ui.connect\') }}</span>' +
+          '</div>' +
+          '<div v-if="!isLocal" class="context-menu__item" role="menuitem" tabindex="-1" :aria-disabled="!targetDevice" @click="chatWithDevice">' +
+            '<span class="context-menu__item-icon">💬</span>' +
+            '<span class="context-menu__item-label">{{ t(\'context.open_chat\') }}</span>' +
           '</div>' +
           '<div class="context-menu__item" role="menuitem" tabindex="-1" :aria-disabled="!targetDevice" @click="renameDevice">' +
             '<span class="context-menu__item-icon">✏</span>' +
