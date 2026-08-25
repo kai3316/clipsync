@@ -1631,55 +1631,70 @@
               '<div class="settings-dialog__content">' +
                 '<p v-if="searchNoMatches" class="settings-hint" style="padding:8px 0">{{ t(\'settings.search_no_matches\') }}</p>' +
 
-                '<!-- ═══════ Appearance ═══════ (theme + visual only) -->' +
+                '<!-- ═══════ Appearance ═══════ (master switch reveals theme / animation) -->' +
                 '<section v-if="activeSection === \'appearance\'" class="settings-section">' +
-                  '<h3 class="settings-section__title">{{ t(\'settings.appearance\') }}</h3>' +
-                  '<div class="settings-theme-row">' +
-                    '<button v-for="opt in themeOptions" :key="opt.value"' +
-                      ' class="settings-theme-btn"' +
-                      ' :class="{ \'settings-theme-btn--active\': store.theme === opt.value }"' +
-                      ' @click="selectTheme(opt.value)">' +
-                      '<span class="settings-theme-btn__label">{{ opt.label }}</span>' +
-                      '<span v-if="store.theme === opt.value" class="settings-theme-btn__check">✓</span>' +
-                    '</button>' +
-                  '</div>' +
-
-                  '<h3 class="settings-section__title settings-section__title--sub" style="margin-top:24px">{{ t(\'settings.animation\') }}</h3>' +
                   '<div class="settings-toggle-row">' +
-                    '<span class="settings-toggle-label">{{ t(\'settings.animation\') }}</span>' +
-                    '<button class="settings-toggle" role="switch" :aria-checked="store.animationsEnabled" :aria-label="t(\'settings.animation\')" :class="{ \'settings-toggle--on\': store.animationsEnabled }" @click="toggleAnimation">' +
+                    '<span class="settings-toggle-label"><strong>{{ t(\'settings.appearance\') }}</strong></span>' +
+                    '<button class="settings-toggle" role="switch" :aria-checked="store.appearanceMaster" :aria-label="t(\'settings.appearance\')" :class="{ \'settings-toggle--on\': store.appearanceMaster }" @click="store.setAppearanceMaster(!store.appearanceMaster)">' +
                       '<span class="settings-toggle__knob"></span>' +
                     '</button>' +
                   '</div>' +
+                  '<p class="settings-hint" style="margin-bottom:0">{{ t(\'settings_window.appearance_desc\') }}</p>' +
+                  '<template v-if="store.appearanceMaster">' +
+                    '<div class="settings-theme-row" style="margin-top:12px">' +
+                      '<button v-for="opt in themeOptions" :key="opt.value"' +
+                        ' class="settings-theme-btn"' +
+                        ' :class="{ \'settings-theme-btn--active\': store.theme === opt.value }"' +
+                        ' @click="selectTheme(opt.value)">' +
+                        '<span class="settings-theme-btn__label">{{ opt.label }}</span>' +
+                        '<span v-if="store.theme === opt.value" class="settings-theme-btn__check">✓</span>' +
+                      '</button>' +
+                    '</div>' +
+
+                    '<h3 class="settings-section__title settings-section__title--sub" style="margin-top:24px">{{ t(\'settings.animation\') }}</h3>' +
+                    '<div class="settings-toggle-row">' +
+                      '<span class="settings-toggle-label">{{ t(\'settings.animation\') }}</span>' +
+                      '<button class="settings-toggle" role="switch" :aria-checked="store.animationsEnabled" :aria-label="t(\'settings.animation\')" :class="{ \'settings-toggle--on\': store.animationsEnabled }" @click="toggleAnimation">' +
+                        '<span class="settings-toggle__knob"></span>' +
+                      '</button>' +
+                    '</div>' +
+                  '</template>' +
                 '</section>' +
 
-                '<!-- ═══════ Preferences ═══════ (language / system / notifications) -->' +
+                '<!-- ═══════ Preferences ═══════ (master switch reveals language / system; notifications stay visible) -->' +
                 '<section v-if="activeSection === \'preferences\'" class="settings-section">' +
-                  '<h3 class="settings-section__title">{{ t(\'settings.preferences\') }}</h3>' +
-
-                  '<h3 class="settings-section__title settings-section__title--sub">{{ t(\'settings.language\') }}</h3>' +
-                  '<select class="settings-select"' +
-                    ' :value="currentLocale"' +
-                    ' @change="selectLocale($event.target.value)">' +
-                    '<option v-for="loc in locales" :key="loc.code" :value="loc.code">{{ loc.label }}</option>' +
-                  '</select>' +
-                  '<p class="settings-hint">{{ t("settings.language_hint") }}</p>' +
-
-                  '<h3 class="settings-section__title settings-section__title--sub" style="margin-top:24px">{{ t(\'settings_window.system_title\') }}</h3>' +
                   '<div class="settings-toggle-row">' +
-                    '<span class="settings-toggle-label">{{ t(\'network.auto_start\') }}</span>' +
-                    '<button class="settings-toggle" role="switch" :aria-checked="autoStart" :aria-label="t(\'network.auto_start\')" :class="{ \'settings-toggle--on\': autoStart }" @click="toggleAutoStart">' +
+                    '<span class="settings-toggle-label"><strong>{{ t(\'settings.preferences\') }}</strong></span>' +
+                    '<button class="settings-toggle" role="switch" :aria-checked="store.preferencesMaster" :aria-label="t(\'settings.preferences\')" :class="{ \'settings-toggle--on\': store.preferencesMaster }" @click="store.setPreferencesMaster(!store.preferencesMaster)">' +
                       '<span class="settings-toggle__knob"></span>' +
                     '</button>' +
                   '</div>' +
-                  '<p class="settings-hint">{{ t(\'settings_window.auto_start_hint\') }}</p>' +
-                  '<div class="settings-toggle-row">' +
-                    '<span class="settings-toggle-label">{{ t(\'settings.ui_mode\') }}</span>' +
-                    '<button class="settings-toggle" role="switch" :aria-checked="uiBackend === \'webview\'" :aria-label="t(\'settings.ui_mode\')" :class="{ \'settings-toggle--on\': uiBackend === \'webview\' }" @click="toggleUIMode">' +
-                      '<span class="settings-toggle__knob"></span>' +
-                    '</button>' +
-                  '</div>' +
-                  '<p class="settings-hint">{{ t(\'settings_window.ui_backend_hint\') }}</p>' +
+                  '<template v-if="store.preferencesMaster">' +
+
+                    '<h3 class="settings-section__title settings-section__title--sub">{{ t(\'settings.language\') }}</h3>' +
+                    '<select class="settings-select"' +
+                      ' :value="currentLocale"' +
+                      ' @change="selectLocale($event.target.value)">' +
+                      '<option v-for="loc in locales" :key="loc.code" :value="loc.code">{{ loc.label }}</option>' +
+                    '</select>' +
+                    '<p class="settings-hint">{{ t("settings.language_hint") }}</p>' +
+
+                    '<h3 class="settings-section__title settings-section__title--sub" style="margin-top:24px">{{ t(\'settings_window.system_title\') }}</h3>' +
+                    '<div class="settings-toggle-row">' +
+                      '<span class="settings-toggle-label">{{ t(\'network.auto_start\') }}</span>' +
+                      '<button class="settings-toggle" role="switch" :aria-checked="autoStart" :aria-label="t(\'network.auto_start\')" :class="{ \'settings-toggle--on\': autoStart }" @click="toggleAutoStart">' +
+                        '<span class="settings-toggle__knob"></span>' +
+                      '</button>' +
+                    '</div>' +
+                    '<p class="settings-hint">{{ t(\'settings_window.auto_start_hint\') }}</p>' +
+                    '<div class="settings-toggle-row">' +
+                      '<span class="settings-toggle-label">{{ t(\'settings.ui_mode\') }}</span>' +
+                      '<button class="settings-toggle" role="switch" :aria-checked="uiBackend === \'webview\'" :aria-label="t(\'settings.ui_mode\')" :class="{ \'settings-toggle--on\': uiBackend === \'webview\' }" @click="toggleUIMode">' +
+                        '<span class="settings-toggle__knob"></span>' +
+                      '</button>' +
+                    '</div>' +
+                    '<p class="settings-hint">{{ t(\'settings_window.ui_backend_hint\') }}</p>' +
+                  '</template>' +
 
                   '<!-- Notifications (moved here from Security; each toggle saves immediately) -->' +
                   '<h3 class="settings-section__title settings-section__title--sub" style="margin-top:28px">{{ t(\'settings_window.notify_title\') }}</h3>' +

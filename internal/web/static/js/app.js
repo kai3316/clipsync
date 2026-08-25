@@ -477,11 +477,16 @@
           if (s.ui_backend) store.uiBackend = s.ui_backend;
           if (typeof s.sound_enabled === 'boolean') store.soundEnabled = s.sound_enabled;
           if (typeof s.ui_animation_enabled === 'boolean') store.animationsEnabled = s.ui_animation_enabled;
+          if (typeof s.auto_start === 'boolean') store.autoStart = s.auto_start;
           // The server is the source of truth for the sound preference — keep
           // the sound module in sync so WS tones obey the saved setting.
           if (typeof ClipsyncSound !== 'undefined' && ClipsyncSound.setEnabled) {
             ClipsyncSound.setEnabled(store.soundEnabled);
           }
+          // 外观/偏好 master switches: an explicit user choice (localStorage)
+          // wins; otherwise derive from the loaded settings so a customised
+          // group stays open instead of collapsing.
+          store.loadMasters();
           return s;
         });
       },

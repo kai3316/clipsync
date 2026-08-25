@@ -272,6 +272,7 @@
     settingsRequestedSection: '',   // open settings on this section when set
     soundEnabled: true,
     animationsEnabled: true,
+    autoStart: false,
     uiBackend: 'webview',       // 'webview' | 'ctk'
     settingsCache: {},           // cached settings from server
 
@@ -280,9 +281,20 @@
        ═══════════════════════════════════════════════════════════════ */
     onboardingDone: false,      // true once the wizard was finished/skipped
     showOnboarding: false,      // true while the wizard overlay is visible
-    onboardingStep: 1,          // 1 = welcome · 2 = pair a device · 3 = phone access
+    onboardingStep: 1,          // 1 = welcome · 2 = pair · 3 = phone · 4-9 = settings toggles
     onboardingError: '',        // inline error shown on the wizard (e.g. empty name)
     onboardingSaving: false,    // true while the device-name save is in flight
+
+    // Steps 4-9: master switches, all default OFF on a fresh install.
+    // The four real feature toggles write their backend keys when the wizard
+    // completes; 外观/偏好 are UI masters persisted to localStorage (their
+    // sub-settings still persist via the normal settings keys when chosen).
+    onboardContentFilter: false,
+    onboardAppFilter: false,
+    onboardRemoteSync: false,
+    onboardSound: false,
+    appearanceMaster: false,
+    preferencesMaster: false,
 
     /* ═══════════════════════════════════════════════════════════════
        Dialog system (server-pushed modals)
@@ -398,7 +410,12 @@
     },
 
     /**
-     * Mark onboarding as done, persist it, and hide the wizard overlay.
+     * Mark onboarding as done, persist it, hide the wizard overlay, and commit
+     * the six master switches from steps 4-9. All switches default OFF on a
+     * fresh install, so a wizard the user just clicks through leaves the four
+     * real feature toggles (content filter / app filter / internet sync /
+     * sound) explicitly off. 外观/偏好 are UI-only masters already persisted
+     * to localStorage the moment they are flipped.
      */
     completeOnboarding: function () {
       this.onboardingDone = true;
@@ -407,20 +424,187 @@
       this.onboardingError = '';
       this.onboardingSaving = false;
       try { localStorage.setItem('clipsync_onboarded', '1'); } catch (e) { /* ignore */ }
+
+      var self = this;
+      var patch = {
+        filter_enabled_categories: this.onboardContentFilter
+          ? this.defaultFilterCategories()
+          : [],
+        app_filter_enabled: this.onboardAppFilter,
+        internet_sync_enabled: this.onboardRemoteSync,
+        sound_enabled: this.onboardSound,
+      };
+      if (this.onboardSound !== this.soundEnabled) {
+        this.soundEnabled = this.onboardSound;
+        if (typeof ClipsyncSound !== 'undefined' && ClipsyncSound.setEnabled) {
+          ClipsyncSound.setEnabled(this.soundEnabled);
+        }
+      }
+      if (window.ClipsyncAPI && window.ClipsyncAPI.updateSettings) {
+        window.ClipsyncAPI.updateSettings(patch).then(function (res) {
+          if (res && res.updated) self.mergeSettings(res.updated);
+        }).catch(function () {
+          self.showToast(t('dialog.failed'), 2000, 'error');
+        });
+      }
     },
 
     /**
-     * Advance to the next onboarding step (1 → 2 → 3).
+     * The full set of sensitive-content categories the content filter guards
+     * when enabled (mirrors the settings panel's default filterEnabled list).
+     * @returns {string[]}
+     */
+    defaultFilterCategories: function () {
+      return ['credit_card', 'ssn', 'api_key', 'private_key', 'password'];
+    },
+
+    /**
+     * Advance to the next onboarding step (1 → 2 → … → 9).
      * Entering step 3 ensures the LAN IP / web port are loaded so the
      * phone-connect URL and QR button have real data to work with.
      */
     nextOnboardingStep: function () {
       this.onboardingError = '';
-      if (this.onboardingStep < 3) {
+      if (this.onboardingStep < 9) {
         this.onboardingStep += 1;
       }
       if (this.onboardingStep === 3) {
         this.ensureOverview();
+      }
+    },
+
+    /**
+     * Load the 外观/偏好 master switches. The user's explicit choice is
+     * persisted to localStorage; on first visit (no stored choice) it is
+     * derived from the loaded settings so existing customisations — a dark
+     * theme, autostart — keep their group visible instead of collapsing it.
+     */
+    loadMasters: function () {
+      var s = this.settingsCache || {};
+      var ap = null, pr = null;
+      try { ap = localStorage.getItem('clipsync_appearance_master'); } catch (e) { /* ignore */ }
+      try { pr = localStorage.getItem('clipsync_preferences_master'); } catch (e) { /* ignore */ }
+      if (ap === '1' || ap === '0') {
+        this.appearanceMaster = ap === '1';
+      } else {
+        this.appearanceMaster = !!(s.appearance_mode && s.appearance_mode !== 'system') ||
+          s.ui_animation_enabled === false;
+      }
+      if (pr === '1' || pr === '0') {
+        this.preferencesMaster = pr === '1';
+      } else {
+        this.preferencesMaster = s.auto_start === true;
+      }
+    },
+
+    /**
+     * Set and persist the 外观 master switch (UI-only: reveals the theme /
+     * animation controls). The sub-settings keep their own server keys.
+     * @param {boolean} v
+     */
+    setAppearanceMaster: function (v) {
+      this.appearanceMaster = !!v;
+      try { localStorage.setItem('clipsync_appearance_master', this.appearanceMaster ? '1' : '0'); } catch (e) { /* ignore */ }
+    },
+
+    /**
+     * Set and persist the 偏好 master switch (UI-only: reveals the language /
+     * autostart controls).
+     * @param {boolean} v
+     */
+    setPreferencesMaster: function (v) {
+      this.preferencesMaster = !!v;
+      try { localStorage.setItem('clipsync_preferences_master', this.preferencesMaster ? '1' : '0'); } catch (e) { /* ignore */ }
+    },
+
+    /**
+     * Wizard (and settings panel) theme picker: apply + persist appearance_mode.
+     * @param {'light'|'dark'|'system'} t
+     */
+    selectAppearanceTheme: function (t) {
+      var self = this;
+      this.setTheme(t);
+      if (window.ClipsyncAPI && window.ClipsyncAPI.updateSettings) {
+        window.ClipsyncAPI.updateSettings({ appearance_mode: t }).then(function (res) {
+          if (res && res.updated) self.settingsCache.appearance_mode = t;
+        }).catch(function () {
+          self.showToast(t('dialog.failed'), 2000, 'error');
+        });
+      }
+    },
+
+    /**
+     * Toggle the UI-animation switch: flip local state and persist the key.
+     */
+    toggleAnimation: function () {
+      var self = this;
+      var next = !this.animationsEnabled;
+      this.animationsEnabled = next;
+      if (window.ClipsyncAPI && window.ClipsyncAPI.updateSettings) {
+        window.ClipsyncAPI.updateSettings({ ui_animation_enabled: next }).then(function (res) {
+          if (res && res.updated) self.settingsCache.ui_animation_enabled = next;
+        }).catch(function () {
+          self.animationsEnabled = !next;
+          self.showToast(t('dialog.failed'), 2000, 'error');
+        });
+      }
+    },
+
+    /**
+     * Toggle the launch-at-login switch: flip local state and persist the key.
+     */
+    toggleAutoStart: function () {
+      var self = this;
+      var next = !this.autoStart;
+      this.autoStart = next;
+      if (window.ClipsyncAPI && window.ClipsyncAPI.updateSettings) {
+        window.ClipsyncAPI.updateSettings({ auto_start: next }).then(function (res) {
+          if (res && res.updated) self.settingsCache.auto_start = next;
+        }).catch(function () {
+          self.autoStart = !next;
+          self.showToast(t('dialog.failed'), 2000, 'error');
+        });
+      }
+    },
+
+    /**
+     * Current UI locale, read live so the wizard's language picker reflects
+     * the language the page was actually served in.
+     * @returns {string}
+     */
+    currentLocale: function () {
+      if (typeof ClipsyncI18n !== 'undefined' && ClipsyncI18n.locale) {
+        return ClipsyncI18n.locale;
+      }
+      try { return localStorage.getItem('clipsync_locale') || 'en'; } catch (e) { return 'en'; }
+    },
+
+    /**
+     * Theme choices for the wizard's inline picker (same keys as the settings
+     * panel's themeOptions). @returns {Array<{value:string,label:string}>}
+     */
+    themeOptions: function () {
+      return [
+        { value: 'system', label: t('settings_window.theme_system') },
+        { value: 'light', label: t('settings_window.theme_light') },
+        { value: 'dark', label: t('settings_window.theme_dark') },
+      ];
+    },
+
+    /**
+     * Wizard language picker: persist the choice (same key the settings panel
+     * uses) and reload so every string re-resolves in the new language.
+     * @param {string} locale
+     */
+    selectLocale: function (locale) {
+      var self = this;
+      try { localStorage.setItem('clipsync_locale', locale); } catch (e) { /* ignore */ }
+      if (window.ClipsyncAPI && window.ClipsyncAPI.updateSettings) {
+        window.ClipsyncAPI.updateSettings({ language: locale }).then(function () {
+          window.setTimeout(function () { window.location.reload(); }, 600);
+        }).catch(function () {
+          self.showToast(t('dialog.failed'), 2000, 'error');
+        });
       }
     },
 

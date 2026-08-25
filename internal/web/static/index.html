@@ -7199,6 +7199,41 @@
       user-select: text;
     }
 
+    /* Master switch row (steps 4-9): label + on/off switch */
+    .onboard-switch {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: var(--clipsync-space-3);
+      width: 100%;
+      max-width: 300px;
+      margin-top: var(--clipsync-space-1);
+    }
+
+    .onboard-switch__label {
+      font-size: 14px;
+      font-weight: 600;
+      color: var(--clipsync-fg);
+    }
+
+    /* Inline sub-options revealed when the 外观/偏好 master is on */
+    .onboard-inline {
+      width: 100%;
+      max-width: 300px;
+      margin-top: var(--clipsync-space-3);
+      text-align: left;
+    }
+
+    .onboard-inline-row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: var(--clipsync-space-3);
+      width: 100%;
+      max-width: 300px;
+      margin: 16px auto 0;
+    }
+
     /* Buttons */
     .onboard-btn {
       display: inline-flex;
@@ -7431,7 +7466,7 @@
           </div>
 
           <!-- Step 3: Phone access -->
-          <div v-else class="onboard-step">
+          <div v-else-if="store.onboardingStep === 3" class="onboard-step">
             <div class="onboard-step__icon">&#x1F4F1;</div>
             <h1 class="onboard-step__title">{{ t('onboarding.phone_title') }}</h1>
             <p class="onboard-step__text">{{ t('onboarding.phone_body') }}</p>
@@ -7443,15 +7478,169 @@
             </div>
             <div class="onboard-actions">
               <button class="onboard-btn" @click="store.showPhoneQr()">{{ t('transfer.phone_action') }}</button>
+              <button class="onboard-btn onboard-btn--primary" @click="store.nextOnboardingStep()">{{ t('onboarding.next') }}</button>
+            </div>
+          </div>
+
+          <!-- Step 4: Content filter (master switch, default OFF) -->
+          <div v-else-if="store.onboardingStep === 4" class="onboard-step">
+            <div class="onboard-step__icon">&#x1F6E1;&#xFE0F;</div>
+            <h1 class="onboard-step__title">{{ t('onboarding.content_filter_title') }}</h1>
+            <p class="onboard-step__text">{{ t('onboarding.content_filter_body') }}</p>
+            <div class="onboard-switch">
+              <span class="onboard-switch__label">{{ t('onboarding.enable') }}</span>
+              <button class="settings-toggle" role="switch" :aria-checked="store.onboardContentFilter"
+                      :aria-label="t('onboarding.content_filter_title')"
+                      :class="{ 'settings-toggle--on': store.onboardContentFilter }"
+                      @click="store.onboardContentFilter = !store.onboardContentFilter">
+                <span class="settings-toggle__knob"></span>
+              </button>
+            </div>
+            <div class="onboard-actions">
+              <button class="onboard-btn onboard-btn--primary" @click="store.nextOnboardingStep()">{{ t('onboarding.next') }}</button>
+            </div>
+          </div>
+
+          <!-- Step 5: App filter (master switch, default OFF) -->
+          <div v-else-if="store.onboardingStep === 5" class="onboard-step">
+            <div class="onboard-step__icon">&#x1F4CB;</div>
+            <h1 class="onboard-step__title">{{ t('onboarding.app_filter_title') }}</h1>
+            <p class="onboard-step__text">{{ t('onboarding.app_filter_body') }}</p>
+            <div class="onboard-switch">
+              <span class="onboard-switch__label">{{ t('onboarding.enable') }}</span>
+              <button class="settings-toggle" role="switch" :aria-checked="store.onboardAppFilter"
+                      :aria-label="t('onboarding.app_filter_title')"
+                      :class="{ 'settings-toggle--on': store.onboardAppFilter }"
+                      @click="store.onboardAppFilter = !store.onboardAppFilter">
+                <span class="settings-toggle__knob"></span>
+              </button>
+            </div>
+            <div class="onboard-actions">
+              <button class="onboard-btn onboard-btn--primary" @click="store.nextOnboardingStep()">{{ t('onboarding.next') }}</button>
+            </div>
+          </div>
+
+          <!-- Step 6: Remote / internet sync (master switch, default OFF) -->
+          <div v-else-if="store.onboardingStep === 6" class="onboard-step">
+            <div class="onboard-step__icon">&#x1F310;</div>
+            <h1 class="onboard-step__title">{{ t('onboarding.remote_sync_title') }}</h1>
+            <p class="onboard-step__text">{{ t('onboarding.remote_sync_body') }}</p>
+            <div class="onboard-switch">
+              <span class="onboard-switch__label">{{ t('onboarding.enable') }}</span>
+              <button class="settings-toggle" role="switch" :aria-checked="store.onboardRemoteSync"
+                      :aria-label="t('onboarding.remote_sync_title')"
+                      :class="{ 'settings-toggle--on': store.onboardRemoteSync }"
+                      @click="store.onboardRemoteSync = !store.onboardRemoteSync">
+                <span class="settings-toggle__knob"></span>
+              </button>
+            </div>
+            <div class="onboard-actions">
+              <button class="onboard-btn onboard-btn--primary" @click="store.nextOnboardingStep()">{{ t('onboarding.next') }}</button>
+            </div>
+          </div>
+
+          <!-- Step 7: Appearance (master switch → reveals theme / animation) -->
+          <div v-else-if="store.onboardingStep === 7" class="onboard-step">
+            <div class="onboard-step__icon">&#x1F3A8;</div>
+            <h1 class="onboard-step__title">{{ t('onboarding.appearance_title') }}</h1>
+            <p class="onboard-step__text">{{ t('onboarding.appearance_body') }}</p>
+            <div class="onboard-switch">
+              <span class="onboard-switch__label">{{ t('onboarding.enable') }}</span>
+              <button class="settings-toggle" role="switch" :aria-checked="store.appearanceMaster"
+                      :aria-label="t('onboarding.appearance_title')"
+                      :class="{ 'settings-toggle--on': store.appearanceMaster }"
+                      @click="store.setAppearanceMaster(!store.appearanceMaster)">
+                <span class="settings-toggle__knob"></span>
+              </button>
+            </div>
+            <template v-if="store.appearanceMaster">
+              <div class="onboard-inline">
+                <div class="settings-theme-row">
+                  <button v-for="opt in store.themeOptions()" :key="opt.value"
+                          class="settings-theme-btn"
+                          :class="{ 'settings-theme-btn--active': store.theme === opt.value }"
+                          @click="store.selectAppearanceTheme(opt.value)">
+                    <span class="settings-theme-btn__label">{{ opt.label }}</span>
+                    <span v-if="store.theme === opt.value" class="settings-theme-btn__check">✓</span>
+                  </button>
+                </div>
+                <div class="onboard-inline-row">
+                  <span class="onboard-switch__label">{{ t('settings.animation') }}</span>
+                  <button class="settings-toggle" role="switch" :aria-checked="store.animationsEnabled"
+                          :aria-label="t('settings.animation')"
+                          :class="{ 'settings-toggle--on': store.animationsEnabled }"
+                          @click="store.toggleAnimation()">
+                    <span class="settings-toggle__knob"></span>
+                  </button>
+                </div>
+              </div>
+            </template>
+            <div class="onboard-actions">
+              <button class="onboard-btn onboard-btn--primary" @click="store.nextOnboardingStep()">{{ t('onboarding.next') }}</button>
+            </div>
+          </div>
+
+          <!-- Step 8: Preferences (master switch → reveals language / autostart) -->
+          <div v-else-if="store.onboardingStep === 8" class="onboard-step">
+            <div class="onboard-step__icon">&#x2699;&#xFE0F;</div>
+            <h1 class="onboard-step__title">{{ t('onboarding.preferences_title') }}</h1>
+            <p class="onboard-step__text">{{ t('onboarding.preferences_body') }}</p>
+            <div class="onboard-switch">
+              <span class="onboard-switch__label">{{ t('onboarding.enable') }}</span>
+              <button class="settings-toggle" role="switch" :aria-checked="store.preferencesMaster"
+                      :aria-label="t('onboarding.preferences_title')"
+                      :class="{ 'settings-toggle--on': store.preferencesMaster }"
+                      @click="store.setPreferencesMaster(!store.preferencesMaster)">
+                <span class="settings-toggle__knob"></span>
+              </button>
+            </div>
+            <template v-if="store.preferencesMaster">
+              <div class="onboard-inline">
+                <label class="onboard-device__label" for="onboard-locale">{{ t('settings.language') }}</label>
+                <select id="onboard-locale" class="settings-select"
+                        :value="store.currentLocale()"
+                        @change="store.selectLocale($event.target.value)">
+                  <option value="en">English</option>
+                  <option value="zh-CN">中文 (简体)</option>
+                </select>
+                <div class="onboard-inline-row">
+                  <span class="onboard-switch__label">{{ t('network.auto_start') }}</span>
+                  <button class="settings-toggle" role="switch" :aria-checked="store.autoStart"
+                          :aria-label="t('network.auto_start')"
+                          :class="{ 'settings-toggle--on': store.autoStart }"
+                          @click="store.toggleAutoStart()">
+                    <span class="settings-toggle__knob"></span>
+                  </button>
+                </div>
+              </div>
+            </template>
+            <div class="onboard-actions">
+              <button class="onboard-btn onboard-btn--primary" @click="store.nextOnboardingStep()">{{ t('onboarding.next') }}</button>
+            </div>
+          </div>
+
+          <!-- Step 9: Sound (master switch, default OFF) -->
+          <div v-else class="onboard-step">
+            <div class="onboard-step__icon">&#x1F50A;</div>
+            <h1 class="onboard-step__title">{{ t('onboarding.sound_title') }}</h1>
+            <p class="onboard-step__text">{{ t('onboarding.sound_body') }}</p>
+            <div class="onboard-switch">
+              <span class="onboard-switch__label">{{ t('onboarding.enable') }}</span>
+              <button class="settings-toggle" role="switch" :aria-checked="store.onboardSound"
+                      :aria-label="t('onboarding.sound_title')"
+                      :class="{ 'settings-toggle--on': store.onboardSound }"
+                      @click="store.onboardSound = !store.onboardSound">
+                <span class="settings-toggle__knob"></span>
+              </button>
+            </div>
+            <div class="onboard-actions">
               <button class="onboard-btn onboard-btn--primary" @click="store.completeOnboarding()">{{ t('onboarding.finish') }}</button>
             </div>
           </div>
 
           <!-- Step indicator + Skip -->
           <div class="onboard-dots" aria-hidden="true">
-            <span class="onboard-dots__dot" :class="{ 'onboard-dots__dot--active': store.onboardingStep === 1 }"></span>
-            <span class="onboard-dots__dot" :class="{ 'onboard-dots__dot--active': store.onboardingStep === 2 }"></span>
-            <span class="onboard-dots__dot" :class="{ 'onboard-dots__dot--active': store.onboardingStep === 3 }"></span>
+            <span v-for="n in 9" :key="n" class="onboard-dots__dot" :class="{ 'onboard-dots__dot--active': store.onboardingStep === n }"></span>
           </div>
           <button class="onboard-skip" @click="store.completeOnboarding()">{{ t('onboarding.skip') }}</button>
         </div>

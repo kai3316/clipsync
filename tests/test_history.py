@@ -887,13 +887,14 @@ def test_python_i18n_web_locales_are_fully_mirrored():
     its raw name across the UI.  The web files currently carry a known gap
     (AUDIT: "缺 640/1271 键" — aiconfig.*, devices.netpair_*, diag.*, ...; the
     2026-08-26 UI pass added 23 more web-only keys — now 664; the settings
-    reorganization added 2 more — settings_nav.remote_sync, settings_window.system_title) that has its own server-side
+    reorganization added 2 more — settings_nav.remote_sync, settings_window.system_title; the
+    onboarding-steps pass added 13 more — onboarding.enable + the six steps' titles/bodies) that has its own server-side
     mitigation, so its SIZE is pinned here: a NEW web-only key — the regression
     class this guards — changes the count and fails the suite."""
     from internal import i18n
     en, zh = _load_web_locales()
-    assert len(set(en) - set(i18n._EN)) == 666
-    assert len(set(zh) - set(i18n._ZH)) == 666
+    assert len(set(en) - set(i18n._EN)) == 679
+    assert len(set(zh) - set(i18n._ZH)) == 679
 
 
 def test_web_t_literals_resolve_in_both_locales():
