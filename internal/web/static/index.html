@@ -32,6 +32,14 @@
       outline: none;
     }
 
+    /* Hide the raw (pre-Vue) HTML until the app mounts.  Without this, a
+       refresh briefly paints the un-compiled markup — including the v-if
+       onboarding overlay — as a garbled flash of "code + images" before the
+       bundle runs (the reported "刷新闪一下引导页，全是代码"). */
+    [v-cloak] {
+      display: none !important;
+    }
+
     /* ── App Shell Layout ────────────────────────────────────────── */
 
     .app-shell {
@@ -7187,7 +7195,7 @@
   </style>
 </head>
 <body>
-  <div id="app" @contextmenu.prevent>
+  <div id="app" v-cloak @contextmenu.prevent>
     <!-- Toast notification overlay -->
     <toast></toast>
 

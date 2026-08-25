@@ -6,6 +6,7 @@ All notable changes to ClipSync are documented in this file.
 
 - **Fix stale cached web pages after an update** ("重启后打开的好像还是 quickpaste 页面"). The dashboard's service worker cached static assets **cache-first** and fell back to the cache on a navigation 404, so after an update removed `quickpaste.html`, the browser kept serving the old cached copy — and updated JS/CSS were never picked up. The cache is now versioned `shell-v2` (old v1 caches — including any cached `quickpaste.html` — are purged on activation) and shell assets are **network-first** (the server is local, so the extra round-trip is negligible; updates take effect immediately, cache is only the offline fallback).
 - **De-flake the queued-dialog response-window test** (was intermittently failing on the macOS CI runner: margins of ~0.05 s against a loaded runner). The queued-dialog test now uses ~1 s margins and passes consistently.
+- **No more garbled flash on refresh** ("刷新会闪一下引导页，全是代码"). Before the Vue bundle mounts, the raw HTML — including the `v-if` onboarding overlay — was briefly painted unstyled. The app root now carries `v-cloak` so the shell stays hidden until the app mounts, then renders fully controlled by state.
 
 ## [1.0.76] — 2026-08-25
 
