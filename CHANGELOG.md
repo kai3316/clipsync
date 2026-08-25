@@ -5,6 +5,10 @@ All notable changes to ClipSync are documented in this file.
 ## [Unreleased]
 
 ### Internet sync
+- **Delivery confirmation for relay chat.** Messages sent over the internet relay now carry a per-bubble mark — ✓ delivered / ✗ not delivered / … sending — via an end-to-end ack: the receiver replies on the same paired topic, and the sender updates the bubble. Clipboard items keep working as before; confirmation rides the same ack.
+- **Offline queue for internet clipboard.** If the relay or the peer is unreachable at send time, the clip lands in a persisted local queue (`relay_pending.json`) and is retried automatically when the relay comes back online or the peer is seen again (up to 5 attempts). The Devices page shows a small "N pending" badge per internet-paired device plus the last send result.
+
+### Internet sync
 - **Chat now works across the internet.** Start a conversation with an internet-paired device even when it isn't on your network — text, typing indicator and session state travel through the relay. Delivery is LAN-first, so a device reachable both ways gets each message exactly once.
 - **One device, one card, both worlds.** Chat targets and the devices panel deduplicate LAN + internet entries: a machine on both networks appears once, with a 🌐 badge and (for LAN cards) your alias shown instead of its raw name. The chat picker lists internet-only devices with their live online state.
 - Removed the dead "relay URL" field from web settings (the editable broker list is the real setting); un-pairing now broadcasts so every open tab drops the device immediately.

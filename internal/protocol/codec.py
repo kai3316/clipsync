@@ -111,11 +111,16 @@ CHAT_MSG_TYPES = frozenset({
 # file bytes from unpaired peers.
 UNPAIRED_GATE_MSG_TYPES = PAIRING_MSG_TYPES | CHAT_MSG_TYPES | frozenset({"file_chunk"})
 
-# Internet-relay enrollment ({relay_secret}) sent to an already-paired peer
-# over its encrypted LAN connection, so both sides can derive the shared
-# public-broker topic + key (internal/transport/relay.py).  Paired-only by
-# construction — deliberately NOT in UNPAIRED_GATE_MSG_TYPES.
-RELAY_MSG_TYPES = frozenset({"relay_enroll"})
+# Internet-relay messages.  ``relay_enroll`` ({relay_secret}) is sent to an
+# already-paired peer over its encrypted LAN connection, so both sides can
+# derive the shared public-broker topic + key (internal/transport/relay.py).
+# ``relay_ack`` (Round 17) is the internet "delivered" receipt: {msg_id, ts},
+# published back on the same encrypted relay channel when a clipboard frame
+# lands in the receiver's history.  Both are paired-only by construction —
+# deliberately NOT in UNPAIRED_GATE_MSG_TYPES (the transport gate drops them
+# from unpaired LAN peers; the relay path only ever admits them from peers
+# that hold the shared channel key).
+RELAY_MSG_TYPES = frozenset({"relay_enroll", "relay_ack"})
 
 # AI-config sync (Round 12): paired devices exchange *metadata* inventories of
 # their user-declared AI tool config files (CLAUDE.md, memory notes, skills,

@@ -167,21 +167,29 @@ class SyncManager:
         self._monitor.stop()
         logger.info("SyncManager stopped")
 
-    def handle_remote_message(self, msg: SyncMessage):
-        """Process a clipboard message received from a peer."""
+    def handle_remote_message(self, msg: SyncMessage) -> bool:
+        """Process a clipboard message received from a peer.
+
+        Returns True when the message was ACCEPTED (recorded into history and
+        applied to the clipboard), False when it was dropped for any reason
+        (sync disabled, crossed write, empty content, loop-prevention dedup,
+        rate limit).  Round 17: the caller uses the return value to decide
+        whether to send an internet ``relay_ack`` receipt — only a message that
+        actually landed in history earns a "已送达" confirmation.
+        """
         with self._lock:
             if not self._enabled:
-                return
+                return False
 
             # Crossed writes: near-simultaneous copies should resolve by copy
             # time, not arrival order.  If the local clipboard changed very
             # recently, the local copy is probably newer — drop this message.
             if time.time() - self._last_local_copy_time < CROSSED_WRITE_WINDOW:
-                return
+                return False
 
         content = msg.content
         if content.is_empty():
-            return
+            return False
 
         # Stamp the sender's device ID so history shows the correct source.
         content.source_device = msg.source_device
@@ -191,11 +199,11 @@ class SyncManager:
         with self._lock:
             # Skip if we just sent this content (loop prevention)
             if content_hash == self._last_local_hash:
-                return
+                return False
 
             # Skip if recently processed (loop prevention, TTL-bounded)
             if self._dedup_seen(content_hash):
-                return
+                return False
 
             # Receive-side rate limit: a peer must not be able to flood the
             # local clipboard with writes.  Drop messages once the per-window
@@ -205,7 +213,7 @@ class SyncManager:
                    and now - self._remote_apply_times[0] > REMOTE_RATE_WINDOW):
                 self._remote_apply_times.popleft()
             if len(self._remote_apply_times) >= REMOTE_RATE_MAX:
-                return
+                return False
 
             self._dedup_ring_remember(content_hash)
 
@@ -238,7 +246,7 @@ class SyncManager:
         # toward the rate limit only if it actually lands.
         with self._lock:
             if not self._enabled:
-                return
+                return False
             self._remote_apply_times.append(time.time())
 
         # Write to local clipboard.  Guarded so a clipboard-writer failure
@@ -260,6 +268,8 @@ class SyncManager:
                     cb()
                 except Exception:
                     logger.debug("on_write_error callback failed", exc_info=True)
+        # The message was accepted (history + clipboard write attempted).
+        return True
 
     def _on_clipboard_change(self):
         """Called by the clipboard monitor when local clipboard changes.

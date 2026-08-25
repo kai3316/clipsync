@@ -15,6 +15,7 @@ import sys
 import threading
 import time
 import tkinter as tk
+from collections import OrderedDict
 from pathlib import Path
 from tkinter import filedialog
 from urllib.parse import quote, urlparse
@@ -83,6 +84,15 @@ _console_handler: logging.StreamHandler | None = None
 # A netpair peer counts as "online" when a frame arrived within this window.
 # Roughly a keepalive horizon — nothing is polled, so it is the only signal.
 NETPAIR_ONLINE_WINDOW = 90.0
+
+# Round 17: internet delivery ("已送达" receipt + offline retransmission).
+ACK_WINDOW = 15.0              # how long a relayed clipboard send waits for ack
+DELIVERY_SCAN_INTERVAL = 2.0   # background scan cadence for timed-out sends
+QUEUE_RETRY_INTERVAL = 60.0    # periodic offline-queue retry cadence
+MAX_QUEUE_RETRIES = 5          # per-message retry budget before marking failed
+DELIVERY_LEDGER_MAX = 50       # in-memory send rows kept per peer (REST shows 20)
+DELIVERY_QUEUE_MAX = 100       # persisted offline rows kept per peer (hard cap)
+RELAY_PENDING_FILE = "relay_pending.json"
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -527,6 +537,20 @@ class Application:
         # mirrored clipboard frame).  Runtime-only — the device page derives
         # "online" from `now - last_seen <= 90s`; nothing here is persisted.
         self._netpair_last_seen: dict[str, float] = {}
+        # Round 17: internet delivery ledger + offline queue.  ``_delivery_ledger``
+        # maps peer_id -> OrderedDict[msg_id -> {content_hash, ts, status,
+        # deadline, preview}] for every clipboard frame we mirrored to that
+        # peer (status ∈ sent/delivered/failed/queued).  ``_delivery_queue`` is
+        # the persisted subset (status=queued, offline at send time), grouped
+        # by peer with the full encoded frame so it can be republished later.
+        # Both are guarded by ``_delivery_lock`` and touched by the main thread
+        # (send), the relay receive thread (acks), web threads (REST) and a
+        # background scanner (timeouts + retries).
+        self._delivery_ledger: dict[str, "OrderedDict[str, dict]"] = {}
+        self._delivery_queue: dict[str, "OrderedDict[str, dict]"] = {}
+        self._delivery_lock = threading.RLock()
+        self._delivery_thread: threading.Thread | None = None
+        self._delivery_stop_evt = threading.Event()
         # Timestamp of the last silent auto-update check (throttled to ~6h).
         self._last_auto_update_check = 0.0
 
@@ -957,6 +981,11 @@ class Application:
         # manager (all netpair logic lives in the methods below).
         from internal.web.api import internetpair as _internetpair_api
         _internetpair_api.bind(self)
+        # ── Internet delivery (Round 17) ──────────────────────────
+        # Self-contained REST branch over the delivery ledger + queue; the
+        # Application itself is the bound manager.
+        from internal.web.api import internetdelivery as _internetdelivery_api
+        _internetdelivery_api.bind(self)
 
         # ── Discovery ───────────────────────────────────────────
         self.discovery = Discovery(
@@ -2551,6 +2580,12 @@ class Application:
 
     def _on_peer_message(self, msg, peer_id: str | None = None) -> None:
         msg_type = getattr(msg, "msg_type", "clipboard")
+        # Round 17: any frame from a peer is an "active" signal — retry its
+        # offline queue (cheap no-op when the peer has nothing queued).
+        try:
+            self._delivery_peer_active(peer_id)
+        except Exception:
+            logger.debug("delivery retry on peer message failed", exc_info=True)
         if msg_type == "nav_url":
             url = getattr(msg, "_raw_payload", {}).get("url", "") or ""
             # Only ever open http/https from a peer. Anything else (file://,
@@ -2582,9 +2617,13 @@ class Application:
                 )
             except Exception:
                 fp_short = ""
-            self.chat_mgr.handle_message(
+            accepted = self.chat_mgr.handle_message(
                 msg_type, raw_payload, peer_id or "", fp_short, send_fn,
             )
+            # Round 17: a chat frame the chat layer processed earns a relay_ack
+            # so the internet sender can mark its message delivered.
+            if accepted and peer_id:
+                self._maybe_send_relay_ack(msg, peer_id)
             return
         # Binary chunks: offer them to the chat layer first; only fall through
         # to clipboard file transfers when the chat layer did not claim them.
@@ -2619,6 +2658,11 @@ class Application:
             self._handle_relay_enroll(
                 getattr(msg, "_raw_payload", {}), peer_id)
             return
+        # Round 17: internet "delivered" receipt.  Routed here so a relay_ack
+        # arriving over the relay OR the LAN (same frame stream) both resolve.
+        if msg_type == "relay_ack":
+            self._handle_relay_ack(getattr(msg, "_raw_payload", {}), peer_id)
+            return
         # AI-config sync (Round 12): paired-only inventory / pull frames.
         if msg_type in AICONFIG_MSG_TYPES:
             self.aicfg_mgr.handle_message(
@@ -2631,6 +2675,14 @@ class Application:
         # monitor's read-back matches and nothing is re-broadcast.
         if msg_type == "clipboard" and getattr(self.cfg, "plain_text_only", False):
             msg.content = strip_rich_formats(msg.content)
+        if msg_type == "clipboard":
+            # Round 17: a clipboard frame that was actually ACCEPTED into
+            # history earns a relay_ack back to its internet-reachable sender,
+            # turning the relay's QoS0 best-effort into a "已送达" receipt.
+            accepted = self.sync_mgr.handle_remote_message(msg)
+            if accepted and peer_id:
+                self._maybe_send_relay_ack(msg, peer_id)
+            return
         self.sync_mgr.handle_remote_message(msg)
 
     def _on_transfer_progress(self, transfer_id: str, progress: float) -> None:
@@ -7308,6 +7360,14 @@ class Application:
                 self.web_server.broadcast("relay_state", {"state": state})
         except Exception:
             logger.debug("relay_state WS broadcast failed", exc_info=True)
+        # Round 17: coming online is a retransmission trigger — flush the
+        # offline queue for every peer that queued frames while we were down.
+        if state == "online":
+            try:
+                self._delivery_on_relay_online()
+            except Exception:
+                logger.debug("delivery retry on relay-online failed",
+                             exc_info=True)
 
     def _get_relay_state(self) -> str:
         """Current internet-sync state for late-joining web clients.
@@ -7360,6 +7420,13 @@ class Application:
         if source and source in (getattr(self.cfg, "netpair_secrets", {}) or {}):
             getattr(self, "_netpair_last_seen", {})[source] = (
                 time.time() if now is None else now)
+        # Round 17: any frame from a peer is an "active" signal — retry that
+        # peer's offline queue so queued clipboard frames flush as soon as the
+        # peer proves reachable.
+        try:
+            self._delivery_peer_active(source)
+        except Exception:
+            logger.debug("delivery retry on relay frame failed", exc_info=True)
         if getattr(sync_msg, "msg_type", "") == "netpair_hello":
             try:
                 self._handle_netpair_hello(
@@ -7388,6 +7455,12 @@ class Application:
         )
         self._relay = transport
         transport.start()
+        # Round 17: load any previously-persisted offline queue and start the
+        # timeout-scan / queue-retry thread (also triggered by relay-online).
+        try:
+            self._delivery_start()
+        except Exception:
+            logger.debug("delivery thread start failed", exc_info=True)
         # Enroll every paired peer so both sides learn each other's relay
         # secret over the encrypted LAN channel (offline peers pick it up on
         # their next enroll reply exchange once they connect).
@@ -7395,6 +7468,11 @@ class Application:
             self._send_relay_enroll(pid)
 
     def _stop_internet_sync(self) -> None:
+        # Round 17: persist any still-queued rows before tearing down.
+        try:
+            self._delivery_stop()
+        except Exception:
+            logger.debug("delivery stop failed", exc_info=True)
         transport, self._relay = self._relay, None
         if transport is not None:
             transport.stop()
@@ -7454,10 +7532,30 @@ class Application:
         transit is pure waste).  Both ends of a pairing derive the same
         channel set, so the peer's subscription always covers whichever topic
         we publish on.
+
+        Round 17: clipboard frames also enter the delivery ledger — a successful
+        publish is tracked as sent (awaits a relay_ack), a failed one (relay
+        offline / no live channel) is persisted to the offline queue for later
+        retransmission.
         """
         transport = self._relay
         if transport is None or not self.cfg.internet_sync_enabled:
             return
+        # Delivery metadata is only relevant for clipboard frames (chat and
+        # file frames keep their old best-effort mirror with no ledger).
+        delivery = None
+        try:
+            from internal.protocol.codec import decode_message
+            _d = decode_message(frame_bytes)
+            if _d is not None and getattr(_d, "msg_type", "clipboard") == "clipboard":
+                delivery = {
+                    "msg_id": getattr(_d, "msg_id", "") or "",
+                    "content_hash": (_d.content.hash_key()
+                                     if getattr(_d, "content", None) else ""),
+                    "preview": self._delivery_preview(_d),
+                }
+        except Exception:
+            logger.debug("delivery metadata decode failed", exc_info=True)
         netpair_secrets = getattr(self.cfg, "netpair_secrets", {}) or {}
         from internal.transport.relay import derive_key, derive_topic
         my_secret = self._ensure_relay_secret()
@@ -7470,10 +7568,20 @@ class Application:
             topic = derive_topic(my_secret, peer_secret)
             key = derive_key(my_secret, peer_secret)
             try:
-                transport.publish(frame_bytes, topic, key)
+                ok = transport.publish(frame_bytes, topic, key)
             except Exception:
                 logger.debug("relay publish to %s failed", pid[:12],
                              exc_info=True)
+                ok = False
+            if delivery:
+                if ok:
+                    self._delivery_on_sent(
+                        pid, delivery["msg_id"], delivery["content_hash"],
+                        delivery["preview"])
+                else:
+                    self._delivery_enqueue(
+                        pid, delivery["msg_id"], delivery["content_hash"],
+                        delivery["preview"], frame_bytes)
         # Netpair channels: mirror to every CONFIRMED pairing-code peer too.
         # (Generated-but-unconfirmed codes stay subscribed but are not used for
         # clipboard mirroring — nothing has been confirmed yet.)
@@ -7484,11 +7592,21 @@ class Application:
             if pid == self.cfg.device_id:
                 continue  # a stray self-entry must never mirror to ourselves
             try:
-                transport.publish(frame_bytes,
-                                  netpair_topic(peer_secret),
-                                  netpair_key(peer_secret))
+                ok = transport.publish(frame_bytes,
+                                       netpair_topic(peer_secret),
+                                       netpair_key(peer_secret))
             except Exception:
                 logger.debug("netpair publish failed", exc_info=True)
+                ok = False
+            if delivery:
+                if ok:
+                    self._delivery_on_sent(
+                        pid, delivery["msg_id"], delivery["content_hash"],
+                        delivery["preview"])
+                else:
+                    self._delivery_enqueue(
+                        pid, delivery["msg_id"], delivery["content_hash"],
+                        delivery["preview"], frame_bytes)
 
     def _relay_publish_to_peer(self, frame_bytes: bytes, peer_id: str) -> bool:
         """Mirror one chat frame to a single internet-reachable peer.
@@ -7518,9 +7636,11 @@ class Application:
         # dual-connected peer, inflating the receiver's byte counter and failing
         # the size check in ChatManager._finalize_receive — keep binary chunks
         # LAN-only; only text/control chat frames cross the internet.
+        decoded = None
         try:
             from internal.protocol.codec import decode_message
-            if getattr(decode_message(frame_bytes), "msg_type", "") == "file_chunk":
+            decoded = decode_message(frame_bytes)
+            if getattr(decoded, "msg_type", "") == "file_chunk":
                 return False
         except Exception:
             logger.debug("relay publish to peer: frame decode failed",
@@ -7543,11 +7663,561 @@ class Application:
             topic, key = (derive_topic(my_secret, peer_secret),
                           derive_key(my_secret, peer_secret))
         try:
-            return transport.publish(frame_bytes, topic, key) is True
+            ok = transport.publish(frame_bytes, topic, key) is True
         except Exception:
             logger.debug("relay publish to %s failed", str(peer_id)[:12],
                          exc_info=True)
             return False
+        # Round 17: relayed CHAT frames get a delivery receipt too (ledger
+        # sent → ack → delivered / failed), same relay_ack mechanism as
+        # clipboard.  No offline queue for chat — that stays clipboard-only.
+        if ok and decoded is not None \
+                and getattr(decoded, "msg_type", "") in CHAT_MSG_TYPES \
+                and hasattr(self, "_delivery_ledger"):
+            try:
+                payload = getattr(decoded, "_raw_payload", {}) or {}
+                sid = payload.get("session_id", "")
+                self._delivery_on_sent(
+                    peer_id,
+                    getattr(decoded, "msg_id", "") or "",
+                    "",
+                    self._delivery_chat_preview(getattr(decoded, "msg_type", ""),
+                                                payload),
+                    kind=getattr(decoded, "msg_type", "chat"),
+                    session_id=str(sid) if isinstance(sid, str) else "",
+                )
+            except Exception:
+                logger.debug("chat delivery ledger failed", exc_info=True)
+        return ok
+
+    # -------------------------------------------- internet delivery (Round 17)
+    #
+    # "已送达" receipt + offline retransmission.  Clipboard frames mirrored to
+    # internet peers get a ledger row (status sent → ack → delivered, or →
+    # failed on ack timeout).  If the relay is offline / the peer has no live
+    # channel at send time the frame is persisted to <config>/relay_pending.json
+    # and republished on reconnect, on a peer-active signal, and on a timer.
+
+    def _delivery_queue_path(self) -> "Path":
+        """Path of the persisted offline-queue file (atomic-write target)."""
+        from internal.config.config import _config_dir
+        return _config_dir() / RELAY_PENDING_FILE
+
+    def _delivery_ws(self, peer_id: str, msg_id: str, status: str,
+                     content_hash: str = "", kind: str = "clipboard",
+                     session_id: str = "") -> None:
+        """Broadcast an ``internet_delivery`` WS event to every web client.
+
+        ``kind`` discriminates clipboard ("clipboard") from relayed chat frames
+        (the chat ``msg_type``, e.g. "chat_text"); ``session_id`` lets the chat
+        panel locate the session an event belongs to.  Both are empty/no-op for
+        the other payload type.
+        """
+        try:
+            if getattr(self, "web_server", None) is not None:
+                self.web_server.broadcast("internet_delivery", {
+                    "peer_id": peer_id,
+                    "msg_id": msg_id,
+                    "status": status,
+                    "content_hash": content_hash or "",
+                    "kind": kind or "clipboard",
+                    "session_id": session_id or "",
+                })
+        except Exception:
+            logger.debug("internet_delivery WS broadcast failed", exc_info=True)
+
+    @staticmethod
+    def _delivery_preview(msg) -> str:
+        """First 40 chars of a decoded clipboard message's text (for REST)."""
+        try:
+            types = getattr(getattr(msg, "content", None), "types", {}) or {}
+            for ct in (_CT.TEXT, _CT.HTML, _CT.RTF):
+                raw = types.get(ct)
+                if not raw:
+                    continue
+                text = raw.decode("utf-8", errors="replace").strip()
+                if text:
+                    return text[:40]
+        except Exception:
+            pass
+        return ""
+
+    @staticmethod
+    def _delivery_chat_preview(msg_type: str, payload: dict) -> str:
+        """Short preview of a chat frame for the delivery ledger / REST.
+
+        chat_text shows the message text; file offers show the file name; the
+        rest fall back to the msg_type so a row is still identifiable.
+        """
+        try:
+            if msg_type == "chat_text":
+                text = str(payload.get("text", "") or "").strip()
+                if text:
+                    return text[:40]
+            elif msg_type == "chat_file_offer":
+                name = str(payload.get("file_name", "") or "").strip()
+                if name:
+                    return name[:40]
+        except Exception:
+            pass
+        return msg_type or "chat"
+
+    def _delivery_bounded(self, peer_id: str) -> None:
+        """Keep per-peer ledger/queue sizes within sane caps.
+
+        The ledger only feeds the REST "recent 20" view; the queue cap
+        prevents an offline spell from growing relay_pending.json without
+        bound.  Evicted queue rows are surfaced as failed (WS + ledger) so the
+        UI never silently loses a tracked send.
+        """
+        led = self._delivery_ledger.get(peer_id)
+        if led:
+            while len(led) > DELIVERY_LEDGER_MAX:
+                led.popitem(last=False)
+        q = self._delivery_queue.get(peer_id)
+        if q and len(q) > DELIVERY_QUEUE_MAX:
+            while len(q) > DELIVERY_QUEUE_MAX:
+                _mid, oldest = q.popitem(last=False)
+                if led is not None and _mid in led:
+                    led[_mid]["status"] = "failed"
+                    led[_mid]["deadline"] = None
+                    self._delivery_ws(peer_id, _mid, "failed",
+                                      oldest.get("content_hash", ""),
+                                      oldest.get("kind", "clipboard"),
+                                      oldest.get("session_id", ""))
+
+    def _delivery_content_delivered(self, peer_id: str, content_hash: str,
+                                    skip_msg_id: str | None = None) -> bool:
+        """True when the same content_hash already reached ``peer_id``.
+
+        Content-level ack fallback: a broker redelivery / re-copy of content
+        that was already confirmed delivered must not be re-reported as failed
+        merely because its own ack never came back.
+        """
+        if not content_hash:
+            return False
+        for e in (self._delivery_ledger.get(peer_id) or {}).values():
+            if e.get("msg_id") == skip_msg_id:
+                continue
+            if e.get("content_hash") == content_hash \
+                    and e.get("status") == "delivered":
+                return True
+        return False
+
+    def _delivery_on_sent(self, peer_id: str, msg_id: str, content_hash: str,
+                          preview: str, kind: str = "clipboard",
+                          session_id: str = "") -> None:
+        """Record a freshly-published send (clipboard or relayed chat) in the ledger."""
+        if not peer_id or not msg_id:
+            return
+        now = time.time()
+        with self._delivery_lock:
+            led = self._delivery_ledger.setdefault(peer_id, OrderedDict())
+            led[msg_id] = {
+                "msg_id": msg_id,
+                "content_hash": content_hash,
+                "ts": now,
+                "status": "sent",
+                "deadline": now + ACK_WINDOW,
+                "preview": preview,
+                "kind": kind or "clipboard",
+                "session_id": session_id or "",
+            }
+            if content_hash and self._delivery_content_delivered(
+                    peer_id, content_hash, skip_msg_id=msg_id):
+                led[msg_id]["status"] = "delivered"
+                led[msg_id]["deadline"] = None
+                status = "delivered"
+            else:
+                status = "sent"
+            q = self._delivery_queue.get(peer_id)
+            if q and msg_id in q:
+                del q[msg_id]          # defensive: never double-track a msg
+                self._delivery_persist_queue()
+            self._delivery_bounded(peer_id)
+        self._delivery_ws(peer_id, msg_id, status, content_hash, kind, session_id)
+
+    def _delivery_enqueue(self, peer_id: str, msg_id: str, content_hash: str,
+                          preview: str, frame_bytes: bytes,
+                          kind: str = "clipboard", session_id: str = "") -> None:
+        """Persist a clipboard frame that could not be published right now."""
+        if not peer_id or not msg_id:
+            return
+        import base64 as _b
+        with self._delivery_lock:
+            q = self._delivery_queue.setdefault(peer_id, OrderedDict())
+            if msg_id in q:
+                return  # already queued
+            q[msg_id] = {
+                "msg_id": msg_id,
+                "content_hash": content_hash,
+                "ts": time.time(),
+                "retries": 0,
+                "preview": preview,
+                "kind": kind or "clipboard",
+                "session_id": session_id or "",
+                "frame_b64": _b.b64encode(frame_bytes).decode("ascii"),
+            }
+            led = self._delivery_ledger.setdefault(peer_id, OrderedDict())
+            led[msg_id] = {
+                "msg_id": msg_id,
+                "content_hash": content_hash,
+                "ts": q[msg_id]["ts"],
+                "status": "queued",
+                "deadline": None,
+                "preview": preview,
+                "kind": kind or "clipboard",
+                "session_id": session_id or "",
+            }
+            self._delivery_bounded(peer_id)
+            self._delivery_persist_queue()
+        self._delivery_ws(peer_id, msg_id, "queued", content_hash, kind, session_id)
+
+    def _delivery_persist_queue(self) -> None:
+        """Atomically write the offline queue to disk (crash-safe)."""
+        try:
+            import json as _json
+            path = self._delivery_queue_path()
+            # Nothing to persist and no stale file to clear — skip the write so
+            # a fresh install doesn't create an empty relay_pending.json.
+            if not self._delivery_queue and not path.exists():
+                return
+            path.parent.mkdir(parents=True, exist_ok=True)
+            tmp = path.with_name(path.name + ".tmp")
+            tmp.write_text(
+                _json.dumps({"version": 1, "peers": self._delivery_queue},
+                            ensure_ascii=False),
+                encoding="utf-8",
+            )
+            os.replace(tmp, path)
+        except Exception:
+            logger.debug("Failed persisting relay pending queue", exc_info=True)
+
+    def _delivery_load_queue(self) -> None:
+        """Load a previously persisted offline queue into memory at startup."""
+        try:
+            import json as _json
+            path = self._delivery_queue_path()
+            if not path.exists():
+                return
+            data = _json.loads(path.read_text(encoding="utf-8"))
+            peers = data.get("peers", {}) if isinstance(data, dict) else {}
+            if not isinstance(peers, dict):
+                return
+            with self._delivery_lock:
+                for peer_id, msgs in peers.items():
+                    if not isinstance(peer_id, str) or not isinstance(msgs, dict):
+                        continue
+                    od: OrderedDict = OrderedDict()
+                    for msg_id, e in msgs.items():
+                        if isinstance(msg_id, str) and isinstance(e, dict):
+                            od[msg_id] = e
+                    if not od:
+                        continue
+                    self._delivery_queue[peer_id] = od
+                    led = self._delivery_ledger.setdefault(
+                        peer_id, OrderedDict())
+                    for msg_id, e in od.items():
+                        led[msg_id] = {
+                            "msg_id": msg_id,
+                            "content_hash": e.get("content_hash", ""),
+                            "ts": float(e.get("ts", 0.0) or 0.0),
+                            "status": "queued",
+                            "deadline": None,
+                            "preview": e.get("preview", ""),
+                            "kind": e.get("kind", "clipboard"),
+                            "session_id": e.get("session_id", ""),
+                        }
+        except Exception:
+            logger.debug("Failed loading relay pending queue", exc_info=True)
+
+    def _delivery_mark_timeout(self, peer_id: str, msg_id: str) -> None:
+        """Ack window expired: fail the send (unless content-level ack)."""
+        with self._delivery_lock:
+            led = self._delivery_ledger.get(peer_id)
+            if not led or msg_id not in led:
+                return
+            entry = led[msg_id]
+            if entry.get("status") != "sent":
+                return
+            content_hash = entry.get("content_hash", "")
+            if content_hash and self._delivery_content_delivered(
+                    peer_id, content_hash, skip_msg_id=msg_id):
+                entry["status"] = "delivered"
+                entry["deadline"] = None
+                status = "delivered"
+            else:
+                entry["status"] = "failed"
+                entry["deadline"] = None
+                status = "failed"
+            kind = entry.get("kind", "clipboard")
+            session_id = entry.get("session_id", "")
+        self._delivery_ws(peer_id, msg_id, status, content_hash, kind, session_id)
+
+    def _delivery_scan_expired(self) -> None:
+        """Background sweep: fail every sent row whose ack window elapsed."""
+        now = time.time()
+        with self._delivery_lock:
+            expired = []
+            for peer_id, led in list(self._delivery_ledger.items()):
+                for msg_id, e in list(led.items()):
+                    if e.get("status") == "sent" and e.get("deadline") \
+                            and e["deadline"] <= now:
+                        expired.append((peer_id, msg_id))
+        for peer_id, msg_id in expired:
+            try:
+                self._delivery_mark_timeout(peer_id, msg_id)
+            except Exception:
+                logger.debug("delivery timeout mark failed", exc_info=True)
+
+    def _delivery_retry_peer(self, peer_id: str) -> None:
+        """Republish every queued frame for one peer.
+
+        Successful republish: drop the queue row, reset the ledger to sent with
+        a fresh ack window, WS queued→sent.  Failed republish: bump retries;
+        past ``MAX_QUEUE_RETRIES`` mark the row failed and drop it.
+        """
+        if not peer_id or not hasattr(self, "_delivery_lock"):
+            return
+        with self._delivery_lock:
+            q = self._delivery_queue.get(peer_id)
+            if not q:
+                return
+            items = [(mid, dict(e)) for mid, e in list(q.items())]
+        changed = False
+        for msg_id, entry in items:
+            try:
+                import base64 as _b
+                frame_bytes = _b.b64decode(entry.get("frame_b64", "") or "")
+                ok = self._relay_publish_to_peer(frame_bytes, peer_id)
+            except Exception:
+                logger.debug("delivery republish to %s failed",
+                             str(peer_id)[:12], exc_info=True)
+                ok = False
+            with self._delivery_lock:
+                q2 = self._delivery_queue.get(peer_id)
+                if not q2 or msg_id not in q2:
+                    continue  # changed concurrently — leave it alone
+                content_hash = entry.get("content_hash", "")
+                if ok:
+                    del q2[msg_id]
+                    led = self._delivery_ledger.setdefault(
+                        peer_id, OrderedDict())
+                    now = time.time()
+                    led[msg_id] = {
+                        "msg_id": msg_id,
+                        "content_hash": content_hash,
+                        "ts": now,
+                        "status": "sent",
+                        "deadline": now + ACK_WINDOW,
+                        "preview": entry.get("preview", ""),
+                        "kind": entry.get("kind", "clipboard"),
+                        "session_id": entry.get("session_id", ""),
+                    }
+                    changed = True
+                    self._delivery_ws(peer_id, msg_id, "sent", content_hash,
+                                      entry.get("kind", "clipboard"),
+                                      entry.get("session_id", ""))
+                else:
+                    q2[msg_id]["retries"] = entry.get("retries", 0) + 1
+                    if q2[msg_id]["retries"] >= MAX_QUEUE_RETRIES:
+                        del q2[msg_id]
+                        led = self._delivery_ledger.setdefault(
+                            peer_id, OrderedDict())
+                        if msg_id in led:
+                            led[msg_id]["status"] = "failed"
+                            led[msg_id]["deadline"] = None
+                        changed = True
+                        self._delivery_ws(peer_id, msg_id, "failed",
+                                          content_hash,
+                                          entry.get("kind", "clipboard"),
+                                          entry.get("session_id", ""))
+                if not q2:
+                    self._delivery_queue.pop(peer_id, None)
+        if changed:
+            with self._delivery_lock:
+                self._delivery_persist_queue()
+
+    def _delivery_retry_queue(self) -> None:
+        """Retry the entire offline queue (relay-online + 60s timer)."""
+        if not hasattr(self, "_delivery_lock"):
+            return
+        with self._delivery_lock:
+            peers = list(self._delivery_queue.keys())
+        for pid in peers:
+            try:
+                self._delivery_retry_peer(pid)
+            except Exception:
+                logger.debug("delivery retry for %s failed",
+                             str(pid)[:12], exc_info=True)
+
+    def _delivery_peer_active(self, peer_id: str) -> None:
+        """Retry a peer's queue when any frame from it arrives (active signal)."""
+        if not peer_id:
+            return
+        try:
+            self._delivery_retry_peer(peer_id)
+        except Exception:
+            logger.debug("delivery retry on peer-active failed", exc_info=True)
+
+    def _delivery_on_relay_online(self) -> None:
+        """Relay came online — flush every peer's offline queue."""
+        self._delivery_retry_queue()
+
+    def _delivery_start(self) -> None:
+        """Load the persisted queue and start the background scan/retry thread."""
+        if getattr(self, "_delivery_thread", None) is not None:
+            return
+        if not hasattr(self, "_delivery_stop_evt"):
+            return
+        self._delivery_stop_evt.clear()
+        self._delivery_load_queue()
+        self._delivery_thread = threading.Thread(
+            target=self._delivery_run, name="internet-delivery", daemon=True)
+        self._delivery_thread.start()
+
+    def _delivery_stop(self) -> None:
+        """Persist any queued rows and stop the background thread."""
+        if not hasattr(self, "_delivery_stop_evt"):
+            return
+        self._delivery_stop_evt.set()
+        thread, self._delivery_thread = self._delivery_thread, None
+        if thread is not None:
+            try:
+                thread.join(timeout=2.0)
+            except Exception:
+                logger.debug("delivery thread join failed", exc_info=True)
+        try:
+            self._delivery_persist_queue()
+        except Exception:
+            logger.debug("delivery final persist failed", exc_info=True)
+
+    def _delivery_run(self) -> None:
+        """Lightweight loop: 2s timeout scan, 60s queue retry, 1s granularity."""
+        last_scan = time.monotonic()
+        last_retry = time.monotonic()
+        while not getattr(self, "_delivery_stop_evt",
+                          threading.Event()).wait(1.0):
+            now = time.monotonic()
+            if now - last_scan >= DELIVERY_SCAN_INTERVAL:
+                try:
+                    self._delivery_scan_expired()
+                except Exception:
+                    logger.debug("delivery scan failed", exc_info=True)
+                last_scan = now
+            if now - last_retry >= QUEUE_RETRY_INTERVAL:
+                try:
+                    self._delivery_retry_queue()
+                except Exception:
+                    logger.debug("delivery queue retry failed", exc_info=True)
+                last_retry = now
+
+    def _handle_relay_ack(self, payload: dict, peer_id: str | None) -> None:
+        """Route an incoming ``relay_ack`` receipt to its ledger row."""
+        if not peer_id or not isinstance(payload, dict):
+            return
+        msg_id = payload.get("msg_id")
+        if not isinstance(msg_id, str) or not msg_id:
+            return
+        content_hash = ""
+        kind = "clipboard"
+        session_id = ""
+        with self._delivery_lock:
+            led = self._delivery_ledger.get(peer_id)
+            if not led or msg_id not in led:
+                return  # unknown msg_id — ignore
+            entry = led[msg_id]
+            if entry.get("status") == "delivered":
+                return
+            content_hash = entry.get("content_hash", "")
+            kind = entry.get("kind", "clipboard")
+            session_id = entry.get("session_id", "")
+            entry["status"] = "delivered"
+            entry["deadline"] = None
+            q = self._delivery_queue.get(peer_id)
+            if q and msg_id in q:
+                del q[msg_id]
+                self._delivery_persist_queue()
+        self._delivery_ws(peer_id, msg_id, "delivered", content_hash,
+                          kind, session_id)
+
+    def _maybe_send_relay_ack(self, msg, peer_id: str | None) -> None:
+        """Ack a relayed clipboard / chat frame that the receiver accepted.
+
+        Published on the same encrypted relay channel (netpair channel wins
+        over LAN-relay enrollment), keyed only by the source frame's msg_id —
+        the sender's ledger resolves it back to the exact message.
+        """
+        if not peer_id:
+            return
+        mt = getattr(msg, "msg_type", "clipboard")
+        if mt != "clipboard" and mt not in CHAT_MSG_TYPES:
+            return
+        try:
+            if not self._peer_is_internet_reachable(peer_id):
+                return
+            ack_frame = encode_frame(
+                {"msg_type": "relay_ack",
+                 "msg_id": getattr(msg, "msg_id", ""),
+                 "ts": time.time()},
+                source_device=self.cfg.device_id,
+            )
+            self._relay_publish_to_peer(ack_frame, peer_id)
+        except Exception:
+            logger.debug("relay ack send failed", exc_info=True)
+
+    def _delivery_render_sends(self, peer_id: str, led: dict,
+                               queue: dict, now: float) -> list[dict]:
+        """REST row list for one peer's ledger, newest first, capped at 20."""
+        out: list[dict] = []
+        for msg_id, e in led.items():
+            if e.get("status") == "queued":
+                status = "queued"
+                ts = e.get("ts", now)
+            else:
+                status = e.get("status", "sent")
+                ts = e.get("ts", now)
+            out.append({
+                "msg_id": msg_id,
+                "ts": ts,
+                "status": status,
+                "preview": e.get("preview", ""),
+                "content_hash": e.get("content_hash", ""),
+                "kind": e.get("kind", "clipboard"),
+                "session_id": e.get("session_id", ""),
+            })
+        out.sort(key=lambda s: float(s.get("ts", 0.0) or 0.0), reverse=True)
+        return out[:20]
+
+    def _delivery_status(self, peer_id: str = "") -> dict:
+        """REST: ``{pending, sends:[{msg_id, ts, status, preview, content_hash}]}``.
+
+        With ``peer_id`` the response is scoped to that peer; without it the
+        rows are merged across all peers (still capped at the 20 most recent).
+        """
+        now = time.time()
+        with self._delivery_lock:
+            if peer_id:
+                led = self._delivery_ledger.get(peer_id, {})
+                queue = self._delivery_queue.get(peer_id, {})
+                return {
+                    "pending": len(queue),
+                    "sends": self._delivery_render_sends(peer_id, led, queue, now),
+                }
+            sends: list[dict] = []
+            total_pending = 0
+            for pid, led in self._delivery_ledger.items():
+                queue = self._delivery_queue.get(pid, {})
+                total_pending += len(queue)
+                sends.extend(self._delivery_render_sends(pid, led, queue, now))
+            sends.sort(key=lambda s: float(s.get("ts", 0.0) or 0.0),
+                       reverse=True)
+            return {"pending": total_pending, "sends": sends[:20]}
+
+    def _delivery_counts(self) -> dict:
+        """Per-peer queued counts for device-page badges: ``{peers:{id:N}}``."""
+        with self._delivery_lock:
+            return {"peers": {pid: len(q) for pid, q in self._delivery_queue.items()}}
 
     # ---------------------------------------------------- internet pairing
 
@@ -7777,6 +8447,11 @@ class Application:
         # generator only adds the enterer's real id here).
         if peer_id:
             getattr(self, "_netpair_last_seen", {})[peer_id] = time.time()
+            # Round 17: a hello is an active signal — retry the peer's queue.
+            try:
+                self._delivery_peer_active(peer_id)
+            except Exception:
+                logger.debug("delivery retry on hello failed", exc_info=True)
         try:
             self._save_cfg_and_peers()
         except Exception:

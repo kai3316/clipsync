@@ -213,6 +213,16 @@
                   '<button class="btn-ghost" @click="renamePeer(peer)" :disabled="netpairBusy">{{ t(\'devices.netpair_rename\') }}</button>' +
                   '<button class="btn-ghost btn-danger" @click="unpairPeer(peer)" :disabled="netpairBusy">{{ t(\'devices.netpair_unpair\') }}</button>' +
                 '</div>' +
+
+                '<!-- One-line delivery status (round 17): queued badge + last result -->' +
+                '<div v-if="deliveryShown(peer)" class="netpair-peer__delivery">' +
+                  '<span v-if="deliveryPending(peer) > 0" class="netpair-delivery-badge netpair-delivery-badge--pending" :title="t(\'delivery.offline_retry_hint\')">' +
+                    '{{ t(\'delivery.pending_badge\', { count: deliveryPending(peer) }) }}' +
+                  '</span>' +
+                  '<span v-if="deliveryLastStatus(peer)" class="netpair-delivery-result" :class="deliveryLastClass(peer)">' +
+                    '{{ deliveryLastIcon(peer) }} {{ t(deliveryLastKey(peer)) }}' +
+                  '</span>' +
+                '</div>' +
               '</div>' +
             '</div>' +
           '</template>' +
@@ -328,7 +338,72 @@
         this.store.fetchInternetPairStatus().finally(function () {
           self.netpairLoading = false;
           self._netpairLoadInFlight = false;
+          // Seed each peer card's one-line delivery status (queued badge +
+          // last send result) once the paired list is known.
+          self.loadAllDeliveries();
         });
+      },
+
+      // ── Internet delivery status (round 17) ────────────────────────
+
+      // Fetch delivery data for every paired peer (offline-retry pending
+      // counts + most recent send result). Defensive: a backend without the
+      // endpoint settles silently and the card simply shows no delivery row.
+      loadAllDeliveries: function () {
+        var self = this;
+        (this.store.internetPairPeers || []).forEach(function (peer) {
+          self.store.fetchInternetDelivery(peer.peer_id);
+        });
+      },
+
+      // The normalized delivery state for a peer (null when the backend
+      // hasn't reported any — hides the whole row).
+      deliveryFor: function (peer) {
+        if (!peer || !peer.peer_id) return null;
+        return this.store.internetDelivery[String(peer.peer_id)] || null;
+      },
+
+      // Whether the one-line delivery row should render at all: only when
+      // data was actually loaded AND there is something to say (a queued
+      // count or a last send result). "Nothing to show" and "backend not
+      // ready" both hide the row.
+      deliveryShown: function (peer) {
+        var d = this.deliveryFor(peer);
+        if (!d || !d.loaded || d.loadFailed) return false;
+        return (d.pending > 0) || !!d.lastStatus;
+      },
+
+      deliveryPending: function (peer) {
+        var d = this.deliveryFor(peer);
+        return (d && typeof d.pending === 'number') ? d.pending : 0;
+      },
+
+      deliveryLastStatus: function (peer) {
+        var d = this.deliveryFor(peer);
+        var st = d && d.lastStatus;
+        return (['sent', 'delivered', 'failed', 'queued'].indexOf(st) !== -1) ? st : null;
+      },
+
+      deliveryLastClass: function (peer) {
+        switch (this.deliveryLastStatus(peer)) {
+          case 'delivered': return 'netpair-delivery-result--ok';
+          case 'failed': return 'netpair-delivery-result--err';
+          case 'queued': return 'netpair-delivery-result--queued';
+          default: return 'netpair-delivery-result--sending';
+        }
+      },
+
+      deliveryLastIcon: function (peer) {
+        switch (this.deliveryLastStatus(peer)) {
+          case 'delivered': return '✅';
+          case 'failed': return '❌';
+          default: return '⏳';
+        }
+      },
+
+      deliveryLastKey: function (peer) {
+        var st = this.deliveryLastStatus(peer) || 'sent';
+        return 'delivery.' + (st === 'failed' ? 'not_delivered' : st === 'sent' ? 'sending' : st);
       },
 
       generateNetpairCode: function () {

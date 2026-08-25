@@ -577,6 +577,21 @@ var ClipsyncAPI = (function () {
     },
 
     /**
+     * Per-peer internet delivery status: how many clips are queued for
+     * offline retry (pending) and the recent send history (sends, newest
+     * first). Each send is {msg_id, ts, status, preview} with status one of
+     * sent / delivered / failed / queued. Defensive: an older backend that
+     * predates this endpoint answers 404 and the caller treats that as
+     * "no delivery data" (the card simply shows no delivery row).
+     * @param {string} peerId - The internet peer's device id
+     * @returns {Promise<{pending: number, sends: Array}>}
+     */
+    getInternetDelivery: function (peerId) {
+      return this._fetch('GET',
+        '/api/internetdelivery?peer_id=' + encodeURIComponent(peerId || ''));
+    },
+
+    /**
      * Pause clipboard sync for a number of minutes (auto-resumes).
      * @param {number} minutes - 1..1440
      * @returns {Promise<{ok: boolean, minutes: number, until: number}>}

@@ -86,6 +86,12 @@ class ChatEntry:
     fraction: float = 0.0
     saved_path: str = ""
     transfer_id: str = ""
+    # Round 17: the wire frame's protocol ``msg_id`` for OUTGOING entries.  The
+    # relay delivery ledger and ``internet_delivery`` WS events are keyed by
+    # this id, so carrying it on the entry lets the frontend match a
+    # sent/delivered/failed receipt back to the exact chat bubble.  Empty for
+    # incoming/system entries (delivery receipts are a sender-side concern).
+    msg_id: str = ""
 
     def to_dict(self) -> dict:
         return {
@@ -103,6 +109,7 @@ class ChatEntry:
             "fraction": self.fraction,
             "saved_path": self.saved_path,
             "transfer_id": self.transfer_id,
+            "msg_id": self.msg_id,
         }
 
 
@@ -293,15 +300,21 @@ class ChatManager:
         except Exception:
             logger.warning("chat callback %s raised", attr, exc_info=True)
 
-    def _send_frame(self, payload: dict, send_fn: SendFn | None) -> bool:
+    def _send_frame(self, payload: dict, send_fn: SendFn | None,
+                    msg_id: str = "") -> bool:
         if send_fn is None:
             return False
         try:
             # Carry the real device id in the frame: the LAN transport infers
             # the sender from the connection, but a relay-mirrored copy has no
             # connection — the receiving host attributes it via
-            # ``source_device`` (Round 16 chat-over-internet).
-            data = encode_frame(payload, source_device=self._device_id)
+            # ``source_device`` (Round 16 chat-over-internet).  ``msg_id`` is
+            # the Round-17 delivery correlation id: the relay ledger and
+            # ``internet_delivery`` events are keyed by the frame's protocol
+            # msg_id, so text sends mint it here and stamp the ChatEntry with
+            # the same value (empty → encode_frame auto-generates one).
+            data = encode_frame(payload, msg_id=msg_id,
+                                source_device=self._device_id)
         except Exception:
             logger.debug("chat: encode failed for %s", payload.get("msg_type"), exc_info=True)
             return False
@@ -560,9 +573,13 @@ class ChatManager:
                 return False
             dq.append(now)
             fn = send_fn or self._latest_send_fn.get(session.peer_id)
+            # Round 17: mint the frame msg_id up front so the entry carries it
+            # and the relay delivery ledger/events match this exact bubble.
+            frame_msg_id = uuid.uuid4().hex
             entry = ChatEntry(
                 entry_id=uuid.uuid4().hex[:16], kind="text", outgoing=True,
                 ts=time.time(), text=text, status="pending",
+                msg_id=frame_msg_id,
             )
             self._append_entry(session, entry)
             ok = self._send_frame({
@@ -570,7 +587,7 @@ class ChatManager:
                 "session_id": session.session_id,
                 "text": text,
                 "ts": entry.ts,
-            }, fn)
+            }, fn, msg_id=frame_msg_id)
             if not ok:
                 # A failed send must not permanently consume a rate-limit slot:
                 # roll back the timestamp we just charged.
@@ -652,12 +669,16 @@ class ChatManager:
                 return False
             dq.append(now)
             fn = send_fn or self._latest_send_fn.get(session.peer_id)
+            # Round 17: a resend mints a NEW frame msg_id and re-stamps the
+            # entry so the fresh delivery receipt matches this bubble.
+            frame_msg_id = uuid.uuid4().hex
+            entry.msg_id = frame_msg_id
             ok = self._send_frame({
                 "msg_type": "chat_text",
                 "session_id": session.session_id,
                 "text": entry.text,
                 "ts": entry.ts,
-            }, fn)
+            }, fn, msg_id=frame_msg_id)
             if not ok:
                 # Same rollback rule as send_text: a failed retry must not
                 # permanently consume a rate-limit slot.

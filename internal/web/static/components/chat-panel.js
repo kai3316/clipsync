@@ -313,6 +313,9 @@
                         '<button class="chat-bubble__retry" :title="t(\'chat.resend\')"' +
                           ' :disabled="resendBusy === m.entry_id" @click="resendText(m)">⟳</button>' +
                       '</template>' +
+                      '<span v-if="chatDeliveryStatus(m)" class="chat-bubble__delivery" :class="chatDeliveryClass(m)" :title="t(\'delivery.offline_retry_hint\')">' +
+                        '{{ chatDeliveryIcon(m) }} {{ t(chatDeliveryKey(m)) }}' +
+                      '</span>' +
                       '{{ formatTime(m.ts) }}' +
                     '</div>' +
                   '</div>' +
@@ -951,6 +954,46 @@
         var h = String(d.getHours()).padStart(2, '0');
         var m = String(d.getMinutes()).padStart(2, '0');
         return h + ':' + m;
+      },
+
+      /* ── Internet relay delivery stamp (round 17) ──────────────────
+         A tiny ✓已送达 / ✗未送达 / …发送中 pill on an OUTGOING relay-chat
+         text bubble, bottom-right. The bubble carries `msg_id` on newer
+         hosts; when it matches an `internet_delivery` WS event the store's
+         msg_id → status map stamps it. Defensive: entries without msg_id
+         (older hosts) or with an id the store never saw get no stamp, and a
+         chat-level "failed" bubble keeps its failed label instead (a message
+         that never left is not "sending"). */
+
+      chatDeliveryStatus: function (m) {
+        if (!m || !m.outgoing || m.kind !== 'text') return null;
+        if (m.status === 'failed') return null;
+        if (m.msg_id === undefined || m.msg_id === null || m.msg_id === '') return null;
+        var st = this.store.internetDeliveryMsgs[String(m.msg_id)];
+        return (['sent', 'delivered', 'failed', 'queued'].indexOf(st) !== -1) ? st : null;
+      },
+
+      chatDeliveryClass: function (m) {
+        switch (this.chatDeliveryStatus(m)) {
+          case 'delivered': return 'chat-bubble__delivery--ok';
+          case 'failed': return 'chat-bubble__delivery--err';
+          case 'queued': return 'chat-bubble__delivery--queued';
+          default: return 'chat-bubble__delivery--sending';
+        }
+      },
+
+      chatDeliveryIcon: function (m) {
+        switch (this.chatDeliveryStatus(m)) {
+          case 'delivered': return '✓';
+          case 'failed': return '✗';
+          default: return '…';
+        }
+      },
+
+      chatDeliveryKey: function (m) {
+        var st = this.chatDeliveryStatus(m) || 'sent';
+        return 'delivery.' + (st === 'failed' ? 'not_delivered'
+          : st === 'sent' ? 'sending' : st);
       },
 
       _scrollToBottom: function () {

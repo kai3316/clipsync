@@ -12,6 +12,7 @@ import time
 from internal.web.api import chat as _chat_api
 from internal.web.api import aiconfig as _aiconfig_api  # Round 12 (self-contained; manager bound by src/main.py)
 from internal.web.api import internetpair as _internetpair_api  # Round 14 (self-contained; app bound by src/main.py)
+from internal.web.api import internetdelivery as _internetdelivery_api  # Round 17 (self-contained; app bound by src/main.py)
 from internal.web.api.devices import get_devices
 from internal.web.api.favorites import (
     add_favorite,
@@ -295,6 +296,12 @@ def _dispatch(method, path, query_params, body, cfg, history, sync_mgr,
     # handler module holds the bound Application reference set by src/main.py.
     if path.startswith("/api/internetpair"):
         data, status = _internetpair_api.handle(method, path, query_params, body)
+        return _json_response(data, status)
+
+    # ── Internet delivery (Round 17) — self-contained branch; the handler
+    # module holds the bound Application reference set by src/main.py.
+    if path.startswith("/api/internetdelivery"):
+        data, status = _internetdelivery_api.handle(method, path, query_params, body)
         return _json_response(data, status)
 
     # ── GET routes ─────────────────────────────────────────────────

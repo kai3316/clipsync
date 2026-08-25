@@ -186,6 +186,32 @@
     internetPairCode: '',
 
     /* ═══════════════════════════════════════════════════════════════
+       Internet delivery status (round 17)
+       Two lightweight mirrors, both fed by the WS `internet_delivery` event
+       ({peer_id, msg_id, status}) and seeded by GET /api/internetdelivery
+       per peer:
+
+       internetDelivery: { [peerId]: { pending, lastStatus, msgStatus,
+       loaded, loadFailed } } — drives the one-line status on each internet
+       device card: `pending` is the number of clips queued for offline
+       retry (the "待补发 N" badge), `lastStatus` is the most recent
+       transition (⏳/✅/❌), and `msgStatus` (msg_id → status) dedupes the
+       pending count across re-broadcasts.
+
+       internetDeliveryMsgs: { [msg_id]: status } — the small msg_id → status
+       map the chat panel reads to stamp ✓已送达 / ✗未送达 / …发送中 on an
+       outgoing relay-chat bubble. Chat entries expose msg_id from newer
+       hosts only; when the field is absent the badge is skipped (matched
+       messages update live as the WS events arrive).
+
+       `loaded`/`loadFailed` let the device card distinguish "backend not
+       ready" from "nothing to show" so the row disappears cleanly on an
+       older host.
+       ═══════════════════════════════════════════════════════════════ */
+    internetDelivery: {},
+    internetDeliveryMsgs: {},
+
+    /* ═══════════════════════════════════════════════════════════════
        Speed test
        ═══════════════════════════════════════════════════════════════ */
     speedTest: {
@@ -1873,6 +1899,132 @@
         }
       }
       this.internetPairPeers = next;
+    },
+
+    /**
+     * Fetch one internet peer's delivery status (pending count + most recent
+     * send result) from GET /api/internetdelivery. Fully defensive: an older
+     * backend answers 404 and the fetch settles with loadFailed=true so the
+     * device card hides its delivery row instead of spinning. In-flight
+     * calls per peer are coalesced.
+     * @param {string} peerId
+     * @returns {Promise<boolean>} true when a snapshot was applied
+     */
+    fetchInternetDelivery: function (peerId) {
+      var self = this;
+      var pid = String(peerId || '');
+      if (!pid || !window.ClipsyncAPI || !window.ClipsyncAPI.getInternetDelivery) {
+        return Promise.resolve(false);
+      }
+      this._internetDeliveryInFlight = this._internetDeliveryInFlight || {};
+      if (this._internetDeliveryInFlight[pid]) return Promise.resolve(false);
+      this._internetDeliveryInFlight[pid] = true;
+      var entry = this.internetDelivery[pid] || {
+        pending: 0, lastStatus: null, msgStatus: {}, loaded: false, loadFailed: false,
+      };
+      entry.loaded = false;
+      entry.loadFailed = false;
+      return window.ClipsyncAPI.getInternetDelivery(pid)
+        .then(function (res) {
+          var qCount = 0;
+          var lastStatus = null;
+          var msgStatus = {};
+          if (res && Array.isArray(res.sends)) {
+            for (var i = 0; i < res.sends.length; i++) {
+              var s = res.sends[i];
+              // Skip rows missing an id — the card must never count a send
+              // it cannot key or later transition.
+              if (!s || s.msg_id === undefined || s.msg_id === null) continue;
+              var st = (['sent', 'delivered', 'failed', 'queued'].indexOf(s.status) !== -1)
+                ? s.status : 'sent';
+              if (i === 0) lastStatus = st;          // sends are newest-first
+              msgStatus[String(s.msg_id)] = st;
+              if (st === 'queued') qCount++;
+            }
+          }
+          // pending is authoritative when present; otherwise derive it from
+          // the queued rows so the badge never lies.
+          entry.pending = (res && typeof res.pending === 'number') ? res.pending : qCount;
+          entry.lastStatus = lastStatus;
+          entry.msgStatus = msgStatus;
+          entry.loaded = true;
+          entry.loadFailed = false;
+          self.internetDelivery[pid] = entry;
+          return true;
+        })
+        .catch(function () {
+          // 404 (older backend) / network error — settle so the card can
+          // hide the row; a later WS delivery event still surfaces live data.
+          entry.loaded = true;
+          entry.loadFailed = true;
+          self.internetDelivery[pid] = entry;
+          return false;
+        })
+        .finally(function () {
+          if (self._internetDeliveryInFlight) delete self._internetDeliveryInFlight[pid];
+        });
+    },
+
+    /**
+     * Fold one WS `internet_delivery` event into the delivery state. The
+     * event carries {peer_id, msg_id, status}. This:
+     *   1. stamps the chat-bubble map (msg_id → status) so an outgoing
+     *      relay-chat bubble shows ✓已送达 / ✗未送达 / …发送中;
+     *   2. updates the peer's one-line card state (pending "待补发 N" count
+     *      deduped by msg_id, plus the most recent status); and
+     *   3. for genuine contact events (sent/delivered) refreshes the peer's
+     *      "last sync" time so the card never looks stale next to a fresh ✅.
+     * Re-broadcasting the same queued status is a no-op (no double count).
+     * @param {{peer_id: string, msg_id?: string|number, status: string}} data
+     */
+    applyInternetDelivery: function (data) {
+      if (!data || typeof data !== 'object') return;
+      var pid = (data.peer_id === undefined || data.peer_id === null)
+        ? '' : String(data.peer_id);
+      var status = data.status;
+      if (!pid || ['sent', 'delivered', 'failed', 'queued'].indexOf(status) === -1) return;
+      var mid = (data.msg_id === undefined || data.msg_id === null)
+        ? '' : String(data.msg_id);
+
+      // Chat-bubble stamp map: msg_id → latest status. Capped so a long
+      // session never grows it without bound (only the ~200 visible chat
+      // bubbles can ever be stamped).
+      if (mid) {
+        this._internetDeliveryMsgOrder = this._internetDeliveryMsgOrder || [];
+        if (this.internetDeliveryMsgs[mid] === undefined) {
+          this._internetDeliveryMsgOrder.push(mid);
+          if (this._internetDeliveryMsgOrder.length > 250) {
+            var oldest = this._internetDeliveryMsgOrder.shift();
+            if (oldest !== undefined) delete this.internetDeliveryMsgs[oldest];
+          }
+        }
+        this.internetDeliveryMsgs[mid] = status;
+      }
+
+      var entry = this.internetDelivery[pid] || {
+        pending: 0, lastStatus: null, msgStatus: {}, loaded: true, loadFailed: false,
+      };
+      var wasQueued = !!mid && entry.msgStatus[mid] === 'queued';
+      if (mid) entry.msgStatus[mid] = status;
+      if (status === 'queued') {
+        if (!wasQueued) entry.pending = (entry.pending || 0) + 1;
+      } else if (wasQueued) {
+        entry.pending = Math.max(0, (entry.pending || 0) - 1);
+      }
+      entry.lastStatus = status;
+      this.internetDelivery[pid] = entry;
+
+      // A sent/delivered event means the peer was reachable — refresh the
+      // card's "last sync" time so it never looks stale next to a fresh ✅.
+      if (status === 'delivered' || status === 'sent') {
+        var peers = this.internetPairPeers || [];
+        for (var p = 0; p < peers.length; p++) {
+          if (String(peers[p].peer_id) === pid) {
+            peers[p].last_seen = Math.floor(Date.now() / 1000);
+            break;
+          }
+        }
+      }
     },
 
     /**

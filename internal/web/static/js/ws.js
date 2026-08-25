@@ -615,6 +615,19 @@ var ClipsyncWS = (function () {
           }
           break;
 
+        case 'internet_delivery':
+          // Delivery-status transition for one internet-sent message
+          // ({peer_id, msg_id, status}). Only the known status vocabulary
+          // reaches the store, which stamps the chat-bubble map
+          // (msg_id → status), updates the peer card's one-line status +
+          // "待补发 N" badge, and refreshes the peer's last-sync time for
+          // real contact events — no full-page refresh.
+          if (data && data.peer_id &&
+              ['sent', 'delivered', 'failed', 'queued'].indexOf(data.status) !== -1) {
+            store.applyInternetDelivery(data);
+          }
+          break;
+
         case 'show_dialog':
           // Server-pushed dialog modal
           if (data && data.dialog_id) {
