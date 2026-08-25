@@ -2,6 +2,12 @@
 
 All notable changes to ClipSync are documented in this file.
 
+## [1.0.76] — 2026-08-25
+
+- **Fix Windows auto-update relaunch crash.** After replacing `clipsync.exe`, the update helper launched the new exe with `start ""` from a batch file and then exited — so the relaunched exe's parent `cmd` was already gone when PyInstaller's onefile bootloader validated it, killing the app with `Security validation failure: failed to obtain executable path for parent process`. The helper now runs the new exe **directly**, keeping itself alive as the parent for the app's whole lifetime, so the validation always resolves and the app auto-reopens after updating. (`clipsync.exe.old` next to the exe is the intended rollback backup.)
+- **Defensive fix for garbled clipboard history.** The history decode helper only tried UTF-8 and single-byte CJK encodings; any entry stored as wide (UTF-16 with BOM) text — very old data, or a peer that didn't normalize — fell through and rendered as mojibake. `_safe_decode` now detects a UTF-16 BOM first in both the SQLite and JSON history backends.
+- **Fix macOS update check** (`Update check failed after 3 attempts: [SSL: CERTIFICATE_VERIFY_FAILED] unable to get local issuer certificate`): the updater's `urllib` requests used the default SSL context, which on macOS / frozen builds has no CA store. Both the release-info fetch and the asset download now use a certifi-backed context (same root cause as the v1.0.75 relay fix).
+
 ## [1.0.75] — 2026-08-25
 
 - **Fix macOS internet sync** (relay `wss://` brokers all failed with `SSL: CERTIFICATE_VERIFY_FAILED: unable to get local issuer certificate`): macOS / frozen builds have no OS trust store in OpenSSL's default paths, so every public-broker handshake was rejected. The relay client and the connectivity-test probe now pin certifi's bundled CA bundle (`certifi` added as a dependency; PyInstaller bundles its `cacert.pem` automatically). Windows / Linux keep their system trust store.

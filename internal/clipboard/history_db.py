@@ -35,7 +35,18 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 def _safe_decode(data: bytes) -> str:
-    """Decode bytes to string, trying common encodings."""
+    """Decode bytes to string, trying common encodings.
+
+    A UTF-16 BOM is checked first: very old entries (or a peer platform that
+    didn't normalize clipboard text to UTF-8) may store wide text raw.  Without
+    this the bytes fall through to the CJK single-byte attempts and render as
+    mojibake (the "history became garbled after update" report).
+    """
+    if data[:2] in (b"\xff\xfe", b"\xfe\xff"):
+        try:
+            return data.decode("utf-16")
+        except UnicodeDecodeError:
+            pass
     try:
         return data.decode("utf-8")
     except UnicodeDecodeError:

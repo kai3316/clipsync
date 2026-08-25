@@ -453,7 +453,11 @@ def test_windows_bat_contains_old_copy_step():
     assert ".old" in script
     # And the actual replace loop is unchanged.
     assert ":retry" in script and "move /y" in script
-    assert 'start "" ' in script
+    # The relaunch runs the new exe DIRECTLY (not `start ""`): a detached
+    # child whose parent cmd exits immediately hits PyInstaller's onefile
+    # parent-process validation failure on startup.
+    assert f'"{cur}"' in script
+    assert 'start "" ' not in script
 
 
 def test_linux_backup_copies_current_binary(tmp_path):

@@ -8,6 +8,7 @@ parse failure simply returns "no update available".
 import json
 import logging
 import os
+import ssl
 import urllib.request
 
 from internal.version import __version__
@@ -17,6 +18,22 @@ logger = logging.getLogger(__name__)
 _GITHUB_REPO = "kai3316/clipsync"
 _LATEST_URL = f"https://api.github.com/repos/{_GITHUB_REPO}/releases/latest"
 _RELEASES_PAGE = f"https://github.com/{_GITHUB_REPO}/releases/latest"
+
+
+def _https_context() -> ssl.SSLContext:
+    """An SSL context with a usable CA store on macOS / frozen builds.
+
+    macOS Python (and PyInstaller-frozen apps on any OS) often lack the OS
+    trust store in OpenSSL's default paths, so a plain ``urlopen`` fails with
+    ``CERTIFICATE_VERIFY_FAILED: unable to get local issuer certificate`` —
+    the "update check failed" error seen on macOS.  certifi ships its own
+    ``cacert.pem`` (bundled by PyInstaller's hook); prefer it when present.
+    """
+    try:
+        import certifi
+        return ssl.create_default_context(cafile=certifi.where())
+    except Exception:
+        return ssl.create_default_context()
 
 
 def _parse_version(version: str) -> tuple:
@@ -67,7 +84,8 @@ def _fetch_latest_release(timeout: float = 6.0) -> dict | None:
                     "User-Agent": "clipsync",
                 },
             )
-            with urllib.request.urlopen(req, timeout=timeout) as resp:
+            with urllib.request.urlopen(
+                    req, timeout=timeout, context=_https_context()) as resp:
                 return json.loads(resp.read().decode("utf-8"))
         except Exception as exc:
             last_exc = exc
@@ -268,7 +286,8 @@ def download_latest_release(dest_dir: str) -> tuple[str | None, str | None]:
         temp_path = dest_path + ".part"
         req = urllib.request.Request(browser_url, headers={"User-Agent": "clipsync"})
         try:
-            with urllib.request.urlopen(req, timeout=60.0) as resp:
+            with urllib.request.urlopen(
+                    req, timeout=60.0, context=_https_context()) as resp:
                 with open(temp_path, "wb") as out:
                     while True:
                         chunk = resp.read(64 * 1024)

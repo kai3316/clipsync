@@ -122,7 +122,14 @@ def _build_windows_bat(staged: Path, cur: Path) -> str:
         "if %tries% geq 300 goto launch\n"
         "goto retry\n"
         ":launch\n"
-        f'start "" "{cur}"\n'
+        # Run the new exe DIRECTLY (not via `start ""`).  PyInstaller onefile
+        # bootloaders validate their parent process at startup; `start` hands
+        # the child to cmd and then this shell exits immediately, so the
+        # relaunched exe's parent is already gone and it dies with
+        # "Security validation failure: failed to obtain executable path for
+        # parent process".  Running it here keeps THIS cmd alive as its parent
+        # for the whole app lifetime, so the validation always resolves.
+        f'"{cur}"\n'
         'del "%~f0"\n'
     )
 
