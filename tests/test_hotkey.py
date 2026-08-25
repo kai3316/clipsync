@@ -39,11 +39,23 @@ from internal.system.hotkey import (
 # ═════════════════════════════════════════════════════════════════════════
 
 
+def _expected_letter_vk(char):
+    """The VK a letter key resolves to on the current platform.
+
+    macOS uses Carbon (kVK_ANSI_*) keycodes — hardware-based and locale-
+    independent — while Windows/Linux fall back to ASCII ``ord()``.
+    """
+    char = char.upper()
+    if hk_module._platform() == "macos":
+        return hk_module._MAC_LETTER_VK[char]
+    return ord(char)
+
+
 def test_parse_accepts_modifiers_and_alnum_keys():
     mgr = HotkeyManager()
     mods, vk = mgr._parse_shortcut("Ctrl+Shift+V")
     assert mods == (MOD_CONTROL | MOD_SHIFT)
-    assert vk == ord("V")
+    assert vk == _expected_letter_vk("V")
 
     mods, vk = mgr._parse_shortcut("alt+F5")
     assert mods == MOD_ALT
@@ -387,4 +399,4 @@ def test_punctuation_keys_resolve_via_tables_not_ord():
 def test_letters_still_use_ord():
     mgr = HotkeyManager()
     _mods, vk = mgr._parse_shortcut("Ctrl+a")
-    assert vk == ord("A")
+    assert vk == _expected_letter_vk("A")

@@ -914,6 +914,7 @@ class Application:
         _dedup_mod.DEDUP_ALGO = cfg.dedup_method or "sha256"
         # Expire unpinned history rows older than the configured max age
         # (0 disables the limit).
+        from internal.clipboard import history_db as _history_db
         _history_db.set_max_age_days(cfg.history_max_age_days or 0)
 
         # ── Source tracking / app filter ────────────────────────

@@ -2,6 +2,14 @@
 
 All notable changes to ClipSync are documented in this file.
 
+## [1.0.72] — 2026-08-25
+
+- **Fix startup crash** (regression from v1.0.71): `Application._create_services` referenced `_history_db` after the dedup-wiring edit dropped its import — the app could not start. Now re-imports `history_db` before `set_max_age_days`; regression test added.
+- **Fix headless-Linux import crash**: `systray.py` annotated a method return `-> pystray.Menu` which was evaluated eagerly and blew up when `pystray` is unavailable (headless CI); annotation is now lazy.
+- **Fix macOS hotkey tests**: the parse tests asserted Windows `ord()` key codes; they now expect the platform's actual code (macOS Carbon kVK vs ASCII ord elsewhere).
+- **Docs / landing page**: the GitHub Pages site now defaults to Chinese (`index.html`), English at `index_en.html`; README (中文 + English) updated with diagnostics, relay connectivity test, AI-config presets / local manager, internet pairing management, chat-over-internet, delivery confirmation & offline queue.
+- **Web default language**: the SPA i18n fallback and static `<html lang>` now default to Chinese (matching `config.language` default); the server-injected locale still overrides per the user's configured language.
+
 ## [1.0.71] — 2026-08-25
 
 ### Code consistency (staged-development cleanup)

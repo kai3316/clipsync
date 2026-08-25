@@ -21,7 +21,10 @@ var ClipsyncI18n = (function () {
   'use strict';
 
   var _translations = {};
-  var _locale = 'en';
+  // Default locale matches the app's default language (config.language
+  // defaults to zh-CN); the server injects the real configured locale, and
+  // this is only the fallback when that injection is missing.
+  var _locale = 'zh-CN';
   var _ready = false;
 
   /* ═══════════════════════════════════════════════════════════════
@@ -33,11 +36,11 @@ var ClipsyncI18n = (function () {
     /**
      * (Re-)initialise with a translations dictionary.
      * @param {object} translations - Flat key-value pairs
-     * @param {string} [locale='en'] - Active locale code
+     * @param {string} [locale='zh-CN'] - Active locale code
      */
     init: function (translations, locale) {
       _translations = translations || {};
-      _locale = locale || 'en';
+      _locale = locale || 'zh-CN';
       _ready = true;
     },
 

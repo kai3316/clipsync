@@ -940,3 +940,21 @@ def test_chromium_templates_keep_app_mode_and_size():
     for name, tmpl in desktop:
         assert any(a.startswith("--app={url}") for a in tmpl), name
         assert "--window-size={width},{height}" in tmpl, name
+
+
+def test_app_startup_dedup_and_age_wiring_bindings_resolve():
+    """Regression (v1.0.71): ``Application._create_services`` crashed on
+    startup with ``NameError: name '_history_db' is not defined`` — a dedup-
+    wiring edit dropped the history_db import binding that the following
+    ``set_max_age_days`` call still used.  Guard the two local imports stay
+    present and ordered so the real startup path can't silently lose one.
+    """
+    import inspect
+    import src.main as main_mod
+    src = inspect.getsource(main_mod.Application._create_services)
+    assert "from internal.clipboard import dedup as _dedup_mod" in src
+    assert "from internal.clipboard import history_db as _history_db" in src
+    assert "_history_db.set_max_age_days(" in src
+    # The history_db binding must be established before set_max_age_days runs.
+    assert src.index("from internal.clipboard import history_db as _history_db") \
+        < src.index("_history_db.set_max_age_days(")

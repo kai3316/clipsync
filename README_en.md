@@ -99,13 +99,19 @@ Clips are deduplicated by content hash, not timestamp. Rapid alternating copies 
 - **Sync across networks — office ↔ home.** Enable "Internet sync" in settings and clipboard text / small payloads are mirrored over free public MQTT-over-WebSocket relays: zero cost, zero signup. The broker list defaults to three well-known free public services and is editable, with automatic failover.
 - **End-to-end encrypted.** Relays only ever see ciphertext — the key is derived from both devices' secrets and the topic is unguessable. LAN delivery stays primary; the relay is a mirror path for paired peers outside the network, and duplicate-merge collapses double deliveries.
 - **Compare the security code when pairing.** Both devices show the same short safety code (SAS) during pairing confirmation — verify they match before confirming, which closes the pairing-code man-in-the-middle window that matters on the public internet.
-- Note: free public relays are best-effort (no SLA); large file transfers and chat stay on the LAN and don't go through the relay.
+- **Internet pairing management on the Devices page.** Devices that have never met pair with a 12-character code; paired devices are managed on the Devices page — alias rename, online / last-synced status, and one-sided unpair.
+- **Chat works across the internet.** Start a conversation with an internet-paired device even when it's off your network (text, typing indicator and session state ride the relay); delivery is LAN-first so a device reachable both ways gets each message exactly once.
+- **Delivery confirmation + offline queue.** Relay messages carry an end-to-end ack (✓ delivered / ✗ not delivered in the bubble); if the peer or relay is unreachable, the clip lands in a persisted local queue and is retried automatically (up to 5 attempts).
+- Note: free public relays are best-effort (no SLA); large file transfers and chat files stay on the LAN and don't go through the relay.
 
 ### AI Config Sync
 
 - **Browse and migrate AI tool configs across your own devices.** A new "Config" tab lists what each paired device has on its watch list (CLAUDE.md, memory notes, skills, `.mcp.json`, ... — the monitored root folders are editable in settings), letting you preview any file and pull it over.
 - **Never overwritten silently.** Choose per pull: overwrite / save a copy / append to Markdown (text files only). Inventories carry metadata only (path, hash, size, time) — file content moves only when you request it, over the same encrypted channel.
-- Note: paired devices only; single files over 1 MB are truncated with a clear flag.
+- **AI-tool config presets.** The default watch list covers the real paths used by Claude Code / Codex / Cursor / Gemini CLI (CLAUDE.md, settings.json, skills, rules, GEMINI.md, ...), added with one click; credential files (e.g. auth.json) stay excluded.
+- **New-vs-old comparison badges.** The cross-device browser marks every file  missing / same / local newer / remote newer (hash then modified time), so you can pick the pull direction before anything is overwritten.
+- **Local config manager.** Even with no paired devices you can manage the files on your watch list — browse, preview, edit & save (auto `.bak`), remove to a trash folder (never hard-deleted), and open the containing folder.
+- Note: cross-device browsing requires paired devices; single files over 1 MB are truncated with a clear flag.
 
 ### Web Companion
 
@@ -114,8 +120,10 @@ Clips are deduplicated by content hash, not timestamp. Rapid alternating copies 
 - **PWA** — "Add to Home Screen" on iOS/Android for a native feel
 - View clipboard history, push text to desktop clipboard
 - Upload and download files between phone and desktop
-- Stackable toast notifications; keyboard navigation in the history list (↑/↓ select, Enter copy, Del delete)
+- Stackable toast notifications; keyboard navigation in the history list (↑/↓ select, Enter copy, Del delete); newest/oldest sort toggle; one-click push a favorite to the desktop clipboard; right-click "open link in browser" for URL entries
 - Token-based authentication (auto-generated or custom)
+- **Comprehensive diagnostics** — the Diagnostics page groups every module (system / network / internet / AI config / chat / transfers / filesystem), each item with ok/warn/fail status, detail and a fix hint
+- **Test relay connectivity** — a one-click button in Settings → Network probes every configured relay broker (TCP/TLS handshake, latency per broker) without disturbing the live session
 - **Web-first direction** — new features land in the web dashboard only; the classic Tk desktop UI is being phased out (stability fixes only). The mobile page is kept in step with the desktop dashboard.
 
 ### Nearby Chat

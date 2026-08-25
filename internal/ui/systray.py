@@ -198,7 +198,7 @@ class SystrayApp:
         if self._tray:
             self._tray.menu = self._build_full_menu()
 
-    def _build_peer_menu(self) -> pystray.Menu:
+    def _build_peer_menu(self) -> "pystray.Menu":
         """Build the peer submenu with static items."""
         if not self._peers:
             return pystray.Menu(
