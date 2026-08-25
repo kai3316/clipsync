@@ -4,6 +4,10 @@ All notable changes to ClipSync are documented in this file.
 
 ## [Unreleased]
 
+### Internet sync
+- **Internet pairing code — two devices that have never shared a network can now pair over the internet.** One side generates a 12-character code (`XXXX-XXXX-XXXX`), the other types it in; both derive a private channel from it directly, so the old "must have met on the LAN first" limitation is gone. The code carries a device tag plus a checksum (typos fail loudly), and the real device identity is confirmed over the channel before the pair is stored.
+- **The web settings section is now a guided flow**: three numbered steps (switch on / generate a code / enter it), an actionable message instead of a bare relay error ("can't reach the public relay — check your network, or update the app"), and a "pair a device" button whenever internet sync is on with no paired device yet.
+
 ### Reliability
 - Backups now carry the internet-sync and AI-config settings too (relay brokers, secrets, watch list) — restoring a backup no longer silently drops them.
 

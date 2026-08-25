@@ -5589,6 +5589,69 @@
       color: var(--clipsync-fg-muted);
     }
 
+    /* Internet pairing guide + generated code (round 14) */
+    .netpair-guide {
+      border: 1px solid var(--clipsync-border-strong);
+      border-radius: var(--clipsync-radius-md);
+      background: var(--clipsync-panel-2);
+      padding: var(--clipsync-space-3);
+      margin: var(--clipsync-space-3) 0 var(--clipsync-space-2);
+      outline: none;
+    }
+
+    .netpair-guide:focus-visible {
+      box-shadow: 0 0 0 2px var(--clipsync-accent);
+    }
+
+    .netpair-guide__title {
+      font-size: 0.8rem;
+      font-weight: 600;
+      color: var(--clipsync-fg);
+      margin-bottom: var(--clipsync-space-2);
+    }
+
+    .netpair-guide__steps {
+      margin: 0;
+      padding: 0;
+      list-style: none;
+      display: flex;
+      flex-direction: column;
+      gap: var(--clipsync-space-2);
+    }
+
+    .netpair-guide__step {
+      display: flex;
+      align-items: flex-start;
+      gap: var(--clipsync-space-2);
+      font-size: 0.82rem;
+      line-height: 1.5;
+      color: var(--clipsync-fg);
+    }
+
+    .netpair-guide__icon {
+      flex-shrink: 0;
+      color: var(--clipsync-accent);
+    }
+
+    .netpair-code {
+      display: flex;
+      align-items: center;
+      gap: var(--clipsync-space-2);
+      margin-top: var(--clipsync-space-2);
+    }
+
+    .netpair-code__value {
+      font-family: var(--clipsync-font-mono);
+      font-size: 1.15rem;
+      font-weight: 700;
+      letter-spacing: 0.08em;
+      color: var(--clipsync-accent-text, var(--clipsync-accent));
+      background: var(--clipsync-panel-2);
+      padding: var(--clipsync-space-2) var(--clipsync-space-3);
+      border-radius: var(--clipsync-radius-md);
+      border: 1px dashed var(--clipsync-border-strong);
+    }
+
     /* Toggle switches */
     .settings-toggle-row {
       display: flex;

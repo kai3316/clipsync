@@ -173,6 +173,16 @@
     relayState: '',
 
     /* ═══════════════════════════════════════════════════════════════
+       Internet pairing (round 14)
+       internetPairPeers mirrors GET /api/internetpair/status:
+       [{ peer_id, name, status }] — kept live by the WS `netpair_peer`
+       event and refreshed after enter/generate.
+       internetPairCode is the code THIS device generated ('' = none).
+       ═══════════════════════════════════════════════════════════════ */
+    internetPairPeers: [],
+    internetPairCode: '',
+
+    /* ═══════════════════════════════════════════════════════════════
        Speed test
        ═══════════════════════════════════════════════════════════════ */
     speedTest: {
@@ -1737,6 +1747,75 @@
           self._aiConfigInFlight = false;
           self.aiConfigRefreshing = false;
         });
+    },
+
+    /* ═══════════════════════════════════════════════════════════════
+       Internet pairing helpers (round 14)
+       ═══════════════════════════════════════════════════════════════ */
+
+    /**
+     * Replace the paired-over-internet device list (and the code this device
+     * generated) with the backend's authoritative snapshot, normalized.  Fully
+     * defensive: a host whose backend predates this feature answers 404 — the
+     * fetch settles with the existing state kept (or the empty list) instead
+     * of throwing, so the settings panel always shows its empty state.
+     * @returns {Promise<boolean>} true when a snapshot was applied
+     */
+    fetchInternetPairStatus: function () {
+      var self = this;
+      if (!window.ClipsyncAPI || !window.ClipsyncAPI.getInternetPairStatus) {
+        return Promise.resolve(false);
+      }
+      if (this._netpairInFlight) return Promise.resolve(false);
+      this._netpairInFlight = true;
+      return window.ClipsyncAPI.getInternetPairStatus()
+        .then(function (res) {
+          if (res && Array.isArray(res.peers)) {
+            var list = [];
+            for (var i = 0; i < res.peers.length; i++) {
+              var p = res.peers[i];
+              if (!p || p.peer_id === undefined || p.peer_id === null) continue;
+              list.push({
+                peer_id: String(p.peer_id),
+                name: p.name || String(p.peer_id),
+                status: p.status || 'paired',
+              });
+            }
+            self.internetPairPeers = list;
+          }
+          if (res && res.generated_code) {
+            self.internetPairCode = String(res.generated_code);
+          }
+          return true;
+        })
+        .catch(function () {
+          // 404 (older backend) / network error — keep whatever is loaded and
+          // signal failure so the panel can render its empty state.
+          return false;
+        })
+        .finally(function () {
+          self._netpairInFlight = false;
+        });
+    },
+
+    /**
+     * Fold one WS `netpair_peer` event (status:"paired") into the paired list
+     * and toast it. Only called by ws.js after validating the vocabulary.
+     * @param {{peer_id: string, name: string, status: string}} data
+     */
+    applyNetpairPeer: function (data) {
+      var pid = (data.peer_id !== undefined && data.peer_id !== null)
+        ? String(data.peer_id) : '';
+      if (!pid) return;
+      var name = data.name || pid;
+      // Upsert: drop any prior row for the same peer, then append the fresh one.
+      var list = this.internetPairPeers.filter(function (p) {
+        return p.peer_id !== pid;
+      });
+      list.push({ peer_id: pid, name: name, status: 'paired' });
+      this.internetPairPeers = list;
+      this.showToast(t('settings_window.netpair_paired_toast', { name: name }),
+        3000, 'success');
     },
 
     /**

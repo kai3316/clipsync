@@ -512,6 +512,12 @@ class Application:
         # relay.py), created lazily by _start_internet_sync() when the
         # internet_sync_enabled setting is on.
         self._relay = None
+        # Internet pairing code (Round 14): runtime-only state.  ``_netpair_pending``
+        # maps a generated code -> its secret until the partner's hello confirms
+        # it (confirmation is then persisted in cfg.netpair_secrets).  Names are
+        # learned from the hello payload (netpair peers are never in cfg.peers).
+        self._netpair_pending: dict[str, str] = {}
+        self._netpair_names: dict[str, str] = {}
         # Timestamp of the last silent auto-update check (throttled to ~6h).
         self._last_auto_update_check = 0.0
 
@@ -936,6 +942,12 @@ class Application:
         )
         from internal.web.api import aiconfig as _aiconfig_api
         _aiconfig_api.bind(self.aicfg_mgr)
+
+        # ── Internet pairing code (Round 14) ─────────────────────
+        # Self-contained REST branch; the Application itself is the bound
+        # manager (all netpair logic lives in the methods below).
+        from internal.web.api import internetpair as _internetpair_api
+        _internetpair_api.bind(self)
 
         # ── Discovery ───────────────────────────────────────────
         self.discovery = Discovery(
@@ -7181,12 +7193,16 @@ class Application:
         return self.cfg.relay_secret
 
     def _relay_channels(self) -> dict[str, bytes]:
-        """{topic: key} for every paired peer whose relay secret we know.
+        """{topic: key} for every paired peer whose relay secret we know, plus
+        every ACTIVE netpair channel (persisted pairs + generated-but-not-yet-
+        confirmed pairing codes, so the partner's hello can arrive).
 
         Derivation is symmetric, so both ends compute identical topics/keys
         from their two secrets without ever transmitting them again.
         """
-        from internal.transport.relay import derive_key, derive_topic
+        from internal.transport.relay import (
+            derive_key, derive_topic, netpair_key, netpair_topic,
+        )
         my_secret = self._ensure_relay_secret()
         channels: dict[str, bytes] = {}
         for pid, peer_secret in list(self.cfg.peer_relay_secrets.items()):
@@ -7195,7 +7211,33 @@ class Application:
                 continue
             channels[derive_topic(my_secret, peer_secret)] = derive_key(
                 my_secret, peer_secret)
+        for secret in self._netpair_secrets_all().values():
+            if secret:
+                channels[netpair_topic(secret)] = netpair_key(secret)
         return channels
+
+    # ------------------------------------------- internet pairing code state
+
+    def _netpair_secrets_all(self) -> dict[str, str]:
+        """Every netpair secret this device should listen on: persisted pairs
+        plus codes it generated that are still awaiting confirmation."""
+        out: dict[str, str] = {}
+        for k, v in (getattr(self.cfg, "netpair_secrets", {}) or {}).items():
+            if isinstance(k, str) and isinstance(v, str):
+                out[k] = v
+        for code, v in getattr(self, "_netpair_pending", {}).items():
+            out.setdefault(f"pending:{code}", v)
+        return out
+
+    def _netpair_secret_for_topic(self, topic: str) -> str | None:
+        """Map a received relay topic back to the netpair secret behind it."""
+        if not topic:
+            return None
+        from internal.transport.relay import netpair_topic
+        for secret in self._netpair_secrets_all().values():
+            if secret and netpair_topic(secret) == topic:
+                return secret
+        return None
 
     def _on_relay_state(self, state: str) -> None:
         logger.info("Internet sync relay state: %s", state)
@@ -7224,19 +7266,34 @@ class Application:
         except Exception:
             return "connecting"
 
-    def _on_relay_frame(self, frame_bytes: bytes) -> None:
+    def _on_relay_frame(self, frame_bytes: bytes,
+                        topic: str | None = None) -> None:
         """A clipboard frame arrived through the public relay.
 
         It is a standard ClipSync frame — decode and feed the very same
         message router used for LAN frames.  Replies (acks etc.) ride the
         LAN connection when the peer happens to be connected; the relay is
-        one-way clipboard content only in this MVP.
+        one-way clipboard content only in this MVP.  Internet pairing-code
+        ``netpair_hello`` frames are routed to the netpair handshake instead
+        (they never enter the clipboard/file/chat routers).
         """
         try:
             from internal.protocol.codec import decode_message
             sync_msg = decode_message(frame_bytes)
         except Exception:
             logger.debug("Relay frame failed to decode", exc_info=True)
+            return
+        if sync_msg is None:
+            return
+        if getattr(sync_msg, "msg_type", "") == "netpair_hello":
+            try:
+                self._handle_netpair_hello(
+                    getattr(sync_msg, "_raw_payload", {}),
+                    getattr(sync_msg, "source_device", "") or None,
+                    topic,
+                )
+            except Exception:
+                logger.debug("netpair hello handling failed", exc_info=True)
             return
         source = getattr(sync_msg, "source_device", "") or None
         try:
@@ -7329,6 +7386,162 @@ class Application:
             except Exception:
                 logger.debug("relay publish to %s failed", pid[:12],
                              exc_info=True)
+        # Netpair channels: mirror to every CONFIRMED pairing-code peer too.
+        # (Generated-but-unconfirmed codes stay subscribed but are not used for
+        # clipboard mirroring — nothing has been confirmed yet.)
+        from internal.transport.relay import netpair_key, netpair_topic
+        for peer_secret in (getattr(self.cfg, "netpair_secrets", {}) or {}).values():
+            if not isinstance(peer_secret, str) or not peer_secret:
+                continue
+            try:
+                transport.publish(frame_bytes,
+                                  netpair_topic(peer_secret),
+                                  netpair_key(peer_secret))
+            except Exception:
+                logger.debug("netpair publish failed", exc_info=True)
+
+    # ---------------------------------------------------- internet pairing
+
+    def _netpair_generate(self) -> tuple[dict, int]:
+        """Generate a fresh internet pairing code for THIS device (REST)."""
+        from internal.transport.relay import (
+            generate_netpair_code, generate_netpair_secret,
+        )
+        if not self.cfg.internet_sync_enabled:
+            return {"ok": False, "error": "internet sync is off"}, 400
+        secret = generate_netpair_secret()
+        code = generate_netpair_code(self.cfg.device_id, secret)
+        self._netpair_pending[code] = secret
+        # Subscribe to the code's topic so the partner's hello is received
+        # (RelayTransport re-reads get_channels on refresh).
+        if self._relay is not None:
+            try:
+                self._relay.refresh_channels()
+            except Exception:
+                logger.debug("netpair generate refresh failed", exc_info=True)
+        return {"ok": True, "code": code}, 200
+
+    def _netpair_enter(self, code: str) -> tuple[dict, int]:
+        """Enter a pairing code from another device and send our hello (REST)."""
+        from internal.transport.relay import decode_netpair_code
+        decoded = decode_netpair_code(code)
+        if decoded is None:
+            return {"ok": False, "error": "invalid pairing code"}, 400
+        peer_id, secret = decoded
+        if not self.cfg.internet_sync_enabled:
+            return {"ok": False, "error": "internet sync is off"}, 400
+        self.cfg.netpair_secrets[peer_id] = secret
+        try:
+            self._save_cfg_and_peers()
+        except Exception:
+            logger.debug("Failed persisting netpair secret", exc_info=True)
+        if self._relay is not None:
+            try:
+                self._relay.refresh_channels()
+            except Exception:
+                logger.debug("netpair enter refresh failed", exc_info=True)
+        self._send_netpair_hello(peer_id, secret)
+        return {"ok": True, "peer_id": peer_id}, 200
+
+    def _netpair_status(self) -> tuple[dict, int]:
+        """Current netpair state for late-joining web clients (REST)."""
+        code = next(iter(getattr(self, "_netpair_pending", {})), None)
+        peers = []
+        for pid in (getattr(self.cfg, "netpair_secrets", {}) or {}):
+            name = getattr(self, "_netpair_names", {}).get(pid, "")
+            peer = self.cfg.peers.get(pid)
+            if not name and peer is not None:
+                name = getattr(peer, "device_name", "")
+            peers.append({"peer_id": pid, "name": name})
+        peers.sort(key=lambda p: p["peer_id"])
+        return {"generated_code": code, "peers": peers}, 200
+
+    def _send_netpair_hello(self, target_peer_id: str, secret: str) -> None:
+        """Publish a netpair_hello frame on the secret's channel."""
+        transport = self._relay
+        if transport is None or not self.cfg.internet_sync_enabled:
+            return
+        try:
+            from internal.transport.relay import netpair_key, netpair_topic
+            payload = {
+                "msg_type": "netpair_hello",
+                "peer_id": target_peer_id,
+                "device_name": self.cfg.device_name,
+                "ts": time.time(),
+            }
+            frame = encode_frame(payload, source_device=self.cfg.device_id)
+            transport.publish(frame, netpair_topic(secret), netpair_key(secret))
+        except Exception:
+            logger.debug("netpair hello publish failed", exc_info=True)
+
+    def _handle_netpair_hello(self, payload: dict,
+                              source_device: str | None,
+                              topic: str | None) -> None:
+        """A netpair_hello arrived on one of our netpair channels.
+
+        Two roles, distinguished by the hello's ``peer_id`` field:
+
+        GENERATOR (A) — the hello names OUR device tag (the one we put in the
+          code).  The frame's source_device is the enterer's real id: persist
+          netpair_secrets[enterer_id] = secret, broadcast ``netpair_peer`` and
+          reply with a hello so the enterer also confirms identity.
+
+        ENTERER (B) — the reply hello names OUR real device id.  The frame's
+          source_device is the generator's real id: re-key the provisional tag
+          entry to the generator's real id and broadcast ``netpair_peer``.
+        """
+        if not isinstance(payload, dict):
+            return
+        secret = self._netpair_secret_for_topic(topic or "")
+        if secret is None:
+            return
+        from internal.transport.relay import netpair_device_tag
+        incoming_tag = payload.get("peer_id")
+        peer_id = source_device if isinstance(source_device, str) else ""
+        our_tag = netpair_device_tag(self.cfg.device_id)
+        if incoming_tag == self.cfg.device_id:
+            # Reply to us — we are the ENTERER.  Only accept when we are not
+            # also the tag's owner (a real 12-hex id never equals a base32 tag).
+            if not peer_id:
+                return
+            # Re-key the provisional tag entry for this secret to the real id.
+            for k in [k for k, v in (getattr(self.cfg, "netpair_secrets", {}) or {}).items()
+                      if v == secret and k != peer_id]:
+                self.cfg.netpair_secrets.pop(k, None)
+            self.cfg.netpair_secrets[peer_id] = secret
+            name = payload.get("device_name") or peer_id
+            self._netpair_names[peer_id] = name
+        elif incoming_tag == our_tag:
+            # First hello from the code's holder — we are the GENERATOR.
+            if not peer_id:
+                return
+            self.cfg.netpair_secrets[peer_id] = secret
+            name = payload.get("device_name") or peer_id
+            self._netpair_names[peer_id] = name
+            # The pairing is confirmed — drop the pending code entry.
+            for code in [c for c, s in getattr(self, "_netpair_pending", {}).items()
+                         if s == secret]:
+                self._netpair_pending.pop(code, None)
+            # Reply so the enterer also confirms identity.
+            self._send_netpair_hello(peer_id, secret)
+        else:
+            return  # not a reply to our code / not for us — ignore
+        try:
+            self._save_cfg_and_peers()
+        except Exception:
+            logger.debug("Failed persisting netpair confirmation", exc_info=True)
+        if self._relay is not None:
+            try:
+                self._relay.refresh_channels()
+            except Exception:
+                logger.debug("netpair refresh after hello failed", exc_info=True)
+        try:
+            if getattr(self, "web_server", None) is not None:
+                self.web_server.broadcast(
+                    "netpair_peer", {"peer_id": peer_id, "name": name,
+                                     "status": "paired"})
+        except Exception:
+            logger.debug("netpair_peer WS broadcast failed", exc_info=True)
 
     def _apply_internet_sync_enabled(self, enabled: bool) -> None:
         """Live-apply the internet_sync_enabled setting."""

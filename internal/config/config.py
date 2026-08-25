@@ -177,6 +177,11 @@ class Config:
     relay_secret: str = ""
     # peer device_id → that peer's relay secret, learned via relay_enroll.
     peer_relay_secrets: dict[str, str] = field(default_factory=dict)
+    # Internet pairing-code (Round 14): peer device_id → the shared secret that
+    # was typed in from (or confirmed via) a pairing code.  Unlike
+    # peer_relay_secrets, no prior LAN pairing is required — the code is the
+    # bootstrap.
+    netpair_secrets: dict[str, str] = field(default_factory=dict)
 
     # AI-config sync (Round 12): watch-list root directories whose AI tool
     # config files (CLAUDE.md, memory notes, skills/, .mcp.json, ...) are
@@ -307,6 +312,7 @@ _FIELD_RULES: dict[str, tuple] = {
     "relay_brokers": ("strlist_nonnull",),
     "relay_secret": ("str",),
     "peer_relay_secrets": ("strdict",),
+    "netpair_secrets": ("strdict",),
     "ai_config_paths": ("strlist_nonnull",),
 }
 
@@ -433,6 +439,7 @@ def load() -> Config:
                 "hotkeys", "hotkeys_enabled",
                 "internet_sync_enabled", "relay_brokers",
                 "relay_secret", "peer_relay_secrets",
+                "netpair_secrets",
                 "ai_config_paths",
             ):
                 if key in data:
@@ -586,6 +593,7 @@ def save(cfg: Config, enc_mgr: "EncryptionManager | None" = None):
             "relay_brokers": cfg.relay_brokers,
             "relay_secret": cfg.relay_secret,
             "peer_relay_secrets": cfg.peer_relay_secrets,
+            "netpair_secrets": cfg.netpair_secrets,
             "ai_config_paths": cfg.ai_config_paths,
             "peers": [
                 {

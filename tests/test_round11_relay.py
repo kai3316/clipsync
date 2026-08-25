@@ -160,7 +160,7 @@ def make_transport(channels_dict, brokers=None):
     t = R.RelayTransport(
         brokers or ["wss://broker.example:8884/mqtt"],
         get_channels=lambda: dict(channels_dict),
-        on_frame=received.append,
+        on_frame=lambda frame, _topic=None: received.append(frame),
         on_state=states.append,
         client_factory=factory,
         sleeper=lambda s: None,

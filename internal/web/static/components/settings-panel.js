@@ -30,6 +30,16 @@
       'settings_window.save_network',
       'settings_window.internet_sync_title', 'network.internet_sync',
       'settings_window.internet_sync_hint', 'settings_window.relay_brokers_label',
+      // Round 14 internet pairing guide (so the search box finds it too).
+      'relay.state.initial',
+      'settings_window.netpair_steps_title', 'settings_window.netpair_step1',
+      'settings_window.netpair_step2', 'settings_window.netpair_step3',
+      'settings_window.netpair_generate', 'settings_window.netpair_regenerate',
+      'settings_window.netpair_generate_hint', 'settings_window.netpair_enter_title',
+      'settings_window.netpair_confirm', 'settings_window.netpair_invalid_code',
+      'settings_window.netpair_paired_title', 'settings_window.netpair_empty',
+      'settings_window.netpair_error_detail', 'settings_window.netpair_go_pair',
+      'settings_window.netpair_code_copied',
     ],
     web: [
       'settings_nav.web_companion', 'settings_window.web_enable',
@@ -131,6 +141,16 @@
         relayBrokersText: '',
         brokersSaving: false,
         brokersOpen: false,
+
+        // Internet pairing (round 14): pairing code + paired-device UX. The
+        // paired list and generated code live in the store (kept live by the
+        // WS `netpair_peer` event); these are the transient UI bits.
+        netpairGenerating: false,
+        netpairEnterOpen: false,
+        netpairCodeInput: '',
+        netpairConfirming: false,
+        netpairError: '',
+        netpairLoading: false,
 
         // Web Companion
         webEnabled: true,
@@ -303,17 +323,62 @@
         return cache.internet_sync_state || 'off';
       },
 
+      // relay_state=off while internet sync is ENABLED is the moment right
+      // before the host starts connecting — show an "initial" state instead of
+      // a confusing "Off".
+      relayDisplayState: function () {
+        var state = this.effectiveRelayState || 'off';
+        if (this.internetSyncEnabled && state === 'off') return 'initial';
+        return state;
+      },
+
       relayStateKey: function () {
-        return 'relay.state.' + (this.effectiveRelayState || 'off');
+        return 'relay.state.' + (this.relayDisplayState || 'off');
       },
 
       relayStateColor: function () {
-        switch (this.effectiveRelayState || 'off') {
+        switch (this.relayDisplayState) {
           case 'online': return 'var(--clipsync-success)';
           case 'connecting': return 'var(--clipsync-warning)';
+          case 'initial': return 'var(--clipsync-warning)';
           case 'error': return 'var(--clipsync-danger)';
           default: return 'var(--clipsync-fg-muted)';
         }
+      },
+
+      // Detailed, actionable text shown only in the relay error state — the
+      // status line never leaves a bare red "Error" with no explanation.
+      relayStateErrorText: function () {
+        return this.effectiveRelayState === 'error'
+          ? this.t('settings_window.netpair_error_detail') : '';
+      },
+
+      // ── Internet pairing (round 14) mirrors of store state ─────────
+
+      internetPairPeers: function () {
+        return this.store.internetPairPeers || [];
+      },
+
+      netpairGeneratedCode: function () {
+        return this.store.internetPairCode || '';
+      },
+
+      // The generated code grouped for display: ABCD-EFGH-IJKL.
+      netpairDisplayCode: function () {
+        var raw = this.netpairGeneratedCode || '';
+        var clean = raw.toUpperCase().replace(/[^A-Z0-9]/g, '');
+        if (!clean) return '';
+        return clean.match(/.{1,4}/g).join('-');
+      },
+
+      hasInternetPairPeers: function () {
+        return this.internetPairPeers.length > 0;
+      },
+
+      // When the toggle is on but no internet peer is paired yet, surface a
+      // "go pair" action next to the status line.
+      showUnpairedHint: function () {
+        return this.internetSyncEnabled && !this.hasInternetPairPeers;
       },
 
       themeOptions: function () {
@@ -576,6 +641,133 @@
             self.brokersSaving = false;
             self.store.showToast(self.t('dialog.failed'), 2000);
           });
+      },
+
+      // ── Internet pairing (round 14) ──────────────────────────────
+
+      // Refresh the paired-device list + generated code. Called when the
+      // network section opens and after enter/generate. The store method is
+      // fully defensive (older backend → empty state, no throw).
+      loadNetpairState: function () {
+        var self = this;
+        this.netpairLoading = true;
+        this.store.fetchInternetPairStatus().finally(function () {
+          self.netpairLoading = false;
+        });
+      },
+
+      generateNetpairCode: function () {
+        var self = this;
+        if (this.netpairGenerating) return;
+        this.netpairGenerating = true;
+        this.netpairError = '';
+        ClipsyncAPI.generateInternetPair()
+          .then(function (res) {
+            self.netpairGenerating = false;
+            if (res && res.ok && res.code) {
+              self.store.internetPairCode = String(res.code);
+              // The big grouped code + "enter it on another device" hint appear
+              // inline right below the button — that IS the feedback.
+              self.store.showToast(self.t('settings_window.netpair_generate_hint'),
+                2400, 'success');
+            } else {
+              self.store.showToast(self.t('dialog.failed'), 2000);
+            }
+          })
+          .catch(function () {
+            self.netpairGenerating = false;
+            self.store.showToast(self.t('dialog.failed'), 2000);
+          });
+      },
+
+      copyNetpairCode: function () {
+        var code = this.netpairDisplayCode;
+        if (!code) return;
+        var self = this;
+        var done = function () {
+          self.store.showToast(self.t('settings_window.netpair_code_copied'), 2000);
+        };
+        if (navigator.clipboard && navigator.clipboard.writeText) {
+          navigator.clipboard.writeText(code).then(done).catch(done);
+        } else {
+          var textarea = document.createElement('textarea');
+          textarea.value = code;
+          textarea.style.position = 'fixed';
+          textarea.style.opacity = '0';
+          document.body.appendChild(textarea);
+          textarea.select();
+          try { document.execCommand('copy'); } catch (e) { /* ignore */ }
+          document.body.removeChild(textarea);
+          done();
+        }
+      },
+
+      // Keep the code input to exactly 12 A-Z0-9 characters, ignoring spaces
+      // and lower-casing as the user types (12-char alphanumeric pairing code).
+      onNetpairCodeInput: function () {
+        this.netpairCodeInput = (this.netpairCodeInput || '')
+          .toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, 12);
+      },
+
+      confirmNetpairCode: function () {
+        var self = this;
+        var code = (this.netpairCodeInput || '')
+          .toUpperCase().replace(/[^A-Z0-9]/g, '');
+        if (code.length !== 12) {
+          this.netpairError = this.t('settings_window.netpair_invalid_code');
+          return;
+        }
+        this.netpairError = '';
+        this.netpairConfirming = true;
+        ClipsyncAPI.enterInternetPair(code)
+          .then(function (res) {
+            self.netpairConfirming = false;
+            if (res && res.ok) {
+              self.netpairCodeInput = '';
+              self.netpairEnterOpen = false;
+              var peerId = res.peer_id;
+              // Refresh the paired list, then toast with the peer's name once
+              // known (fall back to its id on a degraded backend).
+              self.store.fetchInternetPairStatus().finally(function () {
+                var name = peerId;
+                var list = self.store.internetPairPeers || [];
+                for (var i = 0; i < list.length; i++) {
+                  if (String(list[i].peer_id) === String(peerId)) {
+                    name = list[i].name || peerId;
+                    break;
+                  }
+                }
+                self.store.showToast(
+                  self.t('settings_window.netpair_paired_toast', { name: name }),
+                  3000, 'success');
+              });
+            } else {
+              self.netpairError = self.t('settings_window.netpair_invalid_code');
+            }
+          })
+          .catch(function (e) {
+            self.netpairConfirming = false;
+            if (e && e.status === 400) {
+              self.netpairError = self.t('settings_window.netpair_invalid_code');
+            } else {
+              // Older backend / network error — keep the inline error explicit
+              // instead of a silent no-op.
+              self.netpairError = self.t('dialog.failed');
+            }
+          });
+      },
+
+      // Scroll to / focus the three-step guide so a new user knows where to go
+      // (used by the "go pair" button next to the status line).
+      focusNetpairGuide: function () {
+        var self = this;
+        this.$nextTick(function () {
+          var el = self.$refs.netpairGuide;
+          if (!el) return;
+          try { el.scrollIntoView({ behavior: 'smooth', block: 'start' }); } catch (e) { /* older webview */ }
+          el.setAttribute('tabindex', '-1');
+          try { el.focus({ preventScroll: true }); } catch (e) { el.focus(); }
+        });
       },
 
       saveWeb: function () {
@@ -1397,6 +1589,7 @@
           if (this.activeSection === 'logs') this.loadLogs();
           if (this.activeSection === 'security') this.loadCerts();
           if (this.activeSection === 'aiconfig') this.loadAiConfigPaths();
+          if (this.activeSection === 'network') this.loadNetpairState();
           var self = this;
           if (!this._prevFocus) {
             this._prevFocus = document.activeElement;
@@ -1428,6 +1621,7 @@
         if (val === 'logs') this.loadLogs();
         if (val === 'security') this.loadCerts();
         if (val === 'aiconfig') this.loadAiConfigPaths();
+        if (val === 'network') this.loadNetpairState();
       },
 
       // ── Staged-section dirty tracking ────────────────────────────
@@ -1603,6 +1797,18 @@
 
                   '<!-- Internet (cross-network) sync -->' +
                   '<h3 class="settings-section__title settings-section__title--sub" style="margin-top:28px">{{ t(\'settings_window.internet_sync_title\') }}</h3>' +
+
+                  // Three-step pairing guide (always visible at the top of the
+                  // internet sync block; focusable so "Go pair" can scroll to it).
+                  '<div ref="netpairGuide" tabindex="-1" class="netpair-guide">' +
+                    '<div class="netpair-guide__title">{{ t(\'settings_window.netpair_steps_title\') }}</div>' +
+                    '<ol class="netpair-guide__steps">' +
+                      '<li class="netpair-guide__step"><span class="netpair-guide__icon">①</span><span>{{ t(\'settings_window.netpair_step1\') }}</span></li>' +
+                      '<li class="netpair-guide__step"><span class="netpair-guide__icon">②</span><span>{{ t(\'settings_window.netpair_step2\') }}</span></li>' +
+                      '<li class="netpair-guide__step"><span class="netpair-guide__icon">③</span><span>{{ t(\'settings_window.netpair_step3\') }}</span></li>' +
+                    '</ol>' +
+                  '</div>' +
+
                   '<div class="settings-toggle-row">' +
                     '<span class="settings-toggle-label">{{ t(\'network.internet_sync\') }}</span>' +
                     '<button class="settings-toggle" role="switch" :aria-checked="internetSyncEnabled" :aria-label="t(\'network.internet_sync\')" :class="{ \'settings-toggle--on\': internetSyncEnabled }" @click="toggleInternetSync">' +
@@ -1610,12 +1816,73 @@
                     '</button>' +
                   '</div>' +
                   '<p class="settings-hint" style="margin-bottom:4px">🔒 {{ t(\'settings_window.internet_sync_hint\') }}</p>' +
+
+                  // Status line: colored dot + state label, a "Go pair" action
+                  // when the toggle is on but no peer is paired yet, and an
+                  // actionable reason when the relay is in the error state
+                  // (never a bare red dot with no explanation).
                   '<div class="settings-field" style="margin-top:12px">' +
                     '<span class="settings-field__label">{{ t(\'settings_window.internet_sync_state_label\') }}</span>' +
-                    '<span class="settings-field__value">' +
-                      '<span :style="{ display:\'inline-block\', width:\'10px\', height:\'10px\', borderRadius:\'50%\', marginRight:\'6px\', verticalAlign:\'middle\', background: relayStateColor }"></span>{{ t(relayStateKey) }}' +
-                    '</span>' +
+                    '<div class="settings-field__row">' +
+                      '<span class="settings-field__value">' +
+                        '<span :style="{ display:\'inline-block\', width:\'10px\', height:\'10px\', borderRadius:\'50%\', marginRight:\'6px\', verticalAlign:\'middle\', background: relayStateColor }"></span>{{ t(relayStateKey) }}' +
+                      '</span>' +
+                      '<button v-if="showUnpairedHint" class="settings-btn settings-btn--sm settings-btn--accent" @click="focusNetpairGuide" style="margin-left:auto">{{ t(\'settings_window.netpair_go_pair\') }}</button>' +
+                    '</div>' +
+                    '<p v-if="relayStateErrorText" class="settings-hint" style="color:var(--clipsync-danger);margin-top:4px">{{ relayStateErrorText }}</p>' +
                   '</div>' +
+
+                  // Generate a pairing code (regenerate invalidates the old one).
+                  '<div class="settings-field" style="margin-top:8px">' +
+                    '<div class="settings-field__row">' +
+                      '<button class="settings-btn settings-btn--accent" @click="generateNetpairCode" :disabled="netpairGenerating" style="flex:1">' +
+                        '{{ netpairGenerating ? \'...\' : (netpairGeneratedCode ? t(\'settings_window.netpair_regenerate\') : t(\'settings_window.netpair_generate\')) }}' +
+                      '</button>' +
+                    '</div>' +
+                    '<template v-if="netpairGeneratedCode">' +
+                      '<div class="netpair-code">' +
+                        '<code class="netpair-code__value selectable">{{ netpairDisplayCode }}</code>' +
+                        '<button class="settings-btn settings-btn--sm" @click="copyNetpairCode">{{ t(\'ui.copy\') }}</button>' +
+                      '</div>' +
+                      '<span class="settings-hint">{{ t(\'settings_window.netpair_generate_hint\') }}</span>' +
+                    '</template>' +
+                  '</div>' +
+
+                  // Enter a code generated on another device.
+                  '<div class="settings-field" style="margin-top:8px">' +
+                    '<button class="settings-btn settings-btn--sm" @click="netpairEnterOpen = !netpairEnterOpen" style="width:100%">' +
+                      '{{ netpairEnterOpen ? \'▾\' : \'▸\' }} {{ t(\'settings_window.netpair_enter_title\') }}' +
+                    '</button>' +
+                    '<template v-if="netpairEnterOpen">' +
+                      '<div class="settings-field__row" style="margin-top:8px">' +
+                        '<input type="text" class="settings-input" v-model="netpairCodeInput" spellcheck="false" autocomplete="off"' +
+                          ' @input="onNetpairCodeInput" @keydown.enter.prevent="confirmNetpairCode"' +
+                          ' :placeholder="t(\'settings_window.netpair_enter_placeholder\')"' +
+                          ' :aria-label="t(\'settings_window.netpair_enter_title\')" style="flex:1">' +
+                        '<button class="settings-btn settings-btn--accent" @click="confirmNetpairCode" :disabled="netpairConfirming" style="flex-shrink:0">' +
+                          '{{ netpairConfirming ? \'...\' : t(\'settings_window.netpair_confirm\') }}' +
+                        '</button>' +
+                      '</div>' +
+                      '<span v-if="netpairError" class="settings-hint" style="color:var(--clipsync-danger);margin-top:4px;display:block">{{ netpairError }}</span>' +
+                    '</template>' +
+                  '</div>' +
+
+                  // Paired-over-internet device list.
+                  '<div class="settings-field" style="margin-top:10px">' +
+                    '<span class="settings-field__label">{{ t(\'settings_window.netpair_paired_title\') }}</span>' +
+                    '<div v-if="netpairLoading" class="settings-hint" style="padding:6px 0">{{ t(\'ui.loading\') }}</div>' +
+                    '<div v-else-if="internetPairPeers.length === 0" class="settings-hint" style="padding:6px 0">{{ t(\'settings_window.netpair_empty\') }}</div>' +
+                    '<div v-else class="settings-backup-list">' +
+                      '<div v-for="peer in internetPairPeers" :key="peer.peer_id" class="settings-backup-item">' +
+                        '<div class="settings-backup-item__info">' +
+                          '<span class="settings-backup-item__name">{{ peer.name || shortId(peer.peer_id) }}</span>' +
+                          '<span class="settings-backup-item__meta text-mono selectable">{{ shortId(peer.peer_id) }}</span>' +
+                        '</div>' +
+                        '<span v-if="peer.status === \'paired\'" class="settings-hint" style="font-size:11px;color:var(--clipsync-success);flex-shrink:0">{{ t(\'ui.paired\') }}</span>' +
+                      '</div>' +
+                    '</div>' +
+                  '</div>' +
+
                   '<div style="margin-top:6px">' +
                     '<button class="settings-btn settings-btn--sm" @click="brokersOpen = !brokersOpen">{{ brokersOpen ? \'▾\' : \'▸\' }} {{ t(\'settings_window.relay_brokers_toggle\') }}</button>' +
                   '</div>' +

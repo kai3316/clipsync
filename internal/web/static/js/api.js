@@ -517,6 +517,39 @@ var ClipsyncAPI = (function () {
       return this._fetch('POST', '/api/settings', data);
     },
 
+    /* ═══════════════════════════════════════════════════════════════
+       Internet pairing endpoints (round 14)
+       ═══════════════════════════════════════════════════════════════ */
+
+    /**
+     * Generate a fresh internet pairing code. Generating a new code
+     * invalidates any previously generated one (the old code stops working).
+     * @returns {Promise<{ok: boolean, code: string}>}
+     */
+    generateInternetPair: function () {
+      return this._fetch('POST', '/api/internetpair/generate');
+    },
+
+    /**
+     * Enter a 12-character internet pairing code generated on another device.
+     * Spaces/dashes are tolerated — the backend normalizes them.
+     * @param {string} code - e.g. "ABCD-EFGH-IJKL"
+     * @returns {Promise<{ok: boolean, peer_id?: string}>} — 400 when the code
+     *   is invalid/expired.
+     */
+    enterInternetPair: function (code) {
+      return this._fetch('POST', '/api/internetpair/enter', { code: code });
+    },
+
+    /**
+     * Current internet pairing state: the code this device generated (if any)
+     * and the devices it has paired with over the internet relay.
+     * @returns {Promise<{generated_code?: string, peers: Array}>}
+     */
+    getInternetPairStatus: function () {
+      return this._fetch('GET', '/api/internetpair/status');
+    },
+
     /**
      * Pause clipboard sync for a number of minutes (auto-resumes).
      * @param {number} minutes - 1..1440

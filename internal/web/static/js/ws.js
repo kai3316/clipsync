@@ -605,6 +605,15 @@ var ClipsyncWS = (function () {
           }
           break;
 
+        case 'netpair_peer':
+          // A device paired with this one over the internet relay. Fold it
+          // into the paired list and toast. Only the known status vocabulary
+          // is accepted so a malformed payload can't poison the list.
+          if (data && data.peer_id && data.status === 'paired') {
+            store.applyNetpairPeer(data);
+          }
+          break;
+
         case 'show_dialog':
           // Server-pushed dialog modal
           if (data && data.dialog_id) {

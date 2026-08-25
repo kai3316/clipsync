@@ -128,6 +128,13 @@ AICONFIG_MSG_TYPES = frozenset({
     "aiconfig_inv", "aiconfig_req", "aiconfig_data",
 })
 
+# Internet pairing-code handshake (Round 14): ``netpair_hello`` rides the
+# encrypted public-relay channel on a topic derived from a shared pairing code,
+# so it is implicitly authenticated by that secret — there is no LAN trust to
+# gate.  Deliberately NOT in UNPAIRED_GATE_MSG_TYPES: an unpaired LAN peer must
+# never be able to inject a hello over the local channel.
+NETPAIR_MSG_TYPES = frozenset({"netpair_hello"})
+
 
 def encode_frame(payload_dict: dict, msg_id: str = "", source_device: str = "") -> bytes:
     """Encode a generic JSON payload dict into the binary frame format.

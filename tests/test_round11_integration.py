@@ -123,6 +123,11 @@ def make_app_stub(**attrs):
         lambda _a=app: Application._ensure_relay_secret(_a))
     app._relay_channels = (
         lambda _a=app: Application._relay_channels(_a))
+    # Round 14 netpair surface: _relay_channels now folds netpair channels in.
+    app._netpair_secrets_all = (
+        lambda _a=app: Application._netpair_secrets_all(_a))
+    app._netpair_secret_for_topic = (
+        lambda topic, _a=app: Application._netpair_secret_for_topic(_a, topic))
     app._on_relay_state = lambda state, _a=app: None
     app._on_relay_frame = (
         lambda frame, _a=app: Application._on_relay_frame(_a, frame))
@@ -134,6 +139,7 @@ def cfg_stub(**over):
     c.internet_sync_enabled = over.get("enabled", True)
     c.relay_secret = over.get("secret", "aa" * 32)
     c.peer_relay_secrets = dict(over.get("secrets", {}))
+    c.netpair_secrets = dict(over.get("netpair_secrets", {}))
     c.relay_brokers = ["wss://x:8884/mqtt"]
 
     peers = {}

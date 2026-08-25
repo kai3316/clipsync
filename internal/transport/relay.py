@@ -52,6 +52,24 @@ RELAY_TS_WINDOW = 300          # seconds of tolerated clock skew either way
 MAX_RELAY_PAYLOAD = 256 * 1024  # refuse to carry anything larger than this
 _SEEN_CAP = 512                 # recent ciphertext hashes remembered
 
+# ── Internet pairing code (Round 14) ──────────────────────────────────────
+# A self-contained shared-secret bootstrap for devices that have NEVER met:
+# one device generates a short human-readable code (device tag + secret +
+# checksum), the other types it in, and both derive the SAME netpair topic+key
+# from the secret alone — no prior LAN pairing required.  The broker only ever
+# sees an unguessable topic + ciphertext, exactly like LAN-relay enrollment,
+# but the secret travels inside the code instead of over a TLS channel to an
+# already-paired peer.
+NETPAIR_TOPIC_PREFIX = "clipsync/net/v1/"
+# 32-symbol alphabet (5 bits/char).  Removes the worst confusables 0/O/1/I so a
+# code typed by hand fails loudly on a typo (checksum catches the rest).
+NETPAIR_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
+_NETPAIR_ALPHA_INDEX = {c: i for i, c in enumerate(NETPAIR_ALPHABET)}
+NETPAIR_CODE_CHARS = 12        # "XXXX-XXXX-XXXX"
+NETPAIR_DEVICE_CHARS = 4       # chars [0:4]  -> 20-bit device tag
+NETPAIR_SECRET_CHARS = 7       # chars [4:11] -> 35-bit shared secret
+NETPAIR_SECRET_BITS = NETPAIR_SECRET_CHARS * 5
+
 # Connection retry backoff across the broker list (seconds; capped).
 BACKOFF_SEQUENCE = (1, 2, 4, 8, 15, 30, 60)
 # How long to wait for the CONNACK/handshake before moving to the next broker.
@@ -117,6 +135,105 @@ def derive_key(secret_a: str, secret_b: str) -> bytes:
     return key[:32]
 
 
+# --------------------------------------------------- internet pairing code
+
+def _int_to_b32(value: int, nchars: int) -> str:
+    """Render ``value`` (at most nchars*5 bits) as nchars base32 chars."""
+    out = []
+    for i in range(nchars - 1, -1, -1):
+        out.append(NETPAIR_ALPHABET[(value >> (5 * i)) & 0x1F])
+    return "".join(out)
+
+
+def _b32_to_int(chars: str) -> int | None:
+    value = 0
+    for c in chars:
+        i = _NETPAIR_ALPHA_INDEX.get(c)
+        if i is None:
+            return None
+        value = (value << 5) | i
+    return value
+
+
+def _checksum_char(data11: str) -> str:
+    """One base32 char derived from the first 11 code chars (typo detection)."""
+    digest = hashlib.sha256(
+        b"clipsync-netpair-check|" + data11.encode("ascii")).digest()
+    return NETPAIR_ALPHABET[digest[0] & 0x1F]
+
+
+def netpair_device_tag(device_id: str) -> str:
+    """20-bit fingerprint of a device id -> 4 base32 chars (the code's device
+    field).  Lossy by design: the code is compact, so the full 12-hex device id
+    is not carried — the real identity is confirmed over the channel when the
+    partner's hello frame arrives (its source_device is verified against this
+    tag).
+    """
+    digest = hashlib.sha256(
+        b"clipsync-netpair-device|"
+        + str(device_id or "").strip().lower().encode("ascii"),
+    ).digest()
+    return _int_to_b32(int.from_bytes(digest[:3], "big") >> 4,
+                       NETPAIR_DEVICE_CHARS)
+
+
+def generate_netpair_secret() -> str:
+    """A fresh 35-bit shared secret, rendered as 7 base32 chars."""
+    import secrets as _secrets
+    return _int_to_b32(_secrets.randbits(NETPAIR_SECRET_BITS),
+                       NETPAIR_SECRET_CHARS)
+
+
+def generate_netpair_code(device_id: str, secret: str) -> str:
+    """Encode (device tag, secret) into a 12-char ``XXXX-XXXX-XXXX`` code."""
+    tag = netpair_device_tag(device_id)
+    if (not isinstance(secret, str) or len(secret) != NETPAIR_SECRET_CHARS
+            or any(c not in _NETPAIR_ALPHA_INDEX for c in secret)):
+        raise ValueError("invalid netpair secret")
+    data = tag + secret                      # 11 chars: tag(4) + secret(7)
+    code = data + _checksum_char(data)       # 12 chars: data(11) + checksum
+    return f"{code[0:4]}-{code[4:8]}-{code[8:12]}"
+
+
+def decode_netpair_code(code: str) -> tuple[str, str] | None:
+    """Parse a pairing code back into ``(device_tag, secret)``, or None when
+    the format, alphabet, length or checksum is wrong (typo on entry)."""
+    if not isinstance(code, str):
+        return None
+    norm = "".join(ch for ch in code.upper() if ch not in " -")
+    if len(norm) != NETPAIR_CODE_CHARS:
+        return None
+    if any(c not in _NETPAIR_ALPHA_INDEX for c in norm):
+        return None
+    data = norm[:11]
+    if norm[11] != _checksum_char(data):
+        return None
+    tag = data[:NETPAIR_DEVICE_CHARS]
+    secret = data[NETPAIR_DEVICE_CHARS:
+                  NETPAIR_DEVICE_CHARS + NETPAIR_SECRET_CHARS]
+    return tag, secret
+
+
+def netpair_topic(secret: str) -> str:
+    """Unguessable MQTT topic for one netpair shared secret."""
+    digest = hashlib.sha256(
+        b"clipsync-netpair-topic|" + secret.encode("ascii")).hexdigest()
+    return NETPAIR_TOPIC_PREFIX + digest[:24]
+
+
+def netpair_key(secret: str) -> bytes:
+    """AES-256 key both ends derive independently (same HMAC style as relay)."""
+    prk = hmac.new(b"clipsync-netpair-salt", secret.encode("ascii"),
+                   hashlib.sha256).digest()
+    key = b""
+    i = 1
+    while len(key) < 32:
+        key = hmac.new(prk, b"clipsync-netpair-key" + bytes([i]),
+                       hashlib.sha256).digest()
+        i += 1
+    return key[:32]
+
+
 def pack_envelope(frame_bytes: bytes, key: bytes, now: float) -> bytes:
     """Wrap an encoded ClipSync frame into an encrypted relay envelope."""
     if len(frame_bytes) > MAX_RELAY_PAYLOAD:
@@ -157,7 +274,9 @@ class RelayTransport:
       brokers           -- list of ``wss://host:port[/path]`` endpoints
       get_channels      -- returns {topic: key}; re-read on reconnect and when
                            ``refresh_channels`` is called (new enrollments)
-      on_frame          -- called with inner frame bytes for received frames
+      on_frame          -- called with (inner frame bytes, topic) for received
+                           frames; the topic lets the owner map a frame back to
+                           the channel/secret it arrived on (netpair handshake)
       on_state          -- called with one of STATE_* on every change
       client_factory    -- returns a paho-compatible client, or None when the
                            optional dependency is missing (tests inject fakes)
@@ -425,7 +544,7 @@ class RelayTransport:
             logger.debug("relay frame dropped (auth/window/format)")
             return
         try:
-            self._on_frame(frame)
+            self._on_frame(frame, msg.topic)
         except Exception:
             logger.debug("relay on_frame callback failed", exc_info=True)
 
