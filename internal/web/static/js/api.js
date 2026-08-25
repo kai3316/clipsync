@@ -651,6 +651,17 @@ var ClipsyncAPI = (function () {
     },
 
     /**
+     * Test relay broker connectivity (a light TCP/TLS handshake per broker —
+     * the live relay session is not disturbed).  Pass the broker list to test
+     * (e.g. unsaved edits); an empty list tests the persisted config.
+     * @param {string[]} [brokers]
+     * @returns {Promise<{ok: boolean, results: Array, summary: string}>}
+     */
+    testRelay: function (brokers) {
+      return this._fetch('POST', '/api/internetpair/test', { brokers: brokers || [] });
+    },
+
+    /**
      * Per-peer internet delivery status: how many clips are queued for
      * offline retry (pending) and the recent send history (sends, newest
      * first). Each send is {msg_id, ts, status, preview} with status one of

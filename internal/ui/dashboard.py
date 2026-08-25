@@ -17,6 +17,8 @@ from collections.abc import Callable
 import customtkinter as ctk
 
 from internal.i18n import T
+from internal.transport.discovery import _get_local_address
+from internal.transport.ids import peer_id_hash
 from internal.ui.dialogs import (
     _is_dark_mode,
     ask_string,
@@ -505,11 +507,10 @@ class DashboardWindow:
 
     @staticmethod
     def _hash_device_id(peer_id: str) -> str:
-        """Hash a real device id into its mDNS form (same recipe as the
-        transport layer's reconnect bookkeeping keys)."""
-        import hashlib
+        """Hash a real device id into its mDNS form (single source of truth:
+        internal.transport.ids.peer_id_hash — same recipe as the transport)."""
         try:
-            return hashlib.sha256(peer_id.encode()).hexdigest()[:12]
+            return peer_id_hash(peer_id)
         except Exception:
             return ""
 
@@ -1014,15 +1015,10 @@ class DashboardWindow:
 
     @staticmethod
     def _detect_local_ip() -> str:
-        try:
-            s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-            s.settimeout(0)
-            s.connect(("10.254.254.254", 1))
-            ip = s.getsockname()[0]
-            s.close()
-            return ip
-        except Exception:
-            return "127.0.0.1"
+        # Single source: discovery._get_local_address (private-filtered,
+        # priority-ranked, falls back to 127.0.0.1).  The old single UDP-trick
+        # could surface a VPN/virtual-adapter IP that peers could never reach.
+        return _get_local_address()
 
     _network_info_cache: dict | None = None
     _network_detect_started = False

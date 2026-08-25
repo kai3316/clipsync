@@ -36,6 +36,7 @@ import hashlib
 import hmac
 import json
 import logging
+import socket
 import ssl
 import threading
 import time
@@ -265,6 +266,40 @@ def open_envelope(blob: bytes, key: bytes, now: float) -> bytes | None:
     except Exception:
         return None
     return decrypt(ct, key)
+
+
+def probe_relay_endpoint(endpoint: str, timeout: float = 4.0) -> dict:
+    """Probe one relay broker endpoint with a TCP (+TLS) handshake.
+
+    A pure connectivity check — opens its own socket and never touches the
+    live ``RelayTransport`` client, so clicking "test connection" cannot
+    disturb an active relay session.  Returns:
+    ``{"endpoint", "ok", "latency_ms", "detail"}`` and never raises.
+    """
+    try:
+        scheme, _, rest = endpoint.partition("://")
+        host_port, _, _path = rest.partition("/")
+        host, _, port = host_port.partition(":")
+        port = int(port or 8884)
+    except Exception:
+        return {"endpoint": endpoint, "ok": False, "latency_ms": None, "detail": "invalid endpoint"}
+    if not host:
+        return {"endpoint": endpoint, "ok": False, "latency_ms": None, "detail": "invalid endpoint"}
+    use_tls = scheme.lower() in ("wss", "ssl", "tls", "mqtts")
+    started = time.time()
+    try:
+        with socket.create_connection((host, port), timeout=timeout) as sock:
+            if use_tls:
+                ctx = ssl.create_default_context()
+                with ctx.wrap_socket(sock, server_hostname=host):
+                    pass  # handshake completed — reachable
+        latency_ms = round((time.time() - started) * 1000.0, 1)
+        return {"endpoint": endpoint, "ok": True, "latency_ms": latency_ms, "detail": "reachable"}
+    except socket.timeout:
+        return {"endpoint": endpoint, "ok": False, "latency_ms": None, "detail": "timeout"}
+    except Exception as e:
+        detail = str(e) or type(e).__name__
+        return {"endpoint": endpoint, "ok": False, "latency_ms": None, "detail": detail[:120]}
 
 
 class RelayTransport:
@@ -575,7 +610,3 @@ class RelayTransport:
             self._on_frame(frame, msg.topic)
         except Exception:
             logger.debug("relay on_frame callback failed", exc_info=True)
-
-
-def default_client_factory():  # backward-compat alias
-    return build_paho_client

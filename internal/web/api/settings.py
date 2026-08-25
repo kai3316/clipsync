@@ -46,7 +46,6 @@ _SAFE_FIELDS = {
     "auto_start",
     "port",
     "service_type",
-    "relay_url",
     "app_filter_enabled",
     "app_filter_mode",
     "app_filter_list",
@@ -126,7 +125,6 @@ _MUTABLE_FIELDS = {
     "log_level",
     "port",
     "service_type",
-    "relay_url",
     "auto_start",
     "app_filter_enabled",
     "app_filter_mode",
@@ -441,11 +439,11 @@ def import_data(body, cfg, history):
 
     filepath = data.get("filepath", "").strip()
     if not filepath:
-        return {"ok": False, "error": T("web.import_missing_path")}, 200
+        return {"ok": False, "error": T("web.import_missing_path")}, 400
 
     filepath = os.path.expanduser(filepath)
     if not os.path.isfile(filepath):
-        return {"ok": False, "error": T("web.import_file_not_found", path=filepath)}, 200
+        return {"ok": False, "error": T("web.import_file_not_found", path=filepath)}, 404
 
     # Confine import to where a legitimate export/backup actually lands — the
     # app data dir (backups) and the user's Downloads folder (manual exports) —
@@ -456,19 +454,19 @@ def import_data(body, cfg, history):
     downloads_root = os.path.realpath(os.path.join(os.path.expanduser("~"), "Downloads"))
     real = os.path.realpath(filepath)
     if not any(real == r or real.startswith(r + os.sep) for r in (data_root, downloads_root)):
-        return {"ok": False, "error": T("web.import_path_not_allowed")}, 200
+        return {"ok": False, "error": T("web.import_path_not_allowed")}, 400
 
     # Cap at ~10 MB so a huge or mistaken file can't be slurped into memory.
     try:
         size = os.path.getsize(filepath)
     except OSError:
-        return {"ok": False, "error": T("web.import_file_not_found", path=filepath)}, 200
+        return {"ok": False, "error": T("web.import_file_not_found", path=filepath)}, 404
     if size > 10 * 1024 * 1024:
-        return {"ok": False, "error": T("web.import_file_too_large")}, 200
+        return {"ok": False, "error": T("web.import_file_too_large")}, 413
 
     ext = os.path.splitext(filepath)[1].lower()
     if ext not in (".json", ".csv"):
-        return {"ok": False, "error": T("web.import_unsupported_format")}, 200
+        return {"ok": False, "error": T("web.import_unsupported_format")}, 415
 
     # Validate before applying so a malformed file fails with a clear
     # localized error instead of a generic 500 mid-import.
@@ -477,22 +475,22 @@ def import_data(body, cfg, history):
             with open(filepath, "r", encoding="utf-8") as f:
                 parsed = json.load(f)
             if not isinstance(parsed, list) or not all(isinstance(item, dict) for item in parsed):
-                return {"ok": False, "error": T("web.import_invalid_content")}, 200
+                return {"ok": False, "error": T("web.import_invalid_content")}, 400
             # Require ClipSync export fields so a foreign JSON array (e.g. a
             # browser/app config dump) can't be ingested and read back through
             # the history API.  An empty list is a valid no-op import.
             if not all(("text_preview" in item or "types" in item or "content_type" in item)
                        for item in parsed):
-                return {"ok": False, "error": T("web.import_invalid_content")}, 200
+                return {"ok": False, "error": T("web.import_invalid_content")}, 400
         else:
             with open(filepath, "r", encoding="utf-8", newline="") as f:
                 reader = csv.DictReader(f)
                 expected = {"timestamp", "content_type", "text_preview"}
                 if not expected.intersection(reader.fieldnames or []):
-                    return {"ok": False, "error": T("web.import_invalid_content")}, 200
+                    return {"ok": False, "error": T("web.import_invalid_content")}, 400
     except (OSError, json.JSONDecodeError, UnicodeDecodeError):
         logger.warning("Import validation failed for %s", filepath, exc_info=True)
-        return {"ok": False, "error": T("web.import_invalid_content")}, 200
+        return {"ok": False, "error": T("web.import_invalid_content")}, 400
 
     try:
         from internal.data.export import import_history_csv, import_history_json

@@ -156,6 +156,17 @@
         </div>
         <div class="history-panel__filter-meta">
           <span class="history-panel__count">{{ sections.pinned.length + sections.unpinned.length }} {{ t('history.items') || 'items' }}</span>
+          <!-- Sort toggle: flips the client-side newest/oldest ordering
+               (store.historySort, already implemented in filteredHistory). -->
+          <button
+            class="btn-ghost"
+            :title="t('history.sort_hint') || 'Sort history'"
+            @click="store.historySort = (store.historySort === 'newest' ? 'oldest' : 'newest')"
+          >
+            {{ store.historySort === 'newest'
+              ? '↓ ' + (t('history.sort_newest') || 'Newest')
+              : '↑ ' + (t('history.sort_oldest') || 'Oldest') }}
+          </button>
           <button class="btn-ghost" style="color:var(--clipsync-danger)" @click="clearAll" :disabled="clearingAll">
             {{ clearingAll ? '...' : t('history.clear_all') || 'Clear' }}
           </button>

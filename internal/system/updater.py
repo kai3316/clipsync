@@ -135,10 +135,6 @@ def sha256_file(path: str) -> str:
     return digest.hexdigest()
 
 
-# Backwards-compatible alias (the checker used to be private).
-_sha256_file = sha256_file
-
-
 def fetch_latest_asset_info(timeout: float = 10.0) -> dict | None:
     """Return authoritative info about this platform's latest release asset.
 

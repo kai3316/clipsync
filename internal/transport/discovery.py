@@ -4,7 +4,6 @@ Registers this device as a _clipsync._tcp service and discovers
 other devices running ClipSync on the same local network.
 """
 
-import hashlib
 import json
 import logging
 import platform
@@ -15,12 +14,13 @@ from collections.abc import Callable
 
 from zeroconf import ServiceBrowser, ServiceInfo, Zeroconf
 
+from internal.transport.ids import peer_id_hash, sanitize_peer_str as _sanitize_peer_str
 from internal.version import __version__
 
 logger = logging.getLogger(__name__)
 
 
-def _get_all_local_addresses():
+def get_all_local_addresses():
     """Enumerate every non-loopback IPv4 address on this host.
 
     ``socket.gethostname()`` alone is unreliable: on macOS/Linux it can
@@ -150,7 +150,7 @@ def _get_interface_priorities():
 
 
 def _get_local_address():
-    all_ips = _get_all_local_addresses()
+    all_ips = get_all_local_addresses()
     if not all_ips:
         logger.warning(
             "No non-loopback IP found, falling back to 127.0.0.1 "
@@ -174,16 +174,6 @@ def _is_private_ip(ip: str) -> bool:
     except ValueError:
         return False
     return a == 10 or (a == 192 and b == 168) or (a == 172 and 16 <= b <= 31)
-
-
-def _sanitize_peer_str(value: str, max_len: int = 64) -> str:
-    """Strip control characters and cap length of peer-supplied strings.
-
-    mDNS instance names are attacker-controlled on a LAN and flow into log
-    lines, OS notifications and UI lists — keep them to sane printable text.
-    """
-    cleaned = "".join(ch for ch in value if ch.isprintable())
-    return cleaned[:max_len]
 
 
 def _pick_best_address(candidates: list[str], our_ip: str) -> str:
@@ -215,7 +205,7 @@ class Discovery:
 
     @staticmethod
     def _hash_device_id(device_id: str) -> str:
-        return hashlib.sha256(device_id.encode()).hexdigest()[:12]
+        return peer_id_hash(device_id)
 
     def __init__(self, device_id: str, device_name: str, port: int, service_type: str):
         self._device_id = device_id
@@ -270,7 +260,7 @@ class Discovery:
             b"arch": (platform.machine() or "").lower().encode("utf-8"),
         }
 
-        all_ips = _get_all_local_addresses()
+        all_ips = get_all_local_addresses()
         for i, ip in enumerate(all_ips):
             props[f"alt_ip_{i}".encode()] = ip.encode()
 
@@ -353,7 +343,7 @@ class Discovery:
             if self._zc is None:
                 return
             try:
-                current = frozenset(_get_all_local_addresses())
+                current = frozenset(get_all_local_addresses())
             except Exception:
                 continue
             if not current or current == self._advertised_ips:
@@ -427,7 +417,7 @@ class Discovery:
             b"os": platform.system().lower().encode("utf-8"),
             b"arch": (platform.machine() or "").lower().encode("utf-8"),
         }
-        all_ips = _get_all_local_addresses()
+        all_ips = get_all_local_addresses()
         for i, ip in enumerate(all_ips):
             props[f"alt_ip_{i}".encode()] = ip.encode()
         local_ip = _get_local_address()
@@ -578,16 +568,6 @@ class Discovery:
         if on_found:
             on_found(peer_id_hash, peer_display, address, port)
 
-    def get_peer_version_info(self, peer_id_hash: str) -> dict:
-        """Return the {version, os, arch} a peer advertises, or empty strings."""
-        with self._lock:
-            peer = self._known_peers.get(peer_id_hash) or {}
-        return {
-            "version": peer.get("version", ""),
-            "os": peer.get("os", ""),
-            "arch": peer.get("arch", ""),
-        }
-
     def _handle_service_removed(self, name):
         with self._lock:
             peer_id = self._service_to_peer.pop(name, None)
@@ -610,6 +590,3 @@ class Discovery:
             logger.info("Peer lost: %s", peer_id)
             if on_lost:
                 on_lost(peer_id)
-
-    def _get_local_ip(self) -> str:
-        return _get_local_address()

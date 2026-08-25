@@ -1,6 +1,5 @@
 """TLS-encrypted TCP connection management for peer-to-peer sync."""
 
-import hashlib
 import logging
 import os
 import socket
@@ -24,6 +23,7 @@ from cryptography import x509
 from cryptography.hazmat.primitives import serialization
 from cryptography.x509.oid import NameOID
 
+from internal.config.config import config_dir
 from internal.protocol.codec import (
     PAIRING_MSG_TYPES,
     UNPAIRED_GATE_MSG_TYPES,
@@ -31,6 +31,7 @@ from internal.protocol.codec import (
 )
 from internal.security.encryption import is_encrypted
 from internal.security.pairing import CertificateChangedError, PairingManager, fingerprint_pem
+from internal.transport.ids import peer_id_hash, sanitize_peer_str as _sanitize_peer_str
 
 logger = logging.getLogger(__name__)
 
@@ -57,28 +58,6 @@ ANON_CONN_MAX_LIFE = 60
 # side reads this before creating a PeerConnection and knows not to
 # schedule a reconnect.
 _REJECT_MARKER = b"\xff\xff\xff\xffRJCT"
-
-
-def peer_id_hash(device_id: str) -> str:
-    """The hashed mDNS peer id for *device_id*: sha256 hex, first 12 chars.
-
-    This MUST stay identical to ``Discovery._hash_device_id`` (the formula
-    peers advertise in their mDNS TXT record) — the transport relies on it to
-    map an advertised hash back to the real device id once the certificate
-    identity reveals it.
-    """
-    return hashlib.sha256(device_id.encode()).hexdigest()[:12]
-
-
-def _sanitize_peer_str(value: str, max_len: int = 64) -> str:
-    """Strip control characters and cap length of peer-supplied strings.
-
-    Names from mDNS instance names and certificate CN/OU fields are fully
-    attacker-controlled on a LAN and flow into log lines, OS notifications
-    and UI lists — keep them to sane printable text.
-    """
-    cleaned = "".join(ch for ch in value if ch.isprintable())
-    return cleaned[:max_len]
 
 
 class PeerConnection:
@@ -466,18 +445,10 @@ class TransportManager:
         never world-readable and survive only as long as the app runs.
         Stale files from previous crashes are cleaned on next startup.
         """
-        import platform
-        system = platform.system()
-        if system == "Windows":
-            base = os.environ.get("APPDATA", str(Path.home()))
-            scratch = Path(base) / "ClipSync" / ".scratch"
-        elif system == "Darwin":
-            scratch = Path.home() / "Library" / "Application Support" / "ClipSync" / ".scratch"
-        else:
-            scratch = Path.home() / ".config" / "clipsync" / ".scratch"
+        scratch = config_dir() / ".scratch"
         scratch.mkdir(parents=True, exist_ok=True)
         # On Unix, restrict permissions so only the owner can read
-        if system != "Windows":
+        if os.name != "nt":
             try:
                 scratch.chmod(0o700)
             except Exception:

@@ -69,6 +69,8 @@ def handle(method: str, path: str, query_params, body) -> tuple[dict, int]:
             return _mgr._netpair_rename(b.get("peer_id", ""), b.get("name"))
         if path == "/api/internetpair/unpair" and method == "POST":
             return _mgr._netpair_unpair(_body_dict(body).get("peer_id", ""))
+        if path == "/api/internetpair/test" and method == "POST":
+            return _mgr._netpair_test(_body_dict(body))
         return {"ok": False, "error": "not found"}, 404
     except Exception:
         logger.exception("internetpair handler failed: %s %s", method, path)

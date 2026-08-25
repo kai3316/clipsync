@@ -136,6 +136,8 @@
         relayBrokersText: '',
         brokersSaving: false,
         brokersOpen: false,
+        relayTesting: false,
+        relayTestResult: null,   // {summary, results:[{endpoint,ok,latency_ms,detail}]}
 
         // Web Companion
         webEnabled: true,
@@ -598,6 +600,41 @@
           .catch(function () {
             self.brokersSaving = false;
             self.store.showToast(self.t('dialog.failed'), 2000);
+          });
+      },
+
+      // Test the currently staged broker list (before saving) with a light
+      // per-broker TCP/TLS handshake; the live relay session is untouched.
+      testRelay: function () {
+        var self = this;
+        if (self.relayTesting) return;
+        var lines = (self.relayBrokersText || '').split('\n')
+          .map(function (s) { return s.trim(); })
+          .filter(Boolean);
+        var seen = {}, brokers = [];
+        lines.forEach(function (l) {
+          if (!seen[l]) { seen[l] = true; brokers.push(l); }
+        });
+        self.relayTesting = true;
+        self.relayTestResult = null;
+        ClipsyncAPI.testRelay(brokers)
+          .then(function (res) {
+            self.relayTesting = false;
+            if (res && res.ok) {
+              self.relayTestResult = res;
+            } else {
+              self.relayTestResult = {
+                summary: (res && res.error) || 'test failed',
+                results: [],
+              };
+            }
+          })
+          .catch(function (e) {
+            self.relayTesting = false;
+            self.relayTestResult = {
+              summary: (e && e.message) || 'test failed',
+              results: [],
+            };
           });
       },
 
@@ -1272,9 +1309,12 @@
           } else {
             self.store.showToast(self.t('settings.import_failed') + ((res && res.error) ? ': ' + res.error : ''), 2500);
           }
-        }).catch(function () {
+        }).catch(function (e) {
           self.importing = false;
-          self.store.showToast(self.t('settings.import_failed'), 2000);
+          // Errors now come back as 4xx, so they land in .catch; surface the
+          // backend's detail (e.message is set from the error body by api.js).
+          var detail = (e && e.message) ? ': ' + e.message : '';
+          self.store.showToast(self.t('settings.import_failed') + detail, 2500);
         });
           }).catch(function () { /* cancelled */ });
       },
@@ -1670,6 +1710,19 @@
                     '<button class="settings-btn settings-btn--accent" @click="saveRelayBrokers" :disabled="brokersSaving" style="width:100%;margin-top:4px">' +
                       '{{ brokersSaving ? \'...\' : t(\'settings_window.save_relay_brokers\') }}' +
                     '</button>' +
+                    // Test connectivity of the staged list (no need to save first).
+                    '<button class="settings-btn settings-btn--sm" @click="testRelay" :disabled="relayTesting || brokersSaving" style="width:100%;margin-top:6px">' +
+                      '{{ relayTesting ? \'...\' : t(\'settings_window.test_relay_btn\') }}' +
+                    '</button>' +
+                    '<div v-if="relayTestResult" class="settings-field" style="margin-top:8px">' +
+                      '<span class="settings-field__label">{{ t(\'settings_window.test_relay_result\') }}: <span :style="{ color: relayTestResult.summary.indexOf(\'/\') !== -1 && relayTestResult.results.length ? (relayTestResult.results.every(r =&gt; r.ok) ? \'var(--clipsync-success)\' : \'var(--clipsync-danger)\') : \'inherit\' }">{{ relayTestResult.summary }}</span></span>' +
+                      '<div v-for="r in relayTestResult.results" :key="r.endpoint" style="margin-top:4px">' +
+                        '<span :style="{ color: r.ok ? \'var(--clipsync-success)\' : \'var(--clipsync-danger)\' }">{{ r.ok ? \'✓\' : \'✗\' }}</span> ' +
+                        '<span style="word-break:break-all">{{ r.endpoint }}</span>' +
+                        '<span v-if="r.ok && r.latency_ms != null" style="opacity:.65"> · {{ r.latency_ms }} ms</span>' +
+                        '<span v-if="!r.ok && r.detail" style="color:var(--clipsync-danger);word-break:break-all"> — {{ r.detail }}</span>' +
+                      '</div>' +
+                    '</div>' +
                   '</template>' +
                 '</section>' +
 

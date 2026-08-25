@@ -40,6 +40,26 @@ class PeerInfo:
     last_port: int = 0  # even when it is momentarily off mDNS / across restarts
 
 
+# Default global-hotkey bindings — single source of truth.  The Config
+# dataclass defaults from this, and internal/system/hotkey.py re-exports it
+# (as DEFAULT_SHORTCUTS) so the manager and its tests see the same map.
+DEFAULT_HOTKEYS: dict[str, str] = {
+    "quick_paste": "Ctrl+`",
+    "paste_1": "Ctrl+1",
+    "paste_2": "Ctrl+2",
+    "paste_3": "Ctrl+3",
+    "paste_4": "Ctrl+4",
+    "paste_5": "Ctrl+5",
+    "paste_6": "Ctrl+6",
+    "paste_7": "Ctrl+7",
+    "paste_8": "Ctrl+8",
+    "paste_9": "Ctrl+9",
+    "paste_plain": "Ctrl+Shift+V",
+    "toggle_monitor": "Ctrl+Shift+M",
+    "show_window": "Ctrl+Shift+Space",
+}
+
+
 @dataclass
 class Config:
     # Schema version for one-way migrations on load. v1 configs stored
@@ -61,7 +81,6 @@ class Config:
     # None = not configured → all redaction categories enabled (default ON).
     # [] = user explicitly disabled redaction. Non-empty = that subset.
     filter_enabled_categories: list[str] | None = None
-    relay_url: str = ""
     private_key_pem: str = ""
     certificate_pem: str = ""
     # Advanced settings
@@ -142,21 +161,7 @@ class Config:
     translate_api_key: str = ""   # never exposed to web clients
 
     # Hotkeys
-    hotkeys: dict[str, str] = field(default_factory=lambda: {
-        "quick_paste": "Ctrl+`",
-        "paste_1": "Ctrl+1",
-        "paste_2": "Ctrl+2",
-        "paste_3": "Ctrl+3",
-        "paste_4": "Ctrl+4",
-        "paste_5": "Ctrl+5",
-        "paste_6": "Ctrl+6",
-        "paste_7": "Ctrl+7",
-        "paste_8": "Ctrl+8",
-        "paste_9": "Ctrl+9",
-        "paste_plain": "Ctrl+Shift+V",
-        "toggle_monitor": "Ctrl+Shift+M",
-        "show_window": "Ctrl+Shift+Space",
-    })
+    hotkeys: dict[str, str] = field(default_factory=lambda: dict(DEFAULT_HOTKEYS))
 
     # Global hotkeys are off by default; the user can enable them in settings.
     hotkeys_enabled: bool = False
@@ -223,6 +228,12 @@ def _config_dir() -> Path:
         return Path.home() / ".config" / "clipsync"
 
 
+# Public alias — this helper is imported across many modules (transport,
+# backup, web, UI); keep the historic private name working for existing
+# callers while new code uses the public form.
+config_dir = _config_dir
+
+
 def _log_dir() -> Path:
     """Directory the application writes its rotating log file to.
 
@@ -280,7 +291,6 @@ _FIELD_RULES: dict[str, tuple] = {
     "timed_pause_until": ("float",),
     "auto_start": ("bool",),
     "filter_enabled_categories": ("strlist",),
-    "relay_url": ("str",),
     "private_key_pem": ("str",),
     "certificate_pem": ("str",),
     "history_max_entries": ("int",),
@@ -430,7 +440,6 @@ def load() -> Config:
                 "device_id", "device_name", "port", "service_type",
                 "sync_enabled", "timed_pause_until", "auto_start",
                 "filter_enabled_categories",
-                "relay_url",
                 "private_key_pem", "certificate_pem",
                 "history_max_entries", "history_max_age_days",
                 "file_receive_dir",
@@ -563,7 +572,6 @@ def save(cfg: Config, enc_mgr: "EncryptionManager | None" = None):
             "timed_pause_until": cfg.timed_pause_until,
             "auto_start": cfg.auto_start,
             "filter_enabled_categories": cfg.filter_enabled_categories,
-            "relay_url": cfg.relay_url,
             "private_key_pem": private_key_to_save,
             "certificate_pem": cfg.certificate_pem,
             "history_max_entries": cfg.history_max_entries,

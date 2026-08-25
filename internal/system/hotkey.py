@@ -168,21 +168,9 @@ _MAC_DIGIT_VK: dict[str, int] = {
 # Default shortcuts
 # ══════════════════════════════════════════════════════════════════════
 
-DEFAULT_SHORTCUTS: dict[str, str] = {
-    "quick_paste": "Ctrl+`",
-    "paste_1": "Ctrl+1",
-    "paste_2": "Ctrl+2",
-    "paste_3": "Ctrl+3",
-    "paste_4": "Ctrl+4",
-    "paste_5": "Ctrl+5",
-    "paste_6": "Ctrl+6",
-    "paste_7": "Ctrl+7",
-    "paste_8": "Ctrl+8",
-    "paste_9": "Ctrl+9",
-    "paste_plain": "Ctrl+Shift+V",
-    "toggle_monitor": "Ctrl+Shift+M",
-    "show_window": "Ctrl+Shift+Space",
-}
+# Single source of truth lives in config.DEFAULT_HOTKEYS — re-export under
+# the historic name so existing imports (and tests) keep working.
+from internal.config.config import DEFAULT_HOTKEYS as DEFAULT_SHORTCUTS
 
 
 # ══════════════════════════════════════════════════════════════════════

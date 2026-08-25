@@ -356,7 +356,7 @@ def _dispatch(method, path, query_params, body, cfg, history, sync_mgr,
 
         elif path == "/api/download":
             # Handled directly in server.py for file streaming
-            return _json_response({"error": "not found"}, 404)
+            return _json_response({"ok": False, "error": "not found"}, 404)
 
         elif path == "/api/favorites":
             data, status = get_favorites()
@@ -493,7 +493,7 @@ def _dispatch(method, path, query_params, body, cfg, history, sync_mgr,
             # Streaming file download handled directly in server.py; keep the
             # route here so a request that reaches dispatch (rather than being
             # intercepted for streaming) fails cleanly instead of 404ing oddly.
-            return _json_response({"error": "not found"}, 404)
+            return _json_response({"ok": False, "error": "not found"}, 404)
 
     # ── POST routes ────────────────────────────────────────────────
 
@@ -592,7 +592,7 @@ def _dispatch(method, path, query_params, body, cfg, history, sync_mgr,
 
         elif path == "/api/upload":
             # Handled directly in server.py due to multipart parsing
-            return _json_response({"error": "not found"}, 404)
+            return _json_response({"ok": False, "error": "not found"}, 404)
 
         elif path == "/api/favorites":
             data, status = add_favorite(body)
@@ -776,7 +776,7 @@ def _dispatch(method, path, query_params, body, cfg, history, sync_mgr,
 
         elif path == "/api/speed-test":
             if on_speed_test_start is None:
-                return _json_response({"error": "speed test not available"}, 503)
+                return _json_response({"ok": False, "error": "speed test not available"}, 503)
             ok = on_speed_test_start()
             return _json_response({"ok": ok})
 

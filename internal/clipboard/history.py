@@ -5,11 +5,9 @@ Stores up to 50 most recent clipboard entries in
 """
 
 import base64
-import hashlib
 import json
 import logging
 import os
-import re
 import tempfile
 import threading
 import time
@@ -17,28 +15,19 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from internal.clipboard.dedup import (
+    CONTENT_TYPE_LABELS,
     adds_new_flavors,
     labels_to_types,
+    make_dedup_key as _make_dedup_key,
     merge_types,
 )
-from internal.clipboard.format import ClipboardContent, ContentType
+from internal.clipboard.format import ClipboardContent, ContentType, strip_html
 from internal.config.config import _config_dir
 
 if TYPE_CHECKING:
     from internal.security.encryption import EncryptionManager
 
 logger = logging.getLogger(__name__)
-
-_CONTENT_TYPE_LABELS: dict[ContentType, str] = {
-    ContentType.TEXT: "TEXT",
-    ContentType.HTML: "HTML",
-    ContentType.RTF: "RTF",
-    ContentType.IMAGE_PNG: "IMAGE",
-    ContentType.IMAGE_EMF: "IMAGE_EMF",
-    ContentType.FILE: "FILE",
-    ContentType.URL: "URL",
-}
-
 
 def _safe_decode(data: bytes) -> str:
     """Decode bytes to string, trying common encodings."""
@@ -54,65 +43,6 @@ def _safe_decode(data: bytes) -> str:
     return data.decode("utf-8", errors="replace")
 
 
-def _strip_html(text: str) -> str:
-    """Remove HTML tags, style/script blocks, comments, and unescape entities."""
-    import html as _html
-    # Remove <style> and <script> blocks (including their content)
-    text = re.sub(r"<style[^>]*>.*?</style>", "", text, flags=re.DOTALL | re.IGNORECASE)
-    text = re.sub(r"<script[^>]*>.*?</script>", "", text, flags=re.DOTALL | re.IGNORECASE)
-    # Remove HTML comments
-    text = re.sub(r"<!--.*?-->", "", text, flags=re.DOTALL)
-    # Strip remaining tags
-    plain = re.sub(r"<[^>]*>", "", text)
-    # Unescape HTML entities
-    plain = _html.unescape(plain)
-    # Collapse whitespace
-    plain = re.sub(r"\s+", " ", plain)
-    return plain.strip()
-
-
-def _make_dedup_key(content: ClipboardContent) -> str:
-    """Build a stable dedup key from the 'primary' content.
-
-    Uses the text body (when available) rather than hashing all types,
-    so multi-step clipboard writes (TEXT → HTML → RTF) that produce
-    different ``hash_key()`` values are still recognised as the same
-    user action.  Falls back to image-data hashes for image-only copies.
-    """
-    if ContentType.TEXT in content.types:
-        text = content.types[ContentType.TEXT].decode("utf-8", errors="replace")
-        # Hash the full body so two long texts sharing a prefix are not
-        # wrongly coalesced within the dedup window.
-        return "text:" + hashlib.sha256(
-            text.encode("utf-8", errors="replace")
-        ).hexdigest()
-    if ContentType.IMAGE_PNG in content.types:
-        return "png:" + hashlib.sha256(
-            content.types[ContentType.IMAGE_PNG]
-        ).hexdigest()
-    if ContentType.IMAGE_EMF in content.types:
-        return "emf:" + hashlib.sha256(
-            content.types[ContentType.IMAGE_EMF]
-        ).hexdigest()
-    if ContentType.HTML in content.types:
-        return "html:" + hashlib.sha256(
-            content.types[ContentType.HTML]
-        ).hexdigest()
-    if ContentType.RTF in content.types:
-        return "rtf:" + hashlib.sha256(
-            content.types[ContentType.RTF]
-        ).hexdigest()
-    if ContentType.FILE in content.types:
-        # FILE content is the newline-joined file paths — hash them so
-        # file-only copies dedup instead of falling through to a unique key.
-        return "file:" + hashlib.sha256(
-            content.types[ContentType.FILE]
-        ).hexdigest()
-    if ContentType.URL in content.types:
-        return "url:" + hashlib.sha256(
-            content.types[ContentType.URL]
-        ).hexdigest()
-    return "other:" + str(time.time())
 
 
 def _build_preview(types: dict[ContentType, bytes]) -> str:
@@ -122,7 +52,7 @@ def _build_preview(types: dict[ContentType, bytes]) -> str:
         return text[:200]
     if ContentType.HTML in types:
         html = _safe_decode(types[ContentType.HTML])
-        plain = _strip_html(html)
+        plain = strip_html(html)
         return plain[:200] if plain else "[HTML]"
     if ContentType.IMAGE_EMF in types:
         return "[Vector Image]"
@@ -134,14 +64,7 @@ def _build_preview(types: dict[ContentType, bytes]) -> str:
 
 
 def _map_type_to_label(content_type: ContentType) -> str:
-    return _CONTENT_TYPE_LABELS.get(content_type, "TEXT")
-
-
-def _map_label_to_type(label: str) -> ContentType:
-    for ct, lbl in _CONTENT_TYPE_LABELS.items():
-        if lbl == label:
-            return ct
-    return ContentType.TEXT
+    return CONTENT_TYPE_LABELS.get(content_type, "TEXT")
 
 
 class ClipboardHistory:

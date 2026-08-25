@@ -704,6 +704,11 @@ class Application:
             return
         if getattr(self.cfg, "language_chosen", False):
             return
+        # Web-first: in webview mode the SPA's own first-run wizard owns the
+        # language choice (gated by the same language_chosen flag).  Popping
+        # a Tk picker on top of it would show two wizards at first launch.
+        if self._is_webview():
+            return
         self._onboarding_shown = True
         try:
             from internal.ui.onboarding import show_language_onboarding
@@ -903,9 +908,10 @@ class Application:
             retry_enabled=cfg.retry_capture_enabled,
         )
         self.sync_mgr.set_enabled(cfg.sync_enabled)
-        # Wire the dedup hash algorithm (sha256 default / simple=md5).
-        from internal.clipboard import history_db as _history_db
-        _history_db.DEDUP_ALGO = cfg.dedup_method or "sha256"
+        # Wire the dedup hash algorithm (sha256 default / simple=md5).  It
+        # lives in internal.clipboard.dedup so both history backends share it.
+        from internal.clipboard import dedup as _dedup_mod
+        _dedup_mod.DEDUP_ALGO = cfg.dedup_method or "sha256"
         # Expire unpinned history rows older than the configured max age
         # (0 disables the limit).
         _history_db.set_max_age_days(cfg.history_max_age_days or 0)
@@ -1090,6 +1096,13 @@ class Application:
             chat_start_session=self._web_chat_start_session,
             get_chat_muted=self._get_chat_muted,
             set_chat_muted=self._set_chat_muted,
+        )
+
+        # The web sync-pause API delegates to the host's single timed-pause
+        # implementation instead of arming a second auto-resume timer.
+        from internal.web.api import sync_control as _sync_control
+        _sync_control.set_host_pause_hooks(
+            self._pause_sync_for_minutes, self._resume_timed_pause,
         )
 
         # ── Live history push to web clients ────────────────────────
@@ -3336,8 +3349,8 @@ class Application:
                 logger.debug("Failed to apply low_memory_mode live", exc_info=True)
 
         if "dedup_method" in updated:
-            from internal.clipboard import history_db as _history_db
-            _history_db.DEDUP_ALGO = updated["dedup_method"] or "sha256"
+            from internal.clipboard import dedup as _dedup_mod
+            _dedup_mod.DEDUP_ALGO = updated["dedup_method"] or "sha256"
         if "history_max_age_days" in updated and self.clipboard_history is not None:
             try:
                 from internal.clipboard import history_db as _history_db
@@ -5462,6 +5475,7 @@ class Application:
             set_skip_save_on_shutdown=lambda v: setattr(
                 self, "_skip_save_on_shutdown", v,
             ),
+            on_web_action=self._on_web_action,
         )
         self.settings_win.show()
         self._switch_settings_panel(tab)
@@ -8914,6 +8928,51 @@ class Application:
         except Exception:
             logger.debug("netpair_peer unpair WS broadcast failed", exc_info=True)
         return {"ok": True}, 200
+
+    def _netpair_test(self, body=None) -> tuple[dict, int]:
+        """POST /api/internetpair/test — probe the configured relay brokers.
+
+        Opens a short TCP (+TLS) socket to each broker independently (the live
+        relay client is untouched), so the user gets a per-broker reachability
+        + latency readout without any chance of disrupting an active session.
+        An optional ``{"brokers": [...]}`` body probes that list instead of
+        the persisted cfg.relay_brokers (used when the user tests edits before
+        saving them).
+        """
+        from internal.transport.relay import probe_relay_endpoint
+        brokers = None
+        if isinstance(body, dict):
+            cand = body.get("brokers")
+            if isinstance(cand, list):
+                brokers = [str(b).strip() for b in cand if isinstance(b, str) and b.strip()]
+        if not brokers:
+            brokers = list(getattr(self.cfg, "relay_brokers", []) or [])
+        if not brokers:
+            return {"ok": False, "error": "no relay brokers configured"}, 400
+        results: list[dict] = []
+        _lock = threading.Lock()
+
+        def _probe(endpoint: str) -> None:
+            r = probe_relay_endpoint(endpoint)
+            with _lock:
+                results.append(r)
+
+        threads = [
+            threading.Thread(target=_probe, args=(b,), daemon=True) for b in brokers
+        ]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(timeout=6.0)
+        ok_count = sum(1 for r in results if r.get("ok"))
+        results.sort(key=lambda r: (
+            not r.get("ok"), r.get("latency_ms") is None, r.get("latency_ms") or 0,
+        ))
+        return {
+            "ok": True,
+            "results": results,
+            "summary": f"{ok_count}/{len(brokers)} reachable",
+        }, 200
 
     def _send_netpair_hello(self, target_peer_id: str, secret: str) -> None:
         """Publish a netpair_hello frame on the secret's channel."""

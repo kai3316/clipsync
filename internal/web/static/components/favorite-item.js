@@ -86,6 +86,12 @@
       <div class="history-item__actions" @click.stop>
         <button
           class="history-item__action-btn"
+          @click="pushToDesktop"
+          :title="t('favorites.push_tooltip')"
+          :aria-label="t('favorites.push_tooltip')"
+        >&#128228;</button>
+        <button
+          class="history-item__action-btn"
           @click="copyItem"
           :title="t('favorites.copy_tooltip')"
           :aria-label="t('favorites.copy_tooltip')"
@@ -211,6 +217,25 @@
         } else {
           this.fallbackCopy(text);
         }
+      },
+
+      // On a phone, "copy" only writes the phone's own clipboard.  This pushes
+      // the favorite text to the DESKTOP clipboard (then syncs everywhere) —
+      // the web companion's primary purpose.
+      pushToDesktop: function () {
+        var text = ((this.item.title || '') + '\n' + (this.item.content || '')).trim();
+        if (!text) {
+          this.store.showToast(this.t('history.nothing_to_copy'), 1500);
+          return;
+        }
+        var self = this;
+        ClipsyncAPI.pushText(text).then(function (res) {
+          self.store.showToast(
+            res && res.ok ? self.t('history.copy_to_desktop_toast') : self.t('dialog.failed'),
+            2000);
+        }).catch(function () {
+          self.store.showToast(self.t('dialog.failed'), 2000);
+        });
       },
 
       fallbackCopy: function (text) {

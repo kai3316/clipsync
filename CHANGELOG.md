@@ -2,7 +2,29 @@
 
 All notable changes to ClipSync are documented in this file.
 
-## [Unreleased]
+## [1.0.71] — 2026-08-25
+
+### Code consistency (staged-development cleanup)
+- **Single sources of truth** for four formulas that were copy-pasted across layers: the mDNS device-id hash (`internal/transport/ids.peer_id_hash`, used by transport/discovery/dashboard/web), the persisted content-type label table (`dedup.CONTENT_TYPE_LABELS` — the wire label stays protocol-fixed), the history dedup key (`dedup.make_dedup_key`, JSON and SQLite backends now agree, `DEDUP_ALGO` honours the simple/md5 switch in both), and HTML→text preview (`format.strip_html`).
+- **Removed the dead `relay_url` field** end-to-end (config, backup schema, both settings UIs, locales) — it was replaced by `relay_brokers` but kept being persisted and editable.
+- **Default hotkeys single-sourced** in `config.DEFAULT_HOTKEYS` (the manager re-exports it as `DEFAULT_SHORTCUTS`).
+- **Local IP detection converged** onto `discovery.get_all_local_addresses` / `_get_local_address` — the dashboard card and web server no longer run their own (divergent) detection.
+- **Timed sync-pause is single-owner**: the web `/api/sync/pause|resume` delegates to the host's one resume timer instead of arming a second one.
+- **Web API error shapes unified**: `/api/import` failures now return real 4xx (was 200), history-item and placeholder errors carry `ok: false`, and the settings front-end surfaces the backend reason.
+- **Web-companion toggling is instant from the desktop settings** too (previously "restart needed"), via the same host action the dashboard/web-settings use.
+- **First-run language picker no longer double-appears** in webview mode (the web SPA's own wizard owns it).
+- Renamed the misleading `ai_config.MAX_FILE_SIZE` → `MAX_CONFIG_FILE_SIZE`; removed ~8 dead functions/aliases.
+- Diagnostics helper cleanup: the probe path and relay helpers share the platform config dir via `config.config_dir`.
+
+### Web UX
+- **Test server connectivity** button in Settings → Network: probes every configured relay broker with a light TCP/TLS handshake (parallel, ~latency per broker, never disturbs the live relay) via the new `POST /api/internetpair/test`.
+- **History list sort toggle** (newest / oldest) in the history filter bar.
+- **Favorites gain a "push to desktop clipboard" button** (the old copy only wrote the phone's own clipboard).
+- **History right-click menu gains "open link in browser"** for link-type items (`/api/nav`, URL-safe).
+- **Chat file cards gain "open / show in folder"** for completed inbound files.
+
+### Tests
+- **Reorganized the test suite by feature instead of development round**: 59 round-named files → 25 feature-named files (`test_chat`, `test_pairing`, `test_internet_pairing`, `test_aiconfig`, `test_aiconfig_ui`, `test_diagnostics`, `test_history`, `test_relay`, `test_delivery`, `test_devices`, `test_web_server`, `test_web_api`, `test_codec`, `test_clipboard`, `test_sync`, `test_update`, `test_hotkey`, `test_config`, `test_file_transfer`, `test_connection`, `test_chat_api`, `test_chat_ui`, `test_desktop_ui`, `test_integration`, `test_pairing`). Multi-round files were split to their feature homes; shared web-UI scaffolding is suffixed per round to avoid shadowing. Full suite stays at **1246 passed / 4 skipped**.
 
 ### AI config
 - **Syncing exactly the real AI-tool config files.** The default watch list now covers the actual locations used by Claude Code, Codex, Cursor and Gemini CLI (`.claude/CLAUDE.md`, `.claude/settings.json`, `.claude/skills`, `.codex/config.toml`, `.cursor/rules`, `.cursor/commands`, `.gemini/settings.json`, `.gemini/GEMINI.md`) — files *and* folders are both valid watch entries, so credentials like `auth.json` stay out. The paths dialog gains a ✨ one-click "add common AI config paths".

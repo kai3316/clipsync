@@ -342,6 +342,10 @@
                         ' class="chat-action-btn chat-action-btn--danger" :disabled="fileBusy === m.transfer_id" @click="fileAction(m, \'cancel\')">{{ t(\'chat.cancel\') }}</button>' +
                       '<button v-if="m.status === \'done\' && m.saved_path"' +
                         ' class="chat-action-btn chat-action-btn--accept" @click="downloadFile(m)">{{ t(\'chat.download\') }}</button>' +
+                      '<button v-if="m.status === \'done\' && m.saved_path"' +
+                        ' class="chat-action-btn" :title="t(\'transfer.open\')" @click="openFile(m.saved_path)">{{ t(\'transfer.open\') }}</button>' +
+                      '<button v-if="m.status === \'done\' && m.saved_path"' +
+                        ' class="chat-action-btn" :title="t(\'transfer.open_folder\')" @click="revealFile(m.saved_path)">{{ t(\'transfer.open_folder\') }}</button>' +
                     '</div>' +
                   '</div>' +
                 '</div>' +
@@ -836,6 +840,22 @@
         document.body.appendChild(a);
         a.click();
         document.body.removeChild(a);
+      },
+
+      openFile: function (path) {
+        var self = this;
+        if (!path) return;
+        ClipsyncAPI.openFile(path).catch(function () {
+          self.store.showToast(self.t('ui.open_failed_title'), 2000);
+        });
+      },
+
+      revealFile: function (path) {
+        var self = this;
+        if (!path) return;
+        ClipsyncAPI.revealFile(path).catch(function () {
+          self.store.showToast(self.t('ui.open_failed_title'), 2000);
+        });
       },
 
       /* ── Label helpers ───────────────────────────────────────── */

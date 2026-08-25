@@ -15,6 +15,8 @@ Two distinct mechanisms live under the "dedup" umbrella:
 """
 
 import base64
+import hashlib
+import time
 
 from internal.clipboard.format import ClipboardContent, ContentType
 
@@ -29,17 +31,65 @@ def content_hash(content: ClipboardContent) -> str:
     return content.hash_key()
 
 
-# Persisted entries store formats keyed by these display labels (the same
-# labels both history backends serialize with), so a stored entry can be
-# decoded back into ContentType->bytes without importing either backend.
+# Dedup hash algorithm for history text-body keys, wired from
+# cfg.dedup_method ("sha256" default, or "simple" for a faster md5).
+# Set at startup by the application; both history backends read it here.
+DEDUP_ALGO = "sha256"
+
+# Config value → hashlib algorithm name ("simple" is the fast path).
+_DEDUP_ALGO_MAP = {"sha256": "sha256", "simple": "md5"}
+
+
+def make_dedup_key(content: ClipboardContent) -> str:
+    """Build a stable dedup key from the 'primary' content.
+
+    Uses the text body (when available) rather than hashing all types,
+    so multi-step clipboard writes (TEXT → HTML → RTF) that produce
+    different ``hash_key()`` values are still recognised as the same
+    user action.  Falls back to image-data hashes for image-only copies.
+    Honours ``DEDUP_ALGO`` (sha256 / simple=md5) so both history backends
+    coalesce identically for a given config.
+    """
+    _h = lambda data: hashlib.new(_DEDUP_ALGO_MAP.get(DEDUP_ALGO, "sha256"), data).hexdigest()
+    if ContentType.TEXT in content.types:
+        text = content.types[ContentType.TEXT].decode("utf-8", errors="replace")
+        # Hash the full body so two long texts sharing a prefix are not
+        # wrongly coalesced within the dedup window.
+        return "text:" + _h(text.encode("utf-8", errors="replace"))
+    if ContentType.IMAGE_PNG in content.types:
+        return "png:" + _h(content.types[ContentType.IMAGE_PNG])
+    if ContentType.IMAGE_EMF in content.types:
+        return "emf:" + _h(content.types[ContentType.IMAGE_EMF])
+    if ContentType.HTML in content.types:
+        return "html:" + _h(content.types[ContentType.HTML])
+    if ContentType.RTF in content.types:
+        return "rtf:" + _h(content.types[ContentType.RTF])
+    if ContentType.FILE in content.types:
+        # FILE content is the newline-joined file paths — hash them so
+        # file-only copies dedup instead of falling through to a unique key.
+        return "file:" + _h(content.types[ContentType.FILE])
+    if ContentType.URL in content.types:
+        return "url:" + _h(content.types[ContentType.URL])
+    return "other:" + str(time.time())
+
+
+# Canonical persistence labels for content types.  Stored entries and the
+# backup/restore schema serialize format keys under these labels, and both
+# history backends decode through them, so this is the single source of
+# truth for the persisted (non-wire) label set.  NOTE: the wire protocol
+# (codec.py) labels image formats "IMAGE_PNG" — that one is protocol-fixed
+# for cross-version compatibility and must NOT be aligned to "IMAGE".
+CONTENT_TYPE_LABELS: dict[ContentType, str] = {
+    ContentType.TEXT: "TEXT",
+    ContentType.HTML: "HTML",
+    ContentType.RTF: "RTF",
+    ContentType.IMAGE_PNG: "IMAGE",
+    ContentType.IMAGE_EMF: "IMAGE_EMF",
+    ContentType.FILE: "FILE",
+    ContentType.URL: "URL",
+}
 LABEL_TYPE_MAP: dict[str, ContentType] = {
-    "TEXT": ContentType.TEXT,
-    "HTML": ContentType.HTML,
-    "RTF": ContentType.RTF,
-    "IMAGE": ContentType.IMAGE_PNG,
-    "IMAGE_EMF": ContentType.IMAGE_EMF,
-    "FILE": ContentType.FILE,
-    "URL": ContentType.URL,
+    label: ct for ct, label in CONTENT_TYPE_LABELS.items()
 }
 
 

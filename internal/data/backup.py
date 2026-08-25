@@ -186,7 +186,6 @@ def create_backup(
             "sync_enabled": cfg.sync_enabled,
             "auto_start": cfg.auto_start,
             "filter_enabled_categories": cfg.filter_enabled_categories,
-            "relay_url": cfg.relay_url,
             # Internet (cross-network) relay sync + AI-config watch list: a
             # backup→restore cycle must not silently drop these (they are
             # re-applied through the same schema below).  The relay secret and
@@ -471,7 +470,6 @@ _APPLY_SCHEMA: dict[str, tuple] = {
     "sync_enabled": ("bool",),
     "auto_start": ("bool",),
     "filter_enabled_categories": ("strlist",),
-    "relay_url": ("str",),
     # Internet relay sync + AI-config watch list — round-trip with the export
     # added above.  relay_brokers / ai_config_paths are strlist_nonnull so a
     # hand-edited backup writing null cannot set them to None.

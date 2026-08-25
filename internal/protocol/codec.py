@@ -57,6 +57,10 @@ HEADER_SIZE = 7
 # expanding into a zip-bomb OOM during decode.
 MAX_FRAME_SIZE = 10 * 1024 * 1024  # 10 MB
 
+# Wire-protocol type labels.  These are fixed for cross-version
+# compatibility and intentionally differ from the persistence labels
+# (internal.clipboard.dedup.CONTENT_TYPE_LABELS, where IMAGE_PNG is "IMAGE"):
+# do NOT align the two — the wire name is part of the on-the-wire contract.
 _TYPE_NAME_MAP = {
     ContentType.TEXT: "TEXT",
     ContentType.HTML: "HTML",

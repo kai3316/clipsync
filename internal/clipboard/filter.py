@@ -151,16 +151,6 @@ def _luhn_valid(number: str) -> bool:
     return total % 10 == 0
 
 
-def is_filtered_text(text: str) -> bool:
-    """Return True if *text* contains the ``[FILTERED]`` marker.
-
-    Lets the UI explain a redacted clip to the user ("some sensitive content
-    was replaced") instead of showing a bare marker with no context.  Both the
-    desktop and web views can call this before rendering a received clip.
-    """
-    return bool(text) and FILTERED_MARKER in text
-
-
 class ContentFilter:
     """Detect and optionally strip sensitive content from clipboard data.
 

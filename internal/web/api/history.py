@@ -87,11 +87,11 @@ def get_history_item(query_params, history, cfg):
     """
     entry_id = (query_params.get("entry_id", [""])[0] or "").strip()
     if not entry_id:
-        return {"error": "entry_id required"}, 400
+        return {"ok": False, "error": "entry_id required"}, 400
 
     _, entry = history.find_by_id(entry_id)
     if entry is None:
-        return {"error": "not found"}, 404
+        return {"ok": False, "error": "not found"}, 404
 
     device_names = {cfg.device_id: cfg.device_name}
     for peer in list(cfg.peers.values()):

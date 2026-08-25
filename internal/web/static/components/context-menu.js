@@ -67,6 +67,16 @@
         return cm.mode === 'history-item' ? cm.target : null;
       },
 
+      // A URL worth offering "open in browser" for: a link-type history item,
+      // or any text entry that is itself an http(s) URL.
+      linkUrl: function () {
+        var item = this.targetItem;
+        if (!item) return '';
+        var t = (item.text_preview || '').trim();
+        if (item.content_type === 'link' || /^https?:\/\//i.test(t)) return t;
+        return '';
+      },
+
       targetDevice: function () {
         var cm = this.store.contextMenu || {};
         return cm.mode === 'device' ? cm.target : null;
@@ -241,6 +251,20 @@
         if (legacy()) show();
         else self.store.showToast(self.t('history.copy_failed'), 2000);
         return Promise.resolve();
+      },
+
+      openLink: function () {
+        var url = this.linkUrl;
+        if (!url) return;
+        this.closeMenu();
+        var self = this;
+        ClipsyncAPI.navigate(url).then(function (res) {
+          if (!(res && res.ok)) {
+            self.store.showToast(self.t('context.open_link_failed'), 2000);
+          }
+        }).catch(function () {
+          self.store.showToast(self.t('context.open_link_failed'), 2000);
+        });
       },
 
       pasteToDevice: function () {
@@ -768,6 +792,10 @@
           '<div class="context-menu__item" role="menuitem" tabindex="-1" :aria-disabled="!targetItem" @click="translateItem">' +
             '<span class="context-menu__item-icon">🌐</span>' +
             '<span class="context-menu__item-label">{{ t(\'ui.translate\') }}</span>' +
+          '</div>' +
+          '<div v-if="linkUrl" class="context-menu__item" role="menuitem" tabindex="-1" @click="openLink">' +
+            '<span class="context-menu__item-icon">🔗</span>' +
+            '<span class="context-menu__item-label">{{ t(\'context.open_link\') }}</span>' +
           '</div>' +
           '<div class="context-menu__item context-menu__item--danger" role="menuitem" tabindex="-1" :aria-disabled="!targetItem || targetItem.entry_id === undefined || targetItem.entry_id === null" @click="deleteItem">' +
             '<span class="context-menu__item-icon">🗑</span>' +

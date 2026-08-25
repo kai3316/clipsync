@@ -12,8 +12,11 @@ Design notes
   so the host's live-apply callback (``_on_web_settings_change``) runs the
   exact same path a manual toggle uses — it clears any pending classic pause
   bookkeeping, updates the tray checkbox, and keeps cfg/config.json in step.
-* The auto-resume timer lives HERE (the web server shares the app process),
-  but every fire re-validates against the persisted deadline
+* The auto-resume timer is owned by the HOST (``src/main.py``'s tray path).
+  When the host registers via :func:`set_host_pause_hooks` — every real app
+  run — pause/resume delegate to it, so exactly one timer is ever armed.  The
+  fallback timer below only exists for direct unit-test calls without a host.
+  Every fire re-validates against the persisted deadline
   (``cfg.timed_pause_until``): an explicit toggle anywhere (tray, dashboard,
   another tab) zeroes that field through the host's ``_clear_pause_state``,
   which turns a stale timer into a no-op instead of resurrecting a pause.
@@ -43,6 +46,21 @@ MAX_MINUTES = 24 * 60
 
 _lock = threading.Lock()
 _resume_timer: threading.Timer | None = None
+
+# Host hooks — registered once by src/main.py at startup.  The app process
+# owns exactly ONE auto-resume timer (the tray path's); web-driven pauses
+# delegate to it so a web pause can never leave a second timer armed that
+# could race the host's on a later pause.  When no host has registered
+# (direct unit-test calls), the self-contained fallback below applies.
+_host_pause_sync = None
+_host_resume_sync = None
+
+
+def set_host_pause_hooks(pause_fn, resume_fn) -> None:
+    """Register the host's timed-pause implementation (called once at startup)."""
+    global _host_pause_sync, _host_resume_sync
+    _host_pause_sync = pause_fn
+    _host_resume_sync = resume_fn
 
 
 def _persist_cfg(cfg) -> bool:
@@ -131,6 +149,16 @@ def pause_sync(body, cfg, on_settings_change=None):
             "error": f"minutes must be between {MIN_MINUTES} and {MAX_MINUTES}",
         }, 400
 
+    # Single-owner delegation: when the host registered (normal app run), it
+    # flips sync off, persists the deadline and arms the ONE resume timer.
+    if _host_pause_sync is not None:
+        _host_pause_sync(minutes)
+        return {
+            "ok": True,
+            "minutes": minutes,
+            "until": getattr(cfg, "timed_pause_until", 0.0),
+        }, 200
+
     # Flip sync off through the standard settings path so the host applies it
     # live exactly like a manual toggle (and clears its own pause bookkeeping
     # first).  When sync is already off there is nothing to flip — attaching a
@@ -156,6 +184,11 @@ def pause_sync(body, cfg, on_settings_change=None):
 def resume_sync(body, cfg, on_settings_change=None):
     """POST /api/sync/resume — end a timed (or manual) pause right now."""
     _cancel_timer()
+    if _host_resume_sync is not None:
+        was_off = not getattr(cfg, "sync_enabled", True)
+        _host_resume_sync()
+        return {"ok": True, "resumed": was_off}, 200
+
     had_pause = False
     try:
         had_pause = float(getattr(cfg, "timed_pause_until", 0.0) or 0.0) > 0.0

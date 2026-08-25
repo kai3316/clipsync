@@ -23,6 +23,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from io import BytesIO
 
 from internal.i18n import T
+from internal.transport.discovery import get_all_local_addresses
 
 logger = logging.getLogger(__name__)
 
@@ -2122,16 +2123,11 @@ class WebServer:
 
     @staticmethod
     def get_all_ips() -> list[str]:
-        ips = []
-        try:
-            hostname = socket.gethostname()
-            for info in socket.getaddrinfo(hostname, None, socket.AF_INET,
-                                           socket.SOCK_STREAM, 0, socket.AI_PASSIVE):
-                ip = info[4][0]
-                if ip and not ip.startswith("127.") and ip not in ips:
-                    ips.append(ip)
-        except Exception:
-            pass
+        # Single source: discovery.get_all_local_addresses (private-filtered,
+        # deduplicated across UDP-route / hostname / FQDN).  Keep the default-
+        # route UDP fallback so a host with no private address still returns
+        # something reachable instead of an empty list.
+        ips = list(get_all_local_addresses())
         if not ips:
             try:
                 s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)

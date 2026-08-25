@@ -2,8 +2,27 @@
 
 import enum
 import hashlib
+import re
 import struct
 from dataclasses import dataclass, field
+
+
+def strip_html(text: str) -> str:
+    """Remove HTML tags, style/script blocks, comments, and unescape entities.
+
+    Single source of truth for turning an HTML payload into visible text —
+    every history/preview path shares it so the same payload renders the same
+    preview wherever it is displayed.
+    """
+    import html as _html
+
+    text = re.sub(r"<style[^>]*>.*?</style>", "", text, flags=re.DOTALL | re.IGNORECASE)
+    text = re.sub(r"<script[^>]*>.*?</script>", "", text, flags=re.DOTALL | re.IGNORECASE)
+    text = re.sub(r"<!--.*?-->", "", text, flags=re.DOTALL)
+    plain = re.sub(r"<[^>]*>", "", text)
+    plain = _html.unescape(plain)
+    plain = re.sub(r"\s+", " ", plain)
+    return plain.strip()
 
 
 class ContentType(enum.Enum):

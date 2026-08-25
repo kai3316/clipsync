@@ -15,7 +15,7 @@ Design constraints:
   an explicit ``mode`` chosen in the web UI ("overwrite" | "copy" | "append");
   the manager never picks a destructive default itself.
 - Bounded.  Collection skips files > 1 MB and temp junk, caps at
-  MAX_ENTRIES per device; served/pulled content is capped at MAX_FILE_SIZE;
+  MAX_ENTRIES per device; served/pulled content is capped at MAX_CONFIG_FILE_SIZE;
   b64 decode failures are discarded.
 
 Wire payloads (JSON):
@@ -49,7 +49,7 @@ logger = logging.getLogger(__name__)
 # never served, never landed).  Mirrors the spec's 1 MB cap and keeps every
 # aiconfig_data frame far below the transport's 10 MB frame limit even after
 # base64 expansion (~1.37x).
-MAX_FILE_SIZE = 1024 * 1024
+MAX_CONFIG_FILE_SIZE = 1024 * 1024
 # Hard cap on inventory entries advertised per device — protects both the
 # collector (a runaway directory tree) and the wire (inv frame size).
 MAX_ENTRIES = 2000
@@ -120,7 +120,7 @@ def is_temp_name(name: str) -> bool:
     )
 
 
-def _hash_file(path: Path, max_bytes: int = MAX_FILE_SIZE) -> tuple[str, int] | None:
+def _hash_file(path: Path, max_bytes: int = MAX_CONFIG_FILE_SIZE) -> tuple[str, int] | None:
     """(sha256[:16], size) of up to *max_bytes* of the file, else None."""
     h = hashlib.sha256()
     total = 0
@@ -142,7 +142,7 @@ def _hash_file(path: Path, max_bytes: int = MAX_FILE_SIZE) -> tuple[str, int] | 
 def collect_roots(
     paths,
     home: str | Path | None = None,
-    max_bytes: int = MAX_FILE_SIZE,
+    max_bytes: int = MAX_CONFIG_FILE_SIZE,
     max_entries: int = MAX_ENTRIES,
 ) -> list[dict]:
     """Collect inventory entries across all watch-list roots (pure function).
@@ -366,7 +366,7 @@ class AIConfigManager:
         if not isinstance(sha, str) or not _SHA16_RE.match(sha):
             return None
         if isinstance(size, bool) or not isinstance(size, int) \
-                or not (0 <= size <= MAX_FILE_SIZE):
+                or not (0 <= size <= MAX_CONFIG_FILE_SIZE):
             return None
         if isinstance(mtime, bool) or not isinstance(mtime, (int, float)) \
                 or mtime != mtime or mtime in (float("inf"), float("-inf")):
@@ -503,10 +503,10 @@ class AIConfigManager:
             size = target.stat().st_size
         except OSError:
             return
-        truncated = size > MAX_FILE_SIZE
+        truncated = size > MAX_CONFIG_FILE_SIZE
         try:
             with open(target, "rb") as f:
-                data = f.read(MAX_FILE_SIZE)
+                data = f.read(MAX_CONFIG_FILE_SIZE)
         except OSError:
             return
         digest = hashlib.sha256(data).hexdigest()[:16]
@@ -549,7 +549,7 @@ class AIConfigManager:
                         peer_id[:12])
             self._finish_pending(pending, key, "error", reason="b64_decode")
             return
-        if len(data) > MAX_FILE_SIZE:
+        if len(data) > MAX_CONFIG_FILE_SIZE:
             self._finish_pending(pending, key, "error", reason="too_large")
             return
         digest = hashlib.sha256(data).hexdigest()[:16]

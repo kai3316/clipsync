@@ -136,6 +136,7 @@ class SettingsWindow:
         on_quit: Callable | None = None,
         set_skip_save_on_shutdown: Callable[[bool], None] | None = None,
         on_theme_changed: Callable | None = None,
+        on_web_action: Callable | None = None,
     ):
         self._root = root
         self._get_config = get_config
@@ -147,6 +148,7 @@ class SettingsWindow:
         self._get_log_text = get_log_text
         self._on_quit = on_quit
         self._on_theme_changed = on_theme_changed
+        self._web_action_cb = on_web_action
         # Lets the host application suppress its config re-save during
         # shutdown() after a restart / factory reset (otherwise shutdown
         # would recreate config.json with the old settings).
@@ -169,7 +171,6 @@ class SettingsWindow:
         # Form vars
         self._port_var: tk.StringVar | None = None
         self._svc_var: tk.StringVar | None = None
-        self._relay_var: tk.StringVar | None = None
         self._filter_vars: dict[str, tk.BooleanVar] = {}
         # Advanced panel vars
         self._history_max_var: tk.StringVar | None = None
@@ -782,14 +783,6 @@ class SettingsWindow:
         ).pack(anchor="w", padx=16, pady=(14, 10))
 
         ctk.CTkLabel(
-            card2, text=T("network.relay_url"), anchor="w",
-            font=ctk.CTkFont(size=12),
-        ).pack(anchor="w", padx=16)
-        self._relay_var = tk.StringVar(value=cfg.relay_url)
-        ctk.CTkEntry(card2, textvariable=self._relay_var, height=32).pack(
-            fill="x", padx=16, pady=(4, 6))
-
-        ctk.CTkLabel(
             card2,
             text=T("settings_window.relay_hint"),
             font=ctk.CTkFont(size=11),
@@ -815,7 +808,6 @@ class SettingsWindow:
         cfg = self._get_config()
         cfg.port = port
         cfg.service_type = self._svc_var.get().strip()
-        cfg.relay_url = self._relay_var.get().strip()
         self._save_config()
         show_info(
             self._window,
@@ -1224,6 +1216,15 @@ class SettingsWindow:
         cfg.web_history_limit = limit
         cfg.web_token = self._web_token_var.get()
         self._save_config()
+
+        if self._web_action_cb is not None:
+            # Apply immediately (mirror the dashboard web card and web-settings
+            # paths) instead of telling the user a restart is needed: port /
+            # token / history-limit changes need a restart of the server, so
+            # restart when enabling, stop when disabling.
+            self._web_action_cb({"action": "restart" if cfg.web_enabled else "stop"})
+            show_info(self._window, T("dialog.saved"), T("settings_window.web_saved"))
+            return
 
         if self._status_label:
             self._status_label.configure(text=T("settings_window.web_saved"))
