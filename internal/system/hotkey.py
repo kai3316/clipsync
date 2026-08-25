@@ -248,7 +248,7 @@ class HotkeyManager:
         """Register a global hotkey.
 
         Args:
-            hotkey_id: Unique identifier (e.g. ``"quick_paste"``).
+            hotkey_id: Unique identifier (e.g. ``"show_window"``).
             shortcut: String like ``"Ctrl+`"``, ``"Ctrl+Shift+V"``.
             callback: Function called when hotkey is pressed (no args).
 

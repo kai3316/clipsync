@@ -702,8 +702,7 @@ class WebServer:
                  chat_send_fn=None,
                  chat_start_session=None,
                  get_chat_muted=None,
-                 set_chat_muted=None,
-                 on_quickpaste_done=None):
+                 set_chat_muted=None):
         self._cfg = cfg
         self._sync_mgr = sync_mgr
         self._get_connected_ids = get_connected_ids
@@ -759,10 +758,6 @@ class WebServer:
         self._chat_start_session = chat_start_session
         self._get_chat_muted = get_chat_muted
         self._set_chat_muted = set_chat_muted
-        # ── Quick Paste close callback (POST /api/quickpaste/done) ──
-        # Passed per-WebServer (like the other dispatch callbacks) so a
-        # re-created server never holds a stale reference to a dead host.
-        self._on_quickpaste_done = on_quickpaste_done
         self._httpd: ThreadingHTTPServer | None = None
         self._thread: threading.Thread | None = None
         self._firewall_ok: bool = False
@@ -1041,7 +1036,6 @@ class WebServer:
         chat_start_session = self._chat_start_session
         get_chat_muted = self._get_chat_muted
         set_chat_muted = self._set_chat_muted
-        on_quickpaste_done = self._on_quickpaste_done
         get_diagnostics = self._get_diagnostics
         on_update_download = self._on_update_download
         on_update_install = self._on_update_install
@@ -1591,12 +1585,12 @@ class WebServer:
                     # duplicate launcher icon.  The maskable-purpose entries
                     # stop Android launchers cropping the icon.
                     #
-                    # ``?page=mobile`` / ``?page=quickpaste`` produce a variant
-                    # whose start_url / id point at that page, so the phone
-                    # companion pages install as their own standalone apps.
+                    # ``?page=mobile`` produces a variant whose start_url / id
+                    # point at that page, so the phone companion page installs
+                    # as its own standalone app.
                     page = ""
                     _page_q = query_params.get("page")
-                    if isinstance(_page_q, list) and _page_q and _page_q[0] in ("mobile", "quickpaste"):
+                    if isinstance(_page_q, list) and _page_q and _page_q[0] == "mobile":
                         page = _page_q[0]
                     start_path = f"/{page}.html" if page else "/"
                     manifest = {
@@ -1964,7 +1958,6 @@ class WebServer:
                         get_chat_devices=get_chat_devices,
                         chat_send_fn=chat_send_fn,
                         chat_start_session=chat_start_session,
-                        on_quickpaste_done=on_quickpaste_done,
                     )
                     inner_self.send_response(status)
                     inner_self.send_header("Content-Type", content_type)

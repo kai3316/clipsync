@@ -564,9 +564,9 @@
           return;
         }
 
-        // ↑/↓/Enter/Del — keyboard navigation over the visible history list,
-        // mirroring the Quick Paste popup. Only on the history tab, and only
-        // when no modal/menu owns the keys and no editable field is focused.
+        // ↑/↓/Enter/Del — keyboard navigation over the visible history list.
+        // Only on the history tab, and only when no modal/menu owns the keys
+        // and no editable field is focused.
         // Enter/Del are further skipped when focus sits on an interactive
         // control (a history card handles its own Enter; a focused button
         // owns both) so actions never fire twice.

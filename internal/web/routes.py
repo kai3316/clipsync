@@ -48,11 +48,6 @@ from internal.web.api.translate import translate_text
 
 logger = logging.getLogger(__name__)
 
-# NOTE: the host's Quick Paste close callback is threaded through ``dispatch``
-# as the ``on_quickpaste_done`` parameter (like ``on_send_url`` / ``on_window_close``),
-# NOT stored at module scope — a module-level registry survives server re-creation
-# and would keep calling a stale bound method on a dead host instance.
-
 
 def _chat_tmp_dir() -> str:
     """Return the directory purpose=chat web uploads land in (temp only).
@@ -201,8 +196,7 @@ def dispatch(method, path, query_params, body, cfg, history, sync_mgr,
              chat_send_fn=None,
              chat_start_session=None,
              get_chat_muted=None,
-             set_chat_muted=None,
-             on_quickpaste_done=None):
+             set_chat_muted=None):
     """Route an API request to the appropriate handler, never raising.
 
     Wraps _dispatch in a safety net so an unexpected exception in a handler
@@ -240,7 +234,7 @@ def dispatch(method, path, query_params, body, cfg, history, sync_mgr,
             get_certs, get_diagnostics, on_update_download,
             on_update_install, on_diagnostics_request,
             chat_mgr, get_chat_devices, chat_send_fn, chat_start_session,
-            get_chat_muted, set_chat_muted, on_quickpaste_done,
+            get_chat_muted, set_chat_muted,
         )
     except Exception:
         logger.exception("Unhandled error in API route: %s %s", method, path)
@@ -276,8 +270,7 @@ def _dispatch(method, path, query_params, body, cfg, history, sync_mgr,
               chat_send_fn=None,
               chat_start_session=None,
               get_chat_muted=None,
-              set_chat_muted=None,
-              on_quickpaste_done=None):
+              set_chat_muted=None):
     """Route an API request to the appropriate handler.
 
     All handler functions return (data_dict, status_code).
@@ -1053,48 +1046,6 @@ def _dispatch(method, path, query_params, body, cfg, history, sync_mgr,
             if on_send_url is None:
                 return _json_response({"ok": False, "error": "not available"}, 503)
             on_send_url()
-            return _json_response({"ok": True})
-
-        elif path == "/api/quickpaste/done":
-            # The Quick Paste popup reports that it finished (paste succeeded,
-            # or the 60s abandonment safety net fired).  Ask the host to tear
-            # down exactly the --app instance this popup belongs to — the body
-            # carries its ``instance`` id, so a stale/abandoned popup can never
-            # close a newer instance.  This is the real close mechanism for the
-            # popup, since window.close() is blocked in a plain tab.  Token-gated
-            # by the server's /api/* POST auth gate like every other route here.
-            handler = on_quickpaste_done
-            if handler is None:
-                return _json_response({"ok": False, "error": "not available"}, 503)
-            instance_id = None
-            try:
-                payload = json.loads(body.decode("utf-8")) if body else {}
-                if isinstance(payload, dict):
-                    instance_id = payload.get("instance")
-            except (json.JSONDecodeError, UnicodeDecodeError):
-                instance_id = None
-            # The host keys _quickpaste_instances by int; the page echoes its
-            # id back as a JSON number, but an int-like string ("7") is equally
-            # valid on the wire.  Anything else (bool, float, object, garbage
-            # string) is a malformed request — reject with 400 so a bad id can
-            # never reach the host as a confusing value.  A missing instance —
-            # and an EMPTY-STRING instance, a legacy client's way of omitting
-            # the id — is allowed through: the host no-ops on it.
-            if instance_id == "":
-                instance_id = None
-            if instance_id is not None:
-                if isinstance(instance_id, bool) or not isinstance(instance_id, (int, str)):
-                    return _json_response({"ok": False, "error": "invalid instance"}, 400)
-                if isinstance(instance_id, str):
-                    try:
-                        instance_id = int(instance_id)
-                    except ValueError:
-                        return _json_response({"ok": False, "error": "invalid instance"}, 400)
-            try:
-                handler(instance_id)
-            except Exception:
-                logger.exception("quickpaste done handler failed")
-                return _json_response({"ok": False, "error": "handler failed"}, 500)
             return _json_response({"ok": True})
 
         elif path == "/api/dialog-response":

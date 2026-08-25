@@ -602,14 +602,6 @@ class Application:
         # Used to keep the "recently opened" guard from blocking a re-open
         # after the window was closed (client disconnected) within 8s.
         self._webview_client_seen = False
-        # Quick Paste --app window management.  Every open gets a unique
-        # instance id; the Popen and its private --user-data-dir profile are
-        # bound to that id so a done POST (which carries the id) tears down
-        # exactly the popup that issued it — never a newer one, and never the
-        # user's whole browser (a blind terminate() on a handed-off --app
-        # process would kill the browser that inherited the URL).
-        self._quickpaste_instances: dict[int, dict] = {}
-        self._quickpaste_next_id = 0
 
         # ── macOS multiprocessing state ─────────────────────────────
         self._parent_conn = None
@@ -1076,11 +1068,6 @@ class Application:
             on_settings_change=self._on_web_settings_change,
             on_show_web_qr=lambda: self.root.after(0, self._show_web_qr),
             on_send_url=lambda: self.root.after(0, self._do_send_url),
-            # Quick Paste done callback: POST /api/quickpaste/done (token-gated)
-            # asks the host to tear down the --app popup that posted it.  Passed
-            # per-WebServer (like every other dispatch callback) so a re-created
-            # server can never hold a stale reference to a dead host instance.
-            on_quickpaste_done=self._close_quick_paste,
             get_discovered_peers=lambda: self._snapshot_discovered_peers(),
             on_open_file=self._open_file,
             on_open_folder=self._open_folder,
@@ -1960,9 +1947,7 @@ class Application:
         self.hotkey_mgr = HotkeyManager()
 
         def _cb_factory(action: str):
-            if action == "quick_paste":
-                return lambda: self.root.after(0, self._open_quick_paste)
-            elif action == "show_window":
+            if action == "show_window":
                 return lambda: self.root.after(0, self.open_dashboard)
             elif action == "toggle_monitor":
                 return lambda: self.root.after(0, self._toggle_monitor)
@@ -2044,448 +2029,6 @@ class Application:
         except Exception:
             logger.debug("Could not surface hotkey failure notification", exc_info=True)
 
-    def _open_quick_paste(self) -> None:
-        """Open the Quick Paste floating window."""
-        import secrets
-        import webbrowser
-
-        # Ensure the web server is running
-        if self.web_server is not None and not self.web_server.is_running:
-            if not self.cfg.web_token:
-                self.cfg.web_token = secrets.token_urlsafe(16)
-                self._save_cfg_encrypted()
-                logger.info("Generated web token for Quick Paste")
-            self.web_server.start()
-            if not self.web_server.is_running:
-                self._notify_error(
-                    T("ui.web_companion"),
-                    T("ui.web_start_failed2", port=self.cfg.web_port),
-                )
-                return
-            logger.info("Web server started for Quick Paste")
-
-        port = self.cfg.web_port
-        token = self.cfg.web_token or ""
-        host = f"http://127.0.0.1:{port}"
-        # URL-encode the token (and the host query value) so a token containing
-        # '/', '+', '=' etc. cannot break the URL's query string.
-        # The popup is opened with auto_close=1 so the page enables the
-        # auto-close / Esc / X affordances ONLY for this popup — a user-opened
-        # tab (no auto_close) keeps them hidden.  auto_close is deliberately
-        # decoupled from the device's touch capability, so a touch-screen
-        # Windows laptop still auto-closes.
-        # Each open is a distinct instance so the done POST can close exactly
-        # the popup it came from.  The id travels in the URL; the page echoes
-        # it back in POST /api/quickpaste/done (paste path and 60s safety net),
-        # and _close_quick_paste(instance_id) tears down only that instance.
-        # Lightweight periodic sweep: a popup that died without POSTing done
-        # (crash, OS window close, Task Manager) leaks its instance entry and
-        # private --user-data-dir profile — reclaim those before opening again.
-        self._sweep_quick_paste_instances()
-
-        instance_id = self._quickpaste_next_id
-        self._quickpaste_next_id += 1
-        url = (
-            f"{host}/quickpaste.html?token={quote(token, safe='')}"
-            f"&host={quote(host, safe='')}&auto_close=1"
-            f"&instance={instance_id}"
-        )
-
-        # Preferred open: a dedicated Chromium --app subprocess.  A plain tab
-        # opened via webbrowser.open_new cannot window.close() itself (browsers
-        # block it), so v1.0.29's popup could never actually close.  --app
-        # windows ARE closeable: the page POSTs /api/quickpaste/done after a
-        # paste (or a 60s safety net) and we kill the process.  mode=app tells
-        # the page it was opened this way so it enables that close flow.
-        # NOTE: the token and instance id ride in the --app command line, which
-        # is visible only to same-user local processes — equivalent to their
-        # already being able to read config.json, so no extra mechanism is
-        # needed to protect it here.
-        proc, profile_dir = self._launch_quickpaste_app_window(
-            url + "&mode=app", instance_id,
-        )
-        if proc is not None:
-            self._quickpaste_instances[instance_id] = {
-                "proc": proc,
-                "profile_dir": profile_dir,
-            }
-            logger.debug(
-                "Opening Quick Paste instance %d in a Chromium --app window",
-                instance_id,
-            )
-            return
-
-        # Fallback: no Chromium-family browser found.  Open a plain tab and
-        # accept the degradation — the popup cannot be script-closed, so the
-        # page shows a "✓ Pasted" confirmation and the user closes the tab.
-        # No process was spawned, so nothing is registered in the instance dict
-        # and the done POST for this id is a harmless no-op.
-        logger.debug("Quick Paste --app unavailable; falling back to a plain tab")
-        # Never log the token in the URL (the file handler logs at DEBUG).
-        logger.debug("Opening Quick Paste: %s", url.split("?")[0])
-        webbrowser.open_new(url)
-
-    def _launch_quickpaste_app_window(self, url: str, instance_id: int):
-        """Launch *url* in a Chromium ``--app`` window; return ``(Popen, profile_dir)``.
-
-        Probes common Chromium-family executables (msedge / chrome / chromium),
-        preferring PATH hits, then well-known install locations on Windows.
-        ``--app`` renders the page without browser chrome and gives the page a
-        real window that can be torn down by terminating the process (the done
-        handler).  Returns ``(None, None)`` when nothing usable was found so the
-        caller can fall back to ``webbrowser.open_new``.
-
-        A private ``--user-data-dir`` forces a brand-new browser instance.  A
-        bare ``--app`` URL would be handed off to an already-running browser —
-        the spawned Popen exits within ~1s after delegating, so a later
-        ``terminate()`` would be a no-op and the popup would never close; and
-        when no browser was running, the spawned process IS the whole browser,
-        so killing it would nuke the user's browsing session.  Owning a
-        dedicated profile means we own the entire process tree and can tear it
-        down without touching the user's browser.
-        """
-        import subprocess
-        import tempfile
-
-        candidates: list[str] = []
-        for exe in ("msedge", "chrome", "chromium", "chromium-browser"):
-            found = shutil.which(exe)
-            if found:
-                candidates.append(found)
-        if not candidates and sys.platform == "win32":
-            roots = [
-                os.environ.get("ProgramFiles(x86)", ""),
-                os.environ.get("ProgramFiles", ""),
-                os.environ.get("LOCALAPPDATA", ""),
-            ]
-            for root in roots:
-                if not root:
-                    continue
-                for rel in (
-                    os.path.join("Microsoft", "Edge", "Application", "msedge.exe"),
-                    os.path.join("Google", "Chrome", "Application", "chrome.exe"),
-                ):
-                    candidate = os.path.join(root, rel)
-                    if os.path.isfile(candidate):
-                        candidates.append(candidate)
-        if not candidates:
-            return None, None
-
-        profile_dir = tempfile.mkdtemp(prefix=f"clipsync_qp_{instance_id}_")
-        for exe in candidates:
-            try:
-                proc = subprocess.Popen(
-                    [
-                        exe,
-                        "--app=" + url,
-                        "--window-size=420,560",
-                        "--user-data-dir=" + profile_dir,
-                    ],
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL,
-                    # POSIX: run the popup in its OWN process group so
-                    # _close_quick_paste's os.killpg() signals only the popup's
-                    # tree — a shared group would let the SIGTERM reach and kill
-                    # ClipSync itself.  Windows tears the tree down by PID
-                    # (taskkill /T /F), where start_new_session is unnecessary
-                    # (and unsupported the same way).
-                    **({"start_new_session": True} if sys.platform != "win32" else {}),
-                )
-                return proc, profile_dir
-            except OSError:
-                continue
-        # No candidate launched — drop the unused profile and report failure.
-        try:
-            shutil.rmtree(profile_dir, ignore_errors=True)
-        except Exception:
-            pass
-        return None, None
-
-    def _kill_quick_paste_proc(self, proc, instance_id) -> None:
-        """Terminate one Quick Paste --app process (platform-appropriate).
-
-        Windows tears down the whole tree with ``taskkill /T /F``; other
-        platforms SIGTERM the process group (which the popup owns, thanks to
-        ``start_new_session``), wait a short beat, then SIGKILL the survivor.
-        Best-effort — never raises.
-        """
-        import subprocess
-
-        try:
-            if sys.platform == "win32":
-                subprocess.run(
-                    ["taskkill", "/PID", str(proc.pid), "/T", "/F"],
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL,
-                    timeout=5.0,
-                    creationflags=subprocess.CREATE_NO_WINDOW,
-                )
-            else:
-                import signal
-                try:
-                    os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
-                except (OSError, ProcessLookupError, PermissionError):
-                    try:
-                        proc.terminate()
-                    except OSError:
-                        pass
-                try:
-                    proc.wait(timeout=2.0)
-                except Exception:
-                    try:
-                        os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
-                    except Exception:
-                        pass
-        except Exception:
-            logger.debug(
-                "Quick Paste --app window kill failed for instance %s",
-                instance_id, exc_info=True,
-            )
-
-    def _close_quick_paste(self, instance_id=None) -> None:
-        """Kill the Quick Paste --app window for *instance_id*.
-
-        Called via POST /api/quickpaste/done (token-gated); the page carries
-        its own instance id (from ``?instance=``) in both the paste-time and
-        the 60s-safety-net POSTs, so a stale or abandoned popup can never close
-        a newer instance.  Windows tears down the whole tree with ``taskkill
-        /T /F``; other platforms SIGTERM the process group (which the popup
-        owns, thanks to ``start_new_session``).  The instance's private
-        ``--user-data-dir`` is removed afterwards.  A plain-tab fallback has no
-        process, so this is a no-op there — the page's "✓ Pasted" confirmation
-        carries it.  Idempotent: the slot is removed only AFTER the process is
-        killed AND its profile is removed, so a second done POST for the same
-        id cannot double-kill; a profile that fails to remove leaves the entry
-        registered for the sweep to retry (bounded by the sweep's retry cap)
-        instead of leaking a partial tree.  A missing or non-numeric instance
-        id is a strict no-op (log only) — we never guess which popup to close.
-        """
-        # The page echoes its instance id back as a JSON number, but on the
-        # wire it can arrive as an int or an int-like string (older pages / a
-        # plain-tab fallback).  Normalize to int so dict lookup matches the int
-        # keys in _quickpaste_instances.  A missing / non-numeric id is a
-        # no-op: a blind guess could close a NEWER popup that issued its own
-        # (valid) done POST.
-        if instance_id is None:
-            logger.debug("Quick Paste done POST without an instance id — ignoring")
-            return
-        try:
-            instance_id = int(str(instance_id))
-        except (TypeError, ValueError):
-            logger.debug("Quick Paste done POST with invalid instance id %r — ignoring", instance_id)
-            return
-        entry = self._quickpaste_instances.get(instance_id)
-        if entry is None:
-            return
-        proc = entry.get("proc")
-        profile_dir = entry.get("profile_dir", "")
-        if proc is not None and proc.poll() is None:
-            self._kill_quick_paste_proc(proc, instance_id)
-        removed_profile = True
-        if profile_dir:
-            try:
-                shutil.rmtree(profile_dir, ignore_errors=False)
-            except FileNotFoundError:
-                # Either already gone (external temp cleanup) or a concurrent
-                # remover deleted partway through.  Distinguish by checking
-                # whether the path is really absent — a mid-removal raise must
-                # keep the entry so the sweep can finish the job.
-                if not os.path.exists(profile_dir):
-                    pass  # fully gone — nothing to reclaim
-                else:
-                    removed_profile = False
-                    logger.debug(
-                        "Quick Paste profile removal interrupted for instance %s "
-                        "— kept for sweep retry", instance_id,
-                    )
-            except Exception:
-                # Partial / failed removal — keep the entry so the sweep (with
-                # its retry cap) reclaims the profile later instead of leaking
-                # a partial tree forever.  The process is already dead / being
-                # killed, so leaving the entry registered is safe and
-                # idempotent (a second done POST for the same id retries).
-                removed_profile = False
-                logger.debug(
-                    "Quick Paste profile cleanup incomplete for instance %s — "
-                    "kept for sweep retry", instance_id, exc_info=True,
-                )
-        if removed_profile:
-            self._quickpaste_instances.pop(instance_id, None)
-
-    def _sweep_quick_paste_instances(self) -> None:
-        """Reclaim Quick Paste instances whose process already exited.
-
-        A done POST is the normal teardown, but a popup that was killed out
-        from under us (crash, OS window close, Task Manager) never POSTs — its
-        instance entry and private ``--user-data-dir`` profile would leak.
-        Called before opening a new popup (and folded into shutdown cleanup).
-        Only entries whose process has already exited are touched; live popups
-        are never disturbed here — a LIVE popup is left alone whatever its
-        profile state, so a missing/absent profile never evicts a running
-        popup's entry (that would orphan the process, whose done POST would
-        then find no entry to tear down).
-
-        A dead popup's profile removal can fail PART-WAY when a leftover child
-        of the popup (a browser subprocess) still holds a lock on the dir.
-        Those entries are KEPT for the next sweep to retry instead of being
-        dropped, so a partially-deleted profile is never leaked and forgotten.
-        If the popup's own process is still lingering (poll() is None), it is
-        given a best-effort kill before the retry.  A dead entry whose profile
-        still cannot be removed after MAX_SWEEP_ATTEMPTS sweeps is dropped with
-        a log — a permanently-locked profile (an orphaned child that will never
-        release the dir) must not be hammered forever; the residue is left for
-        the OS / user cleanup.
-        """
-        MAX_SWEEP_ATTEMPTS = 3
-        for iid, entry in list(self._quickpaste_instances.items()):
-            proc = entry.get("proc")
-            profile_dir = entry.get("profile_dir", "")
-            # Live popup first — never evict a running instance regardless of
-            # its profile state (a missing profile would otherwise make the
-            # check below drop the entry and orphan the live process).
-            if proc is not None and proc.poll() is None:
-                continue  # still running — leave it alone
-            if not profile_dir or not os.path.exists(profile_dir):
-                # Nothing left to reclaim — drop the entry.
-                self._quickpaste_instances.pop(iid, None)
-                continue
-            # The popup's process has exited.  Try to remove its profile; a
-            # leftover child can make rmtree fail part-way.  If the popup's own
-            # process is still lingering, kill it first, then retry once.  When
-            # the dir still can't be fully removed, keep the entry for the next
-            # sweep instead of leaking the partial tree — but only up to a cap;
-            # past it, drop the entry with a log so we stop repeating I/O on a
-            # profile that will never be released.
-            removed = False
-            attempts = entry.get("sweep_attempts", 0) + 1
-            for _ in range(2):
-                if proc is not None and proc.poll() is None:
-                    self._kill_quick_paste_proc(proc, iid)
-                try:
-                    shutil.rmtree(profile_dir, ignore_errors=False)
-                    removed = True
-                    break
-                except Exception:
-                    removed = False
-            if not removed:
-                entry["sweep_attempts"] = attempts
-                if attempts >= MAX_SWEEP_ATTEMPTS:
-                    logger.warning(
-                        "Quick Paste profile cleanup gave up after %d sweeps "
-                        "for instance %s (%s) — residue left for system cleanup",
-                        attempts, iid, profile_dir,
-                    )
-                    self._quickpaste_instances.pop(iid, None)
-                else:
-                    logger.debug(
-                        "Quick Paste profile cleanup incomplete for instance %s "
-                        "(attempt %d) — retrying next sweep",
-                        iid, attempts, exc_info=True,
-                    )
-                continue
-            self._quickpaste_instances.pop(iid, None)
-
-    def _cleanup_quick_paste_instances(self) -> None:
-        """Tear down every live Quick Paste popup (app exit path) — in parallel.
-
-        A forced kill / crash / OS window close never POSTs
-        /api/quickpaste/done, so the registered instances and their private
-        ``--user-data-dir`` profiles would otherwise leak past shutdown.
-
-        Unlike _close_quick_paste (one popup, a blocking per-kill teardown),
-        shutdown tears down ALL popups at once: signal every live process
-        first, wait one short round (~2s total budget), then force-kill any
-        survivor.  Serializing one 2–5s teardown per popup would block exit
-        for N× the single-popup budget.  Profiles are removed after the kill
-        round, then the dict is cleared.
-        """
-        import subprocess
-
-        if sys.platform == "win32":
-            # taskkill /T /F is a hard tree-kill; fire them all without waiting
-            # so N popups die concurrently, then wait for the shared round.
-            killers: list = []
-            for iid in list(self._quickpaste_instances.keys()):
-                entry = self._quickpaste_instances.get(iid)
-                proc = entry.get("proc") if entry else None
-                if proc is None or proc.poll() is not None:
-                    continue
-                try:
-                    killers.append(subprocess.Popen(
-                        ["taskkill", "/PID", str(proc.pid), "/T", "/F"],
-                        stdout=subprocess.DEVNULL,
-                        stderr=subprocess.DEVNULL,
-                        creationflags=subprocess.CREATE_NO_WINDOW,
-                    ))
-                except Exception:
-                    continue
-            deadline = time.monotonic() + 2.0
-            for killer in killers:
-                try:
-                    killer.wait(timeout=max(0.0, deadline - time.monotonic()))
-                except Exception:
-                    pass
-        else:
-            import signal
-            # SIGTERM every live process group first...
-            for iid in list(self._quickpaste_instances.keys()):
-                entry = self._quickpaste_instances.get(iid)
-                proc = entry.get("proc") if entry else None
-                if proc is None or proc.poll() is not None:
-                    continue
-                try:
-                    os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
-                except (OSError, ProcessLookupError, PermissionError):
-                    try:
-                        proc.terminate()
-                    except OSError:
-                        pass
-            # ...then wait one short round and SIGKILL the survivors.
-            deadline = time.monotonic() + 2.0
-            for iid in list(self._quickpaste_instances.keys()):
-                entry = self._quickpaste_instances.get(iid)
-                proc = entry.get("proc") if entry else None
-                if proc is None:
-                    continue
-                try:
-                    proc.wait(timeout=max(0.0, deadline - time.monotonic()))
-                except Exception:
-                    try:
-                        os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
-                    except Exception:
-                        try:
-                            proc.kill()
-                        except Exception:
-                            pass
-        # Reclaim each private profile (best-effort) and clear the dict.  A
-        # late kill can leave a leftover child still holding a lock on the
-        # profile, so retry the removal once after a short beat (only between
-        # attempts — no pointless sleep after the final one).  The instance
-        # dict dies with this process, so a profile we can't remove is dropped
-        # with a visible warning (the OS temp cleaner will eventually reclaim
-        # it) rather than a false "retried at next startup" promise.
-        for iid in list(self._quickpaste_instances.keys()):
-            entry = self._quickpaste_instances.get(iid)
-            profile_dir = entry.get("profile_dir", "") if entry else ""
-            if not profile_dir:
-                self._quickpaste_instances.pop(iid, None)
-                continue
-            removed = False
-            for attempt in range(2):
-                try:
-                    shutil.rmtree(profile_dir, ignore_errors=False)
-                    removed = True
-                    break
-                except Exception:
-                    removed = False
-                    if attempt == 0:
-                        time.sleep(0.1)
-            self._quickpaste_instances.pop(iid, None)
-            if not removed:
-                logger.warning(
-                    "Quick Paste profile %s could not be removed at shutdown — "
-                    "left in place; you can delete it manually", profile_dir,
-                )
 
     def _paste_nth(self, n: int) -> None:
         """Paste the nth history item (1-indexed) directly to the clipboard."""
@@ -3571,14 +3114,8 @@ class Application:
         except OSError:
             pass
         # Factory reset exits WITHOUT calling shutdown(), so anything shutdown
-        # would normally tear down must be cleaned here — otherwise leftover
-        # Quick Paste --app windows (and their private profiles) survive the
-        # restart and the user is met by a stale quickpaste.html popup instead
-        # of the dashboard (reported on Windows).
-        try:
-            self._cleanup_quick_paste_instances()
-        except Exception:
-            logger.debug("Factory reset: quickpaste cleanup failed", exc_info=True)
+        # would normally tear down must be cleaned here — close the dashboard
+        # window so the restart opens a fresh one.
         if self.webview_win is not None:
             try:
                 self.webview_win.stop()
@@ -3656,13 +3193,8 @@ class Application:
             (_config_dir() / ".lock").unlink()
         except OSError:
             pass
-        # A restart also skips shutdown(): tear down Quick Paste popups first
-        # so a stale quickpaste.html window isn't what the user sees after the
-        # relaunch (same leak as factory reset, just less data deleted).
-        try:
-            self._cleanup_quick_paste_instances()
-        except Exception:
-            logger.debug("Restart: quickpaste cleanup failed", exc_info=True)
+        # A restart also skips shutdown(): close the dashboard window so the
+        # relaunched instance opens a fresh one.
         if self.webview_win is not None:
             try:
                 self.webview_win.stop()
@@ -4184,13 +3716,6 @@ class Application:
         if self.web_server:
             self.web_server.stop()
 
-        # Tear down any still-running Quick Paste --app popups and their
-        # private profiles so they don't outlive the app — a killed/crashed
-        # popup never POSTs done, so its instance would leak otherwise.
-        try:
-            self._cleanup_quick_paste_instances()
-        except Exception:
-            logger.debug("Quick Paste shutdown cleanup failed", exc_info=True)
         # Cancel any debounced pairing notifications still in flight (they'd
         # fire against a half-torn-down app otherwise).
         for _pid, timer in list(self._pairing_notify_timers.items()):
@@ -6051,8 +5576,8 @@ class Application:
 
         The only reliable signal that a dashboard window is open is a live
         WebSocket client: the SPA keeps a WS connection while the window shows,
-        and quickpaste (the phone QR page) does not use WS, so client_count>0
-        means the dashboard itself is open. Process tracking is NOT reliable
+        so client_count>0 means the dashboard itself is open. Process tracking
+        is NOT reliable
         here — Chrome --app hands off to an already-running instance and the
         spawned process exits, so is_running() goes False even while the window
         is open. Gating on is_running() is exactly what made every call spawn a

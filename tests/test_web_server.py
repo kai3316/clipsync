@@ -454,46 +454,12 @@ def test_dispatch_delete_file_rejects_directory(tmp_path):
     assert d.is_dir(), "a directory must not be deleted"
 
 
-# ── Frontend fix guards (#1 quickpaste close, #9 reconnect merge) ────
+# ── Frontend fix guards (reconnect merge) ──────────────────────────
 
 def _read_repo_file(rel: str) -> str:
     root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     with open(os.path.join(root, rel), encoding="utf-8") as f:
         return f.read()
-
-
-def test_quickpaste_close_no_longer_gated_on_opener():
-    """#1: the desktop popup's close paths are gated on the auto_close query
-    flag, not on a touch heuristic or window.opener — it is opened via a
-    Chromium --app window / webbrowser.open_new (no opener), and a touch-screen
-    laptop reports maxTouchPoints>0 so the old touch gate would leave it open
-    forever.  IS_TOUCH (coarse-pointer) now gates KEYBOARD NAVIGATION only,
-    deliberately decoupled from AUTO_CLOSE."""
-    html = _read_repo_file("internal/web/static/quickpaste.html")
-    assert 'onclick="closeWindow()"' not in html, (
-        "inline onclick would ReferenceError against the IIFE-local function"
-    )
-    assert "closeBtn.addEventListener('click'" in html
-    assert "var AUTO_CLOSE = params.get('auto_close') === '1'" in html
-    # Close behavior (X/Esc/auto-close) is gated on AUTO_CLOSE, not touch.
-    assert "if (!AUTO_CLOSE) { return; }" in html
-    # IS_TOUCH exists and gates keyboard navigation (listbox focus / 1-9 hint),
-    # not the close paths — a manually-opened desktop tab (no auto_close) still
-    # gets keyboard paste support.
-    assert "var IS_TOUCH = !!(window.matchMedia && window.matchMedia('(pointer: coarse)').matches);" in html
-    assert "if (!IS_APP_WINDOW) {" in html
-    # No close path may still be gated on window.opener (it only appears in
-    # comments explaining the webbrowser.open_new no-opener behavior).
-    assert "if (window.opener)" not in html
-
-
-def test_main_passes_auto_close_to_quickpaste():
-    """#1: main.py opens the Quick Paste popup with auto_close=1 so the page
-    enables the close affordances; a user-opened tab (no flag) keeps the X
-    hidden because a plain tab cannot window.close() itself."""
-    src = _read_repo_file("src/main.py")
-    assert "&auto_close=1" in src
-    assert "webbrowser.open_new(url)" in src
 
 
 def test_history_merge_cursor_recomputed_from_length():
@@ -664,300 +630,6 @@ def test_history_api_returns_total():
     assert '"total": total' in src
 
 
-def _dispatch_post_with_qp_done(body_bytes, on_quickpaste_done):
-    return dispatch(
-        "POST", "/api/quickpaste/done", {}, body_bytes,
-        cfg=object(),
-        history=None,
-        sync_mgr=None,
-        get_connected_ids=lambda: [],
-        on_nav_url=None,
-        on_forward_file=None,
-        upload_dir=".",
-        on_quickpaste_done=on_quickpaste_done,
-    )
-
-
-def test_routes_quickpaste_done_invokes_dispatch_handler():
-    """#3/#1: POST /api/quickpaste/done invokes the dispatch-provided host
-    callback (main.py's _close_quick_paste), passing the popup's instance id
-    from the body so the host closes exactly that instance.  The page sends the
-    id as a JSON number, but on the wire it arrives as an int-like STRING —
-    routes must normalize it to int (the host keys _quickpaste_instances by
-    int) or the done POST would never match and the popup would never close.
-    Token-gating is handled by the server's /api/* POST auth gate."""
-    calls = []
-    status, _ct, body_b = _dispatch_post_with_qp_done(
-        _body({"instance": "7"}), lambda instance_id: calls.append(instance_id),
-    )
-    assert status == 200
-    assert json.loads(body_b)["ok"] is True
-    assert calls == [7]
-
-
-def test_routes_quickpaste_done_passes_missing_instance_as_none():
-    """#3: a legacy done POST without an `instance` body value still reaches the
-    host callback (with None) instead of erroring — the host falls back to the
-    most-recent instance."""
-    calls = []
-    status, _ct, body_b = _dispatch_post_with_qp_done(
-        _body({}), lambda instance_id: calls.append(instance_id),
-    )
-    assert status == 200
-    assert json.loads(body_b)["ok"] is True
-    assert calls == [None]
-
-
-def test_routes_quickpaste_done_unavailable_without_handler():
-    status, _ct, body_b = _dispatch_post_with_qp_done(_body({}), None)
-    assert status == 503
-    assert json.loads(body_b)["error"] == "not available"
-
-
-def test_routes_quickpaste_done_rejects_invalid_instance():
-    """#1: a done POST carrying a non-int / non-int-convertible instance (bool,
-    float, garbage string, object) is malformed — the route returns 400 and
-    never calls the host, so a bad id can't reach main.py as a confusing value.
-    A missing instance is allowed through (the host no-ops on it)."""
-    for bad in (
-        {"instance": True},
-        {"instance": 1.5},
-        {"instance": "abc"},
-        {"instance": {"x": 1}},
-        {"instance": ["7"]},
-    ):
-        calls = []
-        status, _ct, body_b = _dispatch_post_with_qp_done(
-            _body(bad), lambda instance_id: calls.append(instance_id),
-        )
-        assert status == 400, bad
-        assert json.loads(body_b)["error"] == "invalid instance", bad
-        assert calls == [], bad
-
-
-# ── v1.0.30 quick-paste refactor (#1 instance ids + user-data-dir + terminal) ──
-
-def test_main_quickpaste_launch_forces_private_profile():
-    """#1: the --app launch must pass a private --user-data-dir (per instance)
-    so Chromium starts a brand-new instance instead of handing the URL off to an
-    already-running browser — handoff makes the spawned Popen exit in ~1s so a
-    later terminate() is a no-op, and without a browser running the spawned
-    process IS the whole browser (a blind terminate() would kill it)."""
-    src = _read_repo_file("src/main.py")
-    assert "--user-data-dir=" in src
-    assert "tempfile.mkdtemp" in src
-    assert "prefix=f\"clipsync_qp_{instance_id}_\"" in src
-
-
-def test_main_quickpaste_close_uses_taskkill_tree_on_windows():
-    """#1: Windows teardown uses `taskkill /PID <pid> /T /F` (whole tree) so the
-    popup's private browser instance is killed without touching the user's own
-    browser; non-Windows SIGTERMs the process group.  Both live behind a guard
-    so the kill is only attempted while the process is actually running."""
-    src = _read_repo_file("src/main.py")
-    assert '"taskkill", "/PID", str(proc.pid), "/T", "/F"' in src
-    assert "os.killpg" in src
-    assert "proc.poll() is None" in src
-
-
-def test_close_quick_paste_noop_when_no_instances():
-    """#1: _close_quick_paste is a safe no-op with an empty instance dict and
-    for an unknown instance id (plain-tab fallback / legacy id)."""
-    from src.main import Application
-    app = Application.__new__(Application)
-    app._quickpaste_instances = {}
-    app._close_quick_paste(None)   # must not raise
-    app._close_quick_paste(42)     # unknown id must not raise
-    assert app._quickpaste_instances == {}
-
-
-def test_close_quick_paste_cleans_exited_instance_and_profile(tmp_path):
-    """#1: an exited instance (proc.poll() != None) is removed from the dict and
-    its private --user-data-dir profile is cleaned up; no kill is attempted."""
-    import os
-
-    from src.main import Application
-    profile_dir = str(tmp_path / "clipsync_qp_profile")
-    os.makedirs(profile_dir, exist_ok=True)
-
-    class FakeProc:
-        pid = 999999
-        def poll(self):
-            return 0  # already exited
-
-    app = Application.__new__(Application)
-    app._quickpaste_instances = {
-        3: {"proc": FakeProc(), "profile_dir": profile_dir},
-    }
-    app._close_quick_paste(3)
-    assert app._quickpaste_instances == {}
-    assert not os.path.exists(profile_dir)
-
-
-def test_close_quick_paste_none_is_noop_not_fallback(tmp_path):
-    """#7: a done POST without an instance id is a strict no-op — it must NOT
-    fall back to closing the most recently opened popup.  A blind guess could
-    close a NEWER popup that issued its own valid done POST (the page always
-    sends its id, so a missing id means an unknown/legacy caller)."""
-    from src.main import Application
-
-    class FakeProc:
-        pid = 1
-        def poll(self):
-            return 0  # already exited → no kill attempted
-
-    app = Application.__new__(Application)
-    app._quickpaste_instances = {
-        5: {"proc": FakeProc(), "profile_dir": ""},
-        9: {"proc": FakeProc(), "profile_dir": ""},
-    }
-    app._close_quick_paste(None)
-    # Nothing was closed — both instances remain registered.
-    assert 9 in app._quickpaste_instances
-    assert 5 in app._quickpaste_instances
-
-
-def test_close_quick_paste_normalizes_string_instance(tmp_path):
-    """#1: the done POST carries the instance id as a JSON number on the wire,
-    but a page may send an int-like STRING; _close_quick_paste normalizes it to
-    int so dict lookup matches the int keys in _quickpaste_instances — the
-    popup actually closes instead of leaking."""
-    import os
-
-    from src.main import Application
-    profile_dir = str(tmp_path / "clipsync_qp_profile")
-    os.makedirs(profile_dir, exist_ok=True)
-
-    class FakeProc:
-        pid = 999998
-        def poll(self):
-            return 0  # already exited → no kill attempted
-
-    app = Application.__new__(Application)
-    app._quickpaste_instances = {
-        3: {"proc": FakeProc(), "profile_dir": profile_dir},
-    }
-    app._close_quick_paste("3")
-    assert app._quickpaste_instances == {}
-    assert not os.path.exists(profile_dir)
-
-
-def test_close_quick_paste_invalid_instance_is_noop(tmp_path):
-    """#1/#7: a non-numeric instance id (garbage string, float, dict, None) is
-    a no-op — never raises and never closes any popup."""
-    from src.main import Application
-
-    class FakeProc:
-        pid = 1
-        def poll(self):
-            return 0  # already exited → no kill attempted
-
-    app = Application.__new__(Application)
-    app._quickpaste_instances = {
-        5: {"proc": FakeProc(), "profile_dir": ""},
-    }
-    # Must not raise and must not close instance 5.
-    app._close_quick_paste("abc")
-    app._close_quick_paste(1.5)
-    app._close_quick_paste(None)
-    app._close_quick_paste(True)   # bool is an int subclass — but not a valid id
-    assert 5 in app._quickpaste_instances
-
-
-def test_sweep_quick_paste_removes_dead_instances_and_profiles(tmp_path):
-    """#6: _sweep_quick_paste_instances reclaims entries whose process already
-    exited (crash / OS window close / Task Manager never POST done) and their
-    leftover --user-data-dir profiles, while leaving live popups untouched."""
-    import os
-
-    from src.main import Application
-    dead_profile = str(tmp_path / "dead_profile")
-    live_profile = str(tmp_path / "live_profile")
-    os.makedirs(dead_profile, exist_ok=True)
-    os.makedirs(live_profile, exist_ok=True)
-
-    class DeadProc:
-        pid = 111
-        def poll(self):
-            return 1  # exited
-
-    class LiveProc:
-        pid = 222
-        def poll(self):
-            return None  # still running
-
-    app = Application.__new__(Application)
-    app._quickpaste_instances = {
-        1: {"proc": DeadProc(), "profile_dir": dead_profile},
-        2: {"proc": LiveProc(), "profile_dir": live_profile},
-    }
-    app._sweep_quick_paste_instances()
-    assert 1 not in app._quickpaste_instances
-    assert 2 in app._quickpaste_instances
-    assert not os.path.exists(dead_profile)
-    assert os.path.exists(live_profile)
-
-
-def test_cleanup_quick_paste_instances_kills_live_popups_in_parallel(monkeypatch, tmp_path):
-    """#6/#8: shutdown cleanup signals every live popup and reclaims profiles
-    and the dict — in PARALLEL (Windows fires one taskkill Popen per live popup
-    without waiting, then waits a single shared round) instead of serializing N
-    blocking 2–5s teardowns that would stretch exit to N× the budget."""
-    import subprocess
-
-    from src.main import Application
-    profile_a = str(tmp_path / "qp_a")
-    profile_b = str(tmp_path / "qp_b")
-    os.makedirs(profile_a, exist_ok=True)
-    os.makedirs(profile_b, exist_ok=True)
-
-    class FakeProc:
-        pid = 333
-        def poll(self):
-            return None  # live — must be signalled
-
-    spawned = []
-
-    class FakeKiller:
-        def wait(self, timeout=None):
-            return 0
-
-    def fake_popen(cmd, *args, **kwargs):
-        spawned.append(cmd)
-        return FakeKiller()
-
-    app = Application.__new__(Application)
-    app._quickpaste_instances = {
-        4: {"proc": FakeProc(), "profile_dir": profile_a},
-        8: {"proc": FakeProc(), "profile_dir": profile_b},
-    }
-    if sys.platform == "win32":
-        monkeypatch.setattr(subprocess, "Popen", fake_popen)
-        app._cleanup_quick_paste_instances()
-        assert len(spawned) == 2, "both live popups must be signalled"
-        for cmd in spawned:
-            assert cmd[0] == "taskkill" and "333" in cmd
-    else:
-        monkeypatch.setattr("src.main.os.killpg", lambda *a, **k: None)
-        monkeypatch.setattr("src.main.os.getpgid", lambda *a, **k: 999)
-        app._cleanup_quick_paste_instances()
-    # Dict cleared and every profile reclaimed after the kill round.
-    assert app._quickpaste_instances == {}
-    assert not os.path.exists(profile_a)
-    assert not os.path.exists(profile_b)
-
-
-def test_main_quickpaste_launch_uses_own_process_group_on_posix():
-    """#2: non-Windows launches pass start_new_session=True so the popup owns
-    its own process group — _close_quick_paste's os.killpg() then signals only
-    the popup's tree, never ClipSync itself (a shared group would kill the
-    whole app).  Windows keeps taskkill /T /F and does not pass the POSIX-only
-    flag."""
-    src = _read_repo_file("src/main.py")
-    assert "start_new_session" in src
-    assert 'sys.platform != "win32"' in src
-
-
 def test_history_api_limit_total_returns_authoritative_list(tmp_path):
     """#2: the frontend full-calibration depends on `limit=total` returning
     every remaining history item — the authoritative list that replaces ghost
@@ -985,22 +657,6 @@ def test_history_api_limit_total_returns_authoritative_list(tmp_path):
     assert len(data["items"]) == total
 
 
-def test_quickpaste_terminal_state_is_final():
-    """#6: the plain-tab "✓ Pasted" fallback marks state.terminal so render()
-    and the keydown paste paths short-circuit (no redraw, no further paste, no
-    duplicate postDone), keeping the fallback a real terminal state."""
-    html = _read_repo_file("internal/web/static/quickpaste.html")
-    assert "terminal:     false," in html
-    assert "state.terminal = true;" in html
-    # render() short-circuits at the very top.
-    assert "// Terminal (plain-tab \"✓ Pasted\" fallback): freeze the done state" in html
-    # pasteItem() short-circuits before touching the list.
-    assert "function pasteItem(index) {\n    if (state.terminal) { return; }" in html
-    # keydown keeps Escape live but short-circuits the navigation/paste paths.
-    assert "// Terminal (plain-tab \"✓ Pasted\" fallback): no more navigation or paste" in html
-    assert html.count("if (state.terminal) { return; }") == 3
-
-
 def test_main_chat_accept_file_annotated_bool_or_none():
     """#7: _chat_accept_file's annotation is `bool | None` so the None sentinel
     (offer expired) is a documented, first-class return — never collapsed into
@@ -1021,53 +677,6 @@ def test_dashboard_chat_do_accept_file_handles_none_expired():
     assert "if result is None:" in src
     assert 'self._chat_show_hint(T("pairing.state.expired"))' in src
 
-def test_main_prefers_app_window_and_registers_done_handler():
-    """#3: main.py opens Quick Paste as a Chromium --app subprocess (mode=app,
-    so the page enables the done-close flow), pins a unique instance id into the
-    URL, forces a private --user-data-dir so the app owns the whole process
-    tree, and falls back to webbrowser for the plain-tab degradation.  The done
-    callback is wired through the WebServer constructor (dispatch-param mode,
-    like on_send_url) so a re-created server never holds a stale reference."""
-    src = _read_repo_file("src/main.py")
-    assert "_launch_quickpaste_app_window(" in src
-    assert "url + \"&mode=app\", instance_id," in src
-    assert '"&instance=' in src
-    assert '"--user-data-dir=" + profile_dir' in src
-    assert "taskkill" in src
-    assert "os.killpg" in src
-    assert "webbrowser.open_new(url)" in src
-    assert "on_quickpaste_done=self._close_quick_paste" in src
-    assert "set_quickpaste_done_handler" not in src
-    assert "def _close_quick_paste(self" in src
-    assert "self._quickpaste_instances" in src
-
-
-def test_quickpaste_page_posts_done_and_has_safety_net():
-    """#3/#5: the page POSTs /api/quickpaste/done after a paste (and as a 60s
-    safety net), echoes its instance id in the body, uses the fetchWithTimeout
-    helper (not a bare fetch), keeps window.close() as a harmless extra attempt,
-    and shows a '✓ Pasted' confirmation for the plain-tab fallback.  #5: the
-    done flag is set ONLY on server confirmation (not before the fetch), so a
-    timeout/failure leaves it false and the 60s net retries up to 3 times, then
-    shows a 'close this window' hint."""
-    html = _read_repo_file("internal/web/static/quickpaste.html")
-    assert "postDone()" in html
-    assert "fetchWithTimeout(apiUrl('/api/quickpaste/done')," in html
-    assert "fetch(apiUrl('/api/quickpaste/done')," not in html
-    assert "body: JSON.stringify({ instance: INSTANCE_ID })" in html
-    assert "var INSTANCE_ID = params.get('instance') || '';" in html
-    # donePosted is set only inside the 2xx confirmation branch — a timeout /
-    # network failure keeps it false so the safety net retries.
-    assert "if (r.ok) {\n        donePosted = true;" in html
-    # The 60s safety net retries up to DONE_NET_ATTEMPTS, then gives up with a
-    # persistent "close this window" hint.
-    assert "DONE_NET_ATTEMPTS = 3;" in html
-    assert "scheduleDoneNet(0);" in html
-    assert "Could not auto-close" in html
-    assert "showPastedFallback()" in html
-    assert "window.close()" in html
-
-
 def test_chat_panel_toasts_expired_not_generic():
     """#4 frontend guard: the chat file-accept failure toast distinguishes the
     backend's {error:'expired'} (offer lapsed under the stale-receive reaper
@@ -1078,20 +687,6 @@ def test_chat_panel_toasts_expired_not_generic():
 
 
 # ── v1.0.32 adversarial-self-review fixes (#1–#10) ─────────────────────────
-
-def test_routes_quickpaste_done_empty_string_instance_is_missing():
-    """#6: a legacy done POST carrying an EMPTY-STRING instance is treated as
-    missing (the host no-ops on a missing id) instead of 400 — "" is a legacy
-    client's way of omitting the id, and the route comment already promised
-    missing ids pass through."""
-    calls = []
-    status, _ct, body_b = _dispatch_post_with_qp_done(
-        _body({"instance": ""}), lambda instance_id: calls.append(instance_id),
-    )
-    assert status == 200
-    assert json.loads(body_b)["ok"] is True
-    assert calls == [None]
-
 
 def test_calibrate_history_all_terminal_states_consume_budget_and_advance_gen():
     """Core calibration semantics (#2/#6): every terminal state of a
@@ -1215,88 +810,6 @@ def test_mobile_calibration_throttled_and_failure_pins_min():
     assert "historyOffset = Math.min(historyItems.length, total);" not in html
 
 
-def test_quickpaste_safety_net_does_not_clobber_pasted_state():
-    """#5: the 60s safety net must not overwrite a successful "✓ Pasted" final
-    state with the 'could not auto-close' banner — pastedOk guards it: when set
-    (a paste succeeded), the exhaustion path only toasts a light hint; otherwise
-    it shows the manual-close banner."""
-    html = _read_repo_file("internal/web/static/quickpaste.html")
-    assert "pastedOk:     false," in html
-    assert "state.pastedOk = true;" in html
-    assert "if (state.pastedOk) {" in html
-    # The banner branch only runs when a paste did NOT succeed.
-    assert html.index("if (state.pastedOk) {") < html.index("Could not auto-close")
-    # Both paste success paths set pastedOk — the --app window success path AND
-    # the plain-tab showPastedFallback — so a successful paste is never
-    # clobbered by the banner even when the --app close POST goes unconfirmed.
-    assert html.count("state.pastedOk = true;") >= 2
-
-
-def test_sweep_quick_paste_keeps_entry_when_rmtree_incomplete(monkeypatch, tmp_path):
-    """#10: a dead popup whose profile dir can't be fully removed (a leftover
-    child still holds a lock) must KEEP its instance entry so the next sweep
-    retries — popping it would leak the partial profile forever."""
-    from src.main import Application
-
-    profile_dir = str(tmp_path / "locked_profile")
-    os.makedirs(profile_dir, exist_ok=True)
-
-    class DeadProc:
-        pid = 111
-        def poll(self):
-            return 1  # exited
-
-    def stuck_rmtree(path, ignore_errors=False):
-        raise OSError("file still in use (partial deletion)")
-
-    app = Application.__new__(Application)
-    app._quickpaste_instances = {
-        1: {"proc": DeadProc(), "profile_dir": profile_dir},
-    }
-    monkeypatch.setattr("src.main.shutil.rmtree", stuck_rmtree)
-    app._sweep_quick_paste_instances()
-    # rmtree failed both attempts → the entry is kept for a later retry.
-    assert 1 in app._quickpaste_instances
-    assert os.path.exists(profile_dir)
-
-
-def test_sweep_quick_paste_retries_rmtree_once(tmp_path, monkeypatch):
-    """#10: the sweep retries a failed profile removal once; a transient lock
-    that clears on retry still reclaims the entry."""
-    import shutil as _shutil
-
-    from src.main import Application
-
-    profile_dir = str(tmp_path / "flaky_profile")
-    os.makedirs(profile_dir, exist_ok=True)
-
-    class DeadProc:
-        pid = 112
-        def poll(self):
-            return 1  # exited
-
-    real_rmtree = _shutil.rmtree
-    state = {"n": 0}
-
-    def flaky_rmtree(path, ignore_errors=False):
-        state["n"] += 1
-        if state["n"] == 1:
-            raise OSError("transient lock")
-        real_rmtree(path, ignore_errors=ignore_errors)
-
-    app = Application.__new__(Application)
-    app._quickpaste_instances = {
-        1: {"proc": DeadProc(), "profile_dir": profile_dir},
-    }
-    monkeypatch.setattr("src.main.shutil.rmtree", flaky_rmtree)
-    app._sweep_quick_paste_instances()
-    assert state["n"] == 2, "rmtree is retried once after a failure"
-    assert 1 not in app._quickpaste_instances
-    assert not os.path.exists(profile_dir)
-
-
-# ── v1.0.33 adversarial-self-review fixes (#4/#5/#7/#10) ─────────────────
-
 def test_history_mutation_helpers_consolidate_sites():
     """#10: store.js exposes the shared history-mutation helpers and every
     hand-written splice/unshift/Object.assign history-change site in
@@ -1319,123 +832,11 @@ def test_history_mutation_helpers_consolidate_sites():
     assert "store.history.unshift(fresh" not in app
 
 
-def test_sweep_quick_paste_never_evicts_live_popup_with_missing_profile(tmp_path):
-    """#4: a LIVE popup is never evicted, even when its profile_dir is missing
-    or doesn't exist — evicting it would orphan the running process (its done
-    POST would then find no entry to tear down).  Only DEAD processes are
-    evaluated for profile cleanup."""
-    from src.main import Application
-
-    class LiveProc:
-        pid = 444
-        def poll(self):
-            return None  # still running
-
-    app = Application.__new__(Application)
-    app._quickpaste_instances = {
-        1: {"proc": LiveProc(), "profile_dir": ""},
-        2: {"proc": LiveProc(), "profile_dir": str(tmp_path / "nonexistent")},
-    }
-    app._sweep_quick_paste_instances()
-    assert 1 in app._quickpaste_instances
-    assert 2 in app._quickpaste_instances
-
-
-def test_sweep_quick_paste_gives_up_after_retry_cap(tmp_path, monkeypatch):
-    """#7: a dead entry whose profile can NEVER be removed (a permanently-
-    locked dir) is dropped with a log after MAX_SWEEP_ATTEMPTS sweeps instead
-    of being retried forever — the residue is left for system cleanup rather
-    than repeated I/O on every sweep."""
-    from src.main import Application
-
-    profile_dir = str(tmp_path / "locked_forever")
-    os.makedirs(profile_dir, exist_ok=True)
-
-    class DeadProc:
-        pid = 999
-        def poll(self):
-            return 1  # exited
-
-    def stuck_rmtree(path, ignore_errors=False):
-        raise OSError("file still in use (permanent lock)")
-
-    app = Application.__new__(Application)
-    app._quickpaste_instances = {
-        1: {"proc": DeadProc(), "profile_dir": profile_dir},
-    }
-    monkeypatch.setattr("src.main.shutil.rmtree", stuck_rmtree)
-    for _ in range(3):
-        app._sweep_quick_paste_instances()
-    # After 3 failed sweeps the entry is dropped (bounded leak).
-    assert 1 not in app._quickpaste_instances
-    assert os.path.exists(profile_dir)
-
-
-def test_close_quick_paste_keeps_entry_when_profile_removal_fails(monkeypatch, tmp_path):
-    """#5: _close_quick_paste must NOT pop the entry before the profile is
-    removed — a partial/failed rmtree keeps the entry registered so the sweep
-    (with its retry cap) can reclaim the profile later, instead of leaking a
-    partial tree forever."""
-    import os
-
-    from src.main import Application
-
-    profile_dir = str(tmp_path / "locked_profile")
-    os.makedirs(profile_dir, exist_ok=True)
-
-    class DeadProc:
-        pid = 998
-        def poll(self):
-            return 1  # exited → no kill attempted
-
-    def stuck_rmtree(path, ignore_errors=False):
-        raise OSError("file still in use")
-
-    app = Application.__new__(Application)
-    app._quickpaste_instances = {
-        3: {"proc": DeadProc(), "profile_dir": profile_dir},
-    }
-    monkeypatch.setattr("src.main.shutil.rmtree", stuck_rmtree)
-    app._close_quick_paste(3)
-    # Entry kept so the sweep can retry the removal.
-    assert 3 in app._quickpaste_instances
-    assert os.path.exists(profile_dir)
-
-
-def test_close_quick_paste_pops_only_after_profile_removed(monkeypatch, tmp_path):
-    """#5: after a successful profile removal _close_quick_paste pops the
-    entry; a subsequent done POST for the same id is a clean no-op."""
-    from src.main import Application
-
-    profile_dir = str(tmp_path / "clean_profile")
-    os.makedirs(profile_dir, exist_ok=True)
-
-    class DeadProc:
-        pid = 997
-        def poll(self):
-            return 1  # exited → no kill attempted
-
-    app = Application.__new__(Application)
-    app._quickpaste_instances = {
-        4: {"proc": DeadProc(), "profile_dir": profile_dir},
-    }
-    app._close_quick_paste(4)
-    assert 4 not in app._quickpaste_instances
-    assert not os.path.exists(profile_dir)
-    # Second done POST for the same id is a no-op (entry already gone).
-    app._close_quick_paste(4)
-    assert app._quickpaste_instances == {}
-
-
 # ══════════════════════════════════════════════════
 # merged from test_round7_web.py
 # ══════════════════════════════════════════════════
 
-import os
 import re
-import sys
-
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from internal.web.server import (
     _check_declared_length,
@@ -1819,7 +1220,7 @@ _STATIC = os.path.join(
     "internal", "web", "static",
 )
 
-_PAGES = ("mobile.html", "quickpaste.html")
+_PAGES = ("mobile.html",)
 
 
 def _interpolate(html: str, locale: str = "zh-CN", token: str = "tok") -> str:

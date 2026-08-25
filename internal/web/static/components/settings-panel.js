@@ -357,7 +357,7 @@
 
       hotkeyFields: function () {
         var names = [
-          'quick_paste', 'paste_1', 'paste_2', 'paste_3', 'paste_4',
+          'paste_1', 'paste_2', 'paste_3', 'paste_4',
           'paste_5', 'paste_6', 'paste_7', 'paste_8', 'paste_9',
           'paste_plain', 'toggle_monitor', 'show_window',
         ];

@@ -44,7 +44,6 @@ class PeerInfo:
 # dataclass defaults from this, and internal/system/hotkey.py re-exports it
 # (as DEFAULT_SHORTCUTS) so the manager and its tests see the same map.
 DEFAULT_HOTKEYS: dict[str, str] = {
-    "quick_paste": "Ctrl+`",
     "paste_1": "Ctrl+1",
     "paste_2": "Ctrl+2",
     "paste_3": "Ctrl+3",

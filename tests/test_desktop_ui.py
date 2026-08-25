@@ -124,7 +124,7 @@ def _isolated_favorites(tmp_path, monkeypatch):
 class TestBackupHotkeys:
     def test_hotkeys_roundtrip(self, tmp_path, _isolated_favorites):
         cfg = Config()
-        cfg.hotkeys = {"quick_paste": "Ctrl+^", "paste_1": "Ctrl+Alt+1"}
+        cfg.hotkeys = {"paste_1": "Ctrl+Alt+1"}
         cfg.hotkeys_enabled = True
         history = ClipboardHistory(storage_path=str(tmp_path / "h.json"))
 
@@ -135,8 +135,7 @@ class TestBackupHotkeys:
         result = backup_mod.restore_backup(zip_path, fresh, history)
 
         assert result["config"] is True
-        assert fresh.hotkeys == {
-            "quick_paste": "Ctrl+^", "paste_1": "Ctrl+Alt+1"}
+        assert fresh.hotkeys == {"paste_1": "Ctrl+Alt+1"}
         assert fresh.hotkeys_enabled is True
 
     def test_restore_drops_non_string_pairs(self, tmp_path,

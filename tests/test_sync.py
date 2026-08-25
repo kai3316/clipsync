@@ -1139,21 +1139,20 @@ class TestBackupHotkeysXMigration:
     def test_hotkeys_roundtrip_through_backup(self, tmp_path):
         hist = ClipboardHistoryDB(storage_path=str(tmp_path / "h.db"))
         cfg = Config()
-        cfg.hotkeys = {"quick_paste": "Ctrl+Alt+P", "paste_1": "F2"}
+        cfg.hotkeys = {"paste_1": "F2"}
         cfg.hotkeys_enabled = True
         zip_path = backup_mod.create_backup(cfg, hist,
                                             backup_dir=str(tmp_path / "bk"))
         assert zipfile.is_zipfile(zip_path)
         with zipfile.ZipFile(zip_path) as zf:
             exported = json.loads(zf.read("config.json").decode("utf-8"))
-        assert exported["hotkeys"] == {"quick_paste": "Ctrl+Alt+P",
-                                       "paste_1": "F2"}
+        assert exported["hotkeys"] == {"paste_1": "F2"}
         assert exported["hotkeys_enabled"] is True
 
         target = Config()
         summary = backup_mod.restore_backup(zip_path, target, hist)
         assert summary["config"] is True
-        assert target.hotkeys == {"quick_paste": "Ctrl+Alt+P", "paste_1": "F2"}
+        assert target.hotkeys == {"paste_1": "F2"}
         assert target.hotkeys_enabled is True
 
     def test_old_backup_without_hotkeys_keeps_defaults(self, tmp_path):
@@ -1170,7 +1169,7 @@ class TestBackupHotkeysXMigration:
                                                     tmp_path / "h.db")))
         assert summary["config"] is True
         assert target.device_name == "OldBackupBox"
-        assert target.hotkeys.get("quick_paste") == "Ctrl+`", \
+        assert target.hotkeys.get("paste_1") == "Ctrl+1", \
             "defaults must survive a keyless backup"
         assert target.hotkeys_enabled is False
 

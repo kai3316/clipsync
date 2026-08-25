@@ -726,8 +726,6 @@ _EN: dict[str, str] = {
     "carousel.zero_config_desc": "Just run it. Auto-discovers devices on your LAN via mDNS/Bonjour. No setup required.",
     "carousel.smart_dedup": "Smart Dedup",
     "carousel.smart_dedup_desc": "SHA256 content hashing with multi-round retry capture. Never lose complex formats from Office or Photoshop.",
-    "carousel.quick_paste": "Quick Paste",
-    "carousel.quick_paste_desc": "Ctrl+` to summon, number keys to select, Enter to paste. Lightning-fast keyboard-driven workflow.",
     "carousel.smart_favorites": "Smart Favorites",
     "carousel.smart_favorites_desc": "Pin frequently used clips, organize with groups, drag to reorder. Your essential snippets always at hand.",
     # Settings panel (web UI)
@@ -1519,8 +1517,6 @@ _ZH: dict[str, str] = {
     "carousel.zero_config_desc": "即装即用。通过 mDNS/Bonjour 自动发现局域网设备，无需任何设置。",
     "carousel.smart_dedup": "智能去重",
     "carousel.smart_dedup_desc": "SHA256 内容哈希 + 多轮重试捕获。绝不丢失 Office 或 Photoshop 的复杂格式。",
-    "carousel.quick_paste": "快速粘贴",
-    "carousel.quick_paste_desc": "Ctrl+` 呼出面板，数字键选择，Enter 粘贴。闪电般快速的键盘驱动工作流。",
     "carousel.smart_favorites": "智能收藏",
     "carousel.smart_favorites_desc": "固定常用片段，用分组管理，拖拽排序。你的常用片段随时可用。",
     # Settings panel (web UI)
