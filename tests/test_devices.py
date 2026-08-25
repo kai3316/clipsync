@@ -724,11 +724,15 @@ def test_each_lan_section_keeps_empty_skip_guard():
         assert guard in src, guard
 
 
-def test_ai_config_sub_panel_stays_at_bottom():
+def test_ai_config_sub_panel_moved_out_of_devices():
+    # The paired-device AI-config inventories panel no longer lives in the
+    # Devices page (it was relocated to the AI Config tab, under the local
+    # manager) — the Devices template must not mount it.
     src = _read_r19("components", "device-panel.js")
-    # The round-18 relocated AI-config device inventories panel remains the
-    # last element of the device panel.
-    assert src.index("aiconfig-device-panel") > src.index("devices.pairing_requests")
+    assert "aiconfig-device-panel" not in src
+    # And it IS mounted by the AI Config tab.
+    aiconf = _read_r19("components", "aiconfig-panel.js")
+    assert "<aiconfig-device-panel></aiconfig-device-panel>" in aiconf
 
 
 # ── 4. Locale parity (round 19 adds no new copy) ────────────────────────

@@ -85,6 +85,10 @@
         mode: 'copy',           // default = never clobber silently
         pulling: false,
         modes: MODES,
+        // Expanded directory nodes in the tree view ("root_index|path").
+        // Folders default collapsed so a big skill doesn't dump every nested
+        // file onto the list.
+        expanded: {},
         preview: {
           visible: false,
           loading: false,
@@ -136,6 +140,84 @@
           return String(a.rel_path || '').localeCompare(String(b.rel_path || ''));
         });
         return items;
+      },
+
+      // Rows to render: flat search matches while searching, otherwise a
+      // directory tree built from the remote rel_paths.  Entries are grouped
+      // by their top-level folder (skills/commands/rules/…) and subdirectories
+      // are collapsible nodes, so a device's config isn't dumped as one flat
+      // list of every nested file.
+      treeRows: function () {
+        var q = (this.search || '').toLowerCase().trim();
+        var out = [];
+        if (q) {
+          var flat = this.filteredEntries;
+          for (var i = 0; i < flat.length; i++) {
+            var m = flat[i];
+            out.push({
+              key: keyOf(m), label: m.rel_path, depth: 0,
+              isDir: false, entry: m, node: null,
+            });
+          }
+          return out;
+        }
+        var peer = this.currentPeer;
+        if (!peer) return [];
+        var nodes = {};
+        var roots = [];
+        var self = this;
+        peer.entries.forEach(function (e) {
+          var rel = String(e.rel_path || '').replace(/\/+$/, '');
+          if (!rel) return;
+          var parts = rel.split('/');
+          var parent = null;
+          var leaf = null;
+          for (var j = 0; j < parts.length; j++) {
+            var key = String(e.root_index) + KEY_SEP + parts.slice(0, j + 1).join('/');
+            if (j === 0) {
+              leaf = nodes[key];
+              if (!leaf) {
+                leaf = nodes[key] = {
+                  key: key, root_index: e.root_index, name: parts[0],
+                  path: parts[0], is_dir: parts.length > 1, entry: null,
+                  children: [],
+                };
+                roots.push(leaf);
+              }
+              parent = leaf;
+            } else {
+              var child = null;
+              for (var c = 0; c < parent.children.length; c++) {
+                if (parent.children[c].key === key) { child = parent.children[c]; break; }
+              }
+              if (!child) {
+                child = {
+                  key: key, root_index: e.root_index, name: parts[j],
+                  path: parts.slice(0, j + 1).join('/'),
+                  is_dir: j < parts.length - 1, entry: null, children: [],
+                };
+                parent.children.push(child);
+              }
+              parent = child;
+              leaf = child;
+            }
+          }
+          if (leaf) { leaf.entry = e; leaf.is_dir = false; }
+        });
+        var walk = function (nodesList, depth) {
+          for (var i = 0; i < nodesList.length; i++) {
+            var node = nodesList[i];
+            out.push({
+              key: node.key, label: node.name, depth: depth,
+              isDir: node.is_dir, entry: node.entry, node: node,
+            });
+            if (node.is_dir && self.expanded[node.key]) {
+              walk(node.children, depth + 1);
+            }
+          }
+        };
+        walk(roots, 0);
+        return out;
       },
 
       multiRoot: function () {
@@ -217,8 +299,8 @@
 
     mounted: function () {
       document.addEventListener('keydown', this._onKeyDown);
-      // The Devices tab is open — prime the peer-inventory cache so the
-      // section renders immediately (the AI Config tab no longer owns it).
+      // The AI Config tab is open — prime the peer-inventory cache so the
+      // section renders immediately (it lives here, under the local manager).
       if (!this.store.aiConfigLoaded) {
         this.store.fetchAiConfigInventory(false);
       }
@@ -247,6 +329,21 @@
         if (id === this.selectedPeerId) return;
         this.selectedPeerId = id;
         this.checked = {};   // selection belongs to one device
+        this.expanded = {};  // fresh device starts with folders collapsed
+      },
+
+      isDirExpanded: function (node) {
+        return !!(node && this.expanded[node.key]);
+      },
+
+      toggleDir: function (node) {
+        if (!node) return;
+        if (this.expanded[node.key]) {
+          delete this.expanded[node.key];
+        } else {
+          this.expanded[node.key] = true;
+        }
+        this.expanded = Object.assign({}, this.expanded);
       },
 
       isChecked: function (entry) {
@@ -498,27 +595,34 @@
                     '</tr>' +
                   '</thead>' +
                   '<tbody>' +
-                    '<tr v-for="e in filteredEntries" :key="keyOf(e)">' +
+                    '<tr v-for="row in treeRows" :key="row.key">' +
                       '<td class="aiconfig-panel__td-check">' +
-                        '<input type="checkbox" :checked="isChecked(e)" @change="toggleCheck(e)"' +
-                          ' :aria-label="e.rel_path">' +
+                        '<span v-if="row.isDir && row.node" class="aiconfig-panel__tree-chevron" :class="{ \'aiconfig-panel__tree-chevron--open\': expanded[row.node.key] }" @click.stop="toggleDir(row.node)">▸</span>' +
+                        '<span v-else class="aiconfig-panel__tree-chevron aiconfig-panel__tree-chevron--spacer"></span>' +
+                        '<input v-if="!row.isDir" type="checkbox" :checked="isChecked(row.entry)" @change="toggleCheck(row.entry)" :aria-label="row.entry.rel_path">' +
                       '</td>' +
-                      '<td class="aiconfig-panel__cell-path">' +
-                        '<span v-if="multiRoot" class="aiconfig-panel__root-chip" :title="t(\'aiconfig.root_label\', { n: e.root_index })">R{{ e.root_index }}</span>' +
-                        '<button class="aiconfig-panel__path-btn selectable" @click="openPreview(e)" :title="t(\'aiconfig.preview_title\')">{{ e.rel_path }}</button>' +
-                        '<span v-if="compareState(e)" class="aiconfig-panel__ver-badge"' +
-                          ' :class="\'aiconfig-panel__ver-badge--\' + compareState(e)"' +
-                          ' :title="compareTitle(e)">{{ t(verKey(compareState(e))) }}</span>' +
+                      '<td class="aiconfig-panel__cell-path" :style="row.depth ? { paddingLeft: (12 + row.depth * 18) + \'px\' } : {}">' +
+                        '<span v-if="multiRoot && !row.isDir" class="aiconfig-panel__root-chip" :title="t(\'aiconfig.root_label\', { n: row.entry.root_index })">R{{ row.entry.root_index }}</span>' +
+                        // Directory nodes: a collapsible folder group (skills /
+                        // commands / rules / …).  Click to expand, dbl-click to
+                        // open in the OS file manager on THIS device.
+                        '<button v-if="row.isDir" class="aiconfig-panel__path-btn aiconfig-panel__path-btn--dir selectable" @click="toggleDir(row.node)" :title="t(\'aiconfig.local_open_dir\')">📁 {{ row.label }}</button>' +
+                        '<template v-else>' +
+                          '<button class="aiconfig-panel__path-btn selectable" @click="openPreview(row.entry)" :title="t(\'aiconfig.preview_title\')">{{ row.label }}</button>' +
+                          '<span v-if="compareState(row.entry)" class="aiconfig-panel__ver-badge"' +
+                            ' :class="\'aiconfig-panel__ver-badge--\' + compareState(row.entry)"' +
+                            ' :title="compareTitle(row.entry)">{{ t(verKey(compareState(row.entry))) }}</span>' +
+                        '</template>' +
                       '</td>' +
-                      '<td class="aiconfig-panel__cell-size">{{ fmtSize(e.size) }}</td>' +
-                      '<td class="aiconfig-panel__cell-time">{{ fmtTime(e.mtime) }}</td>' +
+                      '<td class="aiconfig-panel__cell-size">{{ row.isDir ? \'\' : fmtSize(row.entry.size) }}</td>' +
+                      '<td class="aiconfig-panel__cell-time">{{ row.isDir ? \'\' : fmtTime(row.entry.mtime) }}</td>' +
                       '<td class="aiconfig-panel__cell-status">' +
-                        '<span v-if="resultFor(e)" class="aiconfig-panel__badge"' +
-                          ' :class="\'aiconfig-panel__badge--\' + resultFor(e).status"' +
-                          ' :title="statusTitle(resultFor(e))">{{ statusGlyph(resultFor(e).status) }}</span>' +
+                        '<span v-if="!row.isDir && resultFor(row.entry)" class="aiconfig-panel__badge"' +
+                          ' :class="\'aiconfig-panel__badge--\' + resultFor(row.entry).status"' +
+                          ' :title="statusTitle(resultFor(row.entry))">{{ statusGlyph(resultFor(row.entry).status) }}</span>' +
                       '</td>' +
                     '</tr>' +
-                    '<tr v-if="filteredEntries.length === 0">' +
+                    '<tr v-if="treeRows.length === 0">' +
                       '<td colspan="5" class="aiconfig-panel__none">{{ t(\'aiconfig.no_match\') }}</td>' +
                     '</tr>' +
                   '</tbody>' +

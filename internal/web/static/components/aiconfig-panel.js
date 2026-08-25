@@ -629,6 +629,11 @@
           '</div>' +
         '</section>' +
 
+        '<!-- Paired-device AI-config inventories (round 12; relocated here from' +
+        'the Devices tab — device configs belong with the config manager, not in' +
+        'the device list) -->' +
+        '<aiconfig-device-panel></aiconfig-device-panel>' +
+
         '<!-- Watch-paths management dialog (round 18) -->' +
         '<transition name="dialog-fade">' +
           '<div v-if="pathsDialog.visible" class="aiconfig-paths__overlay" role="dialog" aria-modal="true" @click.self="closePathsDialog">' +

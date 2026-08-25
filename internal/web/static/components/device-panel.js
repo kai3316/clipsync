@@ -331,9 +331,6 @@
             '<p class="panel-empty-desc">{{ t(\'devices.auto_discover_hint\') }}</p>' +
           '</div>' +
         '</template>' +
-
-        '<!-- AI-config device inventories (round 12, relocated here round 18) -->' +
-        '<aiconfig-device-panel></aiconfig-device-panel>' +
       '</div>',
 
     methods: {

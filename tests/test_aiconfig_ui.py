@@ -238,8 +238,9 @@ def test_panel_local_defensive_empty_state():
     assert "store.fetchAiConfigLocal()" in src
 
 
-def test_device_config_relocated_to_devices_tab():
-    # The round-12 device browse/pull UI now lives in aiconfig-device-panel.
+def test_device_config_lives_in_ai_config_tab():
+    # The round-12 device browse/pull UI lives in aiconfig-device-panel, mounted
+    # in the AI Config tab (under the local manager) — NOT in the Devices page.
     dev = _read("components", "aiconfig-device-panel.js")
     assert "__CLIPSYNC_COMPONENTS__['aiconfig-device-panel']" in dev
     assert "peersList" in dev
@@ -251,9 +252,12 @@ def test_device_config_relocated_to_devices_tab():
     assert "aiconfig.mode_label" in dev
     assert "aiconfig.devices" in dev
     assert "aiconfig.local_device_title" in dev
-    # Mounted exactly once in the Devices tab (device-panel.js).
-    panel = _read("components", "device-panel.js")
+    # Mounted exactly once in the AI Config tab (aiconfig-panel.js).
+    panel = _read("components", "aiconfig-panel.js")
     assert "<aiconfig-device-panel></aiconfig-device-panel>" in panel
+    # ...and no longer in the Devices tab.
+    devices = _read("components", "device-panel.js")
+    assert "<aiconfig-device-panel></aiconfig-device-panel>" not in devices
     # index.html loads the new component script before app.js.
     html = _read("index.html")
     assert 'src="components/aiconfig-device-panel.js?token=__TOKEN__"' in html
@@ -921,14 +925,18 @@ def test_index_html_hosts_version_badge_css():
 
 def test_panel_binds_version_badge_in_template():
     src = _read_r19("components", "aiconfig-device-panel.js")
-    # Badge is rendered inline after the file path, gated on compareState.
+    # Badge is rendered inline after the file path, gated on compareState
+    # (rows are tree rows now — files carry `row.entry`).
     assert "aiconfig-panel__ver-badge" in src
-    assert "compareState(e)" in src
-    assert "compareTitle(e)" in src
+    assert "compareState(row.entry)" in src
+    assert "compareTitle(row.entry)" in src
     assert "aiconfig.ver_" in src
+    # Directory-tree grouping is wired.
+    assert "treeRows" in src
+    assert "toggleDir(row.node)" in src
     # Path button / preview / check interactions stay intact.
-    assert "openPreview(e)" in src
-    assert "toggleCheck(e)" in src
+    assert "openPreview(row.entry)" in src
+    assert "toggleCheck(row.entry)" in src
     assert "pullAiConfigFiles" in src
 
 
