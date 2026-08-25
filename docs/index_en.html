@@ -1,0 +1,1302 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>ClipSync — Cross-device Clipboard Sync | LAN &amp; Internet, Encrypted</title>
+  <meta name="description" content="ClipSync syncs your clipboard across Windows, macOS, and Linux devices — zero-config over your LAN, with optional encrypted internet sync. End-to-end encrypted, no accounts. Free and open source.">
+  <meta name="keywords" content="clipboard sync, cross-device clipboard, LAN clipboard, clipboard sharing, copy paste sync, encrypted clipboard, mDNS, zero config, open source, Windows, macOS, Linux">
+  <meta name="robots" content="index, follow">
+  <link rel="canonical" href="https://kai3316.github.io/clipsync/">
+  <link rel="alternate" hreflang="en" href="https://kai3316.github.io/clipsync/index_en.html">
+  <link rel="alternate" hreflang="zh" href="https://kai3316.github.io/clipsync/index.html">
+  <link rel="alternate" hreflang="x-default" href="https://kai3316.github.io/clipsync/">
+  <link rel="icon" type="image/svg+xml" href="https://raw.githubusercontent.com/kai3316/clipsync/master/assets/icon.svg">
+
+  <!-- Open Graph -->
+  <meta property="og:type" content="website">
+  <meta property="og:url" content="https://kai3316.github.io/clipsync/">
+  <meta property="og:title" content="ClipSync — Cross-device Clipboard Sync">
+  <meta property="og:description" content="Copy on one device, paste on another. Instantly, securely, over your local network. No cloud, no accounts, zero config. Free and open source.">
+  <meta property="og:image" content="https://raw.githubusercontent.com/kai3316/clipsync/master/assets/icon.svg">
+  <meta property="og:site_name" content="ClipSync">
+
+  <!-- Twitter Card -->
+  <meta name="twitter:card" content="summary">
+  <meta name="twitter:title" content="ClipSync — Cross-device Clipboard Sync">
+  <meta name="twitter:description" content="Copy on one device, paste on another. Instantly, securely, over your local network. Free and open source.">
+  <meta name="twitter:image" content="https://raw.githubusercontent.com/kai3316/clipsync/master/assets/icon.svg">
+
+  <!-- Structured Data -->
+  <script type="application/ld+json">
+  {
+    "@context": "https://schema.org",
+    "@type": "SoftwareApplication",
+    "name": "ClipSync",
+    "description": "Instant cross-device clipboard sync over LAN. End-to-end encrypted, zero configuration.",
+    "operatingSystem": "Windows, macOS, Linux",
+    "applicationCategory": "UtilitiesApplication",
+    "license": "https://opensource.org/licenses/MIT",
+    "url": "https://kai3316.github.io/clipsync/",
+    "downloadUrl": "https://github.com/kai3316/clipsync/releases/latest",
+    "offers": {
+      "@type": "Offer",
+      "price": "0",
+      "priceCurrency": "USD"
+    },
+    "author": {
+      "@type": "Person",
+      "name": "kai3316"
+    }
+  }
+  </script>
+  <style>
+    /* ── Reset & Base ────────────────────────────────────── */
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    html { scroll-behavior: smooth; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Inter', Roboto, sans-serif;
+      background: #0a0a0f;
+      color: #e4e4e8;
+      line-height: 1.6;
+      overflow-x: hidden;
+    }
+
+    /* ── Typography ──────────────────────────────────────── */
+    h1, h2, h3 { font-weight: 700; letter-spacing: -0.02em; }
+    h2 { font-size: 2.5rem; margin-bottom: 1rem; }
+
+    /* ── Gradient text utility ──────────────────────────── */
+    .gradient-text {
+      background: linear-gradient(135deg, #3498DB, #2ECC71);
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+      background-clip: text;
+    }
+
+    /* ── Navigation ──────────────────────────────────────── */
+    nav {
+      position: fixed; top: 0; width: 100%; z-index: 1000;
+      backdrop-filter: blur(20px) saturate(140%);
+      background: rgba(10,10,15,0.82);
+      border-bottom: 1px solid rgba(255,255,255,0.06);
+    }
+    .nav-inner {
+      max-width: 1200px; margin: 0 auto;
+      display: flex; align-items: center; justify-content: space-between;
+      padding: 0 2rem; height: 64px;
+    }
+    .nav-logo { display: flex; align-items: center; gap: 12px; text-decoration: none; color: #fff; }
+    .nav-logo img { width: 36px; height: 36px; }
+    .nav-logo span { font-size: 1.25rem; font-weight: 700; }
+    .nav-links { display: flex; gap: 2rem; list-style: none; }
+    .nav-links a { color: #a1a1aa; text-decoration: none; font-size: 0.9rem; font-weight: 500; transition: color 0.2s; }
+    .nav-links a:hover { color: #fff; }
+    .lang-switch {
+      display: inline-flex; align-items: center; gap: 0;
+      background: rgba(255,255,255,0.05); border: 1px solid rgba(255,255,255,0.1);
+      border-radius: 8px; overflow: hidden; margin-right: 0.75rem;
+    }
+    .lang-switch a {
+      padding: 0.35rem 0.65rem; font-size: 0.8rem; font-weight: 600;
+      text-decoration: none; color: #71717a; transition: all 0.2s;
+    }
+    .lang-switch a.active {
+      background: rgba(52,152,219,0.2); color: #3498DB;
+    }
+    .lang-switch a:not(.active):hover {
+      background: rgba(255,255,255,0.05); color: #a1a1aa;
+    }
+    .nav-cta {
+      background: linear-gradient(135deg, #3498DB, #2980B9);
+      color: #fff; border: none; padding: 0.5rem 1.25rem; border-radius: 8px;
+      font-size: 0.9rem; font-weight: 600; cursor: pointer; text-decoration: none;
+      transition: transform 0.2s, box-shadow 0.2s;
+    }
+    .nav-cta:hover { transform: translateY(-1px); box-shadow: 0 4px 20px rgba(52,152,219,0.4); }
+
+    /* Hamburger menu */
+    .hamburger {
+      display: none; flex-direction: column; gap: 5px;
+      background: none; border: none; cursor: pointer; padding: 4px;
+      z-index: 1001;
+    }
+    .hamburger span {
+      display: block; width: 24px; height: 2px;
+      background: #e4e4e8; border-radius: 2px;
+      transition: transform 0.3s, opacity 0.3s;
+    }
+    .hamburger.open span:nth-child(1) { transform: rotate(45deg) translate(5px, 5px); }
+    .hamburger.open span:nth-child(2) { opacity: 0; }
+    .hamburger.open span:nth-child(3) { transform: rotate(-45deg) translate(5px, -5px); }
+    .mobile-menu {
+      display: none; position: fixed; top: 64px; left: 0; right: 0;
+      background: rgba(10,10,15,0.95); backdrop-filter: blur(20px);
+      border-bottom: 1px solid rgba(255,255,255,0.08);
+      padding: 1.5rem 2rem; z-index: 999;
+      flex-direction: column; gap: 1rem;
+    }
+    .mobile-menu.open { display: flex; }
+    .mobile-menu a { color: #a1a1aa; text-decoration: none; font-size: 1.05rem; font-weight: 500; }
+    .mobile-menu a:hover { color: #fff; }
+
+    @media (max-width: 768px) {
+      .nav-links { display: none; }
+      .nav-cta { display: none; }
+      .hamburger { display: flex; }
+    }
+
+    @media (min-width: 769px) {
+      .mobile-menu.open { display: none !important; }
+    }
+
+    /* ── Hero ────────────────────────────────────────────── */
+    .hero {
+      min-height: 100vh; display: flex; align-items: center; justify-content: center;
+      padding: 7rem 2rem 2rem;
+      background:
+        radial-gradient(ellipse 80% 60% at 50% -10%, rgba(52,152,219,0.18), transparent),
+        radial-gradient(ellipse 60% 50% at 85% 85%, rgba(46,204,113,0.1), transparent),
+        radial-gradient(ellipse 40% 40% at 15% 80%, rgba(155,89,182,0.06), transparent),
+        #0a0a0f;
+      position: relative; overflow: hidden;
+    }
+    .hero::before {
+      content: ''; position: absolute; inset: 0;
+      background-image: url("data:image/svg+xml,%3Csvg width='60' height='60' viewBox='0 0 60 60' xmlns='http://www.w3.org/2000/svg'%3E%3Cg fill='none' fill-rule='evenodd'%3E%3Cg fill='%23ffffff' fill-opacity='0.02'%3E%3Cpath d='M36 34v-4h-2v4h-4v2h4v4h2v-4h4v-2h-4zm0-30V0h-2v4h-4v2h4v4h2V6h4V4h-4zM6 34v-4H4v4H0v2h4v4h2v-4h4v-2H6zM6 4V0H4v4H0v2h4v4h2V6h4V4H6z'/%3E%3C/g%3E%3C/g%3E%3C/svg%3E");
+    }
+    .hero-inner {
+      display: flex; flex-direction: row; align-items: center;
+      gap: 5rem; max-width: 1200px; width: 100%;
+      position: relative; z-index: 1;
+    }
+    .hero-content { flex: 1 1 55%; max-width: 580px; }
+
+    .hero-icon-wrap { margin-bottom: 2rem; }
+    .hero-icon { width: 52px; height: 52px; }
+
+    .hero-badge {
+      display: inline-block;
+      padding: 0.35rem 1rem;
+      border-radius: 20px;
+      background: rgba(52,152,219,0.1);
+      border: 1px solid rgba(52,152,219,0.2);
+      color: #5DADE2;
+      font-size: 0.85rem; font-weight: 600;
+      letter-spacing: 0.04em;
+      margin-bottom: 1.5rem;
+    }
+
+    .hero h1 {
+      font-size: 4.5rem; font-weight: 800; letter-spacing: -0.03em;
+      line-height: 1.15; margin-bottom: 0.25rem;
+      color: #fff;
+    }
+    .hero-underline {
+      width: 64px; height: 4px; border-radius: 2px;
+      background: linear-gradient(90deg, #3498DB, #2ECC71);
+      margin-bottom: 1.75rem;
+    }
+    .hero p {
+      font-size: 1.15rem; color: #71717a; max-width: 500px;
+      margin-bottom: 2.25rem; line-height: 1.7;
+    }
+
+    .hero-buttons { display: flex; gap: 1rem; flex-wrap: wrap; }
+    .btn {
+      display: inline-flex; align-items: center; gap: 8px;
+      padding: 0.85rem 2rem; border-radius: 12px; font-size: 1rem;
+      font-weight: 600; text-decoration: none; cursor: pointer; border: none;
+      transition: transform 0.2s, box-shadow 0.2s;
+    }
+    .btn:hover { transform: translateY(-2px); }
+    .btn-primary { background: linear-gradient(135deg, #3498DB, #2980B9); color: #fff; box-shadow: 0 4px 30px rgba(52,152,219,0.35); }
+    .btn-primary:hover { box-shadow: 0 8px 40px rgba(52,152,219,0.5); }
+    .btn-secondary { background: rgba(255,255,255,0.05); color: #e4e4e8; border: 1px solid rgba(255,255,255,0.12); }
+    .btn-secondary:hover { background: rgba(255,255,255,0.1); border-color: rgba(255,255,255,0.2); }
+
+    /* ── Hero Dashboard Card ──────────────────────────── */
+    .hero-visual {
+      flex: 1 1 45%;
+      display: flex; align-items: center; justify-content: center;
+    }
+    .dashboard-card {
+      width: 100%; max-width: 400px;
+      background: rgba(20,20,30,0.7);
+      border: 1px solid rgba(255,255,255,0.08);
+      border-radius: 20px;
+      padding: 1.75rem;
+      backdrop-filter: blur(12px);
+      box-shadow: 0 20px 60px rgba(0,0,0,0.4), 0 0 40px rgba(52,152,219,0.05);
+      animation: cardFloat 6s ease-in-out infinite;
+    }
+    @keyframes cardFloat {
+      0%, 100% { transform: translateY(0); }
+      50% { transform: translateY(-8px); }
+    }
+    .dash-header {
+      display: flex; align-items: center; justify-content: space-between;
+      margin-bottom: 1.25rem;
+    }
+    .dash-status {
+      display: flex; align-items: center; gap: 8px;
+      font-size: 0.85rem; font-weight: 600; color: #2ECC71;
+    }
+    .dash-dot {
+      width: 9px; height: 9px; border-radius: 50%;
+      background: #2ECC71;
+      animation: dotPulse 2s ease-in-out infinite;
+    }
+    @keyframes dotPulse {
+      0%, 100% { box-shadow: 0 0 6px #2ECC71; }
+      50% { box-shadow: 0 0 16px #2ECC71, 0 0 28px rgba(46,204,113,0.5); }
+    }
+    .dash-enc-badge {
+      padding: 3px 10px; border-radius: 6px;
+      font-size: 0.7rem; font-weight: 700; letter-spacing: 0.06em;
+      background: rgba(52,152,219,0.12); color: #5DADE2;
+    }
+    .dash-devices {
+      display: flex; gap: 0.75rem; margin-bottom: 1.25rem;
+    }
+    .dash-device {
+      flex: 1; text-align: center;
+      padding: 0.75rem 0.5rem;
+      background: rgba(255,255,255,0.02);
+      border-radius: 12px;
+      border: 1px solid rgba(255,255,255,0.05);
+    }
+    .dash-device .dev-icon {
+      font-size: 1.5rem; margin-bottom: 0.35rem;
+    }
+    .dash-device .dev-name {
+      font-size: 0.8rem; font-weight: 600; color: #e4e4e8;
+    }
+    .dash-device .dev-label {
+      font-size: 0.7rem; color: #52525b; margin-top: 2px;
+    }
+    .dash-divider {
+      border: none; border-top: 1px solid rgba(255,255,255,0.05);
+      margin: 0 0 1rem;
+    }
+    .dash-feed-label {
+      font-size: 0.68rem; font-weight: 700; text-transform: uppercase;
+      letter-spacing: 0.08em; color: #52525b; margin-bottom: 0.65rem;
+    }
+    .dash-feed-item {
+      display: flex; align-items: center; gap: 10px;
+      padding: 0.6rem 0.75rem;
+      background: rgba(255,255,255,0.015);
+      border-radius: 10px;
+      margin-bottom: 0.5rem;
+      border: 1px solid rgba(255,255,255,0.03);
+    }
+    .dash-feed-icon {
+      width: 30px; height: 30px; border-radius: 8px;
+      display: flex; align-items: center; justify-content: center;
+      font-size: 0.8rem; flex-shrink: 0;
+    }
+    .dash-feed-icon.text { background: rgba(52,152,219,0.12); }
+    .dash-feed-icon.image { background: rgba(46,204,113,0.12); }
+    .dash-feed-info { flex: 1; min-width: 0; }
+    .dash-feed-info .feed-title {
+      font-size: 0.78rem; color: #d4d4d8; font-weight: 500;
+      white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+    }
+    .dash-feed-info .feed-meta {
+      font-size: 0.68rem; color: #52525b; margin-top: 2px;
+    }
+    .dash-feed-time {
+      font-size: 0.68rem; color: #52525b; flex-shrink: 0;
+    }
+
+    /* ── Sections ────────────────────────────────────────── */
+    section { padding: 6rem 2rem; }
+    .section-inner { max-width: 1100px; margin: 0 auto; }
+    .section-label {
+      display: inline-block; font-size: 0.8rem; font-weight: 600; text-transform: uppercase;
+      letter-spacing: 0.08em; color: #3498DB; margin-bottom: 0.75rem;
+    }
+    .section-header { text-align: center; margin-bottom: 4rem; }
+    .section-header p { color: #71717a; font-size: 1.1rem; max-width: 500px; margin: 0 auto; }
+
+    /* ── Feature Grid ────────────────────────────────────── */
+    .features { background: #0d0d14; }
+    .feature-grid {
+      display: grid; grid-template-columns: repeat(auto-fit, minmax(250px, 1fr)); gap: 1.5rem;
+    }
+    .feature-card {
+      background: rgba(255,255,255,0.03); border: 1px solid rgba(255,255,255,0.06);
+      border-radius: 16px; padding: 2rem; transition: border-color 0.3s, transform 0.3s;
+    }
+    .feature-card:hover { border-color: rgba(52,152,219,0.3); transform: translateY(-4px); }
+    .feature-icon {
+      width: 48px; height: 48px; border-radius: 12px; display: flex; align-items: center;
+      justify-content: center; font-size: 1.5rem; margin-bottom: 1.25rem;
+    }
+    .feature-icon.blue { background: rgba(52,152,219,0.12); }
+    .feature-icon.green { background: rgba(46,204,113,0.12); }
+    .feature-icon.purple { background: rgba(155,89,182,0.12); }
+    .feature-icon.orange { background: rgba(243,156,18,0.12); }
+    .feature-icon.red { background: rgba(231,76,60,0.12); }
+    .feature-icon.cyan { background: rgba(26,188,156,0.12); }
+    .feature-card h3 { font-size: 1.1rem; margin-bottom: 0.5rem; }
+    .feature-card p { color: #71717a; font-size: 0.9rem; }
+
+    /* ── Security Section ────────────────────────────────── */
+    .security { background: #0a0a0f; }
+    .security-cards {
+      display: flex; align-items: stretch; justify-content: center;
+      gap: 0; max-width: 1000px; margin: 0 auto;
+    }
+    .sec-card {
+      flex: 1; background: rgba(255,255,255,0.02);
+      border: 1px solid rgba(255,255,255,0.06);
+      border-radius: 20px; padding: 2.25rem 2rem;
+      transition: border-color 0.4s, box-shadow 0.4s, transform 0.4s;
+      position: relative; z-index: 1;
+      display: flex; flex-direction: column;
+    }
+    .sec-card:hover {
+      transform: translateY(-6px); z-index: 2;
+    }
+    .sec-card:nth-child(1):hover {
+      border-color: rgba(52,152,219,0.5); box-shadow: 0 12px 40px rgba(52,152,219,0.12);
+    }
+    .sec-card:nth-child(3):hover {
+      border-color: rgba(46,204,113,0.5); box-shadow: 0 12px 40px rgba(46,204,113,0.12);
+    }
+    .sec-card:nth-child(5):hover {
+      border-color: rgba(243,156,18,0.5); box-shadow: 0 12px 40px rgba(243,156,18,0.12);
+    }
+    .sec-card-header {
+      display: flex; align-items: center; gap: 0.75rem; margin-bottom: 1rem;
+    }
+    .sec-card-icon {
+      width: 44px; height: 44px; border-radius: 12px;
+      display: flex; align-items: center; justify-content: center;
+      font-size: 1.3rem; flex-shrink: 0;
+    }
+    .sec-card-icon.app  { background: rgba(52,152,219,0.15); }
+    .sec-card-icon.transport { background: rgba(46,204,113,0.15); }
+    .sec-card-icon.rest  { background: rgba(243,156,18,0.15); }
+    .sec-card-badge {
+      padding: 3px 12px; border-radius: 6px;
+      font-size: 0.75rem; font-weight: 700;
+      text-transform: uppercase; letter-spacing: 0.05em;
+    }
+    .badge-app { background: rgba(52,152,219,0.18); color: #3498DB; }
+    .badge-transport { background: rgba(46,204,113,0.18); color: #2ECC71; }
+    .badge-rest { background: rgba(243,156,18,0.18); color: #F39C12; }
+    .sec-card h4 { font-size: 1.05rem; margin-bottom: 0.6rem; }
+    .sec-card-details {
+      list-style: none; padding: 0; margin: 0;
+      color: #71717a; font-size: 0.85rem; line-height: 1.8;
+      flex: 1;
+    }
+    .sec-card-details li { padding: 0.2rem 0; padding-left: 1rem; position: relative; }
+    .sec-card-details li::before {
+      content: ''; position: absolute; left: 0; top: 0.65em;
+      width: 5px; height: 5px; border-radius: 50%;
+    }
+    .sec-card:nth-child(1) .sec-card-details li::before { background: #3498DB; }
+    .sec-card:nth-child(3) .sec-card-details li::before { background: #2ECC71; }
+    .sec-card:nth-child(5) .sec-card-details li::before { background: #F39C12; }
+    .sec-arrow {
+      display: flex; align-items: center; justify-content: center;
+      padding: 0 0.5rem; color: #3a3a40; font-size: 1.5rem;
+      flex-shrink: 0; user-select: none;
+    }
+    @media (max-width: 768px) {
+      .security-cards { flex-direction: column; gap: 0; }
+      .sec-card { padding: 1.75rem 1.5rem; }
+      .sec-arrow { transform: rotate(90deg); padding: 0.25rem 0; font-size: 1.2rem; }
+    }
+    .sec-note {
+      max-width: 720px; margin: 2.5rem auto 0; text-align: center;
+      color: #71717a; font-size: 0.85rem; line-height: 1.8;
+      background: rgba(255,255,255,0.02); border: 1px solid rgba(255,255,255,0.05);
+      border-radius: 14px; padding: 1.25rem 1.5rem;
+    }
+
+    /* ── How It Works ────────────────────────────────────── */
+    /* Use Cases */
+    .web-companion { background: #0d0d14; }
+    .web-feat-card:hover {
+      border-color: rgba(52,152,219,0.3) !important; transform: translateY(-4px);
+      box-shadow: 0 0 25px rgba(52,152,219,0.08);
+    }
+
+    .usecases { background: #0a0a0f; }
+    .usecase-grid {
+      display: grid; grid-template-columns: repeat(3, 1fr); gap: 1.5rem;
+    }
+    @media (max-width: 768px) { .usecase-grid { grid-template-columns: 1fr; } }
+    .usecase-card {
+      background: rgba(255,255,255,0.02); border: 1px solid rgba(255,255,255,0.05);
+      border-radius: 16px; padding: 2rem; text-align: center;
+      transition: border-color 0.3s, transform 0.3s;
+    }
+    .usecase-card:hover {
+      border-color: rgba(255,255,255,0.12); transform: translateY(-4px);
+    }
+    .usecase-emoji { font-size: 2.5rem; margin-bottom: 0.75rem; }
+    .usecase-card h4 { font-size: 1rem; margin-bottom: 0.4rem; }
+    .usecase-card p { color: #71717a; font-size: 0.85rem; line-height: 1.7; }
+
+    /* Comparison */
+    .compare { background: #0a0a0f; }
+    .compare-table {
+      display: grid; grid-template-columns: 1.3fr 1fr 1fr;
+      gap: 0; max-width: 900px; margin: 0 auto;
+      border: 1px solid rgba(255,255,255,0.06); border-radius: 16px;
+      overflow: hidden;
+    }
+    @media (max-width: 640px) { .compare-table { grid-template-columns: 1fr; } }
+    .compare-row {
+      display: contents;
+    }
+    .compare-cell {
+      padding: 1rem 1.5rem; display: flex; align-items: center; gap: 0.5rem;
+      border-bottom: 1px solid rgba(255,255,255,0.04);
+      font-size: 0.9rem;
+    }
+    .compare-cell:first-child {
+      font-weight: 600; color: #e4e4e8; justify-content: flex-start;
+    }
+    .compare-cell:not(:first-child) {
+      justify-content: center; text-align: center;
+    }
+    .compare-head {
+      background: rgba(255,255,255,0.03); font-weight: 700; font-size: 0.95rem;
+      color: #e4e4e8; padding: 1.15rem 1.5rem;
+    }
+    .compare-head.highlight {
+      background: rgba(52,152,219,0.08); color: #3498DB;
+    }
+    .compare-cell .check { color: #2ECC71; font-weight: 700; }
+    .compare-cell .cross { color: #52525b; }
+    .compare-cell .partial { color: #F39C12; }
+
+    /* FAQ */
+    .faq { background: #0d0d14; }
+    .faq-list { max-width: 700px; margin: 0 auto; display: flex; flex-direction: column; gap: 0.75rem; }
+    .faq-item {
+      background: rgba(255,255,255,0.02); border: 1px solid rgba(255,255,255,0.05);
+      border-radius: 14px; overflow: hidden;
+      transition: border-color 0.3s;
+    }
+    .faq-item:hover { border-color: rgba(255,255,255,0.1); }
+    .faq-q {
+      width: 100%; background: none; border: none; color: #e4e4e8;
+      padding: 1.25rem 1.5rem; font-size: 0.95rem; font-weight: 600;
+      text-align: left; cursor: pointer; display: flex; align-items: center;
+      justify-content: space-between; gap: 1rem; font-family: inherit;
+    }
+    .faq-q::after {
+      content: '+'; font-size: 1.3rem; font-weight: 300; color: #52525b;
+      transition: transform 0.3s; flex-shrink: 0;
+    }
+    .faq-item.open .faq-q::after { content: '\2212'; transform: rotate(180deg); }
+    .faq-a {
+      max-height: 0; overflow: hidden; transition: max-height 0.35s ease, padding 0.35s ease;
+      padding: 0 1.5rem; color: #71717a; font-size: 0.9rem; line-height: 1.8;
+    }
+    .faq-item.open .faq-a { max-height: 300px; padding: 0 1.5rem 1.25rem; }
+
+    .how { background: #0d0d14; }
+    .steps { display: grid; grid-template-columns: repeat(4, 1fr); gap: 1.5rem; }
+    .step {
+      text-align: center; position: relative;
+      background: rgba(255,255,255,0.02); border: 1px solid rgba(255,255,255,0.05);
+      border-radius: 16px; padding: 2rem 1.5rem;
+    }
+    .step-num {
+      width: 40px; height: 40px; border-radius: 50%;
+      background: linear-gradient(135deg, #3498DB, #2ECC71);
+      display: flex; align-items: center; justify-content: center;
+      font-weight: 700; font-size: 1rem; margin: 0 auto 1rem;
+    }
+    .step h4 { font-size: 1rem; margin-bottom: 0.5rem; }
+    .step p { color: #71717a; font-size: 0.85rem; }
+
+    /* ── Formats Table ───────────────────────────────────── */
+    .formats { background: #0a0a0f; }
+    table {
+      width: 100%; border-collapse: separate; border-spacing: 0;
+      background: rgba(255,255,255,0.02); border-radius: 16px;
+      overflow: hidden; border: 1px solid rgba(255,255,255,0.06);
+    }
+    th, td { padding: 1rem 1.5rem; text-align: left; }
+    th { background: rgba(255,255,255,0.03); font-weight: 600; font-size: 0.85rem; color: #a1a1aa; text-transform: uppercase; letter-spacing: 0.05em; }
+    td { border-top: 1px solid rgba(255,255,255,0.04); font-size: 0.95rem; }
+    td code {
+      background: rgba(52,152,219,0.12); color: #5DADE2;
+      padding: 2px 8px; border-radius: 4px; font-size: 0.8rem; font-weight: 600;
+    }
+
+    /* ── Stats Bar ───────────────────────────────────────── */
+    .stats {
+      padding: 4rem 2rem; background: linear-gradient(135deg, rgba(52,152,219,0.08), rgba(46,204,113,0.06));
+      border-top: 1px solid rgba(255,255,255,0.04); border-bottom: 1px solid rgba(255,255,255,0.04);
+    }
+    .stats-grid { display: flex; justify-content: center; gap: 4rem; flex-wrap: wrap; }
+    .stat { text-align: center; }
+    .stat-icon { font-size: 2rem; margin-bottom: 0.5rem; }
+    .stat-text { font-size: 1.15rem; font-weight: 700; color: #e4e4e8; }
+    .stat-label { color: #71717a; font-size: 0.85rem; margin-top: 0.35rem; }
+    @media (max-width: 768px) { .stats-grid { gap: 2rem; } .stat-text { font-size: 1rem; } }
+
+    /* ── Download Grid ────────────────────────────────────── */
+    .download-grid {
+      display: grid; grid-template-columns: repeat(3, 1fr); gap: 1.5rem;
+      max-width: 900px; margin: 0 auto;
+    }
+    @media (max-width: 768px) { .download-grid { grid-template-columns: 1fr; max-width: 360px; } }
+    .download-card {
+      background: rgba(255,255,255,0.02); border: 1px solid rgba(255,255,255,0.06);
+      border-radius: 16px; padding: 2rem; text-align: center;
+      transition: border-color 0.3s, transform 0.3s;
+      display: flex; flex-direction: column; align-items: center; gap: 0.75rem;
+    }
+    .download-card:hover {
+      border-color: rgba(52,152,219,0.3); transform: translateY(-4px);
+    }
+    .download-icon { font-size: 2.5rem; }
+    .download-card h4 { font-size: 1.1rem; color: #e4e4e8; }
+    .download-card p { color: #71717a; font-size: 0.9rem; margin-bottom: 0.5rem; }
+    .download-card code {
+      background: rgba(52,152,219,0.12); color: #5DADE2;
+      padding: 2px 8px; border-radius: 4px; font-size: 0.8rem; font-weight: 600;
+    }
+
+    /* ── CTA Section ─────────────────────────────────────── */
+    .cta { background: #0d0d14; text-align: center; }
+    .cta .hero-buttons { justify-content: center; }
+    .cta-box {
+      background: linear-gradient(135deg, rgba(52,152,219,0.08), rgba(46,204,113,0.05));
+      border: 1px solid rgba(52,152,219,0.15); border-radius: 24px;
+      padding: 4rem 3rem; max-width: 700px; margin: 0 auto;
+    }
+    .cta-box h2 { margin-bottom: 0.5rem; }
+    .cta-box p { color: #71717a; margin-bottom: 2rem; }
+
+    /* ── Footer ──────────────────────────────────────────── */
+    footer {
+      background: #0a0a0f; border-top: 1px solid rgba(255,255,255,0.05);
+      padding: 2.5rem 2rem; text-align: center; color: #52525b; font-size: 0.85rem;
+    }
+    footer a { color: #71717a; text-decoration: none; }
+    footer a:hover { color: #a1a1aa; }
+
+    /* ── 📱 Responsive ────────────────────────────────────── */
+
+    /* Tablet */
+    @media (max-width: 1024px) {
+      .feature-grid { grid-template-columns: repeat(2, 1fr); }
+      .steps { grid-template-columns: repeat(2, 1fr); }
+      .web-features { grid-template-columns: repeat(2, 1fr) !important; }
+      .hero-inner { flex-direction: column; gap: 3rem; text-align: center; }
+      .hero-content { max-width: 100%; }
+      .hero-underline { margin: 0 auto 1.75rem; }
+      .hero h1 { font-size: 2.8rem; }
+      .hero p { margin-left: auto; margin-right: auto; }
+      .hero-buttons { justify-content: center; }
+      .hero-visual { width: 100%; }
+      .dashboard-card { max-width: 100%; }
+      
+      section { padding: 4.5rem 1.5rem; }
+      .stats-grid { gap: 2.5rem; }
+      .stat-text { font-size: 1.05rem; }
+    }
+
+    /* Phone */
+    @media (max-width: 640px) {
+      .feature-grid { grid-template-columns: 1fr; }
+      .steps { grid-template-columns: 1fr; }
+      .hero { min-height: 100svh; padding: 6rem 1.25rem 3rem; }
+      .hero-inner { gap: 2.5rem; }
+      .hero h1 { font-size: 2rem; }
+      .hero p { font-size: 0.95rem; }
+      .hero-icon { width: 44px; height: 44px; }
+      .hero-buttons { flex-direction: column; align-items: center; }
+      .btn { width: 100%; justify-content: center; max-width: 300px; }
+      .dashboard-card { padding: 1.25rem; }
+      section { padding: 3rem 1rem; }
+      .section-header { margin-bottom: 2.5rem; }
+      .section-header h2 { font-size: 1.6rem; }
+      .stats-grid { gap: 1.5rem; flex-direction: column; align-items: center; }
+      .stat-text { font-size: 1rem; }
+      .cta-box { padding: 2.5rem 1.5rem; }
+      .nav-inner { padding: 0 1rem; }
+      table { font-size: 0.8rem; display: block; overflow-x: auto; }
+      th, td { padding: 0.6rem 0.75rem; white-space: nowrap; }
+      .orb { opacity: 0.06; }
+      .feature-card { padding: 1.5rem; }
+      .step { padding: 1.5rem 1rem; }
+      .web-features { grid-template-columns: 1fr !important; }
+    }
+
+    /* Small phone */
+    @media (max-width: 400px) {
+      .hero h1 { font-size: 1.8rem; }
+      .mobile-menu { padding: 1rem 1.25rem; }
+      .mobile-menu a { font-size: 0.95rem; }
+      .cta-box { padding: 2rem 1rem; }
+      table { font-size: 0.75rem; }
+      th, td { padding: 0.5rem 0.6rem; }
+    }
+
+    /* ── ✨ Animations & Effects ──────────────────────────── */
+
+    /* Floating background orbs */
+    .orbs { position: fixed; inset: 0; pointer-events: none; z-index: 0; overflow: hidden; }
+    .orb {
+      position: absolute; border-radius: 50%; filter: blur(100px); opacity: 0.12;
+      animation: floatOrb 20s ease-in-out infinite;
+    }
+    .orb:nth-child(1) {
+      width: 600px; height: 600px;
+      background: radial-gradient(circle, #3498DB, transparent);
+      top: -200px; left: -100px;
+      animation-delay: 0s;
+    }
+    .orb:nth-child(2) {
+      width: 500px; height: 500px;
+      background: radial-gradient(circle, #2ECC71, transparent);
+      bottom: -150px; right: -100px;
+      animation-delay: -5s;
+    }
+    .orb:nth-child(3) {
+      width: 400px; height: 400px;
+      background: radial-gradient(circle, #9B59B6, transparent);
+      top: 50%; left: 50%;
+      animation-delay: -10s;
+      animation-duration: 25s;
+    }
+    .orb:nth-child(4) {
+      width: 350px; height: 350px;
+      background: radial-gradient(circle, #F39C12, transparent);
+      top: 30%; right: 10%;
+      animation-delay: -15s;
+      animation-duration: 22s;
+    }
+
+    @keyframes floatOrb {
+      0%, 100% { transform: translate(0, 0) scale(1); }
+      25%  { transform: translate(80px, -60px) scale(1.08); }
+      50%  { transform: translate(-40px, -100px) scale(0.92); }
+      75%  { transform: translate(-90px, 40px) scale(1.05); }
+    }
+
+    /* Float animation for stat icons */
+    @keyframes floatIcon {
+      0%, 100% { transform: translateY(0); }
+      50%  { transform: translateY(-10px); }
+    }
+
+    /* Animated gradient text */
+    .gradient-text-anim {
+      background: linear-gradient(135deg, #3498DB, #2ECC71, #3498DB);
+      background-size: 200% auto;
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+      background-clip: text;
+      animation: gradientShift 4s ease-in-out infinite;
+    }
+    @keyframes gradientShift {
+      0%, 100% { background-position: 0% center; }
+      50%  { background-position: 200% center; }
+    }
+
+    /* Button shimmer */
+    .btn-primary {
+      position: relative; overflow: hidden;
+    }
+    .btn-primary::after {
+      content: '';
+      position: absolute; top: 0; left: -100%;
+      width: 100%; height: 100%;
+      background: linear-gradient(90deg, transparent, rgba(255,255,255,0.15), transparent);
+      animation: shimmer 3s ease-in-out infinite;
+    }
+    @keyframes shimmer {
+      0% { left: -100%; }
+      50%, 100% { left: 100%; }
+    }
+
+    /* Enhanced feature card hover */
+    .feature-card:hover {
+      border-color: rgba(52,152,219,0.4) !important;
+      box-shadow: 0 0 30px rgba(52,152,219,0.1), 0 8px 32px rgba(0,0,0,0.3);
+      transform: translateY(-6px);
+    }
+
+    /* Step card hover */
+    .step {
+      transition: border-color 0.3s, transform 0.3s, box-shadow 0.3s;
+    }
+    .step:hover {
+      border-color: rgba(46,204,113,0.3);
+      box-shadow: 0 0 25px rgba(46,204,113,0.08);
+      transform: translateY(-4px);
+    }
+
+    /* Step number pulse */
+    .step-num {
+      animation: pulse 3s ease-in-out infinite;
+    }
+    @keyframes pulse {
+      0%, 100% { box-shadow: 0 0 0 0 rgba(52,152,219,0.4); }
+      50%  { box-shadow: 0 0 0 12px rgba(52,152,219,0); }
+    }
+
+    /* CTA box glow on hover */
+    .cta-box {
+      transition: border-color 0.4s, box-shadow 0.4s;
+    }
+    .cta-box:hover {
+      border-color: rgba(52,152,219,0.35);
+      box-shadow: 0 0 50px rgba(52,152,219,0.08);
+    }
+
+    /* Scroll reveal */
+    .reveal {
+      opacity: 0; transform: translateY(30px);
+      transition: opacity 0.7s cubic-bezier(0.16, 1, 0.3, 1),
+                  transform 0.7s cubic-bezier(0.16, 1, 0.3, 1);
+    }
+    .reveal.visible { opacity: 1; transform: translateY(0); }
+
+    /* Stagger children reveal */
+    .stagger-reveal > * {
+      opacity: 0; transform: translateY(24px);
+      transition: opacity 0.5s cubic-bezier(0.16, 1, 0.3, 1),
+                  transform 0.5s cubic-bezier(0.16, 1, 0.3, 1);
+    }
+    .stagger-reveal.visible > *:nth-child(1) { transition-delay: 0s; opacity: 1; transform: translateY(0); }
+    .stagger-reveal.visible > *:nth-child(2) { transition-delay: 0.1s; opacity: 1; transform: translateY(0); }
+    .stagger-reveal.visible > *:nth-child(3) { transition-delay: 0.2s; opacity: 1; transform: translateY(0); }
+    .stagger-reveal.visible > *:nth-child(4) { transition-delay: 0.3s; opacity: 1; transform: translateY(0); }
+    .stagger-reveal.visible > *:nth-child(5) { transition-delay: 0.35s; opacity: 1; transform: translateY(0); }
+    .stagger-reveal.visible > *:nth-child(6) { transition-delay: 0.4s; opacity: 1; transform: translateY(0); }
+
+    /* Table row hover */
+    tbody tr { transition: background 0.2s; }
+    tbody tr:hover { background: rgba(52,152,219,0.06); }
+
+    /* Nav link underline animation */
+    .nav-links a {
+      position: relative;
+    }
+    .nav-links a::after {
+      content: '';
+      position: absolute; bottom: -4px; left: 0;
+      width: 0; height: 2px;
+      background: linear-gradient(90deg, #3498DB, #2ECC71);
+      border-radius: 1px;
+      transition: width 0.3s ease;
+    }
+    .nav-links a:hover::after { width: 100%; }
+
+    /* Stats icon float delay */
+    .stat:nth-child(1) .stat-icon { animation: floatIcon 4s ease-in-out infinite; }
+    .stat:nth-child(2) .stat-icon { animation: floatIcon 4s ease-in-out infinite; animation-delay: -1.3s; }
+    .stat:nth-child(3) .stat-icon { animation: floatIcon 4s ease-in-out infinite; animation-delay: -2.6s; }
+  </style>
+</head>
+<body>
+
+  <!-- Animated background orbs -->
+  <div class="orbs">
+    <div class="orb"></div><div class="orb"></div><div class="orb"></div><div class="orb"></div>
+  </div>
+
+  <!-- Navigation -->
+  <nav>
+    <div class="nav-inner">
+      <a href="#" class="nav-logo">
+        <img src="https://raw.githubusercontent.com/kai3316/clipsync/master/assets/icon.svg" alt="">
+        <span>ClipSync</span>
+      </a>
+      <ul class="nav-links">
+        <li><a href="#features">Features</a></li>
+        <li><a href="#web-companion">Web Companion</a></li>
+        <li><a href="#security">Security</a></li>
+        <li><a href="#how-it-works">How It Works</a></li>
+        <li><a href="#download">Download</a></li>
+      </ul>
+      <div class="lang-switch">
+        <a href="index_en.html" class="active">EN</a>
+        <a href="index.html">中文</a>
+      </div>
+      <a href="https://github.com/kai3316/clipsync" class="nav-cta">View on GitHub</a>
+      <button class="hamburger" aria-label="Menu" onclick="document.querySelector('.mobile-menu').classList.toggle('open');this.classList.toggle('open')">
+        <span></span><span></span><span></span>
+      </button>
+    </div>
+    <div class="mobile-menu">
+      <a href="#features" onclick="document.querySelector('.mobile-menu').classList.remove('open');document.querySelector('.hamburger').classList.remove('open')">Features</a>
+      <a href="#web-companion" onclick="document.querySelector('.mobile-menu').classList.remove('open');document.querySelector('.hamburger').classList.remove('open')">Web Companion</a>
+      <a href="#security" onclick="document.querySelector('.mobile-menu').classList.remove('open');document.querySelector('.hamburger').classList.remove('open')">Security</a>
+      <a href="#how-it-works" onclick="document.querySelector('.mobile-menu').classList.remove('open');document.querySelector('.hamburger').classList.remove('open')">How It Works</a>
+      <a href="#download" onclick="document.querySelector('.mobile-menu').classList.remove('open');document.querySelector('.hamburger').classList.remove('open')">Download</a>
+      <a href="index.html">中文</a>
+      <a href="https://github.com/kai3316/clipsync" style="color:#3498DB">View on GitHub</a>
+    </div>
+  </nav>
+
+  <!-- Hero -->
+  <section class="hero">
+    <div class="hero-inner">
+      <div class="hero-content">
+        <div class="hero-icon-wrap">
+          <img src="https://raw.githubusercontent.com/kai3316/clipsync/master/assets/icon.svg" alt="" class="hero-icon">
+        </div>
+        <div class="hero-badge">Clipboard Sync — on your LAN &amp; across the internet</div>
+        <h1>ClipSync</h1>
+        <div class="hero-underline"></div>
+        <p>Copy text, images, rich HTML, or files on one device — paste on another. Zero-config over your LAN, with optional encrypted internet sync. End-to-end encryption, no accounts, full fidelity.</p>
+        <div class="hero-buttons">
+          <a href="https://github.com/kai3316/clipsync/releases/latest" class="btn btn-primary">&#8595; Download Latest</a>
+          <a href="https://github.com/kai3316/clipsync" class="btn btn-secondary">&#8594; View Source</a>
+        </div>
+      </div>
+      <div class="hero-visual">
+        <div class="dashboard-card">
+          <div class="dash-header">
+            <div class="dash-status"><span class="dash-dot"></span> Live Sync Active</div>
+            <div class="dash-enc-badge">AES-256-GCM</div>
+          </div>
+          <div class="dash-devices">
+            <div class="dash-device">
+              <div class="dev-icon">&#128187;</div>
+              <div class="dev-name">This Device</div>
+              <div class="dev-label">Windows &middot; macOS &middot; Linux</div>
+            </div>
+            <div class="dash-device">
+              <div class="dev-icon">&#128187;</div>
+              <div class="dev-name">Peer Device</div>
+              <div class="dev-label">Connected &amp; Encrypted</div>
+            </div>
+          </div>
+          <hr class="dash-divider">
+          <div class="dash-feed-label">Recent Activity</div>
+          <div class="dash-feed-item">
+            <div class="dash-feed-icon text">&#9993;</div>
+            <div class="dash-feed-info">
+              <div class="feed-title">Meeting notes: Q3 roadmap &amp; milestones...</div>
+              <div class="feed-meta">Text &middot; from This Device</div>
+            </div>
+            <div class="dash-feed-time">just now</div>
+          </div>
+          <div class="dash-feed-item">
+            <div class="dash-feed-icon image">&#128247;</div>
+            <div class="dash-feed-info">
+              <div class="feed-title">design_mockup_v3.png (2.1 MB)</div>
+              <div class="feed-meta">Image &middot; from Peer Device</div>
+            </div>
+            <div class="dash-feed-time">2s ago</div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- Stats -->
+  <div class="stats">
+    <div class="stats-grid">
+      <div class="stat"><div class="stat-icon">&#128187;</div><div class="stat-text">Cross-platform</div><div class="stat-label">Windows &middot; macOS &middot; Linux</div></div>
+      <div class="stat"><div class="stat-icon">&#128274;</div><div class="stat-text">Dual-layer Encryption</div><div class="stat-label">TLS 1.3 + AES-256-GCM</div></div>
+      <div class="stat"><div class="stat-icon">&#9889;</div><div class="stat-text">Zero Configuration</div><div class="stat-label">Auto-discovery via mDNS</div></div>
+      <div class="stat"><div class="stat-icon">&#127760;</div><div class="stat-text">Internet Sync</div><div class="stat-label">Optional &middot; encrypted relay</div></div>
+    </div>
+  </div>
+
+  <!-- Features -->
+  <section class="features" id="features">
+    <div class="section-inner">
+      <div class="section-header reveal">
+        <div class="section-label">Features</div>
+        <h2>Everything You Need</h2>
+        <p>Clipboard sync that's fast, secure, and requires zero configuration.</p>
+      </div>
+      <div class="feature-grid stagger-reveal">
+        <div class="feature-card">
+          <div class="feature-icon blue">&#9889;</div>
+          <h3>Instant Sync</h3>
+          <p>Sub-second sync with smart de-duplication — no echoes or duplicate pastes. Every item gets a delivery confirmation; offline peers auto-queue and catch up when back.</p>
+        </div>
+        <div class="feature-card">
+          <div class="feature-icon green">&#128274;</div>
+          <h3>Dual-layer Encryption</h3>
+          <p>TLS 1.3 secures transport. AES-256-GCM encrypts every frame with per-pair derived keys, plus an optional shared password.</p>
+        </div>
+        <div class="feature-card">
+          <div class="feature-icon purple">&#128295;</div>
+          <h3>Zero Configuration</h3>
+          <p>mDNS auto-discovers peers on your LAN. No IP addresses, no setup — just run and it works.</p>
+        </div>
+        <div class="feature-card">
+          <div class="feature-icon orange">&#128196;</div>
+          <h3>All Formats Supported</h3>
+          <p>Plain text, rich HTML and RTF, spreadsheets, PNG images, and any file — preserved with full fidelity.</p>
+        </div>
+        <div class="feature-card">
+          <div class="feature-icon cyan">&#127760;</div>
+          <h3>Internet Sync</h3>
+          <p>Pair devices across networks with a 12-digit code and sync clipboard &amp; chat over the internet. The relay only sees ciphertext; channel topics are derived from both keys and unguessable.</p>
+        </div>
+        <div class="feature-card">
+          <div class="feature-icon blue">&#129302;</div>
+          <h3>AI Config Sync</h3>
+          <p>Sync AI-tool configs and skill folders — Claude Code, Codex, Cursor, Gemini — and browse, compare and pull them across devices for a one-click migration.</p>
+        </div>
+        <div class="feature-card">
+          <div class="feature-icon green">&#128172;</div>
+          <h3>Nearby Chat</h3>
+          <p>Message discovered devices with no pairing needed — and chat across the internet too. Two-sided consent and certificate fingerprints, over encrypted channels.</p>
+        </div>
+        <div class="feature-card">
+          <div class="feature-icon purple">&#128230;</div>
+          <h3>File Transfer</h3>
+          <p>Peer-to-peer files and folders (auto-zipped) over the same encrypted channel, with drag &amp; drop, retry, and a LAN speed test.</p>
+        </div>
+        <div class="feature-card">
+          <div class="feature-icon red">&#128221;</div>
+          <h3>Web Dashboard</h3>
+          <p>A real-time web panel (history, transfers, diagnostics, chat, AI config) on any LAN device — scan a QR code on your phone, installable as a PWA.</p>
+        </div>
+        <div class="feature-card">
+          <div class="feature-icon orange">&#128065;</div>
+          <h3>Privacy by Design</h3>
+          <p>LAN-only by default; internet mode goes through an encrypted relay that never sees plaintext. History encrypted at rest, optional password, instant cert-change alerts.</p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- Web Companion -->
+  <section class="web-companion" id="web-companion">
+    <div class="section-inner">
+      <div class="section-header reveal">
+        <div class="section-label">Web Companion</div>
+        <h2>Mobile Access, No App Needed</h2>
+        <p>Scan a QR code and access your clipboard, files, and even chat from any phone or browser on the same network. No install, no account.</p>
+      </div>
+      <div class="web-features stagger-reveal" style="display:grid;grid-template-columns:repeat(4,1fr);gap:1.5rem;max-width:1000px;margin:0 auto;">
+        <div class="web-feat-card" style="background:rgba(255,255,255,0.02);border:1px solid rgba(255,255,255,0.05);border-radius:16px;padding:1.75rem;text-align:center;transition:border-color 0.3s,transform 0.3s;">
+          <div style="font-size:2rem;margin-bottom:0.75rem;">&#128241;</div>
+          <h4 style="margin-bottom:0.4rem;font-size:0.95rem;">No App Needed</h4>
+          <p style="color:#71717a;font-size:0.82rem;">Open your phone browser, scan the QR code, done. Works on iOS and Android right away.</p>
+        </div>
+        <div class="web-feat-card" style="background:rgba(255,255,255,0.02);border:1px solid rgba(255,255,255,0.05);border-radius:16px;padding:1.75rem;text-align:center;transition:border-color 0.3s,transform 0.3s;">
+          <div style="font-size:2rem;margin-bottom:0.75rem;">&#128203;</div>
+          <h4 style="margin-bottom:0.4rem;font-size:0.95rem;">View &amp; Copy</h4>
+          <p style="color:#71717a;font-size:0.82rem;">Browse and paginate through clipboard history from all your devices. Tap any item to copy it, or delete uploaded files.</p>
+        </div>
+        <div class="web-feat-card" style="background:rgba(255,255,255,0.02);border:1px solid rgba(255,255,255,0.05);border-radius:16px;padding:1.75rem;text-align:center;transition:border-color 0.3s,transform 0.3s;">
+          <div style="font-size:2rem;margin-bottom:0.75rem;">&#128228;</div>
+          <h4 style="margin-bottom:0.4rem;font-size:0.95rem;">Push &amp; Transfer</h4>
+          <p style="color:#71717a;font-size:0.82rem;">Type text on your phone and push it to any connected device. Upload and download files too.</p>
+        </div>
+        <div class="web-feat-card" style="background:rgba(255,255,255,0.02);border:1px solid rgba(255,255,255,0.05);border-radius:16px;padding:1.75rem;text-align:center;transition:border-color 0.3s,transform 0.3s;">
+          <div style="font-size:2rem;margin-bottom:0.75rem;">&#127760;</div>
+          <h4 style="margin-bottom:0.4rem;font-size:0.95rem;">PWA Ready</h4>
+          <p style="color:#71717a;font-size:0.82rem;">Installable PWAs — the dashboard and each phone page install as standalone apps and keep working offline after first visit.</p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- Use Cases -->
+  <section class="usecases">
+    <div class="section-inner">
+      <div class="section-header reveal">
+        <div class="section-label">Use Cases</div>
+        <h2>Sync Everywhere, Seamlessly</h2>
+        <p>Whether you're coding, designing, or just getting work done — ClipSync fits right in.</p>
+      </div>
+      <div class="usecase-grid stagger-reveal">
+        <div class="usecase-card">
+          <div class="usecase-emoji">&#128187;</div>
+          <h4>Multi-Device Workflow</h4>
+          <p>Copy text on your desktop while writing docs. Pick up your laptop and paste instantly — no email or messaging middleman.</p>
+        </div>
+        <div class="usecase-card">
+          <div class="usecase-emoji">&#128736;</div>
+          <h4>Development & Debugging</h4>
+          <p>Copy error logs on Windows, paste into your MacBook terminal. Code snippets, API responses — sync in under a second.</p>
+        </div>
+        <div class="usecase-card">
+          <div class="usecase-emoji">&#127912;</div>
+          <h4>Creative Flow</h4>
+          <p>Copy a color palette on your desktop, paste it into a design file on your laptop. Ideas move as fast as you do.</p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- Comparison -->
+  <section class="compare">
+    <div class="section-inner">
+      <div class="section-header reveal">
+        <div class="section-label">Why ClipSync</div>
+        <h2>Not All Clipboard Tools Are Equal</h2>
+        <p>Most clipboard sync tools are cloud-dependent or plain-text only. ClipSync is different.</p>
+      </div>
+      <div class="compare-table reveal">
+        <div class="compare-row">
+          <div class="compare-cell compare-head"></div>
+          <div class="compare-cell compare-head highlight">ClipSync</div>
+          <div class="compare-cell compare-head">Cloud Tools</div>
+        </div>
+        <div class="compare-row">
+          <div class="compare-cell">Rich Text / HTML <span style="color:#71717a;font-weight:400;font-size:0.8rem;">(links, tables, formatting)</span></div>
+          <div class="compare-cell"><span class="check">&#10003;</span> Full fidelity</div>
+          <div class="compare-cell"><span class="cross">&#10007;</span> Plain text only</div>
+        </div>
+        <div class="compare-row">
+          <div class="compare-cell">Images <span style="color:#71717a;font-weight:400;font-size:0.8rem;">(PNG, any resolution)</span></div>
+          <div class="compare-cell"><span class="check">&#10003;</span> Full resolution</div>
+          <div class="compare-cell"><span class="cross">&#10007;</span> Not supported</div>
+        </div>
+        <div class="compare-row">
+          <div class="compare-cell">File Transfer</div>
+          <div class="compare-cell"><span class="check">&#10003;</span> Encrypted channel</div>
+          <div class="compare-cell"><span class="cross">&#10007;</span> Not supported</div>
+        </div>
+        <div class="compare-row">
+          <div class="compare-cell">Cross-network sync <span style="color:#71717a;font-weight:400;font-size:0.8rem;">(devices on different networks)</span></div>
+          <div class="compare-cell"><span class="check">&#10003;</span> Optional encrypted relay</div>
+          <div class="compare-cell"><span class="partial">~</span> Needs their servers</div>
+        </div>
+        <div class="compare-row">
+          <div class="compare-cell">Data Privacy</div>
+          <div class="compare-cell"><span class="check">&#10003;</span> LAN-first; relay sees ciphertext only</div>
+          <div class="compare-cell"><span class="cross">&#10007;</span> Plaintext through cloud</div>
+        </div>
+        <div class="compare-row">
+          <div class="compare-cell">Account Required</div>
+          <div class="compare-cell"><span class="check">&#10003;</span> None — just run it</div>
+          <div class="compare-cell"><span class="cross">&#10007;</span> Account + sign-in</div>
+        </div>
+        <div class="compare-row">
+          <div class="compare-cell">Cross-Platform</div>
+          <div class="compare-cell"><span class="check">&#10003;</span> Win / Mac / Linux</div>
+          <div class="compare-cell"><span class="partial">~</span> Varies by tool</div>
+        </div>
+        <div class="compare-row">
+          <div class="compare-cell">Encryption</div>
+          <div class="compare-cell"><span class="check">&#10003;</span> TLS 1.3 + AES-256-GCM</div>
+          <div class="compare-cell"><span class="partial">~</span> TLS only (if at all)</div>
+        </div>
+        <div class="compare-row">
+          <div class="compare-cell">Price</div>
+          <div class="compare-cell"><span class="check">&#10003;</span> Free & Open Source</div>
+          <div class="compare-cell"><span class="cross">&#10007;</span> Freemium / Paid</div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- Security -->
+  <section class="security" id="security">
+    <div class="section-inner">
+      <div class="section-header reveal">
+        <div class="section-label">Security</div>
+        <h2>Defense in Depth</h2>
+        <p>Multiple layers of encryption protect your data — in transit and at rest.</p>
+      </div>
+      <div class="security-cards reveal">
+        <div class="sec-card">
+          <div class="sec-card-header">
+            <div class="sec-card-icon app">&#128274;</div>
+            <span class="sec-card-badge badge-app">Application</span>
+          </div>
+          <h4>AES-256-GCM per frame</h4>
+          <ul class="sec-card-details">
+            <li>Keys derived via HKDF from Ed25519 certificates</li>
+            <li>Optional pre-shared password for extra entropy (PBKDF2, 600K iterations)</li>
+          </ul>
+        </div>
+        <div class="sec-arrow">&#10132;</div>
+        <div class="sec-card">
+          <div class="sec-card-header">
+            <div class="sec-card-icon transport">&#128273;</div>
+            <span class="sec-card-badge badge-transport">Transport</span>
+          </div>
+          <h4>TLS 1.3 + Ed25519</h4>
+          <ul class="sec-card-details">
+            <li>Self-signed X.509 certificates with Ed25519 keys</li>
+            <li>Certificate pinning — trust-on-first-use with change detection</li>
+          </ul>
+        </div>
+        <div class="sec-arrow">&#10132;</div>
+        <div class="sec-card">
+          <div class="sec-card-header">
+            <div class="sec-card-icon rest">&#128190;</div>
+            <span class="sec-card-badge badge-rest">At-Rest</span>
+          </div>
+          <h4>AES-256-GCM on disk</h4>
+          <ul class="sec-card-details">
+            <li>Encrypted config + clipboard history storage</li>
+            <li>Password stored as PBKDF2 verification token (never persisted)</li>
+          </ul>
+        </div>
+      </div>
+      <p class="sec-note reveal">Internet mode: the relay only forwards AES-256-GCM ciphertext. Channel topics are derived from both devices' keys and unguessable; each side derives its key independently, so the public relay can never decrypt anything.</p>
+    </div>
+  </section>
+
+  <!-- How It Works -->
+  <section class="how" id="how-it-works">
+    <div class="section-inner">
+      <div class="section-header reveal">
+        <div class="section-label">How It Works</div>
+        <h2>Four Simple Steps</h2>
+        <p>From discovery to sync in under a second.</p>
+      </div>
+      <div class="steps stagger-reveal">
+        <div class="step">
+          <div class="step-num">1</div>
+          <h4>Discover</h4>
+          <p>Devices find each other automatically on the LAN via mDNS/Zeroconf.</p>
+        </div>
+        <div class="step">
+          <div class="step-num">2</div>
+          <h4>Pair</h4>
+          <p>Confirm the 8-digit code on LAN, or a 12-digit internet pairing code for cross-network devices. Certificates are pinned for long-term trust.</p>
+        </div>
+        <div class="step">
+          <div class="step-num">3</div>
+          <h4>Sync</h4>
+          <p>Clipboard change detected &rarr; hash dedup &rarr; encrypt &rarr; direct LAN send; internet peers are mirrored through the encrypted relay, with dual-channel de-duplication.</p>
+        </div>
+        <div class="step">
+          <div class="step-num">4</div>
+          <h4>Trust</h4>
+          <p>Paired devices auto-reconnect and offline items queue, resending on reconnect. Cert changes are flagged immediately.</p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- Formats -->
+  <section class="formats" id="formats">
+    <div class="section-inner">
+      <div class="section-header reveal">
+        <div class="section-label">Supported Formats</div>
+        <h2>Full Fidelity Sync</h2>
+      </div>
+      <table class="reveal">
+        <thead>
+          <tr><th>Format</th><th>Type</th><th>Notes</th></tr>
+        </thead>
+        <tbody>
+          <tr><td>Plain Text</td><td><code>TEXT</code></td><td>UTF-8, full Unicode support</td></tr>
+          <tr><td>HTML</td><td><code>HTML</code></td><td>Preserves links, tables, formatting, embedded images</td></tr>
+          <tr><td>Rich Text</td><td><code>RTF</code></td><td>Microsoft Office / WordPad compatible</td></tr>
+          <tr><td>PNG Images</td><td><code>IMAGE_PNG</code></td><td>Any resolution, compressed</td></tr>
+          <tr><td>Files (transfer)</td><td><code>FILE</code></td><td>Any file type, encrypted channel, no size limit</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <!-- FAQ -->
+  <section class="faq">
+    <div class="section-inner">
+      <div class="section-header reveal">
+        <div class="section-label">FAQ</div>
+        <h2>Still have questions?</h2>
+      </div>
+      <div class="faq-list reveal">
+        <div class="faq-item">
+          <button class="faq-q" onclick="this.parentElement.classList.toggle('open')">Does ClipSync send my data through the cloud?</button>
+          <div class="faq-a">Not by default. Data transfers peer-to-peer over your LAN with TLS 1.3 and never touches a server. The optional internet mode relays through free public MQTT brokers — but they only see AES-256-GCM ciphertext on unguessable, key-derived channels, so nothing can be read.</div>
+        </div>
+        <div class="faq-item">
+          <button class="faq-q" onclick="this.parentElement.classList.toggle('open')">Can devices on different networks sync?</button>
+          <div class="faq-a">Yes. Turn on "Internet Sync" in Settings and pair the two devices with the same 12-digit code. Clipboard and chat then work across networks, fully encrypted — the public relay can never decrypt them.</div>
+        </div>
+        <div class="faq-item">
+          <button class="faq-q" onclick="this.parentElement.classList.toggle('open')">Is it cross-platform?</button>
+          <div class="faq-a">Yes. ClipSync runs on Windows, macOS, and Linux. You can copy on Windows and paste on a MacBook seamlessly — the platform doesn't matter.</div>
+        </div>
+        <div class="faq-item">
+          <button class="faq-q" onclick="this.parentElement.classList.toggle('open')">Do I need to create an account?</button>
+          <div class="faq-a">No accounts, no sign-ups, no registration. Download, run, and devices discover each other automatically via mDNS. One-time pairing with an 8-digit LAN code (or a 12-digit internet code) is all it takes.</div>
+        </div>
+        <div class="faq-item">
+          <button class="faq-q" onclick="this.parentElement.classList.toggle('open')">How secure is it? Can someone intercept my clipboard?</button>
+          <div class="faq-a">ClipSync uses dual-layer encryption: TLS 1.3 secures the transport channel, and AES-256-GCM encrypts each data frame at the application layer. Initial pairing uses an 8-digit verification code to prevent MITM attacks, followed by certificate pinning — you'll be alerted immediately if a device's identity changes.</div>
+        </div>
+        <div class="faq-item">
+          <button class="faq-q" onclick="this.parentElement.classList.toggle('open')">Is it really free?</button>
+          <div class="faq-a">Yes. ClipSync is free and open-source software under the MIT license. No ads, no paywalls, no data collection. The code is on GitHub — contributions are welcome.</div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- Download -->
+  <section class="cta" id="download">
+    <div class="section-inner">
+      <div class="section-header reveal">
+        <div class="section-label">Download</div>
+        <h2>Ready to Try?</h2>
+        <p>Download for your platform. No install needed — just run and sync.</p>
+      </div>
+      <div class="download-grid stagger-reveal">
+        <div class="download-card">
+          <div class="download-icon">&#128187;</div>
+          <h4>Windows</h4>
+          <p>Portable <code>.exe</code></p>
+          <a href="https://github.com/kai3316/clipsync/releases/latest/download/clipsync-windows.zip" class="btn btn-primary" style="width:100%;justify-content:center;">&#8595; Download</a>
+        </div>
+        <div class="download-card">
+          <div class="download-icon">&#127822;</div>
+          <h4>macOS</h4>
+          <p>Apple Silicon <code>.app</code> bundle</p>
+          <a href="https://github.com/kai3316/clipsync/releases/latest/download/clipsync-macos-arm64.zip" class="btn btn-primary" style="width:100%;justify-content:center;">&#8595; Download (Apple Silicon)</a>
+        </div>
+        <div class="download-card">
+          <div class="download-icon">&#128039;</div>
+          <h4>Linux</h4>
+          <p>Binary <code>tar.gz</code></p>
+          <a href="https://github.com/kai3316/clipsync/releases/latest/download/clipsync-linux.tar.gz" class="btn btn-primary" style="width:100%;justify-content:center;">&#8595; Download (x86_64)</a>
+          <a href="https://github.com/kai3316/clipsync/releases/latest/download/clipsync-linux-arm64.tar.gz" class="btn btn-primary" style="width:100%;justify-content:center;margin-top:0.5rem;">&#8595; Download (ARM64)</a>
+        </div>
+      </div>
+      <p style="margin-top:2rem;font-size:0.9rem;color:#71717a;">
+        Or <a href="https://github.com/kai3316/clipsync/releases/latest" style="color:#3498DB;">view all releases</a> &middot;
+        <a href="https://github.com/kai3316/clipsync#install-from-source" style="color:#3498DB;">build from source</a>
+      </p>
+    </div>
+  </section>
+
+  <!-- Footer -->
+  <footer>
+    <p>ClipSync &mdash; MIT Licensed. Built with Python, customtkinter, and love.</p>
+    <p style="margin-top:0.5rem;">
+      <a href="https://github.com/kai3316/clipsync">GitHub</a> &middot;
+      <a href="https://github.com/kai3316/clipsync/releases">Releases</a> &middot;
+      <a href="https://github.com/kai3316/clipsync/blob/master/README.md">中文文档</a>
+    </p>
+  </footer>
+
+<script>
+  const observer = new IntersectionObserver((entries) => {
+    entries.forEach(entry => {
+      if (entry.isIntersecting) {
+        entry.target.classList.add('visible');
+      }
+    });
+  }, { threshold: 0.15, rootMargin: '0px 0px -50px 0px' });
+
+  document.querySelectorAll('.reveal, .stagger-reveal').forEach(el => observer.observe(el));
+</script>
+
+</body>
+</html>
