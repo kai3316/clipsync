@@ -551,6 +551,32 @@ var ClipsyncAPI = (function () {
     },
 
     /**
+     * Rename (alias) an internet-paired peer. The alias takes display
+     * priority over the device's own reported name in every UI.
+     * @param {string} peerId - The internet peer's device id
+     * @param {string} name   - New alias
+     * @returns {Promise<{ok: boolean}>}
+     */
+    renameInternetPair: function (peerId, name) {
+      return this._fetch('POST', '/api/internetpair/rename', {
+        peer_id: peerId,
+        name: name,
+      });
+    },
+
+    /**
+     * Unpair an internet-paired peer on THIS side only. The pairing is not
+     * symmetric — the other side must unpair independently.
+     * @param {string} peerId - The internet peer's device id
+     * @returns {Promise<{ok: boolean}>}
+     */
+    unpairInternetPair: function (peerId) {
+      return this._fetch('POST', '/api/internetpair/unpair', {
+        peer_id: peerId,
+      });
+    },
+
+    /**
      * Pause clipboard sync for a number of minutes (auto-resumes).
      * @param {number} minutes - 1..1440
      * @returns {Promise<{ok: boolean, minutes: number, until: number}>}

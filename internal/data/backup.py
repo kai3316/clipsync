@@ -203,6 +203,13 @@ def create_backup(
                 k: v for k, v in (cfg.netpair_secrets or {}).items()
                 if isinstance(k, str) and isinstance(v, str)
             },
+            # Round 15: user-assigned per-peer aliases ride along so a
+            # backup→restore cycle keeps the friendly names users set on the
+            # device page (strictly local — never sent to the peer).
+            "netpair_aliases": {
+                k: v for k, v in (cfg.netpair_aliases or {}).items()
+                if isinstance(k, str) and isinstance(v, str)
+            },
             "ai_config_paths": list(cfg.ai_config_paths),
             "history_max_entries": cfg.history_max_entries,
             "history_max_age_days": cfg.history_max_age_days,
@@ -473,6 +480,7 @@ _APPLY_SCHEMA: dict[str, tuple] = {
     "relay_secret": ("str",),
     "peer_relay_secrets": ("strdict",),
     "netpair_secrets": ("strdict",),
+    "netpair_aliases": ("strdict",),
     "ai_config_paths": ("strlist_nonnull",),
     "history_max_entries": ("int", 1, 100000),
     "history_max_age_days": ("float",),

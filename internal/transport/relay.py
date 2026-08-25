@@ -361,7 +361,13 @@ class RelayTransport:
         self.start()
 
     def refresh_channels(self) -> None:
-        """New enrollment arrived — resubscribe without dropping the link."""
+        """Channel set changed — resubscribe without dropping the link.
+
+        Subscribes any topic that is not yet subscribed AND unsubscribes any
+        topic that is no longer in the current channel set (e.g. an internet
+        pair was removed), so a stale subscription cannot keep delivering
+        frames from an unpaired peer.
+        """
         with self._lock:
             client = self._client
         if client is None:
@@ -375,6 +381,14 @@ class RelayTransport:
                 self._subscribed.add(topic)
             except Exception:
                 logger.debug("subscribe %s failed", topic, exc_info=True)
+        for topic in list(self._subscribed):
+            if topic in channels:
+                continue
+            try:
+                client.unsubscribe(topic)
+            except Exception:
+                logger.debug("unsubscribe %s failed", topic, exc_info=True)
+            self._subscribed.discard(topic)
 
     def publish(self, frame_bytes: bytes, topic: str, key: bytes) -> bool:
         """Publish one encoded frame to ``topic``. False if currently offline."""

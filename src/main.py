@@ -80,6 +80,10 @@ logger = logging.getLogger(__name__)
 
 _console_handler: logging.StreamHandler | None = None
 
+# A netpair peer counts as "online" when a frame arrived within this window.
+# Roughly a keepalive horizon — nothing is polled, so it is the only signal.
+NETPAIR_ONLINE_WINDOW = 90.0
+
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # Module-level helpers (must be picklable for macOS multiprocessing)
@@ -518,6 +522,11 @@ class Application:
         # learned from the hello payload (netpair peers are never in cfg.peers).
         self._netpair_pending: dict[str, str] = {}
         self._netpair_names: dict[str, str] = {}
+        # Round 15: peer device_id -> epoch-seconds timestamp of the last frame
+        # received from that internet-paired peer (any netpair_hello or
+        # mirrored clipboard frame).  Runtime-only — the device page derives
+        # "online" from `now - last_seen <= 90s`; nothing here is persisted.
+        self._netpair_last_seen: dict[str, float] = {}
         # Timestamp of the last silent auto-update check (throttled to ~6h).
         self._last_auto_update_check = 0.0
 
@@ -7270,7 +7279,7 @@ class Application:
             return "connecting"
 
     def _on_relay_frame(self, frame_bytes: bytes,
-                        topic: str | None = None) -> None:
+                        topic: str | None = None, *, now: float | None = None) -> None:
         """A clipboard frame arrived through the public relay.
 
         It is a standard ClipSync frame — decode and feed the very same
@@ -7295,6 +7304,12 @@ class Application:
         if source and source == self.cfg.device_id:
             logger.debug("Dropping self-originated relay frame")
             return
+        # Round 15: any frame from a confirmed internet-paired peer counts as
+        # "seen" (both the netpair_hello handshake and mirrored clipboard
+        # frames), so the device page can show online / last-synced state.
+        if source and source in (getattr(self.cfg, "netpair_secrets", {}) or {}):
+            getattr(self, "_netpair_last_seen", {})[source] = (
+                time.time() if now is None else now)
         if getattr(sync_msg, "msg_type", "") == "netpair_hello":
             try:
                 self._handle_netpair_hello(
@@ -7460,18 +7475,95 @@ class Application:
         self._send_netpair_hello(peer_id, secret)
         return {"ok": True, "peer_id": peer_id}, 200
 
-    def _netpair_status(self) -> tuple[dict, int]:
-        """Current netpair state for late-joining web clients (REST)."""
+    def _netpair_status(self, now: float | None = None) -> tuple[dict, int]:
+        """Current netpair state for late-joining web clients (REST).
+
+        Round 15 extension — per peer: ``name`` = the peer's device name
+        (unknown → ""), ``alias`` = this device's user-set memo ("" = unset,
+        the web UI falls back to ``name``), ``online`` = a frame was received
+        within the last ``NETPAIR_ONLINE_WINDOW`` seconds, ``last_seen`` = the
+        epoch-seconds of that last frame (or None), ``paired`` = True (this
+        list only contains confirmed internet pairs).
+        """
         code = next(iter(getattr(self, "_netpair_pending", {})), None)
+        if now is None:
+            now = time.time()
         peers = []
         for pid in (getattr(self.cfg, "netpair_secrets", {}) or {}):
+            alias = (getattr(self.cfg, "netpair_aliases", {}) or {}).get(pid, "")
             name = getattr(self, "_netpair_names", {}).get(pid, "")
-            peer = self.cfg.peers.get(pid)
-            if not name and peer is not None:
-                name = getattr(peer, "device_name", "")
-            peers.append({"peer_id": pid, "name": name})
+            if not name:
+                peer = self.cfg.peers.get(pid)
+                if peer is not None:
+                    name = getattr(peer, "device_name", "")
+            last_seen = getattr(self, "_netpair_last_seen", {}).get(pid)
+            online = (last_seen is not None
+                      and (now - last_seen) <= NETPAIR_ONLINE_WINDOW)
+            peers.append({
+                "peer_id": pid,
+                "name": name,
+                "alias": alias,
+                "online": bool(online),
+                "last_seen": last_seen,
+                "paired": True,
+            })
         peers.sort(key=lambda p: p["peer_id"])
         return {"generated_code": code, "peers": peers}, 200
+
+    def _netpair_rename(self, peer_id: str,
+                        name: str | None = None) -> tuple[dict, int]:
+        """Set or clear this device's alias for an internet-paired peer (REST).
+
+        Local-only: the peer is never told.  ``name`` empty (or whitespace)
+        clears the alias.  400 when the peer is not a confirmed internet pair
+        or the alias value is not a plain string (or exceeds 120 chars).
+        """
+        secrets = getattr(self.cfg, "netpair_secrets", {}) or {}
+        if not isinstance(peer_id, str) or peer_id not in secrets:
+            return {"ok": False, "error": "unknown peer"}, 400
+        if not isinstance(name, str):
+            return {"ok": False, "error": "invalid name"}, 400
+        name = name.strip()
+        if len(name) > 120:
+            return {"ok": False, "error": "name too long"}, 400
+        aliases = getattr(self.cfg, "netpair_aliases", {})
+        if name:
+            aliases[peer_id] = name
+        else:
+            aliases.pop(peer_id, None)
+        try:
+            self._save_cfg_and_peers()
+        except Exception:
+            logger.debug("Failed persisting netpair alias", exc_info=True)
+        return {"ok": True}, 200
+
+    def _netpair_unpair(self, peer_id: str) -> tuple[dict, int]:
+        """Unpair this device from an internet-paired peer (REST).
+
+        Removes the shared secret + alias + runtime name/last-seen state, then
+        refreshes the relay channels so the peer's topic is no longer
+        subscribed.  If the peer was ALSO a LAN-paired cfg.peers member (same
+        device id), the LAN relationship is left untouched — only the internet
+        pairing is severed.  This is a one-sided break: the remote side keeps
+        its copy of the secret until it unpairs itself.
+        """
+        secrets = getattr(self.cfg, "netpair_secrets", {}) or {}
+        if not isinstance(peer_id, str) or peer_id not in secrets:
+            return {"ok": False, "error": "unknown peer"}, 400
+        secrets.pop(peer_id, None)
+        (getattr(self.cfg, "netpair_aliases", {}) or {}).pop(peer_id, None)
+        self._netpair_names.pop(peer_id, None)
+        getattr(self, "_netpair_last_seen", {}).pop(peer_id, None)
+        try:
+            self._save_cfg_and_peers()
+        except Exception:
+            logger.debug("Failed persisting netpair unpair", exc_info=True)
+        if self._relay is not None:
+            try:
+                self._relay.refresh_channels()
+            except Exception:
+                logger.debug("netpair unpair refresh failed", exc_info=True)
+        return {"ok": True}, 200
 
     def _send_netpair_hello(self, target_peer_id: str, secret: str) -> None:
         """Publish a netpair_hello frame on the secret's channel."""
@@ -7547,6 +7639,12 @@ class Application:
             self._send_netpair_hello(peer_id, secret)
         else:
             return  # not a reply to our code / not for us — ignore
+        # A confirmed handshake is itself proof the peer is alive: mark it seen
+        # so the device page shows online immediately after pairing (the source
+        # may not be in netpair_secrets at the _on_relay_frame check above — the
+        # generator only adds the enterer's real id here).
+        if peer_id:
+            getattr(self, "_netpair_last_seen", {})[peer_id] = time.time()
         try:
             self._save_cfg_and_peers()
         except Exception:

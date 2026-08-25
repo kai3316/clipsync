@@ -12,7 +12,18 @@ src/main.py at startup — no dispatch-signature threading needed):
         {"ok": true, "peer_id": "..."}  (400 on an invalid / typo'd code).
 
   GET  /api/internetpair/status
-        {"generated_code": "..."?, "peers": [{"peer_id", "name"}]}
+        {"generated_code": "..."?, "peers": [{"peer_id", "name", "alias",
+          "online", "last_seen", "paired"}]}
+        (Round 15: name = peer device name, alias = our memo, online = frame
+         seen within the last 90s, last_seen = epoch seconds or null.)
+
+  POST /api/internetpair/rename   {"peer_id", "name"}
+        Set (or clear, when name is empty) this device's alias for a paired
+        peer: {"ok": true}  (400 on unknown peer / invalid name).
+
+  POST /api/internetpair/unpair   {"peer_id"}
+        One-sided unpair: {"ok": true}  (400 on unknown peer).  Removes the
+        secret + alias + state and unsubscribes the relay channel.
 
 The WebSocket manager broadcasts ``netpair_peer`` {peer_id, name,
 status: "paired"} from the host once a code handshake confirms identity.
@@ -53,6 +64,11 @@ def handle(method: str, path: str, query_params, body) -> tuple[dict, int]:
             return _mgr._netpair_enter(_body_dict(body).get("code", ""))
         if path == "/api/internetpair/status" and method == "GET":
             return _mgr._netpair_status()
+        if path == "/api/internetpair/rename" and method == "POST":
+            b = _body_dict(body)
+            return _mgr._netpair_rename(b.get("peer_id", ""), b.get("name"))
+        if path == "/api/internetpair/unpair" and method == "POST":
+            return _mgr._netpair_unpair(_body_dict(body).get("peer_id", ""))
         return {"ok": False, "error": "not found"}, 404
     except Exception:
         logger.exception("internetpair handler failed: %s %s", method, path)

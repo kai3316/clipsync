@@ -5652,6 +5652,258 @@
       border: 1px dashed var(--clipsync-border-strong);
     }
 
+    /* Internet pairing management on the Devices page (round 15) */
+    .netpair-overview {
+      display: flex;
+      align-items: center;
+      gap: var(--clipsync-space-2);
+      font-size: 0.82rem;
+      color: var(--clipsync-fg-muted);
+      margin: var(--clipsync-space-1) 0 var(--clipsync-space-2);
+    }
+
+    .netpair-overview__dot {
+      width: 10px;
+      height: 10px;
+      border-radius: 50%;
+      display: inline-block;
+      flex-shrink: 0;
+    }
+
+    .netpair-overview__state {
+      font-weight: 600;
+      color: var(--clipsync-fg);
+    }
+
+    .netpair-overview__count {
+      margin-left: auto;
+    }
+
+    .netpair-loading {
+      font-size: 0.8rem;
+      color: var(--clipsync-fg-muted);
+      padding: var(--clipsync-space-2) 0;
+    }
+
+    .netpair-empty {
+      padding: var(--clipsync-space-4);
+      margin-bottom: var(--clipsync-space-3);
+    }
+
+    .netpair-empty__title {
+      font-size: 0.85rem;
+      font-weight: 600;
+      color: var(--clipsync-fg);
+      margin-bottom: var(--clipsync-space-2);
+    }
+
+    .netpair-steps {
+      margin: 0;
+      padding: 0;
+      list-style: none;
+      display: flex;
+      flex-direction: column;
+      gap: var(--clipsync-space-2);
+    }
+
+    .netpair-step {
+      display: flex;
+      align-items: flex-start;
+      gap: var(--clipsync-space-2);
+      font-size: 0.82rem;
+      line-height: 1.5;
+      color: var(--clipsync-fg);
+    }
+
+    .netpair-step__icon {
+      flex-shrink: 0;
+      color: var(--clipsync-accent);
+      font-weight: 700;
+    }
+
+    .netpair-step__link {
+      margin-left: auto;
+      flex-shrink: 0;
+      white-space: nowrap;
+    }
+
+    .netpair-generate {
+      margin: var(--clipsync-space-2) 0;
+    }
+
+    .netpair-hint {
+      display: block;
+      font-size: 0.75rem;
+      color: var(--clipsync-fg-muted);
+      margin-top: var(--clipsync-space-1);
+    }
+
+    .netpair-enter {
+      margin: var(--clipsync-space-2) 0;
+    }
+
+    .netpair-enter__row {
+      display: flex;
+      gap: var(--clipsync-space-2);
+    }
+
+    .netpair-enter__input {
+      flex: 1;
+      padding: 6px 10px;
+      font-family: var(--clipsync-font-mono);
+      font-size: 0.9rem;
+      letter-spacing: 0.08em;
+      background: var(--clipsync-panel);
+      border: 1px solid var(--clipsync-border-strong);
+      border-radius: var(--clipsync-radius-sm);
+      color: var(--clipsync-fg);
+      outline: none;
+      min-width: 0;
+    }
+
+    .netpair-enter__input:focus {
+      border-color: var(--clipsync-accent);
+    }
+
+    .netpair-error {
+      display: block;
+      font-size: 0.78rem;
+      color: var(--clipsync-danger);
+      margin-top: var(--clipsync-space-1);
+    }
+
+    .netpair-peers {
+      margin-top: var(--clipsync-space-3);
+    }
+
+    .netpair-peers__title {
+      font-size: 0.75rem;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.06em;
+      color: var(--clipsync-fg-muted);
+      margin-bottom: var(--clipsync-space-2);
+    }
+
+    .netpair-peer {
+      display: flex;
+      align-items: center;
+      gap: var(--clipsync-space-3);
+      padding: var(--clipsync-space-2) var(--clipsync-space-3);
+      margin-bottom: var(--clipsync-space-2);
+    }
+
+    .netpair-peer__info {
+      flex: 1;
+      min-width: 0;
+      display: flex;
+      flex-direction: column;
+      gap: 2px;
+    }
+
+    .netpair-peer__name {
+      font-size: 0.85rem;
+      font-weight: 600;
+      color: var(--clipsync-fg);
+    }
+
+    .netpair-peer__id {
+      font-size: 0.7rem;
+      color: var(--clipsync-fg-muted);
+    }
+
+    .netpair-peer__status {
+      display: flex;
+      align-items: center;
+      gap: var(--clipsync-space-1);
+      flex-shrink: 0;
+      font-size: 0.75rem;
+      color: var(--clipsync-fg-muted);
+    }
+
+    .netpair-peer__dot {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      flex-shrink: 0;
+    }
+
+    .netpair-peer__dot--online {
+      background: var(--clipsync-success);
+      box-shadow: 0 0 6px var(--clipsync-success-glow);
+    }
+
+    .netpair-peer__dot--offline {
+      background: var(--clipsync-fg-subtle);
+    }
+
+    .netpair-peer__state {
+      white-space: nowrap;
+    }
+
+    .netpair-peer__last-seen {
+      white-space: nowrap;
+    }
+
+    .netpair-peer__actions {
+      display: flex;
+      gap: var(--clipsync-space-1);
+      flex-shrink: 0;
+    }
+
+    /* Internet badge overlay on LAN device cards + the local-device badge.
+       A LAN card that is ALSO an internet-paired peer gets a 🌐 corner badge
+       (green when that peer's relay channel is online, grey otherwise). */
+    .device-internet-wrap {
+      position: relative;
+    }
+
+    .netpair-card-badge {
+      position: absolute;
+      top: 6px;
+      right: 8px;
+      z-index: 2;
+      display: inline-flex;
+      align-items: center;
+      gap: 3px;
+      padding: 0 6px;
+      font-size: 9px;
+      font-weight: 700;
+      line-height: 16px;
+      border-radius: 999px;
+      background: var(--clipsync-panel-2);
+      border: 1px solid var(--clipsync-border-strong);
+      color: var(--clipsync-fg-muted);
+      white-space: nowrap;
+      cursor: default;
+    }
+
+    .netpair-card-badge--online {
+      color: var(--clipsync-success);
+      border-color: var(--clipsync-success-glow);
+    }
+
+    .netpair-card-badge--offline {
+      color: var(--clipsync-fg-muted);
+      border-color: var(--clipsync-border-strong);
+    }
+
+    .netpair-local-badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 3px;
+      margin-left: var(--clipsync-space-2);
+      padding: 0 6px;
+      font-size: 9px;
+      font-weight: 700;
+      line-height: 16px;
+      border-radius: 999px;
+      color: var(--clipsync-success);
+      border: 1px solid var(--clipsync-success-glow);
+      background: var(--clipsync-panel-2);
+      white-space: nowrap;
+    }
+
     /* Toggle switches */
     .settings-toggle-row {
       display: flex;

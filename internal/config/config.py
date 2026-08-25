@@ -182,6 +182,10 @@ class Config:
     # peer_relay_secrets, no prior LAN pairing is required — the code is the
     # bootstrap.
     netpair_secrets: dict[str, str] = field(default_factory=dict)
+    # Round 15: user-assigned friendly alias per internet-paired peer (peer
+    # device_id → alias).  Local-only view — the peer never learns it.  Empty /
+    # missing entry = no alias (the web UI falls back to the device name).
+    netpair_aliases: dict[str, str] = field(default_factory=dict)
 
     # AI-config sync (Round 12): watch-list root directories whose AI tool
     # config files (CLAUDE.md, memory notes, skills/, .mcp.json, ...) are
@@ -313,6 +317,7 @@ _FIELD_RULES: dict[str, tuple] = {
     "relay_secret": ("str",),
     "peer_relay_secrets": ("strdict",),
     "netpair_secrets": ("strdict",),
+    "netpair_aliases": ("strdict",),
     "ai_config_paths": ("strlist_nonnull",),
 }
 
@@ -440,6 +445,7 @@ def load() -> Config:
                 "internet_sync_enabled", "relay_brokers",
                 "relay_secret", "peer_relay_secrets",
                 "netpair_secrets",
+                "netpair_aliases",
                 "ai_config_paths",
             ):
                 if key in data:
@@ -594,6 +600,7 @@ def save(cfg: Config, enc_mgr: "EncryptionManager | None" = None):
             "relay_secret": cfg.relay_secret,
             "peer_relay_secrets": cfg.peer_relay_secrets,
             "netpair_secrets": cfg.netpair_secrets,
+            "netpair_aliases": cfg.netpair_aliases,
             "ai_config_paths": cfg.ai_config_paths,
             "peers": [
                 {

@@ -173,10 +173,13 @@
     relayState: '',
 
     /* ═══════════════════════════════════════════════════════════════
-       Internet pairing (round 14)
+       Internet pairing (round 14/15)
        internetPairPeers mirrors GET /api/internetpair/status:
-       [{ peer_id, name, status }] — kept live by the WS `netpair_peer`
-       event and refreshed after enter/generate.
+       [{ peer_id, name, alias, online, last_seen, paired, status }] — kept
+       live by the WS `netpair_peer` event and refreshed after enter/generate/
+       rename/unpair. `alias` is a user-chosen display name (empty = fall back
+       to `name`); `last_seen` is an epoch-seconds timestamp or null; `online`
+       is a boolean (this device has a live relay channel to the peer).
        internetPairCode is the code THIS device generated ('' = none).
        ═══════════════════════════════════════════════════════════════ */
     internetPairPeers: [],
@@ -1778,14 +1781,19 @@
               list.push({
                 peer_id: String(p.peer_id),
                 name: p.name || String(p.peer_id),
+                alias: p.alias || '',
+                online: !!p.online,
+                last_seen: (typeof p.last_seen === 'number') ? p.last_seen : null,
+                paired: p.paired !== false,
                 status: p.status || 'paired',
               });
             }
             self.internetPairPeers = list;
           }
-          if (res && res.generated_code) {
-            self.internetPairCode = String(res.generated_code);
-          }
+          // generated_code may be null when no code is pending — clear a stale
+          // one so the big code block disappears once a pairing confirms.
+          self.internetPairCode = (res && res.generated_code)
+            ? String(res.generated_code) : '';
           return true;
         })
         .catch(function () {
@@ -1799,23 +1807,72 @@
     },
 
     /**
-     * Fold one WS `netpair_peer` event (status:"paired") into the paired list
-     * and toast it. Only called by ws.js after validating the vocabulary.
-     * @param {{peer_id: string, name: string, status: string}} data
+     * Fold one WS `netpair_peer` event into the paired list.
+     * status:"paired" upserts the peer (with a toast); status:"unpaired"
+     * removes it (the acting side already confirmed, no toast needed).
+     * Only called by ws.js after validating the vocabulary.
+     * @param {{peer_id: string, name: string, alias?: string, status: string}} data
      */
     applyNetpairPeer: function (data) {
       var pid = (data.peer_id !== undefined && data.peer_id !== null)
         ? String(data.peer_id) : '';
       if (!pid) return;
+      if (data.status === 'unpaired') {
+        this.removeInternetPeer(pid);
+        return;
+      }
       var name = data.name || pid;
       // Upsert: drop any prior row for the same peer, then append the fresh one.
       var list = this.internetPairPeers.filter(function (p) {
         return p.peer_id !== pid;
       });
-      list.push({ peer_id: pid, name: name, status: 'paired' });
+      list.push({
+        peer_id: pid,
+        name: name,
+        alias: data.alias || '',
+        online: !!data.online,
+        last_seen: (typeof data.last_seen === 'number') ? data.last_seen : null,
+        paired: true,
+        status: 'paired',
+      });
       this.internetPairPeers = list;
       this.showToast(t('settings_window.netpair_paired_toast', { name: name }),
         3000, 'success');
+    },
+
+    /**
+     * Remove one internet-paired peer from the list (after a local unpair, or
+     * a WS `netpair_peer` status:"unpaired" event). No-op when absent.
+     * @param {string} peerId
+     */
+    removeInternetPeer: function (peerId) {
+      var pid = String(peerId);
+      this.internetPairPeers = this.internetPairPeers.filter(function (p) {
+        return String(p.peer_id) !== pid;
+      });
+    },
+
+    /**
+     * Update an internet-paired peer's display name/alias locally after a
+     * successful rename so the list reflects the change immediately.
+     * @param {string} peerId
+     * @param {string} name
+     */
+    setInternetPeerName: function (peerId, name) {
+      var pid = String(peerId);
+      var next = [];
+      for (var i = 0; i < this.internetPairPeers.length; i++) {
+        var p = this.internetPairPeers[i];
+        if (String(p.peer_id) === pid) {
+          next.push(Object.assign({}, p, {
+            name: name || p.name,
+            alias: name || p.alias,
+          }));
+        } else {
+          next.push(p);
+        }
+      }
+      this.internetPairPeers = next;
     },
 
     /**

@@ -5,6 +5,12 @@ All notable changes to ClipSync are documented in this file.
 ## [Unreleased]
 
 ### Internet sync
+- **Internet pairing moved into the Devices page** as a first-class device-management section (no longer buried in Settings → Network): a numbered guide, generate/copy/regenerate the pairing code, type-to-pair with inline errors, and a per-device list with **rename-to-alias** (persisted), **online / last-synced status**, and **unpair** (single-sided, LAN pairing unaffected).
+- **Internet-presence badges everywhere a device appears**: the local device shows a 🌐 "internet online" badge when the relay is up, and any LAN device that is also internet-paired carries a 🌐 badge (online/offline). One device card, both reachability indicators.
+- The relay now **unsubscribes** channels on unpair/refresh — an unpaired peer can no longer keep delivering frames because its topic stayed subscribed.
+- Settings → Network keeps just the toggle and live relay status, with a link to pairing management on the Devices page.
+
+### Internet sync
 - **Internet pairing code — two devices that have never shared a network can now pair over the internet.** One side generates a 12-character code (`XXXX-XXXX-XXXX`), the other types it in; both derive a private channel from it directly, so the old "must have met on the LAN first" limitation is gone. The code carries a device tag plus a checksum (typos fail loudly), and the real device identity is confirmed over the channel before the pair is stored.
 - **The web settings section is now a guided flow**: three numbered steps (switch on / generate a code / enter it), an actionable message instead of a bare relay error ("can't reach the public relay — check your network, or update the app"), and a "pair a device" button whenever internet sync is on with no paired device yet.
 
