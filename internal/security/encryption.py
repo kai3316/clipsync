@@ -22,6 +22,9 @@ _TAG_LEN = 16    # AES-GCM tag is 16 bytes
 _AES_KEY_LEN = 32
 _PBKDF2_ITERATIONS = 600_000
 _PW_VERIFY_ITERATIONS = 100_000  # for password verification token
+# NOTE: intentionally NOT aligned with _PBKDF2_ITERATIONS (600k) — persisted
+# verification tokens were derived at 100k, and raising it would make every
+# existing stored token fail verification. Keep the value as-is.
 _PW_VERIFY_LEN = 32  # hex chars
 
 # Sentinels for distinguishing encrypted data from plaintext (legacy)
@@ -53,7 +56,8 @@ def make_password_hash(password: str, fingerprint: str) -> str:
 
 def verify_password(password: str, fingerprint: str, stored_hash: str) -> bool:
     """Check an entered password against a stored verification token."""
-    return make_password_hash(password, fingerprint) == stored_hash
+    computed = make_password_hash(password, fingerprint)
+    return hmac.compare_digest(computed, stored_hash)
 
 
 def _hkdf_expand(ikm: bytes, info: bytes, length: int = _AES_KEY_LEN) -> bytes:
@@ -110,7 +114,16 @@ def _compute_frame_key(my_fingerprint: str, peer_fingerprint: str, password: str
     salt = b"clipsync-frame-salt"
     if password:
         pw_key = derive_key(password, fps[0].encode("ascii"))
-        ikm = bytes(a ^ b for a, b in zip(ikm.ljust(32, b"\x00"), pw_key))
+        # Bind BOTH full fingerprints: the concatenation is far longer than 32
+        # bytes, so XOR-ing it against pw_key directly (zip-truncated to the
+        # password key's length) dropped the tail of the larger fingerprint —
+        # frame(X, Y) == frame(X, Z) whenever the first 32 bytes match. Hash
+        # the whole concatenation to a 32-byte digest first, then fold in the
+        # password key with a full-length XOR. NOTE: this changes the key for
+        # password-protected frames — paired devices must re-pair once after
+        # both upgrade to the same version.
+        fp_digest = hashlib.sha256(ikm).digest()
+        ikm = bytes(a ^ b for a, b in zip(fp_digest, pw_key))
     prk = _hkdf_extract(salt, ikm)
     return _hkdf_expand(prk, b"clipsync-frame-key", _AES_KEY_LEN)
 

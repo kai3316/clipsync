@@ -7,6 +7,7 @@ Takes (method, path, query_params, body, ...) and returns
 import json
 import logging
 import os
+import threading
 import time
 
 from internal.web.api import chat as _chat_api
@@ -47,6 +48,11 @@ from internal.web.api.transfer import get_speed_test, get_transfers, post_transf
 from internal.web.api.translate import translate_text
 
 logger = logging.getLogger(__name__)
+
+# Hard cap on how long GET /api/update/check may hold its worker thread.
+# check_for_update() can otherwise block for ~25s (3 x 8s urlopen attempts
+# + backoff) when GitHub is unreachable, pinning the settings-UI request.
+UPDATE_CHECK_WALL_BOUND = 8.0
 
 
 def _chat_tmp_dir() -> str:
@@ -421,14 +427,28 @@ def _dispatch(method, path, query_params, body, cfg, history, sync_mgr,
 
         elif path == "/api/update/check":
             # Manual check for a newer release (the auto_update_check setting
-            # only gates the silent periodic check, not this button).  Runs on
-            # this request's worker thread (ThreadingHTTPServer), never raises.
+            # only gates the silent periodic check, not this button).
+            # check_for_update can block for ~25s worst-case when GitHub is
+            # unreachable, so run it on a daemon thread and wait no longer
+            # than a hard wall-clock bound — a slow network must not pin this
+            # request's worker thread.  Never raises.
             from internal.system.updater import check_for_update
-            try:
-                result = check_for_update(timeout=8.0)
-            except Exception:
-                logger.exception("GET /api/update/check failed")
-                result = {}
+
+            result = {}
+            done = threading.Event()
+
+            def _run():
+                nonlocal result
+                try:
+                    result = check_for_update(timeout=8.0)
+                except Exception:
+                    logger.exception("GET /api/update/check failed")
+                finally:
+                    done.set()
+
+            threading.Thread(target=_run, name="web-update-check",
+                             daemon=True).start()
+            done.wait(timeout=UPDATE_CHECK_WALL_BOUND)
             if not isinstance(result, dict):
                 result = {}
             return _json_response({
@@ -551,9 +571,10 @@ def _dispatch(method, path, query_params, body, cfg, history, sync_mgr,
                 data = json.loads(body.decode("utf-8"))
             except (json.JSONDecodeError, UnicodeDecodeError):
                 return _json_response({"ok": False, "error": "invalid json"}, 400)
-            url = data.get("url", "").strip()
-            if not url:
+            url = data.get("url", "")
+            if not isinstance(url, str) or not url.strip():
                 return _json_response({"ok": False, "error": "empty url"}, 400)
+            url = url.strip()
             from internal.web.api.security import is_safe_nav_url
             if not is_safe_nav_url(url):
                 return _json_response({"ok": False, "error": "only http/https URLs are allowed"}, 400)
@@ -758,9 +779,10 @@ def _dispatch(method, path, query_params, body, cfg, history, sync_mgr,
                 req = json.loads(body.decode("utf-8"))
             except (json.JSONDecodeError, UnicodeDecodeError):
                 return _json_response({"ok": False, "error": "invalid json"}, 400)
-            text = req.get("text", "").strip()
-            if not text:
+            text = req.get("text", "")
+            if not isinstance(text, str) or not text.strip():
                 return _json_response({"ok": False, "error": "no text provided"}, 400)
+            text = text.strip()
             target = req.get("target", "en")
             source = req.get("source", "auto")
             result = translate_text(text, target, source, cfg)

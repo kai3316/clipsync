@@ -7,6 +7,7 @@ Config is stored as JSON in the user's config directory:
 
 import json
 import logging
+import math
 import os
 import platform
 import tempfile
@@ -343,6 +344,27 @@ _FIELD_RULES: dict[str, tuple] = {
     "ai_config_paths": ("strlist_nonnull",),
 }
 
+# Inclusive numeric bounds applied to numeric fields on load.  load()/restore
+# only type-check; without clamping a hand-edited config.json (or a crafted
+# backup restored into it, which coerces floats without bounds) could write
+# clipboard_poll_interval=0 → CPU busy-spin or port=70000 → OverflowError when
+# a socket binds at startup.  Bounds mirror the web settings API's
+# _RANGE_LIMITS (internal/web/api/settings.py) so load and the web UI agree;
+# port/web_port use the full 1-65535 (like backup restore) rather than the
+# API's privileged-port cut at 1024, so a valid low port is never mangled.
+_FIELD_RANGES: dict[str, tuple] = {
+    "port": (1, 65535),
+    "web_port": (1, 65535),
+    "web_history_limit": (1, 500),
+    "history_max_entries": (10, 10000),
+    # Retention window in days; 0 disables age-based pruning entirely.
+    "history_max_age_days": (0, 36500),
+    "sync_debounce": (0.05, 10.0),
+    "clipboard_poll_interval": (0.1, 60.0),
+    "max_reconnect_attempts": (0, 100),
+    "transfer_timeout": (5, 3600),
+}
+
 # Sentinel returned by _validate_field when a value must be skipped.
 _SKIP_FIELD = object()
 
@@ -363,11 +385,23 @@ def _validate_field(key: str, value: object):
     if kind == "int":
         if not isinstance(value, int) or isinstance(value, bool):
             return _SKIP_FIELD
+        limits = _FIELD_RANGES.get(key)
+        if limits is not None:
+            return max(limits[0], min(limits[1], value))
         return value
     if kind == "float":
         if not isinstance(value, (int, float)) or isinstance(value, bool):
             return _SKIP_FIELD
-        return float(value)
+        value = float(value)
+        limits = _FIELD_RANGES.get(key)
+        if limits is not None:
+            # NaN/±Infinity aren't JSON numbers in principle, but Python's
+            # json module round-trips them; reject rather than clamp so a
+            # crafted value can't poison a later sleep()/settimeout().
+            if not math.isfinite(value):
+                return _SKIP_FIELD
+            return max(limits[0], min(limits[1], value))
+        return value
     if kind == "strlist":
         if value is None:
             return None

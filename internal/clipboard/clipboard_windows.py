@@ -39,6 +39,22 @@ gdi32.DeleteEnhMetaFile.restype = ctypes.c_int
 gdi32.GetEnhMetaFileBits.argtypes = [ctypes.c_void_p, ctypes.c_uint, ctypes.c_char_p]
 gdi32.GetEnhMetaFileBits.restype = ctypes.c_uint
 
+# GDI32 bitmap functions (CF_BITMAP is an HBITMAP; pixel data is pulled out
+# via GetObjectW + GetDIBits).
+gdi32.GetObjectW.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_void_p]
+gdi32.GetObjectW.restype = ctypes.c_int
+gdi32.CreateCompatibleDC.argtypes = [ctypes.c_void_p]
+gdi32.CreateCompatibleDC.restype = ctypes.c_void_p
+gdi32.DeleteDC.argtypes = [ctypes.c_void_p]
+gdi32.DeleteDC.restype = ctypes.c_int
+gdi32.SelectObject.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+gdi32.SelectObject.restype = ctypes.c_void_p
+gdi32.GetDIBits.argtypes = [
+    ctypes.c_void_p, ctypes.c_void_p, ctypes.c_uint, ctypes.c_uint,
+    ctypes.c_void_p, ctypes.c_void_p, ctypes.c_uint,
+]
+gdi32.GetDIBits.restype = ctypes.c_int
+
 # Set up function signatures
 kernel32.GlobalAlloc.argtypes = [ctypes.c_uint, ctypes.c_size_t]
 kernel32.GlobalAlloc.restype = ctypes.c_void_p
@@ -114,6 +130,44 @@ WM_DESTROY = 0x0002
 WNDPROC = ctypes.WINFUNCTYPE(ctypes.c_longlong, ctypes.c_void_p, ctypes.c_uint, ctypes.c_ulonglong, ctypes.c_longlong)
 
 
+class _BITMAP(ctypes.Structure):
+    """GDI BITMAP structure (filled by GetObjectW on an HBITMAP)."""
+    _fields_ = [
+        ("bmType", ctypes.c_long),
+        ("bmWidth", ctypes.c_long),
+        ("bmHeight", ctypes.c_long),
+        ("bmWidthBytes", ctypes.c_long),
+        ("bmPlanes", ctypes.c_ushort),
+        ("bmBitsPixel", ctypes.c_ushort),
+        ("bmBits", ctypes.c_void_p),
+    ]
+
+
+class _BITMAPINFOHEADER(ctypes.Structure):
+    """GDI BITMAPINFOHEADER (40 bytes)."""
+    _fields_ = [
+        ("biSize", ctypes.c_uint),
+        ("biWidth", ctypes.c_long),
+        ("biHeight", ctypes.c_long),
+        ("biPlanes", ctypes.c_ushort),
+        ("biBitCount", ctypes.c_ushort),
+        ("biCompression", ctypes.c_uint),
+        ("biSizeImage", ctypes.c_uint),
+        ("biXPelsPerMeter", ctypes.c_long),
+        ("biYPelsPerMeter", ctypes.c_long),
+        ("biClrUsed", ctypes.c_uint),
+        ("biClrImportant", ctypes.c_uint),
+    ]
+
+
+class _BITMAPINFO(ctypes.Structure):
+    """GDI BITMAPINFO: header plus a scratch color-table slot."""
+    _fields_ = [
+        ("bmiHeader", _BITMAPINFOHEADER),
+        ("bmiColors", ctypes.c_uint * 1),
+    ]
+
+
 class _ClipboardReader(ClipboardReader):
     def read(self) -> ClipboardContent:
         content = ClipboardContent(timestamp=time.time())
@@ -176,6 +230,8 @@ class _ClipboardReader(ClipboardReader):
             return data
         elif fmt in (CF_DIB, CF_DIBV5):
             return self._read_dib_handle(handle)
+        elif fmt == CF_BITMAP:
+            return self._read_bitmap_handle(handle)
         elif fmt == CF_ENHMETAFILE:
             return self._read_emf_handle(handle)
         elif fmt == CF_HDROP:
@@ -298,6 +354,68 @@ class _ClipboardReader(ClipboardReader):
             logger.debug("Failed to read DIB from clipboard", exc_info=True)
             return b""
 
+    def _read_bitmap_handle(self, handle) -> bytes:
+        """Read a CF_BITMAP (an HBITMAP GDI object) into BMP file bytes.
+
+        CF_BITMAP predates CF_DIB: ``GetClipboardData(CF_BITMAP)`` returns a
+        GDI bitmap handle whose pixels are not directly readable, so the DIB
+        reader above cannot touch it.  Render the bitmap into a 32bpp BI_RGB
+        DIB with ``GetDIBits`` and wrap it in a BMP file header (same output
+        shape as ``_read_dib_handle``) so CF_BITMAP-only clips are captured
+        instead of silently lost.  Any GDI failure returns b"" — the clip is
+        skipped exactly as it was before this branch existed.
+        """
+        try:
+            bitmap = _BITMAP()
+            if not gdi32.GetObjectW(handle, ctypes.sizeof(bitmap), ctypes.byref(bitmap)):
+                return b""
+            width = bitmap.bmWidth
+            height = bitmap.bmHeight
+            if width <= 0 or height <= 0:
+                return b""
+
+            hdc = gdi32.CreateCompatibleDC(None)
+            if not hdc:
+                return b""
+            try:
+                old = gdi32.SelectObject(hdc, handle)
+                # Ask for 32bpp BI_RGB regardless of the source depth so the
+                # DIB has a predictable layout (no palette, no compression).
+                bmi = _BITMAPINFO()
+                bmi.bmiHeader.biSize = ctypes.sizeof(_BITMAPINFOHEADER)
+                bmi.bmiHeader.biWidth = width
+                bmi.bmiHeader.biHeight = height
+                bmi.bmiHeader.biPlanes = 1
+                bmi.bmiHeader.biBitCount = 32
+                bmi.bmiHeader.biCompression = 0  # BI_RGB
+                stride = ((width * 32 + 31) // 32) * 4
+                pixel_size = stride * height
+                pixel_buf = ctypes.create_string_buffer(pixel_size)
+                lines = gdi32.GetDIBits(
+                    hdc, handle, 0, height, pixel_buf,
+                    ctypes.byref(bmi), 0,  # DIB_RGB_COLORS
+                )
+                if lines == 0:
+                    return b""
+
+                bf_off_bits = 14 + ctypes.sizeof(_BITMAPINFOHEADER)
+                bf_size = bf_off_bits + pixel_size
+                buf = BytesIO()
+                buf.write(struct.pack("<HIHHI", 0x4D42, bf_size, 0, 0, bf_off_bits))
+                buf.write(ctypes.string_at(
+                    ctypes.byref(bmi.bmiHeader), ctypes.sizeof(_BITMAPINFOHEADER),
+                ))
+                buf.write(pixel_buf.raw[:pixel_size])
+
+                self._image_fmt = "bmp"
+                return buf.getvalue()
+            finally:
+                gdi32.SelectObject(hdc, old)
+                gdi32.DeleteDC(hdc)
+        except Exception:
+            logger.debug("Failed to read CF_BITMAP from clipboard", exc_info=True)
+            return b""
+
     def _read_emf_handle(self, handle) -> bytes:
         """Read EMF from global memory handle (HENHMETAFILE cast to HGLOBAL)."""
         try:
@@ -381,6 +499,8 @@ class _ClipboardReader(ClipboardReader):
             return ContentType.RTF
         elif fmt in (CF_DIB, CF_DIBV5):
             return ContentType.IMAGE_PNG
+        elif fmt == CF_BITMAP:
+            return ContentType.IMAGE_PNG
         elif fmt == CF_ENHMETAFILE:
             return ContentType.IMAGE_EMF
         elif fmt == CF_HDROP:
@@ -389,7 +509,7 @@ class _ClipboardReader(ClipboardReader):
 
 
 class _ClipboardWriter(ClipboardWriter):
-    def write(self, content: ClipboardContent):
+    def write(self, content: ClipboardContent) -> bool:
         # Serialize with the reader (see _CLIPBOARD_LOCK) and retry briefly:
         # the Win32 clipboard can only be opened by one thread at a time, and
         # another app may hold it momentarily.  Silently dropping a remote
@@ -403,7 +523,7 @@ class _ClipboardWriter(ClipboardWriter):
                 time.sleep(_OPEN_CLIPBOARD_RETRY_DELAY)
             if not opened:
                 logger.warning("OpenClipboard failed after retries — dropping remote write")
-                return
+                return False
             try:
                 user32.EmptyClipboard()
 
@@ -428,6 +548,7 @@ class _ClipboardWriter(ClipboardWriter):
                         self._set_hdrop(data)
             finally:
                 user32.CloseClipboard()
+        return True
 
     def _set_text(self, data: bytes):
         # errors="replace": a peer's TEXT bytes are not guaranteed UTF-8
@@ -444,6 +565,23 @@ class _ClipboardWriter(ClipboardWriter):
             if not user32.SetClipboardData(CF_UNICODETEXT, handle):
                 logger.warning("SetClipboardData(CF_UNICODETEXT) failed")
                 kernel32.GlobalFree(handle)
+
+        # Also offer CF_TEXT (ANSI, system code page).  Legacy 16-bit apps
+        # enumerate only CF_TEXT and paste empty text when the clipboard
+        # carries nothing but CF_UNICODETEXT.
+        try:
+            acp = kernel32.GetACP()
+            ansi_text = text.encode(f"cp{acp}", errors="replace") + b"\x00"
+        except Exception:
+            ansi_text = text.encode("latin-1", errors="replace") + b"\x00"
+        ansi_handle = kernel32.GlobalAlloc(0x0002, len(ansi_text))  # GMEM_MOVEABLE
+        if ansi_handle:
+            ptr = kernel32.GlobalLock(ansi_handle)
+            ctypes.memmove(ptr, ansi_text, len(ansi_text))
+            kernel32.GlobalUnlock(ansi_handle)
+            if not user32.SetClipboardData(CF_TEXT, ansi_handle):
+                logger.warning("SetClipboardData(CF_TEXT) failed")
+                kernel32.GlobalFree(ansi_handle)
 
     def _set_html(self, data: bytes):
         cf_html = self._build_cf_html(data)

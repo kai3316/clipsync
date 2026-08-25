@@ -61,6 +61,7 @@ def _mask_path(path: str) -> str:
 CHUNK_SIZE = 262144                    # 256 KB per chunk
 TRANSFER_TIMEOUT = 120.0               # seconds -- overall transfer deadline
 COMPLETION_WAIT_TIMEOUT = 60.0         # seconds -- wait for FILE_COMPLETE after last chunk
+RETRANSMIT_TIMEOUT = 30.0              # seconds -- receiver waits this long per retransmit round
 SPEED_TEST_CHUNKS = 20                 # number of chunks for speed test (~1.3 MB)
 MAX_HISTORY = 50                       # max completed transfers to remember
 MAX_FILE_SIZE = 2 * 1024**3            # 2 GiB -- maximum accepted file size
@@ -136,7 +137,7 @@ _WINDOWS_RESERVED_NAMES = {
 
 def _sanitize_file_name(file_name: str) -> str:
     """Strip path separators, traversal components, Windows-reserved names,
-    and trailing dots/spaces from a remote file name.
+    control characters, and trailing dots/spaces from a remote file name.
 
     A peer may send either separator style regardless of the host platform
     (a Windows peer's ``..\\..\\evil.txt`` arrives verbatim on Linux), so both
@@ -150,6 +151,12 @@ def _sanitize_file_name(file_name: str) -> str:
     if not name:
         name = "unnamed_file"
     name = name.rstrip(" .")
+    if not name:
+        name = "unnamed_file"
+    # Control characters (NUL and friends) are illegal in filenames on every
+    # platform; an embedded NUL makes os.rename raise ValueError (not OSError),
+    # which escaped the old except and leaked the .part file.
+    name = "".join(ch for ch in name if ch >= " " and ch != "\x7f")
     if not name:
         name = "unnamed_file"
     base = name.split(".")[0].upper()
@@ -1040,7 +1047,7 @@ class FileTransferManager:
             if self._on_transfer_complete is not None:
                 self._on_transfer_complete(transfer_id, True, False, "success")
 
-        except OSError as exc:
+        except (OSError, ValueError) as exc:
             logger.error("I/O error finalizing transfer %s: %s", transfer_id[:8], exc)
             if temp_fh is not None and not temp_fh.closed:
                 try:
@@ -1067,8 +1074,7 @@ class FileTransferManager:
         then re-calls finalization (which will send another ``file_chunk_ack``
         if chunks are still missing, up to 3 rounds).
         """
-        RETRANSMIT_TIMEOUT = 30.0
-
+        # RETRANSMIT_TIMEOUT is the module-level constant (same name).
         deadline = time.time() + RETRANSMIT_TIMEOUT
         send_fn = None
         while time.time() < deadline:
@@ -1296,22 +1302,31 @@ class FileTransferManager:
                 # ---- first pass: send all chunks in order (no seek needed) ----
                 for chunk_index in range(total_chunks):
                     # Pause check — wait while paused (with cancellation check)
+                    cancelled = False
                     while True:
                         with self._lock:
                             transfer = self._transfers.get(transfer_id)
                             if transfer is None:
                                 return  # removed by cancel/cleanup, which fired the callback
                             if transfer.get("cancelled"):
-                                logger.info(
-                                    "Transfer %s cancelled mid-send", transfer_id[:8],
-                                )
-                                # Once-guard so a concurrent cancel_transfer()
-                                # can't double-fire the terminal callback.
-                                self._fire_complete_once(transfer_id, False, True, "cancelled")
-                                return
+                                cancelled = True
+                                break
                             if not transfer.get("paused"):
                                 break
                         time.sleep(0.5)
+
+                    if cancelled:
+                        logger.info(
+                            "Transfer %s cancelled mid-send", transfer_id[:8],
+                        )
+                        # Fire the terminal callback OUTSIDE the lock:
+                        # _fire_complete_once re-acquires self._lock, and
+                        # threading.Lock is not re-entrant -- calling it while
+                        # the lock above is still held would self-deadlock the
+                        # whole transfer manager.  The once-guard still stops a
+                        # concurrent cancel_transfer() from double-firing.
+                        self._fire_complete_once(transfer_id, False, True, "cancelled")
+                        return
 
                     _send_one_chunk(fh, chunk_index, total_chunks, seek=False)
 
@@ -1409,7 +1424,13 @@ class FileTransferManager:
         # still catching up).  The receiver re-finalizes every ~30s and
         # re-requests the missing chunks, so keep polling _retransmit_queue
         # instead of only reading it in the fixed rounds above.
-        deadline = time.time() + COMPLETION_WAIT_TIMEOUT
+        # The receiver keeps re-finalizing and re-requesting missing chunks
+        # for up to MAX_RETRANSMIT_ROUNDS rounds of ~RETRANSMIT_TIMEOUT each
+        # (see _finalize_received_file / _retransmit_wait).  A 60s wait alone
+        # made the sender give up ~30s before the receiver's last retransmit
+        # round on a lossy link -- a one-sided false failure.  Wait out the
+        # full retransmit window so both sides agree on the outcome.
+        deadline = time.time() + COMPLETION_WAIT_TIMEOUT + MAX_RETRANSMIT_ROUNDS * RETRANSMIT_TIMEOUT
         late_rounds = 0
         while time.time() < deadline:
             with self._lock:
@@ -1684,10 +1705,34 @@ class FileTransferManager:
             with self._lock:
                 if self._speed_test:
                     self._speed_test["chunks_sent"] = i + 1
-            time.sleep(0.002)  # minimal delay between chunks
 
-        elapsed = time.time() - start
-        mbps = (total_bytes / (1024 * 1024)) / elapsed if elapsed > 0 else 0.0
+        # Measure a true round trip: the receiver echoes speed_test_result on
+        # the last chunk (see handle_speed_test_data) and handle_speed_test_result
+        # flips state to "acknowledged".  Waiting for that echo -- not local
+        # wall-clock -- is what the start_speed_test docstring promises.  The
+        # old 0.002s/chunk sleep floor also capped the report at ~125 MB/s
+        # regardless of link speed, so it is gone.  Time out so a dropped peer
+        # can't hang the thread.
+        SPEED_TEST_TIMEOUT = 30.0
+        acknowledged = False
+        deadline = time.time() + SPEED_TEST_TIMEOUT
+        while time.time() < deadline:
+            with self._lock:
+                if self._speed_test is None or self._speed_test.get("test_id") != test_id:
+                    return
+                if self._speed_test["state"] == "acknowledged":
+                    acknowledged = True
+                    break
+            time.sleep(0.05)
+
+        if acknowledged:
+            elapsed = time.time() - start
+            mbps = (total_bytes / (1024 * 1024)) / elapsed if elapsed > 0 else 0.0
+        else:
+            logger.warning(
+                "Speed test %s timed out waiting for peer echo", test_id[:8],
+            )
+            mbps = 0.0
         with self._lock:
             if self._speed_test:
                 self._speed_test["state"] = "done"

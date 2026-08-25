@@ -722,10 +722,10 @@ def _osascript_argv_cmd(script: str, *values: str) -> list[str]:
 
 
 class _ClipboardWriter(ClipboardWriter):
-    def write(self, content: ClipboardContent):
+    def write(self, content: ClipboardContent) -> bool:
         # Try atomic multi-format write via ctypes NSPasteboard bridge.
         if self._write_atomic(content):
-            return
+            return True
 
         # Fallback: write formats individually (best-effort, TEXT last).
         # Each subprocess call replaces the entire clipboard, so write
@@ -747,6 +747,7 @@ class _ClipboardWriter(ClipboardWriter):
                 self._set_files(data)
             elif fmt_type == ContentType.URL:
                 self._set_url(data)
+        return True
 
     def _write_atomic(self, content: ClipboardContent) -> bool:
         """Write all formats atomically via ctypes NSPasteboard.

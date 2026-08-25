@@ -18,8 +18,15 @@ class ClipboardWriter(ABC):
     """Write content to clipboard."""
 
     @abstractmethod
-    def write(self, content: ClipboardContent):
-        """Write content to the clipboard in the best available format."""
+    def write(self, content: ClipboardContent) -> bool:
+        """Write content to the clipboard in the best available format.
+
+        Returns True when the write was applied, False when it could not be
+        (e.g. the Win32 clipboard was held open by another app and
+        OpenClipboard failed).  Callers use the return value to decide whether
+        a remote write actually landed and should count against the receive
+        rate limit.
+        """
 
 
 def _html_to_plain_text(data: bytes) -> bytes:

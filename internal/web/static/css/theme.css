@@ -234,3 +234,10 @@
   --clipsync-shadow-lg: 0 8px 30px rgba(15, 23, 42, 0.12);
   --clipsync-shadow-glow: 0 0 18px rgba(8, 145, 178, 0.16);
 }
+
+/* Light theme: the internet-pairing switch's off-track uses --clipsync-panel-2,
+   which is too faint against the near-white card — give it a visible edge. */
+.light .netpair-switch input:not(:checked) + .netpair-switch__slider,
+[data-theme="light"] .netpair-switch input:not(:checked) + .netpair-switch__slider {
+  border: 1px solid var(--clipsync-border-strong);
+}

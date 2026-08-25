@@ -175,10 +175,10 @@ Runs quietly in the system tray with:
 
 | Platform | File | Notes |
 |----------|------|-------|
-| Windows 10/11 | `clipsync.exe` | Portable, no admin needed |
-| macOS 12+ | `clipsync.app` (zip) | Universal binary (Intel + Apple Silicon) |
-| Linux (X11/Wayland) | `clipsync` (tar.gz x86_64) | Requires `xclip` or `wl-clipboard` |
-| Linux (ARM64) | `clipsync` (tar.gz arm64) | Raspberry Pi 4/5, etc. |
+| Windows 10/11 | `clipsync-windows.zip` | Portable, no admin needed |
+| macOS 12+ | `clipsync-macos-arm64.zip` | Apple Silicon |
+| Linux (X11/Wayland) | `clipsync-linux.tar.gz` (x86_64) | Requires `xclip` or `wl-clipboard` |
+| Linux (ARM64) | `clipsync-linux-arm64.tar.gz` | Raspberry Pi 4/5, etc. |
 
 [Latest release](https://github.com/kai3316/clipsync/releases/latest) &nbsp;|&nbsp; [Changelog](CHANGELOG.md)
 
@@ -306,7 +306,7 @@ internal/
     ws.py                     #   WebSocket live push
     api/                      #   devices/history/favorites/transfer/settings/translate/security/aiconfig
     static/                   #   Web dashboard, phone pages, PWA assets
-tests/                        #   949 tests covering clipboard, codec, config, pairing, sync, file transfer, chat, web API, cross-platform
+tests/                        #   1235 tests covering clipboard, codec, config, pairing, sync, file transfer, chat, web API, cross-platform
 ```
 
 ### Data Flow

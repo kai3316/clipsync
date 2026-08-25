@@ -597,7 +597,7 @@
                   '<tbody>' +
                     '<tr v-for="row in treeRows" :key="row.key">' +
                       '<td class="aiconfig-panel__td-check">' +
-                        '<span v-if="row.isDir && row.node" class="aiconfig-panel__tree-chevron" :class="{ \'aiconfig-panel__tree-chevron--open\': expanded[row.node.key] }" @click.stop="toggleDir(row.node)">▸</span>' +
+                        '<span v-if="row.isDir && row.node" class="aiconfig-panel__tree-chevron" :class="{ \'aiconfig-panel__tree-chevron--open\': expanded[row.node.key] }" role="button" tabindex="0" :aria-label="row.label" :aria-expanded="!!expanded[row.node.key]" @click.stop="toggleDir(row.node)" @keydown.enter.space.stop.prevent="toggleDir(row.node)">▸</span>' +
                         '<span v-else class="aiconfig-panel__tree-chevron aiconfig-panel__tree-chevron--spacer"></span>' +
                         '<input v-if="!row.isDir" type="checkbox" :checked="isChecked(row.entry)" @change="toggleCheck(row.entry)" :aria-label="row.entry.rel_path">' +
                       '</td>' +
@@ -653,7 +653,7 @@
             '<div class="aiconfig-preview glass-neo">' +
               '<div class="aiconfig-preview__header">' +
                 '<code class="aiconfig-preview__path selectable">{{ preview.relPath }}</code>' +
-                '<button class="settings-dialog__close" @click="closePreview" :title="t(\'ui.close\')">' +
+                '<button class="settings-dialog__close" @click="closePreview" :title="t(\'ui.close\')" :aria-label="t(\'ui.close\')">' +
                   '<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">' +
                     '<line x1="18" y1="6" x2="6" y2="18"></line>' +
                     '<line x1="6" y1="6" x2="18" y2="18"></line>' +

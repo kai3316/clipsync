@@ -55,9 +55,9 @@
           position: 'fixed',
           left: x + 'px',
           top: y + 'px',
-          // Above the toast (z-toast=500) so a "favorited" toast can't cover
-          // the menu when it opens near the bottom of the screen.
-          zIndex: String(600),
+          // Below the modal overlay layer (z-400) so the menu never floats
+          // above a confirm/prompt dialog.
+          zIndex: String(390),
           minWidth: '200px',
         };
       },
@@ -87,6 +87,11 @@
         return cm.mode === 'chat-session' ? cm.target : null;
       },
 
+      targetChatMsg: function () {
+        var cm = this.store.contextMenu || {};
+        return cm.mode === 'chat-message' ? cm.target : null;
+      },
+
       isSessionMuted: function () {
         var s = this.targetSession;
         return !!(s && this.store.isChatMuted(s.peer_id));
@@ -110,6 +115,10 @@
       isPaired: function () {
         var t = this.targetDevice;
         return t && t.paired;
+      },
+
+      isMac: function () {
+        return /Mac/i.test(navigator.platform);
       },
     },
 
@@ -573,6 +582,14 @@
           .catch(function () { self.closeMenu(); });
       },
 
+      // Copy the device's id to the local (browser) clipboard.
+      copyDeviceId: function () {
+        var device = this.targetDevice;
+        if (!device || !device.device_id) return;
+        this.closeMenu();
+        this._copyText(String(device.device_id), this.t('history.copied'));
+      },
+
       // ── Chat session actions ────────────────────────────────────
 
       toggleSessionMute: function () {
@@ -644,6 +661,16 @@
           this.store.chatSessions.splice(idx, 1);
         }
         this.store.recalcChatUnread();
+      },
+
+      // Copy a chat message to the local (browser) clipboard.  Text bubbles
+      // carry `.text`; file cards carry only a file name, so fall back to that.
+      copyChatMsg: function () {
+        var m = this.targetChatMsg;
+        if (!m) return;
+        this.closeMenu();
+        var text = (m && m.text) ? m.text : ((m && m.file_name) || '');
+        this._copyText(text, this.t('history.copied'));
       },
 
       // ── Event handlers ────────────────────────────────────────────
@@ -796,7 +823,7 @@
           '<div class="context-menu__item" role="menuitem" tabindex="-1" :aria-disabled="!targetItem" @click="copyItem">' +
             '<span class="context-menu__item-icon">📋</span>' +
             '<span class="context-menu__item-label">{{ t(\'context.copy\') }}</span>' +
-            '<span class="context-menu__shortcut text-subtle">Ctrl+C</span>' +
+            '<span class="context-menu__shortcut text-subtle">{{ isMac ? \'⌘C\' : \'Ctrl+C\' }}</span>' +
           '</div>' +
           '<div class="context-menu__item" role="menuitem" tabindex="-1" :aria-disabled="!targetItem || targetItem.entry_id === undefined || targetItem.entry_id === null" @click="togglePin">' +
             '<span class="context-menu__item-icon">📌</span>' +
@@ -817,7 +844,7 @@
           '<div class="context-menu__item context-menu__item--danger" role="menuitem" tabindex="-1" :aria-disabled="!targetItem || targetItem.entry_id === undefined || targetItem.entry_id === null" @click="deleteItem">' +
             '<span class="context-menu__item-icon">🗑</span>' +
             '<span class="context-menu__item-label">{{ t(\'context.delete\') }}</span>' +
-            '<span class="context-menu__shortcut text-subtle">Del</span>' +
+            '<span class="context-menu__shortcut text-subtle">{{ isMac ? \'⌘D\' : \'Del\' }}</span>' +
           '</div>' +
           '<div class="context-menu__divider divider"></div>' +
           '<div class="context-menu__item" role="menuitem" tabindex="-1" :aria-disabled="!targetItem" @click="viewDetails">' +
@@ -840,6 +867,10 @@
             '<span class="context-menu__item-icon">✏</span>' +
             '<span class="context-menu__item-label">{{ t(\'context.rename\') }}</span>' +
           '</div>' +
+          '<div class="context-menu__item" role="menuitem" tabindex="-1" :aria-disabled="!targetDevice" @click="copyDeviceId">' +
+            '<span class="context-menu__item-icon">📋</span>' +
+            '<span class="context-menu__item-label">{{ t(\'context.copy_device_id\') }}</span>' +
+          '</div>' +
           '<div v-if="!isLocal" class="context-menu__item context-menu__item--danger" role="menuitem" tabindex="-1" :aria-disabled="!targetDevice" @click="forgetDevice">' +
             '<span class="context-menu__item-icon">🗑</span>' +
             '<span class="context-menu__item-label">{{ t(\'context.forget_device\') }}</span>' +
@@ -860,6 +891,14 @@
           '<div class="context-menu__item context-menu__item--danger" role="menuitem" tabindex="-1" :aria-disabled="!targetSession" @click="closeSession">' +
             '<span class="context-menu__item-icon">🗑</span>' +
             '<span class="context-menu__item-label">{{ t(\'chat.close_session\') }}</span>' +
+          '</div>' +
+        '</template>' +
+
+        '<!-- Chat message mode -->' +
+        '<template v-if="store.contextMenu.mode === \'chat-message\'">' +
+          '<div class="context-menu__item" role="menuitem" tabindex="-1" :aria-disabled="!targetChatMsg" @click="copyChatMsg">' +
+            '<span class="context-menu__item-icon">📋</span>' +
+            '<span class="context-menu__item-label">{{ t(\'context.copy\') }}</span>' +
           '</div>' +
         '</template>' +
       '</div>',

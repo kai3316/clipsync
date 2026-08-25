@@ -21,18 +21,18 @@
         translating: false,
         error: '',
         languages: [
-          { code: 'auto', name: 'Auto-detect' },
-          { code: 'en', name: 'English' },
-          { code: 'zh', name: 'Chinese' },
-          { code: 'ja', name: 'Japanese' },
-          { code: 'ko', name: 'Korean' },
-          { code: 'fr', name: 'French' },
-          { code: 'de', name: 'German' },
-          { code: 'es', name: 'Spanish' },
-          { code: 'pt', name: 'Portuguese' },
-          { code: 'ru', name: 'Russian' },
-          { code: 'ar', name: 'Arabic' },
-          { code: 'hi', name: 'Hindi' },
+          { code: 'auto', nameKey: 'translate.lang_auto' },
+          { code: 'en', nameKey: 'translate.lang_en' },
+          { code: 'zh', nameKey: 'translate.lang_zh' },
+          { code: 'ja', nameKey: 'translate.lang_ja' },
+          { code: 'ko', nameKey: 'translate.lang_ko' },
+          { code: 'fr', nameKey: 'translate.lang_fr' },
+          { code: 'de', nameKey: 'translate.lang_de' },
+          { code: 'es', nameKey: 'translate.lang_es' },
+          { code: 'pt', nameKey: 'translate.lang_pt' },
+          { code: 'ru', nameKey: 'translate.lang_ru' },
+          { code: 'ar', nameKey: 'translate.lang_ar' },
+          { code: 'hi', nameKey: 'translate.lang_hi' },
         ],
       };
     },
@@ -92,6 +92,35 @@
 
       copyTranslated: function () {
         var text = this.translated || this.store.translateModal.translated;
+        if (!text) return;
+
+        if (navigator.clipboard && navigator.clipboard.writeText) {
+          var self = this;
+          navigator.clipboard.writeText(text).then(function () {
+            self.store.showToast(self.t('translate.copied'), 1500);
+          }).catch(function () {
+            self.store.showToast(self.t('history.copy_failed'), 2000);
+          });
+        } else {
+          // Fallback for older browsers / non-HTTPS
+          var textarea = document.createElement('textarea');
+          textarea.value = text;
+          textarea.style.position = 'fixed';
+          textarea.style.opacity = '0';
+          document.body.appendChild(textarea);
+          textarea.select();
+          try {
+            document.execCommand('copy');
+            this.store.showToast(this.t('translate.copied'), 1500);
+          } catch (e) {
+            this.store.showToast(this.t('history.copy_failed'), 2000);
+          }
+          document.body.removeChild(textarea);
+        }
+      },
+
+      copySource: function () {
+        var text = this.store.translateModal.text;
         if (!text) return;
 
         if (navigator.clipboard && navigator.clipboard.writeText) {
@@ -224,8 +253,16 @@
           '<div class="translate-modal__body">' +
             '<!-- Source text -->' +
             '<div class="translate-modal__section">' +
-              '<label class="translate-modal__label">{{ t(\'translate.original_text\') }}</label>' +
-              '<div class="translate-modal__source-text">{{ store.translateModal.text }}</div>' +
+              '<div class="translate-modal__result-header">' +
+                '<span class="translate-modal__label">{{ t(\'translate.original_text\') }}</span>' +
+                '<button' +
+                  ' class="btn-ghost translate-modal__copy-btn"' +
+                  ' @click="copySource"' +
+                '>' +
+                  '<span>&#x1F4CB;</span> {{ t(\'ui.copy\') }}' +
+                '</button>' +
+              '</div>' +
+              '<div class="translate-modal__source-text selectable">{{ store.translateModal.text }}</div>' +
             '</div>' +
 
             '<!-- Language selectors -->' +
@@ -237,7 +274,7 @@
                     ' v-for="lang in languages"' +
                     ' :key="lang.code"' +
                     ' :value="lang.code"' +
-                  '>{{ lang.name }}</option>' +
+                  '>{{ t(lang.nameKey) }}</option>' +
                 '</select>' +
               '</div>' +
               '<div class="translate-modal__lang-arrow">&#x27A1;</div>' +
@@ -248,7 +285,7 @@
                     ' v-for="lang in targetLanguages"' +
                     ' :key="lang.code"' +
                     ' :value="lang.code"' +
-                  '>{{ lang.name }}</option>' +
+                  '>{{ t(lang.nameKey) }}</option>' +
                 '</select>' +
               '</div>' +
             '</div>' +
@@ -281,7 +318,7 @@
                   '<span>&#x1F4CB;</span> {{ t(\'ui.copy\') }}' +
                 '</button>' +
               '</div>' +
-              '<div class="translate-modal__result-text">{{ translated }}</div>' +
+              '<div class="translate-modal__result-text selectable">{{ translated }}</div>' +
             '</div>' +
           '</div>' +
         '</div>' +

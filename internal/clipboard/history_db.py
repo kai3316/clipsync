@@ -201,8 +201,10 @@ class ClipboardHistoryDB:
                 try:
                     src.rename(Path(str(self._db_path) + f".corrupt-{stamp}{suffix}"))
                 except OSError:
+                    # One sidecar failing to move must not abort the whole
+                    # quarantine: keep trying the remaining files and still
+                    # replace _conn below, or history stays memory-only.
                     logger.warning("Could not quarantine corrupt DB file %s", src)
-                    return
         try:
             conn = sqlite3.connect(str(self._db_path), check_same_thread=False)
             self._apply_pragmas(conn)
@@ -472,11 +474,14 @@ class ClipboardHistoryDB:
         # -- dedup ---------------------------------------------------
         # Use the local clock for the dedup window so a sender's clock
         # skew can neither defeat dedup (window looks too old) nor break
-        # it (window looks negative).  Keep the sender's timestamp for
-        # display, when one was supplied.
+        # it (window looks negative).  Stamp the stored timestamp with
+        # the local capture time rather than the sender's clock: a skewed
+        # peer's raw timestamp must not reorder history after a restart or
+        # skew trim / age-pruning (the same never-reorder invariant the
+        # merge guard in _merge_into_top() enforces with max()).
         dedup_key = _make_dedup_key(content)
         now = time.time()
-        captured_at = content.timestamp or now
+        captured_at = now
 
         with self._lock:
             if (dedup_key == self._last_dedup_key
@@ -838,6 +843,9 @@ class ClipboardHistoryDB:
             # Load in display order (pinned first, then newest by timestamp)
             # so the restored in-memory list matches get_all() and survives a
             # paste-to-top touch() with the same semantics as the live list.
+            # Timestamps are stamped with the local capture time on insert
+            # (see add()), so this order is local-arrival order and immune to
+            # a peer's clock skew reordering entries after a restart.
             rows = conn.execute(
                 "SELECT entry_id, timestamp, content_type, text_preview, "
                 "types, source_device, source_app, source_title, "
@@ -862,6 +870,12 @@ class ClipboardHistoryDB:
                     "image_fmt": row[11] if len(row) > 11 else "",
                 }
                 self._entries.append(entry)
+
+            # Cap the load at MAX_ENTRIES, same as the JSON backend's
+            # data[:MAX_ENTRIES].  The DB can legitimately hold more rows
+            # (growth before the next capture trims), and loading them all
+            # would report an inflated total to /api/history until then.
+            self._entries = self._entries[: self.MAX_ENTRIES]
 
             if self._entries:
                 self._next_id = max(

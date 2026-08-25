@@ -19,6 +19,7 @@ var ClipsyncSound = (function () {
 
   var ctx = null;
   var _soundEnabled = true;
+  var _prefKnown = false;  // true once a real preference (localStorage or server) is known
 
   /* ── Initialise AudioContext on first user gesture ─────────────── */
   function _ensureContext() {
@@ -35,19 +36,24 @@ var ClipsyncSound = (function () {
 
   /* ── Check sound preference ────────────────────────────────────── */
   function _loadEnabled() {
-    // Prefer the server-loaded value from the store (the source of truth);
-    // fall back to the legacy localStorage key for older installs.
-    var store = window.__CLIPSYNC_STORE__;
-    if (store && typeof store.soundEnabled === 'boolean') {
-      _soundEnabled = store.soundEnabled;
-      return;
+    // Read the per-browser localStorage preference immediately.  The store's
+    // soundEnabled is NOT consulted yet — it defaults to true until the server
+    // settings load, so trusting it here would make a sound-disabled user hear
+    // the startup chime on every launch.  The authoritative server value
+    // arrives shortly afterwards via setEnabled() (called from loadSettings)
+    // and becomes known then.
+    var val = null;
+    try { val = localStorage.getItem('clipsync_sound'); } catch (e) { /* ignore */ }
+    if (val === '0' || val === 'false') {
+      _soundEnabled = false;
+      _prefKnown = true;
+    } else if (val === '1' || val === 'true') {
+      _soundEnabled = true;
+      _prefKnown = true;
     }
-    try {
-      var val = localStorage.getItem('clipsync_sound');
-      if (val === '0' || val === 'false') {
-        _soundEnabled = false;
-      }
-    } catch (e) { /* ignore */ }
+    // No localStorage value: the preference stays UNKNOWN until the server
+    // settings arrive. ws.js gates the startup connect chime on
+    // ClipsyncSound.known so it is never played from a guess.
   }
   _loadEnabled();
 
@@ -158,6 +164,7 @@ var ClipsyncSound = (function () {
     /** Enable or disable sound effects. Persisted to localStorage. */
     setEnabled: function (enabled) {
       _soundEnabled = !!enabled;
+      _prefKnown = true;
       // Keep the reactive store in sync so WS tones and the settings toggle
       // always agree with the server-side preference.
       var store = window.__CLIPSYNC_STORE__;
@@ -170,6 +177,13 @@ var ClipsyncSound = (function () {
     /** Check whether sound is enabled. */
     get isEnabled() {
       return _soundEnabled;
+    },
+
+    /** Whether the sound preference has actually been determined (localStorage
+     * or the server settings). Until true, the startup connect chime is
+     * suppressed rather than played from an unloaded default. */
+    get known() {
+      return _prefKnown;
     },
   };
 

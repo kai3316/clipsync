@@ -8,6 +8,7 @@ filtering preferences, and version information.
 import logging
 import os
 import sys
+import threading
 import tkinter as tk
 from collections.abc import Callable
 
@@ -939,25 +940,68 @@ class SettingsWindow:
     # ═══════════════════════════════════════════════════════════════
 
     def _web_lan_ip(self) -> str:
-        """Return the LAN IP for the web panel, cached briefly.
+        """Return the cached LAN IP for the web panel (never blocks).
 
-        ``_get_lan_ip()`` runs ``getaddrinfo`` on the hostname; calling it
-        twice on every settings open (label + QR) did that work twice on
-        the UI thread, and a slow resolver stalled the window.  A 30 s TTL
-        matches the dashboard's web card.
+        ``_get_lan_ip()`` runs ``getaddrinfo`` on the hostname; a slow
+        resolver must not stall the settings window, so the probe happens on
+        a background thread (see ``_ensure_web_lan_ip``) and this only reads
+        the cache.  A 30 s TTL matches the dashboard's web card.
+        """
+        self._ensure_web_lan_ip()
+        return getattr(self, "_lan_ip_val", "")
+
+    def _ensure_web_lan_ip(self) -> None:
+        """Kick a background LAN-IP lookup when the cached value is stale.
+
+        Mirrors the dashboard's ``_ensure_web_lan_ip`` pattern: probe off the
+        UI thread, backfill via ``root.after`` so widgets are only ever
+        touched on the main thread.  A 30 s TTL means reopening settings
+        reuses the cached IP instead of calling getaddrinfo again.
         """
         import time
 
         now = time.monotonic()
-        if (now - getattr(self, "_lan_ip_ts", 0.0)) > 30.0 or not getattr(
+        if (now - getattr(self, "_lan_ip_ts", 0.0)) <= 30.0 and getattr(
             self, "_lan_ip_val", ""
         ):
+            return  # fresh enough
+        if getattr(self, "_lan_ip_probing", False):
+            return  # a lookup is already in flight
+        self._lan_ip_probing = True
+
+        def _worker():
             try:
-                self._lan_ip_val = WebServer._get_lan_ip()
+                ip = WebServer._get_lan_ip()
             except Exception:
-                self._lan_ip_val = "127.0.0.1"
-            self._lan_ip_ts = now
-        return self._lan_ip_val
+                ip = "127.0.0.1"
+            self._lan_ip_val = ip
+            self._lan_ip_ts = time.monotonic()
+            self._lan_ip_probing = False
+            try:
+                self._root.after(0, self._apply_web_lan_ip)
+            except Exception:
+                pass
+
+        threading.Thread(target=_worker, daemon=True,
+                         name="settings-lan-ip").start()
+
+    def _apply_web_lan_ip(self) -> None:
+        """Repaint the web IP / QR once a fresh LAN IP arrives (main thread).
+
+        Runs via ``root.after`` from a worker, so it can fire after the
+        settings window was destroyed — guard every widget touch.
+        """
+        try:
+            label = getattr(self, "_web_ip_label", None)
+            if label is not None:
+                try:
+                    label.configure(text=self._web_lan_ip())
+                except Exception:
+                    pass
+            self._refresh_web_qr()
+        except Exception:
+            logger.debug("Could not repaint web IP with fresh LAN IP",
+                         exc_info=True)
 
     def _build_web_companion_panel(self):
         panel = ctk.CTkFrame(self._content_frame, fg_color="transparent")
@@ -1062,7 +1106,7 @@ class SettingsWindow:
             font=ctk.CTkFont(size=13, weight="bold"),
         ).pack(anchor="w", padx=16, pady=(14, 4))
         self._web_ip_label = ctk.CTkLabel(
-            card2, text=self._web_lan_ip(),
+            card2, text=self._web_lan_ip() or T("network.detecting"),
             font=ctk.CTkFont(size=12, weight="bold"),
         )
         self._web_ip_label.pack(anchor="w", padx=16, pady=(0, 8))
@@ -1127,6 +1171,19 @@ class SettingsWindow:
             token = self._web_token_var.get() if self._web_token_var else ""
             port = self._web_port_var.get() if self._web_port_var else "19991"
             ip = self._web_lan_ip()
+            if not ip:
+                # First lookup still in flight — keep a neutral placeholder and
+                # let _apply_web_lan_ip repaint once a real IP is known (never
+                # render a URL/QR from an empty host).
+                if self._web_url_label:
+                    self._web_url_label.configure(text=T("network.detecting"))
+                self._web_qr_label.configure(
+                    image=None,
+                    text=T("network.detecting"),
+                    font=ctk.CTkFont(size=11),
+                    text_color=("gray50", "gray60"),
+                )
+                return
             # A phone scans this QR, so point at the lightweight phone companion
             # page — consistent with the desktop overview card and the tray
             # "Web QR" dialog, instead of the full desktop dashboard.
@@ -1224,12 +1281,6 @@ class SettingsWindow:
             # restart when enabling, stop when disabling.
             self._web_action_cb({"action": "restart" if cfg.web_enabled else "stop"})
             show_info(self._window, T("dialog.saved"), T("settings_window.web_saved"))
-            return
-
-        if self._status_label:
-            self._status_label.configure(text=T("settings_window.web_saved"))
-        msg = T("settings_window.web_saved") + "\n\n" + T("settings_window.web_restart_note")
-        show_info(self._window, T("dialog.saved"), msg)
 
     # ═══════════════════════════════════════════════════════════════
     # Panel: Content Filter

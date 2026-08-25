@@ -169,14 +169,14 @@
               '<div class="pairing-request-card__info">' +
                 '<span class="pairing-request-card__name">{{ pr.peer_name || pr.device_name || pr.peer_id }}</span>' +
                 '<span class="pairing-request-card__id">{{ pr.peer_id }}</span>' +
-                // Both codes side by side at the top of the card — the pairing
-                // code AND the SAS fingerprint — so the two devices can be
-                // compared at a glance.
+                // The 8-digit shared pairing code is the only value actually
+                // validated on both devices. The SAS fingerprint is derived
+                // from different inputs and is never equal to it, so showing
+                // both is confusing — display only the code to compare.
                 '<div class="pairing-request-card__codes">' +
-                  '<span class="pairing-request-code-badge">{{ t(\'ui.pairing_code_label\') }} <strong>{{ formattedCode(pr) }}</strong></span>' +
-                  '<span v-if="pr.sas" class="pairing-request-code-badge">&#128737; {{ t(\'devices.sas_label\') }} <strong style="letter-spacing:1px">{{ pr.sas }}</strong></span>' +
+                  '<span class="pairing-request-code-badge selectable">{{ t(\'ui.pairing_code_label\') }} <strong>{{ formattedCode(pr) }}</strong></span>' +
+                  '<button class="btn-ghost" @click="copyPairingCode(pr)">{{ t(\'ui.copy\') }}</button>' +
                 '</div>' +
-                '<span v-if="pr.sas" class="pairing-request-card__hint">{{ t(\'devices.sas_verify_hint\') }}</span>' +
                 '<span class="pairing-request-card__hint">{{ pairingHint(pr) }}</span>' +
                 '<span class="pairing-request-card__hint">{{ t(\'devices.pairing_expiry_hint\') }}</span>' +
               '</div>' +
@@ -199,7 +199,7 @@
               '<span class="section-header__badge">{{ onlineRemoteDevices.length }}</span>' +
             '</div>' +
             '<div v-for="dev in onlineRemoteDevices" :key="dev.device_id" class="device-internet-wrap">' +
-              '<span v-if="netpairPeerFor(dev.device_id)" class="netpair-card-badge" :class="netpairPeerFor(dev.device_id).online ? \'netpair-card-badge--online\' : \'netpair-card-badge--offline\'" :title="t(\'devices.netpair_also_internet\')">🌐 {{ netpairPeerFor(dev.device_id).online ? t(\'devices.netpair_online\') : t(\'devices.netpair_offline\') }}</span>' +
+              '<span v-if="netpairPeerFor(dev.device_id)" class="netpair-card-badge" @contextmenu.stop :class="netpairPeerFor(dev.device_id).online ? \'netpair-card-badge--online\' : \'netpair-card-badge--offline\'" :title="t(\'devices.netpair_also_internet\')">🌐 {{ netpairPeerFor(dev.device_id).online ? t(\'devices.netpair_online\') : t(\'devices.netpair_offline\') }}</span>' +
               '<device-card :device="devWithAlias(dev)"></device-card>' +
             '</div>' +
           '</div>' +
@@ -211,7 +211,7 @@
               '<span class="section-header__badge section-header__badge--muted">{{ pairedOfflineDevices.length }}</span>' +
             '</div>' +
             '<div v-for="dev in pairedOfflineDevices" :key="dev.device_id" class="device-internet-wrap">' +
-              '<span v-if="netpairPeerFor(dev.device_id)" class="netpair-card-badge" :class="netpairPeerFor(dev.device_id).online ? \'netpair-card-badge--online\' : \'netpair-card-badge--offline\'" :title="t(\'devices.netpair_also_internet\')">🌐 {{ netpairPeerFor(dev.device_id).online ? t(\'devices.netpair_online\') : t(\'devices.netpair_offline\') }}</span>' +
+              '<span v-if="netpairPeerFor(dev.device_id)" class="netpair-card-badge" @contextmenu.stop :class="netpairPeerFor(dev.device_id).online ? \'netpair-card-badge--online\' : \'netpair-card-badge--offline\'" :title="t(\'devices.netpair_also_internet\')">🌐 {{ netpairPeerFor(dev.device_id).online ? t(\'devices.netpair_online\') : t(\'devices.netpair_offline\') }}</span>' +
               '<device-card :device="devWithAlias(dev)"></device-card>' +
             '</div>' +
           '</div>' +
@@ -223,7 +223,7 @@
               '<span class="section-header__badge section-header__badge--muted">{{ discoveredDevices.length }}</span>' +
             '</div>' +
             '<div v-for="dev in discoveredDevices" :key="dev.device_id" class="device-internet-wrap">' +
-              '<span v-if="netpairPeerFor(dev.device_id)" class="netpair-card-badge" :class="netpairPeerFor(dev.device_id).online ? \'netpair-card-badge--online\' : \'netpair-card-badge--offline\'" :title="t(\'devices.netpair_also_internet\')">🌐 {{ netpairPeerFor(dev.device_id).online ? t(\'devices.netpair_online\') : t(\'devices.netpair_offline\') }}</span>' +
+              '<span v-if="netpairPeerFor(dev.device_id)" class="netpair-card-badge" @contextmenu.stop :class="netpairPeerFor(dev.device_id).online ? \'netpair-card-badge--online\' : \'netpair-card-badge--offline\'" :title="t(\'devices.netpair_also_internet\')">🌐 {{ netpairPeerFor(dev.device_id).online ? t(\'devices.netpair_online\') : t(\'devices.netpair_offline\') }}</span>' +
               '<device-card :device="devWithAlias(dev)"></device-card>' +
             '</div>' +
           '</div>' +
@@ -250,17 +250,14 @@
         'toggle so the page isn\'t a wall of pairing prompts.  Only when the' +
         'switch is on does the detail (relay state, generate/enter code,' +
         'paired list) show. -->' +
-        '<div class="device-panel__section netpair-section netpair-section--bottom">' +
-          '<div class="section-header netpair-section__header">' +
-            '<span class="netpair-section__title" role="button" tabindex="0" @click="toggleNetpair" @keyup.enter="toggleNetpair">' +
+        '<div v-if="!store.loading && !loadFailed && !store.devicesLoadFailed" class="device-panel__section netpair-section netpair-section--bottom">' +
+          '<button type="button" class="netpair-section__header" :aria-expanded="netpairExpanded" :aria-label="t(\'devices.netpair_toggle_hint\')" @click="toggleNetpair">' +
+            '<span class="netpair-section__title">' +
               '🌐 {{ t(\'devices.netpair_title\') }}' +
               '<span class="section-header__badge">{{ netpairPairedCount }}</span>' +
             '</span>' +
-            '<label class="netpair-switch" :title="t(\'devices.netpair_toggle_hint\')">' +
-              '<input type="checkbox" :checked="netpairExpanded" @change="toggleNetpair" :aria-label="t(\'devices.netpair_toggle_hint\')">' +
-              '<span class="netpair-switch__slider"></span>' +
-            '</label>' +
-          '</div>' +
+            '<span class="netpair-section__chevron" :class="{ \'netpair-section__chevron--open\': netpairExpanded }">▾</span>' +
+          '</button>' +
 
           '<div v-if="netpairExpanded" class="netpair-body">' +
             '<div class="netpair-overview">' +
@@ -272,8 +269,8 @@
             '<div v-if="netpairLoading" class="netpair-loading">{{ t(\'ui.loading\') }}</div>' +
             '<template v-else>' +
               '<div v-if="!internetSyncEnabled" class="netpair-syncoff">' +
-                '{{ t(\'devices.netpair_sync_off\') }}' +
-                '<button class="netpair-step__link" @click="openInternetSyncSettings">{{ t(\'devices.netpair_go_settings\') }}</button>' +
+                '<span class="netpair-syncoff__text">{{ t(\'devices.netpair_sync_off\') }}</span>' +
+                '<button type="button" class="btn-ghost" @click="openInternetSyncSettings">{{ t(\'devices.netpair_go_settings\') }}</button>' +
               '</div>' +
               '<!-- Generate + enter a pairing code (no multi-step guide) -->' +
               '<div class="netpair-actions">' +
@@ -453,6 +450,30 @@
 
       copyNetpairCode: function () {
         var code = this.netpairDisplayCode;
+        if (!code) return;
+        var self = this;
+        var done = function () {
+          self.store.showToast(self.t('devices.netpair_code_copied'), 2000);
+        };
+        if (navigator.clipboard && navigator.clipboard.writeText) {
+          navigator.clipboard.writeText(code).then(done).catch(done);
+        } else {
+          var textarea = document.createElement('textarea');
+          textarea.value = code;
+          textarea.style.position = 'fixed';
+          textarea.style.opacity = '0';
+          document.body.appendChild(textarea);
+          textarea.select();
+          try { document.execCommand('copy'); } catch (e) { /* ignore */ }
+          document.body.removeChild(textarea);
+          done();
+        }
+      },
+
+      // 📋 Copy an 8-digit LAN pairing-request code to the clipboard.
+      // Mirrors copyNetpairCode so both pairing codes behave identically.
+      copyPairingCode: function (pr) {
+        var code = this.formattedCode(pr);
         if (!code) return;
         var self = this;
         var done = function () {

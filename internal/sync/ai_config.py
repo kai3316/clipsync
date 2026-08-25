@@ -225,6 +225,12 @@ def collect_roots(
                             "mtime": float(dstat.st_mtime),
                         })
                 for fname in sorted(filenames):
+                    # Prune during the walk: stop buffering once we have
+                    # enough candidates — the hash loop below applies the
+                    # cap, so a huge tree (node_modules) must not have every
+                    # matching file buffered before that cap is reached.
+                    if len(found) >= max_entries or len(entries) >= max_entries:
+                        break
                     if is_temp_name(fname):
                         continue
                     full = Path(dirpath) / fname
@@ -238,6 +244,8 @@ def collect_roots(
                         continue
                     rel = full.relative_to(root).as_posix()
                     found.append((rel, full, st))
+                if len(found) >= max_entries or len(entries) >= max_entries:
+                    break  # enough candidates buffered — stop descending
         except OSError:
             continue
         for rel, full, st in found:
@@ -502,13 +510,23 @@ class AIConfigManager:
                          peer_id[:12])
             return
         root = expand_root(roots[ri])
-        if root is None or not root.is_dir():
+        if root is None:
             return
-        target = resolve_safe(root, rel)
-        if target is None:
-            logger.info("Rejected aiconfig_req with unsafe path from %s",
-                        peer_id[:12])
-            return
+        if root.is_file():
+            # Single-file watch root (e.g. ~/.claude/CLAUDE.md): the only
+            # servable rel is the file's own basename and the file itself is
+            # the target — no directory walk required.
+            if rel.replace("\\", "/") != root.name:
+                return
+            target = root
+        else:
+            if not root.is_dir():
+                return
+            target = resolve_safe(root, rel)
+            if target is None:
+                logger.info("Rejected aiconfig_req with unsafe path from %s",
+                            peer_id[:12])
+                return
         # The file must be part of our CURRENT inventory (i.e. we advertised
         # it) and its content hash must still match what we advertised.
         with self._lock:
@@ -624,15 +642,64 @@ class AIConfigManager:
         """Watch root for landing pulled files (created on demand)."""
         return self._resolve_root(ri, create=True)
 
+    def _land_target(self, ri: int, rel: str) -> tuple[Path | None, str | None]:
+        """Exact local file a pulled *rel* should be written to (with reason).
+
+        The ``root_index`` on the wire indexes the PEER's watch list, which
+        may differ from ours — remap before writing so a pull can never
+        clobber a same-named file in an unrelated local root.  *ri* is
+        honoured only when *rel* genuinely belongs to that root (a file root
+        owns only its own basename and is the target itself; a directory root
+        owns a rel that resolves to a real file under it).  Otherwise every
+        local root is scanned for the one that owns *rel*; exactly one match
+        wins, and ambiguity or the absence of a match is reported as a clear
+        reason rather than guessed.
+        """
+        norm = rel.replace("\\", "/")
+        roots = list(getattr(self._cfg, "ai_config_paths", []))
+
+        def owns(index: int) -> Path | None:
+            """The target this watch entry owns for *rel*, or None."""
+            raw = roots[index] if 0 <= index < len(roots) else None
+            root = expand_root(raw)
+            if root is None:
+                return None
+            try:
+                if root.is_dir():
+                    # Directory root: owns *rel* only when it resolves to a
+                    # real file under the root — never guess a landing spot.
+                    resolved = resolve_safe(root, rel)
+                    if resolved is None or not resolved.is_file() \
+                            or resolved.is_symlink():
+                        return None
+                    return resolved
+            except OSError:
+                return None
+            # Not an existing directory — a single-FILE watch entry (present
+            # or not-yet-created) owns only its own basename, and the target
+            # IS the file itself.
+            return root if norm == root.name else None
+
+        hinted = owns(ri)
+        if hinted is not None:
+            return hinted, None
+        matches: list[Path] = []
+        for i in range(len(roots)):
+            hit = owns(i)
+            if hit is not None:
+                matches.append(hit)
+        if len(matches) == 1:
+            return matches[0], None
+        if len(matches) > 1:
+            return None, "ambiguous_root"
+        return None, "no_local_root"
+
     def _land_file(self, ri: int, rel: str, data: bytes, mode: str,
                    peer_id: str) -> tuple[str, str | None]:
         """Write pulled bytes per *mode*.  Returns (status, reason)."""
-        root = self._local_root(ri)
-        if root is None:
-            return "error", "no_local_root"
-        target = resolve_safe(root, rel)
+        target, reason = self._land_target(ri, rel)
         if target is None:
-            return "error", "unsafe_path"
+            return "error", reason or "no_local_root"
         try:
             if mode == "overwrite":
                 target.parent.mkdir(parents=True, exist_ok=True)

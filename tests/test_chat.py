@@ -214,8 +214,10 @@ class TestTextMessaging:
             FP_A,
             self.pair.send_from_b,
         )
-        assert ok is True  # consumed by the chat router...
-        # ...but nothing was appended to the real conversation.
+        # Dropped (unknown peer, no active session) -> the host must NOT
+        # send a relay_ack "delivered" receipt for it...
+        assert ok is False
+        # ...and nothing was appended to the real conversation.
         assert len(self.pair.b.get_messages(self.sid)) == before
 
     def test_text_with_mismatched_session_id_still_delivered(self):
@@ -406,7 +408,10 @@ class TestFileTransfer:
         assert open(received["saved_path"], "rb").read() == b""
 
     def test_unknown_transfer_id_returns_false_for_chat_router(self):
-        assert self.pair.b.handle_message("chat_text", {"session_id": "x" * 16}, DEV_A, FP_A, None)
+        # No active session for this peer -> dropped, so no relay_ack is sent.
+        assert self.pair.b.handle_message(
+            "chat_text", {"session_id": "x" * 16}, DEV_A, FP_A, None
+        ) is False
         # A foreign chunk id must fall through (False) to clipboard transfers.
         assert self.pair.b.handle_binary_chunk(
             {"transfer_id": "e" * 32, "chunk_index": 0, "total_chunks": 1, "_raw_data": b""},

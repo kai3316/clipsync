@@ -70,6 +70,11 @@ class SyncManager:
         self._read_lock = threading.Lock()
         self._last_local_hash: str | None = None
         self._last_content_hash: str = ""
+        # Monotonic time the hash fields above were last set.  Bounds how long
+        # they keep suppressing re-captures (mirrors DEDUP_RING_TTL), so a
+        # deliberate re-copy of the same content after the window is treated
+        # as new instead of being suppressed forever.
+        self._last_hash_ts: float = 0.0
         self._dedup_ring: list[tuple[str, float]] = []  # (hash, monotonic_ts)
         self._sync_debounce = sync_debounce
         self._pending_timer: threading.Timer | None = None
@@ -152,6 +157,7 @@ class SyncManager:
         with self._lock:
             self._last_local_hash = None
             self._last_content_hash = ""
+            self._last_hash_ts = 0.0
             self._dedup_ring.clear()
             self._monitor.suppress_until = 0.0
 
@@ -173,9 +179,10 @@ class SyncManager:
         Returns True when the message was ACCEPTED (recorded into history and
         applied to the clipboard), False when it was dropped for any reason
         (sync disabled, crossed write, empty content, loop-prevention dedup,
-        rate limit).  Round 17: the caller uses the return value to decide
-        whether to send an internet ``relay_ack`` receipt — only a message that
-        actually landed in history earns a "已送达" confirmation.
+        rate limit) or when the clipboard write failed to land.  Round 17: the
+        caller uses the return value to decide whether to send an internet
+        ``relay_ack`` receipt — only a message that actually landed on the
+        clipboard earns a "已送达" confirmation.
         """
         with self._lock:
             if not self._enabled:
@@ -224,6 +231,7 @@ class SyncManager:
             # (e.g. BMP/TIFF -> PNG on Linux/macOS) — is not re-detected.
             self._last_local_hash = content_hash
             self._last_content_hash = content_hash
+            self._last_hash_ts = time.monotonic()
             self._monitor.suppress_for(self._sync_debounce + self._poll_interval + 0.2)
 
             # Cancel any pending local timer so it doesn't fire with
@@ -242,12 +250,10 @@ class SyncManager:
         self._notify_history_change()
 
         # Re-check enabled immediately before writing so a disable that
-        # happened while we were processing is honored, and count this write
-        # toward the rate limit only if it actually lands.
+        # happened while we were processing is honored.
         with self._lock:
             if not self._enabled:
                 return False
-            self._remote_apply_times.append(time.time())
 
         # Write to local clipboard.  Guarded so a clipboard-writer failure
         # drops this one message instead of killing the peer connection.
@@ -256,9 +262,12 @@ class SyncManager:
                 "Writing remote clipboard from %s: %d format(s)",
                 msg.source_device, len(content.types),
             )
-            self._writer.write(content)
+            wrote = self._writer.write(content)
         except Exception:
+            wrote = False
             logger.exception("Failed to write remote clipboard content")
+
+        if not wrote:
             # Surface the failure (desktop notification) without letting it
             # crash the sync loop — a transient clipboard-busy error on the
             # receiver should not kill the peer connection.
@@ -268,7 +277,15 @@ class SyncManager:
                     cb()
                 except Exception:
                     logger.debug("on_write_error callback failed", exc_info=True)
-        # The message was accepted (history + clipboard write attempted).
+            # The write did not land — do not count it toward the rate limit
+            # and do not acknowledge the message to the peer.
+            return False
+
+        # The message was accepted (history + clipboard write applied).
+        # Count this write toward the rate limit only now that it landed.
+        with self._lock:
+            self._remote_apply_times.append(time.time())
+
         return True
 
     def _on_clipboard_change(self):
@@ -329,6 +346,18 @@ class SyncManager:
         if len(self._dedup_ring) > DEDUP_RING_SIZE:
             self._dedup_ring = self._dedup_ring[-DEDUP_RING_SIZE:]
 
+    def _reset_dedup_hashes(self) -> None:
+        """Clear the loop-prevention hash state.
+
+        Used when content is dropped as noise (empty clipboard, whitespace-only
+        text, app-filtered copy) so a later copy of previously-seen content is
+        not suppressed against stale hashes.
+        """
+        with self._lock:
+            self._last_local_hash = None
+            self._last_content_hash = ""
+            self._last_hash_ts = 0.0
+
     def _do_read_and_send_locked(self):
         """Capture + broadcast. Called while holding ``_read_lock``."""
         with self._lock:
@@ -344,15 +373,24 @@ class SyncManager:
             content = self._reader.read()
 
         if not content or content.is_empty():
+            # Clipboard was cleared — clear the loop-prevention hashes so a
+            # later copy of previously-seen content is not suppressed.
+            self._reset_dedup_hashes()
             return
 
         # Skip accidental clipboard noise: whitespace-only copies that
         # terminals often emit on click/select.  A single character is a
         # legitimate copy (a digit or letter) and must not be dropped.
+        # Only drop whitespace-only TEXT when nothing else is on the
+        # clipboard — a whitespace TEXT alongside an image or file list is
+        # part of a legitimate rich copy and must survive.
         if ContentType.TEXT in content.types:
             text = content.types[ContentType.TEXT].decode("utf-8", errors="replace")
             stripped = text.strip()
-            if not stripped:
+            if not stripped and not any(
+                data for fmt, data in content.types.items() if fmt != ContentType.TEXT
+            ):
+                self._reset_dedup_hashes()
                 return
 
         # Retrieve source-app info once (captured by the monitor before the
@@ -362,6 +400,7 @@ class SyncManager:
         # App filter: drop content from disallowed source applications.
         if self._app_filter_fn is not None and not self._app_filter_fn(source_app):
             logger.debug("Clipboard from disallowed app filtered out: %s", source_app)
+            self._reset_dedup_hashes()
             return
 
         # Content-based dedup — a single canonical hash for all loop-prevention
@@ -373,11 +412,18 @@ class SyncManager:
             # may enter history or reach the network once the user paused.
             if not self._enabled:
                 return
-            # Catches duplicate captures (same content re-read after debounce)
-            if content_hash == self._last_content_hash:
+            # Catches duplicate captures (same content re-read after debounce).
+            # Bounded by the same TTL as the dedup ring, so a deliberate
+            # re-copy of the last content after DEDUP_RING_TTL is treated as
+            # new instead of being suppressed forever.
+            if (content_hash == self._last_content_hash
+                    and time.monotonic() - self._last_hash_ts <= DEDUP_RING_TTL):
                 return
-            # Skip if we just sent this content (loop prevention)
-            if content_hash == self._last_local_hash:
+            # Skip if we just sent this content (loop prevention) — same TTL
+            # bound, so an echoed-back remote write stops suppressing once the
+            # ring window has passed.
+            if (content_hash == self._last_local_hash
+                    and time.monotonic() - self._last_hash_ts <= DEDUP_RING_TTL):
                 return
             # Skip if recently seen (e.g. a remote write reflected back whose
             # read-back was not re-encoded)
@@ -386,6 +432,7 @@ class SyncManager:
 
             self._last_content_hash = content_hash
             self._last_local_hash = content_hash
+            self._last_hash_ts = time.monotonic()
 
             self._dedup_ring_remember(content_hash)
 
@@ -421,4 +468,10 @@ class SyncManager:
                 return
 
         if self._on_send:
-            self._on_send(msg)
+            try:
+                self._on_send(msg)
+            except Exception:
+                # A failing send callback must not kill the daemon Timer
+                # thread (which would drop future captures) nor lose the
+                # capture already recorded in history above.
+                logger.exception("on_send callback failed")

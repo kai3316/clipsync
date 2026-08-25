@@ -541,7 +541,7 @@
     },
 
     template:
-      '<div class="aiconfig-panel">' +
+      '<div class="aiconfig-panel" style="overflow-y:auto">' +
 
         '<!-- Header -->' +
         '<div class="favorites-panel__header">' +
@@ -556,7 +556,7 @@
         '</div>' +
 
         '<!-- Local config manager (round 18) -->' +
-        '<section class="aiconfig-panel__local glass">' +
+        '<section class="aiconfig-panel__local glass" style="flex:none">' +
           '<div class="aiconfig-panel__local-header">' +
             '<div class="aiconfig-panel__local-header-left">' +
               '<span class="aiconfig-panel__local-title">📁 {{ t(\'aiconfig.local_title\') }}</span>' +
@@ -612,7 +612,7 @@
               '<tbody>' +
                 '<tr v-for="row in localRows" :key="row.key">' +
                   '<td class="aiconfig-panel__cell-path" :style="row.depth ? { paddingLeft: (12 + row.depth * 18) + \'px\' } : {}">' +
-                    '<span v-if="row.isDir && row.node" class="aiconfig-panel__tree-chevron" :class="{ \'aiconfig-panel__tree-chevron--open\': localExpanded[row.node.key] }" @click.stop="toggleDir(row.node)">▸</span>' +
+                    '<span v-if="row.isDir && row.node" class="aiconfig-panel__tree-chevron" :class="{ \'aiconfig-panel__tree-chevron--open\': localExpanded[row.node.key] }" role="button" tabindex="0" :aria-label="row.label" :aria-expanded="!!localExpanded[row.node.key]" @click.stop="toggleDir(row.node)" @keydown.enter.space.stop.prevent="toggleDir(row.node)">▸</span>' +
                     '<span v-else class="aiconfig-panel__tree-chevron aiconfig-panel__tree-chevron--spacer"></span>' +
                     '<span v-if="localMultiRoot && !row.isDir" class="aiconfig-panel__root-chip" :title="localRootLabel(row.entry.root_index)">R{{ row.entry.root_index }}</span>' +
                     // Folders: click to expand/collapse the tree, double-click
@@ -623,14 +623,11 @@
                   '<td class="aiconfig-panel__cell-size">{{ row.isDir ? \'\' : fmtSize(row.entry.size) }}</td>' +
                   '<td class="aiconfig-panel__cell-time">{{ fmtTime(row.entry.mtime) }}</td>' +
                   '<td class="aiconfig-panel__local-actions">' +
-                    '<button class="settings-btn settings-btn--sm aiconfig-panel__icon-btn" @click="openRowDir(row)" :title="t(\'aiconfig.local_open_dir\')">📂</button>' +
+                    '<button class="settings-btn settings-btn--sm aiconfig-panel__icon-btn" @click="openRowDir(row)" :title="t(\'aiconfig.local_open_dir\')" :aria-label="t(\'aiconfig.local_open_dir\')">📂</button>' +
                     // Files AND folders can be trashed (a folder goes to the
                     // recycle bin whole, recoverable).
-                    '<button v-if="row.entry" class="settings-btn settings-btn--sm aiconfig-panel__icon-btn aiconfig-panel__icon-btn--danger" @click="trashEntry(row.entry)" :title="t(\'aiconfig.local_trash_title\')">🗑</button>' +
+                    '<button v-if="row.entry" class="settings-btn settings-btn--sm aiconfig-panel__icon-btn aiconfig-panel__icon-btn--danger" @click="trashEntry(row.entry)" :title="t(\'aiconfig.local_trash_title\')" :aria-label="t(\'aiconfig.local_trash_title\')">🗑</button>' +
                   '</td>' +
-                '</tr>' +
-                '<tr v-if="localFilteredEntries.length === 0">' +
-                  '<td colspan="4" class="aiconfig-panel__none">{{ t(\'aiconfig.no_match\') }}</td>' +
                 '</tr>' +
               '</tbody>' +
             '</table>' +
@@ -648,7 +645,7 @@
             '<div class="aiconfig-paths glass-neo">' +
               '<div class="aiconfig-paths__header">' +
                 '<span class="aiconfig-paths__title">🗂 {{ t(\'aiconfig.local_manage_paths\') }}</span>' +
-                '<button class="settings-dialog__close" @click="closePathsDialog" :title="t(\'ui.close\')">' +
+                '<button class="settings-dialog__close" @click="closePathsDialog" :title="t(\'ui.close\')" :aria-label="t(\'ui.close\')">' +
                   '<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">' +
                     '<line x1="18" y1="6" x2="6" y2="18"></line>' +
                     '<line x1="6" y1="6" x2="18" y2="18"></line>' +
@@ -685,7 +682,7 @@
                   '<button v-if="!localPreview.loading && !localPreview.failed && !localPreview.editing" class="settings-btn settings-btn--sm" @click="startLocalEdit">✏️ {{ t(\'aiconfig.local_edit\') }}</button>' +
                   '<button v-if="localPreview.editing" class="settings-btn settings-btn--sm settings-btn--accent" @click="saveLocalEdit" :disabled="localPreview.saving">{{ localPreview.saving ? \'...\' : t(\'aiconfig.local_save\') }}</button>' +
                   '<button v-if="localPreview.editing" class="settings-btn settings-btn--sm" @click="cancelLocalEdit">{{ t(\'ui.cancel\') }}</button>' +
-                  '<button class="settings-dialog__close" @click="closeLocalPreview" :title="t(\'ui.close\')">' +
+                  '<button class="settings-dialog__close" @click="closeLocalPreview" :title="t(\'ui.close\')" :aria-label="t(\'ui.close\')">' +
                     '<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">' +
                       '<line x1="18" y1="6" x2="6" y2="18"></line>' +
                       '<line x1="6" y1="6" x2="18" y2="18"></line>' +

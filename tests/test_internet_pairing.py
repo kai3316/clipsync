@@ -190,13 +190,17 @@ def make_app_stub(**attrs):
     app._save_cfg_and_peers = lambda: saved.__setitem__("n", saved["n"] + 1)
     app._saved = saved
 
-    class WS:
+    class WSManager:
         def __init__(self):
             self.broadcasts = []
 
         def broadcast(self, mtype, data):
             self.broadcasts.append((mtype, data))
             return 1
+
+    class WS:
+        def __init__(self):
+            self.ws_manager = WSManager()
     app.web_server = WS()
 
     # bind the real Application methods the handlers delegate to
@@ -312,10 +316,12 @@ def test_hello_roundtrip_confirms_identity():
     assert b.cfg.netpair_secrets == {"a1b2c3d4e5f6": secret}
     assert b._saved["n"] >= 2
     # Both ends broadcast the netpair_peer event with real ids + names.
-    events_a = [d for m, d in a.web_server.broadcasts if m == "netpair_peer"]
+    events_a = [d for m, d in a.web_server.ws_manager.broadcasts
+                if m == "netpair_peer"]
     assert events_a and events_a[0] == {"peer_id": "bbbbbbbbbbbb",
                                         "name": "DevB", "status": "paired"}
-    events_b = [d for m, d in b.web_server.broadcasts if m == "netpair_peer"]
+    events_b = [d for m, d in b.web_server.ws_manager.broadcasts
+                if m == "netpair_peer"]
     assert events_b and events_b[0] == {"peer_id": "a1b2c3d4e5f6",
                                         "name": "DevA", "status": "paired"}
 
@@ -516,18 +522,6 @@ import pytest
 
 # ------------------------------------------------------------------ config
 
-@pytest.fixture()
-def test_config_netpair_aliases_roundtrip(isolated_config):
-    cfg_mod = isolated_config
-    cfg = cfg_mod.Config()
-    cfg.netpair_aliases = {"peer-1": "客厅电脑", "peer-2": "Office PC"}
-    cfg_mod.save(cfg)
-    loaded = cfg_mod.load()
-    assert loaded.netpair_aliases == {"peer-1": "客厅电脑",
-                                      "peer-2": "Office PC"}
-    assert cfg_mod.Config().netpair_aliases == {}  # fresh default
-
-
 def test_config_netpair_aliases_bad_type_falls_back(isolated_config):
     cfg_mod = isolated_config
     path = cfg_mod._config_path()
@@ -588,13 +582,17 @@ def make_app_stub_mgmt(**attrs):
     app._save_cfg_and_peers = lambda: saved.__setitem__("n", saved["n"] + 1)
     app._saved = saved
 
-    class WS:
+    class WSManager:
         def __init__(self):
             self.broadcasts = []
 
         def broadcast(self, mtype, data):
             self.broadcasts.append((mtype, data))
             return 1
+
+    class WS:
+        def __init__(self):
+            self.ws_manager = WSManager()
     app.web_server = WS()
 
     # bind the real Application methods the handlers delegate to
@@ -829,33 +827,6 @@ def test_api_rename_unpair_routes():
 
 # ----------------------------------------------------------------- backup
 
-@pytest.fixture()
-def test_backup_roundtrip_includes_netpair_aliases(tmp_path,
-                                                   _isolated_favorites):
-    import internal.data.backup as backup_mod
-    from internal.clipboard.history import ClipboardHistory
-    from internal.config.config import Config
-
-    cfg = Config()
-    cfg.netpair_aliases = {"peer-1": "客厅电脑", "peer-2": "Office PC"}
-    cfg.netpair_secrets = {"peer-1": "ABCDEFG"}
-
-    history = ClipboardHistory(storage_path=str(tmp_path / "h.json"))
-    zip_path = backup_mod.create_backup(
-        cfg, history, backup_dir=str(tmp_path / "bk"))
-
-    with zipfile.ZipFile(zip_path) as zf:
-        exported = json.loads(zf.read("config.json").decode("utf-8"))
-    assert exported["netpair_aliases"] == {"peer-1": "客厅电脑",
-                                           "peer-2": "Office PC"}
-
-    fresh = Config()
-    result = backup_mod.restore_backup(zip_path, fresh, history)
-    assert result["config"] is True
-    assert fresh.netpair_aliases == {"peer-1": "客厅电脑",
-                                     "peer-2": "Office PC"}
-
-
 def test_backup_restore_ignores_malformed_netpair_aliases(
         tmp_path, _isolated_favorites):
     import internal.data.backup as backup_mod
@@ -1013,13 +984,17 @@ def make_app_stub_audit(**attrs):
     app._save_cfg_encrypted = lambda: saved.__setitem__("n", saved["n"] + 1)
     app._saved = saved
 
-    class WS:
+    class WSManager:
         def __init__(self):
             self.broadcasts = []
 
         def broadcast(self, mtype, data):
             self.broadcasts.append((mtype, data))
             return 1
+
+    class WS:
+        def __init__(self):
+            self.ws_manager = WSManager()
 
     app.web_server = WS()
 
@@ -1362,7 +1337,8 @@ def test_p7_unpair_broadcasts_unpaired_to_web_tabs():
     secret = _netpair_secret()
     app = make_app_stub_audit(netpair_secrets={pid: secret})
     app._netpair_unpair(pid)
-    ws_events = [e for e in app.web_server.broadcasts if e[0] == "netpair_peer"]
+    ws_events = [e for e in app.web_server.ws_manager.broadcasts
+                 if e[0] == "netpair_peer"]
     assert len(ws_events) == 1
     assert ws_events[0][1] == {"peer_id": pid, "status": "unpaired"}
 

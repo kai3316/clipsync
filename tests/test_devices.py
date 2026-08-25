@@ -52,11 +52,13 @@ def test_device_panel_has_internet_pairing_section():
 
 def test_device_panel_collapsed_behind_toggle():
     src = _read("components", "device-panel.js")
-    # The section is collapsed behind a switch — the body only renders when
-    # the toggle is on, so the page isn't a wall of pairing prompts.
+    # The section is collapsed behind a chevron accordion header — the body
+    # only renders when expanded, so the page isn't a wall of pairing prompts.
     assert "netpairExpanded" in src
     assert "toggleNetpair" in src
-    assert "netpair-switch" in src
+    assert "netpair-section__header" in src
+    assert "netpair-section__chevron" in src
+    assert "netpair-switch" not in src
     assert 'v-if="netpairExpanded"' in src
     # Auto-expand once the first internet peer arrives.
     assert "netpairPairedCount" in src

@@ -319,15 +319,48 @@
         }
       },
 
-      onContextMenu: function (e) {
-        this.store.contextMenu = {
+      // Capture any live text selection that overlaps THIS item, so a
+      // right-click on a partial selection can copy it.  Returns '' when
+      // nothing is selected or the selection belongs to another row.
+      _selectionOverlappingItem: function () {
+        var sel = window.getSelection ? window.getSelection() : null;
+        if (!sel || sel.isCollapsed || sel.rangeCount === 0) return '';
+        var text = sel.toString();
+        if (!text) return '';
+        var el = this.$el;
+        if (!el) return '';
+        // Anchor/focus may be text nodes — walk up to their element.
+        var a = sel.anchorNode;
+        var f = sel.focusNode;
+        var aEl = (a && a.nodeType === 1) ? a : (a && a.parentNode);
+        var fEl = (f && f.nodeType === 1) ? f : (f && f.parentNode);
+        if ((aEl && el.contains(aEl)) || (fEl && el.contains(fEl))) return text;
+        return '';
+      },
+
+      // Shared menu-open path for right-click and touch long-press.  When a
+      // text selection overlaps this item, the selected text is copied right
+      // away (so a partial selection can never be uncopyable) and exposed as
+      // contextMenu.selectionText so the menu's Copy action can prefer it.
+      _openContextMenu: function (x, y, opener) {
+        var selText = this._selectionOverlappingItem();
+        var menu = {
           visible: true,
-          x: e.clientX,
-          y: e.clientY,
+          x: x,
+          y: y,
           mode: 'history-item',
           target: this.item,
-          opener: e.currentTarget || e.target
+          opener: opener
         };
+        if (selText) {
+          menu.selectionText = selText;
+          this.fallbackCopy(selText);
+        }
+        this.store.contextMenu = menu;
+      },
+
+      onContextMenu: function (e) {
+        this._openContextMenu(e.clientX, e.clientY, e.currentTarget || e.target);
       },
 
       // iOS Safari never fires contextmenu on divs, and long-press is
@@ -379,14 +412,7 @@
       },
 
       openContextMenuAt: function (x, y) {
-        this.store.contextMenu = {
-          visible: true,
-          x: x,
-          y: y,
-          mode: 'history-item',
-          target: this.item,
-          opener: this.$el
-        };
+        this._openContextMenu(x, y, this.$el);
         // The browser synthesizes a click right after a long-press; the
         // context-menu component listens on document in the capture phase and
         // would close the menu instantly. Mark it as touch-opened so that

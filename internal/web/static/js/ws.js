@@ -133,9 +133,12 @@ var ClipsyncWS = (function () {
         _connected = true;
         reconnectDelay = 1000;  // Reset backoff
         self._dispatch('connected', {});
-        // Play connection sound — honour the server-side sound setting.
-        var store = window.__CLIPSYNC_STORE__;
-        if (window.ClipsyncSound && (!store || store.soundEnabled)) {
+        // Play connection sound — honour the sound preference. Gated on
+        // ClipsyncSound.known: before the localStorage/server preference is
+        // actually known (store.soundEnabled defaults to true until the
+        // settings load), a sound-disabled user would hear the startup chime
+        // on every launch. playConnect() itself respects the loaded value.
+        if (window.ClipsyncSound && ClipsyncSound.known) {
           ClipsyncSound.playConnect();
         }
       };

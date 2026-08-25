@@ -195,7 +195,7 @@
       <template v-else-if="hasContent">
         <!-- Pinned section -->
         <template v-if="sections.pinned.length > 0">
-          <div class="section-header">&#128204; {{ t('web.pinned') }}</div>
+          <div class="section-header">{{ t('web.pinned') }}</div>
           <history-item
             v-for="(item, index) in sections.pinned"
             :key="item.entry_id || 'p'+index"
@@ -231,7 +231,7 @@
         <div v-if="store.historySearch" class="history-panel__empty-search">
           <span class="history-panel__empty-search-icon">🔍</span>
           <p class="history-panel__empty-search-title">{{ t('empty.no_results', { query: store.historySearch }) }}</p>
-          <button class="btn-ghost" @click="clearSearch">{{ t('ui.cancel') }}</button>
+          <button class="btn-ghost" @click="clearSearch">{{ t('history.clear_search') }}</button>
         </div>
 
         <!-- Type-filter empty state: there IS history, just none of this type -->
@@ -271,7 +271,7 @@
             </button>
             <button class="btn-action-bar btn-action-bar--danger" @click="deleteSelected" :disabled="deleting || batchBusy">
               <span class="btn-action-bar__icon">&#128465;</span>
-              <span class="btn-action-bar__label">{{ deleting ? t('web.deleted') : t('web.delete') }}</span>
+              <span class="btn-action-bar__label">{{ deleting ? t('history.deleting') : t('web.delete') }}</span>
             </button>
             <button class="btn-action-bar btn-action-bar--ghost" @click="clearSelection" :disabled="batchBusy">
               <span class="btn-action-bar__icon">&#10006;&#65039;</span>

@@ -6,9 +6,10 @@ back to its own dated default (Arial on Windows, the system default elsewhere),
 which makes the CTk backend look visibly non-native next to the web UI.
 
 This module resolves the best actually-installed UI font for the current
-platform and provides :func:`make_font` so every CTkFont call site gets the
-same family — while still honouring an explicit ``family=`` (e.g. the monospace
-URL rows) and every other CTkFont keyword.
+platform and patches ``ctk.CTkFont`` (via :func:`install_platform_font_patch`)
+so every CTkFont call site gets the same family — while still honouring an
+explicit ``family=`` (e.g. the monospace URL rows) and every other CTkFont
+keyword.
 """
 
 from __future__ import annotations
@@ -119,24 +120,13 @@ def resolve_ui_font_family() -> str:
     return _tk_default_family()
 
 
-def make_font(family: str | None = None, **kwargs) -> ctk.CTkFont:
-    """Create a CTkFont using the platform UI font unless ``family`` is given.
-
-    Every keyword (``size``, ``weight``, ``slant``, ...) is passed through to
-    :class:`customtkinter.CTkFont`, so this is a drop-in replacement for
-    ``ctk.CTkFont(...)``.
-    """
-    if family is None:
-        family = resolve_ui_font_family()
-    return ctk.CTkFont(family=family, **kwargs)
-
-
 def configure_platform_font(root) -> None:
     """Align Tk's default font with the platform UI font.
 
-    Called once at startup after the root window exists.  CTk widgets all go
-    through :func:`make_font`; this also nudges the plain-Tk widgets embedded
-    in CTk (e.g. the internal Entry) onto the same family and a saner size.
+    Called once at startup after the root window exists.  CTk fonts all
+    resolve the platform family through :func:`install_platform_font_patch`;
+    this also nudges the plain-Tk widgets embedded in CTk (e.g. the internal
+    Entry) onto the same family and a saner size.
     """
     try:
         import tkinter.font as tkfont

@@ -1037,6 +1037,60 @@ def test_collector_skips_missing_file_root_silently(tmp_path):
     assert entries == []
 
 
+def test_file_root_serves_pull_to_peer(tmp_path):
+    """A single-file watch root must be servable on the peer path too: the
+    aiconfig_req handler targets the file itself (no directory walk), so a pull
+    lands its content on the receiver."""
+    srv = _StubMgrRound12(tmp_path, roots=[str(tmp_path / "CLAUDE.md")])
+    _mk_round12(tmp_path, "CLAUDE.md", b"# hello\n")
+    srv.mgr.collect()
+    assert [e["path"] for e in srv.mgr._local_entries] == ["CLAUDE.md"]
+
+    recv_roots = tmp_path / "recv-root"
+    recv_roots.mkdir()
+    _mk_round12(recv_roots, "CLAUDE.md", b"# old")  # landing needs an existing target
+    r = _StubMgrRound12(tmp_path, roots=[str(recv_roots)])
+
+    # pull: full async req -> serve -> land loop against the file-root server
+    assert _pull_and_deliver(r, srv, "CLAUDE.md", "overwrite") is False
+    assert (recv_roots / "CLAUDE.md").read_bytes() == b"# hello\n"
+
+
+def test_file_root_preview_returns_content_without_landing(tmp_path):
+    """Preview of a single-file root returns the file's content and never
+    lands anything on the receiver's disk."""
+    srv = _StubMgrRound12(tmp_path, roots=[str(tmp_path / "CLAUDE.md")])
+    _mk_round12(tmp_path, "CLAUDE.md", b"# hello\n")
+    srv.mgr.collect()
+
+    recv_roots = tmp_path / "recv-root"
+    recv_roots.mkdir()
+    r = _StubMgrRound12(tmp_path, roots=[str(recv_roots)])
+    result_box = {}
+
+    def run():
+        result_box["res"] = r.mgr.preview("p1", 0, "CLAUDE.md")
+
+    t = threading.Thread(target=run)
+    t.start()
+    deadline = time.time() + 2.0
+    while not r.sent and time.time() < deadline:
+        time.sleep(0.01)  # wait for the preview's aiconfig_req to be sent
+    assert r.sent, "preview never sent its request"
+    req = decode_message(r.sent[-1][1])._raw_payload
+    assert req["msg_type"] == "aiconfig_req"
+    srv.mgr.handle_message("aiconfig_req", req, "p1")
+    reply = decode_message(srv.sent[-1][1])._raw_payload
+    r.mgr.handle_message("aiconfig_data", reply, "p1")
+    t.join(2.0)
+    assert not t.is_alive()
+    res = result_box["res"]
+    assert res["ok"] is True
+    assert res["content"] == "# hello\n"
+    assert res["truncated"] is False
+    assert list(recv_roots.iterdir()) == []
+
+
 # ------------------------------------------------------------- frontend static
 
 def test_preset_button_wired_in_panel_and_locales():

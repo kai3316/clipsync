@@ -20,6 +20,11 @@
    served without interpolation. */
 try { window.__I18N_LOCALE__ = __CLIPSYNC_I18N_LOCALE__; }
 catch (e) { window.__I18N_LOCALE__ = ''; }
+/* Same shared locale JSON the dashboard uses (locales/*.json), so dotted keys
+   (netpair_*, diag.v2.*, chat.*, ...) can be resolved via jt() below instead
+   of duplicating them in the inline T dict. */
+try { window.__I18N_JSON__ = __CLIPSYNC_I18N_DATA__; }
+catch (e) { window.__I18N_JSON__ = null; }
 </script>
 <script>
 /* Register the service worker so an installed phone page keeps working when
@@ -340,6 +345,9 @@ body::before {
   color: var(--fg);
   font-size: 13px;
   font-weight: 600;
+  font-family: var(--font);
+  cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
 }
 .fav-export:active { border-color: var(--accent); color: var(--accent); }
 
@@ -385,8 +393,8 @@ body::before {
 
 .f-item__delete {
   flex-shrink: 0;
-  width: 30px;
-  height: 30px;
+  width: 40px;
+  height: 40px;
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -501,7 +509,12 @@ body.light .chat-device,
 body.light .chat-session,
 body.light .tr-item,
 body.light .fav-item,
-body.light .set-card {
+body.light .set-card,
+body.light .h-item,
+body.light .f-item,
+body.light .send-card,
+body.light .fav-export,
+body.light .upload-btn {
   background: linear-gradient(135deg, rgba(255,255,255,0.92), rgba(240,244,251,0.92));
 }
 
@@ -573,6 +586,9 @@ body.light .set-card {
   padding: 4px 0 8px;
   -webkit-user-select: text;
   user-select: text;
+  /* Let iOS show the native long-press callout (copy/lookup) on messages —
+     the body-level -webkit-touch-callout:none must not suppress it here. */
+  -webkit-touch-callout: default;
 }
 
 .chat-msg-row { display: flex; flex-direction: column; }
@@ -628,6 +644,22 @@ body.light .set-card {
   -webkit-tap-highlight-color: transparent;
 }
 .chat-bubble__retry:disabled { opacity: 0.45; }
+
+.chat-bubble__copy {
+  display: inline-block;
+  margin-right: 5px;
+  padding: 0 6px;
+  font-size: 11px;
+  line-height: 16px;
+  font-family: inherit;
+  color: inherit;
+  background: transparent;
+  border: 1px solid currentColor;
+  border-radius: 9px;
+  cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
+}
+.chat-bubble__copy:active { opacity: 0.6; }
 
 .chat-file {
   align-self: flex-start;
@@ -916,8 +948,8 @@ body.light .set-card {
 
 .tr-hitem__retry {
   flex-shrink: 0;
-  width: 34px;
-  height: 34px;
+  width: 40px;
+  height: 40px;
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -940,8 +972,8 @@ body.light .set-card {
 
 .chat-bell {
   flex-shrink: 0;
-  width: 36px;
-  height: 36px;
+  width: 40px;
+  height: 40px;
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -1403,6 +1435,22 @@ body.light .set-card {
   var serverLocale = window.__I18N_LOCALE__ || '';
   var ZH = (serverLocale || navigator.language || '').toLowerCase().indexOf('zh') === 0;
   document.documentElement.lang = ZH ? 'zh-CN' : 'en';
+
+  // The shared locale JSON the dashboard uses, injected above. The inline T
+  // dict below is a partial duplicate of it and drifts — new strings belong in
+  // internal/web/static/locales/*.json FIRST; keep mobile-only keys in T.
+  // For any dotted key already in the JSON (netpair_*, diag.v2.*, chat.*, ...),
+  // use jt(key, fmt) instead of a parallel entry here.
+  var I18N_JSON = window.__I18N_JSON__ || null;
+  function jt(key, fmt) {
+    var text = (I18N_JSON && typeof I18N_JSON[key] === 'string') ? I18N_JSON[key] : key;
+    if (fmt && typeof fmt === 'object') {
+      Object.keys(fmt).forEach(function (k) {
+        text = text.split('{' + k + '}').join(fmt[k]);
+      });
+    }
+    return text;
+  }
 
   var T = {
     title: ZH ? '剪贴板' : 'ClipSync',
@@ -2665,16 +2713,21 @@ body.light .set-card {
     return '';
   }
 
-  // Local key map for the server's system-message text_keys — the mobile page
-  // carries its own T dict, so translate here instead of via the dashboard i18n.
+  // The server's system-message text_keys are dotted keys that live in the
+  // shared locale JSON (locales/*.json, injected as __I18N_JSON__) — prefer
+  // that single source via jt(); fall back to the inline T dict below for
+  // older payloads that don't carry a resolvable text_key.
   function chatSystemText(entry) {
     var tk = entry && entry.text_key;
-    var tkey = '';
-    if (tk === 'chat.system.peer_offline') tkey = 'chatSystemPeerOffline';
-    else if (tk === 'chat.system.session_closed_by_peer') tkey = 'chatSystemClosedByPeer';
-    else if (tk === 'chat.system.file_declined') tkey = 'chatSystemFileDeclined';
-    else if (tk === 'chat.system.file_cancelled') tkey = 'chatSystemFileCancelled';
-    var raw = tkey ? T[tkey] : (entry ? entry.text || T.chatSystemUnknown : T.chatSystemUnknown);
+    var raw = tk ? jt(tk) : '';
+    if (!raw || raw === tk) {
+      var tkey = '';
+      if (tk === 'chat.system.peer_offline') tkey = 'chatSystemPeerOffline';
+      else if (tk === 'chat.system.session_closed_by_peer') tkey = 'chatSystemClosedByPeer';
+      else if (tk === 'chat.system.file_declined') tkey = 'chatSystemFileDeclined';
+      else if (tk === 'chat.system.file_cancelled') tkey = 'chatSystemFileCancelled';
+      raw = tkey ? T[tkey] : (entry ? entry.text || T.chatSystemUnknown : T.chatSystemUnknown);
+    }
     if (!raw) return '';
     var fmt = (entry && entry.fmt) || {};
     var name = fmt.name || '';
@@ -2758,6 +2811,10 @@ body.light .set-card {
         meta += '<span class="chat-bubble__failed">' + esc(T.chatTextFailed) + '</span>';
         meta += '<button class="chat-bubble__retry" data-resend-entry="' + esc(m.entry_id) + '" title="' + esc(T.chatResend) + '">⟳</button>';
       }
+      // Text bubbles get an explicit copy affordance — mobile webviews make
+      // long-press selection unreliable, so the meta row always carries a
+      // small copy button (label + tooltip share the localized copy string).
+      meta += '<button class="chat-bubble__copy" data-copy-msg title="' + esc(T.copy) + '">' + esc(T.copy) + '</button>';
       return '<div class="chat-msg-row"><div class="chat-bubble' + (m.outgoing ? ' chat-bubble--out' : ' chat-bubble--in') + (failed ? ' chat-bubble--failed' : '') + '">' +
         '<div class="chat-bubble__text">' + esc(m.text || '') + '</div>' +
         '<div class="chat-bubble__meta">' + meta + esc(fmtClock(m.ts)) + '</div>' +
@@ -2896,8 +2953,8 @@ body.light .set-card {
     if (!silent && chatOpenSession === null && chatDevices.length === 0 && chatSessions.length === 0) {
       chatView.innerHTML = '<div class="skeleton"></div><div class="skeleton"></div><div class="skeleton"></div>';
     }
-    var pDev = getJson('/api/chat/devices').then(function (d) { return d.devices || []; }, function () { return []; });
-    var pSess = getJson('/api/chat/sessions').then(function (d) { return d || {}; }, function () { return {}; });
+    var pDev = getJson('/api/chat/devices').then(function (d) { return d.devices || []; }, function (err) { if (err && err.status === 403) notifyTokenExpired(); return []; });
+    var pSess = getJson('/api/chat/sessions').then(function (d) { return d || {}; }, function (err) { if (err && err.status === 403) notifyTokenExpired(); return {}; });
     Promise.all([pDev, pSess]).then(function (out) {
       chatDevices = out[0];
       chatSessions = (out[1] && out[1].sessions) || [];
@@ -2935,9 +2992,10 @@ body.light .set-card {
             renderChatConversation();
           }
         })
-        .catch(function () {
+        .catch(function (err) {
           chatLoading = false;
           chatMessages = [];
+          if (err && err.status === 403) notifyTokenExpired();
           if (!silent) renderChatConversation();
         });
     });
@@ -3092,6 +3150,40 @@ body.light .set-card {
       .catch(function () {
         showToast(T.chatResendFail + ' · ' + T.loadFailHint, true);
       });
+  }
+
+  // Copy a text bubble's contents to the phone clipboard. The message text is
+  // rendered from m.text into the bubble DOM, so read it back from there —
+  // same clipboard chain as the item-modal copy: navigator.clipboard first,
+  // then a hidden-textarea execCommand fallback on plain-HTTP LAN.
+  function chatCopyMsg(btn) {
+    var bubble = btn.closest ? btn.closest('.chat-bubble') : null;
+    if (!bubble) return;
+    var textEl = bubble.querySelector('.chat-bubble__text');
+    var text = textEl ? (textEl.textContent || '') : '';
+    if (!text) return;
+    function fallback() {
+      try {
+        var ta = document.createElement('textarea');
+        ta.value = text;
+        ta.style.position = 'fixed';
+        ta.style.opacity = '0';
+        document.body.appendChild(ta);
+        ta.focus();
+        ta.select();
+        var ok = document.execCommand('copy');
+        document.body.removeChild(ta);
+        if (ok) { showToast(T.copied); return; }
+      } catch (e) { /* fall through */ }
+      showToast(T.copyFail, true);
+    }
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(text).then(function () {
+        showToast(T.copied);
+      }).catch(fallback);
+    } else {
+      fallback();
+    }
   }
 
   function chatFileAction(action, transferId) {
@@ -3303,6 +3395,8 @@ body.light .set-card {
       chatResend(resendBtn.getAttribute('data-resend-entry'));
       return;
     }
+    var copyBtn = el.closest ? el.closest('[data-copy-msg]') : null;
+    if (copyBtn) { chatCopyMsg(copyBtn); return; }
     var fileBtn = el.closest ? el.closest('[data-file-action]') : null;
     if (fileBtn) {
       chatFileAction(fileBtn.getAttribute('data-file-action'), fileBtn.getAttribute('data-transfer-id'));

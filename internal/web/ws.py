@@ -25,6 +25,12 @@ _OP_CLOSE = 0x8
 _OP_PING = 0x9
 _OP_PONG = 0xA
 
+# Broadcasts bound each client's send to a shorter deadline than the steady-
+# state 5s socket timeout, so one client that stops reading (backing up its
+# send buffer) cannot stall every other client's update for the full 5s.
+# The stuck client still self-evicts via send_bytes failing.
+_BROADCAST_SEND_TIMEOUT = 1.0
+
 
 class WebSocketClient:
     """Represents a single connected WebSocket client."""
@@ -59,14 +65,17 @@ class WebSocketClient:
             self._closed = True
             return False
 
-    def send_bytes(self, payload: bytes) -> bool:
+    def send_bytes(self, payload: bytes, timeout: float | None = None) -> bool:
         """Send a pre-serialized JSON text-frame payload.
 
         Avoids re-running ``json.dumps`` once per client on a broadcast.
+        ``timeout``, when given, narrows the socket's send deadline for just
+        this frame and restores it afterwards; broadcasts use it so one
+        stalled client cannot delay the rest for the full steady-state 5s.
         Returns True on success.
         """
         try:
-            self._send_frame(_OP_TEXT, payload)
+            self._send_frame(_OP_TEXT, payload, timeout)
             return True
         except (OSError, ConnectionError) as e:
             logger.debug("WS send error (%s): %s", self.addr[0], e)
@@ -217,8 +226,12 @@ class WebSocketClient:
                 return None
         return buf
 
-    def _send_frame(self, opcode: int, payload: bytes):
-        """Send a WebSocket frame."""
+    def _send_frame(self, opcode: int, payload: bytes, timeout: float | None = None):
+        """Send a WebSocket frame.
+
+        ``timeout`` (if given) temporarily narrows the socket timeout around
+        the sendall and restores the previous value afterwards.
+        """
         with self._lock:
             frame = bytearray()
             frame.append(0x80 | opcode)  # FIN + opcode
@@ -234,7 +247,14 @@ class WebSocketClient:
                 frame.extend(struct.pack("!Q", length))
 
             frame.extend(payload)
-            self.sock.sendall(bytes(frame))
+            prev_timeout = self.sock.gettimeout()
+            if timeout is not None:
+                self.sock.settimeout(timeout)
+            try:
+                self.sock.sendall(bytes(frame))
+            finally:
+                if timeout is not None:
+                    self.sock.settimeout(prev_timeout)
 
 
 class WebSocketManager:
@@ -380,7 +400,12 @@ class WebSocketManager:
             if client.closed:
                 dead.append(client)
                 continue
-            if client.send_bytes(payload):
+            # Bound each client's send to a shorter deadline than the steady-
+            # state 5s socket timeout: a client that is not reading backs up
+            # its send buffer and would otherwise stall every other client's
+            # update for the full 5s.  A timed-out send still self-evicts the
+            # stuck client below.
+            if client.send_bytes(payload, timeout=_BROADCAST_SEND_TIMEOUT):
                 delivered += 1
             else:
                 dead.append(client)
@@ -499,13 +524,22 @@ class WebSocketManager:
         self.broadcast("devices_updated", dev_data)
 
     def broadcast_transfer_progress(self, transfer_id: str, progress: float,
-                                    status: str = "transferring"):
-        """Convenience: broadcast transfer progress."""
-        self.broadcast("transfer_progress", {
+                                    status: str = "transferring",
+                                    direction: str | None = None):
+        """Convenience: broadcast transfer progress.
+
+        ``direction`` is optional ('up'/'down'): when present it is forwarded
+        so the UI can render the correct arrow; when omitted the payload is
+        exactly the legacy shape, so existing callers are unaffected.
+        """
+        payload = {
             "id": transfer_id,
             "progress": progress,
             "status": status,
-        })
+        }
+        if direction is not None:
+            payload["direction"] = direction
+        self.broadcast("transfer_progress", payload)
 
     def broadcast_transfer_complete(self, transfer_id: str, success: bool, cancelled: bool = False):
         """Convenience: broadcast a transfer completion event."""

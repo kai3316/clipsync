@@ -104,6 +104,20 @@
         return !!(this.store.activeChatSession && this.activeSession);
       },
 
+      // The open session's peer is an internet-ONLY (netpair) peer — file
+      // bytes can never cross the relay (file_chunk is refused), so offering
+      // the attach button would hand the peer an offer it can never receive,
+      // then stall 600s with a misleading "peer_offline". Disable it instead.
+      activePeerIsInternetOnly: function () {
+        var s = this.activeSession;
+        if (!s || s.peer_id === undefined || s.peer_id === null) return false;
+        var net = this.internetDeviceList;
+        for (var i = 0; i < net.length; i++) {
+          if (String(net[i].peer_id) === String(s.peer_id)) return true;
+        }
+        return false;
+      },
+
       // Incoming invitation awaiting accept/decline — show the invite banner.
       isInvitedSession: function () {
         var s = this.activeSession;
@@ -140,9 +154,14 @@
     },
 
     watch: {
-      // Auto-scroll whenever new entries land in the open conversation.
+      // Auto-scroll when new entries land in the open conversation, but ONLY
+      // when the user is still near the bottom — an up-scrolled reader keeps
+      // their place instead of being yanked to the newest message.
       'store.chatMessages': function () {
-        this._scrollToBottom();
+        var el = this.$refs.msgList;
+        if (el && el.scrollHeight - el.scrollTop - el.clientHeight < 80) {
+          this._scrollToBottom();
+        }
       },
 
       // Safety net: if a chat_sessions push shows the session we're viewing
@@ -173,7 +192,6 @@
       this._typingLastState = null;
       this._typingLastSent = 0;
       this._peerTypingTimer = null;
-      this._injectTypingStyle();
       this.loadDevices();
       this.loadSessions();
       // Internet-paired peers live in the store (kept live by WS + the
@@ -264,6 +282,7 @@
                 '</div>' +
               '</div>' +
               '<button class="chat-session-row__mute" :class="{ \'chat-session-row__mute--on\': isMuted(s) }"' +
+                ' :aria-label="isMuted(s) ? t(\'chat.unmute\') : t(\'chat.mute\')" :aria-pressed="isMuted(s)"' +
                 ' :title="isMuted(s) ? t(\'chat.unmute\') : t(\'chat.mute\')"' +
                 ' @click.stop="toggleMute(s)">{{ isMuted(s) ? \'🔕\' : \'🔔\' }}</button>' +
             '</div>' +
@@ -301,12 +320,13 @@
               '<div v-else-if="store.chatMessages.length === 0" class="chat-conv-empty">{{ t(\'chat.invite_greeting\') }}</div>' +
               '<template v-else>' +
                 '<div v-for="m in store.chatMessages" :key="m.entry_id" class="chat-msg-row">' +
-                  '<div v-if="m.kind === \'system\'" class="chat-system">{{ systemText(m) }}</div>' +
+                  '<div v-if="m.kind === \'system\'" class="chat-system selectable">{{ systemText(m) }}</div>' +
 
                   '<div v-else-if="m.kind === \'text\'" class="chat-bubble"' +
                     ' :class="[m.outgoing ? \'chat-bubble--out\' : \'chat-bubble--in\',' +
-                    ' (m.outgoing && m.status === \'failed\') ? \'chat-bubble--failed\' : \'\']">' +
-                    '<div class="chat-bubble__text">{{ m.text }}</div>' +
+                    ' (m.outgoing && m.status === \'failed\') ? \'chat-bubble--failed\' : \'\']"' +
+                    ' @contextmenu.prevent="openMsgMenu(m, $event)">' +
+                    '<div class="chat-bubble__text selectable">{{ m.text }}</div>' +
                     '<div class="chat-bubble__meta">' +
                       '<template v-if="m.outgoing && m.status === \'failed\'">' +
                         '<span class="chat-bubble__failed">{{ t(\'chat.text_failed\') }}</span>' +
@@ -321,10 +341,11 @@
                   '</div>' +
 
                   '<div v-else class="chat-file"' +
-                    ' :class="m.outgoing ? \'chat-file--out\' : \'chat-file--in\'">' +
+                    ' :class="m.outgoing ? \'chat-file--out\' : \'chat-file--in\'"' +
+                    ' @contextmenu.prevent="openMsgMenu(m, $event)">' +
                     '<div class="chat-file__icon">📄</div>' +
                     '<div class="chat-file__body">' +
-                      '<div class="chat-file__name">{{ m.file_name }}</div>' +
+                      '<div class="chat-file__name selectable">{{ m.file_name }}</div>' +
                       '<div class="chat-file__meta">' +
                         '<span>{{ formatSize(m.file_size) }}</span>' +
                         '<span class="chat-file__status">{{ fileStatusLabel(m) }}</span>' +
@@ -352,17 +373,17 @@
               '</template>' +
             '</div>' +
 
-            '<div v-if="showPeerTyping" class="chat-typing">{{ t(\'chat.typing\') }}' +
+            '<div v-if="showPeerTyping" class="chat-typing" style="padding:2px 12px 6px;font-size:12px;font-style:italic;display:flex;align-items:center;gap:4px;color:var(--clipsync-fg-muted)">{{ t(\'chat.typing\') }}' +
               '<span class="d">●</span><span class="d">●</span><span class="d">●</span>' +
             '</div>' +
 
             '<div class="chat-composer">' +
-              '<button class="chat-composer__attach" :title="t(\'chat.attach\')" :disabled="sendingFile" @click="pickFile">' +
+              '<button class="chat-composer__attach" :title="activePeerIsInternetOnly ? t(\'chat.attach_lan_only\') : t(\'chat.attach\')" :disabled="sendingFile || activePeerIsInternetOnly" @click="pickFile">' +
                 '{{ sendingFile ? \'...\' : \'📎\' }}' +
               '</button>' +
-              '<input class="chat-composer__input" type="text" v-model="composing"' +
+              '<input ref="composerInput" class="chat-composer__input" type="text" v-model="composing"' +
                 ' :placeholder="t(\'chat.input_placeholder\')" :disabled="sendingText"' +
-                ' maxlength="4000" @input="onComposerInput" @keyup.enter="sendText">' +
+                ' maxlength="4000" @input="onComposerInput" @keyup.enter="onComposerEnter">' +
               '<button class="chat-composer__send" :disabled="!canSend" @click="sendText">{{ t(\'chat.send\') }}</button>' +
               '<input type="file" ref="fileInput" style="display:none" @change="onFilePicked">' +
             '</div>' +
@@ -447,6 +468,19 @@
         this.loadMessages();
         this.markRead();
         this._armPeerTyping(session);
+        // On the mobile stacked layout the conversation sits below the whole
+        // device+session list — scroll the panel down so it comes into view.
+        var self = this;
+        this.$nextTick(function () {
+          if (window.innerWidth <= 768) {
+            var panel = self.$el;
+            if (panel && panel.scrollTo) {
+              panel.scrollTo({ top: panel.scrollHeight, behavior: 'smooth' });
+            } else if (panel) {
+              panel.scrollTop = panel.scrollHeight;
+            }
+          }
+        });
       },
 
       markRead: function () {
@@ -491,6 +525,20 @@
           y: e.clientY,
           mode: 'chat-session',
           target: session,
+          opener: e.currentTarget || e.target,
+        };
+      },
+
+      // Right-click a chat message (text bubble or file card): open the shared
+      // context menu in chat-message mode (copy text / file name).
+      openMsgMenu: function (m, e) {
+        if (!m) return;
+        this.store.contextMenu = {
+          visible: true,
+          x: e.clientX,
+          y: e.clientY,
+          mode: 'chat-message',
+          target: m,
           opener: e.currentTarget || e.target,
         };
       },
@@ -635,6 +683,11 @@
           })
           .finally(function () {
             self.sendingText = false;
+            // Give the (now re-enabled) composer its focus back.
+            self.$nextTick(function () {
+              var inp = self.$refs.composerInput;
+              if (inp) inp.focus();
+            });
           });
       },
 
@@ -644,6 +697,14 @@
       // reports "stopped" immediately (state changes bypass the throttle).
       onComposerInput: function () {
         this.sendTypingState(!!(this.composing || '').trim());
+      },
+
+      // Enter-to-send, but never during IME composition: keyup fires once the
+      // composition ends, and the isComposing/229 guard drops any lingering
+      // intermediate keyups so a Chinese user's half-typed phrase isn't sent.
+      onComposerEnter: function (e) {
+        if (e && (e.isComposing || e.keyCode === 229)) return;
+        this.sendText();
       },
 
       sendTypingState: function (typing) {
@@ -685,24 +746,6 @@
         } else {
           this.peerTypingLocal = false;
         }
-      },
-
-      // One-time stylesheet for the indicator row (index.html's CSS is not
-      // editable from this component).
-      _injectTypingStyle: function () {
-        if (document.getElementById('cs-chat-typing-style')) return;
-        var el = document.createElement('style');
-        el.id = 'cs-chat-typing-style';
-        el.textContent =
-          '.chat-typing{padding:2px 12px 6px;font-size:12px;color:#8a8f98;' +
-          'font-style:italic;display:flex;align-items:center;gap:4px}' +
-          '.chat-typing .d{display:inline-block;font-size:9px;line-height:1;' +
-          'animation:cs-typing-b 1.2s infinite}' +
-          '.chat-typing .d:nth-child(2){animation-delay:.2s}' +
-          '.chat-typing .d:nth-child(3){animation-delay:.4s}' +
-          '@keyframes cs-typing-b{0%,60%,100%{opacity:.25;transform:translateY(0)}' +
-          '30%{opacity:1;transform:translateY(-2px)}}';
-        document.head.appendChild(el);
       },
 
       /* ── Failed-text resend ──────────────────────────────────── */
@@ -775,6 +818,10 @@
           .catch(function (err) {
             console.error('[ClipSync] Failed to send chat file:', err);
             self.store.showToast(self.t('chat.err_send_failed'), 2500);
+            // Reset the picker so the SAME file can be re-selected after an
+            // error — otherwise it's only cleared on the success path and the
+            // next pick of the identical file would be a no-op.
+            e.target.value = '';
           })
           .finally(function () {
             self.sendingFile = false;
@@ -794,10 +841,28 @@
           '&purpose=chat';
         var formData = new FormData();
         formData.append('file', file);
-        return fetch(url, { method: 'POST', body: formData })
+        // Mirror ClipsyncAPI.uploadFile's 15s stall guard: a hung upload must
+        // not leave sendingFile=true forever (the attach button stays
+        // disabled) with no way to retry the same file.
+        var options = { method: 'POST', body: formData };
+        var controller = null;
+        var timeoutId = null;
+        if (typeof AbortController !== 'undefined') {
+          controller = new AbortController();
+          options.signal = controller.signal;
+          timeoutId = setTimeout(function () {
+            controller.abort();
+          }, 15000);
+        }
+        return fetch(url, options)
           .then(function (r) {
+            clearTimeout(timeoutId);
             if (!r.ok) throw new Error('HTTP ' + r.status);
             return r.json();
+          })
+          .catch(function (e) {
+            clearTimeout(timeoutId);
+            throw e;
           });
       },
 
@@ -971,9 +1036,26 @@
       formatTime: function (ts) {
         if (!ts) return '';
         var d = new Date(ts * 1000);
-        var h = String(d.getHours()).padStart(2, '0');
-        var m = String(d.getMinutes()).padStart(2, '0');
-        return h + ':' + m;
+        var hh = String(d.getHours()).padStart(2, '0');
+        var mm = String(d.getMinutes()).padStart(2, '0');
+        var hhmm = hh + ':' + mm;
+        var now = new Date();
+        var sameDay = function (a, b) {
+          return a.getFullYear() === b.getFullYear() &&
+            a.getMonth() === b.getMonth() &&
+            a.getDate() === b.getDate();
+        };
+        // Today → just the clock time; yesterday → locale-aware label; any
+        // older timestamp gets a short MM-DD prefix so it isn't mistaken for
+        // today.
+        if (sameDay(d, now)) return hhmm;
+        var yesterday = new Date(now.getFullYear(), now.getMonth(), now.getDate() - 1);
+        if (sameDay(d, yesterday)) {
+          return this.t('history.yesterday', { time: hhmm });
+        }
+        var mo = String(d.getMonth() + 1).padStart(2, '0');
+        var dd = String(d.getDate()).padStart(2, '0');
+        return mo + '-' + dd + ' ' + hhmm;
       },
 
       /* ── Internet relay delivery stamp (round 17) ──────────────────

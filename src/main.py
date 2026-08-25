@@ -815,10 +815,27 @@ class Application:
                     logger.info("Private key decrypted from encrypted storage (%d chars)", len(pt))
                 cfg.private_key_pem = pt
             else:
+                # GCM auth failure — the stored private key is undecryptable
+                # (wrong password or corrupt blob).  Fail gracefully like the
+                # wrong-password branch above: neutralize the bad blob (so
+                # _bootstrap_identity does not crash on the base64 ciphertext
+                # in load_pem_private_key) and exit with a clean dialog.
                 logger.warning(
                     "Private key decryption FAILED — possibly wrong password "
-                    "or corrupted data. Trying as plaintext."
+                    "or corrupted data; exiting cleanly."
                 )
+                cfg.private_key_pem = ""
+                err_root = tk.Tk()
+                err_root.withdraw()
+                try:
+                    show_error(
+                        err_root,
+                        T("encryption.wrong_password_title"),
+                        T("encryption.wrong_password_msg"),
+                    )
+                finally:
+                    err_root.destroy()
+                sys.exit(1)
 
     # ═══════════════════════════════════════════════════════════════
     # Phase 4: Identity / Pairing
@@ -1427,6 +1444,29 @@ class Application:
         def _send(data: bytes):
             lan_ok = self.transport_mgr.send_to_peer(peer_id, data)
             if lan_ok:
+                # Round 17: a chat frame delivered over LAN P2P to an
+                # internet-reachable peer is ledger-recorded too, so the
+                # peer's relay_ack is not dropped as an unknown msg_id (the
+                # relay path already records inside _relay_publish_to_peer).
+                try:
+                    from internal.protocol.codec import decode_message
+                    decoded = decode_message(data)
+                    if getattr(decoded, "msg_type", "") in CHAT_MSG_TYPES \
+                            and hasattr(self, "_delivery_ledger") \
+                            and self._peer_is_internet_reachable(peer_id):
+                        payload = getattr(decoded, "_raw_payload", {}) or {}
+                        sid = payload.get("session_id", "")
+                        self._delivery_on_sent(
+                            peer_id,
+                            getattr(decoded, "msg_id", "") or "",
+                            "",
+                            self._delivery_chat_preview(
+                                getattr(decoded, "msg_type", ""), payload),
+                            kind=getattr(decoded, "msg_type", "chat"),
+                            session_id=str(sid) if isinstance(sid, str) else "",
+                        )
+                except Exception:
+                    logger.debug("chat delivery ledger failed", exc_info=True)
                 return True
             return self._relay_publish_to_peer(data, peer_id)
         return _send
@@ -2276,7 +2316,13 @@ class Application:
                         break
             except Exception:
                 logger.debug("Could not read transfer state for web push", exc_info=True)
-        self._push_web("broadcast_transfer_progress", transfer_id, progress, state)
+        # Direction (up for outgoing / down for incoming) rides the payload so
+        # the web UI can render the correct transfer arrow.  The ws_manager
+        # convenience method folds it into the transfer_progress event.
+        direction = self._transfer_directions.get(transfer_id, "outgoing")
+        direction = "up" if direction == "outgoing" else "down"
+        self._push_web("broadcast_transfer_progress",
+                       transfer_id, progress, state, direction)
 
     def _reject_incoming_transfer(self, transfer_id: str, send_fn) -> None:
         """Reject an incoming transfer and forget its direction entry.
@@ -4018,6 +4064,7 @@ class Application:
                         T("ui.web_start_failed2", port=self.cfg.web_port),
                     )
                     return
+                self._set_systray_web_enabled(True)
             logger.info("Web companion restarted via dashboard")
 
     # ═══════════════════════════════════════════════════════════════
@@ -4181,10 +4228,15 @@ class Application:
 
         ok, verdict = False, "no_release_info"
         release_info = None
-        try:
-            release_info = fetch_latest_asset_info()
-        except Exception as exc:  # defensive — the helper never raises
-            logger.debug("Release info lookup failed: %s", exc)
+        if source != "github":
+            # Only non-GitHub (P2P) arrivals need the release digest fetched;
+            # that lookup can block for ~30s (urlopen + backoff), and the
+            # GitHub path short-circuits in verify_update_blob when
+            # release_info is None — so never run it on the UI thread here.
+            try:
+                release_info = fetch_latest_asset_info()
+            except Exception as exc:  # defensive — the helper never raises
+                logger.debug("Release info lookup failed: %s", exc)
         try:
             ok, verdict = verify_update_blob(
                 path, release_info, __version__, source=source)
@@ -6783,6 +6835,9 @@ class Application:
         # Tell the peer we unpaired, before the connection is torn down.
         self._send_pairing_msg(peer_id, "pairing_unpair")
         self.transport_mgr.forget_peer(peer_id)
+        # Round 17: a forgotten peer must stop burning relay retries, and its
+        # base64 payloads must not linger on disk in relay_pending.json.
+        getattr(self, "_delivery_clear_peer", lambda pid: None)(peer_id)
         self._save_cfg_encrypted()
         self._push_web("broadcast_devices")
 
@@ -7883,7 +7938,7 @@ class Application:
         """
         try:
             if getattr(self, "web_server", None) is not None:
-                self.web_server.broadcast("internet_delivery", {
+                self.web_server.ws_manager.broadcast("internet_delivery", {
                     "peer_id": peer_id,
                     "msg_id": msg_id,
                     "status": status,
@@ -8260,6 +8315,30 @@ class Application:
         except Exception:
             logger.debug("delivery final persist failed", exc_info=True)
 
+    def _delivery_clear_peer(self, peer_id: str) -> None:
+        """Drop a peer's delivery ledger + offline queue and re-persist.
+
+        Called when a peer is unpaired/forgotten: an unpaired peer must stop
+        burning relay retries, and its base64 payloads must not linger on disk
+        in relay_pending.json.  Defensive on missing delivery state so test
+        stubs / early teardown are no-ops.
+        """
+        if not peer_id:
+            return
+        lock = getattr(self, "_delivery_lock", None)
+        if lock is None:
+            return
+        with lock:
+            queue = getattr(self, "_delivery_queue", None)
+            if queue is not None:
+                queue.pop(peer_id, None)
+            ledger = getattr(self, "_delivery_ledger", None)
+            if ledger is not None:
+                ledger.pop(peer_id, None)
+        persist = getattr(self, "_delivery_persist_queue", None)
+        if persist is not None:
+            persist()
+
     def _delivery_run(self) -> None:
         """Lightweight loop: 2s timeout scan, 60s queue retry, 1s granularity."""
         last_scan = time.monotonic()
@@ -8519,6 +8598,9 @@ class Application:
             self._save_cfg_and_peers()
         except Exception:
             logger.debug("Failed persisting netpair unpair", exc_info=True)
+        # Round 17: the unpaired peer must stop burning relay retries, and its
+        # base64 payloads must not linger on disk in relay_pending.json.
+        getattr(self, "_delivery_clear_peer", lambda pid: None)(peer_id)
         if self._relay is not None:
             try:
                 self._relay.refresh_channels()
@@ -8529,7 +8611,7 @@ class Application:
         # through a WS push (ws.js folds status:"unpaired" into the peer list).
         try:
             if getattr(self, "web_server", None) is not None:
-                self.web_server.broadcast(
+                self.web_server.ws_manager.broadcast(
                     "netpair_peer", {"peer_id": peer_id, "status": "unpaired"})
         except Exception:
             logger.debug("netpair_peer unpair WS broadcast failed", exc_info=True)
@@ -8676,7 +8758,7 @@ class Application:
                 logger.debug("netpair refresh after hello failed", exc_info=True)
         try:
             if getattr(self, "web_server", None) is not None:
-                self.web_server.broadcast(
+                self.web_server.ws_manager.broadcast(
                     "netpair_peer", {"peer_id": peer_id, "name": name,
                                      "status": "paired"})
         except Exception:
@@ -8816,6 +8898,11 @@ def main():
     app._create_ui()
     app._show_first_run_onboarding_if_needed()
     app._start_services()
+    # A webview-mode fresh install that downgraded to the ctk backend (all web
+    # ports busy) skipped the picker above (it deferred to the SPA wizard) —
+    # re-check once services are up so the first-run language wizard still
+    # appears on this launch.
+    app._show_first_run_onboarding_if_needed()
     app._start_threads()
 
     app.run()

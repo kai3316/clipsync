@@ -76,10 +76,35 @@
           self.targetDevice = devs[0].device_id;
         }
       }, { immediate: true });
+
+      // F17: a manual re-selection of a target device re-arms the UI — clear
+      // the stale "peer went offline" hint and re-enable auto-selection.
+      // Guarded on a non-empty value: the onlineDevices watcher clears
+      // targetDevice to '' when the selected peer drops, and that clearing
+      // must NOT swallow the hint (otherwise it would be masked on the very
+      // drop that set it).
+      this._unwatchTarget = this.$watch('targetDevice', function (val) {
+        if (val) {
+          self.peerOffline = false;
+        }
+      });
+
+      // F16: a transfer_progress WS push can arrive before the backend knows
+      // the transfer's name/size, leaving an active row stuck on "Unknown
+      // file" with no size until the next full refetch. Watch the active list
+      // and hydrate the first nameless entry from the authoritative
+      // /api/transfer snapshot (in-flight-gated, non-blocking).
+      this._unwatchHydrate = this.$watch(
+        function () { return self.store.activeTransfers; },
+        function () { self._hydrateNamelessTransfers(); },
+        { deep: true, immediate: true }
+      );
     },
 
     beforeUnmount: function () {
       if (this._unwatch) this._unwatch();
+      if (this._unwatchTarget) this._unwatchTarget();
+      if (this._unwatchHydrate) this._unwatchHydrate();
     },
 
     template: `<div class="transfer-panel">
@@ -114,7 +139,7 @@
         <!-- Device selector -->
         <div class="transfer-device-select" v-if="onlineDevices.length > 0">
           <span class="transfer-device-select__label">{{ t('transfer.send_to') }}</span>
-          <select class="settings-select" v-model="targetDevice">
+          <select class="settings-select" v-model="targetDevice" :aria-label="t('transfer.send_to')">
             <option v-for="d in onlineDevices" :key="d.device_id" :value="d.device_id">
               {{ d.device_name || d.name || d.device_id }}
             </option>
@@ -329,6 +354,9 @@
           return;
         }
         self.sending = true;
+        // F17: a fresh send re-arms the UI — drop any stale "peer went
+        // offline" hint left over from an earlier failed send.
+        self.peerOffline = false;
         var uploaded = 0;
         var total = files.length;
         var errors = [];
@@ -383,11 +411,33 @@
       formatTimestamp: function (ts) {
         if (!ts) return '';
         var d = new Date(ts * 1000);
-        var month = String(d.getMonth() + 1).padStart(2, '0');
-        var day = String(d.getDate()).padStart(2, '0');
-        var hours = String(d.getHours()).padStart(2, '0');
-        var mins = String(d.getMinutes()).padStart(2, '0');
-        return month + '/' + day + ' ' + hours + ':' + mins;
+        if (isNaN(d.getTime())) return '';
+        var locale = (typeof ClipsyncI18n !== 'undefined' && ClipsyncI18n.locale)
+          ? ClipsyncI18n.locale
+          : (navigator.language || 'en-US');
+        var sameYear = new Date().getFullYear() === d.getFullYear();
+        var opts = {
+          month: '2-digit',
+          day: '2-digit',
+          hour: '2-digit',
+          minute: '2-digit',
+          hour12: false,
+        };
+        // F56: include the year only when it differs from the current year so
+        // recent entries stay compact while older history stays unambiguous.
+        if (!sameYear) opts.year = 'numeric';
+        try {
+          return new Intl.DateTimeFormat(locale, opts).format(d);
+        } catch (e) {
+          // Very old webview without Intl / unparseable locale tag — fall back
+          // to the previous fixed US-style rendering (year included when it
+          // differs, matching the Intl behaviour above).
+          var month = String(d.getMonth() + 1).padStart(2, '0');
+          var day = String(d.getDate()).padStart(2, '0');
+          var hours = String(d.getHours()).padStart(2, '0');
+          var mins = String(d.getMinutes()).padStart(2, '0');
+          return (sameYear ? '' : (d.getFullYear() + '/')) + month + '/' + day + ' ' + hours + ':' + mins;
+        }
       },
       isCancelledTransfer: function (tr) {
         return !!(tr && (tr.status === 'cancelled' || tr.cancelled));
@@ -472,6 +522,56 @@
             }
           }
           return res;
+        });
+      },
+      // F16: hydrate a nameless active-transfer entry from the authoritative
+      // /api/transfer snapshot so it renders with a name/size instead of
+      // "Unknown file" until the next full refetch. In-flight-gated so the
+      // progress pushes that keep arriving can't stack requests; non-blocking
+      // and failure-tolerant (the entry simply keeps its placeholder).
+      _hydrateNamelessTransfers: function () {
+        var self = this;
+        if (self._hydrateInFlight) return;
+        var hasNameless = (self.store.activeTransfers || []).some(function (t) {
+          return t && !(t.filename || t.file_name);
+        });
+        if (!hasNameless) return;
+        self._hydrateInFlight = true;
+        ClipsyncAPI.getTransfers().then(function (res) {
+          self._hydrateInFlight = false;
+          var byId = {};
+          var active = (res && res.active) || [];
+          for (var i = 0; i < active.length; i++) {
+            var a = active[i];
+            if (a && a.id !== undefined && a.id !== null) byId[a.id] = a;
+          }
+          var list = self.store.activeTransfers;
+          for (var j = 0; j < list.length; j++) {
+            var tr = list[j];
+            var match = tr && byId[tr.id];
+            if (!match) continue;
+            // Fill only the fields this entry is missing — never clobber live
+            // progress/speed/eta values coming off the WS stream.
+            var patch = {};
+            if (!(tr.filename || tr.file_name)) {
+              patch.filename = match.filename || match.file_name || '';
+            }
+            if (!tr.size) {
+              patch.size = match.size || 0;
+            }
+            if (!tr.direction) {
+              patch.direction = match.direction || tr.direction || 'down';
+            }
+            if (!tr.state && !tr.status) {
+              patch.state = match.state;
+              patch.status = match.status;
+            }
+            if (Object.keys(patch).length > 0) {
+              Object.assign(tr, patch);
+            }
+          }
+        }).catch(function () {
+          self._hydrateInFlight = false;
         });
       },
       cancelTransfer: function (id) {

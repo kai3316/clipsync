@@ -1026,6 +1026,12 @@ elif _platform() == "macos":
         _cf.CFRunLoopStop.restype = None
         _cf.CFRunLoopStop.argtypes = [_CFRunLoopRef]
 
+        _cf.CFMachPortInvalidate.restype = None
+        _cf.CFMachPortInvalidate.argtypes = [_CFMachPortRef]
+
+        _cf.CFRelease.restype = None
+        _cf.CFRelease.argtypes = [ctypes.c_void_p]  # CFTypeRef
+
         # ── Module-level reference for the callback ────────────────
         _mac_mgr: "HotkeyManager | None" = None
 
@@ -1128,6 +1134,17 @@ elif _platform() == "macos":
                 _cg.CGEventTapEnable(tap, False)
             except Exception:
                 pass
+            # CGEventTapCreate returns a +1 reference; invalidate + release so
+            # start/stop cycles don't leave the tap registered for process
+            # lifetime.
+            try:
+                _cf.CFMachPortInvalidate(tap)
+            except Exception:
+                pass
+            try:
+                _cf.CFRelease(tap)
+            except Exception:
+                pass
             self._mac_tap = None
 
         rl = self._mac_run_loop
@@ -1138,7 +1155,15 @@ elif _platform() == "macos":
                 pass
             self._mac_run_loop = None
 
-        self._mac_source = None
+        source = self._mac_source
+        if source is not None:
+            # CFMachPortCreateRunLoopSource returns a +1 reference; release it
+            # (the run loop's own retain keeps it alive until the thread exits).
+            try:
+                _cf.CFRelease(source)
+            except Exception:
+                pass
+            self._mac_source = None
 
     def _macos_is_trusted(self: HotkeyManager) -> bool:
         """Return True when this process is trusted for Accessibility input.

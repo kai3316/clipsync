@@ -177,11 +177,13 @@ class WebViewWindow:
                     # ...). taskkill /T /F kills the tree so no orphan child
                     # survives after the main process is gone. run without a
                     # shell — never route the PID through a shell string.
-                    subprocess.run(
+                    # Spawned detached and not waited on: `run(..., timeout=10)`
+                    # could block the caller for up to 10 s (incl. the Tk main
+                    # thread on factory reset / shutdown) if taskkill stalled.
+                    subprocess.Popen(
                         ["taskkill", "/PID", str(proc.pid), "/T", "/F"],
                         stdout=subprocess.DEVNULL,
                         stderr=subprocess.DEVNULL,
-                        timeout=10,
                         creationflags=subprocess.CREATE_NO_WINDOW,
                     )
                 else:

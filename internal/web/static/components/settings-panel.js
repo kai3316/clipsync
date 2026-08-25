@@ -719,12 +719,16 @@
           payload.password = self.passwordValue;
         }
         ClipsyncAPI.updateSettings(payload).then(function (res) {
+          // Clear the password field without re-marking the section dirty (the
+          // passwordValue watcher would otherwise flag it again).
+          self._skipDirty = true;
           self.passwordValue = '';
           if (res && typeof res.password_set === 'boolean') {
             self.passwordSet = res.password_set;
           }
           if (res && res.updated) self.store.mergeSettings(res.updated);
           self.dirtySections['security'] = false;
+          self.$nextTick(function () { self._skipDirty = false; });
           self.store.showToast(self.t('settings_window.security_saved'), 3000);
         }).catch(function () {
           self.store.showToast(self.t('settings.save_security_failed'), 2000);
@@ -895,9 +899,13 @@
           if (res && typeof res.translate_key_set === 'boolean') {
             self.translateKeySet = res.translate_key_set;
           }
+          // Clear the key field without re-marking the section dirty (the
+          // translateKeyValue watcher would otherwise flag it again).
+          self._skipDirty = true;
           self.translateKeyValue = '';
           if (res && res.updated) self.store.mergeSettings(res.updated);
           self.dirtySections['translation'] = false;
+          self.$nextTick(function () { self._skipDirty = false; });
           self.store.showToast(self.t('settings_window.translation_saved'), 3000);
         }).catch(function () {
           self.store.showToast(self.t('settings.save_translation_failed'), 2000);
@@ -1560,7 +1568,7 @@
 
     template:
       '<transition name="dialog-fade">' +
-        '<div v-if="visible" class="settings-dialog-overlay" ref="overlay" role="dialog" aria-modal="true" :aria-label="t(\'settings.title\')" @click="onOverlayClick" @contextmenu.prevent>' +
+        '<div v-if="visible" class="settings-dialog-overlay" ref="overlay" role="dialog" aria-modal="true" :aria-label="t(\'settings.title\')" @click="onOverlayClick">' +
           '<div class="settings-dialog glass-neo">' +
 
             '<!-- Header -->' +
@@ -1572,7 +1580,7 @@
                 ' :aria-label="t(\'settings.search_placeholder\')"' +
                 ' @keydown.enter.prevent="onSearchEnter"' +
                 ' @keydown.escape.stop.prevent="clearSearch">' +
-              '<button class="settings-dialog__close" @click="close" :title="t(\'ui.close\')">' +
+              '<button class="settings-dialog__close" @click="close" :title="t(\'ui.close\')" :aria-label="t(\'ui.close\')">' +
                 '<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">' +
                   '<line x1="18" y1="6" x2="6" y2="18"></line>' +
                   '<line x1="6" y1="6" x2="18" y2="18"></line>' +
@@ -1590,16 +1598,15 @@
                   ' :class="{ \'settings-dialog__tab--active\': activeSection === tab.id, \'settings-dialog__tab--dim\': tab.dim }"' +
                   ' @click="selectSection(tab.id)"' +
                 '>' +
-                  '<span v-if="tab.icon" class="settings-dialog__tab-icon">{{ tab.icon }}</span>' +
                   '<span class="settings-dialog__tab-label">{{ tab.label }}</span>' +
                   '<span v-if="tab.dirty" class="settings-dialog__tab-dirty" :title="t(\'common.unsaved_changes\')">●</span>' +
                   '<span v-if="tab.count" class="settings-dialog__tab-count">{{ tab.count }}</span>' +
                 '</button>' +
-                '<p v-if="searchNoMatches" class="settings-hint" style="padding:8px 4px 0">{{ t(\'settings.search_no_matches\') }}</p>' +
               '</div>' +
 
               '<!-- Right content area -->' +
               '<div class="settings-dialog__content">' +
+                '<p v-if="searchNoMatches" class="settings-hint" style="padding:8px 0">{{ t(\'settings.search_no_matches\') }}</p>' +
 
                 '<!-- ═══════ Appearance ═══════ -->' +
                 '<section v-if="activeSection === \'appearance\'" class="settings-section">' +
@@ -1609,7 +1616,6 @@
                       ' class="settings-theme-btn"' +
                       ' :class="{ \'settings-theme-btn--active\': store.theme === opt.value }"' +
                       ' @click="selectTheme(opt.value)">' +
-                      '<span v-if="opt.icon" class="settings-theme-btn__icon">{{ opt.icon }}</span>' +
                       '<span class="settings-theme-btn__label">{{ opt.label }}</span>' +
                       '<span v-if="store.theme === opt.value" class="settings-theme-btn__check">✓</span>' +
                     '</button>' +
@@ -1661,7 +1667,7 @@
                   '</div>' +
                   '<div class="settings-field">' +
                     '<span class="settings-field__label">{{ t(\'network.local_address\') }}</span>' +
-                    '<span class="settings-field__value settings-field__value--mono">{{ store.overview.localIp }}:{{ store.overview.port || port }}</span>' +
+                    '<span class="settings-field__value settings-field__value--mono">{{ store.overview.localIp }}:{{ port || (store.settingsCache && store.settingsCache.port) || 53317 }}</span>' +
                   '</div>' +
                   '<button class="settings-btn settings-btn--accent" @click="saveNetwork" :disabled="networkSaving" style="width:100%;margin-top:8px">' +
                     '{{ networkSaving ? \'...\' : t(\'settings_window.save_network\') }}' +
@@ -1679,7 +1685,7 @@
                       '<span class="settings-toggle__knob"></span>' +
                     '</button>' +
                   '</div>' +
-                  '<p class="settings-hint" style="margin-bottom:4px">🔒 {{ t(\'settings_window.internet_sync_hint\') }}</p>' +
+                  '<p class="settings-hint" style="margin-bottom:4px">{{ t(\'settings_window.internet_sync_hint\') }}</p>' +
 
                   // Status line: colored dot + state label, and an actionable
                   // reason when the relay is in the error state (never a bare
@@ -1715,7 +1721,7 @@
                       '{{ relayTesting ? \'...\' : t(\'settings_window.test_relay_btn\') }}' +
                     '</button>' +
                     '<div v-if="relayTestResult" class="settings-field" style="margin-top:8px">' +
-                      '<span class="settings-field__label">{{ t(\'settings_window.test_relay_result\') }}: <span :style="{ color: relayTestResult.summary.indexOf(\'/\') !== -1 && relayTestResult.results.length ? (relayTestResult.results.every(r =&gt; r.ok) ? \'var(--clipsync-success)\' : \'var(--clipsync-danger)\') : \'inherit\' }">{{ relayTestResult.summary }}</span></span>' +
+                      '<span class="settings-field__label">{{ t(\'settings_window.test_relay_result\') }}: <span :style="{ color: relayTestResult.results.length && relayTestResult.results.every(r =&gt; r.ok) ? \'var(--clipsync-success)\' : \'var(--clipsync-danger)\' }">{{ relayTestResult.summary }}</span></span>' +
                       '<div v-for="r in relayTestResult.results" :key="r.endpoint" style="margin-top:4px">' +
                         '<span :style="{ color: r.ok ? \'var(--clipsync-success)\' : \'var(--clipsync-danger)\' }">{{ r.ok ? \'✓\' : \'✗\' }}</span> ' +
                         '<span style="word-break:break-all">{{ r.endpoint }}</span>' +
@@ -1793,8 +1799,8 @@
                   '<h3 class="settings-section__title">{{ t(\'settings_window.filter_title\') }}</h3>' +
                   '<p class="settings-hint" style="margin-bottom:12px">{{ t(\'settings_window.filter_desc\') }}</p>' +
                   '<div class="settings-toggle-row">' +
-                    '<span class="settings-toggle-label">{{ t(\'settings_window.filter_title\') }}</span>' +
-                    '<button class="settings-toggle" role="switch" :aria-checked="filterEnabled" :aria-label="t(\'settings_window.filter_title\')" :class="{ \'settings-toggle--on\': filterEnabled }" @click="filterEnabled = !filterEnabled">' +
+                    '<span class="settings-toggle-label">{{ t(\'settings_window.filter_enable\') }}</span>' +
+                    '<button class="settings-toggle" role="switch" :aria-checked="filterEnabled" :aria-label="t(\'settings_window.filter_enable\')" :class="{ \'settings-toggle--on\': filterEnabled }" @click="filterEnabled = !filterEnabled">' +
                       '<span class="settings-toggle__knob"></span>' +
                     '</button>' +
                   '</div>' +
@@ -2161,8 +2167,8 @@
 
                   '<h3 class="settings-section__title" style="margin-top:20px">{{ t(\'settings_window.auto_update_check\') }}</h3>' +
                   '<div class="settings-toggle-row">' +
-                    '<span class="settings-toggle-label">{{ t(\'settings_window.auto_update_check\') }}</span>' +
-                    '<button class="settings-toggle" role="switch" :aria-checked="autoUpdateCheck" :aria-label="t(\'settings_window.auto_update_check\')" :class="{ \'settings-toggle--on\': autoUpdateCheck }" @click="toggleAutoUpdateCheck">' +
+                    '<span class="settings-toggle-label">{{ t(\'settings_window.auto_update_check_toggle\') }}</span>' +
+                    '<button class="settings-toggle" role="switch" :aria-checked="autoUpdateCheck" :aria-label="t(\'settings_window.auto_update_check_toggle\')" :class="{ \'settings-toggle--on\': autoUpdateCheck }" @click="toggleAutoUpdateCheck">' +
                       '<span class="settings-toggle__knob"></span>' +
                     '</button>' +
                   '</div>' +

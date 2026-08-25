@@ -522,8 +522,9 @@ def test_memory_trim_matches_db_trim_under_clock_skew(tmp_path):
     path = str(tmp_path / "history.db")
     db = ClipboardHistoryDB(storage_path=path, max_entries=3)
 
-    # Arrival order vs. timestamps skewed like remote senders' clocks.
-    db.add(_text("X", ts=5000.0))  # arrives first, newest by clock
+    # The DB stamps local receipt time (not the sender's clock), so these
+    # wildly skewed `ts` values must NOT reorder or drive the trim.
+    db.add(_text("X", ts=5000.0))  # arrives first
     db.add(_text("Y", ts=1000.0))
     db.add(_text("Z", ts=2000.0))
     assert len(db.get_all()) == 3
@@ -531,9 +532,9 @@ def test_memory_trim_matches_db_trim_under_clock_skew(tmp_path):
     db.add(_text("W", ts=1500.0))  # over limit -> trim one
 
     mem = {e["text_preview"] for e in db.get_all()}
-    # Aligned rule keeps the top-3 by timestamp DESC: X(5000), Z(2000),
-    # W(1500).  Arrival-order trimming would have dropped X instead.
-    assert mem == {"X", "Z", "W"}
+    # Trim keeps the most recent ARRIVALS (W, Z, Y); the skewed timestamps
+    # are ignored, so X — the oldest arrival — is the one dropped.
+    assert mem == {"W", "Z", "Y"}
 
     conn = sqlite3.connect(path)
     rows = {
@@ -559,7 +560,9 @@ def test_memory_trim_preserves_pinned_entries(tmp_path):
     db.add(_text("W", ts=1500.0))  # 4 entries, 1 pinned -> keep top-2 unpinned
 
     previews = {e["text_preview"] for e in db.get_all()}
-    assert previews == {"X", "Y", "Z"}  # W(1500) is the youngest unpinned drop
+    # Local-receipt stamping: the trim keeps pinned Y plus the two most
+    # recent ARRIVALS (W, Z); X — the oldest arrival — is the one dropped.
+    assert previews == {"W", "Y", "Z"}
 
     conn = sqlite3.connect(path)
     rows = {r[0] for r in conn.execute("SELECT text_preview FROM history")}
@@ -576,6 +579,10 @@ class TestFileCompleteTimeoutReason:
         from internal.sync.file_transfer import FileTransferManager
 
         monkeypatch.setattr(ft_mod, "COMPLETION_WAIT_TIMEOUT", 1.0)
+        # The sender now waits out the receiver's full retransmit window
+        # (COMPLETION_WAIT_TIMEOUT + MAX_RETRANSMIT_ROUNDS * RETRANSMIT_TIMEOUT),
+        # so shrink RETRANSMIT_TIMEOUT too or the give-up never fires in time.
+        monkeypatch.setattr(ft_mod, "RETRANSMIT_TIMEOUT", 0.2)
 
         mgr = FileTransferManager("test-device", str(tmp_path / "out"))
         completions = []

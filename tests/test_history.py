@@ -228,6 +228,23 @@ class TestDedupPrimitives:
                                            ContentType.HTML: b"h"}) is True
 
 
+# ── 1d. Preview decode: UTF-16-BOM raw bytes (v1.0.76) ───────────────
+
+
+def test_utf16_bom_text_preview_decodes_cleanly(tmp_path):
+    """Very old entries / peer platforms may store wide text raw (a UTF-16 BOM
+    followed by UTF-16-LE bytes).  _safe_decode must spot the BOM and decode
+    them as UTF-16 instead of falling through to the CJK single-byte attempts
+    and rendering mojibake — the 'history became garbled after update' report.
+    """
+    wide = "剪贴板乱码修复".encode("utf-16")   # includes the BOM
+    h = ClipboardHistory(storage_path=str(tmp_path / "h.json"))
+    h.add(_content({ContentType.TEXT: wide}))
+    preview = h.get_all()[0]["text_preview"]
+    assert preview == "剪贴板乱码修复"
+    assert "�" not in preview
+
+
 # ── 2. Config save durability ────────────────────────────────────────
 
 
@@ -733,12 +750,21 @@ def test_stripped_clip_shares_dedup_key_with_plain_text():
 # ── 4. history_max_age_days cleanup x pinned / favorites ──────────────
 
 def test_age_prune_spares_pinned_entries(tmp_path):
+    from unittest.mock import patch
     db = ClipboardHistoryDB(storage_path=str(tmp_path / "h.db"), max_entries=50)
+    # The DB stamps local receipt time (a sender's clock must not reorder
+    # history), so inject genuine age by freezing the clock back 5 days
+    # while the entries are added.
     old_ts = time.time() - 5 * 86400
-    db.add(ClipboardContent(types={ContentType.TEXT: b"pinned note"},
-                            timestamp=old_ts))
-    db.add(ClipboardContent(types={ContentType.TEXT: b"stale note"},
-                            timestamp=old_ts - 10))
+    counter = {"n": 0}
+
+    def fake_time():
+        counter["n"] += 1
+        return old_ts + counter["n"] * 100.0  # > FLAVOR_MERGE_WINDOW apart
+
+    with patch("internal.clipboard.history_db.time.time", side_effect=fake_time):
+        db.add(ClipboardContent(types={ContentType.TEXT: b"pinned note"}))
+        db.add(ClipboardContent(types={ContentType.TEXT: b"stale note"}))
     entries = db.get_all()
     pinned_id = next(e["entry_id"] for e in entries if e["text_preview"] == "pinned note")
     stale_id = next(e["entry_id"] for e in entries if e["text_preview"] == "stale note")
@@ -807,6 +833,66 @@ def test_web_locale_en_zh_key_parity():
         f"only in en.json: {sorted(en_keys - zh_keys)}; "
         f"only in zh-CN.json: {sorted(zh_keys - en_keys)}"
     )
+
+
+def _placeholder_tokens(text):
+    """Set of ``{name}`` placeholder names in a translation string.  Python
+    format specs are stripped (``{size:.1f}`` vs the web's ``{size}`` are the
+    same token — the web frontend only substitutes ``{name}``).  List values
+    (e.g. settings_window.about_features) are joined first, since the web UI
+    renders them as arrays."""
+    if isinstance(text, list):
+        text = "\n".join(str(x) for x in text)
+    return set(re.findall(r"\{([a-zA-Z0-9_]+)(?::[^}]*)?\}", text))
+
+
+# Shared keys whose placeholder tokens intentionally diverge between the
+# Python i18n dicts and the web locale JSONs (AUDIT: "11 个占位符差异").  Each
+# is a real inconsistency — device.reconnecting formats {n}/{m} in desktop
+# dialogs but {attempt}/{max} on the web, and the chat/pairing entries carry a
+# placeholder on exactly one side.  Pinned explicitly so only NEW drift fails.
+_PLACEHOLDER_GAP_KEYS = frozenset({
+    "device.reconnecting",
+    "pairing.notify.unpaired_by_peer", "pairing.notify.repair_prompt",
+    "chat.invite_banner_title", "chat.invite_fingerprint",
+    "chat.invite_greeting", "chat.connecting",
+    "chat.system.peer_offline", "chat.system.session_closed_by_peer",
+    "chat.system.file_cancelled", "chat.err_connect_timeout",
+})
+
+
+def test_python_i18n_placeholder_parity_with_web_locales():
+    """Shared keys must agree on ``{token}`` placeholders across the Python
+    dicts and the web locale JSONs — the audit's cross-system parity class.  A
+    key that formats "{count}" on the desktop but "{n}" on the web leaves one
+    side rendering a literal "{n}".  The known divergences are pinned in
+    _PLACEHOLDER_GAP_KEYS so only new drift fails."""
+    from internal import i18n
+    en, zh = _load_web_locales()
+    for py, web in ((i18n._EN, en), (i18n._ZH, zh)):
+        for key, val in py.items():
+            if key not in web or key in _PLACEHOLDER_GAP_KEYS:
+                continue
+            py_tokens = _placeholder_tokens(val)
+            web_tokens = _placeholder_tokens(web[key])
+            assert py_tokens == web_tokens, (
+                f"{key}: python {sorted(py_tokens)} != web {sorted(web_tokens)}")
+
+
+def test_python_i18n_web_locales_are_fully_mirrored():
+    """Every web locale key must have a Python-dict mirror.
+
+    The web server's locale fallback (server.py _load_i18n_translations) drops
+    to the Python dicts only as a last resort; a key missing there renders as
+    its raw name across the UI.  The web files currently carry a known gap
+    (AUDIT: "缺 640/1271 键" — aiconfig.*, devices.netpair_*, diag.*, ...; the
+    2026-08-26 UI pass added 23 more web-only keys — now 664) that has its own server-side
+    mitigation, so its SIZE is pinned here: a NEW web-only key — the regression
+    class this guards — changes the count and fails the suite."""
+    from internal import i18n
+    en, zh = _load_web_locales()
+    assert len(set(en) - set(i18n._EN)) == 664
+    assert len(set(zh) - set(i18n._ZH)) == 664
 
 
 def test_web_t_literals_resolve_in_both_locales():

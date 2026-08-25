@@ -51,13 +51,24 @@ def _coerce_csv_int(value, default: int) -> int:
 
 
 def _decode_types(entry: dict) -> dict:
-    """Decode base64-encoded type values to readable text strings."""
+    """Decode base64-encoded type values to readable text strings.
+
+    Text payloads (TEXT/HTML/RTF/URL) decode to readable UTF-8 text.
+    Binary payloads (IMAGE/IMAGE_EMF/FILE) are not valid UTF-8, so they are
+    kept as a marked ``{"_b64": ...}`` base64 wrapper instead — decoding
+    them with errors="replace" used to corrupt images irreversibly.
+    """
     decoded = {}
     for key, val in entry.get("types", {}).items():
         try:
-            decoded[key] = base64.b64decode(val).decode("utf-8", errors="replace")
+            raw = base64.b64decode(val)
         except Exception:
             decoded[key] = val
+            continue
+        try:
+            decoded[key] = raw.decode("utf-8")
+        except UnicodeDecodeError:
+            decoded[key] = {"_b64": val}
     return decoded
 
 
@@ -440,10 +451,23 @@ def _finalize_import(history: _HistoryType, imported: int) -> None:
 
 
 def _encode_types(types: dict) -> dict:
-    """Re-encode type values back to base64 for storage."""
+    """Re-encode type values back to base64 for storage.
+
+    Plain strings (the readable-text form written by _decode_types, and the
+    already-lossy output of older backups) are base64-encoded as-is — old
+    backups stay exactly as they were, never corrupted further.  Binary
+    payloads written as ``{"_b64": ...}`` wrappers are stored verbatim, so
+    the export→import round-trip for images is byte-exact.
+    """
     encoded = {}
     for key, val in types.items():
-        encoded[key] = base64.b64encode(
-            val.encode("utf-8", errors="replace")
-        ).decode("ascii")
+        if isinstance(val, dict) and isinstance(val.get("_b64"), str):
+            encoded[key] = val["_b64"]
+        elif isinstance(val, str):
+            encoded[key] = base64.b64encode(
+                val.encode("utf-8", errors="replace")
+            ).decode("ascii")
+        else:
+            # Unknown / malformed value — drop it rather than crash the import.
+            continue
     return encoded

@@ -89,6 +89,12 @@ class PeerConnection:
         # means the session's key state is broken, so the connection is closed
         # and the normal reconnect machinery takes over.
         self._frame_failures = 0
+        # Set once a frame pattern consistent with an encryption-setting
+        # mismatch between paired peers is detected (we encrypt but the peer
+        # sends plaintext, or we don't encrypt but the peer sends encrypted
+        # frames).  The transport backs off instead of reconnecting into the
+        # drop-and-tear-down loop.
+        self._crypto_mismatch = False
         # Bytes consumed by the post-handshake rejection probe that turned
         # out not to be a rejection marker — replayed by _recv_exact so the
         # first application frame stays intact.
@@ -274,21 +280,51 @@ class PeerConnection:
                     else:
                         # Encrypted mode + plaintext frame: fail closed.  A peer
                         # that suddenly sends unencrypted frames either lost its
-                        # key state (e.g. re-paired on one side only) or the
-                        # stream is being tampered with — acting on that data
-                        # would be unsafe, and enough of them means the session
-                        # is broken, so close it and let reconnect rebuild state.
+                        # key state (e.g. re-paired on one side only) or has
+                        # app-layer encryption DISABLED while we have it enabled
+                        # (an encryption-setting mismatch between paired
+                        # devices) — acting on that data would be unsafe.  Flag
+                        # the likely mismatch so the disconnect path backs off
+                        # instead of reconnecting into a tear-down loop.
                         self._frame_failures += 1
                         logger.warning(
                             "[%s] Dropped unencrypted frame (%d bytes) while "
-                            "encryption is enabled (%d consecutive)",
+                            "encryption is enabled (%d consecutive) — peer "
+                            "appears to have encryption DISABLED; check that "
+                            "both devices use the same encryption setting",
                             self.device_name, len(payload), self._frame_failures,
                         )
                         if self._frame_failures >= 5:
-                            end_reason = "repeated unexpected unencrypted frames"
+                            self._crypto_mismatch = True
+                            end_reason = (
+                                "encryption mismatch: peer sending unencrypted "
+                                "frames while we have encryption enabled"
+                            )
                             break
                         continue
                 else:
+                    if is_encrypted(payload):
+                        # No enc_mgr but the peer sent an encrypted frame — the
+                        # paired devices disagree on app-layer encryption (peer
+                        # has it ENABLED, we have it DISABLED).  Such frames can
+                        # never be parsed, so drop them and back off once the
+                        # pattern is clear instead of silently discarding sync.
+                        self._frame_failures += 1
+                        logger.warning(
+                            "[%s] Dropped encrypted frame (%d bytes) while "
+                            "encryption is disabled (%d consecutive) — peer "
+                            "appears to have encryption ENABLED; check that "
+                            "both devices use the same encryption setting",
+                            self.device_name, len(payload), self._frame_failures,
+                        )
+                        if self._frame_failures >= 5:
+                            self._crypto_mismatch = True
+                            end_reason = (
+                                "encryption mismatch: peer sending encrypted "
+                                "frames while we have encryption disabled"
+                            )
+                            break
+                        continue
                     logger.debug(
                         "[%s] Received frame (%d bytes) — no enc_mgr, passing through",
                         self.device_name, len(payload),
@@ -1008,15 +1044,28 @@ class TransportManager:
         for user-initiated disconnects to prevent the remote side from
         immediately reconnecting.
         """
+        timers_to_cancel = []
         with self._lock:
-            conn = self._peers.pop(peer_id, None)
-            # Cancel any pending reconnect timer so we don't race with it
-            timer = self._reconnect_timers.pop(peer_id, None)
-            self._reconnect_attempts.pop(peer_id, None)
+            # Discovery (e.g. _on_peer_lost) may call us with a hashed mDNS id,
+            # but _peers is keyed by the real device_id — resolve it first so
+            # the pop lands (the same resolution forget_peer does), otherwise
+            # the connection lingers until idle timeouts clean it up.
+            real_id = self._hash_to_real_id.get(peer_id, peer_id)
+            conn = self._peers.pop(real_id, None)
+            # Reconnect bookkeeping may be keyed under the hashed id or the
+            # resolved real id — clear both so a stale timer can't reconnect
+            # into a peer the user just disconnected.
+            for pid in {peer_id, real_id}:
+                timer = self._reconnect_timers.pop(pid, None)
+                if timer:
+                    timers_to_cancel.append(timer)
+                self._reconnect_attempts.pop(pid, None)
             if reject:
                 self._rejected_peer_ids.add(peer_id)
-        if timer:
-            timer.cancel()
+                if real_id != peer_id:
+                    self._rejected_peer_ids.add(real_id)
+        for t in timers_to_cancel:
+            t.cancel()
         if conn:
             logger.info("[%s] manual disconnect%s", peer_id[:12],
                         " (rejected)" if reject else "")
@@ -1206,6 +1255,17 @@ class TransportManager:
             with self._lock:
                 self._peer_addresses.pop(peer_id, None)
                 self._reconnect_attempts.pop(peer_id, None)
+            return
+        if conn is not None and getattr(conn, "_crypto_mismatch", False):
+            # The peers disagree on app-layer encryption (the recv loop detected
+            # it above): reconnecting would only repeat the drop-and-tear-down
+            # cycle, so back off.  Keep the saved address so a manual reconnect
+            # or restart works once both devices use the same setting.
+            logger.info(
+                "[%s] encryption-setting mismatch — keeping connection down, "
+                "no auto-reconnect until both devices use the same setting",
+                peer_id[:12],
+            )
             return
         # Only auto-reconnect to paired peers. Unpaired connections
         # (during pairing) should be user-initiated to avoid a

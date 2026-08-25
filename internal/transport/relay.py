@@ -75,6 +75,8 @@ NETPAIR_SECRET_BITS = NETPAIR_SECRET_CHARS * 5
 BACKOFF_SEQUENCE = (1, 2, 4, 8, 15, 30, 60)
 # How long to wait for the CONNACK/handshake before moving to the next broker.
 CONNECT_TIMEOUT = 10.0
+# How long stop() waits for the worker thread to exit before giving up.
+STOP_JOIN_TIMEOUT = 5.0
 
 STATE_OFF = "off"
 STATE_CONNECTING = "connecting"
@@ -342,7 +344,8 @@ class RelayTransport:
       on_state          -- called with one of STATE_* on every change
       client_factory    -- returns a paho-compatible client, or None when the
                            optional dependency is missing (tests inject fakes)
-      sleeper           -- called between retries (tests inject instant sleep)
+      sleeper           -- called between retries (tests inject instant sleep);
+                           defaults to a stop-interruptible sleep
     """
 
     def __init__(
@@ -352,14 +355,14 @@ class RelayTransport:
         on_frame: Callable[[bytes], None],
         on_state: Callable[[str], None],
         client_factory: Callable | None = None,
-        sleeper: Callable[[float], None] = time.sleep,
+        sleeper: Callable[[float], None] | None = None,
     ):
         self._brokers = [b for b in brokers if isinstance(b, str) and b]
         self._get_channels = get_channels
         self._on_frame = on_frame
         self._on_state = on_state
         self._client_factory = client_factory or build_paho_client
-        self._sleeper = sleeper
+        self._sleeper = sleeper if sleeper is not None else self._interruptible_sleep
         self._lock = threading.RLock()
         self._thread: threading.Thread | None = None
         self._client = None
@@ -395,6 +398,8 @@ class RelayTransport:
                 self._set_state(STATE_ERROR)
                 return
             self._stop.clear()
+            self._wakeup.clear()   # a prior stop() left it set; don't let the
+                                   # fresh worker inherit a spurious wakeup
             self._set_state(STATE_CONNECTING)
             self._thread = threading.Thread(
                 target=self._run, name="relay-sync", daemon=True)
@@ -406,6 +411,7 @@ class RelayTransport:
         self._wakeup.set()
         with self._lock:
             client, self._client = self._client, None
+            thread = self._thread
             self._thread = None
             self._subscribed.clear()
             self._connected_on_broker = None
@@ -415,6 +421,14 @@ class RelayTransport:
                 client.disconnect()
             except Exception:
                 logger.debug("relay disconnect during stop failed", exc_info=True)
+        if thread is not None:
+            # Wait (bounded) for the worker to notice _stop and exit before a
+            # rapid stop() → start() restart can spawn a second worker running
+            # alongside the old one (which would still be mid-CONNACK wait or
+            # backoff).  The worker's waits are all stop-aware, so this returns
+            # promptly in practice and only falls through on the timeout if a
+            # blocking broker call itself never returns.
+            thread.join(timeout=STOP_JOIN_TIMEOUT)
         self._set_state(STATE_OFF)
 
     def restart(self) -> None:
@@ -456,7 +470,11 @@ class RelayTransport:
         """Publish one encoded frame to ``topic``. False if currently offline."""
         with self._lock:
             client = self._client
-            online = self._state == STATE_ONLINE and client is not None
+            # Gate on a *confirmed* connection (CONNACK received), not just the
+            # last remembered state: after a disconnect the state may lag until
+            # the worker reconnects, and publish() must not report frames as
+            # sent into a dead link.
+            online = self._connected_on_broker is not None and client is not None
         if not online:
             return False
         try:
@@ -481,6 +499,17 @@ class RelayTransport:
         except Exception:
             logger.debug("get_channels failed", exc_info=True)
             return {}
+
+    def _interruptible_sleep(self, delay: float) -> None:
+        """Default between-retry sleep; stop() can interrupt it via _wakeup.
+
+        A plain ``time.sleep(delay)`` here would let the worker miss a stop()
+        that lands mid-backoff and keep running alongside the restarted one;
+        waiting on ``_wakeup`` (set by stop()) returns as soon as the transport
+        is stopping, so restart()'s join actually sees the old thread exit.
+        """
+        self._wakeup.wait(timeout=delay)
+        self._wakeup.clear()
 
     def _run(self) -> None:
         attempt = 0
@@ -529,6 +558,20 @@ class RelayTransport:
             logger.warning("Invalid relay broker endpoint: %r", endpoint)
             return False
         host, port, path = parsed
+        with self._lock:
+            old_client, self._client = self._client, None
+            self._connected_on_broker = None
+        if old_client is not None:
+            # A previous attempt's client may still be running (loop_start()
+            # spawned its own network thread).  Stop it before installing the
+            # new one — an orphaned client leaks a thread + socket, and its
+            # late on_connect would otherwise satisfy the next CONNACK wait
+            # with a stale "connected" and churn failover.
+            try:
+                old_client.loop_stop()
+                old_client.disconnect()
+            except Exception:
+                logger.debug("relay client cleanup failed", exc_info=True)
         client = self._client_factory()
         if client is None:
             logger.warning("paho-mqtt not available — internet sync disabled")
@@ -611,9 +654,21 @@ class RelayTransport:
 
     def _make_on_disconnect(self, index: int):
         def _on_disconnect(client, userdata, *args):
+            was_current = False
             with self._lock:
-                if self._connected_on_broker == index:
+                # Only a drop of the *installed* client counts — a stale
+                # callback from a retired client (or one mid-cleanup) must not
+                # pull a healthy new connection back out of ONLINE.
+                if self._client is client and self._connected_on_broker == index:
                     self._connected_on_broker = None
+                    was_current = True
+            if was_current:
+                # An observed drop (TCP close or keepalive timeout) must leave
+                # ONLINE immediately — on a silent partition publish() would
+                # otherwise keep reporting frames as sent while they are being
+                # silently dropped.  CONNECTING makes publish() return False so
+                # frames queue/retry instead of being reported as delivered.
+                self._set_state(STATE_CONNECTING)
             logger.debug("relay disconnected from broker #%d", index)
         return _on_disconnect
 

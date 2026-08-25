@@ -17,6 +17,9 @@
       return {
         editingName: false,
         nameInput: '',
+        // Set when the name editor is cancelled (e.g. Escape) so the blur that
+        // fires when Vue removes the input doesn't re-commit the typed name.
+        cancelNameEdit: false,
         // Animated stat counters (key -> current displayed number).
         stats: {},
         // Network health summary ('ok' | 'warn' | 'fail' | '').
@@ -373,6 +376,9 @@
       },
 
       saveName: function () {
+        // Bail out of a blur that fired because cancelEditName just removed the
+        // input — the escape was a cancel, not a commit.
+        if (this.cancelNameEdit) return;
         var name = this.nameInput.trim();
         var self = this;
         if (name && name !== this.store.deviceName) {
@@ -392,7 +398,15 @@
         }
       },
 
-      cancelEditName: function () { this.editingName = false; },
+      cancelEditName: function () {
+        var self = this;
+        // Mark the cancel so the blur handler (fired when Vue removes the
+        // input on the next render) doesn't commit the typed name; clear the
+        // flag once the DOM update is done.
+        this.cancelNameEdit = true;
+        this.editingName = false;
+        this.$nextTick(function () { self.cancelNameEdit = false; });
+      },
 
       copyUrl: function () {
         var proto = window.location.protocol === 'https:' ? 'https' : 'http';
@@ -496,7 +510,7 @@
             '<div class="overview-device-info">' +
               '<span v-if="!editingName" class="overview-device-name">' +
                 '<span class="overview-hero-icon">💻</span> {{ store.deviceName }}' +
-                '<button class="btn-ghost overview-edit-btn" @click="startEditName" :title="t(\'overview.edit_name\')">&#9999;&#65039;</button>' +
+                '<button class="btn-ghost overview-edit-btn" @click="startEditName" :title="t(\'overview.edit_name\')" :aria-label="t(\'overview.edit_name\')">&#9999;&#65039;</button>' +
               '</span>' +
               '<span v-else class="overview-device-name">' +
                 '<input ref="nameInput" v-model="nameInput" class="overview-name-input" @keydown.enter="saveName" @keydown.escape="cancelEditName" @blur="saveName">' +
@@ -515,6 +529,7 @@
               '<span class="overview-hero-chip">{{ t(\'overview.uptime\') }} {{ uptimeDisplay }}</span>' +
             '</div>' +
             '<div v-if="o.webEnabled && o.localIp" class="overview-web-qr">' +
+              '<span class="text-subtle">{{ t(\'overview.local_address\') }}:</span>' +
               '<code class="text-mono text-subtle">{{ o.localIp }}:{{ o.port }}</code>' +
               '<button class="btn-ghost overview-copy-btn" @click="copyUrl">{{ t(\'overview.copy_url\') }}</button>' +
             '</div>' +
@@ -536,8 +551,8 @@
                 '<span>{{ t(\'overview.pause_for\') }}</span>' +
                 '<span class="overview-pause-presets">' +
                   '<button class="overview-quick-btn overview-pause-btn" @click="pauseSync(15)" :disabled="pauseBusy">{{ pauseBusy ? \'...\' : t(\'overview.pause_15m\') }}</button>' +
-                  '<button class="overview-quick-btn overview-pause-btn" @click="pauseSync(30)" :disabled="pauseBusy">{{ t(\'overview.pause_30m\') }}</button>' +
-                  '<button class="overview-quick-btn overview-pause-btn" @click="pauseSync(60)" :disabled="pauseBusy">{{ t(\'overview.pause_1h\') }}</button>' +
+                  '<button class="overview-quick-btn overview-pause-btn" @click="pauseSync(30)" :disabled="pauseBusy">{{ pauseBusy ? \'...\' : t(\'overview.pause_30m\') }}</button>' +
+                  '<button class="overview-quick-btn overview-pause-btn" @click="pauseSync(60)" :disabled="pauseBusy">{{ pauseBusy ? \'...\' : t(\'overview.pause_1h\') }}</button>' +
                 '</span>' +
               '</div>' +
               '<div class="overview-toggle-row">' +
@@ -574,9 +589,9 @@
             '<span class="overview-stat-sub">{{ stats.pinned || 0 }} {{ t(\'overview.pinned\') }}</span>' +
           '</div>' +
           '<div class="overview-stat-card glass" style="--stat-accent: var(--clipsync-accent)">' +
-            '<span class="overview-stat-value">{{ stats.transfers || 0 }}</span>' +
+            '<span class="overview-stat-value">{{ stats.completed || 0 }}</span>' +
             '<span class="overview-stat-label">{{ t(\'overview.transfers\') }}</span>' +
-            '<span class="overview-stat-sub">{{ stats.completed || 0 }} {{ t(\'overview.completed\') }}</span>' +
+            '<span class="overview-stat-sub">{{ stats.transfers || 0 }} {{ t(\'overview.active\') }}</span>' +
           '</div>' +
         '</div>' +
 
@@ -626,7 +641,7 @@
           '<div v-if="recentList.length > 0" class="overview-feed">' +
             '<div v-for="(item, i) in recentList" :key="i" class="overview-feed__item" role="button" tabindex="0" :title="t(\'ui.history\')" :style="{ animationDelay: (i * 0.06) + \'s\' }" @click="openHistoryTab" @keydown.enter="openHistoryTab" @keydown.space.prevent="openHistoryTab">' +
               '<span class="overview-feed__icon">{{ typeIcon(item.type) }}</span>' +
-              '<span class="overview-feed__text text-ellipsis">{{ item.text || t(\'history.empty_preview\') }}</span>' +
+              '<span class="overview-feed__text text-ellipsis selectable">{{ item.text || t(\'history.empty_preview\') }}</span>' +
               '<span class="overview-feed__meta">' +
                 '<span v-if="item.pinned" class="overview-feed__pin">📌</span>' +
                 '<span class="text-subtle">{{ timeAgo(item.time) }}</span>' +

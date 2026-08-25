@@ -255,8 +255,16 @@ class PairingManager:
         code = str(code_int).zfill(PAIRING_CODE_LENGTH)
 
         with self._lock:
-            self._pending_pairings[peer_id] = (code, time.time())
-            self._pairing_status[peer_id] = PAIRING_STATUS_PENDING
+            # Start the 300s PAIRING_TIMEOUT clock only on a genuinely NEW
+            # pending request. Both connection paths call this on every
+            # reconnect from a not-yet-paired peer, and refreshing the
+            # timestamp on each call would keep the card from ever expiring
+            # (the timeout would never lapse). An already-pending peer keeps
+            # its original timestamp and status — the shared code is
+            # deterministic per peer, so the cached entry stays valid.
+            if peer_id not in self._pending_pairings:
+                self._pending_pairings[peer_id] = (code, time.time())
+                self._pairing_status[peer_id] = PAIRING_STATUS_PENDING
             # Do NOT reset _pairing_attempts here: a connecting peer could
             # otherwise nullify the rate limit by reconnecting and re-generating
             # the shared code. Attempts are cleared only on a successful

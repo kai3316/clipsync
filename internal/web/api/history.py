@@ -127,9 +127,10 @@ def push_text(body, cfg, sync_mgr, history):
     except (json.JSONDecodeError, UnicodeDecodeError):
         return {"ok": False, "error": "invalid json"}, 400
 
-    text = data.get("text", "").strip()
-    if not text:
+    text = data.get("text", "")
+    if not isinstance(text, str) or not text.strip():
         return {"ok": False, "error": "empty text"}, 400
+    text = text.strip()
 
     from internal.clipboard.format import ClipboardContent, ContentType, SyncMessage
 
@@ -144,8 +145,11 @@ def push_text(body, cfg, sync_mgr, history):
     writer = create_writer()
     writer.write(content)
 
-    if hasattr(sync_mgr, '_suppress_monitor_until'):
-        sync_mgr._suppress_monitor_until = time.time() + 2.0
+    # Absorb the monitor event from this write so the pushed text is not
+    # captured again and re-broadcast as a duplicate (on_send below sends
+    # it to peers exactly once).
+    if sync_mgr is not None:
+        sync_mgr._monitor.suppress_for(2.0)
 
     try:
         history.add(content)

@@ -62,9 +62,6 @@
         renamingGroup: null,
         renameValue: '',
 
-        // Mobile sidebar toggle
-        mobileSidebarOpen: false,
-
         // Loading states
         addingFavorite: false,
 
@@ -90,7 +87,7 @@
             :disabled="exporting"
             :title="t('favorites.export_tooltip')"
             :aria-label="t('favorites.export_tooltip')"
-          >{{ exporting ? '...' : t('favorites.export') }}</button>
+          >{{ exporting ? t('favorites.exporting') : t('favorites.export') }}</button>
           <button class="favorites-panel__add-btn btn-primary" @click="openAddModal">
             <span>+</span> {{ t('favorites.add') }}
           </button>
@@ -659,6 +656,11 @@
       },
 
       addFromHistory: function (hitem) {
+        // Guard against a double-click creating two favorites. The flag is set
+        // synchronously here — before the async full-item fetch below — so a
+        // second click in the same gesture can't slip through the gate.
+        if (this.addingFavorite) return;
+        this.addingFavorite = true;
         var self = this;
         var group = this.getEffectiveGroup();
         this.store.ensureGroup(group);

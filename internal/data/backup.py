@@ -9,6 +9,7 @@ import json
 import logging
 import os
 import tempfile
+import uuid
 import zipfile
 from datetime import UTC, datetime
 from pathlib import Path
@@ -134,7 +135,10 @@ def _import_favorites_from_json(filepath: Path) -> int:
                     "(id, title, content, \"group\", position, created, updated) "
                     "VALUES (?, ?, ?, ?, ?, ?, ?)",
                     (
-                        item.get("id", ""),
+                        # id-less legacy entries would all collapse onto the
+                        # single pk "" row under INSERT OR REPLACE; mint a uuid
+                        # so N entries restore as N rows (mirrors favorites.py).
+                        item.get("id") or uuid.uuid4().hex[:12],
                         item.get("title", ""),
                         item.get("content", ""),
                         item.get("group", ""),
@@ -246,6 +250,9 @@ def create_backup(
                 if isinstance(k, str) and isinstance(v, str)
             },
             "hotkeys_enabled": bool(getattr(cfg, "hotkeys_enabled", False)),
+            # Snapshot the peers dict first: pairing threads add/remove
+            # peers on cfg.peers, and iterating the live dict mid-backup can
+            # raise RuntimeError (dictionary changed size during iteration).
             "peers": [
                 {
                     "device_id": p.device_id,
@@ -253,7 +260,7 @@ def create_backup(
                     "paired": p.paired,
                     "notes": p.notes,
                 }
-                for p in cfg.peers.values()
+                for p in list(cfg.peers.values())
             ],
         }
         (tmpdir / "config.json").write_text(
@@ -561,16 +568,21 @@ def _validate_config_value(value: object, rule: tuple):
             return _SKIP
         return value
     if kind == "strdict":
-        # Hotkey bindings: keep only well-formed id → shortcut pairs so a
-        # hand-edited backup can never put a non-string into the hotkey
-        # reload path (HotkeyManager already rejects those, but the Config
-        # should stay clean too).
+        # Hotkey bindings (and other str→str maps): keep only well-formed
+        # id → shortcut pairs so a hand-edited backup can never put a
+        # non-string into the reload path (HotkeyManager already rejects
+        # those, but the Config should stay clean too).  If a non-empty map
+        # validates to nothing, skip it entirely rather than replace the
+        # live bindings with {} from invalid input.
         if not isinstance(value, dict):
             return _SKIP
-        return {
+        cleaned = {
             k: v for k, v in value.items()
             if isinstance(k, str) and isinstance(v, str)
         }
+        if value and not cleaned:
+            return _SKIP
+        return cleaned
     return _SKIP
 
 

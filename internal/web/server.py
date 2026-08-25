@@ -70,6 +70,38 @@ def _get_upload_dir(cfg=None) -> str:
     return d
 
 
+# ── Upload filename sanitisation ─────────────────────────────────
+
+_WINDOWS_RESERVED_NAMES = {
+    "CON", "PRN", "AUX", "NUL",
+    *(f"COM{i}" for i in range(1, 10)),
+    *(f"LPT{i}" for i in range(1, 10)),
+}
+
+
+def _sanitize_upload_filename(name: str) -> str:
+    """Sanitize an upload filename (ported from the P2P file-transfer
+    sanitizer).  Strips path separators, traversal components, control
+    characters, trailing dots/spaces and Windows-reserved names so an
+    illegal name cannot raise OSError/ValueError or escape the upload dir.
+    """
+    name = str(name or "").replace("\\", "/")
+    name = os.path.basename(name)
+    name = name.lstrip(".")
+    if not name:
+        name = "uploaded_file"
+    name = name.rstrip(" .")
+    if not name:
+        name = "uploaded_file"
+    name = "".join(ch for ch in name if ch >= " " and ch != "\x7f")
+    if not name:
+        name = "uploaded_file"
+    base = name.split(".")[0].upper()
+    if base in _WINDOWS_RESERVED_NAMES:
+        name = f"_{name}"
+    return name
+
+
 # ── Simple multipart form parser (no external deps) ──────────────
 
 class _MultipartError(ValueError):
@@ -1068,7 +1100,12 @@ class WebServer:
                 # outright rather than queued (which would grow threads
                 # unboundedly).
                 if not connection_semaphore.acquire(blocking=False):
+                    # Reject with a clean HTTP 503 rather than a bare close —
+                    # a rejected connection (a reload during a busy period)
+                    # would otherwise see a connection reset and take the
+                    # whole UI offline.
                     try:
+                        inner_self._send_json({"error": "server busy"}, 503)
                         inner_self.connection.close()
                     except OSError:
                         pass
@@ -1143,13 +1180,28 @@ class WebServer:
                 # Try JSON locale file first
                 locales_dir = os.path.join(static_dir, "locales")
                 json_path = os.path.join(locales_dir, f"{locale}.json")
-                try:
-                    if not os.path.isfile(json_path):
-                        raise OSError("no locale JSON file")
-                    with open(json_path, encoding="utf-8") as f:
-                        translations = json.load(f)
-                except (OSError, json.JSONDecodeError, UnicodeDecodeError):
-                    logger.warning("Failed to load locale JSON: %s, falling back to Python dict", json_path)
+
+                def _load_locale_json(code):
+                    """Load a locale's JSON file, or None when missing/corrupt."""
+                    path = os.path.join(locales_dir, f"{code}.json")
+                    try:
+                        if not os.path.isfile(path):
+                            return None
+                        with open(path, encoding="utf-8") as f:
+                            return json.load(f)
+                    except (OSError, json.JSONDecodeError, UnicodeDecodeError):
+                        return None
+
+                translations = _load_locale_json(locale)
+                if translations is None:
+                    # The configured locale's JSON is missing/corrupt.  Fall
+                    # back to the on-disk JSON locale files, which carry every
+                    # web key — the Python i18n dicts are a subset and would
+                    # render raw key names across many panels.
+                    logger.warning("Failed to load locale JSON: %s, falling back to en.json", json_path)
+                    translations = _load_locale_json("en")
+                if translations is None:
+                    logger.warning("No locale JSON on disk, falling back to Python dict")
                     translations = dict(LOCALES.get(locale, LOCALES.get("en", {})))
 
                 # The version lives in exactly one place (internal/version.py);
@@ -1856,9 +1908,7 @@ class WebServer:
                     else:
                         upload_target = request_upload_dir
                     # Sanitize filename
-                    safe_name = os.path.basename(fname).replace("\\", "_").replace("/", "_")
-                    if not safe_name:
-                        safe_name = "uploaded_file"
+                    safe_name = _sanitize_upload_filename(fname)
                     dest = os.path.join(upload_target, safe_name)
                     # Avoid overwriting
                     base, ext = os.path.splitext(safe_name)
@@ -1866,8 +1916,13 @@ class WebServer:
                     while os.path.exists(dest):
                         dest = os.path.join(upload_target, f"{base} ({counter}){ext}")
                         counter += 1
-                    with open(dest, "wb") as f:
-                        f.write(fdata)
+                    try:
+                        with open(dest, "wb") as f:
+                            f.write(fdata)
+                    except (OSError, ValueError) as exc:
+                        logger.warning("Web upload write failed: %s", exc)
+                        inner_self._send_json({"ok": False, "error": "could not save file"}, 400)
+                        return
                     logger.info("Web upload: %s (%d bytes) -> %s", safe_name, len(fdata), dest)
                     if is_chat_upload:
                         # A chat staging upload must not trigger the received-
@@ -1975,6 +2030,8 @@ class WebServer:
             def do_DELETE(inner_self):
                 parsed = urllib.parse.urlparse(inner_self.path)
                 path = parsed.path
+                # Mirror do_GET/do_POST: normalize path aliases before routing.
+                path = posixpath.normpath(path) if path else path
                 qs = parsed.query
                 query_params = urllib.parse.parse_qs(qs)
 
@@ -2030,6 +2087,8 @@ class WebServer:
             def do_PATCH(inner_self):
                 parsed = urllib.parse.urlparse(inner_self.path)
                 path = parsed.path
+                # Mirror do_GET/do_POST: normalize path aliases before routing.
+                path = posixpath.normpath(path) if path else path
                 qs = parsed.query
                 query_params = urllib.parse.parse_qs(qs)
 
@@ -2099,6 +2158,13 @@ class WebServer:
             logger.info("Stopping web companion")
             self._ws_manager.shutdown()
             self._httpd.shutdown()
+            # Release the listening socket now rather than at GC — without
+            # server_close() a restart can hit EADDRINUSE on Linux (or
+            # double-listen on Windows) while lingering handlers hold it.
+            try:
+                self._httpd.server_close()
+            except OSError:
+                logger.debug("Web server server_close failed", exc_info=True)
             self._httpd = None
         self._thread = None
 

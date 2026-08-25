@@ -2,6 +2,12 @@
 
 All notable changes to ClipSync are documented in this file.
 
+## [1.0.78] — 2026-08-26
+
+- **全面代码审计修复**（48 文件，+1624/−633）。高严重度：修复已送达/配对上屏事件全死（`web_server.broadcast` → `ws_manager.broadcast` 三处，并把伪造 `broadcasts` 属性的测试断言一并修正）、AI 配置单文件根跨设备拉取/预览、AI 配置 root_index 落错目录、文件传输取消自死锁、中继 failover 泄漏 paho 客户端、Linux 更新跨文件系统 EXDEV 加 copy 兜底。中/低：剪贴板写失败不计速率并正确回 ack、空白文本不再吞图片、重抄尊重 90s 去重窗、Linux 空剪贴板慢节奏、历史时间戳改本地接收时间（修复发送端时钟偏差重排/误裁）、聊天丢弃帧不再误回已送达、聊天文件回调移出锁外、Web 聊天上传暂存清理、收藏/导出数据不损、中继静默分区状态、加密帧密钥绑定双方完整指纹（配对设备两边升级后需重新配对一次）、存储密钥未动存量可读、端口/轮询值钳制、`pip install .` 补 paho-mqtt 与 web static 打包等。
+- **Web 前端全面审计重构**（25 文件，+829/−235）。核心：**放开全局右键**（三处 preventDefault + `user-select:none` 全处理）——聊天/历史/诊断/AI 配置等文字可选中、输入框可右键粘贴；**聊天消息气泡/文件卡片新增右键「复制」菜单**；各面板布局/按钮/文案/无障碍修复（设备页配对码可复制、设置"保存后又提示未保存"、历史"删除中"文案、传输未知文件显示真实名、AI 配置 tab 可滚动、移动端浅色主题修复、聊天 IME 回车守卫等）。24 个新 locale 键中英同步。
+- **互联网配对折叠区改版**：折叠开关从"像功能开关的 checkbox"改为**chevron 手风琴按钮**（▸/▾ 旋转指示展开态），去开启按钮改为行内 accent 幽灵按钮，不再浮到最右。
+
 ## [1.0.77] — 2026-08-25
 
 - **Fix stale cached web pages after an update** ("重启后打开的好像还是 quickpaste 页面"). The dashboard's service worker cached static assets **cache-first** and fell back to the cache on a navigation 404, so after an update removed `quickpaste.html`, the browser kept serving the old cached copy — and updated JS/CSS were never picked up. The cache is now versioned `shell-v2` (old v1 caches — including any cached `quickpaste.html` — are purged on activation) and shell assets are **network-first** (the server is local, so the extra round-trip is negligible; updates take effect immediately, cache is only the offline fallback).

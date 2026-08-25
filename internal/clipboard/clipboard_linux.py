@@ -328,7 +328,7 @@ class _ClipboardReader(ClipboardReader):
 
 
 class _ClipboardWriter(ClipboardWriter):
-    def write(self, content: ClipboardContent):
+    def write(self, content: ClipboardContent) -> bool:
         # Write formats sorted so TEXT lands last — each xclip/wl-copy
         # call replaces the entire clipboard, and plain text is the
         # most important fallback for the receiving side.
@@ -351,6 +351,7 @@ class _ClipboardWriter(ClipboardWriter):
             elif fmt_type == ContentType.URL:
                 self._set_url(data)
             # IMAGE_EMF is Windows-only, skip on Linux
+        return True
 
     def _set_text(self, data: bytes):
         if not _can_write():
@@ -630,6 +631,10 @@ class LinuxClipboardMonitor(ClipboardMonitor):
         Includes both plain text and ``text/html`` so a change that only
         differs in the HTML representation (same plain text) is caught.
         With no plain text the clipboard may hold an image — hash that.
+        Returns "" when the clipboard is entirely empty so the caller can
+        tell "cleared" apart from "holds a hash" (a bare sha256 hexdigest of
+        empty probes is always truthy and would otherwise never reset
+        ``last_full_hash``).
         """
         if text:
             html = self._get_html_primary()
@@ -642,18 +647,24 @@ class LinuxClipboardMonitor(ClipboardMonitor):
         # list (text/uri-list), a URL, or an image. Probe each so a change in
         # any single format is detected (image-only hashes to the image).
         h = hashlib.sha256()
+        found = False
         for probe in (self._get_html_primary, self._probes._get_rtf,
                       self._probes._get_files, self._probes._get_url):
             try:
                 data = probe()
             except Exception:
                 data = b""
+            if data:
+                found = True
             h.update(data or b"")
             h.update(b"\x00")
         img_hash = self._get_image_hash()
         if img_hash:
+            found = True
             h.update(b"image:")
             h.update(img_hash.encode("ascii"))
+        if not found:
+            return ""
         return h.hexdigest()
 
 

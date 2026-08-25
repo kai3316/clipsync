@@ -63,19 +63,6 @@
       }).length;
     }),
 
-    // True when the app's configured language is Chinese. Used for the few
-    // inline bilingual strings that have no locale entry (e.g. wizard "Next").
-    // Follows the server-injected locale (like the phone pages do), not the
-    // browser's — otherwise an English app on a Chinese system mixes
-    // languages mid-sentence.
-    isZh: computed(function () {
-      var locale = String(window.__I18N_LOCALE__ || '').toLowerCase();
-      if (!locale) {
-        locale = (navigator.language || '').toLowerCase();
-      }
-      return locale.indexOf('zh') === 0;
-    }),
-
     // The phone-connect URL shown on onboarding step 3:
     // http://<lan-ip>:<web-port>/mobile.html?token=<token>
     mobileUrl: computed(function () {
@@ -348,6 +335,15 @@
       // stop tracking later OS light/dark changes.
       if (saved === 'dark' || saved === 'light') {
         this.setTheme(saved);
+      } else if (this.settingsCache &&
+                 (this.settingsCache.appearance_mode === 'dark' ||
+                  this.settingsCache.appearance_mode === 'light' ||
+                  this.settingsCache.appearance_mode === 'system')) {
+        // The theme choice is persisted server-side too (selectTheme POSTs
+        // appearance_mode). On a fresh browser (empty localStorage) use the
+        // saved server theme so the page doesn't silently fall back to the OS
+        // "system" default. localStorage, when present, still wins above.
+        this.setTheme(this.settingsCache.appearance_mode);
       } else {
         this.setTheme('system');
       }
@@ -438,7 +434,7 @@
       var name = (this.deviceName || '').trim();
       this.deviceName = name;
       if (!name) {
-        this.onboardingError = this.isZh ? '请输入设备名称' : 'Please enter a device name';
+        this.onboardingError = t('onboarding.err_device_name');
         return;
       }
       this.onboardingError = '';
@@ -448,7 +444,7 @@
         self.nextOnboardingStep();
       }).catch(function () {
         self.onboardingSaving = false;
-        self.showToast(self.isZh ? '保存设备名称失败' : 'Failed to save device name', 2500, 'error');
+        self.showToast(t('onboarding.err_save_name'), 2500, 'error');
       });
     },
 
@@ -511,7 +507,7 @@
         if (window.ClipsyncAPI && window.ClipsyncAPI._fetch) {
           window.ClipsyncAPI._fetch('POST', '/api/show_qr', {}).catch(function (e) {
             console.error('[ClipSync] Failed to show phone QR:', e);
-            self.showToast(self.isZh ? '显示二维码失败' : 'Failed to show QR code', 2500, 'error');
+            self.showToast(t('onboarding.err_qr'), 2500, 'error');
           });
         }
       });

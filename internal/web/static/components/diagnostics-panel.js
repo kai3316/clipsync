@@ -75,6 +75,15 @@
 
     computed: {},
 
+    beforeUnmount: function () {
+      if (this._diagTimers && this._diagTimers.length) {
+        for (var i = 0; i < this._diagTimers.length; i++) {
+          clearTimeout(this._diagTimers[i]);
+        }
+        this._diagTimers = [];
+      }
+    },
+
     methods: {
 
       runDiagnostics: function () {
@@ -122,12 +131,13 @@
           self.diagScanning = false;
           return;
         }
+        self._diagTimers = self._diagTimers || [];
         for (var i = 0; i < start; i++) {
           (function (idx) {
-            setTimeout(function () { self.diagRevealed = idx + 1; }, 350 * (idx + 1));
+            self._diagTimers.push(setTimeout(function () { self.diagRevealed = idx + 1; }, 350 * (idx + 1)));
           })(i);
         }
-        setTimeout(function () { self.diagScanning = false; }, 350 * start + 400);
+        self._diagTimers.push(setTimeout(function () { self.diagScanning = false; }, 350 * start + 400));
       },
 
       _groupsSummary: function (groups) {
@@ -159,13 +169,14 @@
           self.diagScanning = false;
           return;
         }
+        self._diagTimers = self._diagTimers || [];
         checks.forEach(function (_, i) {
-          setTimeout(function () {
+          self._diagTimers.push(setTimeout(function () {
             self.diagRevealed = i + 1;
             if (i === checks.length - 1) {
-              setTimeout(function () { self.diagScanning = false; }, 400);
+              self._diagTimers.push(setTimeout(function () { self.diagScanning = false; }, 400));
             }
-          }, 350 * (i + 1));
+          }, 350 * (i + 1)));
         });
       },
 
@@ -198,6 +209,8 @@
 
       groupStatus: function (groupId) {
         var items = this.groupItems(groupId);
+        // An empty/unavailable group is not a pass — render a warn badge.
+        if (items.length === 0) return 'warn';
         var hasFail = false, hasWarn = false;
         for (var i = 0; i < items.length; i++) {
           if (items[i].status === 'fail') hasFail = true;
@@ -335,13 +348,13 @@
           '<div class="diag-groups">' +
             '<div v-for="def in diagGroupDefs" :key="def.id" class="diag-group"' +
                  ':class="{ \'diag-group--revealed\': groupStart(def.id) < diagRevealed }">' +
-              '<button class="diag-group__header" @click="toggleGroup(def.id)">' +
+              '<button class="diag-group__header" @click="toggleGroup(def.id)" :aria-expanded="!isCollapsed(def.id)" :aria-controls="\'diag-group-items-\' + def.id">' +
                 '<span class="diag-group__chevron">{{ isCollapsed(def.id) ? \'▸\' : \'▾\' }}</span>' +
                 '<span class="diag-group__title">{{ t(def.labelKey) }}</span>' +
-                '<span class="diag-group__count">{{ groupItems(def.id).length }}</span>' +
+                '<span v-if="!groupUnavailable(def.id)" class="diag-group__count">{{ groupItems(def.id).length }}</span>' +
                 '<span class="diag-group__status" :class="\'diag-group__status--\' + groupStatus(def.id)">{{ groupStatusText(groupStatus(def.id)) }}</span>' +
               '</button>' +
-              '<div v-if="!isCollapsed(def.id)" class="diag-group__items">' +
+              '<div v-if="!isCollapsed(def.id)" :id="\'diag-group-items-\' + def.id" class="diag-group__items">' +
                 '<div v-if="groupUnavailable(def.id)" class="diag-group__unavailable">' +
                   '{{ t(\'diag.v2.group.unavailable\') }}' +
                 '</div>' +
@@ -349,9 +362,9 @@
                      ':class="{ \'diag-check--revealed\': itemRevealed(def.id, j), \'diag-check--ok\': itemRevealed(def.id, j) && item.status === \'ok\', \'diag-check--warn\': itemRevealed(def.id, j) && item.status === \'warn\', \'diag-check--fail\': itemRevealed(def.id, j) && item.status === \'fail\' }">' +
                   '<span class="diag-check__status">{{ itemRevealed(def.id, j) ? statusIcon(item.status) : \'·\' }}</span>' +
                   '<div class="diag-check__body">' +
-                    '<span class="diag-check__label">{{ diagV2ItemLabel(item) }}</span>' +
-                    '<span v-if="itemRevealed(def.id, j) && diagDetail(item)" class="diag-check__detail">{{ diagDetail(item) }}</span>' +
-                    '<span v-if="itemRevealed(def.id, j) && diagGuidance(item)" class="diag-check__guidance">💡 {{ diagGuidance(item) }}</span>' +
+                    '<span class="diag-check__label selectable">{{ diagV2ItemLabel(item) }}</span>' +
+                    '<span v-if="itemRevealed(def.id, j) && diagDetail(item)" class="diag-check__detail selectable">{{ diagDetail(item) }}</span>' +
+                    '<span v-if="itemRevealed(def.id, j) && diagGuidance(item)" class="diag-check__guidance selectable">💡 {{ diagGuidance(item) }}</span>' +
                     '<button v-if="itemRevealed(def.id, j) && item.id === \'firewall\' && item.status === \'fail\'" class="settings-btn settings-btn--sm diagnostics-panel__action" style="align-self:flex-start;margin-top:4px" @click="requestDiagnosticsAction(item)">{{ t(\'settings_window.diag_request\') }}</button>' +
                   '</div>' +
                 '</div>' +
@@ -370,9 +383,9 @@
                  ':class="{ \'diag-check--revealed\': i < diagRevealed, \'diag-check--ok\': chk.ok === true && i < diagRevealed, \'diag-check--fail\': chk.ok === false && i < diagRevealed }">' +
               '<span class="diag-check__status">{{ i < diagRevealed ? (chk.ok ? \'✓\' : \'✕\') : \'·\' }}</span>' +
               '<div class="diag-check__body">' +
-                '<span class="diag-check__label">{{ diagLabel(chk.id) }}</span>' +
-                '<span v-if="i < diagRevealed && diagDetail(chk)" class="diag-check__detail">{{ diagDetail(chk) }}</span>' +
-                '<span v-if="i < diagRevealed && diagGuidance(chk)" class="diag-check__guidance">💡 {{ diagGuidance(chk) }}</span>' +
+                '<span class="diag-check__label selectable">{{ diagLabel(chk.id) }}</span>' +
+                '<span v-if="i < diagRevealed && diagDetail(chk)" class="diag-check__detail selectable">{{ diagDetail(chk) }}</span>' +
+                '<span v-if="i < diagRevealed && diagGuidance(chk)" class="diag-check__guidance selectable">💡 {{ diagGuidance(chk) }}</span>' +
                 '<button v-if="i < diagRevealed && (chk.id === \'firewall\' || chk.id === \'permissions\')" class="settings-btn settings-btn--sm diagnostics-panel__action" style="align-self:flex-start;margin-top:4px" @click="requestDiagnosticsAction(chk)">{{ t(\'settings_window.diag_request\') }}</button>' +
               '</div>' +
             '</div>' +

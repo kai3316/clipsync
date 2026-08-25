@@ -111,13 +111,17 @@ def make_app_stub(**attrs):
             pass
     app._relay = Relay()
 
-    class WS:
+    class WSManager:
         def __init__(self):
             self.broadcasts = []
 
         def broadcast(self, mtype, data):
             self.broadcasts.append((mtype, data))
             return 1
+
+    class WS:
+        def __init__(self):
+            self.ws_manager = WSManager()
     app.web_server = WS()
 
     class SyncMgr:
@@ -164,7 +168,8 @@ def make_app_stub(**attrs):
 
 
 def _delivery_events(app, status=None):
-    evs = [d for m, d in app.web_server.broadcasts if m == "internet_delivery"]
+    evs = [d for m, d in app.web_server.ws_manager.broadcasts
+           if m == "internet_delivery"]
     if status is not None:
         evs = [d for d in evs if d.get("status") == status]
     return evs

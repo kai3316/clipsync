@@ -28,6 +28,7 @@ dependencies = [
     "customtkinter>=5.2.0",
     "qrcode>=7.4",
     "certifi>=2023.7.22",
+    "paho-mqtt>=2.0; python_version < '4'",
     "pyobjc-framework-Cocoa>=10.0; sys_platform == 'darwin'",
     "pynput>=1.7; sys_platform == 'linux'",
 ]
@@ -49,6 +50,12 @@ clipsync = "src.main:main"
 # Auto-discovery previously mis-detected a "src-layout" because of `src/main.py`
 # and dropped `internal` from the wheel entirely.
 packages = {find = {include = ["internal*", "src*"]}}
+
+[tool.setuptools.package-data]
+# Ship the web UI's static assets in the wheel, mirroring clipsync.spec's
+# bundle. `static` is a data dir, not a package (no __init__.py), so glob from
+# the parent `internal.web` package or the wheel serves only the fallback page.
+"internal.web" = ["static/**/*"]
 
 [tool.setuptools.dynamic]
 version = {attr = "internal.version.__version__"}

@@ -17,6 +17,7 @@ The callers are the update-check/download flows in ``src/main.py``; in a
 non-frozen (source) run everything is a no-op.
 """
 
+import errno
 import logging
 import os
 import shutil
@@ -179,7 +180,22 @@ def _apply_linux(staged: Path) -> bool:
     # Keep the running binary as .old for manual rollback.  os.replace below
     # swaps the directory entry, so the copy must happen first.
     _backup_current_binary(cur)
-    os.replace(staged, cur)
+    try:
+        os.replace(staged, cur)
+    except OSError as exc:
+        # The staged dir may live on a different filesystem (a tmpfs /tmp or a
+        # separate /home), and os.replace can't move across filesystems.  Copy
+        # into a temp name next to the target, then swap within that same
+        # directory.  The .old backup and the chmod below still apply.
+        if exc.errno != errno.EXDEV:
+            raise
+        logger.warning(
+            "Cross-filesystem staged update %s → %s (%s); copying instead",
+            staged, cur, exc,
+        )
+        tmp = cur.with_name(cur.name + ".new")
+        shutil.copy2(staged, tmp)
+        os.replace(tmp, cur)
     os.chmod(cur, 0o755)
     subprocess.Popen([str(cur)], close_fds=True, start_new_session=True)
     logger.info("Linux update applied; relaunched %s", cur)

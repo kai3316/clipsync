@@ -63,8 +63,12 @@
         self.isWideLayout = e.matches;
       });
 
-      // Prevent browser native context menu — we use our own
+      // Prevent browser native context menu — we use our own.  Editable
+      // fields and anything explicitly marked .selectable keep the native
+      // menu so right-click copy/paste still works there.
       document.addEventListener('contextmenu', function (e) {
+        if (isEditable(e.target)) return;
+        if (e.target && e.target.closest && e.target.closest('.selectable')) return;
         e.preventDefault();
       });
 
@@ -224,6 +228,21 @@
           // startup).  _dataLoadTriggered only gates the WS-down fallback.
           self._dataLoadTriggered = true;
           self.loadData();
+          // Re-sync safety net: WS events missed during a disconnect gap
+          // (netpair_peer / internet_delivery) are recovered by refetching the
+          // internet-pair list and each peer's delivery counts — not just the
+          // overview/settings that loadData() already covers.
+          if (store.fetchInternetPairStatus) {
+            store.fetchInternetPairStatus().then(function () {
+              var peers = store.internetPairPeers || [];
+              for (var i = 0; i < peers.length; i++) {
+                if (peers[i].peer_id === undefined || peers[i].peer_id === null) continue;
+                if (store.fetchInternetDelivery) {
+                  store.fetchInternetDelivery(peers[i].peer_id);
+                }
+              }
+            });
+          }
         },
       };
 
@@ -319,7 +338,9 @@
           // Also load overview
           store.fetchOverview();
 
-          Promise.all(promises)
+          // Return the chain so callers can await the whole load (e.g.
+          // title-bar.js refreshes via this.$root.loadData().catch(...)).
+          return Promise.all(promises)
             .then(function () {
               store.loadError = false;
             })
@@ -343,6 +364,10 @@
           store.loading = false;
           store.initialLoad = false;
           store.loadError = true;
+          // Resolve rather than reject: the error is already surfaced via
+          // store.loadError, and callers (connected handler, title-bar) don't
+          // expect a rejected promise from the shared load path.
+          return Promise.resolve();
         }
       },
 
@@ -441,6 +466,11 @@
         return ClipsyncAPI.getSettings().then(function (res) {
           var s = (res && res.settings) || {};
           store.settingsCache = s;
+          // The theme is persisted server-side too (selectTheme POSTs
+          // appearance_mode). Re-run loadTheme now that the server value is
+          // known so a fresh browser (empty localStorage) uses the saved theme
+          // instead of falling back to OS "system".
+          store.loadTheme();
           // Seed the internet-sync relay state (kept live afterwards by the
           // WS `relay_state` event handled in ws.js).
           if (s.internet_sync_state) store.relayState = s.internet_sync_state;

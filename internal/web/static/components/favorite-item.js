@@ -38,18 +38,15 @@
       draggable="true"
       :data-id="item.id"
       :data-index="index"
-      role="button"
-      tabindex="0"
-      :aria-label="t('favorites.copy_tooltip')"
       :class="{
         'favorite-item--dragging': isDragging,
       }"
       @click="onClick"
-      @keydown="onKeyDown"
       @dragstart="onDragStart"
       @dragend="onDragEnd"
     >
       <span
+        v-if="showDragHandle"
         class="favorite-item__drag-handle"
         :title="t('favorites.drag_reorder_hint')"
         aria-hidden="true"
@@ -172,30 +169,34 @@
         var d = new Date(tsMs);
         return d.toLocaleDateString();
       },
+
+      // HTML5 drag-and-drop reordering never fires on coarse-pointer (touch)
+      // devices, so hide the drag handle there — the panel renders up/down
+      // reorder arrows instead. Mirrors favorites-panel's isCoarsePointer.
+      showDragHandle: function () {
+        if (this._coarseChecked === undefined) {
+          this._coarseChecked = true;
+          this._coarseValue = !!(window.matchMedia && window.matchMedia('(pointer: coarse)').matches);
+        }
+        return !this._coarseValue;
+      },
     },
 
     methods: {
-      onKeyDown: function (e) {
-        // Only the card itself triggers the primary action — inner buttons and
-        // the title editor handle their own keys.
-        if (e.target !== this.$el) return;
-        if (e.key === 'Enter' || e.key === ' ') {
-          e.preventDefault();
-          this.onClick(e);
-        }
-      },
-
       onClick: function (e) {
         // Don't copy while a drag is in progress — the browser synthesizes a
         // click after dragend, which would clobber the clipboard.
         if (this.isDragging) return;
-        // Ignore clicks on inner action buttons / the group menu.
+        // Ignore clicks on inner action buttons / the group menu / the drag
+        // handle (the handle is a grab surface, not a copy affordance).
         if (e.target && e.target.closest &&
-            e.target.closest('button, .history-item__actions, .favorite-item__group-menu')) {
+            e.target.closest('button, .history-item__actions, .favorite-item__group-menu, .favorite-item__drag-handle')) {
           return;
         }
-        // Ignore clicks on the title itself — double-click handles editing
-        if (e.target.closest('.favorite-item__title') || e.target.closest('.favorite-item__title-edit')) return;
+        // Ignore clicks on the title (double-click edits it) and on the
+        // preview (so a text-selection gesture never triggers copyItem).
+        if (e.target.closest('.favorite-item__title') || e.target.closest('.favorite-item__title-edit') ||
+            e.target.closest('.favorite-item__preview')) return;
         this.copyItem();
       },
 
@@ -325,9 +326,16 @@
             if (!menu) return;
             menu.classList.remove('favorite-item__group-menu--down');
             var content = self.$el.closest('.favorites-panel__content');
-            var contentTop = content ? content.getBoundingClientRect().top : 0;
-            if (menu.getBoundingClientRect().top < contentTop) {
+            var contentRect = content ? content.getBoundingClientRect() : null;
+            if (contentRect && menu.getBoundingClientRect().top < contentRect.top) {
               menu.classList.add('favorite-item__group-menu--down');
+              // Flipped down still clips at the bottom on short lists, so
+              // clamp the menu's height to the space below the button.
+              var menuRect = menu.getBoundingClientRect();
+              if (menuRect.bottom > contentRect.bottom) {
+                var overflow = menuRect.bottom - contentRect.bottom;
+                menu.style.maxHeight = Math.max(60, menuRect.height - overflow) + 'px';
+              }
             }
           });
         }

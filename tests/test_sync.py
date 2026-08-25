@@ -374,12 +374,20 @@ def test_two_secrets_local_two_entries_but_peer_one(tmp_path):
 # ── 3. max-age x pinned x id types ─────────────────────────────────────
 
 def test_string_id_pin_protects_entry_from_age_prune(tmp_path):
+    from unittest.mock import patch
     db = ClipboardHistoryDB(storage_path=str(tmp_path / "h.db"))
+    # The DB stamps local receipt time, so inject genuine age by freezing
+    # the clock back 5 days while the entries are added.
     old = time.time() - 5 * 86400
-    db.add(ClipboardContent(types={ContentType.TEXT: b"keep me"},
-                            timestamp=old))
-    db.add(ClipboardContent(types={ContentType.TEXT: b"drop me"},
-                            timestamp=old - 10))
+    counter = {"n": 0}
+
+    def fake_time():
+        counter["n"] += 1
+        return old + counter["n"] * 100.0  # > FLAVOR_MERGE_WINDOW apart
+
+    with patch("internal.clipboard.history_db.time.time", side_effect=fake_time):
+        db.add(ClipboardContent(types={ContentType.TEXT: b"keep me"}))
+        db.add(ClipboardContent(types={ContentType.TEXT: b"drop me"}))
     by_preview = {e["text_preview"]: e["entry_id"] for e in db.get_all()}
     keep_id, drop_id = by_preview["keep me"], by_preview["drop me"]
 

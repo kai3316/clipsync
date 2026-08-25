@@ -355,7 +355,17 @@
       display: flex;
       align-items: center;
       gap: var(--clipsync-space-2);
-      flex-shrink: 0;
+      flex-shrink: 1;
+      min-width: 0;
+    }
+
+    /* Long device names must clamp so the search box keeps a usable width
+       on narrow windows instead of being squeezed to nothing. */
+    .title-bar__device-name {
+      max-width: 140px;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
     }
 
     .title-bar__logo {
@@ -593,6 +603,18 @@
     }
 
     .tab-nav__btn:not(.tab-nav__btn--active) .tab-nav__badge {
+      background: var(--clipsync-panel-2);
+      color: var(--clipsync-fg-muted);
+    }
+
+    /* Vertical (sidebar) tabs use different button classes, so the badge
+       rules above never matched and the sidebar badges stayed washed out. */
+    .tab-nav-vertical__btn--active .tab-nav__badge {
+      background: rgba(5, 6, 13, 0.35);
+      color: #ffffff;
+    }
+
+    .tab-nav-vertical__btn:not(.tab-nav-vertical__btn--active) .tab-nav__badge {
       background: var(--clipsync-panel-2);
       color: var(--clipsync-fg-muted);
     }
@@ -1660,7 +1682,8 @@
       display: grid;
       grid-template-columns: 1fr 1fr;
       gap: var(--clipsync-space-3);
-      margin-top: var(--clipsync-space-3);
+      /* Spacing comes from .overview-panel's column gap — a margin-top here
+         double-stacks it. */
     }
 
     @media (max-width: 768px) {
@@ -1860,7 +1883,7 @@
 
     /* ── Recent activity feed ─────────────────────────────────── */
     .overview-activity-card {
-      margin-top: var(--clipsync-space-3);
+      /* Spacing comes from .overview-panel's column gap — no margin-top. */
     }
 
     .overview-feed {
@@ -2775,7 +2798,7 @@
       cursor: pointer;
       font-size: 12px;
       line-height: 1;
-      opacity: 0.4;
+      opacity: 0.6;
       border-radius: var(--clipsync-radius-sm);
       transition: opacity var(--clipsync-transition-fast),
         background var(--clipsync-transition-fast);
@@ -2893,7 +2916,7 @@
     }
 
     .chat-bubble__failed {
-      color: #ff8a8f;
+      color: var(--clipsync-danger);
       font-weight: 600;
       margin-right: 6px;
     }
@@ -3674,8 +3697,10 @@
       font-size: 13px;
       line-height: 1.4;
       cursor: pointer;
-      user-select: none;
-      -webkit-user-select: none;
+      /* Deliberately selectable/copyable like history items — favorites are
+         user text worth copying. */
+      user-select: text;
+      -webkit-user-select: text;
     }
 
     .favorite-item__title:hover {
@@ -4074,7 +4099,8 @@
       overflow-x: hidden;
       padding: 0;
       pointer-events: none;
-      z-index: var(--clipsync-z-tooltip);
+      /* Below the modal layer (z-modal 400), alongside the context menu. */
+      z-index: 390;
     }
 
     .preview-popover__header {
@@ -4787,11 +4813,18 @@
     .settings-dialog__tab-count {
       font-size: 10px;
       line-height: 1;
-      color: var(--clipsync-accent-text);
-      border: 1px solid currentColor;
+      color: var(--clipsync-fg-muted);
+      border: 1px solid var(--clipsync-border-strong);
       border-radius: 999px;
       padding: 2px 6px;
       flex-shrink: 0;
+    }
+
+    /* On the active tab the badge sits on the accent gradient — switch to
+       accent-text so it reads on the bright pill. */
+    .settings-dialog__tab--active .settings-dialog__tab-count {
+      color: var(--clipsync-accent-text);
+      border-color: currentColor;
     }
 
     .settings-dialog__body {
@@ -5008,8 +5041,10 @@
     }
 
     .diag-check__label { font-size: 12px; font-weight: 600; }
-    .diag-check__detail { font-size: 11px; color: var(--clipsync-fg-muted); }
-    .diag-check__guidance { font-size: 11px; color: var(--clipsync-warning); }
+    /* Long unbroken diagnostic paths (data_dir, log_path) must wrap instead
+       of being clipped by the group's overflow:hidden. */
+    .diag-check__detail { font-size: 11px; color: var(--clipsync-fg-muted); word-break: break-word; }
+    .diag-check__guidance { font-size: 11px; color: var(--clipsync-warning); word-break: break-word; }
 
     .diag-summary {
       margin-top: 10px;
@@ -6260,7 +6295,7 @@
        behind a toggle switch so it doesn't read as a wall of prompts. */
     .netpair-section--bottom {
       margin-top: var(--clipsync-space-4);
-      border-top: 1px solid rgba(255,255,255,0.05);
+      border-top: 1px solid var(--clipsync-border);
       padding-top: var(--clipsync-space-3);
     }
     .netpair-section__header {
@@ -6268,52 +6303,37 @@
       align-items: center;
       justify-content: space-between;
       gap: var(--clipsync-space-3);
+      width: 100%;
+      padding: var(--clipsync-space-1) 0;
+      background: none;
+      border: none;
+      border-radius: var(--clipsync-radius-sm);
+      cursor: pointer;
+      text-align: left;
+      font: inherit;
+      color: inherit;
+      transition: background var(--clipsync-transition-fast);
+    }
+    .netpair-section__header:hover {
+      background: var(--clipsync-hover);
     }
     .netpair-section__title {
       display: inline-flex;
       align-items: center;
       gap: var(--clipsync-space-2);
-      cursor: pointer;
       user-select: none;
     }
-    .netpair-switch {
-      position: relative;
-      display: inline-block;
-      width: 38px;
-      height: 22px;
+    /* Chevron accordion affordance for the collapsible internet-pairing
+       section (replaces the switch, which read as a feature on/off). */
+    .netpair-section__chevron {
       flex-shrink: 0;
-      cursor: pointer;
+      color: var(--clipsync-fg-muted);
+      font-size: 0.8rem;
+      line-height: 1;
+      transition: transform var(--clipsync-transition-fast);
     }
-    .netpair-switch input {
-      opacity: 0;
-      width: 0;
-      height: 0;
-      position: absolute;
-    }
-    .netpair-switch__slider {
-      position: absolute;
-      inset: 0;
-      border-radius: 22px;
-      background: rgba(255,255,255,0.12);
-      transition: background 0.25s;
-    }
-    .netpair-switch__slider::before {
-      content: '';
-      position: absolute;
-      width: 16px;
-      height: 16px;
-      left: 3px;
-      top: 3px;
-      border-radius: 50%;
-      background: var(--clipsync-fg-muted, #a1a1aa);
-      transition: transform 0.25s, background 0.25s;
-    }
-    .netpair-switch input:checked + .netpair-switch__slider {
-      background: rgba(52,152,219,0.45);
-    }
-    .netpair-switch input:checked + .netpair-switch__slider::before {
-      transform: translateX(16px);
-      background: #fff;
+    .netpair-section__chevron--open {
+      transform: rotate(180deg);
     }
     .netpair-body {
       margin-top: var(--clipsync-space-2);
@@ -6328,10 +6348,21 @@
     .netpair-syncoff {
       display: flex;
       align-items: center;
+      flex-wrap: wrap;
       gap: var(--clipsync-space-2);
       font-size: 0.85rem;
       color: var(--clipsync-warning, #B7950B);
       margin: var(--clipsync-space-2) 0;
+    }
+    /* The "去开启" CTA sits inline with the hint, styled as the accent action
+       instead of the old step-guide link that floated to the far edge. */
+    .netpair-syncoff .btn-ghost {
+      padding: 4px 10px;
+      font-size: 12px;
+      color: var(--clipsync-accent);
+    }
+    .netpair-syncoff .btn-ghost:hover {
+      color: var(--clipsync-accent);
     }
 
     /* One-line privacy/security note under the internet-pairing overview
@@ -6574,7 +6605,8 @@
 
     .netpair-card-badge {
       position: absolute;
-      top: 6px;
+      top: auto;
+      bottom: 6px;
       right: 8px;
       z-index: 2;
       display: inline-flex;
@@ -6722,6 +6754,21 @@
       font-family: 'SF Mono', 'Fira Code', 'Cascadia Code', monospace;
       font-size: 0.75rem;
       color: var(--clipsync-accent);
+    }
+
+    /* Device cards on very narrow windows: a paired-offline card renders 4
+       shrink-0 action buttons that overflow the card.  Wrap the actions
+       under the card and let the meta badge shrink instead of clipping. */
+    @media (max-width: 640px) {
+      .device-card {
+        flex-wrap: wrap;
+      }
+      .device-card__actions {
+        flex-basis: 100%;
+      }
+      .device-card__meta {
+        flex-shrink: 1;
+      }
     }
 
     /* Responsive */
@@ -6999,7 +7046,9 @@
     .onboard-overlay {
       position: fixed;
       inset: 0;
-      z-index: var(--clipsync-z-modal);
+      /* Own the screen: above toasts (z-toast 500) so a first-run toast can't
+         cover the wizard, while normal modals stay below. */
+      z-index: 600;
       display: flex;
       align-items: center;
       justify-content: center;
@@ -7273,7 +7322,7 @@
   </style>
 </head>
 <body>
-  <div id="app" v-cloak @contextmenu.prevent>
+  <div id="app" v-cloak>
     <!-- Toast notification overlay -->
     <toast></toast>
 
@@ -7377,7 +7426,7 @@
             <p class="onboard-step__text">{{ t('onboarding.pair_body') }}</p>
             <div class="onboard-actions">
               <button class="onboard-btn" @click="store.goToDevices()">{{ t('onboarding.pair_cta') }}</button>
-              <button class="onboard-btn onboard-btn--primary" @click="store.nextOnboardingStep()">{{ store.isZh ? '下一步' : 'Next' }}</button>
+              <button class="onboard-btn onboard-btn--primary" @click="store.nextOnboardingStep()">{{ t('onboarding.next') }}</button>
             </div>
           </div>
 
@@ -7387,7 +7436,7 @@
             <h1 class="onboard-step__title">{{ t('onboarding.phone_title') }}</h1>
             <p class="onboard-step__text">{{ t('onboarding.phone_body') }}</p>
             <div class="onboard-phone">
-              <label class="onboard-device__label" for="onboard-phone-url">{{ store.isZh ? '手机访问地址' : 'Phone address' }}</label>
+              <label class="onboard-device__label" for="onboard-phone-url">{{ t('onboarding.phone_address') }}</label>
               <input id="onboard-phone-url" class="onboard-device__input onboard-phone__input" readonly
                      :value="store.mobileUrl"
                      @focus="$event.target.select()" @click="$event.target.select()">

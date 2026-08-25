@@ -176,10 +176,10 @@ ClipSync 通过**局域网直连**同步剪贴板 — 无需账号、无需云�
 
 | 平台 | 文件 | 备注 |
 |----------|------|-------|
-| Windows 10/11 | `clipsync.exe` | 便携版，无需管理员权限 |
-| macOS 12+ | `clipsync.app` (zip) | 通用二进制 (Intel + Apple Silicon) |
-| Linux (X11/Wayland) | `clipsync` (tar.gz x86_64) | 需要 `xclip` 或 `wl-clipboard` |
-| Linux (ARM64) | `clipsync` (tar.gz arm64) | 树莓派 4/5 等 |
+| Windows 10/11 | `clipsync-windows.zip` | 便携版，无需管理员权限 |
+| macOS 12+ | `clipsync-macos-arm64.zip` | Apple Silicon |
+| Linux (X11/Wayland) | `clipsync-linux.tar.gz` (x86_64) | 需要 `xclip` 或 `wl-clipboard` |
+| Linux (ARM64) | `clipsync-linux-arm64.tar.gz` | 树莓派 4/5 等 |
 
 [最新版本](https://github.com/kai3316/clipsync/releases/latest) &nbsp;|&nbsp; [更新日志](CHANGELOG.md)
 
@@ -307,7 +307,7 @@ internal/
     ws.py                     #   WebSocket 实时推送
     api/                      #   devices/history/favorites/transfer/settings/translate/security/aiconfig
     static/                   #   Web 控制面板、手机页、PWA 资源
-tests/                        #   949 个测试覆盖剪贴板、编解码、配置、配对、同步、文件传输、聊天、Web API、跨平台
+tests/                        #   1235 个测试覆盖剪贴板、编解码、配置、配对、同步、文件传输、聊天、Web API、跨平台
 ```
 
 ### 数据流

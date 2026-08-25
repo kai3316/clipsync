@@ -1022,6 +1022,22 @@ def test_new_locale_keys_present_in_both_languages():
         assert key in en and key in zh, key
 
 
+def test_swjs_and_index_still_carry_v177_fixes():
+    """v1.0.77: the service worker pins the app-shell cache version and
+    index.html hides pre-Vue markup.  A regression here serves stale cached
+    pages forever after an update (SW cache-first), or flashes the raw
+    onboarding markup on refresh."""
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    with open(os.path.join(root, "internal/web/static/sw.js"),
+              encoding="utf-8") as f:
+        sw = f.read()
+    assert "clipsync-shell-v2" in sw
+    with open(os.path.join(root, "internal/web/static/index.html"),
+              encoding="utf-8") as f:
+        index = f.read()
+    assert "v-cloak" in index
+
+
 # ══════════════════════════════════════════════════
 # merged from test_round10_mobile.py
 # ══════════════════════════════════════════════════

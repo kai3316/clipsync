@@ -71,6 +71,90 @@ def test_missing_secrets_raise():
         R.derive_key(None, "b")
 
 
+# ------------------------------------------------------------ probe
+
+def test_probe_relay_endpoint_invalid_never_raises():
+    """probe_relay_endpoint (v1.0.75 SSL fix) is a pure connectivity check that
+    never raises — clicking 'test connection' must not disturb a live
+    RelayTransport session.  Malformed endpoints are refused up front."""
+    for bad in ("", "not a url", "wss://", "tcp://", "tcp://:9999"):
+        res = R.probe_relay_endpoint(bad, timeout=0.01)
+        assert isinstance(res, dict)
+        assert res["ok"] is False
+        assert "detail" in res
+
+
+def test_probe_relay_endpoint_reports_connect_failures(monkeypatch):
+    def refused(_addr, timeout=...):
+        raise OSError("connection refused")
+
+    monkeypatch.setattr(R.socket, "create_connection", refused)
+    res = R.probe_relay_endpoint("tcp://broker.example:1883")
+    assert res["ok"] is False
+    assert res["detail"] == "connection refused"
+
+    def hung(_addr, timeout=...):
+        raise TimeoutError("timed out")
+
+    monkeypatch.setattr(R.socket, "create_connection", hung)
+    res2 = R.probe_relay_endpoint("tcp://broker.example:1883")
+    assert res2["ok"] is False
+    assert res2["detail"] == "timeout"
+
+
+def test_probe_relay_endpoint_reports_tcp_reachable():
+    """A plain TCP endpoint that accepts the connection is 'reachable'."""
+    import socket
+    listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    listener.bind(("127.0.0.1", 0))
+    listener.listen(1)
+    port = listener.getsockname()[1]
+    try:
+        res = R.probe_relay_endpoint(f"tcp://127.0.0.1:{port}", timeout=2.0)
+    finally:
+        listener.close()
+    assert res["ok"] is True
+    assert res["detail"] == "reachable"
+    assert res["latency_ms"] is not None
+
+
+def test_probe_relay_endpoint_tls_handshake_uses_ca_bundle(monkeypatch):
+    """wss:// endpoints must run a TLS handshake against the certifi CA bundle
+    (v1.0.75 fix: a default context on macOS / frozen builds can't find the OS
+    trust store and would report every wss:// endpoint unreachable)."""
+    calls = {}
+
+    class FakeSock:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+    class FakeCtx:
+        def __init__(self, cafile):
+            calls["cafile"] = cafile
+
+        def wrap_socket(self, sock, server_hostname=None):
+            calls["server_hostname"] = server_hostname
+            return FakeSock()
+
+    def fake_connect(_addr, timeout=...):
+        calls["connect"] = True
+        return FakeSock()
+
+    monkeypatch.setattr(R.socket, "create_connection", fake_connect)
+    monkeypatch.setattr(R.ssl, "create_default_context", FakeCtx)
+    monkeypatch.setattr(R, "_ca_bundle_path", lambda: "/tmp/cacert.pem")
+
+    res = R.probe_relay_endpoint("wss://broker.example:8884/mqtt")
+    assert res["ok"] is True
+    assert res["detail"] == "reachable"
+    assert calls["cafile"] == "/tmp/cacert.pem"
+    assert calls["server_hostname"] == "broker.example"
+
+
 # ------------------------------------------------------------- fake client
 
 class FakeClient:

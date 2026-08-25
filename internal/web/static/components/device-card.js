@@ -120,14 +120,14 @@
         '<div class="device-card__icon">{{ osIcon }}</div>' +
         '<div class="device-card__info">' +
           '<span class="device-card__name text-ellipsis">{{ device.device_name || device.name || device.device_id }}</span>' +
-          '<span class="device-card__id text-ellipsis">{{ isLocal ? \'💻 \' + t(\'device.this_computer\') : device.device_id }}</span>' +
+          '<span class="device-card__id text-ellipsis selectable">{{ isLocal ? \'💻 \' + t(\'device.this_computer\') : device.device_id }}</span>' +
           '<span v-if="device.os" class="device-card__os">{{ device.os }}</span>' +
           '<!-- Note -->' +
           '<div v-if="!editingNote" class="device-card__note" role="button" tabindex="0" @click.stop="startEditNote" @keyup.enter="startEditNote" @keyup.space.prevent="startEditNote">' +
-            '<span v-if="device.note" class="device-card__note-text">{{ device.note }}</span>' +
+            '<span v-if="device.note" class="device-card__note-text selectable">{{ device.note }}</span>' +
             '<span v-else class="device-card__note-placeholder">{{ t(\'device.add_note\') }}</span>' +
           '</div>' +
-          '<div v-if="editingNote" class="device-card__note-edit" @click.stop>' +
+          '<div v-if="editingNote" class="device-card__note-edit" @click.stop @contextmenu.stop>' +
             '<input type="text" v-model="noteDraft" class="device-card__note-input" :placeholder="t(\'device.note_placeholder\')" @keyup.enter="saveNote" @keyup.escape="cancelEditNote" ref="noteInput">' +
             '<button class="device-card__note-save" @click="saveNote" :disabled="noteSaving">{{ noteSaving ? \'...\' : t(\'device.save_note\') }}</button>' +
             '<button class="device-card__note-cancel" :aria-label="t(\'ui.cancel\')" @click="cancelEditNote">✕</button>' +

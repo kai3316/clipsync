@@ -58,7 +58,7 @@
             '</svg>' +
           '</span>' +
           '<h1 class="title-bar__title">{{ t(\'web.app_name\') }}</h1>' +
-          '<span style="font-size:11px;color:var(--clipsync-fg-muted);margin-left:8px">· {{ store.deviceName }}</span>' +
+          '<span class="title-bar__device-name" style="font-size:11px;color:var(--clipsync-fg-muted);margin-left:8px">· {{ store.deviceName }}</span>' +
         '</div>' +
         '<div class="title-bar__search" style="-webkit-app-region:no-drag">' +
           '<span class="title-bar__search-icon">&#128269;</span>' +
