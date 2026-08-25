@@ -5026,6 +5026,102 @@
       flex-direction: column;
     }
 
+    /* ── Grouped diagnostics cards (round 19) ───────────────────── */
+    .diag-groups {
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+    }
+
+    .diag-group {
+      border: 1px solid var(--clipsync-border);
+      border-radius: var(--clipsync-radius-sm);
+      background: color-mix(in srgb, var(--clipsync-panel) 50%, transparent);
+      opacity: 0.45;
+      transition: opacity 0.3s;
+      overflow: hidden;
+    }
+
+    .diag-group--revealed { opacity: 1; }
+
+    .diag-group__header {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      width: 100%;
+      padding: 10px 12px;
+      background: none;
+      border: none;
+      cursor: pointer;
+      text-align: left;
+      color: var(--clipsync-fg);
+      font: inherit;
+    }
+
+    .diag-group__header:hover { background: color-mix(in srgb, var(--clipsync-panel) 80%, transparent); }
+
+    .diag-group__chevron {
+      width: 14px;
+      flex-shrink: 0;
+      color: var(--clipsync-fg-subtle);
+      font-size: 12px;
+    }
+
+    .diag-group__title {
+      flex: 1;
+      font-size: 13px;
+      font-weight: 700;
+      min-width: 0;
+    }
+
+    .diag-group__count {
+      font-size: 11px;
+      color: var(--clipsync-fg-subtle);
+      background: color-mix(in srgb, var(--clipsync-border) 60%, transparent);
+      border-radius: 10px;
+      padding: 1px 8px;
+    }
+
+    .diag-group__status {
+      font-size: 11px;
+      font-weight: 700;
+      padding: 1px 8px;
+      border-radius: 10px;
+      flex-shrink: 0;
+    }
+
+    .diag-group__status--ok {
+      color: var(--clipsync-success);
+      background: color-mix(in srgb, var(--clipsync-success) 14%, transparent);
+    }
+
+    .diag-group__status--warn {
+      color: var(--clipsync-warning);
+      background: color-mix(in srgb, var(--clipsync-warning) 14%, transparent);
+    }
+
+    .diag-group__status--fail {
+      color: var(--clipsync-danger);
+      background: color-mix(in srgb, var(--clipsync-danger) 14%, transparent);
+    }
+
+    .diag-group__items {
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+      padding: 0 12px 10px;
+    }
+
+    .diag-group__unavailable {
+      font-size: 11px;
+      color: var(--clipsync-fg-subtle);
+      padding: 6px 0;
+      font-style: italic;
+    }
+
+    .diag-check--warn { border-color: color-mix(in srgb, var(--clipsync-warning) 40%, transparent); }
+    .diag-check--warn .diag-check__status { color: var(--clipsync-warning); }
+
     /* ── AI-config panel (round 12) ─────────────────────────────── */
     .aiconfig-panel {
       display: flex;
@@ -5201,7 +5297,7 @@
     }
 
     .aiconfig-panel__cell-path {
-      max-width: 380px;
+      max-width: 480px;
     }
 
     .aiconfig-panel__root-chip {
@@ -5285,6 +5381,47 @@
     .aiconfig-panel__badge--error {
       color: var(--clipsync-danger-text, var(--clipsync-danger));
       background: var(--clipsync-danger-bg);
+    }
+
+    /* Per-row version badge (round 19): this device vs remote copy.
+       Three-colour scheme — missing = neutral, same = green, one side
+       is newer = cyan (local) / amber (remote, i.e. pull suggests itself). */
+    .aiconfig-panel__ver-badge {
+      display: inline-block;
+      flex-shrink: 0;
+      margin-left: 8px;
+      padding: 1px 8px;
+      font-size: 10px;
+      font-weight: 700;
+      line-height: 1.5;
+      border-radius: var(--clipsync-radius-full);
+      background: var(--clipsync-panel-2);
+      color: var(--clipsync-fg-muted);
+      vertical-align: middle;
+      cursor: default;
+      white-space: nowrap;
+      -webkit-user-select: none;
+      user-select: none;
+    }
+
+    .aiconfig-panel__ver-badge--same {
+      color: var(--clipsync-success-text, var(--clipsync-success));
+      background: var(--clipsync-success-bg);
+    }
+
+    .aiconfig-panel__ver-badge--local_newer {
+      color: var(--clipsync-cyan);
+      background: var(--clipsync-info-bg);
+    }
+
+    .aiconfig-panel__ver-badge--remote_newer {
+      color: var(--clipsync-warning-text, var(--clipsync-warning));
+      background: var(--clipsync-warning-bg);
+    }
+
+    .aiconfig-panel__ver-badge--missing {
+      color: var(--clipsync-fg-muted);
+      background: var(--clipsync-panel-2);
     }
 
     /* Action bar */
@@ -5406,18 +5543,11 @@
       color: var(--clipsync-danger-text, var(--clipsync-danger));
     }
 
-    /* ── Two-section layout: local manager + device config (round 18) ── */
-    .aiconfig-panel__sections {
-      display: flex;
-      flex-direction: column;
-      gap: var(--clipsync-space-3);
-      flex: 1;
-      min-height: 0;
-    }
-
-    .aiconfig-panel__local,
-    .aiconfig-panel__device {
-      flex: 1 1 50%;
+    /* ── Local config manager card (round 18) — the AI Config tab is
+       local-only now; the device card (aiconfig-device) lives in the
+       Devices tab. ── */
+    .aiconfig-panel__local {
+      flex: 1 1 auto;
       min-height: 0;
       display: flex;
       flex-direction: column;
@@ -5427,12 +5557,7 @@
       overflow: hidden;
     }
 
-    .aiconfig-panel__device {
-      flex: 1 1 auto;
-    }
-
-    .aiconfig-panel__local-header,
-    .aiconfig-panel__device-header {
+    .aiconfig-panel__local-header {
       display: flex;
       align-items: center;
       justify-content: space-between;
@@ -5632,13 +5757,59 @@
       overflow: auto;
     }
 
+    /* AI-config DEVICE card — mounted in the Devices tab (round 18
+       relocation; the AI Config tab is local-only now) */
+    .aiconfig-device {
+      padding: var(--clipsync-space-3);
+      border-radius: var(--clipsync-radius-lg);
+      display: flex;
+      flex-direction: column;
+      gap: var(--clipsync-space-2);
+    }
+
+    .aiconfig-device__header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: var(--clipsync-space-2);
+      flex-shrink: 0;
+    }
+
+    .aiconfig-device__body {
+      display: flex;
+      gap: var(--clipsync-space-4);
+    }
+
+    /* Inside a scrollable tab the body must not stretch to fill: cap the
+       table and the peer list so the card stays a bounded section. */
+    .aiconfig-device .aiconfig-panel__body,
+    .aiconfig-device__body {
+      flex: none;
+      min-height: 0;
+    }
+
+    .aiconfig-device .aiconfig-panel__tablewrap {
+      max-height: 44vh;
+    }
+
+    .aiconfig-device .aiconfig-panel__peers {
+      max-height: 44vh;
+    }
+
     @media (max-width: 767px) {
-      .aiconfig-panel__sections {
-        overflow-y: auto;
+      .aiconfig-device__body {
+        flex-direction: column;
       }
 
-      .aiconfig-panel__local,
-      .aiconfig-panel__device {
+      .aiconfig-device .aiconfig-panel__peers {
+        width: 100%;
+        max-height: none;
+        flex-direction: row;
+        flex-wrap: wrap;
+        align-self: stretch;
+      }
+
+      .aiconfig-panel__local {
         flex: none;
         min-height: 260px;
       }
@@ -7120,6 +7291,7 @@
   <script src="components/favorites-panel.js?token=__TOKEN__"></script>
   <script src="components/diagnostics-panel.js?token=__TOKEN__"></script>
   <script src="components/aiconfig-panel.js?token=__TOKEN__"></script>
+  <script src="components/aiconfig-device-panel.js?token=__TOKEN__"></script>
   <script src="components/preview-popover.js?token=__TOKEN__"></script>
   <script src="components/context-menu.js?token=__TOKEN__"></script>
   <script src="components/translate-modal.js?token=__TOKEN__"></script>

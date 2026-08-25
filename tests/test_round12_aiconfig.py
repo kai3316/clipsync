@@ -80,7 +80,10 @@ def test_config_ai_config_paths_roundtrip(isolated_config):
     cfg_mod.save(cfg)
     loaded = cfg_mod.load()
     assert loaded.ai_config_paths == ["~/ai-configs", "D:\\notes"]
-    assert cfg_mod.Config().ai_config_paths == []  # fresh default
+    # round 19: fresh default is the common AI-tool config presets
+    fresh = cfg_mod.Config()
+    assert len(fresh.ai_config_paths) >= 4
+    assert ".claude" in " ".join(fresh.ai_config_paths)
 
 
 def test_config_ai_config_paths_bad_type_falls_back(isolated_config):
@@ -90,7 +93,8 @@ def test_config_ai_config_paths_bad_type_falls_back(isolated_config):
     path.write_text(json.dumps({"ai_config_paths": "not-a-list"}),
                     encoding="utf-8")
     loaded = cfg_mod.load()
-    assert loaded.ai_config_paths == []
+    # bad type → the (non-empty) preset default, not an empty list
+    assert len(loaded.ai_config_paths) >= 4
 
 
 # --------------------------------------------------------------- collector

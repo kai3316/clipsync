@@ -83,8 +83,9 @@ def test_tab_navigation_registers_aiconfig():
     src = _read("components", "tab-navigation.js")
     assert "id: 'aiconfig'" in src
     assert "t('ui.aiconfig')" in src
-    # Badge = number of peers that published an inventory.
-    assert "aiConfigInventory" in src
+    # Badge = number of LOCAL config files (round 18: the AI Config tab is
+    # the local manager only; device inventories live in the Devices tab).
+    assert "aiConfigLocal" in src
 
 
 def test_api_inventory_wrapper():
@@ -180,8 +181,11 @@ def test_ws_handles_aiconfig_file_event():
 
 
 def test_panel_component_structure():
-    src = _read("components", "aiconfig-panel.js")
-    assert "__CLIPSYNC_COMPONENTS__['aiconfig-panel']" in src
+    # Round 18: the device browse/pull UI relocated from the AI Config tab
+    # to the Devices tab, so the device assertions live in the relocated
+    # aiconfig-device-panel component.
+    src = _read("components", "aiconfig-device-panel.js")
+    assert "__CLIPSYNC_COMPONENTS__['aiconfig-device-panel']" in src
     # Registered under its own name and injected with the shared store.
     assert "inject: ['store']" in src
     # Default landing mode must be copy — never a silent overwrite.
@@ -322,6 +326,8 @@ def test_locale_json_files_still_parse():
 
 _TOUCHED_JS = [
     ("components", "aiconfig-panel.js"),
+    ("components", "aiconfig-device-panel.js"),
+    ("components", "device-panel.js"),
     ("components", "tab-navigation.js"),
     ("components", "settings-panel.js"),
     ("js", "api.js"),

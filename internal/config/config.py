@@ -193,7 +193,20 @@ class Config:
     # paired peers.  "~" expands to the current user's home at collection
     # time.  Empty list = feature off for this device (nothing is collected
     # and no inventory is broadcast).
-    ai_config_paths: list[str] = field(default_factory=list)
+    ai_config_paths: list[str] = field(default_factory=lambda: [
+        # Default watch list (round 19): the common AI-tool config locations —
+        # Claude Code, Codex, Cursor, Gemini CLI.  File entries (e.g.
+        # ~/.claude/CLAUDE.md) sync exactly that file; credentials like
+        # auth.json are deliberately NOT listed.  Users can edit freely.
+        "~/.claude/CLAUDE.md",
+        "~/.claude/settings.json",
+        "~/.claude/skills",
+        "~/.codex/config.toml",
+        "~/.cursor/rules",
+        "~/.cursor/commands",
+        "~/.gemini/settings.json",
+        "~/.gemini/GEMINI.md",
+    ])
 
     def add_peer(self, peer: PeerInfo):
         self.peers[peer.device_id] = peer

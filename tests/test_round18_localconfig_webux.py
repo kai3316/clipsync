@@ -55,13 +55,12 @@ def test_panel_mounted_in_both_layouts():
 def test_index_html_has_local_section_css():
     css = _read("index.html")
     for cls in (
-        ".aiconfig-panel__sections {",
-        ".aiconfig-panel__local,",
-        ".aiconfig-panel__device {",
+        ".aiconfig-panel__local {",
         ".aiconfig-panel__local-tablewrap {",
         ".aiconfig-panel__local-actions {",
         ".aiconfig-paths__overlay {",
         ".aiconfig-local-preview__editor {",
+        ".aiconfig-device {",
     ):
         assert cls in css, f"missing CSS rule: {cls}"
 
@@ -147,13 +146,15 @@ def test_store_local_fetch_normalizes_defensively():
 # ── 4. aiconfig-panel.js: local manager + device section wiring ────────
 
 
-def test_panel_has_two_section_layout():
+def test_panel_local_only_layout():
+    # The AI Config tab is the LOCAL manager only — device config moved out.
     src = _read("components", "aiconfig-panel.js")
-    assert "aiconfig-panel__sections" in src
     assert "aiconfig-panel__local" in src
-    assert "aiconfig-panel__device" in src
     assert "aiconfig.local_title" in src
-    assert "aiconfig.local_device_title" in src
+    # No device section / peer inventory left behind in the AI Config tab.
+    assert "aiconfig-panel__device" not in src
+    assert "peersList" not in src
+    assert "aiconfig-panel__body" not in src
 
 
 def test_panel_local_toolbar_and_paths_dialog():
@@ -237,18 +238,30 @@ def test_panel_local_defensive_empty_state():
     assert "store.fetchAiConfigLocal()" in src
 
 
-def test_panel_device_section_kept():
-    src = _read("components", "aiconfig-panel.js")
-    # Round-12 device browse/pull UI is intact inside its own section.
-    assert "peersList" in src
-    assert "aiconfig-panel__body" in src
-    assert "selectedCount === 0 || pulling" in src
-    assert "openPreview" in src
-    assert "pullAiConfigFiles" in src
-    assert "aiconfig.empty_title" in src
-    assert "aiconfig.empty_desc" in src
-    assert "aiconfig.mode_label" in src
-    assert "aiconfig.devices" in src
+def test_device_config_relocated_to_devices_tab():
+    # The round-12 device browse/pull UI now lives in aiconfig-device-panel.
+    dev = _read("components", "aiconfig-device-panel.js")
+    assert "__CLIPSYNC_COMPONENTS__['aiconfig-device-panel']" in dev
+    assert "peersList" in dev
+    assert "selectedCount === 0 || pulling" in dev
+    assert "openPreview" in dev
+    assert "pullAiConfigFiles" in dev
+    assert "aiconfig.empty_title" in dev
+    assert "aiconfig.empty_desc" in dev
+    assert "aiconfig.mode_label" in dev
+    assert "aiconfig.devices" in dev
+    assert "aiconfig.local_device_title" in dev
+    # Mounted exactly once in the Devices tab (device-panel.js).
+    panel = _read("components", "device-panel.js")
+    assert "<aiconfig-device-panel></aiconfig-device-panel>" in panel
+    # index.html loads the new component script before app.js.
+    html = _read("index.html")
+    assert 'src="components/aiconfig-device-panel.js?token=__TOKEN__"' in html
+    assert html.index("components/aiconfig-device-panel.js") < html.index("js/app.js")
+    # No duplication: the device strings must NOT appear in aiconfig-panel.js.
+    local = _read("components", "aiconfig-panel.js")
+    for token in ("peersList", "pullAiConfigFiles", "aiconfig-panel__device"):
+        assert token not in local, token
 
 
 # ── 5. Locale parity ───────────────────────────────────────────────────
@@ -329,6 +342,8 @@ def test_locale_json_files_still_parse():
 
 _TOUCHED_JS = [
     ("components", "aiconfig-panel.js"),
+    ("components", "aiconfig-device-panel.js"),
+    ("components", "device-panel.js"),
     ("js", "api.js"),
     ("js", "store.js"),
 ]

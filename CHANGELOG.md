@@ -5,6 +5,14 @@ All notable changes to ClipSync are documented in this file.
 ## [Unreleased]
 
 ### AI config
+- **Syncing exactly the real AI-tool config files.** The default watch list now covers the actual locations used by Claude Code, Codex, Cursor and Gemini CLI (`.claude/CLAUDE.md`, `.claude/settings.json`, `.claude/skills`, `.codex/config.toml`, `.cursor/rules`, `.cursor/commands`, `.gemini/settings.json`, `.gemini/GEMINI.md`) — files *and* folders are both valid watch entries, so credentials like `auth.json` stay out. The paths dialog gains a ✨ one-click "add common AI config paths".
+- **Know which device is newer.** The cross-device config browser marks every remote file with a badge: ✓ same / this device newer / remote device newer / missing here — compared by hash then modified time, with a tooltip showing both sides' size and time, so you can decide the pull direction before anything is overwritten.
+- The AI-config tab is now purely the local manager; the cross-device browse/pull moved to the Devices page as its own section.
+
+### Diagnostics
+- **Comprehensive diagnostics.** The Diagnostics page is now a set of grouped cards covering every module — system (version/uptime/data dir), network (LAN IP/port/mDNS/web/firewall), internet sync (toggle/relay state/brokers/netpair pairs/pending sends), AI config (watch roots/entries/last collect/trash), chat, transfers, and filesystem (history DB size/disk free) — each item with ok/warn/fail status, detail and a fix hint. The old flat response shape is preserved for the mobile card.
+
+### AI config
 - **Local config manager — works with no paired devices.** The Config tab's new "Local config" section is a small file manager over your watch list: browse files (path/size/mtime, searchable, multi-root), preview text, **edit & save** (the original file is auto-backed up as `.bak`), **remove to a trash folder** (never hard-deleted — files land in `aiconfig_trash/` with a timestamp, recoverable manually), **open the containing folder**, and manage the watch paths themselves. Every write is path-locked to the watch roots, size-capped, and refuses binary content. The cross-device browse/pull section stays as before.
 
 ### Internet sync

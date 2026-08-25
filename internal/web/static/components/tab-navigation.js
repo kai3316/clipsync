@@ -83,9 +83,10 @@
             id: 'aiconfig',
             label: t('ui.aiconfig'),
             icon: '🤖',
-            count: Object.keys(
-              (s.aiConfigInventory && s.aiConfigInventory.peers) || {}
-            ).length,
+            // The AI Config tab is the LOCAL config manager only (round 18);
+            // the badge counts this machine's files, not paired peers.
+            count: (s.aiConfigLocal && s.aiConfigLocal.entries)
+              ? s.aiConfigLocal.entries.length : 0,
           },
           {
             id: 'diagnostics',

@@ -6248,6 +6248,525 @@ class Application:
                 "This device appears to be on a public/routable IP — you may be behind a VPN or on an "
                 "isolated network. VPNs and client isolation prevent LAN discovery.")
 
+    # ═══════════════════════════════════════════════════════════════
+    # Round 19 — comprehensive diagnostics groups
+    # ═══════════════════════════════════════════════════════════════
+    # Every probe below is defensive: a missing manager / a probe failure
+    # yields a warn/fail item with a hint instead of raising, so the panel
+    # always gets a complete, renderable shape even on a degraded app.
+
+    @staticmethod
+    def _diag_item(item_id, status, detail, hint=None,
+                   detail_key=None, detail_params=None,
+                   hint_key=None, hint_params=None) -> dict:
+        """One diagnostic item: ``{id, status, detail, hint, *_key/*_params}``.
+
+        ``status`` is one of "ok" | "warn" | "fail".  ``detail``/``hint`` are
+        raw fallback strings; the optional ``*_key``/``*_params`` let the web
+        panel resolve a localized string first (mirroring the flat ``checks``
+        contract).
+        """
+        item = {
+            "id": item_id,
+            "status": status,
+            "detail": detail or "",
+            "hint": hint or None,
+        }
+        if detail_key:
+            item["detail_key"] = detail_key
+            item["detail_params"] = dict(detail_params or {})
+        if hint_key:
+            item["hint_key"] = hint_key
+            item["hint_params"] = dict(hint_params or {})
+        return item
+
+    @staticmethod
+    def _diag_fmt_duration(secs) -> str:
+        secs = max(int(secs or 0), 0)
+        if secs < 60:
+            return f"{secs}s"
+        mins = secs // 60
+        if mins < 60:
+            return f"{mins}m {secs % 60}s"
+        hours = mins // 60
+        if hours < 24:
+            return f"{hours}h {mins % 60}m"
+        days = hours // 24
+        return f"{days}d {hours % 24}h"
+
+    @staticmethod
+    def _diag_fmt_bytes(n) -> str:
+        n = int(n or 0)
+        if n >= 1_000_000_000:
+            return f"{n / 1_000_000_000:.1f} GB"
+        if n >= 1_000_000:
+            return f"{n / 1_000_000:.1f} MB"
+        if n >= 1_000:
+            return f"{n / 1_000:.1f} KB"
+        return f"{n} B"
+
+    @staticmethod
+    def _diag_effective_data_dir(cfg) -> "Path":
+        """Resolve the effective data directory (custom ``cfg.data_dir`` wins)."""
+        custom = str(getattr(cfg, "data_dir", "") or "").strip()
+        if custom:
+            return Path(custom)
+        return _config_dir()
+
+    @staticmethod
+    def _diag_dir_writable(path: "Path") -> bool:
+        try:
+            path.mkdir(parents=True, exist_ok=True)
+            return os.access(str(path), os.W_OK)
+        except Exception:
+            return False
+
+    @staticmethod
+    def _diag_trash_size(mgr) -> int:
+        """Total bytes in the AI-config recoverable trash (0 when empty)."""
+        base = mgr._trash_base()
+        if not base.is_dir():
+            return 0
+        total = 0
+        for p in base.rglob("*"):
+            try:
+                if p.is_file():
+                    total += p.stat().st_size
+            except OSError:
+                continue
+        return total
+
+    def _build_diag_groups(self, ctx: dict) -> dict:
+        """Comprehensive grouped diagnostics (Round 19).
+
+        ``ctx`` carries the already-computed network/firewall probe results
+        from ``_get_diagnostics`` so the groups stay consistent with the flat
+        ``checks`` list.  Returns ``{group_id: {label_key, items: [...]}}``.
+        """
+        return {
+            "system": self._diag_group_system(),
+            "network": self._diag_group_network(ctx),
+            "internet": self._diag_group_internet(),
+            "ai_config": self._diag_group_aiconfig(),
+            "chat": self._diag_group_chat(),
+            "transfer": self._diag_group_transfer(),
+            "filesystem": self._diag_group_filesystem(),
+        }
+
+    def _diag_group_system(self) -> dict:
+        items = []
+        try:
+            from internal.version import __version__ as _ver
+        except Exception:
+            _ver = "?"
+        items.append(self._diag_item(
+            "app_version", "ok", f"Version {_ver}",
+            detail_key="diag.v2.item.app_version.detail",
+            detail_params={"version": _ver}))
+        try:
+            uptime = max(int(time.time()) - int(getattr(self, "_start_time", 0) or 0), 0)
+        except Exception:
+            uptime = 0
+        _up = self._diag_fmt_duration(uptime)
+        items.append(self._diag_item(
+            "uptime", "ok", f"Running for {_up}",
+            detail_key="diag.v2.item.uptime.detail",
+            detail_params={"uptime": _up}))
+        # Data directory + writability.
+        try:
+            data_dir = self._diag_effective_data_dir(self.cfg)
+            writable = self._diag_dir_writable(data_dir)
+            if writable:
+                items.append(self._diag_item(
+                    "data_dir", "ok", str(data_dir),
+                    detail_key="diag.v2.item.data_dir.detail",
+                    detail_params={"dir": str(data_dir)}))
+            else:
+                items.append(self._diag_item(
+                    "data_dir", "warn", f"{data_dir} (not writable)",
+                    detail_key="diag.v2.item.data_dir.warn.detail",
+                    detail_params={"dir": str(data_dir)},
+                    hint="Data directory is not writable — backups and history may fail.",
+                    hint_key="diag.v2.item.data_dir.warn.hint"))
+        except Exception:
+            items.append(self._diag_item(
+                "data_dir", "fail", "Data directory unavailable",
+                detail_key="diag.v2.item.data_dir.fail.detail",
+                hint="Could not access the data directory.",
+                hint_key="diag.v2.item.data_dir.fail.hint"))
+        # Log path + writability.
+        try:
+            log_path = _get_log_path()
+            log_writable = self._diag_dir_writable(log_path.parent)
+            if log_writable:
+                items.append(self._diag_item(
+                    "log_path", "ok", str(log_path),
+                    detail_key="diag.v2.item.log_path.detail",
+                    detail_params={"path": str(log_path)}))
+            else:
+                items.append(self._diag_item(
+                    "log_path", "warn", str(log_path),
+                    detail_key="diag.v2.item.log_path.warn.detail",
+                    detail_params={"path": str(log_path)},
+                    hint="Log directory is not writable — logging may fail.",
+                    hint_key="diag.v2.item.log_path.warn.hint"))
+        except Exception:
+            items.append(self._diag_item(
+                "log_path", "warn", "Log path unavailable",
+                detail_key="diag.v2.item.log_path.unavailable.detail"))
+        return {"label_key": "diag.v2.group.system", "items": items}
+
+    def _diag_group_network(self, ctx: dict) -> dict:
+        items = []
+        lan_ip = ctx.get("lan_ip", "")
+        # LAN IP (cached).
+        if not lan_ip or lan_ip.startswith("127."):
+            items.append(self._diag_item(
+                "lan_ip", "fail", "No LAN address detected",
+                detail_key="diag.v2.item.lan_ip.nolan.detail",
+                hint="No LAN address detected — check that WiFi/Ethernet is connected to a network.",
+                hint_key="diag.v2.item.lan_ip.warn.hint"))
+        elif lan_ip.startswith("169.254."):
+            items.append(self._diag_item(
+                "lan_ip", "warn", f"Link-local address ({lan_ip})",
+                detail_key="diag.v2.item.lan_ip.linklocal.detail",
+                detail_params={"lan_ip": lan_ip},
+                hint="No DHCP address (169.254 link-local) — check that WiFi/Ethernet is connected to a network.",
+                hint_key="diag.v2.item.lan_ip.warn.hint"))
+        elif self._is_private_ip(lan_ip):
+            items.append(self._diag_item(
+                "lan_ip", "ok", f"{lan_ip} (private LAN)",
+                detail_key="diag.v2.item.lan_ip.ok.detail",
+                detail_params={"lan_ip": lan_ip}))
+        else:
+            items.append(self._diag_item(
+                "lan_ip", "warn", f"{lan_ip} (public/routable)",
+                detail_key="diag.v2.item.lan_ip.public.detail",
+                detail_params={"lan_ip": lan_ip},
+                hint="This device appears to be on a public/routable IP — you may be behind a VPN or on an isolated network.",
+                hint_key="diag.v2.item.lan_ip.warn.hint"))
+        # TCP port listening.
+        port = ctx.get("port", 0)
+        if ctx.get("server_running"):
+            items.append(self._diag_item(
+                "tcp_port", "ok", f"Listening on port {port}",
+                detail_key="diag.v2.item.tcp_port.ok.detail",
+                detail_params={"port": port}))
+        else:
+            items.append(self._diag_item(
+                "tcp_port", "fail", f"Not listening on port {port}",
+                detail_key="diag.v2.item.tcp_port.fail.detail",
+                detail_params={"port": port},
+                hint="Another app may be using the port, or the firewall blocks it. Try a different port in Settings → Network.",
+                hint_key="diag.v2.item.tcp_port.fail.hint"))
+        # mDNS service registration.
+        if ctx.get("discovery_running"):
+            items.append(self._diag_item(
+                "mdns_service", "ok", "mDNS discovery active",
+                detail_key="diag.v2.item.mdns_service.ok.detail"))
+        else:
+            items.append(self._diag_item(
+                "mdns_service", "fail", "mDNS discovery not active",
+                detail_key="diag.v2.item.mdns_service.fail.detail",
+                hint="mDNS discovery isn't active. If you're on a guest/enterprise WiFi, AP/client isolation blocks discovery.",
+                hint_key="diag.v2.item.mdns_service.fail.hint"))
+        # Web service (enabled / port / running).
+        web_enabled = bool(getattr(self.cfg, "web_enabled", False))
+        web_port = ctx.get("web_port", 0)
+        if not web_enabled:
+            items.append(self._diag_item(
+                "web_service", "warn", "Disabled",
+                detail_key="diag.v2.item.web_service.off.detail",
+                hint="Enable remote access in Settings → Remote access to control this device from a phone or browser.",
+                hint_key="diag.v2.item.web_service.off.hint"))
+        elif ctx.get("web_running"):
+            items.append(self._diag_item(
+                "web_service", "ok", f"Enabled on :{web_port}",
+                detail_key="diag.v2.item.web_service.ok.detail",
+                detail_params={"web_port": web_port}))
+        else:
+            items.append(self._diag_item(
+                "web_service", "fail", "Enabled but not running",
+                detail_key="diag.v2.item.web_service.fail.detail"))
+        # Firewall recommendation (reuses the flat-check probe result).
+        if ctx.get("fw_ok"):
+            items.append(self._diag_item(
+                "firewall", "ok", ctx.get("fw_detail") or "No firewall blockage detected",
+                detail_key=ctx.get("fw_detail_key") or "diag.v2.item.firewall.ok.detail",
+                detail_params=ctx.get("fw_detail_params") or {}))
+        else:
+            items.append(self._diag_item(
+                "firewall", "fail", ctx.get("fw_detail") or "Firewall may be blocking",
+                detail_key=ctx.get("fw_detail_key") or "diag.v2.item.firewall.fail.detail",
+                detail_params=ctx.get("fw_detail_params") or {},
+                hint=ctx.get("fw_guidance") or "The firewall may be blocking ClipSync.",
+                hint_key=ctx.get("fw_guidance_key") or "diag.v2.item.firewall.fail.hint",
+                hint_params=ctx.get("fw_guidance_params") or {}))
+        return {"label_key": "diag.v2.group.network", "items": items}
+
+    def _diag_group_internet(self) -> dict:
+        items = []
+        enabled = bool(getattr(self.cfg, "internet_sync_enabled", False))
+        if enabled:
+            items.append(self._diag_item(
+                "internet_enabled", "ok", "Enabled",
+                detail_key="diag.v2.item.internet_enabled.ok.detail"))
+        else:
+            items.append(self._diag_item(
+                "internet_enabled", "warn", "Disabled",
+                detail_key="diag.v2.item.internet_enabled.off.detail",
+                hint="Enable internet sync in Settings → Internet sync to sync across networks.",
+                hint_key="diag.v2.item.internet_enabled.off.hint"))
+        # Relay state.
+        try:
+            relay_state = self._get_relay_state()
+        except Exception:
+            relay_state = "off"
+        if relay_state == "online":
+            items.append(self._diag_item(
+                "relay_state", "ok", "Connected to relay",
+                detail_key="diag.v2.item.relay_state.online.detail"))
+        elif relay_state == "connecting":
+            items.append(self._diag_item(
+                "relay_state", "warn", "Connecting to relay…",
+                detail_key="diag.v2.item.relay_state.connecting.detail"))
+        elif relay_state == "error":
+            items.append(self._diag_item(
+                "relay_state", "fail", "Relay connection error",
+                detail_key="diag.v2.item.relay_state.error.detail",
+                hint="The relay could not be reached. Check your internet connection.",
+                hint_key="diag.v2.item.relay_state.error.hint"))
+        else:
+            items.append(self._diag_item(
+                "relay_state", "warn", "Relay off (internet sync disabled)",
+                detail_key="diag.v2.item.relay_state.off.detail"))
+        # Broker list — inferred from config + relay state (no real connect).
+        brokers = [b for b in getattr(self.cfg, "relay_brokers", [])
+                   if isinstance(b, str) and b]
+        if not brokers:
+            items.append(self._diag_item(
+                "brokers", "fail", "No brokers configured",
+                detail_key="diag.v2.item.brokers.fail.detail",
+                hint="Add at least one public MQTT relay in Settings → Internet sync.",
+                hint_key="diag.v2.item.brokers.fail.hint"))
+        elif relay_state == "online":
+            items.append(self._diag_item(
+                "brokers", "ok", f"{len(brokers)} broker(s) configured, reachable",
+                detail_key="diag.v2.item.brokers.ok.detail",
+                detail_params={"count": len(brokers)}))
+        elif relay_state == "error":
+            items.append(self._diag_item(
+                "brokers", "fail", f"{len(brokers)} broker(s) configured, none reachable",
+                detail_key="diag.v2.item.brokers.fail_reachable.detail",
+                detail_params={"count": len(brokers)},
+                hint="None of the configured relays could be reached. Check your internet connection.",
+                hint_key="diag.v2.item.brokers.fail_reachable.hint"))
+        else:
+            items.append(self._diag_item(
+                "brokers", "warn", f"{len(brokers)} broker(s) configured",
+                detail_key="diag.v2.item.brokers.warn.detail",
+                detail_params={"count": len(brokers)}))
+        # Internet-paired (netpair) device count.
+        netpair = getattr(self.cfg, "netpair_secrets", {}) or {}
+        items.append(self._diag_item(
+            "netpair_count", "ok", f"{len(netpair)} internet-paired device(s)",
+            detail_key="diag.v2.item.netpair_count.detail",
+            detail_params={"count": len(netpair)}))
+        # Pending offline-queue sends.
+        try:
+            counts = self._delivery_counts()
+            pending = sum(counts.get("peers", {}).values()) if isinstance(counts, dict) else 0
+        except Exception:
+            pending = -1
+        if pending < 0:
+            items.append(self._diag_item(
+                "pending_count", "warn", "Delivery stats unavailable",
+                detail_key="diag.v2.item.pending_count.unavailable.detail"))
+        elif pending == 0:
+            items.append(self._diag_item(
+                "pending_count", "ok", "No pending sends",
+                detail_key="diag.v2.item.pending_count.ok.detail"))
+        else:
+            items.append(self._diag_item(
+                "pending_count", "warn", f"{pending} pending send(s)",
+                detail_key="diag.v2.item.pending_count.warn.detail",
+                detail_params={"count": pending},
+                hint="Some clipboard items are queued and will be sent when the peer reconnects.",
+                hint_key="diag.v2.item.pending_count.warn.hint"))
+        return {"label_key": "diag.v2.group.internet", "items": items}
+
+    def _diag_group_aiconfig(self) -> dict:
+        items = []
+        mgr = getattr(self, "aicfg_mgr", None)
+        roots = [r for r in (getattr(self.cfg, "ai_config_paths", []) or [])
+                 if isinstance(r, str) and r]
+        if roots:
+            items.append(self._diag_item(
+                "watch_roots", "ok", f"{len(roots)} root(s)",
+                detail_key="diag.v2.item.watch_roots.ok.detail",
+                detail_params={"count": len(roots)}))
+        else:
+            items.append(self._diag_item(
+                "watch_roots", "warn", "No watch roots",
+                detail_key="diag.v2.item.watch_roots.warn.detail",
+                hint="Add watch directories in AI config settings to inventory AI tool configs.",
+                hint_key="diag.v2.item.watch_roots.warn.hint"))
+        if mgr is None:
+            for it in ("local_entries", "last_collected", "trash_size"):
+                items.append(self._diag_item(
+                    it, "warn", "Unavailable",
+                    detail_key="diag.v2.item.unavailable.detail",
+                    hint="This data isn't available in the current state.",
+                    hint_key="diag.v2.item.unavailable.hint"))
+            return {"label_key": "diag.v2.group.ai_config", "items": items}
+        try:
+            summary = mgr.local_summary()
+            entry_count = int(summary.get("entry_count", 0) or 0)
+            items.append(self._diag_item(
+                "local_entries", "ok", f"{entry_count} local file(s)",
+                detail_key="diag.v2.item.local_entries.detail",
+                detail_params={"count": entry_count}))
+            collected = float(summary.get("collected_at", 0.0) or 0.0)
+            if collected > 0:
+                ago = self._diag_fmt_duration(int(time.time() - collected))
+                items.append(self._diag_item(
+                    "last_collected", "ok", f"{ago} ago",
+                    detail_key="diag.v2.item.last_collected.ok.detail",
+                    detail_params={"ago": ago}))
+            else:
+                items.append(self._diag_item(
+                    "last_collected", "warn", "Never collected",
+                    detail_key="diag.v2.item.last_collected.warn.detail",
+                    hint="Run a collection from the AI config panel, or add watch roots.",
+                    hint_key="diag.v2.item.last_collected.warn.hint"))
+        except Exception:
+            items.append(self._diag_item(
+                "local_entries", "warn", "Unavailable",
+                detail_key="diag.v2.item.unavailable.detail"))
+            items.append(self._diag_item(
+                "last_collected", "warn", "Unavailable",
+                detail_key="diag.v2.item.unavailable.detail"))
+        try:
+            trash_size = self._diag_trash_size(mgr)
+            items.append(self._diag_item(
+                "trash_size", "ok" if trash_size == 0 else "warn",
+                self._diag_fmt_bytes(trash_size),
+                detail_key="diag.v2.item.trash_size.detail",
+                detail_params={"size": self._diag_fmt_bytes(trash_size)},
+                hint=None if trash_size == 0 else "Recycle bin is non-empty — restore or clear it from the AI config panel.",
+                hint_key=None if trash_size == 0 else "diag.v2.item.trash_size.warn.hint"))
+        except Exception:
+            items.append(self._diag_item(
+                "trash_size", "warn", "Unavailable",
+                detail_key="diag.v2.item.unavailable.detail"))
+        return {"label_key": "diag.v2.group.ai_config", "items": items}
+
+    def _diag_group_chat(self) -> dict:
+        items = []
+        mgr = getattr(self, "chat_mgr", None)
+        if mgr is None:
+            items.append(self._diag_item(
+                "chat_sessions", "warn", "Unavailable",
+                detail_key="diag.v2.item.unavailable.detail",
+                hint="This data isn't available in the current state.",
+                hint_key="diag.v2.item.unavailable.hint"))
+        else:
+            try:
+                count = len(mgr.get_sessions())
+                items.append(self._diag_item(
+                    "chat_sessions", "ok", f"{count} active session(s)",
+                    detail_key="diag.v2.item.chat_sessions.detail",
+                    detail_params={"count": count}))
+            except Exception:
+                items.append(self._diag_item(
+                    "chat_sessions", "warn", "Unavailable",
+                    detail_key="diag.v2.item.unavailable.detail"))
+        return {"label_key": "diag.v2.group.chat", "items": items}
+
+    def _diag_group_transfer(self) -> dict:
+        items = []
+        mgr = getattr(self, "file_transfer_mgr", None)
+        if mgr is None:
+            for it in ("active_transfers", "transfer_failures"):
+                items.append(self._diag_item(
+                    it, "warn", "Unavailable",
+                    detail_key="diag.v2.item.unavailable.detail",
+                    hint="This data isn't available in the current state.",
+                    hint_key="diag.v2.item.unavailable.hint"))
+            return {"label_key": "diag.v2.group.transfer", "items": items}
+        try:
+            active = sum(1 for t in mgr.get_transfers()
+                         if t.get("status") not in ("completed", "cancelled", "failed"))
+            items.append(self._diag_item(
+                "active_transfers", "ok", f"{active} in progress",
+                detail_key="diag.v2.item.active_transfers.detail",
+                detail_params={"count": active}))
+        except Exception:
+            items.append(self._diag_item(
+                "active_transfers", "warn", "Unavailable",
+                detail_key="diag.v2.item.unavailable.detail"))
+        try:
+            hist = mgr.get_history()
+            failures = sum(1 for t in hist if not t.get("success"))
+            if failures:
+                items.append(self._diag_item(
+                    "transfer_failures", "warn", f"{failures} failed transfer(s)",
+                    detail_key="diag.v2.item.transfer_failures.warn.detail",
+                    detail_params={"count": failures},
+                    hint="Check the Transfers panel and retry any failed transfers.",
+                    hint_key="diag.v2.item.transfer_failures.warn.hint"))
+            else:
+                items.append(self._diag_item(
+                    "transfer_failures", "ok", "No recent failures",
+                    detail_key="diag.v2.item.transfer_failures.ok.detail"))
+        except Exception:
+            items.append(self._diag_item(
+                "transfer_failures", "warn", "Unavailable",
+                detail_key="diag.v2.item.unavailable.detail"))
+        return {"label_key": "diag.v2.group.transfer", "items": items}
+
+    def _diag_group_filesystem(self) -> dict:
+        items = []
+        # History database file size.
+        try:
+            db_path = (getattr(self.clipboard_history, "_db_path", None)
+                       if self.clipboard_history is not None else None)
+            if db_path and Path(db_path).exists():
+                size = Path(db_path).stat().st_size
+                items.append(self._diag_item(
+                    "history_db_size", "ok", self._diag_fmt_bytes(size),
+                    detail_key="diag.v2.item.history_db_size.detail",
+                    detail_params={"size": self._diag_fmt_bytes(size)}))
+            else:
+                items.append(self._diag_item(
+                    "history_db_size", "warn", "Missing or unreadable",
+                    detail_key="diag.v2.item.history_db_size.warn.detail",
+                    hint="History database is missing or unreadable — history may be lost.",
+                    hint_key="diag.v2.item.history_db_size.warn.hint"))
+        except Exception:
+            items.append(self._diag_item(
+                "history_db_size", "warn", "Unavailable",
+                detail_key="diag.v2.item.unavailable.detail"))
+        # Free disk space on the data directory.
+        try:
+            data_dir = self._diag_effective_data_dir(self.cfg)
+            usage = shutil.disk_usage(str(data_dir))
+            free = int(getattr(usage, "free", 0) or 0)
+            low = free < 500 * 1024 * 1024  # < 500 MB
+            items.append(self._diag_item(
+                "disk_free", "warn" if low else "ok",
+                f"{self._diag_fmt_bytes(free)} free" + (" (low)" if low else ""),
+                detail_key=("diag.v2.item.disk_free.warn.detail" if low
+                            else "diag.v2.item.disk_free.ok.detail"),
+                detail_params={"free": self._diag_fmt_bytes(free)},
+                hint="Low disk space — history and transfers may fail." if low else None,
+                hint_key="diag.v2.item.disk_free.warn.hint" if low else None))
+        except Exception:
+            items.append(self._diag_item(
+                "disk_free", "warn", "Unavailable",
+                detail_key="diag.v2.item.unavailable.detail"))
+        return {"label_key": "diag.v2.group.filesystem", "items": items}
+
     def _get_diagnostics(self) -> dict:
         """Return a live snapshot of core service state + actionable network checks."""
         import platform as _platform
@@ -6257,16 +6776,22 @@ class Application:
         port = int(getattr(self.cfg, "port", 0) or 0)
         web_port = int(getattr(self.cfg, "web_port", 0) or 0)
 
-        server_running = bool(self.transport_mgr is not None
-                              and getattr(self.transport_mgr, "_running", False))
-        discovery_running = bool(self.discovery is not None
-                                 and getattr(self.discovery, "is_browsing", False))
-        advertising = bool(self.discovery is not None
-                           and getattr(self.discovery, "is_advertising", False))
-        web_running = bool(self.web_server is not None and self.web_server.is_running)
+        # Defensive getattr for every manager: a degraded/partial app must
+        # still produce a complete diagnostics payload (round 19 requirement).
+        transport_mgr = getattr(self, "transport_mgr", None)
+        discovery = getattr(self, "discovery", None)
+        web_server = getattr(self, "web_server", None)
+
+        server_running = bool(transport_mgr is not None
+                              and getattr(transport_mgr, "_running", False))
+        discovery_running = bool(discovery is not None
+                                 and getattr(discovery, "is_browsing", False))
+        advertising = bool(discovery is not None
+                           and getattr(discovery, "is_advertising", False))
+        web_running = bool(web_server is not None and web_server.is_running)
 
         try:
-            lan_ip = self.web_server._get_lan_ip() if self.web_server is not None else ""
+            lan_ip = web_server._get_lan_ip() if web_server is not None else ""
         except Exception:
             lan_ip = ""
 
@@ -6374,7 +6899,7 @@ class Application:
                     # to be open — a single-port rule would otherwise show up
                     # as a "wrong port" mismatch.
                     fw_ports = [self.cfg.port, self.cfg.web_port]
-                    ok, detail = self.web_server.check_firewall_rule(fw_ports)
+                    ok, detail = web_server.check_firewall_rule(fw_ports) if web_server is not None else (True, "")
                     if not ok:
                         fw_ok, fw_detail = False, detail
                         fw_guidance = ("The Windows firewall may be blocking ClipSync. Tap "
@@ -6492,14 +7017,37 @@ class Application:
         else:
             summary = "ok"
 
-        connected = (self.transport_mgr.get_connected_peers()
-                     if self.transport_mgr is not None else [])
-        paired = (self.pairing_mgr.get_paired_peers()
-                  if self.pairing_mgr is not None else [])
+        transport_mgr = getattr(self, "transport_mgr", None)
+        pairing_mgr = getattr(self, "pairing_mgr", None)
+        connected = (transport_mgr.get_connected_peers()
+                     if transport_mgr is not None else [])
+        paired = (pairing_mgr.get_paired_peers()
+                  if pairing_mgr is not None else [])
+
+        # Round 19: comprehensive grouped diagnostics.  Reuses the probe
+        # results computed above so the flat checks and the groups agree.
+        groups = self._build_diag_groups({
+            "port": port,
+            "web_port": web_port,
+            "server_running": server_running,
+            "discovery_running": discovery_running,
+            "advertising": advertising,
+            "web_running": web_running,
+            "lan_ip": lan_ip,
+            "fw_ok": fw_ok,
+            "fw_detail": fw_detail,
+            "fw_detail_key": fw_detail_key,
+            "fw_detail_params": fw_detail_params,
+            "fw_guidance": fw_guidance,
+            "fw_guidance_key": fw_guidance_key,
+            "fw_guidance_params": fw_guidance_params,
+        })
 
         return {
+            "v2": True,
             "summary": summary,
             "checks": checks,
+            "groups": groups,
             "discovery_running": discovery_running,
             "server_running": server_running,
             "connected_count": len(connected),
@@ -7378,7 +7926,7 @@ class Application:
         """
         if not getattr(self.cfg, "internet_sync_enabled", False):
             return "off"
-        relay = self._relay
+        relay = getattr(self, "_relay", None)
         if relay is None:
             # Enabled but the transport is not up yet (startup ordering) —
             # report connecting rather than a misleading "off".

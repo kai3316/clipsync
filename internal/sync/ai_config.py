@@ -165,6 +165,31 @@ def collect_roots(
         if root_key in seen_roots:
             continue  # duplicate root — same files would be advertised twice
         seen_roots.add(root_key)
+        # A watch entry may be a single FILE (e.g. ~/.claude/CLAUDE.md or
+        # ~/.codex/config.toml) so presets can include exactly the config
+        # files — and keep credentials (auth.json etc.) out by not listing
+        # their directories.  Such a root advertises itself as one entry.
+        if root.is_file():
+            try:
+                if root.is_symlink():
+                    continue
+                st = root.stat()
+            except OSError:
+                continue
+            if st.st_size > max_bytes:
+                continue
+            hashed = _hash_file(root, max_bytes=max_bytes)
+            if hashed is None:
+                continue
+            digest, size = hashed
+            entries.append({
+                "path": root.name,
+                "root_index": index,
+                "sha256": digest,
+                "size": size,
+                "mtime": float(st.st_mtime),
+            })
+            continue
         if not root.is_dir():
             continue
         found: list[tuple[str, Path, os.stat_result]] = []
@@ -562,7 +587,10 @@ class AIConfigManager:
             return None
         if create:
             try:
-                root.mkdir(parents=True, exist_ok=True)
+                if root.exists() and root.is_file():
+                    pass  # a single-file watch entry — nothing to create
+                else:
+                    root.mkdir(parents=True, exist_ok=True)
             except OSError:
                 return None
         return root
@@ -854,6 +882,21 @@ class AIConfigManager:
         return {"collected_at": collected_at, "roots": roots,
                 "entries": listing}
 
+    @staticmethod
+    def _target_for(root: Path, rel: str) -> Path | None:
+        """Resolve a (root, rel) pair to a file, honouring FILE roots.
+
+        A watch entry may point directly at a config file (see collect_roots);
+        for such a root the only valid rel is the file's own basename and the
+        target IS the root.  Directory roots resolve via resolve_safe as before.
+        """
+        try:
+            if root.is_file():
+                return root if (rel or "").replace("\\", "/") == root.name else None
+        except OSError:
+            return None
+        return resolve_safe(root, rel)
+
     def local_read(self, ri, rel) -> dict:
         """Read one file's text content (local only, ≤64 KB).
 
@@ -863,7 +906,7 @@ class AIConfigManager:
         root = self._resolve_root(ri)
         if root is None:
             return {"ok": False, "error": "no_root"}
-        target = resolve_safe(root, rel)
+        target = self._target_for(root, rel)
         if target is None:
             return {"ok": False, "error": "unsafe_path"}
         if target.is_symlink() or not target.is_file():
@@ -903,7 +946,7 @@ class AIConfigManager:
         root = self._resolve_root(ri, create=True)
         if root is None:
             return {"ok": False, "error": "no_root"}
-        target = resolve_safe(root, rel)
+        target = self._target_for(root, rel)
         if target is None:
             return {"ok": False, "error": "unsafe_path"}
         with self._lock:
@@ -945,7 +988,7 @@ class AIConfigManager:
         root = self._resolve_root(ri)
         if root is None:
             return {"ok": False, "error": "no_root"}
-        target = resolve_safe(root, rel)
+        target = self._target_for(root, rel)
         if target is None:
             return {"ok": False, "error": "unsafe_path"}
         if target.is_symlink() or not target.is_file():
@@ -977,7 +1020,7 @@ class AIConfigManager:
         root = self._resolve_root(ri)
         if root is None:
             return {"ok": False, "error": "no_root"}
-        target = resolve_safe(root, rel)
+        target = self._target_for(root, rel)
         if target is None:
             return {"ok": False, "error": "unsafe_path"}
         if target.is_symlink() or not (target.is_file() or target.is_dir()):
