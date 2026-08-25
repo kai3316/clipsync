@@ -1164,6 +1164,8 @@
   "settings_window.netpair_manage_hint": "Pairing management has moved to the Devices page.",
   "settings_window.netpair_manage_cta": "Manage pairing →",
   "devices.netpair_title": "Internet pairing",
+  "devices.netpair_toggle_hint": "Expand / collapse internet pairing",
+  "devices.netpair_sync_off": "Internet sync is off — ",
   "devices.netpair_overview_paired": "Paired {count} internet device(s)",
   "devices.netpair_empty_title": "No internet-paired devices yet",
   "devices.netpair_step1": "On this device, turn on Internet sync under Settings → Network",

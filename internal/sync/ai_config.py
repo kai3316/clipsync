@@ -1011,13 +1011,14 @@ class AIConfigManager:
         return result
 
     def local_trash(self, ri, rel) -> dict:
-        """Move a watched file into the recoverable trash (no physical delete).
+        """Move a watched file OR directory into the recoverable trash.
 
         Destination is ``<data_dir>/aiconfig_trash/<original subpath>/
         <timestamp>_<name>`` — the relative directory structure is preserved
-        so same-named files in different folders never collide, and the
-        timestamp prefix keeps trashed copies sortable.  Collisions get an
-        incremented ``-N`` suffix.  Returns {"ok", "trashed_to"}.
+        so same-named files/folders in different places never collide, and the
+        timestamp prefix keeps trashed copies sortable.  A directory is moved
+        whole (recursively).  Collisions get an incremented ``-N`` suffix.
+        Returns {"ok", "trashed_to"}.
         """
         root = self._resolve_root(ri)
         if root is None:
@@ -1025,7 +1026,7 @@ class AIConfigManager:
         target = self._target_for(root, rel)
         if target is None:
             return {"ok": False, "error": "unsafe_path"}
-        if target.is_symlink() or not target.is_file():
+        if target.is_symlink() or not (target.is_file() or target.is_dir()):
             return {"ok": False, "error": "not_found"}
         base = self._trash_base()
         rel_dir = os.path.dirname(rel.replace("\\", "/"))

@@ -50,18 +50,25 @@ def test_device_panel_has_internet_pairing_section():
     assert "devices.netpair_overview_paired" in src
 
 
-def test_device_panel_three_step_guide():
+def test_device_panel_collapsed_behind_toggle():
     src = _read("components", "device-panel.js")
-    # Empty state card + three guided steps (what + why).
-    assert "netpair-empty" in src
-    assert "devices.netpair_empty_title" in src
-    for i in ("1", "2", "3"):
-        assert f"devices.netpair_step{i}" in src, f"missing guide step {i}"
-    assert "devices.netpair_step1_done" in src
-    # Step 1 shows a ✓ when internet sync is already on, else a jump-to-settings link.
+    # The section is collapsed behind a switch — the body only renders when
+    # the toggle is on, so the page isn't a wall of pairing prompts.
+    assert "netpairExpanded" in src
+    assert "toggleNetpair" in src
+    assert "netpair-switch" in src
+    assert 'v-if="netpairExpanded"' in src
+    # Auto-expand once the first internet peer arrives.
+    assert "netpairPairedCount" in src
+    assert "_netpairAutoExpanded" in src
+    # When internet sync is off, one compact line + jump-to-settings (not the
+    # old multi-step guide).
     assert "internetSyncEnabled" in src
+    assert "devices.netpair_sync_off" in src
     assert "devices.netpair_go_settings" in src
     assert "openInternetSyncSettings" in src
+    # The old 3-step guide is gone.
+    assert "netpair_step1" not in src
 
 
 def test_device_panel_generate_wiring():
@@ -74,7 +81,6 @@ def test_device_panel_generate_wiring():
     assert "copyNetpairCode" in src
     assert "devices.netpair_generate" in src
     assert "devices.netpair_regenerate" in src
-    assert "devices.netpair_code_valid_hint" in src
     assert "devices.netpair_code_copied" in src
 
 
@@ -621,16 +627,17 @@ def _read_r19(*parts) -> str:
 # (label, unique template marker) for each device section, top→bottom as the
 # agreed target order dictates.  Each marker must appear exactly once in the
 # template (checked below) so its index is a reliable ordering signal.
-# Pairing Requests are PINNED to the top (right after Internet pairing): the
-# pairing codes are time-sensitive and must be compared on both devices, so
-# they must never sit below the device lists.
+# Pairing Requests are PINNED near the top: the pairing codes are
+# time-sensitive and must be compared on both devices, so they must never sit
+# below the device lists.  Internet pairing sits at the very BOTTOM, collapsed
+# behind a toggle (per user request — fewer prompts).
 _SECTION_MARKERS = [
     ("this_device", "devices.this_device"),
-    ("netpair", "devices.netpair_title"),
     ("pairing_requests", "devices.pairing_requests"),
     ("connected", "device.connected"),
     ("paired_offline", "device.paired_offline"),
     ("discovered", "device.discovered"),
+    ("netpair", "devices.netpair_title"),
 ]
 
 
@@ -662,14 +669,15 @@ def test_section_markers_each_appear_once():
 # ── 2. This Device on top / loading gate / terminal states ──────────────
 
 
-def test_this_device_and_netpair_render_above_loading_gate():
+def test_this_device_on_top_loading_gates_lan_sections():
     src = _read_r19("components", "device-panel.js")
-    # This Device is the first section — it must appear before the internet
-    # section AND before the LAN-list loading skeleton.
+    # This Device is the first section — above the LAN-list loading skeleton.
     assert src.index("devices.this_device") < src.index("device-panel__loading")
-    assert src.index("devices.netpair_title") < src.index("device-panel__loading")
     # The loading skeleton gates only the LAN sections below it.
     assert src.index("device-panel__loading") < src.index("devices.pairing_requests")
+    # Internet pairing is at the very bottom (below the LAN lists).
+    assert src.index("device-panel__loading") < src.index("devices.netpair_title")
+    assert src.index("device.discovered") < src.index("devices.netpair_title")
 
 
 def test_empty_and_load_failed_states_stay_at_bottom():

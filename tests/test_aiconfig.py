@@ -761,6 +761,24 @@ def test_local_trash_moves_into_recoverable_trash(tmp_path):
     assert trashed.parent == tmp_path / "aiconfig_trash" / "sub"
 
 
+def test_local_trash_folder_moves_whole_directory(tmp_path):
+    """Trashing a folder (not just a file) moves the whole directory tree into
+    the recoverable trash, preserving its contents and structure."""
+    s = StubMgr(tmp_path, roots=[str(tmp_path / "r")], data_dir=tmp_path)
+    _mk(tmp_path / "r", "skills/my-skill/SKILL.md", b"skill")
+    _mk(tmp_path / "r", "skills/my-skill/sub/extra.md", b"extra")
+    res = s.mgr.local_trash(0, "skills/my-skill/")
+    assert res["ok"] is True
+    trashed = Path(res["trashed_to"])
+    assert trashed.exists() and trashed.is_dir()
+    assert (trashed / "SKILL.md").read_text(encoding="utf-8") == "skill"
+    assert (trashed / "sub" / "extra.md").read_text(encoding="utf-8") == "extra"
+    # The whole folder is gone from the original root; the recoverable copy
+    # keeps the relative path structure under data_dir/aiconfig_trash.
+    assert not (tmp_path / "r" / "skills" / "my-skill").exists()
+    assert tmp_path / "aiconfig_trash" in trashed.parents
+
+
 def test_local_trash_renames_on_collision_and_rejects_bad(tmp_path):
     s = StubMgr(tmp_path, roots=[str(tmp_path / "r")], data_dir=tmp_path)
     _mk(tmp_path / "r", "a.md", b"one")

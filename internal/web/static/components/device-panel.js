@@ -29,6 +29,8 @@
         netpairConfirming: false,
         netpairError: '',
         netpairBusy: false,       // a rename/unpair request is in flight
+        netpairExpanded: false,   // the section is collapsed behind a toggle
+        _netpairAutoExpanded: false,
         _netpairLoadInFlight: false,
         netpairClockTimer: null,  // refreshes relative "last sync" times
       };
@@ -147,95 +149,7 @@
           '<device-card :device="localDev"></device-card>' +
         '</div>' +
 
-        '<!-- Internet pairing (round 15) -->' +
-        '<div class="device-panel__section netpair-section">' +
-          '<div class="section-header">' +
-            '🌐 {{ t(\'devices.netpair_title\') }}' +
-            '<span class="section-header__badge">{{ netpairPairedCount }}</span>' +
-          '</div>' +
-
-          '<div class="netpair-overview">' +
-            '<span class="netpair-overview__dot" :style="{ background: relayStateColor }"></span>' +
-            '<span class="netpair-overview__state">{{ t(relayStateKey) }}</span>' +
-            '<span class="netpair-overview__count">{{ t(\'devices.netpair_overview_paired\', { count: netpairPairedCount }) }}</span>' +
-          '</div>' +
-          '<div class="netpair-privacy">🔒 {{ t(\'settings_window.internet_sync_hint\') }}</div>' +
-
-          '<div v-if="netpairLoading" class="netpair-loading">{{ t(\'ui.loading\') }}</div>' +
-
-          '<template v-else>' +
-            '<!-- Empty state + three-step guide -->' +
-            '<div v-if="netpairPairedCount === 0" class="netpair-empty card">' +
-              '<div class="netpair-empty__title">{{ t(\'devices.netpair_empty_title\') }}</div>' +
-              '<ol class="netpair-steps">' +
-                '<li class="netpair-step">' +
-                  '<span class="netpair-step__icon">{{ internetSyncEnabled ? \'✓\' : \'①\' }}</span>' +
-                  '<span class="netpair-step__text">{{ internetSyncEnabled ? t(\'devices.netpair_step1_done\') : t(\'devices.netpair_step1\') }}</span>' +
-                  '<button v-if="!internetSyncEnabled" class="btn-ghost netpair-step__link" @click="openInternetSyncSettings">{{ t(\'devices.netpair_go_settings\') }}</button>' +
-                '</li>' +
-                '<li class="netpair-step"><span class="netpair-step__icon">②</span><span class="netpair-step__text">{{ t(\'devices.netpair_step2\') }}</span></li>' +
-                '<li class="netpair-step"><span class="netpair-step__icon">③</span><span class="netpair-step__text">{{ t(\'devices.netpair_step3\') }}</span></li>' +
-              '</ol>' +
-            '</div>' +
-
-            '<!-- Generate + enter a pairing code -->' +
-            '<div class="netpair-generate">' +
-              '<button class="btn-ghost" @click="generateNetpairCode" :disabled="netpairGenerating">' +
-                '{{ netpairGenerating ? \'...\' : (netpairGeneratedCode ? t(\'devices.netpair_regenerate\') : t(\'devices.netpair_generate\')) }}' +
-              '</button>' +
-              '<template v-if="netpairGeneratedCode">' +
-                '<div class="netpair-code">' +
-                  '<code class="netpair-code__value selectable">{{ netpairDisplayCode }}</code>' +
-                  '<button class="btn-ghost" @click="copyNetpairCode">{{ t(\'ui.copy\') }}</button>' +
-                '</div>' +
-                '<span class="netpair-hint">{{ t(\'devices.netpair_code_valid_hint\') }}</span>' +
-              '</template>' +
-            '</div>' +
-
-            '<div class="netpair-enter">' +
-              '<div class="netpair-enter__row">' +
-                '<input type="text" class="netpair-enter__input" v-model="netpairCodeInput" spellcheck="false" autocomplete="off"' +
-                  ' :placeholder="t(\'devices.netpair_enter_title\')"' +
-                  ' :aria-label="t(\'devices.netpair_enter_title\')"' +
-                  ' @input="onNetpairCodeInput" @keydown.enter.prevent="confirmNetpairCode">' +
-                '<button class="btn-ghost" @click="confirmNetpairCode" :disabled="netpairConfirming">' +
-                  '{{ netpairConfirming ? \'...\' : t(\'devices.netpair_confirm\') }}' +
-                '</button>' +
-              '</div>' +
-              '<span v-if="netpairError" class="netpair-error">{{ netpairError }}</span>' +
-            '</div>' +
-
-            '<!-- Paired-over-internet device list -->' +
-            '<div v-if="netpairPeers.length > 0" class="netpair-peers">' +
-              '<div class="netpair-peers__title">{{ t(\'devices.netpair_paired_list\') }}</div>' +
-              '<div v-for="peer in netpairPeers" :key="peer.peer_id" class="netpair-peer card">' +
-                '<div class="netpair-peer__info">' +
-                  '<span class="netpair-peer__name text-ellipsis">{{ peerDisplayName(peer) }}</span>' +
-                  '<span class="netpair-peer__id text-mono selectable">{{ shortId(peer.peer_id) }}</span>' +
-                '</div>' +
-                '<div class="netpair-peer__status">' +
-                  '<span class="netpair-peer__dot" :class="peer.online ? \'netpair-peer__dot--online\' : \'netpair-peer__dot--offline\'"></span>' +
-                  '<span class="netpair-peer__state">{{ peer.online ? t(\'devices.netpair_online\') : t(\'devices.netpair_offline\') }}</span>' +
-                  '<span class="netpair-peer__last-seen">· {{ lastSeenText(peer) }}</span>' +
-                '</div>' +
-                '<div class="netpair-peer__actions">' +
-                  '<button class="btn-ghost" @click="renamePeer(peer)" :disabled="netpairBusy">{{ t(\'devices.netpair_rename\') }}</button>' +
-                  '<button class="btn-ghost btn-danger" @click="unpairPeer(peer)" :disabled="netpairBusy">{{ t(\'devices.netpair_unpair\') }}</button>' +
-                '</div>' +
-
-                '<!-- One-line delivery status (round 17): queued badge + last result -->' +
-                '<div v-if="deliveryShown(peer)" class="netpair-peer__delivery">' +
-                  '<span v-if="deliveryPending(peer) > 0" class="netpair-delivery-badge netpair-delivery-badge--pending" :title="t(\'delivery.offline_retry_hint\')">' +
-                    '{{ t(\'delivery.pending_badge\', { count: deliveryPending(peer) }) }}' +
-                  '</span>' +
-                  '<span v-if="deliveryLastStatus(peer)" class="netpair-delivery-result" :class="deliveryLastClass(peer)">' +
-                    '{{ deliveryLastIcon(peer) }} {{ t(deliveryLastKey(peer)) }}' +
-                  '</span>' +
-                '</div>' +
-              '</div>' +
-            '</div>' +
-          '</template>' +
-        '</div>' +
+        '<!-- Internet pairing moved to the bottom (collapsed behind a toggle) -->' +
 
         '<div v-if="store.loading" class="device-panel__loading">' +
           '<div class="skeleton-card animate-shimmer" v-for="n in 2" :key="n"></div>' +
@@ -331,10 +245,113 @@
             '<p class="panel-empty-desc">{{ t(\'devices.auto_discover_hint\') }}</p>' +
           '</div>' +
         '</template>' +
+
+        '<!-- Internet pairing (round 15) — at the BOTTOM, collapsed behind a' +
+        'toggle so the page isn\'t a wall of pairing prompts.  Only when the' +
+        'switch is on does the detail (relay state, generate/enter code,' +
+        'paired list) show. -->' +
+        '<div class="device-panel__section netpair-section netpair-section--bottom">' +
+          '<div class="section-header netpair-section__header">' +
+            '<span class="netpair-section__title" role="button" tabindex="0" @click="toggleNetpair" @keyup.enter="toggleNetpair">' +
+              '🌐 {{ t(\'devices.netpair_title\') }}' +
+              '<span class="section-header__badge">{{ netpairPairedCount }}</span>' +
+            '</span>' +
+            '<label class="netpair-switch" :title="t(\'devices.netpair_toggle_hint\')">' +
+              '<input type="checkbox" :checked="netpairExpanded" @change="toggleNetpair" :aria-label="t(\'devices.netpair_toggle_hint\')">' +
+              '<span class="netpair-switch__slider"></span>' +
+            '</label>' +
+          '</div>' +
+
+          '<div v-if="netpairExpanded" class="netpair-body">' +
+            '<div class="netpair-overview">' +
+              '<span class="netpair-overview__dot" :style="{ background: relayStateColor }"></span>' +
+              '<span class="netpair-overview__state">{{ t(relayStateKey) }}</span>' +
+              '<span class="netpair-overview__count">{{ t(\'devices.netpair_overview_paired\', { count: netpairPairedCount }) }}</span>' +
+            '</div>' +
+            '<div class="netpair-privacy">🔒 {{ t(\'settings_window.internet_sync_hint\') }}</div>' +
+            '<div v-if="netpairLoading" class="netpair-loading">{{ t(\'ui.loading\') }}</div>' +
+            '<template v-else>' +
+              '<div v-if="!internetSyncEnabled" class="netpair-syncoff">' +
+                '{{ t(\'devices.netpair_sync_off\') }}' +
+                '<button class="netpair-step__link" @click="openInternetSyncSettings">{{ t(\'devices.netpair_go_settings\') }}</button>' +
+              '</div>' +
+              '<!-- Generate + enter a pairing code (no multi-step guide) -->' +
+              '<div class="netpair-actions">' +
+                '<button class="btn-ghost" @click="generateNetpairCode" :disabled="netpairGenerating">' +
+                  '{{ netpairGenerating ? \'...\' : (netpairGeneratedCode ? t(\'devices.netpair_regenerate\') : t(\'devices.netpair_generate\')) }}' +
+                '</button>' +
+                '<template v-if="netpairGeneratedCode">' +
+                  '<div class="netpair-code">' +
+                    '<code class="netpair-code__value selectable">{{ netpairDisplayCode }}</code>' +
+                    '<button class="btn-ghost" @click="copyNetpairCode">{{ t(\'ui.copy\') }}</button>' +
+                  '</div>' +
+                '</template>' +
+                '<div class="netpair-enter__row">' +
+                  '<input type="text" class="netpair-enter__input" v-model="netpairCodeInput" spellcheck="false" autocomplete="off"' +
+                    ' :placeholder="t(\'devices.netpair_enter_title\')"' +
+                    ' :aria-label="t(\'devices.netpair_enter_title\')"' +
+                    ' @input="onNetpairCodeInput" @keydown.enter.prevent="confirmNetpairCode">' +
+                  '<button class="btn-ghost" @click="confirmNetpairCode" :disabled="netpairConfirming">' +
+                    '{{ netpairConfirming ? \'...\' : t(\'devices.netpair_confirm\') }}' +
+                  '</button>' +
+                '</div>' +
+                '<span v-if="netpairError" class="netpair-error">{{ netpairError }}</span>' +
+              '</div>' +
+
+              '<!-- Paired-over-internet device list -->' +
+              '<div v-if="netpairPeers.length > 0" class="netpair-peers">' +
+                '<div class="netpair-peers__title">{{ t(\'devices.netpair_paired_list\') }}</div>' +
+                '<div v-for="peer in netpairPeers" :key="peer.peer_id" class="netpair-peer card">' +
+                  '<div class="netpair-peer__info">' +
+                    '<span class="netpair-peer__name text-ellipsis">{{ peerDisplayName(peer) }}</span>' +
+                    '<span class="netpair-peer__id text-mono selectable">{{ shortId(peer.peer_id) }}</span>' +
+                  '</div>' +
+                  '<div class="netpair-peer__status">' +
+                    '<span class="netpair-peer__dot" :class="peer.online ? \'netpair-peer__dot--online\' : \'netpair-peer__dot--offline\'"></span>' +
+                    '<span class="netpair-peer__state">{{ peer.online ? t(\'devices.netpair_online\') : t(\'devices.netpair_offline\') }}</span>' +
+                    '<span class="netpair-peer__last-seen">· {{ lastSeenText(peer) }}</span>' +
+                  '</div>' +
+                  '<div class="netpair-peer__actions">' +
+                    '<button class="btn-ghost" @click="renamePeer(peer)" :disabled="netpairBusy">{{ t(\'devices.netpair_rename\') }}</button>' +
+                    '<button class="btn-ghost btn-danger" @click="unpairPeer(peer)" :disabled="netpairBusy">{{ t(\'devices.netpair_unpair\') }}</button>' +
+                  '</div>' +
+                  '<!-- One-line delivery status (round 17): queued badge + last result -->' +
+                  '<div v-if="deliveryShown(peer)" class="netpair-peer__delivery">' +
+                    '<span v-if="deliveryPending(peer) > 0" class="netpair-delivery-badge netpair-delivery-badge--pending" :title="t(\'delivery.offline_retry_hint\')">' +
+                      '{{ t(\'delivery.pending_badge\', { count: deliveryPending(peer) }) }}' +
+                    '</span>' +
+                    '<span v-if="deliveryLastStatus(peer)" class="netpair-delivery-result" :class="deliveryLastClass(peer)">' +
+                      '{{ deliveryLastIcon(peer) }} {{ t(deliveryLastKey(peer)) }}' +
+                    '</span>' +
+                  '</div>' +
+                '</div>' +
+              '</div>' +
+            '</template>' +
+          '</div>' +
+        '</div>' +
       '</div>',
+
+    watch: {
+      // The section is collapsed by default; auto-expand it the first time an
+      // internet peer actually shows up, so existing pairs are visible without
+      // hunting for the toggle (no peers → stays collapsed, no prompt noise).
+      netpairPairedCount: function (count) {
+        if (count > 0 && !this._netpairAutoExpanded) {
+          this._netpairAutoExpanded = true;
+          this.netpairExpanded = true;
+        }
+      },
+    },
 
     methods: {
       // ── Internet pairing (round 15) ──────────────────────────────
+
+      // Toggle the collapsed internet-pairing section (the switch in the
+      // section header).  Collapsed by default so the page isn't a wall of
+      // pairing prompts.
+      toggleNetpair: function () {
+        this.netpairExpanded = !this.netpairExpanded;
+      },
 
       // Refresh the paired-over-internet list + generated code. The store
       // method is fully defensive (older backend → empty state, no throw).

@@ -9,6 +9,8 @@ All notable changes to ClipSync are documented in this file.
 - **No more garbled flash on refresh** ("刷新会闪一下引导页，全是代码"). Before the Vue bundle mounts, the raw HTML — including the `v-if` onboarding overlay — was briefly painted unstyled. The app root now carries `v-cloak` so the shell stays hidden until the app mounts, then renders fully controlled by state.
 - **Paired-device AI-config inventories moved out of the Devices page** into the「配置」(AI Config) tab, under the local config manager — device configs belong with the config manager, not buried at the bottom of the device list.
 - **Device AI-config files are now grouped by directory.** Instead of one flat table of every nested file, a device's inventory is a tree grouped by its top-level folders (skills/commands/rules/…) with subdirectories collapsible (▸/▾); search still returns flat matches. Applies to the local manager too (same treatment from v1.0.75).
+- **Internet pairing moved to the bottom of the Devices page, collapsed behind a toggle.** It no longer sits at the top as a wall of pairing prompts — the section header now has an on/off switch and the detail (relay state, generate/enter code, paired list) only shows when expanded; the verbose three-step guide is gone (just a one-line "sync off → 去开启" when disabled). It auto-expands once a paired internet device actually appears.
+- **AI config: folders can now be trashed too.** The local config manager's 🗑 previously only appeared on files — a folder entry now also trashes (moves the whole directory tree to the recoverable recycle-bin trash) and the list drops every entry under it.
 
 ## [1.0.76] — 2026-08-25
 

@@ -1164,6 +1164,8 @@
   "settings_window.netpair_manage_hint": "配对管理已移至『设备』页。",
   "settings_window.netpair_manage_cta": "管理配对 →",
   "devices.netpair_title": "互联网配对",
+  "devices.netpair_toggle_hint": "展开 / 收起互联网配对",
+  "devices.netpair_sync_off": "互联网同步未开启，",
   "devices.netpair_overview_paired": "已配 {count} 台互联网设备",
   "devices.netpair_empty_title": "还没有互联网配对设备",
   "devices.netpair_step1": "在这台设备打开 设置 → 网络 → 互联网同步 开关",

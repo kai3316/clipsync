@@ -490,18 +490,24 @@
             var dest = (res && res.trashed_to) || '';
             self.store.showToast(self.t('aiconfig.local_trashed_toast', { dest: dest }),
               3200, 'success');
-            // Drop the trashed row from the local list immediately.
+            // Drop the trashed row(s) from the local list immediately.  A
+            // folder trash removes its own row AND every entry under it.
+            var prefix = String(entry.rel_path || '').replace(/\/+$/, '') + '/';
             var cur = self.store.aiConfigLocal.entries.slice();
             for (var i = cur.length - 1; i >= 0; i--) {
+              var rp = String(cur[i].rel_path || '');
               if (cur[i].root_index === entry.root_index &&
-                  cur[i].rel_path === entry.rel_path) {
+                  (rp === entry.rel_path ||
+                   (entry.is_dir && rp.indexOf(prefix) === 0))) {
                 cur.splice(i, 1);
               }
             }
             self.store.aiConfigLocal.entries = cur;
             if (self.localPreview.visible &&
                 self.localPreview.rootIndex === entry.root_index &&
-                self.localPreview.relPath === entry.rel_path) {
+                (self.localPreview.relPath === entry.rel_path ||
+                 (entry.is_dir &&
+                  String(self.localPreview.relPath || '').indexOf(prefix) === 0))) {
               self.closeLocalPreview();
             }
           } else {
@@ -618,7 +624,9 @@
                   '<td class="aiconfig-panel__cell-time">{{ fmtTime(row.entry.mtime) }}</td>' +
                   '<td class="aiconfig-panel__local-actions">' +
                     '<button class="settings-btn settings-btn--sm aiconfig-panel__icon-btn" @click="openRowDir(row)" :title="t(\'aiconfig.local_open_dir\')">📂</button>' +
-                    '<button v-if="!row.isDir && row.entry" class="settings-btn settings-btn--sm aiconfig-panel__icon-btn aiconfig-panel__icon-btn--danger" @click="trashEntry(row.entry)" :title="t(\'aiconfig.local_trash_title\')">🗑</button>' +
+                    // Files AND folders can be trashed (a folder goes to the
+                    // recycle bin whole, recoverable).
+                    '<button v-if="row.entry" class="settings-btn settings-btn--sm aiconfig-panel__icon-btn aiconfig-panel__icon-btn--danger" @click="trashEntry(row.entry)" :title="t(\'aiconfig.local_trash_title\')">🗑</button>' +
                   '</td>' +
                 '</tr>' +
                 '<tr v-if="localFilteredEntries.length === 0">' +
