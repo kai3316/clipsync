@@ -648,15 +648,21 @@ def test_local_listing_shape_and_reuses_collector(tmp_path):
     listing = s.mgr.local_listing()
     assert set(listing) == {"collected_at", "roots", "entries"}
     assert listing["collected_at"] > 0
+    # The local file manager shows the folder tree, so "sub/" appears as a
+    # folder entry alongside its file.
     assert listing["roots"] == [
-        {"root_index": 0, "path": str(tmp_path / "r"), "count": 2}]
-    assert len(listing["entries"]) == 2
+        {"root_index": 0, "path": str(tmp_path / "r"), "count": 3}]
+    assert len(listing["entries"]) == 3
     by_rel = {e["rel_path"]: e for e in listing["entries"]}
-    assert set(by_rel) == {"CLAUDE.md", "sub/notes.md"}
+    assert set(by_rel) == {"CLAUDE.md", "sub/notes.md", "sub/"}
     for e in listing["entries"]:
-        assert set(e) == {"root_index", "rel_path", "size", "mtime", "sha256"}
+        assert set(e) == {"root_index", "rel_path", "size", "mtime", "sha256", "is_dir"}
         assert e["root_index"] == 0
-        assert e["size"] > 0 and e["mtime"] > 0
+    # folder entry: no size / no content hash, flagged is_dir
+    assert by_rel["sub/"]["is_dir"] is True
+    assert by_rel["sub/"]["size"] is None and by_rel["sub/"]["sha256"] is None
+    assert by_rel["CLAUDE.md"]["is_dir"] is False
+    assert by_rel["CLAUDE.md"]["size"] > 0 and by_rel["CLAUDE.md"]["mtime"] > 0
     # entries carry the collector's sha256 prefix, not a copy
     assert by_rel["CLAUDE.md"]["sha256"] == \
         hashlib.sha256(b"# rules\n").hexdigest()[:16]

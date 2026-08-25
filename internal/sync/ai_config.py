@@ -144,6 +144,7 @@ def collect_roots(
     home: str | Path | None = None,
     max_bytes: int = MAX_CONFIG_FILE_SIZE,
     max_entries: int = MAX_ENTRIES,
+    include_dirs: bool = False,
 ) -> list[dict]:
     """Collect inventory entries across all watch-list roots (pure function).
 
@@ -152,6 +153,11 @@ def collect_roots(
     to their root using forward slashes so they are stable across platforms.
     Output is deterministic (sorted within each root).  The global result is
     capped at *max_entries* entries.
+
+    When *include_dirs* is true, subdirectories are also emitted as ``is_dir``
+    entries (e.g. a Claude Code skill folder ``my-skill/``) so a file manager
+    UI can show the folder tree — used by the LOCAL listing only; the
+    peer-inventory exchange keeps emitting files only.
     """
     entries: list[dict] = []
     seen_roots: set[str] = set()
@@ -199,6 +205,25 @@ def collect_roots(
                     d for d in dirnames
                     if not is_temp_name(d) and not (Path(dirpath) / d).is_symlink()
                 )
+                if include_dirs:
+                    # Emit each subdirectory as a folder entry (trailing slash
+                    # marks it) so the local file manager can show skill /
+                    # command folders as openable items.
+                    for dname in dirnames:
+                        if len(entries) >= max_entries:
+                            break
+                        dpath = Path(dirpath) / dname
+                        try:
+                            dstat = dpath.stat()
+                        except OSError:
+                            continue
+                        entries.append({
+                            "path": dpath.relative_to(root).as_posix() + "/",
+                            "root_index": index,
+                            "is_dir": True,
+                            "size": None,
+                            "mtime": float(dstat.st_mtime),
+                        })
                 for fname in sorted(filenames):
                     if is_temp_name(fname):
                         continue
@@ -856,8 +881,16 @@ class AIConfigManager:
         Reuses the same collector as the paired-peer exchange, but shapes the
         entries with ``rel_path`` (file-manager vocabulary) and adds a
         per-root summary.  No pairing is required — this is purely local.
+        Directories are included as folder entries so skill / command folders
+        show up as openable items in the file manager.
         """
-        entries = self.collect()
+        entries = collect_roots(
+            list(getattr(self._cfg, "ai_config_paths", [])), include_dirs=True,
+        )
+        # Remember when this fresh local scan ran (the peer inventory keeps its
+        # own collect() cache; the two are deliberately independent).
+        with self._lock:
+            self._local_collected_at = time.time()
         raw_roots = list(getattr(self._cfg, "ai_config_paths", []))
         roots = [
             {
@@ -871,9 +904,10 @@ class AIConfigManager:
             {
                 "root_index": e["root_index"],
                 "rel_path": e["path"],
-                "size": e["size"],
-                "mtime": e["mtime"],
-                "sha256": e["sha256"],
+                "size": e.get("size"),
+                "mtime": e.get("mtime"),
+                "sha256": e.get("sha256"),
+                "is_dir": bool(e.get("is_dir")),
             }
             for e in entries
         ]

@@ -239,6 +239,12 @@
 
       openLocalPreview: function (entry) {
         var self = this;
+        // A folder entry can't be previewed as text — open it in the OS file
+        // manager instead (that's the "open the skill" action).
+        if (entry && entry.is_dir) {
+          this.openEntryDir(entry);
+          return;
+        }
         this.localPreview = {
           visible: true,
           loading: true,
@@ -398,7 +404,7 @@
             '<div class="aiconfig-panel__local-toolbar">' +
               '<input type="search" class="aiconfig-panel__search" v-model="localSearch"' +
                 ' :placeholder="t(\'aiconfig.search_placeholder\')" :aria-label="t(\'aiconfig.search_placeholder\')">' +
-              '<button class="settings-btn settings-btn--sm" @click="refreshLocal" :disabled="store.aiConfigLocal.refreshing">' +
+              '<button class="settings-btn settings-btn--sm" style="white-space:nowrap" @click="refreshLocal" :disabled="store.aiConfigLocal.refreshing">' +
                 '{{ store.aiConfigLocal.refreshing ? \'...\' : (\'🔄 \' + t(\'ui.refresh\')) }}' +
               '</button>' +
             '</div>' +
@@ -442,14 +448,16 @@
               '<tbody>' +
                 '<tr v-for="e in localFilteredEntries" :key="localKeyOf(e)">' +
                   '<td class="aiconfig-panel__cell-path">' +
-                    '<span v-if="localMultiRoot" class="aiconfig-panel__root-chip" :title="localRootLabel(e.root_index)">R{{ e.root_index }}</span>' +
-                    '<button class="aiconfig-panel__path-btn selectable" @click="openLocalPreview(e)" :title="t(\'aiconfig.preview_title\')">{{ e.rel_path }}</button>' +
+                    '<span v-if="localMultiRoot && !e.is_dir" class="aiconfig-panel__root-chip" :title="localRootLabel(e.root_index)">R{{ e.root_index }}</span>' +
+                    // Folder entries (skills / commands) open as a folder rather
+                    // than a text preview; the 📁 marks them in the list.
+                    '<button class="aiconfig-panel__path-btn selectable" :class="{ \'aiconfig-panel__path-btn--dir\': e.is_dir }" @click="openLocalPreview(e)" :title="e.is_dir ? t(\'aiconfig.local_open_dir\') : t(\'aiconfig.preview_title\')">{{ e.is_dir ? \'📁 \' : \'\' }}{{ e.rel_path }}</button>' +
                   '</td>' +
-                  '<td class="aiconfig-panel__cell-size">{{ fmtSize(e.size) }}</td>' +
+                  '<td class="aiconfig-panel__cell-size">{{ e.is_dir ? \'\' : fmtSize(e.size) }}</td>' +
                   '<td class="aiconfig-panel__cell-time">{{ fmtTime(e.mtime) }}</td>' +
                   '<td class="aiconfig-panel__local-actions">' +
                     '<button class="settings-btn settings-btn--sm aiconfig-panel__icon-btn" @click="openEntryDir(e)" :title="t(\'aiconfig.local_open_dir\')">📂</button>' +
-                    '<button class="settings-btn settings-btn--sm aiconfig-panel__icon-btn aiconfig-panel__icon-btn--danger" @click="trashEntry(e)" :title="t(\'aiconfig.local_trash_title\')">🗑</button>' +
+                    '<button v-if="!e.is_dir" class="settings-btn settings-btn--sm aiconfig-panel__icon-btn aiconfig-panel__icon-btn--danger" @click="trashEntry(e)" :title="t(\'aiconfig.local_trash_title\')">🗑</button>' +
                   '</td>' +
                 '</tr>' +
                 '<tr v-if="localFilteredEntries.length === 0">' +

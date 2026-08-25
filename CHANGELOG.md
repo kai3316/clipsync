@@ -2,6 +2,12 @@
 
 All notable changes to ClipSync are documented in this file.
 
+## [1.0.73] — 2026-08-25
+
+- **Fix headless-Linux import crash** (second site): `systray._build_full_menu` also annotated `-> pystray.Menu` eagerly; now lazy, so importing the module on a display-less Linux no longer crashes.
+- **AI-config local manager: skill / command folders are now visible.** The local file manager lists each subdirectory (e.g. `~/.claude/skills/my-skill/`, `~/.cursor/commands/search/`) as an openable 📁 folder entry — click it (or the 📂 button) to open the folder in the OS file manager. The peer-inventory exchange still advertises files only.
+- **AI-config refresh button no longer wraps to two lines** (`white-space: nowrap`).
+
 ## [1.0.72] — 2026-08-25
 
 - **Fix startup crash** (regression from v1.0.71): `Application._create_services` referenced `_history_db` after the dedup-wiring edit dropped its import — the app could not start. Now re-imports `history_db` before `set_max_age_days`; regression test added.

@@ -261,7 +261,7 @@ class SystrayApp:
             ),
         ]
 
-    def _build_full_menu(self) -> pystray.Menu:
+    def _build_full_menu(self) -> "pystray.Menu":
         """Build the complete tray menu."""
         menu_items = [
             pystray.MenuItem("📋  " + T("ui.app_name"), None, enabled=False),
