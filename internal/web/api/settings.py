@@ -142,6 +142,10 @@ _MUTABLE_FIELDS = {
     "auto_update_check",
     "internet_sync_enabled",
     "relay_brokers",
+    # Optional pairing passphrase (see netpair_passphrase_error): empty string
+    # clears it; a non-empty value is strength-validated before saving.  The
+    # value is never echoed back — only netpair_password_set is exposed.
+    "netpair_password",
     "data_dir",
     "favorites_path",
     "hotkeys",
@@ -203,6 +207,10 @@ def get_settings(cfg, get_internet_sync_state=None):
     # Expose only *whether* a translation API key is configured, never the
     # key itself (see module docstring).
     result["translate_key_set"] = bool(getattr(cfg, "translate_api_key", ""))
+
+    # Same for the optional pairing passphrase: the UI sees set/not-set only,
+    # never the value (it is a decryption key for netpair traffic).
+    result["netpair_password_set"] = bool(getattr(cfg, "netpair_password", ""))
 
     # Live internet-sync state (never a secret).  When sync is disabled the
     # state is definitively "off" — no callback needed; otherwise fall back to
@@ -286,6 +294,23 @@ def update_settings(body, cfg, on_settings_change=None, enc_mgr=None):
         data = json.loads(body.decode("utf-8"))
     except (json.JSONDecodeError, UnicodeDecodeError):
         return {"ok": False, "error": "invalid json"}, 400
+
+    # The pairing passphrase is strength-validated server-side too, so the
+    # rules (length ≥ 12 + uppercase/lowercase/digit/special) can't be
+    # bypassed by editing the request body.  Empty string = clear the
+    # passphrase (allowed).  Runs before the mutation loop so an invalid
+    # value is rejected without touching cfg.
+    if "netpair_password" in data:
+        pw = data["netpair_password"]
+        if not isinstance(pw, str):
+            return {"ok": False, "error": "netpair_password_type"}, 400
+        pw = pw.strip()
+        if pw:
+            from internal.transport.relay import netpair_passphrase_error
+            err = netpair_passphrase_error(pw)
+            if err is not None:
+                return {"ok": False, "error": "netpair_password_" + err}, 400
+        data["netpair_password"] = pw
 
     updated = {}
     for field in _MUTABLE_FIELDS:

@@ -7544,37 +7544,26 @@
             <div class="onboard-step__icon">&#x1F3A8;</div>
             <h1 class="onboard-step__title">{{ t('onboarding.appearance_title') }}</h1>
             <p class="onboard-step__text">{{ t('onboarding.appearance_body') }}</p>
-            <div class="onboard-switch">
-              <span class="onboard-switch__label">{{ t('onboarding.enable') }}</span>
-              <button class="settings-toggle" role="switch" :aria-checked="store.appearanceMaster"
-                      :aria-label="t('onboarding.appearance_title')"
-                      :class="{ 'settings-toggle--on': store.appearanceMaster }"
-                      @click="store.setAppearanceMaster(!store.appearanceMaster)">
-                <span class="settings-toggle__knob"></span>
-              </button>
-            </div>
-            <template v-if="store.appearanceMaster">
-              <div class="onboard-inline">
-                <div class="settings-theme-row">
-                  <button v-for="opt in store.themeOptions()" :key="opt.value"
-                          class="settings-theme-btn"
-                          :class="{ 'settings-theme-btn--active': store.theme === opt.value }"
-                          @click="store.selectAppearanceTheme(opt.value)">
-                    <span class="settings-theme-btn__label">{{ opt.label }}</span>
-                    <span v-if="store.theme === opt.value" class="settings-theme-btn__check">✓</span>
-                  </button>
-                </div>
-                <div class="onboard-inline-row">
-                  <span class="onboard-switch__label">{{ t('settings.animation') }}</span>
-                  <button class="settings-toggle" role="switch" :aria-checked="store.animationsEnabled"
-                          :aria-label="t('settings.animation')"
-                          :class="{ 'settings-toggle--on': store.animationsEnabled }"
-                          @click="store.toggleAnimation()">
-                    <span class="settings-toggle__knob"></span>
-                  </button>
-                </div>
+            <div class="onboard-inline">
+              <div class="settings-theme-row">
+                <button v-for="opt in store.themeOptions()" :key="opt.value"
+                        class="settings-theme-btn"
+                        :class="{ 'settings-theme-btn--active': store.theme === opt.value }"
+                        @click="store.selectAppearanceTheme(opt.value)">
+                  <span class="settings-theme-btn__label">{{ opt.label }}</span>
+                  <span v-if="store.theme === opt.value" class="settings-theme-btn__check">✓</span>
+                </button>
               </div>
-            </template>
+              <div class="onboard-inline-row">
+                <span class="onboard-switch__label">{{ t('settings.animation') }}</span>
+                <button class="settings-toggle" role="switch" :aria-checked="store.animationsEnabled"
+                        :aria-label="t('settings.animation')"
+                        :class="{ 'settings-toggle--on': store.animationsEnabled }"
+                        @click="store.toggleAnimation()">
+                  <span class="settings-toggle__knob"></span>
+                </button>
+              </div>
+            </div>
             <div class="onboard-actions">
               <button class="onboard-btn onboard-btn--primary" @click="store.nextOnboardingStep()">{{ t('onboarding.next') }}</button>
             </div>
@@ -7585,35 +7574,24 @@
             <div class="onboard-step__icon">&#x2699;&#xFE0F;</div>
             <h1 class="onboard-step__title">{{ t('onboarding.preferences_title') }}</h1>
             <p class="onboard-step__text">{{ t('onboarding.preferences_body') }}</p>
-            <div class="onboard-switch">
-              <span class="onboard-switch__label">{{ t('onboarding.enable') }}</span>
-              <button class="settings-toggle" role="switch" :aria-checked="store.preferencesMaster"
-                      :aria-label="t('onboarding.preferences_title')"
-                      :class="{ 'settings-toggle--on': store.preferencesMaster }"
-                      @click="store.setPreferencesMaster(!store.preferencesMaster)">
-                <span class="settings-toggle__knob"></span>
-              </button>
-            </div>
-            <template v-if="store.preferencesMaster">
-              <div class="onboard-inline">
-                <label class="onboard-device__label" for="onboard-locale">{{ t('settings.language') }}</label>
-                <select id="onboard-locale" class="settings-select"
-                        :value="store.currentLocale()"
-                        @change="store.selectLocale($event.target.value)">
-                  <option value="en">English</option>
-                  <option value="zh-CN">中文 (简体)</option>
-                </select>
-                <div class="onboard-inline-row">
-                  <span class="onboard-switch__label">{{ t('network.auto_start') }}</span>
-                  <button class="settings-toggle" role="switch" :aria-checked="store.autoStart"
-                          :aria-label="t('network.auto_start')"
-                          :class="{ 'settings-toggle--on': store.autoStart }"
-                          @click="store.toggleAutoStart()">
-                    <span class="settings-toggle__knob"></span>
-                  </button>
-                </div>
+            <div class="onboard-inline">
+              <label class="onboard-device__label" for="onboard-locale">{{ t('settings.language') }}</label>
+              <select id="onboard-locale" class="settings-select"
+                      :value="store.currentLocale()"
+                      @change="store.selectLocale($event.target.value)">
+                <option value="en">English</option>
+                <option value="zh-CN">中文 (简体)</option>
+              </select>
+              <div class="onboard-inline-row">
+                <span class="onboard-switch__label">{{ t('network.auto_start') }}</span>
+                <button class="settings-toggle" role="switch" :aria-checked="store.autoStart"
+                        :aria-label="t('network.auto_start')"
+                        :class="{ 'settings-toggle--on': store.autoStart }"
+                        @click="store.toggleAutoStart()">
+                  <span class="settings-toggle__knob"></span>
+                </button>
               </div>
-            </template>
+            </div>
             <div class="onboard-actions">
               <button class="onboard-btn onboard-btn--primary" @click="store.nextOnboardingStep()">{{ t('onboarding.next') }}</button>
             </div>

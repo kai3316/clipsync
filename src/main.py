@@ -40,6 +40,7 @@ from internal.platform.notify import notification_mgr
 from internal.protocol.codec import (
     AICONFIG_MSG_TYPES,
     CHAT_MSG_TYPES,
+    DEVICE_PROBE_MSG_TYPES,
     FILE_TRANSFER_MSG_TYPES,
     PAIRING_MSG_TYPES,
     encode_frame,
@@ -93,6 +94,10 @@ MAX_QUEUE_RETRIES = 5          # per-message retry budget before marking failed
 DELIVERY_LEDGER_MAX = 50       # in-memory send rows kept per peer (REST shows 20)
 DELIVERY_QUEUE_MAX = 100       # persisted offline rows kept per peer (hard cap)
 RELAY_PENDING_FILE = "relay_pending.json"
+
+# Device-connectivity probe ("test connection" on a device card): how long we
+# wait for a device_pong after sending device_ping on each available channel.
+DEVICE_PING_TIMEOUT = 4.0
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -400,6 +405,7 @@ def _run_tray(device_name: str, pipe, parent_pid: int, locale: str = "en"):
         on_pause_minutes=lambda m: pipe.send(("pause_minutes", m)),
         on_resume_sync=lambda: pipe.send(("resume_sync",)),
         on_quit=lambda: pipe.send(("quit",)),
+        on_tray_failed=lambda: pipe.send(("tray_failed",)),
     )
 
     def _recv_notifications():
@@ -537,6 +543,11 @@ class Application:
         # mirrored clipboard frame).  Runtime-only — the device page derives
         # "online" from `now - last_seen <= 90s`; nothing here is persisted.
         self._netpair_last_seen: dict[str, float] = {}
+        # Device-connectivity probe state (device card "test connection"):
+        # ping_id -> {results, replied, event} for in-flight probes.  Runtime
+        # only — a probe is a button-press check, nothing is persisted.
+        self._device_probes: dict[str, dict] = {}
+        self._device_probes_lock = threading.Lock()
         # Round 17: internet delivery ledger + offline queue.  ``_delivery_ledger``
         # maps peer_id -> OrderedDict[msg_id -> {content_hash, ts, status,
         # deadline, preview}] for every clipboard frame we mirrored to that
@@ -1069,6 +1080,7 @@ class Application:
             on_forward_file=_on_web_forward_file,
             get_overview_data=self._get_overview_data,
             on_device_action=self._handle_web_device_action,
+            on_device_test=self._device_test_connection,
             on_transfer_action=self._handle_web_transfer_action,
             on_get_transfers=lambda: (
                 self.file_transfer_mgr.get_transfers(),
@@ -1341,15 +1353,14 @@ class Application:
                 accepted = False
             self._chat_respond_invite(sid, accepted)
         else:
-            # Window hidden: surface an OS notification; the invite stays
+            # Window hidden: surface an in-app toast; the invite stays
             # pending in the dashboard where the user can act on it later.
             try:
-                notification_mgr.show(
-                    title,
-                    T("chat.notify_invite_msg", name=peer_name, fingerprint=fp or "—"),
-                )
+                self._web_toast(
+                    f"{title} · "
+                    + T("chat.notify_invite_msg", name=peer_name, fingerprint=fp or "—"))
             except Exception:
-                logger.debug("chat invite notification failed", exc_info=True)
+                logger.debug("chat invite toast failed", exc_info=True)
             self._chat_event_on_main()
 
     def _chat_respond_invite(self, sid: str, accepted: bool) -> None:
@@ -1396,12 +1407,11 @@ class Application:
                     and not muted and getattr(self.cfg, "sound_enabled", True)):
                 peer_name = self._chat_peer_name_for_sid(session_id) or "?"
                 text = (entry_dict.get("text") or "")[:120]
-                notification_mgr.show(
-                    T("chat.notify_message_title"),
-                    T("chat.notify_message_msg", name=peer_name, text=text),
-                )
+                self._web_toast(
+                    f"{T('chat.notify_message_title')}: "
+                    + T("chat.notify_message_msg", name=peer_name, text=text))
         except Exception:
-            logger.debug("chat message notification failed", exc_info=True)
+            logger.debug("chat message toast failed", exc_info=True)
         self._chat_event_on_main()
 
     def _chat_peer_id_for_sid(self, sid: str) -> str | None:
@@ -2061,13 +2071,6 @@ class Application:
             self._notify_error(T("hotkey.failed_title"), T("hotkey.failed_msg"))
         except Exception:
             logger.debug("Could not surface hotkey failure dialog", exc_info=True)
-        # Also try a desktop notification: in webview mode _notify_error only
-        # toasts (which needs a web client), and the dialog can be suppressed —
-        # this makes the failure visible even with no client attached.
-        try:
-            notification_mgr.show(T("hotkey.failed_title"), T("hotkey.failed_msg"))
-        except Exception:
-            logger.debug("Could not surface hotkey failure notification", exc_info=True)
 
 
     def _paste_nth(self, n: int) -> None:
@@ -2187,7 +2190,11 @@ class Application:
         # receivers' dedup collapses double deliveries).
         self._relay_publish_frame(data)
 
-    def _on_peer_message(self, msg, peer_id: str | None = None) -> None:
+    def _on_peer_message(self, msg, peer_id: str | None = None,
+                         *, via_relay: bool = False) -> None:
+        """Route one decoded frame.  *via_relay* marks frames that arrived
+        over the public relay so a device_pong echoes back on the same channel
+        (device_* probes answer on the transport they came in on)."""
         msg_type = getattr(msg, "msg_type", "clipboard")
         # Round 17: any frame from a peer is an "active" signal — retry its
         # offline queue (cheap no-op when the peer has nothing queued).
@@ -2195,6 +2202,14 @@ class Application:
             self._delivery_peer_active(peer_id)
         except Exception:
             logger.debug("delivery retry on peer message failed", exc_info=True)
+        if msg_type in DEVICE_PROBE_MSG_TYPES:
+            try:
+                self._handle_device_probe(
+                    msg_type, getattr(msg, "_raw_payload", {}) or {},
+                    peer_id or "", via_relay)
+            except Exception:
+                logger.debug("device probe handling failed", exc_info=True)
+            return
         if msg_type == "nav_url":
             url = getattr(msg, "_raw_payload", {}).get("url", "") or ""
             # Only ever open http/https from a peer. Anything else (file://,
@@ -2204,7 +2219,7 @@ class Application:
                 import webbrowser
                 logger.info("Opening URL from peer: %s", url[:80])
                 webbrowser.open(url)
-                notification_mgr.show(T("nav_url.title"), url[:120])
+                self._web_toast(f"{T('nav_url.title')}: {url[:120]}")
             else:
                 logger.warning("Ignoring unsafe nav_url from peer: %s", url[:80])
             return
@@ -2822,18 +2837,9 @@ class Application:
     def _apply_config(self) -> None:
         cfg = self.cfg
         notification_mgr.enabled = cfg.notifications_enabled
-        # Notifications may be enabled by the user while the platform cannot
-        # deliver them (e.g. Linux without notify-send).  Surface that once —
-        # do not spam the log on every notification attempt.
-        if cfg.notifications_enabled:
-            try:
-                if not notification_mgr.is_available():
-                    logger.warning(
-                        "Notifications are enabled but this platform cannot "
-                        "deliver them (notify-send is not installed)."
-                    )
-            except Exception:
-                logger.debug("Notification availability check failed", exc_info=True)
+        # Notifications are in-app web toasts (no OS channel), so no
+        # platform-availability check is needed — a toast renders whenever a
+        # web page is attached, regardless of notify-send/pystray support.
         if cfg.log_level:
             level = getattr(logging, cfg.log_level.upper(), None)
             if level is not None:
@@ -2880,6 +2886,15 @@ class Application:
             except Exception:
                 logger.debug("relay restart after broker change failed",
                              exc_info=True)
+        if "netpair_password" in updated and self._relay is not None:
+            # Pairing passphrase set/cleared — re-derive the netpair channel
+            # keys so the change applies to live traffic immediately.
+            try:
+                self._relay.refresh_channels()
+            except Exception:
+                logger.debug(
+                    "relay refresh_channels after netpair_password change "
+                    "failed", exc_info=True)
         if "filter_enabled_categories" in updated and self.content_filter is not None:
             self.content_filter.enabled_categories = updated["filter_enabled_categories"]
         if "source_tracking_enabled" in updated and getattr(self, "_monitor", None) is not None:
@@ -3356,6 +3371,8 @@ class Application:
             on_pause_minutes=lambda m: self.root.after(0, self._pause_sync_for_minutes, m),
             on_resume_sync=lambda: self.root.after(0, self._resume_timed_pause),
             on_quit=lambda: self.root.after(0, self.shutdown),
+            on_tray_failed=lambda: self._web_toast(
+                f"{T('tray.failed_title')}: {T('tray.failed_msg')}"),
         )
         # Seed the parent's tray state so the initial menu matches the config
         # (the macOS subprocess receives it via _push_tray_state once spawned).
@@ -3633,6 +3650,8 @@ class Application:
             self._check_for_update()
         elif cmd == "about":
             self._show_about()
+        elif cmd == "tray_failed":
+            self._web_toast(f"{T('tray.failed_title')}: {T('tray.failed_msg')}")
         elif cmd == "quit":
             self.shutdown()
 
@@ -4112,10 +4131,10 @@ class Application:
         if getattr(self, "_checking_update", False):
             return
         self._checking_update = True
-        notification_mgr.show(T("ui.app_name"), T("notify.update_checking"))
+        self._web_toast(T("notify.update_checking"))
 
         def _present(title: str, message: str) -> None:
-            notification_mgr.show(title, message)
+            self._web_toast(f"{title}: {message}")
             if not self._notifications_enabled():
                 self._notify_info(title, message)
 
@@ -4170,7 +4189,7 @@ class Application:
 
         from internal.system.updater import download_latest_release
 
-        notification_mgr.show(T("ui.app_name"), T("notify.update_downloading"))
+        self._web_toast(T("notify.update_downloading"))
 
         if from_peers:
             # Ask connected peers first (M2): a peer with the cached asset responds
@@ -4200,7 +4219,7 @@ class Application:
                else "notify.update_rejected_old")
         logger.warning("Update blob discarded (%s): %s", verdict,
                        _mask_path(path))
-        notification_mgr.show(T("ui.app_name"), T(key))
+        self._web_toast(T(key))
 
     def _finish_update_install(self, path, reason, source: str = "github") -> None:
         """Verify, then stage + apply an update asset — or surface the failure.
@@ -4521,7 +4540,7 @@ class Application:
                                 source_device=self.cfg.device_id)
             self.transport_mgr.send_to_peer(peer_id, data)
             logger.info("Sent URL to peer %s: %s", peer_id[:12], url[:80])
-            notification_mgr.show(T("nav_url.title"), url[:120])
+            self._web_toast(f"{T('nav_url.title')}: {url[:120]}")
 
         self._pick_peer_then(_deliver)
 
@@ -5208,8 +5227,17 @@ class Application:
         ).start()
 
     def _web_toast(self, message: str, duration: int = 3000) -> None:
-        """Push a non-blocking toast notification to the web UI."""
-        mgr = self.web_server.dialog_mgr if self.web_server else None
+        """Push a non-blocking toast notification to the web UI.
+
+        The master ``notifications_enabled`` switch gates every toast, so
+        turning notifications OFF silences in-app toasts too.  A toast only
+        renders where a web page (webview dashboard / remote access) is
+        attached; no OS-level notification is ever shown.
+        """
+        if not self._notifications_enabled():
+            return
+        ws = getattr(self, "web_server", None)
+        mgr = getattr(ws, "dialog_mgr", None) if ws is not None else None
         if mgr is not None:
             mgr.toast(message, duration)
 
@@ -5231,22 +5259,22 @@ class Application:
             return False
 
     def _notify(self, cfg_flag: str, title: str, message: str) -> None:
-        """Show a desktop notification gated by a per-type config toggle.
+        """Show a notification as a web toast, gated by a per-type toggle.
 
         Returns early (no notification) when ``cfg.<cfg_flag>`` is False.
-        The master ``notifications_enabled`` switch is enforced inside
-        ``notification_mgr`` itself, so it applies on top of these toggles.
+        The master ``notifications_enabled`` switch is enforced in
+        ``_web_toast``, so it applies on top of these toggles.
 
-        ``sound_enabled`` ("通知提示音") is the user-facing master: on some
-        platforms a notification always plays a sound, so the settings label
-        is "notification sound" and turning it OFF means no notifications at
-        all, not merely silence.
+        ``sound_enabled`` ("通知提示音") still gates these toasts for
+        backward compatibility with the old desktop notifications: a user
+        who turned it OFF was living without notifications, and stays that
+        way.
         """
         if not getattr(self.cfg, "sound_enabled", True):
             return
         if not getattr(self.cfg, cfg_flag, True):
             return
-        notification_mgr.show(title, message)
+        self._web_toast(f"{title}: {message}")
 
     def _notify_error(self, title: str, message: str) -> None:
         """Show an error — toast in webview mode, CTk dialog in CTk mode."""
@@ -7547,8 +7575,17 @@ class Application:
                 continue
             if pid == self.cfg.device_id or pid == f"pending:{self.cfg.device_id}":
                 continue  # never listen on a channel derived from our own code
-            channels[netpair_topic(secret)] = netpair_key(secret)
+            channels[netpair_topic(secret)] = netpair_key(
+                secret, self._netpair_pw())
         return channels
+
+    def _netpair_pw(self) -> str:
+        """Configured pairing passphrase ("" when unset).
+
+        Read fresh from cfg on every call so a settings change applies to the
+        channel keys immediately, without a restart.
+        """
+        return getattr(self.cfg, "netpair_password", "") or ""
 
     # ------------------------------------------- internet pairing code state
 
@@ -7661,7 +7698,7 @@ class Application:
                 logger.debug("netpair hello handling failed", exc_info=True)
             return
         try:
-            self._on_peer_message(sync_msg, source)
+            self._on_peer_message(sync_msg, source, via_relay=True)
         except Exception:
             logger.debug("Relay frame handling failed", exc_info=True)
 
@@ -7817,7 +7854,7 @@ class Application:
             try:
                 ok = transport.publish(frame_bytes,
                                        netpair_topic(peer_secret),
-                                       netpair_key(peer_secret))
+                                       netpair_key(peer_secret, self._netpair_pw()))
             except Exception:
                 logger.debug("netpair publish failed", exc_info=True)
                 ok = False
@@ -7874,7 +7911,7 @@ class Application:
         )
         secret = (getattr(self.cfg, "netpair_secrets", {}) or {}).get(peer_id)
         if isinstance(secret, str) and secret:
-            topic, key = netpair_topic(secret), netpair_key(secret)
+            topic, key = netpair_topic(secret), netpair_key(secret, self._netpair_pw())
         else:
             peer_secret = (
                 getattr(self.cfg, "peer_relay_secrets", {}) or {}).get(peer_id)
@@ -8662,6 +8699,133 @@ class Application:
             "summary": f"{ok_count}/{len(brokers)} reachable",
         }, 200
 
+    def _handle_device_probe(self, msg_type: str, payload: dict,
+                             peer_id: str, via_relay: bool) -> None:
+        """A ``device_ping``/``device_pong`` from a paired peer.
+
+        A ping is answered with a pong echoing the same ping_id + ts, sent back
+        on the channel it arrived on (LAN ``transport_mgr`` or public relay).
+        A pong resolves the matching in-flight probe for that channel and
+        records the round-trip latency (both timestamps are local monotonic —
+        this side sent the ping and receives the pong).
+        """
+        chan = "relay" if via_relay else "lan"
+        if msg_type == "device_ping":
+            pong = {
+                "msg_type": "device_pong",
+                "ping_id": str(payload.get("ping_id") or ""),
+                "ts": payload.get("ts"),
+            }
+            frame = encode_frame(pong, source_device=self.cfg.device_id)
+            if via_relay:
+                self._relay_publish_to_peer(frame, peer_id)
+            else:
+                # LAN peer may have just dropped — a failed send is a valid
+                # negative probe result, not an error to crash on.
+                self.transport_mgr.send_to_peer(peer_id, frame)
+            return
+        if msg_type == "device_pong":
+            ping_id = str(payload.get("ping_id") or "")
+            if not ping_id:
+                return
+            with self._device_probes_lock:
+                entry = self._device_probes.get(ping_id)
+                if entry is None:
+                    return
+                res = entry["results"].get(chan)
+                if res is None:
+                    return
+                res["ok"] = True
+                res["latency_ms"] = (time.monotonic() - res["send_ts"]) * 1000.0
+                entry["replied"].add(chan)
+                entry["event"].set()
+
+    def _device_test_connection(self, peer_id: str) -> dict:
+        """Probe every reachable channel to *peer_id* and measure RTT.
+
+        Returns ``{ok, results: [{channel, ok, latency_ms?, error?}]}`` where
+        ``channel`` is ``lan`` and/or ``relay`` — whichever the peer is
+        reachable through.  Each channel gets its own device_ping; a pong must
+        echo the same ping_id back within ``DEVICE_PING_TIMEOUT`` seconds.
+        """
+        lan_channels: list[str] = []
+        try:
+            connected = set(self.transport_mgr.get_connected_peers() or set())
+            if peer_id in connected:
+                lan_channels = ["lan"]
+        except Exception:
+            logger.debug("device test: LAN connectivity check failed",
+                         exc_info=True)
+        relay_ok = False
+        try:
+            relay_ok = bool(self._peer_is_internet_reachable(peer_id))
+        except Exception:
+            logger.debug("device test: relay reachability check failed",
+                         exc_info=True)
+        channels = lan_channels + (["relay"] if relay_ok else [])
+        if not channels:
+            return {
+                "ok": False,
+                "results": [],
+                "error": "no_channel",
+            }
+        ping_id = secrets.token_hex(6)
+        entry = {
+            "results": {
+                c: {
+                    "channel": c,
+                    "ok": False,
+                    "send_ts": time.monotonic(),
+                    "latency_ms": None,
+                    "error": "timeout",
+                } for c in channels
+            },
+            "replied": set(),
+            "event": threading.Event(),
+        }
+        with self._device_probes_lock:
+            self._device_probes[ping_id] = entry
+        # Fire one ping per channel; a failed send marks that channel failed
+        # up-front (no pong will arrive for it).
+        ts = time.monotonic()
+        frame = encode_frame(
+            {"msg_type": "device_ping", "ping_id": ping_id, "ts": ts},
+            source_device=self.cfg.device_id,
+        )
+        for c in channels:
+            try:
+                if c == "lan":
+                    self.transport_mgr.send_to_peer(peer_id, frame)
+                else:
+                    self._relay_publish_to_peer(frame, peer_id)
+            except Exception:
+                logger.debug("device test: %s ping send failed", c,
+                             exc_info=True)
+                entry["results"][c]["error"] = "send_failed"
+        # Wait for every channel to pong (or the timeout to elapse).
+        deadline = time.monotonic() + DEVICE_PING_TIMEOUT
+        while time.monotonic() < deadline:
+            with self._device_probes_lock:
+                if len(entry["replied"]) >= len(channels):
+                    break
+            entry["event"].wait(min(deadline - time.monotonic(), 0.2))
+        with self._device_probes_lock:
+            self._device_probes.pop(ping_id, None)
+        results = [
+            {
+                "channel": r["channel"],
+                "ok": bool(r["ok"]),
+                "latency_ms": r["latency_ms"],
+                "error": None if r["ok"] else r["error"],
+            }
+            for r in entry["results"].values()
+        ]
+        results.sort(key=lambda r: not r["ok"])
+        return {
+            "ok": any(r["ok"] for r in results),
+            "results": results,
+        }
+
     def _send_netpair_hello(self, target_peer_id: str, secret: str) -> None:
         """Publish a netpair_hello frame on the secret's channel."""
         transport = self._relay
@@ -8676,7 +8840,7 @@ class Application:
                 "ts": time.time(),
             }
             frame = encode_frame(payload, source_device=self.cfg.device_id)
-            transport.publish(frame, netpair_topic(secret), netpair_key(secret))
+            transport.publish(frame, netpair_topic(secret), netpair_key(secret, self._netpair_pw()))
         except Exception:
             logger.debug("netpair hello publish failed", exc_info=True)
 

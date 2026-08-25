@@ -191,6 +191,12 @@ class Config:
     # device_id → alias).  Local-only view — the peer never learns it.  Empty /
     # missing entry = no alias (the web UI falls back to the device name).
     netpair_aliases: dict[str, str] = field(default_factory=dict)
+    # Round 22: optional user-set pairing passphrase.  When set, netpair
+    # channel keys are derived from the passphrase (with the 35-bit code secret
+    # as a salt) instead of the code alone, closing the code's brute-force
+    # window.  Empty string = passphrase off, original derivation unchanged.
+    # The value itself never leaves this device (GET only exposes a boolean).
+    netpair_password: str = ""
 
     # AI-config sync (Round 12): watch-list root directories whose AI tool
     # config files (CLAUDE.md, memory notes, skills/, .mcp.json, ...) are

@@ -443,6 +443,20 @@ def test_api_js_wrappers_exist():
     assert "'/api/sync/resume'" in api_js
 
 
+def test_device_test_connection_ui_wired():
+    # The "test connection" button (F2) is a real API wrapper wired into the
+    # device card actions and the internet-paired peer list.
+    api_js = _read_repo_file("internal/web/static/js/api.js")
+    assert "testDeviceConnection: function (peerId)" in api_js
+    assert "'/api/device/test'" in api_js
+    card = _read_repo_file("internal/web/static/components/device-card.js")
+    assert "key: 'test'" in card
+    assert "ClipsyncAPI.testDeviceConnection(peerId)" in card
+    panel = _read_repo_file("internal/web/static/components/device-panel.js")
+    assert "testNetpairPeer: function (peer)" in panel
+    assert "ClipsyncAPI.testDeviceConnection(peer.peer_id)" in panel
+
+
 def test_overview_panel_pause_ui_wired():
     panel = _read_repo_file(
         "internal/web/static/components/overview-panel.js")
@@ -920,6 +934,112 @@ def test_plain_text_only_bool_roundtrip_and_type_guard():
     )
     assert status == 400
     assert cfg.plain_text_only is False
+
+
+# ── 4c. netpair_password (layered pairing passphrase) ──────────────────
+
+_STRONG_PW = "Passw0rd!123"
+
+
+@pytest.mark.usefixtures("sandboxed_persist")
+def test_netpair_password_set_then_cleared():
+    cfg = _SettingsCfg()
+    data, status = update_settings(
+        _body({"netpair_password": _STRONG_PW}), cfg)
+    assert status == 200
+    assert cfg.netpair_password == _STRONG_PW
+    # an empty string clears the passphrase (back to the code-only key)
+    data, status = update_settings(
+        _body({"netpair_password": ""}), cfg)
+    assert status == 200
+    assert cfg.netpair_password == ""
+
+
+@pytest.mark.usefixtures("sandboxed_persist")
+@pytest.mark.parametrize("bad", [
+    "tooshort1",        # <12
+    "password1!ab",     # missing uppercase
+    "PASSWORD1!AB",     # missing lowercase
+    "Password!!ab",     # missing digit
+    "Password1abc",     # missing special
+])
+def test_netpair_password_strength_rejected(bad):
+    cfg = _SettingsCfg()
+    data, status = update_settings(_body({"netpair_password": bad}), cfg)
+    assert status == 400
+    assert data["ok"] is False
+    assert not getattr(cfg, "netpair_password", "")
+
+
+@pytest.mark.usefixtures("sandboxed_persist")
+def test_netpair_password_non_string_rejected():
+    cfg = _SettingsCfg()
+    data, status = update_settings(_body({"netpair_password": 12345}), cfg)
+    assert status == 400
+    assert not getattr(cfg, "netpair_password", "")
+
+
+def test_get_settings_exposes_only_netpair_set_flag():
+    cfg = _SettingsCfg()
+    data, _ = settings_api.get_settings(cfg)
+    assert data["settings"]["netpair_password_set"] is False
+    assert "netpair_password" not in data["settings"]
+    cfg.netpair_password = _STRONG_PW
+    data, _ = settings_api.get_settings(cfg)
+    assert data["settings"]["netpair_password_set"] is True
+    assert "netpair_password" not in data["settings"]
+
+
+# ── 4d. /api/device/test (test-connection probe route) ─────────────────
+
+def test_device_test_route_probes_and_reports_per_channel():
+    called = {}
+
+    def on_device_test(peer_id):
+        called["peer_id"] = peer_id
+        return {
+            "ok": True,
+            "results": [
+                {"channel": "lan", "ok": True, "latency_ms": 1.2, "error": None},
+                {"channel": "relay", "ok": False, "latency_ms": None,
+                 "error": "timeout"},
+            ],
+        }
+
+    status, _ct, body_b = _dispatch(
+        "POST", "/api/device/test", _body({"peer_id": "peer-1"}),
+        on_device_test=on_device_test,
+    )
+    data = json.loads(body_b)
+    assert status == 200 and data["ok"] is True
+    assert called["peer_id"] == "peer-1"
+    assert data["results"][0]["channel"] == "lan"
+    assert data["results"][1]["error"] == "timeout"
+
+
+def test_device_test_route_requires_peer_id():
+    status, _ct, body_b = _dispatch(
+        "POST", "/api/device/test", _body({}),
+        on_device_test=lambda pid: {"ok": True},
+    )
+    assert status == 400
+    assert json.loads(body_b)["error"] == "peer_id required"
+
+
+def test_device_test_route_invalid_json_is_400():
+    status, _ct, body_b = _dispatch(
+        "POST", "/api/device/test", b"not-json",
+        on_device_test=lambda pid: {"ok": True},
+    )
+    assert status == 400
+    assert json.loads(body_b)["error"] == "invalid json"
+
+
+def test_device_test_route_without_handler_is_503():
+    status, _ct, body_b = _dispatch(
+        "POST", "/api/device/test", _body({"peer_id": "peer-1"}))
+    assert status == 503
+    assert json.loads(body_b)["error"] == "not available"
 
 
 # ── 5. failure-history regressions in FileTransferManager ──────────────

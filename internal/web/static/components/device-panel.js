@@ -29,8 +29,8 @@
         netpairConfirming: false,
         netpairError: '',
         netpairBusy: false,       // a rename/unpair request is in flight
-        netpairExpanded: false,   // the section is collapsed behind a toggle
-        _netpairAutoExpanded: false,
+        netpairTesting: false,    // the "test connection" probe is in flight
+        netpairExpanded: true,    // default expanded; fold it if the page is busy
         _netpairLoadInFlight: false,
         netpairClockTimer: null,  // refreshes relative "last sync" times
       };
@@ -309,6 +309,7 @@
                     '<span class="netpair-peer__last-seen">· {{ lastSeenText(peer) }}</span>' +
                   '</div>' +
                   '<div class="netpair-peer__actions">' +
+                    '<button class="btn-ghost" @click="testNetpairPeer(peer)" :disabled="netpairBusy || netpairTesting">{{ netpairTesting ? \'...\' : t(\'device.test_connection\') }}</button>' +
                     '<button class="btn-ghost" @click="renamePeer(peer)" :disabled="netpairBusy">{{ t(\'devices.netpair_rename\') }}</button>' +
                     '<button class="btn-ghost btn-danger" @click="unpairPeer(peer)" :disabled="netpairBusy">{{ t(\'devices.netpair_unpair\') }}</button>' +
                   '</div>' +
@@ -328,24 +329,13 @@
         '</div>' +
       '</div>',
 
-    watch: {
-      // The section is collapsed by default; auto-expand it the first time an
-      // internet peer actually shows up, so existing pairs are visible without
-      // hunting for the toggle (no peers → stays collapsed, no prompt noise).
-      netpairPairedCount: function (count) {
-        if (count > 0 && !this._netpairAutoExpanded) {
-          this._netpairAutoExpanded = true;
-          this.netpairExpanded = true;
-        }
-      },
-    },
-
     methods: {
       // ── Internet pairing (round 15) ──────────────────────────────
 
-      // Toggle the collapsed internet-pairing section (the switch in the
-      // section header).  Collapsed by default so the page isn't a wall of
-      // pairing prompts.
+      // Toggle the internet-pairing section (the switch in the section
+      // header).  Expanded by default so the pairing controls and paired list
+      // are visible without hunting; the user can fold it when the page is
+      // busy.
       toggleNetpair: function () {
         this.netpairExpanded = !this.netpairExpanded;
       },
@@ -555,6 +545,49 @@
               self.netpairError = self.t('dialog.failed');
             }
           });
+      },
+
+      // 🔌 Test connectivity to an internet-paired peer: probe the relay
+      // channel (and the LAN channel when also reachable), toast the result.
+      // Mirrors device-card.js's test action — same endpoint, same toast.
+      testNetpairPeer: function (peer) {
+        var self = this;
+        if (self.netpairTesting) return;
+        self.netpairTesting = true;
+        ClipsyncAPI.testDeviceConnection(peer.peer_id)
+          .then(function (res) {
+            if (res && res.results) {
+              var parts = res.results.map(function (r) {
+                var channel = self.t(r.channel === 'relay'
+                  ? 'device.test_channel_relay' : 'device.test_channel_lan');
+                if (r.ok && r.latency_ms != null) {
+                  return self.t('device.test_channel_ok',
+                    { channel: channel, latency: Math.round(r.latency_ms) });
+                }
+                return self.t('device.test_channel_fail',
+                  { channel: channel, reason: self._netpairTestError(r) });
+              });
+              var key2 = res.ok ? 'device.test_success' : 'device.test_failed';
+              self.store.showToast(self.t(key2, { detail: parts.join(' · ') }), 4500);
+            } else {
+              var reason = (res && res.error === 'no_channel')
+                ? self.t('device.test_no_channel') : self.t('device.test_failed');
+              self.store.showToast(self.t('device.test_failed', { detail: reason }), 3500);
+            }
+          })
+          .catch(function () {
+            self.store.showToast(self.t('device.test_failed'), 3000);
+          })
+          .finally(function () {
+            self.netpairTesting = false;
+          });
+      },
+
+      // Localize one per-channel failure reason from the probe result.
+      _netpairTestError: function (r) {
+        if (r.error === 'timeout') return this.t('device.test_timeout');
+        if (r.error === 'send_failed') return this.t('device.test_send_failed');
+        return r.error || this.t('device.test_failed');
       },
 
       // ✏️ Rename an internet-paired peer. Prompt is pre-filled with the

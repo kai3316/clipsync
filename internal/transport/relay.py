@@ -70,6 +70,10 @@ NETPAIR_CODE_CHARS = 12        # "XXXX-XXXX-XXXX"
 NETPAIR_DEVICE_CHARS = 4       # chars [0:4]  -> 20-bit device tag
 NETPAIR_SECRET_CHARS = 7       # chars [4:11] -> 35-bit shared secret
 NETPAIR_SECRET_BITS = NETPAIR_SECRET_CHARS * 5
+# Optional user-set pairing passphrase layered on top of the code secret: the
+# code still routes (topic) while the key strength becomes the passphrase's.
+NETPAIR_PASSPHRASE_MIN = 12
+NETPAIR_PASSPHRASE_MAX = 200
 
 # Connection retry backoff across the broker list (seconds; capped).
 BACKOFF_SEQUENCE = (1, 2, 4, 8, 15, 30, 60)
@@ -247,9 +251,21 @@ def netpair_topic(secret: str) -> str:
     return NETPAIR_TOPIC_PREFIX + digest[:24]
 
 
-def netpair_key(secret: str) -> bytes:
-    """AES-256 key both ends derive independently (same HMAC style as relay)."""
-    prk = hmac.new(b"clipsync-netpair-salt", secret.encode("ascii"),
+def netpair_key(secret: str, password: str = "") -> bytes:
+    """AES-256 key both ends derive independently (same HMAC style as relay).
+
+    *password* optionally layers a user-set pairing passphrase on top of the
+    35-bit code secret (see ``netpair_passphrase_error``): the code keeps doing
+    the routing (the topic is still ``netpair_topic(secret)``) and doubles as a
+    salt, while the actual key strength becomes the passphrase's — so brute-
+    forcing the short code no longer reveals the key.  An empty password is the
+    original secret-only derivation, byte-for-byte identical, so existing
+    pairings and tests are unchanged.
+    """
+    keying = secret.encode("utf-8")
+    if password:
+        keying = keying + b"\x00" + password.encode("utf-8")
+    prk = hmac.new(b"clipsync-netpair-salt", keying,
                    hashlib.sha256).digest()
     key = b""
     i = 1
@@ -258,6 +274,27 @@ def netpair_key(secret: str) -> bytes:
                        hashlib.sha256).digest()
         i += 1
     return key[:32]
+
+
+def netpair_passphrase_error(pw: str) -> str | None:
+    """Return an error tag for an invalid pairing passphrase, or None when it
+    satisfies every rule: length within ``NETPAIR_PASSPHRASE_MIN`` .. ``MAX``,
+    plus at least one of each of uppercase, lowercase, digit and a non-alnum
+    non-space special character.  Enforced server-side on save so the strength
+    rules can't be bypassed by editing the request body."""
+    if not isinstance(pw, str):
+        return "type"
+    if not (NETPAIR_PASSPHRASE_MIN <= len(pw) <= NETPAIR_PASSPHRASE_MAX):
+        return "length"
+    if not any(c.isupper() for c in pw):
+        return "upper"
+    if not any(c.islower() for c in pw):
+        return "lower"
+    if not any(c.isdigit() for c in pw):
+        return "digit"
+    if not any(not c.isalnum() and not c.isspace() for c in pw):
+        return "special"
+    return None
 
 
 def pack_envelope(frame_bytes: bytes, key: bytes, now: float) -> bytes:

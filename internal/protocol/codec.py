@@ -144,6 +144,14 @@ AICONFIG_MSG_TYPES = frozenset({
 # never be able to inject a hello over the local channel.
 NETPAIR_MSG_TYPES = frozenset({"netpair_hello"})
 
+# Device connectivity probe (device card "test connection" button): a paired
+# peer answers ``device_ping`` with ``device_pong`` echoing the same ping_id +
+# ts so the initiator can measure per-channel round-trip latency.  Paired-only
+# by construction — NOT in UNPAIRED_GATE_MSG_TYPES: an unpaired LAN peer must
+# never be able to solicit a pong (or have its pings routed) over the local
+# channel, and the relay path only admits them from channel-key holders.
+DEVICE_PROBE_MSG_TYPES = frozenset({"device_ping", "device_pong"})
+
 
 def encode_frame(payload_dict: dict, msg_id: str = "", source_device: str = "") -> bytes:
     """Encode a generic JSON payload dict into the binary frame format.

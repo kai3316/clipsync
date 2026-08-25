@@ -92,6 +92,9 @@
         // internet-paired ones, via the relay) — offer it for both.
         if (this.isOnline || this.isPaired) {
           acts.push({ key: 'chat', label: this.t('devices.chat_action'), cls: 'device-card__action--accent' });
+          // Connectivity probe: reachable online OR paired (relay can reach a
+          // paired-but-LAN-offline peer) — exactly the chat condition.
+          acts.push({ key: 'test', label: this.t('device.test_connection'), cls: '' });
         }
         if (this.isOnline) {
           acts.push({ key: 'disconnect', label: this.t('device.disconnect'), cls: '' });
@@ -295,7 +298,46 @@
             .catch(function () { self.actionLoading = false; });
           return;
         }
+        if (key === 'test') {
+          // Full probe result (per-channel RTT + reasons), not a bool.
+          ClipsyncAPI.testDeviceConnection(peerId)
+            .then(function (res) {
+              if (res && res.results) {
+                var parts = res.results.map(function (r) {
+                  var channel = self.t(r.channel === 'relay'
+                    ? 'device.test_channel_relay' : 'device.test_channel_lan');
+                  if (r.ok && r.latency_ms != null) {
+                    return self.t('device.test_channel_ok',
+                      { channel: channel, latency: Math.round(r.latency_ms) });
+                  }
+                  return self.t('device.test_channel_fail',
+                    { channel: channel, reason: self._deviceTestError(r) });
+                });
+                var key2 = res.ok ? 'device.test_success' : 'device.test_failed';
+                self.store.showToast(self.t(key2, { detail: parts.join(' · ') }), 4500);
+              } else {
+                var reason = (res && res.error === 'no_channel')
+                  ? self.t('device.test_no_channel') : self.t('device.test_failed');
+                self.store.showToast(self.t('device.test_failed', { detail: reason }), 3500);
+              }
+            })
+            .catch(function () {
+              self.store.showToast(self.t('device.test_failed'), 3000);
+            })
+            .finally(function () {
+              self.actionLoading = false;
+              self.actionLabel = '';
+            });
+          return;
+        }
         self.actionLoading = false;
+      },
+
+      // Localize one per-channel failure reason from the probe result.
+      _deviceTestError: function (r) {
+        if (r.error === 'timeout') return this.t('device.test_timeout');
+        if (r.error === 'send_failed') return this.t('device.test_send_failed');
+        return r.error || this.t('device.test_failed');
       },
 
       onContextMenu: function (e) {

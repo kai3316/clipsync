@@ -285,16 +285,13 @@
     onboardingError: '',        // inline error shown on the wizard (e.g. empty name)
     onboardingSaving: false,    // true while the device-name save is in flight
 
-    // Steps 4-9: master switches, all default OFF on a fresh install.
-    // The four real feature toggles write their backend keys when the wizard
-    // completes; 外观/偏好 are UI masters persisted to localStorage (their
-    // sub-settings still persist via the normal settings keys when chosen).
+    // Steps 4-9: feature toggles, all default OFF on a fresh install. The four
+    // real toggles write their backend keys when the wizard completes. 外观/偏好
+    // (steps 7-8) are shown directly as their real controls — no UI masters.
     onboardContentFilter: false,
     onboardAppFilter: false,
     onboardRemoteSync: false,
     onboardSound: false,
-    appearanceMaster: false,
-    preferencesMaster: false,
 
     /* ═══════════════════════════════════════════════════════════════
        Dialog system (server-pushed modals)
@@ -411,11 +408,10 @@
 
     /**
      * Mark onboarding as done, persist it, hide the wizard overlay, and commit
-     * the six master switches from steps 4-9. All switches default OFF on a
-     * fresh install, so a wizard the user just clicks through leaves the four
-     * real feature toggles (content filter / app filter / internet sync /
-     * sound) explicitly off. 外观/偏好 are UI-only masters already persisted
-     * to localStorage the moment they are flipped.
+     * the four feature toggles from steps 4-6 and 9. All default OFF on a
+     * fresh install, so a wizard the user just clicks through leaves them
+     * explicitly off. 外观/偏好 (steps 7-8) are applied immediately by their
+     * real controls.
      */
     completeOnboarding: function () {
       this.onboardingDone = true;
@@ -471,50 +467,6 @@
       if (this.onboardingStep === 3) {
         this.ensureOverview();
       }
-    },
-
-    /**
-     * Load the 外观/偏好 master switches. The user's explicit choice is
-     * persisted to localStorage; on first visit (no stored choice) it is
-     * derived from the loaded settings so existing customisations — a dark
-     * theme, autostart — keep their group visible instead of collapsing it.
-     */
-    loadMasters: function () {
-      var s = this.settingsCache || {};
-      var ap = null, pr = null;
-      try { ap = localStorage.getItem('clipsync_appearance_master'); } catch (e) { /* ignore */ }
-      try { pr = localStorage.getItem('clipsync_preferences_master'); } catch (e) { /* ignore */ }
-      if (ap === '1' || ap === '0') {
-        this.appearanceMaster = ap === '1';
-      } else {
-        this.appearanceMaster = !!(s.appearance_mode && s.appearance_mode !== 'system') ||
-          s.ui_animation_enabled === false;
-      }
-      if (pr === '1' || pr === '0') {
-        this.preferencesMaster = pr === '1';
-      } else {
-        this.preferencesMaster = s.auto_start === true;
-      }
-    },
-
-    /**
-     * Set and persist the 外观 master switch (UI-only: reveals the theme /
-     * animation controls). The sub-settings keep their own server keys.
-     * @param {boolean} v
-     */
-    setAppearanceMaster: function (v) {
-      this.appearanceMaster = !!v;
-      try { localStorage.setItem('clipsync_appearance_master', this.appearanceMaster ? '1' : '0'); } catch (e) { /* ignore */ }
-    },
-
-    /**
-     * Set and persist the 偏好 master switch (UI-only: reveals the language /
-     * autostart controls).
-     * @param {boolean} v
-     */
-    setPreferencesMaster: function (v) {
-      this.preferencesMaster = !!v;
-      try { localStorage.setItem('clipsync_preferences_master', this.preferencesMaster ? '1' : '0'); } catch (e) { /* ignore */ }
     },
 
     /**

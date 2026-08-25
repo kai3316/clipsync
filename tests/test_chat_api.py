@@ -768,6 +768,8 @@ def make_app_stub(**attrs):
     )
     app.cfg = c
     app._netpair_last_seen = dict(attrs.get("_netpair_last_seen", {}))
+    app._netpair_pw = (
+        lambda _a=app: Application._netpair_pw(_a))
 
     class Relay:
         def __init__(self):
@@ -818,7 +820,8 @@ def make_app_stub(**attrs):
     app._peer_is_internet_reachable = (
         lambda pid, _a=app: Application._peer_is_internet_reachable(_a, pid))
     app._on_peer_message = (
-        lambda msg, pid=None, _a=app: Application._on_peer_message(_a, msg, pid))
+        lambda msg, pid=None, _a=app, via_relay=False:
+        Application._on_peer_message(_a, msg, pid, via_relay=via_relay))
     app._on_relay_frame = (
         lambda frame, topic=None, _a=app, **kw: Application._on_relay_frame(
             _a, frame, topic, **kw))

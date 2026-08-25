@@ -60,9 +60,10 @@ def test_device_panel_collapsed_behind_toggle():
     assert "netpair-section__chevron" in src
     assert "netpair-switch" not in src
     assert 'v-if="netpairExpanded"' in src
-    # Auto-expand once the first internet peer arrives.
+    # Expanded by default so the pairing controls are visible without hunting;
+    # the count badge shows how many internet peers are paired.
+    assert "netpairExpanded: true" in src
     assert "netpairPairedCount" in src
-    assert "_netpairAutoExpanded" in src
     # When internet sync is off, one compact line + jump-to-settings (not the
     # old multi-step guide).
     assert "internetSyncEnabled" in src

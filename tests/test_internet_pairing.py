@@ -12,6 +12,7 @@ and every frame crosses the wire through the real codec.
 """
 
 import json
+import threading
 import types
 import zipfile
 
@@ -38,6 +39,13 @@ def test_netpair_types_are_pairing_only():
     assert frozenset({"netpair_hello"}) == codec.NETPAIR_MSG_TYPES
     # must never be admitted from an unpaired LAN peer at the transport gate
     assert not (codec.NETPAIR_MSG_TYPES & codec.UNPAIRED_GATE_MSG_TYPES)
+
+
+def test_device_probe_types_registered():
+    assert frozenset({"device_ping", "device_pong"}) == codec.DEVICE_PROBE_MSG_TYPES
+    # probes are only sent to already-paired devices — never admitted from an
+    # unpaired LAN peer at the transport gate
+    assert not (codec.DEVICE_PROBE_MSG_TYPES & codec.UNPAIRED_GATE_MSG_TYPES)
 
 
 # ------------------------------------------------------------ code format
@@ -118,6 +126,60 @@ def test_netpair_topic_key_agree_and_differ_from_relay():
     assert R.netpair_key(secret) != R.netpair_key(s2)
 
 
+# ------------------------------------------------- passphrase layering
+
+def test_netpair_key_empty_password_is_byte_identical():
+    # Backward compat: the default call and an explicit empty password are
+    # the SAME derivation, so existing pairings/tests are untouched.
+    secret = R.generate_netpair_secret()
+    assert R.netpair_key(secret) == R.netpair_key(secret, "")
+    assert len(R.netpair_key(secret, "")) == 32
+
+
+def test_netpair_key_password_layers_deterministically():
+    secret = R.generate_netpair_secret()
+    pw = "Passw0rd!123"
+    # deterministic, same length, and different from the code-only key
+    assert R.netpair_key(secret, pw) == R.netpair_key(secret, pw)
+    assert R.netpair_key(secret, pw) != R.netpair_key(secret)
+    assert len(R.netpair_key(secret, pw)) == 32
+    # routing topic is unchanged — the code still picks the channel
+    assert R.netpair_topic(secret) == R.netpair_topic(secret)
+    # different passwords or different secrets -> different keys
+    assert R.netpair_key(secret, pw) != R.netpair_key(secret, pw + "!")
+    other = R.generate_netpair_secret()
+    assert R.netpair_key(secret, pw) != R.netpair_key(other, pw)
+
+
+def test_netpair_key_unicode_password_supported():
+    # A non-ASCII passphrase (Chinese chars + all four classes) derives a
+    # full-strength key; both ends must compute it identically.
+    pw = "密码Ab12!@安全加密"
+    secret = R.generate_netpair_secret()
+    assert R.netpair_passphrase_error(pw) is None
+    assert R.netpair_key(secret, pw) == R.netpair_key(secret, pw)
+    assert len(R.netpair_key(secret, pw)) == 32
+
+
+def test_netpair_passphrase_error_accepts_strong():
+    for pw in ("Passw0rd!123", "P@ssphrase-2024-Beta", "密码Ab12!@安全加密"):
+        assert R.netpair_passphrase_error(pw) is None, pw
+
+
+def test_netpair_passphrase_error_rejects_each_missing_class():
+    assert R.netpair_passphrase_error("password1!ab") == "upper"
+    assert R.netpair_passphrase_error("PASSWORD1!AB") == "lower"
+    assert R.netpair_passphrase_error("Password!!ab") == "digit"
+    assert R.netpair_passphrase_error("Password1abc") == "special"
+
+
+def test_netpair_passphrase_error_length_and_type_rules():
+    assert R.netpair_passphrase_error("Ab1!") == "length"          # <12
+    assert R.netpair_passphrase_error("A1!a" + "x" * 200) == "length"  # >200
+    assert R.netpair_passphrase_error(12345) == "type"             # not a str
+    assert R.netpair_passphrase_error(None) == "type"
+
+
 # ------------------------------------------------------------------ config
 
 @pytest.fixture()
@@ -172,6 +234,11 @@ def make_app_stub(**attrs):
     app.cfg = c
     app._netpair_pending = dict(attrs.get("_netpair_pending", {}))
     app._netpair_names = dict(attrs.get("_netpair_names", {}))
+    app._netpair_pw = (
+        lambda _a=app: Application._netpair_pw(_a))
+    # device-probe state (test-connection button) — fresh per stub
+    app._device_probes = {}
+    app._device_probes_lock = threading.Lock()
 
     class Relay:
         def __init__(self):
@@ -324,6 +391,196 @@ def test_hello_roundtrip_confirms_identity():
                 if m == "netpair_peer"]
     assert events_b and events_b[0] == {"peer_id": "a1b2c3d4e5f6",
                                         "name": "DevA", "status": "paired"}
+
+
+def test_hello_roundtrip_with_layered_password():
+    # Both sides configure the SAME pairing passphrase: the pairing flow is
+    # unchanged (same code, same topic) but the AES key is derived WITH the
+    # passphrase, so the two ends still confirm the real identity.
+    pw = "Passw0rd!123"
+    a = make_app_stub(device_id="a1b2c3d4e5f6", device_name="DevA")
+    b = make_app_stub(device_id="bbbbbbbbbbbb", device_name="DevB")
+    a.cfg.netpair_password = pw
+    b.cfg.netpair_password = pw
+    data, _ = a._netpair_generate()
+    code = data["code"]
+    secret = R.decode_netpair_code(code)[1]
+    topic = R.netpair_topic(secret)
+    data, _ = b._netpair_enter(code)
+    b_frame, b_topic, b_key = b._relay.published[0]
+    # B keyed the hello with the passphrase-layered key on the same topic —
+    # and it is NOT the code-only key (that mismatch is what blocks an
+    # un-passphrased peer from reading the channel).
+    assert b_topic == topic
+    assert b_key == R.netpair_key(secret, pw)
+    assert b_key != R.netpair_key(secret)
+    a._on_relay_frame(b_frame, b_topic)
+    assert a.cfg.netpair_secrets == {"bbbbbbbbbbbb": secret}
+    # A replied with the same layered key.
+    a_frame, a_topic, a_key = a._relay.published[0]
+    assert a_topic == topic and a_key == R.netpair_key(secret, pw)
+    b._on_relay_frame(a_frame, a_topic)
+    assert b.cfg.netpair_secrets == {"a1b2c3d4e5f6": secret}
+
+
+# ---------------------------------------------- device probe (test connection)
+
+def _probe_app(**attrs):
+    """make_app_stub + the device-probe plumbing (LAN transport, real methods).
+
+    ``connected_peers`` names the peers ``transport_mgr`` reports as LAN-online.
+    By default a sent ping is echoed as a pong synchronously (simulating the
+    remote), so a roundtrip completes without threads; pass ``echo=False`` to
+    exercise the timeout/send-failure paths.
+    """
+    app = make_app_stub(**attrs)
+    connected = set(attrs.get("connected_peers", []))
+    echo = bool(attrs.get("echo", True))
+    lan_frames = []
+    relay_frames = []
+
+    def _echo(peer_id, frame, via_relay):
+        if not echo:
+            return
+        try:
+            msg = decode_message(frame)
+        except Exception:
+            return
+        if getattr(msg, "msg_type", "") != "device_ping":
+            return
+        payload = msg._raw_payload
+        app._handle_device_probe(
+            "device_pong",
+            {"msg_type": "device_pong",
+             "ping_id": payload.get("ping_id"),
+             "ts": payload.get("ts")},
+            peer_id, via_relay=via_relay)
+
+    class TransportMgr:
+        def get_connected_peers(self):
+            return list(connected)
+
+        def send_to_peer(self, peer_id, frame):
+            lan_frames.append((peer_id, frame))
+            _echo(peer_id, frame, via_relay=False)
+    app.transport_mgr = TransportMgr()
+
+    orig_publish = app._relay.publish
+
+    def publish(frame, topic, key):
+        relay_frames.append((frame, topic, key))
+        # echo to whichever netpair peer owns this topic
+        for pid, secret in (app.cfg.netpair_secrets or {}).items():
+            if topic == R.netpair_topic(secret):
+                _echo(pid, frame, via_relay=True)
+                break
+        return True
+    app._relay.publish = publish
+    app._relay_published = relay_frames
+    app._lan_published = lan_frames
+
+    app._peer_is_internet_reachable = (
+        lambda pid, _a=app: Application._peer_is_internet_reachable(_a, pid))
+    app._relay_publish_to_peer = (
+        lambda frame, pid, _a=app: Application._relay_publish_to_peer(
+            _a, frame, pid))
+    app._handle_device_probe = (
+        lambda mt, payload, pid, via_relay, _a=app:
+        Application._handle_device_probe(_a, mt, payload, pid, via_relay))
+    app._device_test_connection = (
+        lambda pid, _a=app: Application._device_test_connection(_a, pid))
+    app._on_peer_message = (
+        lambda msg, pid, _a=app: Application._on_peer_message(_a, msg, pid))
+    return app
+
+
+def test_device_probe_lan_roundtrip():
+    app = _probe_app(connected_peers=["bbbbbbbbbbbb"])
+    result = app._device_test_connection("bbbbbbbbbbbb")
+    assert result["ok"] is True
+    by_chan = {r["channel"]: r for r in result["results"]}
+    assert set(by_chan) == {"lan"}
+    assert by_chan["lan"]["ok"] is True
+    assert by_chan["lan"]["latency_ms"] is not None
+    assert by_chan["lan"]["error"] is None
+
+
+def test_device_probe_relay_roundtrip():
+    # A confirmed netpair peer (no LAN presence) is probed over the relay;
+    # the ping lands on its netpair topic and the pong echo resolves it.
+    app = _probe_app(netpair_secrets={"bbbbbbbbbbbb": "ABCDEFG"})
+    result = app._device_test_connection("bbbbbbbbbbbb")
+    assert result["ok"] is True
+    by_chan = {r["channel"]: r for r in result["results"]}
+    assert set(by_chan) == {"relay"}
+    assert by_chan["relay"]["ok"] is True
+    assert by_chan["relay"]["latency_ms"] is not None
+    # the ping really went out on the peer's netpair topic
+    assert app._relay_published and \
+        app._relay_published[0][1] == R.netpair_topic("ABCDEFG")
+
+
+def test_device_probe_both_channels_roundtrip():
+    app = _probe_app(connected_peers=["bbbbbbbbbbbb"],
+                     netpair_secrets={"bbbbbbbbbbbb": "ABCDEFG"})
+    result = app._device_test_connection("bbbbbbbbbbbb")
+    assert result["ok"] is True
+    by_chan = {r["channel"]: r for r in result["results"]}
+    assert set(by_chan) == {"lan", "relay"}
+    assert all(r["ok"] for r in result["results"])
+
+
+def test_device_probe_no_channel():
+    # peer is neither LAN-connected nor internet-reachable -> no_channel
+    app = _probe_app()
+    result = app._device_test_connection("bbbbbbbbbbbb")
+    assert result["ok"] is False
+    assert result["error"] == "no_channel"
+    assert result["results"] == []
+
+
+def test_device_probe_lan_timeout(monkeypatch):
+    monkeypatch.setattr("src.main.DEVICE_PING_TIMEOUT", 0.3)
+    app = _probe_app(connected_peers=["bbbbbbbbbbbb"], echo=False)
+    result = app._device_test_connection("bbbbbbbbbbbb")
+    assert result["ok"] is False
+    r = result["results"][0]
+    assert r["channel"] == "lan" and r["ok"] is False
+    assert r["error"] == "timeout"
+
+
+def test_device_probe_send_failed(monkeypatch):
+    monkeypatch.setattr("src.main.DEVICE_PING_TIMEOUT", 0.3)
+
+    def boom(peer_id, frame):
+        raise RuntimeError("no route to host")
+    app = _probe_app(connected_peers=["bbbbbbbbbbbb"], echo=False)
+    app.transport_mgr.send_to_peer = boom
+    result = app._device_test_connection("bbbbbbbbbbbb")
+    assert result["ok"] is False
+    r = result["results"][0]
+    assert r["channel"] == "lan" and r["ok"] is False
+    assert r["error"] == "send_failed"
+
+
+def test_device_ping_is_answered_on_the_channel_it_arrived_on():
+    # LAN: a device_ping is answered with a device_pong echoing ping_id+ts.
+    app = _probe_app()
+    app._delivery_peer_active = lambda pid: None  # present on the stub
+    sent = []
+    app.transport_mgr.send_to_peer = (
+        lambda pid, frame: sent.append((pid, frame)))
+    frame = encode_frame({"msg_type": "device_ping", "ping_id": "abc123",
+                          "ts": 1.0}, source_device="bbbbbbbbbbbb")
+    app._on_peer_message(decode_message(frame), "bbbbbbbbbbbb")
+    assert len(sent) == 1
+    pid, pong_frame = sent[0]
+    assert pid == "bbbbbbbbbbbb"
+    pong = decode_message(pong_frame)
+    assert getattr(pong, "msg_type", "") == "device_pong"
+    assert pong._raw_payload["ping_id"] == "abc123"
+    assert pong._raw_payload["ts"] == 1.0
+    assert pong.source_device == app.cfg.device_id
 
 
 def test_netpair_status_lists_generated_code_and_peers():
@@ -564,6 +821,8 @@ def make_app_stub_mgmt(**attrs):
     app._netpair_pending = dict(attrs.get("_netpair_pending", {}))
     app._netpair_names = dict(attrs.get("_netpair_names", {}))
     app._netpair_last_seen = dict(attrs.get("_netpair_last_seen", {}))
+    app._netpair_pw = (
+        lambda _a=app: Application._netpair_pw(_a))
 
     class Relay:
         def __init__(self):
@@ -959,6 +1218,8 @@ def make_app_stub_audit(**attrs):
     app._netpair_pending = dict(attrs.get("_netpair_pending", {}))
     app._netpair_names = dict(attrs.get("_netpair_names", {}))
     app._netpair_last_seen = dict(attrs.get("_netpair_last_seen", {}))
+    app._netpair_pw = (
+        lambda _a=app: Application._netpair_pw(_a))
 
     class Relay:
         def __init__(self):
@@ -1123,7 +1384,9 @@ def test_p2_relay_publish_is_off_without_transport():
 def test_p3_relay_clipboard_routes_to_peer_router():
     """A clipboard frame over the relay hits the SAME _on_peer_message router."""
     calls = []
-    app = make_app_stub_audit(_on_peer_message=lambda msg, pid, _a=None: calls.append((msg, pid)))
+    app = make_app_stub_audit(
+        _on_peer_message=lambda msg, pid, _a=None, via_relay=False:
+        calls.append((msg, pid)))
     frame = encode_frame(
         {"msg_type": "clipboard", "text": "relay clip"}, source_device="device-B")
     app._on_relay_frame(frame, topic="t")
@@ -1136,7 +1399,9 @@ def test_p3_relay_clipboard_routes_to_peer_router():
 def test_p3_relay_self_frame_is_dropped():
     """Our own mirrored frame must never re-enter the router (self-echo)."""
     calls = []
-    app = make_app_stub_audit(_on_peer_message=lambda msg, pid, _a=None: calls.append((msg, pid)))
+    app = make_app_stub_audit(
+        _on_peer_message=lambda msg, pid, _a=None, via_relay=False:
+        calls.append((msg, pid)))
     frame = encode_frame(
         {"msg_type": "clipboard", "text": "self"}, source_device=app.cfg.device_id)
     app._on_relay_frame(frame, topic="t")
@@ -1147,7 +1412,9 @@ def test_p3_relay_netpair_hello_never_reaches_clipboard_router():
     """netpair_hello frames are routed to the handshake, not the router."""
     router_calls = []
     hello_calls = []
-    app = make_app_stub_audit(_on_peer_message=lambda msg, pid, _a=None: router_calls.append(msg))
+    app = make_app_stub_audit(
+        _on_peer_message=lambda msg, pid, _a=None, via_relay=False:
+        router_calls.append(msg))
     app._handle_netpair_hello = (
         lambda payload, source, topic, _a=app: hello_calls.append((payload, source, topic)))
     frame = encode_frame(

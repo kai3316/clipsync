@@ -418,6 +418,16 @@ def test_set_files_empty_list_is_a_noop(run_capture):
     assert run_capture.commands == []
 
 
+def test_write_atomic_invalid_utf8_file_data_falls_back(monkeypatch):
+    # A FILE payload whose bytes are not valid UTF-8 (the 0xb8 opcode byte)
+    # used to raise UnicodeDecodeError out of _write_atomic → HTTP 500 on
+    # /api/paste-rich. It must fall back to the osascript _set_files path.
+    monkeypatch.setattr(
+        darwin, "_init_nspasteboard", lambda: (object(), object()))
+    content = ClipboardContent(types={ContentType.FILE: b"bad-\xb8-name"})
+    assert darwin._ClipboardWriter()._write_atomic(content) is False
+
+
 # ── #2 image_fmt exposed through storage and web API ──────────────────
 
 @pytest.fixture

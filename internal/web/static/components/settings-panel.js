@@ -47,6 +47,18 @@
       'settings_window.relay_brokers_toggle', 'settings_window.relay_brokers_label',
       'settings_window.relay_brokers_hint', 'settings_window.save_relay_brokers',
       'settings_window.test_relay_btn', 'settings_window.test_relay_result',
+      'settings_window.netpair_password_label', 'settings_window.netpair_password_unset',
+      'settings_window.netpair_password_set', 'settings_window.netpair_password_btn_set',
+      'settings_window.netpair_password_btn_modify', 'settings_window.netpair_password_btn_clear',
+      'settings_window.netpair_password_placeholder',
+      'settings_window.netpair_password_confirm_placeholder',
+      'settings_window.netpair_password_rule_length', 'settings_window.netpair_password_rule_upper',
+      'settings_window.netpair_password_rule_lower', 'settings_window.netpair_password_rule_digit',
+      'settings_window.netpair_password_rule_special', 'settings_window.netpair_password_hint',
+      'settings_window.netpair_password_saved', 'settings_window.netpair_password_cleared',
+      'settings_window.netpair_password_mismatch',
+      'settings_window.netpair_password_clear_confirm_title',
+      'settings_window.netpair_password_clear_confirm_msg',
     ],
     web: [
       'settings_nav.web_companion', 'settings_window.web_enable',
@@ -183,6 +195,15 @@
         translateKeySet: false,
         showTranslateKey: false,
         translateSaving: false,
+
+        // Internet-pairing passphrase (layered encryption). The value is
+        // NEVER echoed back by the server — only netpair_password_set.
+        netpairPasswordSet: false,
+        netpairPasswordOpen: false,
+        netpairPwValue: '',
+        netpairPwConfirmValue: '',
+        netpairPwShow: false,
+        netpairPwSaving: false,
 
         // Advanced
         historyMax: 200,
@@ -355,6 +376,54 @@
       // The network section no longer manages pairing — it points at the
       // Devices page (round 15). Relay status stays here.
 
+      // Passphrase strength — the SAME five classes the server enforces via
+      // netpair_passphrase_error. All must pass before the Save button arms.
+      netpairPwRules: function () {
+        var pw = this.netpairPwValue || '';
+        return [
+          { key: 'length', ok: pw.length >= 12 },
+          { key: 'upper', ok: /[A-Z]/.test(pw) },
+          { key: 'lower', ok: /[a-z]/.test(pw) },
+          { key: 'digit', ok: /[0-9]/.test(pw) },
+          { key: 'special', ok: /[^A-Za-z0-9]/.test(pw) },
+        ];
+      },
+
+      netpairPwRuleKey: function () {
+        var map = {
+          length: 'settings_window.netpair_password_rule_length',
+          upper: 'settings_window.netpair_password_rule_upper',
+          lower: 'settings_window.netpair_password_rule_lower',
+          digit: 'settings_window.netpair_password_rule_digit',
+          special: 'settings_window.netpair_password_rule_special',
+        };
+        var self = this;
+        return this.netpairPwRules.map(function (r) {
+          return { key: r.key, ok: r.ok, label: self.t(map[r.key]) };
+        });
+      },
+
+      netpairPwValid: function () {
+        var rules = this.netpairPwRules;
+        return rules.length === 5 && rules.every(function (r) { return r.ok; });
+      },
+
+      // Non-empty confirm that differs from the primary field.
+      netpairPwMismatch: function () {
+        return !!this.netpairPwConfirmValue
+          && this.netpairPwValue !== this.netpairPwConfirmValue;
+      },
+
+      netpairPwSaveDisabled: function () {
+        return !this.netpairPwValid || this.netpairPwMismatch || this.netpairPwSaving;
+      },
+
+      // Strength bar: fraction of the five rules currently satisfied.
+      netpairPwStrengthPct: function () {
+        var okCount = this.netpairPwRules.filter(function (r) { return r.ok; }).length;
+        return Math.round(100 * okCount / 5);
+      },
+
       themeOptions: function () {
         return [
           { value: 'system', label: this.t('settings_window.theme_system') },
@@ -477,6 +546,7 @@
         if (s.service_type !== undefined) this.serviceType = s.service_type || '';
         if (s.internet_sync_enabled !== undefined) this.internetSyncEnabled = !!s.internet_sync_enabled;
         if (s.relay_brokers !== undefined) this.relayBrokersText = (s.relay_brokers || []).join('\n');
+        if (s.netpair_password_set !== undefined) this.netpairPasswordSet = !!s.netpair_password_set;
         if (s.web_enabled !== undefined) this.webEnabled = !!s.web_enabled;
         if (s.web_port !== undefined) this.webPort = String(s.web_port);
         if (s.web_history_limit !== undefined) this.webHistoryLimit = s.web_history_limit;
@@ -932,6 +1002,50 @@
           self.store.showToast(self.t('settings_window.translate_key_cleared'), 2000);
         }).catch(function () {
           self.store.showToast(self.t('settings.save_translation_failed'), 2000);
+        });
+      },
+
+      saveNetpairPassword: function () {
+        var self = this;
+        if (self.netpairPwSaveDisabled) return;
+        self.netpairPwSaving = true;
+        ClipsyncAPI.updateSettings({ netpair_password: self.netpairPwValue })
+          .then(function () {
+            self.netpairPasswordSet = true;
+            self.netpairPasswordOpen = false;
+            self.netpairPwValue = '';
+            self.netpairPwConfirmValue = '';
+            self.store.showToast(self.t('settings_window.netpair_password_saved'), 3000);
+          })
+          .catch(function () {
+            // Server-side rejection is a rare fallback — the Save button is
+            // already armed only when the five client rules pass.
+            self.store.showToast(self.t('settings_window.update_failed'), 2000);
+          })
+          .finally(function () {
+            self.netpairPwSaving = false;
+          });
+      },
+
+      clearNetpairPassword: function () {
+        var self = this;
+        self.store.confirm(
+          self.t('settings_window.netpair_password_clear_confirm_title'),
+          self.t('settings_window.netpair_password_clear_confirm_msg'),
+        ).then(function () {
+          return ClipsyncAPI.updateSettings({ netpair_password: '' });
+        }).then(function () {
+          self.netpairPasswordSet = false;
+          self.netpairPasswordOpen = false;
+          self.netpairPwValue = '';
+          self.netpairPwConfirmValue = '';
+          self.store.showToast(self.t('settings_window.netpair_password_cleared'), 2000);
+        }).catch(function (err) {
+          // A real update failure has err.status; a cancelled confirm is
+          // just a plain rejection — silently stay put in that case.
+          if (err && err.status) {
+            self.store.showToast(self.t('settings_window.update_failed'), 2000);
+          }
         });
       },
 
@@ -1631,70 +1745,53 @@
               '<div class="settings-dialog__content">' +
                 '<p v-if="searchNoMatches" class="settings-hint" style="padding:8px 0">{{ t(\'settings.search_no_matches\') }}</p>' +
 
-                '<!-- ═══════ Appearance ═══════ (master switch reveals theme / animation) -->' +
+                '<!-- ═══════ Appearance ═══════ (theme / animation, shown directly) -->' +
                 '<section v-if="activeSection === \'appearance\'" class="settings-section">' +
+                  '<h3 class="settings-section__title">{{ t(\'settings.appearance\') }}</h3>' +
+                  '<p class="settings-hint" style="margin-bottom:0">{{ t(\'settings_window.appearance_desc\') }}</p>' +
+                  '<div class="settings-theme-row" style="margin-top:12px">' +
+                    '<button v-for="opt in themeOptions" :key="opt.value"' +
+                      ' class="settings-theme-btn"' +
+                      ' :class="{ \'settings-theme-btn--active\': store.theme === opt.value }"' +
+                      ' @click="selectTheme(opt.value)">' +
+                      '<span class="settings-theme-btn__label">{{ opt.label }}</span>' +
+                      '<span v-if="store.theme === opt.value" class="settings-theme-btn__check">✓</span>' +
+                    '</button>' +
+                  '</div>' +
+                  '<h3 class="settings-section__title settings-section__title--sub" style="margin-top:24px">{{ t(\'settings.animation\') }}</h3>' +
                   '<div class="settings-toggle-row">' +
-                    '<span class="settings-toggle-label"><strong>{{ t(\'settings.appearance\') }}</strong></span>' +
-                    '<button class="settings-toggle" role="switch" :aria-checked="store.appearanceMaster" :aria-label="t(\'settings.appearance\')" :class="{ \'settings-toggle--on\': store.appearanceMaster }" @click="store.setAppearanceMaster(!store.appearanceMaster)">' +
+                    '<span class="settings-toggle-label">{{ t(\'settings.animation\') }}</span>' +
+                    '<button class="settings-toggle" role="switch" :aria-checked="store.animationsEnabled" :aria-label="t(\'settings.animation\')" :class="{ \'settings-toggle--on\': store.animationsEnabled }" @click="toggleAnimation">' +
                       '<span class="settings-toggle__knob"></span>' +
                     '</button>' +
                   '</div>' +
-                  '<p class="settings-hint" style="margin-bottom:0">{{ t(\'settings_window.appearance_desc\') }}</p>' +
-                  '<template v-if="store.appearanceMaster">' +
-                    '<div class="settings-theme-row" style="margin-top:12px">' +
-                      '<button v-for="opt in themeOptions" :key="opt.value"' +
-                        ' class="settings-theme-btn"' +
-                        ' :class="{ \'settings-theme-btn--active\': store.theme === opt.value }"' +
-                        ' @click="selectTheme(opt.value)">' +
-                        '<span class="settings-theme-btn__label">{{ opt.label }}</span>' +
-                        '<span v-if="store.theme === opt.value" class="settings-theme-btn__check">✓</span>' +
-                      '</button>' +
-                    '</div>' +
-
-                    '<h3 class="settings-section__title settings-section__title--sub" style="margin-top:24px">{{ t(\'settings.animation\') }}</h3>' +
-                    '<div class="settings-toggle-row">' +
-                      '<span class="settings-toggle-label">{{ t(\'settings.animation\') }}</span>' +
-                      '<button class="settings-toggle" role="switch" :aria-checked="store.animationsEnabled" :aria-label="t(\'settings.animation\')" :class="{ \'settings-toggle--on\': store.animationsEnabled }" @click="toggleAnimation">' +
-                        '<span class="settings-toggle__knob"></span>' +
-                      '</button>' +
-                    '</div>' +
-                  '</template>' +
                 '</section>' +
 
-                '<!-- ═══════ Preferences ═══════ (master switch reveals language / system; notifications stay visible) -->' +
+                '<!-- ═══════ Preferences ═══════ (language / system shown directly; notifications stay visible) -->' +
                 '<section v-if="activeSection === \'preferences\'" class="settings-section">' +
+                  '<h3 class="settings-section__title settings-section__title--sub">{{ t(\'settings.language\') }}</h3>' +
+                  '<select class="settings-select"' +
+                    ' :value="currentLocale"' +
+                    ' @change="selectLocale($event.target.value)">' +
+                    '<option v-for="loc in locales" :key="loc.code" :value="loc.code">{{ loc.label }}</option>' +
+                  '</select>' +
+                  '<p class="settings-hint">{{ t("settings.language_hint") }}</p>' +
+
+                  '<h3 class="settings-section__title settings-section__title--sub" style="margin-top:24px">{{ t(\'settings_window.system_title\') }}</h3>' +
                   '<div class="settings-toggle-row">' +
-                    '<span class="settings-toggle-label"><strong>{{ t(\'settings.preferences\') }}</strong></span>' +
-                    '<button class="settings-toggle" role="switch" :aria-checked="store.preferencesMaster" :aria-label="t(\'settings.preferences\')" :class="{ \'settings-toggle--on\': store.preferencesMaster }" @click="store.setPreferencesMaster(!store.preferencesMaster)">' +
+                    '<span class="settings-toggle-label">{{ t(\'network.auto_start\') }}</span>' +
+                    '<button class="settings-toggle" role="switch" :aria-checked="autoStart" :aria-label="t(\'network.auto_start\')" :class="{ \'settings-toggle--on\': autoStart }" @click="toggleAutoStart">' +
                       '<span class="settings-toggle__knob"></span>' +
                     '</button>' +
                   '</div>' +
-                  '<template v-if="store.preferencesMaster">' +
-
-                    '<h3 class="settings-section__title settings-section__title--sub">{{ t(\'settings.language\') }}</h3>' +
-                    '<select class="settings-select"' +
-                      ' :value="currentLocale"' +
-                      ' @change="selectLocale($event.target.value)">' +
-                      '<option v-for="loc in locales" :key="loc.code" :value="loc.code">{{ loc.label }}</option>' +
-                    '</select>' +
-                    '<p class="settings-hint">{{ t("settings.language_hint") }}</p>' +
-
-                    '<h3 class="settings-section__title settings-section__title--sub" style="margin-top:24px">{{ t(\'settings_window.system_title\') }}</h3>' +
-                    '<div class="settings-toggle-row">' +
-                      '<span class="settings-toggle-label">{{ t(\'network.auto_start\') }}</span>' +
-                      '<button class="settings-toggle" role="switch" :aria-checked="autoStart" :aria-label="t(\'network.auto_start\')" :class="{ \'settings-toggle--on\': autoStart }" @click="toggleAutoStart">' +
-                        '<span class="settings-toggle__knob"></span>' +
-                      '</button>' +
-                    '</div>' +
-                    '<p class="settings-hint">{{ t(\'settings_window.auto_start_hint\') }}</p>' +
-                    '<div class="settings-toggle-row">' +
-                      '<span class="settings-toggle-label">{{ t(\'settings.ui_mode\') }}</span>' +
-                      '<button class="settings-toggle" role="switch" :aria-checked="uiBackend === \'webview\'" :aria-label="t(\'settings.ui_mode\')" :class="{ \'settings-toggle--on\': uiBackend === \'webview\' }" @click="toggleUIMode">' +
-                        '<span class="settings-toggle__knob"></span>' +
-                      '</button>' +
-                    '</div>' +
-                    '<p class="settings-hint">{{ t(\'settings_window.ui_backend_hint\') }}</p>' +
-                  '</template>' +
+                  '<p class="settings-hint">{{ t(\'settings_window.auto_start_hint\') }}</p>' +
+                  '<div class="settings-toggle-row">' +
+                    '<span class="settings-toggle-label">{{ t(\'settings.ui_mode\') }}</span>' +
+                    '<button class="settings-toggle" role="switch" :aria-checked="uiBackend === \'webview\'" :aria-label="t(\'settings.ui_mode\')" :class="{ \'settings-toggle--on\': uiBackend === \'webview\' }" @click="toggleUIMode">' +
+                      '<span class="settings-toggle__knob"></span>' +
+                    '</button>' +
+                  '</div>' +
+                  '<p class="settings-hint">{{ t(\'settings_window.ui_backend_hint\') }}</p>' +
 
                   '<!-- Notifications (moved here from Security; each toggle saves immediately) -->' +
                   '<h3 class="settings-section__title settings-section__title--sub" style="margin-top:28px">{{ t(\'settings_window.notify_title\') }}</h3>' +
@@ -1817,6 +1914,40 @@
                         '<span v-if="!r.ok && r.detail" style="color:var(--clipsync-danger);word-break:break-all"> — {{ r.detail }}</span>' +
                       '</div>' +
                     '</div>' +
+                  '</template>' +
+
+                  // ── Pairing passphrase (layered encryption) ──────────────
+                  // The value is never echoed back — only netpair_password_set.
+                  // When unset the pairing flow uses the 35-bit code alone
+                  // (default); when set, the code routes and the passphrase
+                  // derives the AES key.
+                  '<div class="settings-field" style="margin-top:12px">' +
+                    '<span class="settings-field__label">{{ t(\'settings_window.netpair_password_label\') }}</span>' +
+                    '<div class="settings-field__row">' +
+                      '<span class="settings-field__value">{{ netpairPasswordSet ? t(\'settings_window.netpair_password_set\') : t(\'settings_window.netpair_password_unset\') }}</span>' +
+                      '<button class="settings-btn settings-btn--sm settings-btn--accent" @click="netpairPasswordOpen = !netpairPasswordOpen" style="margin-left:auto">{{ netpairPasswordSet ? t(\'settings_window.netpair_password_btn_modify\') : t(\'settings_window.netpair_password_btn_set\') }}</button>' +
+                      '<button v-if="netpairPasswordSet" class="settings-btn settings-btn--sm" @click="clearNetpairPassword" style="margin-left:4px">{{ t(\'settings_window.netpair_password_btn_clear\') }}</button>' +
+                    '</div>' +
+                    '<p class="settings-hint" style="margin-top:4px">{{ t(\'settings_window.netpair_password_hint\') }}</p>' +
+                  '</div>' +
+                  '<template v-if="netpairPasswordOpen">' +
+                    '<div class="settings-field" style="margin-top:8px">' +
+                      '<div class="settings-field__row">' +
+                        '<input :type="netpairPwShow ? \'text\' : \'password\'" class="settings-input" v-model="netpairPwValue" maxlength="200" :placeholder="t(\'settings_window.netpair_password_placeholder\')" style="flex:1">' +
+                        '<button class="settings-btn settings-btn--sm" @click="netpairPwShow = !netpairPwShow" style="margin-left:4px">{{ netpairPwShow ? t(\'settings_window.hide\') : t(\'settings_window.show\') }}</button>' +
+                      '</div>' +
+                      '<div style="height:4px;border-radius:2px;background:rgba(128,128,128,.18);margin-top:6px">' +
+                        '<div :style="{ width: netpairPwStrengthPct + \'%\', height: \'100%\', borderRadius: \'2px\', background: netpairPwValid ? \'var(--clipsync-success)\' : \'var(--clipsync-warning)\', transition: \'width .2s\' }"></div>' +
+                      '</div>' +
+                      '<ul style="margin:6px 0 0;padding:0;list-style:none;font-size:12px;line-height:1.6">' +
+                        '<li v-for="r in netpairPwRuleKey" :key="r.key" :style="{ color: r.ok ? \'var(--clipsync-success)\' : \'var(--clipsync-fg-muted)\' }">{{ r.ok ? \'✓\' : \'✗\' }} {{ r.label }}</li>' +
+                      '</ul>' +
+                      '<input :type="netpairPwShow ? \'text\' : \'password\'" class="settings-input" v-model="netpairPwConfirmValue" maxlength="200" :placeholder="t(\'settings_window.netpair_password_confirm_placeholder\')" style="margin-top:6px">' +
+                      '<p v-if="netpairPwMismatch" class="settings-hint" style="color:var(--clipsync-danger);margin-top:4px">{{ t(\'settings_window.netpair_password_mismatch\') }}</p>' +
+                    '</div>' +
+                    '<button class="settings-btn settings-btn--accent" @click="saveNetpairPassword" :disabled="netpairPwSaveDisabled" style="width:100%;margin-top:4px">' +
+                      '{{ netpairPwSaving ? \'...\' : (netpairPasswordSet ? t(\'settings_window.netpair_password_btn_modify\') : t(\'settings_window.netpair_password_btn_set\')) }}' +
+                    '</button>' +
                   '</template>' +
                 '</section>' +
 

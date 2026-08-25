@@ -85,10 +85,10 @@
         mode: 'copy',           // default = never clobber silently
         pulling: false,
         modes: MODES,
-        // Expanded directory nodes in the tree view ("root_index|path").
-        // Folders default collapsed so a big skill doesn't dump every nested
-        // file onto the list.
-        expanded: {},
+        // Directory nodes explicitly COLLAPSED in the tree view
+        // ("root_index|path").  Folders are open by default so everything is
+        // visible at a glance; the user folds what they don't need.
+        collapsed: {},
         preview: {
           visible: false,
           loading: false,
@@ -211,7 +211,7 @@
               key: node.key, label: node.name, depth: depth,
               isDir: node.is_dir, entry: node.entry, node: node,
             });
-            if (node.is_dir && self.expanded[node.key]) {
+            if (node.is_dir && !self.collapsed[node.key]) {
               walk(node.children, depth + 1);
             }
           }
@@ -328,22 +328,22 @@
       selectPeer: function (id) {
         if (id === this.selectedPeerId) return;
         this.selectedPeerId = id;
-        this.checked = {};   // selection belongs to one device
-        this.expanded = {};  // fresh device starts with folders collapsed
+        this.checked = {};    // selection belongs to one device
+        this.collapsed = {};  // fresh device starts with all folders open
       },
 
       isDirExpanded: function (node) {
-        return !!(node && this.expanded[node.key]);
+        return !(node && this.collapsed[node.key]);
       },
 
       toggleDir: function (node) {
         if (!node) return;
-        if (this.expanded[node.key]) {
-          delete this.expanded[node.key];
+        if (this.collapsed[node.key]) {
+          delete this.collapsed[node.key];
         } else {
-          this.expanded[node.key] = true;
+          this.collapsed[node.key] = true;
         }
-        this.expanded = Object.assign({}, this.expanded);
+        this.collapsed = Object.assign({}, this.collapsed);
       },
 
       isChecked: function (entry) {
@@ -597,7 +597,7 @@
                   '<tbody>' +
                     '<tr v-for="row in treeRows" :key="row.key">' +
                       '<td class="aiconfig-panel__td-check">' +
-                        '<span v-if="row.isDir && row.node" class="aiconfig-panel__tree-chevron" :class="{ \'aiconfig-panel__tree-chevron--open\': expanded[row.node.key] }" role="button" tabindex="0" :aria-label="row.label" :aria-expanded="!!expanded[row.node.key]" @click.stop="toggleDir(row.node)" @keydown.enter.space.stop.prevent="toggleDir(row.node)">▸</span>' +
+                        '<span v-if="row.isDir && row.node" class="aiconfig-panel__tree-chevron" :class="{ \'aiconfig-panel__tree-chevron--open\': !collapsed[row.node.key] }" role="button" tabindex="0" :aria-label="row.label" :aria-expanded="!collapsed[row.node.key]" @click.stop="toggleDir(row.node)" @keydown.enter.space.stop.prevent="toggleDir(row.node)">▸</span>' +
                         '<span v-else class="aiconfig-panel__tree-chevron aiconfig-panel__tree-chevron--spacer"></span>' +
                         '<input v-if="!row.isDir" type="checkbox" :checked="isChecked(row.entry)" @change="toggleCheck(row.entry)" :aria-label="row.entry.rel_path">' +
                       '</td>' +

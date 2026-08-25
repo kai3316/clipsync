@@ -314,6 +314,26 @@ def test_receive_bad_payload_dropped(channels):
     t.stop()
 
 
+def test_netpair_channel_rejects_passphrase_keyed_envelope():
+    # Layered pairing passphrase: routing stays on the code's topic, but the
+    # AES key changes.  A receiver WITHOUT the passphrase holds the code-only
+    # key, so an envelope encrypted by a passphrase-configured sender must be
+    # dropped ("一方有密码一方无 → 解不开") while the code-only key still works.
+    secret = R.generate_netpair_secret()
+    topic = R.netpair_topic(secret)
+    no_pw = {topic: R.netpair_key(secret)}
+    t, clients, received, _ = make_transport(no_pw)
+    t.start()
+    clients[0].fire_connect(0, t)
+    wrong = R.pack_envelope(
+        b"x", R.netpair_key(secret, "Passw0rd!123"), time.time())
+    clients[0].fire_message(t, topic, wrong)
+    right = R.pack_envelope(b"y", R.netpair_key(secret), time.time())
+    clients[0].fire_message(t, topic, right)
+    assert received == [b"y"]
+    t.stop()
+
+
 def test_failover_to_next_broker():
     ch = {R.derive_topic("a", "b"): R.derive_key("a", "b")}
     brokers = ["bad-scheme-no-host", "wss://first:8884/mqtt"]

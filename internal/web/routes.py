@@ -178,6 +178,7 @@ def dispatch(method, path, query_params, body, cfg, history, sync_mgr,
              dialog_mgr=None,
              get_overview_data=None,
              on_device_action=None,
+             on_device_test=None,
              on_transfer_action=None,
              on_get_transfers=None,
              on_speed_test_start=None,
@@ -230,7 +231,8 @@ def dispatch(method, path, query_params, body, cfg, history, sync_mgr,
         return _dispatch(
             method, path, query_params, body, cfg, history, sync_mgr,
             get_connected_ids, on_nav_url, on_forward_file, upload_dir,
-            dialog_mgr, get_overview_data, on_device_action, on_transfer_action,
+            dialog_mgr, get_overview_data, on_device_action, on_device_test,
+            on_transfer_action,
             on_get_transfers, on_speed_test_start, on_speed_test_poll,
             on_window_close, on_toggle_discovery, on_toggle_visibility,
             on_settings_change, on_show_web_qr, on_send_url, get_discovered,
@@ -252,6 +254,7 @@ def _dispatch(method, path, query_params, body, cfg, history, sync_mgr,
               dialog_mgr=None,
               get_overview_data=None,
               on_device_action=None,
+              on_device_test=None,
               on_transfer_action=None,
               on_get_transfers=None,
               on_speed_test_start=None,
@@ -887,6 +890,25 @@ def _dispatch(method, path, query_params, body, cfg, history, sync_mgr,
                 return _json_response({"ok": False, "error": "peer_id required"}, 400)
             ok = on_device_action("forget", peer_id)
             return _json_response({"ok": ok})
+
+        elif path == "/api/device/test":
+            # Full probe result (per-channel RTT + reasons), not a bool — the
+            # card shows which channels answered and at what latency.
+            if on_device_test is None:
+                return _json_response({"ok": False, "error": "not available"}, 503)
+            try:
+                req = json.loads(body.decode("utf-8"))
+            except (json.JSONDecodeError, UnicodeDecodeError):
+                return _json_response({"ok": False, "error": "invalid json"}, 400)
+            peer_id = req.get("peer_id", "").strip()
+            if not peer_id:
+                return _json_response({"ok": False, "error": "peer_id required"}, 400)
+            try:
+                result = on_device_test(peer_id) or {"ok": False}
+            except Exception:
+                logger.exception("device test failed for %s", peer_id[:12])
+                return _json_response({"ok": False, "error": "internal server error"}, 500)
+            return _json_response(result)
 
         elif path == "/api/transfer/cancel":
             if on_transfer_action is None:

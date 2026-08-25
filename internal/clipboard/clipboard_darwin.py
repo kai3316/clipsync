@@ -785,7 +785,14 @@ class _ClipboardWriter(ClipboardWriter):
                 else:
                     write_ops.append((b"public.png", data))
             elif fmt_type == ContentType.FILE:
-                paths = [p.strip() for p in data.decode("utf-8").split("\n") if p.strip()]
+                # A file path may not be valid UTF-8 (e.g. an opaque filename
+                # pasted from a foreign app). Fall through to the osascript
+                # writeObjects: path rather than raising a 500 mid-paste.
+                try:
+                    paths = [p.strip() for p in data.decode("utf-8").split("\n") if p.strip()]
+                except UnicodeDecodeError:
+                    logger.debug("atomic write: file data not valid UTF-8, falling back")
+                    return False
                 if len(paths) > 1:
                     # setData:forType: overwrites a UTI, so multiple
                     # public.file-url writes would leave only the last file.

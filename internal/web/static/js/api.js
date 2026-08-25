@@ -857,6 +857,18 @@ var ClipsyncAPI = (function () {
       });
     },
 
+    /**
+     * Probe connectivity to a device over every available channel (LAN when
+     * reachable + relay when internet-paired). Returns the per-channel result.
+     * @param {string} peerId
+     * @returns {Promise<{ok: boolean, results: Array<{channel: string, ok: boolean, latency_ms?: number, error?: string}>}>}
+     */
+    testDeviceConnection: function (peerId) {
+      return this._fetch('POST', '/api/device/test', {
+        peer_id: peerId,
+      });
+    },
+
     /* ═══════════════════════════════════════════════════════════════
        Transfer actions
        ═══════════════════════════════════════════════════════════════ */

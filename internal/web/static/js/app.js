@@ -483,10 +483,6 @@
           if (typeof ClipsyncSound !== 'undefined' && ClipsyncSound.setEnabled) {
             ClipsyncSound.setEnabled(store.soundEnabled);
           }
-          // 外观/偏好 master switches: an explicit user choice (localStorage)
-          // wins; otherwise derive from the loaded settings so a customised
-          // group stays open instead of collapsing.
-          store.loadMasters();
           return s;
         });
       },

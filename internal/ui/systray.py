@@ -88,6 +88,7 @@ class SystrayApp:
         on_about: Callable | None = None,
         on_pause_minutes: Callable | None = None,
         on_resume_sync: Callable | None = None,
+        on_tray_failed: Callable | None = None,
     ):
         self._device_name = device_name
         self._on_enable_toggle = on_enable_toggle
@@ -101,6 +102,7 @@ class SystrayApp:
         self._on_about_cb = on_about
         self._on_pause_minutes = on_pause_minutes
         self._on_resume_sync = on_resume_sync
+        self._on_tray_failed = on_tray_failed
         self._syncing = True
         self._web_enabled = False
         # Wall-clock deadline (time.time()) of a timed "pause for N minutes",
@@ -355,14 +357,12 @@ class SystrayApp:
             # only UI, so a silently-absent tray isn't mistaken for a working
             # one.
             logger.exception("System tray failed to start or crashed")
-            try:
-                notification_mgr.show(
-                    T("tray.failed_title"),
-                    T("tray.failed_msg"),
-                )
-            except Exception:
-                logger.debug("Tray-failure notification could not be shown",
-                             exc_info=True)
+            if self._on_tray_failed is not None:
+                try:
+                    self._on_tray_failed()
+                except Exception:
+                    logger.debug("Tray-failure toast could not be shown",
+                                 exc_info=True)
         finally:
             self._tray = None
 

@@ -711,6 +711,7 @@ class WebServer:
     def __init__(self, cfg, clipboard_history, sync_mgr, get_connected_ids=None,
                  on_nav_url=None, on_forward_file=None,
                  get_overview_data=None, on_device_action=None,
+                 on_device_test=None,
                  on_transfer_action=None,
                  on_get_transfers=None,
                  on_speed_test_start=None, on_speed_test_poll=None,
@@ -769,6 +770,7 @@ class WebServer:
         self._on_forward_file = on_forward_file
         self._get_overview_data = get_overview_data
         self._on_device_action = on_device_action
+        self._on_device_test = on_device_test
         self._on_transfer_action = on_transfer_action
         self._on_get_transfers = on_get_transfers
         self._on_speed_test_start = on_speed_test_start
@@ -1051,6 +1053,7 @@ class WebServer:
         on_forward_file = self._on_forward_file
         get_overview_data = self._get_overview_data
         on_device_action = self._on_device_action
+        on_device_test = self._on_device_test
         on_transfer_action = self._on_transfer_action
         on_get_transfers = self._on_get_transfers
         on_speed_test_start = self._on_speed_test_start
@@ -1770,6 +1773,7 @@ class WebServer:
                         dialog_mgr=self._dialog_mgr,
                         get_overview_data=get_overview_data,
                         on_device_action=on_device_action,
+                        on_device_test=on_device_test,
                         on_transfer_action=on_transfer_action,
                         on_get_transfers=on_get_transfers,
                         on_speed_test_start=on_speed_test_start,
@@ -1986,6 +1990,7 @@ class WebServer:
                         dialog_mgr=self._dialog_mgr,
                         get_overview_data=get_overview_data,
                         on_device_action=on_device_action,
+                        on_device_test=on_device_test,
                         on_transfer_action=on_transfer_action,
                         on_get_transfers=on_get_transfers,
                         on_speed_test_start=on_speed_test_start,
@@ -2063,6 +2068,7 @@ class WebServer:
                         dialog_mgr=self._dialog_mgr,
                         get_overview_data=get_overview_data,
                         on_device_action=on_device_action,
+                        on_device_test=on_device_test,
                         on_transfer_action=on_transfer_action,
                         on_get_transfers=on_get_transfers,
                         on_speed_test_start=on_speed_test_start,
@@ -2120,6 +2126,7 @@ class WebServer:
                         dialog_mgr=self._dialog_mgr,
                         get_overview_data=get_overview_data,
                         on_device_action=on_device_action,
+                        on_device_test=on_device_test,
                         on_transfer_action=on_transfer_action,
                         on_get_transfers=on_get_transfers,
                         on_speed_test_start=on_speed_test_start,

@@ -62,11 +62,12 @@
     data: function () {
       return {
         localSearch: '',
-        // Expanded folder keys in the tree view: "root_index|rel_path".
-        // Folders render collapsed by default so a big skill doesn't dump
-        // every nested file onto the list (the "一个 skill 所有文件都显示了"
-        // complaint).  Folders stay open across refreshes (keyed, not index).
-        localExpanded: {},
+        // Folder keys explicitly COLLAPSED in the tree view: "root_index|rel_path".
+        // Folders are open by default so everything is visible at a glance; the
+        // user folds the ones they don't need (a big skill dumps every nested
+        // file, so folding stays one click away).  Collapse state survives
+        // refreshes (keyed, not index).
+        localCollapsed: {},
         pathsDialog: { visible: false, paths: [], saving: false },
         localPreview: {
           visible: false,
@@ -287,18 +288,18 @@
       // ── Tree view helpers (round 19) ─────────────────────────────
 
       isDirExpanded: function (node) {
-        return !!(node && this.localExpanded[node.key]);
+        return !(node && this.localCollapsed[node.key]);
       },
 
       toggleDir: function (node) {
         if (!node) return;
-        if (this.localExpanded[node.key]) {
-          delete this.localExpanded[node.key];
+        if (this.localCollapsed[node.key]) {
+          delete this.localCollapsed[node.key];
         } else {
-          this.localExpanded[node.key] = true;
+          this.localCollapsed[node.key] = true;
         }
         // Reassign a copy so Vue 2's object-change detection picks it up.
-        this.localExpanded = Object.assign({}, this.localExpanded);
+        this.localCollapsed = Object.assign({}, this.localCollapsed);
       },
 
       // Clicking a folder toggles its expansion; a file opens the preview.
@@ -612,7 +613,7 @@
               '<tbody>' +
                 '<tr v-for="row in localRows" :key="row.key">' +
                   '<td class="aiconfig-panel__cell-path" :style="row.depth ? { paddingLeft: (12 + row.depth * 18) + \'px\' } : {}">' +
-                    '<span v-if="row.isDir && row.node" class="aiconfig-panel__tree-chevron" :class="{ \'aiconfig-panel__tree-chevron--open\': localExpanded[row.node.key] }" role="button" tabindex="0" :aria-label="row.label" :aria-expanded="!!localExpanded[row.node.key]" @click.stop="toggleDir(row.node)" @keydown.enter.space.stop.prevent="toggleDir(row.node)">▸</span>' +
+                    '<span v-if="row.isDir && row.node" class="aiconfig-panel__tree-chevron" :class="{ \'aiconfig-panel__tree-chevron--open\': !localCollapsed[row.node.key] }" role="button" tabindex="0" :aria-label="row.label" :aria-expanded="!localCollapsed[row.node.key]" @click.stop="toggleDir(row.node)" @keydown.enter.space.stop.prevent="toggleDir(row.node)">▸</span>' +
                     '<span v-else class="aiconfig-panel__tree-chevron aiconfig-panel__tree-chevron--spacer"></span>' +
                     '<span v-if="localMultiRoot && !row.isDir" class="aiconfig-panel__root-chip" :title="localRootLabel(row.entry.root_index)">R{{ row.entry.root_index }}</span>' +
                     // Folders: click to expand/collapse the tree, double-click
