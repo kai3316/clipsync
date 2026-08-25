@@ -278,3 +278,51 @@ def test_stop_joins_cleanly_under_contention(channels):
     clients[0].fire_connect(0, t)  # race a callback against stop
     stopper.join(timeout=5)
     assert not stopper.is_alive()
+
+
+class StrictTlsClient(FakeClient):
+    """paho 2.x behaviour: a SECOND tls_set() raises immediately."""
+
+    def __init__(self, owner):
+        super().__init__()
+        self._owner = owner
+        self.tls_calls = 0
+
+    def tls_set(self, **kwargs):
+        self.tls_calls += 1
+        if self.tls_calls > 1:
+            raise ValueError("SSL/TLS has already been configured.")
+
+    def connect(self, host, port, keepalive=60):
+        super().connect(host, port, keepalive)
+        # fire CONNACK synchronously so the test never waits 10s
+        self.on_connect(self, None, None, 0)
+        return self
+
+
+def test_connect_one_does_not_double_configure_tls(channels):
+    # Regression: the worker called client.tls_set() a second time after the
+    # factory already configured TLS -> paho 2.x raised "already configured",
+    # which killed the relay-sync thread on real installs. The TLS belongs in
+    # the factory; _connect_one must not touch it.
+    calls = []
+
+    def factory():
+        c = StrictTlsClient(calls)
+        calls.append(c)
+        return c
+
+    t = R.RelayTransport(
+        ["wss://broker.example:8884/mqtt"],
+        get_channels=lambda: dict(channels),
+        on_frame=lambda *a: None,
+        on_state=lambda s: None,
+        client_factory=factory,
+        sleeper=lambda s: None,
+    )
+    assert t._connect_one(0) is True
+    assert t.state == R.STATE_ONLINE
+    # _connect_one must not configure TLS at all — that's the factory's job
+    # (a second tls_set() is what raised on real paho 2.x).
+    assert calls[0].tls_calls == 0
+    t.stop()

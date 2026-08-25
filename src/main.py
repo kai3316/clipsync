@@ -7211,9 +7211,12 @@ class Application:
                 continue
             channels[derive_topic(my_secret, peer_secret)] = derive_key(
                 my_secret, peer_secret)
-        for secret in self._netpair_secrets_all().values():
-            if secret:
-                channels[netpair_topic(secret)] = netpair_key(secret)
+        for pid, secret in self._netpair_secrets_all().items():
+            if not secret:
+                continue
+            if pid == self.cfg.device_id or pid == f"pending:{self.cfg.device_id}":
+                continue  # never listen on a channel derived from our own code
+            channels[netpair_topic(secret)] = netpair_key(secret)
         return channels
 
     # ------------------------------------------- internet pairing code state
@@ -7285,17 +7288,23 @@ class Application:
             return
         if sync_msg is None:
             return
+        # Never ingest our own frames: a self-entered netpair code or a
+        # self-published relay-enroll topic would otherwise echo straight
+        # back into the clipboard/file/chat routers.
+        source = getattr(sync_msg, "source_device", "") or None
+        if source and source == self.cfg.device_id:
+            logger.debug("Dropping self-originated relay frame")
+            return
         if getattr(sync_msg, "msg_type", "") == "netpair_hello":
             try:
                 self._handle_netpair_hello(
                     getattr(sync_msg, "_raw_payload", {}),
-                    getattr(sync_msg, "source_device", "") or None,
+                    source,
                     topic,
                 )
             except Exception:
                 logger.debug("netpair hello handling failed", exc_info=True)
             return
-        source = getattr(sync_msg, "source_device", "") or None
         try:
             self._on_peer_message(sync_msg, source)
         except Exception:
@@ -7390,9 +7399,11 @@ class Application:
         # (Generated-but-unconfirmed codes stay subscribed but are not used for
         # clipboard mirroring — nothing has been confirmed yet.)
         from internal.transport.relay import netpair_key, netpair_topic
-        for peer_secret in (getattr(self.cfg, "netpair_secrets", {}) or {}).values():
+        for pid, peer_secret in (getattr(self.cfg, "netpair_secrets", {}) or {}).items():
             if not isinstance(peer_secret, str) or not peer_secret:
                 continue
+            if pid == self.cfg.device_id:
+                continue  # a stray self-entry must never mirror to ourselves
             try:
                 transport.publish(frame_bytes,
                                   netpair_topic(peer_secret),
@@ -7430,6 +7441,12 @@ class Application:
         peer_id, secret = decoded
         if not self.cfg.internet_sync_enabled:
             return {"ok": False, "error": "internet sync is off"}, 400
+        # Entering a code we generated ourselves is a no-op: the code's
+        # device tag is our own, so this would only pair us with ourselves.
+        from internal.transport.relay import netpair_device_tag
+        if peer_id == netpair_device_tag(self.cfg.device_id):
+            return {"ok": False,
+                    "error": "cannot pair with this device"}, 400
         self.cfg.netpair_secrets[peer_id] = secret
         try:
             self._save_cfg_and_peers()
@@ -7498,6 +7515,10 @@ class Application:
         from internal.transport.relay import netpair_device_tag
         incoming_tag = payload.get("peer_id")
         peer_id = source_device if isinstance(source_device, str) else ""
+        # A frame from ourselves (e.g. entering our own code on the same
+        # machine) must never become a paired peer.
+        if peer_id and peer_id == self.cfg.device_id:
+            return
         our_tag = netpair_device_tag(self.cfg.device_id)
         if incoming_tag == self.cfg.device_id:
             # Reply to us — we are the ENTERER.  Only accept when we are not

@@ -412,7 +412,16 @@ class RelayTransport:
             for index, endpoint in enumerate(self._brokers):
                 if self._stop.is_set():
                     return
-                if self._connect_one(index):
+                try:
+                    ok = self._connect_one(index)
+                except Exception:
+                    # Never let an unexpected setup/connect error kill the
+                    # worker thread silently (a dead thread leaves the state
+                    # stuck on "connecting" with no recovery path).
+                    logger.warning("relay broker #%d raised during connect",
+                                   index, exc_info=True)
+                    ok = False
+                if ok:
                     attempt = 0
                     self._serve_until_lost(index)
                     if self._stop.is_set():
@@ -450,18 +459,23 @@ class RelayTransport:
             self._set_state(STATE_ERROR)
             self._stop.set()
             return False
-        client.ws_set_options(path=path)
-        client.tls_set(cert_reqs=ssl.CERT_REQUIRED)
         client.on_connect = self._make_on_connect(index)
         client.on_disconnect = self._make_on_disconnect(index)
         client.on_message = self._on_message
         with self._lock:
             self._client = client
         try:
+            # NOTE: TLS is configured inside build_paho_client() (the factory).
+            # Calling client.tls_set() again here raises
+            # "SSL/TLS has already been configured" on paho 2.x, which killed
+            # the relay thread on real paho (unit fakes never noticed).  Only
+            # the websocket path is transport-specific and set per-endpoint.
+            client.ws_set_options(path=path)
             client.connect(host, port, keepalive=45)
             client.loop_start()
         except Exception:
-            logger.debug("relay connect %s:%s failed", host, port, exc_info=True)
+            logger.warning("relay connect to %s:%s failed", host, port,
+                           exc_info=True)
             with self._lock:
                 self._client = None
             return False

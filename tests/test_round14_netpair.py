@@ -372,6 +372,16 @@ def test_api_routes_with_bound_app():
         data, status = api.handle(
             "POST", "/api/internetpair/enter", {},
             json.dumps({"code": code}).encode())
+        # Entering OUR OWN generated code is self-pairing — must be rejected.
+        assert status == 400 and data["ok"] is False
+        from internal.transport.relay import (
+            generate_netpair_code, generate_netpair_secret,
+        )
+        other_code = generate_netpair_code("999999999999",
+                                           generate_netpair_secret())
+        data, status = api.handle(
+            "POST", "/api/internetpair/enter", {},
+            json.dumps({"code": other_code}).encode())
         assert status == 200 and data["peer_id"]
         data, status = api.handle("GET", "/api/internetpair/nope", {}, b"")
         assert status == 404
@@ -449,3 +459,48 @@ def test_backup_restore_ignores_malformed_netpair_secrets(tmp_path,
     fresh = Config()
     backup_mod.restore_backup(str(crafted), fresh, None)
     assert fresh.netpair_secrets == {"ok": "ABCDEFG"}  # junk pairs dropped
+
+
+# ------------------------------------------------- self-pairing guards (hotfix)
+
+def test_netpair_enter_own_code_rejected():
+    # Entering a code we generated ourselves must not pair us with ourselves.
+    from internal.transport.relay import generate_netpair_code
+    app = make_app_stub(device_id="a1b2c3d4e5f6")
+    code = generate_netpair_code(app.cfg.device_id, "SECRETX")
+    resp, status = Application._netpair_enter(app, code)
+    assert status == 400
+    assert "cannot pair" in resp.get("error", "")
+    assert app.cfg.netpair_secrets == {}
+
+
+def test_netpair_hello_from_self_ignored():
+    from internal.transport.relay import (
+        generate_netpair_code, generate_netpair_secret,
+    )
+    app = make_app_stub(device_id="a1b2c3d4e5f6", internet_sync_enabled=True)
+    secret = generate_netpair_secret()
+    code = generate_netpair_code(app.cfg.device_id, secret)
+    # Simulate: we entered our own code, sent ourselves a hello, and it bounced
+    # back with source_device == our real id.
+    app.cfg.netpair_secrets["ABCD"] = secret  # provisional self tag entry
+    Application._handle_netpair_hello(
+        app,
+        {"msg_type": "netpair_hello", "peer_id": code.split("-")[0],
+         "device_name": "self", "ts": 1},
+        source_device=app.cfg.device_id,   # the self-origin marker
+        topic=None,
+    )
+    assert app.cfg.netpair_secrets == {"ABCD": secret}  # unchanged
+
+
+def test_on_relay_frame_drops_self_originated():
+    from internal.protocol.codec import encode_frame
+    app = make_app_stub(device_id="a1b2c3d4e5f6")
+    routed = []
+    app._on_peer_message = lambda msg, pid: routed.append(pid)
+    frame = encode_frame({"msg_type": "clipboard", "types": {"TEXT": "aGk="},
+                          "timestamp": 1.0},
+                         source_device=app.cfg.device_id)
+    Application._on_relay_frame(app, frame, "some/topic")
+    assert routed == []  # self-originated relay frames never enter the routers
