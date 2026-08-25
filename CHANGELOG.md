@@ -2,6 +2,11 @@
 
 All notable changes to ClipSync are documented in this file.
 
+## [1.0.77] — 2026-08-25
+
+- **Fix stale cached web pages after an update** ("重启后打开的好像还是 quickpaste 页面"). The dashboard's service worker cached static assets **cache-first** and fell back to the cache on a navigation 404, so after an update removed `quickpaste.html`, the browser kept serving the old cached copy — and updated JS/CSS were never picked up. The cache is now versioned `shell-v2` (old v1 caches — including any cached `quickpaste.html` — are purged on activation) and shell assets are **network-first** (the server is local, so the extra round-trip is negligible; updates take effect immediately, cache is only the offline fallback).
+- **De-flake the queued-dialog response-window test** (was intermittently failing on the macOS CI runner: margins of ~0.05 s against a loaded runner). The queued-dialog test now uses ~1 s margins and passes consistently.
+
 ## [1.0.76] — 2026-08-25
 
 - **Fix Windows auto-update relaunch crash.** After replacing `clipsync.exe`, the update helper launched the new exe with `start ""` from a batch file and then exited — so the relaunched exe's parent `cmd` was already gone when PyInstaller's onefile bootloader validated it, killing the app with `Security validation failure: failed to obtain executable path for parent process`. The helper now runs the new exe **directly**, keeping itself alive as the parent for the app's whole lifetime, so the validation always resolves and the app auto-reopens after updating. (`clipsync.exe.old` next to the exe is the intended rollback backup.)

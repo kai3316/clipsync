@@ -17,7 +17,12 @@
 
 'use strict';
 
-var CACHE = 'clipsync-shell-v1';
+// v2: shell assets are network-first (the app updates in place on 127.0.0.1,
+// so cache-first served stale JS/CSS after an update forever) and the version
+// bump purges v1 caches — including any cached copy of the removed
+// quickpaste.html, which the old navigation cache-fallback kept serving after
+// the file was deleted.
+var CACHE = 'clipsync-shell-v2';
 
 self.addEventListener('install', function () {
   // No precaching: we only cache what the page actually loaded successfully,
@@ -80,18 +85,23 @@ self.addEventListener('fetch', function (event) {
     return;
   }
 
-  // Static shell asset — cache-first, fetch-and-cache on miss.
+  // Static shell asset — network-first, fall back to the cache only offline.
+  // The server is local (127.0.0.1), so the extra round-trip is negligible,
+  // and an in-place app update immediately serves the fresh JS/CSS instead of
+  // an indefinitely-stale cached copy (the "still the quickpaste page after
+  // update" bug was cache-first feeding old components forever).
   if (isShellAsset(url.pathname)) {
     event.respondWith(
-      caches.match(request).then(function (hit) {
-        if (hit) return hit;
-        return fetch(request).then(function (response) {
+      fetch(request)
+        .then(function (response) {
           if (response.ok) {
             caches.open(CACHE).then(function (cache) { cache.put(request, response.clone()); });
           }
           return response;
-        });
-      })
+        })
+        .catch(function () {
+          return caches.match(request);
+        })
     );
   }
   // Everything else (downloads, QR data, …) is left to the browser.
