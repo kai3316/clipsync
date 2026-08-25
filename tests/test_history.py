@@ -318,6 +318,10 @@ class TestNotifyHardening:
 # ── 4. Tray timed pause ──────────────────────────────────────────────
 
 
+@pytest.mark.skipif(
+    sys.platform == "linux" and not os.environ.get("DISPLAY"),
+    reason="tray tests need a display (pystray Icon) on headless Linux",
+)
 class TestTrayPause:
     def test_pause_left_minutes_math(self):
         pytest.importorskip("pystray")

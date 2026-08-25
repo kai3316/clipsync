@@ -2,6 +2,10 @@
 
 All notable changes to ClipSync are documented in this file.
 
+## [1.0.74] — 2026-08-25
+
+- **Tray timed-pause tests skip on headless Linux** (`TestTrayPause` needs a display to build a `pystray.Icon`; CI runners have no X server). CI test gate is now green on Windows / macOS / Linux.
+
 ## [1.0.73] — 2026-08-25
 
 - **Fix headless-Linux import crash** (second site): `systray._build_full_menu` also annotated `-> pystray.Menu` eagerly; now lazy, so importing the module on a display-less Linux no longer crashes.
