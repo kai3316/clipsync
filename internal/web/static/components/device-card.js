@@ -302,7 +302,10 @@
           // Full probe result (per-channel RTT + reasons), not a bool.
           ClipsyncAPI.testDeviceConnection(peerId)
             .then(function (res) {
-              if (res && res.results) {
+              // A successful probe always carries per-channel rows; an empty
+              // array ([] is truthy in JS!) means the backend reported
+              // "no_channel" — fall through so the reason actually shows.
+              if (res && res.results && res.results.length > 0) {
                 var parts = res.results.map(function (r) {
                   var channel = self.t(r.channel === 'relay'
                     ? 'device.test_channel_relay' : 'device.test_channel_lan');
@@ -337,6 +340,7 @@
       _deviceTestError: function (r) {
         if (r.error === 'timeout') return this.t('device.test_timeout');
         if (r.error === 'send_failed') return this.t('device.test_send_failed');
+        if (r.error === 'relay_offline') return this.t('device.test_relay_offline');
         return r.error || this.t('device.test_failed');
       },
 

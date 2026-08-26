@@ -1405,7 +1405,7 @@ class Application:
             peer_id = self._chat_peer_id_for_sid(session_id) or ""
             muted = bool(peer_id and peer_id in self._chat_muted)
             if (kind == "text" and not outgoing and not self._dashboard_visible()
-                    and not muted and getattr(self.cfg, "sound_enabled", True)):
+                    and not muted):
                 peer_name = self._chat_peer_name_for_sid(session_id) or "?"
                 text = (entry_dict.get("text") or "")[:120]
                 self._web_toast(
@@ -2698,6 +2698,15 @@ class Application:
 
     def _on_peer_found(self, peer_id: str, peer_name: str, address: str, port: int) -> None:
         with self._discovered_lock:
+            prev = self._discovered_peers.get(peer_id)
+            # A peer that re-appeared at a NEW address must be re-connected
+            # from scratch: the earlier auto-connect (if one is in flight)
+            # targets the stale address, so clear the dedup guard here or the
+            # _maybe_auto_connect below would return early and leave the peer
+            # stuck "waiting for pairing" at its new address.
+            if prev is not None and (prev.get("address") != address
+                                     or prev.get("port") != port):
+                self._auto_connect_pending.discard(peer_id)
             self._discovered_peers[peer_id] = {
                 "name": peer_name, "address": address, "port": port,
             }
@@ -2904,7 +2913,10 @@ class Application:
         elif "relay_brokers" in updated and self._relay is not None:
             # Broker list edited while the relay is live — recycle it so the
             # new endpoints take effect immediately (no restart needed).
+            # restart() alone re-runs the worker but still reads the OLD
+            # broker list, so swap the new one in first.
             try:
+                self._relay.set_brokers(updated["relay_brokers"])
                 self._relay.restart()
             except Exception:
                 logger.debug("relay restart after broker change failed",
@@ -3093,6 +3105,11 @@ class Application:
         if "password" in special and special["password"]:
             self.cfg.encryption_enabled = True
             self.cfg.encryption_password = special["password"]
+            # Unification: the single password also derives the internet
+            # pairing channel keys.  Mirror it into the legacy persisted
+            # netpair_password so pairing keeps working across a restart —
+            # the encryption password itself is runtime-only until re-entered.
+            self.cfg.netpair_password = special["password"]
             self._save_cfg_encrypted()
             response["password_set"] = True
             logger.info("Encryption password set via web UI")
@@ -3100,9 +3117,36 @@ class Application:
         if "clear_password" in special:
             self.cfg.encryption_password = ""
             self.cfg.encryption_password_hash = ""
+            self.cfg.netpair_password = ""
             self._save_cfg_encrypted()
             response["password_set"] = False
             logger.info("Encryption password cleared via web UI")
+
+        # An encryption change (toggle, set, or clear) must rebuild the live
+        # EncryptionManager and re-derive the netpair channel keys.  Previously
+        # only cfg was mutated, so traffic kept the startup key state — the UI
+        # showed encryption on while frames still went out plaintext, or a peer
+        # on a different key state tore the connection down after ~5 frames.
+        if ("encryption_enabled" in updated or "password" in special
+                or "clear_password" in special):
+            try:
+                self.enc_mgr = EncryptionManager(
+                    self.pairing_mgr.get_identity().fingerprint,
+                    password=(self.cfg.encryption_password
+                              if self.cfg.encryption_enabled else ""),
+                )
+                if self.transport_mgr is not None:
+                    self.transport_mgr.set_encryption_manager(
+                        self.enc_mgr if self.cfg.encryption_enabled else None,
+                    )
+                if self._relay is not None:
+                    # Netpair channel keys derive from the single password —
+                    # re-derive so a set/clear/toggle applies to pairing
+                    # traffic immediately (mirrors the legacy netpair_password
+                    # branch above).
+                    self._relay.refresh_channels()
+            except Exception:
+                logger.debug("live encryption re-wire failed", exc_info=True)
 
         if "set_translate_key" in special:
             key = special["set_translate_key"]
@@ -5288,13 +5332,10 @@ class Application:
         The master ``notifications_enabled`` switch is enforced in
         ``_web_toast``, so it applies on top of these toggles.
 
-        ``sound_enabled`` ("通知提示音") still gates these toasts for
-        backward compatibility with the old desktop notifications: a user
-        who turned it OFF was living without notifications, and stays that
-        way.
+        ``sound_enabled`` ("通知提示音") is a pure sound toggle since v1.0.84
+        — it must NOT gate whether a notification appears, only whether a
+        beep accompanies it (see ``_play_transfer_sound``).
         """
-        if not getattr(self.cfg, "sound_enabled", True):
-            return
         if not getattr(self.cfg, cfg_flag, True):
             return
         self._web_toast(f"{title}: {message}")
@@ -7107,7 +7148,17 @@ class Application:
         self.pairing_mgr.remove_peer(peer_id)
         self.transport_mgr.disconnect_peer(peer_id)
         with self._discovered_lock:
+            # _discovered_peers is keyed by the HASHED mDNS id (see
+            # _on_peer_found), so popping only the real id is a no-op and the
+            # removed online peer reappears in the Discovered section.  Pop
+            # both — the same dual-lookup _on_connect uses.
             self._discovered_peers.pop(peer_id, None)
+            try:
+                self._discovered_peers.pop(
+                    Discovery._hash_device_id(peer_id), None)
+            except Exception:
+                logger.debug("Failed to hash device id in _on_remove",
+                             exc_info=True)
         self.cfg.peers.pop(peer_id, None)
         self._save_cfg_encrypted()
         self._push_web("broadcast_devices")
@@ -7603,12 +7654,19 @@ class Application:
         return channels
 
     def _netpair_pw(self) -> str:
-        """Configured pairing passphrase ("" when unset).
+        """The single app password used to derive netpair channel keys.
+
+        Unification: the encryption password (``encryption_password``, the one
+        password the user sets) is the source of truth.  The legacy
+        ``netpair_password`` config field is kept only as a fallback for
+        devices upgraded from before the merge, where a persisted passphrase
+        must keep working until the user re-enters the encryption password.
 
         Read fresh from cfg on every call so a settings change applies to the
         channel keys immediately, without a restart.
         """
-        return getattr(self.cfg, "netpair_password", "") or ""
+        return (getattr(self.cfg, "encryption_password", "") or ""
+                or getattr(self.cfg, "netpair_password", "") or "")
 
     # ------------------------------------------- internet pairing code state
 
@@ -7726,6 +7784,37 @@ class Application:
         if source and source in (getattr(self.cfg, "netpair_secrets", {}) or {}):
             getattr(self, "_netpair_last_seen", {})[source] = (
                 time.time() if now is None else now)
+        elif source:
+            # Self-heal (F04): the ENTERER stores the provisional base32 tag
+            # as the netpair key before the confirmation hello, and a lost
+            # hello (single best-effort QoS0 publish) leaves that tag-keyed
+            # entry permanent.  Any later frame from the peer re-keys the tag
+            # to its real id — exactly what the lost reply hello would have
+            # done — so the phantom "paired" entry disappears on its own.
+            try:
+                from internal.transport.relay import netpair_device_tag
+                tag = netpair_device_tag(source)
+                secrets = getattr(self.cfg, "netpair_secrets", {}) or {}
+                if tag and tag in secrets and tag != source:
+                    secret = secrets.pop(tag)
+                    secrets[source] = secret
+                    getattr(self, "_netpair_last_seen", {})[source] = (
+                        time.time() if now is None else now)
+                    try:
+                        self._save_cfg_and_peers()
+                    except Exception:
+                        logger.debug(
+                            "Failed persisting netpair self-heal re-key",
+                            exc_info=True)
+                    if self._relay is not None:
+                        try:
+                            self._relay.refresh_channels()
+                        except Exception:
+                            logger.debug(
+                                "netpair refresh after self-heal failed",
+                                exc_info=True)
+            except Exception:
+                logger.debug("netpair self-heal re-key failed", exc_info=True)
         # Round 17: any frame from a peer is an "active" signal — retry that
         # peer's offline queue so queued clipboard frames flush as soon as the
         # peer proves reachable.
@@ -8568,6 +8657,11 @@ class Application:
             return {"ok": False, "error": "internet sync is off"}, 400
         secret = generate_netpair_secret()
         code = generate_netpair_code(self.cfg.device_id, secret)
+        # A fresh code supersedes any earlier unconfirmed one (see the
+        # generateInternetPair docstring in api.js): drop prior pending codes
+        # so only the newest stays live, the old code stops pairing, and
+        # _netpair_status can never report a stale code.
+        self._netpair_pending.clear()
         self._netpair_pending[code] = secret
         # Subscribe to the code's topic so the partner's hello is received
         # (RelayTransport re-reads get_channels on refresh).
@@ -8620,7 +8714,17 @@ class Application:
         if now is None:
             now = time.time()
         peers = []
+        from internal.transport.relay import NETPAIR_ALPHABET
         for pid in (getattr(self.cfg, "netpair_secrets", {}) or {}):
+            # A provisional base32 tag key (see _netpair_enter) is NOT a
+            # confirmed pair — it only means "we entered a code and haven't
+            # confirmed the peer's identity yet".  Skipping it here prevents
+            # the phantom "paired" entry the F04 self-heal is cleaning up.
+            # The tag is exactly a 4-char string from the code alphabet; a
+            # real 12-hex device id can never match that shape.
+            if isinstance(pid, str) and len(pid) == 4 \
+                    and all(c in NETPAIR_ALPHABET for c in pid):
+                continue
             alias = (getattr(self.cfg, "netpair_aliases", {}) or {}).get(pid, "")
             name = getattr(self, "_netpair_names", {}).get(pid, "")
             if not name:
@@ -8851,7 +8955,12 @@ class Application:
                 if c == "lan":
                     self.transport_mgr.send_to_peer(peer_id, frame)
                 else:
-                    self._relay_publish_to_peer(frame, peer_id)
+                    # publish returns False when the relay client is absent /
+                    # not connected / internet_sync off — that is a distinct
+                    # "relay offline" result, not a timeout (no pong can ever
+                    # arrive for a frame that was never handed to the broker).
+                    if not self._relay_publish_to_peer(frame, peer_id):
+                        entry["results"][c]["error"] = "relay_offline"
             except Exception:
                 logger.debug("device test: %s ping send failed", c,
                              exc_info=True)
@@ -8976,9 +9085,16 @@ class Application:
                 logger.debug("netpair refresh after hello failed", exc_info=True)
         try:
             if getattr(self, "web_server", None) is not None:
+                # Carry the authoritative liveness fields (the peer was just
+                # confirmed alive above) so the device page renders a green
+                # online dot immediately instead of a misleading offline dot —
+                # applyNetpairPeer sets online/last_seen from these and nothing
+                # refetches while the Devices tab is open.
                 self.web_server.ws_manager.broadcast(
                     "netpair_peer", {"peer_id": peer_id, "name": name,
-                                     "status": "paired"})
+                                     "status": "paired",
+                                     "online": True,
+                                     "last_seen": int(time.time())})
         except Exception:
             logger.debug("netpair_peer WS broadcast failed", exc_info=True)
 

@@ -385,12 +385,24 @@ def test_hello_roundtrip_confirms_identity():
     # Both ends broadcast the netpair_peer event with real ids + names.
     events_a = [d for m, d in a.web_server.ws_manager.broadcasts
                 if m == "netpair_peer"]
-    assert events_a and events_a[0] == {"peer_id": "bbbbbbbbbbbb",
-                                        "name": "DevB", "status": "paired"}
+    assert events_a
+    ev_a = events_a[0]
+    assert ev_a["peer_id"] == "bbbbbbbbbbbb"
+    assert ev_a["name"] == "DevB"
+    assert ev_a["status"] == "paired"
+    # v1.0.84: the broadcast also carries authoritative liveness so the
+    # device page renders a green online dot immediately.
+    assert ev_a["online"] is True
+    assert isinstance(ev_a["last_seen"], int) and ev_a["last_seen"] > 0
     events_b = [d for m, d in b.web_server.ws_manager.broadcasts
                 if m == "netpair_peer"]
-    assert events_b and events_b[0] == {"peer_id": "a1b2c3d4e5f6",
-                                        "name": "DevA", "status": "paired"}
+    assert events_b
+    ev_b = events_b[0]
+    assert ev_b["peer_id"] == "a1b2c3d4e5f6"
+    assert ev_b["name"] == "DevA"
+    assert ev_b["status"] == "paired"
+    assert ev_b["online"] is True
+    assert isinstance(ev_b["last_seen"], int) and ev_b["last_seen"] > 0
 
 
 def test_hello_roundtrip_with_layered_password():

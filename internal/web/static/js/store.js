@@ -2124,6 +2124,10 @@
         status: 'paired',
       });
       this.internetPairPeers = list;
+      // The generated code has served its purpose once a peer confirms the
+      // pair — drop it so a stale/used code no longer sits in the "your
+      // code" box (regenerate if another device still needs to pair).
+      this.internetPairCode = '';
       this.showToast(t('settings_window.netpair_paired_toast', { name: name }),
         3000, 'success');
     },

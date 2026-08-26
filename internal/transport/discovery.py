@@ -19,6 +19,12 @@ from internal.version import __version__
 
 logger = logging.getLogger(__name__)
 
+# Grace window after ``start_browsing()`` during which a previously-known
+# peer must re-announce to stay "online".  Peers that do not re-announce
+# vanished while browsing was paused and are reported lost (see
+# ``_reconcile_after_resume``).
+RECONFIRM_GRACE_SECONDS = 4.0
+
 
 def get_all_local_addresses():
     """Enumerate every non-loopback IPv4 address on this host.
@@ -233,6 +239,11 @@ class Discovery:
         # plus a stop signal for the light poll in _network_watch_loop.
         self._netmon_stop = threading.Event()
         self._advertised_ips: frozenset[str] = frozenset()
+        # Post-resume reconcile bookkeeping (see start_browsing /
+        # _reconcile_after_resume): peers re-confirmed during the grace
+        # window + the timer that reports the rest lost.
+        self._reconfirm: set[str] = set()
+        self._reconcile_timer: threading.Timer | None = None
 
     def set_callbacks(self, on_found: Callable, on_lost: Callable):
         """Set callbacks for peer discovery events.
@@ -382,6 +393,12 @@ class Discovery:
             self._browser.cancel()
             self._browser = None
             logger.info("Stopped browsing for peers")
+        # A pending post-resume reconcile belongs to the browse session we are
+        # pausing — cancel it so a later start_browsing() starts a fresh one
+        # instead of stacking timers.
+        if self._reconcile_timer is not None:
+            self._reconcile_timer.cancel()
+            self._reconcile_timer = None
 
     def start_browsing(self):
         """Resume discovering new peers. Requires start() to have been called."""
@@ -389,11 +406,28 @@ class Discovery:
             return
         if self._zc is None:
             return
+        with self._lock:
+            # Snapshot the peers known before the pause: any that do NOT
+            # re-announce within the grace window vanished while we were not
+            # listening and must be reported lost (a paused browser fires no
+            # Removed events, so they would otherwise ghost forever).
+            stale = set(self._known_peers)
+            self._reconfirm.clear()
+            # The new browser re-fires Added for every live service, so the
+            # name→id mapping is rebuilt from scratch.
+            self._service_to_peer.clear()
         self._browser = ServiceBrowser(
             self._zc,
             self._service_type,
             handlers=[self._on_service_state_change],
         )
+        if self._reconcile_timer is not None:
+            self._reconcile_timer.cancel()
+        self._reconcile_timer = threading.Timer(
+            RECONFIRM_GRACE_SECONDS, self._reconcile_after_resume, args=(stale,),
+        )
+        self._reconcile_timer.daemon = True
+        self._reconcile_timer.start()
         logger.info("Resumed browsing for peers")
 
     def stop_advertising(self):
@@ -479,6 +513,14 @@ class Discovery:
         if peer_id_hash == self._device_id_hash:
             return
 
+        # A legacy / malformed service with no hashed id in its TXT records
+        # cannot be addressed as a peer.  Skip it instead of creating a bogus
+        # _known_peers entry keyed by "" (which ghosts the Discovered list).
+        if not peer_id_hash:
+            logger.debug("Discovered service %s with no device_id_hash — skipping",
+                         name)
+            return
+
         # Advertised version/platform/arch (M2 P2P update). Absent for older
         # peers that predate these TXT fields.
         peer_version = props.get(b"v", b"").decode("utf-8", errors="replace")
@@ -531,6 +573,9 @@ class Discovery:
         with self._lock:
             existing = self._known_peers.get(peer_id_hash)
             self._service_to_peer[name] = peer_id_hash
+            # This peer just re-announced — the post-resume reconcile timer
+            # must not report it lost.
+            self._reconfirm.add(peer_id_hash)
             if existing is not None:
                 # Refresh on re-announcement: the peer's address may have
                 # changed (DHCP renewal, Wi-Fi reconnect, interface switch).
@@ -590,3 +635,36 @@ class Discovery:
             logger.info("Peer lost: %s", peer_id)
             if on_lost:
                 on_lost(peer_id)
+
+    def _reconcile_after_resume(self, stale: set):
+        """Report lost any peer that did not re-announce after a browse resume.
+
+        Fires on the ``RECONFIRM_GRACE_SECONDS`` timer armed by
+        ``start_browsing()``.  ``_handle_service_added`` adds each live peer to
+        ``self._reconfirm`` as it re-announces, so ``stale - _reconfirm`` is
+        exactly the set of peers that vanished while browsing was paused.  They
+        leave ``_known_peers`` and fire ``on_lost`` — same effect a Removed
+        event would have had had we been listening.
+        """
+        lost: list[str] = []
+        with self._lock:
+            self._reconcile_timer = None
+            gone = stale - self._reconfirm
+            for pid in gone:
+                if pid in self._known_peers:
+                    del self._known_peers[pid]
+                lost.append(pid)
+            # Drop any service-name mapping still pointing at a lost peer so a
+            # later Added for the same name starts clean.
+            for name in [n for n, pid in self._service_to_peer.items()
+                         if pid in gone]:
+                self._service_to_peer.pop(name, None)
+            on_lost = self._on_peer_lost
+        for pid in lost:
+            logger.info("Peer lost after browse resume: %s", pid)
+            if on_lost:
+                try:
+                    on_lost(pid)
+                except Exception:
+                    logger.debug("on_lost callback failed for %s", pid,
+                                 exc_info=True)

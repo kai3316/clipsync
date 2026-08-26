@@ -612,6 +612,19 @@ class RelayTransport:
         self.stop()
         self.start()
 
+    def set_brokers(self, brokers: list) -> None:
+        """Replace the broker list *before* a restart.
+
+        ``restart()`` alone only re-runs the worker — it still reads the
+        brokers captured at construction, so a broker-list edit in settings
+        would otherwise restart against the OLD list.  Call this first with
+        the new list, then ``restart()``.  The live worker is untouched here;
+        the swap only takes effect on the next connect loop.
+        """
+        cleaned = [b for b in brokers if isinstance(b, str) and b]
+        with self._lock:
+            self._brokers = cleaned
+
     def refresh_channels(self) -> None:
         """Channel set changed — resubscribe without dropping the link.
 
@@ -799,6 +812,22 @@ class RelayTransport:
             client.ws_set_options(path=path)
             client.connect(host, port, keepalive=45)
             client.loop_start()
+        except TimeoutError:
+            # A broker that never accepts (offline / firewalled / wrong port)
+            # hits the socket timeout — a routine condition, so log a one-liner
+            # instead of a full traceback.
+            logger.warning("relay connect to %s:%s timed out", host, port)
+            with self._lock:
+                self._client = None
+            return False
+        except OSError as exc:
+            # Same for refused/reset/unreachable — expected when the endpoint
+            # is down, not a code bug worth a stack trace for.
+            logger.warning("relay connect to %s:%s failed (%s: %s)",
+                           host, port, type(exc).__name__, exc)
+            with self._lock:
+                self._client = None
+            return False
         except Exception:
             logger.warning("relay connect to %s:%s failed", host, port,
                            exc_info=True)
@@ -882,6 +911,16 @@ class RelayTransport:
                 ok = str(reason_code) in ("0", "Success")
             if not ok:
                 logger.debug("broker #%d refused connection: %s", index, reason_code)
+                return
+            with self._lock:
+                installed = self._client
+            if client is not installed:
+                # A callback from a retired/stale client (one that was
+                # superseded by a restart or dropped during failover) must not
+                # claim the broker slot for a connection that is no longer
+                # installed — it would overwrite the healthy client's state.
+                logger.debug(
+                    "broker #%d on_connect ignored: stale client", index)
                 return
             with self._lock:
                 self._connected_on_broker = index

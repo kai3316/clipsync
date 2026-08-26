@@ -330,50 +330,62 @@ class PeerConnection:
                         self.device_name, len(payload),
                     )
 
-                msg = decode_message(payload)
-                if msg and self._on_message:
-                    # Incoming pairing gate: only paired peers may send app-level
-                    # messages. Pairing happens via the connection's own identity
-                    # frames, not decoded app frames, so no legitimate pre-pairing
-                    # app frames exist. Dropping them stops unpaired LAN peers
-                    # from injecting clipboard / nav_url / file-dialog content.
-                    if self._pairing_mgr is not None and not self._pairing_mgr.is_peer_paired(self.device_id):
-                        # Anonymous connections never sent an identity frame —
-                        # no pairing and no chat (both require a real
-                        # certificate identity).  Dropping every app frame here
-                        # stops a flood of fresh TLS connections from spamming
-                        # chat invites, each with a fresh per-connection rate
-                        # budget.
-                        if self.is_anonymous:
-                            logger.debug(
-                                "[%s] dropping app frame from anonymous connection",
-                                self.device_name,
-                            )
-                            continue
-                        # Pairing lifecycle messages must pass through so a peer
-                        # can confirm / reject / unpair even before it is paired
-                        # — that is exactly how the two-sided handshake completes.
-                        # Nearby-chat messages also pass: they are consent-gated
-                        # at the application layer (the receiving user must
-                        # explicitly accept each chat invitation before any
-                        # content flows). ``file_chunk`` additionally passes so
-                        # chat file bytes can reach unpaired peers (the app
-                        # router gives chat right-of-first-refusal on it, and
-                        # FileTransferManager no-ops unknown transfer_ids, so
-                        # clipboard transfers still cannot be initiated by
-                        # unpaired peers). Every other app frame from an
-                        # unpaired peer is dropped.
-                        if getattr(msg, "msg_type", "clipboard") not in UNPAIRED_GATE_MSG_TYPES:
-                            logger.warning(
-                                "[%s] dropping %s frame from unpaired peer (device_id=%s)",
-                                self.device_name, getattr(msg, "msg_type", "clipboard"),
-                                self.device_id[:12],
-                            )
-                            continue
-                    # Pass this connection's peer id so handlers can respond to
-                    # the sender (e.g. file-transfer acks/chunks) instead of
-                    # broadcasting to every peer.
-                    self._on_message(msg, self.device_id)
+                try:
+                    msg = decode_message(payload)
+                    if msg and self._on_message:
+                        # Incoming pairing gate: only paired peers may send app-level
+                        # messages. Pairing happens via the connection's own identity
+                        # frames, not decoded app frames, so no legitimate pre-pairing
+                        # app frames exist. Dropping them stops unpaired LAN peers
+                        # from injecting clipboard / nav_url / file-dialog content.
+                        if self._pairing_mgr is not None and not self._pairing_mgr.is_peer_paired(self.device_id):
+                            # Anonymous connections never sent an identity frame —
+                            # no pairing and no chat (both require a real
+                            # certificate identity).  Dropping every app frame here
+                            # stops a flood of fresh TLS connections from spamming
+                            # chat invites, each with a fresh per-connection rate
+                            # budget.
+                            if self.is_anonymous:
+                                logger.debug(
+                                    "[%s] dropping app frame from anonymous connection",
+                                    self.device_name,
+                                )
+                                continue
+                            # Pairing lifecycle messages must pass through so a peer
+                            # can confirm / reject / unpair even before it is paired
+                            # — that is exactly how the two-sided handshake completes.
+                            # Nearby-chat messages also pass: they are consent-gated
+                            # at the application layer (the receiving user must
+                            # explicitly accept each chat invitation before any
+                            # content flows). ``file_chunk`` additionally passes so
+                            # chat file bytes can reach unpaired peers (the app
+                            # router gives chat right-of-first-refusal on it, and
+                            # FileTransferManager no-ops unknown transfer_ids, so
+                            # clipboard transfers still cannot be initiated by
+                            # unpaired peers). Every other app frame from an
+                            # unpaired peer is dropped.
+                            if getattr(msg, "msg_type", "clipboard") not in UNPAIRED_GATE_MSG_TYPES:
+                                logger.warning(
+                                    "[%s] dropping %s frame from unpaired peer (device_id=%s)",
+                                    self.device_name, getattr(msg, "msg_type", "clipboard"),
+                                    self.device_id[:12],
+                                )
+                                continue
+                        # Pass this connection's peer id so handlers can respond to
+                        # the sender (e.g. file-transfer acks/chunks) instead of
+                        # broadcasting to every peer.
+                        self._on_message(msg, self.device_id)
+                except Exception as e:
+                    # One bad frame must not take down the connection: log and
+                    # drop it, keep the socket alive.  A decode or handler bug
+                    # is contained to this frame instead of tearing down the
+                    # connection + scheduling a reconnect (which drops every
+                    # peer and redials).
+                    logger.warning(
+                        "[%s] dropping frame that failed to process (%s: %s)",
+                        self.device_name, type(e).__name__, e,
+                    )
+                    continue
 
             except (ConnectionError, OSError) as e:
                 end_reason = f"ConnectionError: {e}"
@@ -945,8 +957,14 @@ class TransportManager:
                 for c in to_stop:
                     c.stop()
 
-                self._reconnect_attempts.pop(peer_id, None)
-                self._reconnect_attempts.pop(real_peer_id, None)
+                # Success clears the reconnect backoff for both the hashed and
+                # real id under the lock — every other _reconnect_attempts
+                # mutation takes the lock, so a racing _schedule_reconnect in
+                # the disconnect thread must not interleave with these pops
+                # (a lost update would leave a stale backoff running).
+                with self._lock:
+                    self._reconnect_attempts.pop(peer_id, None)
+                    self._reconnect_attempts.pop(real_peer_id, None)
                 logger.info("[%s] connected [%s] (%s:%d)", peer_name, real_peer_id[:12], address, port)
 
             except CertificateChangedError:

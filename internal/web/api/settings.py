@@ -142,7 +142,10 @@ _MUTABLE_FIELDS = {
     "auto_update_check",
     "internet_sync_enabled",
     "relay_brokers",
-    # Optional pairing passphrase (see netpair_passphrase_error): empty string
+    # Legacy pairing passphrase (v1.0.84 unification: the single encryption
+    # password in the Security tab now derives the netpair channel keys, so
+    # the web UI no longer sends this field — it is kept only so an older
+    # companion build can still set the pre-merge value).  Empty string
     # clears it; a non-empty value is strength-validated before saving.  The
     # value is never echoed back — only netpair_password_set is exposed.
     "netpair_password",
@@ -212,8 +215,10 @@ def get_settings(cfg, get_internet_sync_state=None,
     # key itself (see module docstring).
     result["translate_key_set"] = bool(getattr(cfg, "translate_api_key", ""))
 
-    # Same for the optional pairing passphrase: the UI sees set/not-set only,
-    # never the value (it is a decryption key for netpair traffic).
+    # Same for the (legacy, pre-unification) pairing passphrase: the UI sees
+    # set/not-set only, never the value (it is a decryption key for netpair
+    # traffic).  Since v1.0.84 the single encryption password drives netpair
+    # channels, so this flag reflects the leftover fallback config.
     result["netpair_password_set"] = bool(getattr(cfg, "netpair_password", ""))
 
     # Live internet-sync state (never a secret).  When sync is disabled the

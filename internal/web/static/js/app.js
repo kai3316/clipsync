@@ -208,7 +208,21 @@
         },
         pairingRequest: function (data) {
           if (data && data.peer_id) {
-            store.pairingRequests.push(data);
+            // Upsert: a peer re-announcing a pairing request (or a WS
+            // reconnect re-delivering it) must not stack a duplicate card —
+            // replace the existing pending request for that peer instead.
+            var idx = -1;
+            for (var i = 0; i < store.pairingRequests.length; i++) {
+              if (store.pairingRequests[i].peer_id === data.peer_id) {
+                idx = i;
+                break;
+              }
+            }
+            if (idx !== -1) {
+              store.pairingRequests[idx] = data;
+            } else {
+              store.pairingRequests.push(data);
+            }
             store.showToast(self.t('notify.pairing_request', {
               name: data.peer_name || data.peer_id,
               code: data.code || '',

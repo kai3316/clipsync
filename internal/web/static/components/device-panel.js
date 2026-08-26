@@ -181,7 +181,7 @@
                 '<span class="pairing-request-card__hint">{{ t(\'devices.pairing_expiry_hint\') }}</span>' +
               '</div>' +
               '<div class="pairing-request-card__actions">' +
-                '<button v-if="pr.status !== \'confirmed_waiting\'" class="device-card__action device-card__action--accent" @click="acceptPairing(pr)" :disabled="pairingResponding === pr.peer_id">' +
+                '<button v-if="pr.status !== \'confirmed_waiting\' && pr.status !== \'expired\'" class="device-card__action device-card__action--accent" @click="acceptPairing(pr)" :disabled="pairingResponding === pr.peer_id">' +
                   '{{ pairingResponding === pr.peer_id ? \'...\' : t(\'ui.confirm\') }}' +
                 '</button>' +
                 '<span v-else class="pairing-request-card__waiting">⏳ {{ t(\'pairing.state.confirmed_waiting\') }}</span>' +
@@ -544,7 +544,7 @@
             if (e && e.status === 400) {
               // Distinguish "paired with yourself" from a generic bad code.
               var reason = (e.data && e.data.error) || '';
-              if (/self|own|same/i.test(reason)) {
+              if (/self|own|same|cannot pair with this device/i.test(reason)) {
                 self._setNetpairError(self.t('devices.netpair_error_self'));
               } else {
                 self._setNetpairError(self.t('devices.netpair_error_invalid'));
@@ -595,6 +595,7 @@
       _netpairTestError: function (r) {
         if (r.error === 'timeout') return this.t('device.test_timeout');
         if (r.error === 'send_failed') return this.t('device.test_send_failed');
+        if (r.error === 'relay_offline') return this.t('device.test_relay_offline');
         return r.error || this.t('device.test_failed');
       },
 
@@ -754,6 +755,7 @@
         var st = pr.status || 'pending';
         if (st === 'confirmed_waiting') return this.t('pairing.state.confirmed_waiting');
         if (st === 'peer_confirmed') return '✅ ' + this.t('pairing.state.peer_confirmed');
+        if (st === 'expired') return '⏳ ' + this.t('pairing.state.expired');
         return this.t('devices.pairing_confirm_hint');
       },
 
