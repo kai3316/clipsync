@@ -285,6 +285,20 @@
         return this.store.fetchAiConfigLocal();
       },
 
+      // Number of skill / command folders in the local inventory — the
+      // headline count beside "AI config".  The inventory emits one is_dir
+      // entry per subdirectory, so counting those is the folder count; plain
+      // config files (CLAUDE.md, settings.json, …) are deliberately not
+      // counted here.
+      localSkillCount: function () {
+        var entries = (this.store.aiConfigLocal && this.store.aiConfigLocal.entries) || [];
+        var n = 0;
+        for (var i = 0; i < entries.length; i++) {
+          if (entries[i] && entries[i].is_dir) n++;
+        }
+        return n;
+      },
+
       // ── Tree view helpers (round 19) ─────────────────────────────
 
       isDirExpanded: function (node) {
@@ -549,7 +563,7 @@
           '<div class="favorites-panel__header-left">' +
             '<span class="favorites-panel__header-icon">📁</span>' +
             '<span class="favorites-panel__header-title">{{ t(\'ui.aiconfig\') }}</span>' +
-            '<span v-if="store.aiConfigLocal.loaded && store.aiConfigLocal.entries.length" class="favorites-panel__header-count neon-badge">{{ store.aiConfigLocal.entries.length }}</span>' +
+            '<span v-if="store.aiConfigLocal.loaded && localSkillCount()" class="favorites-panel__header-count neon-badge">{{ localSkillCount() }}</span>' +
           '</div>' +
           '<button class="settings-btn settings-btn--sm" @click="openPathsDialog">' +
             '🗂 {{ t(\'aiconfig.local_manage_paths\') }}' +
