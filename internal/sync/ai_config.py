@@ -156,8 +156,9 @@ def collect_roots(
 
     When *include_dirs* is true, subdirectories are also emitted as ``is_dir``
     entries (e.g. a Claude Code skill folder ``my-skill/``) so a file manager
-    UI can show the folder tree — used by the LOCAL listing only; the
-    peer-inventory exchange keeps emitting files only.
+    UI can show the folder tree and count skills — used by the local listing
+    and by the peer-inventory exchange (a peer can then show the same folder
+    count).
     """
     entries: list[dict] = []
     seen_roots: set[str] = set()
@@ -389,6 +390,7 @@ class AIConfigManager:
         sha = entry.get("sha256")
         size = entry.get("size")
         mtime = entry.get("mtime")
+        is_dir = entry.get("is_dir") is True
         if not isinstance(path, str) or not path or len(path) > MAX_PATH_LEN:
             return None
         if ".." in path.replace("\\", "/").split("/"):
@@ -396,13 +398,27 @@ class AIConfigManager:
         if isinstance(ri, bool) or not isinstance(ri, int) \
                 or not (0 <= ri <= MAX_ROOTS):
             return None
+        if isinstance(mtime, bool) or not isinstance(mtime, (int, float)) \
+                or mtime != mtime or mtime in (float("inf"), float("-inf")):
+            return None
+        if is_dir:
+            # Folder entry (our own collect_roots with include_dirs=True emits
+            # these): no content hash / size, and the path carries a trailing
+            # "/" so a peer can never alias a plain file path as a folder.
+            if not path.endswith("/"):
+                return None
+            return {
+                "path": path,
+                "root_index": ri,
+                "is_dir": True,
+                "size": None,
+                "mtime": float(mtime),
+                "sha256": "",
+            }
         if not isinstance(sha, str) or not _SHA16_RE.match(sha):
             return None
         if isinstance(size, bool) or not isinstance(size, int) \
                 or not (0 <= size <= MAX_CONFIG_FILE_SIZE):
-            return None
-        if isinstance(mtime, bool) or not isinstance(mtime, (int, float)) \
-                or mtime != mtime or mtime in (float("inf"), float("-inf")):
             return None
         return {
             "path": path,
@@ -410,13 +426,17 @@ class AIConfigManager:
             "sha256": sha,
             "size": size,
             "mtime": float(mtime),
+            "is_dir": False,
         }
 
     # ---------------------------------------------------------- inventory
 
     def collect(self) -> list[dict]:
         """Re-scan the watch list and remember the result."""
-        entries = collect_roots(list(getattr(self._cfg, "ai_config_paths", [])))
+        entries = collect_roots(
+            list(getattr(self._cfg, "ai_config_paths", [])),
+            include_dirs=True,
+        )
         with self._lock:
             self._local_entries = entries
             self._local_collected_at = time.time()

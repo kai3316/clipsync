@@ -262,6 +262,37 @@ def test_inv_garbage_entries_sanitized_and_capped(tmp_path):
     _feed(b, None, {"device_name": 5, "entries": "nope"}, "aiconfig_inv")
 
 
+def test_inv_folder_entries_carried_with_is_dir(tmp_path):
+    a = _StubMgrRound12(tmp_path, roots=[str(tmp_path / "a")])
+    _mk_round12(tmp_path / "a", "CLAUDE.md", b"# mine")
+    (tmp_path / "a" / "skills" / "my-skill").mkdir(parents=True)
+    (tmp_path / "a" / "skills" / "my-skill" / "SKILL.md").write_bytes(b"# sk")
+    b = _StubMgrRound12(tmp_path, roots=[])
+    a.mgr.collect()  # include_dirs=True -> the skill folder is advertised too
+    assert a.mgr.send_inventory_to("p1")
+    _feed(b, a, {"device_name": "SelfDev", "entries":
+                 decode_message(a.sent[0][1])._raw_payload["entries"]},
+          "aiconfig_inv")
+    inv = b.mgr.get_peer_inventories()["p1"]["entries"]
+    by_path = {e["path"]: e for e in inv}
+    assert by_path["skills/my-skill/"]["is_dir"] is True
+    assert by_path["skills/my-skill/"]["size"] is None
+    assert by_path["skills/my-skill/"]["sha256"] == ""
+    assert by_path["CLAUDE.md"]["is_dir"] is False
+    # A folder claim must carry the trailing-slash folder shape: an is_dir
+    # entry without one is dropped, while any trailing-slash path is a valid
+    # folder entry whatever the name looks like (and the req handler's
+    # is_file() gate keeps such folders unpullable).
+    _feed(b, None, {"device_name": "X", "entries": [
+        {"path": "dangle", "root_index": 0, "is_dir": True, "mtime": 1.0},
+        {"path": "config.toml/", "root_index": 0, "is_dir": True,
+         "sha256": "ab" * 8, "size": 1, "mtime": 1.0},
+    ]}, "aiconfig_inv")
+    inv2 = {e["path"]: e for e in b.mgr.get_peer_inventories()["p1"]["entries"]}
+    assert "dangle" not in inv2
+    assert inv2["config.toml/"]["is_dir"] is True
+
+
 def test_unpaired_sender_rejected_for_all_three_types(tmp_path):
     b = _StubMgrRound12(tmp_path, roots=[str(tmp_path / "r")])
     b.cfg.peers["ghost"] = types.SimpleNamespace(

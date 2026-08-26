@@ -1935,6 +1935,7 @@
                   sha256: e.sha256 || '',
                   size: (typeof e.size === 'number') ? e.size : Number(e.size) || 0,
                   mtime: e.mtime,
+                  is_dir: !!e.is_dir,
                 };
               }),
               fetchedAt: p.fetched_at || '',
@@ -2013,6 +2014,7 @@
               sha256: e.sha256 || '',
               size: (typeof e.size === 'number') ? e.size : Number(e.size) || 0,
               mtime: e.mtime,
+              is_dir: !!e.is_dir,
             });
           }
           self.aiConfigLocal = {

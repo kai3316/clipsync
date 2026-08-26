@@ -156,7 +156,7 @@
             var m = flat[i];
             out.push({
               key: keyOf(m), label: m.rel_path, depth: 0,
-              isDir: false, entry: m, node: null,
+              isDir: !!m.is_dir, entry: m, node: null,
             });
           }
           return out;
@@ -179,7 +179,7 @@
               if (!leaf) {
                 leaf = nodes[key] = {
                   key: key, root_index: e.root_index, name: parts[0],
-                  path: parts[0], is_dir: parts.length > 1, entry: null,
+                  path: parts[0], is_dir: parts.length > 1 || !!e.is_dir, entry: null,
                   children: [],
                 };
                 roots.push(leaf);
@@ -194,7 +194,7 @@
                 child = {
                   key: key, root_index: e.root_index, name: parts[j],
                   path: parts.slice(0, j + 1).join('/'),
-                  is_dir: j < parts.length - 1, entry: null, children: [],
+                  is_dir: j < parts.length - 1 || !!e.is_dir, entry: null, children: [],
                 };
                 parent.children.push(child);
               }
@@ -202,7 +202,7 @@
               leaf = child;
             }
           }
-          if (leaf) { leaf.entry = e; leaf.is_dir = false; }
+          if (leaf) { leaf.entry = e; leaf.is_dir = !!e.is_dir; }
         });
         var walk = function (nodesList, depth) {
           for (var i = 0; i < nodesList.length; i++) {
@@ -252,13 +252,26 @@
         return Object.keys(this.checked).filter(function (k) { return this.checked[k]; }, this).length;
       },
 
+      // Skills (is_dir folder entries) a peer's inventory carries; mirrors the
+      // local panel's localSkillCount so both sides of the panel agree.
+      peerSkillCount: function (peer) {
+        var entries = (peer && peer.entries) || [];
+        var n = 0;
+        for (var i = 0; i < entries.length; i++) {
+          if (entries[i] && entries[i].is_dir) n++;
+        }
+        return n;
+      },
+
       allSelected: function () {
         var items = this.filteredEntries;
-        if (items.length === 0) return false;
+        var saw = false;
         for (var i = 0; i < items.length; i++) {
+          if (items[i].is_dir) continue;  // folders aren't pullable
+          saw = true;
           if (!this.checked[keyOf(items[i])]) return false;
         }
-        return true;
+        return saw;
       },
 
       modeHint: function () {
@@ -369,6 +382,7 @@
         }
         var next = {};
         for (var i = 0; i < items.length; i++) {
+          if (items[i].is_dir) continue;  // folders aren't pullable
           next[keyOf(items[i])] = true;
         }
         this.checked = next;
@@ -568,7 +582,7 @@
                 ' :class="{ \'aiconfig-panel__peer-btn--active\' : p.id === selectedPeerId }"' +
                 ' @click="selectPeer(p.id)">' +
                 '<span class="aiconfig-panel__peer-name">{{ p.name }}</span>' +
-                '<span class="aiconfig-panel__peer-meta">{{ t(\'aiconfig.files_count\', { count: p.entries.length }) }}</span>' +
+                '<span class="aiconfig-panel__peer-meta">{{ t(\'aiconfig.skills_count\', { count: peerSkillCount(p) }) }}</span>' +
                 '<span v-if="p.fetchedAt" class="aiconfig-panel__peer-meta">{{ t(\'aiconfig.fetched_at\', { time: fmtTime(p.fetchedAt) }) }}</span>' +
               '</button>' +
             '</div>' +
@@ -606,7 +620,10 @@
                         // Directory nodes: a collapsible folder group (skills /
                         // commands / rules / …).  Click to expand, dbl-click to
                         // open in the OS file manager on THIS device.
-                        '<button v-if="row.isDir" class="aiconfig-panel__path-btn aiconfig-panel__path-btn--dir selectable" @click="toggleDir(row.node)" :title="t(\'aiconfig.local_open_dir\')">📁 {{ row.label }}</button>' +
+                        '<button v-if="row.isDir && row.node" class="aiconfig-panel__path-btn aiconfig-panel__path-btn--dir selectable" @click="toggleDir(row.node)" :title="t(\'aiconfig.local_open_dir\')">📁 {{ row.label }}</button>' +
+                        // A folder entry surfaced by search has no tree node, so
+                        // it renders as a plain (non-collapsible) folder label.
+                        '<span v-else-if="row.isDir" class="aiconfig-panel__path-btn aiconfig-panel__path-btn--dir selectable">📁 {{ row.label }}</span>' +
                         '<template v-else>' +
                           '<button class="aiconfig-panel__path-btn selectable" @click="openPreview(row.entry)" :title="t(\'aiconfig.preview_title\')">{{ row.label }}</button>' +
                           '<span v-if="compareState(row.entry)" class="aiconfig-panel__ver-badge"' +

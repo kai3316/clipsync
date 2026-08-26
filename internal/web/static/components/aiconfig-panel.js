@@ -576,7 +576,7 @@
             '<div class="aiconfig-panel__local-header-left">' +
               '<span class="aiconfig-panel__local-title">📁 {{ t(\'aiconfig.local_title\') }}</span>' +
               '<span v-if="store.aiConfigLocal.loaded && store.aiConfigLocal.entries.length" class="aiconfig-panel__local-meta">' +
-                '{{ t(\'aiconfig.local_files_count\', { count: store.aiConfigLocal.entries.length }) }}' +
+                '{{ t(\'aiconfig.local_skills_count\', { count: localSkillCount() }) }}' +
                 '<template v-if="store.aiConfigLocal.collected_at"> · {{ t(\'aiconfig.local_collected_at\', { time: fmtTime(store.aiConfigLocal.collected_at) }) }}</template>' +
               '</span>' +
             '</div>' +

@@ -864,6 +864,8 @@ _EN: dict[str, str] = {
     "chat.notify_invite_msg": "{name} ({fingerprint}) invites you to chat.",
     "chat.notify_message_title": "Nearby Chat",
     "chat.notify_message_msg": "{name}: {text}",
+    "aiconfig.skills_count": "{count} skills",
+    "aiconfig.local_skills_count": "{count} skills",
 }
 
 _ZH: dict[str, str] = {
@@ -1688,6 +1690,8 @@ _ZH: dict[str, str] = {
     "chat.notify_invite_msg": "{name}（{fingerprint}）邀请你聊天。",
     "chat.notify_message_title": "附近聊天",
     "chat.notify_message_msg": "{name}：{text}",
+    "aiconfig.skills_count": "{count} 个技能",
+    "aiconfig.local_skills_count": "{count} 个技能",
 }
 
 LOCALES: dict[str, dict[str, str]] = {
