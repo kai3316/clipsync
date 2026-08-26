@@ -155,6 +155,78 @@ def test_probe_relay_endpoint_tls_handshake_uses_ca_bundle(monkeypatch):
     assert calls["server_hostname"] == "broker.example"
 
 
+def test_endpoint_scheme_normalizes():
+    """_endpoint_scheme: absent/unknown scheme defaults to the historical wss."""
+    assert R._endpoint_scheme(None) == "wss"
+    assert R._endpoint_scheme("") == "wss"
+    assert R._endpoint_scheme("WSS://host") == "wss"
+    assert R._endpoint_scheme("ws://host") == "ws"
+    assert R._endpoint_scheme("mqtt://host") == "mqtt"
+    assert R._endpoint_scheme("mqtts://host") == "mqtts"
+    # A bare hostname with no scheme parses as wss (safe default).
+    assert R._endpoint_scheme("broker.example:8884/mqtt") == "wss"
+
+
+def test_parse_endpoint_scheme_default_ports():
+    """_parse_endpoint: native MQTT defaults to 1883, WebSocket to 8884."""
+    t, _, _, _ = make_transport({})
+    assert t._parse_endpoint("mqtt://broker.example") == ("broker.example", 1883, "/mqtt")
+    assert t._parse_endpoint("mqtts://broker.example:9000/custom") == ("broker.example", 9000, "/custom")
+    assert t._parse_endpoint("ws://broker.example") == ("broker.example", 8884, "/mqtt")
+    assert t._parse_endpoint("wss://broker.example/mqtt") == ("broker.example", 8884, "/mqtt")
+
+
+def test_build_paho_client_scheme_selects_transport_and_tls(monkeypatch):
+    """The scheme, not a hardcoded wss, must pick transport + TLS."""
+    created = []
+
+    class FakePahoClient:
+        def __init__(self, api_version, protocol, transport):
+            self.transport = transport
+            self.tls_called = False
+            created.append(transport)
+
+        def tls_set(self, **kwargs):
+            self.tls_called = True
+
+    class FakeModule:
+        class CallbackAPIVersion:
+            VERSION2 = 2
+        MQTTv311 = 4
+        Client = FakePahoClient
+
+    monkeypatch.setattr(R, "_mqtt", FakeModule)
+    monkeypatch.setattr(R, "_ca_bundle_path", lambda: "/tmp/ca.pem")
+
+    ws_plain = R.build_paho_client("ws://broker:8884/mqtt")
+    assert ws_plain.transport == "websockets"
+    assert ws_plain.tls_called is False
+
+    ws_tls = R.build_paho_client("wss://broker:8884/mqtt")
+    assert ws_tls.transport == "websockets"
+    assert ws_tls.tls_called is True
+
+    mqtt_plain = R.build_paho_client("mqtt://broker:1883")
+    assert mqtt_plain.transport == "tcp"
+    assert mqtt_plain.tls_called is False
+
+    mqtt_tls = R.build_paho_client("mqtts://broker:8883")
+    assert mqtt_tls.transport == "tcp"
+    assert mqtt_tls.tls_called is True
+
+    # Bare factory call (unit-test path) and unknown scheme keep the
+    # historical wss behavior.
+    assert R.build_paho_client(None).transport == "websockets"
+    assert R.build_paho_client(None).tls_called is True
+    assert R.build_paho_client("broker.example:8884").transport == "websockets"
+
+
+def test_build_paho_client_returns_none_without_paho(monkeypatch):
+    monkeypatch.setattr(R, "_mqtt", None)
+    assert R.build_paho_client("wss://broker.example:8884/mqtt") is None
+
+
+
 # ------------------------------------------------------------- fake client
 
 class FakeClient:
@@ -175,6 +247,10 @@ class FakeClient:
 
     def tls_set(self, **kwargs):
         self.tls_kwargs = kwargs
+
+    def username_pw_set(self, username, password):
+        self.broker_username = username
+        self.broker_password = password
 
     def connect(self, host, port, keepalive=60):
         if not self.connect_ok:
@@ -352,6 +428,62 @@ def test_failover_to_next_broker():
     t.stop()
 
 
+def test_credentials_apply_to_new_clients(channels):
+    """set_credentials is anonymous by default, applied once per client."""
+    t, clients, _, _ = make_transport(channels)
+    anon = t._new_client("wss://broker.example:8884/mqtt")
+    assert not hasattr(anon, "broker_username")
+    t.set_credentials("user1", "pass1")
+    authed = t._new_client("wss://broker.example:8884/mqtt")
+    assert authed.broker_username == "user1"
+    assert authed.broker_password == "pass1"
+    # Clearing both returns to anonymous.
+    t.set_credentials("", "")
+    anon2 = t._new_client("wss://broker.example:8884/mqtt")
+    assert not hasattr(anon2, "broker_username")
+
+
+def test_credentials_from_init_survive_start(channels):
+    """The RelayTransport(...) kwargs path main.py uses must reach the client."""
+    received, states, clients = [], [], []
+
+    def factory():
+        c = FakeClient()
+        clients.append(c)
+        return c
+
+    t = R.RelayTransport(
+        ["wss://broker.example:8884/mqtt"],
+        get_channels=lambda: dict(channels),
+        on_frame=lambda frame, _topic=None: received.append(frame),
+        on_state=states.append,
+        client_factory=factory,
+        username="init_user",
+        password="init_pass",
+    )
+    t.start()
+    deadline = time.time() + 2
+    while len(clients) < 1 and time.time() < deadline:
+        time.sleep(0.005)
+    assert clients[0].broker_username == "init_user"
+    assert clients[0].broker_password == "init_pass"
+    t.stop()
+
+
+def test_credentials_swap_before_restart(channels):
+    """set_credentials + restart() must build the reconnect with new creds."""
+    t, clients, _, _ = make_transport(channels)
+    t.start()
+    assert t._test_wait_clients(1)
+    assert not hasattr(clients[0], "broker_username")
+    t.set_credentials("u2", "p2")
+    t.restart()
+    assert t._test_wait_clients(2)
+    assert clients[1].broker_username == "u2"
+    assert clients[1].broker_password == "p2"
+    t.stop()
+
+
 def test_no_brokers_means_error_state():
     t, clients, _, _ = make_transport({})
     t._brokers = []
@@ -501,7 +633,7 @@ def test_config_relay_bad_types_fall_back_to_defaults(isolated_config):
     path.write_text(json.dumps(base), encoding="utf-8")
     loaded = cfg_mod.load()
     assert loaded.internet_sync_enabled is False
-    assert isinstance(loaded.relay_brokers, list) and len(loaded.relay_brokers) == 3
+    assert isinstance(loaded.relay_brokers, list) and len(loaded.relay_brokers) == 2
     assert loaded.relay_secret == ""
     assert loaded.peer_relay_secrets == {}
 
@@ -662,7 +794,8 @@ def test_start_internet_sync_enrolls_paired_peers_only(monkeypatch):
 
     class FakeTransport:
         def __init__(self, brokers, get_channels, on_frame, on_state,
-                     client_factory=None, sleeper=None):
+                     client_factory=None, sleeper=None,
+                     username="", password=""):
             started["args"] = (brokers, get_channels, on_frame, on_state)
 
         def start(self):

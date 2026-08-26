@@ -867,6 +867,8 @@ class _SettingsCfg:
         self.device_id = "dev1"
         self.history_max_age_days = 0
         self.private_key_pem = "KEY"
+        self.relay_username = ""
+        self.relay_password = ""
 
 
 @pytest.fixture()
@@ -1035,6 +1037,58 @@ def test_get_settings_exposes_only_netpair_set_flag():
     data, _ = settings_api.get_settings(cfg)
     assert data["settings"]["netpair_password_set"] is True
     assert "netpair_password" not in data["settings"]
+
+
+# ── 4e. relay broker credentials (v1.0.86) ──────────────────────────────
+# relay_username/relay_password are ordinary mutable string fields: no
+# strength rules (a broker may accept any credential), and the password is
+# never echoed back — only a set/not-set flag, mirroring translate_api_key.
+
+
+@pytest.mark.usefixtures("sandboxed_persist")
+def test_relay_credentials_saved_and_echoed_username_only():
+    cfg = _SettingsCfg()
+    data, status = update_settings(
+        _body({"relay_username": "clipsync_mqtt",
+               "relay_password": "s3cret!"}),
+        cfg,
+    )
+    assert status == 200
+    assert cfg.relay_username == "clipsync_mqtt"
+    assert cfg.relay_password == "s3cret!"
+    # The sender's own write is echoed back (same as translate_api_key) — the
+    # secrecy boundary is GET: settings never expose the password to a reader.
+    assert data["updated"]["relay_username"] == "clipsync_mqtt"
+    assert data["updated"]["relay_password"] == "s3cret!"
+
+
+@pytest.mark.usefixtures("sandboxed_persist")
+def test_relay_credentials_blank_password_clears():
+    cfg = _SettingsCfg()
+    cfg.relay_username = "old_user"
+    cfg.relay_password = "old_pass"
+    data, status = update_settings(
+        _body({"relay_username": "new_user", "relay_password": ""}),
+        cfg,
+    )
+    assert status == 200
+    assert cfg.relay_username == "new_user"
+    assert cfg.relay_password == ""
+
+
+@pytest.mark.usefixtures("sandboxed_persist")
+def test_get_settings_exposes_relay_username_and_password_flag():
+    cfg = _SettingsCfg()
+    data, _ = settings_api.get_settings(cfg)
+    assert data["settings"]["relay_username"] == ""
+    assert data["settings"]["relay_password_set"] is False
+    assert "relay_password" not in data["settings"]
+    cfg.relay_username = "clipsync_mqtt"
+    cfg.relay_password = "s3cret!"
+    data, _ = settings_api.get_settings(cfg)
+    assert data["settings"]["relay_username"] == "clipsync_mqtt"
+    assert data["settings"]["relay_password_set"] is True
+    assert "relay_password" not in data["settings"]
 
 
 # ── 4d. /api/device/test (test-connection probe route) ─────────────────

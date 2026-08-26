@@ -2,6 +2,13 @@
 
 All notable changes to ClipSync are documented in this file.
 
+## [1.0.86] — 2026-08-26
+
+- **中继支持私有 broker 账号鉴权**：远程同步设置里新增「Broker 用户名 / 密码」输入（可留空保持匿名，公共中继行为不变）。保存后立即生效——正在运行的中继会热切换凭据并重连，无需重启；密码永不回显，只显示「已设置」状态，可用「清除」按钮显式移除。凭据随配置持久化（设置了应用密码时随配置整体加密），并随备份/恢复一同迁移。
+- **中继传输按 URL scheme 自动选择**：之前所有中继地址都被强制走 WebSocket+TLS，私有 broker 的明文/原生 MQTT 监听端口无法使用。现在 `wss://`（默认）走 TLS WebSocket、`ws://` 走明文 WebSocket、`mqtt://` 走原生 TCP、`mqtts://`/`ssl://`/`tls://` 走原生 TCP+TLS；端口缺省时按协议取默认值（原生 MQTT 1883、WebSocket 8884）。设置页的中继服务器列表校验与提示同步放宽。
+- **私有 broker 设为默认**：中继默认服务器改为用户的私有 broker（`mqtt://mqttyyc.top:1883` + `ws://mqttyyc.top:8083/mqtt`，两者互为故障切换），broker 账号密码已预填为默认值——开启互联网同步即可直接使用，无需再手动输入账号密码。
+- 新增 5 个 locale 键（`settings_window.relay_username_label` / `relay_password_label` / `relay_password_placeholder` / `relay_password_clear` / `relay_password_hint`）中英 + Python 全量同步（镜像 gap 保持 679）。
+
 ## [1.0.85] — 2026-08-26
 
 - **加密开关措辞简化**：设置里的开关标签去掉「（所有三项功能）」字样，提示语也不再列举三处功能，只说明「在 TLS 之上再叠加一层密码加密」。

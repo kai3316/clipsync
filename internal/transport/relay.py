@@ -1,8 +1,10 @@
-"""Internet (cross-network) clipboard sync over public MQTT-over-WebSocket relays.
+"""Internet (cross-network) clipboard sync over MQTT brokers.
 
 Design goals (user-mandated): zero cost, zero signup, no third-party client,
-works behind NAT without port forwarding.  Peers talk to free public MQTT
-brokers (an editable list, defaulting to broker.emqx.io / HiveMQ / Mosquitto).
+works behind NAT without port forwarding.  Peers talk to an MQTT broker (an
+editable list, defaulting to the user's private broker mqttyyc.top with
+credentials preconfigured — any public broker like broker.emqx.io works too
+when left anonymous).
 The broker only ever sees two things:
 
   topic — ``clipsync/v1/<hash[:24]>`` derived from BOTH devices' relay secrets
@@ -116,24 +118,51 @@ def _ca_bundle_path() -> str | None:
         return None
 
 
-def build_paho_client():
-    """Build one paho websocket client, or None when paho is missing."""
+def _endpoint_scheme(endpoint: str | None) -> str:
+    """Normalized broker-URL scheme ("wss" when absent/unknown)."""
+    if not endpoint:
+        return "wss"
+    scheme = endpoint.split("://", 1)[0].lower().strip()
+    if scheme in ("ws", "wss", "mqtt", "mqtts", "tcp", "tls", "ssl"):
+        return scheme
+    # A bare hostname / unknown scheme is not a transport choice — keep the
+    # historical wss default rather than treating the whole string as a scheme.
+    return "wss"
 
+
+def build_paho_client(endpoint: str | None = None):
+    """Build one paho MQTT client for ``endpoint``, or None when paho is missing.
+
+    The scheme selects the wire transport.  Previously every broker was forced
+    onto WebSocket + TLS, which made private brokers on plaintext / native-TCP
+    listeners unusable — the broker-list validator even rejected non-wss URLs.
+    Now each scheme gets the transport it means:
+
+      ws://      WebSocket, no TLS        mqtt://    native TCP, no TLS
+      wss://     WebSocket, TLS (default) mqtts:///ssl:///tls://  native TCP, TLS
+
+    ``endpoint`` may be None for a bare factory call (unit tests) — that
+    resolves to the historical wss behavior.  TLS is configured HERE because
+    paho forbids ``tls_set()`` after ``connect()``; the WebSocket path is
+    transport-specific and set per-endpoint by the caller.
+    """
     if _mqtt is None:
         return None
-
+    scheme = _endpoint_scheme(endpoint)
+    transport = "websockets" if scheme in ("ws", "wss") else "tcp"
     try:
         client = _mqtt.Client(_mqtt.CallbackAPIVersion.VERSION2,
-                              protocol=_mqtt.MQTTv311, transport="websockets")
+                              protocol=_mqtt.MQTTv311, transport=transport)
     except AttributeError:  # paho 1.x
-        client = _mqtt.Client(protocol=_mqtt.MQTTv311, transport="websockets")
-    ca = _ca_bundle_path()
-    if ca:
-        # certifi is available — pin the CA bundle so TLS verification has a
-        # trust store to check against on macOS / frozen builds.
-        client.tls_set(ca_certs=ca, cert_reqs=ssl.CERT_REQUIRED)
-    else:
-        client.tls_set(cert_reqs=ssl.CERT_REQUIRED)
+        client = _mqtt.Client(protocol=_mqtt.MQTTv311, transport=transport)
+    if scheme in ("wss", "ssl", "tls", "mqtts"):
+        ca = _ca_bundle_path()
+        if ca:
+            # certifi is available — pin the CA bundle so TLS verification has a
+            # trust store to check against on macOS / frozen builds.
+            client.tls_set(ca_certs=ca, cert_reqs=ssl.CERT_REQUIRED)
+        else:
+            client.tls_set(cert_reqs=ssl.CERT_REQUIRED)
     return client
 
 
@@ -342,7 +371,11 @@ def probe_relay_endpoint(endpoint: str, timeout: float = 4.0) -> dict:
         scheme, _, rest = endpoint.partition("://")
         host_port, _, _path = rest.partition("/")
         host, _, port = host_port.partition(":")
-        port = int(port or 8884)
+        # Scheme-aware default port, matching _parse_endpoint: native MQTT
+        # defaults to 1883, WebSocket keeps the historical 8884.
+        default_port = (1883 if scheme.lower() in ("mqtt", "mqtts", "tcp", "tls", "ssl")
+                        else 8884)
+        port = int(port or default_port)
     except Exception:
         return {"endpoint": endpoint, "ok": False, "latency_ms": None, "detail": "invalid endpoint"}
     if not host:
@@ -429,7 +462,7 @@ class _MirrorConnection:
         if parsed is None:
             return False
         host, port, path = parsed
-        client = self._transport._client_factory()
+        client = self._transport._new_client(self._endpoint)
         if client is None:
             return False
         client.on_connect = self._on_connect
@@ -437,7 +470,10 @@ class _MirrorConnection:
         self._client = client
         self._connected = False
         try:
-            client.ws_set_options(path=path)
+            # TLS/transport comes from the scheme-aware factory; only the
+            # WebSocket path is transport-specific and set per-endpoint.
+            if _endpoint_scheme(self._endpoint) in ("ws", "wss"):
+                client.ws_set_options(path=path)
             client.connect(host, port, keepalive=45)
             client.loop_start()
         except Exception:
@@ -512,12 +548,16 @@ class RelayTransport:
         on_state: Callable[[str], None],
         client_factory: Callable | None = None,
         sleeper: Callable[[float], None] | None = None,
+        username: str = "",
+        password: str = "",
     ):
         self._brokers = [b for b in brokers if isinstance(b, str) and b]
         self._get_channels = get_channels
         self._on_frame = on_frame
         self._on_state = on_state
         self._client_factory = client_factory or build_paho_client
+        self._username = username or ""
+        self._password = password or ""
         self._sleeper = sleeper if sleeper is not None else self._interruptible_sleep
         self._lock = threading.RLock()
         self._thread: threading.Thread | None = None
@@ -624,6 +664,18 @@ class RelayTransport:
         cleaned = [b for b in brokers if isinstance(b, str) and b]
         with self._lock:
             self._brokers = cleaned
+
+    def set_credentials(self, username: str, password: str) -> None:
+        """Replace the broker credentials *before* a restart.
+
+        Like ``set_brokers`` this only swaps the stored value — the live
+        worker keeps the old creds until the next connect loop (call
+        ``restart()``).  Empty username+password = anonymous, the historical
+        public-broker behavior.
+        """
+        with self._lock:
+            self._username = username or ""
+            self._password = password or ""
 
     def refresh_channels(self) -> None:
         """Channel set changed — resubscribe without dropping the link.
@@ -762,14 +814,39 @@ class RelayTransport:
 
     def _parse_endpoint(self, endpoint: str) -> tuple[str, int, str] | None:
         try:
+            scheme = _endpoint_scheme(endpoint)
             rest = endpoint.split("://", 1)[1]
             host_port, _, path = rest.partition("/")
             host, _, port = host_port.partition(":")
             if not host:
                 return None
-            return host, int(port or 8884), "/" + path.lstrip("/") if path else "/mqtt"
+            # Scheme-aware default ports (only when the URL omits one):
+            # native MQTT defaults to 1883, WebSocket keeps the historical
+            # 8884.
+            default_port = (1883 if scheme in ("mqtt", "mqtts", "tcp", "tls", "ssl")
+                            else 8884)
+            return host, int(port or default_port), "/" + path.lstrip("/") if path else "/mqtt"
         except Exception:
             return None
+
+    def _new_client(self, endpoint: str):
+        """Build a scheme-appropriate paho client for ``endpoint``.
+
+        The factory is handed the endpoint so it can pick transport + TLS
+        (see ``build_paho_client``).  A caller-supplied factory may be a bare
+        no-arg callable (the unit-test fakes) — fall back to calling it
+        without the endpoint when it doesn't accept one.  Broker credentials
+        (when configured) are applied here, once, for both primary and mirror
+        connections.
+        """
+        factory = self._client_factory
+        try:
+            client = factory(endpoint)
+        except TypeError:
+            client = factory()
+        if client is not None and (self._username or self._password):
+            client.username_pw_set(self._username, self._password)
+        return client
 
     def _connect_one(self, index: int) -> bool:
         endpoint = self._brokers[index]
@@ -792,7 +869,7 @@ class RelayTransport:
                 old_client.disconnect()
             except Exception:
                 logger.debug("relay client cleanup failed", exc_info=True)
-        client = self._client_factory()
+        client = self._new_client(endpoint)
         if client is None:
             logger.warning("paho-mqtt not available — internet sync disabled")
             self._set_state(STATE_ERROR)
@@ -804,12 +881,14 @@ class RelayTransport:
         with self._lock:
             self._client = client
         try:
-            # NOTE: TLS is configured inside build_paho_client() (the factory).
-            # Calling client.tls_set() again here raises
-            # "SSL/TLS has already been configured" on paho 2.x, which killed
-            # the relay thread on real paho (unit fakes never noticed).  Only
-            # the websocket path is transport-specific and set per-endpoint.
-            client.ws_set_options(path=path)
+            # NOTE: TLS/transport is configured inside build_paho_client()
+            # (the scheme-aware factory).  Calling client.tls_set() again here
+            # raises "SSL/TLS has already been configured" on paho 2.x, which
+            # killed the relay thread on real paho (unit fakes never noticed).
+            # Only the websocket path is transport-specific and set per-
+            # endpoint (native-TCP clients have no path).
+            if _endpoint_scheme(endpoint) in ("ws", "wss"):
+                client.ws_set_options(path=path)
             client.connect(host, port, keepalive=45)
             client.loop_start()
         except TimeoutError:

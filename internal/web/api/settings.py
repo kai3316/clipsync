@@ -67,6 +67,9 @@ _SAFE_FIELDS = {
     # able to read or overwrite them through this API.
     "internet_sync_enabled",
     "relay_brokers",
+    # The relay broker *username* is exposed so the web UI can prefill it; the
+    # password is not — only relay_password_set is exposed (see get_settings).
+    "relay_username",
     "data_dir",
     "favorites_path",
     "hotkeys",
@@ -142,6 +145,8 @@ _MUTABLE_FIELDS = {
     "auto_update_check",
     "internet_sync_enabled",
     "relay_brokers",
+    "relay_username",
+    "relay_password",
     # Legacy pairing passphrase (v1.0.84 unification: the single encryption
     # password in the Security tab now derives the netpair channel keys, so
     # the web UI no longer sends this field — it is kept only so an older
@@ -220,6 +225,11 @@ def get_settings(cfg, get_internet_sync_state=None,
     # traffic).  Since v1.0.84 the single encryption password drives netpair
     # channels, so this flag reflects the leftover fallback config.
     result["netpair_password_set"] = bool(getattr(cfg, "netpair_password", ""))
+
+    # Relay broker password: set/not-set only, never the value.  The web UI
+    # shows an empty field with a "set" indicator, exactly like the security
+    # password — a token holder must not be able to read the broker credential.
+    result["relay_password_set"] = bool(getattr(cfg, "relay_password", ""))
 
     # Live internet-sync state (never a secret).  When sync is disabled the
     # state is definitively "off" — no callback needed; otherwise fall back to

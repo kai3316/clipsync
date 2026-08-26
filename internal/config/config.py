@@ -173,10 +173,20 @@ class Config:
     # topic derived from both devices' secrets.
     internet_sync_enabled: bool = False
     relay_brokers: list[str] = field(default_factory=lambda: [
-        "wss://broker.emqx.io:8084/mqtt",
-        "wss://broker.hivemq.com:8884/mqtt",
-        "wss://test.mosquitto.org:8081/mqtt",
+        # Private broker (mqttyyc.top) is the default: its plaintext native
+        # MQTT and WebSocket endpoints both authenticate with the default
+        # relay_username/relay_password below, so enabling internet sync needs
+        # no manual credential entry.  Both endpoints are listed for failover
+        # (the mirror-publish path covers one being down).
+        "mqtt://mqttyyc.top:1883",
+        "ws://mqttyyc.top:8083/mqtt",
     ])
+    # Default broker credentials for the private relay broker above — filled in
+    # so the default server "just works" with no typing.  Stored in the config
+    # file, which is encrypted at rest when an app password is set — same
+    # treatment as the translation API key.
+    relay_username: str = "clipsync_mqtt"
+    relay_password: str = "Y*CT$#qgn_Ft#p6JG+"
     # This device's own relay secret — generated lazily on first use and
     # never transmitted in the clear (enrollment rides the TLS LAN channel).
     relay_secret: str = ""
@@ -343,6 +353,8 @@ _FIELD_RULES: dict[str, tuple] = {
     "hotkeys_enabled": ("bool",),
     "internet_sync_enabled": ("bool",),
     "relay_brokers": ("strlist_nonnull",),
+    "relay_username": ("str",),
+    "relay_password": ("str",),
     "relay_secret": ("str",),
     "peer_relay_secrets": ("strdict",),
     "netpair_secrets": ("strdict",),
@@ -504,6 +516,7 @@ def load() -> Config:
                 "translate_url", "translate_api_key",
                 "hotkeys", "hotkeys_enabled",
                 "internet_sync_enabled", "relay_brokers",
+                "relay_username", "relay_password",
                 "relay_secret", "peer_relay_secrets",
                 "netpair_secrets",
                 "netpair_aliases",
@@ -657,6 +670,8 @@ def save(cfg: Config, enc_mgr: "EncryptionManager | None" = None):
             "hotkeys_enabled": cfg.hotkeys_enabled,
             "internet_sync_enabled": cfg.internet_sync_enabled,
             "relay_brokers": cfg.relay_brokers,
+            "relay_username": cfg.relay_username,
+            "relay_password": cfg.relay_password,
             "relay_secret": cfg.relay_secret,
             "peer_relay_secrets": cfg.peer_relay_secrets,
             "netpair_secrets": cfg.netpair_secrets,

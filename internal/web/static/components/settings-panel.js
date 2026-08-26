@@ -47,6 +47,9 @@
       'settings_window.relay_brokers_toggle', 'settings_window.relay_brokers_label',
       'settings_window.relay_brokers_hint', 'settings_window.save_relay_brokers',
       'settings_window.test_relay_btn', 'settings_window.test_relay_result',
+      'settings_window.relay_username_label', 'settings_window.relay_password_label',
+      'settings_window.relay_password_placeholder', 'settings_window.relay_password_clear',
+      'settings_window.relay_password_hint',
     ],
     web: [
       'settings_nav.web_companion', 'settings_window.web_enable',
@@ -146,6 +149,11 @@
         // Pairing management itself lives on the Devices page (round 15).
         internetSyncEnabled: false,
         relayBrokersText: '',
+        relayUsername: '',
+        relayPassword: '',
+        relayShowPassword: false,
+        relayClearPassword: false,
+        relayPasswordSet: false,
         brokersSaving: false,
         brokersOpen: false,
         relayTesting: false,
@@ -511,6 +519,11 @@
         if (s.service_type !== undefined) this.serviceType = s.service_type || '';
         if (s.internet_sync_enabled !== undefined) this.internetSyncEnabled = !!s.internet_sync_enabled;
         if (s.relay_brokers !== undefined) this.relayBrokersText = (s.relay_brokers || []).join('\n');
+        if (s.relay_username !== undefined) this.relayUsername = s.relay_username || '';
+        // Password is never echoed back — only a set/not-set flag.  A blank
+        // field means "keep the stored value" on save.
+        this.relayPassword = '';
+        this.relayPasswordSet = !!s.relay_password_set;
         if (s.web_enabled !== undefined) this.webEnabled = !!s.web_enabled;
         if (s.web_port !== undefined) this.webPort = String(s.web_port);
         if (s.web_history_limit !== undefined) this.webHistoryLimit = s.web_history_limit;
@@ -610,6 +623,13 @@
           });
       },
 
+      // Valid broker-URL schemes.  wss:// (TLS WebSocket) remains the default
+      // and the only one understood by the old public broker; the others map to
+      // the scheme-aware transports added for private brokers:
+      //   ws://    plain WebSocket          mqtt://   native MQTT, plain
+      //   wss://   TLS WebSocket            mqtts:///ssl:///tls:// native MQTT, TLS
+      _RELAY_SCHEMES: ['ws://', 'wss://', 'mqtt://', 'mqtts://', 'ssl://', 'tls://'],
+
       saveRelayBrokers: function () {
         var self = this;
         var lines = (self.relayBrokersText || '').split('\n')
@@ -622,7 +642,10 @@
           return;
         }
         var hasBad = lines.some(function (l) {
-          return l.toLowerCase().indexOf('wss://') !== 0;
+          var lo = l.toLowerCase();
+          return !self._RELAY_SCHEMES.some(function (s) {
+            return lo.indexOf(s) === 0;
+          });
         });
         if (hasBad) {
           self.store.showToast(self.t('settings.relay_brokers_invalid'), 3000);
@@ -635,8 +658,18 @@
         lines.forEach(function (l) {
           if (!seen[l]) { seen[l] = true; brokers.push(l); }
         });
+        var payload = { relay_brokers: brokers };
+        // Username is echoed back, so always send it.  The password never is:
+        // a blank field means "keep the stored value", unless the user hit
+        // the explicit "clear" affordance (which sends an empty password).
+        payload.relay_username = self.relayUsername || '';
+        if (self.relayClearPassword) {
+          payload.relay_password = '';
+        } else if (self.relayPassword) {
+          payload.relay_password = self.relayPassword;
+        }
         self.brokersSaving = true;
-        ClipsyncAPI.updateSettings({ relay_brokers: brokers })
+        ClipsyncAPI.updateSettings(payload)
           .then(function (res) {
             self.brokersSaving = false;
             if (res && res.updated) self.store.mergeSettings(res.updated);
@@ -646,6 +679,14 @@
             self._skipDirty = true;
             self.relayBrokersText = brokers.join('\n');
             self.$nextTick(function () { self._skipDirty = false; });
+            // Reflect the new stored-password state in the placeholder/clear
+            // affordance: a sent password sets it, an explicit clear removes it.
+            if (payload.relay_password !== undefined) {
+              self.relayPasswordSet = !!payload.relay_password;
+            }
+            self.relayClearPassword = false;
+            self.relayPassword = '';
+            self.relayShowPassword = false;
             self.store.showToast(self.t('settings.relay_brokers_saved'), 2500);
           })
           .catch(function () {
@@ -1616,6 +1657,9 @@
       port: function () { this.markDirty('network'); },
       serviceType: function () { this.markDirty('network'); },
       relayBrokersText: function () { this.markDirty('remote'); },
+      relayUsername: function () { this.markDirty('remote'); },
+      relayPassword: function () { this.markDirty('remote'); },
+      relayClearPassword: function () { this.markDirty('remote'); },
       webEnabled: function () { this.markDirty('web'); },
       webPort: function () { this.markDirty('web'); },
       webHistoryLimit: function () { this.markDirty('web'); },
@@ -1865,8 +1909,23 @@
                   '<template v-if="brokersOpen">' +
                     '<div class="settings-field" style="margin-top:8px">' +
                       '<label class="settings-field__label">{{ t(\'settings_window.relay_brokers_label\') }}</label>' +
-                      '<textarea class="settings-input" rows="4" v-model="relayBrokersText" placeholder="wss://broker.emqx.io:8884/mqtt"></textarea>' +
+                      '<textarea class="settings-input" rows="4" v-model="relayBrokersText" placeholder="mqtt://mqttyyc.top:1883"></textarea>' +
                       '<span class="settings-hint">{{ t(\'settings_window.relay_brokers_hint\') }}</span>' +
+                    '</div>' +
+                    // Broker credentials for private/authenticated brokers.
+                    // Anonymous public brokers just leave both blank.
+                    '<div class="settings-field" style="margin-top:8px">' +
+                      '<label class="settings-field__label">{{ t(\'settings_window.relay_username_label\') }}</label>' +
+                      '<input type="text" class="settings-input" v-model="relayUsername" autocomplete="off" placeholder="clipsync_mqtt">' +
+                    '</div>' +
+                    '<div class="settings-field" style="margin-top:8px">' +
+                      '<label class="settings-field__label">{{ t(\'settings_window.relay_password_label\') }}</label>' +
+                      '<div class="settings-field__row">' +
+                        '<input :type="relayShowPassword ? \'text\' : \'password\'" class="settings-input" v-model="relayPassword" autocomplete="new-password" :placeholder="relayPasswordSet && !relayClearPassword ? \'●●●●●●●●\' : t(\'settings_window.relay_password_placeholder\')">' +
+                        '<button class="settings-btn settings-btn--sm" @click="relayShowPassword = !relayShowPassword">{{ relayShowPassword ? t(\'settings_window.hide\') : t(\'settings_window.show\') }}</button>' +
+                        '<button v-if="relayPasswordSet && !relayClearPassword" class="settings-btn settings-btn--sm" @click="relayClearPassword = true">{{ t(\'settings_window.relay_password_clear\') }}</button>' +
+                      '</div>' +
+                      '<span class="settings-hint">{{ t(\'settings_window.relay_password_hint\') }}</span>' +
                     '</div>' +
                     '<button class="settings-btn settings-btn--accent" @click="saveRelayBrokers" :disabled="brokersSaving" style="width:100%;margin-top:4px">' +
                       '{{ brokersSaving ? \'...\' : t(\'settings_window.save_relay_brokers\') }}' +

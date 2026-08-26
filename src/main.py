@@ -2921,6 +2921,20 @@ class Application:
             except Exception:
                 logger.debug("relay restart after broker change failed",
                              exc_info=True)
+        elif ("relay_username" in updated or "relay_password" in updated) \
+                and self._relay is not None:
+            # Broker credentials edited while the relay is live — swap them
+            # into the existing clients (including pending reconnects).
+            try:
+                self._relay.set_credentials(
+                    str(updated.get("relay_username", "") or ""),
+                    str(updated.get("relay_password", "") or ""),
+                )
+                self._relay.restart()
+            except Exception:
+                logger.debug(
+                    "relay restart after credential change failed",
+                    exc_info=True)
         if "netpair_password" in updated and self._relay is not None:
             # Pairing passphrase set/cleared — re-derive the netpair channel
             # keys so the change applies to live traffic immediately.
@@ -7847,6 +7861,8 @@ class Application:
             on_frame=self._on_relay_frame,
             on_state=self._on_relay_state,
             client_factory=build_paho_client,
+            username=getattr(self.cfg, "relay_username", "") or "",
+            password=getattr(self.cfg, "relay_password", "") or "",
         )
         self._relay = transport
         transport.start()

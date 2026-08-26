@@ -197,6 +197,8 @@ def create_backup(
             # without requiring re-enrollment over the LAN.
             "internet_sync_enabled": cfg.internet_sync_enabled,
             "relay_brokers": list(cfg.relay_brokers),
+            "relay_username": cfg.relay_username,
+            "relay_password": cfg.relay_password,
             "relay_secret": cfg.relay_secret,
             "peer_relay_secrets": {
                 k: v for k, v in (cfg.peer_relay_secrets or {}).items()
@@ -482,6 +484,8 @@ _APPLY_SCHEMA: dict[str, tuple] = {
     # hand-edited backup writing null cannot set them to None.
     "internet_sync_enabled": ("bool",),
     "relay_brokers": ("strlist_nonnull",),
+    "relay_username": ("str",),
+    "relay_password": ("str",),
     "relay_secret": ("str",),
     "peer_relay_secrets": ("strdict",),
     "netpair_secrets": ("strdict",),
