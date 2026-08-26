@@ -536,7 +536,7 @@ def make_app_stub(**attrs):
                 self.published = []
                 self.refreshed = 0
 
-            def publish(self, frame, topic, key):
+            def publish(self, frame, topic, key, qos=0):
                 self.published.append((frame, topic, key))
 
             def refresh_channels(self):

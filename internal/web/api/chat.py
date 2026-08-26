@@ -15,6 +15,8 @@ the desktop connect-first logic (see ``src/main.py:_chat_start_session``).
 import json
 import logging
 
+from internal.sync.nearby_chat import ChatFileTooLarge
+
 logger = logging.getLogger(__name__)
 
 _UNAVAILABLE = {"error": "chat unavailable"}
@@ -283,6 +285,10 @@ def send_file(chat_mgr, body, send_fn_for_peer):
     send_fn = _send_fn_for(chat_mgr, session_id, send_fn_for_peer)
     try:
         transfer_id = chat_mgr.send_file(session_id, file_path, send_fn)
+    except ChatFileTooLarge:
+        # The peer is internet-only and the file exceeds the relay cap; tell
+        # the UI so it can show a specific message instead of a generic one.
+        return {"ok": False, "error": "internet_file_cap"}, 400
     except Exception:
         logger.debug("chat: send_file failed", exc_info=True)
         transfer_id = None

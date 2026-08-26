@@ -54,6 +54,10 @@ logger = logging.getLogger(__name__)
 SendFn = Callable[[bytes], Any]
 
 
+class ChatFileTooLarge(Exception):
+    """A file was refused because it exceeds the internet-relay payload cap."""
+
+
 def _default_receive_dir() -> Path:
     return Path.home() / "Downloads" / "ClipSync" / "Chat"
 
@@ -198,6 +202,11 @@ class ChatManager:
     MAX_SESSIONS = 8                  # simultaneously live sessions
     # ---- transfer tuning (mirrors FileTransferManager) ----------------------
     CHUNK_SIZE = 256 * 1024
+    # Chunks for internet-only peers must fit inside the relay payload cap
+    # (MAX_RELAY_PAYLOAD - envelope overhead); LAN peers keep CHUNK_SIZE so the
+    # wire format stays byte-identical for pre-update LAN peers.
+    RELAY_CHUNK_SIZE = 224 * 1024
+    RELAY_FILE_CAP = 5 * 1024 * 1024  # internet-relay file size cap (bytes)
     INVITE_ACCEPT_TIMEOUT = 300.0     # sender waits this long for chat_file_accept
     COMPLETION_WAIT_TIMEOUT = 60.0
     TRANSFER_STALL_TIMEOUT = 600.0    # no chunk progress this long => fail + remove .part
@@ -710,6 +719,16 @@ class ChatManager:
             session = self._session_by_sid.get(session_id)
             if session is None or session.status != "active" or not session.online:
                 return None
+            fn = send_fn or self._latest_send_fn.get(session.peer_id)
+            # Internet-only peers ship bytes through the relay, which caps
+            # both per-chunk and total size; refuse early and loudly so the
+            # UI can tell the user why instead of hanging at 0%.
+            internet_cap = getattr(fn, "internet_cap", None)
+            if internet_cap and size > internet_cap:
+                raise ChatFileTooLarge(
+                    f"{path.name}: {size} bytes exceeds relay cap {internet_cap}"
+                )
+            chunk_size = getattr(fn, "chunk_size", None) or self.CHUNK_SIZE
             # Mirror the incoming cap so a UI bug (or a fast-clicking user)
             # cannot spawn an unbounded number of chunk threads per session.
             outgoing_inflight = sum(
@@ -718,7 +737,6 @@ class ChatManager:
             if outgoing_inflight >= self.MAX_CONCURRENT_OUTGOING_FILES:
                 logger.info("chat: too many outgoing files for session %s", session_id[:8])
                 return None
-            fn = send_fn or self._latest_send_fn.get(session.peer_id)
             transfer_id = uuid.uuid4().hex
             entry = ChatEntry(
                 entry_id=transfer_id, kind="file", outgoing=True, ts=time.time(),
@@ -734,7 +752,8 @@ class ChatManager:
                 "file_size": size,
                 # 0-byte files have zero chunks; the "sent" completion frame
                 # below is what lets the receiver finalize them.
-                "total_chunks": math.ceil(size / self.CHUNK_SIZE),
+                "total_chunks": math.ceil(size / chunk_size),
+                "chunk_size": chunk_size,
                 "accept_event": threading.Event(),
                 "complete_event": threading.Event(),
                 "cancel": False,
@@ -749,6 +768,7 @@ class ChatManager:
                 "transfer_id": transfer_id,
                 "file_name": entry.file_name,
                 "file_size": size,
+                "chunk_size": chunk_size,
                 "mime": "",
             }, fn)
             if not ok:
@@ -1402,6 +1422,16 @@ class ChatManager:
                 mime=str(payload.get("mime", ""))[:100],
                 status="await_accept", transfer_id=transfer_id,
             )
+            # The sender advertises the chunk size it will use; internet-only
+            # peers send smaller chunks to fit the relay cap.  Old senders omit
+            # the field, so default to CHUNK_SIZE.  A bogus value (0, negative,
+            # oversized, non-numeric) is ignored rather than trusted for seeks.
+            try:
+                chunk_size = int(payload.get("chunk_size") or 0)
+            except (TypeError, ValueError):
+                chunk_size = 0
+            if chunk_size <= 0 or chunk_size > self.CHUNK_SIZE:
+                chunk_size = self.CHUNK_SIZE
             self._append_entry(session, entry)
             self._receives[transfer_id] = {
                 "transfer_id": transfer_id,
@@ -1409,7 +1439,8 @@ class ChatManager:
                 "entry": entry,
                 "file_name": entry.file_name,
                 "file_size": size,
-                "total_chunks": math.ceil(size / self.CHUNK_SIZE),
+                "total_chunks": math.ceil(size / chunk_size),
+                "chunk_size": chunk_size,
                 "accepted": False,
                 "fh": None,
                 "temp_path": None,
@@ -1567,7 +1598,11 @@ class ChatManager:
                 logger.warning("chat: malformed chunk for %s -- dropped", transfer_id[:8])
                 return True
             try:
-                state["fh"].seek(index * self.CHUNK_SIZE)
+                # Chunk size travels with the offer; LAN receivers keep
+                # CHUNK_SIZE, internet-relay receivers use the smaller relay
+                # chunk.  Fall back to CHUNK_SIZE defensively.
+                chunk_size = state.get("chunk_size") or self.CHUNK_SIZE
+                state["fh"].seek(index * chunk_size)
                 state["fh"].write(data)
             except OSError:
                 logger.warning("chat: disk write failed for %s", transfer_id[:8], exc_info=True)
@@ -1741,6 +1776,7 @@ class ChatManager:
                 return
             path, size = state["file_path"], state["file_size"]
             total_chunks = state["total_chunks"]
+            chunk_size = state.get("chunk_size") or self.CHUNK_SIZE
             send_fn = state["send_fn"]
             session = state["session"]
             # Bind early: the failure paths below use these, and the stall
@@ -1754,7 +1790,7 @@ class ChatManager:
                         state = self._sends.get(transfer_id)
                         if state is None or state["cancel"]:
                             return
-                    chunk = fh.read(self.CHUNK_SIZE)
+                    chunk = fh.read(chunk_size)
                     if not chunk:
                         break
                     frame = encode_binary_chunk(transfer_id, index, total_chunks, chunk)

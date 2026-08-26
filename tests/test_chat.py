@@ -21,8 +21,9 @@ from internal.protocol.codec import (
     encode_binary_chunk,
     encode_frame,
 )
-from internal.sync.nearby_chat import ChatManager
+from internal.sync.nearby_chat import ChatFileTooLarge, ChatManager
 from internal.transport.connection import PeerConnection, TransportManager
+from internal.transport.relay import MAX_RELAY_PAYLOAD
 
 DEV_A = "device-aaaa"
 DEV_B = "device-bbbb"
@@ -430,6 +431,135 @@ class TestFileTransfer:
                 break
             sent.append(tid)
         assert len(sent) == ChatManager.MAX_CONCURRENT_OUTGOING_FILES
+
+
+class TestInternetRelayFileTransfers:
+    """Internet-only peers ship chat files through the relay.
+
+    The send_fn carries the relay chunk size + file cap as function
+    attributes (tagged by main._chat_send_fn for peers with no live LAN
+    connection).  Chunks must fit inside MAX_RELAY_PAYLOAD and the receiver
+    must seek with the advertised chunk size.
+    """
+
+    def setup_method(self):
+        import tempfile
+        from pathlib import Path
+        self._tmp = tempfile.TemporaryDirectory()
+        base = Path(self._tmp.name)
+        self.dir_a, self.dir_b = base / "a", base / "b"
+        self.pair = LinkedPair(self.dir_a, self.dir_b)
+        self.sid = self.pair.establish()
+
+    def teardown_method(self):
+        self.pair.close()
+        self._tmp.cleanup()
+
+    def _relay_fn(self):
+        # Mirrors main._chat_send_fn's tagging for an internet-only peer.
+        def fn(data: bytes) -> bool:
+            return self.pair.send_from_a(data)
+
+        fn.chunk_size = ChatManager.RELAY_CHUNK_SIZE
+        fn.internet_cap = ChatManager.RELAY_FILE_CAP
+        return fn
+
+    def _source(self, size: int):
+        src = self.dir_a / "source.bin"
+        src.write_bytes(bytes(range(256)) * (size // 256) + b"x" * (size % 256))
+        return src
+
+    def _b_entry(self, tid):
+        msgs = self.pair.b.get_messages(self.sid)
+        return next((e for e in msgs if e["transfer_id"] == tid), None)
+
+    def _offer_chunk_size(self) -> int:
+        for frame in self.pair.frames_a_to_b:
+            msg = decode_message(frame)
+            payload = getattr(msg, "_raw_payload", None)
+            if payload and payload.get("msg_type") == "chat_file_offer":
+                return int(payload.get("chunk_size") or 0)
+        raise AssertionError("no chat_file_offer frame captured")
+
+    def test_internet_file_uses_relay_chunk_size_and_preserves_bytes(self):
+        src = self._source(ChatManager.RELAY_CHUNK_SIZE * 2 + 1234)
+        tid = self.pair.a.send_file(self.sid, str(src), self._relay_fn())
+        assert tid, "send_file returned None"
+        assert self._offer_chunk_size() == ChatManager.RELAY_CHUNK_SIZE
+        assert _wait_until(lambda: (self._b_entry(tid) or {}).get("status") == "await_accept")
+        assert self.pair.b.accept_file(self.sid, tid, self.pair.send_from_b)
+        assert _wait_until(lambda: (self._b_entry(tid) or {}).get("status") == "done")
+        # Every binary chunk frame must fit inside the relay payload cap.
+        for frame in self.pair.frames_a_to_b:
+            msg = decode_message(frame)
+            if getattr(msg, "msg_type", "") == "file_chunk":
+                assert len(frame) <= MAX_RELAY_PAYLOAD, (
+                    f"chunk frame {len(frame)}B exceeds relay cap")
+        received = next(
+            e for e in self.pair.b.get_messages(self.sid) if e["transfer_id"] == tid
+        )
+        assert open(received["saved_path"], "rb").read() == src.read_bytes()
+
+    def test_internet_file_cap_refused(self):
+        src = self._source(ChatManager.RELAY_FILE_CAP + 1)
+        try:
+            self.pair.a.send_file(self.sid, str(src), self._relay_fn())
+        except ChatFileTooLarge:
+            pass
+        else:
+            raise AssertionError("expected ChatFileTooLarge")
+        # No offer frame should have left the sender.
+        assert not any(
+            (getattr(decode_message(f), "_raw_payload", {}) or {}).get("msg_type")
+            == "chat_file_offer"
+            for f in self.pair.frames_a_to_b
+        )
+
+    def test_lan_untagged_fn_keeps_default_chunk_size(self):
+        # A dual/LAN peer's send_fn carries no tag → LAN wire format unchanged.
+        src = self._source(ChatManager.CHUNK_SIZE + 1234)
+        tid = self.pair.a.send_file(self.sid, str(src), self.pair.send_from_a)
+        assert tid
+        assert self._offer_chunk_size() == ChatManager.CHUNK_SIZE
+
+    def test_bogus_chunk_size_in_offer_falls_back_to_default(self):
+        # A corrupted/attacker-advertised chunk_size must not be trusted for
+        # seeks; the receiver falls back to CHUNK_SIZE when parsing the offer.
+        import math
+        payload = {
+            "msg_type": "chat_file_offer",
+            "session_id": self.sid,
+            "transfer_id": "f" * 32,
+            "file_name": "bogus.bin",
+            "file_size": 1024,
+            "chunk_size": "not-a-number",
+            "mime": "",
+        }
+        assert self.pair.b.handle_message(
+            "chat_file_offer", payload, DEV_A, FP_A, self.pair.send_from_b) is True
+        entry = next(
+            e for e in self.pair.b.get_messages(self.sid) if e["transfer_id"] == "f" * 32
+        )
+        assert entry["status"] == "await_accept"
+        recv = self.pair.b._receives.get("f" * 32)
+        assert recv is not None
+        assert recv["chunk_size"] == ChatManager.CHUNK_SIZE
+        assert recv["total_chunks"] == math.ceil(1024 / ChatManager.CHUNK_SIZE)
+        # Zero / negative / oversized values are treated the same way.  Each
+        # iteration needs a FRESH transfer_id: a second offer for an id already
+        # in _receives is rejected as a duplicate, which would make this loop
+        # test the dedup guard instead of the chunk_size fallback.  The slot is
+        # freed afterwards so a later iteration isn't rejected by the
+        # MAX_CONCURRENT_INCOMING_FILES guard either.
+        for i, bogus in enumerate((0, -7, ChatManager.CHUNK_SIZE + 1)):
+            tid = ("%02x" % i).ljust(32, "e")[:32]  # unique per iteration
+            recv2_payload = dict(payload, chunk_size=bogus, transfer_id=tid)
+            assert self.pair.b.handle_message(
+                "chat_file_offer", recv2_payload, DEV_A, FP_A,
+                self.pair.send_from_b) is True
+            recv2 = self.pair.b._receives.get(tid)
+            assert recv2 is not None and recv2["chunk_size"] == ChatManager.CHUNK_SIZE
+            self.pair.b._receives.pop(tid, None)
 
 
 class TestDisconnectAndSnapshots:

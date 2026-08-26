@@ -103,7 +103,7 @@ def make_app_stub(**attrs):
         def __init__(self):
             self.published = []
 
-        def publish(self, frame, topic, key):
+        def publish(self, frame, topic, key, qos=0):
             self.published.append((frame, topic, key))
             return relay_ok
 
@@ -382,7 +382,7 @@ def test_relay_online_trigger_flushes_queue(isolated_config, tmp_path):
     assert msg_id in app._delivery_queue["bbbbbbbbbbbb"]
     # relay comes online → flush: switch the stub relay to online behaviour
     app._relay.published.clear()
-    app._relay.publish = lambda f, t, k: (app._relay.published.append(
+    app._relay.publish = lambda f, t, k, qos=0: (app._relay.published.append(
         (f, t, k)) or True)
     Application._on_relay_state(app, "online")
     assert msg_id not in app._delivery_queue.get("bbbbbbbbbbbb", {})
@@ -402,7 +402,7 @@ def test_peer_active_trigger_flushes_queue(isolated_config, tmp_path):
     assert msg_id in app._delivery_queue["bbbbbbbbbbbb"]
     # a frame from the peer arrives (active signal) while relay now online
     app._relay.published.clear()
-    app._relay.publish = lambda f, t, k: (app._relay.published.append(
+    app._relay.publish = lambda f, t, k, qos=0: (app._relay.published.append(
         (f, t, k)) or True)
     incoming = encode_frame({
         "msg_type": "clipboard", "types": {"TEXT": "aGVsbG8="},
@@ -420,7 +420,7 @@ def test_timer_retry_flushes_queue(isolated_config, tmp_path):
     app._relay_publish_frame(frame)
     msg_id = decode_message(frame).msg_id
     app._relay.published.clear()
-    app._relay.publish = lambda f, t, k: (app._relay.published.append(
+    app._relay.publish = lambda f, t, k, qos=0: (app._relay.published.append(
         (f, t, k)) or True)
     app._delivery_retry_queue()
     assert msg_id not in app._delivery_queue.get("bbbbbbbbbbbb", {})

@@ -67,7 +67,7 @@ from internal.security.pairing import (
 from internal.sync.ai_config import AIConfigManager
 from internal.sync.file_transfer import FileTransferManager
 from internal.sync.manager import SyncManager
-from internal.sync.nearby_chat import ChatManager
+from internal.sync.nearby_chat import ChatFileTooLarge, ChatManager
 from internal.system.hotkey import HotkeyManager
 from internal.transport.connection import MAX_FRAME_SIZE, PortInUseError, TransportManager
 from internal.transport.discovery import Discovery
@@ -1480,6 +1480,25 @@ class Application:
                     logger.debug("chat delivery ledger failed", exc_info=True)
                 return True
             return self._relay_publish_to_peer(data, peer_id)
+        # Internet-only peer (internet-reachable but with no live LAN P2P
+        # connection): every file byte must ride the relay, so tell
+        # ChatManager to chunk the file relay-safe and refuse files past the
+        # relay cap — otherwise a 256 KiB chunk would exceed MAX_RELAY_PAYLOAD
+        # and the transfer would stall exactly like it used to.  A
+        # LAN-connected (dual) peer keeps the 256 KiB LAN wire format so
+        # pre-update LAN peers still interoperate unchanged.
+        if peer_id:
+            try:
+                connected = set(self.transport_mgr.get_connected_peers() or [])
+            except Exception:
+                connected = set()
+            if peer_id not in connected and self._peer_is_internet_reachable(peer_id):
+                # RELAY_CHUNK_SIZE / RELAY_FILE_CAP are class attributes on
+                # ChatManager (already imported at module scope) — no local
+                # import here: a NameError inside the send closure would be
+                # swallowed by chat's frame handler and kill the whole chat.
+                _send.chunk_size = ChatManager.RELAY_CHUNK_SIZE
+                _send.internet_cap = ChatManager.RELAY_FILE_CAP
         return _send
 
     def _peer_is_internet_reachable(self, peer_id: str) -> bool:
@@ -1828,6 +1847,9 @@ class Application:
                 session_id, file_path,
                 self._chat_send_fn(self._chat_peer_id_for_sid(session_id)),
             )
+        except ChatFileTooLarge:
+            logger.info("chat: refusing file above internet relay cap")
+            return None
         except Exception:
             return None
 
@@ -7909,27 +7931,34 @@ class Application:
         The frame must already carry ``source_device`` (chat's ``_send_frame``
         encodes it) so the receiving side can attribute it back to this peer —
         the relay has no connection object to infer the sender from.
+
+        Chat file BYTES (``file_chunk`` frames) DO cross the relay, so an
+        internet-only paired device can receive files up to the relay cap
+        (ChatManager picks a relay-safe chunk size + size cap for those peers).
+        No double delivery: ``_chat_send_fn`` is LAN-first, so a chunk only
+        reaches this relay path when the LAN send already failed — a
+        dual-connected peer receives it exactly once, over whichever path
+        delivered it.  Chunks ride at QoS 1 so a best-effort public broker
+        redelivers a dropped packet (receiver-side ``_seen`` + per-index chunk
+        dedup absorb at-least-once duplicates).
         """
         transport = self._relay
         if transport is None or not self.cfg.internet_sync_enabled:
             return False
         if not peer_id:
             return False
-        # Chat file BYTES ride the compact ``file_chunk`` framing.  Mirroring
-        # those too would deliver each chunk TWICE (LAN + relay) to a
-        # dual-connected peer, inflating the receiver's byte counter and failing
-        # the size check in ChatManager._finalize_receive — keep binary chunks
-        # LAN-only; only text/control chat frames cross the internet.
+        # Best-effort type sniff: only picks QoS 1 for binary file chunks.
+        # A frame that fails to decode still publishes at QoS 0, matching the
+        # pre-file-transfer behavior (decode was never a gate here).
         decoded = None
+        is_chunk = False
         try:
             from internal.protocol.codec import decode_message
             decoded = decode_message(frame_bytes)
-            if getattr(decoded, "msg_type", "") == "file_chunk":
-                return False
+            is_chunk = getattr(decoded, "msg_type", "") == "file_chunk"
         except Exception:
             logger.debug("relay publish to peer: frame decode failed",
                          exc_info=True)
-            return False
         from internal.transport.relay import (
             derive_key, derive_topic, netpair_key, netpair_topic,
         )
@@ -7947,7 +7976,8 @@ class Application:
             topic, key = (derive_topic(my_secret, peer_secret),
                           derive_key(my_secret, peer_secret))
         try:
-            ok = transport.publish(frame_bytes, topic, key) is True
+            ok = transport.publish(
+                frame_bytes, topic, key, qos=1 if is_chunk else 0) is True
         except Exception:
             logger.debug("relay publish to %s failed", str(peer_id)[:12],
                          exc_info=True)

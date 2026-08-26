@@ -245,7 +245,7 @@ def make_app_stub(**attrs):
             self.published = []
             self.refreshed = 0
 
-        def publish(self, frame, topic, key):
+        def publish(self, frame, topic, key, qos=0):
             self.published.append((frame, topic, key))
             return True
 
@@ -467,7 +467,7 @@ def _probe_app(**attrs):
 
     orig_publish = app._relay.publish
 
-    def publish(frame, topic, key):
+    def publish(frame, topic, key, qos=0):
         relay_frames.append((frame, topic, key))
         # echo to whichever netpair peer owns this topic
         for pid, secret in (app.cfg.netpair_secrets or {}).items():
@@ -829,7 +829,7 @@ def make_app_stub_mgmt(**attrs):
             self.published = []
             self.refreshed = 0
 
-        def publish(self, frame, topic, key):
+        def publish(self, frame, topic, key, qos=0):
             self.published.append((frame, topic, key))
             return True
 
@@ -1227,7 +1227,7 @@ def make_app_stub_audit(**attrs):
             self.refreshed = 0
             self.stopped = 0
 
-        def publish(self, frame, topic, key):
+        def publish(self, frame, topic, key, qos=0):
             self.published.append((frame, topic, key))
             return True
 

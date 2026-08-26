@@ -642,7 +642,8 @@ class RelayTransport:
                 logger.debug("unsubscribe %s failed", topic, exc_info=True)
             self._subscribed.discard(topic)
 
-    def publish(self, frame_bytes: bytes, topic: str, key: bytes) -> bool:
+    def publish(self, frame_bytes: bytes, topic: str, key: bytes,
+                qos: int = 0) -> bool:
         """Publish one encoded frame to ``topic`` on every connected broker.
 
         The primary client sends on the broker we are currently subscribed to;
@@ -652,6 +653,12 @@ class RelayTransport:
         connected client accepted the frame — a peer reachable only through a
         mirror counts as delivered (the offline-queue path only applies when
         nothing at all is connected).
+
+        ``qos`` is the MQTT delivery level.  File chunks ride the relay at
+        QoS 1 so a best-effort public broker redelivers a dropped packet
+        (paho requeues un-acked QoS>0 messages across reconnects); the
+        receiver's envelope ``_seen`` dedup already absorbs at-least-once
+        duplicates.  Clipboard/text frames stay QoS 0 (cheap, loss-tolerant).
         """
         with self._lock:
             client = self._client
@@ -677,7 +684,7 @@ class RelayTransport:
         delivered = False
         if primary_online:
             try:
-                info = client.publish(topic, blob, qos=0)
+                info = client.publish(topic, blob, qos=qos)
                 delivered = delivered or (getattr(info, "rc", 0) == 0)
             except Exception:
                 logger.debug("relay publish (primary) failed", exc_info=True)
@@ -686,7 +693,7 @@ class RelayTransport:
             if mirror_client is None:
                 continue
             try:
-                info = mirror_client.publish(topic, blob, qos=0)
+                info = mirror_client.publish(topic, blob, qos=qos)
                 delivered = delivered or (getattr(info, "rc", 0) == 0)
             except Exception:
                 logger.debug("relay publish (mirror) failed", exc_info=True)

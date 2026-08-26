@@ -121,7 +121,7 @@
 
 ## 交叉问题（完整性批评，未逐一验证）
 
-1. **互联网配对聊天传文件结构性不可能**：中继镜像拒绝 file_chunk（main.py:7811，为双通道去重），文件字节只能走 LAN；但聊天附件按钮对纯互联网 peer 照常提供，OFFER/ACCEPT 帧却过中继 → 接收方接受了一个永远收不到字节的 offer，发送方首块报误导性 'peer_offline'，接收方卡到 600s sweeper。要么禁用该按钮、要么提示，要么支持分块中继。
+1. **互联网配对聊天传文件结构性不可能**：中继镜像拒绝 file_chunk（main.py:7811，为双通道去重），文件字节只能走 LAN；但聊天附件按钮对纯互联网 peer 照常提供，OFFER/ACCEPT 帧却过中继 → 接收方接受了一个永远收不到字节的 offer，发送方首块报误导性 'peer_offline'，接收方卡到 600s sweeper。要么禁用该按钮、要么提示，要么支持分块中继。**【已修 v1.0.83】**：中继放行 file_chunk（qos=1 at-least-once），纯互联网对端用小分块（RELAY_CHUNK_SIZE=224KiB，封包 < 256KiB 中继上限）并设 5MB 文件上限，双通道对端仍走 LAN 原格式不重复投递；前端附件按钮联网态改名提示 + 客户端预校验，测速对纯联网对端改报"仅局域网"。详见文末"v1.0.83 修复记录"。
 2. **Web 实时态无重连兜底**：已送达/配对/中继态/AI 结果/会话全靠 WS 事件；审计证明一整族（internet_delivery/netpair_peer）在发行版已死，唯一 REST 兜底是一次性 fetch、重连不补拉。
 3. **unpair/forget 不清送达账本**：`_netpair_unpair` 清了 secret/别名却不清 `_delivery_queue`/`_delivery_ledger`/relay_pending.json → 已断关系的队列继续烧 5 次重试、base64 载荷在盘上留几分钟。
 4. **聊天账本只在中继路径记账**：LAN P2P 送达的聊天文字不进账本，对端 relay_ack 被当 unknown msg_id 丢弃 → 同一 peer 中继送达有 ✓、LAN 送达永远无 ✓。
@@ -157,3 +157,20 @@
   - `PLAN.md` 在工作区被删（` D PLAN.md`），按要求**未触碰**，别被 `git commit -am` 顺手固化。
   - 移动端 mobile.html 聊天附件对纯互联网 peer 仍可见（与 chat-panel.js 相同问题，本轮按清单只修了 Web 端）；`pytest-timeout` 未装、60s 超时护栏无效（存量）。
   - 未提交任何 commit。
+
+---
+
+## v1.0.83 修复记录（2026-08-26，交叉问题 #1）
+
+修复交叉问题 #1（互联网配对聊天传文件）：`_relay_publish_to_peer` 曾硬拒 `file_chunk` 帧（main.py:7927 旧行，双通道去重遗留），导致纯互联网对端能收到 offer/accept 控制帧但永远收不到文件字节 → 卡 0% / 假报"速度很慢"。
+
+- **nearby_chat.py**：新增 `ChatFileTooLarge`；类常量 `RELAY_CHUNK_SIZE=224KiB`（带 46B 头封包 < 256KiB 中继上限）、`RELAY_FILE_CAP=5MB`；send_file 按发送闭包上标记的 `chunk_size`/`internet_cap` 算总块数并提前拒绝超限；offer 载荷新增 `chunk_size` 字段（旧接收端忽略未知字段）。
+- **src/main.py `_chat_send_fn`**：对"不在已连接 LAN 列表 + 互联网可达"的对端，把 `_send.chunk_size`/`_send.internet_cap` 打成函数属性；LAN/双通道对端保持 256KiB 原格式（线协议字节不变，无旧 LAN 对端回归）。
+- **`_relay_publish_to_peer`**：移除 file_chunk 禁令，best-effort 解码嗅探 chunk 帧走 `qos=1`（broker at-least-once），文本/控制帧仍 qos=0；解码失败不阻断（不误杀无法解码的帧）。
+- **relay.py**：`publish()` 新增 `qos` 参数（默认 0），主/镜像 client 均透传。
+- **前端**：chat-panel.js 附件按钮纯互联网对端改名"发送文件（互联网中继，上限 5 MB）"+ 客户端 5MB 预校验 + `internet_file_cap` 错误区分；store.js 测速对纯联网对端报"仅支持局域网"而非误导的"很慢"。
+- **i18n 四镜像**：`chat.attach_internet`、`chat.err_internet_file_cap`、`transfer.speed_test.lan_only` 同步 en/zh-CN JSON + Python _EN/_ZH。
+- **测试**：relay 桩 publish 增 `qos` 形参；中继文件块测试改断言 qos=1 + 文本 qos=0；新增 `TestInternetRelayFileTransfers` 4 例（跨中继收发、小分块、超 5MB 拒绝、bogus chunk_size 回退）。全量 **1273 passed / 4 skipped（exit 0）**。
+- **版本**：v1.0.83（CHANGELOG 同步）。
+
+> 已知边界：新版发送端 → 旧版纯互联网接收端仍失败（旧接收端连 offer 都收不到字节，修复前即全坏，非回归）；新→新全通。旧 LAN 对端不受影响。

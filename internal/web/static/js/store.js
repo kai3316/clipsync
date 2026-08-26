@@ -991,11 +991,19 @@
             self._pollSpeedTest();
           } else {
             self.speedTest.running = false;
-            // The backend refuses to run without a connected peer — surface a
-            // helpful message instead of a generic "failed to start".
-            var noPeer = !(self.devices || []).some(function (d) { return d.connected; });
-            self.speedTest.error = noPeer ? t('transfer.speed_test.no_peer')
-                                          : t('transfer.speed_test.start_failed');
+            // The backend refuses to run without a connected LAN peer — the
+            // speed test measures LAN throughput only.  Internet (netpair)
+            // peers don't count: the relay is slow and best-effort, so the
+            // honest message is "LAN-only", not a generic failure.
+            var lanOnline = (self.devices || []).some(function (d) { return d.connected; });
+            var anyOnline = lanOnline || (self.internetPairPeers || []).some(
+              function (p) { return !!p.online; });
+            if (!lanOnline && anyOnline) {
+              self.speedTest.error = t('transfer.speed_test.lan_only');
+            } else {
+              self.speedTest.error = !anyOnline ? t('transfer.speed_test.no_peer')
+                                                : t('transfer.speed_test.start_failed');
+            }
           }
         })
         .catch(function (e) {

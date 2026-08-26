@@ -105,9 +105,9 @@
       },
 
       // The open session's peer is an internet-ONLY (netpair) peer — file
-      // bytes can never cross the relay (file_chunk is refused), so offering
-      // the attach button would hand the peer an offer it can never receive,
-      // then stall 600s with a misleading "peer_offline". Disable it instead.
+      // bytes ride the public relay in smaller chunks, so sending works but
+      // is capped at RELAY_FILE_CAP (5 MB).  The attach button stays enabled;
+      // this flag only selects the hint title and the client-side size gate.
       activePeerIsInternetOnly: function () {
         var s = this.activeSession;
         if (!s || s.peer_id === undefined || s.peer_id === null) return false;
@@ -378,7 +378,7 @@
             '</div>' +
 
             '<div class="chat-composer">' +
-              '<button class="chat-composer__attach" :title="activePeerIsInternetOnly ? t(\'chat.attach_lan_only\') : t(\'chat.attach\')" :disabled="sendingFile || activePeerIsInternetOnly" @click="pickFile">' +
+              '<button class="chat-composer__attach" :title="activePeerIsInternetOnly ? t(\'chat.attach_internet\') : t(\'chat.attach\')" :disabled="sendingFile" @click="pickFile">' +
                 '{{ sendingFile ? \'...\' : \'📎\' }}' +
               '</button>' +
               '<input ref="composerInput" class="chat-composer__input" type="text" v-model="composing"' +
@@ -795,6 +795,14 @@
           return;
         }
         var file = files[0];
+        // Internet-only peers ship bytes through the public relay, which caps
+        // the file at 5 MB.  Reject client-side so the user hears the reason
+        // immediately instead of waiting for an upload + server round-trip.
+        if (this.activePeerIsInternetOnly && file.size > 5 * 1024 * 1024) {
+          this.store.showToast(this.t('chat.err_internet_file_cap'), 3000);
+          e.target.value = '';
+          return;
+        }
         this.sendingFile = true;
         // purpose=chat lands the file in a temp dir on the server (never the
         // received-files dir) and skips the receive notification/sound/Files
@@ -810,7 +818,14 @@
           .then(function (res) {
             e.target.value = '';
             if (res && res.ok === false) {
-              self.store.showToast(self.t('chat.err_send_failed'), 2500);
+              // The server only answers this specific code when the peer is
+              // internet-only and the file exceeds the relay cap (a race the
+              // client-side gate above can miss when the peer was offline).
+              if (res.error === 'internet_file_cap') {
+                self.store.showToast(self.t('chat.err_internet_file_cap'), 3000);
+              } else {
+                self.store.showToast(self.t('chat.err_send_failed'), 2500);
+              }
               return;
             }
             self.loadMessages();

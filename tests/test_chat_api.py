@@ -774,9 +774,11 @@ def make_app_stub(**attrs):
     class Relay:
         def __init__(self):
             self.published = []
+            self.published_qos = []
 
-        def publish(self, frame, topic, key):
+        def publish(self, frame, topic, key, qos=0):
             self.published.append((frame, topic, key))
+            self.published_qos.append(qos)
             return True
     app._relay = Relay()
 
@@ -917,14 +919,25 @@ def test_relay_publish_to_peer_relay_absent_noop():
     assert ok is False
 
 
-def test_relay_publish_to_peer_skips_chat_file_chunk():
-    # Binary chat-file bytes must stay LAN-only: mirroring them would
-    # double-deliver every chunk to a dual-connected peer and break the
-    # receiver's size check.
+def test_relay_publish_to_peer_publishes_chat_file_chunk_qos1():
+    # Chat-file bytes now cross the relay (the whole point of internet-mode
+    # file transfer).  Chunks ride QoS 1 so the broker retries them on a
+    # reconnect; control frames stay QoS 0.
     app = make_app_stub(netpair_secrets={"bbbbbbbbbbbb": "ABCDEFG"})
     chunk = encode_binary_chunk("a" * 32, 0, 1, b"payload")
     ok = Application._relay_publish_to_peer(app, chunk, "bbbbbbbbbbbb")
-    assert ok is False and app._relay.published == []
+    assert ok is True and len(app._relay.published) == 1
+    assert app._relay.published_qos == [1]
+    frame = app._relay.published[0][0]
+    decoded = decode_message(frame)
+    assert getattr(decoded, "msg_type", "") == "file_chunk"
+
+
+def test_relay_publish_to_peer_text_stays_qos0():
+    app = make_app_stub(netpair_secrets={"bbbbbbbbbbbb": "ABCDEFG"})
+    ok = Application._relay_publish_to_peer(
+        app, _chat_frame(app.cfg.device_id), "bbbbbbbbbbbb")
+    assert ok is True and app._relay.published_qos == [0]
 
 
 # ------------------------------------------------------------- _chat_send_fn
