@@ -969,6 +969,19 @@
     },
 
     /**
+     * Record a speed-test failure and surface it as a toast.  The inline
+     * speedTest.error keeps the panel state truthful (it also clears the
+     * panel-empty hint); the toast is what the user actually notices — a
+     * small inline line under the spinner is easy to miss.
+     * @param {string} msg
+     * @param {string} [type] toast variant ('error' | 'warning' | 'info')
+     */
+    _setSpeedTestError: function (msg, type) {
+      this.speedTest.error = msg;
+      this.showToast(msg, 3500, type || 'error');
+    },
+
+    /**
      * Start a speed test.
      */
     startSpeedTest: function () {
@@ -981,7 +994,7 @@
       if (!window.ClipsyncAPI || !window.ClipsyncAPI.startSpeedTest) {
         // No API client — don't leave the spinner running forever.
         this.speedTest.running = false;
-        this.speedTest.error = t('transfer.speed_test.unavailable');
+        this._setSpeedTestError(t('transfer.speed_test.unavailable'));
         return;
       }
       this.speedTest.running = true;
@@ -999,16 +1012,17 @@
             var anyOnline = lanOnline || (self.internetPairPeers || []).some(
               function (p) { return !!p.online; });
             if (!lanOnline && anyOnline) {
-              self.speedTest.error = t('transfer.speed_test.lan_only');
+              self._setSpeedTestError(t('transfer.speed_test.lan_only'), 'warning');
             } else {
-              self.speedTest.error = !anyOnline ? t('transfer.speed_test.no_peer')
-                                                : t('transfer.speed_test.start_failed');
+              self._setSpeedTestError(
+                !anyOnline ? t('transfer.speed_test.no_peer')
+                           : t('transfer.speed_test.start_failed'));
             }
           }
         })
         .catch(function (e) {
           self.speedTest.running = false;
-          self.speedTest.error = t('transfer.speed_test.unavailable');
+          self._setSpeedTestError(t('transfer.speed_test.unavailable'));
         });
     },
 
@@ -1021,7 +1035,7 @@
             // Empty/transient response — treat it as a failure so the
             // spinner doesn't run forever.
             self.speedTest.running = false;
-            self.speedTest.error = t('transfer.speed_test.failed');
+            self._setSpeedTestError(t('transfer.speed_test.failed'));
             return;
           }
           if (res.done) {
@@ -1038,7 +1052,7 @@
         })
         .catch(function () {
           self.speedTest.running = false;
-          self.speedTest.error = t('transfer.speed_test.failed');
+          self._setSpeedTestError(t('transfer.speed_test.failed'));
         });
     },
 
