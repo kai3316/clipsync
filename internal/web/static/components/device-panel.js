@@ -418,6 +418,14 @@
         return 'delivery.' + (st === 'failed' ? 'not_delivered' : st === 'sent' ? 'sending' : st);
       },
 
+      // Surface a netpair action failure: keep the inline error anchored to
+      // the form (it stays until the next attempt) and ALSO fire a toast so
+      // the failure isn't missed (same pattern as the speed test).
+      _setNetpairError: function (msg) {
+        this.netpairError = msg;
+        this.store.showToast(msg, 3000, 'error');
+      },
+
       generateNetpairCode: function () {
         var self = this;
         if (this.netpairGenerating) return;
@@ -496,12 +504,12 @@
         var code = (this.netpairCodeInput || '')
           .toUpperCase().replace(/[^A-Z0-9]/g, '');
         if (code.length !== 12) {
-          this.netpairError = this.t('devices.netpair_error_format');
+          this._setNetpairError(this.t('devices.netpair_error_format'));
           return;
         }
         // Pairing over the internet is meaningless while the relay is off.
         if (!this.internetSyncEnabled) {
-          this.netpairError = this.t('devices.netpair_error_sync_off');
+          this._setNetpairError(this.t('devices.netpair_error_sync_off'));
           return;
         }
         this.netpairError = '';
@@ -528,7 +536,7 @@
                   3000, 'success');
               });
             } else {
-              self.netpairError = self.t('devices.netpair_error_invalid');
+              self._setNetpairError(self.t('devices.netpair_error_invalid'));
             }
           })
           .catch(function (e) {
@@ -537,12 +545,12 @@
               // Distinguish "paired with yourself" from a generic bad code.
               var reason = (e.data && e.data.error) || '';
               if (/self|own|same/i.test(reason)) {
-                self.netpairError = self.t('devices.netpair_error_self');
+                self._setNetpairError(self.t('devices.netpair_error_self'));
               } else {
-                self.netpairError = self.t('devices.netpair_error_invalid');
+                self._setNetpairError(self.t('devices.netpair_error_invalid'));
               }
             } else {
-              self.netpairError = self.t('dialog.failed');
+              self._setNetpairError(self.t('dialog.failed'));
             }
           });
       },
