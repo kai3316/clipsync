@@ -89,6 +89,14 @@ def get_devices(cfg, get_connected_ids, get_discovered=None,
     seen_ids = {d["device_id"] for d in devices}
     known_names = {d["device_name"].lower() for d in devices}
 
+    # Removed/archived devices (the forget action) so the device page can
+    # offer a Restore management surface.  Read here (before the discovered
+    # sweep) so a forgotten device that is still advertising on the LAN is
+    # NOT re-surfaced as a fresh "Discovered" device — it lives only in the
+    # Removed archive until restored or purged.  Newest removal first.
+    removed_peers = getattr(cfg, "removed_peers", None) or {}
+    removed_ids = {getattr(p, "device_id", "") for p in removed_peers.values()}
+
     # Resolve hashed discovery ids to real peer ids (desktop _get_peers
     # ~2724): a hashed id that maps to a known/paired device is "seen".
     if get_resolved_hashes is not None:
@@ -136,7 +144,7 @@ def get_devices(cfg, get_connected_ids, get_discovered=None,
             discovered = {}
         for peer_id, info in discovered.items():
             name = info.get("name", peer_id) if isinstance(info, dict) else str(info)
-            if peer_id in seen_ids or _name_matches_known(name):
+            if peer_id in seen_ids or peer_id in removed_ids or _name_matches_known(name):
                 continue
             devices.append({
                 "device_id": peer_id,
@@ -187,10 +195,10 @@ def get_devices(cfg, get_connected_ids, get_discovered=None,
         result["pending_pairings"] = pending_list
 
     # Removed/archived devices (the forget action) so the device page can
-    # offer a Restore management surface.  Newest removal first.  Defensive
-    # getattr: a config shape without the archive (or a test stub) yields an
-    # empty list instead of crashing the snapshot.
-    removed_peers = getattr(cfg, "removed_peers", None) or {}
+    # offer a Restore management surface.  Newest removal first.  `removed_peers`
+    # was read above (for the discovered-sweep dedup); the defensive getattr
+    # there also lets a config shape without the archive (or a test stub)
+    # yield an empty list instead of crashing the snapshot.
     result["removed"] = [
         {
             "device_id": p.device_id,

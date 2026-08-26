@@ -123,6 +123,10 @@
       // Animate stat counters whenever the backend pushes a new overview.
       'store.overview': {
         deep: true,
+        // Seed the counters synchronously on mount/tab re-entry — the polling
+        // loop keeps refreshing them, but without `immediate` the stat cards
+        // sit at 0 until the first push arrives.
+        immediate: true,
         handler: function (o) {
           if (!o) return;
           var self = this;
@@ -174,6 +178,15 @@
     beforeUnmount: function () {
       if (this._netHealthTimer) clearInterval(this._netHealthTimer);
       if (this._pauseTickTimer) clearInterval(this._pauseTickTimer);
+      // Cancel any in-flight counter animations so a remount never fires
+      // requestAnimationFrame callbacks against a torn-down component.
+      var anims = this._animTimers;
+      if (anims) {
+        Object.keys(anims).forEach(function (key) {
+          if (anims[key]) cancelAnimationFrame(anims[key]);
+        });
+        this._animTimers = null;
+      }
     },
 
     methods: {
@@ -251,6 +264,11 @@
               return;
             }
             self.store.overview.syncEnabled = desired;
+            // The server clears any pending timed pause on every explicit
+            // sync_enabled update (_clear_pause_state) — mirror it locally so
+            // the "⏸ N min left" row doesn't linger under a fresh toggle.
+            self.store.mergeSettings({ timed_pause_until: 0 });
+            self.nowTick = Date.now();
           })
           .catch(function (e) {
             self._toggleSettled('sync');
@@ -409,12 +427,14 @@
       },
 
       copyUrl: function () {
-        var proto = window.location.protocol === 'https:' ? 'https' : 'http';
-        // Deliver the lightweight phone page (mobile.html), matching the QR
-        // code, so a phone opening the copied URL gets the mobile UI instead
-        // of the heavy desktop dashboard.
-        var url = proto + '://' + this.o.localIp + ':' + this.o.port +
-          '/mobile.html?token=' + encodeURIComponent(this.store.token);
+        // Single source for the phone-connect link: store.mobileUrl already
+        // delivers /mobile.html (the lightweight page) and follows the
+        // serving scheme (http vs https) so a copied link always works.
+        var url = this.store.mobileUrl;
+        if (!url) {
+          this.store.showToast(this.t('dialog.failed'), 2000, 'error');
+          return;
+        }
         var self = this;
         var done = function () { self.store.showToast(self.t('toast.url_copied'), 1500); };
         if (navigator.clipboard && navigator.clipboard.writeText) {
@@ -589,9 +609,9 @@
             '<span class="overview-stat-sub">{{ stats.pinned || 0 }} {{ t(\'overview.pinned\') }}</span>' +
           '</div>' +
           '<div class="overview-stat-card glass" style="--stat-accent: var(--clipsync-accent)">' +
-            '<span class="overview-stat-value">{{ stats.completed || 0 }}</span>' +
+            '<span class="overview-stat-value">{{ stats.transfers || 0 }}</span>' +
             '<span class="overview-stat-label">{{ t(\'overview.transfers\') }}</span>' +
-            '<span class="overview-stat-sub">{{ stats.transfers || 0 }} {{ t(\'overview.active\') }}</span>' +
+            '<span class="overview-stat-sub">{{ stats.completed || 0 }} {{ t(\'overview.completed\') }}</span>' +
           '</div>' +
         '</div>' +
 

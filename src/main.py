@@ -5651,6 +5651,13 @@ class Application:
         import time as _time
         connected = self.transport_mgr.get_connected_peers() if self.transport_mgr else []
         paired = getattr(self.pairing_mgr, 'get_paired_peers', lambda: [])() if self.pairing_mgr else []
+        # "Connected" in the overview means an active *sync session*: filter to
+        # paired peers so the count agrees with the frontend's paired-only
+        # connectedCount and the ring's connected/paired-offline math stays
+        # consistent.  Chat-only or mid-pairing connections are live but not
+        # trusted sync peers, so they don't count here.
+        paired_ids = {getattr(p, "device_id", "") for p in paired}
+        connected = [pid for pid in connected if pid in paired_ids]
         # Count active transfers
         active_tx = 0
         try:
@@ -5678,12 +5685,12 @@ class Application:
         # ── Transfer stats ─────────────────────────────────────────
         tx_hist = self.file_transfer_mgr.get_history() if self.file_transfer_mgr else []
         transfer_completed = sum(1 for t in tx_hist if t.get("success"))
-        transfer_bytes = sum(int(t.get("file_size", 0) or 0) for t in tx_hist if t.get("success"))
         # ── Connected peers (names for the live device chips) ─────
         connected_names = []
         try:
             connected_names = [
-                name for _pid, name in self.transport_mgr.get_connected_peers_with_names()
+                name for pid, name in self.transport_mgr.get_connected_peers_with_names()
+                if pid in paired_ids
             ]
         except Exception:
             pass
@@ -5709,7 +5716,6 @@ class Application:
             'history_images': history_images,
             'active_transfers': active_tx,
             'transfer_completed': transfer_completed,
-            'transfer_bytes': transfer_bytes,
             'discovering': bool(self.discovery and self.discovery.is_browsing),
             'visible': bool(self.discovery and self.discovery.is_advertising),
             'sync_enabled': self.cfg.sync_enabled if self.cfg else True,
@@ -5722,7 +5728,6 @@ class Application:
             'network_type': ntype,
             'network_detail': niface,
             'recent_items': recent_items,
-            'recent_activity': '',
         }
 
     def _handle_web_device_action(self, action: str, peer_id: str, *args) -> bool:

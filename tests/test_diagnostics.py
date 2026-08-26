@@ -398,9 +398,15 @@ def test_panel_script_tag_loaded():
 
 
 def test_panel_mounted_in_both_layouts():
+    # The app shell mounts panels through ONE dynamic dispatcher —
+    # <component :is="panelComponent"> — used in BOTH the wide and the narrow
+    # layout, and app.js maps the diagnostics tab to diagnostics-panel there.
+    # (The old hand-maintained per-layout v-else-if chain is gone.)
     html = _read("index.html")
-    needle = "<diagnostics-panel v-else-if=\"store.activeTab === 'diagnostics'\" key=\"diagnostics\"></diagnostics-panel>"
-    assert html.count(needle) == 2
+    assert html.count("<component :is=\"panelComponent\"") == 2
+    app = _read("js", "app.js")
+    chunk = app.split("var PANEL_COMPONENTS = {")[1].split("};")[0]
+    assert "diagnostics: 'diagnostics-panel'" in chunk
 
 
 # ── 3. locale parity + v2 keys ────────────────────────────────────────────

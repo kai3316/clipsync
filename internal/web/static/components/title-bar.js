@@ -166,7 +166,9 @@
         } else {
           next = 'system';
         }
-        this.store.setTheme(next);
+        // Same persistence path as the settings-panel picker: apply locally
+        // AND POST appearance_mode so the choice survives across devices.
+        this.store.selectAppearanceTheme(next);
       },
 
       openSettings: function () {

@@ -302,8 +302,13 @@ var ClipsyncAPI = (function () {
       }
 
       var options = { method: 'POST', body: formData };
-      // Mirror the generic _fetch timeout: a stalled upload (phone asleep,
-      // network drop) must not hang the send dialog forever.
+      // Stall guard — not a fixed deadline. The server reads the WHOLE body
+      // before it responds, so a flat 15s timeout killed any slow-but-working
+      // multi-megabyte send. Scale by size instead: 15s base (a dead small
+      // upload still fails fast) + 5s per MB, so a transfer up to the 128MB
+      // body cap gets ~11 minutes of headroom and only a genuinely stalled
+      // connection is aborted.
+      var stallMs = 15000 + Math.ceil(file.size / 1048576) * 5000;
       var controller = null;
       var timeoutId = null;
       if (typeof AbortController !== 'undefined') {
@@ -311,7 +316,7 @@ var ClipsyncAPI = (function () {
         options.signal = controller.signal;
         timeoutId = setTimeout(function () {
           controller.abort();
-        }, 15000);
+        }, stallMs);
       }
 
       return fetch(url, options)

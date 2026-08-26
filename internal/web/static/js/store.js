@@ -65,21 +65,27 @@
     },
     connectedCount: computed(function () {
       // Exclude the local device — "connected" counts remote *sync* sessions
-      // only (live connection on a paired device), matching the backend's
-      // get_connected_peers() semantics.  Chat-only temporary connections
-      // (connected && !paired) don't count here.
+      // only (live connection on a paired device), agreeing with the web
+      // overview's connected_count (which the backend filters to paired
+      // peers too).  Chat-only temporary connections (connected && !paired)
+      // don't count here.
       return store.devices.filter(function (d) {
         return d.connected && d.paired && d.device_id !== store.deviceId;
       }).length;
     }),
 
-    // The phone-connect URL shown on onboarding step 3:
-    // http://<lan-ip>:<web-port>/mobile.html?token=<token>
+    // The phone-connect URL shown on onboarding step 3 and copied by the
+    // overview: <scheme>://<lan-ip>:<web-port>/mobile.html?token=<token>.
+    // The scheme follows the page the web UI is actually served over — the
+    // web companion can sit behind TLS, and a phone copying a hardcoded
+    // http:// link would fail to connect in that case.
     mobileUrl: computed(function () {
       var ip = store.overview.localIp || (store.settingsCache && store.settingsCache.web_ip) || '';
       var port = store.overview.port || (store.settingsCache && store.settingsCache.web_port) || '';
       if (!ip || !port) return '';
-      return 'http://' + ip + ':' + port + '/mobile.html?token=' + encodeURIComponent(store.token);
+      var proto = (typeof window !== 'undefined' && window.location &&
+                   window.location.protocol === 'https:') ? 'https' : 'http';
+      return proto + '://' + ip + ':' + port + '/mobile.html?token=' + encodeURIComponent(store.token);
     }),
 
     /* ═══════════════════════════════════════════════════════════════
@@ -179,8 +185,6 @@
       platform: '',
       networkType: '',       // 'wifi' | 'ethernet' | 'lan'
       networkDetail: '',     // SSID or link speed
-      recentActivity: '',    // "12 clips · 3 transfers"
-      loading: false,
     },
 
     /* ═══════════════════════════════════════════════════════════════
@@ -265,7 +269,7 @@
     /* ═══════════════════════════════════════════════════════════════
        UI state
        ═══════════════════════════════════════════════════════════════ */
-    activeTab: 'overview',      // 'overview' | 'history' | 'devices' | 'transfers' | 'favorites' | 'diagnostics'
+    activeTab: 'overview',      // 'overview' | 'history' | 'devices' | 'transfers' | 'favorites' | 'chat' | 'aiconfig' | 'diagnostics'
     theme: 'system',            // 'system' | 'light' | 'dark'
     sidebarOpen: true,
     selectedIds: new Set(),     // multi-select set of entry IDs
@@ -283,7 +287,7 @@
     contextMenu: {
       visible: false,
       x: 0, y: 0,
-      mode: 'history-item',  // 'history-item' | 'device'
+      mode: 'history-item',  // 'history-item' | 'device' | 'chat-session' | 'chat-message'
       target: null           // the item or device object
     },
 
@@ -382,8 +386,8 @@
                  (this.settingsCache.appearance_mode === 'dark' ||
                   this.settingsCache.appearance_mode === 'light' ||
                   this.settingsCache.appearance_mode === 'system')) {
-        // The theme choice is persisted server-side too (selectTheme POSTs
-        // appearance_mode). On a fresh browser (empty localStorage) use the
+        // The theme choice is persisted server-side too (selectAppearanceTheme
+        // POSTs appearance_mode). On a fresh browser (empty localStorage) use the
         // saved server theme so the page doesn't silently fall back to the OS
         // "system" default. localStorage, when present, still wins above.
         this.setTheme(this.settingsCache.appearance_mode);
@@ -669,17 +673,22 @@
     },
 
     /**
-     * Step 3 "Show QR Code": ask the server to push the phone-connect QR dialog.
+     * "Show QR Code": ask the server to push the phone-connect QR dialog.
+     * The single implementation both the onboarding step and the transfer
+     * panel's "Send to Phone" button use (the panel delegates here and just
+     * manages its own busy state around the returned promise).
+     * @returns {Promise} resolves once the request settles (failure is toasted)
      */
     showPhoneQr: function () {
       var self = this;
-      this.ensureOverview().then(function () {
+      return this.ensureOverview().then(function () {
         if (window.ClipsyncAPI && window.ClipsyncAPI._fetch) {
-          window.ClipsyncAPI._fetch('POST', '/api/show_qr', {}).catch(function (e) {
+          return window.ClipsyncAPI._fetch('POST', '/api/show_qr', {}).catch(function (e) {
             console.error('[ClipSync] Failed to show phone QR:', e);
-            self.showToast(t('onboarding.err_qr'), 2500, 'error');
+            self.showToast(t('transfer.phone_qr_failed'), 2500, 'error');
           });
         }
+        return null;
       });
     },
 
@@ -960,7 +969,6 @@
       var self = this;
       if (this._overviewInFlight) return;
       this._overviewInFlight = true;
-      this.overview.loading = true;
       if (!window.ClipsyncAPI) {
         this._overviewInFlight = false;
         return;
@@ -983,7 +991,6 @@
             self.overview.platform = o.platform || '';
             self.overview.networkType = o.network_type || '';
             self.overview.networkDetail = o.network_detail || '';
-            self.overview.recentActivity = o.recent_activity || '';
             // Newer overview fields (rich stats + live activity feed).
             self.overview.connectedNames = o.connected_names || [];
             self.overview.discoveredCount = o.discovered_count || 0;
@@ -991,7 +998,6 @@
             self.overview.historyPinned = o.history_pinned || 0;
             self.overview.historyImages = o.history_images || 0;
             self.overview.transferCompleted = o.transfer_completed || 0;
-            self.overview.transferBytes = o.transfer_bytes || 0;
             self.overview.version = o.version || '';
             self.overview.recentItems = o.recent_items || [];
           }
@@ -1001,7 +1007,6 @@
         })
         .finally(function () {
           self._overviewInFlight = false;
-          self.overview.loading = false;
         });
     },
 
@@ -1106,6 +1111,43 @@
       if (h > 0) return h + 'h ' + m + 'm';
       if (m > 0) return m + 'm';
       return (seconds % 60) + 's';
+    },
+
+    /**
+     * Reconcile the active + history transfer lists against a GET
+     * /api/transfer response.  The single implementation every caller uses
+     * (initial load, WS transfer-complete, post-action refresh, periodic
+     * poll) so the splice logic cannot drift between app.js and the panels.
+     * @param {Object} res - { active: Array, history: Array } from the API
+     */
+    reconcileTransfers: function (res) {
+      if (res && res.active) {
+        this.activeTransfers.splice(0, this.activeTransfers.length);
+        for (var i = 0; i < res.active.length; i++) {
+          this.activeTransfers.push(res.active[i]);
+        }
+      }
+      if (res && res.history) {
+        this.transferHistory.splice(0, this.transferHistory.length);
+        for (var j = 0; j < res.history.length; j++) {
+          this.transferHistory.push(res.history[j]);
+        }
+      }
+    },
+
+    /**
+     * Fetch the transfer snapshot and reconcile it into the store.
+     * @returns {Promise<Object|null>} the API response (rejects on failure)
+     */
+    refreshTransfers: function () {
+      var self = this;
+      if (!window.ClipsyncAPI || !window.ClipsyncAPI.getTransfers) {
+        return Promise.resolve(null);
+      }
+      return window.ClipsyncAPI.getTransfers().then(function (res) {
+        self.reconcileTransfers(res);
+        return res;
+      });
     },
 
     /* ═══════════════════════════════════════════════════════════════
@@ -1482,6 +1524,92 @@
     },
 
     /**
+     * Copy one history entry to the DESKTOP clipboard via paste-rich, bump
+     * its local paste count, and toast the result.  Single source for the
+     * per-item copy action — history-item and the app-level keyboard path
+     * both delegate here so the paste/count/toast contract lives in one
+     * place.  (The right-click context menu keeps its own inline pasteRich
+     * on the exact clicked row — see context-menu.js _copyFull — and does
+     * NOT route through this helper.)
+     * @param {string|number} eid - history entry id
+     * @param {Object} [opts] - { coarse } switches the success toast to the
+     *   touch (phone) wording ("copied to desktop").
+     * @returns {Promise<boolean>} resolves true when the copy succeeded
+     */
+    pasteHistoryItem: function (eid, opts) {
+      var self = this;
+      opts = opts || {};
+      if (eid === undefined || eid === null) {
+        return Promise.resolve(false);
+      }
+      return window.ClipsyncAPI.pasteRich(eid).then(function (res) {
+        if (res && res.ok !== false) {
+          var idx = self.history.findIndex(function (h) {
+            return h.entry_id === eid;
+          });
+          if (idx !== -1) {
+            self.history[idx].paste_count = (self.history[idx].paste_count || 0) + 1;
+          }
+          self.showToast(
+            opts.coarse ? self.t('history.copy_to_desktop_toast') : self.t('history.copied'),
+            1500
+          );
+          return true;
+        }
+        self.showToast(self.t('history.copy_failed'), 2000);
+        return false;
+      }).catch(function () {
+        self.showToast(self.t('history.copy_failed'), 2000);
+        return false;
+      });
+    },
+
+    // 🔌 Probe connectivity to a peer and toast the per-channel result.  The
+    // LAN device card's test action and the internet-pair peer row's "test"
+    // both delegate here so the endpoint call, result parsing and toast
+    // wording live in ONE place (each caller keeps its own busy flag).
+    // Resolves when the probe finishes; a network failure still resolves
+    // (after toasting) so a caller's .finally() runs.
+    testPeerConnection: function (peerId) {
+      var self = this;
+      return window.ClipsyncAPI.testDeviceConnection(peerId)
+        .then(function (res) {
+          // A successful probe always carries per-channel rows; an empty
+          // array ([] is truthy in JS!) means the backend reported
+          // "no_channel" — fall through so the reason actually shows.
+          if (res && res.results && res.results.length > 0) {
+            var parts = res.results.map(function (r) {
+              var channel = self.t(r.channel === 'relay'
+                ? 'device.test_channel_relay' : 'device.test_channel_lan');
+              if (r.ok && r.latency_ms != null) {
+                return self.t('device.test_channel_ok',
+                  { channel: channel, latency: Math.round(r.latency_ms) });
+              }
+              return self.t('device.test_channel_fail',
+                { channel: channel, reason: self._testErrorReason(r) });
+            });
+            var key2 = res.ok ? 'device.test_success' : 'device.test_failed';
+            self.showToast(self.t(key2, { detail: parts.join(' · ') }), 4500);
+          } else {
+            var reason = (res && res.error === 'no_channel')
+              ? self.t('device.test_no_channel') : self.t('device.test_failed');
+            self.showToast(self.t('device.test_failed', { detail: reason }), 3500);
+          }
+        })
+        .catch(function () {
+          self.showToast(self.t('device.test_failed'), 3000);
+        });
+    },
+
+    // Localize one per-channel failure reason from a probe result.
+    _testErrorReason: function (r) {
+      if (r.error === 'timeout') return this.t('device.test_timeout');
+      if (r.error === 'send_failed') return this.t('device.test_send_failed');
+      if (r.error === 'relay_offline') return this.t('device.test_relay_offline');
+      return r.error || this.t('device.test_failed');
+    },
+
+    /**
      * Upsert/prepend a page-1 snapshot into the loaded list: matching rows are
      * updated in place (keeps their loaded position), genuinely-new rows are
      * prepended at the top preserving newest-first order, deduped (no
@@ -1757,7 +1885,10 @@
      * Get online devices excluding the local device.
      * Only real sync sessions (live connection on a paired device) — a
      * chat-only temporary connection (connected && !paired) is not a transfer
-     * target.
+     * target.  Internet (relay) pairs are intentionally NOT included: the
+     * web-upload forward path (on_forward_file) only resolves peers in the
+     * LAN transport's connected set, so a relay peer listed here would produce
+     * a send button that always fails with "peer offline".
      * @returns {Array}
      */
     onlineDevices: function () {

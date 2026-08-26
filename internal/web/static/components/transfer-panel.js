@@ -61,11 +61,11 @@
         var ids = devs.map(function (d) { return d.device_id; });
         if (self.targetDevice && ids.indexOf(self.targetDevice) === -1) {
           // The selected peer went offline — clear it so the send buttons
-          // disable rather than aim at a stale target. If a send was in
-          // flight, surface a small "peer offline" hint.
-          if (self.sending) {
-            self.peerOffline = true;
-          }
+          // disable rather than aim at a stale target, and surface a "peer
+          // offline" hint.  The hint also guards the auto-select below:
+          // without it, the watcher would instantly re-aim the send buttons
+          // at a peer the user never chose, defeating the hint's purpose.
+          self.peerOffline = true;
           self.targetDevice = '';
         }
         // Only auto-select the first online device when there is genuinely no
@@ -333,15 +333,16 @@
       },
       showPhoneQr: function () {
         var self = this;
-        self.phoneQrSending = true;
         // Server-pushed QR dialog — the desktop app displays it so the user
-        // can scan it with their phone.
-        ClipsyncAPI._fetch('POST', '/api/show_qr', {})
-          .then(function () { self.phoneQrSending = false; })
-          .catch(function () {
-            self.phoneQrSending = false;
-            self.store.showToast(self.t('transfer.phone_qr_failed'), 2000);
-          });
+        // can scan it with their phone.  The request itself lives in
+        // store.showPhoneQr (single implementation); this wrapper only
+        // manages the button's busy state.  The store toasts failures.
+        self.phoneQrSending = true;
+        self.store.showPhoneQr().then(function () {
+          self.phoneQrSending = false;
+        }).catch(function () {
+          self.phoneQrSending = false;
+        });
       },
       onFilePicked: function (e) {
         var files = e.target.files;
@@ -505,23 +506,9 @@
       },
       // Reconcile the active/history transfer lists with the server after a
       // control action (pause/resume/cancel) so the UI reflects the backend.
+      // Delegates to the store's single shared refresh implementation.
       _refreshTransfers: function () {
-        var self = this;
-        return ClipsyncAPI.getTransfers().then(function (res) {
-          if (res && res.active) {
-            self.store.activeTransfers.splice(0, self.store.activeTransfers.length);
-            for (var i = 0; i < res.active.length; i++) {
-              self.store.activeTransfers.push(res.active[i]);
-            }
-          }
-          if (res && res.history) {
-            self.store.transferHistory.splice(0, self.store.transferHistory.length);
-            for (var j = 0; j < res.history.length; j++) {
-              self.store.transferHistory.push(res.history[j]);
-            }
-          }
-          return res;
-        });
+        return this.store.refreshTransfers();
       },
       // F16: hydrate a nameless active-transfer entry from the authoritative
       // /api/transfer snapshot so it renders with a name/size instead of
@@ -575,7 +562,14 @@
       },
       cancelTransfer: function (id) {
         var self = this;
-        ClipsyncAPI.cancelTransfer(id).then(function () {
+        ClipsyncAPI.cancelTransfer(id).then(function (res) {
+          // The backend answers HTTP 200 with {ok:false} when the row is
+          // already gone / cannot be cancelled — respect that instead of
+          // reporting success and dropping a row the server still tracks.
+          if (!res || res.ok === false) {
+            self.store.showToast(self.t('transfer.cancel_failed'), 2000);
+            return;
+          }
           // Optimistically drop the row, then reconcile with the server.
           var idx = self.store.activeTransfers.findIndex(function (t) { return t.id === id; });
           if (idx !== -1) {
@@ -589,7 +583,11 @@
       },
       pauseTransfer: function (id) {
         var self = this;
-        ClipsyncAPI.pauseTransfer(id).then(function () {
+        ClipsyncAPI.pauseTransfer(id).then(function (res) {
+          if (!res || res.ok === false) {
+            self.store.showToast(self.t('transfer.pause_failed'), 2000);
+            return;
+          }
           var idx = self.store.activeTransfers.findIndex(function (t) { return t.id === id; });
           if (idx !== -1) {
             self.store.activeTransfers[idx].status = 'paused';
@@ -602,7 +600,11 @@
       },
       resumeTransfer: function (id) {
         var self = this;
-        ClipsyncAPI.resumeTransfer(id).then(function () {
+        ClipsyncAPI.resumeTransfer(id).then(function (res) {
+          if (!res || res.ok === false) {
+            self.store.showToast(self.t('transfer.resume_failed'), 2000);
+            return;
+          }
           var idx = self.store.activeTransfers.findIndex(function (t) { return t.id === id; });
           if (idx !== -1) {
             self.store.activeTransfers[idx].status = 'sending';
@@ -628,14 +630,18 @@
         // must not fire a duplicate transfer to the same peer.
         if (self.retryBusyId === id) return;
         self.retryBusyId = id;
-        ClipsyncAPI.retryTransfer(id).then(function () {
+        ClipsyncAPI.retryTransfer(id).then(function (res) {
           self.retryBusyId = '';
+          if (!res || res.ok === false) {
+            self.store.showToast(self.t('transfer.retry_failed'), 2000);
+            return;
+          }
           // The fresh transfer shows up under Active via the reconcile below
           // (plus the transfer_progress pushes that follow).
           self._refreshTransfers().catch(function () {});
         }).catch(function () {
           self.retryBusyId = '';
-          self.store.showToast(self.t('dialog.failed'), 2000);
+          self.store.showToast(self.t('transfer.retry_failed'), 2000);
         });
       },
       cancelAllTransfers: function () {
@@ -644,6 +650,10 @@
         self.cancellingAll = true;
         ClipsyncAPI.cancelAllTransfers().then(function (res) {
           self.cancellingAll = false;
+          if (!res || res.ok === false) {
+            self.store.showToast(self.t('transfer.cancel_failed'), 2000);
+            return;
+          }
           var n = res && typeof res.cancelled === 'number' ? res.cancelled : 0;
           if (n > 0) {
             // Optimistically drop every row, then reconcile with the server

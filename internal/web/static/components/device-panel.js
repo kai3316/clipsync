@@ -1,7 +1,8 @@
 /* ═══════════════════════════════════════════════════════════════════
    ClipSync Device Panel Component
-   Sections (top→bottom): This Device, Internet pairing, Connected, Offline,
-   Discovered, Pairing Requests.
+   Sections (top→bottom): This Device, Pairing Requests, Connected,
+   Temporary, Paired Offline, Discovered, Removed — then the Internet
+   pairing block at the bottom (collapsed behind a toggle).
    Uses device-card component with action buttons and notes editing.
    ═══════════════════════════════════════════════════════════════════ */
 
@@ -9,6 +10,27 @@
   'use strict';
 
   window.__CLIPSYNC_COMPONENTS__ = window.__CLIPSYNC_COMPONENTS__ || {};
+
+  // Shared "also paired over the internet" badge for a LAN device card.  The
+  // same markup used to be inlined three times (Connected / Paired Offline /
+  // Discovered); one definition keeps the online/offline label + class logic
+  // in a single place.  Renders nothing for a device without a netpair peer.
+  window.__CLIPSYNC_COMPONENTS__['netpair-badge'] = {
+    props: {
+      peer: { type: Object, default: null },
+    },
+    computed: {
+      online: function () {
+        return !!(this.peer && this.peer.online);
+      },
+    },
+    template:
+      '<span v-if="peer" class="netpair-card-badge" @contextmenu.stop' +
+        ' :class="online ? \'netpair-card-badge--online\' : \'netpair-card-badge--offline\'"' +
+        ' :title="t(\'devices.netpair_also_internet\')">' +
+        '🌐 {{ online ? t(\'devices.netpair_online\') : t(\'devices.netpair_offline\') }}' +
+      '</span>',
+  };
 
   window.__CLIPSYNC_COMPONENTS__['device-panel'] = {
     inject: ['store'],
@@ -96,14 +118,13 @@
         return this.store.internetPairPeers || [];
       },
 
-      // The overview "已配 {N} 台互联网设备" count. A peer whose `paired`
-      // flag is explicitly false is a stale/in-progress row, not counted.
+      // The overview "已配 {N} 台互联网设备" count. Every entry in
+      // internetPairPeers is a confirmed pair — the backend status endpoint
+      // only lists confirmed pairs (provisional base32 tags are excluded),
+      // and the store normalizes `paired` to true for all of them — so the
+      // count is simply the list length.
       netpairPairedCount: function () {
-        var count = 0;
-        (this.store.internetPairPeers || []).forEach(function (p) {
-          if (p.paired !== false) count++;
-        });
-        return count;
+        return (this.store.internetPairPeers || []).length;
       },
 
       netpairGeneratedCode: function () {
@@ -214,7 +235,9 @@
                   '<button v-if="pr.status !== \'confirmed_waiting\' && pr.status !== \'expired\'" class="device-card__action device-card__action--accent" @click="acceptPairing(pr)" :disabled="pairingResponding === pr.peer_id">' +
                     '{{ pairingResponding === pr.peer_id ? \'...\' : t(\'ui.confirm\') }}' +
                   '</button>' +
-                  '<span v-else class="pairing-request-card__waiting">⏳ {{ t(\'pairing.state.confirmed_waiting\') }}</span>' +
+                  // Expired is not "confirmed, waiting for the other device" —
+                  // label it honestly as expired (same state the hint shows).
+                  '<span v-else class="pairing-request-card__waiting">⏳ {{ t(pr.status === \'expired\' ? \'pairing.state.expired\' : \'pairing.state.confirmed_waiting\') }}</span>' +
                   '<button class="device-card__action device-card__action--danger" @click="rejectPairing(pr)" :disabled="pairingResponding === pr.peer_id">' +
                     '{{ pairingResponding === pr.peer_id ? \'...\' : t(\'ui.reject\') }}' +
                   '</button>' +
@@ -232,7 +255,7 @@
             '</button>' +
             '<div v-if="sections.connected">' +
               '<div v-for="dev in connectedSyncDevices" :key="dev.device_id" class="device-internet-wrap">' +
-                '<span v-if="netpairPeerFor(dev.device_id)" class="netpair-card-badge" @contextmenu.stop :class="netpairPeerFor(dev.device_id).online ? \'netpair-card-badge--online\' : \'netpair-card-badge--offline\'" :title="t(\'devices.netpair_also_internet\')">🌐 {{ netpairPeerFor(dev.device_id).online ? t(\'devices.netpair_online\') : t(\'devices.netpair_offline\') }}</span>' +
+                '<netpair-badge :peer="netpairPeerFor(dev.device_id)"></netpair-badge>' +
                 '<device-card :device="devWithAlias(dev)"></device-card>' +
               '</div>' +
             '</div>' +
@@ -261,7 +284,7 @@
             '</button>' +
             '<div v-if="sections.paired">' +
               '<div v-for="dev in pairedOfflineDevices" :key="dev.device_id" class="device-internet-wrap">' +
-                '<span v-if="netpairPeerFor(dev.device_id)" class="netpair-card-badge" @contextmenu.stop :class="netpairPeerFor(dev.device_id).online ? \'netpair-card-badge--online\' : \'netpair-card-badge--offline\'" :title="t(\'devices.netpair_also_internet\')">🌐 {{ netpairPeerFor(dev.device_id).online ? t(\'devices.netpair_online\') : t(\'devices.netpair_offline\') }}</span>' +
+                '<netpair-badge :peer="netpairPeerFor(dev.device_id)"></netpair-badge>' +
                 '<device-card :device="devWithAlias(dev)"></device-card>' +
               '</div>' +
             '</div>' +
@@ -276,7 +299,7 @@
             '</button>' +
             '<div v-if="sections.discovered">' +
               '<div v-for="dev in discoveredDevices" :key="dev.device_id" class="device-internet-wrap">' +
-                '<span v-if="netpairPeerFor(dev.device_id)" class="netpair-card-badge" @contextmenu.stop :class="netpairPeerFor(dev.device_id).online ? \'netpair-card-badge--online\' : \'netpair-card-badge--offline\'" :title="t(\'devices.netpair_also_internet\')">🌐 {{ netpairPeerFor(dev.device_id).online ? t(\'devices.netpair_online\') : t(\'devices.netpair_offline\') }}</span>' +
+                '<netpair-badge :peer="netpairPeerFor(dev.device_id)"></netpair-badge>' +
                 '<device-card :device="devWithAlias(dev)"></device-card>' +
               '</div>' +
             '</div>' +
@@ -321,8 +344,11 @@
             '</button>' +
           '</div>' +
 
-          '<!-- Empty: loaded and genuinely no devices -->' +
-          '<div v-else-if="allRemoteDevices.length === 0 && pairingRequests.length === 0" class="panel-empty">' +
+          '<!-- Empty: loaded and genuinely no devices. The Removed archive is' +
+          '"devices you had", so a page holding only archived rows must not' +
+          'also claim "No devices found" — that empty state waits until the' +
+          'archive is gone too. -->' +
+          '<div v-else-if="allRemoteDevices.length === 0 && pairingRequests.length === 0 && removedDevices.length === 0" class="panel-empty">' +
             '<span class="panel-empty-icon">📡</span>' +
             '<p class="panel-empty-title">{{ t(\'devices.no_devices_found\') }}</p>' +
             '<p class="panel-empty-desc">{{ t(\'devices.auto_discover_hint\') }}</p>' +
@@ -355,8 +381,11 @@
                 '<span class="netpair-syncoff__text">{{ t(\'devices.netpair_sync_off\') }}</span>' +
                 '<button type="button" class="btn-ghost" @click="openInternetSyncSettings">{{ t(\'devices.netpair_go_settings\') }}</button>' +
               '</div>' +
-              '<!-- Generate + enter a pairing code (no multi-step guide) -->' +
-              '<div class="netpair-actions">' +
+              // Generate + enter a pairing code only make sense while the
+              // relay is actually on — with sync off the controls would be
+              // dead UI (entering a code is already rejected by the handler).
+              // The paired list below stays visible for management.
+              '<div v-if="internetSyncEnabled" class="netpair-actions">' +
                 '<button class="btn-ghost" @click="generateNetpairCode" :disabled="netpairGenerating">' +
                   '{{ netpairGenerating ? \'...\' : (netpairGeneratedCode ? t(\'devices.netpair_regenerate\') : t(\'devices.netpair_generate\')) }}' +
                 '</button>' +
@@ -591,18 +620,20 @@
           });
       },
 
-      copyNetpairCode: function () {
-        var code = this.netpairDisplayCode;
-        if (!code) return;
+      // 📋 Copy text to the clipboard (shared by the netpair-code and the LAN
+      // pairing-request copy actions).  Falls back to a hidden textarea when
+      // the async Clipboard API is unavailable; both callers toast the same
+      // "code copied" message so the two pairing codes behave identically.
+      _copyToClipboard: function (text) {
         var self = this;
         var done = function () {
           self.store.showToast(self.t('devices.netpair_code_copied'), 2000);
         };
         if (navigator.clipboard && navigator.clipboard.writeText) {
-          navigator.clipboard.writeText(code).then(done).catch(done);
+          navigator.clipboard.writeText(text).then(done).catch(done);
         } else {
           var textarea = document.createElement('textarea');
-          textarea.value = code;
+          textarea.value = text;
           textarea.style.position = 'fixed';
           textarea.style.opacity = '0';
           document.body.appendChild(textarea);
@@ -613,28 +644,18 @@
         }
       },
 
-      // 📋 Copy an 8-digit LAN pairing-request code to the clipboard.
-      // Mirrors copyNetpairCode so both pairing codes behave identically.
+      copyNetpairCode: function () {
+        var code = this.netpairDisplayCode;
+        if (!code) return;
+        this._copyToClipboard(code);
+      },
+
+      // 📋 Copy an 8-digit LAN pairing-request code to the clipboard.  Shares
+      // the same clipboard helper as the netpair code.
       copyPairingCode: function (pr) {
         var code = this.formattedCode(pr);
         if (!code) return;
-        var self = this;
-        var done = function () {
-          self.store.showToast(self.t('devices.netpair_code_copied'), 2000);
-        };
-        if (navigator.clipboard && navigator.clipboard.writeText) {
-          navigator.clipboard.writeText(code).then(done).catch(done);
-        } else {
-          var textarea = document.createElement('textarea');
-          textarea.value = code;
-          textarea.style.position = 'fixed';
-          textarea.style.opacity = '0';
-          document.body.appendChild(textarea);
-          textarea.select();
-          try { document.execCommand('copy'); } catch (e) { /* ignore */ }
-          document.body.removeChild(textarea);
-          done();
-        }
+        this._copyToClipboard(code);
       },
 
       // Keep the code input to exactly 12 A-Z0-9 chars, ignoring spaces and
@@ -702,46 +723,16 @@
 
       // 🔌 Test connectivity to an internet-paired peer: probe the relay
       // channel (and the LAN channel when also reachable), toast the result.
-      // Mirrors device-card.js's test action — same endpoint, same toast.
+      // The endpoint + result formatting live in the shared store helper,
+      // which the LAN device card's test action also delegates to — this
+      // method only owns the busy flag.
       testNetpairPeer: function (peer) {
         var self = this;
         if (self.netpairTesting) return;
         self.netpairTesting = true;
-        ClipsyncAPI.testDeviceConnection(peer.peer_id)
-          .then(function (res) {
-            if (res && res.results) {
-              var parts = res.results.map(function (r) {
-                var channel = self.t(r.channel === 'relay'
-                  ? 'device.test_channel_relay' : 'device.test_channel_lan');
-                if (r.ok && r.latency_ms != null) {
-                  return self.t('device.test_channel_ok',
-                    { channel: channel, latency: Math.round(r.latency_ms) });
-                }
-                return self.t('device.test_channel_fail',
-                  { channel: channel, reason: self._netpairTestError(r) });
-              });
-              var key2 = res.ok ? 'device.test_success' : 'device.test_failed';
-              self.store.showToast(self.t(key2, { detail: parts.join(' · ') }), 4500);
-            } else {
-              var reason = (res && res.error === 'no_channel')
-                ? self.t('device.test_no_channel') : self.t('device.test_failed');
-              self.store.showToast(self.t('device.test_failed', { detail: reason }), 3500);
-            }
-          })
-          .catch(function () {
-            self.store.showToast(self.t('device.test_failed'), 3000);
-          })
-          .finally(function () {
-            self.netpairTesting = false;
-          });
-      },
-
-      // Localize one per-channel failure reason from the probe result.
-      _netpairTestError: function (r) {
-        if (r.error === 'timeout') return this.t('device.test_timeout');
-        if (r.error === 'send_failed') return this.t('device.test_send_failed');
-        if (r.error === 'relay_offline') return this.t('device.test_relay_offline');
-        return r.error || this.t('device.test_failed');
+        self.store.testPeerConnection(peer.peer_id).finally(function () {
+          self.netpairTesting = false;
+        });
       },
 
       // ✏️ Rename an internet-paired peer. Prompt is pre-filled with the

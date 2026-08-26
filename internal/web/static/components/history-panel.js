@@ -18,7 +18,6 @@
         deleting: false,
         clearingAll: false,
         loadingMore: false,
-        historyPageSize: 20,
         // True while ANY batch action (push/pin/favorite/delete) is in flight —
         // disables the whole action bar so a second click can't double-fire.
         batchBusy: false,
@@ -173,8 +172,10 @@
         </div>
       </div>
 
-      <!-- Search results count -->
-      <div v-if="store.historySearch" class="history-panel__search-count">
+      <!-- Search results count (only when a search actually matches — when it
+           yields nothing, the empty state's "No results for …" is the single
+           message instead of competing with a "0 results" line here). -->
+      <div v-if="store.historySearch && hasContent" class="history-panel__search-count">
         {{ t('history.search_count', { count: sections.pinned.length + sections.unpinned.length }) }}
       </div>
 
@@ -200,7 +201,6 @@
             v-for="(item, index) in sections.pinned"
             :key="item.entry_id || 'p'+index"
             :item="item"
-            :index="index"
             :flat-index="index"
             class="stagger-item"
           ></history-item>
@@ -212,7 +212,6 @@
           v-for="(item, index) in sections.unpinned"
           :key="item.entry_id || 'u'+index"
           :item="item"
-          :index="index"
           :flat-index="sections.pinned.length + index"
           class="stagger-item"
         ></history-item>
@@ -302,7 +301,11 @@
         var self = this;
         this.loadingMore = true;
         var offset = this.store.historyOffset;
-        ClipsyncAPI.getHistory({ limit: this.historyPageSize, offset: offset })
+        // Use the SAME page size the initial load uses (web_history_limit),
+        // not a separate hardcoded 20 — otherwise "Load more" pages diverge
+        // from the configured first-page size and the offset math disagrees.
+        var limit = (this.store.settingsCache && this.store.settingsCache.web_history_limit) || 30;
+        ClipsyncAPI.getHistory({ limit: limit, offset: offset })
           .then(function (res) {
             var items = (res && res.items) ? res.items : [];
             // Dedup by entry_id — a loadMore that races a concurrent
@@ -349,7 +352,13 @@
                 // that shifted into the now-empty array.
                 self.store.historyOffset = 0;
                 self.store.historyHasMore = false;
+                // Rows that were selected just got wiped — without this the
+                // multi-select action bar keeps floating over an empty list.
+                self.store.clearSelection();
                 self.store.showToast(self.t('history.cleared'), 2000);
+              } else {
+                self.store.showToast(
+                  (res && res.error) || self.t('history.clear_failed'), 2000, 'error');
               }
               self.clearingAll = false;
             }).catch(function () {
@@ -473,6 +482,9 @@
               self.t(newPinned ? 'history.batch_pinned' : 'history.batch_unpinned', { count: res.count }),
               2000
             );
+          } else {
+            store.showToast(
+              (res && res.error) || self.t('history.pin_failed'), 2000, 'error');
           }
         }).catch(function (e) {
           self.batchBusy = false;
@@ -501,6 +513,9 @@
               store.favorites.splice(0, store.favorites.length);
               for (var i = 0; i < favs.length; i++) store.favorites.push(favs[i]);
             }).catch(function () {});
+          } else {
+            store.showToast(
+              (res && res.error) || self.t('favorites.add_failed'), 2000, 'error');
           }
         }).catch(function (e) {
           self.batchBusy = false;
@@ -539,6 +554,9 @@
 
               store.clearSelection();
               store.showToast(self.t('history.deleted_count', { count: (res.count || selectedIds.length) }), 2000);
+            } else {
+              store.showToast(
+                (res && res.error) || self.t('history.delete_failed'), 2000, 'error');
             }
             self.deleting = false;
             self.batchBusy = false;

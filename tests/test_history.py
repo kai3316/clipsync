@@ -893,13 +893,15 @@ def test_python_i18n_web_locales_are_fully_mirrored():
     aiconfig refactor pass net +16 — the unified-panel + migration-wizard keys
     (aiconfig.diff_*, aiconfig.migrate_*, aiconfig.batch_*, aiconfig.local_device*,
     settings_window.aiconfig_tools_* / aiconfig_custom_paths_*) in, the legacy
-    path-list keys out) that has its own server-side
-    mitigation, so its SIZE is pinned here: a NEW web-only key — the regression
-    class this guards — changes the count and fails the suite."""
+    path-list keys out; the web-UI audit pass removed 1 — history.merged (a
+    web-only dead key), the overview dead-key sweep removed keys that were
+    ALSO in the Python dicts so they never moved this gap) that has its own
+    server-side mitigation, so its SIZE is pinned here: a NEW web-only key —
+    the regression class this guards — changes the count and fails the suite."""
     from internal import i18n
     en, zh = _load_web_locales()
-    assert len(set(en) - set(i18n._EN)) == 693
-    assert len(set(zh) - set(i18n._ZH)) == 693
+    assert len(set(en) - set(i18n._EN)) == 692
+    assert len(set(zh) - set(i18n._ZH)) == 692
 
 
 def test_web_t_literals_resolve_in_both_locales():

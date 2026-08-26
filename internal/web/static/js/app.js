@@ -18,6 +18,25 @@
     return;
   }
 
+  // Single source of truth for the tab → panel mapping.  index.html mounts
+  // ONE <component :is="panelComponent"> (in both the wide and narrow
+  // layouts) instead of a hand-maintained v-else-if chain per layout.
+  var PANEL_COMPONENTS = {
+    overview: 'overview-panel',
+    history: 'history-panel',
+    devices: 'device-panel',
+    transfers: 'transfer-panel',
+    chat: 'chat-panel',
+    favorites: 'favorites-panel',
+    aiconfig: 'aiconfig-panel',
+    diagnostics: 'diagnostics-panel',
+  };
+
+  // Transfers poll guard — one reconcile in flight at a time.  Module scope so
+  // the interval closure and the promise handlers share it without reaching
+  // into the reactive store (a Vue option key would be ignored by Vue).
+  var _transfersPollInFlight = false;
+
   var app = createApp({
     data: function () {
       return {
@@ -30,6 +49,12 @@
       return {
         store: this.store,
       };
+    },
+
+    computed: {
+      panelComponent: function () {
+        return PANEL_COMPONENTS[this.store.activeTab] || '';
+      },
     },
 
     watch: {
@@ -179,6 +204,25 @@
         store.fetchOverview();
       }, 5000);
 
+      // 5-second transfer reconcile — but ONLY while a transfer is active.
+      // Outgoing sends are started server-side inside the /api/upload handler,
+      // so the send dialog's "Sent N files" toast can fire before the peer's
+      // P2P transfer even shows up as an active row; WS progress pushes keep
+      // live rows fresh, but a periodic snapshot guarantees a row that missed
+      // its initial push (or lost its WS) still appears and completes.
+      this._transfersTimer = setInterval(function () {
+        if (!document.hasFocus()) return;
+        if (document.hidden) return;
+        if (store.activeTransfers.length === 0) return;
+        if (_transfersPollInFlight) return;
+        _transfersPollInFlight = true;
+        store.refreshTransfers().then(function () {
+          _transfersPollInFlight = false;
+        }, function () {
+          _transfersPollInFlight = false;
+        });
+      }, 5000);
+
       // WebSocket events. Each loader is fire-and-forget, so swallow
       // rejections to avoid unhandled promise rejections on transient
       // network failures.
@@ -294,6 +338,9 @@
       document.removeEventListener('keydown', this.onKeyDown);
       if (this._overviewTimer) {
         clearInterval(this._overviewTimer);
+      }
+      if (this._transfersTimer) {
+        clearInterval(this._transfersTimer);
       }
       if (this._loadFallbackTimer) {
         clearTimeout(this._loadFallbackTimer);
@@ -508,21 +555,10 @@
       },
 
       loadTransfers: function () {
-        return ClipsyncAPI.getTransfers().then(function (res) {
-          if (res && res.active) {
-            store.activeTransfers.splice(0, store.activeTransfers.length);
-            for (var i = 0; i < res.active.length; i++) {
-              store.activeTransfers.push(res.active[i]);
-            }
-          }
-          if (res && res.history) {
-            store.transferHistory.splice(0, store.transferHistory.length);
-            for (var j = 0; j < res.history.length; j++) {
-              store.transferHistory.push(res.history[j]);
-            }
-          }
-          return res;
-        });
+        // Single shared implementation: store.reconcileTransfers is the only
+        // place active/history splicing lives (transfer-panel also refreshes
+        // through it), so the two can never drift.
+        return store.refreshTransfers();
       },
 
       /**
@@ -694,29 +730,14 @@
 
       /**
        * Copy the keyboard-focused item to the desktop clipboard via
-       * paste-rich (so IMAGE entries work too). Mirrors history-item's
-       * copy action, including the paste-count bump and toasts.
+       * paste-rich (so IMAGE entries work too). Delegates to the shared
+       * store helper (paste + count bump + toast) so the keyboard path and
+       * the history-item card agree.
        * @param {Object} item
        */
       _copyKbdItem: function (item) {
-        var self = this;
         if (!item || item.entry_id === undefined || item.entry_id === null) return;
-        var eid = item.entry_id;
-        ClipsyncAPI.pasteRich(eid).then(function (res) {
-          if (res && res.ok !== false) {
-            var idx = store.history.findIndex(function (h) {
-              return h.entry_id === eid;
-            });
-            if (idx !== -1) {
-              store.history[idx].paste_count = (store.history[idx].paste_count || 0) + 1;
-            }
-            store.showToast(self.t('history.copied'), 1500);
-          } else {
-            store.showToast(self.t('history.copy_failed'), 2000);
-          }
-        }).catch(function () {
-          store.showToast(self.t('history.copy_failed'), 2000);
-        });
+        store.pasteHistoryItem(item.entry_id);
       },
 
       /**

@@ -79,16 +79,28 @@ def _T(src: str) -> str:
 
 
 def test_panel_mounted_in_both_layouts():
+    # The tab → panel mapping is a SINGLE source of truth in app.js
+    # (PANEL_COMPONENTS); index.html mounts one <component :is="panelComponent">
+    # per layout instead of a hand-maintained v-else-if chain (the old chain
+    # was duplicated in the wide + narrow layouts and drifted).
     html = _read("index.html")
-    wide = '<aiconfig-panel v-else-if="store.activeTab === \'aiconfig\'" key="aiconfig"></aiconfig-panel>'
-    assert html.count(wide) == 2, (
-        "aiconfig-panel must be wired into the wide AND narrow layouts"
+    mount = '<component :is="panelComponent" :key="store.activeTab"></component>'
+    assert html.count(mount) == 2, (
+        "the panel component mount must appear in the wide AND narrow layouts"
     )
-    # Same v-else-if chain as its siblings: favorites < aiconfig < diagnostics.
-    fav = html.index("<favorites-panel")
-    ai = html.index("<aiconfig-panel")
-    diag = html.index("<diagnostics-panel")
-    assert fav < ai < diag
+    # No literal v-else-if panel chain remains anywhere.
+    assert "<overview-panel v-if=" not in html
+    assert "<aiconfig-panel v-else-if=" not in html
+    # aiconfig is wired through the mapping, alongside every other tab.
+    app_src = _read("js", "app.js")
+    assert "aiconfig: 'aiconfig-panel'" in app_src
+    assert "panelComponent: function ()" in app_src
+    for tab, name in (("overview", "overview-panel"), ("history", "history-panel"),
+                      ("devices", "device-panel"), ("transfers", "transfer-panel"),
+                      ("chat", "chat-panel"), ("favorites", "favorites-panel"),
+                      ("aiconfig", "aiconfig-panel"),
+                      ("diagnostics", "diagnostics-panel")):
+        assert f"{tab}: '{name}'" in app_src, f"missing mapping {tab} → {name}"
 
 
 def test_index_html_loads_unified_scripts():

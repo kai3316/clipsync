@@ -150,12 +150,15 @@
           '<span class="device-card__name text-ellipsis">{{ device.device_name || device.name || device.device_id }}</span>' +
           '<span class="device-card__id text-ellipsis selectable">{{ isLocal ? \'💻 \' + t(\'device.this_computer\') : device.device_id }}</span>' +
           '<span v-if="device.os" class="device-card__os">{{ device.os }}</span>' +
-          '<!-- Note -->' +
-          '<div v-if="!editingNote" class="device-card__note" role="button" tabindex="0" @click.stop="startEditNote" @keyup.enter="startEditNote" @keyup.space.prevent="startEditNote">' +
+          '<!-- Note. Not offered on the local device: notes are cross-device' +
+          'memos keyed to a peer, and the backend drops a note whose peer_id is' +
+          'the local id (it is never in cfg.peers) — so editing here would be' +
+          'a "saved" that silently never persists. -->' +
+          '<div v-if="!isLocal && !editingNote" class="device-card__note" role="button" tabindex="0" @click.stop="startEditNote" @keyup.enter="startEditNote" @keyup.space.prevent="startEditNote">' +
             '<span v-if="device.note" class="device-card__note-text selectable">{{ device.note }}</span>' +
             '<span v-else class="device-card__note-placeholder">{{ t(\'device.add_note\') }}</span>' +
           '</div>' +
-          '<div v-if="editingNote" class="device-card__note-edit" @click.stop @contextmenu.stop>' +
+          '<div v-if="!isLocal && editingNote" class="device-card__note-edit" @click.stop @contextmenu.stop>' +
             '<input type="text" v-model="noteDraft" class="device-card__note-input" :placeholder="t(\'device.note_placeholder\')" @keyup.enter="saveNote" @keyup.escape="cancelEditNote" ref="noteInput">' +
             '<button class="device-card__note-save" @click="saveNote" :disabled="noteSaving">{{ noteSaving ? \'...\' : t(\'device.save_note\') }}</button>' +
             '<button class="device-card__note-cancel" :aria-label="t(\'ui.cancel\')" @click="cancelEditNote">✕</button>' +
@@ -324,49 +327,17 @@
           return;
         }
         if (key === 'test') {
-          // Full probe result (per-channel RTT + reasons), not a bool.
-          ClipsyncAPI.testDeviceConnection(peerId)
-            .then(function (res) {
-              // A successful probe always carries per-channel rows; an empty
-              // array ([] is truthy in JS!) means the backend reported
-              // "no_channel" — fall through so the reason actually shows.
-              if (res && res.results && res.results.length > 0) {
-                var parts = res.results.map(function (r) {
-                  var channel = self.t(r.channel === 'relay'
-                    ? 'device.test_channel_relay' : 'device.test_channel_lan');
-                  if (r.ok && r.latency_ms != null) {
-                    return self.t('device.test_channel_ok',
-                      { channel: channel, latency: Math.round(r.latency_ms) });
-                  }
-                  return self.t('device.test_channel_fail',
-                    { channel: channel, reason: self._deviceTestError(r) });
-                });
-                var key2 = res.ok ? 'device.test_success' : 'device.test_failed';
-                self.store.showToast(self.t(key2, { detail: parts.join(' · ') }), 4500);
-              } else {
-                var reason = (res && res.error === 'no_channel')
-                  ? self.t('device.test_no_channel') : self.t('device.test_failed');
-                self.store.showToast(self.t('device.test_failed', { detail: reason }), 3500);
-              }
-            })
-            .catch(function () {
-              self.store.showToast(self.t('device.test_failed'), 3000);
-            })
-            .finally(function () {
-              self.actionLoading = false;
-              self.actionLabel = '';
-            });
+          // Full probe result (per-channel RTT + reasons), not a bool.  The
+          // shared store helper owns the endpoint + toast (the internet-pair
+          // peer row delegates to it too); this method just keeps the card's
+          // busy flag for the button spinner.
+          self.store.testPeerConnection(peerId).finally(function () {
+            self.actionLoading = false;
+            self.actionLabel = '';
+          });
           return;
         }
         self.actionLoading = false;
-      },
-
-      // Localize one per-channel failure reason from the probe result.
-      _deviceTestError: function (r) {
-        if (r.error === 'timeout') return this.t('device.test_timeout');
-        if (r.error === 'send_failed') return this.t('device.test_send_failed');
-        if (r.error === 'relay_offline') return this.t('device.test_relay_offline');
-        return r.error || this.t('device.test_failed');
       },
 
       onContextMenu: function (e) {

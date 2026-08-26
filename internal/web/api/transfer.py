@@ -3,7 +3,6 @@
 All handlers return a (data_dict, status_code) tuple.
 """
 
-import json
 import logging
 
 logger = logging.getLogger(__name__)
@@ -132,50 +131,3 @@ def get_speed_test(on_get_speed_test=None):
         "status": status,
         "quality": _speed_quality(mbps) if done else "",
     }, 200
-
-
-def post_transfer(body, cfg, on_forward_file=None):
-    """Initiate a file transfer to a peer.
-
-    Delegates the actual send to the host application's *on_forward_file*
-    callback (which routes the file to the target device via
-    FileTransferManager.send_file).
-    """
-    try:
-        data = json.loads(body.decode("utf-8"))
-    except (json.JSONDecodeError, UnicodeDecodeError):
-        return {"ok": False, "error": "invalid json"}, 400
-
-    file_path = data.get("file_path", "").strip()
-    target_device = data.get("device_id", "").strip()
-
-    if not file_path:
-        return {"ok": False, "error": "file_path is required"}, 400
-    if not target_device:
-        return {"ok": False, "error": "device_id is required"}, 400
-
-    import os
-
-    # Only allow forwarding files that live in ClipSync's own data directory —
-    # a client supplied path must not make the host send arbitrary files.
-    from internal.config.config import _config_dir
-    from internal.web.api.security import confine_path
-    safe_path = confine_path(file_path, _config_dir())
-    if safe_path is None:
-        return {"ok": False, "error": "file_path must be inside the ClipSync data directory"}, 400
-    file_path = str(safe_path)
-
-    if not os.path.isfile(file_path):
-        return {"ok": False, "error": "file not found"}, 404
-
-    if on_forward_file is None:
-        return {"ok": False, "error": "file transfer unavailable"}, 503
-
-    try:
-        on_forward_file(file_path, target_device)
-    except Exception:
-        logger.exception("File transfer failed")
-        return {"ok": False, "error": "transfer failed"}, 500
-
-    logger.info("Transfer initiated: %s -> %s", file_path, target_device[:12])
-    return {"ok": True, "file": os.path.basename(file_path), "target": target_device}, 200

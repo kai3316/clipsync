@@ -445,16 +445,21 @@ def test_api_js_wrappers_exist():
 
 def test_device_test_connection_ui_wired():
     # The "test connection" button (F2) is a real API wrapper wired into the
-    # device card actions and the internet-paired peer list.
+    # device card actions and the internet-paired peer list.  The endpoint
+    # call + result formatting live once in store.testPeerConnection; both
+    # call sites delegate to it instead of duplicating the body.
     api_js = _read_repo_file("internal/web/static/js/api.js")
     assert "testDeviceConnection: function (peerId)" in api_js
     assert "'/api/device/test'" in api_js
+    store = _read_repo_file("internal/web/static/js/store.js")
+    assert "testPeerConnection: function (peerId)" in store
+    assert "ClipsyncAPI.testDeviceConnection(peerId)" in store
     card = _read_repo_file("internal/web/static/components/device-card.js")
     assert "key: 'test'" in card
-    assert "ClipsyncAPI.testDeviceConnection(peerId)" in card
+    assert "store.testPeerConnection(peerId)" in card
     panel = _read_repo_file("internal/web/static/components/device-panel.js")
     assert "testNetpairPeer: function (peer)" in panel
-    assert "ClipsyncAPI.testDeviceConnection(peer.peer_id)" in panel
+    assert "store.testPeerConnection(peer.peer_id)" in panel
 
 
 def test_overview_panel_pause_ui_wired():

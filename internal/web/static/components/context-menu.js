@@ -886,7 +886,7 @@
             '<span class="context-menu__item-icon">{{ isSessionMuted ? \'🔔\' : \'🔕\' }}</span>' +
             '<span class="context-menu__item-label">{{ isSessionMuted ? t(\'chat.unmute\') : t(\'chat.mute\') }}</span>' +
           '</div>' +
-          '<div v-if="(targetSession.unread || 0) > 0" class="context-menu__item" role="menuitem" tabindex="-1" :aria-disabled="!targetSession" @click="markSessionRead">' +
+          '<div v-if="((targetSession || {}).unread || 0) > 0" class="context-menu__item" role="menuitem" tabindex="-1" :aria-disabled="!targetSession" @click="markSessionRead">' +
             '<span class="context-menu__item-icon">✓</span>' +
             '<span class="context-menu__item-label">{{ t(\'chat.mark_read\') }}</span>' +
           '</div>' +

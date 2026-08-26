@@ -62,11 +62,9 @@
       flex-direction: column;
     }
 
-    /* Panel entrance animation */
-    .panel-area > * {
-      animation: panelFadeIn 0.2s ease-out;
-    }
-
+    /* Panel entrance is animated solely by the <transition name="panel-fade">
+       wrapper — a base `.panel-area > *` animation would race it and
+       double-fade the panel right after each tab switch. */
     @keyframes panelFadeIn {
       from { opacity: 0; transform: translateY(4px); }
       to { opacity: 1; transform: translateY(0); }
@@ -231,13 +229,8 @@
     }
 
     /* ── Favorites inline panel ──────────────────────────────────── */
-
-    .favorites-panel {
-      display: flex;
-      flex-direction: column;
-      gap: var(--clipsync-space-2);
-      flex: 1;
-    }
+    /* (.favorites-panel base styles live with the component block below —
+       an earlier copy here was fully shadowed by it.) */
 
     .favorites-list {
       display: flex;
@@ -1247,20 +1240,6 @@
       position: relative;
     }
 
-    .history-panel__header {
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
-      margin-bottom: var(--clipsync-space-3);
-      flex-shrink: 0;
-    }
-
-    .history-panel__header-actions {
-      display: flex;
-      align-items: center;
-      gap: var(--clipsync-space-2);
-    }
-
     .history-panel__filters {
       display: flex;
       align-items: center;
@@ -2091,58 +2070,6 @@
       align-items: stretch;
     }
 
-    .transfer-card__icon {
-      flex-shrink: 0;
-      width: 32px;
-      height: 32px;
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      font-size: 18px;
-      background: var(--clipsync-panel);
-      border-radius: var(--clipsync-radius-sm);
-      margin-top: 2px;
-    }
-
-    .transfer-card__info {
-      flex: 1;
-      min-width: 0;
-      display: flex;
-      flex-direction: column;
-      gap: var(--clipsync-space-1);
-    }
-
-    .transfer-card__name {
-      font-size: 13px;
-      font-weight: 600;
-      color: var(--clipsync-fg);
-    }
-
-    .transfer-card__meta {
-      display: flex;
-      align-items: center;
-      gap: var(--clipsync-space-2);
-      flex-wrap: wrap;
-      font-size: 11px;
-      color: var(--clipsync-fg-muted);
-    }
-
-    .transfer-card__peer {
-      max-width: 140px;
-    }
-
-    .transfer-card__speed {
-      font-family: var(--clipsync-font-mono);
-      font-size: 11px;
-      color: var(--clipsync-fg-subtle);
-    }
-
-    .transfer-card__size {
-      font-family: var(--clipsync-font-mono);
-      font-size: 11px;
-      color: var(--clipsync-fg-subtle);
-    }
-
     /* ── Send card (device selector + buttons) ───────────────────── */
     .transfer-card__title {
       font-weight: 600;
@@ -2297,34 +2224,6 @@
       background: linear-gradient(90deg, var(--clipsync-accent), var(--clipsync-accent-2));
       border-radius: 2px;
       transition: width 0.3s;
-    }
-
-    /* ── Progress bar ─────────────────────────────────────────────── */
-
-    .transfer-card__progress-track {
-      height: 4px;
-      background: var(--clipsync-panel);
-      border-radius: 2px;
-      overflow: hidden;
-    }
-
-    .transfer-card__progress-fill {
-      height: 100%;
-      background: linear-gradient(90deg, var(--clipsync-accent), var(--clipsync-accent-2));
-      border-radius: 2px;
-      transition: width var(--clipsync-transition);
-    }
-
-    .transfer-card__pct {
-      font-size: 11px;
-      font-weight: 600;
-      color: var(--clipsync-fg-subtle);
-      font-family: var(--clipsync-font-mono);
-      text-align: right;
-    }
-
-    .transfer-card--done {
-      opacity: 0.75;
     }
 
     /* ── Transfer history item (modern card) ───────────────────── */
@@ -3325,17 +3224,7 @@
        Global Responsive
        ═══════════════════════════════════════════════════════════════ */
 
-    /* ── Medium windows (≤1200px) — remove max-width cap ──────── */
-    @media (max-width: 1200px) {
-      .app-shell {
-        max-width: 100%;
-        margin: 0;
-      }
-
-      .panel-area {
-        max-width: 100%;
-      }
-    }
+    /* ── Medium windows (≤1200px) ──────────────────────────────── */
 
     /* ── Tablet / narrow windows (≤768px) — stack, compact ────── */
     @media (max-width: 768px) {
@@ -3358,11 +3247,6 @@
 
     /* ── Small windows (≤480px) — single column, minimal chrome ── */
     @media (max-width: 480px) {
-      .app-shell {
-        max-width: 100%;
-        margin: 0;
-      }
-
       .panel-area {
         padding: var(--clipsync-space-2);
       }
@@ -6736,63 +6620,6 @@
       padding: var(--clipsync-space-2) 0;
     }
 
-    .netpair-empty {
-      padding: var(--clipsync-space-4);
-      margin-bottom: var(--clipsync-space-3);
-    }
-
-    .netpair-empty__title {
-      font-size: 0.85rem;
-      font-weight: 600;
-      color: var(--clipsync-fg);
-      margin-bottom: var(--clipsync-space-2);
-    }
-
-    .netpair-steps {
-      margin: 0;
-      padding: 0;
-      list-style: none;
-      display: flex;
-      flex-direction: column;
-      gap: var(--clipsync-space-2);
-    }
-
-    .netpair-step {
-      display: flex;
-      align-items: flex-start;
-      gap: var(--clipsync-space-2);
-      font-size: 0.82rem;
-      line-height: 1.5;
-      color: var(--clipsync-fg);
-    }
-
-    .netpair-step__icon {
-      flex-shrink: 0;
-      color: var(--clipsync-accent);
-      font-weight: 700;
-    }
-
-    .netpair-step__link {
-      margin-left: auto;
-      flex-shrink: 0;
-      white-space: nowrap;
-    }
-
-    .netpair-generate {
-      margin: var(--clipsync-space-2) 0;
-    }
-
-    .netpair-hint {
-      display: block;
-      font-size: 0.75rem;
-      color: var(--clipsync-fg-muted);
-      margin-top: var(--clipsync-space-1);
-    }
-
-    .netpair-enter {
-      margin: var(--clipsync-space-2) 0;
-    }
-
     .netpair-enter__row {
       display: flex;
       gap: var(--clipsync-space-2);
@@ -7750,14 +7577,7 @@
               <p class="panel-loading__text">{{ t('app.connecting') }}</p>
             </div>
             <transition v-if="!store.initialLoad || !store.loading" name="panel-fade" mode="out-in">
-              <overview-panel v-if="store.activeTab === 'overview'" key="overview"></overview-panel>
-              <history-panel v-else-if="store.activeTab === 'history'" key="history"></history-panel>
-              <device-panel v-else-if="store.activeTab === 'devices'" key="devices"></device-panel>
-              <transfer-panel v-else-if="store.activeTab === 'transfers'" key="transfers"></transfer-panel>
-              <chat-panel v-else-if="store.activeTab === 'chat'" key="chat"></chat-panel>
-              <favorites-panel v-else-if="store.activeTab === 'favorites'" key="favorites"></favorites-panel>
-              <aiconfig-panel v-else-if="store.activeTab === 'aiconfig'" key="aiconfig"></aiconfig-panel>
-              <diagnostics-panel v-else-if="store.activeTab === 'diagnostics'" key="diagnostics"></diagnostics-panel>
+              <component :is="panelComponent" :key="store.activeTab"></component>
             </transition>
           </main>
           <status-bar></status-bar>
@@ -7773,14 +7593,7 @@
             <p class="panel-loading__text">{{ t('app.connecting') }}</p>
           </div>
           <transition v-if="!store.initialLoad || !store.loading" name="panel-fade" mode="out-in">
-            <overview-panel v-if="store.activeTab === 'overview'" key="overview"></overview-panel>
-            <history-panel v-else-if="store.activeTab === 'history'" key="history"></history-panel>
-            <device-panel v-else-if="store.activeTab === 'devices'" key="devices"></device-panel>
-            <transfer-panel v-else-if="store.activeTab === 'transfers'" key="transfers"></transfer-panel>
-            <chat-panel v-else-if="store.activeTab === 'chat'" key="chat"></chat-panel>
-            <favorites-panel v-else-if="store.activeTab === 'favorites'" key="favorites"></favorites-panel>
-            <aiconfig-panel v-else-if="store.activeTab === 'aiconfig'" key="aiconfig"></aiconfig-panel>
-            <diagnostics-panel v-else-if="store.activeTab === 'diagnostics'" key="diagnostics"></diagnostics-panel>
+            <component :is="panelComponent" :key="store.activeTab"></component>
           </transition>
         </main>
         <status-bar></status-bar>

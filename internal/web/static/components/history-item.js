@@ -19,10 +19,6 @@
         type: Object,
         required: true,
       },
-      index: {
-        type: Number,
-        default: 0,
-      },
       // Position in the FLAT visible list (pinned section ++ unpinned
       // section) — the same order store.filteredHistory() returns, so the
       // keyboard cursor (store.kbdIndex) can highlight this row.
@@ -161,6 +157,13 @@
         if (e.key === 'Enter' || e.key === ' ') {
           e.preventDefault();
           this.onClick(e);
+        } else if (e.key === 'Delete' || e.key === 'Backspace') {
+          // The app-level handler deletes the keyboard-CURSOR row, but it is
+          // gated off when the focused element is a [role="button"] card —
+          // so a card that actually has focus must own Delete itself,
+          // mirroring the same single-item delete (no confirm).
+          e.preventDefault();
+          this.deleteItem();
         }
       },
 
@@ -197,25 +200,10 @@
       copyItem: function () {
         var eid = this.item.entry_id;
         if (eid !== undefined && eid !== null) {
-          var self = this;
-          ClipsyncAPI.pasteRich(eid).then(function (res) {
-            if (res && res.ok !== false) {
-              var idx = self.store.history.findIndex(function (h) {
-                return h.entry_id === eid;
-              });
-              if (idx !== -1) {
-                self.store.history[idx].paste_count = (self.store.history[idx].paste_count || 0) + 1;
-              }
-              self.store.showToast(
-                self.isCoarse ? self.t('history.copy_to_desktop_toast') : self.t('history.copied'),
-                1500
-              );
-            } else {
-              self.store.showToast(self.t('history.copy_failed'), 2000);
-            }
-          }).catch(function () {
-            self.store.showToast(self.t('history.copy_failed'), 2000);
-          });
+          // Shared store helper owns the paste/count/toast contract (the
+          // app-level keyboard path uses it too; the right-click context
+          // menu keeps its own inline pasteRich on the clicked row).
+          this.store.pasteHistoryItem(eid, { coarse: this.isCoarse });
           return;
         }
         // No stable id — fall back to copying the (possibly truncated) preview.
