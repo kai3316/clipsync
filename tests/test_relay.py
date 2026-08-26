@@ -295,7 +295,7 @@ def channels():
     return {R.derive_topic("a", "b"): R.derive_key("a", "b")}
 
 
-def make_transport(channels_dict, brokers=None):
+def make_transport(channels_dict, brokers=None, private_brokers=None):
     received = []
     states = []
     clients = []
@@ -325,6 +325,7 @@ def make_transport(channels_dict, brokers=None):
         on_state=states.append,
         client_factory=factory,
         sleeper=lambda s: None,
+        private_brokers=private_brokers,
     )
     t._test_wait_clients = lambda n=1: wait_for(lambda cl: len(cl) >= n)
     return t, clients, received, states
@@ -429,17 +430,23 @@ def test_failover_to_next_broker():
 
 
 def test_credentials_apply_to_new_clients(channels):
-    """set_credentials is anonymous by default, applied once per client."""
-    t, clients, _, _ = make_transport(channels)
-    anon = t._new_client("wss://broker.example:8884/mqtt")
+    """set_credentials is anonymous by default, applied once per client —
+    and only to private endpoints, never to free public brokers."""
+    PRIV = "wss://broker.example:8884/mqtt"
+    FREE = "wss://free.example:8884/mqtt"
+    t, clients, _, _ = make_transport(channels, private_brokers=[PRIV])
+    anon = t._new_client(PRIV)
     assert not hasattr(anon, "broker_username")
     t.set_credentials("user1", "pass1")
-    authed = t._new_client("wss://broker.example:8884/mqtt")
+    authed = t._new_client(PRIV)
     assert authed.broker_username == "user1"
     assert authed.broker_password == "pass1"
+    # A free endpoint never receives the private broker's credentials.
+    free = t._new_client(FREE)
+    assert not hasattr(free, "broker_username")
     # Clearing both returns to anonymous.
     t.set_credentials("", "")
-    anon2 = t._new_client("wss://broker.example:8884/mqtt")
+    anon2 = t._new_client(PRIV)
     assert not hasattr(anon2, "broker_username")
 
 
@@ -460,6 +467,7 @@ def test_credentials_from_init_survive_start(channels):
         client_factory=factory,
         username="init_user",
         password="init_pass",
+        private_brokers=["wss://broker.example:8884/mqtt"],
     )
     t.start()
     deadline = time.time() + 2
@@ -472,7 +480,8 @@ def test_credentials_from_init_survive_start(channels):
 
 def test_credentials_swap_before_restart(channels):
     """set_credentials + restart() must build the reconnect with new creds."""
-    t, clients, _, _ = make_transport(channels)
+    t, clients, _, _ = make_transport(
+        channels, private_brokers=["wss://broker.example:8884/mqtt"])
     t.start()
     assert t._test_wait_clients(1)
     assert not hasattr(clients[0], "broker_username")
@@ -481,6 +490,24 @@ def test_credentials_swap_before_restart(channels):
     assert t._test_wait_clients(2)
     assert clients[1].broker_username == "u2"
     assert clients[1].broker_password == "p2"
+    t.stop()
+
+
+def test_private_brokers_are_preferred_primary(channels):
+    """Private endpoints come first in the failover list; creds-only-gated."""
+    t, clients, _, _ = make_transport(
+        channels,
+        brokers=["wss://free.example:8884/mqtt"],
+        private_brokers=["wss://broker.example:8884/mqtt"],
+    )
+    assert t._brokers == [
+        "wss://broker.example:8884/mqtt", "wss://free.example:8884/mqtt"]
+    assert "wss://broker.example:8884/mqtt" in t._private_endpoints
+    assert "wss://free.example:8884/mqtt" not in t._private_endpoints
+    # An exact duplicate across sections collapses to a single connection.
+    t.set_brokers(brokers=["wss://dup.example:8884/mqtt"],
+                  private_brokers=["wss://dup.example:8884/mqtt"])
+    assert t._brokers == ["wss://dup.example:8884/mqtt"]
     t.stop()
 
 
@@ -610,12 +637,14 @@ def test_config_relay_keys_roundtrip(isolated_config):
     cfg = cfg_mod.Config()
     cfg.internet_sync_enabled = True
     cfg.relay_brokers = ["wss://b1:8084/mqtt"]
+    cfg.relay_private_brokers = ["mqtt://mqttyyc.top:1883"]
     cfg.relay_secret = "cd" * 32
     cfg.peer_relay_secrets = {"peer-1": "ef" * 32}
     cfg_mod.save(cfg)
     loaded = cfg_mod.load()
     assert loaded.internet_sync_enabled is True
     assert loaded.relay_brokers == ["wss://b1:8084/mqtt"]
+    assert loaded.relay_private_brokers == ["mqtt://mqttyyc.top:1883"]
     assert loaded.relay_secret == "cd" * 32
     assert loaded.peer_relay_secrets == {"peer-1": "ef" * 32}
 
@@ -633,7 +662,7 @@ def test_config_relay_bad_types_fall_back_to_defaults(isolated_config):
     path.write_text(json.dumps(base), encoding="utf-8")
     loaded = cfg_mod.load()
     assert loaded.internet_sync_enabled is False
-    assert isinstance(loaded.relay_brokers, list) and len(loaded.relay_brokers) == 2
+    assert isinstance(loaded.relay_brokers, list) and len(loaded.relay_brokers) == 3
     assert loaded.relay_secret == ""
     assert loaded.peer_relay_secrets == {}
 
@@ -795,7 +824,7 @@ def test_start_internet_sync_enrolls_paired_peers_only(monkeypatch):
     class FakeTransport:
         def __init__(self, brokers, get_channels, on_frame, on_state,
                      client_factory=None, sleeper=None,
-                     username="", password=""):
+                     username="", password="", private_brokers=None):
             started["args"] = (brokers, get_channels, on_frame, on_state)
 
         def start(self):
@@ -842,6 +871,7 @@ class _SettingsCfg:
         self.private_key_pem = "KEY"
         self.internet_sync_enabled = False
         self.relay_brokers = ["wss://broker.emqx.io:8884/mqtt"]
+        self.relay_private_brokers = ["mqtt://mqttyyc.top:1883"]
         self.relay_secret = ""
         self.peer_relay_secrets = {}
 
@@ -909,6 +939,28 @@ def test_settings_relay_brokers_bad_type_rejected():
         assert cfg.relay_brokers == original
 
 
+@pytest.mark.usefixtures("sandboxed_persist")
+def test_settings_relay_private_brokers_roundtrip():
+    from internal.web.api.settings import update_settings
+    cfg = _SettingsCfg()
+    priv = ["mqtt://priv1.example:1883", "ws://priv1.example:8083/mqtt"]
+    data, status = update_settings(_body({"relay_private_brokers": priv}), cfg)
+    assert status == 200
+    assert cfg.relay_private_brokers == priv
+
+
+@pytest.mark.usefixtures("sandboxed_persist")
+def test_settings_relay_private_brokers_bad_type_rejected():
+    from internal.web.api.settings import update_settings
+    cfg = _SettingsCfg()
+    original = list(cfg.relay_private_brokers)
+    for bad in ("mqtt://single.example", 42, {"url": True}, None):
+        data, status = update_settings(
+            _body({"relay_private_brokers": bad}), cfg)
+        assert status == 400, bad
+        assert cfg.relay_private_brokers == original
+
+
 def test_get_settings_exposes_relay_keys_but_never_secrets():
     from internal.web.api.settings import get_settings
     cfg = _SettingsCfg()
@@ -920,6 +972,8 @@ def test_get_settings_exposes_relay_keys_but_never_secrets():
     s = result["settings"]
     assert s["internet_sync_enabled"] is True
     assert isinstance(s["relay_brokers"], list)
+    assert isinstance(s["relay_private_brokers"], list)
+    assert "mqtt://mqttyyc.top:1883" in s["relay_private_brokers"]
     assert s["internet_sync_state"] == "online"
     # Secrets must never reach any client through this endpoint.
     assert "relay_secret" not in s
@@ -1034,8 +1088,10 @@ _NEW_KEYS = [
     "relay.state.online",
     "relay.state.error",
     "settings_window.relay_brokers_toggle",
-    "settings_window.relay_brokers_label",
-    "settings_window.relay_brokers_hint",
+    "settings_window.relay_free_label",
+    "settings_window.relay_free_hint",
+    "settings_window.relay_private_label",
+    "settings_window.relay_private_hint",
     "settings_window.save_relay_brokers",
     "settings_window.internet_sync_hint",
     "settings.relay_brokers_saved",

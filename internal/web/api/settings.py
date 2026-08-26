@@ -67,6 +67,7 @@ _SAFE_FIELDS = {
     # able to read or overwrite them through this API.
     "internet_sync_enabled",
     "relay_brokers",
+    "relay_private_brokers",
     # The relay broker *username* is exposed so the web UI can prefill it; the
     # password is not — only relay_password_set is exposed (see get_settings).
     "relay_username",
@@ -145,6 +146,7 @@ _MUTABLE_FIELDS = {
     "auto_update_check",
     "internet_sync_enabled",
     "relay_brokers",
+    "relay_private_brokers",
     "relay_username",
     "relay_password",
     # Legacy pairing passphrase (v1.0.84 unification: the single encryption

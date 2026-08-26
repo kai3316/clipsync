@@ -2,9 +2,9 @@
 
 Design goals (user-mandated): zero cost, zero signup, no third-party client,
 works behind NAT without port forwarding.  Peers talk to an MQTT broker (an
-editable list, defaulting to the user's private broker mqttyyc.top with
-credentials preconfigured — any public broker like broker.emqx.io works too
-when left anonymous).
+editable list split into anonymous free relays and a credentialed private
+relay (mqttyyc.top preconfigured with login) — any public broker like
+broker.emqx.io works too when left anonymous).
 The broker only ever sees two things:
 
   topic — ``clipsync/v1/<hash[:24]>`` derived from BOTH devices' relay secrets
@@ -527,7 +527,13 @@ class RelayTransport:
     """Connection lifecycle + pub/sub over a failover list of MQTT brokers.
 
     Parameters:
-      brokers           -- list of ``wss://host:port[/path]`` endpoints
+      brokers           -- anonymous (free/public) endpoints, no credentials
+      private_brokers   -- credentialed endpoints; these authenticate with
+                           ``username``/``password``.  Combined into one failover
+                           list with the private endpoints FIRST (a self-hosted
+                           broker is the preferred primary), and credentials are
+                           only ever sent to a private endpoint — an anonymous
+                           public broker must not see them.
       get_channels      -- returns {topic: key}; re-read on reconnect and when
                            ``refresh_channels`` is called (new enrollments)
       on_frame          -- called with (inner frame bytes, topic) for received
@@ -550,8 +556,18 @@ class RelayTransport:
         sleeper: Callable[[float], None] | None = None,
         username: str = "",
         password: str = "",
+        private_brokers: list[str] | None = None,
     ):
-        self._brokers = [b for b in brokers if isinstance(b, str) and b]
+        self._free_brokers = [b for b in brokers if isinstance(b, str) and b]
+        self._private_brokers = [
+            b for b in (private_brokers or []) if isinstance(b, str) and b]
+        # Private endpoints first: a self-hosted broker is the preferred
+        # primary; the free/public list becomes mirrors + failover.  The same
+        # endpoint may legitimately appear in both sections (e.g. mqtt:// vs
+        # ws:// differ, but an exact duplicate must not be connected twice).
+        self._brokers = list(dict.fromkeys(
+            self._private_brokers + self._free_brokers))
+        self._private_endpoints = frozenset(self._private_brokers)
         self._get_channels = get_channels
         self._on_frame = on_frame
         self._on_state = on_state
@@ -652,18 +668,28 @@ class RelayTransport:
         self.stop()
         self.start()
 
-    def set_brokers(self, brokers: list) -> None:
-        """Replace the broker list *before* a restart.
+    def set_brokers(self, brokers: list | None = None,
+                    private_brokers: list | None = None) -> None:
+        """Replace the broker list(s) *before* a restart.
 
         ``restart()`` alone only re-runs the worker — it still reads the
         brokers captured at construction, so a broker-list edit in settings
         would otherwise restart against the OLD list.  Call this first with
-        the new list, then ``restart()``.  The live worker is untouched here;
-        the swap only takes effect on the next connect loop.
+        the new list(s), then ``restart()``.  A ``None`` argument keeps the
+        current list for that group, so a settings save that touches only one
+        group cannot wipe the other.  The live worker is untouched here; the
+        swap only takes effect on the next connect loop.
         """
-        cleaned = [b for b in brokers if isinstance(b, str) and b]
         with self._lock:
-            self._brokers = cleaned
+            if brokers is not None:
+                self._free_brokers = [
+                    b for b in brokers if isinstance(b, str) and b]
+            if private_brokers is not None:
+                self._private_brokers = [
+                    b for b in private_brokers if isinstance(b, str) and b]
+            self._brokers = list(dict.fromkeys(
+                self._private_brokers + self._free_brokers))
+            self._private_endpoints = frozenset(self._private_brokers)
 
     def set_credentials(self, username: str, password: str) -> None:
         """Replace the broker credentials *before* a restart.
@@ -844,7 +870,10 @@ class RelayTransport:
             client = factory(endpoint)
         except TypeError:
             client = factory()
-        if client is not None and (self._username or self._password):
+        # Credentials go ONLY to private endpoints — an anonymous public broker
+        # must never be handed the private broker's password.
+        if (client is not None and endpoint in self._private_endpoints
+                and (self._username or self._password)):
             client.username_pw_set(self._username, self._password)
         return client
 

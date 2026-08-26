@@ -2910,13 +2910,18 @@ class Application:
                 self._set_systray_syncing(enabled)
         if "internet_sync_enabled" in updated:
             self._apply_internet_sync_enabled(updated["internet_sync_enabled"])
-        elif "relay_brokers" in updated and self._relay is not None:
-            # Broker list edited while the relay is live — recycle it so the
+        elif ("relay_brokers" in updated or "relay_private_brokers" in updated) \
+                and self._relay is not None:
+            # Broker list(s) edited while the relay is live — recycle it so the
             # new endpoints take effect immediately (no restart needed).
             # restart() alone re-runs the worker but still reads the OLD
-            # broker list, so swap the new one in first.
+            # broker list, so swap the new one(s) in first.  set_brokers treats
+            # a None argument as "keep the current list" for that group.
             try:
-                self._relay.set_brokers(updated["relay_brokers"])
+                self._relay.set_brokers(
+                    updated.get("relay_brokers"),
+                    updated.get("relay_private_brokers"),
+                )
                 self._relay.restart()
             except Exception:
                 logger.debug("relay restart after broker change failed",
@@ -7857,6 +7862,8 @@ class Application:
         from internal.transport.relay import RelayTransport, build_paho_client
         transport = RelayTransport(
             brokers=list(self.cfg.relay_brokers),
+            private_brokers=list(getattr(
+                self.cfg, "relay_private_brokers", None) or []),
             get_channels=self._relay_channels,
             on_frame=self._on_relay_frame,
             on_state=self._on_relay_state,

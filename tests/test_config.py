@@ -338,6 +338,7 @@ def test_config_save_load_roundtrips_new_keys(tmp_path, monkeypatch):
     cfg = config_module.load()
     cfg.internet_sync_enabled = True
     cfg.relay_brokers = ["wss://broker.emqx.io:8884/mqtt"]
+    cfg.relay_private_brokers = ["mqtt://mqttyyc.top:1883"]
     cfg.relay_username = "clipsync_mqtt"
     cfg.relay_password = "s3cret!"
     cfg.relay_secret = "ab" * 32
@@ -348,6 +349,7 @@ def test_config_save_load_roundtrips_new_keys(tmp_path, monkeypatch):
     cfg2 = config_module.load()
     assert cfg2.internet_sync_enabled is True
     assert cfg2.relay_brokers == cfg.relay_brokers
+    assert cfg2.relay_private_brokers == cfg.relay_private_brokers
     assert cfg2.relay_username == cfg.relay_username
     assert cfg2.relay_password == cfg.relay_password
     assert cfg2.relay_secret == cfg.relay_secret
@@ -378,6 +380,8 @@ def test_backup_roundtrips_new_config_keys(tmp_path, _isolated_favorites):
     cfg = Config()
     cfg.internet_sync_enabled = True
     cfg.relay_brokers = ["wss://broker.hivemq.com:8884/mqtt"]
+    cfg.relay_private_brokers = ["mqtt://mqttyyc.top:1883",
+                                 "ws://mqttyyc.top:8083/mqtt"]
     cfg.relay_username = "clipsync_mqtt"
     cfg.relay_password = "s3cret!"
     cfg.relay_secret = "ab" * 32
@@ -393,6 +397,7 @@ def test_backup_roundtrips_new_config_keys(tmp_path, _isolated_favorites):
         exported = json.loads(zf.read("config.json").decode("utf-8"))
     assert exported["internet_sync_enabled"] is True
     assert exported["relay_brokers"] == cfg.relay_brokers
+    assert exported["relay_private_brokers"] == cfg.relay_private_brokers
     assert exported["relay_username"] == cfg.relay_username
     assert exported["relay_password"] == cfg.relay_password
     assert exported["peer_relay_secrets"] == {"peer-1": "cd" * 32}
@@ -403,6 +408,7 @@ def test_backup_roundtrips_new_config_keys(tmp_path, _isolated_favorites):
     assert result["config"] is True
     assert fresh.internet_sync_enabled is True
     assert fresh.relay_brokers == cfg.relay_brokers
+    assert fresh.relay_private_brokers == cfg.relay_private_brokers
     assert fresh.relay_username == cfg.relay_username
     assert fresh.relay_password == cfg.relay_password
     assert fresh.relay_secret == cfg.relay_secret

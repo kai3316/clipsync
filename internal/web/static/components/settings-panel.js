@@ -44,9 +44,10 @@
       // keeps the toggle + status row and a pointer to the Devices tab.
       'relay.state.initial', 'settings_window.netpair_error_detail',
       'settings_window.netpair_manage_hint', 'settings_window.netpair_manage_cta',
-      'settings_window.relay_brokers_toggle', 'settings_window.relay_brokers_label',
-      'settings_window.relay_brokers_hint', 'settings_window.save_relay_brokers',
+      'settings_window.relay_brokers_toggle', 'settings_window.save_relay_brokers',
       'settings_window.test_relay_btn', 'settings_window.test_relay_result',
+      'settings_window.relay_free_label', 'settings_window.relay_free_hint',
+      'settings_window.relay_private_label', 'settings_window.relay_private_hint',
       'settings_window.relay_username_label', 'settings_window.relay_password_label',
       'settings_window.relay_password_placeholder', 'settings_window.relay_password_clear',
       'settings_window.relay_password_hint',
@@ -149,6 +150,7 @@
         // Pairing management itself lives on the Devices page (round 15).
         internetSyncEnabled: false,
         relayBrokersText: '',
+        relayPrivateBrokersText: '',
         relayUsername: '',
         relayPassword: '',
         relayShowPassword: false,
@@ -519,6 +521,7 @@
         if (s.service_type !== undefined) this.serviceType = s.service_type || '';
         if (s.internet_sync_enabled !== undefined) this.internetSyncEnabled = !!s.internet_sync_enabled;
         if (s.relay_brokers !== undefined) this.relayBrokersText = (s.relay_brokers || []).join('\n');
+        if (s.relay_private_brokers !== undefined) this.relayPrivateBrokersText = (s.relay_private_brokers || []).join('\n');
         if (s.relay_username !== undefined) this.relayUsername = s.relay_username || '';
         // Password is never echoed back — only a set/not-set flag.  A blank
         // field means "keep the stored value" on save.
@@ -630,35 +633,47 @@
       //   wss://   TLS WebSocket            mqtts:///ssl:///tls:// native MQTT, TLS
       _RELAY_SCHEMES: ['ws://', 'wss://', 'mqtt://', 'mqtts://', 'ssl://', 'tls://'],
 
-      saveRelayBrokers: function () {
+      // Parse + dedupe one broker textarea into a normalized endpoint list
+      // (preserving order), or null when a line has an invalid scheme.
+      _parseBrokerList: function (text) {
         var self = this;
-        var lines = (self.relayBrokersText || '').split('\n')
+        var lines = (text || '').split('\n')
           .map(function (s) { return s.trim(); })
           .filter(Boolean);
-        // An empty list would silently disable internet sync with no error
-        // anywhere else in the UI — refuse it here instead.
-        if (lines.length === 0) {
-          self.store.showToast(self.t('settings.relay_brokers_empty'), 3000);
-          return;
-        }
         var hasBad = lines.some(function (l) {
           var lo = l.toLowerCase();
           return !self._RELAY_SCHEMES.some(function (s) {
             return lo.indexOf(s) === 0;
           });
         });
-        if (hasBad) {
+        if (hasBad) return null;
+        var seen = {}, out = [];
+        lines.forEach(function (l) {
+          if (!seen[l]) { seen[l] = true; out.push(l); }
+        });
+        return out;
+      },
+
+      saveRelayBrokers: function () {
+        var self = this;
+        // Two independently-managed groups: anonymous free relays (no
+        // credentials) and the credentialed private relay.  Either may be
+        // empty, but at least one must exist or internet sync has nowhere to
+        // go and would silently fail.
+        var free = self._parseBrokerList(self.relayBrokersText);
+        var priv = self._parseBrokerList(self.relayPrivateBrokersText);
+        if (free === null || priv === null) {
           self.store.showToast(self.t('settings.relay_brokers_invalid'), 3000);
           return;
         }
-        // De-duplicate while preserving order so a pasted-overlapping list
-        // doesn't open redundant broker connections.
-        var seen = {};
-        var brokers = [];
-        lines.forEach(function (l) {
-          if (!seen[l]) { seen[l] = true; brokers.push(l); }
-        });
-        var payload = { relay_brokers: brokers };
+        if (free.length === 0 && priv.length === 0) {
+          self.store.showToast(self.t('settings.relay_brokers_empty'), 3000);
+          return;
+        }
+        var payload = {
+          relay_brokers: free,
+          relay_private_brokers: priv,
+        };
         // Username is echoed back, so always send it.  The password never is:
         // a blank field means "keep the stored value", unless the user hit
         // the explicit "clear" affordance (which sends an empty password).
@@ -674,10 +689,11 @@
             self.brokersSaving = false;
             if (res && res.updated) self.store.mergeSettings(res.updated);
             self.dirtySections['remote'] = false;
-            // Re-writing the normalized list must not re-mark the section
+            // Re-writing the normalized lists must not re-mark the section
             // dirty (the relayBrokersText watcher would flag it again).
             self._skipDirty = true;
-            self.relayBrokersText = brokers.join('\n');
+            self.relayBrokersText = free.join('\n');
+            self.relayPrivateBrokersText = priv.join('\n');
             self.$nextTick(function () { self._skipDirty = false; });
             // Reflect the new stored-password state in the placeholder/clear
             // affordance: a sent password sets it, an explicit clear removes it.
@@ -700,7 +716,10 @@
       testRelay: function () {
         var self = this;
         if (self.relayTesting) return;
-        var lines = (self.relayBrokersText || '').split('\n')
+        // Probe both staged groups (free + private) as one combined list.
+        var all = (self.relayBrokersText || '') + '\n' +
+                  (self.relayPrivateBrokersText || '');
+        var lines = all.split('\n')
           .map(function (s) { return s.trim(); })
           .filter(Boolean);
         var seen = {}, brokers = [];
@@ -1657,6 +1676,7 @@
       port: function () { this.markDirty('network'); },
       serviceType: function () { this.markDirty('network'); },
       relayBrokersText: function () { this.markDirty('remote'); },
+      relayPrivateBrokersText: function () { this.markDirty('remote'); },
       relayUsername: function () { this.markDirty('remote'); },
       relayPassword: function () { this.markDirty('remote'); },
       relayClearPassword: function () { this.markDirty('remote'); },
@@ -1907,13 +1927,23 @@
                     '<button class="settings-btn settings-btn--sm" @click="brokersOpen = !brokersOpen">{{ brokersOpen ? \'▾\' : \'▸\' }} {{ t(\'settings_window.relay_brokers_toggle\') }}</button>' +
                   '</div>' +
                   '<template v-if="brokersOpen">' +
+                    // Part 1 — anonymous free relays.  No credentials: these
+                    // public brokers accept anyone, and must never be handed
+                    // the private broker's password.
                     '<div class="settings-field" style="margin-top:8px">' +
-                      '<label class="settings-field__label">{{ t(\'settings_window.relay_brokers_label\') }}</label>' +
-                      '<textarea class="settings-input" rows="4" v-model="relayBrokersText" placeholder="mqtt://mqttyyc.top:1883"></textarea>' +
-                      '<span class="settings-hint">{{ t(\'settings_window.relay_brokers_hint\') }}</span>' +
+                      '<label class="settings-field__label">{{ t(\'settings_window.relay_free_label\') }}</label>' +
+                      '<textarea class="settings-input" rows="3" v-model="relayBrokersText" placeholder="wss://broker.emqx.io:8884/mqtt"></textarea>' +
+                      '<span class="settings-hint">{{ t(\'settings_window.relay_free_hint\') }}</span>' +
                     '</div>' +
-                    // Broker credentials for private/authenticated brokers.
-                    // Anonymous public brokers just leave both blank.
+                    // Part 2 — credentialed private relay (e.g. a self-hosted
+                    // broker).  These endpoints authenticate with the username
+                    // / password below; leave the whole part empty to use only
+                    // the free relays above.
+                    '<div class="settings-field" style="margin-top:8px">' +
+                      '<label class="settings-field__label">{{ t(\'settings_window.relay_private_label\') }}</label>' +
+                      '<textarea class="settings-input" rows="3" v-model="relayPrivateBrokersText" placeholder="mqtt://mqttyyc.top:1883"></textarea>' +
+                      '<span class="settings-hint">{{ t(\'settings_window.relay_private_hint\') }}</span>' +
+                    '</div>' +
                     '<div class="settings-field" style="margin-top:8px">' +
                       '<label class="settings-field__label">{{ t(\'settings_window.relay_username_label\') }}</label>' +
                       '<input type="text" class="settings-input" v-model="relayUsername" autocomplete="off" placeholder="clipsync_mqtt">' +
