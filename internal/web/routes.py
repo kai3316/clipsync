@@ -191,7 +191,7 @@ def dispatch(method, path, query_params, body, cfg, history, sync_mgr,
              get_discovered=None,
              get_resolved_hashes=None, get_pending_pairings=None,
              get_reconnect_states=None,
-             get_relay_state=None,
+             get_relay_state=None, get_current_relay_broker=None,
              enc_mgr=None, on_open_file=None, on_open_folder=None,
              on_restart=None, on_reset_dedup=None,
              get_certs=None, get_diagnostics=None,
@@ -237,7 +237,7 @@ def dispatch(method, path, query_params, body, cfg, history, sync_mgr,
             on_window_close, on_toggle_discovery, on_toggle_visibility,
             on_settings_change, on_show_web_qr, on_send_url, get_discovered,
             get_resolved_hashes, get_pending_pairings, get_reconnect_states,
-            get_relay_state,
+            get_relay_state, get_current_relay_broker,
             enc_mgr, on_open_file, on_open_folder, on_restart, on_reset_dedup,
             get_certs, get_diagnostics, on_update_download,
             on_update_install, on_diagnostics_request,
@@ -267,7 +267,7 @@ def _dispatch(method, path, query_params, body, cfg, history, sync_mgr,
               get_discovered=None,
               get_resolved_hashes=None, get_pending_pairings=None,
               get_reconnect_states=None,
-              get_relay_state=None,
+              get_relay_state=None, get_current_relay_broker=None,
               enc_mgr=None, on_open_file=None, on_open_folder=None,
               on_restart=None, on_reset_dedup=None,
               get_certs=None, get_diagnostics=None,
@@ -370,7 +370,8 @@ def _dispatch(method, path, query_params, body, cfg, history, sync_mgr,
 
         elif path == "/api/settings":
             data, status = get_settings(
-                cfg, get_internet_sync_state=get_relay_state)
+                cfg, get_internet_sync_state=get_relay_state,
+                get_current_relay_broker=get_current_relay_broker)
             return _json_response(data, status)
 
         elif path == "/api/backups":

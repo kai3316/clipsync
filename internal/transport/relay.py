@@ -368,6 +368,125 @@ def probe_relay_endpoint(endpoint: str, timeout: float = 4.0) -> dict:
         return {"endpoint": endpoint, "ok": False, "latency_ms": None, "detail": detail[:120]}
 
 
+class _MirrorConnection:
+    """Publish-only connection to one non-primary broker.
+
+    MQTT brokers do not federate, so two paired devices that fail over onto
+    different brokers never see each other's frames.  These mirrors keep every
+    *other* broker open for publishing only, so a frame is sent to all of them
+    and reaches the peer wherever it happens to be connected.  A mirror never
+    subscribes — receiving stays on the primary client, leaving the dedup /
+    online-tracking / netpair handshake paths untouched.
+    """
+
+    def __init__(self, transport, index: int, endpoint: str):
+        self._transport = transport
+        self._index = index
+        self._endpoint = endpoint
+        self._client = None
+        self._connected = False
+        self._stop = threading.Event()
+        self._wakeup = threading.Event()
+        self._thread = threading.Thread(
+            target=self._run, name=f"relay-mirror-{index}", daemon=True)
+
+    # ------------------------------------------------------------- state --
+    @property
+    def connected(self) -> bool:
+        return self._connected
+
+    @property
+    def client(self):
+        return self._client
+
+    # ------------------------------------------------------------ public --
+    def start(self) -> None:
+        self._thread.start()
+
+    def stop(self) -> None:
+        self._stop.set()
+        self._wakeup.set()
+        self._teardown()
+        if self._thread is not None:
+            self._thread.join(timeout=STOP_JOIN_TIMEOUT)
+
+    # -------------------------------------------------------------- loop --
+    def _run(self) -> None:
+        attempt = 0
+        while not self._stop.is_set():
+            if self._connect_once():
+                attempt = 0
+                self._wait_until_lost()
+            else:
+                delay = BACKOFF_SEQUENCE[min(
+                    attempt, len(BACKOFF_SEQUENCE) - 1)]
+                attempt += 1
+                self._transport._sleeper(delay)
+        self._teardown()
+
+    def _connect_once(self) -> bool:
+        parsed = self._transport._parse_endpoint(self._endpoint)
+        if parsed is None:
+            return False
+        host, port, path = parsed
+        client = self._transport._client_factory()
+        if client is None:
+            return False
+        client.on_connect = self._on_connect
+        client.on_disconnect = self._on_disconnect
+        self._client = client
+        self._connected = False
+        try:
+            client.ws_set_options(path=path)
+            client.connect(host, port, keepalive=45)
+            client.loop_start()
+        except Exception:
+            if self._client is client:
+                self._client = None
+            return False
+        deadline = time.time() + CONNECT_TIMEOUT
+        while time.time() < deadline:
+            if self._connected and self._client is client:
+                return True
+            if self._stop.is_set():
+                self._teardown()
+                return False
+            time.sleep(0.05)
+        self._teardown()
+        return False
+
+    def _wait_until_lost(self) -> None:
+        while not self._stop.is_set() and self._connected:
+            self._wakeup.wait(timeout=0.5)
+            self._wakeup.clear()
+        self._teardown()
+
+    def _teardown(self) -> None:
+        client = self._client
+        self._client = None
+        self._connected = False
+        if client is not None:
+            try:
+                client.loop_stop()
+                client.disconnect()
+            except Exception:
+                logger.debug("relay mirror cleanup failed", exc_info=True)
+
+    # --------------------------------------------------------- callbacks --
+    def _on_connect(self, client, userdata, flags, reason_code, properties=None):
+        try:
+            ok = int(reason_code) == 0
+        except Exception:
+            ok = str(reason_code) in ("0", "Success")
+        if not ok or client is not self._client:
+            return  # refused, or a retired client's late CONNACK
+        self._connected = True
+
+    def _on_disconnect(self, client, userdata, *args):
+        if client is self._client:
+            self._connected = False
+
+
 class RelayTransport:
     """Connection lifecycle + pub/sub over a failover list of MQTT brokers.
 
@@ -409,12 +528,24 @@ class RelayTransport:
         self._seen: OrderedDict[str, None] = OrderedDict()
         self._connected_on_broker: int | None = None
         self._state = STATE_OFF
+        # index -> publish-only connection to every broker the primary is NOT
+        # currently on (see _MirrorConnection / _sync_mirrors).
+        self._mirror_clients: dict[int, object] = {}
 
     # ------------------------------------------------------------- state --
     @property
     def state(self) -> str:
         with self._lock:
             return self._state
+
+    @property
+    def current_broker(self) -> str:
+        """Endpoint URL of the broker the primary client is connected to
+        ("" when offline).  The UI shows this so a user can tell at a glance
+        whether two paired devices are on the same broker."""
+        with self._lock:
+            idx = self._connected_on_broker
+        return self._brokers[idx] if idx is not None else ""
 
     def _set_state(self, state: str) -> None:
         with self._lock:
@@ -452,12 +583,20 @@ class RelayTransport:
             self._thread = None
             self._subscribed.clear()
             self._connected_on_broker = None
+            mirrors = list(self._mirror_clients.values())
+            self._mirror_clients.clear()
         if client is not None:
             try:
                 client.loop_stop()
                 client.disconnect()
             except Exception:
                 logger.debug("relay disconnect during stop failed", exc_info=True)
+        for conn in mirrors:
+            try:
+                conn.stop()
+            except Exception:
+                logger.debug("relay mirror stop during stop failed",
+                             exc_info=True)
         if thread is not None:
             # Wait (bounded) for the worker to notice _stop and exit before a
             # rapid stop() → start() restart can spawn a second worker running
@@ -504,15 +643,28 @@ class RelayTransport:
             self._subscribed.discard(topic)
 
     def publish(self, frame_bytes: bytes, topic: str, key: bytes) -> bool:
-        """Publish one encoded frame to ``topic``. False if currently offline."""
+        """Publish one encoded frame to ``topic`` on every connected broker.
+
+        The primary client sends on the broker we are currently subscribed to;
+        the mirror clients send on all the *other* brokers, so the receiving
+        peer gets the frame whichever broker it landed on during its own
+        failover (MQTT brokers don't federate).  Returns True if *any*
+        connected client accepted the frame — a peer reachable only through a
+        mirror counts as delivered (the offline-queue path only applies when
+        nothing at all is connected).
+        """
         with self._lock:
             client = self._client
             # Gate on a *confirmed* connection (CONNACK received), not just the
             # last remembered state: after a disconnect the state may lag until
             # the worker reconnects, and publish() must not report frames as
             # sent into a dead link.
-            online = self._connected_on_broker is not None and client is not None
-        if not online:
+            primary_online = (
+                self._connected_on_broker is not None and client is not None)
+            mirrors = [
+                conn for conn in self._mirror_clients.values() if conn.connected
+            ]
+        if not primary_online and not mirrors:
             return False
         try:
             blob = pack_envelope(frame_bytes, key, time.time())
@@ -522,12 +674,23 @@ class RelayTransport:
         except Exception:
             logger.debug("relay pack failed", exc_info=True)
             return False
-        try:
-            info = client.publish(topic, blob, qos=0)
-            return getattr(info, "rc", 0) == 0
-        except Exception:
-            logger.debug("relay publish failed", exc_info=True)
-            return False
+        delivered = False
+        if primary_online:
+            try:
+                info = client.publish(topic, blob, qos=0)
+                delivered = delivered or (getattr(info, "rc", 0) == 0)
+            except Exception:
+                logger.debug("relay publish (primary) failed", exc_info=True)
+        for conn in mirrors:
+            mirror_client = conn.client
+            if mirror_client is None:
+                continue
+            try:
+                info = mirror_client.publish(topic, blob, qos=0)
+                delivered = delivered or (getattr(info, "rc", 0) == 0)
+            except Exception:
+                logger.debug("relay publish (mirror) failed", exc_info=True)
+        return delivered
 
     # ------------------------------------------------------------- worker --
     def _safe_channels(self) -> dict[str, bytes]:
@@ -667,6 +830,42 @@ class RelayTransport:
             else:
                 break
 
+    # -------------------------------------------------------------- mirrors --
+    def _sync_mirrors(self) -> None:
+        """Reconcile the mirror set to every broker the primary is not on.
+
+        Called on every primary connect/disconnect.  ``publish`` fans out to
+        the primary + all connected mirrors, so as long as the peer holds a
+        subscription on *some* broker it receives the frame — even when the
+        two devices landed on different brokers after their own failovers.
+        A broker the primary just moved to is dropped from the mirror set so
+        the same frame is never handed to one broker twice.
+        """
+        with self._lock:
+            primary_idx = self._connected_on_broker
+            targets: set[int] = set()
+            for idx, endpoint in enumerate(self._brokers):
+                if self._parse_endpoint(endpoint) is not None:
+                    targets.add(idx)
+            if primary_idx is not None:
+                targets.discard(primary_idx)
+            stale = [i for i in self._mirror_clients if i not in targets]
+            missing = [i for i in targets if i not in self._mirror_clients]
+            for idx in stale:
+                conn = self._mirror_clients.pop(idx)
+                try:
+                    conn.stop()
+                except Exception:
+                    logger.debug("relay mirror stop failed", exc_info=True)
+            for idx in missing:
+                conn = _MirrorConnection(self, idx, self._brokers[idx])
+                self._mirror_clients[idx] = conn
+                try:
+                    conn.start()
+                except Exception:
+                    logger.debug("relay mirror start failed", exc_info=True)
+                    self._mirror_clients.pop(idx, None)
+
     # ----------------------------------------------------------- callbacks --
     def _make_on_connect(self, index: int):
         def _on_connect(client, userdata, flags, reason_code, properties=None):
@@ -687,6 +886,7 @@ class RelayTransport:
                     logger.debug("subscribe %s failed", topic, exc_info=True)
             logger.info("Relay online via broker #%d", index)
             self._set_state(STATE_ONLINE)
+            self._sync_mirrors()
         return _on_connect
 
     def _make_on_disconnect(self, index: int):
@@ -706,6 +906,9 @@ class RelayTransport:
                 # silently dropped.  CONNECTING makes publish() return False so
                 # frames queue/retry instead of being reported as delivered.
                 self._set_state(STATE_CONNECTING)
+                # The primary left its broker: while the worker reconnects,
+                # mirror every broker so publishing keeps reaching the peer.
+                self._sync_mirrors()
             logger.debug("relay disconnected from broker #%d", index)
         return _on_disconnect
 

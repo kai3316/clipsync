@@ -818,9 +818,14 @@ def test_routes_threads_state_callback_into_settings_get():
     def _state():
         return "error"
 
-    def _fake_get_settings(cfg, get_internet_sync_state=None):
+    def _fake_get_settings(cfg, get_internet_sync_state=None,
+                           get_current_relay_broker=None):
         captured["fn"] = get_internet_sync_state
+        captured["broker"] = get_current_relay_broker
         return {"settings": {}}, 200
+
+    def _broker():
+        return "wss://b0:8884/mqtt"
 
     import internal.web.routes as routes_mod
     original = routes_mod.get_settings
@@ -830,12 +835,15 @@ def test_routes_threads_state_callback_into_settings_get():
             "GET", "/api/settings", {}, b"", cfg=object(), history=None,
             sync_mgr=None, get_connected_ids=lambda: [], on_nav_url=None,
             on_forward_file=None, upload_dir=".", get_relay_state=_state,
+            get_current_relay_broker=_broker,
         )
     finally:
         routes_mod.get_settings = original
     assert status == 200
     assert captured["fn"] is _state
     assert captured["fn"]() == "error"
+    assert captured["broker"] is _broker
+    assert captured["broker"]() == "wss://b0:8884/mqtt"
 
 
 
@@ -1014,5 +1022,258 @@ def test_relay_rejects_stale_or_tampered_envelope():
     # Wrong key cannot be opened.
     assert open_envelope(env, derive_key("secret-a", "secret-c"),
                          1_700_000_000.0) is None
+
+
+# ══════════════════════════════════════════════════
+# v1.0.82 — mirror publishing (broker-split fix)
+# ══════════════════════════════════════════════════
+
+class SyncFakeClient(FakeClient):
+    """Fake whose connect() fires CONNACK synchronously.
+
+    Mirrors run in their OWN threads, so a test that waits for the mirror
+    thread to reach its CONNACK wait and then fires on_connect by hand would
+    race the poll loop.  Syncing the CONNACK into connect() makes every
+    connection path (primary worker AND mirror thread) deterministic.
+    """
+
+    def connect(self, host, port, keepalive=60):
+        super().connect(host, port, keepalive)
+        if self.on_connect is not None:
+            self.on_connect(self, None, None, 0)
+        return self
+
+
+def make_sync_transport(channels_dict, brokers, down=None):
+    """RelayTransport with SyncFakeClient; hosts in *down* raise on connect.
+
+    *down* is a shared mutable set the test mutates mid-run to simulate a
+    broker the primary is failing OFF of (an OSError on connect is exactly
+    what paho raises when a TCP connect is refused).
+    """
+    received = []
+    states = []
+    clients = []
+    down = set(down or ())
+
+    def factory():
+        c = SyncFakeClient()
+        orig = c.connect
+
+        def connect(host, port, keepalive=60):
+            if host in down:
+                raise OSError("refused")
+            return orig(host, port, keepalive)
+
+        c.connect = connect
+        with clients_lock:
+            clients.append(c)
+        return c
+
+    clients_lock = threading.Lock()
+
+    def wait_for(cond, timeout=2.0):
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            with clients_lock:
+                snapshot = list(clients)
+            if cond(snapshot):
+                return True
+            time.sleep(0.005)
+        return False
+
+    t = R.RelayTransport(
+        brokers,
+        get_channels=lambda: dict(channels_dict),
+        on_frame=lambda frame, _topic=None: received.append(frame),
+        on_state=states.append,
+        client_factory=factory,
+        sleeper=lambda s: None,
+    )
+    t._test_wait_clients = lambda n=1: wait_for(lambda cl: len(cl) >= n)
+    return t, clients, received, states, down
+
+
+def _channel():
+    return {R.derive_topic("a", "b"): R.derive_key("a", "b")}
+
+
+def _wait_mirrors_connected(t, n, timeout=2.0):
+    """Wait until the mirror set has exactly *n* entries, all connected."""
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        conns = list(t._mirror_clients.values())
+        if len(conns) == n and all(c.connected for c in conns):
+            return True
+        time.sleep(0.005)
+    return False
+
+
+def _wait_mirror_keys(t, expected, timeout=2.0):
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        if set(t._mirror_clients) == set(expected):
+            return True
+        time.sleep(0.005)
+    return set(t._mirror_clients)
+
+
+def test_mirror_publish_fans_out_to_all_connected_brokers():
+    # The split bug: two devices fail over onto DIFFERENT brokers and never
+    # see each other (MQTT doesn't federate).  Mirroring means one publish()
+    # lands on every broker, so the peer receives it wherever it is.
+    ch = _channel()
+    brokers = ["wss://b0:8884/mqtt", "wss://b1:8884/mqtt", "wss://b2:8884/mqtt"]
+    t, clients, _, _, _ = make_sync_transport(ch, brokers)
+    t.start()
+    assert _wait_mirrors_connected(t, 2)
+    assert set(t._mirror_clients) == {1, 2}      # primary is on #0
+    assert t.current_broker == brokers[0]
+    topic, key = next(iter(ch.items()))
+    frame = b"\x43\x53\x02" + b"mirror-me"
+    assert t.publish(frame, topic, key) is True
+    # Exactly three clients (primary + 2 mirrors), each handed the same frame
+    # — and the primary's broker is NOT double-published (the mirror set
+    # excludes it).
+    pub = [c.published for c in clients]
+    assert len(pub) == 3
+    assert all(len(p) == 1 for p in pub)
+    assert {p[0][0] for p in pub} == {topic}
+    blobs = {p[0][1] for p in pub}
+    assert len(blobs) == 1
+    assert R.open_envelope(pub[0][0][1], key, time.time()) == frame
+    t.stop()
+
+
+def test_mirrors_never_subscribe():
+    # The receive path (subscribe + dedup + netpair handshake) stays entirely
+    # on the primary client; mirrors are publish-only or the same frame would
+    # be delivered to the peer multiple times.
+    ch = _channel()
+    brokers = ["wss://b0:8884/mqtt", "wss://b1:8884/mqtt", "wss://b2:8884/mqtt"]
+    t, clients, _, _, _ = make_sync_transport(ch, brokers)
+    t.start()
+    assert _wait_mirrors_connected(t, 2)
+    assert clients[0].subscribed == [next(iter(ch))]   # primary subscribed
+    for idx, conn in t._mirror_clients.items():
+        assert conn.client.subscribed == []
+    t.stop()
+
+
+def test_mirror_set_reorders_on_primary_failover():
+    # Primary on #0 with mirrors {1,2}; broker #0 drops, the primary fails
+    # over to #1, and the mirror set must flip to {0,2} — the broker the
+    # primary now uses is never mirrored (no double publish), every other one
+    # is.
+    ch = _channel()
+    brokers = ["wss://b0:8884/mqtt", "wss://b1:8884/mqtt", "wss://b2:8884/mqtt"]
+    t, clients, _, _, down = make_sync_transport(ch, brokers)
+    t.start()
+    assert _wait_mirrors_connected(t, 2)
+    assert set(t._mirror_clients) == {1, 2}
+    assert t.current_broker == brokers[0]
+
+    down.add("b0")                              # broker #0 goes away
+    clients[0].on_disconnect(clients[0], None, None)  # primary loses its link
+    # The worker's failover loop walks b0 (refused) then b1 (ok).
+    deadline = time.time() + 2
+    while t.current_broker != brokers[1] and time.time() < deadline:
+        time.sleep(0.005)
+    assert t.current_broker == brokers[1]
+    assert _wait_mirror_keys(t, {0, 2})
+    # The old mirror for the newly-occupied broker #1 is gone.
+    assert 1 not in t._mirror_clients
+    t.stop()
+
+
+def test_publish_returns_true_via_mirror_when_primary_offline():
+    # Delivery ledger semantics: a frame the peer can reach through a mirror
+    # counts as delivered (only "nothing at all connected" goes to the
+    # offline queue).  Hand-build the "primary down, mirror up" state so the
+    # worker's auto-reconnect can't race the assertion.
+    ch = _channel()
+    brokers = ["wss://b0:8884/mqtt", "wss://b1:8884/mqtt"]
+    t, clients, _, _, _ = make_sync_transport(ch, brokers)
+    t._connected_on_broker = None                # primary offline
+    t._client = None
+    conn = R._MirrorConnection(t, 1, brokers[1])
+    t._mirror_clients[1] = conn
+    mc = SyncFakeClient()
+    mc.on_connect = conn._on_connect
+    conn._client = mc
+    conn._connected = True
+    topic, key = next(iter(ch.items()))
+    assert t.publish(b"via-mirror", topic, key) is True
+    assert mc.published
+    # Nothing connected at all -> False (offline-queue path).
+    t._mirror_clients.clear()
+    assert t.publish(b"nowhere", topic, key) is False
+    t.stop()
+
+
+def test_mirror_reconnects_after_its_own_disconnect():
+    # A mirror is an independent connection with its own retry loop: when its
+    # broker drops, it tears down and reconnects rather than going away until
+    # the next _sync_mirrors.  Uses the sync factory because firing a plain
+    # fake's on_connect and on_disconnect back-to-back can land both inside one
+    # 0.05s CONNACK poll interval, so _connect_once never observes the
+    # connected state and would just sit in its 10s handshake wait.
+    ch = _channel()
+    brokers = ["wss://b0:8884/mqtt", "wss://b1:8884/mqtt"]
+    t, clients, _, _, _ = make_sync_transport(ch, brokers)
+    t.start()
+    assert _wait_mirrors_connected(t, 1)             # mirror #1 connected
+    conn = t._mirror_clients[1]
+    mc = conn.client
+
+    mc.on_disconnect(mc, None)                       # its broker drops
+    assert conn.connected is False
+    # The mirror thread leaves _wait_until_lost (wakes within 0.5s), tears the
+    # old client down, and reconnects on a fresh one.
+    deadline = time.time() + 2
+    while True:
+        c = conn.client
+        if c is not None and c is not mc:
+            break
+        assert time.time() < deadline, "mirror never recreated its client"
+        time.sleep(0.005)
+    new = conn.client
+    assert new is not mc                             # fresh client, not a reuse
+    # SyncFakeClient fires the reconnect CONNACK inside connect().
+    deadline = time.time() + 2
+    while not conn.connected and time.time() < deadline:
+        time.sleep(0.005)
+    assert conn.connected
+    topic, key = next(iter(ch.items()))
+    assert t.publish(b"again", topic, key) is True
+    assert new.published
+    t.stop()
+
+
+def test_single_broker_has_no_mirrors():
+    # One broker -> the mirror set is empty and behavior is byte-for-byte the
+    # old single-client publish path (backwards compatible).
+    ch = _channel()
+    t, clients, _, _ = make_transport(ch, ["wss://only:8884/mqtt"])
+    t.start()
+    assert t._test_wait_clients(1)
+    clients[0].fire_connect(0, t)
+    assert t._mirror_clients == {}
+    topic, key = next(iter(ch.items()))
+    assert t.publish(b"x", topic, key) is True
+    assert len(clients[0].published) == 1            # only the primary sent
+    t.stop()
+
+
+def test_current_broker_empty_when_offline():
+    t, clients, _, _ = make_transport(_channel())
+    assert t.current_broker == ""                    # never started
+    t.start()
+    assert t._test_wait_clients(1)
+    # Client created but CONNACK not yet fired -> still offline.
+    assert t.current_broker == ""
+    clients[0].fire_connect(0, t)
+    assert t.current_broker == "wss://broker.example:8884/mqtt"
+    t.stop()
 
 

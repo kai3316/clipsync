@@ -184,13 +184,17 @@ _SAFE_RESPONSE_KEYS = {
 }
 
 
-def get_settings(cfg, get_internet_sync_state=None):
+def get_settings(cfg, get_internet_sync_state=None,
+                 get_current_relay_broker=None):
     """Return safe-to-expose settings (exclude secrets).
 
     *get_internet_sync_state*, when provided, returns the live internet-sync
     relay state (one of off/connecting/online/error) so a freshly loaded
     dashboard shows the current state without waiting for the next WS
     ``relay_state`` transition event.
+
+    *get_current_relay_broker*, when provided, returns the endpoint URL of the
+    broker the relay is currently connected to ("" when offline/disabled).
     """
     result = {}
     for field in _SAFE_FIELDS:
@@ -227,6 +231,20 @@ def get_settings(cfg, get_internet_sync_state=None):
                              exc_info=True)
         result["internet_sync_state"] = state if state in (
             "off", "connecting", "online", "error") else "connecting"
+
+    # Current relay broker endpoint (never a secret, and not a cfg field —
+    # it is a live transport property, so it bypasses _SAFE_FIELDS and is
+    # written straight into the result).  Empty string when sync is disabled,
+    # the transport is not up, or the callback is absent/failed.
+    broker = ""
+    if getattr(cfg, "internet_sync_enabled", False):
+        if get_current_relay_broker is not None:
+            try:
+                broker = str(get_current_relay_broker() or "")
+            except Exception:
+                logger.debug("get_current_relay_broker callback failed",
+                             exc_info=True)
+    result["current_relay_broker"] = broker
 
     return {"settings": result}, 200
 

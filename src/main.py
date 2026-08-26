@@ -1103,6 +1103,7 @@ class Application:
             on_restart=self._restart_app,
             get_pending_pairings=self._get_pending,
             get_relay_state=self._get_relay_state,
+            get_current_relay_broker=self._get_current_relay_broker,
             get_resolved_hashes=lambda: self.transport_mgr.get_resolved_hashes(),
             enc_mgr=self._make_save_enc(),
             get_certs=self._get_certs,
@@ -7610,14 +7611,37 @@ class Application:
                 return secret
         return None
 
+    def _get_current_relay_broker(self) -> str:
+        """Endpoint URL of the broker the relay is currently connected to
+        ("" when offline/disabled).  Surfaced to the web UI so a user can tell
+        at a glance whether two paired devices are on the same broker."""
+        if not getattr(self.cfg, "internet_sync_enabled", False):
+            return ""
+        relay = getattr(self, "_relay", None)
+        if relay is None:
+            return ""
+        try:
+            return relay.current_broker
+        except Exception:
+            return ""
+
     def _on_relay_state(self, state: str) -> None:
         logger.info("Internet sync relay state: %s", state)
         try:
             if getattr(self, "web_server", None) is not None:
+                payload = {"state": state}
+                try:
+                    relay = getattr(self, "_relay", None)
+                    if relay is not None:
+                        broker = relay.current_broker
+                        if broker:
+                            payload["broker"] = broker
+                except Exception:
+                    logger.debug("relay current_broker read failed", exc_info=True)
                 # WebServer itself has no broadcast — the WebSocketManager does
                 # (the "relay_state WS broadcast failed" AttributeError in the
                 # logs was this call resolving to a missing method).
-                self.web_server.ws_manager.broadcast("relay_state", {"state": state})
+                self.web_server.ws_manager.broadcast("relay_state", payload)
         except Exception:
             logger.debug("relay_state WS broadcast failed", exc_info=True)
         # Round 17: coming online is a retransmission trigger — flush the

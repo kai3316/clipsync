@@ -178,6 +178,15 @@
     relayState: '',
 
     /* ═══════════════════════════════════════════════════════════════
+       Current relay broker endpoint URL ('' = offline/disabled/unknown).
+       Read-only diagnostic shown in the settings panel so a user can tell
+       whether two paired devices are on the same broker.  Seeded from
+       GET /api/settings (current_relay_broker), kept live by the WS
+       `relay_state` event (payload.broker, ws.js).
+       ═══════════════════════════════════════════════════════════════ */
+    currentRelayBroker: '',
+
+    /* ═══════════════════════════════════════════════════════════════
        Internet pairing (round 14/15)
        internetPairPeers mirrors GET /api/internetpair/status:
        [{ peer_id, name, alias, online, last_seen, paired, status }] — kept

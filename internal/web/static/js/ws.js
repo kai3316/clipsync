@@ -598,6 +598,13 @@ var ClipsyncWS = (function () {
           // future-format payload can't poison the settings display.
           if (data && ['off', 'connecting', 'online', 'error'].indexOf(data.state) !== -1) {
             store.relayState = data.state;
+            // Current broker travels with the state event (empty when
+            // offline); it is diagnostic-only, so only non-empty values are
+            // accepted to keep the display from clobbering to '' on a
+            // transition that simply didn't carry a broker.
+            if (typeof data.broker === 'string' && data.broker) {
+              store.currentRelayBroker = data.broker;
+            }
             // Keep the cached copy in sync so reopening the settings panel
             // shows the latest state even before the next settings fetch.
             if (store.settingsCache) {

@@ -474,6 +474,7 @@
           // Seed the internet-sync relay state (kept live afterwards by the
           // WS `relay_state` event handled in ws.js).
           if (s.internet_sync_state) store.relayState = s.internet_sync_state;
+          if (s.current_relay_broker) store.currentRelayBroker = s.current_relay_broker;
           if (s.ui_backend) store.uiBackend = s.ui_backend;
           if (typeof s.sound_enabled === 'boolean') store.soundEnabled = s.sound_enabled;
           if (typeof s.ui_animation_enabled === 'boolean') store.animationsEnabled = s.ui_animation_enabled;

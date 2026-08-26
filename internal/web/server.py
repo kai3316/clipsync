@@ -723,6 +723,7 @@ class WebServer:
                  get_resolved_hashes=None, get_pending_pairings=None,
                  get_reconnect_states=None,
                  get_relay_state=None,
+                 get_current_relay_broker=None,
                  enc_mgr=None, on_open_file=None, on_open_folder=None,
                  on_restart=None, on_reset_dedup=None,
                  get_certs=None, get_diagnostics=None,
@@ -746,6 +747,7 @@ class WebServer:
         # when unwired, /api/devices simply omits the reconnecting fields.
         self._get_reconnect_states = get_reconnect_states
         self._get_relay_state = get_relay_state
+        self._get_current_relay_broker = get_current_relay_broker
         self._enc_mgr = enc_mgr
         self._on_open_file = on_open_file
         self._on_open_folder = on_open_folder
@@ -1042,6 +1044,7 @@ class WebServer:
         get_pending_pairings = self._get_pending_pairings
         get_reconnect_states = self._get_reconnect_states
         get_relay_state = self._get_relay_state
+        get_current_relay_broker = self._get_current_relay_broker
         enc_mgr = self._enc_mgr
         on_open_file = self._on_open_file
         on_open_folder = self._on_open_folder
@@ -1782,6 +1785,7 @@ class WebServer:
                         on_toggle_discovery=on_toggle_discovery,
                         on_toggle_visibility=on_toggle_visibility,
                         get_relay_state=get_relay_state,
+                        get_current_relay_broker=get_current_relay_broker,
                         get_resolved_hashes=get_resolved_hashes,
                         get_pending_pairings=get_pending_pairings,
                         get_reconnect_states=get_reconnect_states,

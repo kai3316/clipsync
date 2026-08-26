@@ -1196,6 +1196,7 @@
   "settings_window.internet_sync_title": "Internet Sync",
   "network.internet_sync": "Sync across networks (internet mode)",
   "settings_window.internet_sync_state_label": "Status",
+  "settings_window.current_relay_broker": "Current relay server",
   "relay.state.off": "Off",
   "relay.state.connecting": "Connecting…",
   "relay.state.online": "Online",

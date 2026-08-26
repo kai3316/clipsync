@@ -343,6 +343,15 @@
         return cache.internet_sync_state || 'off';
       },
 
+      // Current relay broker endpoint URL ('' when offline/disabled/unknown).
+      // Read from store (kept live by WS relay_state payload.broker), falling
+      // back to the settings snapshot's copy before the first WS event.
+      currentRelayBroker: function () {
+        if (this.store.currentRelayBroker) return this.store.currentRelayBroker;
+        var cache = this.store.settingsCache || {};
+        return cache.current_relay_broker || '';
+      },
+
       // relay_state=off while internet sync is ENABLED is the moment right
       // before the host starts connecting — show an "initial" state instead of
       // a confusing "Off".
@@ -1880,6 +1889,15 @@
                       '</span>' +
                     '</div>' +
                     '<p v-if="relayStateErrorText" class="settings-hint" style="color:var(--clipsync-danger);margin-top:4px">{{ relayStateErrorText }}</p>' +
+                    // Diagnostic-only readout of which broker the relay is on.
+                    // Shown only while online AND a broker is actually known —
+                    // a blank row would just be noise.  Useful for spotting the
+                    // two-devices-on-different-brokers failure that mirror
+                    // publishing prevents.
+                    '<div v-if="relayDisplayState === \'online\' && currentRelayBroker" class="settings-field__row" style="margin-top:6px">' +
+                      '<span class="settings-field__label">{{ t(\'settings_window.current_relay_broker\') }}</span>' +
+                      '<span class="settings-field__value settings-field__value--mono" style="word-break:break-all;text-align:right">{{ currentRelayBroker }}</span>' +
+                    '</div>' +
                     // Round 15: pairing management moved to the Devices page.
                     // This section keeps the toggle, the relay status row, and
                     // a pointer to the Devices tab.

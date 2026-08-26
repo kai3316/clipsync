@@ -1196,6 +1196,7 @@
   "settings_window.internet_sync_title": "互联网同步",
   "network.internet_sync": "跨网络同步(互联网模式)",
   "settings_window.internet_sync_state_label": "状态",
+  "settings_window.current_relay_broker": "当前中继服务器",
   "relay.state.off": "未启用",
   "relay.state.connecting": "连接中…",
   "relay.state.online": "已在线",
