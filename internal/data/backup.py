@@ -216,7 +216,8 @@ def create_backup(
                 k: v for k, v in (cfg.netpair_aliases or {}).items()
                 if isinstance(k, str) and isinstance(v, str)
             },
-            "ai_config_paths": list(cfg.ai_config_paths),
+            "ai_config_tools": list(cfg.ai_config_tools),
+            "ai_config_custom_paths": list(cfg.ai_config_custom_paths),
             "history_max_entries": cfg.history_max_entries,
             "history_max_age_days": cfg.history_max_age_days,
             "file_receive_dir": cfg.file_receive_dir,
@@ -492,7 +493,8 @@ _APPLY_SCHEMA: dict[str, tuple] = {
     "peer_relay_secrets": ("strdict",),
     "netpair_secrets": ("strdict",),
     "netpair_aliases": ("strdict",),
-    "ai_config_paths": ("strlist_nonnull",),
+    "ai_config_tools": ("strlist_nonnull",),
+    "ai_config_custom_paths": ("strlist_nonnull",),
     "history_max_entries": ("int", 1, 100000),
     "history_max_age_days": ("float",),
     "file_receive_dir": ("str",),

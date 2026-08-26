@@ -44,13 +44,18 @@
       // keeps the toggle + status row and a pointer to the Devices tab.
       'relay.state.initial', 'settings_window.netpair_error_detail',
       'settings_window.netpair_manage_hint', 'settings_window.netpair_manage_cta',
-      'settings_window.relay_brokers_toggle', 'settings_window.save_relay_brokers',
+      'settings_window.save_relay_brokers',
       'settings_window.test_relay_btn', 'settings_window.test_relay_result',
       'settings_window.relay_free_label', 'settings_window.relay_free_hint',
       'settings_window.relay_private_label', 'settings_window.relay_private_hint',
       'settings_window.relay_username_label', 'settings_window.relay_password_label',
-      'settings_window.relay_password_placeholder', 'settings_window.relay_password_clear',
-      'settings_window.relay_password_hint',
+      'settings_window.relay_password_clear', 'settings_window.relay_password_hint',
+      // Relay-broker password editor (set/change flow).
+      'settings_window.relay_pw_status_set', 'settings_window.relay_pw_status_unset',
+      'settings_window.relay_pw_set_btn', 'settings_window.relay_pw_change_btn',
+      'settings_window.relay_pw_new', 'settings_window.relay_pw_repeat',
+      'settings_window.relay_pw_confirm', 'settings_window.relay_pw_cancel',
+      'settings_window.relay_pw_required', 'settings_window.relay_pw_mismatch',
     ],
     web: [
       'settings_nav.web_companion', 'settings_window.web_enable',
@@ -111,7 +116,8 @@
     ],
     aiconfig: [
       'settings_nav.aiconfig', 'settings_window.aiconfig_desc',
-      'settings_window.aiconfig_paths_label', 'settings_window.aiconfig_paths_hint',
+      'settings_window.aiconfig_tools_label', 'settings_window.aiconfig_tools_hint',
+      'settings_window.aiconfig_custom_paths_label', 'settings_window.aiconfig_custom_paths_hint',
       'settings_window.aiconfig_path_placeholder', 'settings_window.aiconfig_add_path',
       'settings_window.save_aiconfig', 'settings_window.aiconfig_save_hint',
     ],
@@ -147,18 +153,24 @@
 
         // Internet (cross-network) sync.  The toggle saves immediately (the
         // host live-applies it and broadcasts relay_state transitions); the
-        // broker list is staged behind the advanced fold with its own save.
-        // Pairing management itself lives on the Devices page (round 15).
+        // broker list + username are staged with their own save.  Pairing
+        // management itself lives on the Devices page (round 15).
         internetSyncEnabled: false,
         relayBrokersText: '',
         relayPrivateBrokersText: '',
         relayUsername: '',
-        relayPassword: '',
-        relayShowPassword: false,
-        relayClearPassword: false,
         relayPasswordSet: false,
         brokersSaving: false,
-        brokersOpen: false,
+        // Relay-broker password editor: set through a dedicated two-field
+        // (enter + confirm) flow, saved immediately on confirm — never staged
+        // with the broker list, never read back from the backend (the value is
+        // not exposed; only the set/not-set flag is).
+        relayPwEditor: false,      // false = status row; true = editor open
+        relayPassword: '',
+        relayPasswordConfirm: '',
+        relayShowPassword: false,
+        relayPwSaving: false,
+        relayPwError: '',
         relayTesting: false,
         relayTestResult: null,   // {summary, results:[{endpoint,ok,latency_ms,detail}]}
 
@@ -219,10 +231,13 @@
         favoritesPath: '',
         dataSaving: false,
 
-        // AI-config sync: root folders whose config files (CLAUDE.md, memory
-        // md, skills, ...) paired devices may browse/pull. Staged behind a
-        // save button like the other path settings.
-        aiConfigPaths: [],
+        // AI-config sync: enabled tool profiles (Claude Code / Codex / Cursor /
+        // Gemini / ...) plus any custom root folders whose config files paired
+        // devices may browse/pull. Staged behind a save button like the other
+        // path settings.
+        aiConfigTools: [],
+        aiConfigCustomPaths: [],
+        aiConfigProfiles: [],
         aiConfigSaving: false,
 
         // Hotkeys
@@ -369,6 +384,14 @@
       relayStateErrorText: function () {
         return this.effectiveRelayState === 'error'
           ? this.t('settings_window.netpair_error_detail') : '';
+      },
+
+      // Relay-password editor: live mismatch signal (both fields filled and
+      // unequal).  The confirm button is additionally disabled until the two
+      // entries match, so a mismatched pair can never be written.
+      relayPwMismatch: function () {
+        return !!this.relayPassword && !!this.relayPasswordConfirm &&
+               this.relayPassword !== this.relayPasswordConfirm;
       },
 
       // The network section no longer manages pairing — it points at the
@@ -523,10 +546,13 @@
         if (s.relay_brokers !== undefined) this.relayBrokersText = (s.relay_brokers || []).join('\n');
         if (s.relay_private_brokers !== undefined) this.relayPrivateBrokersText = (s.relay_private_brokers || []).join('\n');
         if (s.relay_username !== undefined) this.relayUsername = s.relay_username || '';
-        // Password is never echoed back — only a set/not-set flag.  A blank
-        // field means "keep the stored value" on save.
-        this.relayPassword = '';
+        // Password is never echoed back — only a set/not-set flag drives the
+        // status row; the editor always opens empty.
         this.relayPasswordSet = !!s.relay_password_set;
+        this.relayPwEditor = false;
+        this.relayPassword = '';
+        this.relayPasswordConfirm = '';
+        this.relayPwError = '';
         if (s.web_enabled !== undefined) this.webEnabled = !!s.web_enabled;
         if (s.web_port !== undefined) this.webPort = String(s.web_port);
         if (s.web_history_limit !== undefined) this.webHistoryLimit = s.web_history_limit;
@@ -670,19 +696,14 @@
           self.store.showToast(self.t('settings.relay_brokers_empty'), 3000);
           return;
         }
+        // The broker PASSWORD is handled by its own editor (set immediately
+        // on confirm, cleared on demand) — it is never staged with this list,
+        // so the list save sends only brokers + the echoed-back username.
         var payload = {
           relay_brokers: free,
           relay_private_brokers: priv,
+          relay_username: self.relayUsername || '',
         };
-        // Username is echoed back, so always send it.  The password never is:
-        // a blank field means "keep the stored value", unless the user hit
-        // the explicit "clear" affordance (which sends an empty password).
-        payload.relay_username = self.relayUsername || '';
-        if (self.relayClearPassword) {
-          payload.relay_password = '';
-        } else if (self.relayPassword) {
-          payload.relay_password = self.relayPassword;
-        }
         self.brokersSaving = true;
         ClipsyncAPI.updateSettings(payload)
           .then(function (res) {
@@ -695,18 +716,72 @@
             self.relayBrokersText = free.join('\n');
             self.relayPrivateBrokersText = priv.join('\n');
             self.$nextTick(function () { self._skipDirty = false; });
-            // Reflect the new stored-password state in the placeholder/clear
-            // affordance: a sent password sets it, an explicit clear removes it.
-            if (payload.relay_password !== undefined) {
-              self.relayPasswordSet = !!payload.relay_password;
-            }
-            self.relayClearPassword = false;
-            self.relayPassword = '';
-            self.relayShowPassword = false;
             self.store.showToast(self.t('settings.relay_brokers_saved'), 2500);
           })
           .catch(function () {
             self.brokersSaving = false;
+            self.store.showToast(self.t('dialog.failed'), 2000);
+          });
+      },
+
+      // Relay-broker password editor: enter + confirm must match before the
+      // password is written (it saves immediately, not with the broker list).
+      openRelayPwEditor: function () {
+        this.relayPwEditor = true;
+        this.relayPassword = '';
+        this.relayPasswordConfirm = '';
+        this.relayPwError = '';
+        this.relayShowPassword = false;
+      },
+
+      cancelRelayPwEditor: function () {
+        this.relayPwEditor = false;
+        this.relayPassword = '';
+        this.relayPasswordConfirm = '';
+        this.relayPwError = '';
+        this.relayShowPassword = false;
+      },
+
+      confirmRelayPassword: function () {
+        var self = this;
+        if (!self.relayPassword || !self.relayPasswordConfirm) {
+          self.relayPwError = self.t('settings_window.relay_pw_required');
+          return;
+        }
+        if (self.relayPassword !== self.relayPasswordConfirm) {
+          self.relayPwError = self.t('settings_window.relay_pw_mismatch');
+          return;
+        }
+        self.relayPwSaving = true;
+        ClipsyncAPI.updateSettings({ relay_password: self.relayPassword })
+          .then(function (res) {
+            self.relayPwSaving = false;
+            if (res && res.updated) self.store.mergeSettings(res.updated);
+            self.relayPasswordSet = true;
+            self.relayPwEditor = false;
+            self.relayPassword = '';
+            self.relayPasswordConfirm = '';
+            self.relayShowPassword = false;
+            self.store.showToast(self.t('settings.relay_password_saved'), 2500);
+          })
+          .catch(function () {
+            self.relayPwSaving = false;
+            self.relayPwError = self.t('dialog.failed');
+          });
+      },
+
+      clearRelayPassword: function () {
+        var self = this;
+        ClipsyncAPI.updateSettings({ relay_password: '' })
+          .then(function (res) {
+            if (res && res.updated) self.store.mergeSettings(res.updated);
+            self.relayPasswordSet = false;
+            self.relayPwEditor = false;
+            self.relayPassword = '';
+            self.relayPasswordConfirm = '';
+            self.store.showToast(self.t('settings.relay_password_cleared'), 2500);
+          })
+          .catch(function () {
             self.store.showToast(self.t('dialog.failed'), 2000);
           });
       },
@@ -1117,20 +1192,22 @@
         });
       },
 
-      // ── AI-config sync (round 12) ────────────────────────────────
+      // ── AI-config sync (tool profiles) ──────────────────────────
 
-      // The watch list lives behind its own endpoints
-      // (GET/POST /api/aiconfig/paths), NOT the generic settings API — load
-      // it when the panel or section opens, mirroring logs/certs.
-      loadAiConfigPaths: function () {
+      // The enabled tool profile list + custom paths live behind their own
+      // endpoint (GET/POST /api/aiconfig/profiles), NOT the generic settings
+      // API — load it when the panel or section opens, mirroring logs/certs.
+      loadAiConfigProfiles: function () {
         var self = this;
-        if (!window.ClipsyncAPI || !window.ClipsyncAPI.getAiConfigPaths) return;
+        if (!window.ClipsyncAPI || !window.ClipsyncAPI.getAiConfigProfiles) return;
         self._aiCfgLoading = true;
-        ClipsyncAPI.getAiConfigPaths().then(function (res) {
+        ClipsyncAPI.getAiConfigProfiles().then(function (res) {
           self._aiCfgLoading = false;
-          var list = (res && Array.isArray(res.paths)) ? res.paths : [];
           self._skipDirty = true;
-          self.aiConfigPaths = list.map(function (p) { return String(p == null ? '' : p); });
+          self.aiConfigProfiles = (res && Array.isArray(res.tools)) ? res.tools : [];
+          self.aiConfigTools = (res && Array.isArray(res.enabled)) ? res.enabled.slice() : [];
+          self.aiConfigCustomPaths = (res && Array.isArray(res.custom_paths))
+            ? res.custom_paths.map(function (p) { return String(p == null ? '' : p); }) : [];
           self.$nextTick(function () { self._skipDirty = false; });
         }).catch(function () {
           // 404 on an older host — leave whatever rows exist for editing.
@@ -1138,39 +1215,57 @@
         });
       },
 
-      addAiConfigPath: function () {
-        this.aiConfigPaths.push('');
+      toolEnabled: function (key) {
+        return this.aiConfigTools.indexOf(key) !== -1;
       },
 
-      removeAiConfigPath: function (idx) {
-        this.aiConfigPaths.splice(idx, 1);
+      toggleAiConfigTool: function (key) {
+        var i = this.aiConfigTools.indexOf(key);
+        if (i !== -1) this.aiConfigTools.splice(i, 1);
+        else this.aiConfigTools.push(key);
       },
 
-      // Save the monitored root-folder list. Mirrors the server-side
-      // normalization exactly: trim whitespace, drop blanks, exact-string
-      // dedupe, cap at 50 roots. An empty list is allowed — it simply means
-      // this device shares nothing. On success the backend recollects and
-      // re-broadcasts the inventory to paired peers on its own.
-      saveAiConfigPaths: function () {
+      // "~/.claude/CLAUDE.md, ~/.claude/settings.json, ~/.claude/skills"
+      profilePaths: function (prof) {
+        var entries = (prof && Array.isArray(prof.entries)) ? prof.entries : [];
+        return entries.map(function (e) { return String((e && e.path) || ''); })
+          .filter(Boolean).join(', ');
+      },
+
+      addAiConfigCustomPath: function () {
+        this.aiConfigCustomPaths.push('');
+      },
+
+      removeAiConfigCustomPath: function (idx) {
+        this.aiConfigCustomPaths.splice(idx, 1);
+      },
+
+      // Save the enabled tool profiles + custom roots. Mirrors the server-side
+      // normalization: trim whitespace, drop blanks, exact-string dedupe,
+      // cap at 50 custom paths. An empty selection is allowed — it simply
+      // means this device shares nothing. On success the backend recollects
+      // and re-broadcasts the inventory to paired peers on its own.
+      saveAiConfigProfiles: function () {
         var self = this;
         var seen = {};
-        var paths = [];
-        (this.aiConfigPaths || []).forEach(function (p) {
+        var custom = [];
+        (this.aiConfigCustomPaths || []).forEach(function (p) {
           var v = String(p == null ? '' : p).trim();
           if (!v || seen[v]) return;
           seen[v] = true;
-          if (paths.length < 50) paths.push(v);
+          if (custom.length < 50) custom.push(v);
         });
         self.aiConfigSaving = true;
-        ClipsyncAPI.setAiConfigPaths(paths).then(function (res) {
+        ClipsyncAPI.setAiConfigProfiles(this.aiConfigTools.slice(), custom).then(function (res) {
           self.aiConfigSaving = false;
           if (res && res.ok === false) {
             self.store.showToast(self.t('settings.save_aiconfig_failed'), 2000);
             return;
           }
           self._skipDirty = true;
-          self.aiConfigPaths = (res && Array.isArray(res.paths))
-            ? res.paths.slice() : paths;
+          self.aiConfigTools = (res && Array.isArray(res.tools)) ? res.tools.slice() : self.aiConfigTools;
+          self.aiConfigCustomPaths = (res && Array.isArray(res.custom_paths))
+            ? res.custom_paths.slice() : custom;
           self.$nextTick(function () { self._skipDirty = false; });
           self.dirtySections['aiconfig'] = false;
           self.store.showToast(self.t('settings.aiconfig_saved'), 3000);
@@ -1626,7 +1721,7 @@
           // so reload the section data here too.
           if (this.activeSection === 'logs') this.loadLogs();
           if (this.activeSection === 'security') this.loadCerts();
-          if (this.activeSection === 'aiconfig') this.loadAiConfigPaths();
+          if (this.activeSection === 'aiconfig') this.loadAiConfigProfiles();
           var self = this;
           if (!this._prevFocus) {
             this._prevFocus = document.activeElement;
@@ -1657,7 +1752,7 @@
       activeSection: function (val) {
         if (val === 'logs') this.loadLogs();
         if (val === 'security') this.loadCerts();
-        if (val === 'aiconfig') this.loadAiConfigPaths();
+        if (val === 'aiconfig') this.loadAiConfigProfiles();
       },
 
       // ── Staged-section dirty tracking ────────────────────────────
@@ -1666,8 +1761,8 @@
       relayBrokersText: function () { this.markDirty('remote'); },
       relayPrivateBrokersText: function () { this.markDirty('remote'); },
       relayUsername: function () { this.markDirty('remote'); },
-      relayPassword: function () { this.markDirty('remote'); },
-      relayClearPassword: function () { this.markDirty('remote'); },
+      // The relay password is saved immediately by its editor — it is not
+      // staged, so it must not mark the section dirty.
       webEnabled: function () { this.markDirty('web'); },
       webPort: function () { this.markDirty('web'); },
       webHistoryLimit: function () { this.markDirty('web'); },
@@ -1706,7 +1801,11 @@
       },
       dataDir: function () { this.markDirty('data'); },
       favoritesPath: function () { this.markDirty('data'); },
-      aiConfigPaths: {
+      aiConfigTools: {
+        deep: true,
+        handler: function () { this.markDirty('aiconfig'); },
+      },
+      aiConfigCustomPaths: {
         deep: true,
         handler: function () { this.markDirty('aiconfig'); },
       },
@@ -1911,57 +2010,71 @@
                     '</div>' +
                   '</div>' +
 
-                  '<div style="margin-top:6px">' +
-                    '<button class="settings-btn settings-btn--sm" @click="brokersOpen = !brokersOpen">{{ brokersOpen ? \'▾\' : \'▸\' }} {{ t(\'settings_window.relay_brokers_toggle\') }}</button>' +
+                  // Relay-server configuration is always expanded (no fold) —
+                  // everything the user might need to reach is visible at once.
+                  // Part 1 — anonymous free relays.  No credentials: these
+                  // public brokers accept anyone, and must never be handed
+                  // the private broker's password.
+                  '<div class="settings-field" style="margin-top:12px">' +
+                    '<label class="settings-field__label">{{ t(\'settings_window.relay_free_label\') }}</label>' +
+                    '<textarea class="settings-input" rows="3" v-model="relayBrokersText" placeholder="wss://broker.emqx.io:8884/mqtt"></textarea>' +
+                    '<span class="settings-hint">{{ t(\'settings_window.relay_free_hint\') }}</span>' +
                   '</div>' +
-                  '<template v-if="brokersOpen">' +
-                    // Part 1 — anonymous free relays.  No credentials: these
-                    // public brokers accept anyone, and must never be handed
-                    // the private broker's password.
-                    '<div class="settings-field" style="margin-top:8px">' +
-                      '<label class="settings-field__label">{{ t(\'settings_window.relay_free_label\') }}</label>' +
-                      '<textarea class="settings-input" rows="3" v-model="relayBrokersText" placeholder="wss://broker.emqx.io:8884/mqtt"></textarea>' +
-                      '<span class="settings-hint">{{ t(\'settings_window.relay_free_hint\') }}</span>' +
+                  // Part 2 — credentialed private relay (e.g. a self-hosted
+                  // broker).  These endpoints authenticate with the username /
+                  // password; leave the whole part empty to use only the free
+                  // relays above.
+                  '<div class="settings-field" style="margin-top:8px">' +
+                    '<label class="settings-field__label">{{ t(\'settings_window.relay_private_label\') }}</label>' +
+                    '<textarea class="settings-input" rows="3" v-model="relayPrivateBrokersText" placeholder="mqtt://mqttyyc.top:1883"></textarea>' +
+                    '<span class="settings-hint">{{ t(\'settings_window.relay_private_hint\') }}</span>' +
+                  '</div>' +
+                  '<div class="settings-field" style="margin-top:8px">' +
+                    '<label class="settings-field__label">{{ t(\'settings_window.relay_username_label\') }}</label>' +
+                    '<input type="text" class="settings-input" v-model="relayUsername" autocomplete="off" placeholder="clipsync_mqtt">' +
+                  '</div>' +
+                  // Password: a status row plus a dedicated "set/change password"
+                  // button that opens the two-field editor.  The password is
+                  // saved immediately on confirm (it is never staged with the
+                  // broker list), and only after the two entries match.
+                  '<div class="settings-field" style="margin-top:8px">' +
+                    '<label class="settings-field__label">{{ t(\'settings_window.relay_password_label\') }}</label>' +
+                    '<div class="settings-field__row">' +
+                      '<span class="settings-field__value" :style="{ color: relayPasswordSet ? \'var(--clipsync-success)\' : \'var(--clipsync-fg-muted)\' }">{{ relayPasswordSet ? t(\'settings_window.relay_pw_status_set\') : t(\'settings_window.relay_pw_status_unset\') }}</span>' +
+                      '<button v-if="!relayPwEditor" class="settings-btn settings-btn--sm settings-btn--accent" @click="openRelayPwEditor" style="flex-shrink:0">{{ relayPasswordSet ? t(\'settings_window.relay_pw_change_btn\') : t(\'settings_window.relay_pw_set_btn\') }}</button>' +
+                      '<button v-if="relayPasswordSet && !relayPwEditor" class="settings-btn settings-btn--sm" @click="clearRelayPassword" style="flex-shrink:0">{{ t(\'settings_window.relay_password_clear\') }}</button>' +
                     '</div>' +
-                    // Part 2 — credentialed private relay (e.g. a self-hosted
-                    // broker).  These endpoints authenticate with the username
-                    // / password below; leave the whole part empty to use only
-                    // the free relays above.
-                    '<div class="settings-field" style="margin-top:8px">' +
-                      '<label class="settings-field__label">{{ t(\'settings_window.relay_private_label\') }}</label>' +
-                      '<textarea class="settings-input" rows="3" v-model="relayPrivateBrokersText" placeholder="mqtt://mqttyyc.top:1883"></textarea>' +
-                      '<span class="settings-hint">{{ t(\'settings_window.relay_private_hint\') }}</span>' +
-                    '</div>' +
-                    '<div class="settings-field" style="margin-top:8px">' +
-                      '<label class="settings-field__label">{{ t(\'settings_window.relay_username_label\') }}</label>' +
-                      '<input type="text" class="settings-input" v-model="relayUsername" autocomplete="off" placeholder="clipsync_mqtt">' +
-                    '</div>' +
-                    '<div class="settings-field" style="margin-top:8px">' +
-                      '<label class="settings-field__label">{{ t(\'settings_window.relay_password_label\') }}</label>' +
+                    '<span class="settings-hint">{{ t(\'settings_window.relay_password_hint\') }}</span>' +
+                    '<div v-if="relayPwEditor" class="settings-field" style="margin-top:6px;padding:10px;border:1px solid var(--clipsync-border, rgba(128,128,128,.25));border-radius:8px">' +
                       '<div class="settings-field__row">' +
-                        '<input :type="relayShowPassword ? \'text\' : \'password\'" class="settings-input" v-model="relayPassword" autocomplete="new-password" :placeholder="relayPasswordSet && !relayClearPassword ? \'●●●●●●●●\' : t(\'settings_window.relay_password_placeholder\')">' +
-                        '<button class="settings-btn settings-btn--sm" @click="relayShowPassword = !relayShowPassword">{{ relayShowPassword ? t(\'settings_window.hide\') : t(\'settings_window.show\') }}</button>' +
-                        '<button v-if="relayPasswordSet && !relayClearPassword" class="settings-btn settings-btn--sm" @click="relayClearPassword = true">{{ t(\'settings_window.relay_password_clear\') }}</button>' +
+                        '<input :type="relayShowPassword ? \'text\' : \'password\'" class="settings-input" v-model="relayPassword" autocomplete="new-password" :placeholder="t(\'settings_window.relay_pw_new\')">' +
+                        '<button class="settings-btn settings-btn--sm" @click="relayShowPassword = !relayShowPassword" style="flex-shrink:0">{{ relayShowPassword ? t(\'settings_window.hide\') : t(\'settings_window.show\') }}</button>' +
                       '</div>' +
-                      '<span class="settings-hint">{{ t(\'settings_window.relay_password_hint\') }}</span>' +
-                    '</div>' +
-                    '<button class="settings-btn settings-btn--accent" @click="saveRelayBrokers" :disabled="brokersSaving" style="width:100%;margin-top:4px">' +
-                      '{{ brokersSaving ? \'...\' : t(\'settings_window.save_relay_brokers\') }}' +
-                    '</button>' +
-                    // Test connectivity of the staged list (no need to save first).
-                    '<button class="settings-btn settings-btn--sm" @click="testRelay" :disabled="relayTesting || brokersSaving" style="width:100%;margin-top:6px">' +
-                      '{{ relayTesting ? \'...\' : t(\'settings_window.test_relay_btn\') }}' +
-                    '</button>' +
-                    '<div v-if="relayTestResult" class="settings-field" style="margin-top:8px">' +
-                      '<span class="settings-field__label">{{ t(\'settings_window.test_relay_result\') }}: <span :style="{ color: relayTestResult.results.length && relayTestResult.results.every(r =&gt; r.ok) ? \'var(--clipsync-success)\' : \'var(--clipsync-danger)\' }">{{ relayTestResult.summary }}</span></span>' +
-                      '<div v-for="r in relayTestResult.results" :key="r.endpoint" style="margin-top:4px">' +
-                        '<span :style="{ color: r.ok ? \'var(--clipsync-success)\' : \'var(--clipsync-danger)\' }">{{ r.ok ? \'✓\' : \'✗\' }}</span> ' +
-                        '<span style="word-break:break-all">{{ r.endpoint }}</span>' +
-                        '<span v-if="r.ok && r.latency_ms != null" style="opacity:.65"> · {{ r.latency_ms }} ms</span>' +
-                        '<span v-if="!r.ok && r.detail" style="color:var(--clipsync-danger);word-break:break-all"> — {{ r.detail }}</span>' +
+                      '<input :type="relayShowPassword ? \'text\' : \'password\'" class="settings-input" v-model="relayPasswordConfirm" autocomplete="new-password" :placeholder="t(\'settings_window.relay_pw_repeat\')" style="margin-top:6px">' +
+                      '<div v-if="relayPwMismatch" class="settings-hint" style="color:var(--clipsync-danger);margin-top:4px">{{ t(\'settings_window.relay_pw_mismatch\') }}</div>' +
+                      '<div v-if="relayPwError" class="settings-hint" style="color:var(--clipsync-danger);margin-top:4px">{{ relayPwError }}</div>' +
+                      '<div class="settings-field__row" style="margin-top:8px">' +
+                        '<button class="settings-btn settings-btn--accent" @click="confirmRelayPassword" :disabled="relayPwSaving || !relayPassword || !relayPasswordConfirm || relayPwMismatch" style="flex:1">{{ relayPwSaving ? \'...\' : t(\'settings_window.relay_pw_confirm\') }}</button>' +
+                        '<button class="settings-btn settings-btn--sm" @click="cancelRelayPwEditor" style="flex:1;margin-left:6px">{{ t(\'settings_window.relay_pw_cancel\') }}</button>' +
                       '</div>' +
                     '</div>' +
-                  '</template>' +
+                  '</div>' +
+                  '<button class="settings-btn settings-btn--accent" @click="saveRelayBrokers" :disabled="brokersSaving" style="width:100%;margin-top:4px">' +
+                    '{{ brokersSaving ? \'...\' : t(\'settings_window.save_relay_brokers\') }}' +
+                  '</button>' +
+                  // Test connectivity of the staged list (no need to save first).
+                  '<button class="settings-btn settings-btn--sm" @click="testRelay" :disabled="relayTesting || brokersSaving" style="width:100%;margin-top:6px">' +
+                    '{{ relayTesting ? \'...\' : t(\'settings_window.test_relay_btn\') }}' +
+                  '</button>' +
+                  '<div v-if="relayTestResult" class="settings-field" style="margin-top:8px">' +
+                    '<span class="settings-field__label">{{ t(\'settings_window.test_relay_result\') }}: <span :style="{ color: relayTestResult.results.length && relayTestResult.results.every(r =&gt; r.ok) ? \'var(--clipsync-success)\' : \'var(--clipsync-danger)\' }">{{ relayTestResult.summary }}</span></span>' +
+                    '<div v-for="r in relayTestResult.results" :key="r.endpoint" style="margin-top:4px">' +
+                      '<span :style="{ color: r.ok ? \'var(--clipsync-success)\' : \'var(--clipsync-danger)\' }">{{ r.ok ? \'✓\' : \'✗\' }}</span> ' +
+                      '<span style="word-break:break-all">{{ r.endpoint }}</span>' +
+                      '<span v-if="r.ok && r.latency_ms != null" style="opacity:.65"> · {{ r.latency_ms }} ms</span>' +
+                      '<span v-if="!r.ok && r.detail" style="color:var(--clipsync-danger);word-break:break-all"> — {{ r.detail }}</span>' +
+                    '</div>' +
+                  '</div>' +
 
                   // (Internet-pairing passphrase UI removed in v1.0.84 — the
                   // single encryption password in the Security tab derives the
@@ -2335,22 +2448,34 @@
                   '</div>' +
                 '</section>' +
 
-                '<!-- ═══════ AI Config (round 12) ═══════ -->' +
+                '<!-- ═══════ AI Config ═══════ -->' +
                 '<section v-if="activeSection === \'aiconfig\'" class="settings-section">' +
                   '<h3 class="settings-section__title">{{ t(\'settings_nav.aiconfig\') }}</h3>' +
                   '<p class="settings-hint" style="margin-bottom:12px">{{ t(\'settings_window.aiconfig_desc\') }}</p>' +
+
                   '<div class="settings-field">' +
-                    '<label class="settings-field__label">{{ t(\'settings_window.aiconfig_paths_label\') }}</label>' +
-                    '<div v-for="(p, idx) in aiConfigPaths" :key="\'aipath-\' + idx" class="settings-field__row">' +
-                      '<input type="text" class="settings-input" v-model="aiConfigPaths[idx]" spellcheck="false"' +
-                        ' :placeholder="t(\'settings_window.aiconfig_path_placeholder\')"' +
-                        ' :aria-label="t(\'settings_window.aiconfig_paths_label\')">' +
-                      '<button class="settings-btn settings-btn--sm" @click="removeAiConfigPath(idx)" :aria-label="t(\'ui.delete\')">✕</button>' +
-                    '</div>' +
-                    '<button class="settings-btn settings-btn--sm" @click="addAiConfigPath" style="margin-top:6px">+ {{ t(\'settings_window.aiconfig_add_path\') }}</button>' +
-                    '<span class="settings-hint">{{ t(\'settings_window.aiconfig_paths_hint\') }}</span>' +
+                    '<label class="settings-field__label">{{ t(\'settings_window.aiconfig_tools_label\') }}</label>' +
+                    '<label v-for="prof in aiConfigProfiles" :key="prof.key" class="settings-checkbox">' +
+                      '<input type="checkbox" :checked="toolEnabled(prof.key)" @change="toggleAiConfigTool(prof.key)">' +
+                      '<span class="settings-checkbox__name">{{ prof.label || prof.key }}</span>' +
+                      '<code class="settings-checkbox__paths">{{ profilePaths(prof) }}</code>' +
+                    '</label>' +
+                    '<span class="settings-hint">{{ t(\'settings_window.aiconfig_tools_hint\') }}</span>' +
                   '</div>' +
-                  '<button class="settings-btn settings-btn--accent" @click="saveAiConfigPaths" :disabled="aiConfigSaving" style="width:100%;margin-top:8px">' +
+
+                  '<div class="settings-field">' +
+                    '<label class="settings-field__label">{{ t(\'settings_window.aiconfig_custom_paths_label\') }}</label>' +
+                    '<div v-for="(p, idx) in aiConfigCustomPaths" :key="\'aipath-\' + idx" class="settings-field__row">' +
+                      '<input type="text" class="settings-input" v-model="aiConfigCustomPaths[idx]" spellcheck="false"' +
+                        ' :placeholder="t(\'settings_window.aiconfig_path_placeholder\')"' +
+                        ' :aria-label="t(\'settings_window.aiconfig_custom_paths_label\')">' +
+                      '<button class="settings-btn settings-btn--sm" @click="removeAiConfigCustomPath(idx)" :aria-label="t(\'ui.delete\')">✕</button>' +
+                    '</div>' +
+                    '<button class="settings-btn settings-btn--sm" @click="addAiConfigCustomPath" style="margin-top:6px">+ {{ t(\'settings_window.aiconfig_add_path\') }}</button>' +
+                    '<span class="settings-hint">{{ t(\'settings_window.aiconfig_custom_paths_hint\') }}</span>' +
+                  '</div>' +
+
+                  '<button class="settings-btn settings-btn--accent" @click="saveAiConfigProfiles" :disabled="aiConfigSaving" style="width:100%;margin-top:8px">' +
                     '{{ aiConfigSaving ? \'...\' : t(\'settings_window.save_aiconfig\') }}' +
                   '</button>' +
                   '<p class="settings-hint" style="margin-top:6px">{{ t(\'settings_window.aiconfig_save_hint\') }}</p>' +

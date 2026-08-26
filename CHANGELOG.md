@@ -2,6 +2,16 @@
 
 All notable changes to ClipSync are documented in this file.
 
+## [1.0.90] — 2026-08-27
+
+- **AI 配置同步彻底重构：从「原始路径列表」升级为「AI 工具档案」**。此前该功能维护一份监视根路径列表、界面到处是 R0/R1 这类 `root_index` 编号、对端清单映射到本机时报「模糊根 / 无本地根」——心智模型混乱。现在「配置」tab 是一个统一面板：**顶部设备条**（本机 + 各已配对设备，每台标注差异总数徽标）、**中部按工具档案分组的清单**（Claude Code / Codex / Cursor / Gemini + 自定义路径，每行对比徽标）、**本机管理子视图**（预览 / 编辑保存留 .bak / 回收站 / 打开文件夹）。旧的本机文件管理器占 2/3、跨设备浏览被挤到底部的陈旧布局已删除。
+- **内置 4 个工具档案取代手工路径**：claude_code（`CLAUDE.md`、`settings.json`、`skills/`）、codex（`config.toml`）、cursor（`rules/`、`commands/`）、gemini（`settings.json`、`GEMINI.md`），另保留用户自定义路径兜底。配置字段 `ai_config_paths` → `ai_config_tools` + `ai_config_custom_paths`；旧配置**自动迁移**（路径命中档案即启用对应工具，其余归为自定义路径），已在测试中锁定。设置页改为档案勾选 + 自定义路径，前端不再硬编码预置表（唯一事实源在后端 `/api/aiconfig/profiles`）。
+- **skills 文件夹真正支持整文件夹递归拉取**：勾选一个技能/命令文件夹即从对端清单递归展开该文件夹下全部文件，一次批量 pull，逐文件独立哈希校验原子落盘，进度条实时显示「N/M」，失败可单独重试。此前文件夹只是只读元数据、无法勾选拉取。
+- **一键迁移向导**：选源设备 → 按工具分组的差异清单（缺失 / 本地新 / 远端新，默认全选差异）→ 一键应用，冲突默认「跳过已有」（可选「覆盖留 .bak」/「另存副本」），批量进度 + 逐文件结果。主视图的「迁移」按钮直接进向导并预选全部差异。
+- **协议升级为 v2（`root_index` → `tool` 维度），旧版兼容保留**：清单条目改按 `{tool, rel_path, sha256, size, mtime, is_dir}` 描述，落盘按工具档案解析、不再扫描所有本地根猜 `ambiguous_root`；对旧版对端的清单仍可只读浏览与预览（标记「旧版只读」），文件夹拉取与迁移仅对新版对端可用。对比键 = `(tool, rel_path)`，哈希相同→相同、否则按 mtime 判本地新/远端新、单边→缺失。
+- **前端重复逻辑收敛**：`aiconfig-device-panel.js` 删除，设备条 / 对比徽标 / 格式化的重复实现抽为公共 `js/aiconfig-helpers.js`（纯函数，node 测试直接驱动）；对比徽标在本地清单未加载时返回「无徽标」而非误报「缺失」（修复一个徽标闪烁前误报的隐患）。
+- 对应新增/重写测试：`tests/test_aiconfig.py`（75 个后端用例：档案展开、tool 落盘、文件夹展开拉取、batch 结果、v2/legacy 兼容、profiles 端点、迁移辅助）、`tests/test_aiconfig_ui.py`（38 个前端用例：统一面板结构、迁移向导、store/api/ws、locale 全量镜像、node --check、无硬编码预置）。修复 1 个后端缺陷：同名的顶层文件根优先于同名目录根命中（否则拉取 `CLAUDE.md` 会误报「模糊根」）。
+
 ## [1.0.89] — 2026-08-26
 
 - **更新流程改造：下载进度可见 + 下载完提示手动运行（Windows 不再自动重启）**。之前的自动更新会在部分 Windows 机器上触发 PyInstaller 的父进程校验崩溃（`parent process has different executable`）——现在 Windows 下载更新时设置页显示实时进度条（百分比随分块推进），下载完成并校验后把可运行的新版 `clipsync.exe` 解到 `下载\clipsync-update\`，弹出提示 + 设置页显示「新版本就绪」卡片（版本 / 文件路径 / 「打开所在文件夹」按钮），由你手动退出当前应用、双击运行新版；剪贴板历史与设备数据都留在本机，新版直接使用。Linux 保持自动替换重启，macOS 保持自动打开文件夹，均不变。

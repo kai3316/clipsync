@@ -75,9 +75,11 @@ _SAFE_FIELDS = {
     "favorites_path",
     "hotkeys",
     "hotkeys_enabled",
-    # AI-config sync watch list (Round 12): root directories whose config
-    # files are inventoried and shareable with paired peers.
-    "ai_config_paths",
+    # AI-config sync profiles (refactor round 1): enabled tool keys + user
+    # custom paths.  Effective watch roots are expanded from the profile
+    # table at collection time.
+    "ai_config_tools",
+    "ai_config_custom_paths",
     # Wall-clock epoch of a pending timed sync pause (0 = none).  Read-only:
     # the pause/resume actions go through /api/sync/pause|resume, which run
     # their own live-apply + timer bookkeeping; a direct client write here
@@ -160,7 +162,8 @@ _MUTABLE_FIELDS = {
     "favorites_path",
     "hotkeys",
     "hotkeys_enabled",
-    "ai_config_paths",
+    "ai_config_tools",
+    "ai_config_custom_paths",
 }
 
 # Action keys that trigger a host-side operation rather than a plain

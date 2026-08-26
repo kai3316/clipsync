@@ -21,6 +21,8 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from internal.security.encryption import EncryptionManager
 
+from internal.sync import ai_profiles as _ai_profiles
+
 logger = logging.getLogger(__name__)
 
 # Guards the shared Config instance. save() and load() hold it, and callers
@@ -221,26 +223,20 @@ class Config:
     # The value itself never leaves this device (GET only exposes a boolean).
     netpair_password: str = ""
 
-    # AI-config sync (Round 12): watch-list root directories whose AI tool
-    # config files (CLAUDE.md, memory notes, skills/, .mcp.json, ...) are
-    # advertised — as metadata only (rel path + sha256 + size + mtime) — to
-    # paired peers.  "~" expands to the current user's home at collection
-    # time.  Empty list = feature off for this device (nothing is collected
-    # and no inventory is broadcast).
-    ai_config_paths: list[str] = field(default_factory=lambda: [
-        # Default watch list (round 19): the common AI-tool config locations —
-        # Claude Code, Codex, Cursor, Gemini CLI.  File entries (e.g.
-        # ~/.claude/CLAUDE.md) sync exactly that file; credentials like
-        # auth.json are deliberately NOT listed.  Users can edit freely.
-        "~/.claude/CLAUDE.md",
-        "~/.claude/settings.json",
-        "~/.claude/skills",
-        "~/.codex/config.toml",
-        "~/.cursor/rules",
-        "~/.cursor/commands",
-        "~/.gemini/settings.json",
-        "~/.gemini/GEMINI.md",
-    ])
+    # AI-config sync (refactor round 1): enabled tool profiles + user custom
+    # paths whose AI tool config files (CLAUDE.md, memory notes, skills/,
+    # .mcp.json, ...) are advertised — as metadata only (rel path + sha256 +
+    # size + mtime) — to paired peers.  The effective watch list is the
+    # flattened union of the enabled tools' profile entries and the custom
+    # paths (see internal/sync/ai_profiles.py).  "~" expands to the current
+    # user's home at collection time.  No tools enabled AND no custom paths =
+    # feature off for this device (nothing is collected / broadcast).
+    ai_config_tools: list[str] = field(
+        default_factory=lambda: list(_ai_profiles.DEFAULT_TOOL_KEYS),
+    )
+    # User-added watch paths (file or directory), beyond the built-in tool
+    # profiles.  Kept separate so the built-in profiles stay deterministic.
+    ai_config_custom_paths: list[str] = field(default_factory=list)
 
     def add_peer(self, peer: PeerInfo):
         self.peers[peer.device_id] = peer
@@ -373,7 +369,8 @@ _FIELD_RULES: dict[str, tuple] = {
     "peer_relay_secrets": ("strdict",),
     "netpair_secrets": ("strdict",),
     "netpair_aliases": ("strdict",),
-    "ai_config_paths": ("strlist_nonnull",),
+    "ai_config_tools": ("strlist_nonnull",),
+    "ai_config_custom_paths": ("strlist_nonnull",),
 }
 
 # Inclusive numeric bounds applied to numeric fields on load.  load()/restore
@@ -599,7 +596,8 @@ def load() -> Config:
                 "relay_secret", "peer_relay_secrets",
                 "netpair_secrets",
                 "netpair_aliases",
-                "ai_config_paths",
+                "ai_config_tools",
+                "ai_config_custom_paths",
             ):
                 if key in data:
                     value = _validate_field(key, data[key])
@@ -628,6 +626,15 @@ def load() -> Config:
             #   {"device_id": {device_name, public_key_pem, paired, notes}, ...}
             cfg.peers = _parse_peer_list(data, "peers")
             cfg.removed_peers = _parse_peer_list(data, "removed_peers")
+            # Migrate from the pre-refactor watch list (ai_config_paths) to the
+            # tool-profile model: each old path either enables its built-in
+            # tool profile or becomes a user custom path.  Persisted on the
+            # next save() like the other one-way migrations above.
+            if "ai_config_paths" in data and "ai_config_tools" not in data:
+                keys, custom = _ai_profiles.migrate_watch_paths(
+                    data.get("ai_config_paths"))
+                cfg.ai_config_tools = keys
+                cfg.ai_config_custom_paths = custom
             return cfg
         return Config()
 
@@ -708,7 +715,8 @@ def save(cfg: Config, enc_mgr: "EncryptionManager | None" = None):
             "peer_relay_secrets": cfg.peer_relay_secrets,
             "netpair_secrets": cfg.netpair_secrets,
             "netpair_aliases": cfg.netpair_aliases,
-            "ai_config_paths": cfg.ai_config_paths,
+            "ai_config_tools": cfg.ai_config_tools,
+            "ai_config_custom_paths": cfg.ai_config_custom_paths,
             "peers": [
                 {
                     "device_id": p.device_id,

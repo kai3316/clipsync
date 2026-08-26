@@ -1,57 +1,63 @@
-"""AI-config sync REST backend (Round 12).
+"""AI-config sync REST backend (refactor round 1 — tool profiles).
 
 Routes (registered as one branch in routes.py; the manager is bound by
 src/main.py at startup — no dispatch-signature threading needed):
 
   GET  /api/aiconfig/inventory[?refresh=1&peer_id=X]
         Cached inventories of known peers:
-        {"peers": {pid: {name, entries, fetched_at}}}.
-        ?refresh=1 asks the peer (or every paired peer) to re-send its
-        inventory now via an inventory_refresh aiconfig_req.
+        {"peers": {pid: {name, legacy, entries, fetched_at}}, "local": {...}}.
+        Entries are v2 (tool / rel_path) or legacy (root_index / path) per
+        peer's ``legacy`` flag.  ?refresh=1 asks the peer (or every paired
+        peer) to re-send its inventory now via an inventory_refresh aiconfig_req.
 
-  GET  /api/aiconfig/paths          -> this device's watch list
-  POST /api/aiconfig/paths          {"paths": ["~/ai-configs", ...]}
-        Normalize + persist the watch list, then recollect and rebroadcast
-        the inventory to connected paired peers.
+  GET  /api/aiconfig/profiles
+        {"tools": [{key,label,entries:[{path,kind}]}...], "enabled": [keys...],
+         "custom_paths": [...]} — single source of truth for the UI; presets
+        are never hard-coded client-side.
 
-  POST /api/aiconfig/pull           {"peer_id", "items": [{root_index,
-        rel_path}...], "mode": "overwrite"|"copy"|"append"}
-        Send a aiconfig_req per item.  Landing happens asynchronously when
-        each aiconfig_data arrives (mode executed then); clients refresh via
-        the `aiconfig_file` WS event.  Responds {"requested": N} immediately.
-        mode defaults to "copy" — never overwrite silently.
+  POST /api/aiconfig/profiles   {"tools": [keys...], "custom_paths": [paths...]}
+        Normalize + persist the enabled tool profiles and custom paths, then
+        recollect and rebroadcast the inventory to connected paired peers.
 
-  POST /api/aiconfig/preview        {"peer_id", "root_index", "rel_path"}
+  POST /api/aiconfig/pull       {"peer_id", "items": [{tool, rel_path[, is_dir]},
+        ...], "mode": "overwrite"|"copy"|"append", "batch_id": str}
+        Sends a aiconfig_req per item (folders expanded server-side from the
+        peer's cached inventory).  Landing happens asynchronously when each
+        aiconfig_data arrives; clients track progress via the `aiconfig_file`
+        WS event, which echoes *batch_id*.  mode defaults to "copy" — never
+        overwrite silently.  Responds {"requested": N} immediately.
+
+  POST /api/aiconfig/preview    {"peer_id", "tool", "rel_path"}
+                                OR {"peer_id", "root_index", "rel_path"} (legacy)
         Fetch one file's content for display only.  Blocks up to 5 s for the
         reply and returns {"ok": true, "content": str(<=64KB), "truncated"}.
         Nothing is written to disk.
 
-Local file manager (Round 18) — no pairing required, a basic file manager
-over the same watch roots:
+Local file manager (no pairing required, a basic file manager over the same
+tool-profile roots):
 
   GET  /api/aiconfig/local
-        Fresh local listing: {"collected_at", "roots": [{root_index, path,
-        count}], "entries": [{root_index, rel_path, size, mtime, sha256}]}.
-        Reuses the round-12 collector (same shape as the peer inventory).
+        Fresh local listing: {"collected_at", "tools": [...], "custom_paths":
+        [...], "roots": [{tool, kind, path, count}], "entries": [{tool,
+        rel_path, size, mtime, sha256, is_dir}]}.
 
-  GET  /api/aiconfig/local/item?root_index=&rel_path=
-        Read one file's text content: {"ok", "content" (<=64KB),
-        "truncated"}.  Binary content (NUL bytes) -> 400 "binary"; missing
-        file -> 404 "not_found"; traversal -> 400 "unsafe_path".
+  GET  /api/aiconfig/local/item?tool=&rel_path=
+        Read one file's text content: {"ok", "content" (<=64KB), "truncated"}.
+        Binary content (NUL bytes) -> 400 "binary"; missing file -> 404
+        "not_found"; traversal -> 400.
 
-  POST /api/aiconfig/local/save     {"root_index", "rel_path", "content"}
+  POST /api/aiconfig/local/save     {"tool", "rel_path", "content"}
         Write text back: automatic <rel_path>.bak of the pre-save original,
-        atomic temp-file + os.replace, text-only (NUL refused), content
-        capped at 256 KB.  Returns {"ok"}.
+        atomic temp-file + os.replace, text-only (NUL refused), content capped
+        at 256 KB.  Returns {"ok"}.
 
-  POST /api/aiconfig/local/trash    {"root_index", "rel_path"}
-        MOVE a watched file to <data_dir>/aiconfig_trash/<original subpath>/
-        <timestamp>_<name> — never a physical delete; collisions increment a
-        -N suffix.  Returns {"ok", "trashed_to"}.
+  POST /api/aiconfig/local/trash    {"tool", "rel_path"}
+        MOVE a watched file/dir to <data_dir>/aiconfig_trash/<original
+        subpath>/<timestamp>_<name> — never a physical delete.  Returns
+        {"ok", "trashed_to"}.
 
-  POST /api/aiconfig/open           {"root_index", "rel_path"}
-        Open the file (or directory) with the OS default app
-        (os.startfile / open / xdg-open).  400 on failure.
+  POST /api/aiconfig/open           {"tool", "rel_path"}
+        Open the file (or directory) with the OS default app.
 
 All handlers return (data_dict, status_code) and never raise.
 """
@@ -85,12 +91,10 @@ def handle(method: str, path: str, query_params, body) -> tuple[dict, int]:
     try:
         if path == "/api/aiconfig/inventory" and method == "GET":
             return _inventory(query_params)
-        if path == "/api/aiconfig/paths" and method == "GET":
-            summary = _mgr.local_summary()
-            return {"ok": True, "paths": summary["paths"],
-                    "summary": summary}, 200
-        if path == "/api/aiconfig/paths" and method == "POST":
-            return _set_paths(_body_dict(body))
+        if path == "/api/aiconfig/profiles" and method == "GET":
+            return _profiles(), 200
+        if path == "/api/aiconfig/profiles" and method == "POST":
+            return _set_profiles(_body_dict(body))
         if path == "/api/aiconfig/pull" and method == "POST":
             return _pull(_body_dict(body))
         if path == "/api/aiconfig/preview" and method == "POST":
@@ -127,13 +131,28 @@ def _inventory(query_params) -> tuple[dict, int]:
     }, 200
 
 
-def _set_paths(data: dict) -> tuple[dict, int]:
-    result = _mgr.set_watch_list(data.get("paths"))
+def _profiles() -> dict:
+    """Tool profile table (single source of truth) + the current selection."""
+    from internal.sync import ai_profiles
+    return {
+        "ok": True,
+        "tools": ai_profiles.TOOLS,
+        "enabled": list(getattr(_mgr._cfg, "ai_config_tools", []) or []),
+        "custom_paths": list(
+            getattr(_mgr._cfg, "ai_config_custom_paths", []) or []),
+    }
+
+
+def _set_profiles(data: dict) -> tuple[dict, int]:
+    result = _mgr.set_profiles(data.get("tools"),
+                               data.get("custom_paths"))
     if not result.get("ok"):
         return result, 400
-    # Recollect + rebroadcast so paired peers see the new list immediately.
+    # Recollect + rebroadcast so paired peers see the new selection immediately.
     sent = _mgr.on_watch_list_changed()
-    return {"ok": True, "paths": result["paths"], "broadcast_to": sent}, 200
+    return {"ok": True, "tools": result["tools"],
+            "custom_paths": result["custom_paths"],
+            "broadcast_to": sent}, 200
 
 
 def _pull(data: dict) -> tuple[dict, int]:
@@ -141,7 +160,11 @@ def _pull(data: dict) -> tuple[dict, int]:
     if not peer_id:
         return {"ok": False, "error": "peer_id required"}, 400
     mode = data.get("mode", "copy")
-    result = _mgr.pull(peer_id, data.get("items"), mode=mode)
+    batch_id = data.get("batch_id")
+    if not isinstance(batch_id, str):
+        batch_id = ""
+    result = _mgr.pull(peer_id, data.get("items"), mode=mode,
+                       batch_id=batch_id[:128])
     result["ok"] = result.get("requested", 0) > 0
     status = 200 if result["ok"] else 400
     return result, status
@@ -149,50 +172,51 @@ def _pull(data: dict) -> tuple[dict, int]:
 
 def _preview(data: dict) -> tuple[dict, int]:
     peer_id = str(data.get("peer_id") or "").strip()
-    ri = data.get("root_index")
-    rel = data.get("rel_path")
     if not peer_id:
         return {"ok": False, "error": "peer_id required"}, 400
-    result = _mgr.preview(peer_id, ri, rel)
+    if "tool" in data and "rel_path" in data:
+        result = _mgr.preview(peer_id, data.get("tool"), data.get("rel_path"))
+    elif "root_index" in data and "rel_path" in data:
+        result = _mgr.preview_legacy(peer_id, data.get("root_index"),
+                                     data.get("rel_path"))
+    else:
+        return {"ok": False, "error": "invalid_item"}, 400
     return result, 200 if result.get("ok") else (
         400 if result.get("error") in ("invalid_item", "peer_not_paired",
-                                       "peer_offline") else 502)
+                                       "peer_offline", "legacy_peer") else 502)
 
 
-# ------------------------------------------------- Round 18 local manager
+# ----------------------------------------------------- local file manager
 
 
-def _item_ri_rel(data, query=None) -> tuple | None:
-    """Normalize a (root_index, rel_path) pair from a dict or query params.
+def _tool_rel(data, query=None) -> tuple | None:
+    """Normalize a (tool, rel_path) pair from a dict or query params.
 
-    Returns (ri, rel) or None when malformed.  ri must be a real int (bool
-    rejected); rel must be a non-empty string.  Query-param values arrive as
-    strings, so a numeric string is coerced.
+    Returns (tool, rel) or None when malformed.  tool must be a non-empty
+    string (bool rejected); rel must be a non-empty string.  Query-param
+    values arrive as strings; the first list element is taken.
     """
     src = query if query is not None else data
     if query is not None:
-        ri_raw = (src.get("root_index") or [None])[0]
+        tool_raw = (src.get("tool") or [None])[0]
         rel_raw = (src.get("rel_path") or [None])[0]
     else:
-        ri_raw = src.get("root_index")
+        tool_raw = src.get("tool")
         rel_raw = src.get("rel_path")
-    if isinstance(ri_raw, bool):
+    if isinstance(tool_raw, bool) or not isinstance(tool_raw, str) \
+            or not tool_raw:
         return None
-    if not isinstance(ri_raw, int):
-        if not (isinstance(ri_raw, str) and ri_raw.strip().isdigit()):
-            return None
-        ri_raw = int(ri_raw)
     if not isinstance(rel_raw, str) or not rel_raw:
         return None
-    return ri_raw, rel_raw.strip()
+    return tool_raw.strip(), rel_raw.strip()
 
 
 def _local_item(query_params) -> tuple[dict, int]:
-    item = _item_ri_rel(None, query=query_params)
+    item = _tool_rel(None, query=query_params)
     if item is None:
         return {"ok": False, "error": "invalid_item"}, 400
-    ri, rel = item
-    result = _mgr.local_read(ri, rel)
+    tool, rel = item
+    result = _mgr.local_read(tool, rel)
     status = 404 if result.get("error") == "not_found" else 400
     return result, status if not result.get("ok") else 200
 
@@ -200,20 +224,20 @@ def _local_item(query_params) -> tuple[dict, int]:
 def _local_save(data: dict) -> tuple[dict, int]:
     if not isinstance(data, dict) or not isinstance(data.get("content"), str):
         return {"ok": False, "error": "content_required"}, 400
-    item = _item_ri_rel(data)
+    item = _tool_rel(data)
     if item is None:
         return {"ok": False, "error": "invalid_item"}, 400
-    ri, rel = item
-    result = _mgr.local_save(ri, rel, data["content"])
+    tool, rel = item
+    result = _mgr.local_save(tool, rel, data["content"])
     return result, 200 if result.get("ok") else 400
 
 
 def _local_trash(data: dict) -> tuple[dict, int]:
-    item = _item_ri_rel(data)
+    item = _tool_rel(data)
     if item is None:
         return {"ok": False, "error": "invalid_item"}, 400
-    ri, rel = item
-    result = _mgr.local_trash(ri, rel)
+    tool, rel = item
+    result = _mgr.local_trash(tool, rel)
     if not result.get("ok"):
         status = 404 if result.get("error") == "not_found" else 400
         return result, status
@@ -221,9 +245,9 @@ def _local_trash(data: dict) -> tuple[dict, int]:
 
 
 def _open_local(data: dict) -> tuple[dict, int]:
-    item = _item_ri_rel(data)
+    item = _tool_rel(data)
     if item is None:
         return {"ok": False, "error": "invalid_item"}, 400
-    ri, rel = item
-    result = _mgr.local_open(ri, rel)
+    tool, rel = item
+    result = _mgr.local_open(tool, rel)
     return result, 200 if result.get("ok") else 400

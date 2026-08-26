@@ -1,32 +1,43 @@
-"""Round 18 — web UI layer for the local AI-config manager.
+"""Refactor round 1 — AI-config web UI layer (unified tool-profile model).
 
-The 「配置」 tab is now split into two sections:
-  1. 本机配置 (local config manager, round 18) — a file manager over THIS
-     device's watch roots, independent of any pairing: watch-path
-     management dialog, file table (path/size/mtime, sorted), search,
-     click-to-preview, edit-and-save (leaves a .bak), move-to-Recycle-Bin
-     with a confirm, and open-containing-folder.  The local API is fully
-     defensive (empty + retry when the backend predates it).
-  2. 设备配置 (device config, round 12) — the existing peer-inventory
-     browse / pull UI, unchanged.
+The 「配置」 tab is now ONE unified panel (aiconfig-panel.js) driven by TOOL
+PROFILES instead of raw watch paths:
+  - device bar (this device + each paired device, diff badges per device)
+  - per-tool grouped inventory with compare badges + folder whole-select
+  - batch progress + per-file retry
+  - a migration wizard (aiconfig-migrate-panel.js) + local manage sub-view
+  - all diff/format logic shared via js/aiconfig-helpers.js (pure, testable)
+The settings window's AI-config section is a profile checkbox list + custom
+paths — the old raw watch-path list and its dedicated /paths endpoint are gone.
 
 Static wiring assertions:
-  1. index.html hosts the two-section layout + the new local CSS classes,
-     and the panel is still mounted in both layouts.
-  2. api.js wraps the five new local endpoints (local / local/item / save /
-     trash / open) against the agreed contract paths and payloads.
-  3. store.js holds the aiConfigLocal state + a defensive fetch helper.
-  4. aiconfig-panel.js wires the local manager UI (toolbar, paths dialog,
-     file table, preview/edit/save, trash confirm, open dir) to the API
-     and keeps the device section intact.
-  5. Locales: en / zh-CN key sets identical and every new key present and
-     non-empty in both.
-  6. A node --check pass over every JS file this round touched.
+  1. index.html hosts the unified panel in both layouts, the helpers +
+     wizard scripts, and the new CSS — and no longer loads the deleted
+     aiconfig-device-panel.js.
+  2. js/aiconfig-helpers.js is the single source of diff/format logic; a
+     Node test drives it directly (pure functions).
+  3. api.js wraps profiles / pull (folders + batch) / preview / local against
+     the tool-based contract — no /api/aiconfig/paths wrappers remain.
+  4. store.js holds the unified state (inventory, local, batches, migrate,
+     profiles) and defensively normalizes every fetch.
+  5. aiconfig-panel.js wires the unified UI (device bar, tool groups, folder
+     whole-select, batch progress, migrate mount, local view) to the API.
+  6. aiconfig-migrate-panel.js implements the wizard (source → diff → apply)
+     with skip/overwrite/copy strategies and batch progress.
+  7. settings-panel.js exposes the profile checkbox list (no raw path rows,
+     no hardcoded preset table — profiles come from the API).
+  8. tab-navigation.js badge = summed file-diff across paired devices.
+  9. Locales: en / zh-CN key sets identical; every new key present and
+     non-empty in both; the refactored-away keys are gone.
+  10. A node --check pass over every JS file this round touched.
 """
 
 import json
 import os
+import shutil
+import subprocess
 import sys
+import textwrap
 
 import pytest
 
@@ -41,7 +52,30 @@ def _read(*parts) -> str:
         return f.read()
 
 
-# ── 1. index.html: two-section layout + CSS + panel mounts ─────────────
+def _locales():
+    with open(os.path.join(_STATIC, "locales", "en.json"), encoding="utf-8") as f:
+        en = json.load(f)
+    with open(os.path.join(_STATIC, "locales", "zh-CN.json"), encoding="utf-8") as f:
+        zh = json.load(f)
+    return en, zh
+
+
+def _has_node():
+    return shutil.which("node") is not None
+
+
+def _T(src: str) -> str:
+    """Un-escape template-string quotes so t('key') tokens are searchable.
+
+    Components embed their templates as single-quoted JS strings, which means
+    every t('...') call inside a template is written t(\'...\') in the source.
+    Normalizing lets tests assert on the rendered form without caring about
+    which quoting layer a token lives in.
+    """
+    return src.replace("\\'", "'")
+
+
+# ── 1. index.html: unified panel + scripts + CSS ────────────────────────
 
 
 def test_panel_mounted_in_both_layouts():
@@ -50,239 +84,544 @@ def test_panel_mounted_in_both_layouts():
     assert html.count(wide) == 2, (
         "aiconfig-panel must be wired into the wide AND narrow layouts"
     )
+    # Same v-else-if chain as its siblings: favorites < aiconfig < diagnostics.
+    fav = html.index("<favorites-panel")
+    ai = html.index("<aiconfig-panel")
+    diag = html.index("<diagnostics-panel")
+    assert fav < ai < diag
 
 
-def test_index_html_has_local_section_css():
+def test_index_html_loads_unified_scripts():
+    html = _read("index.html")
+    # Shared pure helpers load first; the panel and wizard after it, all
+    # before app.js (which registers every component at mount).
+    assert 'src="js/aiconfig-helpers.js?token=__TOKEN__"' in html
+    assert 'src="components/aiconfig-panel.js?token=__TOKEN__"' in html
+    assert 'src="components/aiconfig-migrate-panel.js?token=__TOKEN__"' in html
+    i_helpers = html.index("aiconfig-helpers.js")
+    i_panel = html.index("components/aiconfig-panel.js")
+    i_wizard = html.index("aiconfig-migrate-panel.js")
+    i_app = html.index("js/app.js")
+    assert i_helpers < i_panel < i_wizard < i_app
+    # The deleted device panel is not loaded anywhere.
+    assert "aiconfig-device-panel.js" not in html
+
+
+def test_index_html_has_unified_panel_css():
     css = _read("index.html")
     for cls in (
+        ".aiconfig-panel__hero {",
+        ".aiconfig-panel__device-pill {",
+        ".aiconfig-panel__device-pill-badge {",
+        ".aiconfig-panel__device-pill-tag--legacy {",
+        ".aiconfig-panel__folder-check {",
+        ".aiconfig-panel__batch {",
+        ".aiconfig-panel__batch-bar {",
         ".aiconfig-panel__local {",
         ".aiconfig-panel__local-tablewrap {",
-        ".aiconfig-panel__local-actions {",
-        ".aiconfig-paths__overlay {",
-        ".aiconfig-local-preview__editor {",
-        ".aiconfig-device {",
+        ".aiconfig-panel__ver-badge {",
+        ".aiconfig-panel__ver-badge--missing {",
+        ".aiconfig-migrate__overlay {",
+        ".aiconfig-migrate__groups {",
+        ".aiconfig-migrate__strategy {",
+        ".settings-checkbox {",
     ):
         assert cls in css, f"missing CSS rule: {cls}"
 
 
-def test_index_html_loads_panel_script():
-    html = _read("index.html")
-    assert 'src="components/aiconfig-panel.js?token=__TOKEN__"' in html
-    assert html.index("components/aiconfig-panel.js") < html.index("js/app.js")
+def test_device_panel_component_is_deleted():
+    # The old browse/pull UI was merged into the unified panel; the separate
+    # component file must be gone (not merely unused).
+    assert not os.path.exists(os.path.join(_STATIC, "components",
+                                           "aiconfig-device-panel.js"))
+    assert not os.path.exists(os.path.join(_STATIC, "components",
+                                           "aiconfig-helpers.js"))
 
 
-# ── 2. api.js: five new local-endpoint wrappers ────────────────────────
+# ── 2. aiconfig-helpers.js: shared pure logic ───────────────────────────
 
 
-def test_api_local_inventory_wrapper():
+def test_helpers_export_table():
+    src = _read("js", "aiconfig-helpers.js")
+    for fn in ("fmtSize", "fmtTime", "mtimeMs", "keyOf", "legacyKeyOf",
+               "buildLocalIndex", "compareState", "diffCounts", "toolLabel"):
+        assert f"{fn}:" in src, fn
+    assert "KEY_SEP" in src
+    assert "__CLIPSYNC_AICONFIG_HELPERS__" in src
+
+
+_NODE_HELPERS = textwrap.dedent(r"""
+    const fs = require('fs');
+    global.window = {};
+    eval(fs.readFileSync(process.argv[2], 'utf8'));
+    const H = global.window.__CLIPSYNC_AICONFIG_HELPERS__;
+
+    const assert = (cond, msg) => { if (!cond) { console.error('FAIL ' + msg); process.exit(1); } };
+    const E = (tool, rel_path, sha256, mtime) => ({ tool, rel_path, sha256, mtime });
+
+    const localEntries = [
+      E('claude_code', 'CLAUDE.md', 'aaaa', 1000),
+      E('claude_code', 'settings.json', 'bbbb', 2000),
+      E('custom', 'notes.md', 'cccc', 3000),
+      { tool: 'claude_code', rel_path: 'skills/x/', is_dir: true }, // excluded
+    ];
+    const idx = H.buildLocalIndex(localEntries);
+
+    // keyOf: tool + rel_path, joined by a separator that can't collide.
+    assert(H.keyOf(E('claude_code', 'CLAUDE.md')) === 'claude_codeCLAUDE.md', 'keyOf shape');
+    assert(H.legacyKeyOf({ root_index: 2, rel_path: 'x' }) === 'legacy2x', 'legacyKeyOf shape');
+    // buildLocalIndex keys by (tool, rel_path); directories are dropped.
+    assert(idx.byKey['claude_codeCLAUDE.md'].sha256 === 'aaaa', 'byKey lookup');
+    assert(idx.byKey['claude_codeskills/x/'] === undefined, 'dirs excluded');
+    assert(idx.byPath['notes.md'].tool === 'custom', 'byPath fallback');
+
+    // compareState: same / missing / local_newer / remote_newer.
+    assert(H.compareState(idx, E('claude_code', 'CLAUDE.md', 'aaaa', 1000)) === 'same', 'same');
+    assert(H.compareState(idx, E('claude_code', 'NEW.md', 'dddd', 1)) === 'missing', 'missing');
+    assert(H.compareState(idx, E('claude_code', 'CLAUDE.md', 'zzzz', 500)) === 'local_newer', 'local_newer');
+    assert(H.compareState(idx, E('claude_code', 'CLAUDE.md', 'zzzz', 5000)) === 'remote_newer', 'remote_newer');
+    // Equal mtime with differing hash falls through to "remote is newer".
+    assert(H.compareState(idx, E('claude_code', 'CLAUDE.md', 'zzzz', 1000)) === 'remote_newer', 'equal mtime');
+    // Directory rows and an unloaded local index produce no badge.
+    assert(H.compareState(idx, { tool: 'claude_code', rel_path: 'skills/x/', is_dir: true }) === null, 'dir null');
+    assert(H.compareState(null, E('claude_code', 'CLAUDE.md', 'aaaa', 1000)) === null, 'no local null');
+
+    // mtime unit invariance: seconds below ~1e12, anything bigger is ms.
+    const msIdx = H.buildLocalIndex([E('custom', 'a.md', 's1', 2000000000000)]);
+    assert(H.compareState(msIdx, E('custom', 'a.md', 's2', 1500000000000)) === 'local_newer', 'ms local_newer');
+    assert(H.compareState(msIdx, E('custom', 'a.md', 's2', 3000000000000)) === 'remote_newer', 'ms remote_newer');
+
+    // A legacy remote row (root_index) compares against local by rel_path only.
+    assert(H.compareState(idx, { root_index: 0, rel_path: 'notes.md', sha256: 'cccc', mtime: 1 }, true) === 'same', 'legacy same');
+    // A v2 remote whose tool is not local still falls back to byPath.
+    assert(H.compareState(idx, E('codex', 'notes.md', 'cccc', 1)) === 'same', 'byPath fallback');
+
+    // diffCounts aggregates the four states.
+    const cnt = H.diffCounts(idx, [
+      E('claude_code', 'CLAUDE.md', 'aaaa', 1),        // same
+      E('claude_code', 'NEW.md', 'x', 1),             // missing
+      E('claude_code', 'settings.json', 'zzzz', 1),   // local_newer
+      E('claude_code', 'settings.json', 'zzzz', 9e6), // remote_newer
+    ]);
+    assert(cnt.same === undefined && cnt.total === 3, 'diffCounts total');
+    assert(cnt.missing === 1 && cnt.local_newer === 1 && cnt.remote_newer === 1, 'diffCounts buckets');
+    assert(H.diffCounts(idx, 'not-a-list').total === 0, 'diffCounts defensive');
+
+    // Formatters + tool label.
+    assert(H.mtimeMs(1000) === 1000000 && H.mtimeMs(2000000000000) === 2000000000000, 'mtimeMs');
+    assert(H.mtimeMs(undefined) === -1, 'mtimeMs missing');
+    assert(H.fmtSize(512) === '512 B' && H.fmtSize(2048) === '2.0 KB', 'fmtSize');
+    assert(H.toolLabel([{ key: 'claude_code', label: 'Claude Code' }], 'claude_code') === 'Claude Code', 'toolLabel');
+    assert(H.toolLabel([], 'custom') === 'custom', 'toolLabel fallback');
+
+    console.log('ALL_OK');
+""")
+
+
+def test_helpers_behavior_via_node(tmp_path):
+    if not _has_node():
+        pytest.skip("node not available")
+    script = tmp_path / "helpers_check.js"
+    script.write_text(_NODE_HELPERS, encoding="utf-8")
+    path = os.path.join(_STATIC, "js", "aiconfig-helpers.js")
+    proc = subprocess.run([shutil.which("node"), str(script), path],
+                          stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                          text=True)
+    assert proc.returncode == 0, (
+        f"helpers script failed:\n{proc.stdout}\n{proc.stderr}")
+    assert "ALL_OK" in proc.stdout
+
+
+# ── 3. api.js: tool-based contract, no /paths wrappers ──────────────────
+
+
+def test_api_profiles_wrappers():
     src = _read("js", "api.js")
-    assert "getAiConfigLocal" in src
-    assert "'/api/aiconfig/local'" in src
+    assert "getAiConfigProfiles" in src
+    assert "'/api/aiconfig/profiles'" in src
+    body = src.split("setAiConfigProfiles")[1].split("previewAiConfigFile")[0]
+    assert "'/api/aiconfig/profiles'" in body          # POST
+    for field in ("tools", "custom_paths"):
+        assert field in body, field
 
 
-def test_api_local_item_wrapper_uses_query_params():
+def test_api_pull_wrapper_supports_folders_and_batch():
     src = _read("js", "api.js")
-    body = src.split("getAiConfigLocalItem")[1].split("saveAiConfigLocal")[0]
-    assert "'/api/aiconfig/local/item?root_index='" in body
+    assert "pullAiConfigFiles" in src
+    assert "'/api/aiconfig/pull'" in src
+    body = src.split("pullAiConfigFiles: function")[1]
+    for field in ("peer_id", "items", "mode"):
+        assert field in body, field
+    # Folder items are just entries with is_dir; batch_id rides the request.
+    assert "batch_id" in body
+    assert "batchId" in body
+
+
+def test_api_preview_wrappers_split_tool_and_legacy():
+    src = _read("js", "api.js")
+    assert "previewAiConfigFile" in src
+    assert "previewAiConfigLegacy" in src
+    v2 = src.split("previewAiConfigFile: function")[1]
+    for field in ("peer_id", "tool", "rel_path"):
+        assert field in v2, field
+    leg = src.split("previewAiConfigLegacy: function")[1]
+    for field in ("peer_id", "root_index", "rel_path"):
+        assert field in leg, field
+    # Tolerant parsing: raw-text bodies must not break the preview modal.
+    assert "JSON.parse(bodyText)" in src
+    assert "65536" in src  # 64KB truncation heuristic
+
+
+def test_api_local_wrappers_use_tool_query():
+    src = _read("js", "api.js")
+    body = src.split("getAiConfigLocalItem: function")[1]
+    assert "'/api/aiconfig/local/item?tool='" in body
     assert "'&rel_path='" in body
-    assert "encodeURIComponent(rootIndex)" in body
+    assert "encodeURIComponent(tool)" in body
     assert "encodeURIComponent(relPath)" in body
+    # local save / trash / open carry the tool field, never root_index.
+    for method, url, fields in (
+        ("saveAiConfigLocal", "/api/aiconfig/local/save",
+         ("tool", "rel_path", "content")),
+        ("trashAiConfigLocal", "/api/aiconfig/local/trash",
+         ("tool", "rel_path")),
+        ("openAiConfigLocal", "/api/aiconfig/open",
+         ("tool", "rel_path")),
+    ):
+        body = src.split(f"{method}: function")[1]
+        assert f"'{url}'" in body, method
+        for field in fields:
+            assert field in body, f"{method}:{field}"
 
 
-def test_api_local_save_wrapper_payload():
+def test_api_has_no_paths_endpoint_wrappers():
+    # The raw watch-path list and its dedicated endpoint are gone.
     src = _read("js", "api.js")
-    assert "saveAiConfigLocal" in src
-    body = src.split("saveAiConfigLocal")[1].split("trashAiConfigLocal")[0]
-    assert "'/api/aiconfig/local/save'" in body
-    for field in ("root_index", "rel_path", "content"):
-        assert field in body, field
+    assert "getAiConfigPaths" not in src
+    assert "setAiConfigPaths" not in src
+    assert "'/api/aiconfig/paths'" not in src
 
 
-def test_api_local_trash_wrapper_payload():
-    src = _read("js", "api.js")
-    assert "trashAiConfigLocal" in src
-    body = src.split("trashAiConfigLocal")[1].split("openAiConfigLocal")[0]
-    assert "'/api/aiconfig/local/trash'" in body
-    for field in ("root_index", "rel_path"):
-        assert field in body, field
+# ── 4. store.js: unified state + defensive normalization ────────────────
 
 
-def test_api_local_open_wrapper_payload():
-    src = _read("js", "api.js")
-    assert "openAiConfigLocal" in src
-    body = src.split("openAiConfigLocal")[1]
-    assert "'/api/aiconfig/open'" in body
-    for field in ("root_index", "rel_path"):
-        assert field in body, field
-
-
-# ── 3. store.js: aiConfigLocal state + defensive fetch ────────────────
-
-
-def test_store_declares_local_state():
+def test_store_declares_unified_aiconfig_state():
     src = _read("js", "store.js")
-    assert "aiConfigLocal: {" in src
-    assert "fetchAiConfigLocal: function" in src
-    assert "aiConfigLocal.loaded" in src
-    assert "aiConfigLocal.loadFailed" in src
+    for token in (
+        "aiConfigInventory:",
+        "aiConfigLocal:",
+        "aiConfigProfiles:",
+        "aiConfigBatches:",
+        "aiConfigMigrateOpen:",
+        "fetchAiConfigInventory: function",
+        "fetchAiConfigLocal: function",
+        "fetchAiConfigProfiles: function",
+        "applyAiConfigFileResult: function",
+        "startAiConfigBatch: function",
+        "clearAiConfigBatch: function",
+        "openAiConfigMigrate: function",
+        "closeAiConfigMigrate: function",
+    ):
+        assert token in src, token
+
+
+def test_store_inventory_fetch_normalizes_defensively():
+    src = _read("js", "store.js")
+    chunk = src.split("fetchAiConfigInventory: function")[1].split(
+        "applyAiConfigFileResult")[0]
+    assert "typeof res.peers === 'object'" in chunk
+    assert "Array.isArray(p.entries)" in chunk
+    # The wire keys each entry's path as `path`; the store normalizes to the
+    # spec'd `rel_path` so every consumer relies on one name.
+    assert "e.rel_path || e.path" in chunk
+    # Failure must still settle the load flag so the panel shows empty/retry.
+    assert "aiConfigLoaded = true" in chunk
 
 
 def test_store_local_fetch_normalizes_defensively():
     src = _read("js", "store.js")
     chunk = src.split("fetchAiConfigLocal: function")[1].split(
-        "Internet pairing helpers (round 14)")[0]
+        "openAiConfigMigrate")[0]
     # The local manager must work with zero paired devices — no peer gate.
     assert "getAiConfigLocal" in chunk
     # Malformed roots/entries degrade to empty lists, never a crash.
     assert "Array.isArray(res.roots)" in chunk
     assert "Array.isArray(res.entries)" in chunk
-    # The wire keys an entry's path as `path` (inventory convention); the
-    # store normalizes to `rel_path` so the panel relies on one name.
     assert "e.rel_path || e.path" in chunk
-    # Failure must settle loaded=true so the panel shows empty/retry.
     assert "aiConfigLocal.loaded = true" in chunk
 
 
-# ── 4. aiconfig-panel.js: local manager + device section wiring ────────
+def test_store_apply_batch_tracks_progress():
+    src = _read("js", "store.js")
+    chunk = src.split("applyAiConfigFileResult: function")[1].split(
+        "startAiConfigBatch")[0]
+    # Rolling results list, capped.
+    assert "aiConfigResults.unshift" in chunk
+    # Batch tracking: a batch_id on the WS event folds into aiConfigBatches
+    # and flips `finished` when the count reaches the total.
+    assert "batch_id" in chunk
+    assert "batch.done += 1" in chunk
+    assert "batch.finished = true" in chunk
+    # The toast key maps each status vocabulary.
+    for key in ("aiconfig.result_error", "aiconfig.result_copied",
+                "aiconfig.result_appended", "aiconfig.result_saved"):
+        assert key in chunk, key
 
 
-def test_panel_local_only_layout():
-    # The AI Config tab is the LOCAL manager only — device config moved out.
+def test_store_batch_lifecycle():
+    src = _read("js", "store.js")
+    chunk = src.split("startAiConfigBatch: function")[1].split(
+        "openAiConfigMigrate")[0]
+    assert "total: total" in chunk and "done: 0" in chunk
+    assert "results: []" in chunk and "finished: false" in chunk
+    assert "peerId: peerId || ''" in chunk
+    # clearAiConfigBatch drops the entry so the map never grows unbounded
+    # (it sits after the migrate helpers in the store, so search the tail).
+    tail = src.split("clearAiConfigBatch: function")[1]
+    assert "delete this.aiConfigBatches[batchId]" in tail
+    # Only a known batch may be cleared — unknown ids are ignored.
+    assert "if (batchId && this.aiConfigBatches[batchId])" in tail
+
+
+# ── 5. aiconfig-panel.js: unified tab wiring ────────────────────────────
+
+
+def test_panel_component_structure():
     src = _read("components", "aiconfig-panel.js")
-    assert "aiconfig-panel__local" in src
-    assert "aiconfig.local_title" in src
-    # No device section / peer inventory left behind in the AI Config tab.
-    assert "aiconfig-panel__device" not in src
-    assert "peersList" not in src
-    assert "aiconfig-panel__body" not in src
+    assert "__CLIPSYNC_COMPONENTS__['aiconfig-panel']" in src
+    assert "inject: ['store']" in src
+    # Default landing mode is copy — never a silent overwrite.
+    assert "mode: 'copy'" in src
+    # The tab opens on the LOCAL device; peer pills are built from the
+    # inventory, not hardcoded.
+    assert "selectedDevice: 'local'" in src
+    assert "buildDevices" in src or "devices: function" in src
 
 
-def test_panel_local_toolbar_and_paths_dialog():
+def test_panel_device_bar_and_diff_badges():
+    src = _T(_read("components", "aiconfig-panel.js"))
+    # Every paired device gets a pill with a summed diff badge.
+    assert "aiconfig-panel__device-pill" in src
+    assert "H.diffCounts(self.localIndex, p.entries, p.legacy)" in src
+    assert "diffTotal: d.total" in src
+    assert "diffRemoteNewer: d.remote_newer" in src
+    # Local pill is the first entry, labelled via the locale.
+    assert "name: this.t('aiconfig.local_device')" in src
+    assert "isLocal: true" in src
+    # The per-device summary line + legacy banner.
+    assert "t('aiconfig.diff_summary'" in src
+    assert "t('aiconfig.legacy_read_only')" in src
+    assert "t('aiconfig.peer_empty')" in src
+    # The diff line is only drawn for a non-legacy peer with a real diff.
+    assert "deviceDiff.total === 0" in src
+
+
+def test_panel_uses_shared_helpers():
     src = _read("components", "aiconfig-panel.js")
-    # Toolbar: refresh + watch-path management.
-    assert "refreshLocal" in src
-    assert "openPathsDialog" in src
-    assert "aiconfig.local_manage_paths" in src
-    # Paths dialog loads from and saves to /api/aiconfig/paths.
-    assert "getAiConfigPaths" in src
-    assert "setAiConfigPaths" in src
-    assert "addPathRow" in src
-    assert "removePathRow" in src
-    assert "savePaths" in src
-    assert "aiconfig-paths__overlay" in src
-    # Saving auto-recollects so the table shows the fresh list.
-    assert "aiconfig.local_paths_saved" in src
-    assert "aiconfig.local_paths_save_failed" in src
+    # The panel binds the helpers into the Vue instance; every diff/format
+    # decision goes through them.
+    for token in ("H.fmtSize", "H.fmtTime", "H.mtimeMs",
+                  "H.keyOf", "H.buildLocalIndex", "H.compareState",
+                  "H.diffCounts", "H.toolLabel"):
+        assert token in src, token
 
 
-def test_panel_local_file_list_search():
-    src = _read("components", "aiconfig-panel.js")
-    assert "localFilteredEntries" in src
-    assert "localSearch" in src
-    assert "localMultiRoot" in src
-    assert "localRootLabel" in src
-    assert "aiconfig-panel__local-tablewrap" in src
+def test_panel_folder_whole_select_and_batch():
+    src = _T(_read("components", "aiconfig-panel.js"))
+    # Folder rows can be whole-selected (recursive); the checkbox state and
+    # descendant enumeration live here.
+    assert "descendantFileKeys: function" in src
+    assert "folderState: function" in src
+    assert "toggleFolder: function" in src
+    # Batch pull progress: N/M bar + retry of the failures.
+    assert "activeBatch: function" in src
+    assert "batchPct: function" in src
+    assert "retryFailures: function" in src
+    assert "t('aiconfig.batch_progress'" in src
+    assert "t('aiconfig.batch_retry')" in src
+    assert "t('aiconfig.batch_done')" in src
+    # Folder whole-select hides when there is nothing to expand.
+    assert "t('aiconfig.folder_select_count'" in src
 
 
-def test_panel_local_preview_edit_save():
-    src = _read("components", "aiconfig-panel.js")
-    # Click a row → preview; preview can switch to a textarea edit.
-    assert "openLocalPreview" in src
-    assert "startLocalEdit" in src
-    assert "cancelLocalEdit" in src
-    assert "saveLocalEdit" in src
-    assert "aiconfig-local-preview__editor" in src
-    # Save hits the save endpoint and toasts the .bak guarantee.
-    assert "saveAiConfigLocal" in src
-    assert "aiconfig.local_saved_toast" in src
-    assert "aiconfig.local_save_failed" in src
-    # Binary / failed previews surface a clear reason instead of a crash.
-    assert "localPreviewError" in src
-    assert "aiconfig.local_preview_binary" in src
-    assert "aiconfig.local_preview_failed" in src
-
-
-def test_panel_local_trash_confirm():
-    src = _read("components", "aiconfig-panel.js")
-    # Delete is a confirmed move to the Recycle Bin — never a hard delete.
-    assert "trashEntry" in src
+def test_panel_migrate_mount_and_local_view():
+    src = _T(_read("components", "aiconfig-panel.js"))
+    # The wizard is mounted from the unified panel, gated on the store flag.
+    assert '<aiconfig-migrate-panel v-if="store.aiConfigMigrateOpen"></aiconfig-migrate-panel>' in src
+    assert "openMigrate: function" in src
+    assert "t('aiconfig.migrate_title')" in src
+    # Local manage sub-view survives inside the unified tab.
+    for token in (
+        "openLocalPreview: function",
+        "startLocalEdit: function",
+        "saveLocalEdit: function",
+        "trashEntry: function",
+        "openEntryDir: function",
+        "openSettingsAiconfig: function",
+        "t('aiconfig.local_manage_profiles')",
+        "t('aiconfig.local_trash_confirm'",
+        "t('aiconfig.local_trashed_toast'",
+    ):
+        assert token in src, token
+    # Trash is a confirmed move — never a silent delete.
     assert "store.confirm" in src
-    assert "aiconfig.local_trash_title" in src
-    assert "aiconfig.local_trash_confirm" in src
-    assert "trashAiConfigLocal" in src
-    assert "aiconfig.local_trashed_toast" in src
-    assert "aiconfig.local_trash_failed" in src
-    # Cancel (confirm rejection) is a silent no-op — the catch guards on
-    # a real Error so a dismissed dialog never toasts "trash failed".
-    assert "typeof err === 'object'" in src
 
 
-def test_panel_local_open_dir():
+def test_panel_mount_primes_data_sources():
     src = _read("components", "aiconfig-panel.js")
-    assert "openEntryDir" in src
-    assert "openAiConfigLocal" in src
-    assert "aiconfig.local_open_dir" in src
-    assert "aiconfig.local_open_failed" in src
+    assert "this.store.fetchAiConfigLocal()" in src
+    assert "this.store.fetchAiConfigInventory(false)" in src
+    assert "this.store.fetchAiConfigProfiles()" in src
 
 
-def test_panel_local_defensive_empty_state():
+def test_panel_has_no_legacy_watch_path_or_device_panel_tokens():
     src = _read("components", "aiconfig-panel.js")
-    # Empty watch list → "add paths first" guide, independent of pairing.
-    assert "localNoPaths" in src
-    assert "aiconfig.local_no_paths" in src
-    assert "aiconfig.local_empty_desc" in src
-    # Local API not ready / 404 → empty + retry, never a crash.
-    assert "store.aiConfigLocal.loadFailed" in src
-    assert "aiconfig.local_retry" in src
-    # First-open primes BOTH sections.
-    assert "store.fetchAiConfigLocal()" in src
+    # The unified panel lives in ONE file — the deleted device-panel component
+    # is not referenced, and the raw watch-path API is not touched.  (root_index
+    # may legitimately appear: legacy peers are still browsable/previewable.)
+    for token in ("getAiConfigPaths", "setAiConfigPaths",
+                  "aiconfig-device-panel", "peersList === null"):
+        assert token not in src, token
 
 
-def test_device_config_lives_in_ai_config_tab():
-    # The round-12 device browse/pull UI lives in aiconfig-device-panel, mounted
-    # in the AI Config tab (under the local manager) — NOT in the Devices page.
-    dev = _read("components", "aiconfig-device-panel.js")
-    assert "__CLIPSYNC_COMPONENTS__['aiconfig-device-panel']" in dev
-    assert "peersList" in dev
-    assert "selectedCount === 0 || pulling" in dev
-    assert "openPreview" in dev
-    assert "pullAiConfigFiles" in dev
-    assert "aiconfig.empty_title" in dev
-    assert "aiconfig.empty_desc" in dev
-    assert "aiconfig.mode_label" in dev
-    assert "aiconfig.devices" in dev
-    assert "aiconfig.local_device_title" in dev
-    # Mounted exactly once in the AI Config tab (aiconfig-panel.js).
-    panel = _read("components", "aiconfig-panel.js")
-    assert "<aiconfig-device-panel></aiconfig-device-panel>" in panel
-    # ...and no longer in the Devices tab.
-    devices = _read("components", "device-panel.js")
-    assert "<aiconfig-device-panel></aiconfig-device-panel>" not in devices
-    # index.html loads the new component script before app.js.
-    html = _read("index.html")
-    assert 'src="components/aiconfig-device-panel.js?token=__TOKEN__"' in html
-    assert html.index("components/aiconfig-device-panel.js") < html.index("js/app.js")
-    # No duplication: the device strings must NOT appear in aiconfig-panel.js.
-    local = _read("components", "aiconfig-panel.js")
-    for token in ("peersList", "pullAiConfigFiles", "aiconfig-panel__device"):
-        assert token not in local, token
+# ── 6. aiconfig-migrate-panel.js: the wizard ────────────────────────────
 
 
-# ── 5. Locale parity ───────────────────────────────────────────────────
+def test_migrate_panel_component_structure():
+    src = _read("components", "aiconfig-migrate-panel.js")
+    assert "__CLIPSYNC_COMPONENTS__['aiconfig-migrate-panel']" in src
+    assert "inject: ['store']" in src
+    # Three landing strategies, all surfaced through the locale.
+    assert "STRATEGIES" in src
+    for value, label in (("skip", "aiconfig.migrate_strategy_skip"),
+                         ("overwrite", "aiconfig.migrate_strategy_overwrite"),
+                         ("copy", "aiconfig.migrate_strategy_copy")):
+        assert f"'{label}'" in src, label
+    # Only v2 peers are migratable (legacy peers are read-only).
+    assert "v2Peers: function" in src
+
+
+def test_migrate_panel_template_and_flow():
+    src = _T(_read("components", "aiconfig-migrate-panel.js"))
+    for token in (
+        "t('aiconfig.migrate_source')",
+        "t('aiconfig.migrate_diff_count'",
+        "t('aiconfig.migrate_nothing_to_do')",
+        "t('aiconfig.migrate_nothing_checked')",
+        "t('aiconfig.migrate_apply'",
+        "t('aiconfig.migrate_strategy_label')",
+        "t('aiconfig.migrate_no_source')",
+    ):
+        assert token in src, token
+    # Applying with zero checked rows is refused client-side.
+    assert "aiconfig.migrate_nothing_checked" in src
+    # Batch progress reuses the panel's batch vocabulary.
+    assert "batch" in src
+
+
+def test_migrate_panel_has_no_legacy_tokens():
+    src = _read("components", "aiconfig-migrate-panel.js")
+    assert "getAiConfigPaths" not in src
+    assert "aiconfig-device-panel" not in src
+
+
+# ── 7. settings-panel.js: tool-profile checkbox list ────────────────────
+
+
+def test_settings_panel_ai_config_section_wiring():
+    src = _read("components", "settings-panel.js")
+    # Settings nav + search index entry.
+    assert "mk('aiconfig'" in src
+    assert "aiconfig: [" in src
+    # Profiles load from the API on open (both the open watcher and the
+    # active-section watcher prime them).
+    assert "loadAiConfigProfiles: function" in src
+    assert src.count("'aiconfig') this.loadAiConfigProfiles()") == 2
+    # Tool toggles + custom path rows + save.
+    assert "toolEnabled: function" in src
+    assert "toggleAiConfigTool: function" in src
+    assert "addAiConfigCustomPath" in src
+    assert "removeAiConfigCustomPath" in src
+    assert "saveAiConfigProfiles: function" in src
+    # The template renders the fetched profile cards as checkboxes.
+    assert "class=\"settings-checkbox\"" in src
+    assert "toolEnabled(prof.key)" in src
+    assert "profilePaths(prof)" in src
+
+
+def test_settings_panel_ai_config_fetches_profiles_not_presets():
+    src = _read("components", "settings-panel.js")
+    # No hardcoded preset table — the cards come from GET /api/aiconfig/profiles.
+    assert "getAiConfigProfiles" in src
+    assert "AICONFIG_PRESETS" not in src
+    assert "getAiConfigPaths" not in src and "setAiConfigPaths" not in src
+    # Custom paths are capped at the backend limit (50) on the way out.
+    assert "custom.length < 50" in src
+    # Saving normalizes via the API and settles the dirty flag.
+    assert "setAiConfigProfiles" in src
+    assert "dirtySections['aiconfig'] = false" in src
+
+
+def test_settings_section_template_registered():
+    src = _read("components", "settings-panel.js")
+    assert "activeSection === 'aiconfig'" in src.replace("\\'", "'")
+
+
+# ── 8. tab-navigation.js: badge = summed diff across peers ──────────────
+
+
+def test_tab_navigation_aiconfig_badge_is_diff_total():
+    src = _read("components", "tab-navigation.js")
+    assert "id: 'aiconfig'" in src
+    assert "t('ui.aiconfig')" in src
+    # Badge = total file-diff count across every paired device (vs this
+    # machine's inventory) — zero = nothing worth pulling.
+    assert "H.diffCounts" in src
+    assert "buildLocalIndex" in src
+    assert "total += H.diffCounts" in src
+    assert "aiConfigInventory" in src
+
+
+# ── 9. Locale parity ───────────────────────────────────────────────────
 
 _NEW_KEYS = [
+    # unified panel / device bar
+    "aiconfig.local_device",
+    "aiconfig.local_device_hint",
+    "aiconfig.peer_empty",
+    "aiconfig.legacy_peer",
+    "aiconfig.legacy_read_only",
+    "aiconfig.diff_summary",
+    "aiconfig.diff_synced",
+    # folder whole-select + batch
+    "aiconfig.folder_select_count",
+    "aiconfig.batch_progress",
+    "aiconfig.batch_retry",
+    "aiconfig.batch_done",
+    # migration wizard
+    "aiconfig.migrate_title",
+    "aiconfig.migrate_source",
+    "aiconfig.migrate_no_source",
+    "aiconfig.migrate_no_source_desc",
+    "aiconfig.migrate_diff_count",
+    "aiconfig.migrate_nothing_to_do",
+    "aiconfig.migrate_nothing_checked",
+    "aiconfig.migrate_apply",
+    "aiconfig.migrate_strategy_label",
+    "aiconfig.migrate_strategy_skip",
+    "aiconfig.migrate_strategy_skip_hint",
+    "aiconfig.migrate_strategy_overwrite",
+    "aiconfig.migrate_strategy_overwrite_hint",
+    "aiconfig.migrate_strategy_copy",
+    "aiconfig.migrate_strategy_copy_hint",
+    # local manage sub-view
     "aiconfig.local_title",
-    "aiconfig.local_device_title",
     "aiconfig.local_empty_title",
     "aiconfig.local_empty_desc",
     "aiconfig.local_no_paths",
-    "aiconfig.local_manage_paths",
-    "aiconfig.local_paths_hint",
-    "aiconfig.local_add_path",
-    "aiconfig.local_paths_saved",
-    "aiconfig.local_paths_save_failed",
+    "aiconfig.local_manage_profiles",
     "aiconfig.local_collected_at",
-    "aiconfig.local_files_count",
+    "aiconfig.local_skills_count",
     "aiconfig.local_edit",
     "aiconfig.local_save",
     "aiconfig.local_saved_toast",
@@ -296,15 +635,41 @@ _NEW_KEYS = [
     "aiconfig.local_preview_binary",
     "aiconfig.local_preview_failed",
     "aiconfig.local_retry",
+    # settings section (profiles + custom paths)
+    "settings_nav.aiconfig",
+    "settings_window.aiconfig_desc",
+    "settings_window.aiconfig_tools_label",
+    "settings_window.aiconfig_tools_hint",
+    "settings_window.aiconfig_custom_paths_label",
+    "settings_window.aiconfig_custom_paths_hint",
+    "settings_window.aiconfig_add_path",
+    "settings_window.aiconfig_path_placeholder",
+    "settings_window.aiconfig_save_hint",
+    "settings.aiconfig_saved",
+    "settings.save_aiconfig_failed",
+    # compare badges (kept from the prior rounds)
+    "aiconfig.ver_missing",
+    "aiconfig.ver_same",
+    "aiconfig.ver_local_newer",
+    "aiconfig.ver_remote_newer",
+    "aiconfig.ver_tooltip",
 ]
 
-
-def _locales():
-    with open(os.path.join(_STATIC, "locales", "en.json"), encoding="utf-8") as f:
-        en = json.load(f)
-    with open(os.path.join(_STATIC, "locales", "zh-CN.json"), encoding="utf-8") as f:
-        zh = json.load(f)
-    return en, zh
+# Keys the refactor deliberately removed (raw watch-path model / old device
+# panel).  Their absence is the assertion that the old UI is really gone.
+_GONE_KEYS = [
+    "aiconfig.devices",
+    "aiconfig.files_count",
+    "aiconfig.local_add_paths",
+    "aiconfig.local_manage_paths",
+    "aiconfig.local_paths_hint",
+    "aiconfig.local_add_path",
+    "aiconfig.local_paths_saved",
+    "aiconfig.local_paths_save_failed",
+    "aiconfig.local_device_title",
+    "settings_window.aiconfig_paths_label",
+    "settings_window.aiconfig_paths_hint",
+]
 
 
 def test_locale_key_sets_identical():
@@ -315,25 +680,58 @@ def test_locale_key_sets_identical():
     assert not zh_only, f"keys missing from en.json: {sorted(zh_only)}"
 
 
-def test_new_round18_keys_present_and_nonempty_in_both_locales():
+def test_refactor_keys_present_and_nonempty_in_both_locales():
     en, zh = _locales()
     for key in _NEW_KEYS:
         assert key in en, f"missing from en.json: {key}"
         assert key in zh, f"missing from zh-CN.json: {key}"
         assert isinstance(en[key], str) and en[key].strip(), key
         assert isinstance(zh[key], str) and zh[key].strip(), key
-    # Placeholders used by the panel code must exist in both translations.
-    for key in ("aiconfig.local_files_count", "aiconfig.local_collected_at",
-                "aiconfig.local_saved_toast"):
-        assert "{count}" in en[key] or "{time}" in en[key] or "{path}" in en[key] or ".bak" in en[key], key
-        assert "{count}" in zh[key] or "{time}" in zh[key] or "{path}" in zh[key] or ".bak" in zh[key], key
-    for key in ("aiconfig.local_trash_confirm",):
-        assert "{path}" in en[key] and "{path}" in zh[key], key
-    for key in ("aiconfig.local_trashed_toast",):
-        assert "{dest}" in en[key] and "{dest}" in zh[key], key
+
+
+def test_removed_watch_path_keys_are_gone():
+    en, zh = _locales()
+    for key in _GONE_KEYS:
+        assert key not in en, f"stale key still in en.json: {key}"
+        assert key not in zh, f"stale key still in zh-CN.json: {key}"
+
+
+def test_locale_placeholders_present():
+    en, zh = _locales()
+    # {count} interpolations.
+    for key in ("aiconfig.folder_select_count", "aiconfig.migrate_diff_count",
+                "aiconfig.migrate_apply", "aiconfig.local_skills_count"):
+        assert "{count}" in en[key], key
+        assert "{count}" in zh[key], key
+    # Batch progress interpolates done/total.
+    assert "{done}" in en["aiconfig.batch_progress"]
+    assert "{done}" in zh["aiconfig.batch_progress"]
+    assert "{total}" in en["aiconfig.batch_progress"]
+    assert "{total}" in zh["aiconfig.batch_progress"]
+    # The device diff summary carries all three buckets.
+    assert "{missing}" in en["aiconfig.diff_summary"]
+    assert "{remote}" in en["aiconfig.diff_summary"]
+    assert "{local}" in en["aiconfig.diff_summary"]
+    for ph in ("{missing}", "{remote}", "{local}"):
+        assert ph in zh["aiconfig.diff_summary"], ph
+    # Local actions interpolate their slot values.
+    assert "{time}" in en["aiconfig.local_collected_at"]
+    assert "{time}" in zh["aiconfig.local_collected_at"]
+    assert "{path}" in en["aiconfig.local_trash_confirm"]
+    assert "{path}" in zh["aiconfig.local_trash_confirm"]
+    assert "{dest}" in en["aiconfig.local_trashed_toast"]
+    assert "{dest}" in zh["aiconfig.local_trashed_toast"]
+    # The saved toast has no slot (it names the .bak backup verbatim).
+    assert "{path}" not in en["aiconfig.local_saved_toast"]
     for key in ("aiconfig.local_save_failed", "aiconfig.local_trash_failed",
                 "aiconfig.local_open_failed", "aiconfig.local_preview_failed"):
-        assert "{reason}" in en[key] and "{reason}" in zh[key], key
+        assert "{reason}" in en[key], key
+        assert "{reason}" in zh[key], key
+    # Version tooltip interpolates both sides.
+    assert "{local}" in en["aiconfig.ver_tooltip"]
+    assert "{remote}" in en["aiconfig.ver_tooltip"]
+    assert "{local}" in zh["aiconfig.ver_tooltip"]
+    assert "{remote}" in zh["aiconfig.ver_tooltip"]
 
 
 def test_locale_json_files_still_parse():
@@ -341,33 +739,30 @@ def test_locale_json_files_still_parse():
     assert len(en) > 1000 and len(zh) > 1000
 
 
-# ── 6. JS syntax (node --check over every file this round touched) ─────
-
+# ── 10. JS syntax (node --check over every file this round touched) ─────
 
 _TOUCHED_JS = [
+    ("js", "aiconfig-helpers.js"),
     ("components", "aiconfig-panel.js"),
-    ("components", "aiconfig-device-panel.js"),
-    ("components", "device-panel.js"),
+    ("components", "aiconfig-migrate-panel.js"),
+    ("components", "tab-navigation.js"),
+    ("components", "settings-panel.js"),
     ("js", "api.js"),
     ("js", "store.js"),
+    ("js", "ws.js"),
 ]
 
 
 def test_touched_js_passes_node_check(tmp_path):
-    import shutil
-    import subprocess
-
-    node = shutil.which("node")
-    if not node:
+    if not _has_node():
         pytest.skip("node not available")
+    node = shutil.which("node")
     for parts in _TOUCHED_JS:
         path = os.path.join(_STATIC, *parts)
-        proc = subprocess.run(
-            [node, "--check", path],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-        )
+        assert os.path.exists(path), f"missing touched JS: {os.path.join(*parts)}"
+        proc = subprocess.run([node, "--check", path],
+                              stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                              text=True)
         assert proc.returncode == 0, (
             f"{os.path.join(*parts)} fails node --check:\n{proc.stderr}"
         )
@@ -381,634 +776,16 @@ def test_no_nul_bytes_in_touched_js():
         assert b"\x00" not in data, f"NUL byte found in {os.path.join(*parts)}"
 
 
-# ══════════════════════════════════════════════════
-# merged from test_round12_webui.py (shared scaffold suffixed r12)
-# ══════════════════════════════════════════════════
-
-import os
-import sys
-
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-
-_ROOT_r12 = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-_STATIC_r12 = os.path.join(_ROOT_r12, "internal", "web", "static")
-
-
-def _read_r12(*parts) -> str:
-    with open(os.path.join(_STATIC_r12, *parts), encoding="utf-8") as f:
-        return f.read()
-
-
-# ── 1. index.html: panel mounted in both layouts + script tag ──────────
-
-
-def test_panel_mounted_in_both_layouts_r12():
-    html = _read_r12("index.html")
-    wide = '<aiconfig-panel v-else-if="store.activeTab === \'aiconfig\'" key="aiconfig"></aiconfig-panel>'
-    assert html.count(wide) == 2, (
-        "aiconfig-panel must be wired into the wide AND narrow layouts"
-    )
-    # It must sit inside the same v-else-if chain as its sibling panels.
-    for chunk in html.split(wide):
-        pass  # existence + count is the assertion; chain order checked below
-
-
-def test_panel_chain_order_with_siblings():
-    html = _read_r12("index.html")
-    fav = "<favorites-panel"
-    ai = "<aiconfig-panel"
-    diag = "<diagnostics-panel"
-    assert html.index(fav) < html.index(ai) < html.index(diag)
-
-
-def test_panel_script_tag_loaded():
-    html = _read_r12("index.html")
-    assert 'src="components/aiconfig-panel.js?token=__TOKEN__"' in html
-    # Must load before app.js, which registers every component at mount.
-    assert html.index("components/aiconfig-panel.js") < html.index("js/app.js")
-
-
-def test_panel_css_present():
-    css = _read_r12("index.html")
-    for cls in (
-        ".aiconfig-panel {",
-        ".aiconfig-panel__peers",
-        ".aiconfig-panel__table",
-        ".aiconfig-panel__actions",
-        ".aiconfig-preview__overlay",
-        ".aiconfig-preview__content",
-    ):
-        assert cls in css, f"missing CSS rule: {cls}"
-
-
-# ── 2. Tab registration + API wrappers ─────────────────────────────────
-
-
-def test_tab_navigation_registers_aiconfig():
-    src = _read_r12("components", "tab-navigation.js")
-    assert "id: 'aiconfig'" in src
-    assert "t('ui.aiconfig')" in src
-    # Badge = number of LOCAL config files (round 18: the AI Config tab is
-    # the local manager only; device inventories live in the Devices tab).
-    assert "aiConfigLocal" in src
-
-
-def test_api_inventory_wrapper():
-    src = _read_r12("js", "api.js")
-    assert "getAiConfigInventory" in src
-    assert "'/api/aiconfig/inventory'" in src
-    assert "'?refresh=1'" in src
-
-
-def test_api_preview_wrapper_contract():
-    src = _read_r12("js", "api.js")
-    assert "previewAiConfigFile" in src
-    assert "'/api/aiconfig/preview'" in src
-    # POST body carries exactly the contract fields.
-    body = src.split("previewAiConfigFile")[1]
-    for field in ("peer_id", "root_index", "rel_path"):
-        assert field in body, field
-    # Tolerant parsing: raw-text bodies must not break the modal.
-    assert "JSON.parse(bodyText)" in src
-    assert "65536" in src  # 64KB truncation heuristic
-
-
-def test_api_pull_wrapper_contract():
-    src = _read_r12("js", "api.js")
-    assert "pullAiConfigFiles" in src
-    assert "'/api/aiconfig/pull'" in src
-    body = src.split("pullAiConfigFiles")[1]
-    for field in ("peer_id", "items", "mode"):
-        assert field in body, field
-
-
-def test_api_paths_wrappers_use_dedicated_endpoint():
-    # The watch list intentionally bypasses POST /api/settings (its whitelist
-    # does not carry ai_config_paths) — edits go through /api/aiconfig/paths.
-    src = _read_r12("js", "api.js")
-    assert "getAiConfigPaths" in src
-    assert "setAiConfigPaths" in src
-    assert src.count("'/api/aiconfig/paths'") == 2  # GET + POST
-    body = src.split("setAiConfigPaths")[1]
-    assert "paths: paths" in body
-
-
-def test_api_preview_surfaces_backend_error_reasons():
-    src = _read_r12("js", "api.js")
-    body = src.split("previewAiConfigFile")[1]
-    # Error bodies are JSON {ok:false,error:...} — the reason must reach the
-    # caller instead of a bare "HTTP 400".
-    assert "parsed.error" in body
-
-
-# ── 3. Store state + WS event wiring ───────────────────────────────────
-
-
-def test_store_declares_aiconfig_state():
-    src = _read_r12("js", "store.js")
-    assert "aiConfigInventory:" in src
-    assert "aiConfigLoaded:" in src
-    assert "aiConfigLoadFailed:" in src
-    assert "aiConfigResults:" in src
-    assert "fetchAiConfigInventory:" in src
-    assert "applyAiConfigFileResult:" in src
-
-
-def test_store_normalizes_inventory_defensively():
-    src = _read_r12("js", "store.js")
-    chunk = src.split("fetchAiConfigInventory: function")[1].split("applyAiConfigFileResult")[0]
-    # Missing/malformed peers map degrades to an empty object, entries to [].
-    assert "typeof res.peers === 'object'" in chunk
-    assert "Array.isArray(p.entries)" in chunk
-    # The wire keys each entry's path as `path`; the store normalizes it to
-    # the spec'd `rel_path` so every consumer relies on one name.
-    assert "e.rel_path || e.path" in chunk
-    # fetched_at (epoch float) becomes the camelCase store field.
-    assert "fetchedAt" in chunk and "fetched_at" in chunk
-    # Failure must still settle the load flag so the panel shows its empty
-    # state instead of spinning forever.
-    assert "aiConfigLoaded = true" in chunk
-
-
-def test_ws_handles_aiconfig_file_event():
-    src = _read_r12("js", "ws.js")
-    assert "case 'aiconfig_file'" in src
-    chunk = src.split("case 'aiconfig_file'")[1].split("break;")[0]
-    # Only the known status vocabulary reaches the store.
-    for status in ("saved", "copied", "appended", "error"):
-        assert f"'{status}'" in chunk, status
-    assert "store.applyAiConfigFileResult" in chunk
-    # Malformed payloads without a path are dropped before the store call.
-    assert "data.rel_path" in chunk
-
-
-# ── 4. Panel component + settings section wiring ────────────────────────
-
-
-def test_panel_component_structure():
-    # Round 18: the device browse/pull UI relocated from the AI Config tab
-    # to the Devices tab, so the device assertions live in the relocated
-    # aiconfig-device-panel component.
-    src = _read_r12("components", "aiconfig-device-panel.js")
-    assert "__CLIPSYNC_COMPONENTS__['aiconfig-device-panel']" in src
-    # Registered under its own name and injected with the shared store.
-    assert "inject: ['store']" in src
-    # Default landing mode must be copy — never a silent overwrite.
-    assert "mode: 'copy'" in src
-    # All three modes offered.
-    for mode in ("overwrite", "copy", "append"):
-        assert f"value: '{mode}'" in src
-    # Pull button disabled at zero selection; preview opens per file.
-    assert "selectedCount === 0 || pulling" in src
-    assert "openPreview" in src
-    # Append mode guards non-text selections client-side (the backend only
-    # lands .txt/.md/.markdown in append mode).
-    assert "append_ext_warning" in src
-    assert "TEXT_EXT_RE" in src
-    # Pull failures surface the backend's reason list (peer_offline, ...).
-    assert "data.errors" in src
-    # Empty state uses the agreed copy keys.
-    assert "aiconfig.empty_title" in src
-    assert "aiconfig.empty_desc" in src
-
-
-def test_settings_panel_ai_config_section_wiring():
-    src = _read_r12("components", "settings-panel.js")
-    # New settings nav entry + search index entry.
-    assert "mk('aiconfig'" in src
-    assert "aiconfig: [" in src
-    # The watch list loads from and saves to its dedicated endpoints —
-    # POST /api/settings does NOT carry ai_config_paths (whitelist).
-    assert "getAiConfigPaths" in src
-    assert "setAiConfigPaths(paths)" in src
-    assert "loadAiConfigPaths" in src
-    # Loaded on open, mirroring logs/certs section loading.
-    assert src.count("=== 'aiconfig') this.loadAiConfigPaths()") == 2
-    # Dirty tracking so closing with unsaved edits prompts.
-    assert "this.markDirty('aiconfig')" in src
-    assert "dirtySections['aiconfig'] = false" in src
-    # Row add/remove + save path.
-    assert "addAiConfigPath" in src
-    assert "removeAiConfigPath" in src
-    assert "saveAiConfigPaths" in src
-    # Broadcast hint shown next to the save button.
-    assert "settings_window.aiconfig_save_hint" in src
-
-
-def test_settings_section_template_registered():
-    src = _read_r12("components", "settings-panel.js")
-    assert "activeSection === 'aiconfig'" in src.replace("\\'", "'")
-
-
-# ── 5. Locale parity ────────────────────────────────────────────────────
-
-_NEW_KEYS_r12 = [
-    "ui.aiconfig",
-    "settings_nav.aiconfig",
-    "aiconfig.empty_title",
-    "aiconfig.empty_desc",
-    "aiconfig.load_failed",
-    "aiconfig.devices",
-    "aiconfig.files_count",
-    "aiconfig.fetched_at",
-    "aiconfig.search_placeholder",
-    "aiconfig.select_all",
-    "aiconfig.col_file",
-    "aiconfig.col_size",
-    "aiconfig.col_time",
-    "aiconfig.no_match",
-    "aiconfig.root_label",
-    "aiconfig.mode_label",
-    "aiconfig.mode_overwrite",
-    "aiconfig.mode_overwrite_hint",
-    "aiconfig.mode_copy",
-    "aiconfig.mode_copy_hint",
-    "aiconfig.mode_append",
-    "aiconfig.mode_append_hint",
-    "aiconfig.pull",
-    "aiconfig.pull_requested",
-    "aiconfig.pull_failed",
-    "aiconfig.append_ext_warning",
-    "aiconfig.preview_title",
-    "aiconfig.preview_truncated",
-    "aiconfig.preview_empty",
-    "aiconfig.preview_failed",
-    "aiconfig.result_saved",
-    "aiconfig.result_copied",
-    "aiconfig.result_appended",
-    "aiconfig.result_error",
-    "settings_window.aiconfig_desc",
-    "settings_window.aiconfig_paths_label",
-    "settings_window.aiconfig_paths_hint",
-    "settings_window.aiconfig_path_placeholder",
-    "settings_window.aiconfig_add_path",
-    "settings_window.save_aiconfig",
-    "settings_window.aiconfig_save_hint",
-    "settings.aiconfig_saved",
-    "settings.save_aiconfig_failed",
-]
-
-
-def _locales_r12():
-    with open(os.path.join(_STATIC_r12, "locales", "en.json"), encoding="utf-8") as f:
-        en = json.load(f)
-    with open(os.path.join(_STATIC_r12, "locales", "zh-CN.json"), encoding="utf-8") as f:
-        zh = json.load(f)
-    return en, zh
-
-
-def test_locale_key_sets_identical_r12():
-    en, zh = _locales_r12()
-    en_only = set(en) - set(zh)
-    zh_only = set(zh) - set(en)
-    assert not en_only, f"keys missing from zh-CN.json: {sorted(en_only)}"
-    assert not zh_only, f"keys missing from en.json: {sorted(zh_only)}"
-
-
-def test_new_round12_keys_present_and_nonempty_in_both_locales():
-    en, zh = _locales_r12()
-    for key in _NEW_KEYS_r12:
-        assert key in en, f"missing from en.json: {key}"
-        assert key in zh, f"missing from zh-CN.json: {key}"
-        assert isinstance(en[key], str) and en[key].strip(), key
-        assert isinstance(zh[key], str) and zh[key].strip(), key
-    # Placeholders used by the panel code must exist in both translations.
-    for key in ("aiconfig.files_count", "aiconfig.fetched_at", "aiconfig.pull",
-                "aiconfig.pull_requested", "aiconfig.result_saved",
-                "aiconfig.result_copied", "aiconfig.result_appended",
-                "aiconfig.result_error"):
-        assert "{count}" in en[key] or "{time}" in en[key] or "{path}" in en[key], key
-        assert "{count}" in zh[key] or "{time}" in zh[key] or "{path}" in zh[key], key
-
-
-def test_locale_json_files_still_parse_r12():
-    en, zh = _locales_r12()
-    assert len(en) > 1000 and len(zh) > 1000
-
-
-# ── 6. JS syntax (node --check over every file this round touched) ──────
-
-
-_TOUCHED_JS_r12 = [
-    ("components", "aiconfig-panel.js"),
-    ("components", "aiconfig-device-panel.js"),
-    ("components", "device-panel.js"),
-    ("components", "tab-navigation.js"),
-    ("components", "settings-panel.js"),
-    ("js", "api.js"),
-    ("js", "store.js"),
-    ("js", "ws.js"),
-]
-
-
-def test_touched_js_passes_node_check_r12(tmp_path):
-    import shutil
-    import subprocess
-
-    node = shutil.which("node")
-    if not node:
-        pytest.skip("node not available")
-    for parts in _TOUCHED_JS_r12:
-        path = os.path.join(_STATIC_r12, *parts)
-        proc = subprocess.run(
-            [node, "--check", path],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-        )
-        assert proc.returncode == 0, (
-            f"{os.path.join(*parts)} fails node --check:\n{proc.stderr}"
-        )
-
-
-def test_no_nul_bytes_in_touched_js_r12():
-    # A stray NUL byte inside a template string survives some editors but is
-    # a landmine for others — keep the shipped sources clean.
-    for parts in _TOUCHED_JS_r12:
-        path = os.path.join(_STATIC_r12, *parts)
-        with open(path, "rb") as f:
-            data = f.read()
-        assert b"\x00" not in data, f"NUL byte found in {os.path.join(*parts)}"
-
-
-# ══════════════════════════════════════════════════
-# merged from test_round19_version_compare.py (shared scaffold suffixed r19)
-# ══════════════════════════════════════════════════
-
-import os
-import shutil
-import subprocess
-import textwrap
-
-_ROOT_r19 = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-_STATIC_r19 = os.path.join(_ROOT_r19, "internal", "web", "static")
-
-_COMPONENT = os.path.join(_STATIC_r19, "components", "aiconfig-device-panel.js")
-
-_NEW_KEYS_r19 = [
-    "aiconfig.ver_missing",
-    "aiconfig.ver_same",
-    "aiconfig.ver_local_newer",
-    "aiconfig.ver_remote_newer",
-    "aiconfig.ver_tooltip",
-]
-
-
-def _read_r19(*parts) -> str:
-    with open(os.path.join(_STATIC_r19, *parts), encoding="utf-8") as f:
-        return f.read()
-
-
-def _locales_r19():
-    with open(os.path.join(_STATIC_r19, "locales", "en.json"), encoding="utf-8") as f:
-        en = json.load(f)
-    with open(os.path.join(_STATIC_r19, "locales", "zh-CN.json"), encoding="utf-8") as f:
-        zh = json.load(f)
-    return en, zh
-
-
-# ── 1. compare-function behaviour (constructed store data, run via Node) ─
-
-# The component registers a plain object (no Vue invoked at load time), so it
-# can be eval'd in a stub-windowed Node and its methods driven directly.
-_NODE_SCRIPT = textwrap.dedent(r"""
-    const fs = require('fs');
-    global.window = {};
-    eval(fs.readFileSync(process.argv[2], 'utf8'));
-    const comp = global.window.__CLIPSYNC_COMPONENTS__['aiconfig-device-panel'];
-
-    const R = (rel_path, sha256, size, mtime) => ({ rel_path, sha256, size, mtime });
-
-    function makeCtx(entries, loaded = true) {
-      const store = { aiConfigLocal: { loaded, entries } };
-      const localByPath = comp.computed.localByPath.call({ store });
-      return { store, localByPath, t: () => '' };
-    }
-
-    function stateOf(entries, remote, loaded = true) {
-      return comp.methods.compareState.call(makeCtx(entries, loaded), remote);
-    }
-
-    const cases = [
-      // name, localEntries, remoteEntry, expected
-      ['missing',
-        [R('A.md', 'aaaa', 10, 1000)],
-        R('B.md', 'bbbb', 20, 2000), 'missing'],
-      ['same',
-        [R('A.md', 'aaaa', 10, 1000)],
-        R('A.md', 'aaaa', 10, 1000), 'same'],
-      ['local_newer',
-        [R('A.md', 'local', 10, 2000)],
-        R('A.md', 'remote', 20, 1000), 'local_newer'],
-      ['remote_newer',
-        [R('A.md', 'local', 10, 1000)],
-        R('A.md', 'remote', 20, 2000), 'remote_newer'],
-      // mtime unit invariance: values > 1e12 are ms, anything smaller is
-      // seconds (1e12 seconds ≈ year 33658, so 1e12 itself is still seconds).
-      ['local_newer_ms',
-        [R('A.md', 'local', 10, 2000000000000)],
-        R('A.md', 'remote', 20, 1500000000000), 'local_newer'],
-      ['remote_newer_sec',
-        [R('A.md', 'local', 10, 1000)],
-        R('A.md', 'remote', 20, 2000), 'remote_newer'],
-      // equal mtime with differing hash falls through to "remote is newer".
-      ['equal_mtime_falls_remote',
-        [R('A.md', 'local', 10, 1234)],
-        R('A.md', 'remote', 20, 1234), 'remote_newer'],
-      // duplicate rel_path across local roots: first match wins, no crash.
-      ['duplicate_local_paths',
-        [R('A.md', 'first', 1, 100), R('A.md', 'second', 2, 200)],
-        R('A.md', 'first', 1, 100), 'same'],
-    ];
-
-    for (const [name, local, remote, expected] of cases) {
-      const got = stateOf(local, remote);
-      if (got !== expected) {
-        console.error(`FAIL ${name}: expected ${expected}, got ${got}`);
-        process.exit(1);
-      }
-      console.log(`ok ${name} -> ${got}`);
-    }
-
-    // Defensive: local inventory not loaded → null (no badge rendered).
-    const notLoaded = stateOf([], R('A.md', 'aaaa', 1, 1), false);
-    if (notLoaded !== null) {
-      console.error(`FAIL not-loaded should be null, got ${notLoaded}`);
-      process.exit(1);
-    }
-    console.log('ok not-loaded -> null');
-
-    // compareTitle: a missing file has no local side — label only (no crash,
-    // no "Local: …" line).  Methods are bound onto the instance like Vue does.
-    function ctxWithT(entries) {
-      return Object.assign(makeCtx(entries), {
-        t: (k) => k,
-        compareState: comp.methods.compareState,
-        verKey: comp.methods.verKey,
-      });
-    }
-    const titleMissing = comp.methods.compareTitle.call(
-      ctxWithT([R('A.md', 'aaaa', 10, 1000)]), R('B.md', 'bbbb', 20, 2000));
-    if (titleMissing !== 'aiconfig.ver_missing') {
-      console.error(`FAIL title(missing) -> ${JSON.stringify(titleMissing)}`);
-      process.exit(1);
-    }
-    console.log('ok title(missing) -> aiconfig.ver_missing');
-
-    // compareTitle for a matched file builds both sides via the tooltip key.
-    const titleSame = comp.methods.compareTitle.call(
-      ctxWithT([R('A.md', 'aaaa', 10, 1000)]), R('A.md', 'aaaa', 10, 1000));
-    if (typeof titleSame !== 'string' || !titleSame.includes('\n') ||
-        !titleSame.includes('aiconfig.ver_tooltip')) {
-      console.error(`FAIL title(same) -> ${JSON.stringify(titleSame)}`);
-      process.exit(1);
-    }
-    console.log('ok title(same) carries tooltip');
-
-    console.log('ALL_OK');
-""")
-
-
-def test_compare_function_states_via_node(tmp_path):
-    node = shutil.which("node")
-    if not node:
-        pytest.skip("node not available")
-    script = tmp_path / "round19_compare.js"
-    script.write_text(_NODE_SCRIPT, encoding="utf-8")
-    proc = subprocess.run(
-        [node, str(script), _COMPONENT],
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-    )
-    assert proc.returncode == 0, (
-        f"round19 compare script failed:\n{proc.stdout}\n{proc.stderr}"
-    )
-    assert "ALL_OK" in proc.stdout
-
-
-def test_compare_logic_present_statically():
-    # Belt-and-suspenders: the four states + defensive guard are named in the
-    # component even on machines without node.
-    src = _read_r19("components", "aiconfig-device-panel.js")
-    for token in (
-        "localByPath",
-        "compareState: function",
-        "compareTitle: function",
-        "'missing'",
-        "'same'",
-        "'local_newer'",
-        "'remote_newer'",
-        "localStore.loaded",
-        "mtimeMs",
-    ):
-        assert token in src, token
-
-
-# ── 2. index.html CSS ──────────────────────────────────────────────────
-
-
-def test_index_html_hosts_version_badge_css():
-    css = _read_r19("index.html")
-    for cls in (
-        ".aiconfig-panel__ver-badge {",
-        ".aiconfig-panel__ver-badge--same {",
-        ".aiconfig-panel__ver-badge--local_newer {",
-        ".aiconfig-panel__ver-badge--remote_newer {",
-        ".aiconfig-panel__ver-badge--missing {",
-    ):
-        assert cls in css, f"missing CSS rule: {cls}"
-
-
-# ── 3. component template binding + mount priming ──────────────────────
-
-
-def test_panel_binds_version_badge_in_template():
-    src = _read_r19("components", "aiconfig-device-panel.js")
-    # Badge is rendered inline after the file path, gated on compareState
-    # (rows are tree rows now — files carry `row.entry`).
-    assert "aiconfig-panel__ver-badge" in src
-    assert "compareState(row.entry)" in src
-    assert "compareTitle(row.entry)" in src
-    assert "aiconfig.ver_" in src
-    # Directory-tree grouping is wired.
-    assert "treeRows" in src
-    assert "toggleDir(row.node)" in src
-    # Path button / preview / check interactions stay intact.
-    assert "openPreview(row.entry)" in src
-    assert "toggleCheck(row.entry)" in src
-    assert "pullAiConfigFiles" in src
-
-
-def test_panel_mount_primes_local_inventory():
-    src = _read_r19("components", "aiconfig-device-panel.js")
-    assert "store.aiConfigLocal.loaded" in src
-    assert "store.fetchAiConfigLocal()" in src
-
-
-# ── 4. Locale parity ───────────────────────────────────────────────────
-
-
-def test_locale_key_sets_identical_r19():
-    en, zh = _locales_r19()
-    en_only = set(en) - set(zh)
-    zh_only = set(zh) - set(en)
-    assert not en_only, f"keys missing from zh-CN.json: {sorted(en_only)}"
-    assert not zh_only, f"keys missing from en.json: {sorted(zh_only)}"
-
-
-def test_new_round19_keys_present_and_nonempty_in_both_locales():
-    en, zh = _locales_r19()
-    for key in _NEW_KEYS_r19:
-        assert key in en, f"missing from en.json: {key}"
-        assert key in zh, f"missing from zh-CN.json: {key}"
-        assert isinstance(en[key], str) and en[key].strip(), key
-        assert isinstance(zh[key], str) and zh[key].strip(), key
-    # The tooltip interpolates both sides' formatted "size · mtime".
-    for key in ("aiconfig.ver_tooltip",):
-        assert "{local}" in en[key] and "{remote}" in en[key], key
-        assert "{local}" in zh[key] and "{remote}" in zh[key], key
-    # The visible badge states must differ across all four keys (non-empty
-    # and mutually distinguishable so the panel reads correctly).
-    seen = set()
-    for key in ("aiconfig.ver_missing", "aiconfig.ver_same",
-                "aiconfig.ver_local_newer", "aiconfig.ver_remote_newer"):
-        assert en[key] != zh[key], f"same text both languages: {key}"
-
-
-def test_locale_json_files_still_parse_r19():
-    en, zh = _locales_r19()
-    assert len(en) > 1000 and len(zh) > 1000
-
-
-# ── 5. JS syntax (node --check over the touched file) ──────────────────
-
-
-_TOUCHED_JS_r19 = [
-    ("components", "aiconfig-device-panel.js"),
-]
-
-
-def test_touched_js_passes_node_check_r19():
-    node = shutil.which("node")
-    if not node:
-        pytest.skip("node not available")
-    for parts in _TOUCHED_JS_r19:
-        path = os.path.join(_STATIC_r19, *parts)
-        proc = subprocess.run(
-            [node, "--check", path],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-        )
-        assert proc.returncode == 0, (
-            f"{os.path.join(*parts)} fails node --check:\n{proc.stderr}"
-        )
-
-
-def test_no_nul_bytes_in_touched_js_r19():
-    for parts in _TOUCHED_JS_r19:
-        path = os.path.join(_STATIC_r19, *parts)
-        with open(path, "rb") as f:
-            data = f.read()
-        assert b"\x00" not in data, f"NUL byte found in {os.path.join(*parts)}"
+def test_no_hardcoded_preset_table_anywhere():
+    # The profile table's single source of truth is the backend
+    # (ai_profiles.py, served via /api/aiconfig/profiles).  No JS file may
+    # embed its own preset list that could drift.
+    for root, _dirs, files in os.walk(os.path.join(_STATIC, "components")):
+        for name in files:
+            if not name.endswith(".js"):
+                continue
+            src = _read(os.path.relpath(os.path.join(root, name), _STATIC))
+            assert "AICONFIG_PRESETS" not in src, f"presets in {name}"
+    for name in ("store.js", "api.js"):
+        src = _read("js", name)
+        assert "AICONFIG_PRESETS" not in src, f"presets in {name}"

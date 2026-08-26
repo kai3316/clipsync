@@ -27,6 +27,7 @@ import pytest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+from internal.sync.ai_profiles import DEFAULT_TOOL_KEYS
 from src.main import Application  # noqa: E402
 
 _GROUPS = ("system", "network", "internet", "ai_config", "chat", "transfer",
@@ -43,7 +44,8 @@ def _base_cfg(**over):
         internet_sync_enabled=False,
         relay_brokers=["wss://broker.emqx.io:8084/mqtt"],
         netpair_secrets={},
-        ai_config_paths=[],
+        ai_config_tools=list(DEFAULT_TOOL_KEYS),
+        ai_config_custom_paths=[],
         data_dir="",
         device_id="a1b2c3d4e5f6",
         device_name="DevA",
@@ -158,7 +160,7 @@ def _full_app(tmp_path, monkeypatch):
         web_enabled=True,
         internet_sync_enabled=True,
         netpair_secrets={"peer1": "secret"},
-        ai_config_paths=["~/claude"],
+        ai_config_custom_paths=["~/claude"],
     )
 
     class Relay:

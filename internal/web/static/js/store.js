@@ -121,30 +121,39 @@
     mutedChatPeers: new Set(), // peer_ids muted in the chat UI (no unread badge)
 
     /* ═══════════════════════════════════════════════════════════════
-       AI-config sync (round 12)
+       AI-config sync (refactor round 1 — tool profiles)
        aiConfigInventory mirrors GET /api/aiconfig/inventory:
-       { peers: { pid: {name, entries[], fetchedAt} }, fetchedAt } —
-       normalized/defensively cleaned in fetchAiConfigInventory().
-       aiConfigResults is the rolling list of WS `aiconfig_file` per-file
-       pull results (newest first, capped) that the config panel badges.
+       { peers: { pid: {name, legacy, entries[], fetchedAt} }, fetchedAt }.
+       v2 entries are {tool, rel_path, sha256, size, mtime, is_dir}; legacy
+       peers' entries are {root_index, path, ...} and read-only (browse +
+       preview only).  aiConfigResults is the rolling list of WS
+       `aiconfig_file` per-file pull results (newest first, capped).
+       aiConfigBatches tracks folder/batch pulls by batch_id so the panel can
+       show "N/M done" progress and retry failures.
        ═══════════════════════════════════════════════════════════════ */
     aiConfigInventory: { peers: {}, fetchedAt: '' },
     aiConfigLoaded: false,     // true once the first inventory fetch settled
     aiConfigLoadFailed: false, // fetch rejected AND nothing cached to show
     aiConfigRefreshing: false, // true while a ?refresh=1 re-request runs
     aiConfigResults: [],
+    aiConfigProfiles: { tools: [], enabled: [], custom_paths: [] },
+    aiConfigProfilesLoaded: false,
+    aiConfigBatches: {},       // batch_id -> {total, done, results: [], peerId}
+    aiConfigMigrateOpen: false, // migration wizard modal visibility
 
     /* ═══════════════════════════════════════════════════════════════
        AI-config LOCAL manager (round 18, no pairing needed)
        aiConfigLocal mirrors GET /api/aiconfig/local:
-       { collected_at, roots: [{root_index, path, count}], entries:
-       [{root_index, rel_path, size, mtime, sha256}] } — normalized
-       defensively in fetchAiConfigLocal().  This is a plain file manager
-       over THIS device's watch roots; it must work with zero paired
-       devices (unlike aiConfigInventory above).
+       { collected_at, tools: [{key,label,entries}], custom_paths: [],
+       roots: [{tool, kind, path, count}], entries: [{tool, rel_path, size,
+       mtime, sha256, is_dir}] } — normalized defensively in
+       fetchAiConfigLocal().  This is a plain file manager over THIS device's
+       tool-profile roots; it must work with zero paired devices.
        ═══════════════════════════════════════════════════════════════ */
     aiConfigLocal: {
       collected_at: '',
+      tools: [],
+      custom_paths: [],
       roots: [],
       entries: [],
       loaded: false,     // true once the first local fetch settled
@@ -1951,18 +1960,30 @@
           Object.keys(raw).forEach(function (pid) {
             var p = raw[pid];
             if (!p || typeof p !== 'object') return;
+            var legacy = !!p.legacy;
             clean[pid] = {
               name: p.name || pid,
-              // Wire entries key the path as `path`; normalize to the
-              // spec'd `rel_path` once here so every consumer (panel,
-              // badges) can rely on one name.
+              legacy: legacy,
               entries: (Array.isArray(p.entries) ? p.entries : []).filter(function (e) {
                 return e && typeof e === 'object' && (e.rel_path || e.path);
               }).map(function (e) {
-                var ri = (typeof e.root_index === 'number') ? e.root_index
-                  : parseInt(e.root_index, 10);
+                if (legacy) {
+                  // Legacy (pre-refactor) shape — root_index + path; read-only.
+                  var ri = (typeof e.root_index === 'number') ? e.root_index
+                    : parseInt(e.root_index, 10);
+                  return {
+                    tool: null,
+                    root_index: isFinite(ri) ? ri : 0,
+                    rel_path: String(e.path || e.rel_path),
+                    sha256: e.sha256 || '',
+                    size: (typeof e.size === 'number') ? e.size : Number(e.size) || 0,
+                    mtime: e.mtime,
+                    is_dir: !!e.is_dir,
+                  };
+                }
+                // v2 shape — deterministic tool key + rel_path.
                 return {
-                  root_index: isFinite(ri) ? ri : 0,
+                  tool: String(e.tool || 'custom'),
                   rel_path: String(e.rel_path || e.path),
                   sha256: e.sha256 || '',
                   size: (typeof e.size === 'number') ? e.size : Number(e.size) || 0,
@@ -1989,6 +2010,38 @@
         .finally(function () {
           self._aiConfigInFlight = false;
           self.aiConfigRefreshing = false;
+        });
+    },
+
+    /**
+     * Fetch the AI-tool profile table + this device's current selection
+     * (GET /api/aiconfig/profiles).  In-flight calls are coalesced.
+     * @returns {Promise<boolean>} true when a snapshot was applied
+     */
+    fetchAiConfigProfiles: function () {
+      var self = this;
+      if (!window.ClipsyncAPI || !window.ClipsyncAPI.getAiConfigProfiles) {
+        return Promise.resolve(false);
+      }
+      if (this._aiConfigProfilesInFlight) return Promise.resolve(false);
+      this._aiConfigProfilesInFlight = true;
+      return window.ClipsyncAPI.getAiConfigProfiles()
+        .then(function (res) {
+          if (!res || typeof res !== 'object') return false;
+          self.aiConfigProfiles = {
+            tools: Array.isArray(res.tools) ? res.tools : [],
+            enabled: Array.isArray(res.enabled) ? res.enabled : [],
+            custom_paths: Array.isArray(res.custom_paths) ? res.custom_paths : [],
+          };
+          self.aiConfigProfilesLoaded = true;
+          return true;
+        })
+        .catch(function () {
+          self.aiConfigProfilesLoaded = true;
+          return false;
+        })
+        .finally(function () {
+          self._aiConfigProfilesInFlight = false;
         });
     },
 
@@ -2022,12 +2075,11 @@
           for (var ri = 0; ri < roots.length; ri++) {
             var r = roots[ri];
             if (r && typeof r === 'object' &&
-                (typeof r.root_index === 'number' || r.root_index !== undefined) &&
+                typeof r.tool === 'string' &&
                 typeof r.path === 'string') {
-              var rri = (typeof r.root_index === 'number') ? r.root_index
-                : parseInt(r.root_index, 10);
               cleanRoots.push({
-                root_index: isFinite(rri) ? rri : 0,
+                tool: r.tool,
+                kind: r.kind || 'dir',
                 path: r.path,
                 count: (typeof r.count === 'number') ? r.count : 0,
               });
@@ -2038,10 +2090,8 @@
           for (var ei = 0; ei < raw.length; ei++) {
             var e = raw[ei];
             if (!e || typeof e !== 'object' || !(e.rel_path || e.path)) continue;
-            var ri2 = (typeof e.root_index === 'number') ? e.root_index
-              : parseInt(e.root_index, 10);
             cleanEntries.push({
-              root_index: isFinite(ri2) ? ri2 : 0,
+              tool: String(e.tool || 'custom'),
               rel_path: String(e.rel_path || e.path),
               sha256: e.sha256 || '',
               size: (typeof e.size === 'number') ? e.size : Number(e.size) || 0,
@@ -2051,6 +2101,8 @@
           }
           self.aiConfigLocal = {
             collected_at: res.collected_at || '',
+            tools: Array.isArray(res.tools) ? res.tools : [],
+            custom_paths: Array.isArray(res.custom_paths) ? res.custom_paths : [],
             roots: cleanRoots,
             entries: cleanEntries,
             loaded: true,
@@ -2334,13 +2386,27 @@
     applyAiConfigFileResult: function (data) {
       var entry = {
         peer_id: (data.peer_id !== undefined && data.peer_id !== null) ? String(data.peer_id) : '',
+        tool: data.tool || '',
         rel_path: data.rel_path || '',
         status: data.status,
+        reason: data.reason || '',
         ts: Date.now(),
       };
       this.aiConfigResults.unshift(entry);
       if (this.aiConfigResults.length > 50) {
         this.aiConfigResults.splice(50, this.aiConfigResults.length - 50);
+      }
+      // Fold into the batch tracker so the panel can show "N/M done" and
+      // retry only the failures.  A batch entry without batch_id on the WS
+      // event (legacy backend) is simply not tracked.
+      var batchId = data.batch_id;
+      if (batchId && this.aiConfigBatches[batchId]) {
+        var batch = this.aiConfigBatches[batchId];
+        batch.done += 1;
+        batch.results.push(entry);
+        if (batch.done >= batch.total) {
+          batch.finished = true;
+        }
       }
       var key = entry.status === 'error' ? 'aiconfig.result_error'
         : entry.status === 'copied' ? 'aiconfig.result_copied'
@@ -2348,6 +2414,47 @@
         : 'aiconfig.result_saved';
       this.showToast(t(key, { path: entry.rel_path }), 2800,
         entry.status === 'error' ? 'error' : 'success');
+    },
+
+    /**
+     * Register a batch pull before POSTing /api/aiconfig/pull so that
+     * per-file aiconfig_file WS events (echoing *batch_id*) accumulate into
+     * `aiConfigBatches[batch_id]` as `{total, done, results, finished}`.
+     * @param {string} batchId non-empty batch id
+     * @param {number} total number of files the pull will request
+     * @param {string} [peerId] device the pull came from (progress is shown
+     *   on that device's view)
+     */
+    startAiConfigBatch: function (batchId, total, peerId) {
+      if (!batchId || !(total > 0)) return;
+      this.aiConfigBatches[batchId] = {
+        total: total,
+        done: 0,
+        results: [],
+        finished: false,
+        peerId: peerId || '',
+      };
+    },
+
+    /**
+     * Open / close the AI-config migration wizard modal.  The wizard reads
+     * aiConfigMigrateOpen and resets its internal state when it becomes true.
+     */
+    openAiConfigMigrate: function () {
+      this.aiConfigMigrateOpen = true;
+    },
+    closeAiConfigMigrate: function () {
+      this.aiConfigMigrateOpen = false;
+    },
+
+    /**
+     * Drop a batch once its pull is complete (or the user dismisses it),
+     * so the batch map never grows unbounded.
+     */
+    clearAiConfigBatch: function (batchId) {
+      if (batchId && this.aiConfigBatches[batchId]) {
+        delete this.aiConfigBatches[batchId];
+      }
     },
 
   });

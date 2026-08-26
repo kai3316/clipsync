@@ -413,7 +413,8 @@ def test_config_save_load_roundtrips_new_keys(tmp_path, monkeypatch):
     cfg.relay_password = "s3cret!"
     cfg.relay_secret = "ab" * 32
     cfg.peer_relay_secrets = {"peer-1": "cd" * 32}
-    cfg.ai_config_paths = ["~/ai-configs", "~/.claude"]
+    cfg.ai_config_tools = ["claude_code", "codex"]
+    cfg.ai_config_custom_paths = ["~/ai-configs"]
     config_module.save(cfg)
 
     cfg2 = config_module.load()
@@ -424,7 +425,45 @@ def test_config_save_load_roundtrips_new_keys(tmp_path, monkeypatch):
     assert cfg2.relay_password == cfg.relay_password
     assert cfg2.relay_secret == cfg.relay_secret
     assert cfg2.peer_relay_secrets == cfg.peer_relay_secrets
-    assert cfg2.ai_config_paths == cfg.ai_config_paths
+    assert cfg2.ai_config_tools == cfg.ai_config_tools
+    assert cfg2.ai_config_custom_paths == cfg.ai_config_custom_paths
+
+
+def test_config_migrates_legacy_ai_config_paths(tmp_path, monkeypatch):
+    """A pre-refactor ai_config_paths list is classified on load.
+
+    Old paths that name a built-in profile entry enable that tool; anything
+    else survives as a custom path.  The migration is one-way and idempotent —
+    a later save persists the new fields, so a re-load never re-runs it.
+    """
+    config_module = _point_config_at(tmp_path, monkeypatch, {
+        "ai_config_paths": [
+            "~/.claude/CLAUDE.md",       # → claude_code profile
+            "~/.codex/config.toml",      # → codex profile
+            "~/ai-notes",                # → custom path
+            "  ",                        # → dropped
+        ],
+    })
+    cfg = config_module.load()
+    assert cfg.ai_config_tools == ["claude_code", "codex"]
+    assert cfg.ai_config_custom_paths == ["~/ai-notes"]
+
+    # Idempotent: reloading the same (un-migrated) file yields the same result.
+    cfg2 = config_module.load()
+    assert cfg2.ai_config_tools == cfg.ai_config_tools
+    assert cfg2.ai_config_custom_paths == cfg.ai_config_custom_paths
+
+
+def test_config_legacy_ai_config_paths_unmatched_keeps_feature_on(
+        tmp_path, monkeypatch):
+    """No built-in path matched → all tools stay enabled (feature stays on)."""
+    config_module = _point_config_at(tmp_path, monkeypatch, {
+        "ai_config_paths": ["~/notes-a", "~/notes-b"],
+    })
+    cfg = config_module.load()
+    from internal.sync.ai_profiles import DEFAULT_TOOL_KEYS
+    assert cfg.ai_config_tools == list(DEFAULT_TOOL_KEYS)
+    assert cfg.ai_config_custom_paths == ["~/notes-a", "~/notes-b"]
 
 
 @pytest.fixture()
@@ -456,7 +495,8 @@ def test_backup_roundtrips_new_config_keys(tmp_path, _isolated_favorites):
     cfg.relay_password = "s3cret!"
     cfg.relay_secret = "ab" * 32
     cfg.peer_relay_secrets = {"peer-1": "cd" * 32}
-    cfg.ai_config_paths = ["~/ai-configs"]
+    cfg.ai_config_tools = ["gemini"]
+    cfg.ai_config_custom_paths = ["~/ai-configs"]
 
     history = ClipboardHistory(storage_path=str(tmp_path / "h.json"))
     zip_path = backup_mod.create_backup(
@@ -471,7 +511,8 @@ def test_backup_roundtrips_new_config_keys(tmp_path, _isolated_favorites):
     assert exported["relay_username"] == cfg.relay_username
     assert exported["relay_password"] == cfg.relay_password
     assert exported["peer_relay_secrets"] == {"peer-1": "cd" * 32}
-    assert exported["ai_config_paths"] == cfg.ai_config_paths
+    assert exported["ai_config_tools"] == cfg.ai_config_tools
+    assert exported["ai_config_custom_paths"] == cfg.ai_config_custom_paths
 
     fresh = Config()   # defaults everywhere
     result = backup_mod.restore_backup(zip_path, fresh, history)
@@ -483,7 +524,8 @@ def test_backup_roundtrips_new_config_keys(tmp_path, _isolated_favorites):
     assert fresh.relay_password == cfg.relay_password
     assert fresh.relay_secret == cfg.relay_secret
     assert fresh.peer_relay_secrets == {"peer-1": "cd" * 32}
-    assert fresh.ai_config_paths == cfg.ai_config_paths
+    assert fresh.ai_config_tools == cfg.ai_config_tools
+    assert fresh.ai_config_custom_paths == cfg.ai_config_custom_paths
 
 
 def test_backup_strlist_nonnull_rule():

@@ -83,10 +83,23 @@
             id: 'aiconfig',
             label: t('ui.aiconfig'),
             icon: '🤖',
-            // The AI Config tab is the LOCAL config manager only (round 18);
-            // the badge counts this machine's files, not paired peers.
-            count: (s.aiConfigLocal && s.aiConfigLocal.entries)
-              ? s.aiConfigLocal.entries.length : 0,
+            // Attention badge: total file-diff count across every paired
+            // device (vs this machine's inventory) — how many config files
+            // differ and are worth pulling. Zero = nothing to sync.
+            count: (function () {
+              var H = window.__CLIPSYNC_AICONFIG_HELPERS__;
+              if (!H) return 0;
+              var local = (s.aiConfigLocal && s.aiConfigLocal.entries) ? s.aiConfigLocal.entries : [];
+              var localIdx = H.buildLocalIndex(local);
+              var inv = (s.aiConfigInventory && s.aiConfigInventory.peers) || {};
+              var total = 0;
+              Object.keys(inv).forEach(function (pid) {
+                var p = inv[pid];
+                if (!p || !Array.isArray(p.entries)) return;
+                total += H.diffCounts(localIdx, p.entries, !!p.legacy).total;
+              });
+              return total;
+            })(),
           },
           {
             id: 'diagnostics',

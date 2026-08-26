@@ -1,11 +1,13 @@
-"""AI-config sync (Round 12) — metadata inventory + selective file pull.
+"""AI-config sync (refactor round 1) — tool profiles + metadata inventory +
+selective file/folder pull.
 
-Each device keeps a user-maintained watch list (``cfg.ai_config_paths``) of
-root directories that hold AI tool configuration files: CLAUDE.md, memory
-markdown files, skills directories, .mcp.json, etc.  Paired devices exchange
-*metadata only* — relative path, sha256 prefix, size, mtime — via
-``aiconfig_inv`` frames; either side may then pull an individual file with
-``aiconfig_req``, answered by ``aiconfig_data`` carrying base64 content.
+Each device advertises the AI-tool config files and skills / commands
+directories from its ENABLED TOOL PROFILES (internal/sync/ai_profiles.py)
+plus its user custom paths.  Paired devices exchange *metadata only* —
+relative path, tool key, sha256 prefix, size, mtime — via ``aiconfig_inv``;
+either side may then pull an individual file (``aiconfig_req`` →
+``aiconfig_data``) or an entire folder, which the receiving side expands from
+the peer's cached inventory and pulls file-by-file under one ``batch_id``.
 
 Design constraints:
 - Paired peers only.  The transport's unpaired gate already drops these
@@ -18,15 +20,23 @@ Design constraints:
   MAX_ENTRIES per device; served/pulled content is capped at MAX_CONFIG_FILE_SIZE;
   b64 decode failures are discarded.
 
+Protocol v2: inventory entries carry a ``tool`` key from the deterministic
+profile table, so a receiving device resolves the landing target through the
+SAME profile — root indices never cross the wire and the old ambiguous_root /
+no_local_root mapping errors are gone.  Legacy (pre-refactor) peers remain
+read-only: their root_index inventories are cached and previewed / pulled via
+the old request shape.
+
 Wire payloads (JSON):
-  aiconfig_inv  {"msg_type", "device_name": str, "entries": [entry...]}
-      entry = {"path": str(rel posix), "root_index": int,
-               "sha256": 16 hex chars, "size": int, "mtime": float}
-  aiconfig_req  {"msg_type", "root_index": int, "rel_path": str}
-      Special form: {"msg_type", "inventory_refresh": true} asks the peer to
-      re-send its inventory now (used by GET /api/aiconfig/inventory?refresh=1).
-  aiconfig_data {"msg_type", "root_index": int, "rel_path": str,
-                 "sha256": 16 hex, "b64_content": str, "truncated": bool}
+  aiconfig_inv  {"msg_type","v":2,"device_name": str,"entries": [entry...]}
+      entry = {"tool": str, "rel_path": str(rel posix), "sha256": 16 hex,
+               "size": int, "mtime": float, "is_dir": bool}
+      legacy entry (no "v"): {"root_index": int, "path": str, ...}
+  aiconfig_req  {"msg_type","tool": str,"rel_path": str}          (v2)
+                {"msg_type","root_index": int,"rel_path": str}    (legacy)
+                {"msg_type","inventory_refresh": true}
+  aiconfig_data {"msg_type","tool","rel_path","sha256","b64_content","truncated"}
+                (or the legacy root_index form)
 """
 
 import base64
@@ -42,6 +52,7 @@ import time
 from pathlib import Path
 
 from internal.protocol.codec import encode_frame
+from internal.sync import ai_profiles
 
 logger = logging.getLogger(__name__)
 
@@ -53,19 +64,17 @@ MAX_CONFIG_FILE_SIZE = 1024 * 1024
 # Hard cap on inventory entries advertised per device — protects both the
 # collector (a runaway directory tree) and the wire (inv frame size).
 MAX_ENTRIES = 2000
-# Watch-list roots accepted per device (set_watch_list sanity bound).
-MAX_ROOTS = 50
-# rel_path / device-name string bounds on the wire.
+# rel_path / tool / device-name string bounds on the wire.
 MAX_PATH_LEN = 512
 # Preview responses are truncated to this many bytes of text.
 PREVIEW_MAX_BYTES = 64 * 1024
-# Local-only file manager (Round 18): reads are capped at the same 64 KB as
-# previews; saves are capped at 256 KB — a generous ceiling for an AI-config
-# text file — and refuse NUL bytes (binary content).
+# Local-only file manager: reads are capped at the same 64 KB as previews;
+# saves are capped at 256 KB — a generous ceiling for an AI-config text file —
+# and refuse NUL bytes (binary content).
 LOCAL_READ_MAX_BYTES = 64 * 1024
 LOCAL_SAVE_MAX_BYTES = 256 * 1024
-# Recoverable trash directory (Round 18), created under the app data dir.
-# Files are MOVED here, never physically deleted, so a mis-click is undoable.
+# Recoverable trash directory, created under the app data dir.  Files are
+# MOVED here, never physically deleted, so a mis-click is undoable.
 TRASH_DIR_NAME = "aiconfig_trash"
 # A pending pull/preview entry expires after this long; late data is dropped.
 PENDING_TTL = 60.0
@@ -86,11 +95,11 @@ _TEMP_NAMES = {".DS_Store", "Thumbs.db", "desktop.ini"}
 
 
 def expand_root(path_str: str, home: str | Path | None = None) -> Path | None:
-    """Expand one watch-list entry to an absolute Path, or None if unusable.
+    """Expand one watch-root entry to an absolute Path, or None if unusable.
 
     Leading "~" expands against *home* (the caller's real home when None so
     tests can inject a fake one).  No environment-variable expansion: watch
-    list entries are plain user-typed paths.
+    entries are plain user-typed paths.
     """
     if not isinstance(path_str, str):
         return None
@@ -140,43 +149,69 @@ def _hash_file(path: Path, max_bytes: int = MAX_CONFIG_FILE_SIZE) -> tuple[str, 
 
 
 def collect_roots(
-    paths,
+    roots,
     home: str | Path | None = None,
     max_bytes: int = MAX_CONFIG_FILE_SIZE,
     max_entries: int = MAX_ENTRIES,
     include_dirs: bool = False,
 ) -> list[dict]:
-    """Collect inventory entries across all watch-list roots (pure function).
+    """Collect inventory entries across watch roots (pure function).
 
-    For every root: recursive walk, skipping files over *max_bytes*, symlinked
-    entries (never followed), and temp junk names.  Paths are emitted relative
-    to their root using forward slashes so they are stable across platforms.
-    Output is deterministic (sorted within each root).  The global result is
-    capped at *max_entries* entries.
+    *roots* is a list of ``(tool, kind, path)`` tuples as produced by
+    ``ai_profiles.effective_roots`` (kind is "file" for a single-config-file
+    root — the file itself is the only advertised entry — or "dir" for a
+    recursive walk).  Entries are emitted relative to their root using forward
+    slashes so they are stable across platforms, each carrying its ``tool``
+    key and an internal ``root_index`` (index into *roots*, used only to trace
+    a served file back to its root).  Output is deterministic (sorted within
+    each root) and capped at *max_entries*; duplicate (tool, rel_path) pairs
+    keep the first occurrence so pulls are never ambiguous.
 
     When *include_dirs* is true, subdirectories are also emitted as ``is_dir``
-    entries (e.g. a Claude Code skill folder ``my-skill/``) so a file manager
-    UI can show the folder tree and count skills — used by the local listing
-    and by the peer-inventory exchange (a peer can then show the same folder
-    count).
+    entries (e.g. a Claude Code skill folder ``my-skill/``) so a file-manager
+    UI can show the folder tree and count skills.
     """
     entries: list[dict] = []
-    seen_roots: set[str] = set()
-    for index, raw in enumerate(paths):
-        if not isinstance(raw, str) or len(entries) >= max_entries:
+    seen: set[tuple[str, str]] = set()
+    for index, raw in enumerate(roots):
+        if len(entries) >= max_entries:
+            break
+        if not (isinstance(raw, (tuple, list)) and len(raw) == 3):
             continue
-        root = expand_root(raw, home=home)
+        tool, kind, path_str = raw[0], raw[1], raw[2]
+        if not isinstance(tool, str) or kind not in ("file", "dir") \
+                or not isinstance(path_str, str):
+            continue
+        root = expand_root(path_str, home=home)
         if root is None:
             continue
-        root_key = str(root).lower() if os.name == "nt" else str(root)
-        if root_key in seen_roots:
-            continue  # duplicate root — same files would be advertised twice
-        seen_roots.add(root_key)
-        # A watch entry may be a single FILE (e.g. ~/.claude/CLAUDE.md or
-        # ~/.codex/config.toml) so presets can include exactly the config
-        # files — and keep credentials (auth.json etc.) out by not listing
-        # their directories.  Such a root advertises itself as one entry.
-        if root.is_file():
+
+        def add_entry(rel: str, *, is_dir: bool = False, size=None,
+                      mtime=None, sha: str = "") -> bool:
+            key = (tool, rel)
+            if key in seen:
+                return False  # same tool + rel — keep the first
+            seen.add(key)
+            entry: dict = {
+                "tool": tool,
+                "path": rel,
+                "root_index": index,
+                "is_dir": is_dir,
+            }
+            if is_dir:
+                entry["size"] = None
+                entry["mtime"] = float(mtime) if mtime is not None else 0.0
+                entry["sha256"] = ""
+            else:
+                entry["size"] = size
+                entry["mtime"] = float(mtime)
+                entry["sha256"] = sha
+            entries.append(entry)
+            return True
+
+        if kind == "file":
+            # Single-file root (a profile file entry or an existing custom
+            # file path): advertises exactly itself.
             try:
                 if root.is_symlink():
                     continue
@@ -189,13 +224,8 @@ def collect_roots(
             if hashed is None:
                 continue
             digest, size = hashed
-            entries.append({
-                "path": root.name,
-                "root_index": index,
-                "sha256": digest,
-                "size": size,
-                "mtime": float(st.st_mtime),
-            })
+            add_entry(root.name, size=size, mtime=float(st.st_mtime),
+                      sha=digest)
             continue
         if not root.is_dir():
             continue
@@ -207,9 +237,6 @@ def collect_roots(
                     if not is_temp_name(d) and not (Path(dirpath) / d).is_symlink()
                 )
                 if include_dirs:
-                    # Emit each subdirectory as a folder entry (trailing slash
-                    # marks it) so the local file manager can show skill /
-                    # command folders as openable items.
                     for dname in dirnames:
                         if len(entries) >= max_entries:
                             break
@@ -218,18 +245,9 @@ def collect_roots(
                             dstat = dpath.stat()
                         except OSError:
                             continue
-                        entries.append({
-                            "path": dpath.relative_to(root).as_posix() + "/",
-                            "root_index": index,
-                            "is_dir": True,
-                            "size": None,
-                            "mtime": float(dstat.st_mtime),
-                        })
+                        rel = dpath.relative_to(root).as_posix() + "/"
+                        add_entry(rel, is_dir=True, mtime=float(dstat.st_mtime))
                 for fname in sorted(filenames):
-                    # Prune during the walk: stop buffering once we have
-                    # enough candidates — the hash loop below applies the
-                    # cap, so a huge tree (node_modules) must not have every
-                    # matching file buffered before that cap is reached.
                     if len(found) >= max_entries or len(entries) >= max_entries:
                         break
                     if is_temp_name(fname):
@@ -246,7 +264,7 @@ def collect_roots(
                     rel = full.relative_to(root).as_posix()
                     found.append((rel, full, st))
                 if len(found) >= max_entries or len(entries) >= max_entries:
-                    break  # enough candidates buffered — stop descending
+                    break
         except OSError:
             continue
         for rel, full, st in found:
@@ -256,13 +274,7 @@ def collect_roots(
             if hashed is None:
                 continue
             digest, size = hashed
-            entries.append({
-                "path": rel,
-                "root_index": index,
-                "sha256": digest,
-                "size": size,
-                "mtime": float(st.st_mtime),
-            })
+            add_entry(rel, size=size, mtime=float(st.st_mtime), sha=digest)
     return entries
 
 
@@ -271,15 +283,14 @@ def resolve_safe(root: Path, rel: str) -> Path | None:
 
     Rejects absolute paths, drive prefixes, ".." segments (after normalizing
     both separator styles) and anything whose resolved location falls outside
-    the resolved root.  Returns an absolute Path on success.
+    the resolved root.  Returns an absolute Path on success — including for a
+    not-yet-existing landing target whose parents resolve inside *root*.
     """
     if not isinstance(rel, str) or not rel or len(rel) > MAX_PATH_LEN:
         return None
     if "\x00" in rel:
         return None
     norm = rel.replace("\\", "/")
-    # Absolute forms are refused outright: windows drive prefixes and both
-    # leading-separator styles ("/etc/passwd", "\\server\\share").
     if re.match(r"^[A-Za-z]:", norm) or norm.startswith("/") \
             or rel.startswith("\\\\"):
         return None
@@ -300,9 +311,9 @@ def resolve_safe(root: Path, rel: str) -> Path | None:
 def open_with_default_app(path: str) -> bool:
     """Open *path* (a file or directory) with the OS default application.
 
-    Round 18 local "open" endpoint: win32 uses ``os.startfile``, macOS uses
-    ``open``, everything else uses ``xdg-open``.  Returns True on success so
-    the REST layer can map failures to a 400.
+    win32 uses ``os.startfile``, macOS uses ``open``, everything else uses
+    ``xdg-open``.  Returns True on success so the REST layer can map failures
+    to a 400.
     """
     try:
         if sys.platform == "win32":
@@ -324,14 +335,14 @@ class AIConfigManager:
     def __init__(self, cfg, send_fn, connected_fn=None, event_fn=None,
                  save_fn=None):
         """*cfg* must expose ``device_id``, ``device_name``,
-        ``ai_config_paths`` and ``peers`` (dict of PeerInfo-like objects with
-        ``paired``/``device_name``); it is read live so setting changes take
-        effect without re-wiring.
+        ``ai_config_tools``, ``ai_config_custom_paths`` and ``peers`` (dict of
+        PeerInfo-like objects with ``paired``/``device_name``); it is read
+        live so setting changes take effect without re-wiring.
 
         *send_fn(peer_id, frame_bytes)* transmits one frame;
         *connected_fn()* returns currently connected peer ids;
         *event_fn(dict)* receives WS-bound events (e.g. aiconfig_file);
-        *save_fn()* persists the config after set_watch_list().
+        *save_fn()* persists the config after profile changes.
         """
         self._cfg = cfg
         self._send_fn = send_fn
@@ -342,11 +353,11 @@ class AIConfigManager:
         # Last locally-collected inventory + timestamp.
         self._local_entries: list[dict] = []
         self._local_collected_at: float = 0.0
-        # peer_id -> {"name": str, "entries": [...], "fetched_at": float}
+        # peer_id -> {"name", "entries", "fetched_at", "legacy": bool}
         self._peer_inventories: dict[str, dict] = {}
-        # (peer_id, root_index, rel_path) -> pending record.  A pending record
-        # carries the landing mode; preview records additionally hold a
-        # threading.Event + result slot for the synchronous REST response.
+        # (peer_id, proto, tool_or_ri, rel_path) -> pending record.  A pending
+        # record carries the landing mode + batch_id; preview records
+        # additionally hold a threading.Event + result slot.
         self._pending: dict[tuple, dict] = {}
 
     # ------------------------------------------------------------ helpers
@@ -380,63 +391,82 @@ class AIConfigManager:
                          exc_info=True)
             return False
 
-    @staticmethod
-    def _sanitize_entry(entry) -> dict | None:
-        """Validate one wire inventory entry; None = drop it."""
-        if not isinstance(entry, dict):
-            return None
-        path = entry.get("path")
-        ri = entry.get("root_index")
-        sha = entry.get("sha256")
-        size = entry.get("size")
-        mtime = entry.get("mtime")
-        is_dir = entry.get("is_dir") is True
-        if not isinstance(path, str) or not path or len(path) > MAX_PATH_LEN:
-            return None
-        if ".." in path.replace("\\", "/").split("/"):
-            return None
-        if isinstance(ri, bool) or not isinstance(ri, int) \
-                or not (0 <= ri <= MAX_ROOTS):
-            return None
-        if isinstance(mtime, bool) or not isinstance(mtime, (int, float)) \
-                or mtime != mtime or mtime in (float("inf"), float("-inf")):
-            return None
-        if is_dir:
-            # Folder entry (our own collect_roots with include_dirs=True emits
-            # these): no content hash / size, and the path carries a trailing
-            # "/" so a peer can never alias a plain file path as a folder.
-            if not path.endswith("/"):
-                return None
-            return {
-                "path": path,
-                "root_index": ri,
-                "is_dir": True,
-                "size": None,
-                "mtime": float(mtime),
-                "sha256": "",
-            }
-        if not isinstance(sha, str) or not _SHA16_RE.match(sha):
-            return None
-        if isinstance(size, bool) or not isinstance(size, int) \
-                or not (0 <= size <= MAX_CONFIG_FILE_SIZE):
-            return None
-        return {
-            "path": path,
-            "root_index": ri,
-            "sha256": sha,
-            "size": size,
-            "mtime": float(mtime),
-            "is_dir": False,
-        }
+    # ------------------------------------------- effective roots / landing
+
+    def _roots(self) -> list[tuple[str, str, str]]:
+        """Effective (tool, kind, path) watch roots from cfg, live.
+
+        Custom paths default to "dir" roots; an existing custom FILE path is
+        promoted to a "file" root so it advertises exactly itself.
+        """
+        roots = ai_profiles.effective_roots(
+            list(getattr(self._cfg, "ai_config_tools", [])),
+            list(getattr(self._cfg, "ai_config_custom_paths", [])),
+        )
+        out: list[tuple[str, str, str]] = []
+        for tool, kind, path in roots:
+            if tool == ai_profiles.CUSTOM_KEY and kind == "dir":
+                r = expand_root(path)
+                if r is not None and r.is_file():
+                    kind = "file"
+            out.append((tool, kind, path))
+        return out
+
+    def _local_roots_for(self, tool: str) -> list[tuple[str, str, str]]:
+        return [rt for rt in self._roots() if rt[0] == tool]
+
+    def _resolve_local_target(self, tool: str, rel: str,
+                              require_exists: bool) -> tuple[Path | None, str | None]:
+        """The local file a (tool, rel) maps to, or a clear reason.
+
+        The peer's entry carries a ``tool`` that resolves through THIS device's
+        own profile table (deterministic on every device), so no root-index
+        remapping is needed.  A file-type root owns only its own basename and
+        IS the target; a dir-type root owns any rel that resolves inside it.
+        ``require_exists`` distinguishes serving (the file must exist) from
+        landing (the target may be created by the write).
+        """
+        matches: list[tuple[Path, str]] = []  # (target, root kind)
+        for _tool, kind, raw in self._local_roots_for(tool):
+            root = expand_root(raw)
+            if root is None:
+                continue
+            norm = rel.replace("\\", "/")
+            try:
+                if kind == "file":
+                    target = root if norm == root.name else None
+                else:
+                    target = resolve_safe(root, rel)
+            except OSError:
+                continue
+            if target is None:
+                continue
+            if require_exists:
+                try:
+                    if not target.is_file() or target.is_symlink():
+                        continue
+                except OSError:
+                    continue
+            matches.append((target, kind))
+        if len(matches) == 1:
+            return matches[0][0], None
+        # An exact file-root name match beats a dir-root path match: a peer's
+        # rel_path that names one of OUR file roots can only have come from that
+        # same file root on the peer (dir roots advertise paths relative to
+        # themselves, never "their own name").  Fall back to the strict
+        # ambiguity error only when several file roots tie or none claims it.
+        named = [t for t, k in matches if k == "file"]
+        if len(named) == 1:
+            return named[0], None
+        if matches:
+            return None, "ambiguous_tool_root"
+        return None, "no_local_root"
 
     # ---------------------------------------------------------- inventory
 
     def collect(self) -> list[dict]:
-        """Re-scan the watch list and remember the result."""
-        entries = collect_roots(
-            list(getattr(self._cfg, "ai_config_paths", [])),
-            include_dirs=True,
-        )
+        """Re-scan the watch roots and remember the result."""
+        entries = collect_roots(self._roots(), include_dirs=True)
         with self._lock:
             self._local_entries = entries
             self._local_collected_at = time.time()
@@ -445,10 +475,23 @@ class AIConfigManager:
     def build_inv_payload(self) -> dict:
         with self._lock:
             entries = [dict(e) for e in self._local_entries]
+        wire_entries = []
+        for e in entries:
+            item = {
+                "tool": e.get("tool", ai_profiles.CUSTOM_KEY),
+                "rel_path": e["path"],
+                "sha256": e.get("sha256", ""),
+                "size": e.get("size"),
+                "mtime": e.get("mtime"),
+            }
+            if e.get("is_dir"):
+                item["is_dir"] = True
+            wire_entries.append(item)
         return {
             "msg_type": "aiconfig_inv",
+            "v": 2,
             "device_name": str(getattr(self._cfg, "device_name", "")),
-            "entries": entries,
+            "entries": wire_entries,
         }
 
     def send_inventory_to(self, peer_id: str) -> bool:
@@ -469,7 +512,7 @@ class AIConfigManager:
         return sent
 
     def on_watch_list_changed(self) -> int:
-        """Watch list was edited (web settings / API) — recollect + rebroadcast."""
+        """Watch roots were edited (web settings / API) — recollect + rebroadcast."""
         return self.refresh_and_broadcast()
 
     # --------------------------------------------------- message handling
@@ -491,6 +534,75 @@ class AIConfigManager:
         else:
             self._handle_data(payload, peer_id or "")
 
+    def _sanitize_entry(self, entry) -> dict | None:
+        """Validate one wire inventory entry; None = drop it."""
+        if not isinstance(entry, dict):
+            return None
+        rel = entry.get("rel_path") or entry.get("path")
+        tool = entry.get("tool")
+        sha = entry.get("sha256")
+        size = entry.get("size")
+        mtime = entry.get("mtime")
+        is_dir = entry.get("is_dir") is True
+        if not isinstance(rel, str) or not rel or len(rel) > MAX_PATH_LEN:
+            return None
+        if ".." in rel.replace("\\", "/").split("/"):
+            return None
+        if isinstance(tool, bool) or not isinstance(tool, str) \
+                or not tool or len(tool) > 64:
+            return None
+        if isinstance(mtime, bool) or not isinstance(mtime, (int, float)) \
+                or mtime != mtime or mtime in (float("inf"), float("-inf")):
+            return None
+        if is_dir:
+            if not rel.endswith("/"):
+                return None
+            return {
+                "tool": tool, "rel_path": rel, "is_dir": True,
+                "size": None, "mtime": float(mtime), "sha256": "",
+            }
+        if not isinstance(sha, str) or not _SHA16_RE.match(sha):
+            return None
+        if isinstance(size, bool) or not isinstance(size, int) \
+                or not (0 <= size <= MAX_CONFIG_FILE_SIZE):
+            return None
+        return {
+            "tool": tool, "rel_path": rel, "sha256": sha,
+            "size": size, "mtime": float(mtime), "is_dir": False,
+        }
+
+    def _sanitize_legacy_entry(self, entry) -> dict | None:
+        """Validate a legacy (pre-refactor) inv entry carrying root_index."""
+        if not isinstance(entry, dict):
+            return None
+        path = entry.get("path")
+        ri = entry.get("root_index")
+        sha = entry.get("sha256")
+        size = entry.get("size")
+        mtime = entry.get("mtime")
+        is_dir = entry.get("is_dir") is True
+        if not isinstance(path, str) or not path or len(path) > MAX_PATH_LEN:
+            return None
+        if ".." in path.replace("\\", "/").split("/"):
+            return None
+        if isinstance(ri, bool) or not isinstance(ri, int) \
+                or not (0 <= ri <= 2000):
+            return None
+        if isinstance(mtime, bool) or not isinstance(mtime, (int, float)):
+            return None
+        if is_dir:
+            if not path.endswith("/"):
+                return None
+            return {"root_index": ri, "path": path, "is_dir": True,
+                    "size": None, "mtime": float(mtime), "sha256": ""}
+        if not isinstance(sha, str) or not _SHA16_RE.match(sha):
+            return None
+        if isinstance(size, bool) or not isinstance(size, int) \
+                or not (0 <= size <= MAX_CONFIG_FILE_SIZE):
+            return None
+        return {"root_index": ri, "path": path, "sha256": sha,
+                "size": size, "mtime": float(mtime), "is_dir": False}
+
     def _handle_inv(self, payload: dict, peer_id: str) -> None:
         name = payload.get("device_name")
         if not isinstance(name, str):
@@ -499,9 +611,11 @@ class AIConfigManager:
         if not isinstance(raw_entries, list):
             logger.debug("aiconfig_inv from %s has invalid entries", peer_id[:12])
             return
+        legacy = not payload.get("v") == 2
         cleaned: list[dict] = []
         for entry in raw_entries[:MAX_ENTRIES]:
-            clean = self._sanitize_entry(entry)
+            clean = (self._sanitize_legacy_entry(entry) if legacy
+                     else self._sanitize_entry(entry))
             if clean is not None:
                 cleaned.append(clean)
         with self._lock:
@@ -509,33 +623,65 @@ class AIConfigManager:
                 "name": name[:128],
                 "entries": cleaned,
                 "fetched_at": time.time(),
+                "legacy": legacy,
             }
-        logger.info("Stored aiconfig inventory from %s (%d entries)",
-                    peer_id[:12], len(cleaned))
+        logger.info("Stored aiconfig inventory from %s (%d entries, %s)",
+                    peer_id[:12], len(cleaned),
+                    "legacy" if legacy else "v2")
+
+    def _peer_legacy(self, peer_id: str) -> bool:
+        with self._lock:
+            inv = self._peer_inventories.get(peer_id)
+        return bool(inv and inv.get("legacy"))
 
     def _handle_req(self, payload: dict, peer_id: str) -> None:
         # Refresh form: the peer wants our current inventory again.
         if payload.get("inventory_refresh"):
             self.send_inventory_to(peer_id)
             return
+        if "tool" in payload:
+            # v2 form — find the local file by (tool, rel_path).
+            tool = payload.get("tool")
+            rel = payload.get("rel_path")
+            if not isinstance(tool, str) or not tool:
+                return
+            if not isinstance(rel, str) or not rel:
+                return
+            known = None
+            with self._lock:
+                for e in self._local_entries:
+                    if e["tool"] == tool and e["path"] == rel.replace("\\", "/"):
+                        known = e
+                        break
+            if known is None:
+                logger.debug("aiconfig_req v2 for unadvertised path from %s",
+                             peer_id[:12])
+                return
+            target, reason = self._resolve_local_target(tool, rel,
+                                                        require_exists=True)
+            if target is None:
+                logger.info("aiconfig_req v2 unresolved (%s) from %s: %s",
+                            rel, peer_id[:12], reason)
+                return
+            self._serve_file(tool, rel, target, known, peer_id)
+            return
+        # Legacy form — root_index + rel_path.
         ri = payload.get("root_index")
         rel = payload.get("rel_path")
         if isinstance(ri, bool) or not isinstance(ri, int):
             return
         if not isinstance(rel, str) or not rel:
             return
-        roots = list(getattr(self._cfg, "ai_config_paths", []))
+        roots = [rt for rt in self._roots()]
         if not (0 <= ri < len(roots)):
             logger.debug("aiconfig_req bad root_index %s from %s", ri,
                          peer_id[:12])
             return
-        root = expand_root(roots[ri])
+        tool, kind, raw = roots[ri]
+        root = expand_root(raw)
         if root is None:
             return
-        if root.is_file():
-            # Single-file watch root (e.g. ~/.claude/CLAUDE.md): the only
-            # servable rel is the file's own basename and the file itself is
-            # the target — no directory walk required.
+        if kind == "file":
             if rel.replace("\\", "/") != root.name:
                 return
             target = root
@@ -544,22 +690,23 @@ class AIConfigManager:
                 return
             target = resolve_safe(root, rel)
             if target is None:
-                logger.info("Rejected aiconfig_req with unsafe path from %s",
+                logger.info("Rejected legacy aiconfig_req with unsafe path from %s",
                             peer_id[:12])
                 return
-        # The file must be part of our CURRENT inventory (i.e. we advertised
-        # it) and its content hash must still match what we advertised.
+        known = None
         with self._lock:
-            known = next(
-                (e for e in self._local_entries
-                 if e["root_index"] == ri and e["path"]
-                 == rel.replace("\\", "/")),
-                None,
-            )
+            for e in self._local_entries:
+                if e["root_index"] == ri and e["path"] == rel.replace("\\", "/"):
+                    known = e
+                    break
         if known is None:
-            logger.debug("aiconfig_req for unadvertised path from %s",
+            logger.debug("aiconfig_req legacy for unadvertised path from %s",
                          peer_id[:12])
             return
+        self._serve_file(tool, rel, target, known, peer_id)
+
+    def _serve_file(self, tool: str, rel: str, target: Path, known: dict,
+                    peer_id: str) -> None:
         if not target.is_file() or target.is_symlink():
             return
         try:
@@ -578,38 +725,64 @@ class AIConfigManager:
             # inventory refresh rather than serving unverified content.
             logger.info("aiconfig_req hash drift for %s — refusing", rel)
             return
-        self._send_frame({
+        is_v2 = not self._peer_legacy(peer_id)
+        payload = {
             "msg_type": "aiconfig_data",
-            "root_index": ri,
-            "rel_path": known["path"],
             "sha256": digest,
             "b64_content": base64.b64encode(data).decode("ascii"),
             "truncated": truncated,
-        }, peer_id)
+        }
+        if is_v2:
+            payload["tool"] = tool
+            payload["rel_path"] = known["path"]
+        else:
+            payload["root_index"] = known["root_index"]
+            payload["rel_path"] = known["path"]
+        self._send_frame(payload, peer_id)
 
     def _handle_data(self, payload: dict, peer_id: str) -> None:
-        ri = payload.get("root_index")
-        rel = payload.get("rel_path")
         sha = payload.get("sha256")
         b64 = payload.get("b64_content")
+        if not isinstance(sha, str) or not isinstance(b64, str):
+            return
+        if "tool" in payload:
+            tool = payload.get("tool")
+            rel = payload.get("rel_path")
+            if not isinstance(tool, str) or not tool:
+                return
+            if not isinstance(rel, str) or not rel:
+                return
+            key = (peer_id, "v2", tool, rel.replace("\\", "/"))
+            pending = self._pop_pending(key)
+            if pending is None:
+                logger.debug("Unsolicited aiconfig_data (v2) from %s dropped",
+                             peer_id[:12])
+                return
+            self._process_data(key, pending, sha, b64)
+            return
+        ri = payload.get("root_index")
+        rel = payload.get("rel_path")
         if isinstance(ri, bool) or not isinstance(ri, int):
             return
         if not isinstance(rel, str) or not rel:
             return
-        if not isinstance(sha, str) or not isinstance(b64, str):
-            return
-        key = (peer_id, ri, rel.replace("\\", "/"))
-        with self._lock:
-            pending = self._pending.pop(key, None)
+        key = (peer_id, "legacy", ri, rel.replace("\\", "/"))
+        pending = self._pop_pending(key)
         if pending is None:
-            logger.debug("Unsolicited aiconfig_data from %s dropped",
+            logger.debug("Unsolicited aiconfig_data (legacy) from %s dropped",
                          peer_id[:12])
             return
+        self._process_data(key, pending, sha, b64)
+
+    def _pop_pending(self, key: tuple) -> dict | None:
+        with self._lock:
+            return self._pending.pop(key, None)
+
+    def _process_data(self, key: tuple, pending: dict, sha: str, b64: str) -> None:
         try:
             data = base64.b64decode(b64, validate=True)
         except Exception:
-            logger.info("aiconfig_data b64 decode failed from %s",
-                        peer_id[:12])
+            logger.info("aiconfig_data b64 decode failed from %s", key[0][:12])
             self._finish_pending(pending, key, "error", reason="b64_decode")
             return
         if len(data) > MAX_CONFIG_FILE_SIZE:
@@ -628,96 +801,30 @@ class AIConfigManager:
             if event is not None:
                 event.set()
             return
-        status, reason = self._land_file(
-            ri, rel, data, pending.get("mode", "copy"), peer_id)
-        self._finish_pending(pending, key, status, reason=reason)
+        # Landing is v2-only (legacy pulls are blocked at the pull() door), so
+        # key[2] is always the tool key here.
+        tool, rel = key[2], key[3]
+        status, reason = self._land_file(tool, rel, data,
+                                         pending.get("mode", "copy"), key[0])
+        self._finish_pending(pending, key, status, reason=reason,
+                             batch_id=pending.get("batch_id"))
 
     # ------------------------------------------------------------ landing
 
-    def _resolve_root(self, ri: int, create: bool = False) -> Path | None:
-        """Absolute watch root for index *ri*, or None if unusable.
+    def _land_target(self, tool: str, rel: str) -> tuple[Path | None, str | None]:
+        """Exact local file a pulled (tool, rel) should be written to.
 
-        Read-only operations (local_read / local_trash / local_open / item)
-        pass ``create=False`` so a missing root fails cleanly; write
-        operations (local_save) pass True so the directory is made on demand.
+        Resolution goes through THIS device's tool profiles (deterministic), so
+        no peer root indices are involved.  The target need not exist yet —
+        the write creates missing parents.  ``ambiguous_tool_root`` /
+        ``no_local_root`` report the two unambiguous failure cases.
         """
-        roots = list(getattr(self._cfg, "ai_config_paths", []))
-        if isinstance(ri, bool) or not isinstance(ri, int) \
-                or not (0 <= ri < len(roots)):
-            return None
-        root = expand_root(roots[ri])
-        if root is None:
-            return None
-        if create:
-            try:
-                if root.exists() and root.is_file():
-                    pass  # a single-file watch entry — nothing to create
-                else:
-                    root.mkdir(parents=True, exist_ok=True)
-            except OSError:
-                return None
-        return root
+        return self._resolve_local_target(tool, rel, require_exists=False)
 
-    def _local_root(self, ri: int) -> Path | None:
-        """Watch root for landing pulled files (created on demand)."""
-        return self._resolve_root(ri, create=True)
-
-    def _land_target(self, ri: int, rel: str) -> tuple[Path | None, str | None]:
-        """Exact local file a pulled *rel* should be written to (with reason).
-
-        The ``root_index`` on the wire indexes the PEER's watch list, which
-        may differ from ours — remap before writing so a pull can never
-        clobber a same-named file in an unrelated local root.  *ri* is
-        honoured only when *rel* genuinely belongs to that root (a file root
-        owns only its own basename and is the target itself; a directory root
-        owns a rel that resolves to a real file under it).  Otherwise every
-        local root is scanned for the one that owns *rel*; exactly one match
-        wins, and ambiguity or the absence of a match is reported as a clear
-        reason rather than guessed.
-        """
-        norm = rel.replace("\\", "/")
-        roots = list(getattr(self._cfg, "ai_config_paths", []))
-
-        def owns(index: int) -> Path | None:
-            """The target this watch entry owns for *rel*, or None."""
-            raw = roots[index] if 0 <= index < len(roots) else None
-            root = expand_root(raw)
-            if root is None:
-                return None
-            try:
-                if root.is_dir():
-                    # Directory root: owns *rel* only when it resolves to a
-                    # real file under the root — never guess a landing spot.
-                    resolved = resolve_safe(root, rel)
-                    if resolved is None or not resolved.is_file() \
-                            or resolved.is_symlink():
-                        return None
-                    return resolved
-            except OSError:
-                return None
-            # Not an existing directory — a single-FILE watch entry (present
-            # or not-yet-created) owns only its own basename, and the target
-            # IS the file itself.
-            return root if norm == root.name else None
-
-        hinted = owns(ri)
-        if hinted is not None:
-            return hinted, None
-        matches: list[Path] = []
-        for i in range(len(roots)):
-            hit = owns(i)
-            if hit is not None:
-                matches.append(hit)
-        if len(matches) == 1:
-            return matches[0], None
-        if len(matches) > 1:
-            return None, "ambiguous_root"
-        return None, "no_local_root"
-
-    def _land_file(self, ri: int, rel: str, data: bytes, mode: str,
+    def _land_file(self, tool: str, rel: str, data: bytes, mode: str,
                    peer_id: str) -> tuple[str, str | None]:
         """Write pulled bytes per *mode*.  Returns (status, reason)."""
-        target, reason = self._land_target(ri, rel)
+        target, reason = self._land_target(tool, rel)
         if target is None:
             return "error", reason or "no_local_root"
         try:
@@ -744,9 +851,6 @@ class AIConfigManager:
                 if target.suffix.lower() not in APPEND_EXTS:
                     return "error", "append_not_text"
                 target.parent.mkdir(parents=True, exist_ok=True)
-                # Newline-separated: open the existing file with a boundary
-                # newline when needed; never stack a blank line when the
-                # incoming chunk already ends with one.
                 prefix = b""
                 if target.exists() and target.stat().st_size > 0:
                     with open(target, "rb") as f:
@@ -763,7 +867,7 @@ class AIConfigManager:
             return "error", "io_error"
 
     def _finish_pending(self, pending: dict, key: tuple, status: str,
-                        reason: str | None = None) -> None:
+                        reason: str | None = None, batch_id=None) -> None:
         if pending.get("mode") == "preview":
             with self._lock:
                 pending["result"] = {"ok": False, "error": reason or status}
@@ -774,14 +878,17 @@ class AIConfigManager:
         ws_event = {
             "type": "aiconfig_file",
             "peer_id": key[0],
-            "rel_path": key[2],
+            "tool": key[2] if key[1] == "v2" else "legacy",
+            "rel_path": key[3],
             "status": status,
         }
         if reason:
             ws_event["reason"] = reason
+        if batch_id:
+            ws_event["batch_id"] = batch_id
         self._emit(ws_event)
         logger.debug("aiconfig_file status=%s reason=%s path=%s",
-                     status, reason, key[2])
+                     status, reason, key[3])
 
     def _peer_display_name(self, peer_id: str) -> str:
         peer = getattr(self._cfg, "peers", {}).get(peer_id)
@@ -811,12 +918,16 @@ class AIConfigManager:
                         "result", {"ok": False, "error": "timeout"})
                 event.set()
 
-    def pull(self, peer_id: str, items, mode: str = "copy") -> dict:
-        """Request several files from a paired peer (REST pull backend).
+    def pull(self, peer_id: str, items, mode: str = "copy",
+             batch_id: str = "") -> dict:
+        """Request files (and/or folders) from a paired peer.
 
-        Returns {"requested": N, "errors": [..]} without waiting for the
-        async aiconfig_data replies — those land via _handle_data and are
-        reported through the aiconfig_file WS event.
+        *items* is a list of v2 dicts, each ``{"tool", "rel_path"}``.  A folder
+        item carries ``"is_dir": true`` and is expanded server-side from the
+        peer's cached inventory into its file entries.  Returns
+        ``{"requested": N, "errors": [...]}`` without waiting for the async
+        aiconfig_data replies — those land via _handle_data and are reported
+        through the aiconfig_file WS event (echoing *batch_id*).
         """
         if mode not in ("overwrite", "copy", "append"):
             mode = "copy"  # never let a malformed request turn destructive
@@ -826,51 +937,90 @@ class AIConfigManager:
             return {"requested": 0, "errors": ["peer_offline"]}
         if not isinstance(items, list):
             return {"requested": 0, "errors": ["items_required"]}
+        # Legacy peers are browse/preview-only (their root_index inventories
+        # cannot resolve to THIS device's tool-profile targets deterministically).
+        if self._peer_legacy(peer_id):
+            return {"requested": 0, "errors": ["legacy_peer_read_only"]}
+        expanded = self._expand_items(peer_id, items)
         requested = 0
         errors: list[str] = []
         with self._lock:
             self._prune_pending()
-        for item in items[:200]:
+        for item in expanded[:MAX_ENTRIES]:
             if not isinstance(item, dict):
                 errors.append("invalid_item")
                 continue
-            ri = item.get("root_index")
+            tool = item.get("tool")
             rel = item.get("rel_path")
-            if isinstance(ri, bool) or not isinstance(ri, int) \
+            if not isinstance(tool, str) or not tool \
                     or not isinstance(rel, str) or not rel \
                     or len(rel) > MAX_PATH_LEN:
                 errors.append("invalid_item")
                 continue
-            key = (peer_id, ri, rel.replace("\\", "/"))
+            key = (peer_id, "v2", tool, rel.replace("\\", "/"))
+            req = {"msg_type": "aiconfig_req", "tool": tool, "rel_path": rel}
             with self._lock:
-                self._pending[key] = {"mode": mode, "ts": time.time()}
-            if self._send_frame({
-                "msg_type": "aiconfig_req",
-                "root_index": ri,
-                "rel_path": rel,
-            }, peer_id):
+                self._pending[key] = {"mode": mode, "ts": time.time(),
+                                      "batch_id": batch_id}
+            if self._send_frame(req, peer_id):
                 requested += 1
             else:
                 with self._lock:
                     self._pending.pop(key, None)
                 errors.append("send_failed")
-        return {"requested": requested, "errors": errors}
+        return {"requested": requested, "errors": errors,
+                "expanded": len(expanded)}
 
-    def preview(self, peer_id: str, ri: int, rel: str,
-                timeout: float = PREVIEW_TIMEOUT) -> dict:
-        """Fetch one file's content for display only — nothing touches disk.
+    def _expand_items(self, peer_id: str, items) -> list[dict]:
+        """Expand folder items into file items from the peer's cached inventory.
+
+        A folder item is ``{"tool", "rel_path" (trailing '/'), "is_dir": true}``.
+        Every cached v2 file entry whose rel_path starts with the folder's
+        rel_path is pulled; the folder entry itself is dropped.  Plain file
+        items pass through unchanged.
+        """
+        out: list[dict] = []
+        with self._lock:
+            inv = self._peer_inventories.get(peer_id, {})
+            cache = inv.get("entries", [])
+        for item in items:
+            if not isinstance(item, dict):
+                out.append(item)
+                continue
+            if not item.get("is_dir"):
+                out.append(item)
+                continue
+            folder_rel = item.get("rel_path")
+            if not isinstance(folder_rel, str) or not folder_rel:
+                out.append(item)
+                continue
+            prefix = folder_rel.replace("\\", "/")
+            if not prefix.endswith("/"):
+                prefix += "/"
+            tool = item.get("tool")
+            matched = 0
+            for e in cache:
+                if e.get("is_dir"):
+                    continue
+                rel = e.get("rel_path") or e.get("path")
+                if not rel:
+                    continue
+                if tool is not None and e.get("tool") != tool:
+                    continue
+                if rel.startswith(prefix):
+                    out.append(e)
+                    matched += 1
+            if matched == 0:
+                out.append(item)  # unknown folder — let the peer refuse cleanly
+        return out
+
+    def _preview_wait(self, peer_id: str, req: dict, key: tuple,
+                      timeout: float) -> dict:
+        """Register a display-only pending, send the request, block for data.
 
         Blocks up to *timeout* seconds waiting for the peer's aiconfig_data
         (the HTTP worker thread can afford this; ThreadingHTTPServer keeps
         serving other requests meanwhile)."""
-        if not self._is_paired(peer_id):
-            return {"ok": False, "error": "peer_not_paired"}
-        if peer_id not in self._connected_peers():
-            return {"ok": False, "error": "peer_offline"}
-        if isinstance(ri, bool) or not isinstance(ri, int) \
-                or not isinstance(rel, str) or not rel:
-            return {"ok": False, "error": "invalid_item"}
-        key = (peer_id, ri, rel.replace("\\", "/"))
         event = threading.Event()
         record: dict = {
             "mode": "preview", "ts": time.time(),
@@ -879,11 +1029,7 @@ class AIConfigManager:
         with self._lock:
             self._prune_pending()
             self._pending[key] = record
-        if not self._send_frame({
-            "msg_type": "aiconfig_req",
-            "root_index": ri,
-            "rel_path": rel,
-        }, peer_id):
+        if not self._send_frame(req, peer_id):
             with self._lock:
                 self._pending.pop(key, None)
             return {"ok": False, "error": "send_failed"}
@@ -891,11 +1037,45 @@ class AIConfigManager:
             with self._lock:
                 self._pending.pop(key, None)
             return {"ok": False, "error": "timeout"}
-        # The data handler popped the registry entry and wrote "result"
-        # into this very record BEFORE setting the event, so reading the
-        # record here (happens-after the Event) is race-free.
         result = record.get("result")
         return result or {"ok": False, "error": "no_data"}
+
+    def preview(self, peer_id: str, tool: str, rel: str,
+                timeout: float = PREVIEW_TIMEOUT) -> dict:
+        """Fetch one v2 file's content for display only — nothing touches disk.
+
+        Returns {"ok", "content" (≤64 KB), "truncated"}; a legacy peer must be
+        previewed via ``preview_legacy`` instead."""
+        if not self._is_paired(peer_id):
+            return {"ok": False, "error": "peer_not_paired"}
+        if peer_id not in self._connected_peers():
+            return {"ok": False, "error": "peer_offline"}
+        if not isinstance(tool, str) or not tool \
+                or not isinstance(rel, str) or not rel:
+            return {"ok": False, "error": "invalid_item"}
+        if self._peer_legacy(peer_id):
+            return {"ok": False, "error": "legacy_peer"}
+        key = (peer_id, "v2", tool, rel.replace("\\", "/"))
+        return self._preview_wait(peer_id, {
+            "msg_type": "aiconfig_req", "tool": tool, "rel_path": rel,
+        }, key, timeout)
+
+    def preview_legacy(self, peer_id: str, root_index, rel: str,
+                       timeout: float = PREVIEW_TIMEOUT) -> dict:
+        """Legacy-peer variant: root_index-based request, same display-only
+        guarantee.  *root_index* is the int from the peer's cached entry."""
+        if not self._is_paired(peer_id):
+            return {"ok": False, "error": "peer_not_paired"}
+        if peer_id not in self._connected_peers():
+            return {"ok": False, "error": "peer_offline"}
+        if isinstance(root_index, bool) or not isinstance(root_index, int) \
+                or not isinstance(rel, str) or not rel:
+            return {"ok": False, "error": "invalid_item"}
+        key = (peer_id, "legacy", root_index, rel.replace("\\", "/"))
+        return self._preview_wait(peer_id, {
+            "msg_type": "aiconfig_req", "root_index": root_index,
+            "rel_path": rel,
+        }, key, timeout)
 
     # ---------------------------------------------------------------- REST
 
@@ -906,6 +1086,7 @@ class AIConfigManager:
             for pid, inv in self._peer_inventories.items():
                 out[pid] = {
                     "name": inv.get("name", ""),
+                    "legacy": bool(inv.get("legacy")),
                     "entries": [dict(e) for e in inv.get("entries", [])],
                     "fetched_at": inv.get("fetched_at", 0.0),
                 }
@@ -924,28 +1105,22 @@ class AIConfigManager:
             return {
                 "collected_at": self._local_collected_at,
                 "entry_count": len(self._local_entries),
-                "paths": list(getattr(self._cfg, "ai_config_paths", [])),
+                "tools": list(getattr(self._cfg, "ai_config_tools", [])),
+                "custom_paths": list(getattr(self._cfg, "ai_config_custom_paths", [])),
             }
 
-    def set_watch_list(self, paths) -> dict:
-        """Normalize + persist the watch list; returns the stored value."""
-        if not isinstance(paths, list):
-            return {"ok": False, "error": "list_required"}
-        cleaned: list[str] = []
-        for raw in paths[:MAX_ROOTS]:
-            if not isinstance(raw, str):
-                continue
-            s = raw.strip()
-            if s and s not in cleaned:
-                cleaned.append(s)
-        self._cfg.ai_config_paths = cleaned
+    def set_profiles(self, tool_keys, custom_paths) -> dict:
+        """Normalize + persist the enabled tool keys and custom paths."""
+        tools = ai_profiles.validate_tool_keys(tool_keys)
+        custom = ai_profiles.validate_custom_paths(custom_paths)
+        self._cfg.ai_config_tools = tools
+        self._cfg.ai_config_custom_paths = custom
         if self._save_fn is not None:
             try:
                 self._save_fn()
             except Exception:
-                logger.debug("aiconfig watch-list persist failed",
-                             exc_info=True)
-        return {"ok": True, "paths": cleaned}
+                logger.debug("aiconfig profile persist failed", exc_info=True)
+        return {"ok": True, "tools": tools, "custom_paths": custom}
 
     # ------------------------------------------------- local file manager
 
@@ -965,31 +1140,25 @@ class AIConfigManager:
     def local_listing(self) -> dict:
         """Fresh local inventory for GET /api/aiconfig/local.
 
-        Reuses the same collector as the paired-peer exchange, but shapes the
-        entries with ``rel_path`` (file-manager vocabulary) and adds a
-        per-root summary.  No pairing is required — this is purely local.
-        Directories are included as folder entries so skill / command folders
-        show up as openable items in the file manager.
+        Reuses the same collector as the paired-peer exchange, grouped by tool
+        profile for the UI.  Directories are included as folder entries so
+        skill / command folders show up as openable items.
         """
-        entries = collect_roots(
-            list(getattr(self._cfg, "ai_config_paths", [])), include_dirs=True,
-        )
-        # Remember when this fresh local scan ran (the peer inventory keeps its
-        # own collect() cache; the two are deliberately independent).
+        entries = collect_roots(self._roots(), include_dirs=True)
         with self._lock:
             self._local_collected_at = time.time()
-        raw_roots = list(getattr(self._cfg, "ai_config_paths", []))
-        roots = [
-            {
-                "root_index": i,
+        roots = []
+        for index, (tool, kind, raw) in enumerate(self._roots()):
+            roots.append({
+                "root_index": index,
+                "tool": tool,
+                "kind": kind,
                 "path": raw,
-                "count": sum(1 for e in entries if e["root_index"] == i),
-            }
-            for i, raw in enumerate(raw_roots[:MAX_ROOTS])
-        ]
+                "count": sum(1 for e in entries if e["root_index"] == index),
+            })
         listing = [
             {
-                "root_index": e["root_index"],
+                "tool": e["tool"],
                 "rel_path": e["path"],
                 "size": e.get("size"),
                 "mtime": e.get("mtime"),
@@ -1000,36 +1169,26 @@ class AIConfigManager:
         ]
         with self._lock:
             collected_at = self._local_collected_at
-        return {"collected_at": collected_at, "roots": roots,
-                "entries": listing}
+        return {
+            "collected_at": collected_at,
+            "tools": [t for t in ai_profiles.TOOLS
+                      if t["key"] in set(getattr(self._cfg, "ai_config_tools", []))],
+            "custom_paths": list(getattr(self._cfg, "ai_config_custom_paths", [])),
+            "roots": roots,
+            "entries": listing,
+        }
 
-    @staticmethod
-    def _target_for(root: Path, rel: str) -> Path | None:
-        """Resolve a (root, rel) pair to a file, honouring FILE roots.
-
-        A watch entry may point directly at a config file (see collect_roots);
-        for such a root the only valid rel is the file's own basename and the
-        target IS the root.  Directory roots resolve via resolve_safe as before.
-        """
-        try:
-            if root.is_file():
-                return root if (rel or "").replace("\\", "/") == root.name else None
-        except OSError:
-            return None
-        return resolve_safe(root, rel)
-
-    def local_read(self, ri, rel) -> dict:
+    def local_read(self, tool, rel) -> dict:
         """Read one file's text content (local only, ≤64 KB).
 
         Returns {"ok", "content", "truncated"}; binary files (any NUL byte
         in the leading window) are refused with error "binary".
         """
-        root = self._resolve_root(ri)
-        if root is None:
-            return {"ok": False, "error": "no_root"}
-        target = self._target_for(root, rel)
+        if not isinstance(tool, str) or not isinstance(rel, str):
+            return {"ok": False, "error": "invalid_item"}
+        target, reason = self._land_target(tool, rel)
         if target is None:
-            return {"ok": False, "error": "unsafe_path"}
+            return {"ok": False, "error": reason or "no_local_root"}
         if target.is_symlink() or not target.is_file():
             return {"ok": False, "error": "not_found"}
         try:
@@ -1046,17 +1205,18 @@ class AIConfigManager:
             "truncated": size > LOCAL_READ_MAX_BYTES,
         }
 
-    def local_save(self, ri, rel, content) -> dict:
+    def local_save(self, tool, rel, content) -> dict:
         """Write text content back to a watched file (local only).
 
-        Safety net (mirrors the spec): ① resolve_safe rejects traversal;
-        ② the pre-save original is copied to ``<rel_path>.bak`` in the same
-        directory (overwriting a stale .bak, which doubles as an
-        "edited here" marker); ③ NUL bytes are refused (text only); ④ content
-        is capped at LOCAL_SAVE_MAX_BYTES.  The write itself is atomic —
-        temp file + os.replace — and serialized under the manager lock so two
-        concurrent saves to the same file cannot interleave backup/replace.
+        Safety net: ① resolve_safe rejects traversal; ② the pre-save original
+        is copied to ``<rel_path>.bak`` in the same directory (overwriting a
+        stale .bak, which doubles as an "edited here" marker); ③ NUL bytes are
+        refused (text only); ④ content is capped at LOCAL_SAVE_MAX_BYTES.  The
+        write itself is atomic — temp file + os.replace — and serialized under
+        the manager lock so two concurrent saves cannot interleave.
         """
+        if not isinstance(tool, str) or not isinstance(rel, str):
+            return {"ok": False, "error": "invalid_item"}
         if not isinstance(content, str):
             return {"ok": False, "error": "content_required"}
         data = content.encode("utf-8")
@@ -1064,12 +1224,9 @@ class AIConfigManager:
             return {"ok": False, "error": "too_large"}
         if b"\x00" in data:
             return {"ok": False, "error": "binary"}
-        root = self._resolve_root(ri, create=True)
-        if root is None:
-            return {"ok": False, "error": "no_root"}
-        target = self._target_for(root, rel)
+        target, reason = self._land_target(tool, rel)
         if target is None:
-            return {"ok": False, "error": "unsafe_path"}
+            return {"ok": False, "error": reason or "no_local_root"}
         with self._lock:
             backup_overwrote = False
             try:
@@ -1097,7 +1254,7 @@ class AIConfigManager:
             result["backup_overwrote"] = True
         return result
 
-    def local_trash(self, ri, rel) -> dict:
+    def local_trash(self, tool, rel) -> dict:
         """Move a watched file OR directory into the recoverable trash.
 
         Destination is ``<data_dir>/aiconfig_trash/<original subpath>/
@@ -1107,12 +1264,11 @@ class AIConfigManager:
         whole (recursively).  Collisions get an incremented ``-N`` suffix.
         Returns {"ok", "trashed_to"}.
         """
-        root = self._resolve_root(ri)
-        if root is None:
-            return {"ok": False, "error": "no_root"}
-        target = self._target_for(root, rel)
+        if not isinstance(tool, str) or not isinstance(rel, str):
+            return {"ok": False, "error": "invalid_item"}
+        target, reason = self._land_target(tool, rel)
         if target is None:
-            return {"ok": False, "error": "unsafe_path"}
+            return {"ok": False, "error": reason or "no_local_root"}
         if target.is_symlink() or not (target.is_file() or target.is_dir()):
             return {"ok": False, "error": "not_found"}
         base = self._trash_base()
@@ -1137,14 +1293,13 @@ class AIConfigManager:
             return {"ok": False, "error": "move_failed"}
         return {"ok": True, "trashed_to": str(candidate)}
 
-    def local_open(self, ri, rel) -> dict:
+    def local_open(self, tool, rel) -> dict:
         """Open a watched file (or directory) with the OS default app."""
-        root = self._resolve_root(ri)
-        if root is None:
-            return {"ok": False, "error": "no_root"}
-        target = self._target_for(root, rel)
+        if not isinstance(tool, str) or not isinstance(rel, str):
+            return {"ok": False, "error": "invalid_item"}
+        target, reason = self._land_target(tool, rel)
         if target is None:
-            return {"ok": False, "error": "unsafe_path"}
+            return {"ok": False, "error": reason or "no_local_root"}
         if target.is_symlink() or not (target.is_file() or target.is_dir()):
             return {"ok": False, "error": "not_found"}
         if open_with_default_app(str(target)):

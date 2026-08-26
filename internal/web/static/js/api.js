@@ -19,6 +19,67 @@ var ClipsyncAPI = (function () {
   var _baseUrl = '';
   var _token = '';
 
+  /**
+   * Shared implementation for previewAiConfigFile / previewAiConfigLegacy.
+   * POSTs a {peer_id, ...tool|root_index, rel_path} body and resolves the
+   * truncated-text response tolerantly (JSON {ok, content, truncated} or a
+   * raw text body).  Aborts after 15 s so a peer that never answers cannot
+   * hang the preview modal.
+   */
+  function _previewAiConfig(body) {
+    var url = _baseUrl + '/api/aiconfig/preview?token=' +
+      encodeURIComponent(_token);
+    var options = {
+      method: 'POST',
+      headers: {
+        'Accept': '*/*',
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify(body),
+    };
+
+    var controller = null;
+    var timeoutId = null;
+    if (typeof AbortController !== 'undefined') {
+      controller = new AbortController();
+      options.signal = controller.signal;
+      timeoutId = setTimeout(function () {
+        controller.abort();
+      }, 15000);
+    }
+
+    return fetch(url, options)
+      .then(function (response) {
+        clearTimeout(timeoutId);
+        return response.text().then(function (bodyText) {
+          var parsed = null;
+          try { parsed = JSON.parse(bodyText); } catch (e) { parsed = null; }
+          if (!response.ok) {
+            // Structured backend errors carry a human-readable reason.
+            throw new Error(
+              (parsed && typeof parsed === 'object' && parsed.error) ||
+              ('HTTP ' + response.status));
+          }
+          if (parsed && typeof parsed === 'object') {
+            if (typeof parsed.error === 'string' && parsed.error) {
+              throw new Error(parsed.error);
+            }
+            if (typeof parsed.content === 'string') {
+              return { content: parsed.content, truncated: !!parsed.truncated };
+            }
+          }
+          // Plain-text (or unexpected-shape) body — show it verbatim and let
+          // the length heuristic drive the truncation notice.
+          return { content: bodyText, truncated: bodyText.length >= 65536 };
+        });
+      })
+      .catch(function (e) {
+        clearTimeout(timeoutId);
+        console.warn('[ClipsyncAPI] AI-config preview failed:', e);
+        throw e;
+      });
+  }
+
   /* ═══════════════════════════════════════════════════════════════
      Public API
      ═══════════════════════════════════════════════════════════════ */
@@ -336,108 +397,74 @@ var ClipsyncAPI = (function () {
     },
 
     /**
-     * This device's AI-config watch list (GET /api/aiconfig/paths).
-     * @returns {Promise<{ok: boolean, paths: string[], summary: Object}>}
+     * The AI-tool profile table (single source of truth) plus this device's
+     * current selection.  Presets are never hard-coded in the UI — the front
+     * end renders whatever this endpoint returns.
+     * @returns {Promise<{ok, tools: [{key,label,entries}], enabled: string[],
+     *   custom_paths: string[]}>}
      */
-    getAiConfigPaths: function () {
-      return this._fetch('GET', '/api/aiconfig/paths');
+    getAiConfigProfiles: function () {
+      return this._fetch('GET', '/api/aiconfig/profiles');
     },
 
     /**
-     * Replace this device's watch list. The backend normalizes, persists,
-     * recollects and re-broadcasts the inventory to paired peers.
-     * @param {string[]} paths - Root directories ('~' supported)
-     * @returns {Promise<{ok: boolean, paths: string[], broadcast_to: number}>}
+     * Replace this device's enabled tool profiles + custom paths.  The backend
+     * normalizes, persists, recollects and re-broadcasts the inventory.
+     * @param {string[]} tools
+     * @param {string[]} customPaths
+     * @returns {Promise<{ok, tools: string[], custom_paths: string[],
+     *   broadcast_to: number}>}
      */
-    setAiConfigPaths: function (paths) {
-      return this._fetch('POST', '/api/aiconfig/paths', { paths: paths });
+    setAiConfigProfiles: function (tools, customPaths) {
+      return this._fetch('POST', '/api/aiconfig/profiles', {
+        tools: tools,
+        custom_paths: customPaths,
+      });
     },
 
     /**
-     * Fetch one remote file's text for preview. The backend truncates at
-     * 64KB. The answer is parsed tolerantly: the documented shape is JSON
-     * `{ok, content, truncated}`; a raw text body is also accepted so an
-     * older/experimental host never breaks the preview modal.
+     * Fetch one remote file's text for preview (v2 — tool + rel_path).  The
+     * backend truncates at 64KB.  The answer is parsed tolerantly: the
+     * documented shape is JSON `{ok, content, truncated}`; a raw text body is
+     * also accepted so an older/experimental host never breaks the preview.
+     * @param {string} peerId
+     * @param {string} tool - tool profile key (or 'custom')
+     * @param {string} relPath
+     * @returns {Promise<{content: string, truncated: boolean}>}
+     */
+    previewAiConfigFile: function (peerId, tool, relPath) {
+      return _previewAiConfig({ peer_id: peerId, tool: tool, rel_path: relPath });
+    },
+
+    /**
+     * Legacy-peer preview variant (root_index-based request shape).
      * @param {string} peerId
      * @param {number} rootIndex
      * @param {string} relPath
      * @returns {Promise<{content: string, truncated: boolean}>}
      */
-    previewAiConfigFile: function (peerId, rootIndex, relPath) {
-      var sep = '/api/aiconfig/preview'.indexOf('?') !== -1 ? '&' : '?';
-      var url = _baseUrl + '/api/aiconfig/preview' + sep +
-        'token=' + encodeURIComponent(_token);
-
-      var options = {
-        method: 'POST',
-        headers: {
-          'Accept': '*/*',
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({
-          peer_id: peerId,
-          root_index: rootIndex,
-          rel_path: relPath,
-        }),
-      };
-
-      var controller = null;
-      var timeoutId = null;
-      if (typeof AbortController !== 'undefined') {
-        controller = new AbortController();
-        options.signal = controller.signal;
-        timeoutId = setTimeout(function () {
-          controller.abort();
-        }, 15000);
-      }
-
-      return fetch(url, options)
-        .then(function (response) {
-          clearTimeout(timeoutId);
-          return response.text().then(function (bodyText) {
-            var parsed = null;
-            try { parsed = JSON.parse(bodyText); } catch (e) { parsed = null; }
-            if (!response.ok) {
-              // Structured backend errors carry a human-readable reason.
-              throw new Error(
-                (parsed && typeof parsed === 'object' && parsed.error) ||
-                ('HTTP ' + response.status));
-            }
-            if (parsed && typeof parsed === 'object') {
-              if (typeof parsed.error === 'string' && parsed.error) {
-                throw new Error(parsed.error);
-              }
-              if (typeof parsed.content === 'string') {
-                return { content: parsed.content, truncated: !!parsed.truncated };
-              }
-            }
-            // Plain-text (or unexpected-shape) body — show it verbatim and let
-            // the length heuristic drive the truncation notice.
-            return { content: bodyText, truncated: bodyText.length >= 65536 };
-          });
-        })
-        .catch(function (e) {
-          clearTimeout(timeoutId);
-          console.warn('[ClipsyncAPI] AI-config preview failed:', e);
-          throw e;
-        });
+    previewAiConfigLegacy: function (peerId, rootIndex, relPath) {
+      return _previewAiConfig({
+        peer_id: peerId, root_index: rootIndex, rel_path: relPath,
+      });
     },
 
     /**
-     * Ask the server to pull the selected files from a peer and land them
-     * locally. Results arrive per-file later via the WS `aiconfig_file`
-     * event — this call only confirms what was requested.
+     * Ask the server to pull the selected files (and/or folders — folder items
+     * carry is_dir:true and are expanded server-side from the peer's cached
+     * inventory) from a peer and land them locally.  Results arrive per-file
+     * later via the WS `aiconfig_file` event, echoing *batchId* so the UI can
+     * aggregate progress — this call only confirms what was requested.
      * @param {string} peerId
-     * @param {Array<{root_index: number, rel_path: string}>} items
+     * @param {Array<{tool: string, rel_path: string, is_dir?: boolean}>} items
      * @param {'overwrite'|'copy'|'append'} mode
-     * @returns {Promise<{requested: number}>}
+     * @param {string} [batchId]
+     * @returns {Promise<{requested: number, expanded: number, errors: string[]}>}
      */
-    pullAiConfigFiles: function (peerId, items, mode) {
-      return this._fetch('POST', '/api/aiconfig/pull', {
-        peer_id: peerId,
-        items: items,
-        mode: mode,
-      });
+    pullAiConfigFiles: function (peerId, items, mode, batchId) {
+      var payload = { peer_id: peerId, items: items, mode: mode };
+      if (batchId) payload.batch_id = batchId;
+      return this._fetch('POST', '/api/aiconfig/pull', payload);
     },
 
     /* ═══════════════════════════════════════════════════════════════
@@ -445,12 +472,12 @@ var ClipsyncAPI = (function () {
        ═══════════════════════════════════════════════════════════════ */
 
     /**
-     * This device's own AI-config inventory — watch roots + file metadata.
-     * Unlike the peer inventory this needs NO paired device: it is a plain
-     * file manager over the local watch list.
-     * @returns {Promise<{collected_at: number, roots: Array, entries: Array}>}
-     *   roots: [{root_index, path, count}]; entries: [{root_index, rel_path,
-     *   size, mtime, sha256}].
+     * This device's own AI-config listing — tool-profile roots + file
+     * metadata, grouped by tool for the UI.
+     * @returns {Promise<{collected_at, tools: Array, custom_paths: string[],
+     *   roots: Array, entries: Array}>}
+     *   roots: [{tool, kind, path, count}]; entries: [{tool, rel_path, size,
+     *   mtime, sha256, is_dir}].
      */
     getAiConfigLocal: function () {
       return this._fetch('GET', '/api/aiconfig/local');
@@ -460,57 +487,53 @@ var ClipsyncAPI = (function () {
      * Read ONE local AI-config file's text for preview (no pairing). Binary
      * files answer {ok:false, error:'binary'} — the caller shows a "cannot
      * preview" notice instead of crashing.
-     * @param {number} rootIndex
+     * @param {string} tool
      * @param {string} relPath
      * @returns {Promise<{ok: boolean, content: string, truncated: boolean}>}
      */
-    getAiConfigLocalItem: function (rootIndex, relPath) {
+    getAiConfigLocalItem: function (tool, relPath) {
       return this._fetch('GET',
-        '/api/aiconfig/local/item?root_index=' + encodeURIComponent(rootIndex) +
+        '/api/aiconfig/local/item?tool=' + encodeURIComponent(tool) +
         '&rel_path=' + encodeURIComponent(relPath));
     },
 
     /**
      * Save edited content back to a LOCAL AI-config file. The backend writes
      * a .bak copy beside it before overwriting (never a silent clobber).
-     * @param {number} rootIndex
+     * @param {string} tool
      * @param {string} relPath
      * @param {string} content
      * @returns {Promise<{ok: boolean}>}
      */
-    saveAiConfigLocal: function (rootIndex, relPath, content) {
+    saveAiConfigLocal: function (tool, relPath, content) {
       return this._fetch('POST', '/api/aiconfig/local/save', {
-        root_index: rootIndex,
-        rel_path: relPath,
-        content: content,
+        tool: tool, rel_path: relPath, content: content,
       });
     },
 
     /**
-     * Move a LOCAL AI-config file to the OS Recycle Bin — recoverable, not a
-     * hard delete. The backend answers the trash path it moved to.
-     * @param {number} rootIndex
+     * Move a LOCAL AI-config file/dir to the recoverable trash (never a hard
+     * delete). The backend answers the trash path it moved to.
+     * @param {string} tool
      * @param {string} relPath
      * @returns {Promise<{ok: boolean, trashed_to: string}>}
      */
-    trashAiConfigLocal: function (rootIndex, relPath) {
+    trashAiConfigLocal: function (tool, relPath) {
       return this._fetch('POST', '/api/aiconfig/local/trash', {
-        root_index: rootIndex,
-        rel_path: relPath,
+        tool: tool, rel_path: relPath,
       });
     },
 
     /**
-     * Ask the server to open a LOCAL AI-config file's containing folder in the
-     * OS file manager (or the file itself when the backend chooses).
-     * @param {number} rootIndex
+     * Ask the server to open a LOCAL AI-config file (or directory) with the OS
+     * default app.
+     * @param {string} tool
      * @param {string} relPath
      * @returns {Promise<{ok: boolean}>}
      */
-    openAiConfigLocal: function (rootIndex, relPath) {
+    openAiConfigLocal: function (tool, relPath) {
       return this._fetch('POST', '/api/aiconfig/open', {
-        root_index: rootIndex,
-        rel_path: relPath,
+        tool: tool, rel_path: relPath,
       });
     },
 

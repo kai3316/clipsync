@@ -5013,6 +5013,34 @@
       flex-wrap: wrap;
     }
 
+    .settings-checkbox {
+      display: flex;
+      align-items: center;
+      gap: var(--clipsync-space-2);
+      flex-wrap: wrap;
+      padding: var(--clipsync-space-2);
+      margin-bottom: var(--clipsync-space-2);
+      border-radius: var(--clipsync-radius-md);
+      border: 1px solid var(--clipsync-border);
+      background: var(--clipsync-panel-2);
+      cursor: pointer;
+      user-select: none;
+    }
+    .settings-checkbox input[type="checkbox"] {
+      accent-color: var(--clipsync-accent);
+    }
+    .settings-checkbox__name {
+      font-weight: 600;
+      font-size: 0.85rem;
+      color: var(--clipsync-fg);
+    }
+    .settings-checkbox__paths {
+      font-family: var(--clipsync-font-mono);
+      font-size: 0.72rem;
+      color: var(--clipsync-fg-muted);
+      overflow-wrap: anywhere;
+    }
+
     .settings-input {
       width: 100%;
       padding: var(--clipsync-space-2) var(--clipsync-space-3);
@@ -5269,7 +5297,7 @@
     .diag-check--warn { border-color: color-mix(in srgb, var(--clipsync-warning) 40%, transparent); }
     .diag-check--warn .diag-check__status { color: var(--clipsync-warning); }
 
-    /* ── AI-config panel (round 12) ─────────────────────────────── */
+    /* ── AI-config panel (refactor round 1 — unified tab) ──────── */
     .aiconfig-panel {
       display: flex;
       flex-direction: column;
@@ -5278,83 +5306,109 @@
       min-height: 0;
     }
 
-    .aiconfig-panel__body {
+    .aiconfig-panel__header-actions {
       display: flex;
-      gap: var(--clipsync-space-4);
-      flex: 1;
-      min-height: 0;
-    }
-
-    /* Device list */
-    .aiconfig-panel__peers {
-      width: 200px;
-      flex-shrink: 0;
-      padding: var(--clipsync-space-3);
-      display: flex;
-      flex-direction: column;
+      align-items: center;
       gap: var(--clipsync-space-2);
-      overflow-y: auto;
-      align-self: flex-start;
-      max-height: 100%;
+      flex-shrink: 0;
     }
 
-    .aiconfig-panel__peer-btn {
+    /* Device bar: THIS device + every paired peer as pills, diff badges */
+    .aiconfig-panel__hero {
+      flex-shrink: 0;
       display: flex;
-      flex-direction: column;
-      align-items: flex-start;
-      gap: 2px;
-      width: 100%;
-      padding: 8px 10px;
+      flex-wrap: wrap;
+      gap: var(--clipsync-space-2);
+      padding: var(--clipsync-space-2) var(--clipsync-space-3);
+      border-radius: var(--clipsync-radius-md);
+    }
+
+    .aiconfig-panel__device-pill {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      padding: 7px 12px;
       font-family: var(--clipsync-font);
-      text-align: left;
-      color: var(--clipsync-fg-muted);
-      background: transparent;
-      border: 1px solid transparent;
-      border-radius: var(--clipsync-radius-sm);
+      font-size: 13px;
+      color: var(--clipsync-fg);
+      background: var(--clipsync-panel-2);
+      border: 1px solid var(--clipsync-border);
+      border-radius: var(--clipsync-radius-full);
       cursor: pointer;
       transition: all var(--clipsync-transition-fast);
       -webkit-user-select: none;
       user-select: none;
     }
 
-    .aiconfig-panel__peer-btn:hover {
-      color: var(--clipsync-fg);
-      background: var(--clipsync-hover);
+    .aiconfig-panel__device-pill:hover {
+      color: var(--clipsync-accent);
+      border-color: var(--clipsync-border-glow);
     }
 
-    .aiconfig-panel__peer-btn--active {
+    .aiconfig-panel__device-pill--active {
       color: var(--clipsync-accent);
       background: var(--clipsync-accent-glow);
       border-color: var(--clipsync-border-glow);
-      box-shadow: -4px 0 12px var(--clipsync-accent-glow);
+      box-shadow: 0 0 12px var(--clipsync-accent-glow);
     }
 
-    .aiconfig-panel__peer-name {
-      font-size: 13px;
+    .aiconfig-panel__device-pill-name {
+      max-width: 200px;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
       font-weight: 600;
-      max-width: 100%;
-      overflow: hidden;
-      text-overflow: ellipsis;
-      white-space: nowrap;
     }
 
-    .aiconfig-panel__peer-meta {
-      font-size: 11px;
+    .aiconfig-panel__device-pill-tag {
+      font-size: 10px;
+      font-weight: 700;
+      padding: 1px 7px;
+      border-radius: var(--clipsync-radius-full);
+      background: var(--clipsync-panel-2);
       color: var(--clipsync-fg-muted);
-      max-width: 100%;
-      overflow: hidden;
-      text-overflow: ellipsis;
-      white-space: nowrap;
     }
 
-    /* Files column */
-    .aiconfig-panel__files {
-      flex: 1;
-      min-width: 0;
-      min-height: 0;
-      display: flex;
-      flex-direction: column;
-      gap: var(--clipsync-space-2);
+    .aiconfig-panel__device-pill-tag--legacy {
+      color: var(--clipsync-warning-text, var(--clipsync-warning));
+      background: var(--clipsync-warning-bg);
+    }
+
+    .aiconfig-panel__device-pill-badge {
+      min-width: 18px;
+      padding: 0 6px;
+      font-size: 11px;
+      font-weight: 700;
+      line-height: 18px;
+      text-align: center;
+      border-radius: var(--clipsync-radius-full);
+      background: var(--clipsync-accent-glow);
+      color: var(--clipsync-accent);
+    }
+
+    .aiconfig-panel__device-pill-badge--warn {
+      color: var(--clipsync-warning-text, var(--clipsync-warning));
+      background: var(--clipsync-warning-bg);
+    }
+
+    /* Cross-device notice + diff summary lines */
+    .aiconfig-panel__notice {
+      flex-shrink: 0;
+      padding: var(--clipsync-space-2) var(--clipsync-space-3);
+      font-size: 12px;
+      color: var(--clipsync-fg-muted);
+      border-radius: var(--clipsync-radius-md);
+    }
+
+    .aiconfig-panel__diff-summary {
+      flex-shrink: 0;
+      padding: var(--clipsync-space-2) var(--clipsync-space-3);
+      border-radius: var(--clipsync-radius-md);
+    }
+
+    .aiconfig-panel__diff-line {
+      font-size: 12px;
+      color: var(--clipsync-fg-muted);
     }
 
     .aiconfig-panel__toolbar {
@@ -5447,19 +5501,6 @@
       max-width: 480px;
     }
 
-    .aiconfig-panel__root-chip {
-      display: inline-block;
-      flex-shrink: 0;
-      margin-right: 6px;
-      padding: 1px 6px;
-      font-size: 10px;
-      font-weight: 700;
-      border-radius: var(--clipsync-radius-full);
-      background: var(--clipsync-panel-2);
-      color: var(--clipsync-fg-muted);
-      vertical-align: middle;
-    }
-
     .aiconfig-panel__path-btn {
       display: inline-block;
       max-width: 340px;
@@ -5512,6 +5553,117 @@
 
     .aiconfig-panel__tree-chevron--spacer:hover {
       color: var(--clipsync-fg-muted);
+    }
+
+    /* Whole-folder selection: a checkbox on folder rows.  Partial state
+       (some but not all descendant files checked) tints the checkbox. */
+    .aiconfig-panel__folder-check {
+      display: inline-flex;
+      align-items: center;
+      vertical-align: middle;
+      margin-right: 2px;
+    }
+
+    .aiconfig-panel__tool-section {
+      flex: 1 1 auto;
+      min-height: 0;
+      display: flex;
+      flex-direction: column;
+      gap: var(--clipsync-space-1);
+      padding: var(--clipsync-space-2) var(--clipsync-space-3) var(--clipsync-space-3);
+      border-radius: var(--clipsync-radius-md);
+    }
+
+    .aiconfig-panel__tool-section-head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: var(--clipsync-space-2);
+      padding: 2px 2px 6px;
+      border-bottom: 1px solid var(--clipsync-border);
+    }
+
+    .aiconfig-panel__tool-section-title {
+      font-size: 12px;
+      font-weight: 700;
+      color: var(--clipsync-fg);
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .aiconfig-panel__tool-section-count {
+      flex-shrink: 0;
+      font-size: 11px;
+      font-weight: 600;
+      color: var(--clipsync-fg-muted);
+      background: var(--clipsync-panel-2);
+      padding: 1px 8px;
+      border-radius: var(--clipsync-radius-full);
+    }
+
+    /* Batch pull progress (folder + migration pulls) */
+    .aiconfig-panel__batch {
+      flex-shrink: 0;
+      display: flex;
+      flex-direction: column;
+      gap: var(--clipsync-space-2);
+      padding: var(--clipsync-space-3);
+      border-radius: var(--clipsync-radius-md);
+    }
+
+    .aiconfig-panel__batch-head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: var(--clipsync-space-2);
+    }
+
+    .aiconfig-panel__batch-label {
+      font-size: 12px;
+      font-weight: 600;
+      color: var(--clipsync-fg);
+    }
+
+    .aiconfig-panel__batch-actions {
+      display: flex;
+      align-items: center;
+      gap: var(--clipsync-space-2);
+      flex-shrink: 0;
+    }
+
+    .aiconfig-panel__batch-bar {
+      height: 6px;
+      border-radius: var(--clipsync-radius-full);
+      background: var(--clipsync-panel-2);
+      overflow: hidden;
+    }
+
+    .aiconfig-panel__batch-bar-fill {
+      height: 100%;
+      border-radius: var(--clipsync-radius-full);
+      background: var(--clipsync-accent);
+      transition: width var(--clipsync-transition);
+    }
+
+    .aiconfig-panel__batch-results {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 4px;
+    }
+
+    .aiconfig-panel__batch-result {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      width: 20px;
+      height: 20px;
+      border-radius: 50%;
+      font-size: 11px;
+      font-weight: 700;
+      cursor: default;
     }
 
     .aiconfig-panel__cell-size,
@@ -5807,11 +5959,11 @@
       color: var(--clipsync-danger-text, var(--clipsync-danger));
     }
 
-    /* Watch-paths management dialog (round 18) */
-    .aiconfig-paths__overlay {
+    /* AI-config migration wizard (modal) */
+    .aiconfig-migrate__overlay {
       position: fixed;
       inset: 0;
-      z-index: var(--clipsync-z-modal);
+      z-index: calc(var(--clipsync-z-modal) + 10);
       display: flex;
       align-items: center;
       justify-content: center;
@@ -5821,9 +5973,9 @@
       -webkit-backdrop-filter: blur(6px);
     }
 
-    .aiconfig-paths {
-      width: min(520px, 100%);
-      max-height: 82vh;
+    .aiconfig-migrate {
+      width: min(680px, 100%);
+      max-height: 88vh;
       display: flex;
       flex-direction: column;
       border-radius: var(--clipsync-radius-lg);
@@ -5831,54 +5983,175 @@
       overflow: hidden;
     }
 
-    .aiconfig-paths__header {
+    .aiconfig-migrate__header {
       display: flex;
       align-items: center;
       justify-content: space-between;
       gap: var(--clipsync-space-3);
       padding: var(--clipsync-space-3) var(--clipsync-space-4);
       border-bottom: 1px solid var(--clipsync-border);
+      flex-shrink: 0;
     }
 
-    .aiconfig-paths__title {
+    .aiconfig-migrate__title {
       font-size: 14px;
       font-weight: 700;
       color: var(--clipsync-fg);
     }
 
-    .aiconfig-paths__hint {
-      padding: 10px var(--clipsync-space-4);
-      font-size: 12px;
-      color: var(--clipsync-fg-muted);
-      border-bottom: 1px solid var(--clipsync-border);
+    .aiconfig-migrate__empty {
+      padding: var(--clipsync-space-5);
+      text-align: center;
     }
 
-    .aiconfig-paths__list {
-      flex: 1;
-      min-height: 0;
-      overflow-y: auto;
+    .aiconfig-migrate__step {
       padding: var(--clipsync-space-3) var(--clipsync-space-4);
+      border-bottom: 1px solid var(--clipsync-border);
+      flex-shrink: 0;
     }
 
-    .aiconfig-paths__row {
-      display: flex;
-      align-items: center;
-      gap: var(--clipsync-space-2);
+    .aiconfig-migrate__step-label {
+      font-size: 11px;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      color: var(--clipsync-fg-muted);
       margin-bottom: var(--clipsync-space-2);
     }
 
-    .aiconfig-paths__row .settings-input {
-      flex: 1;
-      min-width: 0;
+    .aiconfig-migrate__sources {
+      display: flex;
+      flex-wrap: wrap;
+      gap: var(--clipsync-space-2);
     }
 
-    .aiconfig-paths__footer {
+    .aiconfig-migrate__source {
+      padding: 6px 14px;
+      font-family: var(--clipsync-font);
+      font-size: 13px;
+      color: var(--clipsync-fg);
+      background: var(--clipsync-panel-2);
+      border: 1px solid var(--clipsync-border);
+      border-radius: var(--clipsync-radius-full);
+      cursor: pointer;
+      transition: all var(--clipsync-transition-fast);
+      -webkit-user-select: none;
+      user-select: none;
+    }
+
+    .aiconfig-migrate__source:hover {
+      color: var(--clipsync-accent);
+      border-color: var(--clipsync-border-glow);
+    }
+
+    .aiconfig-migrate__source--active {
+      color: var(--clipsync-accent);
+      background: var(--clipsync-accent-glow);
+      border-color: var(--clipsync-border-glow);
+      box-shadow: 0 0 12px var(--clipsync-accent-glow);
+    }
+
+    .aiconfig-migrate__diffbar {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: var(--clipsync-space-2);
+      padding: var(--clipsync-space-3) var(--clipsync-space-4);
+      flex-shrink: 0;
+    }
+
+    .aiconfig-migrate__diffcount {
+      font-size: 13px;
+      font-weight: 600;
+      color: var(--clipsync-fg);
+    }
+
+    .aiconfig-migrate__groups {
+      flex: 1;
+      min-height: 0;
+      overflow-y: auto;
+      padding: 0 var(--clipsync-space-4) var(--clipsync-space-3);
+      display: flex;
+      flex-direction: column;
+      gap: var(--clipsync-space-3);
+    }
+
+    .aiconfig-migrate__group-head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: var(--clipsync-space-2);
+      padding: var(--clipsync-space-2) 0 4px;
+      border-bottom: 1px solid var(--clipsync-border);
+    }
+
+    .aiconfig-migrate__group-count {
+      font-size: 11px;
+      font-weight: 600;
+      color: var(--clipsync-fg-muted);
+      background: var(--clipsync-panel-2);
+      padding: 1px 8px;
+      border-radius: var(--clipsync-radius-full);
+    }
+
+    .aiconfig-migrate__rows {
+      display: flex;
+      flex-direction: column;
+      gap: 2px;
+      padding-top: 4px;
+    }
+
+    .aiconfig-migrate__row {
+      display: flex;
+      align-items: center;
+      gap: var(--clipsync-space-2);
+      padding: 4px 6px;
+      border-radius: var(--clipsync-radius-sm);
+      cursor: pointer;
+      font-size: 13px;
+      -webkit-user-select: none;
+      user-select: none;
+    }
+
+    .aiconfig-migrate__row:hover {
+      background: var(--clipsync-hover);
+    }
+
+    .aiconfig-migrate__path {
+      min-width: 0;
+      flex: 1;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      font-family: var(--clipsync-font-mono);
+      font-size: 12px;
+      color: var(--clipsync-fg);
+    }
+
+    .aiconfig-migrate__strategy {
+      display: flex;
+      align-items: center;
+      gap: var(--clipsync-space-3);
+      flex-wrap: wrap;
+      padding: var(--clipsync-space-3) var(--clipsync-space-4);
+      border-top: 1px solid var(--clipsync-border);
+      flex-shrink: 0;
+    }
+
+    .aiconfig-migrate__footer {
       display: flex;
       align-items: center;
       justify-content: flex-end;
       gap: var(--clipsync-space-2);
       padding: var(--clipsync-space-3) var(--clipsync-space-4);
       border-top: 1px solid var(--clipsync-border);
+      flex-shrink: 0;
+    }
+
+    .aiconfig-migrate__batch {
+      margin: 0 var(--clipsync-space-4) var(--clipsync-space-3);
+      border: 1px solid var(--clipsync-border);
+      flex-shrink: 0;
     }
 
     /* Local preview / edit card (round 18) */
@@ -5935,56 +6208,12 @@
       overflow: auto;
     }
 
-    /* AI-config DEVICE card — mounted in the Devices tab (round 18
-       relocation; the AI Config tab is local-only now) */
-    .aiconfig-device {
-      padding: var(--clipsync-space-3);
-      border-radius: var(--clipsync-radius-lg);
-      display: flex;
-      flex-direction: column;
-      gap: var(--clipsync-space-2);
-    }
-
-    .aiconfig-device__header {
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
-      gap: var(--clipsync-space-2);
-      flex-shrink: 0;
-    }
-
-    .aiconfig-device__body {
-      display: flex;
-      gap: var(--clipsync-space-4);
-    }
-
-    /* Inside a scrollable tab the body must not stretch to fill: cap the
-       table and the peer list so the card stays a bounded section. */
-    .aiconfig-device .aiconfig-panel__body,
-    .aiconfig-device__body {
-      flex: none;
-      min-height: 0;
-    }
-
-    .aiconfig-device .aiconfig-panel__tablewrap {
-      max-height: 44vh;
-    }
-
-    .aiconfig-device .aiconfig-panel__peers {
-      max-height: 44vh;
-    }
+    /* Local sub-view (THIS device) header comment kept minimal — the tool
+       groups it renders share the aiconfig-panel__tool-section styles. */
 
     @media (max-width: 767px) {
-      .aiconfig-device__body {
-        flex-direction: column;
-      }
-
-      .aiconfig-device .aiconfig-panel__peers {
-        width: 100%;
-        max-height: none;
-        flex-direction: row;
-        flex-wrap: wrap;
-        align-self: stretch;
+      .aiconfig-panel__device-pill-name {
+        max-width: 120px;
       }
 
       .aiconfig-panel__local {
@@ -5996,24 +6225,11 @@
         flex-wrap: wrap;
       }
 
-      .aiconfig-panel__body {
-        flex-direction: column;
-        overflow-y: auto;
-      }
-
-      .aiconfig-panel__peers {
-        width: 100%;
-        max-height: none;
-        flex-direction: row;
+      .aiconfig-panel__toolbar {
         flex-wrap: wrap;
-        align-self: stretch;
       }
 
-      .aiconfig-panel__peer-btn {
-        width: auto;
-      }
-
-      .aiconfig-panel__tablewrap {
+      .aiconfig-panel__tool-section .aiconfig-panel__tablewrap {
         flex: none;
         max-height: 50vh;
       }
@@ -7775,6 +7991,7 @@
   <script src="js/api.js?token=__TOKEN__"></script>
   <script src="js/sound.js?token=__TOKEN__"></script>
   <script src="js/ws.js?token=__TOKEN__"></script>
+  <script src="js/aiconfig-helpers.js?token=__TOKEN__"></script>
   <!-- Components -->
   <script src="components/toast.js?token=__TOKEN__"></script>
   <script src="components/title-bar.js?token=__TOKEN__"></script>
@@ -7791,7 +8008,7 @@
   <script src="components/favorites-panel.js?token=__TOKEN__"></script>
   <script src="components/diagnostics-panel.js?token=__TOKEN__"></script>
   <script src="components/aiconfig-panel.js?token=__TOKEN__"></script>
-  <script src="components/aiconfig-device-panel.js?token=__TOKEN__"></script>
+  <script src="components/aiconfig-migrate-panel.js?token=__TOKEN__"></script>
   <script src="components/preview-popover.js?token=__TOKEN__"></script>
   <script src="components/context-menu.js?token=__TOKEN__"></script>
   <script src="components/translate-modal.js?token=__TOKEN__"></script>

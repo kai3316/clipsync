@@ -3073,12 +3073,13 @@ class Application:
             except (TypeError, ValueError):
                 pass
 
-        # AI-config sync (Round 12): the watch list changed via web settings —
-        # recollect and rebroadcast the inventory.  (The dedicated
-        # POST /api/aiconfig/paths editor also triggers on_watch_list_changed
-        # itself; this branch covers the same field arriving through the
-        # main POST /api/settings form.)
-        if "ai_config_paths" in updated and self.aicfg_mgr is not None:
+        # AI-config sync: the enabled tool profiles / custom paths changed via
+        # web settings — recollect and rebroadcast the inventory.  (The
+        # dedicated profiles editor also triggers on_watch_list_changed itself;
+        # this branch covers the same fields arriving through the main
+        # POST /api/settings form.)
+        if ("ai_config_tools" in updated or "ai_config_custom_paths" in updated) \
+                and self.aicfg_mgr is not None:
             try:
                 self.aicfg_mgr.on_watch_list_changed()
             except Exception:
@@ -6482,18 +6483,21 @@ class Application:
     def _diag_group_aiconfig(self) -> dict:
         items = []
         mgr = getattr(self, "aicfg_mgr", None)
-        roots = [r for r in (getattr(self.cfg, "ai_config_paths", []) or [])
-                 if isinstance(r, str) and r]
+        tools = [t for t in (getattr(self.cfg, "ai_config_tools", []) or [])
+                 if isinstance(t, str) and t]
+        custom = [c for c in (getattr(self.cfg, "ai_config_custom_paths", []) or [])
+                  if isinstance(c, str) and c]
+        roots = tools + custom
         if roots:
             items.append(self._diag_item(
-                "watch_roots", "ok", f"{len(roots)} root(s)",
+                "watch_roots", "ok", f"{len(roots)} profile root(s)",
                 detail_key="diag.v2.item.watch_roots.ok.detail",
                 detail_params={"count": len(roots)}))
         else:
             items.append(self._diag_item(
                 "watch_roots", "warn", "No watch roots",
                 detail_key="diag.v2.item.watch_roots.warn.detail",
-                hint="Add watch directories in AI config settings to inventory AI tool configs.",
+                hint="Enable AI tool profiles in AI config settings to inventory AI tool configs.",
                 hint_key="diag.v2.item.watch_roots.warn.hint"))
         if mgr is None:
             for it in ("local_entries", "last_collected", "trash_size"):

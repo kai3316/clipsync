@@ -795,15 +795,20 @@ def test_new_removed_locale_keys_present_in_both():
         assert key in zh and zh[key], key
 
 
-def test_ai_config_sub_panel_moved_out_of_devices():
+def test_ai_config_ui_merged_into_unified_panel():
     # The paired-device AI-config inventories panel no longer lives in the
-    # Devices page (it was relocated to the AI Config tab, under the local
-    # manager) — the Devices template must not mount it.
+    # Devices page — the Devices template must not mount it.
     src = _read_r19("components", "device-panel.js")
     assert "aiconfig-device-panel" not in src
-    # And it IS mounted by the AI Config tab.
+    # The refactor then went further: the separate device sub-panel component
+    # was deleted and merged INTO aiconfig-panel, which now hosts the peer
+    # device bar, the per-device inventories AND the local manager in one file.
+    assert not os.path.exists(os.path.join(
+        _STATIC_r19, "components", "aiconfig-device-panel.js"))
     aiconf = _read_r19("components", "aiconfig-panel.js")
-    assert "<aiconfig-device-panel></aiconfig-device-panel>" in aiconf
+    assert "aiconfig-device-panel" not in aiconf
+    assert "H.diffCounts" in aiconf          # peer diff badges
+    assert "aiconfig.local_title" in aiconf  # local manage sub-view
 
 
 # ── 4. Locale parity (round 19 adds no new copy) ────────────────────────
