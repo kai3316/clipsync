@@ -441,14 +441,22 @@ _EN: dict[str, str] = {
     "tray.export_logs": "Export Logs...",
     "tray.check_update": "Check for Updates",
     "tray.update_available": "ClipSync {version} is available",
-    "tray.update_install_prompt": "ClipSync {version} is available. Download and install now?",
+    "tray.update_install_prompt": "Download the new version now?",
     "tray.update_install_failed": "Failed to install the update",
+    "tray.update_ready_prompt": (
+        "ClipSync {version} is ready. Quit the app and run:\n{path}"),
     "tray.up_to_date": "ClipSync is up to date",
     "tray.update_failed": "Update check failed",
     "settings_window.auto_update_check": "Check for updates automatically",
     "settings_window.auto_update_check_hint": (
         "Periodically checks GitHub releases (about every 6 hours). "
         "Off = no background update requests."),
+    "settings_window.update_downloading_progress": "Downloading… {pct}%",
+    "settings_window.update_ready": "New version {version} is ready",
+    "settings_window.update_ready_hint": (
+        "Quit ClipSync, then run the file below to switch to the new version. "
+        "Your clips and devices stay on this computer."),
+    "settings_window.update_open_folder": "Open containing folder",
     "tray.about": "About ClipSync",
     "tray.quit": "Quit",
     "tray.no_devices": "(no devices connected)",
@@ -1278,13 +1286,21 @@ _ZH: dict[str, str] = {
     "tray.export_logs": "导出日志...",
     "tray.check_update": "检查更新",
     "tray.update_available": "ClipSync {version} 可用",
-    "tray.update_install_prompt": "ClipSync {version} 可用。现在下载并安装吗？",
+    "tray.update_install_prompt": "现在下载新版本吗？",
     "tray.update_install_failed": "安装更新失败",
+    "tray.update_ready_prompt": (
+        "ClipSync {version} 已就绪。请退出应用后运行：\n{path}"),
     "tray.up_to_date": "ClipSync 已是最新版本",
     "tray.update_failed": "检查更新失败",
     "settings_window.auto_update_check": "自动检查更新",
     "settings_window.auto_update_check_hint": (
         "定期检查 GitHub 新版本（约每 6 小时一次）。关闭后不再发起任何后台更新请求。"),
+    "settings_window.update_downloading_progress": "正在下载… {pct}%",
+    "settings_window.update_ready": "新版本 {version} 已就绪",
+    "settings_window.update_ready_hint": (
+        "请退出当前应用，然后运行下方文件以切换到新版本。"
+        "剪贴板历史与设备仍保留在本机。"),
+    "settings_window.update_open_folder": "打开所在文件夹",
     "tray.about": "关于 ClipSync",
     "tray.quit": "退出",
     "tray.no_devices": "（无已连接设备）",

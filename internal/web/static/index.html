@@ -6266,6 +6266,41 @@
       background: var(--clipsync-accent-hover);
     }
 
+    /* ── Update download progress + ready card (About section) ── */
+    .update-progress {
+      position: relative;
+      height: 8px;
+      border-radius: 999px;
+      background: var(--clipsync-panel);
+      border: 1px solid var(--clipsync-border);
+      overflow: hidden;
+    }
+    .update-progress__bar {
+      height: 100%;
+      border-radius: 999px;
+      background: var(--clipsync-accent);
+      transition: width 0.2s ease;
+    }
+    .update-progress__label {
+      display: block;
+      margin-top: 6px;
+      font-size: 0.72rem;
+      color: var(--clipsync-fg-muted);
+    }
+    .update-ready-path {
+      margin-top: 8px;
+      padding: 6px 8px;
+      border-radius: var(--clipsync-radius-sm);
+      background: var(--clipsync-panel);
+      border: 1px solid var(--clipsync-border);
+      font-family: var(--clipsync-font-mono);
+      font-size: 0.72rem;
+      color: var(--clipsync-fg);
+      word-break: break-all;
+      user-select: text;
+      -webkit-user-select: text;
+    }
+
     .settings-btn--sm {
       padding: var(--clipsync-space-1) var(--clipsync-space-3);
       font-size: 0.8rem;

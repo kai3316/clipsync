@@ -119,8 +119,9 @@
       'settings.about', 'settings.version', 'settings.device_name',
       'settings.device_id', 'overview.platform', 'settings_window.about_desc',
       'settings_window.auto_update_check', 'settings_window.auto_update_check_hint',
-      'settings_window.update_check_now', 'settings_window.update_install_now',
-      'settings_window.update_download',
+      'settings_window.update_check_now', 'settings_window.update_download',
+      'settings_window.update_downloading_progress', 'settings_window.update_ready',
+      'settings_window.update_ready_hint', 'settings_window.update_open_folder',
     ],
     danger: [
       'settings_window.danger_zone', 'settings_window.danger_zone_desc',
@@ -242,8 +243,7 @@
         certDevices: [],
         certsLoading: false,
 
-        // Update download / check
-        updateDownloading: false,
+        // Update check
         updateChecking: false,
         // null = not checked yet; true/false = result of the last check
         updateAvailable: null,
@@ -984,46 +984,34 @@
         });
       },
 
-      installUpdate: function () {
+      startDownload: function () {
         var self = this;
-        self.updateDownloading = true;
-        // POST /api/update/install runs the same chain as the tray:
-        // download → verify → stage → apply → restart. The app exits and the
-        // update helper replaces the binary, so this page dies mid-request —
-        // that is expected, not an error to report.
-        ClipsyncAPI._fetch('POST', '/api/update/install', {}, 30000).then(function (res) {
-          if (res && res.ok) {
-            self.store.showToast(self.t('settings_window.update_installing'), 5000);
-          } else {
-            self.updateDownloading = false;
+        // POST /api/update/download returns immediately; the download runs in
+        // the background and live progress / ready / failed arrive as
+        // `update_state` WebSocket events that the store mirrors into
+        // store.updateState.  A refused/failed start only toasts — never
+        // clobber a live state (a second download may already be streaming or
+        // one may already be ready).
+        ClipsyncAPI.downloadUpdate().then(function (res) {
+          if (!res || !res.ok) {
             self.store.showToast(self.t('settings_window.update_failed') +
-              ((res && res.error) ? ': ' + res.error : ''), 2500);
+              ((res && res.error) ? ': ' + res.error : ''), 3000);
           }
         }).catch(function () {
-          // A successful install restarts the host, which aborts this request
-          // — only surface a failure when the dashboard is still alive.
-          setTimeout(function () {
-            self.updateDownloading = false;
-          }, 4000);
+          self.store.showToast(self.t('settings_window.update_failed'), 3000);
         });
       },
 
-      downloadUpdate: function () {
+      openUpdateFolder: function () {
         var self = this;
-        self.updateDownloading = true;
-        // The download can take well over the 15s default request timeout, so
-        // give it a long explicit window. Expected failures now come back as
-        // HTTP 200 {ok:false, error:<reason>} — surfaced via res.error below.
-        ClipsyncAPI._fetch('POST', '/api/update/download', {}, 120000).then(function (res) {
-          self.updateDownloading = false;
-          if (res && res.ok) {
-            self.store.showToast(self.t('settings_window.update_downloaded', { path: res.path || '' }), 4000);
-          } else {
-            self.store.showToast(self.t('settings_window.update_failed') + ((res && res.error) ? ': ' + res.error : ''), 2500);
+        // Reveal the prepared exe's folder in the OS file manager (only
+        // meaningful while the update is `ready`).
+        ClipsyncAPI.openUpdateFolder().then(function (res) {
+          if (!res || !res.ok) {
+            self.store.showToast(self.t('settings_window.update_failed'), 2500);
           }
         }).catch(function () {
-          self.updateDownloading = false;
-          self.store.showToast(self.t('settings_window.update_failed'), 2000);
+          self.store.showToast(self.t('settings_window.update_failed'), 2500);
         });
       },
 
@@ -2401,18 +2389,30 @@
                   '<p class="settings-hint">{{ t(\'settings_window.auto_update_check_hint\') }}</p>' +
 
                   '<div style="display:flex;gap:8px;margin-top:14px">' +
-                    '<button class="settings-btn" @click="checkForUpdate" :disabled="updateChecking || updateDownloading" style="flex:1">' +
+                    '<button class="settings-btn" @click="checkForUpdate" :disabled="updateChecking || store.updateState.phase === \'downloading\'" style="flex:1">' +
                       '{{ updateChecking ? \'...\' : t(\'settings_window.update_check_now\') }}' +
                     '</button>' +
                   '</div>' +
                   '<p v-if="updateAvailable" class="settings-hint" style="margin-top:10px;color:var(--clipsync-accent,#22D3EE)">{{ t(\'settings_window.update_available_found\', { version: updateLatest }) }}</p>' +
 
-                  '<button v-if="updateAvailable" class="settings-btn settings-btn--accent" @click="installUpdate" :disabled="updateDownloading" style="width:100%;margin-top:10px">' +
-                    '{{ updateDownloading ? \'...\' : t(\'settings_window.update_install_now\') }}' +
+                  '<button v-if="updateAvailable && store.updateState.phase === \'idle\'" class="settings-btn settings-btn--accent" @click="startDownload" style="width:100%;margin-top:10px">' +
+                    '{{ t(\'settings_window.update_download\') }}' +
                   '</button>' +
-                  '<button class="settings-btn" @click="downloadUpdate" :disabled="updateDownloading" style="width:100%;margin-top:10px">' +
-                    '{{ updateDownloading ? \'...\' : t(\'settings_window.update_download\') }}' +
-                  '</button>' +
+
+                  '<div v-if="store.updateState.phase === \'downloading\'" class="update-progress" style="margin-top:12px">' +
+                    '<div class="update-progress__bar" :style="{ width: (store.updateState.fraction * 100) + \'%\' }"></div>' +
+                    '<span class="update-progress__label">{{ t(\'settings_window.update_downloading_progress\', { pct: Math.round(store.updateState.fraction * 100) }) }}</span>' +
+                  '</div>' +
+
+                  '<div v-if="store.updateState.phase === \'ready\'" style="margin-top:12px">' +
+                    '<p class="settings-hint" style="margin-top:0;color:var(--clipsync-accent,#22D3EE)">{{ t(\'settings_window.update_ready\', { version: store.updateState.version }) }}</p>' +
+                    '<p class="settings-hint" style="margin-top:6px">{{ t(\'settings_window.update_ready_hint\') }}</p>' +
+                    '<p class="update-ready-path selectable">{{ store.updateState.path }}</p>' +
+                    '<button class="settings-btn" @click="openUpdateFolder" style="margin-top:8px">{{ t(\'settings_window.update_open_folder\') }}</button>' +
+                  '</div>' +
+
+                  '<p v-if="store.updateState.phase === \'failed\'" class="settings-hint" style="margin-top:10px;color:var(--clipsync-danger,#F87171)">{{ t(\'settings_window.update_failed\') }}{{ store.updateState.error ? \': \' + store.updateState.error : \'\' }}</p>' +
+
                   '<p class="settings-hint" style="margin-top:8px">{{ t(\'settings_window.update_hint\') }}</p>' +
                 '</section>' +
 

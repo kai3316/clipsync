@@ -55,6 +55,14 @@
        Devices
        ═══════════════════════════════════════════════════════════════ */
     devices: [],
+    // Update lifecycle state, kept in sync by `update_state` WebSocket events
+    // and hydrated from GET /api/update/status on load. phase is
+    // 'idle' | 'downloading' | 'ready' | 'failed'; on `ready` `version` and
+    // `path` point at the runnable asset the user launches manually.
+    updateState: {
+      phase: 'idle', fraction: 0, downloaded: 0, total: 0,
+      version: '', path: '', error: '',
+    },
     connectedCount: computed(function () {
       // Exclude the local device — "connected" counts remote *sync* sessions
       // only (live connection on a paired device), matching the backend's

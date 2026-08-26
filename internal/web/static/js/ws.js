@@ -696,6 +696,16 @@ var ClipsyncWS = (function () {
           }
           break;
 
+        case 'update_state':
+          // Update download progress / ready / failed lifecycle.  The raw
+          // `_dispatch` above already fired listeners; mirror the payload into
+          // the store so any component can read store.updateState.  Only
+          // accepted when it looks like a state object.
+          if (data && typeof data === 'object' && data.phase) {
+            store.updateState = Object.assign({}, store.updateState, data);
+          }
+          break;
+
         default:
           // Unknown message type — dispatched but not auto-handled
           break;

@@ -10,8 +10,7 @@ Groups covered:
      to one install; failure paths clear the flag again.
   5. auto_update_check switch OFF → the periodic loop makes zero requests
      (network layer guarded), ON → fires when due, throttle respected.
-  6. `.old` fallback copies: Windows bat contains the copy step, Linux helper
-     copies before replace.
+  6. `.old` fallback copies: the Linux helper copies before replace.
   7. Config plumbing: auto_update_check persists and the web settings API
      accepts booleans only.
 """
@@ -259,6 +258,9 @@ def app_env(monkeypatch, tmp_path):
     app._shutting_down = False
     app._skip_save_on_shutdown = False
     app._updating = False
+    app._update_state = {"phase": "idle"}
+    app._update_downloading = False
+    app.web_server = None
     app._exit_process = lambda: state.__setitem__("exited", state["exited"] + 1)
     app._download_and_install_update = lambda **kw: state["downloads"].append(kw)
 
@@ -275,6 +277,8 @@ def _run_scheduled_exit(app, state):
 
 def test_finish_install_github_happy_path(app_env, monkeypatch, tmp_path):
     app, main, state = app_env
+    # win32 dev host: auto-apply only exists on Linux/macOS.
+    monkeypatch.setattr(sys, "platform", "linux")
     path, payload = _write_blob(tmp_path)
     monkeypatch.setattr(updater_mod, "fetch_latest_asset_info",
                         lambda timeout=None: _info_for(payload, "2.0.0"))
@@ -293,6 +297,8 @@ def test_finish_install_second_arrival_skipped(app_env, monkeypatch, tmp_path):
     """GitHub download finishing and a P2P blob arriving around the same time
     must produce exactly ONE install."""
     app, main, state = app_env
+    # win32 dev host: auto-apply only exists on Linux/macOS.
+    monkeypatch.setattr(sys, "platform", "linux")
     path, payload = _write_blob(tmp_path)
     monkeypatch.setattr(updater_mod, "fetch_latest_asset_info",
                         lambda timeout=None: _info_for(payload, "2.0.0"))
@@ -307,6 +313,8 @@ def test_finish_install_second_arrival_skipped(app_env, monkeypatch, tmp_path):
 
 def test_finish_install_flag_cleared_on_stage_failure(app_env, monkeypatch, tmp_path):
     app, main, state = app_env
+    # win32 dev host: auto-apply only exists on Linux/macOS.
+    monkeypatch.setattr(sys, "platform", "linux")
     path, payload = _write_blob(tmp_path)
     monkeypatch.setattr(updater_mod, "fetch_latest_asset_info",
                         lambda timeout=None: _info_for(payload, "2.0.0"))
@@ -321,6 +329,8 @@ def test_finish_install_flag_cleared_on_stage_failure(app_env, monkeypatch, tmp_
 
 def test_finish_install_flag_cleared_on_apply_failure(app_env, monkeypatch, tmp_path):
     app, main, state = app_env
+    # win32 dev host: auto-apply only exists on Linux/macOS.
+    monkeypatch.setattr(sys, "platform", "linux")
     path, payload = _write_blob(tmp_path)
     monkeypatch.setattr(updater_mod, "fetch_latest_asset_info",
                         lambda timeout=None: _info_for(payload, "2.0.0"))
@@ -381,6 +391,8 @@ def test_finish_install_github_without_release_info_proceeds(
     """The GitHub file was verified during download; a failed *second* lookup
     must not block a legitimate install."""
     app, main, state = app_env
+    # win32 dev host: auto-apply only exists on Linux/macOS.
+    monkeypatch.setattr(sys, "platform", "linux")
     path, _ = _write_blob(tmp_path)
     monkeypatch.setattr(updater_mod, "fetch_latest_asset_info",
                         lambda timeout=None: None)
@@ -442,22 +454,6 @@ def test_auto_check_on_respects_throttle():
 # ══════════════════════════════════════════════════════════════════════
 # 6 — .old rollback copies
 # ══════════════════════════════════════════════════════════════════════
-
-
-def test_windows_bat_contains_old_copy_step():
-    cur = Path(r"C:\Apps\ClipSync\clipsync.exe")
-    script = applier_mod._build_windows_bat(
-        Path(r"C:\Apps\ClipSync\clipsync.exe.new"), cur)
-    # Copy (NOT move) keeps the running exe in place while leaving .old behind.
-    assert f'copy /y "{cur}" "{Path(str(cur) + ".old")}"' in script
-    assert ".old" in script
-    # And the actual replace loop is unchanged.
-    assert ":retry" in script and "move /y" in script
-    # The relaunch runs the new exe DIRECTLY (not `start ""`): a detached
-    # child whose parent cmd exits immediately hits PyInstaller's onefile
-    # parent-process validation failure on startup.
-    assert f'"{cur}"' in script
-    assert 'start "" ' not in script
 
 
 def test_linux_backup_copies_current_binary(tmp_path):
@@ -544,6 +540,11 @@ def test_i18n_key_parity_for_new_update_keys():
         "notify.update_rejected_old",
         "settings_window.auto_update_check",
         "settings_window.auto_update_check_hint",
+        "settings_window.update_downloading_progress",
+        "settings_window.update_ready",
+        "settings_window.update_ready_hint",
+        "settings_window.update_open_folder",
+        "tray.update_ready_prompt",
     ]
     for key in new_keys:
         assert key in i18n._EN, key
@@ -565,6 +566,148 @@ def test_web_locale_parity_for_new_keys():
         "settings_window.update_available_found",
         "settings_window.update_install_now",
         "settings_window.update_installing",
+        "settings_window.update_downloading_progress",
+        "settings_window.update_ready",
+        "settings_window.update_ready_hint",
+        "settings_window.update_open_folder",
+        "tray.update_ready_prompt",
     ]
     for key in new_keys:
         assert key in en and key in zh, key
+
+
+# ══════════════════════════════════════════════════════════════════════
+# 8 — Windows manual-run flow (no auto-apply) + download progress
+# ══════════════════════════════════════════════════════════════════════
+
+
+def test_finish_install_windows_ready_no_auto_apply(
+        app_env, monkeypatch, tmp_path):
+    """On Windows the verified asset is never auto-applied: it is prepared as
+    a runnable exe at a known path and the user is prompted to run it."""
+    app, main, state = app_env
+    path, payload = _write_blob(tmp_path)
+    monkeypatch.setattr(updater_mod, "fetch_latest_asset_info",
+                        lambda timeout=None: _info_for(payload, "2.0.0"))
+    app._pending_update_version = "2.0.0"
+    shown = []
+    monkeypatch.setattr(main, "show_info",
+                        lambda root, title, msg: shown.append(msg))
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path))
+
+    def _extract(src, dst):
+        Path(dst).parent.mkdir(parents=True, exist_ok=True)
+        Path(dst).write_bytes(b"NEW-EXE")
+        return True
+    monkeypatch.setattr(updater_mod, "extract_update_exe", _extract)
+
+    app._finish_update_install(path, None, "github")
+
+    assert state["staged"] == [] and state["applied"] == []
+    assert state["cached"] == [path]      # still served to peers (M2)
+    assert app._updating is False
+    assert app._update_state["phase"] == "ready"
+    assert app._update_state["path"].endswith("clipsync.exe")
+    assert app._update_state["version"] == "2.0.0"
+    assert shown, "the manual-run prompt must be shown on the desktop"
+    assert "2.0.0" in shown[0] and "clipsync.exe" in shown[0]
+    assert state["exited"] == 0           # the app must NOT exit on Windows
+
+
+def test_finish_install_windows_prepare_failure_surfaces(
+        app_env, monkeypatch, tmp_path):
+    """If the exe extraction fails the state flips to `failed` and the error
+    surfaces — no silent 'ready' with a missing file."""
+    app, main, state = app_env
+    path, payload = _write_blob(tmp_path)
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path))
+    monkeypatch.setattr(updater_mod, "extract_update_exe", lambda s, d: False)
+
+    app._finish_update_install(path, None, "github")
+
+    assert app._update_state["phase"] == "failed"
+    assert state["errors"], "extract failure must surface an error"
+    assert app._updating is False
+
+
+def test_extract_update_exe(tmp_path):
+    """extract_update_exe unpacks the clipsync.exe member of a release zip."""
+    import zipfile
+    exe_bytes = b"MZ-NEW-CLIPSYNC-EXE"
+    zip_path = tmp_path / "clipsync-windows.zip"
+    with zipfile.ZipFile(zip_path, "w") as z:
+        z.writestr("clipsync.exe", exe_bytes)
+        z.writestr("readme.txt", "ignored")
+
+    out = tmp_path / "out" / "clipsync.exe"
+    out.parent.mkdir(parents=True, exist_ok=True)
+    assert updater_mod.extract_update_exe(str(zip_path), str(out)) is True
+    assert out.read_bytes() == exe_bytes
+
+
+def test_extract_update_exe_missing_member_returns_false(tmp_path):
+    import zipfile
+    zip_path = tmp_path / "no-exe.zip"
+    with zipfile.ZipFile(zip_path, "w") as z:
+        z.writestr("payload.bin", b"x")
+    assert updater_mod.extract_update_exe(
+        str(zip_path), str(tmp_path / "clipsync.exe")) is False
+
+
+def test_download_latest_release_reports_progress(monkeypatch, tmp_path):
+    """The downloader streams chunk-wise and reports monotonic progress."""
+    import hashlib as _hashlib
+    import urllib.request
+
+    chunk = b"x" * 64 * 1024
+    payload = chunk * 3
+    total = len(payload)
+
+    class _FakeResp:
+        headers = {"Content-Length": str(total)}
+
+        def __init__(self):
+            self._buf = bytearray(payload)
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def read(self, n):
+            out = bytes(self._buf[:n])
+            del self._buf[:n]
+            return out
+
+    def _fake_urlopen(req, timeout=None, context=None):
+        return _FakeResp()
+
+    digest = "sha256:" + _hashlib.sha256(payload).hexdigest()
+    monkeypatch.setattr(updater_mod, "_fetch_latest_release", lambda timeout=60.0: {
+        "tag_name": "v2.0.0",
+        "assets": [{
+            # The downloader picks the asset by _platform_asset_name(), which
+            # on this win32 host is clipsync-windows.zip.
+            "name": "clipsync-windows.zip",
+            "browser_download_url": "https://example.com/asset",
+            "size": total,
+            "digest": digest,
+        }],
+    })
+    monkeypatch.setattr(urllib.request, "urlopen", _fake_urlopen)
+
+    progress = []
+    path, reason, version = updater_mod.download_latest_release(
+        str(tmp_path), progress_cb=lambda d, t: progress.append((d, t)))
+
+    assert path and os.path.isfile(path)
+    assert version == "v2.0.0"
+    assert reason is None
+    assert os.path.getsize(path) == total  # size + sha256 verified on the way in
+    assert progress and progress[-1] == (total, total)
+    seen = -1
+    for d, t in progress:
+        assert d >= seen, "progress must be monotonic"
+        seen = d
+        assert t == total

@@ -242,16 +242,21 @@ def verify_update_blob(
     return True, "ok"
 
 
-def download_latest_release(dest_dir: str) -> tuple[str | None, str | None]:
+def download_latest_release(
+    dest_dir: str,
+    progress_cb: callable | None = None,
+) -> tuple[str | None, str | None, str]:
     """Download the latest release asset for this platform into *dest_dir*.
 
     Reuses the same GitHub release lookup as :func:`check_for_update` and
     streams the matching asset to ``dest_dir/<asset-name>`` via urllib.
+    *progress_cb* is called with ``(downloaded_bytes, total_bytes)`` after each
+    64 KiB chunk (total may be unknown/0 for a few servers).
 
-    Returns ``(saved_path, None)`` on success, or ``(None, reason)`` on
-    failure where *reason* is a short human-readable (localized) message
-    describing the problem — e.g. that no release asset exists for this
-    platform.  Never raises.
+    Returns ``(saved_path, None, version)`` on success, or
+    ``(None, reason, "")`` on failure where *reason* is a short human-readable
+    (localized) message describing the problem — e.g. that no release asset
+    exists for this platform.  Never raises.
     """
     from internal.i18n import T
 
@@ -260,11 +265,11 @@ def download_latest_release(dest_dir: str) -> tuple[str | None, str | None]:
     try:
         data = _fetch_latest_release(timeout=60.0)
         if not data:
-            return None, T("web.update_server_unreachable")
+            return None, T("web.update_server_unreachable"), ""
         assets = data.get("assets") or []
         if not assets:
             logger.warning("Latest release has no downloadable assets")
-            return None, T("web.update_no_assets")
+            return None, T("web.update_no_assets"), ""
 
         asset_name = _platform_asset_name()
         matched = None
@@ -274,8 +279,9 @@ def download_latest_release(dest_dir: str) -> tuple[str | None, str | None]:
                 break
         if not matched or not matched.get("browser_download_url"):
             logger.warning("No download asset found for platform: %s", asset_name)
-            return None, T("web.update_no_release", name=asset_name)
+            return None, T("web.update_no_release", name=asset_name), ""
         browser_url = matched["browser_download_url"]
+        version = (data.get("tag_name") or "").strip()
 
         os.makedirs(dest_dir, exist_ok=True)
         dest_path = os.path.join(dest_dir, asset_name)
@@ -288,12 +294,31 @@ def download_latest_release(dest_dir: str) -> tuple[str | None, str | None]:
         try:
             with urllib.request.urlopen(
                     req, timeout=60.0, context=_https_context()) as resp:
+                # Total size: prefer the response Content-Length, fall back to
+                # the release API's asset size (a few servers omit the header).
+                total = None
+                try:
+                    cl = resp.headers.get("Content-Length")
+                    if cl:
+                        total = int(cl)
+                except (AttributeError, TypeError, ValueError):
+                    total = None
+                if not total:
+                    total = matched.get("size")
+                downloaded = 0
                 with open(temp_path, "wb") as out:
                     while True:
                         chunk = resp.read(64 * 1024)
                         if not chunk:
                             break
                         out.write(chunk)
+                        downloaded += len(chunk)
+                        if progress_cb is not None:
+                            try:
+                                progress_cb(downloaded, total or 0)
+                            except Exception:
+                                logger.debug("Update progress callback failed",
+                                             exc_info=True)
             # Verify the downloaded size AND SHA-256 against the release API, so
             # a truncated, corrupted, or tampered asset is rejected before it is
             # exposed as a valid installer. The API digest is "sha256:<hex>".
@@ -319,10 +344,41 @@ def download_latest_release(dest_dir: str) -> tuple[str | None, str | None]:
                 pass
             raise
         logger.info("Downloaded release asset to %s", dest_path)
-        return dest_path, None
+        return dest_path, None, version
     except Exception as exc:
         logger.error("Release download failed: %s", exc)
-        return None, T("web.update_download_failed", reason=exc)
+        return None, T("web.update_download_failed", reason=exc), ""
+
+
+def extract_update_exe(asset_path: str, dest_path: str) -> bool:
+    """Extract the ``clipsync.exe`` member of a downloaded release zip.
+
+    Used by the Windows manual-run flow: the verified asset is unpacked to a
+    runnable ``clipsync.exe`` the user launches by hand (PyInstaller onefile
+    auto-relaunch is unreliable, so nothing is replaced automatically).
+
+    Returns False (never raises) when the archive has no such member or the
+    write fails.
+    """
+    import shutil as _shutil
+    import zipfile as _zipfile
+
+    try:
+        with _zipfile.ZipFile(asset_path) as z:
+            member = next(
+                (n for n in z.namelist() if n.lower().endswith("clipsync.exe")),
+                None,
+            )
+            if not member:
+                logger.warning("Release zip %s has no clipsync.exe member",
+                               asset_path)
+                return False
+            with z.open(member) as src, open(dest_path, "wb") as out:
+                _shutil.copyfileobj(src, out)
+        return True
+    except Exception as exc:
+        logger.warning("extract_update_exe failed for %s: %s", asset_path, exc)
+        return False
 
 
 def _cache_dir() -> str:

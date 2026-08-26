@@ -196,7 +196,8 @@ def dispatch(method, path, query_params, body, cfg, history, sync_mgr,
              on_restart=None, on_reset_dedup=None,
              get_certs=None, get_diagnostics=None,
              on_update_download=None,
-             on_update_install=None,
+             on_update_status=None,
+             on_update_open_folder=None,
              on_diagnostics_request=None,
              chat_mgr=None,
              get_chat_devices=None,
@@ -240,7 +241,7 @@ def dispatch(method, path, query_params, body, cfg, history, sync_mgr,
             get_relay_state, get_current_relay_broker,
             enc_mgr, on_open_file, on_open_folder, on_restart, on_reset_dedup,
             get_certs, get_diagnostics, on_update_download,
-            on_update_install, on_diagnostics_request,
+            on_update_status, on_update_open_folder, on_diagnostics_request,
             chat_mgr, get_chat_devices, chat_send_fn, chat_start_session,
             get_chat_muted, set_chat_muted,
         )
@@ -272,7 +273,8 @@ def _dispatch(method, path, query_params, body, cfg, history, sync_mgr,
               on_restart=None, on_reset_dedup=None,
               get_certs=None, get_diagnostics=None,
               on_update_download=None,
-              on_update_install=None,
+              on_update_status=None,
+              on_update_open_folder=None,
               on_diagnostics_request=None,
               chat_mgr=None,
               get_chat_devices=None,
@@ -461,6 +463,22 @@ def _dispatch(method, path, query_params, body, cfg, history, sync_mgr,
                 "current": result.get("current", ""),
                 "url": result.get("url", ""),
             }, 200)
+
+        elif path == "/api/update/status":
+            # Hydrates the update UI after a page reload: returns the current
+            # update_state (idle / downloading / ready / failed).  The host
+            # callback is cheap (an in-memory dict); a missing callback means
+            # the host never wired updates, so fall back to a benign idle.
+            if on_update_status is None:
+                return _json_response({"state": {"phase": "idle"}}, 200)
+            try:
+                result = on_update_status()
+            except Exception:
+                logger.exception("on_update_status callback failed")
+                result = None
+            if not isinstance(result, dict):
+                return _json_response({"state": {"phase": "idle"}}, 500)
+            return _json_response(result, 200)
 
         elif path == "/api/diagnostics":
             if get_diagnostics is None:
@@ -687,7 +705,7 @@ def _dispatch(method, path, query_params, body, cfg, history, sync_mgr,
 
         elif path == "/api/update/download":
             if on_update_download is None:
-                return _json_response({"ok": False, "path": "", "error": "not available"}, 503)
+                return _json_response({"ok": False, "error": "not available"}, 503)
             try:
                 result = on_update_download()
             except Exception:
@@ -695,31 +713,30 @@ def _dispatch(method, path, query_params, body, cfg, history, sync_mgr,
                 result = None
             if not isinstance(result, dict):
                 # Only an unexpected handler failure is a genuine server error.
-                return _json_response({"ok": False, "path": "", "error": "download handler failed"}, 500)
+                return _json_response({"ok": False, "error": "download handler failed"}, 500)
             ok = bool(result.get("ok"))
             # Expected failures (no asset for this platform, network failure,
             # verify failed) carry a readable error on HTTP 200 so the
             # frontend can surface the real reason instead of a generic 500.
             return _json_response({
                 "ok": ok,
-                "path": result.get("path", ""),
+                "started": bool(result.get("started")),
                 "error": result.get("error"),
             }, 200)
 
-        elif path == "/api/update/install":
-            # Runs the full download→staging→apply→restart chain on the host
-            # (the same path the tray uses).  The heavy work is marshalled to
-            # the UI thread by the callback; this only accepts the request.
-            if on_update_install is None:
+        elif path == "/api/update/open-folder":
+            # Reveal the ready exe's containing folder in the OS file manager.
+            # Only valid while the host has a `ready` update prepared.
+            if on_update_open_folder is None:
                 return _json_response({"ok": False, "error": "not available"}, 503)
             try:
-                result = on_update_install()
+                result = on_update_open_folder()
             except Exception:
-                logger.exception("on_update_install callback failed")
+                logger.exception("on_update_open_folder callback failed")
                 result = None
             if not isinstance(result, dict):
                 return _json_response(
-                    {"ok": False, "error": "install handler failed"}, 500)
+                    {"ok": False, "error": "open-folder handler failed"}, 500)
             return _json_response(result, 200)
 
         elif path == "/api/export":

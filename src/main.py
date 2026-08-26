@@ -609,6 +609,15 @@ class Application:
         # download and the P2P blob arrival may stage+apply, even when both
         # land around the same time.  Cleared again on every failure path.
         self._updating = False
+        # Update lifecycle state pushed to web clients as `update_state`
+        # events: phase is idle | downloading | ready | failed.  On `ready`
+        # the runnable asset lives at `path` for the user to launch manually
+        # (Windows) or the staged bundle has been opened (macOS); on `failed`
+        # the user-facing reason is in `error`.
+        self._update_state = {"phase": "idle"}
+        # True while the GitHub download thread is streaming the release asset
+        # (guards the web "download" trigger from starting a second stream).
+        self._update_downloading = False
         # True once a webview dashboard open actually attached a WS client.
         # Used to keep the "recently opened" guard from blocking a re-open
         # after the window was closed (client disconnected) within 8s.
@@ -1109,7 +1118,8 @@ class Application:
             get_certs=self._get_certs,
             get_diagnostics=self._get_diagnostics,
             on_update_download=self._handle_update_download,
-            on_update_install=self._handle_update_install,
+            on_update_status=self._handle_update_status,
+            on_update_open_folder=self._handle_update_open_folder,
             on_diagnostics_request=self._handle_diagnostics_request,
             on_web_upload=self._on_web_upload,
             # Nearby Chat (web/PWA surface)
@@ -4268,19 +4278,19 @@ class Application:
         threading.Thread(target=_worker, daemon=True, name="update-check").start()
 
     def _offer_update_install(self, result: dict) -> None:
-        """Ask the user to download + install an available update."""
-        if ask_yesno(
-            self.root,
-            T("ui.app_name"),
-            T("tray.update_install_prompt", version=result.get("latest", "")),
-        ):
+        """Ask the user to download an available update."""
+        if ask_yesno(self.root, T("ui.app_name"), T("tray.update_install_prompt")):
             self._download_and_install_update()
 
     def _download_and_install_update(self, from_peers: bool = True) -> None:
-        """Download the latest release, stage it, then apply + restart.
+        """Download the latest release, then apply — or hand it to the user.
 
-        The download runs on a worker thread (it can take tens of seconds);
-        staging + applying run on the main thread, after which the app exits.
+        The download runs on a worker thread (it can take tens of seconds) and
+        pushes live progress to web clients as ``update_state`` events; the
+        finish runs on the main thread.  On Linux/macOS the staged update is
+        applied automatically (Linux relaunches, macOS opens the folder); on
+        Windows nothing is auto-applied — the verified exe is prepared at a
+        known path and the user is prompted to run it by hand.
         *from_peers* asks connected peers for a cached copy first (M2); it is
         disabled on the P2P-fallback re-entry so an unverifiable peer blob
         cannot ping-pong between devices.
@@ -4290,19 +4300,32 @@ class Application:
         from internal.system.updater import download_latest_release
 
         self._web_toast(T("notify.update_downloading"))
+        self._set_update_state({"phase": "downloading", "fraction": 0,
+                                "downloaded": 0, "total": 0, "error": ""})
+        self._update_downloading = True
 
         if from_peers:
             # Ask connected peers first (M2): a peer with the cached asset responds
             # by sending it back; the GitHub download below is the fallback.
             self._request_update_from_peers()
 
+        def _progress(downloaded: int, total: int) -> None:
+            fraction = (downloaded / total) if total > 0 else 0
+            self._set_update_state({
+                "fraction": fraction, "downloaded": downloaded, "total": total,
+            })
+
         def _worker():
             dest_dir = tempfile.mkdtemp(prefix="clipsync_update_")
             try:
-                path, reason = download_latest_release(dest_dir)
+                path, reason, version = download_latest_release(
+                    dest_dir, progress_cb=_progress)
             except Exception as exc:
                 logger.exception("Update download failed")
-                path, reason = None, str(exc)
+                path, reason, version = None, str(exc), ""
+            finally:
+                self._update_downloading = False
+            self._pending_update_version = version
             self.root.after(
                 0, lambda: self._finish_update_install(path, reason, "github"))
 
@@ -4329,6 +4352,11 @@ class Application:
         (*source* "p2p", verified here against the GitHub release digest).
         Re-entrant arrivals (both paths completing at once) are collapsed to
         the first one via ``self._updating``; later ones log and skip.
+
+        Platform split: Linux/macOS stage + apply (Linux relaunches, macOS
+        opens the staged bundle's folder); Windows never auto-applies — the
+        verified asset is prepared as a runnable exe at a known path and the
+        user is prompted to run it by hand (see ``_prepare_update_ready``).
         """
         if getattr(self, "_updating", False):
             logger.info("Update install already in progress — skipping %s "
@@ -4336,6 +4364,8 @@ class Application:
             return
 
         if not path:
+            self._set_update_state({"phase": "failed", "error":
+                                    reason or T("tray.update_install_failed")})
             show_error(self.root, T("ui.app_name"),
                        reason or T("tray.update_install_failed"))
             return
@@ -4385,6 +4415,15 @@ class Application:
         # Keep the verified asset so we can serve it to other LAN devices (M2).
         cache_asset(path)
 
+        if sys.platform == "win32":
+            # PyInstaller onefile bootloaders validate their parent process on
+            # relaunch and an auto-replaced exe fails that check on some
+            # machines — so Windows never auto-applies.  Clear the guard, then
+            # prepare the runnable exe and prompt the user to run it by hand.
+            self._updating = False
+            self._prepare_update_ready(path)
+            return
+
         staged = stage_update(path)
         if staged is None:
             self._updating = False
@@ -4406,6 +4445,68 @@ class Application:
         self._updating = False
         show_error(self.root, T("ui.app_name"), T("tray.update_install_failed"))
 
+    def _set_update_state(self, updates: dict) -> None:
+        """Merge *updates* into ``_update_state`` and broadcast it.
+
+        Pushes the full state to every web client as an ``update_state``
+        event.  The WebSocketManager broadcast is thread-safe, so this is
+        callable from the download worker thread (progress ticks) as well as
+        the main thread.  Never raises.
+        """
+        if not isinstance(updates, dict):
+            return
+        self._update_state.update(updates)
+        self._push_web("broadcast", "update_state", dict(self._update_state))
+
+    def _prepare_update_ready(self, asset_path: str) -> None:
+        """Prepare a runnable Windows exe and prompt the user to run it.
+
+        Extracts ``clipsync.exe`` from the verified release zip into
+        ``~/Downloads/clipsync-update/`` and flips ``_update_state`` to
+        ``ready`` so both the web UI and a native popup can point at the file.
+        Any failure surfaces a ``failed`` state and an error dialog.
+        """
+        from pathlib import Path
+
+        from internal.system.updater import extract_update_exe
+
+        dest_dir = Path.home() / "Downloads" / "clipsync-update"
+        exe_path = dest_dir / "clipsync.exe"
+        ok = False
+        try:
+            dest_dir.mkdir(parents=True, exist_ok=True)
+            ok = extract_update_exe(asset_path, str(exe_path))
+        except Exception:
+            logger.exception("Preparing ready update exe failed")
+        if not ok:
+            self._set_update_state({"phase": "failed",
+                                    "error": T("tray.update_install_failed")})
+            show_error(self.root, T("ui.app_name"),
+                       T("tray.update_install_failed"))
+            return
+
+        version = getattr(self, "_pending_update_version", "") or ""
+        self._set_update_state({
+            "phase": "ready", "version": version, "path": str(exe_path),
+            "fraction": 1,
+        })
+        self.root.after(
+            0, lambda: self._notify_update_ready(version, str(exe_path)))
+
+    def _notify_update_ready(self, version: str, path: str) -> None:
+        """Tell the user the new version is downloaded and ready to run.
+
+        Web UI gets a toast (the settings page also shows a persistent ready
+        card); the desktop gets a native popup with the exe path so the
+        manual-run step is unmistakable.
+        """
+        self._web_toast(T("settings_window.update_ready", version=version))
+        show_info(
+            self.root,
+            T("ui.app_name"),
+            T("tray.update_ready_prompt", version=version, path=path),
+        )
+
     def _maybe_auto_update_check(self) -> None:
         """Fire the silent periodic check when due — never when disabled.
 
@@ -4418,21 +4519,6 @@ class Application:
         if time.monotonic() - self._last_auto_update_check >= 6 * 3600:
             self._last_auto_update_check = time.monotonic()
             self._auto_check_for_update()
-
-    def _handle_update_install(self) -> dict:
-        """POST /api/update/install: run the full tray download→apply chain.
-
-        The actual work is marshalled onto the UI thread because it ends in a
-        process exit; this handler just accepts the request.
-        """
-        if self._shutting_down or getattr(self, "_updating", False):
-            return {"ok": False, "error": "update already in progress"}
-        try:
-            self.root.after(0, self._download_and_install_update)
-            return {"ok": True}
-        except Exception:
-            logger.debug("Could not schedule web-triggered update", exc_info=True)
-            return {"ok": False, "error": "could not start update"}
 
     def _auto_check_for_update(self) -> None:
         """Silent periodic check: only surfaces a result when an update is available."""
@@ -6858,22 +6944,40 @@ class Application:
         }
 
     def _handle_update_download(self) -> dict:
-        """Download the latest release into the user's Downloads folder."""
-        from pathlib import Path
+        """Start the update download in the background.
 
-        from internal.system.updater import download_latest_release
-        dest_dir = str(Path.home() / "Downloads")
+        Returns immediately; progress and the ready/failed outcome arrive as
+        ``update_state`` WebSocket events.  Re-entrant triggers (a download
+        already streaming, or an install finishing) are refused.
+        """
+        if self._shutting_down:
+            return {"ok": False, "error": "app is shutting down"}
+        if self._updating or self._update_downloading:
+            return {"ok": False, "error": "update already in progress"}
         try:
-            path, reason = download_latest_release(dest_dir)
-        except Exception as exc:
-            logger.exception("Update download failed")
-            return {"ok": False, "path": "", "error": str(exc)}
-        if path:
-            return {"ok": True, "path": path, "error": None}
-        # The updater returns a readable (localized) reason for expected
-        # failures — e.g. no release asset for this platform — so the user
-        # sees the real cause instead of a generic "download failed".
-        return {"ok": False, "path": "", "error": reason or "download failed"}
+            self.root.after(0, self._download_and_install_update)
+            return {"ok": True, "started": True}
+        except Exception:
+            logger.debug("Could not schedule web-triggered update", exc_info=True)
+            return {"ok": False, "error": "could not start update"}
+
+    def _handle_update_status(self) -> dict:
+        """GET /api/update/status: current update lifecycle state."""
+        return {"state": dict(self._update_state)}
+
+    def _handle_update_open_folder(self) -> dict:
+        """POST /api/update/open-folder: reveal the ready exe's folder.
+
+        Only meaningful while the update is in the ``ready`` phase; the path
+        comes from the server-side state, never from the client.
+        """
+        if self._update_state.get("phase") != "ready":
+            return {"ok": False, "error": "no ready update"}
+        path = self._update_state.get("path", "")
+        if not path or not os.path.isfile(path):
+            return {"ok": False, "error": "ready file missing"}
+        self._open_folder(path)
+        return {"ok": True}
 
     def _pairing_sas(self, peer_id: str) -> str:
         """Short Authentication String shown on both ends of a pairing.

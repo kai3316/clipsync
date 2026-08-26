@@ -332,6 +332,7 @@
             this.loadFavorites(),
             this.loadTransfers(),
             this.loadChat(),
+            this.loadUpdateStatus(),
           ];
 
           // History reads `settingsCache.web_history_limit`, so it must wait
@@ -521,6 +522,24 @@
             }
           }
           return res;
+        });
+      },
+
+      /**
+       * Load the update lifecycle state (idle / downloading / ready / failed)
+       * so a page reload still shows a prepared "new version ready" card and
+       * the download button's availability.  Catches internally — a failed
+       * status fetch must never block the rest of the dashboard.
+       * @returns {Promise<Object>}
+       */
+      loadUpdateStatus: function () {
+        return ClipsyncAPI.getUpdateStatus().then(function (res) {
+          if (res && res.state && typeof res.state === 'object') {
+            store.updateState = Object.assign({}, store.updateState, res.state);
+          }
+          return res;
+        }).catch(function () {
+          // Leave the store's default idle state.
         });
       },
 

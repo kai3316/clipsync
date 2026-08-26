@@ -2,6 +2,12 @@
 
 All notable changes to ClipSync are documented in this file.
 
+## [1.0.89] — 2026-08-26
+
+- **更新流程改造：下载进度可见 + 下载完提示手动运行（Windows 不再自动重启）**。之前的自动更新会在部分 Windows 机器上触发 PyInstaller 的父进程校验崩溃（`parent process has different executable`）——现在 Windows 下载更新时设置页显示实时进度条（百分比随分块推进），下载完成并校验后把可运行的新版 `clipsync.exe` 解到 `下载\clipsync-update\`，弹出提示 + 设置页显示「新版本就绪」卡片（版本 / 文件路径 / 「打开所在文件夹」按钮），由你手动退出当前应用、双击运行新版；剪贴板历史与设备数据都留在本机，新版直接使用。Linux 保持自动替换重启，macOS 保持自动打开文件夹，均不变。
+- **Windows 自动替换/重启机制整体下线**：删除 `_build_windows_bat` / `_apply_windows` / `/api/update/install` 端点及配套前端「安装更新」按钮、`on_update_install` 回调链、更新 bat 测试。
+- **新增 6 个 locale 键**（`settings_window.update_downloading_progress` / `update_ready` / `update_ready_hint` / `update_open_folder`、`tray.update_ready_prompt`）+ 微调 `tray.update_install_prompt` / `settings_window.update_hint` 文案，中英 + Python 全量同步（镜像 gap 保持 677）。
+
 ## [1.0.88] — 2026-08-26
 
 - **设备页大改：「已连接」只认「已配对 + 实时同步会话」**。设备状态改为六分栏互斥模型：🟢已连接（`connected && paired`）、🟣临时连接（新，`connected && !paired`——聊天拉起的会话不再混进「已连接」）、🟠已配对·离线、🔍已发现、🗑已移除设备（新）、🌐互联网配对。点「连接/断开」不再乐观置位（`{ok:true}` 只代表已发起握手），真实状态由后端广播 ≤3s 收敛——握手失败不再假亮「已连接」。

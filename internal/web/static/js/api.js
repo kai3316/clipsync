@@ -592,6 +592,46 @@ var ClipsyncAPI = (function () {
     },
 
     /* ═══════════════════════════════════════════════════════════════
+       Update endpoints
+       ═══════════════════════════════════════════════════════════════ */
+
+    /**
+     * Check for a newer release.
+     * @returns {Promise<{available: boolean, latest: string, current: string, url: string}>}
+     */
+    checkUpdate: function () {
+      return this._fetch('GET', '/api/update/check', null, 30000);
+    },
+
+    /**
+     * Start the update download in the background.  Returns immediately;
+     * progress and the ready/failed outcome arrive as `update_state`
+     * WebSocket events.
+     * @returns {Promise<{ok: boolean, started?: boolean, error?: string}>}
+     */
+    downloadUpdate: function () {
+      return this._fetch('POST', '/api/update/download', {}, 8000);
+    },
+
+    /**
+     * Current update lifecycle state (idle / downloading / ready / failed),
+     * used to hydrate the UI after a page reload.
+     * @returns {Promise<{state: Object}>}
+     */
+    getUpdateStatus: function () {
+      return this._fetch('GET', '/api/update/status', null, 8000);
+    },
+
+    /**
+     * Reveal the ready update's containing folder in the OS file manager.
+     * Only valid while the host has a `ready` update prepared.
+     * @returns {Promise<{ok: boolean, error?: string}>}
+     */
+    openUpdateFolder: function () {
+      return this._fetch('POST', '/api/update/open-folder', {}, 8000);
+    },
+
+    /* ═══════════════════════════════════════════════════════════════
        Internet pairing endpoints (round 14)
        ═══════════════════════════════════════════════════════════════ */
 
