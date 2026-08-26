@@ -56,10 +56,12 @@
        ═══════════════════════════════════════════════════════════════ */
     devices: [],
     connectedCount: computed(function () {
-      // Exclude the local device — "connected" counts remote peers only,
-      // matching the backend's get_connected_peers() semantics.
+      // Exclude the local device — "connected" counts remote *sync* sessions
+      // only (live connection on a paired device), matching the backend's
+      // get_connected_peers() semantics.  Chat-only temporary connections
+      // (connected && !paired) don't count here.
       return store.devices.filter(function (d) {
-        return d.connected && d.device_id !== store.deviceId;
+        return d.connected && d.paired && d.device_id !== store.deviceId;
       }).length;
     }),
 
@@ -168,6 +170,12 @@
        Pairing requests
        ═══════════════════════════════════════════════════════════════ */
     pairingRequests: [],
+
+    /* ═══════════════════════════════════════════════════════════════
+       Removed (archived) devices — forgotten peers kept in the backend
+       config for Restore / Delete-permanently management on the device page.
+       ═══════════════════════════════════════════════════════════════ */
+    removedDevices: [],
 
     /* ═══════════════════════════════════════════════════════════════
        Internet (cross-network) sync relay state
@@ -736,6 +744,18 @@
     },
 
     /**
+     * Replace the removed-devices archive from the backend's authoritative
+     * `removed` snapshot (polled via /api/devices and WS broadcast).  Same
+     * polling-fallback rationale as syncPairingRequests.
+     */
+    syncRemovedDevices: function (removed) {
+      var list = (removed || []).filter(function (r) {
+        return !!r.device_id;
+      });
+      this.removedDevices = list;
+    },
+
+    /**
      * Open the translate modal with selected text.
      * @param {string} text - Source text to translate
      */
@@ -970,9 +990,10 @@
 
     /**
      * Record a speed-test failure and surface it as a toast.  The inline
-     * speedTest.error keeps the panel state truthful (it also clears the
-     * panel-empty hint); the toast is what the user actually notices — a
-     * small inline line under the spinner is easy to miss.
+     * panel error row was removed (user feedback: showing the failure both
+     * inline and as a toast was a duplicate) — the toast is the single
+     * surface.  speedTest.error is still kept as state so the panel-empty
+     * hint stays hidden after a failed test.
      * @param {string} msg
      * @param {string} [type] toast variant ('error' | 'warning' | 'info')
      */
@@ -1717,12 +1738,15 @@
 
     /**
      * Get online devices excluding the local device.
+     * Only real sync sessions (live connection on a paired device) — a
+     * chat-only temporary connection (connected && !paired) is not a transfer
+     * target.
      * @returns {Array}
      */
     onlineDevices: function () {
       var selfId = this.deviceId;
       return this.devices.filter(function (d) {
-        return d.connected && d.device_id !== selfId;
+        return d.connected && d.paired && d.device_id !== selfId;
       });
     },
 

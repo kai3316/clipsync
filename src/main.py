@@ -3743,6 +3743,7 @@ class Application:
 
     def _update_peers_loop(self) -> None:
         prev_display: list[str] = []
+        prev_web_fp: str = ""
         prev_connected: set[str] = set()
         cleanup_counter = 0
         while not self._stop_updater.is_set():
@@ -3768,6 +3769,19 @@ class Application:
                 if peer_display != prev_display:
                     prev_display = peer_display
                     self.root.after(0, lambda pd=list(peer_display): self._set_systray_peers(pd))
+
+                # Web device page is fed by a full-snapshot fingerprint, not the
+                # coarse systray name+suffix string above — reconnect progress,
+                # name/address/os/note edits and the removed archive all render
+                # on the page but never touch peer_display.  Any field change
+                # broadcasts devices_updated, so the page converges in ≤3s even
+                # without optimistic client state.
+                try:
+                    web_fp = self.web_server.ws_manager.devices_fingerprint()
+                except Exception:
+                    web_fp = ""
+                if web_fp and web_fp != prev_web_fp:
+                    prev_web_fp = web_fp
                     self._push_web("broadcast_devices")
 
                 connected_set = set(connected_ids)
@@ -5645,6 +5659,10 @@ class Application:
             elif action == 'forget':
                 self._on_remove(peer_id)
                 return True
+            elif action == 'restore':
+                return self._on_restore_remove(peer_id)
+            elif action == 'purge':
+                return self._on_purge_remove(peer_id)
             elif action == 'edit_note':
                 note = args[0] if args else ''
                 self._on_edit_note(peer_id, note)
@@ -7164,6 +7182,21 @@ class Application:
         return False
 
     def _on_remove(self, peer_id: str) -> None:
+        # Archive the peer before removal so the device page can offer a
+        # Restore action.  Only peers that were in cfg.peers (known/paired)
+        # are archived; a bare discovered peer forget leaves no trace.
+        peer_cfg = self.cfg.peers.get(peer_id)
+        if peer_cfg is not None and peer_id not in self.cfg.removed_peers:
+            self.cfg.removed_peers[peer_id] = PeerInfo(
+                device_id=peer_cfg.device_id,
+                device_name=peer_cfg.device_name,
+                public_key_pem=peer_cfg.public_key_pem,
+                paired=peer_cfg.paired,
+                notes=peer_cfg.notes,
+                last_ip=peer_cfg.last_ip,
+                last_port=peer_cfg.last_port,
+                removed_at=time.time(),
+            )
         self.pairing_mgr.remove_peer(peer_id)
         self.transport_mgr.disconnect_peer(peer_id)
         with self._discovered_lock:
@@ -7182,10 +7215,50 @@ class Application:
         self._save_cfg_encrypted()
         self._push_web("broadcast_devices")
 
+    def _on_restore_remove(self, peer_id: str) -> bool:
+        """Restore a removed device from the archive back to the known list.
+
+        Preserves the archived paired flag (the other side usually still has us
+        paired, so a reconnect via the saved address resumes sync directly) and
+        attempts a best-effort reconnect through the archived address.
+        """
+        archived = self.cfg.removed_peers.get(peer_id)
+        if archived is None:
+            return False
+        self.cfg.peers[peer_id] = archived
+        self.cfg.removed_peers.pop(peer_id, None)
+        self.pairing_mgr.restore_peer(
+            peer_id, archived.device_name, paired=archived.paired,
+        )
+        self._save_cfg_encrypted()
+        if archived.last_ip and archived.last_port:
+            try:
+                self.transport_mgr.connect_to_peer(
+                    peer_id, archived.device_name,
+                    archived.last_ip, archived.last_port,
+                )
+            except Exception:
+                logger.debug("Restore reconnect to %s failed",
+                             peer_id[:12], exc_info=True)
+        self._push_web("broadcast_devices")
+        return True
+
+    def _on_purge_remove(self, peer_id: str) -> bool:
+        """Permanently drop a removed device from the archive."""
+        if peer_id not in self.cfg.removed_peers:
+            return False
+        self.cfg.removed_peers.pop(peer_id, None)
+        self._save_cfg_encrypted()
+        self._push_web("broadcast_devices")
+        return True
+
     def _on_edit_note(self, peer_id: str, note: str) -> None:
         if peer_id in self.cfg.peers:
             self.cfg.peers[peer_id].notes = note
             self._save_cfg_encrypted()
+            # Notes render in the device list — push so other web tabs reflect
+            # the edit immediately instead of waiting for the next poll cycle.
+            self._push_web("broadcast_devices")
 
     # ═══════════════════════════════════════════════════════════════
     # History helpers

@@ -39,6 +39,7 @@ class PeerInfo:
     notes: str = ""  # user-assigned alias or memo
     last_ip: str = ""  # last known address, so a paired peer can be reached
     last_port: int = 0  # even when it is momentarily off mDNS / across restarts
+    removed_at: float = 0  # wall-clock forget time when archived in removed_peers; 0 = active
 
 
 # Default global-hotkey bindings — single source of truth.  The Config
@@ -70,6 +71,10 @@ class Config:
     port: int = 19990
     service_type: str = "_clipsync._tcp.local."
     peers: dict[str, PeerInfo] = field(default_factory=dict)
+    # Devices the user forgot/removed, archived so the UI can offer a "Restore"
+    # management surface.  Same PeerInfo shape as peers; removed_at > 0 marks
+    # the moment of removal.
+    removed_peers: dict[str, PeerInfo] = field(default_factory=dict)
     sync_enabled: bool = True
     # Wall-clock deadline (time.time()) of a timed "pause for N minutes";
     # 0 = none.  The auto-resume timer itself is runtime-only state, so the
@@ -477,6 +482,70 @@ def _archive_corrupt_config(path: Path) -> None:
         logger.debug("Could not archive corrupt config", exc_info=True)
 
 
+def _parse_peer_list(data: dict, key: str) -> dict[str, PeerInfo]:
+    """Parse a ``peers``-shaped config key into ``{device_id: PeerInfo}``.
+
+    Shared by the live ``peers`` and the archived ``removed_peers`` keys.
+    Tolerates both the legacy dict form (``{id: {...}}``) and the current
+    list form, and drops rows with invalid identity fields instead of
+    aborting the whole config load.
+    """
+    peers_data = data.get(key, [])
+    if isinstance(peers_data, dict):
+        peers_data = [
+            {"device_id": pid, **pinfo}
+            for pid, pinfo in peers_data.items()
+            if isinstance(pinfo, dict)
+        ]
+    if not isinstance(peers_data, list):
+        logger.warning(
+            "Config '%s' has invalid type %s — ignoring",
+            key, type(peers_data).__name__,
+        )
+        return {}
+    result: dict[str, PeerInfo] = {}
+    for peer_data in peers_data:
+        if not isinstance(peer_data, dict):
+            continue
+        device_id = peer_data.get("device_id")
+        device_name = peer_data.get("device_name")
+        if not isinstance(device_id, str) or not device_id:
+            logger.warning("Skipping peer with invalid device_id: %r", device_id)
+            continue
+        if not isinstance(device_name, str):
+            logger.warning("Skipping peer %s with invalid device_name", device_id)
+            continue
+        public_key_pem = peer_data.get("public_key_pem", "")
+        paired = peer_data.get("paired", False)
+        notes = peer_data.get("notes", "")
+        last_ip = peer_data.get("last_ip", "")
+        last_port = peer_data.get("last_port", 0)
+        removed_at = peer_data.get("removed_at", 0)
+        if not isinstance(public_key_pem, str):
+            public_key_pem = ""
+        if not isinstance(paired, bool):
+            paired = False
+        if not isinstance(notes, str):
+            notes = ""
+        if not isinstance(last_ip, str):
+            last_ip = ""
+        if not isinstance(last_port, int) or isinstance(last_port, bool):
+            last_port = 0
+        if not isinstance(removed_at, (int, float)) or isinstance(removed_at, bool):
+            removed_at = 0.0
+        result[device_id] = PeerInfo(
+            device_id=device_id,
+            device_name=device_name,
+            public_key_pem=public_key_pem,
+            paired=paired,
+            notes=notes,
+            last_ip=last_ip,
+            last_port=last_port,
+            removed_at=float(removed_at),
+        )
+    return result
+
+
 def load() -> Config:
     with config_lock:
         _cleanup_stale_temps()
@@ -557,56 +626,8 @@ def load() -> Config:
                 cfg.filter_enabled_categories = None
             # Migrate from legacy dict-format peers (pre-list) to list format:
             #   {"device_id": {device_name, public_key_pem, paired, notes}, ...}
-            peers_data = data.get("peers", [])
-            if isinstance(peers_data, dict):
-                peers_data = [
-                    {"device_id": pid, **pinfo}
-                    for pid, pinfo in peers_data.items()
-                    if isinstance(pinfo, dict)
-                ]
-            if not isinstance(peers_data, list):
-                logger.warning(
-                    "Config 'peers' has invalid type %s — ignoring peers",
-                    type(peers_data).__name__,
-                )
-                peers_data = []
-            for peer_data in peers_data:
-                if not isinstance(peer_data, dict):
-                    continue
-                device_id = peer_data.get("device_id")
-                device_name = peer_data.get("device_name")
-                if not isinstance(device_id, str) or not device_id:
-                    logger.warning("Skipping peer with invalid device_id: %r",
-                                   device_id)
-                    continue
-                if not isinstance(device_name, str):
-                    logger.warning("Skipping peer %s with invalid device_name",
-                                   device_id)
-                    continue
-                public_key_pem = peer_data.get("public_key_pem", "")
-                paired = peer_data.get("paired", False)
-                notes = peer_data.get("notes", "")
-                last_ip = peer_data.get("last_ip", "")
-                last_port = peer_data.get("last_port", 0)
-                if not isinstance(public_key_pem, str):
-                    public_key_pem = ""
-                if not isinstance(paired, bool):
-                    paired = False
-                if not isinstance(notes, str):
-                    notes = ""
-                if not isinstance(last_ip, str):
-                    last_ip = ""
-                if not isinstance(last_port, int) or isinstance(last_port, bool):
-                    last_port = 0
-                cfg.peers[device_id] = PeerInfo(
-                    device_id=device_id,
-                    device_name=device_name,
-                    public_key_pem=public_key_pem,
-                    paired=paired,
-                    notes=notes,
-                    last_ip=last_ip,
-                    last_port=last_port,
-                )
+            cfg.peers = _parse_peer_list(data, "peers")
+            cfg.removed_peers = _parse_peer_list(data, "removed_peers")
             return cfg
         return Config()
 
@@ -699,6 +720,19 @@ def save(cfg: Config, enc_mgr: "EncryptionManager | None" = None):
                     "last_port": p.last_port,
                 }
                 for p in cfg.peers.values()
+            ],
+            "removed_peers": [
+                {
+                    "device_id": p.device_id,
+                    "device_name": p.device_name,
+                    "public_key_pem": p.public_key_pem,
+                    "paired": p.paired,
+                    "notes": p.notes,
+                    "last_ip": p.last_ip,
+                    "last_port": p.last_port,
+                    "removed_at": p.removed_at,
+                }
+                for p in cfg.removed_peers.values()
             ],
         }
         # Atomic save: write to temp file then rename

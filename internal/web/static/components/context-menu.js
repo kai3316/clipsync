@@ -493,17 +493,20 @@
         if (!device) return;
         var peerId = device.device_id;
         var name = device.device_name || device.device_id;
+        var wasConnected = !!device.connected;
         var self = this;
         this.closeMenu();
-        var action = device.connected
+        var action = wasConnected
           ? ClipsyncAPI.disconnectDevice(peerId)
           : ClipsyncAPI.connectDevice(peerId);
         action.then(function (res) {
           if (res && res.ok) {
-            device.connected = !device.connected;
-            device.encrypted = device.connected;
+            // No optimistic flip: {ok:true} only means the connect/disconnect
+            // attempt was *initiated* — the real state converges via the
+            // devices_updated broadcast ≤3s later, so a failed handshake never
+            // hangs the menu in a false live state.
             self.store.showToast(
-              name + (device.connected ? ' ' + self.t('device.connected') : ' ' + self.t('ui.disconnect')),
+              name + (wasConnected ? ' ' + self.t('ui.disconnect') : ' ' + self.t('device.connected')),
               2000
             );
           } else {

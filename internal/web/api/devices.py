@@ -186,4 +186,24 @@ def get_devices(cfg, get_connected_ids, get_discovered=None,
                 })
         result["pending_pairings"] = pending_list
 
+    # Removed/archived devices (the forget action) so the device page can
+    # offer a Restore management surface.  Newest removal first.  Defensive
+    # getattr: a config shape without the archive (or a test stub) yields an
+    # empty list instead of crashing the snapshot.
+    removed_peers = getattr(cfg, "removed_peers", None) or {}
+    result["removed"] = [
+        {
+            "device_id": p.device_id,
+            "device_name": p.device_name,
+            "removed_at": p.removed_at,
+            "paired": p.paired,
+            "has_address": bool(p.last_ip and p.last_port),
+        }
+        for p in sorted(
+            removed_peers.values(),
+            key=lambda p: p.removed_at,
+            reverse=True,
+        )
+    ]
+
     return result, 200

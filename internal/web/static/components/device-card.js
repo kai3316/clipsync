@@ -31,7 +31,26 @@
         return this.device.device_id === this.store.deviceId;
       },
 
-      isOnline: function () {
+      // A real sync session = a live connection on a paired device.  This is
+      // the page's definition of "已连接": chat-only / unpaired sessions are
+      // temporary and render in their own section.
+      isConnected: function () {
+        return !!this.device.connected && !!this.device.paired;
+      },
+
+      // Live but not paired — a chat (or similar) temporary session that must
+      // not count as a sync device.
+      isTemporary: function () {
+        return !!this.device.connected && !this.device.paired;
+      },
+
+      isPairedOffline: function () {
+        return !!this.device.paired && !this.device.connected;
+      },
+
+      // Any live transport session (sync or temporary) — the raw "online"
+      // signal used by card visuals and actions.
+      hasLiveSession: function () {
         return !!this.device.connected;
       },
 
@@ -40,19 +59,20 @@
       },
 
       isDiscovered: function () {
-        return !this.isOnline && !this.isPaired && !this.isLocal;
+        return !this.hasLiveSession && !this.isPaired && !this.isLocal;
       },
 
       statusDot: function () {
         if (this.isLocal) return 'device-card__dot--accent';
-        if (this.isOnline) return 'device-card__dot--online';
-        if (this.isPaired) return 'device-card__dot--warning';
+        if (this.isConnected) return 'device-card__dot--online';
+        if (this.isTemporary) return 'device-card__dot--temp';
+        if (this.isPairedOffline) return 'device-card__dot--warning';
         return '';
       },
 
       statusText: function () {
         if (this.isLocal) return this.t('device.this_device');
-        if (this.isOnline) return this.t('device.connected');
+        if (this.isConnected) return this.t('device.connected');
         // Mid-reconnect shows live attempt progress instead of a bare
         // "Paired · offline" badge, so a dropped device looks active.
         if (this.device.reconnecting) {
@@ -60,14 +80,16 @@
           var max = Number(this.device.reconnect_max) || 0;
           return this.t('device.reconnecting', { attempt: n, max: max });
         }
-        if (this.isPaired) return this.t('device.paired_offline');
+        if (this.isTemporary) return this.t('device.temporary_connected');
+        if (this.isPairedOffline) return this.t('device.paired_offline');
         return this.t('device.discovered');
       },
 
       statusClass: function () {
         if (this.isLocal) return 'badge';
-        if (this.isOnline) return 'badge badge--success';
-        if (this.isPaired) return 'badge badge--warning';
+        if (this.isConnected) return 'badge badge--success';
+        if (this.isTemporary) return 'badge badge--info';
+        if (this.isPairedOffline) return 'badge badge--warning';
         return 'badge badge--info';
       },
 
@@ -88,15 +110,16 @@
       actions: function () {
         if (this.isLocal) return [];
         var acts = [];
-        // Chat invite reaches online LAN peers and paired devices (incl.
-        // internet-paired ones, via the relay) — offer it for both.
-        if (this.isOnline || this.isPaired) {
+        // Chat invite reaches live peers (incl. temporary chat sessions) and
+        // paired devices (incl. internet-paired ones, via the relay) — offer
+        // it for all three live/paired states.
+        if (this.hasLiveSession || this.isPaired) {
           acts.push({ key: 'chat', label: this.t('devices.chat_action'), cls: 'device-card__action--accent' });
           // Connectivity probe: reachable online OR paired (relay can reach a
           // paired-but-LAN-offline peer) — exactly the chat condition.
           acts.push({ key: 'test', label: this.t('device.test_connection'), cls: '' });
         }
-        if (this.isOnline) {
+        if (this.isConnected || this.isTemporary) {
           acts.push({ key: 'disconnect', label: this.t('device.disconnect'), cls: '' });
         } else if (this.isPaired) {
           acts.push({ key: 'connect', label: this.t('device.connect'), cls: 'device-card__action--accent' });
@@ -104,7 +127,9 @@
         } else {
           acts.push({ key: 'connect', label: this.t('device.connect'), cls: 'device-card__action--accent' });
         }
-        if (!this.isOnline) {
+        // Forget only from an offline state — a live session (sync or chat)
+        // must be disconnected before it can be removed.
+        if (!this.isConnected && !this.isTemporary) {
           acts.push({ key: 'forget', label: this.t('device.remove'), cls: 'device-card__action--danger' });
         }
         return acts;
@@ -114,7 +139,7 @@
     template:
       '<div' +
         ' class="device-card card"' +
-        ' :class="{ \'device-card--local\': isLocal, \'device-card--online\': isOnline, \'device-card--offline\': !isOnline && !isLocal }"' +
+        ' :class="{ \'device-card--local\': isLocal, \'device-card--online\': hasLiveSession, \'device-card--offline\': !hasLiveSession && !isLocal }"' +
         ' @contextmenu.prevent="onContextMenu"' +
       '>' +
         '<div class="device-card__status">' +
@@ -138,7 +163,7 @@
         '</div>' +
         '<div class="device-card__meta">' +
           '<span :class="statusClass">{{ statusText }}</span>' +
-          '<span v-if="isOnline && device.encrypted" style="font-size:10px;color:var(--clipsync-fg-muted);margin-left:4px">🔒</span>' +
+          '<span v-if="hasLiveSession && device.encrypted" style="font-size:10px;color:var(--clipsync-fg-muted);margin-left:4px">🔒</span>' +
         '</div>' +
         '<!-- Action buttons -->' +
         '<div v-if="hasActions" class="device-card__actions">' +
@@ -266,16 +291,16 @@
           return;
         }
         if (key === 'connect') {
-          runAction(ClipsyncAPI.connectDevice(peerId), function () {
-            self.device.connected = true;
-            self.device.paired = true;
-          });
+          // No optimistic set: {ok:true} only means the handshake was
+          // *initiated* (main._on_connect).  The real result arrives as a
+          // devices_updated broadcast ≤3s later — a failed handshake leaves
+          // the card untouched instead of hanging in a false live state.
+          runAction(ClipsyncAPI.connectDevice(peerId));
           return;
         }
         if (key === 'disconnect') {
-          runAction(ClipsyncAPI.disconnectDevice(peerId), function () {
-            self.device.connected = false;
-          });
+          // Same: no optimistic flip, real state converges via broadcast.
+          runAction(ClipsyncAPI.disconnectDevice(peerId));
           return;
         }
         if (key === 'unpair') {

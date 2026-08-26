@@ -292,6 +292,11 @@ var ClipsyncWS = (function () {
           if (data.pending_pairings && Array.isArray(data.pending_pairings)) {
             store.syncPairingRequests(data.pending_pairings);
           }
+          // And the removed-devices archive, so restore/purge/forget reflect
+          // instantly on the device page.
+          if (data.removed && Array.isArray(data.removed)) {
+            store.syncRemovedDevices(data.removed);
+          }
           break;
 
         case 'history_updated':

@@ -179,14 +179,15 @@ def test_device_panel_lan_card_internet_badge():
 
 def test_device_panel_lan_cards_are_wrapped_in_all_sections():
     src = _read("components", "device-panel.js")
-    # Connected / Paired Offline / Discovered each wrap their cards.
+    # Connected / Temporary / Paired Offline / Discovered each wrap their cards.
     for vfor in (
-        "v-for=\"dev in onlineRemoteDevices\"",
+        "v-for=\"dev in connectedSyncDevices\"",
+        "v-for=\"dev in temporaryConnectedDevices\"",
         "v-for=\"dev in pairedOfflineDevices\"",
         "v-for=\"dev in discoveredDevices\"",
     ):
         assert vfor in src, vfor
-    assert src.count("class=\"device-internet-wrap\"") == 3
+    assert src.count("class=\"device-internet-wrap\"") == 4
 
 
 # ── 3. API / store / ws wiring for the extended contract ─────────────────
@@ -638,8 +639,13 @@ _SECTION_MARKERS = [
     ("this_device", "devices.this_device"),
     ("pairing_requests", "devices.pairing_requests"),
     ("connected", "device.connected"),
+    # Chat-only live sessions (connected && !paired) get their own section so
+    # they don't masquerade as sync connections.
+    ("temporary", "device.temporary_connected"),
     ("paired_offline", "device.paired_offline"),
     ("discovered", "device.discovered"),
+    # Forgotten devices are archived, not dropped — manageable here.
+    ("removed", "devices.removed_title"),
     ("netpair", "devices.netpair_title"),
 ]
 
@@ -704,15 +710,16 @@ def test_alias_and_netpair_helpers_still_present():
     assert "String(peers[i].peer_id) === String(deviceId)" in src
 
 
-def test_lan_cards_still_wrapped_in_all_three_sections():
+def test_lan_cards_still_wrapped_in_all_four_sections():
     src = _read_r19("components", "device-panel.js")
     for vfor in (
-        "v-for=\"dev in onlineRemoteDevices\"",
+        "v-for=\"dev in connectedSyncDevices\"",
+        "v-for=\"dev in temporaryConnectedDevices\"",
         "v-for=\"dev in pairedOfflineDevices\"",
         "v-for=\"dev in discoveredDevices\"",
     ):
         assert vfor in src, vfor
-    assert src.count("class=\"device-internet-wrap\"") == 3
+    assert src.count("class=\"device-internet-wrap\"") == 4
 
 
 def test_local_device_internet_badge_still_wired():
@@ -727,12 +734,65 @@ def test_local_device_internet_badge_still_wired():
 def test_each_lan_section_keeps_empty_skip_guard():
     src = _read_r19("components", "device-panel.js")
     for guard in (
-        "onlineRemoteDevices.length > 0",
+        "connectedSyncDevices.length > 0",
+        "temporaryConnectedDevices.length > 0",
         "pairedOfflineDevices.length > 0",
         "discoveredDevices.length > 0",
         "pairingRequests.length > 0",
     ):
         assert guard in src, guard
+
+
+# ── 5. Temporary section + removed-devices archive + collapsibility ──────
+
+
+def test_temporary_and_removed_sections_wired():
+    src = _read_r19("components", "device-panel.js")
+    # Temporary bucket = connected && !paired (chat-only sessions).
+    assert "return this.allRemoteDevices.filter(function (d) { return d.connected && !d.paired; });" in src
+    # Removed bucket reads the store archive.
+    assert "removedDevices: function ()" in src
+    assert "this.store.removedDevices || []" in src
+
+
+def test_removed_section_restore_and_purge_wiring():
+    src = _read_r19("components", "device-panel.js")
+    assert "restoreRemovedDevice: function" in src
+    assert "purgeRemovedDevice: function" in src
+    assert "ClipsyncAPI.restoreDevice(dev.device_id)" in src
+    assert "ClipsyncAPI.purgeDevice(dev.device_id)" in src
+    # The row shows removal time and the short id.
+    assert "removed-device-row__time" in src
+    assert "shortId(dev.device_id)" in src
+
+
+def test_sections_are_collapsible_and_default_open():
+    src = _read_r19("components", "device-panel.js")
+    # Every section header is now a toggle button sharing the internet-pairing
+    # chevron affordance.
+    assert src.count("section-header--toggle") >= 7
+    assert "toggleSection: function" in src
+    # All sections default to expanded.
+    for key in ("local", "pairing", "connected", "temporary", "paired",
+                "discovered", "removed"):
+        assert f"{key}: true," in src, f"section {key} must default open"
+
+
+def test_api_restore_and_purge_wrappers():
+    src = _read_r19("js", "api.js")
+    assert "restoreDevice: function" in src
+    assert "purgeDevice: function" in src
+    assert "'/api/device/restore'" in src
+    assert "'/api/device/purge'" in src
+
+
+def test_new_removed_locale_keys_present_in_both():
+    en, zh = _locales_r19()
+    for key in ("device.temporary_connected", "device.restore", "device.purge",
+                "devices.removed_title", "devices.removed_at",
+                "devices.restore_confirm_msg", "devices.purge_confirm_msg"):
+        assert key in en and en[key], key
+        assert key in zh and zh[key], key
 
 
 def test_ai_config_sub_panel_moved_out_of_devices():

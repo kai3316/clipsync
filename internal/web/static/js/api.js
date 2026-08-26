@@ -857,6 +857,21 @@ var ClipsyncAPI = (function () {
       });
     },
 
+    // Bring an archived (removed) device back into the known list — keeps its
+    // paired flag and best-effort reconnects to its last address.
+    restoreDevice: function (peerId) {
+      return this._fetch('POST', '/api/device/restore', {
+        peer_id: peerId,
+      });
+    },
+
+    // Permanently delete an archived (removed) device.  Irreversible.
+    purgeDevice: function (peerId) {
+      return this._fetch('POST', '/api/device/purge', {
+        peer_id: peerId,
+      });
+    },
+
     /**
      * Probe connectivity to a device over every available channel (LAN when
      * reachable + relay when internet-paired). Returns the per-channel result.

@@ -33,6 +33,18 @@
         netpairExpanded: true,    // default expanded; fold it if the page is busy
         _netpairLoadInFlight: false,
         netpairClockTimer: null,  // refreshes relative "last sync" times
+
+        // Section collapsibility — every section defaults to expanded (same
+        // default as the internet-pairing header), foldable by its title.
+        sections: {
+          local: true,
+          pairing: true,
+          connected: true,
+          temporary: true,
+          paired: true,
+          discovered: true,
+          removed: true,
+        },
       };
     },
 
@@ -48,8 +60,17 @@
         });
       },
 
-      onlineRemoteDevices: function () {
-        return this.allRemoteDevices.filter(function (d) { return d.connected; });
+      // A real sync session = a live connection on a paired device.  This is
+      // the page's definition of "已连接": chat-only / unpaired sessions are
+      // temporary and render in their own section below.
+      connectedSyncDevices: function () {
+        return this.allRemoteDevices.filter(function (d) { return d.connected && d.paired; });
+      },
+
+      // Live but not paired — a chat (or similar) temporary session that
+      // must not count as a sync device.
+      temporaryConnectedDevices: function () {
+        return this.allRemoteDevices.filter(function (d) { return d.connected && !d.paired; });
       },
 
       pairedOfflineDevices: function () {
@@ -58,6 +79,11 @@
 
       discoveredDevices: function () {
         return this.allRemoteDevices.filter(function (d) { return !d.paired && !d.connected; });
+      },
+
+      // Archived (forgotten) devices, manageable via Restore / Delete.
+      removedDevices: function () {
+        return this.store.removedDevices || [];
       },
 
       pairingRequests: function () {
@@ -143,10 +169,12 @@
 
         '<!-- This Device (always at the very top) -->' +
         '<div v-if="localDev" class="device-panel__section">' +
-          '<div class="section-header">💻 {{ t(\'devices.this_device\') }}' +
+          '<button type="button" class="section-header section-header--toggle" :aria-expanded="sections.local" @click="toggleSection(\'local\')">' +
+            '💻 {{ t(\'devices.this_device\') }}' +
             '<span v-if="localInternetOnline" class="netpair-local-badge" :title="t(\'devices.netpair_also_internet\')">🌐 {{ t(\'devices.netpair_online\') }}</span>' +
-          '</div>' +
-          '<device-card :device="localDev"></device-card>' +
+            '<span class="netpair-section__chevron" :class="{ \'netpair-section__chevron--open\': sections.local }">▾</span>' +
+          '</button>' +
+          '<div v-if="sections.local"><device-card :device="localDev"></device-card></div>' +
         '</div>' +
 
         '<!-- Internet pairing moved to the bottom (collapsed behind a toggle) -->' +
@@ -161,70 +189,125 @@
           'time-sensitive and both must be compared on the two devices, so they' +
           'must not sit below the device lists. -->' +
           '<div v-if="pairingRequests.length > 0" class="device-panel__section">' +
-            '<div class="section-header" style="color:var(--clipsync-warning)">' +
+            '<button type="button" class="section-header section-header--toggle" style="color:var(--clipsync-warning)" :aria-expanded="sections.pairing" @click="toggleSection(\'pairing\')">' +
               '🔐 {{ t(\'devices.pairing_requests\') }}' +
               '<span class="section-header__badge">{{ pairingRequests.length }}</span>' +
-            '</div>' +
-            '<div v-for="pr in pairingRequests" :key="pr.peer_id" class="pairing-request-card">' +
-              '<div class="pairing-request-card__info">' +
-                '<span class="pairing-request-card__name">{{ pr.peer_name || pr.device_name || pr.peer_id }}</span>' +
-                '<span class="pairing-request-card__id">{{ pr.peer_id }}</span>' +
-                // The 8-digit shared pairing code is the only value actually
-                // validated on both devices. The SAS fingerprint is derived
-                // from different inputs and is never equal to it, so showing
-                // both is confusing — display only the code to compare.
-                '<div class="pairing-request-card__codes">' +
-                  '<span class="pairing-request-code-badge selectable">{{ t(\'ui.pairing_code_label\') }} <strong>{{ formattedCode(pr) }}</strong></span>' +
-                  '<button class="btn-ghost" @click="copyPairingCode(pr)">{{ t(\'ui.copy\') }}</button>' +
+              '<span class="netpair-section__chevron" :class="{ \'netpair-section__chevron--open\': sections.pairing }">▾</span>' +
+            '</button>' +
+            '<div v-if="sections.pairing">' +
+              '<div v-for="pr in pairingRequests" :key="pr.peer_id" class="pairing-request-card">' +
+                '<div class="pairing-request-card__info">' +
+                  '<span class="pairing-request-card__name">{{ pr.peer_name || pr.device_name || pr.peer_id }}</span>' +
+                  '<span class="pairing-request-card__id">{{ pr.peer_id }}</span>' +
+                  // The 8-digit shared pairing code is the only value actually
+                  // validated on both devices. The SAS fingerprint is derived
+                  // from different inputs and is never equal to it, so showing
+                  // both is confusing — display only the code to compare.
+                  '<div class="pairing-request-card__codes">' +
+                    '<span class="pairing-request-code-badge selectable">{{ t(\'ui.pairing_code_label\') }} <strong>{{ formattedCode(pr) }}</strong></span>' +
+                    '<button class="btn-ghost" @click="copyPairingCode(pr)">{{ t(\'ui.copy\') }}</button>' +
+                  '</div>' +
+                  '<span class="pairing-request-card__hint">{{ pairingHint(pr) }}</span>' +
+                  '<span class="pairing-request-card__hint">{{ t(\'devices.pairing_expiry_hint\') }}</span>' +
                 '</div>' +
-                '<span class="pairing-request-card__hint">{{ pairingHint(pr) }}</span>' +
-                '<span class="pairing-request-card__hint">{{ t(\'devices.pairing_expiry_hint\') }}</span>' +
-              '</div>' +
-              '<div class="pairing-request-card__actions">' +
-                '<button v-if="pr.status !== \'confirmed_waiting\' && pr.status !== \'expired\'" class="device-card__action device-card__action--accent" @click="acceptPairing(pr)" :disabled="pairingResponding === pr.peer_id">' +
-                  '{{ pairingResponding === pr.peer_id ? \'...\' : t(\'ui.confirm\') }}' +
-                '</button>' +
-                '<span v-else class="pairing-request-card__waiting">⏳ {{ t(\'pairing.state.confirmed_waiting\') }}</span>' +
-                '<button class="device-card__action device-card__action--danger" @click="rejectPairing(pr)" :disabled="pairingResponding === pr.peer_id">' +
-                  '{{ pairingResponding === pr.peer_id ? \'...\' : t(\'ui.reject\') }}' +
-                '</button>' +
+                '<div class="pairing-request-card__actions">' +
+                  '<button v-if="pr.status !== \'confirmed_waiting\' && pr.status !== \'expired\'" class="device-card__action device-card__action--accent" @click="acceptPairing(pr)" :disabled="pairingResponding === pr.peer_id">' +
+                    '{{ pairingResponding === pr.peer_id ? \'...\' : t(\'ui.confirm\') }}' +
+                  '</button>' +
+                  '<span v-else class="pairing-request-card__waiting">⏳ {{ t(\'pairing.state.confirmed_waiting\') }}</span>' +
+                  '<button class="device-card__action device-card__action--danger" @click="rejectPairing(pr)" :disabled="pairingResponding === pr.peer_id">' +
+                    '{{ pairingResponding === pr.peer_id ? \'...\' : t(\'ui.reject\') }}' +
+                  '</button>' +
+                '</div>' +
               '</div>' +
             '</div>' +
           '</div>' +
 
-          '<!-- Connected -->' +
-          '<div v-if="onlineRemoteDevices.length > 0" class="device-panel__section">' +
-            '<div class="section-header">' +
+          '<!-- Connected: paired + live session → real sync -->' +
+          '<div v-if="connectedSyncDevices.length > 0" class="device-panel__section">' +
+            '<button type="button" class="section-header section-header--toggle" :aria-expanded="sections.connected" @click="toggleSection(\'connected\')">' +
               '🟢 {{ t(\'device.connected\') }}' +
-              '<span class="section-header__badge">{{ onlineRemoteDevices.length }}</span>' +
+              '<span class="section-header__badge">{{ connectedSyncDevices.length }}</span>' +
+              '<span class="netpair-section__chevron" :class="{ \'netpair-section__chevron--open\': sections.connected }">▾</span>' +
+            '</button>' +
+            '<div v-if="sections.connected">' +
+              '<div v-for="dev in connectedSyncDevices" :key="dev.device_id" class="device-internet-wrap">' +
+                '<span v-if="netpairPeerFor(dev.device_id)" class="netpair-card-badge" @contextmenu.stop :class="netpairPeerFor(dev.device_id).online ? \'netpair-card-badge--online\' : \'netpair-card-badge--offline\'" :title="t(\'devices.netpair_also_internet\')">🌐 {{ netpairPeerFor(dev.device_id).online ? t(\'devices.netpair_online\') : t(\'devices.netpair_offline\') }}</span>' +
+                '<device-card :device="devWithAlias(dev)"></device-card>' +
+              '</div>' +
             '</div>' +
-            '<div v-for="dev in onlineRemoteDevices" :key="dev.device_id" class="device-internet-wrap">' +
-              '<span v-if="netpairPeerFor(dev.device_id)" class="netpair-card-badge" @contextmenu.stop :class="netpairPeerFor(dev.device_id).online ? \'netpair-card-badge--online\' : \'netpair-card-badge--offline\'" :title="t(\'devices.netpair_also_internet\')">🌐 {{ netpairPeerFor(dev.device_id).online ? t(\'devices.netpair_online\') : t(\'devices.netpair_offline\') }}</span>' +
-              '<device-card :device="devWithAlias(dev)"></device-card>' +
+          '</div>' +
+
+          '<!-- Temporary: live but not paired (chat-only sessions) -->' +
+          '<div v-if="temporaryConnectedDevices.length > 0" class="device-panel__section">' +
+            '<button type="button" class="section-header section-header--toggle" :aria-expanded="sections.temporary" @click="toggleSection(\'temporary\')">' +
+              '🟣 {{ t(\'device.temporary_connected\') }}' +
+              '<span class="section-header__badge">{{ temporaryConnectedDevices.length }}</span>' +
+              '<span class="netpair-section__chevron" :class="{ \'netpair-section__chevron--open\': sections.temporary }">▾</span>' +
+            '</button>' +
+            '<div v-if="sections.temporary">' +
+              '<div v-for="dev in temporaryConnectedDevices" :key="dev.device_id" class="device-internet-wrap">' +
+                '<device-card :device="devWithAlias(dev)"></device-card>' +
+              '</div>' +
             '</div>' +
           '</div>' +
 
           '<!-- Paired Offline -->' +
           '<div v-if="pairedOfflineDevices.length > 0" class="device-panel__section">' +
-            '<div class="section-header">' +
+            '<button type="button" class="section-header section-header--toggle" :aria-expanded="sections.paired" @click="toggleSection(\'paired\')">' +
               '🟠 {{ t(\'device.paired_offline\') }}' +
               '<span class="section-header__badge section-header__badge--muted">{{ pairedOfflineDevices.length }}</span>' +
-            '</div>' +
-            '<div v-for="dev in pairedOfflineDevices" :key="dev.device_id" class="device-internet-wrap">' +
-              '<span v-if="netpairPeerFor(dev.device_id)" class="netpair-card-badge" @contextmenu.stop :class="netpairPeerFor(dev.device_id).online ? \'netpair-card-badge--online\' : \'netpair-card-badge--offline\'" :title="t(\'devices.netpair_also_internet\')">🌐 {{ netpairPeerFor(dev.device_id).online ? t(\'devices.netpair_online\') : t(\'devices.netpair_offline\') }}</span>' +
-              '<device-card :device="devWithAlias(dev)"></device-card>' +
+              '<span class="netpair-section__chevron" :class="{ \'netpair-section__chevron--open\': sections.paired }">▾</span>' +
+            '</button>' +
+            '<div v-if="sections.paired">' +
+              '<div v-for="dev in pairedOfflineDevices" :key="dev.device_id" class="device-internet-wrap">' +
+                '<span v-if="netpairPeerFor(dev.device_id)" class="netpair-card-badge" @contextmenu.stop :class="netpairPeerFor(dev.device_id).online ? \'netpair-card-badge--online\' : \'netpair-card-badge--offline\'" :title="t(\'devices.netpair_also_internet\')">🌐 {{ netpairPeerFor(dev.device_id).online ? t(\'devices.netpair_online\') : t(\'devices.netpair_offline\') }}</span>' +
+                '<device-card :device="devWithAlias(dev)"></device-card>' +
+              '</div>' +
             '</div>' +
           '</div>' +
 
           '<!-- Discovered -->' +
           '<div v-if="discoveredDevices.length > 0" class="device-panel__section">' +
-            '<div class="section-header">' +
+            '<button type="button" class="section-header section-header--toggle" :aria-expanded="sections.discovered" @click="toggleSection(\'discovered\')">' +
               '🔍 {{ t(\'device.discovered\') }}' +
               '<span class="section-header__badge section-header__badge--muted">{{ discoveredDevices.length }}</span>' +
+              '<span class="netpair-section__chevron" :class="{ \'netpair-section__chevron--open\': sections.discovered }">▾</span>' +
+            '</button>' +
+            '<div v-if="sections.discovered">' +
+              '<div v-for="dev in discoveredDevices" :key="dev.device_id" class="device-internet-wrap">' +
+                '<span v-if="netpairPeerFor(dev.device_id)" class="netpair-card-badge" @contextmenu.stop :class="netpairPeerFor(dev.device_id).online ? \'netpair-card-badge--online\' : \'netpair-card-badge--offline\'" :title="t(\'devices.netpair_also_internet\')">🌐 {{ netpairPeerFor(dev.device_id).online ? t(\'devices.netpair_online\') : t(\'devices.netpair_offline\') }}</span>' +
+                '<device-card :device="devWithAlias(dev)"></device-card>' +
+              '</div>' +
             '</div>' +
-            '<div v-for="dev in discoveredDevices" :key="dev.device_id" class="device-internet-wrap">' +
-              '<span v-if="netpairPeerFor(dev.device_id)" class="netpair-card-badge" @contextmenu.stop :class="netpairPeerFor(dev.device_id).online ? \'netpair-card-badge--online\' : \'netpair-card-badge--offline\'" :title="t(\'devices.netpair_also_internet\')">🌐 {{ netpairPeerFor(dev.device_id).online ? t(\'devices.netpair_online\') : t(\'devices.netpair_offline\') }}</span>' +
-              '<device-card :device="devWithAlias(dev)"></device-card>' +
+          '</div>' +
+
+          '<!-- Removed devices (archive) — forgotten devices, manageable via' +
+          'Restore / Delete permanently. -->' +
+          '<div v-if="removedDevices.length > 0" class="device-panel__section">' +
+            '<button type="button" class="section-header section-header--toggle" :aria-expanded="sections.removed" @click="toggleSection(\'removed\')">' +
+              '🗑 {{ t(\'devices.removed_title\') }}' +
+              '<span class="section-header__badge section-header__badge--muted">{{ removedDevices.length }}</span>' +
+              '<span class="netpair-section__chevron" :class="{ \'netpair-section__chevron--open\': sections.removed }">▾</span>' +
+            '</button>' +
+            '<div v-if="sections.removed">' +
+              '<div v-for="dev in removedDevices" :key="dev.device_id" class="removed-device-row">' +
+                '<div class="removed-device-row__info">' +
+                  '<span class="removed-device-row__name text-ellipsis">{{ dev.device_name || dev.device_id }}</span>' +
+                  '<span class="removed-device-row__id text-mono selectable">{{ shortId(dev.device_id) }}</span>' +
+                  '<span v-if="dev.removed_at" class="removed-device-row__time">' +
+                    '{{ t(\'devices.removed_at\', { time: relTime(dev.removed_at) }) }}' +
+                  '</span>' +
+                '</div>' +
+                '<div class="removed-device-row__actions">' +
+                  '<button class="device-card__action device-card__action--accent" @click="restoreRemovedDevice(dev)">' +
+                    '{{ t(\'device.restore\') }}' +
+                  '</button>' +
+                  '<button class="device-card__action device-card__action--danger" @click="purgeRemovedDevice(dev)">' +
+                    '{{ t(\'device.purge\') }}' +
+                  '</button>' +
+                '</div>' +
+              '</div>' +
             '</div>' +
           '</div>' +
 
@@ -338,6 +421,68 @@
       // busy.
       toggleNetpair: function () {
         this.netpairExpanded = !this.netpairExpanded;
+      },
+
+      // Fold / unfold one page section (this-device, pairing, connected,
+      // temporary, paired, discovered, removed).  All default to expanded.
+      toggleSection: function (name) {
+        if (name in this.sections) {
+          this.sections[name] = !this.sections[name];
+        }
+      },
+
+      // 🔄 Bring an archived (removed) device back into the known list.  Keeps
+      // its paired flag and best-effort reconnects to its last address, so an
+      // online device returns to sync directly; an offline one lands in
+      // "Paired · offline" and reconnects when it comes back.
+      restoreRemovedDevice: function (dev) {
+        var self = this;
+        var name = dev.device_name || dev.device_id;
+        this.store.confirm(
+          this.t('devices.restore_confirm_title'),
+          this.t('devices.restore_confirm_msg', { name: name })
+        )
+          .then(function () {
+            ClipsyncAPI.restoreDevice(dev.device_id)
+              .then(function (res) {
+                if (res && res.ok) {
+                  self.store.showToast(
+                    self.t('devices.restored_toast', { name: name }), 2000, 'success');
+                } else {
+                  self.store.showToast((res && res.error) || self.t('dialog.failed'), 2000);
+                }
+              })
+              .catch(function () {
+                self.store.showToast(self.t('dialog.failed'), 2000);
+              });
+          })
+          .catch(function () { /* cancelled */ });
+      },
+
+      // 🗑 Permanently delete an archived (removed) device.  Irreversible —
+      // confirm before proceeding.
+      purgeRemovedDevice: function (dev) {
+        var self = this;
+        var name = dev.device_name || dev.device_id;
+        this.store.confirm(
+          this.t('devices.purge_confirm_title'),
+          this.t('devices.purge_confirm_msg', { name: name })
+        )
+          .then(function () {
+            ClipsyncAPI.purgeDevice(dev.device_id)
+              .then(function (res) {
+                if (res && res.ok) {
+                  self.store.showToast(
+                    self.t('devices.purged_toast', { name: name }), 2000, 'success');
+                } else {
+                  self.store.showToast((res && res.error) || self.t('dialog.failed'), 2000);
+                }
+              })
+              .catch(function () {
+                self.store.showToast(self.t('dialog.failed'), 2000);
+              });
+          })
+          .catch(function () { /* cancelled */ });
       },
 
       // Refresh the paired-over-internet list + generated code. The store
@@ -731,6 +876,11 @@
             // when no web client is attached, so refresh must re-sync them).
             if (res && res.pending_pairings) {
               self.store.syncPairingRequests(res.pending_pairings);
+            }
+            // Same fallback for the removed-devices archive: restore/purge
+            // from another tab would otherwise be invisible on a cold refresh.
+            if (res && res.removed) {
+              self.store.syncRemovedDevices(res.removed);
             }
           })
           .catch(function () {

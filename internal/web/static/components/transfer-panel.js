@@ -127,7 +127,6 @@
             <div class="transfer-speed-progress__fill" :style="{ width: (speedTest.progress * 100) + '%' }"></div>
           </div>
         </div>
-        <div v-if="speedTest.error" class="transfer-speed-error">{{ speedTest.error }}</div>
       </div>
 
       <!-- Send Files Card -->

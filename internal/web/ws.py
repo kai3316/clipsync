@@ -354,14 +354,7 @@ class WebSocketManager:
     def _send_snapshot(self, client: WebSocketClient):
         """Send initial state snapshot to a newly connected client."""
         # Device list
-        from internal.web.api.devices import get_devices
-        dev_data, _ = get_devices(
-            self._cfg, self._get_connected_ids, self._get_discovered,
-            get_resolved_hashes=self._get_resolved_hashes,
-            get_pending_pairings=self._get_pending_pairings,
-            get_reconnect_states=self._get_reconnect_states,
-        )
-        client.send_json({"type": "devices_updated", "data": dev_data})
+        client.send_json({"type": "devices_updated", "data": self._devices_snapshot()})
 
         # History
         from internal.web.api.history import get_history
@@ -512,8 +505,13 @@ class WebSocketManager:
         """Convenience: tell clients the entire history was wiped."""
         self.broadcast("history_clear", {})
 
-    def broadcast_devices(self):
-        """Convenience: broadcast device list to all clients."""
+    def _devices_snapshot(self) -> dict:
+        """Compute the authoritative web device snapshot.
+
+        Covers the device list plus pending pairings and the removed archive —
+        everything the device page renders — so a fingerprint of it is a sound
+        "did anything user-visible change" signal.
+        """
         from internal.web.api.devices import get_devices
         dev_data, _ = get_devices(
             self._cfg, self._get_connected_ids, self._get_discovered,
@@ -521,7 +519,25 @@ class WebSocketManager:
             get_pending_pairings=self._get_pending_pairings,
             get_reconnect_states=self._get_reconnect_states,
         )
-        self.broadcast("devices_updated", dev_data)
+        return dev_data
+
+    def devices_fingerprint(self) -> str:
+        """Stable serialization of the device snapshot for change detection.
+
+        Any rendered-field change — connected/paired transitions, reconnect
+        progress, names, addresses, notes, the removed archive — yields a
+        different fingerprint, so the peer-status loop can broadcast promptly
+        on real changes instead of a coarse name+suffix string.
+        """
+        import json
+        return json.dumps(
+            self._devices_snapshot(), sort_keys=True,
+            ensure_ascii=False, default=str,
+        )
+
+    def broadcast_devices(self):
+        """Convenience: broadcast device list to all clients."""
+        self.broadcast("devices_updated", self._devices_snapshot())
 
     def broadcast_transfer_progress(self, transfer_id: str, progress: float,
                                     status: str = "transferring",

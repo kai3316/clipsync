@@ -451,6 +451,10 @@
           if (res && res.pending_pairings) {
             store.syncPairingRequests(res.pending_pairings);
           }
+          // Same fallback for the removed-devices archive.
+          if (res && res.removed) {
+            store.syncRemovedDevices(res.removed);
+          }
           return devs;
         }).catch(function (e) {
           store.devicesLoadFailed = true;

@@ -108,6 +108,76 @@ class TestConfigSaveLoad:
             config_module._config_dir = original_dir
             config_module._config_path = original_path
 
+    def test_removed_peers_roundtrip(self):
+        """removed_peers archive round-trips through save/load, keeping
+        removed_at and the restored-to-known-list fields."""
+        tmp_dir = Path(tempfile.mkdtemp())
+        config_path = tmp_dir / "config.json"
+
+        original_dir = config_module._config_dir
+        original_path = config_module._config_path
+        config_module._config_dir = lambda: tmp_dir
+        config_module._config_path = lambda: config_path
+
+        try:
+            cfg = config_module.Config()
+            cfg.peers["peer1"] = config_module.PeerInfo(
+                device_id="peer1",
+                device_name="Peer One",
+                public_key_pem="pem-data-here",
+                paired=True,
+                notes="old note",
+                last_ip="192.168.1.5",
+                last_port=37377,
+            )
+            cfg.removed_peers["peer1"] = config_module.PeerInfo(
+                device_id="peer1",
+                device_name="Peer One",
+                public_key_pem="pem-data-here",
+                paired=True,
+                notes="old note",
+                last_ip="192.168.1.5",
+                last_port=37377,
+                removed_at=1234567890.5,
+            )
+            config_module.save(cfg)
+
+            raw = json.loads(config_path.read_text(encoding="utf-8"))
+            assert isinstance(raw["removed_peers"], list)
+            assert len(raw["removed_peers"]) == 1
+
+            loaded = config_module.load()
+            assert "peer1" in loaded.removed_peers
+            rp = loaded.removed_peers["peer1"]
+            assert rp.device_name == "Peer One"
+            assert rp.paired is True
+            assert rp.last_ip == "192.168.1.5"
+            assert rp.removed_at == 1234567890.5
+        finally:
+            config_module._config_dir = original_dir
+            config_module._config_path = original_path
+
+    def test_old_config_without_removed_peers_loads_empty(self):
+        """A config file predating the archive feature must load with an empty
+        removed_peers dict (backward compatible)."""
+        tmp_dir = Path(tempfile.mkdtemp())
+        config_path = tmp_dir / "config.json"
+        config_path.write_text(
+            json.dumps({"peers": []}), encoding="utf-8")
+
+        original_dir = config_module._config_dir
+        original_path = config_module._config_path
+        config_module._config_dir = lambda: tmp_dir
+        config_module._config_path = lambda: config_path
+
+        try:
+            loaded = config_module.load()
+            assert loaded.removed_peers == {}
+            assert loaded.peers == {}
+        finally:
+            config_module._config_dir = original_dir
+            config_module._config_path = original_path
+
 
 class TestConfigRecovery:
     def test_corrupted_json(self):

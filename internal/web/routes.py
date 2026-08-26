@@ -892,6 +892,36 @@ def _dispatch(method, path, query_params, body, cfg, history, sync_mgr,
             ok = on_device_action("forget", peer_id)
             return _json_response({"ok": ok})
 
+        elif path == "/api/device/restore":
+            # Bring an archived (removed) device back into the known list —
+            # keep its paired flag and best-effort reconnect to its last
+            # address so it returns to sync once reachable again.
+            if on_device_action is None:
+                return _json_response({"ok": False, "error": "not available"}, 503)
+            try:
+                req = json.loads(body.decode("utf-8"))
+            except (json.JSONDecodeError, UnicodeDecodeError):
+                return _json_response({"ok": False, "error": "invalid json"}, 400)
+            peer_id = req.get("peer_id", "").strip()
+            if not peer_id:
+                return _json_response({"ok": False, "error": "peer_id required"}, 400)
+            ok = on_device_action("restore", peer_id)
+            return _json_response({"ok": ok})
+
+        elif path == "/api/device/purge":
+            # Permanently delete an archived (removed) device.  Irreversible.
+            if on_device_action is None:
+                return _json_response({"ok": False, "error": "not available"}, 503)
+            try:
+                req = json.loads(body.decode("utf-8"))
+            except (json.JSONDecodeError, UnicodeDecodeError):
+                return _json_response({"ok": False, "error": "invalid json"}, 400)
+            peer_id = req.get("peer_id", "").strip()
+            if not peer_id:
+                return _json_response({"ok": False, "error": "peer_id required"}, 400)
+            ok = on_device_action("purge", peer_id)
+            return _json_response({"ok": ok})
+
         elif path == "/api/device/test":
             # Full probe result (per-channel RTT + reasons), not a bool — the
             # card shows which channels answered and at what latency.

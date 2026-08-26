@@ -361,6 +361,27 @@ class PairingManager:
             self._pairing_attempts.pop(peer_id, None)
             self._pairing_status.pop(peer_id, None)
 
+    def restore_peer(self, peer_id: str, device_name: str, paired: bool = True):
+        """Re-add a peer restored from the removed-devices archive.
+
+        The archived config entry carries the pinned key and last address; the
+        identity's certificate/fingerprint are re-pinned on the next handshake,
+        so they start empty here.
+        """
+        with self._lock:
+            existing = self._peers.get(peer_id)
+            if existing is not None:
+                existing.device_name = device_name
+                existing.paired = paired
+                return
+            self._peers[peer_id] = PeerIdentity(
+                device_id=peer_id,
+                device_name=device_name,
+                certificate_pem="",
+                paired=paired,
+                fingerprint="",
+            )
+
     def get_pairing_status(self, peer_id: str) -> str:
         """Return the transient pairing lifecycle status for a peer."""
         with self._lock:

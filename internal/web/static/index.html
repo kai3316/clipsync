@@ -179,6 +179,32 @@
       color: var(--clipsync-bg);
     }
 
+    /* Collapsible section header — a button that keeps the label+hairline
+       look of .section-header while adding the internet-pairing fold affordance
+       (same chevron).  All device-page sections default to expanded. */
+    .section-header--toggle {
+      width: 100%;
+      background: none;
+      border: none;
+      border-radius: var(--clipsync-radius-sm);
+      cursor: pointer;
+      text-align: left;
+      font: inherit;
+      user-select: none;
+    }
+
+    .section-header--toggle:hover {
+      background: var(--clipsync-hover);
+    }
+
+    /* The ::after hairline is always the last flex child, so order the
+       chevron after it to sit at the far right — same affordance as the
+       internet-pairing section header. */
+    .section-header--toggle .netpair-section__chevron {
+      order: 1;
+      margin-left: var(--clipsync-space-2);
+    }
+
     /* Transfer panel "Cancel all" (Active transfers section header) */
     .transfer-cancel-all-btn {
       margin-left: var(--clipsync-space-3);
@@ -710,6 +736,15 @@
       box-shadow: 0 0 6px var(--clipsync-warning-glow);
     }
 
+    /* Temporary (chat-only, unpaired) live session — the purple dot.  Same
+       breathing pulse as the accent/online dots so it reads as "live", but in
+       the violet accent-2 tone to distinguish it from a real sync session. */
+    .device-card__dot--temp {
+      background: var(--clipsync-accent-2);
+      box-shadow: 0 0 8px rgba(167, 139, 250, 0.35);
+      animation: glowPulse 2s ease-in-out infinite;
+    }
+
     /* Device card note */
     .device-card__note {
       margin-top: 4px;
@@ -932,6 +967,53 @@
     }
 
     .pairing-request-card__actions {
+      display: flex;
+      gap: 6px;
+      flex-shrink: 0;
+    }
+
+    /* Removed (archived) device row — muted, since these are no longer active
+       peers.  Name + short id + removal time on the left, Restore /
+       Delete-permanently actions on the right. */
+    .removed-device-row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: var(--clipsync-space-3);
+      padding: var(--clipsync-space-3) var(--clipsync-space-4);
+      margin-bottom: var(--clipsync-space-2);
+      background: var(--clipsync-panel-2);
+      border: 1px dashed var(--clipsync-border);
+      border-radius: var(--clipsync-radius);
+      animation: fadeSlideIn 0.3s ease-out;
+    }
+
+    .removed-device-row__info {
+      display: flex;
+      flex-direction: column;
+      gap: 2px;
+      min-width: 0;
+    }
+
+    .removed-device-row__name {
+      font-size: 14px;
+      font-weight: 600;
+      color: var(--clipsync-fg-muted);
+    }
+
+    .removed-device-row__id {
+      font-size: 10px;
+      font-family: var(--clipsync-font-mono);
+      color: var(--clipsync-fg-subtle);
+    }
+
+    .removed-device-row__time {
+      font-size: 11px;
+      color: var(--clipsync-fg-subtle);
+      margin-top: 2px;
+    }
+
+    .removed-device-row__actions {
       display: flex;
       gap: 6px;
       flex-shrink: 0;
@@ -2215,12 +2297,6 @@
       background: linear-gradient(90deg, var(--clipsync-accent), var(--clipsync-accent-2));
       border-radius: 2px;
       transition: width 0.3s;
-    }
-
-    .transfer-speed-error {
-      margin-top: var(--clipsync-space-2);
-      font-size: 12px;
-      color: var(--clipsync-danger);
     }
 
     /* ── Progress bar ─────────────────────────────────────────────── */
