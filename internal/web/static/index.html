@@ -6122,6 +6122,34 @@
       margin: var(--clipsync-space-1) 0 0 0;
     }
 
+    /* ── Password strength checklist (security section) ────────── */
+    .settings-pw-rules {
+      display: flex;
+      flex-direction: column;
+      gap: 2px;
+      margin-top: 8px;
+    }
+    .settings-pw-rule {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      font-size: 0.72rem;
+    }
+    .settings-pw-rule__mark {
+      width: 14px;
+      flex-shrink: 0;
+      color: var(--clipsync-danger);
+    }
+    .settings-pw-rule__mark--ok {
+      color: var(--clipsync-success);
+    }
+    .settings-pw-rule__label {
+      color: var(--clipsync-fg-muted);
+    }
+    .settings-pw-rule__label--ok {
+      color: var(--clipsync-fg);
+    }
+
     /* Button grid */
     .settings-btn-grid {
       display: grid;

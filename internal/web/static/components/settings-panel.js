@@ -442,6 +442,31 @@
         var q = (this.searchQuery || '').trim();
         return !!q && Object.keys(this.searchMatchCounts).length === 0;
       },
+
+      // ── Password strength rules (mirror server-side netpair_passphrase_error)
+      // The unified encryption password keeps the rules the old pairing
+      // passphrase had: length 12..200 plus one of each of uppercase,
+      // lowercase, digit and a non-alnum non-space special character.  The
+      // live checklist is a hint only — the server re-validates on save so a
+      // weak value can't bypass it by editing the request body.
+      passwordRules: function () {
+        var pw = this.passwordValue || '';
+        var P = function (key, met) { return { key: key, met: !!met }; };
+        return [
+          P('settings_window.password_rule_length',
+            pw.length >= 12 && pw.length <= 200),
+          P('settings_window.password_rule_upper', /\p{Lu}/u.test(pw)),
+          P('settings_window.password_rule_lower', /\p{Ll}/u.test(pw)),
+          P('settings_window.password_rule_digit', /\p{N}/u.test(pw)),
+          P('settings_window.password_rule_special', /[^\p{L}\p{N}\s]/u.test(pw)),
+        ];
+      },
+
+      passwordValid: function () {
+        var pw = this.passwordValue || '';
+        if (!pw) return true; // empty field = no change, nothing to validate
+        return this.passwordRules.every(function (r) { return r.met; });
+      },
     },
 
     methods: {
@@ -731,8 +756,37 @@
         });
       },
 
+      // Maps a server-side password_<tag> error code (or the live checklist)
+      // to the human-readable rule label, so a rejected save tells the user
+      // exactly which requirement is missing.
+      passwordErrorText: function (code) {
+        var self = this;
+        if (code && code.indexOf('password_') === 0) {
+          var tag = code.slice('password_'.length);
+          if (tag === 'type') return self.t('settings_window.password_invalid');
+          var key = 'settings_window.password_rule_' + tag;
+          if (self.t(key) !== key) return self.t(key);
+        }
+        return '';
+      },
+
       saveSecurity: function () {
         var self = this;
+        // Reject weak passwords client-side before hitting the server: the
+        // strength rules (≥12 chars + upper/lower/digit/special) are also
+        // enforced server-side, but a live toast here is friendlier than a
+        // round-trip rejection.
+        var firstBad = null;
+        if (self.passwordValue) {
+          var rules = self.passwordRules;
+          for (var i = 0; i < rules.length; i++) {
+            if (!rules[i].met) { firstBad = rules[i]; break; }
+          }
+          if (firstBad) {
+            self.store.showToast(self.t(firstBad.key), 3000);
+            return;
+          }
+        }
         self.securitySaving = true;
         var payload = {
           encryption_enabled: self.encryptionEnabled,
@@ -752,8 +806,12 @@
           self.dirtySections['security'] = false;
           self.$nextTick(function () { self._skipDirty = false; });
           self.store.showToast(self.t('settings_window.security_saved'), 3000);
-        }).catch(function () {
-          self.store.showToast(self.t('settings.save_security_failed'), 2000);
+        }).catch(function (err) {
+          var code = (err && err.data && err.data.error) || '';
+          var rule = self.passwordErrorText(code);
+          self.store.showToast(
+            rule || self.t('settings.save_security_failed'),
+            rule ? 3000 : 2000);
         }).finally(function () {
           self.securitySaving = false;
         });
@@ -1983,6 +2041,13 @@
                     '<div class="settings-field__row">' +
                       '<input :type="showPassword ? \'text\' : \'password\'" class="settings-input" v-model="passwordValue" :placeholder="passwordSet ? \'●●●●●●●●\' : t(\'settings_window.password_placeholder\')">' +
                       '<button class="settings-btn settings-btn--sm" @click="showPassword = !showPassword">{{ showPassword ? t(\'settings_window.hide\') : t(\'settings_window.show\') }}</button>' +
+                    '</div>' +
+                    '<div v-if="passwordValue" class="settings-pw-rules">' +
+                      '<span class="settings-hint" style="margin:0 0 4px 0">{{ t(\'settings_window.password_rules\') }}</span>' +
+                      '<div v-for="r in passwordRules" :key="r.key" class="settings-pw-rule">' +
+                        '<span class="settings-pw-rule__mark" :class="{\'settings-pw-rule__mark--ok\': r.met}">{{ r.met ? \'✓\' : \'✗\' }}</span>' +
+                        '<span class="settings-pw-rule__label" :class="{\'settings-pw-rule__label--ok\': r.met}">{{ t(r.key) }}</span>' +
+                      '</div>' +
                     '</div>' +
                     '<button v-if="passwordSet" class="settings-btn settings-btn--sm" @click="clearPassword" style="margin-top:4px">{{ t(\'settings_window.clear_password\') }}</button>' +
                     '<span class="settings-hint">{{ passwordSet ? t(\'security.password_set\') : t(\'security.no_password\') }}</span>' +

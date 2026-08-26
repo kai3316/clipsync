@@ -335,6 +335,23 @@ def update_settings(body, cfg, on_settings_change=None, enc_mgr=None):
                 return {"ok": False, "error": "netpair_password_" + err}, 400
         data["netpair_password"] = pw
 
+    # The single app password ("password" special action) keeps the same
+    # strength rules the netpair passphrase had — the unified
+    # encryption_password is just as sensitive, so a weak value must be
+    # rejected server-side too rather than only in the web UI.  Empty string
+    # is allowed (it means "leave unchanged" — use clear_password to remove).
+    if "password" in data:
+        pw = data["password"]
+        if not isinstance(pw, str):
+            return {"ok": False, "error": "password_type"}, 400
+        pw = pw.strip()
+        if pw:
+            from internal.transport.relay import netpair_passphrase_error
+            err = netpair_passphrase_error(pw)
+            if err is not None:
+                return {"ok": False, "error": "password_" + err}, 400
+        data["password"] = pw
+
     updated = {}
     for field in _MUTABLE_FIELDS:
         if field in data:

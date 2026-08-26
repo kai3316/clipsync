@@ -979,6 +979,53 @@ def test_netpair_password_non_string_rejected():
     assert not getattr(cfg, "netpair_password", "")
 
 
+# ── 4d. password special action (unified encryption password) ─────────
+# The unified app password carries the SAME strength rules the netpair
+# passphrase had (length ≥ 12 + upper/lower/digit/special), enforced
+# server-side so the web UI's checklist can't be bypassed via the body.
+
+
+@pytest.mark.usefixtures("sandboxed_persist")
+@pytest.mark.parametrize("bad,tag", [
+    ("tooshort1", "length"),        # <12
+    ("password1!ab", "upper"),      # missing uppercase
+    ("PASSWORD1!AB", "lower"),      # missing lowercase
+    ("Password!!ab", "digit"),      # missing digit
+    ("Password1abc", "special"),    # missing special
+])
+def test_password_special_action_strength_rejected(bad, tag):
+    cfg = _SettingsCfg()
+    data, status = update_settings(_body({"password": bad}), cfg)
+    assert status == 400
+    assert data["ok"] is False
+    assert data["error"] == "password_" + tag
+
+
+@pytest.mark.usefixtures("sandboxed_persist")
+def test_password_special_action_strong_accepted():
+    cfg = _SettingsCfg()
+    data, status = update_settings(_body({"password": _STRONG_PW}), cfg)
+    assert status == 200
+    assert data["ok"] is True
+
+
+@pytest.mark.usefixtures("sandboxed_persist")
+def test_password_special_action_empty_is_unchanged_noop():
+    # Empty string = leave unchanged (clear_password removes it), not a 400.
+    cfg = _SettingsCfg()
+    data, status = update_settings(_body({"password": ""}), cfg)
+    assert status == 200
+    assert data["ok"] is True
+
+
+@pytest.mark.usefixtures("sandboxed_persist")
+def test_password_special_action_non_string_rejected():
+    cfg = _SettingsCfg()
+    data, status = update_settings(_body({"password": 12345}), cfg)
+    assert status == 400
+    assert data["error"] == "password_type"
+
+
 def test_get_settings_exposes_only_netpair_set_flag():
     cfg = _SettingsCfg()
     data, _ = settings_api.get_settings(cfg)
