@@ -26,6 +26,8 @@
   "device.save_note": "保存",
   "device.disconnect": "断开连接",
   "device.connect": "连接",
+  "device.connect_started": "正在连接…",
+  "device.connect_rejected": "{name} 拒绝了连接 — 该设备可能已将你移除",
   "device.unpair": "取消配对",
   "device.remove": "移除",
   "device.unpair_confirm_title": "取消配对",

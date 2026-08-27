@@ -2,6 +2,11 @@
 
 All notable changes to ClipSync are documented in this file.
 
+## [1.0.93] — 2026-08-27
+
+- **修复设备页「连接」按钮谎报成功**：在「已发现」里点连接，之前无论结果如何都弹「连接成功」——但 `{ok:true}` 只代表连接已**发起**、不代表连上了；若对端直接拒绝（它的用户曾在另一台设备移除本机，它收到连接后发回拒绝标记），连接静默失败、UI 毫无反馈，看起来就是「提示连接成功然后没有任何反应」。现在：① 点连接后的即时提示改为「正在连接…」，真正的成功以设备卡移入「已连接」区为准；② 对端明确拒绝时，传输层通过新增的 `set_on_connect_rejected` 回调（携带 name/peer_id、线程安全、绝不抛出）把 `connect_rejected` 广播给 Web UI，弹出「{name} 拒绝了连接 — 该设备可能已将你移除」。设备页的「已发现」卡片上，一个被对端移除的设备从此不再是「假成功 + 无反应」，而是有明确、诚实的反馈。
+- 新增 2 个 locale 键（`device.connect_started` / `device.connect_rejected`）中英全量同步。对应测试：`tests/test_connection.py`（回调触发 / 无回调静默 / 回调抛错不传播）与 `tests/test_devices_ui.py`（连接 toast 诚实化、WS 处理 `connect_rejected`、后端接线、locale 镜像、node --check）。
+
 ## [1.0.92] — 2026-08-27
 
 - **修复自动更新检查崩溃**：`internal/system/updater.py` 的 `download_latest_release` 把内建函数 `callable` 误当类型写进参数注解（`progress_cb: callable | None`）。在应用所用的 Python 3.11（注解在函数定义时立即求值）下，懒导入该模块的瞬间即抛 `TypeError: unsupported operand type(s) for |`——自动更新检查每轮都失败并刷 ERROR 日志（启动不报错，因为该模块是定时任务才懒加载；测试环境是 Python 3.14 的惰性注解，也一直没暴露）。改为正确的 `typing.Callable | None`；Python 3.11 / 3.14 双解释器导入与注解访问均验证通过，`tests/test_update.py` 51 例全绿。

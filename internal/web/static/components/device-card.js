@@ -257,10 +257,13 @@
         };
         var actionName = labels[key] || key;
 
-        var runAction = function (method, afterSuccess) {
+        var runAction = function (method, afterSuccess, successMsg) {
           method.then(function (res) {
             if (res && res.ok) {
-              self.store.showToast(self.t('device.action_success', { action: actionName }), 2000);
+              // successMsg lets an action override the generic "… successful"
+              // toast — connect uses "connecting…" because {ok:true} only
+              // means the attempt was *initiated*, not that a session exists.
+              self.store.showToast(successMsg || self.t('device.action_success', { action: actionName }), 2000);
               if (afterSuccess) afterSuccess();
             } else {
               self.store.showToast(self.t('device.action_failed', { action: actionName }) +
@@ -296,9 +299,12 @@
         if (key === 'connect') {
           // No optimistic set: {ok:true} only means the handshake was
           // *initiated* (main._on_connect).  The real result arrives as a
-          // devices_updated broadcast ≤3s later — a failed handshake leaves
-          // the card untouched instead of hanging in a false live state.
-          runAction(ClipsyncAPI.connectDevice(peerId));
+          // devices_updated broadcast ≤3s later (device moves to Connected),
+          // or as a connect_rejected toast when the peer refuses us (its
+          // user removed/forgot this device).  So the immediate toast is
+          // "connecting…", never "connected" — claiming success here is the
+          // lie that left a rejected connect looking like a silent no-op.
+          runAction(ClipsyncAPI.connectDevice(peerId), null, self.t('device.connect_started'));
           return;
         }
         if (key === 'disconnect') {

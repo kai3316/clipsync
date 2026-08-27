@@ -1190,6 +1190,12 @@ class Application:
         # ── Security alerts ──────────────────────────────────────
         self.transport_mgr.set_on_security_alert(self._on_security_alert)
 
+        # ── Connect-rejection feedback ─────────────────────────────
+        # A peer that refuses our connection attempt (its user removed us)
+        # is surfaced to the web UI so a "Connect" click that is rejected
+        # gets honest feedback instead of looking like a silent no-op.
+        self.transport_mgr.set_on_connect_rejected(self._on_connect_rejected)
+
         # ── Wake recovery ───────────────────────────────────────
         self.transport_mgr.set_on_wake(self.discovery._wake_recovery)
 
@@ -5506,6 +5512,18 @@ class Application:
         if not isinstance(event, dict):
             return
         self._push_web("broadcast", "aiconfig_file", event)
+
+    def _on_connect_rejected(self, peer_name: str, peer_id: str) -> None:
+        """A peer refused our connection attempt — it sent its rejection
+        marker after its identity frame, which means its user removed or
+        forgot this device.  Called from the transport connect thread; the
+        WebSocketManager broadcast is thread-safe.  Surfaces a toast in the
+        web UI so the "Connect" click that was refused gets honest feedback
+        (before this, the device just stayed in the list with no signal)."""
+        self._push_web(
+            "broadcast", "connect_rejected",
+            {"peer_id": peer_id, "name": peer_name},
+        )
 
 
 

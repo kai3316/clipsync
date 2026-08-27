@@ -689,6 +689,17 @@ var ClipsyncWS = (function () {
           }
           break;
 
+        case 'connect_rejected':
+          // A peer refused our connection attempt (it sent its rejection
+          // marker after its identity frame — its user removed/forgot us).
+          // Without this the "Connect" click looks like a silent no-op: the
+          // card just stays Discovered.  Localize here so the payload stays
+          // language-neutral.
+          if (data && data.peer_id) {
+            store.showToast(store.t('device.connect_rejected', { name: data.name || '' }), 3500, 'error');
+          }
+          break;
+
         case 'toast':
           // Server-pushed toast notification
           if (data && data.message) {

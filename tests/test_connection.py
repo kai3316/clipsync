@@ -155,6 +155,43 @@ class TestTransportManagerInit:
         assert tm._server_sock is None
 
 
+class TestConnectRejectedCallback:
+    """A peer that refuses our connection attempt must reach the app layer
+    (e.g. a web toast) — otherwise a "Connect" click on a device whose user
+    removed us looks like a silent no-op."""
+
+    def setup_method(self):
+        self.pairing_mgr = MockPairingManager()
+        self.tm = TransportManager("dev-1", "Device 1", 9999, self.pairing_mgr)
+
+    def test_callback_defaults_to_none(self):
+        assert self.tm._on_connect_rejected is None
+
+    def test_setter_stores_callback(self):
+        def cb(name, pid):
+            pass
+        self.tm.set_on_connect_rejected(cb)
+        assert self.tm._on_connect_rejected is cb
+
+    def test_notify_delivers_name_and_peer_id(self):
+        seen = []
+        self.tm.set_on_connect_rejected(lambda name, pid: seen.append((name, pid)))
+        self.tm._notify_connect_rejected("Kais-Mac", "peer-123")
+        assert seen == [("Kais-Mac", "peer-123")]
+
+    def test_notify_without_callback_is_silent_noop(self):
+        # A rejection on a transport thread must never raise when no
+        # callback is wired (e.g. headless or in tests).
+        self.tm._notify_connect_rejected("Kais-Mac", "peer-123")
+
+    def test_throwing_callback_does_not_propagate(self):
+        def boom(name, pid):
+            raise RuntimeError("boom")
+        self.tm.set_on_connect_rejected(boom)
+        # The connect thread must survive a misbehaving callback.
+        self.tm._notify_connect_rejected("Kais-Mac", "peer-123")
+
+
 class TestTransportManagerOperations:
     """Operations that do not need a running server or network."""
 

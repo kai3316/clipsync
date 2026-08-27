@@ -26,6 +26,8 @@
   "device.save_note": "Save",
   "device.disconnect": "Disconnect",
   "device.connect": "Connect",
+  "device.connect_started": "Connecting…",
+  "device.connect_rejected": "Rejected by {name} — this device may have removed you",
   "device.unpair": "Unpair",
   "device.remove": "Remove",
   "device.unpair_confirm_title": "Unpair Device",

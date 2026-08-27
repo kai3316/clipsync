@@ -460,6 +460,7 @@ class TransportManager:
         self._rejected_peer_ids: set[str] = set()
         self._enc_mgr = None
         self._on_security_alert: Callable | None = None
+        self._on_connect_rejected: Callable | None = None
 
     def set_encryption_manager(self, enc_mgr) -> None:
         """Set the encryption manager for app-layer encryption."""
@@ -484,6 +485,25 @@ class TransportManager:
         certificate that triggered the alert (empty if unknown).
         """
         self._on_security_alert = callback
+
+    def set_on_connect_rejected(self, callback: Callable):
+        """Set a callback fired when a peer refuses our connection attempt.
+
+        The accepting side sends its rejection marker right after its
+        identity frame when it refuses us (typically its user removed or
+        forgot this device).  Called with ``(peer_name, peer_id)`` from the
+        connect thread; never raises.
+        """
+        self._on_connect_rejected = callback
+
+    def _notify_connect_rejected(self, peer_name: str, peer_id: str) -> None:
+        cb = self._on_connect_rejected
+        if cb is None:
+            return
+        try:
+            cb(peer_name, peer_id)
+        except Exception:
+            logger.debug("on_connect_rejected callback failed", exc_info=True)
 
     @staticmethod
     def _secure_scratch_dir() -> Path:
@@ -817,6 +837,10 @@ class TransportManager:
                     with self._lock:
                         self._peer_addresses.pop(peer_id, None)
                         self._reconnect_attempts.pop(peer_id, None)
+                    # Surface the refusal to the app layer (e.g. a web toast) —
+                    # otherwise a "Connect" click on a peer that removed us
+                    # looks like a silent no-op.
+                    self._notify_connect_rejected(peer_name, peer_id)
                     ssl_sock.close()
                     return
 

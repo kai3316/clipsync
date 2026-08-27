@@ -52,6 +52,11 @@ def _read(*parts) -> str:
         return f.read()
 
 
+def _read_root(*parts) -> str:
+    with open(os.path.join(_ROOT, *parts), encoding="utf-8") as f:
+        return f.read()
+
+
 def _locales():
     with open(os.path.join(_STATIC, "locales", "en.json"), encoding="utf-8") as f:
         en = json.load(f)
@@ -275,13 +280,52 @@ def test_locale_key_sets_identical():
     assert set(en) == set(zh)
 
 
-# ── 13. node --check ─────────────────────────────────────────────────────
+# ── 13. Connect rejection is surfaced honestly (no fake "success") ─────────
+
+
+def test_connect_toast_is_connecting_not_success():
+    card = _read("components", "device-card.js")
+    # {ok:true} from connect only means the handshake was *initiated*, so the
+    # immediate toast must be "connecting…", never the generic "… successful"
+    # that made a rejected connect look like a silent no-op.
+    assert "runAction(ClipsyncAPI.connectDevice(peerId), null, self.t('device.connect_started'))" in card
+    # The generic success toast stays for the actions that DO complete
+    # synchronously (unpair/forget/disconnect).
+    assert "self.t('device.action_success'" in card
+
+
+def test_ws_handles_connect_rejected_broadcast():
+    ws = _read("js", "ws.js")
+    assert "case 'connect_rejected':" in ws
+    assert "store.t('device.connect_rejected', { name: data.name || '' })" in ws
+    assert "'error'" in ws.split("case 'connect_rejected':")[1].split("break;")[0]
+
+
+def test_backend_wires_and_broadcasts_connect_rejected():
+    # The transport callback is wired, and its handler broadcasts a web event.
+    main = _read_root("src", "main.py")
+    assert "set_on_connect_rejected(self._on_connect_rejected)" in main
+    assert '"connect_rejected"' in main
+    conn = _read_root("internal", "transport", "connection.py")
+    assert "set_on_connect_rejected" in conn
+    assert "self._notify_connect_rejected(peer_name, peer_id)" in conn
+
+
+def test_connect_rejected_locale_keys_present():
+    en, zh = _locales()
+    for key in ("device.connect_started", "device.connect_rejected"):
+        assert key in en and key in zh
+    assert en["device.connect_rejected"]
+    assert zh["device.connect_rejected"]
+
+
+# ── 14. node --check ─────────────────────────────────────────────────────
 
 
 def test_node_check_touched_files():
     if not _has_node():
         pytest.skip("node not available")
-    for rel in ("js/store.js", "components/device-panel.js", "components/device-card.js"):
+    for rel in ("js/store.js", "js/ws.js", "components/device-panel.js", "components/device-card.js"):
         subprocess.run(
             ["node", "--check", os.path.join(_STATIC, rel)],
             check=True,
