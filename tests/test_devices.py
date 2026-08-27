@@ -22,6 +22,8 @@ Devices page into a real device-management surface:
 import json
 import os
 import sys
+import threading
+import time
 
 import pytest
 
@@ -858,3 +860,173 @@ def test_no_nul_bytes_in_device_panel():
     with open(os.path.join(_STATIC_r19, "components", "device-panel.js"), "rb") as f:
         data = f.read()
     assert b"\x00" not in data
+
+
+# ════════════════════════════════════════════════════════════════════════
+# 6 — backend: EVERY removed device is archived (Bug B: 点移除后无法找回)
+# ════════════════════════════════════════════════════════════════════════
+
+
+class _StubPairingMgr:
+    """Minimal pairing manager: records removals, restores forget them."""
+
+    def __init__(self):
+        self.removed = []
+
+    def remove_peer(self, peer_id):
+        self.removed.append(peer_id)
+
+    def restore_peer(self, peer_id, name, paired=False):
+        if peer_id in self.removed:
+            self.removed.remove(peer_id)
+
+    def get_known_peers(self):
+        return []
+
+
+class _StubTransportMgr:
+    def __init__(self):
+        self.disconnected = []
+
+    def disconnect_peer(self, peer_id):
+        self.disconnected.append(peer_id)
+
+    def connect_to_peer(self, *a, **k):
+        pass
+
+
+def _remove_app(monkeypatch):
+    """Application via __new__ for the remove/restore/purge backend."""
+    from internal.config.config import Config
+    from src.main import Application
+
+    app = Application.__new__(Application)
+    cfg = Config()
+    cfg.peers = {}
+    cfg.removed_peers = {}
+    app.cfg = cfg
+    app.pairing_mgr = _StubPairingMgr()
+    app.transport_mgr = _StubTransportMgr()
+    app.chat_mgr = None
+    app._discovered_lock = threading.Lock()
+    app._discovered_peers = {}
+    app._push_web = lambda *a, **k: None
+    monkeypatch.setattr(app, "_save_cfg_encrypted", lambda: None)
+    return app
+
+
+def test_on_remove_archives_paired_peer_for_restore(monkeypatch):
+    """A paired peer being removed lands in removed_peers (not just cfg.peers
+    being dropped) so the Removed section can offer a Restore action."""
+    from internal.config.config import PeerInfo
+
+    app = _remove_app(monkeypatch)
+    app.cfg.peers["peer-1"] = PeerInfo(
+        device_id="peer-1", device_name="Old Mac", public_key_pem="pem",
+        paired=True, notes="the old one", last_ip="192.168.1.20", last_port=19990,
+    )
+
+    app._on_remove("peer-1")
+
+    assert "peer-1" not in app.cfg.peers
+    assert app.pairing_mgr.removed == ["peer-1"]
+    assert app.transport_mgr.disconnected == ["peer-1"]
+    archived = app.cfg.removed_peers.get("peer-1")
+    assert archived is not None, "removed peer must be archived"
+    assert archived.device_name == "Old Mac"
+    assert archived.paired is True
+    assert archived.notes == "the old one"
+    assert archived.last_ip == "192.168.1.20"
+    assert archived.removed_at > 0
+
+    # The archive is the universal recovery path: restore brings it back.
+    assert app._on_restore_remove("peer-1") is True
+    assert "peer-1" in app.cfg.peers
+    assert "peer-1" not in app.cfg.removed_peers
+    assert app.cfg.peers["peer-1"].device_name == "Old Mac"
+    assert app.pairing_mgr.removed == []
+
+
+def test_on_remove_archives_discovered_only_peer(monkeypatch):
+    """A bare discovered advertisement (never paired, no cfg.peers row) must
+    still be archived — the '点移除后无法找回' bug was that it vanished with no
+    trace.  Discovery rows are keyed by the HASHED mDNS id, so the archive
+    lookup has to try that form too."""
+    from internal.transport.discovery import Discovery
+
+    app = _remove_app(monkeypatch)
+    hashed = Discovery._hash_device_id("peer-9")
+    app._discovered_peers[hashed] = {
+        "name": "Living-room PC", "address": "192.168.1.5", "port": 19990,
+    }
+
+    app._on_remove("peer-9")
+
+    archived = app.cfg.removed_peers.get("peer-9")
+    assert archived is not None
+    assert archived.device_name == "Living-room PC"
+    assert archived.paired is False
+    assert archived.last_ip == "192.168.1.5"
+    assert archived.removed_at > 0
+    assert "peer-9" not in app.cfg.peers
+    # …and the hashed discovery row is gone so it does not reappear live.
+    assert hashed not in app._discovered_peers
+
+    assert app._on_restore_remove("peer-9") is True
+    assert app.cfg.peers["peer-9"].device_name == "Living-room PC"
+
+
+def test_on_remove_archives_temp_chat_peer(monkeypatch):
+    """A peer that only exists as a nearby-chat session (no discovery row, no
+    cfg.peers entry) is archived under its session name."""
+    from types import SimpleNamespace
+
+    app = _remove_app(monkeypatch)
+    app.chat_mgr = SimpleNamespace(
+        get_sessions=lambda: [{"peer_id": "peer-7", "peer_name": "ChatBuddy"}],
+    )
+
+    app._on_remove("peer-7")
+
+    archived = app.cfg.removed_peers.get("peer-7")
+    assert archived is not None
+    assert archived.device_name == "ChatBuddy"
+    assert archived.paired is False
+    assert archived.removed_at > 0
+
+
+def test_save_cfg_and_peers_prunes_restored_archive_rows(monkeypatch):
+    """Once a peer is known again (re-paired / restored), its removed_peers
+    row must be dropped — otherwise it lingers in 已移除设备 next to its live
+    card.  Discovered-only forgets archive under the hashed mDNS id, so the
+    prune must match that form too."""
+    from internal.transport.discovery import Discovery
+
+    app = _remove_app(monkeypatch)
+    # A stale archive row for a now-known peer…
+    from internal.config.config import PeerInfo
+    app.cfg.removed_peers["peer-1"] = PeerInfo(
+        device_id="peer-1", device_name="Old Mac", removed_at=time.time())
+    app.cfg.removed_peers["peer-2"] = PeerInfo(
+        device_id="peer-2", device_name="Other", removed_at=time.time())
+    # …keyed by the real id in one case and the hashed mDNS id in the other.
+    hashed = Discovery._hash_device_id("peer-3")
+    app.cfg.removed_peers[hashed] = PeerInfo(
+        device_id=hashed, device_name="Hashed", removed_at=time.time())
+
+    app.pairing_mgr = _StubPairingMgr()
+    known = []
+    for pid, name in (("peer-1", "Old Mac"), ("peer-3", "New Name")):
+        from types import SimpleNamespace
+        known.append(SimpleNamespace(
+            device_id=pid, device_name=name, certificate_pem="",
+            paired=True))
+    app.pairing_mgr.get_known_peers = lambda: known
+
+    app._save_cfg_and_peers()
+
+    assert "peer-1" not in app.cfg.removed_peers
+    assert hashed not in app.cfg.removed_peers
+    assert "peer-2" in app.cfg.removed_peers   # still gone → row stays
+    assert "peer-3" in app.cfg.peers
+    assert app.cfg.peers["peer-1"].device_name == "Old Mac"

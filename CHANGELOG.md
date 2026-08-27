@@ -2,6 +2,14 @@
 
 All notable changes to ClipSync are documented in this file.
 
+## [1.0.95] — 2026-08-27
+
+- **删除弃用的嵌入式移动端旧页面**：`internal/web/server.py` 里内嵌的 `_FALLBACK_HTML`（「剪贴同步 Web」手机页）已被长期弃用，现在彻底删除。Web 界面只服务 dashboard SPA（`static/index.html`）；dashboard 缺失时返回 `{"error": "page not found"}` 500，不再兜底渲染旧页。活的手机伴侣页（`mobile.html`，深色极光主题三 tab）不受影响。
+- **修复「移除设备后无法找回」（Bug B）**：设备页「移除」此前只在 `cfg.peers` 里删行，从未归档——被移除的设备在「已移除」区永远空着、连「恢复」都无从谈起（点移除后无法找回）。现在 `_on_remove` 对**每一台**被移除设备都先写入「已移除设备」归档（已配对设备完整归档证书/备注/地址；仅被发现的广播或临时聊天对端也按发现条目名、地址或会话名归档），「已移除」区成为通用的恢复入口；`_save_cfg_and_peers` 同时清理重新配对/恢复后的陈旧归档行（含按哈希 mDNS id 归档的形态），不再「活的卡片旁边还挂着一条已移除」。对应测试：`tests/test_devices.py` 新增 4 个后端用例（已配对归档+恢复、仅发现设备归档、临时聊天对端归档、归档行清理）。
+- **修复新历史记录详情来源显示「unknown」（Bug C）**：本机剪贴板监视器从不给剪贴打本地 `source_device`（默认为空串），详情接口 `get_history_item` 直接 `device_names.get("", "")` 返回空 → 前端兜底显示「unknown」。现在 `get_history` 与 `get_history_item` 共用 `_source_label`：空来源回退到本地设备名，新建的历史记录详情显示「来自本机」，接收的对端记录仍显示对方设备名。对应测试：`tests/test_clipboard.py` 新增本机/对端两条来源标注用例。
+- **修复「测试连接」点击没反应（Bug D）**：连接探测最长要 ~4 秒（后端 ping 超时），点击后按钮只显示「…」、没有立即反馈，看起来像死了。现在 `store.testPeerConnection` 点击瞬间先弹「正在测试连接…」toast，探测结果（各通道延迟，或失败原因）到了再叠加显示——成功仍按通道报延迟。对应测试：`tests/test_devices_ui.py` 断言 store 里有即时 toast 且 `device.test_connecting` 中英全量。
+- **更新下载完成：三平台统一改为「显示压缩包、用户手动安装」（Bug E）**：此前 Windows 把 exe 解出来提示运行、macOS 打开暂存目录、Linux 自动替换重启——现在三平台行为完全一致：验证通过的压缩包（zip / tar.gz）移到 `~/Downloads/clipsync-update/`，Web 设置页「打开所在文件夹」与桌面弹窗都指向它，提示文案明确要求**退出应用、用压缩包内容替换旧版本**（不再是「运行它」）。删除 `internal/system/applier.py` 与 updater 里的 `extract_update_exe`；`_updating` 重入保护跨整个归档过程（并发到达只产出一次 ready）。对应测试：`tests/test_update.py` 重写为归档流程（缓存+落位+ready 状态+桌面提示+不自退出、重入折叠、归档失败翻 failed 且可重试），44 例全绿。
+
 ## [1.0.94] — 2026-08-27
 
 - **修复 Mac 设备图标显示成「窗户」、平台名裸显「darwin」**：`osIcon` 的「Windows → 🪟」判断排在「macOS → 🍎」之前，而 `"darwin"` 本身包含子串 `"win"`（d-a-r-w-i-n），于是每台 Mac 的设备卡都先命中 `win` 分支、渲染成窗户 emoji，苹果分支根本轮不到。现将 Mac/Darwin 判断提前（附注释说明这个子串陷阱）。同时新增 `osLabel`：`platform.system()` 返回的是内核/平台名（macOS 上是 `"Darwin"`、Windows 是 `"Windows"`、Linux 是 `"Linux"`），界面直接展示太生硬——设备卡、概览页「平台」、诊断页的 OS 统一显示为 **macOS / Windows / Linux** 等用户认识的品牌名（后端新增 `friendly_platform_name` 单一事实源，`internal/platform/__init__.py`；设备卡前端 `osLabel` 兜底）。此前的设备卡 OS 文字显示的是原始字符串「darwin」。

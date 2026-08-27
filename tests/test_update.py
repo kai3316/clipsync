@@ -10,9 +10,12 @@ Groups covered:
      to one install; failure paths clear the flag again.
   5. auto_update_check switch OFF → the periodic loop makes zero requests
      (network layer guarded), ON → fires when due, throttle respected.
-  6. `.old` fallback copies: the Linux helper copies before replace.
-  7. Config plumbing: auto_update_check persists and the web settings API
+  6. Config plumbing: auto_update_check persists and the web settings API
      accepts booleans only.
+  7. Manual-install archive flow: the verified asset is cached for peers and
+     stashed under ``~/Downloads/clipsync-update/`` with a ready state + prompt
+     telling the user to replace the old install — never auto-applied, and a
+     stash failure surfaces ``failed`` and clears the flag.
 """
 
 import hashlib
@@ -26,7 +29,6 @@ import pytest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from internal.system import applier as applier_mod
 from internal.system import updater as updater_mod
 
 # ══════════════════════════════════════════════════════════════════════
@@ -227,9 +229,8 @@ def app_env(monkeypatch, tmp_path):
     notify = _NotifyStub()
     state = {
         "errors": [],
-        "staged": [],
-        "applied": [],
         "cached": [],
+        "shown": [],
         "exited": 0,
         "downloads": [],
     }
@@ -237,21 +238,13 @@ def app_env(monkeypatch, tmp_path):
     monkeypatch.setattr(
         main, "show_error",
         lambda root, title, msg: state["errors"].append(msg))
-
-    def _stage(p):
-        state["staged"].append(p)
-        return tmp_path / "staged.bin"
-
-    def _apply(staged):
-        state["applied"].append(staged)
-        return True
-
-    def _cache(p):
-        state["cached"].append(p)
-
-    monkeypatch.setattr(applier_mod, "stage_update", _stage)
-    monkeypatch.setattr(applier_mod, "apply_and_restart", _apply)
-    monkeypatch.setattr(updater_mod, "cache_asset", _cache)
+    monkeypatch.setattr(
+        main, "show_info",
+        lambda root, title, msg: state["shown"].append(msg))
+    monkeypatch.setattr(
+        updater_mod, "cache_asset", lambda p: state["cached"].append(p))
+    # Keep the archive stash out of the real Downloads during tests.
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path))
 
     app = main.Application.__new__(main.Application)
     app.root = _FakeRoot()
@@ -267,79 +260,78 @@ def app_env(monkeypatch, tmp_path):
     return app, main, state
 
 
-def _run_scheduled_exit(app, state):
-    """Simulate Tk firing the delayed self-exit after a successful apply."""
-    exits = [(d, fn) for d, fn in app.root.scheduled if fn == app._exit_process]
-    assert len(exits) == 1 and exits[0][0] == 300
-    exits[0][1]()
-    assert state["exited"] == 1
-
-
 def test_finish_install_github_happy_path(app_env, monkeypatch, tmp_path):
+    """A verified GitHub asset is cached for peers, stashed as the ready
+    archive under ~/Downloads/clipsync-update/, and prompted for manual
+    install — nothing is auto-applied and the app never self-exits."""
     app, main, state = app_env
-    # win32 dev host: auto-apply only exists on Linux/macOS.
-    monkeypatch.setattr(sys, "platform", "linux")
     path, payload = _write_blob(tmp_path)
     monkeypatch.setattr(updater_mod, "fetch_latest_asset_info",
                         lambda timeout=None: _info_for(payload, "2.0.0"))
+    app._pending_update_version = "2.0.0"
 
     app._finish_update_install(path, None, "github")
 
-    assert state["cached"] == [path]
-    assert len(state["staged"]) == 1
-    assert len(state["applied"]) == 1
-    assert app._skip_save_on_shutdown is True
-    assert Path(path).exists()          # consumed, not deleted
-    _run_scheduled_exit(app, state)     # the delayed self-exit is armed
+    assert state["cached"] == [path]                 # still served to peers (M2)
+    assert app._updating is False                    # next cycle can install
+    assert not Path(path).exists()                   # moved, not copied
+    assert app._update_state["phase"] == "ready"
+    assert app._update_state["version"] == "2.0.0"
+    assert app._update_state["path"].endswith(
+        os.path.join("clipsync-update", "clipsync-windows.zip"))
+    assert Path(app._update_state["path"]).exists()
+    assert state["shown"], "the manual-install prompt must be shown"
+    assert "2.0.0" in state["shown"][0]
+    assert state["exited"] == 0                      # never self-exits
+    assert state["errors"] == []
 
 
 def test_finish_install_second_arrival_skipped(app_env, monkeypatch, tmp_path):
-    """GitHub download finishing and a P2P blob arriving around the same time
-    must produce exactly ONE install."""
+    """A GitHub download finishing while a P2P blob is mid-verify must
+    collapse to exactly ONE stashed archive and one prompt."""
     app, main, state = app_env
-    # win32 dev host: auto-apply only exists on Linux/macOS.
-    monkeypatch.setattr(sys, "platform", "linux")
     path, payload = _write_blob(tmp_path)
     monkeypatch.setattr(updater_mod, "fetch_latest_asset_info",
                         lambda timeout=None: _info_for(payload, "2.0.0"))
 
-    app._finish_update_install(path, None, "github")   # wins
-    app._finish_update_install(path, None, "p2p")      # latecomer
+    seen = []
+    real_cache = updater_mod.cache_asset
 
-    assert len(state["staged"]) == 1
-    assert len(state["applied"]) == 1
-    _run_scheduled_exit(app, state)
-
-
-def test_finish_install_flag_cleared_on_stage_failure(app_env, monkeypatch, tmp_path):
-    app, main, state = app_env
-    # win32 dev host: auto-apply only exists on Linux/macOS.
-    monkeypatch.setattr(sys, "platform", "linux")
-    path, payload = _write_blob(tmp_path)
-    monkeypatch.setattr(updater_mod, "fetch_latest_asset_info",
-                        lambda timeout=None: _info_for(payload, "2.0.0"))
-    monkeypatch.setattr(applier_mod, "stage_update", lambda p: None)
+    def _cache_and_reenter(p):
+        seen.append(p)
+        # A concurrent arrival lands while this install is still in flight —
+        # it must be skipped by the re-entry guard, not installed again.
+        app._finish_update_install(path, None, "p2p")
+        real_cache(p)
+    monkeypatch.setattr(updater_mod, "cache_asset", _cache_and_reenter)
 
     app._finish_update_install(path, None, "github")
 
-    assert state["errors"], "stage failure must surface an error"
+    assert seen == [path]                       # first arrival cached once
+    assert state["cached"] == [path]
+    assert len(state["shown"]) == 1             # exactly one ready prompt
+    assert app._update_state["phase"] == "ready"
+
+
+def test_finish_install_archive_stash_failure_surfaces(
+        app_env, monkeypatch, tmp_path):
+    """If the archive cannot be stashed the state flips to `failed` and the
+    error surfaces — no silent 'ready' with a missing file, and the flag is
+    cleared so a retry stays possible."""
+    import shutil
+    app, main, state = app_env
+    path, payload = _write_blob(tmp_path)
+    monkeypatch.setattr(updater_mod, "fetch_latest_asset_info",
+                        lambda timeout=None: _info_for(payload, "2.0.0"))
+    monkeypatch.setattr(
+        shutil, "move",
+        lambda src, dst: (_ for _ in ()).throw(OSError("disk full")))
+
+    app._finish_update_install(path, None, "github")
+
+    assert app._update_state["phase"] == "failed"
+    assert state["errors"], "stash failure must surface an error"
     assert app._updating is False      # retry remains possible
-    assert state["exited"] == 0
-
-
-def test_finish_install_flag_cleared_on_apply_failure(app_env, monkeypatch, tmp_path):
-    app, main, state = app_env
-    # win32 dev host: auto-apply only exists on Linux/macOS.
-    monkeypatch.setattr(sys, "platform", "linux")
-    path, payload = _write_blob(tmp_path)
-    monkeypatch.setattr(updater_mod, "fetch_latest_asset_info",
-                        lambda timeout=None: _info_for(payload, "2.0.0"))
-    monkeypatch.setattr(applier_mod, "apply_and_restart", lambda s: False)
-
-    app._finish_update_install(path, None, "github")
-
-    assert state["errors"]
-    assert app._updating is False
     assert state["exited"] == 0
 
 
@@ -352,8 +344,8 @@ def test_finish_install_p2p_bad_hash_discarded(app_env, monkeypatch, tmp_path):
     app._finish_update_install(path, None, "p2p")
 
     assert not Path(path).exists(), "rejected blob must be deleted"
-    assert state["staged"] == [] and state["applied"] == []
     assert state["cached"] == []       # unverified bytes are never served
+    assert state["shown"] == []        # no ready prompt for a bad blob
     assert state["downloads"] == []    # hash known → no GitHub fallback needed
     assert app._updating is False
 
@@ -367,7 +359,7 @@ def test_finish_install_p2p_old_version_discarded(app_env, monkeypatch, tmp_path
     app._finish_update_install(path, None, "p2p")
 
     assert not Path(path).exists()
-    assert state["staged"] == []
+    assert state["cached"] == []
     assert app._updating is False
 
 
@@ -382,7 +374,7 @@ def test_finish_install_p2p_without_release_info_falls_back_to_github(
 
     assert state["downloads"] == [{"from_peers": False}], (
         "fallback must go straight to GitHub without re-broadcasting to peers")
-    assert state["staged"] == []       # unverifiable blob never staged
+    assert state["cached"] == []       # unverifiable blob never served
     assert Path(path).exists()         # ...and not installed either way
 
 
@@ -391,16 +383,16 @@ def test_finish_install_github_without_release_info_proceeds(
     """The GitHub file was verified during download; a failed *second* lookup
     must not block a legitimate install."""
     app, main, state = app_env
-    # win32 dev host: auto-apply only exists on Linux/macOS.
-    monkeypatch.setattr(sys, "platform", "linux")
-    path, _ = _write_blob(tmp_path)
+    path, payload = _write_blob(tmp_path)
     monkeypatch.setattr(updater_mod, "fetch_latest_asset_info",
                         lambda timeout=None: None)
+    app._pending_update_version = "2.0.0"
 
     app._finish_update_install(path, None, "github")
 
-    assert len(state["applied"]) == 1
-    _run_scheduled_exit(app, state)
+    assert state["cached"] == [path]
+    assert app._update_state["phase"] == "ready"
+    assert state["shown"]
     assert state["errors"] == []
 
 
@@ -452,31 +444,7 @@ def test_auto_check_on_respects_throttle():
 
 
 # ══════════════════════════════════════════════════════════════════════
-# 6 — .old rollback copies
-# ══════════════════════════════════════════════════════════════════════
-
-
-def test_linux_backup_copies_current_binary(tmp_path):
-    cur = tmp_path / "clipsync"
-    cur.write_bytes(b"CURRENT-BINARY")
-    old = applier_mod._backup_current_binary(cur)
-    assert old == tmp_path / "clipsync.old"
-    assert old.read_bytes() == b"CURRENT-BINARY"
-    assert cur.read_bytes() == b"CURRENT-BINARY"   # copy, original intact
-
-
-def test_linux_backup_failure_never_raises(tmp_path, monkeypatch):
-    cur = tmp_path / "clipsync"
-    cur.write_bytes(b"x")
-
-    def _boom(src, dst):
-        raise OSError("disk full")
-    monkeypatch.setattr(applier_mod.shutil, "copyfile", _boom)
-    assert applier_mod._backup_current_binary(cur) is None
-
-
-# ══════════════════════════════════════════════════════════════════════
-# 7 — config + web settings plumbing for auto_update_check
+# 6 — config + web settings plumbing for auto_update_check
 # ══════════════════════════════════════════════════════════════════════
 
 
@@ -577,81 +545,8 @@ def test_web_locale_parity_for_new_keys():
 
 
 # ══════════════════════════════════════════════════════════════════════
-# 8 — Windows manual-run flow (no auto-apply) + download progress
+# 7 — manual-install archive flow + download progress
 # ══════════════════════════════════════════════════════════════════════
-
-
-def test_finish_install_windows_ready_no_auto_apply(
-        app_env, monkeypatch, tmp_path):
-    """On Windows the verified asset is never auto-applied: it is prepared as
-    a runnable exe at a known path and the user is prompted to run it."""
-    app, main, state = app_env
-    path, payload = _write_blob(tmp_path)
-    monkeypatch.setattr(updater_mod, "fetch_latest_asset_info",
-                        lambda timeout=None: _info_for(payload, "2.0.0"))
-    app._pending_update_version = "2.0.0"
-    shown = []
-    monkeypatch.setattr(main, "show_info",
-                        lambda root, title, msg: shown.append(msg))
-    monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path))
-
-    def _extract(src, dst):
-        Path(dst).parent.mkdir(parents=True, exist_ok=True)
-        Path(dst).write_bytes(b"NEW-EXE")
-        return True
-    monkeypatch.setattr(updater_mod, "extract_update_exe", _extract)
-
-    app._finish_update_install(path, None, "github")
-
-    assert state["staged"] == [] and state["applied"] == []
-    assert state["cached"] == [path]      # still served to peers (M2)
-    assert app._updating is False
-    assert app._update_state["phase"] == "ready"
-    assert app._update_state["path"].endswith("clipsync.exe")
-    assert app._update_state["version"] == "2.0.0"
-    assert shown, "the manual-run prompt must be shown on the desktop"
-    assert "2.0.0" in shown[0] and "clipsync.exe" in shown[0]
-    assert state["exited"] == 0           # the app must NOT exit on Windows
-
-
-def test_finish_install_windows_prepare_failure_surfaces(
-        app_env, monkeypatch, tmp_path):
-    """If the exe extraction fails the state flips to `failed` and the error
-    surfaces — no silent 'ready' with a missing file."""
-    app, main, state = app_env
-    path, payload = _write_blob(tmp_path)
-    monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path))
-    monkeypatch.setattr(updater_mod, "extract_update_exe", lambda s, d: False)
-
-    app._finish_update_install(path, None, "github")
-
-    assert app._update_state["phase"] == "failed"
-    assert state["errors"], "extract failure must surface an error"
-    assert app._updating is False
-
-
-def test_extract_update_exe(tmp_path):
-    """extract_update_exe unpacks the clipsync.exe member of a release zip."""
-    import zipfile
-    exe_bytes = b"MZ-NEW-CLIPSYNC-EXE"
-    zip_path = tmp_path / "clipsync-windows.zip"
-    with zipfile.ZipFile(zip_path, "w") as z:
-        z.writestr("clipsync.exe", exe_bytes)
-        z.writestr("readme.txt", "ignored")
-
-    out = tmp_path / "out" / "clipsync.exe"
-    out.parent.mkdir(parents=True, exist_ok=True)
-    assert updater_mod.extract_update_exe(str(zip_path), str(out)) is True
-    assert out.read_bytes() == exe_bytes
-
-
-def test_extract_update_exe_missing_member_returns_false(tmp_path):
-    import zipfile
-    zip_path = tmp_path / "no-exe.zip"
-    with zipfile.ZipFile(zip_path, "w") as z:
-        z.writestr("payload.bin", b"x")
-    assert updater_mod.extract_update_exe(
-        str(zip_path), str(tmp_path / "clipsync.exe")) is False
 
 
 def test_download_latest_release_reports_progress(monkeypatch, tmp_path):

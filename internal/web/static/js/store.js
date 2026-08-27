@@ -1572,6 +1572,11 @@
     // (after toasting) so a caller's .finally() runs.
     testPeerConnection: function (peerId) {
       var self = this;
+      // Acknowledge the click immediately — the probe can take up to ~4s (the
+      // backend ping timeout), so without this the button can feel dead even
+      // though it shows "...".  The result toast (per-channel latency, or the
+      // failure reason) lands on top when the probe answers.
+      self.showToast(self.t('device.test_connecting'), 1800);
       return window.ClipsyncAPI.testDeviceConnection(peerId)
         .then(function (res) {
           // A successful probe always carries per-channel rows; an empty

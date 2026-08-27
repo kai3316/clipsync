@@ -4295,10 +4295,11 @@ class Application:
 
         The download runs on a worker thread (it can take tens of seconds) and
         pushes live progress to web clients as ``update_state`` events; the
-        finish runs on the main thread.  On Linux/macOS the staged update is
-        applied automatically (Linux relaunches, macOS opens the folder); on
-        Windows nothing is auto-applied — the verified exe is prepared at a
-        known path and the user is prompted to run it by hand.
+        finish runs on the main thread.  Nothing is auto-applied on any
+        platform — the verified archive is stashed under
+        ``~/Downloads/clipsync-update/`` and the user is prompted to quit the
+        app and replace the old install by hand (manual install, all three
+        platforms).
         *from_peers* asks connected peers for a cached copy first (M2); it is
         disabled on the P2P-fallback re-entry so an unverifiable peer blob
         cannot ping-pong between devices.
@@ -4361,10 +4362,10 @@ class Application:
         Re-entrant arrivals (both paths completing at once) are collapsed to
         the first one via ``self._updating``; later ones log and skip.
 
-        Platform split: Linux/macOS stage + apply (Linux relaunches, macOS
-        opens the staged bundle's folder); Windows never auto-applies — the
-        verified asset is prepared as a runnable exe at a known path and the
-        user is prompted to run it by hand (see ``_prepare_update_ready``).
+        Manual install on every platform: the verified archive (zip / tar.gz)
+        is stashed under ``~/Downloads/clipsync-update/`` and pointed at by the
+        web "打开所在文件夹" button and a native prompt that tells the user to
+        replace the old install (see ``_prepare_update_ready_archive``).
         """
         if getattr(self, "_updating", False):
             logger.info("Update install already in progress — skipping %s "
@@ -4413,7 +4414,6 @@ class Application:
             self._discard_update_blob(path, verdict)
             return
 
-        from internal.system.applier import apply_and_restart, stage_update
         from internal.system.updater import cache_asset
 
         # From here on only one install may run; every failure path clears the
@@ -4423,35 +4423,17 @@ class Application:
         # Keep the verified asset so we can serve it to other LAN devices (M2).
         cache_asset(path)
 
-        if sys.platform == "win32":
-            # PyInstaller onefile bootloaders validate their parent process on
-            # relaunch and an auto-replaced exe fails that check on some
-            # machines — so Windows never auto-applies.  Clear the guard, then
-            # prepare the runnable exe and prompt the user to run it by hand.
-            self._updating = False
-            self._prepare_update_ready(path)
-            return
-
-        staged = stage_update(path)
-        if staged is None:
-            self._updating = False
-            show_error(self.root, T("ui.app_name"), T("tray.update_install_failed"))
-            return
-        if apply_and_restart(staged):
-            self._skip_save_on_shutdown = True
-            # Quit through the normal loop instead of sys.exit(): this runs
-            # on the Tk main thread, and SystemExit raised inside an after()
-            # callback does not reliably end the process.  _exit_process
-            # stops the mainloop, run()'s finally runs shutdown(), then
-            # main() returns and the update helper replaces the binary.
-            try:
-                self.root.after(300, self._exit_process)
-                return
-            except Exception:
-                logger.debug("Could not schedule update exit", exc_info=True)
-            self._exit_process()
-        self._updating = False
-        show_error(self.root, T("ui.app_name"), T("tray.update_install_failed"))
+        # Manual install on every platform — nothing is auto-applied and no
+        # binary is extracted.  The verified archive is stashed where the user
+        # can find it (the web "打开所在文件夹" button and the native prompt both
+        # point at it), and the prompt says to quit the app and replace the
+        # old install with the archive's contents.  ``_updating`` stays set
+        # across the stash so a concurrent arrival (a GitHub download finishing
+        # while a P2P blob lands) collapses to this one install;
+        # ``_prepare_update_ready_archive`` clears it on both the ready and the
+        # failed path.
+        self._prepare_update_ready_archive(path)
+        return
 
     def _set_update_state(self, updates: dict) -> None:
         """Merge *updates* into ``_update_state`` and broadcast it.
@@ -4466,47 +4448,48 @@ class Application:
         self._update_state.update(updates)
         self._push_web("broadcast", "update_state", dict(self._update_state))
 
-    def _prepare_update_ready(self, asset_path: str) -> None:
-        """Prepare a runnable Windows exe and prompt the user to run it.
+    def _prepare_update_ready_archive(self, asset_path: str) -> None:
+        """Stash the verified release archive and prompt for a manual install.
 
-        Extracts ``clipsync.exe`` from the verified release zip into
-        ``~/Downloads/clipsync-update/`` and flips ``_update_state`` to
-        ``ready`` so both the web UI and a native popup can point at the file.
+        The downloaded asset (zip / tar.gz) is moved to
+        ``~/Downloads/clipsync-update/`` and ``_update_state`` flips to
+        ``ready`` so both the web UI (打开所在文件夹) and a native popup point
+        at the archive.  Nothing is auto-applied or extracted — the user quits
+        the app and replaces the old install with the archive's contents.
         Any failure surfaces a ``failed`` state and an error dialog.
         """
+        import shutil as _shutil
         from pathlib import Path
 
-        from internal.system.updater import extract_update_exe
-
         dest_dir = Path.home() / "Downloads" / "clipsync-update"
-        exe_path = dest_dir / "clipsync.exe"
-        ok = False
         try:
             dest_dir.mkdir(parents=True, exist_ok=True)
-            ok = extract_update_exe(asset_path, str(exe_path))
+            dest = dest_dir / os.path.basename(asset_path)
+            _shutil.move(asset_path, str(dest))
         except Exception:
-            logger.exception("Preparing ready update exe failed")
-        if not ok:
+            logger.exception("Stashing ready update archive failed")
+            self._updating = False
             self._set_update_state({"phase": "failed",
                                     "error": T("tray.update_install_failed")})
             show_error(self.root, T("ui.app_name"),
                        T("tray.update_install_failed"))
             return
 
+        self._updating = False
         version = getattr(self, "_pending_update_version", "") or ""
         self._set_update_state({
-            "phase": "ready", "version": version, "path": str(exe_path),
+            "phase": "ready", "version": version, "path": str(dest),
             "fraction": 1,
         })
         self.root.after(
-            0, lambda: self._notify_update_ready(version, str(exe_path)))
+            0, lambda: self._notify_update_ready(version, str(dest)))
 
     def _notify_update_ready(self, version: str, path: str) -> None:
         """Tell the user the new version is downloaded and ready to run.
 
         Web UI gets a toast (the settings page also shows a persistent ready
-        card); the desktop gets a native popup with the exe path so the
-        manual-run step is unmistakable.
+        card); the desktop gets a native popup with the archive path so the
+        manual-replace step is unmistakable.
         """
         self._web_toast(T("settings_window.update_ready", version=version))
         show_info(
@@ -6037,7 +6020,9 @@ class Application:
         # Hold the shared config lock so web-server threads can't concurrently
         # iterate/mutate cfg.peers while we snapshot it (avoids RuntimeError).
         with config_lock:
+            known_ids: set[str] = set()
             for peer in self.pairing_mgr.get_known_peers():
+                known_ids.add(peer.device_id)
                 existing = self.cfg.peers.get(peer.device_id)
                 self.cfg.peers[peer.device_id] = PeerInfo(
                     device_id=peer.device_id,
@@ -6046,6 +6031,23 @@ class Application:
                     paired=peer.paired,
                     notes=existing.notes if existing else "",
                 )
+            # Drop stale archive rows for peers that are known again (re-paired
+            # or restored after a forget).  A discovered-only forget archives
+            # under the HASHED mDNS id, so match that form too — otherwise a
+            # re-paired device lingers in 已移除设备 alongside its live card.
+            if self.cfg.removed_peers:
+                hashed_known = set()
+                for rid in known_ids:
+                    try:
+                        hashed_known.add(Discovery._hash_device_id(rid))
+                    except Exception:
+                        pass
+                stale = [
+                    rid for rid in self.cfg.removed_peers
+                    if rid in known_ids or rid in hashed_known
+                ]
+                for rid in stale:
+                    self.cfg.removed_peers.pop(rid, None)
             self._persist_peer_addresses()
             self._save_cfg_encrypted()
 
@@ -6994,7 +6996,7 @@ class Application:
         return {"state": dict(self._update_state)}
 
     def _handle_update_open_folder(self) -> dict:
-        """POST /api/update/open-folder: reveal the ready exe's folder.
+        """POST /api/update/open-folder: reveal the ready archive's folder.
 
         Only meaningful while the update is in the ``ready`` phase; the path
         comes from the server-side state, never from the client.
@@ -7313,22 +7315,65 @@ class Application:
                       peer_id[:12])
         return False
 
+    def _peer_removal_info(self, peer_id: str) -> tuple:
+        """Best-effort name/address for a peer not in cfg.peers at forget time.
+
+        A discovered advertisement or a temp-chat session has no cfg.peers
+        entry, so build the archive row from whatever is known: the discovered
+        entry (name + last address) first, then an active chat session's peer
+        name.  Returns (name, address, port) — name may be empty.
+        """
+        with self._discovered_lock:
+            d = self._discovered_peers.get(peer_id)
+            if d is None:
+                try:
+                    d = self._discovered_peers.get(
+                        Discovery._hash_device_id(peer_id))
+                except Exception:
+                    d = None
+        if d:
+            return d.get("name") or "", d.get("address"), d.get("port")
+        name = ""
+        try:
+            if getattr(self, "chat_mgr", None) is not None:
+                for s in self.chat_mgr.get_sessions():
+                    if s.get("peer_id") == peer_id:
+                        name = s.get("peer_name") or name
+        except Exception:
+            pass
+        return name, None, None
+
     def _on_remove(self, peer_id: str) -> None:
         # Archive the peer before removal so the device page can offer a
-        # Restore action.  Only peers that were in cfg.peers (known/paired)
-        # are archived; a bare discovered peer forget leaves no trace.
+        # Restore action — for EVERY removed device.  A peer that is not in
+        # cfg.peers (a bare discovered advertisement or a temp-chat peer) used
+        # to be forgotten with no trace: the Removed section stayed empty and
+        # the device could not be found again ("点移除后无法找回").  Archive it
+        # under whatever we know so the archive is the universal recovery path.
         peer_cfg = self.cfg.peers.get(peer_id)
-        if peer_cfg is not None and peer_id not in self.cfg.removed_peers:
-            self.cfg.removed_peers[peer_id] = PeerInfo(
-                device_id=peer_cfg.device_id,
-                device_name=peer_cfg.device_name,
-                public_key_pem=peer_cfg.public_key_pem,
-                paired=peer_cfg.paired,
-                notes=peer_cfg.notes,
-                last_ip=peer_cfg.last_ip,
-                last_port=peer_cfg.last_port,
-                removed_at=time.time(),
-            )
+        if peer_id not in self.cfg.removed_peers:
+            if peer_cfg is not None:
+                archived = PeerInfo(
+                    device_id=peer_cfg.device_id,
+                    device_name=peer_cfg.device_name,
+                    public_key_pem=peer_cfg.public_key_pem,
+                    paired=peer_cfg.paired,
+                    notes=peer_cfg.notes,
+                    last_ip=peer_cfg.last_ip,
+                    last_port=peer_cfg.last_port,
+                    removed_at=time.time(),
+                )
+            else:
+                name, address, port = self._peer_removal_info(peer_id)
+                archived = PeerInfo(
+                    device_id=peer_id,
+                    device_name=name or peer_id,
+                    paired=False,
+                    last_ip=address,
+                    last_port=port,
+                    removed_at=time.time(),
+                )
+            self.cfg.removed_peers[peer_id] = archived
         self.pairing_mgr.remove_peer(peer_id)
         self.transport_mgr.disconnect_peer(peer_id)
         with self._discovered_lock:

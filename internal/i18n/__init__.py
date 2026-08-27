@@ -444,7 +444,8 @@ _EN: dict[str, str] = {
     "tray.update_install_prompt": "Download the new version now?",
     "tray.update_install_failed": "Failed to install the update",
     "tray.update_ready_prompt": (
-        "ClipSync {version} is ready. Quit the app and run:\n{path}"),
+        "ClipSync {version} is ready. Quit ClipSync, then replace the old "
+        "version with the contents of:\n{path}"),
     "tray.up_to_date": "ClipSync is up to date",
     "tray.update_failed": "Update check failed",
     "settings_window.auto_update_check": "Check for updates automatically",
@@ -454,7 +455,7 @@ _EN: dict[str, str] = {
     "settings_window.update_downloading_progress": "Downloading… {pct}%",
     "settings_window.update_ready": "New version {version} is ready",
     "settings_window.update_ready_hint": (
-        "Quit ClipSync, then run the file below to switch to the new version. "
+        "Quit ClipSync, then replace the old version with the file below. "
         "Your clips and devices stay on this computer."),
     "settings_window.update_open_folder": "Open containing folder",
     "tray.about": "About ClipSync",
@@ -1301,7 +1302,7 @@ _ZH: dict[str, str] = {
     "tray.update_install_prompt": "现在下载新版本吗？",
     "tray.update_install_failed": "安装更新失败",
     "tray.update_ready_prompt": (
-        "ClipSync {version} 已就绪。请退出应用后运行：\n{path}"),
+        "ClipSync {version} 已就绪。请退出应用，然后用下方压缩包替换旧版本：\n{path}"),
     "tray.up_to_date": "ClipSync 已是最新版本",
     "tray.update_failed": "检查更新失败",
     "settings_window.auto_update_check": "自动检查更新",
@@ -1310,7 +1311,7 @@ _ZH: dict[str, str] = {
     "settings_window.update_downloading_progress": "正在下载… {pct}%",
     "settings_window.update_ready": "新版本 {version} 已就绪",
     "settings_window.update_ready_hint": (
-        "请退出当前应用，然后运行下方文件以切换到新版本。"
+        "请退出当前应用，然后用下方文件替换旧版本。"
         "剪贴板历史与设备仍保留在本机。"),
     "settings_window.update_open_folder": "打开所在文件夹",
     "tray.about": "关于 ClipSync",

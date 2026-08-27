@@ -899,14 +899,16 @@ def test_python_i18n_web_locales_are_fully_mirrored():
     fix added 2 more — device.connect_started / device.connect_rejected; the
     forget-unification pass removed 2 — device.remove_confirm_title/msg (merged
     into the context menu's devices.forget_title/forget_message), but they were
-    mirrored in the Python dicts too, so the gap never moved) that has
+    mirrored in the Python dicts too, so the gap never moved; the test-connection
+    feedback pass added 1 more — device.test_connecting (the store's immediate
+    "正在测试连接…" toast, web-only)) that has
     its own server-side mitigation, so its SIZE is pinned here: a NEW web-only
     key — the regression class this guards — changes the count and fails the
     suite."""
     from internal import i18n
     en, zh = _load_web_locales()
-    assert len(set(en) - set(i18n._EN)) == 694
-    assert len(set(zh) - set(i18n._ZH)) == 694
+    assert len(set(en) - set(i18n._EN)) == 695
+    assert len(set(zh) - set(i18n._ZH)) == 695
 
 
 def test_web_t_literals_resolve_in_both_locales():

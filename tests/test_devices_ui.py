@@ -244,6 +244,17 @@ def test_probe_single_sourced_in_store():
     assert "window.ClipsyncAPI.testDeviceConnection(peerId)" in tp
     assert "device.test_channel_ok" in tp
     assert "device.test_channel_fail" in tp
+    # The probe can take up to ~4s, so the click must be acknowledged
+    # immediately instead of leaving the button looking dead.
+    assert "device.test_connecting" in tp
+    assert "self.showToast(self.t('device.test_connecting')" in tp
+
+
+def test_probe_connecting_locale_keys_present():
+    en, zh = _locales()
+    for lang in (en, zh):
+        assert lang.get("device.test_connecting")
+        assert lang.get("device.test_success")
 
 
 def test_both_call_sites_delegate_to_store_probe():

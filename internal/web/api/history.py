@@ -11,6 +11,18 @@ import uuid
 logger = logging.getLogger(__name__)
 
 
+def _source_label(sid: str, device_names: dict, cfg) -> str:
+    """Map a history row's ``source_device`` to a display name.
+
+    A locally captured clip carries an empty ``source_device`` (the clipboard
+    monitor never stamps the local id), which used to surface as "unknown" in
+    the web detail view.  Fall back to the local device name so a brand-new
+    clip reads as coming from this device instead.
+    """
+    name = device_names.get(sid, sid)
+    return name or device_names.get(cfg.device_id, "")
+
+
 def get_history(history, cfg, limit_str=None, offset_str=None):
     """Return clipboard history list with device name mapping.
 
@@ -67,7 +79,7 @@ def get_history(history, cfg, limit_str=None, offset_str=None):
             "image_fmt": entry.get("image_fmt", ""),
             "text_preview": entry.get("text_preview", ""),
             "source_device": sid,
-            "source_name": device_names.get(sid, sid),
+            "source_name": _source_label(sid, device_names, cfg),
             "source_app": entry.get("source_app", ""),
             "source_title": entry.get("source_title", ""),
             "entry_id": entry.get("entry_id"),
@@ -106,7 +118,7 @@ def get_history_item(query_params, history, cfg):
         "text_preview": entry.get("text_preview", ""),
         "types": entry.get("types", {}),
         "source_device": sid,
-        "source_name": device_names.get(sid, sid),
+        "source_name": _source_label(sid, device_names, cfg),
         "source_app": entry.get("source_app", ""),
         "source_title": entry.get("source_title", ""),
         "entry_id": entry.get("entry_id"),

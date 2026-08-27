@@ -488,6 +488,53 @@ def test_api_history_exposes_image_fmt(history_db):
     assert detail["item"]["types"]["IMAGE"] == "Qk0tZmFrZS1ibXAtYnl0ZXM="
 
 
+def _peer_cfg(peer_id="peer-9", peer_name="Phone"):
+    from types import SimpleNamespace
+
+    cfg = _StubCfg()
+    cfg.peers = {
+        peer_id: SimpleNamespace(device_id=peer_id, device_name=peer_name),
+    }
+    return cfg
+
+
+def test_api_history_local_clip_source_is_local_device_name(history_db):
+    """A clip captured on this machine carries an empty source_device; the API
+    must surface the local device name (not 'unknown') in both the list and
+    the detail view."""
+    from internal.web.api.history import get_history, get_history_item
+
+    cfg = _peer_cfg()
+    history_db.add(_text("hello", 1001.0))               # local clip: empty sid
+
+    payload, status = get_history(history_db, cfg)
+    assert status == 200
+    item = payload["items"][0]
+    assert item["source_device"] == ""
+    assert item["source_name"] == cfg.device_name          # "Local", not "unknown"
+
+    detail, status = get_history_item(
+        {"entry_id": [str(item["entry_id"])]}, history_db, cfg)
+    assert status == 200
+    assert detail["item"]["source_name"] == cfg.device_name
+
+
+def test_api_history_remote_clip_source_is_peer_name(history_db):
+    """A clip received from a peer maps to the peer's display name."""
+    from internal.web.api.history import get_history
+
+    cfg = _peer_cfg()
+    remote = _text("from phone", 1002.0)
+    remote.source_device = "peer-9"
+    history_db.add(remote)
+
+    payload, status = get_history(history_db, cfg)
+    assert status == 200
+    item = payload["items"][0]
+    assert item["source_device"] == "peer-9"
+    assert item["source_name"] == "Phone"
+
+
 def test_legacy_db_without_image_fmt_column_migrates(tmp_path):
     """A pre-image_fmt database must ALTER-add the column, not fail."""
     path = tmp_path / "old.db"

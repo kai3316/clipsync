@@ -351,37 +351,6 @@ def download_latest_release(
         return None, T("web.update_download_failed", reason=exc), ""
 
 
-def extract_update_exe(asset_path: str, dest_path: str) -> bool:
-    """Extract the ``clipsync.exe`` member of a downloaded release zip.
-
-    Used by the Windows manual-run flow: the verified asset is unpacked to a
-    runnable ``clipsync.exe`` the user launches by hand (PyInstaller onefile
-    auto-relaunch is unreliable, so nothing is replaced automatically).
-
-    Returns False (never raises) when the archive has no such member or the
-    write fails.
-    """
-    import shutil as _shutil
-    import zipfile as _zipfile
-
-    try:
-        with _zipfile.ZipFile(asset_path) as z:
-            member = next(
-                (n for n in z.namelist() if n.lower().endswith("clipsync.exe")),
-                None,
-            )
-            if not member:
-                logger.warning("Release zip %s has no clipsync.exe member",
-                               asset_path)
-                return False
-            with z.open(member) as src, open(dest_path, "wb") as out:
-                _shutil.copyfileobj(src, out)
-        return True
-    except Exception as exc:
-        logger.warning("extract_update_exe failed for %s: %s", asset_path, exc)
-        return False
-
-
 def _cache_dir() -> str:
     """Directory where downloaded update assets are cached for P2P serving."""
     from internal.config.config import _config_dir

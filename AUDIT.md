@@ -45,9 +45,10 @@
 - **位置**：`internal/transport/relay.py:542`
 - **事实**：`_connect_one` 每次换 broker 装新 client 并 `loop_start()`，但**从不 stop 旧 client**；`stop()` 只拆当前 `self._client`。paho 默认 reconnect_on_failure=True → 断网后旧 client 线程永久后台重连。旧 client 的 on_connect 写共享 `_connected_on_broker` → 下一次 CONNACK 等待被旧 client 提前满足、`_serve_until_lost` 在健康 broker 上误判断线 → 反复 failover + 每轮泄漏一条线程/一个 socket。单 broker 默认配置下，broker 抖动一次就积累一条永久重复订阅连接。
 
-### H6 Linux 自动更新装不上 —— os.replace 跨文件系统 EXDEV
-- **位置**：`internal/system/applier.py:182`
+### H6 ~~Linux 自动更新装不上 —— os.replace 跨文件系统 EXDEV~~ ✅ v1.0.95 已消除
+- **位置**：`internal/system/applier.py:182`（该文件已在 v1.0.95 删除）
 - **事实**：托盘路径把下载解到 `/tmp`（systemd 默认 tmpfs），Web 路径解到 `~/Downloads`；`os.replace`（rename(2)）跨挂载点抛 `Errno 18 EXDEV`，仓库无任何 EXDEV/copy 兜底 → apply_and_restart 的宽 except 吞掉，用户**永久卡在旧版本**，无重试。系统 `/.old` 回滚复制（:181）在 replace 永远失败时形同虚设。多数发行版默认 tmpfs /tmp → 托盘路径大面积命中。这正是 roadmap「auto-update 缺口」里最实的那个。
+- **消除方式**：v1.0.95 起三平台更新统一改为「显示压缩包、用户手动安装」——不再有 `os.replace` / `/.old` 回滚 / 自动重启，`applier.py` 整体删除，此缺陷随机制一并消失。
 
 ---
 
