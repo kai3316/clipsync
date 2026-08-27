@@ -180,8 +180,6 @@ Runs quietly in the system tray with:
 | Linux (X11/Wayland) | `clipsync-linux.tar.gz` (x86_64) | Requires `xclip` or `wl-clipboard` |
 | Linux (ARM64) | `clipsync-linux-arm64.tar.gz` | Raspberry Pi 4/5, etc. |
 
-[Latest release](https://github.com/kai3316/clipsync/releases/latest) &nbsp;|&nbsp; [Changelog](CHANGELOG.md)
-
 ---
 
 ## Install from Source

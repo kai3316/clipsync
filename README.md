@@ -183,8 +183,6 @@ ClipSync 通过**局域网直连**同步剪贴板 — 无需账号、无需云�
 | Linux (X11/Wayland) | `clipsync-linux.tar.gz` (x86_64) | 需要 `xclip` 或 `wl-clipboard` |
 | Linux (ARM64) | `clipsync-linux-arm64.tar.gz` | 树莓派 4/5 等 |
 
-[最新版本](https://github.com/kai3316/clipsync/releases/latest) &nbsp;|&nbsp; [更新日志](CHANGELOG.md)
-
 ---
 
 ## 从源码运行
