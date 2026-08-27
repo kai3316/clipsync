@@ -2,6 +2,10 @@
 
 All notable changes to ClipSync are documented in this file.
 
+## [1.0.92] — 2026-08-27
+
+- **修复自动更新检查崩溃**：`internal/system/updater.py` 的 `download_latest_release` 把内建函数 `callable` 误当类型写进参数注解（`progress_cb: callable | None`）。在应用所用的 Python 3.11（注解在函数定义时立即求值）下，懒导入该模块的瞬间即抛 `TypeError: unsupported operand type(s) for |`——自动更新检查每轮都失败并刷 ERROR 日志（启动不报错，因为该模块是定时任务才懒加载；测试环境是 Python 3.14 的惰性注解，也一直没暴露）。改为正确的 `typing.Callable | None`；Python 3.11 / 3.14 双解释器导入与注解访问均验证通过，`tests/test_update.py` 51 例全绿。
+
 ## [1.0.91] — 2026-08-27
 
 - **五个 Web 页面整体走查（概览 / 历史 / 设备 / 文件 / 软件壳）**：以「真实缺陷 + 诚实状态」为尺，修掉一批误导性 UI、后端不一致与假成功提示。各页要点如下。

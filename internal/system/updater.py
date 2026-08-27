@@ -10,6 +10,7 @@ import logging
 import os
 import ssl
 import urllib.request
+from typing import Callable
 
 from internal.version import __version__
 
@@ -244,7 +245,7 @@ def verify_update_blob(
 
 def download_latest_release(
     dest_dir: str,
-    progress_cb: callable | None = None,
+    progress_cb: Callable | None = None,
 ) -> tuple[str | None, str | None, str]:
     """Download the latest release asset for this platform into *dest_dir*.
 
