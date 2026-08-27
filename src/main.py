@@ -35,6 +35,7 @@ from internal.clipboard.platform import create_monitor, create_reader, create_wr
 from internal.clipboard.source_tracker import is_app_allowed
 from internal.config.config import Config, PeerInfo, _config_dir, config_lock, load, save
 from internal.i18n import T, set_locale
+from internal.platform import friendly_platform_name
 from internal.platform.autostart import disable_autostart, enable_autostart, is_autostart_enabled
 from internal.platform.notify import notification_mgr
 from internal.protocol.codec import (
@@ -5741,7 +5742,7 @@ class Application:
             'uptime_seconds': uptime,
             'local_ip': WebServer._get_lan_ip(),
             'port': self.cfg.web_port if self.cfg else 0,
-            'platform': _platform.system(),
+            'platform': friendly_platform_name(_platform.system()),
             'version': __version__,
             'network_type': ntype,
             'network_detail': niface,
@@ -6966,7 +6967,7 @@ class Application:
             "web_companion_running": web_running,
             "web_port": web_port,
             "lan_ip": lan_ip,
-            "os": _platform.system(),
+            "os": friendly_platform_name(_platform.system()),
             "version": __version__,
         }
 

@@ -32,8 +32,6 @@
   "device.remove": "移除",
   "device.unpair_confirm_title": "取消配对",
   "device.unpair_confirm_msg": "取消与 \"{name}\" 的配对？\n\n需要重新配对才能同步。",
-  "device.remove_confirm_title": "移除设备",
-  "device.remove_confirm_msg": "将 \"{name}\" 从已知列表中移除？",
   "device.test_connection": "测试连接",
   "device.test_success": "连接正常 · {detail}",
   "device.test_failed": "连接失败 · {detail}",

@@ -2,6 +2,11 @@
 
 All notable changes to ClipSync are documented in this file.
 
+## [1.0.94] — 2026-08-27
+
+- **修复 Mac 设备图标显示成「窗户」、平台名裸显「darwin」**：`osIcon` 的「Windows → 🪟」判断排在「macOS → 🍎」之前，而 `"darwin"` 本身包含子串 `"win"`（d-a-r-w-i-n），于是每台 Mac 的设备卡都先命中 `win` 分支、渲染成窗户 emoji，苹果分支根本轮不到。现将 Mac/Darwin 判断提前（附注释说明这个子串陷阱）。同时新增 `osLabel`：`platform.system()` 返回的是内核/平台名（macOS 上是 `"Darwin"`、Windows 是 `"Windows"`、Linux 是 `"Linux"`），界面直接展示太生硬——设备卡、概览页「平台」、诊断页的 OS 统一显示为 **macOS / Windows / Linux** 等用户认识的品牌名（后端新增 `friendly_platform_name` 单一事实源，`internal/platform/__init__.py`；设备卡前端 `osLabel` 兜底）。此前的设备卡 OS 文字显示的是原始字符串「darwin」。
+- **设备卡「移除」与右键「忘记设备」行为不一致，统一为「忘记」**：两处入口此前都调用同一个 `POST /api/device/forget`（归档到「已移除设备」区、可从那里恢复），但设备卡的「移除」只在离线状态显示、确认弹窗和成功提示用的又是一套独立文案——连接中的设备在卡上找不到「移除」、右键却能「忘记设备」，两边口径不一致。现在设备卡的「移除」对任意非本机设备都提供（`_on_remove` 内部会先断开实时会话，连接中直接移除是安全的），并改用与右键菜单完全相同的确认弹窗（`devices.forget_title` / `devices.forget_message`）与成功提示（`context.device_forgotten`）。删除随之无用的 `device.remove_confirm_title` / `device.remove_confirm_msg` 两个 locale 键（中英全量，Web 镜像 gap 694→692）。
+
 ## [1.0.93] — 2026-08-27
 
 - **修复设备页「连接」按钮谎报成功**：在「已发现」里点连接，之前无论结果如何都弹「连接成功」——但 `{ok:true}` 只代表连接已**发起**、不代表连上了；若对端直接拒绝（它的用户曾在另一台设备移除本机，它收到连接后发回拒绝标记），连接静默失败、UI 毫无反馈，看起来就是「提示连接成功然后没有任何反应」。现在：① 点连接后的即时提示改为「正在连接…」，真正的成功以设备卡移入「已连接」区为准；② 对端明确拒绝时，传输层通过新增的 `set_on_connect_rejected` 回调（携带 name/peer_id、线程安全、绝不抛出）把 `connect_rejected` 广播给 Web UI，弹出「{name} 拒绝了连接 — 该设备可能已将你移除」。设备页的「已发现」卡片上，一个被对端移除的设备从此不再是「假成功 + 无反应」，而是有明确、诚实的反馈。

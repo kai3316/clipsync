@@ -30,7 +30,18 @@ Static wiring assertions for the device-page fixes:
      be a lie).
  11. Dead step-guide CSS removed from index.html.
  12. en / zh-CN key sets identical.
- 13. A node --check pass over every JS file this round touched.
+ 13. Connect rejection is surfaced honestly — the connect action toasts
+     "connecting…", never a fake "… successful", and the transport callback
+     broadcasts a connect_rejected web event that turns into an error toast.
+ 14. A node --check pass over every JS file this round touched.
+ 15. The Mac OS icon is an apple, not a window: the osIcon `win` check came
+     before `mac`/`darwin`, and "darwin" contains the substring "win" — so
+     every macOS device rendered 🪟. OS labels are friendly brands (macOS,
+     Windows, ...) via osLabel + backend friendly_platform_name, never the
+     raw kernel name "Darwin".
+ 16. The device-card "移除" is a full forget matching the context menu's
+     "忘记设备" (same confirm + toast, available for every non-local state);
+     the old card-only device.remove_confirm_* locale keys are gone.
 """
 
 import json
@@ -319,7 +330,91 @@ def test_connect_rejected_locale_keys_present():
     assert zh["device.connect_rejected"]
 
 
-# ── 14. node --check ─────────────────────────────────────────────────────
+# ── 14. Mac icon + friendly OS labels ────────────────────────────────────
+
+
+def test_os_icon_checks_mac_before_win():
+    card = _read("components", "device-card.js")
+    # "darwin" contains the substring "win" (d-a-r-w-i-n), so the Mac branch
+    # must precede the Windows branch or every macOS device renders 🪟.
+    icon = card.split("osIcon: function () {")[1].split("osLabel: function () {")[0]
+    assert icon.index("os.indexOf('mac')") < icon.index("os.indexOf('win')")
+    assert icon.index("os.indexOf('darwin')") < icon.index("os.indexOf('win')")
+
+
+def test_os_label_maps_darwin_to_macos_and_is_rendered():
+    card = _read("components", "device-card.js")
+    label = card.split("osLabel: function () {")[1].split("},")[0]
+    for brand in ("'macOS'", "'Windows'", "'Linux'", "'Android'", "'iOS'"):
+        assert ("return " + brand) in label
+    # The card renders the friendly label, not the raw platform string.
+    assert "device-card__os\">{{ osLabel }}</span>" in card
+
+
+def test_local_device_os_is_friendly_name():
+    from internal.web.api.devices import get_devices
+
+    cfg = _DevCfg()
+    data, status = get_devices(cfg, lambda: [])
+    assert status == 200
+    local = data["devices"][0]
+    # platform.system() ("Darwin") is mapped to the brand ("macOS") so the
+    # backend value is already display-ready for the card icon + label.
+    assert local["os"] in ("macOS", "Windows", "Linux", "Android", "iOS")
+    assert local["os"] != "Darwin"
+
+
+def test_friendly_platform_name_maps_known_systems():
+    from internal.platform import friendly_platform_name
+
+    assert friendly_platform_name("Darwin") == "macOS"
+    assert friendly_platform_name("darwin") == "macOS"
+    assert friendly_platform_name("Mac OS X") == "macOS"
+    assert friendly_platform_name("Windows") == "Windows"
+    assert friendly_platform_name("Linux") == "Linux"
+    assert friendly_platform_name("Android") == "Android"
+    assert friendly_platform_name("iOS") == "iOS"
+    # Unknown systems fall through to the raw kernel name.
+    assert friendly_platform_name("FreeBSD") == "freebsd"
+
+
+# ── 15. Card 移除 == context-menu 忘记设备 ───────────────────────────────
+
+
+def test_card_forget_available_for_every_nonlocal_device():
+    card = _read("components", "device-card.js")
+    acts = card.split("actions: function () {")[1].split("template:")[0]
+    # Forget is offered unconditionally for non-local devices (the method
+    # returns early for the local one). The old gate hid it on connected /
+    # temporary devices while the context menu's 忘记设备 stayed available
+    # for them — now both paths agree.
+    assert "acts.push({ key: 'forget', label: this.t('device.remove')" in acts
+    assert "!this.isConnected && !this.isTemporary" not in acts
+
+
+def test_card_forget_matches_context_menu_confirm_and_toast():
+    card = _read("components", "device-card.js")
+    forget = card.split("if (key === 'forget') {")[1].split("if (key === 'test') {")[0]
+    assert "self.t('devices.forget_title')" in forget
+    assert "self.t('devices.forget_message', {name: deviceName})" in forget
+    assert "self.t('context.device_forgotten')" in forget
+    # The old card-only confirm keys are gone from the action path.
+    assert "device.remove_confirm_title" not in forget
+    assert "device.remove_confirm_msg" not in forget
+
+
+def test_old_remove_confirm_locale_keys_removed():
+    en, zh = _locales()
+    for key in ("device.remove_confirm_title", "device.remove_confirm_msg"):
+        assert key not in en
+        assert key not in zh
+    # The unified forget keys (shared with the context menu) are live.
+    for key in ("devices.forget_title", "devices.forget_message",
+                "context.device_forgotten"):
+        assert key in en and key in zh
+
+
+# ── 16. node --check ─────────────────────────────────────────────────────
 
 
 def test_node_check_touched_files():

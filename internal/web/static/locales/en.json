@@ -32,8 +32,6 @@
   "device.remove": "Remove",
   "device.unpair_confirm_title": "Unpair Device",
   "device.unpair_confirm_msg": "Unpair device \"{name}\"?\n\nYou will need to re-pair to sync again.",
-  "device.remove_confirm_title": "Remove Device",
-  "device.remove_confirm_msg": "Remove device \"{name}\" from known list?",
   "device.test_connection": "Test connection",
   "device.test_success": "Connection OK · {detail}",
   "device.test_failed": "Connection failed · {detail}",

@@ -95,12 +95,28 @@
 
       osIcon: function () {
         var os = (this.device.os || '').toLowerCase();
-        if (os.indexOf('win') !== -1) return '🪟';
+        // 'darwin' contains the substring 'win' (d-a-r-w-i-n), so the Mac
+        // check MUST come before the Windows check — otherwise every macOS
+        // device renders the window emoji.
         if (os.indexOf('mac') !== -1 || os.indexOf('darwin') !== -1) return '🍎';
+        if (os.indexOf('win') !== -1) return '🪟';
         if (os.indexOf('linux') !== -1) return '🐧';
         if (os.indexOf('android') !== -1) return '📱';
         if (os.indexOf('ios') !== -1 || os.indexOf('iphone') !== -1) return '📱';
         return '💻';
+      },
+
+      // Friendly OS label — the backend reports platform.system() ("Darwin",
+      // "Windows", "Linux"), which is a kernel/platform name, not a brand.
+      // Map it to the name users recognise; fall back to the raw value.
+      osLabel: function () {
+        var os = (this.device.os || '').toLowerCase();
+        if (os.indexOf('mac') !== -1 || os.indexOf('darwin') !== -1) return 'macOS';
+        if (os.indexOf('win') !== -1) return 'Windows';
+        if (os.indexOf('linux') !== -1) return 'Linux';
+        if (os.indexOf('android') !== -1) return 'Android';
+        if (os.indexOf('ios') !== -1 || os.indexOf('iphone') !== -1) return 'iOS';
+        return this.device.os || '';
       },
 
       hasActions: function () {
@@ -127,11 +143,11 @@
         } else {
           acts.push({ key: 'connect', label: this.t('device.connect'), cls: 'device-card__action--accent' });
         }
-        // Forget only from an offline state — a live session (sync or chat)
-        // must be disconnected before it can be removed.
-        if (!this.isConnected && !this.isTemporary) {
-          acts.push({ key: 'forget', label: this.t('device.remove'), cls: 'device-card__action--danger' });
-        }
+        // Forget is a full "forget" for every non-local device, matching the
+        // context menu's 忘记设备 exactly (which offers it for all states):
+        // _on_remove disconnects a live session internally, so a connected
+        // device can be removed directly rather than only after disconnecting.
+        acts.push({ key: 'forget', label: this.t('device.remove'), cls: 'device-card__action--danger' });
         return acts;
       },
     },
@@ -149,7 +165,7 @@
         '<div class="device-card__info">' +
           '<span class="device-card__name text-ellipsis">{{ device.device_name || device.name || device.device_id }}</span>' +
           '<span class="device-card__id text-ellipsis selectable">{{ isLocal ? \'💻 \' + t(\'device.this_computer\') : device.device_id }}</span>' +
-          '<span v-if="device.os" class="device-card__os">{{ device.os }}</span>' +
+          '<span v-if="device.os" class="device-card__os">{{ osLabel }}</span>' +
           '<!-- Note. Not offered on the local device: notes are cross-device' +
           'memos keyed to a peer, and the backend drops a note whose peer_id is' +
           'the local id (it is never in cfg.peers) — so editing here would be' +
@@ -323,12 +339,17 @@
           return;
         }
         if (key === 'forget') {
+          // A full "forget" — same confirm dialog and result toast as the
+          // context menu's 忘记设备, so both paths are one behavior (the
+          // backend archives the device so it can be Restored).
           var deviceName = self.device.device_name || self.device.name || peerId;
           this.store.confirm(
-            self.t('device.remove_confirm_title'),
-            self.t('device.remove_confirm_msg', {name: deviceName})
+            self.t('devices.forget_title'),
+            self.t('devices.forget_message', {name: deviceName})
           )
-            .then(function () { runAction(ClipsyncAPI.forgetDevice(peerId), removeFromStore); })
+            .then(function () {
+              runAction(ClipsyncAPI.forgetDevice(peerId), removeFromStore, self.t('context.device_forgotten'));
+            })
             .catch(function () { self.actionLoading = false; });
           return;
         }

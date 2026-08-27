@@ -5,6 +5,8 @@ All handlers return a (data_dict, status_code) tuple.
 
 import platform
 
+from internal.platform import friendly_platform_name
+
 
 def get_devices(cfg, get_connected_ids, get_discovered=None,
                 get_resolved_hashes=None, get_pending_pairings=None,
@@ -34,7 +36,7 @@ def get_devices(cfg, get_connected_ids, get_discovered=None,
         # The local device has no peer connection to encrypt; its OS is known
         # directly from the host platform so the UI can show the right icon.
         "encrypted": False,
-        "os": platform.system(),
+        "os": friendly_platform_name(platform.system()),
         "note": "",
     }]
     for peer in list(cfg.peers.values()):

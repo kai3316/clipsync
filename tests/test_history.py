@@ -896,7 +896,10 @@ def test_python_i18n_web_locales_are_fully_mirrored():
     path-list keys out; the web-UI audit pass removed 1 — history.merged (a
     web-only dead key), the overview dead-key sweep removed keys that were
     ALSO in the Python dicts so they never moved this gap; the connect-rejection
-    fix added 2 more — device.connect_started / device.connect_rejected) that has
+    fix added 2 more — device.connect_started / device.connect_rejected; the
+    forget-unification pass removed 2 — device.remove_confirm_title/msg (merged
+    into the context menu's devices.forget_title/forget_message), but they were
+    mirrored in the Python dicts too, so the gap never moved) that has
     its own server-side mitigation, so its SIZE is pinned here: a NEW web-only
     key — the regression class this guards — changes the count and fails the
     suite."""
