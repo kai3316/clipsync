@@ -579,6 +579,8 @@ def test_download_latest_release_reports_progress(monkeypatch, tmp_path):
     import hashlib as _hashlib
     import urllib.request
 
+    _patch_platform(monkeypatch, "clipsync-windows.zip")
+
     chunk = b"x" * 64 * 1024
     payload = chunk * 3
     total = len(payload)
@@ -611,8 +613,8 @@ def test_download_latest_release_reports_progress(monkeypatch, tmp_path):
             "tag_name": "v2.0.0",
             "assets": [
                 {
-                    # The downloader picks the asset by _platform_asset_name(), which
-                    # on this win32 host is clipsync-windows.zip.
+                    # Force a deterministic asset name above so this test is
+                    # host-platform agnostic.
                     "name": "clipsync-windows.zip",
                     "browser_download_url": "https://example.com/asset",
                     "size": total,
