@@ -223,13 +223,10 @@ def test_touched_js_passes_node_check(tmp_path):
         path = os.path.join(_STATIC, *parts)
         proc = subprocess.run(
             [node, "--check", path],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
+            capture_output=True,
             text=True,
         )
-        assert proc.returncode == 0, (
-            f"{os.path.join(*parts)} fails node --check:\n{proc.stderr}"
-        )
+        assert proc.returncode == 0, f"{os.path.join(*parts)} fails node --check:\n{proc.stderr}"
 
 
 def test_no_nul_bytes_in_touched_js():
@@ -268,11 +265,15 @@ NEW_I18N_KEYS = (
 # 1. The renderer's decision function
 # ══════════════════════════════════════════════════════════════════
 
+
 class TestResendableDecision:
     def test_failed_outgoing_text_is_resendable(self):
-        assert _chat_text_resendable(
-            {"kind": "text", "outgoing": True, "status": "failed"},
-        ) is True
+        assert (
+            _chat_text_resendable(
+                {"kind": "text", "outgoing": True, "status": "failed"},
+            )
+            is True
+        )
 
     def test_other_statuses_are_not_resendable(self):
         for status in ("pending", "sending", "done", "declined", "cancelled"):
@@ -306,13 +307,16 @@ class TestResendableDecision:
 # 2. Decision agrees with ChatManager.resend_text on real entries
 # ══════════════════════════════════════════════════════════════════
 
+
 def _active_mgr() -> tuple[str, ChatManager]:
     """A ChatManager with one ACTIVE session (incoming invite accepted)."""
     mgr = ChatManager("x", "X")
     mgr.handle_message(
         "chat_invite",
         {"session_id": "f" * 16, "from_name": "A", "fingerprint_short": "A1"},
-        PEER, "A1", None,
+        PEER,
+        "A1",
+        None,
     )
     sid = mgr.get_sessions()[0]["session_id"]
     assert mgr.accept_invitation(sid, lambda data: True)
@@ -333,7 +337,9 @@ class TestDecisionMatchesBackend:
             mgr.handle_message(
                 "chat_text",
                 {"session_id": sid, "text": "from them", "ts": time.time()},
-                PEER, "A1", None,
+                PEER,
+                "A1",
+                None,
             )
             incoming = mgr.get_messages(sid)[-1]
             assert _chat_text_resendable(incoming) is False
@@ -355,10 +361,7 @@ class TestDecisionMatchesBackend:
             entry = mgr.get_messages(sid)[-1]
             assert _chat_text_resendable(entry) is True
             assert mgr.resend_text(sid, entry["entry_id"], lambda d: True) is True
-            refreshed = next(
-                e for e in mgr.get_messages(sid)
-                if e["entry_id"] == entry["entry_id"]
-            )
+            refreshed = next(e for e in mgr.get_messages(sid) if e["entry_id"] == entry["entry_id"])
             assert refreshed["status"] == "done"
             assert _chat_text_resendable(refreshed) is False
         finally:
@@ -368,6 +371,7 @@ class TestDecisionMatchesBackend:
 # ══════════════════════════════════════════════════════════════════
 # 3. _chat_do_resend wiring + guards (no Tk root involved)
 # ══════════════════════════════════════════════════════════════════
+
 
 def _bare_dashboard(callback) -> tuple[DashboardWindow, list]:
     """A DashboardWindow shell without running __init__ (no Tk objects).
@@ -441,6 +445,7 @@ class TestChatDoResend:
 # 4. Constructor hook + glue shape
 # ══════════════════════════════════════════════════════════════════
 
+
 class TestWiringShape:
     def test_dashboard_takes_chat_resend_text_kwarg(self):
         params = inspect.signature(DashboardWindow.__init__).parameters
@@ -461,6 +466,7 @@ class TestWiringShape:
 # 5. i18n parity
 # ══════════════════════════════════════════════════════════════════
 
+
 class TestI18nParity:
     def test_new_keys_defined_in_both_locales(self):
         for key in NEW_I18N_KEYS:
@@ -470,7 +476,7 @@ class TestI18nParity:
             assert _ZH[key].strip(), f"{key} has an empty zh-CN string"
             assert _EN[key] != _ZH[key], f"{key}: zh-CN must not reuse en copy"
 
-    def test_keys_resolve_via_T(self):
+    def test_keys_resolve_via_T(self):  # noqa: N802
         for key in NEW_I18N_KEYS:
             value = T(key)
             assert isinstance(value, str) and value.strip()
@@ -542,6 +548,7 @@ def test_service_system_keys_localized():
 
 # ── FakeChatManager signature-drift guard ───────────────────────────
 
+
 class FakeChatManager:
     """Stub matching ChatManager's public API (signatures checked below)."""
 
@@ -587,8 +594,7 @@ class FakeChatManager:
     def shutdown(self):
         return None
 
-    def handle_message(self, msg_type, payload, sender_device_id,
-                       sender_fp_short, send_fn):
+    def handle_message(self, msg_type, payload, sender_device_id, sender_fp_short, send_fn):
         return True
 
     def handle_binary_chunk(self, raw_payload, sender_device_id, send_fn):
@@ -623,22 +629,20 @@ class FakeChatManager:
 
 
 _FAKE_PUBLIC = {
-    name for name in dir(FakeChatManager)
+    name
+    for name in dir(FakeChatManager)
     if not name.startswith("_") and callable(getattr(FakeChatManager, name))
 }
 
 
 def _params_of(fn):
-    return [p for p in inspect.signature(fn).parameters.values()
-            if p.name != "self"]
+    return [p for p in inspect.signature(fn).parameters.values() if p.name != "self"]
 
 
 def test_fake_matches_real_chat_manager_signatures():
     for name in sorted(_FAKE_PUBLIC):
         real_fn = getattr(ChatManager, name, None)
-        assert real_fn is not None, (
-            f"FakeChatManager.{name} has no real ChatManager counterpart"
-        )
+        assert real_fn is not None, f"FakeChatManager.{name} has no real ChatManager counterpart"
         real_params = _params_of(real_fn)
         fake_params = _params_of(getattr(FakeChatManager, name))
         assert [p.name for p in real_params] == [p.name for p in fake_params], (
@@ -657,6 +661,7 @@ def test_main_only_uses_known_chat_api():
 
 
 # ── Helper unit tests ───────────────────────────────────────────────
+
 
 def test_human_size():
     assert human_size(0) == "0 B"
@@ -690,10 +695,42 @@ def test_chat_status_keys_localized():
 
 def test_file_status_keys_localized():
     from internal.ui.dashboard import DashboardWindow
-    statuses = ("pending", "await_accept", "sending", "done",
-                "failed", "declined", "cancelled")
+
+    statuses = ("pending", "await_accept", "sending", "done", "failed", "declined", "cancelled")
     for status in statuses:
         suffix = DashboardWindow._chat_file_status_key(status)
         key = f"chat.file.status.{suffix}"
         assert key in _EN, f"{key} missing from _EN"
         assert key in _ZH, f"{key} missing from _ZH"
+
+
+# ── 8. Picker lists only reachable targets ──────────────────────────────
+# The chat tab used to offer "start chat" on every row /api/chat/devices
+# returned, paired-but-offline devices included — an invite that could only
+# spend 15s on a stale last_ip and end in a timeout toast.  lanTargets keeps
+# the rows a frame can actually reach; the internet group keeps the rest of
+# the paired internet peers.
+
+
+def test_lan_targets_filters_unreachable_rows():
+    src = _read("components", "chat-panel.js")
+    assert "lanTargets: function" in src
+    chunk = src.split("lanTargets: function")[1].split("deviceList: function")[0]
+    # The three flags the host stamps on each row (src/main._get_chat_devices).
+    assert "d.connected || d.discovered || d.relay_reachable" in chunk
+    # A host predating the flags sends none of them: keep the row rather than
+    # rendering an empty picker.
+    assert "d.connected === undefined" in chunk
+    assert "d.relay_reachable === undefined" in chunk
+
+
+def test_both_device_groups_build_on_the_filtered_lan_list():
+    src = _read("components", "chat-panel.js")
+    dev = src.split("deviceList: function")[1].split("internetDeviceList: function")[0]
+    assert "var lan = this.lanTargets;" in dev
+    assert "this.chatDevices" not in dev
+    # The internet group dedups against the FILTERED list, so an internet-paired
+    # peer that went LAN-offline moves into that group instead of vanishing.
+    net = src.split("internetDeviceList: function")[1].split("activeSession: function")[0]
+    assert "var lan = this.lanTargets;" in net
+    assert "this.chatDevices" not in net

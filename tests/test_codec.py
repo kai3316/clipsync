@@ -148,10 +148,13 @@ class TestDecodeErrors:
         assert decode_message(b"\x00\x00") is None
 
     def test_wrong_magic(self):
-        data = encode_message(SyncMessage(
-            content=ClipboardContent(types={ContentType.TEXT: b"x"}),
-            msg_id="t", source_device="t",
-        ))
+        data = encode_message(
+            SyncMessage(
+                content=ClipboardContent(types={ContentType.TEXT: b"x"}),
+                msg_id="t",
+                source_device="t",
+            )
+        )
         # Corrupt magic bytes
         corrupted = bytearray(data)
         corrupted[0] = 0xFF
@@ -159,10 +162,13 @@ class TestDecodeErrors:
         assert decode_message(bytes(corrupted)) is None
 
     def test_wrong_version(self):
-        data = encode_message(SyncMessage(
-            content=ClipboardContent(types={ContentType.TEXT: b"x"}),
-            msg_id="t", source_device="t",
-        ))
+        data = encode_message(
+            SyncMessage(
+                content=ClipboardContent(types={ContentType.TEXT: b"x"}),
+                msg_id="t",
+                source_device="t",
+            )
+        )
         corrupted = bytearray(data)
         corrupted[2] = 99  # wrong version
         assert decode_message(bytes(corrupted)) is None
@@ -170,7 +176,8 @@ class TestDecodeErrors:
     def test_truncated_frame(self):
         msg = SyncMessage(
             content=ClipboardContent(types={ContentType.TEXT: b"test data"}),
-            msg_id="abc", source_device="dev",
+            msg_id="abc",
+            source_device="dev",
         )
         data = encode_message(msg)
         # Truncate at various points
@@ -178,24 +185,28 @@ class TestDecodeErrors:
             result = decode_message(data[:cut])
             if result is not None:
                 # If decode succeeds, validate it
-                assert cut == len(data), f"Decode should only succeed with full data, got success at cut={cut}"
+                assert cut == len(data), (
+                    f"Decode should only succeed with full data, got success at cut={cut}"
+                )
 
     def test_invalid_json_payload(self):
         """Manually construct frame with garbage JSON payload."""
         msg = SyncMessage(
             content=ClipboardContent(types={ContentType.TEXT: b"x"}),
-            msg_id="t", source_device="t",
+            msg_id="t",
+            source_device="t",
         )
         data = encode_message(msg)
         # Corrupt the JSON payload (after header)
         corrupted = bytearray(data)
         # Replace JSON bytes with garbage
-        corrupted[HEADER_SIZE + 4 + 1 + 1 + 1:] = b"not valid json {"
+        corrupted[HEADER_SIZE + 4 + 1 + 1 + 1 :] = b"not valid json {"
         assert decode_message(bytes(corrupted)) is None
 
     def test_invalid_base64_in_payload(self):
         """JSON is valid but base64 data is corrupt — should skip gracefully."""
         import struct
+
         bad_json = json.dumps({"types": {"TEXT": "!!!not-base64!!!"}, "timestamp": 0})
         payload = bad_json.encode("utf-8")
         msg_id = b"abc"
@@ -222,11 +233,13 @@ class TestProtocolVersionCompat:
         """VERSION=2 decoders must accept legacy v1 frames."""
         msg_id = b"v1test"
         src = b"dev"
-        payload = json.dumps({
-            "msg_type": "clipboard",
-            "types": {"TEXT": base64.b64encode(b"hello").decode("ascii")},
-            "timestamp": 1.0,
-        }).encode("utf-8")
+        payload = json.dumps(
+            {
+                "msg_type": "clipboard",
+                "types": {"TEXT": base64.b64encode(b"hello").decode("ascii")},
+                "timestamp": 1.0,
+            }
+        ).encode("utf-8")
 
         buf = BytesIO()
         buf.write(struct.pack(">H B I", MAGIC, 1, len(payload)))  # version 1
@@ -244,12 +257,15 @@ class TestProtocolVersionCompat:
     def test_decode_rejects_version_3(self):
         """Versions beyond VERSION=2 must be rejected."""
         import struct
+
         msg_id = b"v3test"
         src = b"dev"
-        payload = json.dumps({
-            "msg_type": "clipboard",
-            "types": {"TEXT": base64.b64encode(b"hello").decode("ascii")},
-        }).encode("utf-8")
+        payload = json.dumps(
+            {
+                "msg_type": "clipboard",
+                "types": {"TEXT": base64.b64encode(b"hello").decode("ascii")},
+            }
+        ).encode("utf-8")
 
         buf = BytesIO()
         buf.write(struct.pack(">H B I", MAGIC, 3, len(payload)))  # version 3
@@ -311,13 +327,16 @@ class TestImageFmtCodec:
     def test_legacy_uncompressed_tiff_tolerated(self):
         """Legacy uncompressed data (bad zlib) is passed through."""
         import struct
+
         tiff_data = b"II" + b"\x00" * 100  # fake little-endian TIFF header
-        payload = json.dumps({
-            "msg_type": "clipboard",
-            "image_fmt": "tiff",
-            "types": {"IMAGE_PNG": base64.b64encode(tiff_data).decode("ascii")},
-            "timestamp": 0.0,
-        }).encode("utf-8")
+        payload = json.dumps(
+            {
+                "msg_type": "clipboard",
+                "image_fmt": "tiff",
+                "types": {"IMAGE_PNG": base64.b64encode(tiff_data).decode("ascii")},
+                "timestamp": 0.0,
+            }
+        ).encode("utf-8")
 
         msg_id = b"legacy"
         src = b"dev"
@@ -347,12 +366,18 @@ class TestClipboardContent:
 
     def test_hash_order_independent(self):
         """Hash should be the same regardless of insert order."""
-        c1 = ClipboardContent(types={
-            ContentType.TEXT: b"a", ContentType.HTML: b"b",
-        })
-        c2 = ClipboardContent(types={
-            ContentType.HTML: b"b", ContentType.TEXT: b"a",
-        })
+        c1 = ClipboardContent(
+            types={
+                ContentType.TEXT: b"a",
+                ContentType.HTML: b"b",
+            }
+        )
+        c2 = ClipboardContent(
+            types={
+                ContentType.HTML: b"b",
+                ContentType.TEXT: b"a",
+            }
+        )
         assert c1.hash_key() == c2.hash_key()
 
     def test_is_empty(self):
@@ -361,12 +386,14 @@ class TestClipboardContent:
 
     def test_best_format_priority(self):
         """HTML > RTF > TEXT > IMAGE_PNG"""
-        c = ClipboardContent(types={
-            ContentType.IMAGE_PNG: b"png",
-            ContentType.TEXT: b"text",
-            ContentType.HTML: b"html",
-            ContentType.RTF: b"rtf",
-        })
+        c = ClipboardContent(
+            types={
+                ContentType.IMAGE_PNG: b"png",
+                ContentType.TEXT: b"text",
+                ContentType.HTML: b"html",
+                ContentType.RTF: b"rtf",
+            }
+        )
         fmt, data = c.best_format()
         assert fmt == ContentType.HTML
         assert data == b"html"
@@ -391,7 +418,6 @@ import sys
 import pytest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-
 
 
 class TestClipboardContentDefaults:
@@ -426,12 +452,18 @@ class TestHashKey:
 
     def test_order_independent(self):
         """Hash is the same regardless of the order types were inserted."""
-        c1 = ClipboardContent(types={
-            ContentType.TEXT: b"a", ContentType.HTML: b"b",
-        })
-        c2 = ClipboardContent(types={
-            ContentType.HTML: b"b", ContentType.TEXT: b"a",
-        })
+        c1 = ClipboardContent(
+            types={
+                ContentType.TEXT: b"a",
+                ContentType.HTML: b"b",
+            }
+        )
+        c2 = ClipboardContent(
+            types={
+                ContentType.HTML: b"b",
+                ContentType.TEXT: b"a",
+            }
+        )
         assert c1.hash_key() == c2.hash_key()
 
     def test_returns_string(self):
@@ -441,10 +473,12 @@ class TestHashKey:
     def test_includes_all_format_types(self):
         """Hash changes when an additional format type is present."""
         c1 = ClipboardContent(types={ContentType.TEXT: b"same"})
-        c2 = ClipboardContent(types={
-            ContentType.TEXT: b"same",
-            ContentType.HTML: b"other",
-        })
+        c2 = ClipboardContent(
+            types={
+                ContentType.TEXT: b"same",
+                ContentType.HTML: b"other",
+            }
+        )
         assert c1.hash_key() != c2.hash_key()
 
     def test_large_content_consistent(self):
@@ -479,10 +513,12 @@ class TestIsEmpty:
         assert not ClipboardContent(types={ContentType.TEXT: b"x"}).is_empty()
 
     def test_multiple_types_returns_false(self):
-        c = ClipboardContent(types={
-            ContentType.TEXT: b"x",
-            ContentType.HTML: b"y",
-        })
+        c = ClipboardContent(
+            types={
+                ContentType.TEXT: b"x",
+                ContentType.HTML: b"y",
+            }
+        )
         assert not c.is_empty()
 
     def test_only_metadata_returns_true(self):
@@ -496,12 +532,14 @@ class TestBestFormat:
 
     def test_priority_html_top(self):
         """HTML > IMAGE_PNG > RTF > TEXT"""
-        c = ClipboardContent(types={
-            ContentType.IMAGE_PNG: b"png",
-            ContentType.TEXT: b"text",
-            ContentType.HTML: b"html",
-            ContentType.RTF: b"rtf",
-        })
+        c = ClipboardContent(
+            types={
+                ContentType.IMAGE_PNG: b"png",
+                ContentType.TEXT: b"text",
+                ContentType.HTML: b"html",
+                ContentType.RTF: b"rtf",
+            }
+        )
         fmt, data = c.best_format()
         assert fmt == ContentType.HTML
         assert data == b"html"
@@ -511,30 +549,36 @@ class TestBestFormat:
 
     def test_fallback_to_image_png(self):
         """TEXT/RTF rank above IMAGE_PNG (editable formats preferred)."""
-        c = ClipboardContent(types={
-            ContentType.IMAGE_PNG: b"png",
-            ContentType.TEXT: b"text",
-        })
+        c = ClipboardContent(
+            types={
+                ContentType.IMAGE_PNG: b"png",
+                ContentType.TEXT: b"text",
+            }
+        )
         fmt, data = c.best_format()
         assert fmt == ContentType.TEXT
         assert data == b"text"
 
     def test_rtf_over_image(self):
         """RTF ranks above IMAGE_PNG."""
-        c = ClipboardContent(types={
-            ContentType.IMAGE_PNG: b"png",
-            ContentType.RTF: b"rtf",
-        })
+        c = ClipboardContent(
+            types={
+                ContentType.IMAGE_PNG: b"png",
+                ContentType.RTF: b"rtf",
+            }
+        )
         fmt, data = c.best_format()
         assert fmt == ContentType.RTF
         assert data == b"rtf"
 
     def test_fallback_to_rtf(self):
         """RTF over TEXT."""
-        c = ClipboardContent(types={
-            ContentType.RTF: b"rtf",
-            ContentType.TEXT: b"text",
-        })
+        c = ClipboardContent(
+            types={
+                ContentType.RTF: b"rtf",
+                ContentType.TEXT: b"text",
+            }
+        )
         fmt, data = c.best_format()
         assert fmt == ContentType.RTF
         assert data == b"rtf"
@@ -621,10 +665,8 @@ class TestImageFmt:
         assert content.image_fmt == "bmp"
 
     def test_hash_key_ignores_image_fmt(self):
-        c1 = ClipboardContent(types={ContentType.IMAGE_PNG: b"data"},
-                              image_fmt="png")
-        c2 = ClipboardContent(types={ContentType.IMAGE_PNG: b"data"},
-                              image_fmt="bmp")
+        c1 = ClipboardContent(types={ContentType.IMAGE_PNG: b"data"}, image_fmt="png")
+        c2 = ClipboardContent(types={ContentType.IMAGE_PNG: b"data"}, image_fmt="bmp")
         assert c1.hash_key() == c2.hash_key()
 
     def test_is_empty_ignores_image_fmt(self):
@@ -639,6 +681,7 @@ if __name__ == "__main__":
 # ══════════════════════════════════════════════════
 # split from test_round3_core.py — codec malformed / JSON tolerance
 # ══════════════════════════════════════════════════
+
 
 class TestCodecMalformedPayloads:
     def _frame(self, payload: dict) -> bytes:
@@ -655,11 +698,13 @@ class TestCodecMalformedPayloads:
 
     def test_non_numeric_timestamp_coerced_to_zero(self):
         for bad in ("oops", None, [1], float("nan"), float("inf")):
-            data = self._frame({
-                "msg_type": "clipboard",
-                "types": {"TEXT": base64.b64encode(b"hi").decode()},
-                "timestamp": bad,
-            })
+            data = self._frame(
+                {
+                    "msg_type": "clipboard",
+                    "types": {"TEXT": base64.b64encode(b"hi").decode()},
+                    "timestamp": bad,
+                }
+            )
             msg = decode_message(data)
             assert msg is not None, f"timestamp={bad!r}"
             assert msg.content.timestamp == 0.0
@@ -670,11 +715,13 @@ class TestCodecMalformedPayloads:
         assert msg is not None and msg.content.timestamp == 0.0
 
     def test_non_string_image_fmt_tolerated(self):
-        data = self._frame({
-            "msg_type": "clipboard",
-            "types": {},
-            "image_fmt": 42,
-        })
+        data = self._frame(
+            {
+                "msg_type": "clipboard",
+                "types": {},
+                "image_fmt": 42,
+            }
+        )
         msg = decode_message(data)
         assert msg is not None and msg.content.image_fmt == ""
 
@@ -695,14 +742,15 @@ class TestCodecMalformedPayloads:
         assert decoded.source_device == "dev-x"
 
 
-
 class TestCodecJsonTolerance:
     def test_payload_with_unexpected_extra_fields_decodes(self):
-        data = encode_frame({
-            "msg_type": "clipboard",
-            "types": {"TEXT": base64.b64encode(b"x").decode()},
-            "unknown_future_field": {"nested": [1, 2, 3]},
-        })
+        data = encode_frame(
+            {
+                "msg_type": "clipboard",
+                "types": {"TEXT": base64.b64encode(b"x").decode()},
+                "unknown_future_field": {"nested": [1, 2, 3]},
+            }
+        )
         msg = decode_message(data)
         assert msg is not None
         assert msg.content.types[ContentType.TEXT] == b"x"
@@ -711,4 +759,3 @@ class TestCodecJsonTolerance:
     def test_json_array_payload_dropped_not_crash(self):
         data = encode_frame([1, 2, 3])
         assert decode_message(data) is None
-

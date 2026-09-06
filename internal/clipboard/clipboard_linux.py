@@ -55,7 +55,9 @@ def _detect_display_backend() -> str:
     try:
         result = subprocess.run(
             ["loginctl", "show-session", "self", "-p", "Type"],
-            capture_output=True, text=True, timeout=2,
+            capture_output=True,
+            text=True,
+            timeout=2,
         )
         if "wayland" in result.stdout.lower():
             return "wayland"
@@ -127,7 +129,9 @@ def _warn_no_clipboard() -> None:
         logger.warning(
             "No clipboard tool found for %s backend (%s). "
             "Clipboard read/write is disabled. Install %s.",
-            _BACKEND, tool, tool,
+            _BACKEND,
+            tool,
+            tool,
         )
         _clipboard_warned = True
 
@@ -172,9 +176,15 @@ class _ClipboardReader(ClipboardReader):
     def _get_text(self) -> bytes:
         # Try wl-paste first on Wayland, xclip first on X11, but fall back to the other
         tools = (
-            [(["wl-paste", "--no-newline"], "wl-paste"), (["xclip", "-selection", "clipboard", "-o"], "xclip")]
+            [
+                (["wl-paste", "--no-newline"], "wl-paste"),
+                (["xclip", "-selection", "clipboard", "-o"], "xclip"),
+            ]
             if _BACKEND == "wayland"
-            else [(["xclip", "-selection", "clipboard", "-o"], "xclip"), (["wl-paste", "--no-newline"], "wl-paste")]
+            else [
+                (["xclip", "-selection", "clipboard", "-o"], "xclip"),
+                (["wl-paste", "--no-newline"], "wl-paste"),
+            ]
         )
         for args, _name in tools:
             try:
@@ -189,9 +199,15 @@ class _ClipboardReader(ClipboardReader):
         if not _can_read():
             return b""
         tools = (
-            [(["wl-paste", "--type", "text/html"], "wl-paste"), (["xclip", "-selection", "clipboard", "-o", "-t", "text/html"], "xclip")]
+            [
+                (["wl-paste", "--type", "text/html"], "wl-paste"),
+                (["xclip", "-selection", "clipboard", "-o", "-t", "text/html"], "xclip"),
+            ]
             if _BACKEND == "wayland"
-            else [(["xclip", "-selection", "clipboard", "-o", "-t", "text/html"], "xclip"), (["wl-paste", "--type", "text/html"], "wl-paste")]
+            else [
+                (["xclip", "-selection", "clipboard", "-o", "-t", "text/html"], "xclip"),
+                (["wl-paste", "--type", "text/html"], "wl-paste"),
+            ]
         )
         for args, _name in tools:
             try:
@@ -209,9 +225,15 @@ class _ClipboardReader(ClipboardReader):
         if not _can_read():
             return b""
         tools = (
-            [(["wl-paste", "--type", "text/rtf"], "wl-paste"), (["xclip", "-selection", "clipboard", "-o", "-t", "text/rtf"], "xclip")]
+            [
+                (["wl-paste", "--type", "text/rtf"], "wl-paste"),
+                (["xclip", "-selection", "clipboard", "-o", "-t", "text/rtf"], "xclip"),
+            ]
             if _BACKEND == "wayland"
-            else [(["xclip", "-selection", "clipboard", "-o", "-t", "text/rtf"], "xclip"), (["wl-paste", "--type", "text/rtf"], "wl-paste")]
+            else [
+                (["xclip", "-selection", "clipboard", "-o", "-t", "text/rtf"], "xclip"),
+                (["wl-paste", "--type", "text/rtf"], "wl-paste"),
+            ]
         )
         for args, _name in tools:
             try:
@@ -247,14 +269,24 @@ class _ClipboardReader(ClipboardReader):
             return b""
         # Try both CLI tools for image/png
         tools = (
-            [(["wl-paste", "--type", "image/png"], "wl-paste"), (["xclip", "-selection", "clipboard", "-o", "-t", "image/png"], "xclip")]
+            [
+                (["wl-paste", "--type", "image/png"], "wl-paste"),
+                (["xclip", "-selection", "clipboard", "-o", "-t", "image/png"], "xclip"),
+            ]
             if _BACKEND == "wayland"
-            else [(["xclip", "-selection", "clipboard", "-o", "-t", "image/png"], "xclip"), (["wl-paste", "--type", "image/png"], "wl-paste")]
+            else [
+                (["xclip", "-selection", "clipboard", "-o", "-t", "image/png"], "xclip"),
+                (["wl-paste", "--type", "image/png"], "wl-paste"),
+            ]
         )
         for args, _name in tools:
             try:
                 result = subprocess.run(args, capture_output=True, timeout=2)
-                if result.returncode == 0 and result.stdout and result.stdout[:8] == b"\x89PNG\r\n\x1a\n":
+                if (
+                    result.returncode == 0
+                    and result.stdout
+                    and result.stdout[:8] == b"\x89PNG\r\n\x1a\n"
+                ):
                     self._image_fmt = "png"
                     return result.stdout
             except Exception:
@@ -272,11 +304,15 @@ class _ClipboardReader(ClipboardReader):
             return b""
         # Try text/uri-list (most file managers: Dolphin, Thunar, PCManFM)
         tools = (
-            [(["wl-paste", "--type", "text/uri-list"], "wl-paste"),
-             (["xclip", "-selection", "clipboard", "-o", "-t", "text/uri-list"], "xclip")]
+            [
+                (["wl-paste", "--type", "text/uri-list"], "wl-paste"),
+                (["xclip", "-selection", "clipboard", "-o", "-t", "text/uri-list"], "xclip"),
+            ]
             if _BACKEND == "wayland"
-            else [(["xclip", "-selection", "clipboard", "-o", "-t", "text/uri-list"], "xclip"),
-                  (["wl-paste", "--type", "text/uri-list"], "wl-paste")]
+            else [
+                (["xclip", "-selection", "clipboard", "-o", "-t", "text/uri-list"], "xclip"),
+                (["wl-paste", "--type", "text/uri-list"], "wl-paste"),
+            ]
         )
         for args, _name in tools:
             try:
@@ -289,6 +325,7 @@ class _ClipboardReader(ClipboardReader):
                         line = line.strip()
                         if line and not line.startswith("#"):
                             from urllib.parse import unquote, urlparse
+
                             parsed = urlparse(line)
                             # Only local files belong in a FILE entry — an
                             # https:// URI has a non-empty "path" too, and
@@ -309,11 +346,15 @@ class _ClipboardReader(ClipboardReader):
         if not _can_read():
             return b""
         tools = (
-            [(["wl-paste", "--type", "text/uri-list"], "wl-paste"),
-             (["xclip", "-selection", "clipboard", "-o", "-t", "text/uri-list"], "xclip")]
+            [
+                (["wl-paste", "--type", "text/uri-list"], "wl-paste"),
+                (["xclip", "-selection", "clipboard", "-o", "-t", "text/uri-list"], "xclip"),
+            ]
             if _BACKEND == "wayland"
-            else [(["xclip", "-selection", "clipboard", "-o", "-t", "text/uri-list"], "xclip"),
-                  (["wl-paste", "--type", "text/uri-list"], "wl-paste")]
+            else [
+                (["xclip", "-selection", "clipboard", "-o", "-t", "text/uri-list"], "xclip"),
+                (["wl-paste", "--type", "text/uri-list"], "wl-paste"),
+            ]
         )
         for args, _name in tools:
             try:
@@ -332,31 +373,35 @@ class _ClipboardWriter(ClipboardWriter):
         # Write formats sorted so TEXT lands last — each xclip/wl-copy
         # call replaces the entire clipboard, and plain text is the
         # most important fallback for the receiving side.
-        _TEXT_LAST = {ContentType.TEXT: 1}
+        _TEXT_LAST = {ContentType.TEXT: 1}  # noqa: N806
+        wrote_any = False
         for fmt_type, data in sorted(
             content.types.items(),
             key=lambda item: _TEXT_LAST.get(item[0], 0),
         ):
             logger.debug("Writing %s to clipboard (%d bytes)", fmt_type.name, len(data))
+            ok = False
             if fmt_type == ContentType.TEXT:
-                self._set_text(data)
+                ok = self._set_text(data)
             elif fmt_type == ContentType.HTML:
-                self._set_html(data)
+                ok = self._set_html(data)
             elif fmt_type == ContentType.RTF:
-                self._set_rtf(data)
+                ok = self._set_rtf(data)
             elif fmt_type == ContentType.IMAGE_PNG:
-                self._set_image(data, content.image_fmt)
+                ok = self._set_image(data, content.image_fmt)
             elif fmt_type == ContentType.FILE:
-                self._set_files(data)
+                ok = self._set_files(data)
             elif fmt_type == ContentType.URL:
-                self._set_url(data)
+                ok = self._set_url(data)
             # IMAGE_EMF is Windows-only, skip on Linux
-        return True
+            if ok:
+                wrote_any = True
+        return wrote_any
 
-    def _set_text(self, data: bytes):
+    def _set_text(self, data: bytes) -> bool:
         if not _can_write():
             _warn_no_clipboard()
-            return
+            return False
         tools = (
             [(["wl-copy"], "wl-copy"), (["xclip", "-selection", "clipboard", "-in"], "xclip")]
             if _BACKEND == "wayland"
@@ -364,64 +409,87 @@ class _ClipboardWriter(ClipboardWriter):
         )
         for args, _name in tools:
             if _run_write_tool(args, data):
-                return
+                return True
         logger.debug("Failed to write text to clipboard")
+        return False
 
-    def _set_html(self, data: bytes):
+    def _set_html(self, data: bytes) -> bool:
         if not _can_write():
             _warn_no_clipboard()
-            return
+            return False
         tools = (
-            [(["wl-copy", "--type", "text/html"], "wl-copy"), (["xclip", "-selection", "clipboard", "-in", "-t", "text/html"], "xclip")]
+            [
+                (["wl-copy", "--type", "text/html"], "wl-copy"),
+                (["xclip", "-selection", "clipboard", "-in", "-t", "text/html"], "xclip"),
+            ]
             if _BACKEND == "wayland"
-            else [(["xclip", "-selection", "clipboard", "-in", "-t", "text/html"], "xclip"), (["wl-copy", "--type", "text/html"], "wl-copy")]
+            else [
+                (["xclip", "-selection", "clipboard", "-in", "-t", "text/html"], "xclip"),
+                (["wl-copy", "--type", "text/html"], "wl-copy"),
+            ]
         )
         for args, _name in tools:
             if _run_write_tool(args, data):
-                return
+                return True
         logger.debug("Failed to write HTML to clipboard")
+        return False
 
-    def _set_rtf(self, data: bytes):
+    def _set_rtf(self, data: bytes) -> bool:
         if not _can_write():
             _warn_no_clipboard()
-            return
+            return False
         tools = (
-            [(["wl-copy", "--type", "text/rtf"], "wl-copy"), (["xclip", "-selection", "clipboard", "-in", "-t", "text/rtf"], "xclip")]
+            [
+                (["wl-copy", "--type", "text/rtf"], "wl-copy"),
+                (["xclip", "-selection", "clipboard", "-in", "-t", "text/rtf"], "xclip"),
+            ]
             if _BACKEND == "wayland"
-            else [(["xclip", "-selection", "clipboard", "-in", "-t", "text/rtf"], "xclip"), (["wl-copy", "--type", "text/rtf"], "wl-copy")]
+            else [
+                (["xclip", "-selection", "clipboard", "-in", "-t", "text/rtf"], "xclip"),
+                (["wl-copy", "--type", "text/rtf"], "wl-copy"),
+            ]
         )
         for args, _name in tools:
             if _run_write_tool(args, data):
-                return
+                return True
         logger.debug("Failed to write RTF to clipboard")
+        return False
 
-    def _set_image(self, data: bytes, image_fmt: str = ""):
+    def _set_image(self, data: bytes, image_fmt: str = "") -> bool:
         png_data = data
         if image_fmt in ("bmp", "tiff"):
             try:
                 from PIL import Image
+
                 img = Image.open(BytesIO(data))
                 buf = BytesIO()
                 img.save(buf, format="PNG")
                 png_data = buf.getvalue()
             except Exception:
                 logger.debug("Failed to convert %s image to PNG for Linux", image_fmt)
-                return
+                return False
 
         if not _can_write():
             _warn_no_clipboard()
-            return
+            return False
         tools = (
-            [(["wl-copy", "--type", "image/png"], "wl-copy"), (["xclip", "-selection", "clipboard", "-in", "-t", "image/png"], "xclip")]
+            [
+                (["wl-copy", "--type", "image/png"], "wl-copy"),
+                (["xclip", "-selection", "clipboard", "-in", "-t", "image/png"], "xclip"),
+            ]
             if _BACKEND == "wayland"
-            else [(["xclip", "-selection", "clipboard", "-in", "-t", "image/png"], "xclip"), (["wl-copy", "--type", "image/png"], "wl-copy")]
+            else [
+                (["xclip", "-selection", "clipboard", "-in", "-t", "image/png"], "xclip"),
+                (["wl-copy", "--type", "image/png"], "wl-copy"),
+            ]
         )
         for args, _name in tools:
             if _run_write_tool(args, png_data):
-                return
+                return True
         logger.debug("Failed to write image to clipboard")
+        return False
 
-    def _set_files(self, data: bytes):
+    def _set_files(self, data: bytes) -> bool:
         """Write file paths to clipboard as text/uri-list.
 
         Expects newline-separated UTF-8 paths. Each path is converted
@@ -430,54 +498,63 @@ class _ClipboardWriter(ClipboardWriter):
         try:
             paths = [p.strip() for p in data.decode("utf-8").split("\n") if p.strip()]
         except Exception:
-            return
+            return False
         if not paths:
-            return
+            return False
 
         from urllib.parse import quote as urllib_quote_path
-        uri_list = "\n".join(
-            "file://" + urllib_quote_path(p) for p in paths
-        ).encode("utf-8")
+
+        uri_list = "\n".join("file://" + urllib_quote_path(p) for p in paths).encode("utf-8")
 
         if not _can_write():
             _warn_no_clipboard()
-            return
+            return False
         tools = (
-            [(["wl-copy", "--type", "text/uri-list"], "wl-copy"),
-             (["xclip", "-selection", "clipboard", "-in", "-t", "text/uri-list"], "xclip")]
+            [
+                (["wl-copy", "--type", "text/uri-list"], "wl-copy"),
+                (["xclip", "-selection", "clipboard", "-in", "-t", "text/uri-list"], "xclip"),
+            ]
             if _BACKEND == "wayland"
-            else [(["xclip", "-selection", "clipboard", "-in", "-t", "text/uri-list"], "xclip"),
-                  (["wl-copy", "--type", "text/uri-list"], "wl-copy")]
+            else [
+                (["xclip", "-selection", "clipboard", "-in", "-t", "text/uri-list"], "xclip"),
+                (["wl-copy", "--type", "text/uri-list"], "wl-copy"),
+            ]
         )
         for args, _name in tools:
             if _run_write_tool(args, uri_list):
-                return
+                return True
         logger.debug("Failed to write file URIs to clipboard")
+        return False
 
-    def _set_url(self, data: bytes):
+    def _set_url(self, data: bytes) -> bool:
         """Write a URL to the clipboard as text/uri-list."""
         try:
             url = data.decode("utf-8").strip()
         except Exception:
-            return
+            return False
         if not url:
-            return
+            return False
 
         uri_data = url.encode("utf-8")
         if not _can_write():
             _warn_no_clipboard()
-            return
+            return False
         tools = (
-            [(["wl-copy", "--type", "text/uri-list"], "wl-copy"),
-             (["xclip", "-selection", "clipboard", "-in", "-t", "text/uri-list"], "xclip")]
+            [
+                (["wl-copy", "--type", "text/uri-list"], "wl-copy"),
+                (["xclip", "-selection", "clipboard", "-in", "-t", "text/uri-list"], "xclip"),
+            ]
             if _BACKEND == "wayland"
-            else [(["xclip", "-selection", "clipboard", "-in", "-t", "text/uri-list"], "xclip"),
-                  (["wl-copy", "--type", "text/uri-list"], "wl-copy")]
+            else [
+                (["xclip", "-selection", "clipboard", "-in", "-t", "text/uri-list"], "xclip"),
+                (["wl-copy", "--type", "text/uri-list"], "wl-copy"),
+            ]
         )
         for args, _name in tools:
             if _run_write_tool(args, uri_data):
-                return
+                return True
         logger.debug("Failed to write URL to clipboard")
+        return False
 
 
 class LinuxClipboardMonitor(ClipboardMonitor):
@@ -519,9 +596,7 @@ class LinuxClipboardMonitor(ClipboardMonitor):
         idle_rounds = 0
         while self._running:
             # Back the poll interval off once the clipboard has been quiet.
-            time.sleep(
-                self._poll_interval if idle_rounds == 0 else self._idle_poll_interval
-            )
+            time.sleep(self._poll_interval if idle_rounds == 0 else self._idle_poll_interval)
 
             # Cheap probe: plain text via the primary tool only (one
             # subprocess), which covers the dominant text-copy case.
@@ -587,11 +662,15 @@ class LinuxClipboardMonitor(ClipboardMonitor):
     def _get_html_primary(self) -> bytes:
         """Read text/html for change detection (primary tool, then fallback)."""
         tools = (
-            (["wl-paste", "--type", "text/html"],
-             ["xclip", "-selection", "clipboard", "-o", "-t", "text/html"])
+            (
+                ["wl-paste", "--type", "text/html"],
+                ["xclip", "-selection", "clipboard", "-o", "-t", "text/html"],
+            )
             if _BACKEND == "wayland"
-            else (["xclip", "-selection", "clipboard", "-o", "-t", "text/html"],
-                  ["wl-paste", "--type", "text/html"])
+            else (
+                ["xclip", "-selection", "clipboard", "-o", "-t", "text/html"],
+                ["wl-paste", "--type", "text/html"],
+            )
         )
         for args in tools:
             try:
@@ -610,11 +689,15 @@ class LinuxClipboardMonitor(ClipboardMonitor):
         image writes and the manager's dedup sees stable content.
         """
         tools = (
-            [(["wl-paste", "--type", "image/png"], "wl-paste"),
-             (["xclip", "-selection", "clipboard", "-o", "-t", "image/png"], "xclip")]
+            [
+                (["wl-paste", "--type", "image/png"], "wl-paste"),
+                (["xclip", "-selection", "clipboard", "-o", "-t", "image/png"], "xclip"),
+            ]
             if _BACKEND == "wayland"
-            else [(["xclip", "-selection", "clipboard", "-o", "-t", "image/png"], "xclip"),
-                  (["wl-paste", "--type", "image/png"], "wl-paste")]
+            else [
+                (["xclip", "-selection", "clipboard", "-o", "-t", "image/png"], "xclip"),
+                (["wl-paste", "--type", "image/png"], "wl-paste"),
+            ]
         )
         for args, _name in tools:
             try:
@@ -648,8 +731,12 @@ class LinuxClipboardMonitor(ClipboardMonitor):
         # any single format is detected (image-only hashes to the image).
         h = hashlib.sha256()
         found = False
-        for probe in (self._get_html_primary, self._probes._get_rtf,
-                      self._probes._get_files, self._probes._get_url):
+        for probe in (
+            self._get_html_primary,
+            self._probes._get_rtf,
+            self._probes._get_files,
+            self._probes._get_url,
+        ):
             try:
                 data = probe()
             except Exception:

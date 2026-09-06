@@ -21,7 +21,7 @@ var ClipsyncAPI = (function () {
 
   /**
    * Shared implementation for previewAiConfigFile / previewAiConfigLegacy.
-   * POSTs a {peer_id, ...tool|root_index, rel_path} body and resolves the
+   * POSTs a {peer_id, ...tool+root|root_index, rel_path} body and resolves the
    * truncated-text response tolerantly (JSON {ok, content, truncated} or a
    * raw text body).  Aborts after 15 s so a peer that never answers cannot
    * hang the preview modal.
@@ -428,7 +428,7 @@ var ClipsyncAPI = (function () {
     },
 
     /**
-     * Fetch one remote file's text for preview (v2 — tool + rel_path).  The
+     * Fetch one remote file's text for preview (tool + root + rel_path).  The
      * backend truncates at 64KB.  The answer is parsed tolerantly: the
      * documented shape is JSON `{ok, content, truncated}`; a raw text body is
      * also accepted so an older/experimental host never breaks the preview.
@@ -437,8 +437,10 @@ var ClipsyncAPI = (function () {
      * @param {string} relPath
      * @returns {Promise<{content: string, truncated: boolean}>}
      */
-    previewAiConfigFile: function (peerId, tool, relPath) {
-      return _previewAiConfig({ peer_id: peerId, tool: tool, rel_path: relPath });
+    previewAiConfigFile: function (peerId, tool, relPath, root) {
+      return _previewAiConfig({
+        peer_id: peerId, tool: tool, rel_path: relPath, root: root || '',
+      });
     },
 
     /**
@@ -461,7 +463,7 @@ var ClipsyncAPI = (function () {
      * later via the WS `aiconfig_file` event, echoing *batchId* so the UI can
      * aggregate progress — this call only confirms what was requested.
      * @param {string} peerId
-     * @param {Array<{tool: string, rel_path: string, is_dir?: boolean}>} items
+     * @param {Array<{tool: string, root?: string, rel_path: string, is_dir?: boolean}>} items
      * @param {'overwrite'|'copy'|'append'} mode
      * @param {string} [batchId]
      * @returns {Promise<{requested: number, expanded: number, errors: string[]}>}
@@ -481,7 +483,7 @@ var ClipsyncAPI = (function () {
      * metadata, grouped by tool for the UI.
      * @returns {Promise<{collected_at, tools: Array, custom_paths: string[],
      *   roots: Array, entries: Array}>}
-     *   roots: [{tool, kind, path, count}]; entries: [{tool, rel_path, size,
+     *   roots: [{tool, root, kind, path, count}]; entries: [{tool, root, rel_path, size,
      *   mtime, sha256, is_dir}].
      */
     getAiConfigLocal: function () {
@@ -496,10 +498,11 @@ var ClipsyncAPI = (function () {
      * @param {string} relPath
      * @returns {Promise<{ok: boolean, content: string, truncated: boolean}>}
      */
-    getAiConfigLocalItem: function (tool, relPath) {
+    getAiConfigLocalItem: function (tool, relPath, root) {
       return this._fetch('GET',
         '/api/aiconfig/local/item?tool=' + encodeURIComponent(tool) +
-        '&rel_path=' + encodeURIComponent(relPath));
+        '&rel_path=' + encodeURIComponent(relPath) +
+        '&root=' + encodeURIComponent(root || ''));
     },
 
     /**
@@ -510,9 +513,9 @@ var ClipsyncAPI = (function () {
      * @param {string} content
      * @returns {Promise<{ok: boolean}>}
      */
-    saveAiConfigLocal: function (tool, relPath, content) {
+    saveAiConfigLocal: function (tool, relPath, content, root) {
       return this._fetch('POST', '/api/aiconfig/local/save', {
-        tool: tool, rel_path: relPath, content: content,
+        tool: tool, rel_path: relPath, content: content, root: root || '',
       });
     },
 
@@ -523,9 +526,9 @@ var ClipsyncAPI = (function () {
      * @param {string} relPath
      * @returns {Promise<{ok: boolean, trashed_to: string}>}
      */
-    trashAiConfigLocal: function (tool, relPath) {
+    trashAiConfigLocal: function (tool, relPath, root) {
       return this._fetch('POST', '/api/aiconfig/local/trash', {
-        tool: tool, rel_path: relPath,
+        tool: tool, rel_path: relPath, root: root || '',
       });
     },
 
@@ -536,9 +539,9 @@ var ClipsyncAPI = (function () {
      * @param {string} relPath
      * @returns {Promise<{ok: boolean}>}
      */
-    openAiConfigLocal: function (tool, relPath) {
+    openAiConfigLocal: function (tool, relPath, root) {
       return this._fetch('POST', '/api/aiconfig/open', {
-        tool: tool, rel_path: relPath,
+        tool: tool, rel_path: relPath, root: root || '',
       });
     },
 
@@ -943,13 +946,18 @@ var ClipsyncAPI = (function () {
     /**
      * Probe connectivity to a device over every available channel (LAN when
      * reachable + relay when internet-paired). Returns the per-channel result.
+     *
+     * Explicit 8s timeout instead of the 15s default: the host budgets 4s for
+     * the pings and answers at once when nothing could even be sent, so 8s is
+     * ample headroom — and when a wedged socket really does stall the host, the
+     * button reports failure 7s sooner than the default would.
      * @param {string} peerId
      * @returns {Promise<{ok: boolean, results: Array<{channel: string, ok: boolean, latency_ms?: number, error?: string}>}>}
      */
     testDeviceConnection: function (peerId) {
       return this._fetch('POST', '/api/device/test', {
         peer_id: peerId,
-      });
+      }, 8000);
     },
 
     /* ═══════════════════════════════════════════════════════════════
@@ -1012,6 +1020,16 @@ var ClipsyncAPI = (function () {
      */
     retryTransfer: function (transferId) {
       return this._fetch('POST', '/api/transfer/retry', { transfer_id: transferId });
+    },
+
+    /**
+     * Drop ONE row from the transfer history. Bookkeeping only — no file on
+     * disk is touched, so a received file stays where it was saved.
+     * @param {string} transferId
+     * @returns {Promise<{ok: boolean}>}
+     */
+    deleteTransferHistoryItem: function (transferId) {
+      return this._fetch('POST', '/api/transfer/history/delete', { transfer_id: transferId });
     },
 
     /**

@@ -48,8 +48,15 @@ class DialogManager:
 
     # ── Public API ──────────────────────────────────────────────────
 
-    def show(self, dialog_type: str, *, title: str = "", message: str = "",
-             timeout: float = 120.0, **kwargs) -> dict | None:
+    def show(
+        self,
+        dialog_type: str,
+        *,
+        title: str = "",
+        message: str = "",
+        timeout: float = 120.0,
+        **kwargs,
+    ) -> dict | None:
         """Push a dialog to the web UI and wait for the user's response.
 
         Returns the response dict: {"action": "accept", "value": ...}
@@ -113,8 +120,7 @@ class DialogManager:
                 with self._lock:
                     self._pending.pop(dialog_id, None)
                     self._queued_dialogs[:] = [
-                        q for q in self._queued_dialogs
-                        if q.get("dialog_id") != dialog_id
+                        q for q in self._queued_dialogs if q.get("dialog_id") != dialog_id
                     ]
                 return response_holder
             else:
@@ -123,8 +129,7 @@ class DialogManager:
                 with self._lock:
                     self._pending.pop(dialog_id, None)
                     self._queued_dialogs[:] = [
-                        q for q in self._queued_dialogs
-                        if q.get("dialog_id") != dialog_id
+                        q for q in self._queued_dialogs if q.get("dialog_id") != dialog_id
                     ]
                 logger.warning("Dialog %s timed out after %.0fs", dialog_id, timeout)
                 return None
@@ -133,21 +138,21 @@ class DialogManager:
         with self._lock:
             self._pending.pop(dialog_id, None)
             self._queued_dialogs[:] = [
-                q for q in self._queued_dialogs
-                if q.get("dialog_id") != dialog_id
+                q for q in self._queued_dialogs if q.get("dialog_id") != dialog_id
             ]
-        logger.warning("Dialog %s timed out after %.0fs (never shown)",
-                       dialog_id, timeout)
+        logger.warning("Dialog %s timed out after %.0fs (never shown)", dialog_id, timeout)
         return None
 
-    def update_progress(self, dialog_id: str, progress: float,
-                        progress_text: str = "") -> None:
+    def update_progress(self, dialog_id: str, progress: float, progress_text: str = "") -> None:
         """Update the progress bar on an open progress dialog."""
-        self._broadcast("update_dialog", {
-            "dialog_id": dialog_id,
-            "progress": progress,
-            "progress_text": progress_text,
-        })
+        self._broadcast(
+            "update_dialog",
+            {
+                "dialog_id": dialog_id,
+                "progress": progress,
+                "progress_text": progress_text,
+            },
+        )
 
     def close(self, dialog_id: str) -> None:
         """Force-close a dialog on the client."""
@@ -155,8 +160,7 @@ class DialogManager:
         with self._lock:
             self._pending.pop(dialog_id, None)
             self._queued_dialogs[:] = [
-                q for q in self._queued_dialogs
-                if q.get("dialog_id") != dialog_id
+                q for q in self._queued_dialogs if q.get("dialog_id") != dialog_id
             ]
 
     def push(self, dialog_type: str, **kwargs) -> str | None:
@@ -195,10 +199,13 @@ class DialogManager:
 
     def toast(self, message: str, duration: int = 3000) -> None:
         """Push a non-blocking toast notification to all clients."""
-        self._broadcast("toast", {
-            "message": message,
-            "duration": duration,
-        })
+        self._broadcast(
+            "toast",
+            {
+                "message": message,
+                "duration": duration,
+            },
+        )
 
     def flush_pending(self) -> None:
         """Send dialogs that were queued while no client was connected.
@@ -242,8 +249,7 @@ class DialogManager:
 
     # ── Response handler (called from API route) ────────────────────
 
-    def handle_response(self, dialog_id: str, action: str,
-                        value=None) -> bool:
+    def handle_response(self, dialog_id: str, action: str, value=None) -> bool:
         """Handle a dialog response from the client.  Returns True if the
         dialog was found and the response was stored.
         """

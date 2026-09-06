@@ -23,6 +23,9 @@ dist/
 build/
 *.egg-info/
 
+# Frontend tooling (vitest/npm dev dependencies — not shipped)
+node_modules/
+
 # Logs
 *.log
 *.log.[123]

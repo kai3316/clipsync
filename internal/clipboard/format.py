@@ -31,8 +31,8 @@ class ContentType(enum.Enum):
     RTF = 3
     IMAGE_PNG = 4
     IMAGE_EMF = 5  # Windows Enhanced Metafile (vector)
-    FILE = 6       # File paths (CF_HDROP on Windows, NSFilenamesPboardType on macOS)
-    URL = 7        # URL / URI (public.url on macOS, text/uri-list on Linux)
+    FILE = 6  # File paths (CF_HDROP on Windows, NSFilenamesPboardType on macOS)
+    URL = 7  # URL / URI (public.url on macOS, text/uri-list on Linux)
 
 
 @dataclass
@@ -63,9 +63,15 @@ class ClipboardContent:
         is preferred for paste. EMF sits between HTML and RTF because
         it preserves editable vector shapes.
         """
-        for fmt in (ContentType.HTML, ContentType.IMAGE_EMF, ContentType.RTF,
-                    ContentType.TEXT, ContentType.FILE, ContentType.URL,
-                    ContentType.IMAGE_PNG):
+        for fmt in (
+            ContentType.HTML,
+            ContentType.IMAGE_EMF,
+            ContentType.RTF,
+            ContentType.TEXT,
+            ContentType.FILE,
+            ContentType.URL,
+            ContentType.IMAGE_PNG,
+        ):
             if fmt in self.types:
                 return fmt, self.types[fmt]
         return None
@@ -74,6 +80,7 @@ class ClipboardContent:
 @dataclass
 class SyncMessage:
     """Message exchanged between peers."""
+
     content: ClipboardContent
     msg_id: str = ""
     source_device: str = ""

@@ -27,6 +27,7 @@ Transfer flow (receiver):
 """
 
 import base64
+import contextlib
 import logging
 import os
 import threading
@@ -37,34 +38,40 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
+from internal.fsutil import (
+    mask_file_name as _mask_file_name,
+)
+from internal.fsutil import (
+    mask_path as _mask_path,
+)
+from internal.fsutil import (
+    safe_remove as _safe_remove,
+)
 from internal.protocol.codec import encode_binary_chunk, encode_frame
 
 logger = logging.getLogger(__name__)
 
 
-def _mask_file_name(file_name: str) -> str:
-    """Return a privacy-safe file name: only the extension is preserved."""
-    if not file_name or file_name == "?":
-        return file_name
-    ext = os.path.splitext(file_name)[1]
-    return f"*{ext}" if ext else "*"
-
-
-def _mask_path(path: str) -> str:
-    """Return a privacy-safe path: only the parent directory name is shown."""
-    parent = os.path.basename(os.path.dirname(path))
-    return f"{parent}/***" if parent else "***"
-
-
 # ---- Constants -----------------------------------------------------------
 
-CHUNK_SIZE = 262144                    # 256 KB per chunk
-TRANSFER_TIMEOUT = 120.0               # seconds -- overall transfer deadline
-COMPLETION_WAIT_TIMEOUT = 60.0         # seconds -- wait for FILE_COMPLETE after last chunk
-RETRANSMIT_TIMEOUT = 30.0              # seconds -- receiver waits this long per retransmit round
-SPEED_TEST_CHUNKS = 20                 # number of chunks for speed test (~1.3 MB)
-MAX_HISTORY = 50                       # max completed transfers to remember
-MAX_FILE_SIZE = 2 * 1024**3            # 2 GiB -- maximum accepted file size
+CHUNK_SIZE = 262144  # 256 KB per chunk
+TRANSFER_TIMEOUT = 120.0  # seconds -- overall transfer deadline
+COMPLETION_WAIT_TIMEOUT = 60.0  # seconds -- wait for FILE_COMPLETE after last chunk
+RETRANSMIT_TIMEOUT = 30.0  # seconds -- receiver waits this long per retransmit round
+# The sender's first pass is not announced, so a receiver left with gaps has to
+# notice the silence itself: once no chunk has arrived for this long and chunks
+# are still missing, finalization runs and requests them.  Anything shorter
+# risks firing mid-pass on a slow link; the sender honours a late
+# file_chunk_ack for COMPLETION_WAIT_TIMEOUT + 3 * RETRANSMIT_TIMEOUT, so there
+# is plenty of room.
+STALL_GRACE = 5.0  # seconds -- silence with gaps => request retransmit
+# A paused transfer is exempt from the idle timeout (that is the point of
+# pausing), but an abandoned pause must not pin a thread, an fd and a .part
+# file for the life of the process.
+PAUSED_MAX_SECONDS = 1800.0  # seconds -- pause left this long is abandoned
+SPEED_TEST_CHUNKS = 20  # number of chunks for speed test (~1.3 MB)
+MAX_HISTORY = 50  # max completed transfers to remember
+MAX_FILE_SIZE = 2 * 1024**3  # 2 GiB -- maximum accepted file size
 
 # Real-time rate estimation: the transfer panel shows a live speed + ETA for
 # in-flight rows.  Both come from a short window of (monotonic_ts, bytes)
@@ -72,8 +79,8 @@ MAX_FILE_SIZE = 2 * 1024**3            # 2 GiB -- maximum accepted file size
 # accept-dialog wait, the ack round-trip and any paused stretches (the old
 # elapsed-since-start average reported e.g. 20 KB/s on a gigabit LAN simply
 # because the user clicked Accept a minute after the offer arrived).
-SPEED_WINDOW_SECONDS = 6.0             # sample span used for the estimate
-SPEED_STALE_AFTER = 4.0                # no progress this long => show 0 B/s
+SPEED_WINDOW_SECONDS = 6.0  # sample span used for the estimate
+SPEED_STALE_AFTER = 4.0  # no progress this long => show 0 B/s
 
 _MIME_BY_EXT: dict[str, str] = {
     ".txt": "text/plain",
@@ -119,17 +126,11 @@ def _guess_mime_type(file_name: str) -> str:
     return _MIME_BY_EXT.get(ext, "application/octet-stream")
 
 
-def _safe_remove(path: Path) -> None:
-    """Remove a file, suppressing any OSError."""
-    try:
-        if path.exists():
-            path.unlink()
-    except OSError:
-        pass
-
-
 _WINDOWS_RESERVED_NAMES = {
-    "CON", "PRN", "AUX", "NUL",
+    "CON",
+    "PRN",
+    "AUX",
+    "NUL",
     *(f"COM{i}" for i in range(1, 10)),
     *(f"LPT{i}" for i in range(1, 10)),
 }
@@ -165,7 +166,42 @@ def _sanitize_file_name(file_name: str) -> str:
     return name
 
 
+def _reserve_dest_name(dest_path: Path) -> Path:
+    """Atomically claim a free destination name and return the one claimed.
+
+    The old "while dest_path.exists(): bump the counter" loop was a check
+    followed by an unprotected use.  Two transfers of the same file name
+    finishing at the same moment both walked the loop, both settled on
+    ``photo (1).png``, and the second ``os.rename`` silently replaced the
+    first one's file on POSIX (or failed the whole transfer as ``error_disk``
+    on Windows, where rename onto an existing path raises).  Either way one
+    of the two files the user was sent was gone.
+
+    ``O_EXCL`` makes the winner of each name unambiguous: whoever creates the
+    placeholder owns that name, and the loser simply moves to the next
+    counter.  The caller then ``os.replace``s the payload over its own
+    placeholder, which is atomic.
+    """
+    stem = dest_path.stem
+    suffix = dest_path.suffix
+    parent = dest_path.parent
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_BINARY", 0)
+    counter = 0
+    while True:
+        candidate = dest_path if counter == 0 else parent / f"{stem} ({counter}){suffix}"
+        try:
+            fd = os.open(str(candidate), flags, 0o644)
+        except FileExistsError:
+            counter += 1
+            if counter > 999:
+                raise OSError(f"no free destination name for {dest_path.name!r}") from None
+            continue
+        os.close(fd)
+        return candidate
+
+
 # ---- FileTransferManager -------------------------------------------------
+
 
 class FileTransferManager:
     """Manages peer-to-peer file transfers over the existing transport layer.
@@ -181,8 +217,12 @@ class FileTransferManager:
 
     CHUNK_SIZE = CHUNK_SIZE
 
-    def __init__(self, device_id: str, output_dir: str | None = None,
-                 transfer_timeout: float = TRANSFER_TIMEOUT):
+    def __init__(
+        self,
+        device_id: str,
+        output_dir: str | None = None,
+        transfer_timeout: float = TRANSFER_TIMEOUT,
+    ):
         self._device_id = device_id
 
         if output_dir is None:
@@ -239,8 +279,9 @@ class FileTransferManager:
         """
         self._on_transfer_complete = callback
 
-    def _fire_complete_once(self, transfer_id: str, success: bool,
-                            cancelled: bool, status: str) -> None:
+    def _fire_complete_once(
+        self, transfer_id: str, success: bool, cancelled: bool, status: str
+    ) -> None:
         """Invoke ``_on_transfer_complete`` at most once per transfer.
 
         Both the cancel path and the send/receive thread can detect a terminal
@@ -276,7 +317,8 @@ class FileTransferManager:
         return self._received_kinds.pop(transfer_id, "file")
 
     def set_on_transfer_request(
-        self, callback: Callable[[str, str, int, str, Callable], None],
+        self,
+        callback: Callable[[str, str, int, str, Callable], None],
     ) -> None:
         """*callback(transfer_id, file_name, file_size, mime_type, send_fn)* --
         called when a remote peer wants to send a file.
@@ -290,8 +332,9 @@ class FileTransferManager:
     # Public API
     # ------------------------------------------------------------------
 
-    def send_file(self, file_path: str, broadcast_fn: Callable[[bytes], None],
-                  kind: str = "file") -> str:
+    def send_file(
+        self, file_path: str, broadcast_fn: Callable[[bytes], None], kind: str = "file"
+    ) -> str:
         """Start sending *file_path* to all connected peers.
 
         Parameters
@@ -360,7 +403,10 @@ class FileTransferManager:
 
         logger.info(
             "File transfer %s initiated: %s (%d bytes, %d chunks)",
-            transfer_id[:8], _mask_file_name(file_name), file_size, total_chunks,
+            transfer_id[:8],
+            _mask_file_name(file_name),
+            file_size,
+            total_chunks,
         )
         return transfer_id
 
@@ -391,7 +437,7 @@ class FileTransferManager:
             transfer["state"] = "receiving"
             temp_path = self._output_dir / f".{transfer_id}.part"
             try:
-                transfer["temp_fh"] = open(str(temp_path), "wb")
+                transfer["temp_fh"] = open(str(temp_path), "wb")  # noqa: SIM115
             except OSError as exc:
                 accepted_ok = False
                 logger.error("Cannot create temp file for transfer %s: %s", transfer_id[:8], exc)
@@ -419,10 +465,13 @@ class FileTransferManager:
         )
         logger.info(
             "Accepted file transfer: %s (%s)",
-            transfer_id[:8], _mask_file_name(transfer.get("file_name", "?")),
+            transfer_id[:8],
+            _mask_file_name(transfer.get("file_name", "?")),
         )
 
-    def cancel_transfer(self, transfer_id: str, broadcast_fn: Callable[[bytes], None] | None = None) -> bool:
+    def cancel_transfer(
+        self, transfer_id: str, broadcast_fn: Callable[[bytes], None] | None = None
+    ) -> bool:
         """Cancel an active transfer (incoming or outgoing).
 
         Returns True if the transfer was found and cancelled, False otherwise.
@@ -437,24 +486,24 @@ class FileTransferManager:
         if transfer.get("type") == "incoming":
             temp_fh = transfer.get("temp_fh")
             if temp_fh is not None:
-                try:
+                with contextlib.suppress(Exception):
                     temp_fh.close()
-                except Exception:
-                    pass
             temp_path = self._output_dir / f".{transfer_id}.part"
             if temp_path.exists():
-                try:
+                with contextlib.suppress(OSError):
                     temp_path.unlink()
-                except OSError:
-                    pass
 
         # Notify peer -- but only if the transfer actually started.  An
         # outgoing transfer that was never acked already ended with the
         # file_request, so there is nothing to cancel on the peer's side.
-        if broadcast_fn is not None:
+        if broadcast_fn is not None:  # noqa: SIM102
             if not (transfer.get("type") == "outgoing" and not transfer.get("acked")):
                 self._send_as_frame(
-                    {"msg_type": "file_complete", "transfer_id": transfer_id, "status": "cancelled"},
+                    {
+                        "msg_type": "file_complete",
+                        "transfer_id": transfer_id,
+                        "status": "cancelled",
+                    },
                     broadcast_fn,
                 )
 
@@ -482,10 +531,8 @@ class FileTransferManager:
             transfer = self._transfers.pop(transfer_id, None)
 
         if transfer and transfer.get("temp_fh") is not None:
-            try:
+            with contextlib.suppress(Exception):
                 transfer["temp_fh"].close()
-            except Exception:
-                pass
             _safe_remove(self._output_dir / f".{transfer_id}.part")
 
         self._send_as_frame(
@@ -519,9 +566,9 @@ class FileTransferManager:
         """
         with self._lock:
             matched = [
-                tid for tid, t in self._transfers.items()
-                if t.get("type") == "outgoing"
-                and self._transfer_targets_peer(t, peer_id)
+                tid
+                for tid, t in self._transfers.items()
+                if t.get("type") == "outgoing" and self._transfer_targets_peer(t, peer_id)
             ]
         for tid in matched:
             with self._lock:
@@ -539,7 +586,8 @@ class FileTransferManager:
                 self._transfers.pop(tid, None)
             logger.info(
                 "Failed pending transfer %s to offline peer %s",
-                tid[:8], peer_id[:12],
+                tid[:8],
+                peer_id[:12],
             )
 
     def handle_message(
@@ -588,7 +636,9 @@ class FileTransferManager:
     # ------------------------------------------------------------------
 
     @staticmethod
-    def _send_as_frame(payload_dict: dict[str, Any], send_fn: Callable[[bytes], None] | None) -> None:
+    def _send_as_frame(
+        payload_dict: dict[str, Any], send_fn: Callable[[bytes], None] | None
+    ) -> None:
         """JSON-encode *payload_dict*, wrap it in a binary frame, and call *send_fn*.
 
         If *send_fn* is ``None`` the frame is dropped (e.g. a web-triggered
@@ -628,7 +678,7 @@ class FileTransferManager:
         except Exception:
             pass
         try:
-            for cell in (getattr(send_fn, "__closure__", None) or ()):
+            for cell in getattr(send_fn, "__closure__", None) or ():
                 val = cell.cell_contents
                 if isinstance(val, str) and len(val) >= 8:
                     return val
@@ -684,8 +734,9 @@ class FileTransferManager:
     # Message handlers (receiver side)
     # ------------------------------------------------------------------
 
-    def _handle_file_request(self, payload: dict, send_fn: Callable[[bytes], None],
-                             sender_device_id: str = "") -> None:
+    def _handle_file_request(
+        self, payload: dict, send_fn: Callable[[bytes], None], sender_device_id: str = ""
+    ) -> None:
         transfer_id = str(payload.get("transfer_id", ""))
         raw_name = payload.get("file_name")
         if not isinstance(raw_name, str) or not raw_name:
@@ -702,31 +753,40 @@ class FileTransferManager:
         # message handler or slip an absurd file into the pipeline.
         raw_size = payload.get("file_size", 0)
         if isinstance(raw_size, bool) or not isinstance(raw_size, int):
-            logger.warning("Invalid file_size in request for transfer %s: %r", transfer_id[:8], raw_size)
+            logger.warning(
+                "Invalid file_size in request for transfer %s: %r", transfer_id[:8], raw_size
+            )
             self._send_as_frame({"msg_type": "file_reject", "transfer_id": transfer_id}, send_fn)
             return
         file_size = raw_size
         if file_size < 0 or file_size > MAX_FILE_SIZE:
             logger.warning(
                 "Rejecting transfer %s: file_size %r outside allowed range",
-                transfer_id[:8], file_size,
+                transfer_id[:8],
+                file_size,
             )
             self._send_as_frame({"msg_type": "file_reject", "transfer_id": transfer_id}, send_fn)
             return
 
         logger.info(
             "Incoming file transfer request: %s (%s, %d bytes)",
-            _mask_file_name(file_name), transfer_id[:8], file_size,
+            _mask_file_name(file_name),
+            transfer_id[:8],
+            file_size,
         )
 
-        total_chunks = max((file_size + self.CHUNK_SIZE - 1) // self.CHUNK_SIZE, 1) if file_size > 0 else 1
+        total_chunks = (
+            max((file_size + self.CHUNK_SIZE - 1) // self.CHUNK_SIZE, 1) if file_size > 0 else 1
+        )
 
         now = time.time()
         with self._lock:
             existing = self._transfers.get(transfer_id)
-            if existing is not None and existing.get("type") == "incoming" \
-                    and existing.get("state") in (
-                        "pending", "receiving", "awaiting_retransmit"):
+            if (
+                existing is not None
+                and existing.get("type") == "incoming"
+                and existing.get("state") in ("pending", "receiving", "awaiting_retransmit")
+            ):
                 # Duplicate/replayed request for a transfer that is already
                 # registered and alive (both legs of a bidirectional-connect
                 # race can deliver the same broadcast twice).  Re-registering
@@ -767,8 +827,9 @@ class FileTransferManager:
             logger.info("Auto-accepting transfer %s (no UI callback registered)", transfer_id[:8])
             self.accept_transfer(transfer_id, send_fn)
 
-    def _handle_file_chunk(self, payload: dict, send_fn: Callable[[bytes], None],
-                           sender_device_id: str = "") -> None:
+    def _handle_file_chunk(
+        self, payload: dict, send_fn: Callable[[bytes], None], sender_device_id: str = ""
+    ) -> None:
         transfer_id = str(payload.get("transfer_id", ""))
         chunk_index = payload.get("chunk_index", 0)
         total_chunks = payload.get("total_chunks", 0)
@@ -791,18 +852,20 @@ class FileTransferManager:
             # device that learned a transfer_id could inject bytes into a
             # clipboard download it doesn't own.
             expected_peer = transfer.get("peer_id")
-            if (expected_peer and sender_device_id
-                    and sender_device_id != expected_peer):
+            if expected_peer and sender_device_id and sender_device_id != expected_peer:
                 logger.warning(
                     "Chunk for transfer %s from %s, expected %s — dropping",
-                    transfer_id[:8], sender_device_id[:12], expected_peer[:12],
+                    transfer_id[:8],
+                    sender_device_id[:12],
+                    expected_peer[:12],
                 )
                 return
             state = transfer.get("state")
             if state not in ("receiving", "awaiting_retransmit"):
                 logger.debug(
                     "Chunk for transfer in state %s: %s",
-                    state, transfer_id[:8],
+                    state,
+                    transfer_id[:8],
                 )
                 return
             # Receiver-side pause: drop chunk; sender will retransmit on resume
@@ -818,7 +881,9 @@ class FileTransferManager:
             try:
                 chunk_data = base64.b64decode(b64_data)
             except Exception:
-                logger.warning("Invalid base64 in chunk %d for transfer %s", chunk_index, transfer_id[:8])
+                logger.warning(
+                    "Invalid base64 in chunk %d for transfer %s", chunk_index, transfer_id[:8]
+                )
                 return
 
         with self._lock:
@@ -834,7 +899,9 @@ class FileTransferManager:
             if chunk_index >= total:
                 logger.warning(
                     "Chunk index %d out of range for transfer %s (total %d)",
-                    chunk_index, transfer_id[:8], total,
+                    chunk_index,
+                    transfer_id[:8],
+                    total,
                 )
                 return
 
@@ -854,28 +921,95 @@ class FileTransferManager:
                         # Keep the chunk marked missing so it is re-requested.
                         logger.error(
                             "Failed writing chunk %d for transfer %s: %s",
-                            chunk_index, transfer_id[:8], exc,
+                            chunk_index,
+                            transfer_id[:8],
+                            exc,
                         )
                 else:
                     logger.warning(
                         "No open temp file for chunk %d of transfer %s",
-                        chunk_index, transfer_id[:8],
+                        chunk_index,
+                        transfer_id[:8],
                     )
                 transfer["received_chunks"] = total - len(missing)
 
             transfer["_last_activity"] = time.time()
             progress = transfer["received_chunks"] / max(total, 1)
-            # Trigger finalization once all but at most one chunk have arrived.
-            # This fires both when the LAST chunk is still missing (in flight)
-            # and when a MIDDLE chunk is missing (gap) -- the retransmit path
-            # requests anything that did not arrive.
-            is_last = transfer["received_chunks"] >= max(total - 1, 0)
+            # Finalize only once EVERY chunk has arrived.  A transfer still
+            # holding gaps is driven by the stall watchdog instead.  The old
+            # "all but at most one" rule had two faults: a transfer missing two
+            # or more chunks never reached it, so nothing ever emitted
+            # file_chunk_ack and the bytes were dropped at the idle timeout;
+            # and every healthy transfer tripped it on the second-to-last
+            # chunk, burning a retransmit round on the last chunk while it was
+            # still in flight.
+            is_last = transfer["received_chunks"] >= total
+            arm_stall = False
+            if not is_last and not transfer.get("_stall_armed"):
+                transfer["_stall_armed"] = True
+                arm_stall = True
+
+        if arm_stall:
+            threading.Thread(
+                target=self._stall_watchdog,
+                args=(transfer_id, total, send_fn),
+                daemon=True,
+                name=f"stall-watch-{transfer_id[:8]}",
+            ).start()
 
         if self._on_transfer_progress is not None:
             self._on_transfer_progress(transfer_id, progress)
 
         if is_last:
             self._finalize_received_file(transfer_id, transfer, total, send_fn)
+
+    def _stall_watchdog(
+        self,
+        transfer_id: str,
+        total_chunks: int,
+        send_fn: Callable[[bytes], None],
+    ) -> None:
+        """Request retransmission once the sender goes quiet with gaps left.
+
+        The sender does not announce the end of its first pass, so a receiver
+        holding gaps has to notice the silence itself -- ``file_chunk_ack`` is
+        only ever emitted from :meth:`_finalize_received_file`.  Runs for the
+        life of one incoming transfer and exits as soon as every chunk has
+        arrived, the transfer is removed, or finalization takes over.
+        """
+        # Poll at most once a second, but never coarser than the grace itself
+        # (tests shrink STALL_GRACE and would otherwise wait a whole tick).
+        tick = min(1.0, max(STALL_GRACE / 5.0, 0.02))
+        while True:
+            time.sleep(tick)
+            with self._lock:
+                transfer = self._transfers.get(transfer_id)
+                if transfer is None:
+                    return
+                if transfer.get("state") != "receiving":
+                    # awaiting_retransmit -> _retransmit_wait owns it now.
+                    return
+                missing = transfer.get("chunks") or set()
+                if not missing:
+                    return  # complete; the chunk path finalizes
+                if transfer.get("paused"):
+                    continue  # a pause is not a stall
+                idle = time.time() - transfer.get("_last_activity", 0.0)
+                if idle < STALL_GRACE:
+                    continue
+                total = transfer.get("total_chunks", total_chunks)
+                n_missing = len(missing)
+
+            logger.info(
+                "Transfer %s: sender quiet for %.0fs with %d/%d chunks missing "
+                "-- requesting retransmit",
+                transfer_id[:8],
+                idle,
+                n_missing,
+                total,
+            )
+            self._finalize_received_file(transfer_id, transfer, total, send_fn)
+            return
 
     def _finalize_received_file(
         self,
@@ -896,7 +1030,11 @@ class FileTransferManager:
             # instead of vanishing silently.
             self._add_to_history(transfer, False, status="error_internal")
             self._send_as_frame(
-                {"msg_type": "file_complete", "transfer_id": transfer_id, "status": "error_internal"},
+                {
+                    "msg_type": "file_complete",
+                    "transfer_id": transfer_id,
+                    "status": "error_internal",
+                },
                 send_fn,
             )
             if self._on_transfer_complete:
@@ -921,11 +1059,36 @@ class FileTransferManager:
             missing_chunks = sorted(transfer.get("chunks") or set())
 
             if missing_chunks:
+                # A paused transfer must not consume a retransmit round: the
+                # sender is not sending, so asking again is pointless and
+                # counting the round would let a long pause delete the .part
+                # for a transfer that had only a chunk or two left.  Re-arm the
+                # wait thread (its deadline also stalls while paused) and leave
+                # _ack_rounds untouched.
+                with self._lock:
+                    fresh = self._transfers.get(transfer_id)
+                    if fresh is None:
+                        return
+                    is_paused = bool(fresh.get("paused"))
+                    if is_paused:
+                        fresh["_send_fn"] = send_fn
+                        fresh["_finalizing"] = False
+                if is_paused:
+                    threading.Thread(
+                        target=self._retransmit_wait,
+                        args=(transfer_id, total_chunks),
+                        daemon=True,
+                        name=f"retransmit-wait-{transfer_id[:8]}",
+                    ).start()
+                    return
+
                 ack_round = transfer.get("_ack_rounds", 0)
                 if ack_round >= 3:
                     logger.error(
                         "Missing %d chunks after %d ACK rounds for transfer %s -- giving up",
-                        len(missing_chunks), ack_round, transfer_id[:8],
+                        len(missing_chunks),
+                        ack_round,
+                        transfer_id[:8],
                     )
                     temp_fh.close()
                     transfer["temp_fh"] = None
@@ -935,16 +1098,25 @@ class FileTransferManager:
                     # Record the failure so it shows up in the transfers history.
                     self._add_to_history(transfer, False, status="error_missing_chunks")
                     self._send_as_frame(
-                        {"msg_type": "file_complete", "transfer_id": transfer_id, "status": "error_missing_chunks"},
+                        {
+                            "msg_type": "file_complete",
+                            "transfer_id": transfer_id,
+                            "status": "error_missing_chunks",
+                        },
                         send_fn,
                     )
                     if self._on_transfer_complete:
-                        self._on_transfer_complete(transfer_id, False, False, "error_missing_chunks")
+                        self._on_transfer_complete(
+                            transfer_id, False, False, "error_missing_chunks"
+                        )
                     return
 
                 logger.info(
                     "Transfer %s: %d/%d chunks missing, requesting retransmit (round %d)",
-                    transfer_id[:8], len(missing_chunks), total_chunks, ack_round + 1,
+                    transfer_id[:8],
+                    len(missing_chunks),
+                    total_chunks,
+                    ack_round + 1,
                 )
                 transfer["_ack_rounds"] = ack_round + 1
                 transfer["state"] = "awaiting_retransmit"
@@ -985,7 +1157,10 @@ class FileTransferManager:
             if actual_size != expected_size or received_bytes != expected_size:
                 logger.error(
                     "Size mismatch for transfer %s: expected %d, got %d (received_bytes=%d)",
-                    transfer_id[:8], expected_size, actual_size, received_bytes,
+                    transfer_id[:8],
+                    expected_size,
+                    actual_size,
+                    received_bytes,
                 )
                 _safe_remove(temp_path)
                 with self._lock:
@@ -1007,28 +1182,35 @@ class FileTransferManager:
             # Move to final destination, avoiding name collisions
             dest_path = self._output_dir / _sanitize_file_name(file_name)
             if dest_path.resolve().parent != self._output_dir.resolve():
-                logger.error("Path traversal blocked for transfer %s: %s", transfer_id[:8], file_name)
+                logger.error(
+                    "Path traversal blocked for transfer %s: %s", transfer_id[:8], file_name
+                )
                 _safe_remove(temp_path)
                 with self._lock:
                     self._transfers.pop(transfer_id, None)
                 # Record the failure so it shows up in the transfers history.
                 self._add_to_history(transfer, False, status="error_security")
                 self._send_as_frame(
-                    {"msg_type": "file_complete", "transfer_id": transfer_id, "status": "error_security"},
+                    {
+                        "msg_type": "file_complete",
+                        "transfer_id": transfer_id,
+                        "status": "error_security",
+                    },
                     send_fn,
                 )
                 if self._on_transfer_complete:
                     self._on_transfer_complete(transfer_id, False, False, "error_security")
                 return
-            if dest_path.exists():
-                stem = dest_path.stem
-                suffix = dest_path.suffix
-                counter = 1
-                while dest_path.exists():
-                    dest_path = self._output_dir / f"{stem} ({counter}){suffix}"
-                    counter += 1
-
-            os.rename(str(temp_path), str(dest_path))
+            # Claim the name atomically, then move the payload onto our own
+            # placeholder (see _reserve_dest_name).
+            dest_path = _reserve_dest_name(dest_path)
+            try:
+                os.replace(str(temp_path), str(dest_path))
+            except (OSError, ValueError):
+                # Never leave the zero-byte placeholder behind: it would show
+                # up in the user's folder as an empty "received" file.
+                _safe_remove(dest_path)
+                raise
 
             with self._lock:
                 self._transfers.pop(transfer_id, None)
@@ -1038,7 +1220,11 @@ class FileTransferManager:
                 send_fn,
             )
             saved = str(dest_path)
-            logger.info("File received successfully: %s -> %s", _mask_file_name(file_name), _mask_path(saved))
+            logger.info(
+                "File received successfully: %s -> %s",
+                _mask_file_name(file_name),
+                _mask_path(saved),
+            )
             self._add_to_history(transfer, True, saved_path=saved, status="success")
 
             if self._on_file_received is not None:
@@ -1050,10 +1236,8 @@ class FileTransferManager:
         except (OSError, ValueError) as exc:
             logger.error("I/O error finalizing transfer %s: %s", transfer_id[:8], exc)
             if temp_fh is not None and not temp_fh.closed:
-                try:
+                with contextlib.suppress(Exception):
                     temp_fh.close()
-                except Exception:
-                    pass
             _safe_remove(temp_path)
             with self._lock:
                 self._transfers.pop(transfer_id, None)
@@ -1073,6 +1257,11 @@ class FileTransferManager:
         when chunks are missing.  Waits up to 30 s for all chunks to arrive,
         then re-calls finalization (which will send another ``file_chunk_ack``
         if chunks are still missing, up to 3 rounds).
+
+        A pause does not consume the round: the deadline is pushed out for as
+        long as the transfer stays paused, so a user who pauses for a few
+        minutes does not come back to a transfer that burned all three rounds
+        (and deleted the .part) while nothing was being sent.
         """
         # RETRANSMIT_TIMEOUT is the module-level constant (same name).
         deadline = time.time() + RETRANSMIT_TIMEOUT
@@ -1085,6 +1274,8 @@ class FileTransferManager:
                 if transfer.get("received_chunks", 0) >= total_chunks:
                     send_fn = transfer.get("_send_fn")
                     break
+                if transfer.get("paused"):
+                    deadline = time.time() + RETRANSMIT_TIMEOUT
             time.sleep(0.5)
         else:
             # Timeout — check one final time
@@ -1118,7 +1309,8 @@ class FileTransferManager:
             transfer["acked"] = True
 
         logger.info(
-            "File transfer %s acknowledged by peer -- starting chunk send", transfer_id[:8],
+            "File transfer %s acknowledged by peer -- starting chunk send",
+            transfer_id[:8],
         )
 
         stored_send_fn = transfer.get("_send_fn", send_fn)
@@ -1140,7 +1332,8 @@ class FileTransferManager:
         if transfer is not None and transfer.get("type") == "outgoing":
             logger.info(
                 "File transfer %s rejected by peer (%s)",
-                transfer_id[:8], _mask_file_name(transfer.get("file_name", "?")),
+                transfer_id[:8],
+                _mask_file_name(transfer.get("file_name", "?")),
             )
             # Record the failure so it shows up in the transfers history
             # (the web panel offers Retry on failed outgoing rows).
@@ -1162,10 +1355,8 @@ class FileTransferManager:
             # disk — and on Windows the open handle even blocks deletion).
             temp_fh = transfer.get("temp_fh")
             if temp_fh is not None:
-                try:
+                with contextlib.suppress(Exception):
                     temp_fh.close()
-                except Exception:
-                    pass
             _safe_remove(self._output_dir / f".{transfer_id}.part")
 
         if transfer is not None and transfer.get("type") == "outgoing":
@@ -1195,7 +1386,8 @@ class FileTransferManager:
         transfer["_retransmit_queue"] = missing
         logger.info(
             "Transfer %s: receiver requests %d missing chunks",
-            transfer_id[:8], len(missing),
+            transfer_id[:8],
+            len(missing),
         )
 
     def _handle_file_pause(self, payload: dict, _send_fn=None) -> None:
@@ -1205,6 +1397,7 @@ class FileTransferManager:
             transfer = self._transfers.get(transfer_id)
             if transfer:
                 transfer["paused"] = True
+                transfer["_paused_at"] = time.time()
                 transfer["_last_activity"] = time.time()  # paused transfers stay alive
                 logger.info("Transfer %s paused by receiver", transfer_id[:8])
 
@@ -1215,6 +1408,7 @@ class FileTransferManager:
             transfer = self._transfers.get(transfer_id)
             if transfer:
                 transfer["paused"] = False
+                transfer["_paused_at"] = None
                 transfer["_last_activity"] = time.time()
                 logger.info("Transfer %s resumed by receiver", transfer_id[:8])
 
@@ -1229,11 +1423,13 @@ class FileTransferManager:
             if transfer is None:
                 return False
             transfer["paused"] = True
+            transfer["_paused_at"] = time.time()
             transfer["_last_activity"] = time.time()  # paused transfers stay alive
             is_outgoing = transfer.get("type") == "outgoing"
         # Tell the other side to stop sending (only meaningful for receiver→sender)
         self._send_as_frame(
-            {"msg_type": "file_pause", "transfer_id": transfer_id}, send_fn,
+            {"msg_type": "file_pause", "transfer_id": transfer_id},
+            send_fn,
         )
         logger.info("Transfer %s paused (outgoing=%s)", transfer_id[:8], is_outgoing)
         return True
@@ -1249,11 +1445,34 @@ class FileTransferManager:
             if transfer is None:
                 return False
             transfer["paused"] = False
+            transfer["_paused_at"] = None
             transfer["_last_activity"] = time.time()
             is_outgoing = transfer.get("type") == "outgoing"
+            # Chunks that arrived while we were paused were dropped on the
+            # floor (see _handle_file_chunk), and the sender's first pass has
+            # already moved past those indices -- it only resends what a
+            # file_chunk_ack asks for.  Ask now rather than waiting for the
+            # stall watchdog, so the gap is closed while the sender is still
+            # inside its completion wait.
+            missing = sorted(transfer.get("chunks") or ()) if not is_outgoing else []
         self._send_as_frame(
-            {"msg_type": "file_resume", "transfer_id": transfer_id}, send_fn,
+            {"msg_type": "file_resume", "transfer_id": transfer_id},
+            send_fn,
         )
+        if missing:
+            logger.info(
+                "Transfer %s resumed with %d chunks missing -- re-requesting",
+                transfer_id[:8],
+                len(missing),
+            )
+            self._send_as_frame(
+                {
+                    "msg_type": "file_chunk_ack",
+                    "transfer_id": transfer_id,
+                    "missing_chunks": missing,
+                },
+                send_fn,
+            )
         logger.info("Transfer %s resumed (outgoing=%s)", transfer_id[:8], is_outgoing)
         return True
 
@@ -1273,7 +1492,9 @@ class FileTransferManager:
 
         logger.info(
             "Sending %d chunks for transfer %s (%s)",
-            total_chunks, transfer_id[:8], _mask_file_name(file_name),
+            total_chunks,
+            transfer_id[:8],
+            _mask_file_name(file_name),
         )
 
         # Mark state so get_transfers() shows progress / speed / ETA
@@ -1282,7 +1503,7 @@ class FileTransferManager:
             if transfer:
                 transfer["state"] = "sending"
 
-        MAX_RETRANSMIT_ROUNDS = 3
+        MAX_RETRANSMIT_ROUNDS = 3  # noqa: N806
 
         def _send_one_chunk(fh, chunk_index: int, total: int, *, seek: bool = True) -> None:
             """Read + encode + send a single chunk from the open file handle.
@@ -1317,7 +1538,8 @@ class FileTransferManager:
 
                     if cancelled:
                         logger.info(
-                            "Transfer %s cancelled mid-send", transfer_id[:8],
+                            "Transfer %s cancelled mid-send",
+                            transfer_id[:8],
                         )
                         # Fire the terminal callback OUTSIDE the lock:
                         # _fire_complete_once re-acquires self._lock, and
@@ -1357,7 +1579,9 @@ class FileTransferManager:
 
                     logger.info(
                         "Transfer %s retransmit round %d: %d missing chunks",
-                        transfer_id[:8], round_num + 1, len(missing),
+                        transfer_id[:8],
+                        round_num + 1,
+                        len(missing),
                     )
 
                     for chunk_index in missing:
@@ -1380,7 +1604,9 @@ class FileTransferManager:
         except Exception as exc:
             logger.error(
                 "Failed sending chunks for transfer %s (%s): %s",
-                transfer_id[:8], file_name, exc,
+                transfer_id[:8],
+                file_name,
+                exc,
             )
             # Fire while the transfer is still registered so the once-guard
             # can stamp _complete_fired; a concurrent fail_peer_transfers() or
@@ -1395,7 +1621,8 @@ class FileTransferManager:
 
         logger.info(
             "All %d chunks sent for transfer %s -- waiting for FILE_COMPLETE",
-            total_chunks, transfer_id[:8],
+            total_chunks,
+            transfer_id[:8],
         )
 
         # Every chunk is on the wire, but the transfer is NOT done from the
@@ -1430,22 +1657,23 @@ class FileTransferManager:
         # made the sender give up ~30s before the receiver's last retransmit
         # round on a lossy link -- a one-sided false failure.  Wait out the
         # full retransmit window so both sides agree on the outcome.
-        deadline = time.time() + COMPLETION_WAIT_TIMEOUT + MAX_RETRANSMIT_ROUNDS * RETRANSMIT_TIMEOUT
+        deadline = (
+            time.time() + COMPLETION_WAIT_TIMEOUT + MAX_RETRANSMIT_ROUNDS * RETRANSMIT_TIMEOUT
+        )
         late_rounds = 0
         while time.time() < deadline:
             with self._lock:
                 if transfer_id not in self._transfers:
                     return
                 transfer = self._transfers.get(transfer_id)
-                missing = (
-                    transfer.pop("_retransmit_queue", None)
-                    if transfer is not None else None
-                )
+                missing = transfer.pop("_retransmit_queue", None) if transfer is not None else None
             if missing and late_rounds < MAX_RETRANSMIT_ROUNDS:
                 late_rounds += 1
                 logger.info(
                     "Transfer %s late retransmit round %d: %d missing chunks",
-                    transfer_id[:8], late_rounds, len(missing),
+                    transfer_id[:8],
+                    late_rounds,
+                    len(missing),
                 )
                 # Reopen the file: the original handle closed with the send
                 # block above, and reading from it raises ValueError, which
@@ -1470,7 +1698,8 @@ class FileTransferManager:
                 except OSError as exc:
                     logger.error(
                         "Transfer %s: cannot re-read file for late retransmit: %s",
-                        transfer_id[:8], exc,
+                        transfer_id[:8],
+                        exc,
                     )
                     break  # fall through to the FILE_COMPLETE timeout path
             time.sleep(0.5)
@@ -1479,7 +1708,8 @@ class FileTransferManager:
             stale = self._transfers.pop(transfer_id, None)
         if stale is not None:
             logger.warning(
-                "File transfer %s timed out waiting for FILE_COMPLETE", transfer_id[:8],
+                "File transfer %s timed out waiting for FILE_COMPLETE",
+                transfer_id[:8],
             )
             # Record the failure so it shows up in the transfers history.
             self._add_to_history(stale, False, status="error_timeout")
@@ -1502,11 +1732,7 @@ class FileTransferManager:
         """
         with self._lock:
             t = self._transfers.get(transfer_id)
-            return (
-                t is not None
-                and t.get("type") == "incoming"
-                and t.get("state") == "pending"
-            )
+            return t is not None and t.get("type") == "incoming" and t.get("state") == "pending"
 
     def get_transfers(self) -> list[dict]:
         """Return a snapshot of active transfers for UI display.
@@ -1538,18 +1764,20 @@ class FileTransferManager:
                 speed = FileTransferManager._instant_speed(t)
                 remaining = max(file_size - bytes_done, 0)
                 eta = remaining / speed if speed > 0 and remaining > 0 else 0.0
-                result.append({
-                    "transfer_id": tid,
-                    "file_name": t.get("file_name", "?"),
-                    "file_size": file_size,
-                    "direction": direction,
-                    "state": state,
-                    "status": t.get("status", ""),
-                    "progress": min(progress, 1.0),
-                    "speed_bytes_per_sec": speed,
-                    "eta_seconds": eta,
-                    "paused": t.get("paused", False),
-                })
+                result.append(
+                    {
+                        "transfer_id": tid,
+                        "file_name": t.get("file_name", "?"),
+                        "file_size": file_size,
+                        "direction": direction,
+                        "state": state,
+                        "status": t.get("status", ""),
+                        "progress": min(progress, 1.0),
+                        "speed_bytes_per_sec": speed,
+                        "eta_seconds": eta,
+                        "paused": t.get("paused", False),
+                    }
+                )
         return result
 
     def get_history(self) -> list[dict]:
@@ -1571,6 +1799,23 @@ class FileTransferManager:
             except ValueError:
                 return False
 
+    def delete_history_by_id(self, transfer_id: str) -> bool:
+        """Remove a single history entry by its transfer_id.
+
+        The by-object ``delete_history_item`` matches on dict equality, which
+        only works for a caller holding the very entry from ``get_history``.
+        Remote callers (the web UI's transfer-history context menu) only carry
+        the id, so resolve it here under the lock.  Returns True if deleted.
+        """
+        if not transfer_id:
+            return False
+        with self._lock:
+            for i, entry in enumerate(self._history):
+                if entry.get("transfer_id") == transfer_id:
+                    del self._history[i]
+                    return True
+        return False
+
     def get_speed_test(self) -> dict | None:
         """Return current speed test state, if any."""
         with self._lock:
@@ -1585,17 +1830,24 @@ class FileTransferManager:
         the transfer_id so the caller can broadcast a refresh to web clients.
         """
         transfer_id = uuid.uuid4().hex
-        self._add_to_history({
-            "transfer_id": transfer_id,
-            "file_name": file_name,
-            "file_size": file_size,
-            "type": "incoming",
-            "state": "completed",
-            "file_path": saved_path,
-        }, True, saved_path=saved_path, status="success")
+        self._add_to_history(
+            {
+                "transfer_id": transfer_id,
+                "file_name": file_name,
+                "file_size": file_size,
+                "type": "incoming",
+                "state": "completed",
+                "file_path": saved_path,
+            },
+            True,
+            saved_path=saved_path,
+            status="success",
+        )
         return transfer_id
 
-    def _add_to_history(self, transfer: dict, success: bool, saved_path: str = "", status: str = ""):
+    def _add_to_history(
+        self, transfer: dict, success: bool, saved_path: str = "", status: str = ""
+    ):
         """Record a completed transfer in the history list.
 
         *status* is a stable machine-readable reason (``"success"``,
@@ -1636,8 +1888,9 @@ class FileTransferManager:
     # Speed Test
     # ------------------------------------------------------------------
 
-    def start_speed_test(self, broadcast_fn: Callable[[bytes], None],
-                         has_peers_fn: Callable[[], bool] | None = None) -> str | None:
+    def start_speed_test(
+        self, broadcast_fn: Callable[[bytes], None], has_peers_fn: Callable[[], bool] | None = None
+    ) -> str | None:
         """Start a speed test to measure network throughput between peers.
 
         Sends a burst of dummy data and measures the time until the peer
@@ -1684,6 +1937,7 @@ class FileTransferManager:
 
     def _run_speed_test(self, test_id: str, broadcast_fn: Callable[[bytes], None]):
         import secrets as _secrets
+
         dummy = base64.b64encode(_secrets.token_bytes(CHUNK_SIZE)).decode("ascii")
         total_bytes = SPEED_TEST_CHUNKS * CHUNK_SIZE
         start = time.time()
@@ -1713,7 +1967,7 @@ class FileTransferManager:
         # old 0.002s/chunk sleep floor also capped the report at ~125 MB/s
         # regardless of link speed, so it is gone.  Time out so a dropped peer
         # can't hang the thread.
-        SPEED_TEST_TIMEOUT = 30.0
+        SPEED_TEST_TIMEOUT = 30.0  # noqa: N806
         acknowledged = False
         deadline = time.time() + SPEED_TEST_TIMEOUT
         while time.time() < deadline:
@@ -1730,7 +1984,8 @@ class FileTransferManager:
             mbps = (total_bytes / (1024 * 1024)) / elapsed if elapsed > 0 else 0.0
         else:
             logger.warning(
-                "Speed test %s timed out waiting for peer echo", test_id[:8],
+                "Speed test %s timed out waiting for peer echo",
+                test_id[:8],
             )
             mbps = 0.0
         with self._lock:
@@ -1758,7 +2013,7 @@ class FileTransferManager:
         """Sender side: peer acknowledged speed test."""
         test_id = payload.get("test_id", "")
         with self._lock:
-            if self._speed_test and self._speed_test.get("test_id") == test_id:
+            if self._speed_test and self._speed_test.get("test_id") == test_id:  # noqa: SIM102
                 if self._speed_test["state"] == "sending":
                     # Mark as done; the sending thread will finalize
                     self._speed_test["state"] = "acknowledged"
@@ -1774,14 +2029,26 @@ class FileTransferManager:
         actively progressing transfers are not killed mid-flight.  Call
         this periodically (e.g. every 30 s) to prevent memory leaks from
         abandoned transfers. Partial temp files are deleted.
+
+        A paused transfer is exempt from the idle timeout -- but only up to
+        ``PAUSED_MAX_SECONDS``.  Without that cap a pause the user never
+        resumed pinned the transfer dict, an open temp handle and a
+        multi-gigabyte .part file for the life of the process (and on Windows
+        the open handle blocks deleting the file by hand), while the sender's
+        thread spun in its pause loop forever.
         """
         now = time.time()
         with self._lock:
-            stale_ids = [
-                tid for tid, t in self._transfers.items()
-                if not t.get("paused")
-                and now - t.get("_last_activity", t.get("start_time", 0)) > self._transfer_timeout
-            ]
+            stale_ids = []
+            for tid, t in self._transfers.items():
+                if t.get("paused"):
+                    paused_at = t.get("_paused_at")
+                    if paused_at is not None and now - paused_at > PAUSED_MAX_SECONDS:
+                        stale_ids.append(tid)
+                    continue
+                last = t.get("_last_activity", t.get("start_time", 0))
+                if now - last > self._transfer_timeout:
+                    stale_ids.append(tid)
 
         for tid in stale_ids:
             with self._lock:
@@ -1790,15 +2057,14 @@ class FileTransferManager:
                 continue
 
             if transfer.get("temp_fh") is not None:
-                try:
+                with contextlib.suppress(Exception):
                     transfer["temp_fh"].close()
-                except Exception:
-                    pass
             _safe_remove(self._output_dir / f".{tid}.part")
 
             logger.info(
                 "Cleaned up stale transfer %s (%s)",
-                tid[:8], _mask_file_name(transfer.get("file_name", "?")),
+                tid[:8],
+                _mask_file_name(transfer.get("file_name", "?")),
             )
             # Record the failure so it shows up in the transfers history
             # instead of vanishing silently from the Active list.

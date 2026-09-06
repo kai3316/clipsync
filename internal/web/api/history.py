@@ -27,7 +27,7 @@ def get_history(history, cfg, limit_str=None, offset_str=None):
     """Return clipboard history list with device name mapping.
 
     Args:
-        history: ClipboardHistory or ClipboardHistoryDB instance.
+        history: ClipboardHistoryDB instance.
         cfg: Config instance.
         limit_str: Optional string from ``?limit=N`` query param.
                    Overrides cfg.web_history_limit when present.
@@ -71,21 +71,23 @@ def get_history(history, cfg, limit_str=None, offset_str=None):
         # it can be large (images, rich text) and is only needed when the
         # user wants to copy/use a specific item.  Clients fetch the full
         # content via GET /api/history/item when required.
-        result.append({
-            "timestamp": entry.get("timestamp"),
-            "content_type": entry.get("content_type", "TEXT"),
-            # Wire-level image format hint ("png"/"bmp"/"tiff"); clients
-            # use it to pick the right MIME when rendering IMAGE entries.
-            "image_fmt": entry.get("image_fmt", ""),
-            "text_preview": entry.get("text_preview", ""),
-            "source_device": sid,
-            "source_name": _source_label(sid, device_names, cfg),
-            "source_app": entry.get("source_app", ""),
-            "source_title": entry.get("source_title", ""),
-            "entry_id": entry.get("entry_id"),
-            "pinned": entry.get("pinned", False),
-            "paste_count": entry.get("paste_count", 0),
-        })
+        result.append(
+            {
+                "timestamp": entry.get("timestamp"),
+                "content_type": entry.get("content_type", "TEXT"),
+                # Wire-level image format hint ("png"/"bmp"/"tiff"); clients
+                # use it to pick the right MIME when rendering IMAGE entries.
+                "image_fmt": entry.get("image_fmt", ""),
+                "text_preview": entry.get("text_preview", ""),
+                "source_device": sid,
+                "source_name": _source_label(sid, device_names, cfg),
+                "source_app": entry.get("source_app", ""),
+                "source_title": entry.get("source_title", ""),
+                "entry_id": entry.get("entry_id"),
+                "pinned": entry.get("pinned", False),
+                "paste_count": entry.get("paste_count", 0),
+            }
+        )
     return {"items": result, "total": total, "offset": offset, "limit": limit}, 200
 
 
@@ -147,15 +149,30 @@ def push_text(body, cfg, sync_mgr, history):
     from internal.clipboard.format import ClipboardContent, ContentType, SyncMessage
 
     tee_bytes = text.encode("utf-8")
-    WEB_SOURCE = "__web__"
+    WEB_SOURCE = "__web__"  # noqa: N806
     content = ClipboardContent(
         types={ContentType.TEXT: tee_bytes},
         source_device=WEB_SOURCE,
     )
 
     from internal.clipboard.platform import create_writer
+
     writer = create_writer()
-    writer.write(content)
+    # write() returns False when the platform clipboard refused the write
+    # (Win32 OpenClipboard held by another app, no xclip/wl-copy on Linux,
+    # pbcopy failure on macOS).  Reporting {"ok": true} there told the user
+    # the text was on their clipboard when it was not -- and paste silently
+    # produced whatever was there before.  Bail out instead of also
+    # broadcasting: peers would receive text the host itself never got, and
+    # the user's natural retry would then send it twice.
+    try:
+        wrote = writer.write(content)
+    except Exception:
+        logger.debug("Web push clipboard write raised", exc_info=True)
+        wrote = False
+    if not wrote:
+        logger.warning("Web push: clipboard write failed (%d chars)", len(text))
+        return {"ok": False, "error": "clipboard write failed"}, 500
 
     # Absorb the monitor event from this write so the pushed text is not
     # captured again and re-broadcast as a duplicate (on_send below sends
@@ -173,7 +190,10 @@ def push_text(body, cfg, sync_mgr, history):
         msg_id=uuid.uuid4().hex,
         source_device=cfg.device_id,
     )
-    if sync_mgr.on_send:
+    # sync_mgr is None when sync is off (guarded at the suppress_for call
+    # above); dereferencing .on_send here raised AttributeError -> 500 even
+    # though the clipboard write had already succeeded.
+    if sync_mgr is not None and sync_mgr.on_send:
         try:
             sync_mgr.on_send(msg)
         except Exception:
@@ -315,7 +335,6 @@ def batch_favorite(body, history):
     the desktop UI during the batch was silently rolled back.
     """
     import base64
-    import time
     import uuid
 
     from internal.web.api.favorites import _ensure_db, _get_conn, _maybe_migrate
@@ -339,9 +358,7 @@ def batch_favorite(body, history):
     try:
         # Append after the current max position so batch insertion preserves
         # selection order and never fights drag-reorder positions.
-        row = conn.execute(
-            "SELECT COALESCE(MAX(position), -1) FROM favorites"
-        ).fetchone()
+        row = conn.execute("SELECT COALESCE(MAX(position), -1) FROM favorites").fetchone()
         next_position = (row[0] + 1) if row else 0
         for entry_id in entry_ids:
             _, entry = history.find_by_id(entry_id)
@@ -360,10 +377,10 @@ def batch_favorite(body, history):
                     full_text = ""
             content = full_text or entry.get("text_preview", "") or ""
             preview = full_text or entry.get("text_preview", "")
-            title = (preview[:50] if preview else "(empty)")
+            title = preview[:50] if preview else "(empty)"
             fav_id = uuid.uuid4().hex[:12]
             conn.execute(
-                "INSERT INTO favorites (id, title, content, \"group\", position, created) "
+                'INSERT INTO favorites (id, title, content, "group", position, created) '
                 "VALUES (?, ?, ?, ?, ?, ?)",
                 (fav_id, title, content, group, next_position, time.time()),
             )
@@ -468,6 +485,9 @@ def paste_rich(body, history, on_reset_dedup=None):
     if eid is not None:
         history.increment_paste(eid)
 
-    logger.info("paste_rich: wrote %d format(s) to clipboard for entry %s",
-                len(decoded_names), entry.get("entry_id", "?"))
+    logger.info(
+        "paste_rich: wrote %d format(s) to clipboard for entry %s",
+        len(decoded_names),
+        entry.get("entry_id", "?"),
+    )
     return {"ok": True, "formats": decoded_names, "count": len(decoded_names)}, 200

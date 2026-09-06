@@ -58,8 +58,31 @@
         return !!this.device.paired;
       },
 
+      // The host says it still has a relay path to this peer (internet-paired,
+      // or LAN-paired with an exchanged relay secret, and internet sync on).
+      // Absent on a payload from an older host → treated as unreachable, which
+      // only hides buttons rather than offering ones that fail.
+      relayReachable: function () {
+        return !!this.device.relay_reachable;
+      },
+
+      // Can a frame actually get to this device right now?  A live session, or
+      // the relay while it is LAN-offline.  Chat and the connectivity probe
+      // have no other transport, so this gates both.
+      canReachNow: function () {
+        return this.hasLiveSession || this.relayReachable;
+      },
+
       isDiscovered: function () {
         return !this.hasLiveSession && !this.isPaired && !this.isLocal;
+      },
+
+      // Offline, unpaired, but already in our known-peers list (restored from
+      // the removed archive, or a pairing we rejected).  It is NOT an mDNS
+      // sighting — it may not be on the network at all — so it must not wear
+      // the "🔍 Discovered" badge.
+      isKnownUnpaired: function () {
+        return this.isDiscovered && !!this.device.known;
       },
 
       statusDot: function () {
@@ -82,6 +105,7 @@
         }
         if (this.isTemporary) return this.t('device.temporary_connected');
         if (this.isPairedOffline) return this.t('device.paired_offline');
+        if (this.isKnownUnpaired) return this.t('device.not_paired');
         return this.t('device.discovered');
       },
 
@@ -90,6 +114,8 @@
         if (this.isConnected) return 'badge badge--success';
         if (this.isTemporary) return 'badge badge--info';
         if (this.isPairedOffline) return 'badge badge--warning';
+        // Neutral: known but unpaired is a resting state, not a live find.
+        if (this.isKnownUnpaired) return 'badge';
         return 'badge badge--info';
       },
 
@@ -126,22 +152,30 @@
       actions: function () {
         if (this.isLocal) return [];
         var acts = [];
-        // Chat invite reaches live peers (incl. temporary chat sessions) and
-        // paired devices (incl. internet-paired ones, via the relay) — offer
-        // it for all three live/paired states.
-        if (this.hasLiveSession || this.isPaired) {
+        // Chat + the connectivity probe both need a transport that can carry a
+        // frame RIGHT NOW: a live session, or the relay for a LAN-offline peer.
+        // A paired-but-offline device with no relay path has neither, so the
+        // buttons are omitted rather than offered as guaranteed failures.
+        if (this.canReachNow) {
           acts.push({ key: 'chat', label: this.t('devices.chat_action'), cls: 'device-card__action--accent' });
-          // Connectivity probe: reachable online OR paired (relay can reach a
-          // paired-but-LAN-offline peer) — exactly the chat condition.
           acts.push({ key: 'test', label: this.t('device.test_connection'), cls: '' });
         }
-        if (this.isConnected || this.isTemporary) {
+        if (this.isConnected) {
+          acts.push({ key: 'disconnect', label: this.t('device.disconnect'), cls: '' });
+          // A connected + paired device can be unpaired directly — no need to
+          // disconnect first (unpair tears the connection down as part of the
+          // trust revoke). Temporary (chat-only) sessions are not paired, so
+          // no unpair there.
+          acts.push({ key: 'unpair', label: this.t('device.unpair'), cls: 'device-card__action--danger' });
+        } else if (this.isTemporary) {
           acts.push({ key: 'disconnect', label: this.t('device.disconnect'), cls: '' });
         } else if (this.isPaired) {
           acts.push({ key: 'connect', label: this.t('device.connect'), cls: 'device-card__action--accent' });
           acts.push({ key: 'unpair', label: this.t('device.unpair'), cls: 'device-card__action--danger' });
         } else {
-          acts.push({ key: 'connect', label: this.t('device.connect'), cls: 'device-card__action--accent' });
+          // Unpaired + not connected: this starts the PAIRING handshake (both
+          // sides show the 8-digit code), so label it "Pair", not "Connect".
+          acts.push({ key: 'connect', label: this.t('device.pair'), cls: 'device-card__action--accent' });
         }
         // Forget is a full "forget" for every non-local device, matching the
         // context menu's 忘记设备 exactly (which offers it for all states):
@@ -293,9 +327,11 @@
           });
         };
 
-        // Unpair/forget remove the device from the server's peer list, so it
-        // must also be dropped from the local store — otherwise it lingers in
-        // the UI after a "success" toast.
+        // forget removes the device from the server's peer list, so it must
+        // also be dropped from the local store — otherwise it lingers in the
+        // UI after a "success" toast. (unpair only flips paired→false and the
+        // device stays known, so it is NOT removed here — the devices_updated
+        // broadcast moves it to the Discovered section instead.)
         var removeFromStore = function () {
           var idx = self.store.devices.findIndex(function (d) {
             return d.device_id === peerId;
@@ -334,7 +370,7 @@
             self.t('device.unpair_confirm_title'),
             self.t('device.unpair_confirm_msg', {name: deviceName})
           )
-            .then(function () { runAction(ClipsyncAPI.unpairDevice(peerId), removeFromStore); })
+            .then(function () { runAction(ClipsyncAPI.unpairDevice(peerId)); })
             .catch(function () { self.actionLoading = false; });
           return;
         }

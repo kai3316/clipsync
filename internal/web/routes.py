@@ -4,16 +4,23 @@ Takes (method, path, query_params, body, ...) and returns
 (status, content_type, body_bytes).
 """
 
+import contextlib
 import json
 import logging
 import os
 import threading
 import time
 
+from internal.web.api import (
+    aiconfig as _aiconfig_api,  # Round 12 (self-contained; manager bound by src/main.py)
+)
 from internal.web.api import chat as _chat_api
-from internal.web.api import aiconfig as _aiconfig_api  # Round 12 (self-contained; manager bound by src/main.py)
-from internal.web.api import internetpair as _internetpair_api  # Round 14 (self-contained; app bound by src/main.py)
-from internal.web.api import internetdelivery as _internetdelivery_api  # Round 17 (self-contained; app bound by src/main.py)
+from internal.web.api import (
+    internetdelivery as _internetdelivery_api,  # Round 17 (self-contained; app bound by src/main.py)  # noqa: E501
+)
+from internal.web.api import (
+    internetpair as _internetpair_api,  # Round 14 (self-contained; app bound by src/main.py)
+)
 from internal.web.api.devices import get_devices
 from internal.web.api.favorites import (
     add_favorite,
@@ -64,6 +71,7 @@ def _chat_tmp_dir() -> str:
     the server's /api/upload purpose=chat branch writes into it.
     """
     import tempfile
+
     d = os.path.join(tempfile.gettempdir(), "clipsync_chat_uploads")
     os.makedirs(d, exist_ok=True)
     return d
@@ -71,7 +79,31 @@ def _chat_tmp_dir() -> str:
 
 def _json_response(data, status=200):
     """Pack a dict into (status, content_type, body_bytes)."""
-    return status, "application/json; charset=utf-8", json.dumps(data, ensure_ascii=False).encode("utf-8")
+    return (
+        status,
+        "application/json; charset=utf-8",
+        json.dumps(data, ensure_ascii=False).encode("utf-8"),
+    )
+
+
+def _str_field(data, key, default="") -> str:
+    """Read a string field out of a decoded request body, tolerating junk.
+
+    The handlers below were written as ``_str_field(req, "peer_id")``,
+    which raises AttributeError the moment a client sends ``{"peer_id": 123}``
+    or ``{"peer_id": null}``.  That is bad *input*, but it surfaced as a 500
+    with a traceback in the log -- indistinguishable from a real server fault,
+    and impossible for the caller to act on.
+
+    A non-string is simply not a usable value here, so report it as absent
+    (``""``) and let each caller's existing "field required" check answer 400.
+    Nothing is coerced: silently turning 123 into "123" would let a typo'd
+    client keep working by accident until it hit a peer_id that mattered.
+    """
+    value = data.get(key, default)
+    if not isinstance(value, str):
+        return ""
+    return value.strip()
 
 
 def _ws_manager_for(dialog_mgr):
@@ -159,6 +191,7 @@ def _redact_sensitive_line(line: str, cfg) -> str:
         redact.append(home)
     try:
         from internal.config.config import _config_dir
+
         config_dir = str(_config_dir())
         if config_dir and config_dir != home:
             redact.append(config_dir)
@@ -173,38 +206,56 @@ def _redact_sensitive_line(line: str, cfg) -> str:
     return line
 
 
-def dispatch(method, path, query_params, body, cfg, history, sync_mgr,
-             get_connected_ids, on_nav_url, on_forward_file, upload_dir,
-             dialog_mgr=None,
-             get_overview_data=None,
-             on_device_action=None,
-             on_device_test=None,
-             on_transfer_action=None,
-             on_get_transfers=None,
-             on_speed_test_start=None,
-             on_speed_test_poll=None,
-             on_window_close=None,
-             on_toggle_discovery=None,
-             on_toggle_visibility=None,
-             on_settings_change=None,
-             on_show_web_qr=None, on_send_url=None,
-             get_discovered=None,
-             get_resolved_hashes=None, get_pending_pairings=None,
-             get_reconnect_states=None,
-             get_relay_state=None, get_current_relay_broker=None,
-             enc_mgr=None, on_open_file=None, on_open_folder=None,
-             on_restart=None, on_reset_dedup=None,
-             get_certs=None, get_diagnostics=None,
-             on_update_download=None,
-             on_update_status=None,
-             on_update_open_folder=None,
-             on_diagnostics_request=None,
-             chat_mgr=None,
-             get_chat_devices=None,
-             chat_send_fn=None,
-             chat_start_session=None,
-             get_chat_muted=None,
-             set_chat_muted=None):
+def dispatch(
+    method,
+    path,
+    query_params,
+    body,
+    cfg,
+    history,
+    sync_mgr,
+    get_connected_ids,
+    on_nav_url,
+    on_forward_file,
+    upload_dir,
+    dialog_mgr=None,
+    get_overview_data=None,
+    on_device_action=None,
+    on_device_test=None,
+    on_transfer_action=None,
+    on_get_transfers=None,
+    on_speed_test_start=None,
+    on_speed_test_poll=None,
+    on_window_close=None,
+    on_toggle_discovery=None,
+    on_toggle_visibility=None,
+    on_settings_change=None,
+    on_show_web_qr=None,
+    on_send_url=None,
+    get_discovered=None,
+    get_resolved_hashes=None,
+    get_pending_pairings=None,
+    get_reconnect_states=None,
+    get_relay_state=None,
+    get_current_relay_broker=None,
+    enc_mgr=None,
+    on_open_file=None,
+    on_open_folder=None,
+    on_restart=None,
+    on_reset_dedup=None,
+    get_certs=None,
+    get_diagnostics=None,
+    on_update_download=None,
+    on_update_status=None,
+    on_update_open_folder=None,
+    on_diagnostics_request=None,
+    chat_mgr=None,
+    get_chat_devices=None,
+    chat_send_fn=None,
+    chat_start_session=None,
+    get_chat_muted=None,
+    set_chat_muted=None,
+):
     """Route an API request to the appropriate handler, never raising.
 
     Wraps _dispatch in a safety net so an unexpected exception in a handler
@@ -226,62 +277,115 @@ def dispatch(method, path, query_params, body, cfg, history, sync_mgr,
             else:
                 if not isinstance(parsed, dict):
                     return _json_response(
-                        {"ok": False, "error": "invalid json body: expected object"}, 400,
+                        {"ok": False, "error": "invalid json body: expected object"},
+                        400,
                     )
     try:
         return _dispatch(
-            method, path, query_params, body, cfg, history, sync_mgr,
-            get_connected_ids, on_nav_url, on_forward_file, upload_dir,
-            dialog_mgr, get_overview_data, on_device_action, on_device_test,
+            method,
+            path,
+            query_params,
+            body,
+            cfg,
+            history,
+            sync_mgr,
+            get_connected_ids,
+            on_nav_url,
+            on_forward_file,
+            upload_dir,
+            dialog_mgr,
+            get_overview_data,
+            on_device_action,
+            on_device_test,
             on_transfer_action,
-            on_get_transfers, on_speed_test_start, on_speed_test_poll,
-            on_window_close, on_toggle_discovery, on_toggle_visibility,
-            on_settings_change, on_show_web_qr, on_send_url, get_discovered,
-            get_resolved_hashes, get_pending_pairings, get_reconnect_states,
-            get_relay_state, get_current_relay_broker,
-            enc_mgr, on_open_file, on_open_folder, on_restart, on_reset_dedup,
-            get_certs, get_diagnostics, on_update_download,
-            on_update_status, on_update_open_folder, on_diagnostics_request,
-            chat_mgr, get_chat_devices, chat_send_fn, chat_start_session,
-            get_chat_muted, set_chat_muted,
+            on_get_transfers,
+            on_speed_test_start,
+            on_speed_test_poll,
+            on_window_close,
+            on_toggle_discovery,
+            on_toggle_visibility,
+            on_settings_change,
+            on_show_web_qr,
+            on_send_url,
+            get_discovered,
+            get_resolved_hashes,
+            get_pending_pairings,
+            get_reconnect_states,
+            get_relay_state,
+            get_current_relay_broker,
+            enc_mgr,
+            on_open_file,
+            on_open_folder,
+            on_restart,
+            on_reset_dedup,
+            get_certs,
+            get_diagnostics,
+            on_update_download,
+            on_update_status,
+            on_update_open_folder,
+            on_diagnostics_request,
+            chat_mgr,
+            get_chat_devices,
+            chat_send_fn,
+            chat_start_session,
+            get_chat_muted,
+            set_chat_muted,
         )
     except Exception:
         logger.exception("Unhandled error in API route: %s %s", method, path)
         return _json_response({"ok": False, "error": "internal server error"}, 500)
 
 
-def _dispatch(method, path, query_params, body, cfg, history, sync_mgr,
-              get_connected_ids, on_nav_url, on_forward_file, upload_dir,
-              dialog_mgr=None,
-              get_overview_data=None,
-              on_device_action=None,
-              on_device_test=None,
-              on_transfer_action=None,
-              on_get_transfers=None,
-              on_speed_test_start=None,
-              on_speed_test_poll=None,
-              on_window_close=None,
-              on_toggle_discovery=None,
-              on_toggle_visibility=None,
-              on_settings_change=None,
-              on_show_web_qr=None, on_send_url=None,
-              get_discovered=None,
-              get_resolved_hashes=None, get_pending_pairings=None,
-              get_reconnect_states=None,
-              get_relay_state=None, get_current_relay_broker=None,
-              enc_mgr=None, on_open_file=None, on_open_folder=None,
-              on_restart=None, on_reset_dedup=None,
-              get_certs=None, get_diagnostics=None,
-              on_update_download=None,
-              on_update_status=None,
-              on_update_open_folder=None,
-              on_diagnostics_request=None,
-              chat_mgr=None,
-              get_chat_devices=None,
-              chat_send_fn=None,
-              chat_start_session=None,
-              get_chat_muted=None,
-              set_chat_muted=None):
+def _dispatch(
+    method,
+    path,
+    query_params,
+    body,
+    cfg,
+    history,
+    sync_mgr,
+    get_connected_ids,
+    on_nav_url,
+    on_forward_file,
+    upload_dir,
+    dialog_mgr=None,
+    get_overview_data=None,
+    on_device_action=None,
+    on_device_test=None,
+    on_transfer_action=None,
+    on_get_transfers=None,
+    on_speed_test_start=None,
+    on_speed_test_poll=None,
+    on_window_close=None,
+    on_toggle_discovery=None,
+    on_toggle_visibility=None,
+    on_settings_change=None,
+    on_show_web_qr=None,
+    on_send_url=None,
+    get_discovered=None,
+    get_resolved_hashes=None,
+    get_pending_pairings=None,
+    get_reconnect_states=None,
+    get_relay_state=None,
+    get_current_relay_broker=None,
+    enc_mgr=None,
+    on_open_file=None,
+    on_open_folder=None,
+    on_restart=None,
+    on_reset_dedup=None,
+    get_certs=None,
+    get_diagnostics=None,
+    on_update_download=None,
+    on_update_status=None,
+    on_update_open_folder=None,
+    on_diagnostics_request=None,
+    chat_mgr=None,
+    get_chat_devices=None,
+    chat_send_fn=None,
+    chat_start_session=None,
+    get_chat_muted=None,
+    set_chat_muted=None,
+):
     """Route an API request to the appropriate handler.
 
     All handler functions return (data_dict, status_code).
@@ -319,7 +423,9 @@ def _dispatch(method, path, query_params, body, cfg, history, sync_mgr,
 
         elif path == "/api/devices":
             data, status = get_devices(
-                cfg, get_connected_ids, get_discovered,
+                cfg,
+                get_connected_ids,
+                get_discovered,
                 get_resolved_hashes=get_resolved_hashes,
                 get_pending_pairings=get_pending_pairings,
                 get_reconnect_states=get_reconnect_states,
@@ -332,11 +438,14 @@ def _dispatch(method, path, query_params, body, cfg, history, sync_mgr,
 
         elif path == "/api/status":
             from internal.version import __version__
-            return _json_response({
-                "ok": True,
-                "device": cfg.device_name,
-                "version": __version__,
-            })
+
+            return _json_response(
+                {
+                    "ok": True,
+                    "device": cfg.device_name,
+                    "version": __version__,
+                }
+            )
 
         elif path == "/api/files":
             files = []
@@ -346,14 +455,16 @@ def _dispatch(method, path, query_params, body, cfg, history, sync_mgr,
                     if os.path.isfile(fpath):
                         st = os.stat(fpath)
                         size_kb = max(1, st.st_size // 1024)
-                        mtime = time.strftime(
-                            "%Y-%m-%d %H:%M", time.localtime(st.st_mtime)
+                        mtime = time.strftime("%Y-%m-%d %H:%M", time.localtime(st.st_mtime))
+                        files.append(
+                            {
+                                "name": fname,
+                                "size": f"{size_kb} KB"
+                                if size_kb < 1024
+                                else f"{size_kb // 1024:.1f} MB",
+                                "time": mtime,
+                            }
                         )
-                        files.append({
-                            "name": fname,
-                            "size": f"{size_kb} KB" if size_kb < 1024 else f"{size_kb // 1024:.1f} MB",
-                            "time": mtime,
-                        })
             except Exception:
                 pass
             return _json_response({"files": files})
@@ -372,8 +483,10 @@ def _dispatch(method, path, query_params, body, cfg, history, sync_mgr,
 
         elif path == "/api/settings":
             data, status = get_settings(
-                cfg, get_internet_sync_state=get_relay_state,
-                get_current_relay_broker=get_current_relay_broker)
+                cfg,
+                get_internet_sync_state=get_relay_state,
+                get_current_relay_broker=get_current_relay_broker,
+            )
             return _json_response(data, status)
 
         elif path == "/api/backups":
@@ -410,6 +523,7 @@ def _dispatch(method, path, query_params, body, cfg, history, sync_mgr,
             logs: list[str] = []
             try:
                 from internal.config.config import _log_dir
+
                 log_path = _log_dir() / "clipsync.log"
                 if log_path.exists():
                     # Read only the tail (last 256 KB) so an oversized log is
@@ -422,10 +536,7 @@ def _dispatch(method, path, query_params, body, cfg, history, sync_mgr,
                             tail = f.read().decode("utf-8", errors="replace")
                     except Exception:
                         tail = ""
-                    logs = [
-                        _redact_sensitive_line(line, cfg)
-                        for line in tail.splitlines()[-n:]
-                    ]
+                    logs = [_redact_sensitive_line(line, cfg) for line in tail.splitlines()[-n:]]
             except Exception:
                 logger.exception("Failed to read log file for /api/logs")
                 logs = []
@@ -452,17 +563,19 @@ def _dispatch(method, path, query_params, body, cfg, history, sync_mgr,
                 finally:
                     done.set()
 
-            threading.Thread(target=_run, name="web-update-check",
-                             daemon=True).start()
+            threading.Thread(target=_run, name="web-update-check", daemon=True).start()
             done.wait(timeout=UPDATE_CHECK_WALL_BOUND)
             if not isinstance(result, dict):
                 result = {}
-            return _json_response({
-                "available": bool(result.get("available")),
-                "latest": result.get("latest", ""),
-                "current": result.get("current", ""),
-                "url": result.get("url", ""),
-            }, 200)
+            return _json_response(
+                {
+                    "available": bool(result.get("available")),
+                    "latest": result.get("latest", ""),
+                    "current": result.get("current", ""),
+                    "url": result.get("url", ""),
+                },
+                200,
+            )
 
         elif path == "/api/update/status":
             # Hydrates the update UI after a page reload: returns the current
@@ -482,25 +595,30 @@ def _dispatch(method, path, query_params, body, cfg, history, sync_mgr,
 
         elif path == "/api/diagnostics":
             if get_diagnostics is None:
-                return _json_response({
-                    "summary": "fail",
-                    "checks": [
-                        {"id": "server_port", "ok": False,
-                         "detail": "diagnostics unavailable",
-                         "guidance": "Diagnostics are unavailable on this build.",
-                         "detail_key": "diag.server_port.unavailable.detail",
-                         "guidance_key": "diag.server_port.unavailable.guidance"},
-                    ],
-                    "discovery_running": False,
-                    "server_running": False,
-                    "connected_count": 0,
-                    "paired_count": 0,
-                    "web_companion_running": False,
-                    "web_port": 0,
-                    "lan_ip": "",
-                    "os": "",
-                    "version": "",
-                })
+                return _json_response(
+                    {
+                        "summary": "fail",
+                        "checks": [
+                            {
+                                "id": "server_port",
+                                "ok": False,
+                                "detail": "diagnostics unavailable",
+                                "guidance": "Diagnostics are unavailable on this build.",
+                                "detail_key": "diag.server_port.unavailable.detail",
+                                "guidance_key": "diag.server_port.unavailable.guidance",
+                            },
+                        ],
+                        "discovery_running": False,
+                        "server_running": False,
+                        "connected_count": 0,
+                        "paired_count": 0,
+                        "web_companion_running": False,
+                        "web_port": 0,
+                        "lan_ip": "",
+                        "os": "",
+                        "version": "",
+                    }
+                )
             try:
                 data = get_diagnostics()
             except Exception:
@@ -598,13 +716,17 @@ def _dispatch(method, path, query_params, body, cfg, history, sync_mgr,
                 return _json_response({"ok": False, "error": "empty url"}, 400)
             url = url.strip()
             from internal.web.api.security import is_safe_nav_url
+
             if not is_safe_nav_url(url):
-                return _json_response({"ok": False, "error": "only http/https URLs are allowed"}, 400)
+                return _json_response(
+                    {"ok": False, "error": "only http/https URLs are allowed"}, 400
+                )
             target_device = data.get("device_id", "")
             if target_device and target_device != cfg.device_id and on_nav_url:
                 on_nav_url(url, target_device)
             else:
                 import webbrowser
+
                 webbrowser.open(url)
             logger.info("Web nav: %s -> %s", url[:80], target_device[:12] or "local")
             return _json_response({"ok": True})
@@ -616,7 +738,7 @@ def _dispatch(method, path, query_params, body, cfg, history, sync_mgr,
                 req = json.loads(body.decode("utf-8"))
             except (json.JSONDecodeError, UnicodeDecodeError):
                 return _json_response({"ok": False, "error": "invalid json"}, 400)
-            action = req.get("action", "").strip()
+            action = _str_field(req, "action")
             if not action:
                 return _json_response({"ok": False, "error": "action required"}, 400)
             try:
@@ -650,7 +772,7 @@ def _dispatch(method, path, query_params, body, cfg, history, sync_mgr,
                 req = json.loads(body.decode("utf-8"))
             except (json.JSONDecodeError, UnicodeDecodeError):
                 return _json_response({"ok": False, "error": "invalid json"}, 400)
-            file_path = req.get("path", "").strip()
+            file_path = _str_field(req, "path")
             if not file_path:
                 return _json_response({"ok": False, "error": "path required"}, 400)
             # Only allow opening files inside the received-files directory.
@@ -658,6 +780,7 @@ def _dispatch(method, path, query_params, body, cfg, history, sync_mgr,
             # the web UI) is confined correctly, while an absolute path that
             # points outside upload_dir is rejected.
             from internal.web.api.security import confine_path
+
             safe = confine_path(os.path.join(upload_dir, file_path), upload_dir)
             if safe is None:
                 return _json_response(
@@ -676,10 +799,11 @@ def _dispatch(method, path, query_params, body, cfg, history, sync_mgr,
                 req = json.loads(body.decode("utf-8"))
             except (json.JSONDecodeError, UnicodeDecodeError):
                 return _json_response({"ok": False, "error": "invalid json"}, 400)
-            file_path = req.get("path", "").strip()
+            file_path = _str_field(req, "path")
             if not file_path:
                 return _json_response({"ok": False, "error": "path required"}, 400)
             from internal.web.api.security import confine_path
+
             safe = confine_path(os.path.join(upload_dir, file_path), upload_dir)
             if safe is None:
                 return _json_response(
@@ -714,11 +838,14 @@ def _dispatch(method, path, query_params, body, cfg, history, sync_mgr,
             # Expected failures (no asset for this platform, network failure,
             # verify failed) carry a readable error on HTTP 200 so the
             # frontend can surface the real reason instead of a generic 500.
-            return _json_response({
-                "ok": ok,
-                "started": bool(result.get("started")),
-                "error": result.get("error"),
-            }, 200)
+            return _json_response(
+                {
+                    "ok": ok,
+                    "started": bool(result.get("started")),
+                    "error": result.get("error"),
+                },
+                200,
+            )
 
         elif path == "/api/update/open-folder":
             # Reveal the ready exe's containing folder in the OS file manager.
@@ -731,8 +858,7 @@ def _dispatch(method, path, query_params, body, cfg, history, sync_mgr,
                 logger.exception("on_update_open_folder callback failed")
                 result = None
             if not isinstance(result, dict):
-                return _json_response(
-                    {"ok": False, "error": "open-folder handler failed"}, 500)
+                return _json_response({"ok": False, "error": "open-folder handler failed"}, 500)
             return _json_response(result, 200)
 
         elif path == "/api/export":
@@ -758,6 +884,7 @@ def _dispatch(method, path, query_params, body, cfg, history, sync_mgr,
                 req = {}
             which = req.get("which", "data") if isinstance(req, dict) else "data"
             from internal.config.config import _config_dir
+
             folder = _config_dir() / "backups" if which == "backups" else _config_dir()
             try:
                 folder.mkdir(parents=True, exist_ok=True)
@@ -787,8 +914,7 @@ def _dispatch(method, path, query_params, body, cfg, history, sync_mgr,
                     try:
                         mgr.broadcast("onboarding_required")
                     except Exception:
-                        logger.debug("onboarding_required broadcast failed",
-                                     exc_info=True)
+                        logger.debug("onboarding_required broadcast failed", exc_info=True)
             return _json_response(data, status)
 
         elif path == "/api/translate":
@@ -819,8 +945,8 @@ def _dispatch(method, path, query_params, body, cfg, history, sync_mgr,
                 req = json.loads(body.decode("utf-8"))
             except (json.JSONDecodeError, UnicodeDecodeError):
                 return _json_response({"ok": False, "error": "invalid json"}, 400)
-            peer_id = req.get("peer_id", "").strip()
-            note = req.get("note", "")
+            peer_id = _str_field(req, "peer_id")
+            note = _str_field(req, "note")
             if not peer_id:
                 return _json_response({"ok": False, "error": "peer_id required"}, 400)
             ok = on_device_action("edit_note", peer_id, note)
@@ -833,8 +959,8 @@ def _dispatch(method, path, query_params, body, cfg, history, sync_mgr,
                 req = json.loads(body.decode("utf-8"))
             except (json.JSONDecodeError, UnicodeDecodeError):
                 return _json_response({"ok": False, "error": "invalid json"}, 400)
-            peer_id = req.get("peer_id", "").strip()
-            code = req.get("code", "")
+            peer_id = _str_field(req, "peer_id")
+            code = _str_field(req, "code")
             if not peer_id:
                 return _json_response({"ok": False, "error": "peer_id required"}, 400)
             ok = on_device_action("pair", peer_id, code)
@@ -847,7 +973,7 @@ def _dispatch(method, path, query_params, body, cfg, history, sync_mgr,
                 req = json.loads(body.decode("utf-8"))
             except (json.JSONDecodeError, UnicodeDecodeError):
                 return _json_response({"ok": False, "error": "invalid json"}, 400)
-            peer_id = req.get("peer_id", "").strip()
+            peer_id = _str_field(req, "peer_id")
             if not peer_id:
                 return _json_response({"ok": False, "error": "peer_id required"}, 400)
             ok = on_device_action("reject", peer_id)
@@ -860,7 +986,7 @@ def _dispatch(method, path, query_params, body, cfg, history, sync_mgr,
                 req = json.loads(body.decode("utf-8"))
             except (json.JSONDecodeError, UnicodeDecodeError):
                 return _json_response({"ok": False, "error": "invalid json"}, 400)
-            peer_id = req.get("peer_id", "").strip()
+            peer_id = _str_field(req, "peer_id")
             if not peer_id:
                 return _json_response({"ok": False, "error": "peer_id required"}, 400)
             ok = on_device_action("unpair", peer_id)
@@ -873,7 +999,7 @@ def _dispatch(method, path, query_params, body, cfg, history, sync_mgr,
                 req = json.loads(body.decode("utf-8"))
             except (json.JSONDecodeError, UnicodeDecodeError):
                 return _json_response({"ok": False, "error": "invalid json"}, 400)
-            peer_id = req.get("peer_id", "").strip()
+            peer_id = _str_field(req, "peer_id")
             if not peer_id:
                 return _json_response({"ok": False, "error": "peer_id required"}, 400)
             ok = on_device_action("connect", peer_id)
@@ -886,7 +1012,7 @@ def _dispatch(method, path, query_params, body, cfg, history, sync_mgr,
                 req = json.loads(body.decode("utf-8"))
             except (json.JSONDecodeError, UnicodeDecodeError):
                 return _json_response({"ok": False, "error": "invalid json"}, 400)
-            peer_id = req.get("peer_id", "").strip()
+            peer_id = _str_field(req, "peer_id")
             if not peer_id:
                 return _json_response({"ok": False, "error": "peer_id required"}, 400)
             ok = on_device_action("disconnect", peer_id)
@@ -899,7 +1025,7 @@ def _dispatch(method, path, query_params, body, cfg, history, sync_mgr,
                 req = json.loads(body.decode("utf-8"))
             except (json.JSONDecodeError, UnicodeDecodeError):
                 return _json_response({"ok": False, "error": "invalid json"}, 400)
-            peer_id = req.get("peer_id", "").strip()
+            peer_id = _str_field(req, "peer_id")
             if not peer_id:
                 return _json_response({"ok": False, "error": "peer_id required"}, 400)
             ok = on_device_action("forget", peer_id)
@@ -915,7 +1041,7 @@ def _dispatch(method, path, query_params, body, cfg, history, sync_mgr,
                 req = json.loads(body.decode("utf-8"))
             except (json.JSONDecodeError, UnicodeDecodeError):
                 return _json_response({"ok": False, "error": "invalid json"}, 400)
-            peer_id = req.get("peer_id", "").strip()
+            peer_id = _str_field(req, "peer_id")
             if not peer_id:
                 return _json_response({"ok": False, "error": "peer_id required"}, 400)
             ok = on_device_action("restore", peer_id)
@@ -929,7 +1055,7 @@ def _dispatch(method, path, query_params, body, cfg, history, sync_mgr,
                 req = json.loads(body.decode("utf-8"))
             except (json.JSONDecodeError, UnicodeDecodeError):
                 return _json_response({"ok": False, "error": "invalid json"}, 400)
-            peer_id = req.get("peer_id", "").strip()
+            peer_id = _str_field(req, "peer_id")
             if not peer_id:
                 return _json_response({"ok": False, "error": "peer_id required"}, 400)
             ok = on_device_action("purge", peer_id)
@@ -944,7 +1070,7 @@ def _dispatch(method, path, query_params, body, cfg, history, sync_mgr,
                 req = json.loads(body.decode("utf-8"))
             except (json.JSONDecodeError, UnicodeDecodeError):
                 return _json_response({"ok": False, "error": "invalid json"}, 400)
-            peer_id = req.get("peer_id", "").strip()
+            peer_id = _str_field(req, "peer_id")
             if not peer_id:
                 return _json_response({"ok": False, "error": "peer_id required"}, 400)
             try:
@@ -1009,6 +1135,23 @@ def _dispatch(method, path, query_params, body, cfg, history, sync_mgr,
             ok = on_transfer_action("retry", transfer_id)
             return _json_response({"ok": ok})
 
+        elif path == "/api/transfer/history/delete":
+            # Drop ONE completed/failed row from the transfer history (the
+            # transfers panel's per-row context menu).  History-only: this
+            # never touches an active transfer — cancelling one goes through
+            # /api/transfer/cancel.
+            if on_transfer_action is None:
+                return _json_response({"ok": False, "error": "not available"}, 503)
+            try:
+                req = json.loads(body.decode("utf-8"))
+            except (json.JSONDecodeError, UnicodeDecodeError):
+                return _json_response({"ok": False, "error": "invalid json"}, 400)
+            transfer_id = req.get("transfer_id", "")
+            if not transfer_id:
+                return _json_response({"ok": False, "error": "transfer_id required"}, 400)
+            ok = on_transfer_action("history_delete", transfer_id)
+            return _json_response({"ok": ok})
+
         elif path == "/api/transfer/cancel-all":
             # Cancel every ACTIVE transfer at once (the transfers panel's
             # "Cancel all" button).  The live list comes from the host's
@@ -1022,24 +1165,18 @@ def _dispatch(method, path, query_params, body, cfg, history, sync_mgr,
             if on_get_transfers is not None:
                 try:
                     active, _history = on_get_transfers()
-                    ids = [
-                        t.get("transfer_id", "")
-                        for t in (active or [])
-                        if isinstance(t, dict)
-                    ]
+                    ids = [t.get("transfer_id", "") for t in (active or []) if isinstance(t, dict)]
                 except Exception:
                     logger.exception("Failed to read transfer state for cancel-all")
                     ids = []
-            cancelled = sum(
-                1 for tid in ids if tid and on_transfer_action("cancel", tid)
-            )
+            cancelled = sum(1 for tid in ids if tid and on_transfer_action("cancel", tid))
             return _json_response({"ok": True, "cancelled": cancelled})
 
         elif path == "/api/history/clear":
             try:
                 # Capture the count BEFORE clearing so the response reflects
                 # how many items were actually removed (not the 0 remaining).
-                count = len(history.get_all()) if hasattr(history, 'get_all') else 0
+                count = len(history.get_all()) if hasattr(history, "get_all") else 0
                 history.clear()
             except Exception as e:
                 return _json_response({"ok": False, "error": str(e)}, 500)
@@ -1115,8 +1252,8 @@ def _dispatch(method, path, query_params, body, cfg, history, sync_mgr,
                 req = json.loads(body.decode("utf-8"))
             except (json.JSONDecodeError, UnicodeDecodeError):
                 return _json_response({"ok": False, "error": "invalid json"}, 400)
-            dialog_id = req.get("dialog_id", "").strip()
-            action = req.get("action", "").strip()
+            dialog_id = _str_field(req, "dialog_id")
+            action = _str_field(req, "action")
             value = req.get("value")
             if not dialog_id or not action:
                 return _json_response({"ok": False, "error": "dialog_id and action required"}, 400)
@@ -1152,6 +1289,7 @@ def _dispatch(method, path, query_params, body, cfg, history, sync_mgr,
                 fpath = str(req.get("file_path") or "").strip()
                 if fpath:
                     from internal.web.api.security import confine_path
+
                     if os.path.isabs(fpath):
                         # purpose=chat uploads pass an absolute temp path that
                         # lives in the dedicated chat temp dir.
@@ -1169,7 +1307,10 @@ def _dispatch(method, path, query_params, body, cfg, history, sync_mgr,
                         safe = confine_path(os.path.join(base_dir, fpath), base_dir)
                     if safe is None:
                         return _json_response(
-                            {"ok": False, "error": "path must be inside the allowed upload directory"},
+                            {
+                                "ok": False,
+                                "error": "path must be inside the allowed upload directory",
+                            },
                             400,
                         )
                     req["file_path"] = str(safe)
@@ -1179,10 +1320,8 @@ def _dispatch(method, path, query_params, body, cfg, history, sync_mgr,
             # could not be started, remove the staging copy so a failed chat
             # send leaves no orphaned file.
             if chat_staging_path and not data.get("transfer_id"):
-                try:
+                with contextlib.suppress(OSError):
                     os.unlink(chat_staging_path)
-                except OSError:
-                    pass
             return _json_response(data, status)
 
         elif path == "/api/chat/file/accept":
@@ -1243,8 +1382,10 @@ def _dispatch(method, path, query_params, body, cfg, history, sync_mgr,
             if not fname:
                 return _json_response({"ok": False, "error": "filename required"}, 400)
             from internal.web.api.security import confine_path
+
             safe = confine_path(
-                os.path.join(upload_dir, os.path.basename(fname)), upload_dir,
+                os.path.join(upload_dir, os.path.basename(fname)),
+                upload_dir,
             )
             if safe is None:
                 return _json_response(
@@ -1264,9 +1405,8 @@ def _dispatch(method, path, query_params, body, cfg, history, sync_mgr,
 
     # ── PATCH / PUT routes (for favorites update) ───────────────────
 
-    elif method in ("PATCH", "PUT"):
-        if path == "/api/favorites":
-            data, status = update_favorite(body)
-            return _json_response(data, status)
+    elif method in ("PATCH", "PUT") and path == "/api/favorites":
+        data, status = update_favorite(body)
+        return _json_response(data, status)
 
     return _json_response({"error": "not found"}, 404)

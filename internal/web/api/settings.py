@@ -6,6 +6,8 @@ passwords, hashes) are never sent to clients.
 All handlers return a (data_dict, status_code) tuple.
 """
 
+import contextlib
+import copy
 import csv
 import json
 import logging
@@ -72,7 +74,6 @@ _SAFE_FIELDS = {
     # password is not — only relay_password_set is exposed (see get_settings).
     "relay_username",
     "data_dir",
-    "favorites_path",
     "hotkeys",
     "hotkeys_enabled",
     # AI-config sync profiles (refactor round 1): enabled tool keys + user
@@ -159,7 +160,6 @@ _MUTABLE_FIELDS = {
     # value is never echoed back — only netpair_password_set is exposed.
     "netpair_password",
     "data_dir",
-    "favorites_path",
     "hotkeys",
     "hotkeys_enabled",
     "ai_config_tools",
@@ -197,8 +197,7 @@ _SAFE_RESPONSE_KEYS = {
 }
 
 
-def get_settings(cfg, get_internet_sync_state=None,
-                 get_current_relay_broker=None):
+def get_settings(cfg, get_internet_sync_state=None, get_current_relay_broker=None):
     """Return safe-to-expose settings (exclude secrets).
 
     *get_internet_sync_state*, when provided, returns the live internet-sync
@@ -247,23 +246,21 @@ def get_settings(cfg, get_internet_sync_state=None,
             try:
                 state = str(get_internet_sync_state() or "")
             except Exception:
-                logger.debug("get_internet_sync_state callback failed",
-                             exc_info=True)
-        result["internet_sync_state"] = state if state in (
-            "off", "connecting", "online", "error") else "connecting"
+                logger.debug("get_internet_sync_state callback failed", exc_info=True)
+        result["internet_sync_state"] = (
+            state if state in ("off", "connecting", "online", "error") else "connecting"
+        )
 
     # Current relay broker endpoint (never a secret, and not a cfg field —
     # it is a live transport property, so it bypasses _SAFE_FIELDS and is
     # written straight into the result).  Empty string when sync is disabled,
     # the transport is not up, or the callback is absent/failed.
     broker = ""
-    if getattr(cfg, "internet_sync_enabled", False):
-        if get_current_relay_broker is not None:
-            try:
-                broker = str(get_current_relay_broker() or "")
-            except Exception:
-                logger.debug("get_current_relay_broker callback failed",
-                             exc_info=True)
+    if getattr(cfg, "internet_sync_enabled", False) and get_current_relay_broker is not None:
+        try:
+            broker = str(get_current_relay_broker() or "")
+        except Exception:
+            logger.debug("get_current_relay_broker callback failed", exc_info=True)
     result["current_relay_broker"] = broker
 
     return {"settings": result}, 200
@@ -302,17 +299,39 @@ def _persist_preserving_at_rest_private_key(cfg) -> None:
     preserve whatever is already stored on disk (the encrypted blob when
     encryption is enabled) and only update the non-secret fields.
     """
-    stored = {}
+    # Only an at-rest value we actually READ may be written back.  Treating a
+    # failed read as "there is no key" used to blank private_key_pem, which
+    # destroys this device's identity: every paired peer then sees a changed
+    # certificate and the user has to re-pair everything.  So fall back to the
+    # in-memory key whenever the stored value is unavailable -- there is no
+    # encrypted blob to downgrade in exactly those cases (missing file, corrupt
+    # file, key absent), so preserving identity costs nothing.
+    at_rest = None
     try:
         stored = json.loads(_config_path().read_text(encoding="utf-8"))
+        if isinstance(stored, dict):
+            value = stored.get("private_key_pem")
+            if isinstance(value, str) and value:
+                at_rest = value
+    except FileNotFoundError:
+        pass  # First save; nothing stored yet.
     except (OSError, json.JSONDecodeError):
-        pass
-    original = cfg.private_key_pem
-    cfg.private_key_pem = stored.get("private_key_pem", "")
-    try:
-        save_config(cfg)
-    finally:
-        cfg.private_key_pem = original
+        logger.warning(
+            "Could not read the stored private key from %s; keeping the "
+            "in-memory key so this device's identity survives the save.",
+            _config_path(),
+        )
+
+    # Write from a shallow COPY rather than temporarily blanking the shared
+    # cfg: this object is the one live object every thread reads.  While the
+    # old code held the swapped-in value, a concurrent reader (a peer
+    # handshake signing with the private key, a settings GET, the desktop UI)
+    # could observe the encrypted blob and fail for no visible reason.
+    # ``save()`` only reads attributes, so a shallow copy is enough.
+    snapshot = copy.copy(cfg)
+    if at_rest is not None:
+        snapshot.private_key_pem = at_rest
+    save_config(snapshot)
 
 
 def update_settings(body, cfg, on_settings_change=None, enc_mgr=None):
@@ -345,6 +364,7 @@ def update_settings(body, cfg, on_settings_change=None, enc_mgr=None):
         pw = pw.strip()
         if pw:
             from internal.transport.relay import netpair_passphrase_error
+
             err = netpair_passphrase_error(pw)
             if err is not None:
                 return {"ok": False, "error": "netpair_password_" + err}, 400
@@ -362,6 +382,7 @@ def update_settings(body, cfg, on_settings_change=None, enc_mgr=None):
         pw = pw.strip()
         if pw:
             from internal.transport.relay import netpair_passphrase_error
+
             err = netpair_passphrase_error(pw)
             if err is not None:
                 return {"ok": False, "error": "password_" + err}, 400
@@ -375,7 +396,9 @@ def update_settings(body, cfg, on_settings_change=None, enc_mgr=None):
             if _type_mismatch(old_val, new_val):
                 logger.warning(
                     "Settings update rejected for %s: type mismatch (%s -> %s)",
-                    field, type(old_val).__name__, type(new_val).__name__,
+                    field,
+                    type(old_val).__name__,
+                    type(new_val).__name__,
                 )
                 continue
             limits = _RANGE_LIMITS.get(field)
@@ -386,8 +409,11 @@ def update_settings(body, cfg, on_settings_change=None, enc_mgr=None):
                     in_range = False
                 if not in_range:
                     logger.warning(
-                        "Settings update rejected for %s: value %r outside "
-                        "%s..%s", field, new_val, limits[0], limits[1],
+                        "Settings update rejected for %s: value %r outside %s..%s",
+                        field,
+                        new_val,
+                        limits[0],
+                        limits[1],
                     )
                     continue
             setattr(cfg, field, new_val)
@@ -462,8 +488,10 @@ def export_data(body, cfg, history):
         return {"ok": False, "error": "unsupported format (use json, csv or markdown)"}, 400
 
     suffix = {"json": ".json", "csv": ".csv", "markdown": ".md"}[fmt]
-    from internal.config.config import _config_dir
     from pathlib import Path
+
+    from internal.config.config import _config_dir
+
     # Downloads is where users expect exported files; if it can't be
     # determined, fall back to the app data dir (always present).
     downloads = Path.home() / "Downloads"
@@ -482,6 +510,7 @@ def export_data(body, cfg, history):
             export_history_json,
             export_history_markdown,
         )
+
         if fmt == "json":
             count = export_history_json(history, dest_path)
         elif fmt == "markdown":
@@ -491,15 +520,18 @@ def export_data(body, cfg, history):
         # The export functions chmod the file 0600 (plaintext clipboard
         # content).  Do NOT delete it — the whole point is that the user can
         # find and use this file.
-        return {"ok": True, "filepath": dest_path, "filename": filename,
-                "count": count, "format": fmt}, 200
+        return {
+            "ok": True,
+            "filepath": dest_path,
+            "filename": filename,
+            "count": count,
+            "format": fmt,
+        }, 200
     except Exception as exc:
         logger.exception("Export failed")
         # Remove a partial export on failure so no broken file is left behind.
-        try:
+        with contextlib.suppress(OSError):
             os.unlink(dest_path)
-        except OSError:
-            pass
         return {"ok": False, "error": str(exc)}, 500
 
 
@@ -530,6 +562,7 @@ def import_data(body, cfg, history):
     # so a token holder can't read arbitrary files off the disk by importing
     # them into history and reading the content back out.
     from internal.config.config import _config_dir
+
     data_root = os.path.realpath(_config_dir())
     downloads_root = os.path.realpath(os.path.join(os.path.expanduser("~"), "Downloads"))
     real = os.path.realpath(filepath)
@@ -552,18 +585,20 @@ def import_data(body, cfg, history):
     # localized error instead of a generic 500 mid-import.
     try:
         if ext == ".json":
-            with open(filepath, "r", encoding="utf-8") as f:
+            with open(filepath, encoding="utf-8") as f:
                 parsed = json.load(f)
             if not isinstance(parsed, list) or not all(isinstance(item, dict) for item in parsed):
                 return {"ok": False, "error": T("web.import_invalid_content")}, 400
             # Require ClipSync export fields so a foreign JSON array (e.g. a
             # browser/app config dump) can't be ingested and read back through
             # the history API.  An empty list is a valid no-op import.
-            if not all(("text_preview" in item or "types" in item or "content_type" in item)
-                       for item in parsed):
+            if not all(
+                ("text_preview" in item or "types" in item or "content_type" in item)
+                for item in parsed
+            ):
                 return {"ok": False, "error": T("web.import_invalid_content")}, 400
         else:
-            with open(filepath, "r", encoding="utf-8", newline="") as f:
+            with open(filepath, encoding="utf-8", newline="") as f:
                 reader = csv.DictReader(f)
                 expected = {"timestamp", "content_type", "text_preview"}
                 if not expected.intersection(reader.fieldnames or []):
@@ -574,6 +609,7 @@ def import_data(body, cfg, history):
 
     try:
         from internal.data.export import import_history_csv, import_history_json
+
         if ext == ".json":
             count = import_history_json(filepath, history)
         else:
@@ -593,6 +629,7 @@ def create_backup_api(cfg, history):
     """Create a full backup zip and return its path."""
     try:
         from internal.data.backup import create_backup
+
         path = create_backup(cfg, history)
         return {"ok": True, "backup_path": path}, 200
     except Exception as exc:
@@ -619,6 +656,7 @@ def restore_backup_api(body, cfg, history):
 
     from internal.config.config import _config_dir
     from internal.web.api.security import confine_path
+
     safe_path = confine_path(backup_path, _config_dir())
     if safe_path is None:
         return {"ok": False, "error": "backup_path must be inside the ClipSync data directory"}, 400
@@ -630,6 +668,7 @@ def restore_backup_api(body, cfg, history):
     pre_restore_backup = None
     try:
         from internal.data.backup import create_backup
+
         pre_restore_backup = create_backup(cfg, history)
     except Exception as exc:
         logger.warning("Failed to create pre-restore backup: %s", exc)
@@ -637,6 +676,7 @@ def restore_backup_api(body, cfg, history):
 
     try:
         from internal.data.backup import restore_backup
+
         summary = restore_backup(backup_path, cfg, history)
         # Persist the restored config immediately.  A restore that only mutates
         # the in-memory Config is silently discarded if the process crashes
@@ -671,6 +711,7 @@ def list_backups_api(backup_dir: str | None = None):
     """Return a list of available backups."""
     try:
         from internal.data.backup import list_backups
+
         backups = list_backups(backup_dir)
         return {"ok": True, "backups": backups}, 200
     except Exception as exc:

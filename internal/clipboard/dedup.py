@@ -50,7 +50,10 @@ def make_dedup_key(content: ClipboardContent) -> str:
     Honours ``DEDUP_ALGO`` (sha256 / simple=md5) so both history backends
     coalesce identically for a given config.
     """
-    _h = lambda data: hashlib.new(_DEDUP_ALGO_MAP.get(DEDUP_ALGO, "sha256"), data).hexdigest()
+
+    def _h(data):
+        return hashlib.new(_DEDUP_ALGO_MAP.get(DEDUP_ALGO, "sha256"), data).hexdigest()
+
     if ContentType.TEXT in content.types:
         text = content.types[ContentType.TEXT].decode("utf-8", errors="replace")
         # Hash the full body so two long texts sharing a prefix are not
@@ -88,9 +91,7 @@ CONTENT_TYPE_LABELS: dict[ContentType, str] = {
     ContentType.FILE: "FILE",
     ContentType.URL: "URL",
 }
-LABEL_TYPE_MAP: dict[str, ContentType] = {
-    label: ct for ct, label in CONTENT_TYPE_LABELS.items()
-}
+LABEL_TYPE_MAP: dict[str, ContentType] = {label: ct for ct, label in CONTENT_TYPE_LABELS.items()}
 
 
 def labels_to_types(labels: dict | None) -> dict[ContentType, bytes]:
@@ -123,9 +124,9 @@ def types_to_labels(types: dict[ContentType, bytes]) -> dict[str, str]:
     }
 
 
-def merge_types(existing: dict[ContentType, bytes],
-                incoming: dict[ContentType, bytes]
-                ) -> tuple[dict[ContentType, bytes], bool]:
+def merge_types(
+    existing: dict[ContentType, bytes], incoming: dict[ContentType, bytes]
+) -> tuple[dict[ContentType, bytes], bool]:
     """Union two format maps of the SAME logical clip (same text body).
 
     Per format, the incoming capture wins when both sides carry it — those
@@ -147,8 +148,7 @@ def merge_types(existing: dict[ContentType, bytes],
     return merged, changed
 
 
-def adds_new_flavors(existing_labels: dict | None,
-                     incoming: dict[ContentType, bytes]) -> bool:
+def adds_new_flavors(existing_labels: dict | None, incoming: dict[ContentType, bytes]) -> bool:
     """True if *incoming* carries any format the stored entry lacks.
 
     Used on the tight coalesce path: a repeat capture that adds nothing
@@ -156,5 +156,5 @@ def adds_new_flavors(existing_labels: dict | None,
     one that brings a new format (e.g. HTML written a beat later) must be
     merged so the flavor is not lost.
     """
-    have = {LABEL_TYPE_MAP.get(l) for l in (existing_labels or {})}
+    have = {LABEL_TYPE_MAP.get(label) for label in (existing_labels or {})}
     return any(ct not in have for ct in incoming)

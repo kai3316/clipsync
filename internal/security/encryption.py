@@ -18,7 +18,7 @@ from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 logger = logging.getLogger(__name__)
 
 _NONCE_LEN = 12  # bytes
-_TAG_LEN = 16    # AES-GCM tag is 16 bytes
+_TAG_LEN = 16  # AES-GCM tag is 16 bytes
 _AES_KEY_LEN = 32
 _PBKDF2_ITERATIONS = 600_000
 _PW_VERIFY_ITERATIONS = 100_000  # for password verification token
@@ -37,7 +37,11 @@ def derive_key(password: str, salt: bytes) -> bytes:
     Returns a deterministic key for the given (password, salt) pair.
     """
     return hashlib.pbkdf2_hmac(
-        "sha256", password.encode("utf-8"), salt, _PBKDF2_ITERATIONS, dklen=_AES_KEY_LEN,
+        "sha256",
+        password.encode("utf-8"),
+        salt,
+        _PBKDF2_ITERATIONS,
+        dklen=_AES_KEY_LEN,
     )
 
 
@@ -49,8 +53,11 @@ def make_password_hash(password: str, fingerprint: str) -> str:
     """
     salt = fingerprint.encode("ascii")[:16]
     return hashlib.pbkdf2_hmac(
-        "sha256", password.encode("utf-8"), salt,
-        _PW_VERIFY_ITERATIONS, dklen=32,
+        "sha256",
+        password.encode("utf-8"),
+        salt,
+        _PW_VERIFY_ITERATIONS,
+        dklen=32,
     ).hex()[:_PW_VERIFY_LEN]
 
 
@@ -91,7 +98,7 @@ def _compute_storage_key(device_fingerprint: str, password: str = "") -> bytes:
     salt = b"clipsync-at-rest-salt"
     if password:
         pw_key = derive_key(password, device_fingerprint.encode("ascii"))
-        ikm = bytes(a ^ b for a, b in zip(ikm.ljust(32, b"\x00"), pw_key))
+        ikm = bytes(a ^ b for a, b in zip(ikm.ljust(32, b"\x00"), pw_key, strict=False))
     prk = _hkdf_extract(salt, ikm)
     return _hkdf_expand(prk, b"clipsync-storage-key", _AES_KEY_LEN)
 
@@ -123,7 +130,7 @@ def _compute_frame_key(my_fingerprint: str, peer_fingerprint: str, password: str
         # password-protected frames — paired devices must re-pair once after
         # both upgrade to the same version.
         fp_digest = hashlib.sha256(ikm).digest()
-        ikm = bytes(a ^ b for a, b in zip(fp_digest, pw_key))
+        ikm = bytes(a ^ b for a, b in zip(fp_digest, pw_key, strict=False))
     prk = _hkdf_extract(salt, ikm)
     return _hkdf_expand(prk, b"clipsync-frame-key", _AES_KEY_LEN)
 
@@ -147,7 +154,7 @@ def decrypt(data: bytes, key: bytes) -> bytes | None:
     if not data.startswith(_ENCRYPTED_PREFIX):
         return None  # Not encrypted — caller should treat as plaintext
     try:
-        body = data[len(_ENCRYPTED_PREFIX):]
+        body = data[len(_ENCRYPTED_PREFIX) :]
         nonce = body[:_NONCE_LEN]
         ct = body[_NONCE_LEN:]
         aesgcm = AESGCM(key)
@@ -193,18 +200,22 @@ class EncryptionManager:
     def storage_key(self) -> bytes:
         if self._storage_key_cache is None:
             self._storage_key_cache = _compute_storage_key(
-                self._fingerprint, self._password,
+                self._fingerprint,
+                self._password,
             )
         return self._storage_key_cache
 
     def get_frame_key(self, peer_fingerprint: str) -> bytes:
         if peer_fingerprint not in self._frame_key_cache:
             self._frame_key_cache[peer_fingerprint] = _compute_frame_key(
-                self._fingerprint, peer_fingerprint, self._password,
+                self._fingerprint,
+                peer_fingerprint,
+                self._password,
             )
             logger.debug(
                 "Derived frame key for peer %s (cache size=%d)",
-                peer_fingerprint[:16] + "...", len(self._frame_key_cache),
+                peer_fingerprint[:16] + "...",
+                len(self._frame_key_cache),
             )
         return self._frame_key_cache[peer_fingerprint]
 
@@ -212,6 +223,7 @@ class EncryptionManager:
         """Encrypt a string for at-rest storage. Returns base64 of encrypted bytes."""
         ct = encrypt(plaintext.encode("utf-8"), self.storage_key)
         import base64
+
         return base64.b64encode(ct).decode("ascii")
 
     def decrypt_storage(self, ciphertext_b64: str) -> str | None:
@@ -221,6 +233,7 @@ class EncryptionManager:
         like legacy plaintext (no encryption prefix), or None on auth failure.
         """
         import base64
+
         try:
             data = base64.b64decode(ciphertext_b64)
         except Exception:
@@ -239,7 +252,9 @@ class EncryptionManager:
         result = encrypt(plaintext, self.get_frame_key(peer_fingerprint))
         logger.debug(
             "App-layer encrypt: %d bytes plain → %d bytes encrypted (peer=%s)",
-            len(plaintext), len(result), peer_fingerprint[:12] + "...",
+            len(plaintext),
+            len(result),
+            peer_fingerprint[:12] + "...",
         )
         return result
 
@@ -249,7 +264,9 @@ class EncryptionManager:
         if result is not None:
             logger.debug(
                 "App-layer decrypt: %d bytes → %d bytes (peer=%s)",
-                len(data), len(result), peer_fingerprint[:12] + "...",
+                len(data),
+                len(result),
+                peer_fingerprint[:12] + "...",
             )
         else:
             logger.warning(

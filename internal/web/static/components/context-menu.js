@@ -46,7 +46,13 @@
         // Use the measured height once the menu is rendered so the bottom-edge
         // clamp uses the real footprint instead of a hardcoded estimate that
         // leaves the last items unreachable near the bottom of the viewport.
-        var h = this._menuHeight || (mode === 'history-item' ? 300 : 170);
+        // 'transfer' shows up to six entries plus a divider, so it needs a
+        // taller first-frame estimate than the 170 default (which would let a
+        // row right-clicked near the bottom render its last item off-screen).
+        var fallback = 170;
+        if (mode === 'history-item') fallback = 300;
+        else if (mode === 'transfer') fallback = 250;
+        var h = this._menuHeight || fallback;
         if (x + w > window.innerWidth - 8) x = window.innerWidth - w - 8;
         if (y + h > window.innerHeight - 8) y = window.innerHeight - h - 8;
         if (x < 8) x = 8;
@@ -92,6 +98,37 @@
         return cm.mode === 'chat-message' ? cm.target : null;
       },
 
+      // A row from the transfer history (transfer-panel's 传输历史 list).
+      targetTransfer: function () {
+        var cm = this.store.contextMenu || {};
+        return cm.mode === 'transfer' ? cm.target : null;
+      },
+
+      // Absolute path on the HOST machine (saved_path for received files,
+      // source_path for sent ones).  Empty when the host never recorded one.
+      transferPath: function () {
+        var tr = this.targetTransfer;
+        return (tr && tr.path) ? String(tr.path) : '';
+      },
+
+      // Open/reveal target the file actually lives at locally.  Only offered
+      // for RECEIVED rows: an outgoing row's path is the sender's own source
+      // file, which the transfers panel deliberately does not offer to open.
+      transferIsIncoming: function () {
+        var tr = this.targetTransfer;
+        return !!(tr && tr.direction !== 'up');
+      },
+
+      // Same condition the panel's Retry button uses: the host's retry branch
+      // only resolves FAILED OUTGOING rows, so don't offer it elsewhere.
+      transferCanRetry: function () {
+        var tr = this.targetTransfer;
+        if (!tr || tr.id === undefined || tr.id === null || tr.id === '') return false;
+        if (tr.direction !== 'up') return false;
+        if (tr.status === 'completed') return false;
+        return !(tr.status === 'cancelled' || tr.cancelled);
+      },
+
       isSessionMuted: function () {
         var s = this.targetSession;
         return !!(s && this.store.isChatMuted(s.peer_id));
@@ -115,6 +152,15 @@
       isPaired: function () {
         var t = this.targetDevice;
         return t && t.paired;
+      },
+
+      // Same gate the device card's chat button uses: a chat frame needs a live
+      // session or a relay path, so don't offer 打开聊天 on a paired-but-offline
+      // device the host cannot reach at all.
+      deviceCanReachNow: function () {
+        var t = this.targetDevice;
+        if (!t) return false;
+        return !!t.connected || !!t.relay_reachable;
       },
 
       isMac: function () {
@@ -638,12 +684,13 @@
             if (window.ClipsyncAPI && window.ClipsyncAPI.chatSessionAction) {
               window.ClipsyncAPI.chatSessionAction(sid, 'close').then(function (res) {
                 if (res && res.ok === false) {
-                  self.store.showToast(self.t('chat.err_send_failed'), 2500);
+                  self.store.showToast(self.t('chat.close_failed'), 2500);
                   return;
                 }
                 self._dropSession(sid);
               }).catch(function (e) {
                 console.error('[ClipSync] Failed to close chat session:', e);
+                self.store.showToast(self.t('chat.close_failed'), 2500);
               });
             } else {
               self._dropSession(sid);
@@ -674,6 +721,54 @@
         this.closeMenu();
         var text = (m && m.text) ? m.text : ((m && m.file_name) || '');
         this._copyText(text, this.t('history.copied'));
+      },
+
+      // ── Transfer history row actions ──────────────────────────────
+      // All of these close the menu FIRST: the store helpers show toasts and
+      // may await the host, and a menu left open would sit on top of them.
+
+      openTransfer: function () {
+        var path = this.transferPath;
+        this.closeMenu();
+        this.store.openTransferFile(path);
+      },
+
+      revealTransfer: function () {
+        var path = this.transferPath;
+        this.closeMenu();
+        this.store.revealTransferFile(path);
+      },
+
+      copyTransferName: function () {
+        var tr = this.targetTransfer;
+        if (!tr) return;
+        this.closeMenu();
+        this._copyText(tr.filename || '', this.t('history.copied'));
+      },
+
+      copyTransferPath: function () {
+        var path = this.transferPath;
+        if (!path) return;
+        this.closeMenu();
+        this._copyText(path, this.t('history.copied'));
+      },
+
+      resendTransfer: function () {
+        var tr = this.targetTransfer;
+        if (!tr || !tr.id) return;
+        this.closeMenu();
+        this.store.retryTransfer(tr.id);
+      },
+
+      // History bookkeeping only — the file on disk is left untouched, so a
+      // received file stays where it was saved.  No confirm prompt: the row is
+      // already finished, and losing one log line is trivially recoverable
+      // (the same divider-separated danger style flags it as destructive).
+      removeTransferFromHistory: function () {
+        var tr = this.targetTransfer;
+        if (!tr || !tr.id) return;
+        this.closeMenu();
+        this.store.deleteTransferHistoryItem(tr.id);
       },
 
       // ── Event handlers ────────────────────────────────────────────
@@ -862,7 +957,7 @@
             '<span class="context-menu__item-icon">🔗</span>' +
             '<span class="context-menu__item-label">{{ isConnected ? t(\'ui.disconnect\') : t(\'ui.connect\') }}</span>' +
           '</div>' +
-          '<div v-if="!isLocal" class="context-menu__item" role="menuitem" tabindex="-1" :aria-disabled="!targetDevice" @click="chatWithDevice">' +
+          '<div v-if="!isLocal && deviceCanReachNow" class="context-menu__item" role="menuitem" tabindex="-1" :aria-disabled="!targetDevice" @click="chatWithDevice">' +
             '<span class="context-menu__item-icon">💬</span>' +
             '<span class="context-menu__item-label">{{ t(\'context.open_chat\') }}</span>' +
           '</div>' +
@@ -902,6 +997,35 @@
           '<div class="context-menu__item" role="menuitem" tabindex="-1" :aria-disabled="!targetChatMsg" @click="copyChatMsg">' +
             '<span class="context-menu__item-icon">📋</span>' +
             '<span class="context-menu__item-label">{{ t(\'context.copy\') }}</span>' +
+          '</div>' +
+        '</template>' +
+
+        '<!-- Transfer history row mode -->' +
+        '<template v-if="store.contextMenu.mode === \'transfer\'">' +
+          '<div v-if="transferPath && transferIsIncoming" class="context-menu__item" role="menuitem" tabindex="-1" @click="openTransfer">' +
+            '<span class="context-menu__item-icon">📂</span>' +
+            '<span class="context-menu__item-label">{{ t(\'transfer.open\') }}</span>' +
+          '</div>' +
+          '<div v-if="transferPath" class="context-menu__item" role="menuitem" tabindex="-1" @click="revealTransfer">' +
+            '<span class="context-menu__item-icon">📁</span>' +
+            '<span class="context-menu__item-label">{{ t(\'transfer.open_folder\') }}</span>' +
+          '</div>' +
+          '<div class="context-menu__item" role="menuitem" tabindex="-1" :aria-disabled="!(targetTransfer || {}).filename" @click="copyTransferName">' +
+            '<span class="context-menu__item-icon">📋</span>' +
+            '<span class="context-menu__item-label">{{ t(\'context.copy_filename\') }}</span>' +
+          '</div>' +
+          '<div v-if="transferPath" class="context-menu__item" role="menuitem" tabindex="-1" @click="copyTransferPath">' +
+            '<span class="context-menu__item-icon">🔗</span>' +
+            '<span class="context-menu__item-label">{{ t(\'context.copy_path\') }}</span>' +
+          '</div>' +
+          '<div v-if="transferCanRetry" class="context-menu__item" role="menuitem" tabindex="-1" @click="resendTransfer">' +
+            '<span class="context-menu__item-icon">↻</span>' +
+            '<span class="context-menu__item-label">{{ t(\'context.resend\') }}</span>' +
+          '</div>' +
+          '<div class="context-menu__divider divider"></div>' +
+          '<div class="context-menu__item context-menu__item--danger" role="menuitem" tabindex="-1" :aria-disabled="!(targetTransfer || {}).id" @click="removeTransferFromHistory">' +
+            '<span class="context-menu__item-icon">🗑</span>' +
+            '<span class="context-menu__item-label">{{ t(\'context.remove_from_history\') }}</span>' +
           '</div>' +
         '</template>' +
       '</div>',

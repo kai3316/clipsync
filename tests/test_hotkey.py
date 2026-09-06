@@ -152,9 +152,7 @@ def test_default_shortcuts_are_conflict_free():
     for hid, shortcut in DEFAULT_SHORTCUTS.items():
         mods, _vk = mgr._parse_shortcut(shortcut)
         combo = (mods, mgr._canonical_key(shortcut))
-        assert combo not in seen, (
-            f"{hid} ({shortcut}) conflicts with {seen[combo]}"
-        )
+        assert combo not in seen, f"{hid} ({shortcut}) conflicts with {seen[combo]}"
         seen[combo] = hid
 
 
@@ -174,9 +172,7 @@ def test_reload_reports_parse_invalid_shortcuts():
     Linux VK fallback accepts arbitrary named keys, so a bogus key name is
     not a portable failure)."""
     mgr = HotkeyManager()
-    mgr.reload_from_config(
-        {"ok": "Ctrl+1", "bad": "Ctrl+Hyper+1"}, _noop_factory
-    )
+    mgr.reload_from_config({"ok": "Ctrl+1", "bad": "Ctrl+Hyper+1"}, _noop_factory)
     failed = dict(mgr.failed_shortcuts())
     assert "bad" in failed
     assert failed["bad"] == "Ctrl+Hyper+1"
@@ -186,9 +182,7 @@ def test_reload_reports_parse_invalid_shortcuts():
 
 def test_reload_reports_conflicting_shortcuts():
     mgr = HotkeyManager()
-    mgr.reload_from_config(
-        {"first": "Ctrl+7", "second": "ctrl+7"}, _noop_factory
-    )
+    mgr.reload_from_config({"first": "Ctrl+7", "second": "ctrl+7"}, _noop_factory)
     failed = dict(mgr.failed_shortcuts())
     assert "second" in failed
     assert "first" not in failed
@@ -261,9 +255,7 @@ def test_unregister_drops_bookkeeping_before_platform_hook(monkeypatch):
 def test_unregister_unknown_id_skips_platform_call(monkeypatch):
     mgr = HotkeyManager()
     calls = []
-    monkeypatch.setattr(
-        mgr, "_platform_unregister_one", calls.append, raising=False
-    )
+    monkeypatch.setattr(mgr, "_platform_unregister_one", calls.append, raising=False)
     mgr._running = True
     mgr.unregister("never_registered")
     assert calls == []
@@ -291,9 +283,7 @@ def test_fire_swallows_callback_exceptions():
     reason="_to_pynput_shortcut only exists on the linux branch",
 )
 def test_to_pynput_shortcut_conversion():
-    assert (
-        hk_module._to_pynput_shortcut("Ctrl+Shift+V") == "<ctrl>+<shift>+v"
-    )
+    assert hk_module._to_pynput_shortcut("Ctrl+Shift+V") == "<ctrl>+<shift>+v"
     assert hk_module._to_pynput_shortcut("Alt+Space") == "<alt>+<space>"
     assert hk_module._to_pynput_shortcut("Ctrl+`") == "<ctrl>+<grave>"
 
@@ -304,7 +294,7 @@ def test_to_pynput_shortcut_conversion():
 
 
 class _FakeKernel32:
-    def GetLastError(self):
+    def GetLastError(self):  # noqa: N802
         return 1409  # ERROR_HOTKEY_ALREADY_REGISTERED
 
 
@@ -314,13 +304,13 @@ class _FakeUser32:
         self.registered = []  # (hwnd, int_id, mods, vk)
         self.unregistered = []  # (hwnd, int_id)
 
-    def RegisterHotKey(self, hwnd, int_id, mods, vk):
+    def RegisterHotKey(self, hwnd, int_id, mods, vk):  # noqa: N802
         if int_id in self.fail_ids:
             return 0
         self.registered.append((hwnd, int_id, mods, vk))
         return 1
 
-    def UnregisterHotKey(self, hwnd, int_id):
+    def UnregisterHotKey(self, hwnd, int_id):  # noqa: N802
         self.unregistered.append((hwnd, int_id))
         return 1
 

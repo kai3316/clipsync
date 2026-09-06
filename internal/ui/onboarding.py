@@ -5,6 +5,8 @@ Every label is shown in BOTH languages so a user who reads either one can
 complete the step and see what each option means.
 """
 
+import contextlib
+
 import customtkinter as ctk
 
 # (locale_code, native_name, other_language_name)
@@ -41,10 +43,8 @@ def show_language_onboarding(parent) -> str | None:
 
     def _pick(code: str):
         result[0] = code
-        try:
+        with contextlib.suppress(Exception):
             dlg.destroy()
-        except Exception:
-            pass
 
     # Closing the window (X / Esc) dismisses without changing the language.
     dlg.protocol("WM_DELETE_WINDOW", lambda: dlg.destroy())
@@ -54,11 +54,13 @@ def show_language_onboarding(parent) -> str | None:
 
     # ── Title ────────────────────────────────────────────────────
     ctk.CTkLabel(
-        body, text="ClipSync",
+        body,
+        text="ClipSync",
         font=ctk.CTkFont(size=30, weight="bold"),
     ).pack(pady=(0, 6))
     ctk.CTkLabel(
-        body, text="选择语言 · Choose Language",
+        body,
+        text="选择语言 · Choose Language",
         font=ctk.CTkFont(size=20, weight="bold"),
     ).pack(pady=(0, 4))
     ctk.CTkLabel(
@@ -75,26 +77,33 @@ def show_language_onboarding(parent) -> str | None:
     idle_color = ("gray75", "gray30")
     for code, native, other in LANGUAGE_OPTIONS:
         card = ctk.CTkFrame(
-            body, corner_radius=12,
+            body,
+            corner_radius=12,
             fg_color=("gray92", "gray17"),
-            border_width=1, border_color=idle_color,
+            border_width=1,
+            border_color=idle_color,
             cursor="hand2",
         )
         card.pack(fill="x", pady=6)
-        pick_cmd = lambda _e, c=code: _pick(c)
+
+        def pick_cmd(_e, c=code):
+            return _pick(c)
+
         # Clicks land on the child labels, not the frame, so bind the same
         # handler (and hand cursor) to every label inside the card too —
         # otherwise only the thin card margin responds.
         card.bind("<Button-1>", pick_cmd)
         lbl_native = ctk.CTkLabel(
-            card, text=native,
+            card,
+            text=native,
             font=ctk.CTkFont(size=16, weight="bold"),
             cursor="hand2",
         )
         lbl_native.pack(pady=(14, 0))
         lbl_native.bind("<Button-1>", pick_cmd)
         lbl_other = ctk.CTkLabel(
-            card, text=other,
+            card,
+            text=other,
             font=ctk.CTkFont(size=12),
             text_color=("gray40", "gray60"),
             cursor="hand2",
@@ -120,10 +129,8 @@ def show_language_onboarding(parent) -> str | None:
     n = len(cards)
 
     def _focus(index):
-        try:
+        with contextlib.suppress(Exception):
             cards[index % n].focus_set()
-        except Exception:
-            pass
 
     def _find_card(widget):
         """Walk up from the focused widget to the nearest card frame.
@@ -170,10 +177,8 @@ def show_language_onboarding(parent) -> str | None:
     # ── Modal behavior + Escape-to-dismiss ────────────────────────
     dlg.update()
     dlg.transient(parent)
-    try:
+    with contextlib.suppress(Exception):
         dlg.grab_set()
-    except Exception:
-        pass
     dlg.bind("<Escape>", lambda _e: dlg.destroy())
     if n:
         _focus(0)

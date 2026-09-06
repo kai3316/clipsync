@@ -162,8 +162,7 @@ class TestConfigSaveLoad:
         removed_peers dict (backward compatible)."""
         tmp_dir = Path(tempfile.mkdtemp())
         config_path = tmp_dir / "config.json"
-        config_path.write_text(
-            json.dumps({"peers": []}), encoding="utf-8")
+        config_path.write_text(json.dumps({"peers": []}), encoding="utf-8")
 
         original_dir = config_module._config_dir
         original_path = config_module._config_path
@@ -292,13 +291,16 @@ def _restore(zip_path: str, cfg):
 # (a) A valid restore persists the config to disk immediately.
 def test_valid_restore_persists_config_to_disk(isolated_config):
     config_dir, config_path = isolated_config
-    zip_path = _make_backup_zip(config_dir, {
-        "device_name": "Restored Host",
-        "port": 23456,
-        "web_port": 23457,
-        "language": "en",
-        "appearance_mode": "dark",
-    })
+    zip_path = _make_backup_zip(
+        config_dir,
+        {
+            "device_name": "Restored Host",
+            "port": 23456,
+            "web_port": 23457,
+            "language": "en",
+            "appearance_mode": "dark",
+        },
+    )
 
     cfg = config_module.Config()
     assert cfg.port == 19990  # default
@@ -324,12 +326,15 @@ def test_valid_restore_persists_config_to_disk(isolated_config):
 # (b) A malformed backup must not crash; bad values are skipped/clamped.
 def test_restore_with_invalid_port_values_does_not_crash(isolated_config):
     config_dir, _config_path = isolated_config
-    zip_path = _make_backup_zip(config_dir, {
-        "device_name": "Bad Backup",
-        "port": "abc",          # wrong type -> skipped, stays default
-        "web_port": 70000,      # out of range -> clamped to 65535
-        "history_max_entries": 5,
-    })
+    zip_path = _make_backup_zip(
+        config_dir,
+        {
+            "device_name": "Bad Backup",
+            "port": "abc",  # wrong type -> skipped, stays default
+            "web_port": 70000,  # out of range -> clamped to 65535
+            "history_max_entries": 5,
+        },
+    )
 
     cfg = config_module.Config()
     original_port = cfg.port  # 19990
@@ -387,6 +392,7 @@ def test_apply_config_skips_bad_bools_and_enums():
     _apply_config({"language": "fr"}, cfg)
     assert cfg.language == "zh-CN"  # default unchanged
 
+
 # ══════════════════════════════════════════════════
 # split from test_round13_wrapup.py — config/backup new-key roundtrip
 # ══════════════════════════════════════════════════
@@ -394,6 +400,7 @@ def test_apply_config_skips_bad_bools_and_enums():
 
 def _point_config_at(tmp_path, monkeypatch, data=None):
     import internal.config.config as config_module
+
     cfg_dir = tmp_path / "cfg"
     cfg_dir.mkdir(exist_ok=True)
     cfg_path = cfg_dir / "config.json"
@@ -436,14 +443,18 @@ def test_config_migrates_legacy_ai_config_paths(tmp_path, monkeypatch):
     else survives as a custom path.  The migration is one-way and idempotent —
     a later save persists the new fields, so a re-load never re-runs it.
     """
-    config_module = _point_config_at(tmp_path, monkeypatch, {
-        "ai_config_paths": [
-            "~/.claude/CLAUDE.md",       # → claude_code profile
-            "~/.codex/config.toml",      # → codex profile
-            "~/ai-notes",                # → custom path
-            "  ",                        # → dropped
-        ],
-    })
+    config_module = _point_config_at(
+        tmp_path,
+        monkeypatch,
+        {
+            "ai_config_paths": [
+                "~/.claude/CLAUDE.md",  # → claude_code profile
+                "~/.codex/config.toml",  # → codex profile
+                "~/ai-notes",  # → custom path
+                "  ",  # → dropped
+            ],
+        },
+    )
     cfg = config_module.load()
     assert cfg.ai_config_tools == ["claude_code", "codex"]
     assert cfg.ai_config_custom_paths == ["~/ai-notes"]
@@ -454,14 +465,18 @@ def test_config_migrates_legacy_ai_config_paths(tmp_path, monkeypatch):
     assert cfg2.ai_config_custom_paths == cfg.ai_config_custom_paths
 
 
-def test_config_legacy_ai_config_paths_unmatched_keeps_feature_on(
-        tmp_path, monkeypatch):
+def test_config_legacy_ai_config_paths_unmatched_keeps_feature_on(tmp_path, monkeypatch):
     """No built-in path matched → all tools stay enabled (feature stays on)."""
-    config_module = _point_config_at(tmp_path, monkeypatch, {
-        "ai_config_paths": ["~/notes-a", "~/notes-b"],
-    })
+    config_module = _point_config_at(
+        tmp_path,
+        monkeypatch,
+        {
+            "ai_config_paths": ["~/notes-a", "~/notes-b"],
+        },
+    )
     cfg = config_module.load()
     from internal.sync.ai_profiles import DEFAULT_TOOL_KEYS
+
     assert cfg.ai_config_tools == list(DEFAULT_TOOL_KEYS)
     assert cfg.ai_config_custom_paths == ["~/notes-a", "~/notes-b"]
 
@@ -470,12 +485,15 @@ def test_config_legacy_ai_config_paths_unmatched_keeps_feature_on(
 def _isolated_favorites(tmp_path, monkeypatch):
     """Point the favorites paths at tmp so tests never touch real user data."""
     import internal.data.backup as backup_mod
+
     monkeypatch.setattr(
-        backup_mod, "_get_favorites_db_path",
+        backup_mod,
+        "_get_favorites_db_path",
         lambda: tmp_path / "favorites.db",
     )
     monkeypatch.setattr(
-        backup_mod, "_get_favorites_path",
+        backup_mod,
+        "_get_favorites_path",
         lambda: tmp_path / "favorites.json",
     )
     return tmp_path
@@ -483,14 +501,13 @@ def _isolated_favorites(tmp_path, monkeypatch):
 
 def test_backup_roundtrips_new_config_keys(tmp_path, _isolated_favorites):
     import internal.data.backup as backup_mod
-    from internal.clipboard.history import ClipboardHistory
+    from internal.clipboard.history_db import ClipboardHistoryDB
     from internal.config.config import Config
 
     cfg = Config()
     cfg.internet_sync_enabled = True
     cfg.relay_brokers = ["wss://broker.hivemq.com:8884/mqtt"]
-    cfg.relay_private_brokers = ["mqtt://mqttyyc.top:1883",
-                                 "ws://mqttyyc.top:8083/mqtt"]
+    cfg.relay_private_brokers = ["mqtt://mqttyyc.top:1883", "ws://mqttyyc.top:8083/mqtt"]
     cfg.relay_username = "clipsync_mqtt"
     cfg.relay_password = "s3cret!"
     cfg.relay_secret = "ab" * 32
@@ -498,9 +515,8 @@ def test_backup_roundtrips_new_config_keys(tmp_path, _isolated_favorites):
     cfg.ai_config_tools = ["gemini"]
     cfg.ai_config_custom_paths = ["~/ai-configs"]
 
-    history = ClipboardHistory(storage_path=str(tmp_path / "h.json"))
-    zip_path = backup_mod.create_backup(
-        cfg, history, backup_dir=str(tmp_path / "bk"))
+    history = ClipboardHistoryDB(storage_path=str(tmp_path / "h.db"))
+    zip_path = backup_mod.create_backup(cfg, history, backup_dir=str(tmp_path / "bk"))
 
     # The archive itself carries the keys.
     with zipfile.ZipFile(zip_path) as zf:
@@ -514,7 +530,7 @@ def test_backup_roundtrips_new_config_keys(tmp_path, _isolated_favorites):
     assert exported["ai_config_tools"] == cfg.ai_config_tools
     assert exported["ai_config_custom_paths"] == cfg.ai_config_custom_paths
 
-    fresh = Config()   # defaults everywhere
+    fresh = Config()  # defaults everywhere
     result = backup_mod.restore_backup(zip_path, fresh, history)
     assert result["config"] is True
     assert fresh.internet_sync_enabled is True
@@ -536,5 +552,3 @@ def test_backup_strlist_nonnull_rule():
     assert _validate_config_value(None, ("strlist_nonnull",)) is _SKIP
     assert _validate_config_value("nope", ("strlist_nonnull",)) is _SKIP
     assert _validate_config_value([1], ("strlist_nonnull",)) is _SKIP
-
-

@@ -67,6 +67,11 @@ target-version = "py312"
 [tool.ruff.lint]
 select = ["E", "F", "W", "I", "N", "UP", "B", "SIM"]
 
+# Tests prepend the repo root to sys.path then import the package under test,
+# so their imports legitimately sit after a non-import statement (E402).
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["E402"]
+
 [tool.ruff.format]
 quote-style = "double"
 

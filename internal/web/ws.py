@@ -5,6 +5,7 @@ only Python stdlib (hashlib, struct, base64, threading).
 """
 
 import base64
+import contextlib
 import hashlib
 import json
 import logging
@@ -40,6 +41,11 @@ class WebSocketClient:
         self.addr = addr
         self._lock = threading.Lock()
         self._closed = False
+        # Separate from _closed: a failed send/recv sets _closed ("no longer
+        # usable") long before anyone calls close() ("socket released").
+        # Conflating the two meant the socket was never actually closed on the
+        # common disconnect path.
+        self._sock_closed = False
         # Monotonic timestamp of the last successfully-received frame. The
         # keepalive thread pings clients and drops any that go quiet for
         # several intervals (phone asleep, cable pulled) so a zombie
@@ -49,10 +55,8 @@ class WebSocketClient:
         # broadcast forever: bound every send/recv on this socket so
         # sendall() raises instead of blocking indefinitely.  This also
         # closes clients that send a partial frame and then stall.
-        try:
+        with contextlib.suppress(OSError):
             self.sock.settimeout(5.0)
-        except OSError:
-            pass
 
     def send_json(self, data: dict) -> bool:
         """Send a JSON message to the client. Returns True on success."""
@@ -189,18 +193,34 @@ class WebSocketClient:
             self.close()
 
     def close(self):
-        """Send close frame and shut down the socket."""
-        if self._closed:
-            return
-        try:
-            self._send_frame(_OP_CLOSE, b"")
-        except OSError:
-            pass
-        try:
+        """Send a close frame (best effort) and shut the socket down.
+
+        This has to run even when ``_closed`` is already True.  That flag is
+        set by recv_frame/send_* the moment the peer goes away, and the normal
+        disconnect path is exactly: recv_frame sets _closed -> serve()'s loop
+        exits -> ``finally: self.close()``.  The old ``if self._closed:
+        return`` guard therefore returned without ever calling
+        ``sock.close()``, leaking one file descriptor (and one thread's worth
+        of kernel buffers) for every browser tab that ever disconnected.
+        ``_sock_closed`` keeps the method idempotent instead.
+        """
+        with self._lock:
+            if self._sock_closed:
+                return
+            self._sock_closed = True
+            send_close = not self._closed
+            self._closed = True
+        if send_close:
+            # Only worth attempting while the peer is believed alive; a CLOSE
+            # frame down a dead socket just raises.
+            with contextlib.suppress(OSError, ConnectionError):
+                self._send_frame(_OP_CLOSE, b"")
+        # shutdown() first so a peer blocked reading us sees EOF immediately
+        # rather than waiting for the OS to time the connection out.
+        with contextlib.suppress(OSError, ConnectionError):
+            self.sock.shutdown(socket.SHUT_RDWR)
+        with contextlib.suppress(OSError):
             self.sock.close()
-        except OSError:
-            pass
-        self._closed = True
 
     @property
     def closed(self) -> bool:
@@ -260,10 +280,18 @@ class WebSocketClient:
 class WebSocketManager:
     """Manages all connected WebSocket clients and provides broadcast."""
 
-    def __init__(self, cfg, history, sync_mgr, get_connected_ids, get_discovered=None,
-                 get_resolved_hashes=None, get_pending_pairings=None,
-                 get_reconnect_states=None,
-                 on_client_attached=None):
+    def __init__(
+        self,
+        cfg,
+        history,
+        sync_mgr,
+        get_connected_ids,
+        get_discovered=None,
+        get_resolved_hashes=None,
+        get_pending_pairings=None,
+        get_reconnect_states=None,
+        on_client_attached=None,
+    ):
         self._cfg = cfg
         self._history = history
         self._sync_mgr = sync_mgr
@@ -286,7 +314,9 @@ class WebSocketManager:
         # drop) — otherwise they linger as "connected" zombies forever.
         self._hb_stop = threading.Event()
         self._hb_thread = threading.Thread(
-            target=self._heartbeat_loop, daemon=True, name="ws-heartbeat",
+            target=self._heartbeat_loop,
+            daemon=True,
+            name="ws-heartbeat",
         )
         self._hb_thread.start()
 
@@ -299,8 +329,9 @@ class WebSocketManager:
     def on_client_attached(self, cb):
         self._on_client_attached = cb
 
-    def handle_handshake(self, sock: socket.socket, addr: tuple,
-                         request_headers: dict[str, str]) -> WebSocketClient | None:
+    def handle_handshake(
+        self, sock: socket.socket, addr: tuple, request_headers: dict[str, str]
+    ) -> WebSocketClient | None:
         """Perform WebSocket handshake on an already-accepted socket.
 
         Returns the WebSocketClient on success, None on failure.
@@ -311,9 +342,7 @@ class WebSocketManager:
             return None
 
         # Compute accept key
-        accept = base64.b64encode(
-            hashlib.sha1(key.encode() + _WS_MAGIC).digest()
-        ).decode()
+        accept = base64.b64encode(hashlib.sha1(key.encode() + _WS_MAGIC).digest()).decode()
 
         # Build upgrade response
         response = (
@@ -358,6 +387,7 @@ class WebSocketManager:
 
         # History
         from internal.web.api.history import get_history
+
         hist_data, _ = get_history(self._history, self._cfg)
         client.send_json({"type": "history_updated", "data": hist_data})
 
@@ -411,10 +441,8 @@ class WebSocketManager:
                     if client in self._clients:
                         self._clients.remove(client)
             for client in dead:
-                try:
+                with contextlib.suppress(Exception):
                     client.close()
-                except Exception:
-                    pass
         return delivered
 
     def remove_client(self, client: WebSocketClient) -> None:
@@ -422,8 +450,12 @@ class WebSocketManager:
         with self._lock:
             if client in self._clients:
                 self._clients.remove(client)
-                logger.info("WS client removed: %s:%d (%d clients)",
-                            client.addr[0], client.addr[1], len(self._clients))
+                logger.info(
+                    "WS client removed: %s:%d (%d clients)",
+                    client.addr[0],
+                    client.addr[1],
+                    len(self._clients),
+                )
 
     def _ping_and_collect_stale(self, now: float | None = None) -> list:
         """Ping every live client and return the ones to drop.
@@ -445,13 +477,23 @@ class WebSocketManager:
                 stale.append(client)
                 continue
             try:
-                client.send_ping()
+                # send_ping() swallows OSError and returns False -- it does not
+                # raise -- so the bare try/except never fired and a client with
+                # a dead socket survived until the 90s silence window instead
+                # of being dropped on the spot.  Read the return value.
+                if not client.send_ping():
+                    logger.debug(
+                        "WS keepalive: ping failed, dropping %s:%d", client.addr[0], client.addr[1]
+                    )
+                    stale.append(client)
+                    continue
             except Exception:
                 stale.append(client)
                 continue
             if now - client.last_recv > ping_interval * missed_limit:
-                logger.debug("WS keepalive: dropping stalled client %s:%d",
-                             client.addr[0], client.addr[1])
+                logger.debug(
+                    "WS keepalive: dropping stalled client %s:%d", client.addr[0], client.addr[1]
+                )
                 stale.append(client)
         return stale
 
@@ -464,10 +506,8 @@ class WebSocketManager:
                 if client in self._clients:
                     self._clients.remove(client)
         for client in stale:
-            try:
+            with contextlib.suppress(Exception):
                 client.close()
-            except Exception:
-                pass
 
     def _heartbeat_loop(self) -> None:
         """Keepalive loop: ping every client and drop stale ones.
@@ -485,6 +525,7 @@ class WebSocketManager:
     def broadcast_history(self):
         """Convenience: broadcast full history to all clients."""
         from internal.web.api.history import get_history
+
         hist_data, _ = get_history(self._history, self._cfg)
         self.broadcast("history_updated", hist_data)
 
@@ -496,10 +537,13 @@ class WebSocketManager:
         this event so every client removes the entries (and the ones that
         issued the request don't race their own local splice).
         """
-        self.broadcast("history_item_deleted", {
-            "entry_ids": list(entry_ids or []),
-            "total": total,
-        })
+        self.broadcast(
+            "history_item_deleted",
+            {
+                "entry_ids": list(entry_ids or []),
+                "total": total,
+            },
+        )
 
     def broadcast_history_clear(self):
         """Convenience: tell clients the entire history was wiped."""
@@ -513,8 +557,11 @@ class WebSocketManager:
         "did anything user-visible change" signal.
         """
         from internal.web.api.devices import get_devices
+
         dev_data, _ = get_devices(
-            self._cfg, self._get_connected_ids, self._get_discovered,
+            self._cfg,
+            self._get_connected_ids,
+            self._get_discovered,
             get_resolved_hashes=self._get_resolved_hashes,
             get_pending_pairings=self._get_pending_pairings,
             get_reconnect_states=self._get_reconnect_states,
@@ -530,18 +577,25 @@ class WebSocketManager:
         on real changes instead of a coarse name+suffix string.
         """
         import json
+
         return json.dumps(
-            self._devices_snapshot(), sort_keys=True,
-            ensure_ascii=False, default=str,
+            self._devices_snapshot(),
+            sort_keys=True,
+            ensure_ascii=False,
+            default=str,
         )
 
     def broadcast_devices(self):
         """Convenience: broadcast device list to all clients."""
         self.broadcast("devices_updated", self._devices_snapshot())
 
-    def broadcast_transfer_progress(self, transfer_id: str, progress: float,
-                                    status: str = "transferring",
-                                    direction: str | None = None):
+    def broadcast_transfer_progress(
+        self,
+        transfer_id: str,
+        progress: float,
+        status: str = "transferring",
+        direction: str | None = None,
+    ):
         """Convenience: broadcast transfer progress.
 
         ``direction`` is optional ('up'/'down'): when present it is forwarded
@@ -559,11 +613,14 @@ class WebSocketManager:
 
     def broadcast_transfer_complete(self, transfer_id: str, success: bool, cancelled: bool = False):
         """Convenience: broadcast a transfer completion event."""
-        self.broadcast("transfer_complete", {
-            "id": transfer_id,
-            "success": bool(success),
-            "cancelled": bool(cancelled),
-        })
+        self.broadcast(
+            "transfer_complete",
+            {
+                "id": transfer_id,
+                "success": bool(success),
+                "cancelled": bool(cancelled),
+            },
+        )
 
     def broadcast_chat_sessions(self, sessions=None):
         """Convenience: broadcast the full nearby-chat session list.
@@ -575,29 +632,39 @@ class WebSocketManager:
 
     def broadcast_chat_message(self, session_id: str, entry: dict):
         """Convenience: broadcast one new chat message entry."""
-        self.broadcast("chat_message", {
-            "session_id": session_id,
-            "entry": entry or {},
-        })
+        self.broadcast(
+            "chat_message",
+            {
+                "session_id": session_id,
+                "entry": entry or {},
+            },
+        )
 
     def broadcast_chat_progress(self, session_id: str, transfer_id: str, fraction: float):
         """Convenience: broadcast chat file-transfer progress (both directions)."""
-        self.broadcast("chat_progress", {
-            "session_id": session_id,
-            "transfer_id": transfer_id,
-            "fraction": fraction,
-        })
+        self.broadcast(
+            "chat_progress",
+            {
+                "session_id": session_id,
+                "transfer_id": transfer_id,
+                "fraction": fraction,
+            },
+        )
 
-    def broadcast_chat_file_done(self, session_id: str, transfer_id: str,
-                                 success: bool, saved_path: str, status: str):
+    def broadcast_chat_file_done(
+        self, session_id: str, transfer_id: str, success: bool, saved_path: str, status: str
+    ):
         """Convenience: broadcast a completed chat file transfer."""
-        self.broadcast("chat_file_done", {
-            "session_id": session_id,
-            "transfer_id": transfer_id,
-            "success": bool(success),
-            "saved_path": saved_path or "",
-            "status": status or "",
-        })
+        self.broadcast(
+            "chat_file_done",
+            {
+                "session_id": session_id,
+                "transfer_id": transfer_id,
+                "success": bool(success),
+                "saved_path": saved_path or "",
+                "status": status or "",
+            },
+        )
 
     @property
     def client_count(self) -> int:
@@ -615,8 +682,6 @@ class WebSocketManager:
             clients = list(self._clients)
             self._clients.clear()
         for client in clients:
-            try:
+            with contextlib.suppress(Exception):
                 client.close()
-            except Exception:
-                pass
         logger.info("WebSocket manager shut down")

@@ -8,6 +8,7 @@ The server delegates API routes to routes.py, WebSocket handling to
 ws.py, and serves static files from internal/web/static/.
 """
 
+import contextlib
 import hmac
 import json
 import logging
@@ -23,6 +24,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from io import BytesIO
 
 from internal.i18n import T
+from internal.platform import decode_console_output
 from internal.transport.discovery import get_all_local_addresses
 
 logger = logging.getLogger(__name__)
@@ -51,6 +53,7 @@ def _js_string(value: str) -> str:
 
 # ── Upload directory ─────────────────────────────────────────────
 
+
 def _get_upload_dir(cfg=None) -> str:
     """Return the directory phone uploads are saved to.
 
@@ -73,7 +76,10 @@ def _get_upload_dir(cfg=None) -> str:
 # ── Upload filename sanitisation ─────────────────────────────────
 
 _WINDOWS_RESERVED_NAMES = {
-    "CON", "PRN", "AUX", "NUL",
+    "CON",
+    "PRN",
+    "AUX",
+    "NUL",
     *(f"COM{i}" for i in range(1, 10)),
     *(f"LPT{i}" for i in range(1, 10)),
 }
@@ -102,8 +108,25 @@ def _sanitize_upload_filename(name: str) -> str:
     return name
 
 
-# ── Simple multipart form parser (no external deps) ──────────────
+def _canonical_request_path(path: str) -> str:
+    """Collapse request-path aliases to the single form used for routing.
 
+    ``posixpath.normpath`` folds ``/./x`` and ``/a//b``, but it deliberately
+    PRESERVES exactly two leading slashes -- POSIX reserves ``//foo`` for an
+    implementation-defined meaning.  So ``//api/push`` stayed ``//api/push``,
+    matched no ``/api/...`` route, and came back 404 even though every browser,
+    proxy and naive string-join treats it as ``/api/push``.  Collapse the
+    leading run so the alias routes like the canonical path.
+    """
+    if not path:
+        return path
+    path = posixpath.normpath(path)
+    if path.startswith("//"):
+        path = "/" + path.lstrip("/")
+    return path
+
+
+# ── Simple multipart form parser (no external deps) ──────────────
 class _MultipartError(ValueError):
     """Raised by _parse_multipart for a structurally invalid multipart body.
 
@@ -192,7 +215,7 @@ def _parse_multipart(body: bytes, content_type: str) -> dict:
     delimiter = b"--" + b_bytes
     if not body.startswith(delimiter):
         raise _MultipartError("body does not start with the multipart boundary")
-    body = body[len(delimiter):]
+    body = body[len(delimiter) :]
     if body.startswith(b"--"):
         # Legal empty form: "--boundary--" right after the opening delimiter.
         return {}
@@ -211,9 +234,8 @@ def _parse_multipart(body: bytes, content_type: str) -> dict:
     last = parts[-1]
     close_idx = last.rfind(close)
     if close_idx == -1:
-        raise _MultipartError(
-            "multipart body is truncated (closing boundary missing)")
-    epilogue = last[close_idx + len(close):]
+        raise _MultipartError("multipart body is truncated (closing boundary missing)")
+    epilogue = last[close_idx + len(close) :]
     if epilogue.strip(b"\r\n \t"):
         raise _MultipartError("unexpected data after the closing boundary")
 
@@ -259,16 +281,17 @@ def _check_declared_length(body: bytes, declared_length: int) -> str | None:
     multipart, so the caller rejects it up front instead of parsing garbage.
     """
     if declared_length > 0 and len(body) != declared_length:
-        return ("incomplete upload: connection closed before the "
-                "file finished sending")
+        return "incomplete upload: connection closed before the file finished sending"
     return None
 
 
 # ── PWA icons (generated at startup) ────────────────────────────
 
+
 def _make_icon(size: int, dark: bool = False) -> bytes:
     """Generate a simple clipboard icon PNG with PIL."""
     from PIL import Image, ImageDraw
+
     img = Image.new("RGBA", (size, size), (0, 0, 0, 0))
     draw = ImageDraw.Draw(img)
     margin = size // 8
@@ -277,7 +300,8 @@ def _make_icon(size: int, dark: bool = False) -> bytes:
     bg_color = (26, 39, 50, 255) if dark else (26, 82, 118, 255)
     draw.rounded_rectangle(
         [margin, margin, size - margin, size - margin],
-        radius=r, fill=bg_color,
+        radius=r,
+        fill=bg_color,
     )
     # Clipboard shape: white rectangle with top clip
     cx = size // 2
@@ -287,13 +311,15 @@ def _make_icon(size: int, dark: bool = False) -> bytes:
     # Board body
     draw.rounded_rectangle(
         [left, top + r // 2, left + bw, top + bh],
-        radius=r // 2, fill=(255, 255, 255, 240),
+        radius=r // 2,
+        fill=(255, 255, 255, 240),
     )
     # Clip on top
     clip_w = bw // 2
     draw.rounded_rectangle(
         [cx - clip_w // 2, top - r // 2, cx + clip_w // 2, top + r],
-        radius=r // 3, fill=(255, 255, 255, 240),
+        radius=r // 3,
+        fill=(255, 255, 255, 240),
     )
     # Lines on clipboard
     lx = left + bw // 5
@@ -310,12 +336,14 @@ def _make_icon(size: int, dark: bool = False) -> bytes:
 
 # ── Static file directory ───────────────────────────────────────
 
+
 def _get_static_dir() -> str:
     """Return the path to the static files directory."""
     return os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
 
 
 # ── Token validation helper ─────────────────────────────────────
+
 
 def _validate_token(path: str, expected_token: str) -> bool:
     """Check that the query string contains the expected token.
@@ -372,6 +400,7 @@ def _read_request_body(handler) -> bytes:
 
 # ── File download response builder ──────────────────────────────
 
+
 def _build_file_response(filepath: str, mime: str = "application/octet-stream"):
     """Build headers + body for a file download response.
 
@@ -379,7 +408,11 @@ def _build_file_response(filepath: str, mime: str = "application/octet-stream"):
     Returns (404, ...) if file not found.
     """
     if not os.path.isfile(filepath):
-        return 404, {"Content-Type": "application/json"}, json.dumps({"error": "not found"}).encode("utf-8")
+        return (
+            404,
+            {"Content-Type": "application/json"},
+            json.dumps({"error": "not found"}).encode("utf-8"),
+        )
 
     fsize = os.path.getsize(filepath)
     fname = os.path.basename(filepath)
@@ -405,41 +438,58 @@ def _build_file_response(filepath: str, mime: str = "application/octet-stream"):
 # ── WEB SERVER ────────────────────────────────────────────────────
 # ═══════════════════════════════════════════════════════════════════
 
+
 class WebServer:
     """Lightweight HTTP server for the ClipSync web companion."""
 
     FW_RULE_NAME = "ClipSync Web Companion"
 
-    def __init__(self, cfg, clipboard_history, sync_mgr, get_connected_ids=None,
-                 on_nav_url=None, on_forward_file=None,
-                 get_overview_data=None, on_device_action=None,
-                 on_device_test=None,
-                 on_transfer_action=None,
-                 on_get_transfers=None,
-                 on_speed_test_start=None, on_speed_test_poll=None,
-                 on_window_close=None,
-                 on_toggle_discovery=None, on_toggle_visibility=None,
-                 on_settings_change=None,
-                 on_show_web_qr=None, on_send_url=None,
-                 get_discovered_peers=None,
-                 get_resolved_hashes=None, get_pending_pairings=None,
-                 get_reconnect_states=None,
-                 get_relay_state=None,
-                 get_current_relay_broker=None,
-                 enc_mgr=None, on_open_file=None, on_open_folder=None,
-                 on_restart=None, on_reset_dedup=None,
-                 get_certs=None, get_diagnostics=None,
-                 on_update_download=None,
-                 on_update_status=None,
-                 on_update_open_folder=None,
-                 on_diagnostics_request=None,
-                 on_web_upload=None,
-                 chat_mgr=None,
-                 get_chat_devices=None,
-                 chat_send_fn=None,
-                 chat_start_session=None,
-                 get_chat_muted=None,
-                 set_chat_muted=None):
+    def __init__(
+        self,
+        cfg,
+        clipboard_history,
+        sync_mgr,
+        get_connected_ids=None,
+        on_nav_url=None,
+        on_forward_file=None,
+        get_overview_data=None,
+        on_device_action=None,
+        on_device_test=None,
+        on_transfer_action=None,
+        on_get_transfers=None,
+        on_speed_test_start=None,
+        on_speed_test_poll=None,
+        on_window_close=None,
+        on_toggle_discovery=None,
+        on_toggle_visibility=None,
+        on_settings_change=None,
+        on_show_web_qr=None,
+        on_send_url=None,
+        get_discovered_peers=None,
+        get_resolved_hashes=None,
+        get_pending_pairings=None,
+        get_reconnect_states=None,
+        get_relay_state=None,
+        get_current_relay_broker=None,
+        enc_mgr=None,
+        on_open_file=None,
+        on_open_folder=None,
+        on_restart=None,
+        on_reset_dedup=None,
+        get_certs=None,
+        get_diagnostics=None,
+        on_update_download=None,
+        on_update_status=None,
+        on_update_open_folder=None,
+        on_diagnostics_request=None,
+        on_web_upload=None,
+        chat_mgr=None,
+        get_chat_devices=None,
+        chat_send_fn=None,
+        chat_start_session=None,
+        get_chat_muted=None,
+        set_chat_muted=None,
+    ):
         self._cfg = cfg
         self._sync_mgr = sync_mgr
         self._get_connected_ids = get_connected_ids
@@ -460,12 +510,14 @@ class WebServer:
         # peers.  Defaults to the sync manager's own method when available.
         if on_reset_dedup is None:
             _sync_mgr = self._sync_mgr
+
             def _default_reset_dedup():
                 try:
                     if _sync_mgr is not None and hasattr(_sync_mgr, "reset_dedup_for_restore"):
                         _sync_mgr.reset_dedup_for_restore()
                 except Exception:
                     logger.debug("reset_dedup_for_restore failed", exc_info=True)
+
             self._on_reset_dedup = _default_reset_dedup
         else:
             self._on_reset_dedup = on_reset_dedup
@@ -536,34 +588,18 @@ class WebServer:
 
     @staticmethod
     def _upgrade_history(clipboard_history):
-        """Upgrade a ClipboardHistory to ClipboardHistoryDB if needed.
+        """Return the clipboard history instance to use (always ClipboardHistoryDB).
 
-        If *clipboard_history* is already a ClipboardHistoryDB, return
-        it unchanged.  If it is the legacy ClipboardHistory, create a
-        ClipboardHistoryDB instance (which auto-migrates from the JSON
-        file) and return that.
-
-        Returns the history instance to use (ClipboardHistoryDB).
+        If *clipboard_history* is already a ClipboardHistoryDB, return it
+        unchanged.  Otherwise (None or an unknown/mock value), create a
+        fresh ClipboardHistoryDB instance.  The legacy JSON ClipboardHistory
+        backend no longer exists, so there is no migration branch.
         """
-        from internal.clipboard.history import ClipboardHistory
         from internal.clipboard.history_db import ClipboardHistoryDB
 
         if isinstance(clipboard_history, ClipboardHistoryDB):
             return clipboard_history
 
-        if isinstance(clipboard_history, ClipboardHistory):
-            logger.info(
-                "Upgrading ClipboardHistory to ClipboardHistoryDB "
-                "(auto-migrating from JSON if available)"
-            )
-            enc_mgr = getattr(clipboard_history, '_enc_mgr', None)
-            max_entries = getattr(clipboard_history, 'MAX_ENTRIES', 50)
-            return ClipboardHistoryDB(
-                max_entries=max_entries,
-                enc_mgr=enc_mgr,
-            )
-
-        # None or unknown type — create a fresh DB
         logger.info("Creating new ClipboardHistoryDB instance")
         return ClipboardHistoryDB()
 
@@ -613,18 +649,29 @@ class WebServer:
             ports = [ports]
         ports = [str(p) for p in (ports or [])]
         import re
+
         try:
             import subprocess
+
             check = subprocess.run(
-                ["netsh", "advfirewall", "firewall", "show", "rule",
-                 f"name={WebServer.FW_RULE_NAME}", "verbose"],
-                capture_output=True, text=True,
+                [
+                    "netsh",
+                    "advfirewall",
+                    "firewall",
+                    "show",
+                    "rule",
+                    f"name={WebServer.FW_RULE_NAME}",
+                    "verbose",
+                ],
+                # Bytes, then sniff the codepage — see the add-rule call below.
+                capture_output=True,
                 creationflags=subprocess.CREATE_NO_WINDOW,
                 timeout=10,
             )
-            if check.returncode != 0 or WebServer.FW_RULE_NAME not in check.stdout:
+            out = decode_console_output(check.stdout)
+            if check.returncode != 0 or WebServer.FW_RULE_NAME not in out:
                 return (False, "Blocked")
-            m = re.search(r"LocalPort:\s+(\S+)", check.stdout)
+            m = re.search(r"LocalPort:\s+(\S+)", out)
             present = set(m.group(1).split(",")) if m else set()
             missing = [p for p in ports if p not in present]
             if missing:
@@ -644,16 +691,25 @@ class WebServer:
         if web_port and web_port != port:
             ports.append(web_port)
         import subprocess
+
         ok, detail = WebServer.check_firewall_rule(ports)
         if ok:
             return True
         if detail.startswith("Wrong port"):
             logger.info("Deleting stale firewall rule with wrong port")
-            try:
+            try:  # noqa: SIM105
                 subprocess.run(
-                    ["netsh", "advfirewall", "firewall", "delete", "rule",
-                     f"name={WebServer.FW_RULE_NAME}"],
-                    capture_output=True, text=True,
+                    [
+                        "netsh",
+                        "advfirewall",
+                        "firewall",
+                        "delete",
+                        "rule",
+                        f"name={WebServer.FW_RULE_NAME}",
+                    ],
+                    # Output is discarded, but text=True would still risk the
+                    # reader-thread decode crash — capture raw bytes.
+                    capture_output=True,
                     creationflags=subprocess.CREATE_NO_WINDOW,
                     timeout=10,
                 )
@@ -661,24 +717,46 @@ class WebServer:
                 pass
         try:
             result = subprocess.run(
-                ["netsh", "advfirewall", "firewall", "add", "rule",
-                 f"name={WebServer.FW_RULE_NAME}",
-                 "dir=in", "action=allow",
-                 f"localport={','.join(map(str, ports))}", "protocol=TCP",
-                 "profile=any"],
-                capture_output=True, text=True,
+                [
+                    "netsh",
+                    "advfirewall",
+                    "firewall",
+                    "add",
+                    "rule",
+                    f"name={WebServer.FW_RULE_NAME}",
+                    "dir=in",
+                    "action=allow",
+                    f"localport={','.join(map(str, ports))}",
+                    "protocol=TCP",
+                    "profile=any",
+                ],
+                # No text=True: it decodes with the ANSI codepage, but netsh
+                # emits the console output codepage — UTF-8 on plenty of
+                # Windows 11 boxes whose GetACP() still says 936.  That
+                # mismatch first crashed subprocess's reader thread (empty
+                # output, so the failure had no reason attached) and then, once
+                # forced to errors="replace", turned the elevation error into
+                # mojibake.  decode_console_output sniffs it instead.
+                capture_output=True,
                 creationflags=subprocess.CREATE_NO_WINDOW,
                 timeout=10,
             )
             if result.returncode == 0:
-                logger.info("Firewall rule created for port %s",
-                            ",".join(map(str, ports)))
+                logger.info("Firewall rule created for port %s", ",".join(map(str, ports)))
                 return True
             else:
-                stderr = (result.stderr or "").strip()
-                stdout = (result.stdout or "").strip()
-                logger.warning("Failed to create firewall rule: %s",
-                               stderr or stdout)
+                stderr = decode_console_output(result.stderr).strip()
+                stdout = decode_console_output(result.stdout).strip()
+                # Always say something: netsh can fail with no output at all
+                # (typically "not running as administrator"), and a bare
+                # "Failed to create firewall rule:" told the user nothing.
+                logger.warning(
+                    "Failed to create firewall rule (exit %s): %s",
+                    result.returncode,
+                    stderr
+                    or stdout
+                    or "no output — ClipSync is probably not running as administrator",
+                )
                 return False
         except Exception as e:
             logger.warning("Firewall setup error: %s", e)
@@ -701,24 +779,30 @@ class WebServer:
             ports.append(web_port)
         import os as _os
         import tempfile as _tempfile
+
         bat = _os.path.join(
-            _tempfile.gettempdir(),
-            "clipsync_firewall_%s.bat" % "_".join(map(str, ports)))
+            _tempfile.gettempdir(), "clipsync_firewall_{}.bat".format("_".join(map(str, ports)))
+        )
         try:
             # Overwrite any pre-existing file so nothing stale runs elevated.
             with open(bat, "w", encoding="utf-8") as _f:
-                _f.write("\r\n".join([
-                    "@echo off",
-                    f'netsh advfirewall firewall delete rule name="{WebServer.FW_RULE_NAME}" >nul 2>&1',
-                    f'netsh advfirewall firewall add rule name="{WebServer.FW_RULE_NAME}" '
-                    f'dir=in action=allow localport={",".join(map(str, ports))} protocol=TCP profile=any',
-                ]) + "\r\n")
+                _f.write(
+                    "\r\n".join(
+                        [
+                            "@echo off",
+                            f'netsh advfirewall firewall delete rule name="{WebServer.FW_RULE_NAME}" >nul 2>&1',  # noqa: E501
+                            f'netsh advfirewall firewall add rule name="{WebServer.FW_RULE_NAME}" '
+                            f"dir=in action=allow localport={','.join(map(str, ports))} protocol=TCP profile=any",  # noqa: E501
+                        ]
+                    )
+                    + "\r\n"
+                )
             import ctypes
+
             # ShellExecuteW returns a value >32 on success, but 1223
             # (ERROR_CANCELLED) when the user declined the UAC prompt —
             # that is a failure even though it is numerically >32.
-            result = ctypes.windll.shell32.ShellExecuteW(
-                None, "runas", bat, "", None, 1)
+            result = ctypes.windll.shell32.ShellExecuteW(None, "runas", bat, "", None, 1)
             return result > 32 and result != 1223
         except Exception:
             return False
@@ -791,6 +875,12 @@ class WebServer:
         # Cap the number of concurrently handled connections so a flood of
         # slow clients cannot exhaust worker threads.
         connection_semaphore = threading.Semaphore(64)
+        # WebSockets get their OWN budget.  A /ws connection blocks in
+        # client.serve() for as long as the page stays open, so counting it
+        # against the HTTP budget meant a handful of open tabs (each with a
+        # reconnecting socket) could permanently consume slots that short
+        # requests need, and the UI would start answering 503 to everything.
+        ws_semaphore = threading.Semaphore(16)
         import internal.web.routes as api_routes
 
         class _Handler(BaseHTTPRequestHandler):
@@ -801,10 +891,10 @@ class WebServer:
             # applies this to the underlying socket.
             timeout = 30
 
-            def log_message(inner_self, fmt, *args):
+            def log_message(inner_self, fmt, *args):  # noqa: N805
                 pass
 
-            def handle(inner_self):
+            def handle(inner_self):  # noqa: N805
                 # Cap the number of concurrently handled connections so a
                 # flood of slow clients cannot exhaust worker threads.  When
                 # the semaphore is exhausted the connection is rejected
@@ -815,15 +905,42 @@ class WebServer:
                     # a rejected connection (a reload during a busy period)
                     # would otherwise see a connection reset and take the
                     # whole UI offline.
-                    try:
-                        inner_self._send_json({"error": "server busy"}, 503)
+                    #
+                    # This runs BEFORE super().handle(), so no request line has
+                    # been parsed yet and the BaseHTTPRequestHandler response
+                    # helpers cannot be used: send_response() reaches for
+                    # self.requestline / self.request_version and raises
+                    # AttributeError, which is not an OSError -- so the 503 was
+                    # never sent, the traceback escaped, and the client got
+                    # exactly the reset this branch exists to avoid.  Write the
+                    # bytes ourselves instead.
+                    with contextlib.suppress(Exception):
+                        inner_self.connection.sendall(
+                            b"HTTP/1.1 503 Service Unavailable\r\n"
+                            b"Content-Type: application/json\r\n"
+                            b"Content-Length: 25\r\n"
+                            b"Connection: close\r\n"
+                            b"\r\n"
+                            b'{"error": "server busy"}\n'
+                        )
+                    with contextlib.suppress(Exception):
                         inner_self.connection.close()
-                    except OSError:
-                        pass
                     return
+                inner_self._http_slot_held = True
                 try:
                     super().handle()
                 finally:
+                    inner_self._release_http_slot()
+
+            def _release_http_slot(inner_self):  # noqa: N805
+                """Give the HTTP connection slot back, at most once.
+
+                A /ws upgrade calls this early: it then blocks in serve() for
+                the life of the page under the separate WS budget, and must not
+                sit on an HTTP slot while doing so.
+                """
+                if getattr(inner_self, "_http_slot_held", False):
+                    inner_self._http_slot_held = False
                     connection_semaphore.release()
 
             def handle_one_request(self):
@@ -837,10 +954,10 @@ class WebServer:
                 except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
                     self.close_connection = True
 
-            def _token_ok(inner_self) -> bool:
+            def _token_ok(inner_self) -> bool:  # noqa: N805
                 return _validate_token(inner_self.path, cfg.web_token)
 
-            def _companion_client_ok(inner_self) -> bool:
+            def _companion_client_ok(inner_self) -> bool:  # noqa: N805
                 """Allow the request when the companion serves it.
 
                 The web companion's job is to serve the dashboard to phones /
@@ -869,6 +986,7 @@ class WebServer:
                 except OSError:
                     pass
                 from internal.i18n import LOCALES
+
                 locales.update(LOCALES.keys())
                 return locales
 
@@ -882,6 +1000,7 @@ class WebServer:
                 requests don't re-read/re-parse the file every time."""
                 from internal.i18n import LOCALES
                 from internal.version import __version__
+
                 locale = cfg.language if cfg.language in _Handler._available_locales() else "en"
 
                 cached = _i18n_cache.get(locale)
@@ -909,7 +1028,9 @@ class WebServer:
                     # back to the on-disk JSON locale files, which carry every
                     # web key — the Python i18n dicts are a subset and would
                     # render raw key names across many panels.
-                    logger.warning("Failed to load locale JSON: %s, falling back to en.json", json_path)
+                    logger.warning(
+                        "Failed to load locale JSON: %s, falling back to en.json", json_path
+                    )
                     translations = _load_locale_json("en")
                 if translations is None:
                     logger.warning("No locale JSON on disk, falling back to Python dict")
@@ -922,7 +1043,7 @@ class WebServer:
                 _i18n_cache[locale] = result
                 return result
 
-            def _send_json(inner_self, data, status=200):
+            def _send_json(inner_self, data, status=200):  # noqa: N805
                 inner_self.send_response(status)
                 inner_self.send_header("Content-Type", "application/json; charset=utf-8")
                 inner_self.send_header("Cache-Control", "no-cache")
@@ -930,39 +1051,42 @@ class WebServer:
                 inner_self.send_header("Referrer-Policy", "no-referrer")
                 inner_self.send_header("X-Content-Type-Options", "nosniff")
                 inner_self.end_headers()
-                try:
+                with contextlib.suppress(OSError):
                     inner_self.wfile.write(json.dumps(data, ensure_ascii=False).encode("utf-8"))
-                except OSError:
-                    pass
 
-            def _send_html(inner_self, html: str, status=200):
+            def _send_html(inner_self, html: str, status=200):  # noqa: N805
                 inner_self.send_response(status)
                 inner_self.send_header("Content-Type", "text/html; charset=utf-8")
                 inner_self.send_header("Cache-Control", "no-cache")
                 inner_self.send_header("Referrer-Policy", "no-referrer")
                 inner_self.send_header("X-Content-Type-Options", "nosniff")
                 inner_self.end_headers()
-                try:
+                with contextlib.suppress(OSError):
                     inner_self.wfile.write(html.encode("utf-8"))
-                except OSError:
-                    pass
 
             @staticmethod
             def _page_lang() -> str:
                 """Short html ``lang`` attribute matching the configured language."""
                 return "zh" if cfg.language == "zh-CN" else "en"
 
-            def _send_companion_disabled_page(inner_self) -> None:
+            def _send_companion_disabled_page(inner_self) -> None:  # noqa: N805
                 """Serve a friendly page when the companion is off and a browser
                 (phone / tablet) opens the dashboard — not a raw JSON error."""
                 if cfg.language == "zh-CN":
-                    title, desc = "远程访问已关闭", "该设备的远程访问已被关闭，暂时无法访问其仪表盘。"
+                    title, desc = (
+                        "远程访问已关闭",
+                        "该设备的远程访问已被关闭，暂时无法访问其仪表盘。",
+                    )
                 else:
-                    title, desc = ("Remote access disabled",
-                                   "Remote access is turned off on this device, so its "
-                                   "dashboard is temporarily unavailable.")
+                    title, desc = (
+                        "Remote access disabled",
+                        "Remote access is turned off on this device, so its "
+                        "dashboard is temporarily unavailable.",
+                    )
                 html = (
-                    "<!doctype html><html lang='" + inner_self._page_lang() + "'><meta charset='utf-8'>"
+                    "<!doctype html><html lang='"
+                    + inner_self._page_lang()
+                    + "'><meta charset='utf-8'>"
                     "<meta name='viewport' content='width=device-width,initial-scale=1'>"
                     "<meta name='theme-color' content='#05060D'>"
                     "<title>" + title + "</title>"
@@ -977,7 +1101,7 @@ class WebServer:
                 )
                 inner_self._send_html(html, status=403)
 
-            def _wants_html(inner_self) -> bool:
+            def _wants_html(inner_self) -> bool:  # noqa: N805
                 """True when the client asked for an HTML page rather than an API.
 
                 A stale-token phone page (Accept: text/html) should get a
@@ -987,7 +1111,7 @@ class WebServer:
                 accept = (inner_self.headers.get("Accept") or "").lower()
                 return "text/html" in accept or "application/xhtml+xml" in accept
 
-            def _send_token_expired_page(inner_self) -> None:
+            def _send_token_expired_page(inner_self) -> None:  # noqa: N805
                 """Serve a friendly page when a page request has a stale token.
 
                 After the user regenerates the web token, any phone page / PWA
@@ -996,14 +1120,17 @@ class WebServer:
                 """
                 if cfg.language == "zh-CN":
                     title = "访问链接已失效"
-                    desc = ("访问令牌已更改，此链接已失效。"
-                            "请返回电脑端的 ClipSync，重新扫描二维码。")
+                    desc = "访问令牌已更改，此链接已失效。请返回电脑端的 ClipSync，重新扫描二维码。"
                 else:
                     title = "This link has expired"
-                    desc = ("The access token was changed, so this link no longer works. "
-                            "Re-scan the QR code on your computer to reconnect.")
+                    desc = (
+                        "The access token was changed, so this link no longer works. "
+                        "Re-scan the QR code on your computer to reconnect."
+                    )
                 html = (
-                    "<!doctype html><html lang='" + inner_self._page_lang() + "'><meta charset='utf-8'>"
+                    "<!doctype html><html lang='"
+                    + inner_self._page_lang()
+                    + "'><meta charset='utf-8'>"
                     "<meta name='viewport' content='width=device-width,initial-scale=1'>"
                     "<meta name='theme-color' content='#05060D'>"
                     "<title>" + title + "</title>"
@@ -1018,7 +1145,7 @@ class WebServer:
                 )
                 inner_self._send_html(html, status=403)
 
-            def _send_file(inner_self, filepath: str, mime: str = "application/octet-stream"):
+            def _send_file(inner_self, filepath: str, mime: str = "application/octet-stream"):  # noqa: N805
                 status, headers, body = _build_file_response(filepath, mime)
                 inner_self.send_response(status)
                 for key, val in headers.items():
@@ -1041,8 +1168,8 @@ class WebServer:
                     except (ConnectionAbortedError, ConnectionResetError, BrokenPipeError):
                         pass
 
-            def _serve_static(inner_self, rel_path: str, mime: str | None = None):
-                """Serve a file from the static directory. Text files get placeholder interpolation."""
+            def _serve_static(inner_self, rel_path: str, mime: str | None = None):  # noqa: N805
+                """Serve a file from the static directory. Text files get placeholder interpolation."""  # noqa: E501
                 # Security: prevent path traversal
                 safe_path = rel_path.lstrip("/").replace("\\", "/")
                 if ".." in safe_path:
@@ -1064,7 +1191,7 @@ class WebServer:
                     mime, _ = mimetypes.guess_type(full_path)
                 if mime is None:
                     # Explicit MIME map for common web assets (mimetypes may miss on Windows)
-                    _MIME_MAP = {
+                    _MIME_MAP = {  # noqa: N806
                         ".js": "application/javascript; charset=utf-8",
                         ".mjs": "application/javascript; charset=utf-8",
                         ".css": "text/css; charset=utf-8",
@@ -1128,15 +1255,18 @@ class WebServer:
                     last_modified = None
                     try:
                         st = os.stat(full_path)
-                        etag = '"%x-%x"' % (st.st_mtime_ns, len(data))
+                        etag = f'"{st.st_mtime_ns:x}-{len(data):x}"'
                         last_modified = time.strftime(
-                            "%a, %d %b %Y %H:%M:%S GMT", time.gmtime(st.st_mtime))
+                            "%a, %d %b %Y %H:%M:%S GMT", time.gmtime(st.st_mtime)
+                        )
                     except OSError:
                         pass
                     if etag is not None and (
                         inner_self.headers.get("If-None-Match") == etag
-                        or (last_modified is not None
-                            and inner_self.headers.get("If-Modified-Since") == last_modified)
+                        or (
+                            last_modified is not None
+                            and inner_self.headers.get("If-Modified-Since") == last_modified
+                        )
                     ):
                         inner_self.send_response(304)
                         inner_self.send_header("ETag", etag)
@@ -1160,10 +1290,10 @@ class WebServer:
                 inner_self.send_header("Referrer-Policy", "no-referrer")
                 inner_self.send_header("X-Content-Type-Options", "nosniff")
                 inner_self.end_headers()
-                try:
+                with contextlib.suppress(
+                    ConnectionAbortedError, ConnectionResetError, BrokenPipeError
+                ):
                     inner_self.wfile.write(data)
-                except (ConnectionAbortedError, ConnectionResetError, BrokenPipeError):
-                    pass
 
             def _interpolate_html(self, content: str, is_html: bool = True) -> str:
                 """Replace placeholders in static HTML/JS with runtime values.
@@ -1187,12 +1317,19 @@ class WebServer:
                 # restarting so the frontend can clear its browser-side
                 # localStorage (the reset's file deletion can't reach it).
                 # Injected exactly once, then the marker is removed.
+                # Only HTML consumes these markers.  They are one-shot, and the
+                # flags below are interpolated into the HTML branch alone, so
+                # unlinking them while serving a .js or .css file threw the
+                # signal away without anyone acting on it -- and the browser
+                # fetches app.js/theme.css alongside (sometimes before) the
+                # page, so in practice the reset almost never reached the UI.
                 reset_flag = "false"
                 fresh_flag = "false"
                 try:
                     from internal.config.config import _config_dir
+
                     marker = _config_dir() / "factory_reset_pending"
-                    if marker.exists():
+                    if is_html and marker.exists():
                         reset_flag = "true"
                         marker.unlink()
                     # One-shot web-wizard re-surface.  After a factory reset the
@@ -1203,7 +1340,7 @@ class WebServer:
                     # page load after a reset re-surfaces the wizard exactly
                     # once; afterwards the browser's own flag governs again.
                     fresh_marker = _config_dir() / "web_fresh_pending"
-                    if fresh_marker.exists():
+                    if is_html and fresh_marker.exists():
                         fresh_flag = "true"
                         fresh_marker.unlink()
                 except Exception:
@@ -1242,24 +1379,26 @@ class WebServer:
 
             # ── HTTP method handlers ─────────────────────────────
 
-            def do_OPTIONS(inner_self):
+            def do_OPTIONS(inner_self):  # noqa: N805
                 inner_self.send_response(204)
                 inner_self.send_header("Access-Control-Allow-Origin", "*")
-                inner_self.send_header("Access-Control-Allow-Methods",
-                                       "GET, POST, PUT, PATCH, DELETE, OPTIONS")
-                inner_self.send_header("Access-Control-Allow-Headers",
-                                       "Content-Type, Authorization, X-Requested-With")
+                inner_self.send_header(
+                    "Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE, OPTIONS"
+                )
+                inner_self.send_header(
+                    "Access-Control-Allow-Headers", "Content-Type, Authorization, X-Requested-With"
+                )
                 inner_self.send_header("Access-Control-Max-Age", "86400")
                 inner_self.end_headers()
 
-            def do_GET(inner_self):
+            def do_GET(inner_self):  # noqa: N805
                 parsed = urllib.parse.urlparse(inner_self.path)
                 path = parsed.path
                 # Collapse path aliases (`//index.html`, `/./index.html`,
                 # `/a//b`) to their canonical form so they route to the same
                 # handler as the exact path — otherwise they fall through to
                 # the CORS-enabled static path that embeds the auth token.
-                path = posixpath.normpath(path) if path else path
+                path = _canonical_request_path(path)
                 qs = parsed.query
                 query_params = urllib.parse.parse_qs(qs)
 
@@ -1281,21 +1420,35 @@ class WebServer:
                     # Check for WebSocket upgrade headers
                     upgrade = inner_self.headers.get("Upgrade", "").lower()
                     if upgrade == "websocket":
-                        # Build headers dict for ws manager
-                        ws_headers = {}
-                        for key, val in inner_self.headers.items():
-                            ws_headers[key.lower()] = val
-                        # Perform handshake
-                        client = ws_manager.handle_handshake(
-                            inner_self.request, inner_self.client_address, ws_headers
-                        )
-                        if client is None:
-                            inner_self._send_json({"error": "websocket upgrade failed"}, 400)
+                        # A WS connection lives as long as the page does, so it
+                        # takes a slot from the WS budget and hands the HTTP one
+                        # straight back.
+                        if not ws_semaphore.acquire(blocking=False):
+                            inner_self._send_json({"error": "too many websocket clients"}, 503)
                             return
-                        # Enter read loop — blocks until client disconnects
-                        client.serve()
-                        ws_manager.remove_client(client)
-                        return
+                        try:
+                            # Build headers dict for ws manager
+                            ws_headers = {}
+                            for key, val in inner_self.headers.items():
+                                ws_headers[key.lower()] = val
+                            # Perform handshake
+                            client = ws_manager.handle_handshake(
+                                inner_self.request, inner_self.client_address, ws_headers
+                            )
+                            if client is None:
+                                inner_self._send_json({"error": "websocket upgrade failed"}, 400)
+                                return
+                            # Past the handshake this is no longer an HTTP
+                            # request: release the HTTP slot before blocking.
+                            inner_self._release_http_slot()
+                            try:
+                                # Enter read loop — blocks until client disconnects
+                                client.serve()
+                            finally:
+                                ws_manager.remove_client(client)
+                            return
+                        finally:
+                            ws_semaphore.release()
                     else:
                         inner_self._send_json({"error": "websocket upgrade required"}, 426)
                         return
@@ -1308,10 +1461,8 @@ class WebServer:
                     inner_self.send_header("Cache-Control", "public, max-age=86400")
                     inner_self.send_header("Access-Control-Allow-Origin", "*")
                     inner_self.end_headers()
-                    try:
+                    with contextlib.suppress(OSError):
                         inner_self.wfile.write(icon_192)
-                    except OSError:
-                        pass
                     return
 
                 if path == "/icon-512.png":
@@ -1321,10 +1472,8 @@ class WebServer:
                     inner_self.send_header("Cache-Control", "public, max-age=86400")
                     inner_self.send_header("Access-Control-Allow-Origin", "*")
                     inner_self.end_headers()
-                    try:
+                    with contextlib.suppress(OSError):
                         inner_self.wfile.write(icon_512)
-                    except OSError:
-                        pass
                     return
 
                 # ── Token validation for all other paths ─────────
@@ -1366,14 +1515,30 @@ class WebServer:
                         "background_color": "#0A0E1E",
                         "theme_color": "#05060D",
                         "icons": [
-                            {"src": f"/icon-192.png?token={cfg.web_token}",
-                             "sizes": "192x192", "type": "image/png", "purpose": "any"},
-                            {"src": f"/icon-512.png?token={cfg.web_token}",
-                             "sizes": "512x512", "type": "image/png", "purpose": "any"},
-                            {"src": f"/icon-192.png?token={cfg.web_token}",
-                             "sizes": "192x192", "type": "image/png", "purpose": "maskable"},
-                            {"src": f"/icon-512.png?token={cfg.web_token}",
-                             "sizes": "512x512", "type": "image/png", "purpose": "maskable"},
+                            {
+                                "src": f"/icon-192.png?token={cfg.web_token}",
+                                "sizes": "192x192",
+                                "type": "image/png",
+                                "purpose": "any",
+                            },
+                            {
+                                "src": f"/icon-512.png?token={cfg.web_token}",
+                                "sizes": "512x512",
+                                "type": "image/png",
+                                "purpose": "any",
+                            },
+                            {
+                                "src": f"/icon-192.png?token={cfg.web_token}",
+                                "sizes": "192x192",
+                                "type": "image/png",
+                                "purpose": "maskable",
+                            },
+                            {
+                                "src": f"/icon-512.png?token={cfg.web_token}",
+                                "sizes": "512x512",
+                                "type": "image/png",
+                                "purpose": "maskable",
+                            },
                         ],
                     }
                     inner_self._send_json(manifest)
@@ -1411,7 +1576,10 @@ class WebServer:
                         # Defense-in-depth: resolve and re-confine against the
                         # upload dir (also guards symlinks inside it).
                         from internal.web.api.security import confine_path
-                        safe = confine_path(os.path.join(_server._upload_dir, fname), _server._upload_dir)
+
+                        safe = confine_path(
+                            os.path.join(_server._upload_dir, fname), _server._upload_dir
+                        )
                         if safe is None:
                             inner_self._send_json({"error": "invalid filename"}, 400)
                             return
@@ -1429,6 +1597,7 @@ class WebServer:
                             inner_self._send_json({"error": "chat unavailable"}, 503)
                             return
                         from internal.web.api.chat import find_saved_path
+
                         saved_path = find_saved_path(chat_mgr, transfer_id)
                         if not saved_path:
                             inner_self._send_json({"error": "not found"}, 404)
@@ -1439,6 +1608,7 @@ class WebServer:
                         # web upload dir — so a token holder can never stream a
                         # file from elsewhere on the host.
                         from internal.web.api.security import confine_path
+
                         safe = None
                         chat_receive_root = getattr(chat_mgr, "_receive_dir", None)
                         if chat_receive_root is not None:
@@ -1509,10 +1679,8 @@ class WebServer:
                     inner_self.send_header("Cache-Control", "no-cache")
                     inner_self.send_header("Access-Control-Allow-Origin", "*")
                     inner_self.end_headers()
-                    try:
+                    with contextlib.suppress(OSError):
                         inner_self.wfile.write(body_bytes)
-                    except OSError:
-                        pass
                     return
 
                 # ── Static file serving ─────────────────────────
@@ -1526,11 +1694,11 @@ class WebServer:
                 serve_path = path if path != "/" else "/index.html"
                 inner_self._serve_static(serve_path)
 
-            def do_POST(inner_self):
+            def do_POST(inner_self):  # noqa: N805
                 parsed = urllib.parse.urlparse(inner_self.path)
                 path = parsed.path
                 # Mirror do_GET: normalize path aliases before route matching.
-                path = posixpath.normpath(path) if path else path
+                path = _canonical_request_path(path)
                 qs = parsed.query
                 query_params = urllib.parse.parse_qs(qs)
 
@@ -1554,7 +1722,9 @@ class WebServer:
                     request_upload_dir = _get_upload_dir(cfg)
                     content_type = inner_self.headers.get("Content-Type", "")
                     if "multipart" not in content_type:
-                        inner_self._send_json({"ok": False, "error": "expect multipart/form-data"}, 400)
+                        inner_self._send_json(
+                            {"ok": False, "error": "expect multipart/form-data"}, 400
+                        )
                         return
                     # _read_request_body returns b"" for bodies over the cap,
                     # which would surface as a confusing "no file field".  Check
@@ -1568,9 +1738,12 @@ class WebServer:
                         # leave unread bytes for the next request on this socket.
                         inner_self.close_connection = True
                         inner_self._send_json(
-                            {"ok": False,
-                             "error": T("web.upload_too_large",
-                                        limit=_MAX_BODY_BYTES // (1024 * 1024))},
+                            {
+                                "ok": False,
+                                "error": T(
+                                    "web.upload_too_large", limit=_MAX_BODY_BYTES // (1024 * 1024)
+                                ),
+                            },
                             200,
                         )
                         return
@@ -1615,18 +1788,45 @@ class WebServer:
                         upload_target = request_upload_dir
                     # Sanitize filename
                     safe_name = _sanitize_upload_filename(fname)
-                    dest = os.path.join(upload_target, safe_name)
-                    # Avoid overwriting
+                    # Create the destination atomically.  The old
+                    # os.path.exists() loop followed by open(dest, "wb") was a
+                    # TOCTOU: two uploads racing on the same filename (phone and
+                    # laptop, or a double-tap on Send) both saw the name as free
+                    # and the second write silently destroyed the first file.
+                    # O_CREAT|O_EXCL makes the kernel arbitrate -- the loser gets
+                    # EEXIST and tries the next candidate name.  O_BINARY (a
+                    # no-op off Windows) keeps os.open from newline-translating.
                     base, ext = os.path.splitext(safe_name)
-                    counter = 1
-                    while os.path.exists(dest):
-                        dest = os.path.join(upload_target, f"{base} ({counter}){ext}")
-                        counter += 1
+                    _excl_flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_BINARY", 0)
+                    fd = None
+                    counter = 0
+                    while fd is None:
+                        candidate = safe_name if counter == 0 else f"{base} ({counter}){ext}"
+                        dest = os.path.join(upload_target, candidate)
+                        try:
+                            fd = os.open(dest, _excl_flags, 0o644)
+                        except FileExistsError:
+                            counter += 1
+                            if counter > 999:
+                                logger.warning("Web upload: no free name for %s", safe_name)
+                                inner_self._send_json(
+                                    {"ok": False, "error": "could not save file"}, 400
+                                )
+                                return
+                        except (OSError, ValueError) as exc:
+                            logger.warning("Web upload create failed: %s", exc)
+                            inner_self._send_json(
+                                {"ok": False, "error": "could not save file"}, 400
+                            )
+                            return
                     try:
-                        with open(dest, "wb") as f:
+                        with os.fdopen(fd, "wb") as f:
                             f.write(fdata)
                     except (OSError, ValueError) as exc:
                         logger.warning("Web upload write failed: %s", exc)
+                        # Don't leave the empty file we just claimed behind.
+                        with contextlib.suppress(OSError):
+                            os.unlink(dest)
                         inner_self._send_json({"ok": False, "error": "could not save file"}, 400)
                         return
                     logger.info("Web upload: %s (%d bytes) -> %s", safe_name, len(fdata), dest)
@@ -1646,12 +1846,11 @@ class WebServer:
                         if not forwarded:
                             # The upload never reached its target — don't leave
                             # a stray file the user didn't ask to keep locally.
-                            try:
+                            with contextlib.suppress(OSError):
                                 os.unlink(dest)
-                            except OSError:
-                                pass
                             inner_self._send_json(
-                                {"ok": False, "error": T("web.upload_peer_offline")}, 200,
+                                {"ok": False, "error": T("web.upload_peer_offline")},
+                                200,
                             )
                             return
                     else:
@@ -1664,14 +1863,18 @@ class WebServer:
                             logger.debug("on_web_upload callback failed", exc_info=True)
                     if is_chat_upload:
                         # The temp path is handed straight to /api/chat/file.
-                        inner_self._send_json({
-                            "ok": True,
-                            "name": os.path.basename(dest),
-                            "size": len(fdata),
-                            "path": str(dest),
-                        })
+                        inner_self._send_json(
+                            {
+                                "ok": True,
+                                "name": os.path.basename(dest),
+                                "size": len(fdata),
+                                "path": str(dest),
+                            }
+                        )
                     else:
-                        inner_self._send_json({"ok": True, "name": os.path.basename(dest), "size": len(fdata)})
+                        inner_self._send_json(
+                            {"ok": True, "name": os.path.basename(dest), "size": len(fdata)}
+                        )
                     return
 
                 # ── Delegate other API routes ────────────────────
@@ -1727,19 +1930,17 @@ class WebServer:
                     inner_self.send_header("Cache-Control", "no-cache")
                     inner_self.send_header("Access-Control-Allow-Origin", "*")
                     inner_self.end_headers()
-                    try:
+                    with contextlib.suppress(OSError):
                         inner_self.wfile.write(body_bytes)
-                    except OSError:
-                        pass
                     return
 
                 inner_self._send_json({"error": "not found"}, 404)
 
-            def do_DELETE(inner_self):
+            def do_DELETE(inner_self):  # noqa: N805
                 parsed = urllib.parse.urlparse(inner_self.path)
                 path = parsed.path
                 # Mirror do_GET/do_POST: normalize path aliases before routing.
-                path = posixpath.normpath(path) if path else path
+                path = _canonical_request_path(path)
                 qs = parsed.query
                 query_params = urllib.parse.parse_qs(qs)
 
@@ -1785,19 +1986,17 @@ class WebServer:
                     inner_self.send_header("Cache-Control", "no-cache")
                     inner_self.send_header("Access-Control-Allow-Origin", "*")
                     inner_self.end_headers()
-                    try:
+                    with contextlib.suppress(OSError):
                         inner_self.wfile.write(body_bytes)
-                    except OSError:
-                        pass
                     return
 
                 inner_self._send_json({"error": "not found"}, 404)
 
-            def do_PATCH(inner_self):
+            def do_PATCH(inner_self):  # noqa: N805
                 parsed = urllib.parse.urlparse(inner_self.path)
                 path = parsed.path
                 # Mirror do_GET/do_POST: normalize path aliases before routing.
-                path = posixpath.normpath(path) if path else path
+                path = _canonical_request_path(path)
                 qs = parsed.query
                 query_params = urllib.parse.parse_qs(qs)
 
@@ -1843,10 +2042,8 @@ class WebServer:
                     inner_self.send_header("Cache-Control", "no-cache")
                     inner_self.send_header("Access-Control-Allow-Origin", "*")
                     inner_self.end_headers()
-                    try:
+                    with contextlib.suppress(OSError):
                         inner_self.wfile.write(body_bytes)
-                    except OSError:
-                        pass
                     return
 
                 inner_self._send_json({"error": "not found"}, 404)
@@ -1858,7 +2055,9 @@ class WebServer:
             logger.warning("Web server failed to bind %s:%d: %s", host, port, e)
             return False
 
-        self._thread = threading.Thread(target=self._httpd.serve_forever, daemon=True, name="web-server")
+        self._thread = threading.Thread(
+            target=self._httpd.serve_forever, daemon=True, name="web-server"
+        )
         self._thread.start()
         logger.info("Web companion listening on http://%s:%d", self._get_lan_ip(), port)
         return True
@@ -1890,6 +2089,7 @@ class WebServer:
         all_ips = WebServer.get_all_ips()
         if not all_ips:
             return "127.0.0.1"
+
         def _priority(ip):
             if ip.startswith("192.168."):
                 return 0
@@ -1903,6 +2103,7 @@ class WebServer:
                 except ValueError:
                     pass
             return 3
+
         all_ips.sort(key=_priority)
         return all_ips[0]
 

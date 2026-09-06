@@ -172,8 +172,10 @@ def test_empty_state_waits_for_removed_archive():
     panel = _read("components", "device-panel.js")
     # "No devices found" must not overlap the Removed archive: the empty
     # state only renders when the archive is empty too.
-    assert ("allRemoteDevices.length === 0 && pairingRequests.length === 0 "
-            "&& removedDevices.length === 0") in panel
+    assert (
+        "allRemoteDevices.length === 0 && pairingRequests.length === 0 "
+        "&& removedDevices.length === 0"
+    ) in panel
 
 
 # ── 5. Header comment matches reality ────────────────────────────────────
@@ -247,7 +249,7 @@ def test_probe_single_sourced_in_store():
     # The probe can take up to ~4s, so the click must be acknowledged
     # immediately instead of leaving the button looking dead.
     assert "device.test_connecting" in tp
-    assert "self.showToast(self.t('device.test_connecting')" in tp
+    assert "self.showToast(t('device.test_connecting')" in tp
 
 
 def test_probe_connecting_locale_keys_present():
@@ -286,8 +288,13 @@ def test_local_device_note_editor_hidden():
 
 def test_dead_netpair_css_removed():
     html = _read("index.html")
-    for dead in (".netpair-empty", ".netpair-step", ".netpair-generate",
-                 ".netpair-hint", ".netpair-enter {"):
+    for dead in (
+        ".netpair-empty",
+        ".netpair-step",
+        ".netpair-generate",
+        ".netpair-hint",
+        ".netpair-enter {",
+    ):
         assert dead not in html
     # The live controls' styles survive.
     assert ".netpair-actions {" in html
@@ -310,7 +317,10 @@ def test_connect_toast_is_connecting_not_success():
     # {ok:true} from connect only means the handshake was *initiated*, so the
     # immediate toast must be "connecting…", never the generic "… successful"
     # that made a rejected connect look like a silent no-op.
-    assert "runAction(ClipsyncAPI.connectDevice(peerId), null, self.t('device.connect_started'))" in card
+    assert (
+        "runAction(ClipsyncAPI.connectDevice(peerId), null, self.t('device.connect_started'))"
+        in card
+    )
     # The generic success toast stays for the actions that DO complete
     # synchronously (unpair/forget/disconnect).
     assert "self.t('device.action_success'" in card
@@ -341,6 +351,26 @@ def test_connect_rejected_locale_keys_present():
     assert zh["device.connect_rejected"]
 
 
+def test_reject_pairing_notifies_peer():
+    # Web reject must tell the peer (pairing_reject) — the accept path already
+    # sends pairing_confirm, but reject only updated the local side, leaving
+    # the peer's request stuck in "pending / peer_confirmed" until it expired.
+    main = _read_root("src", "main.py")
+    reject = main.split('elif action == "reject":')[1].split('elif action == "connect":')[0]
+    assert 'self._send_pairing_msg(peer_id, "pairing_reject")' in reject
+
+
+def test_connected_device_offers_unpair():
+    card = _read("components", "device-card.js")
+    acts = card.split("actions: function () {")[1].split("template:")[0]
+    # Unpair is offered for both connected+paired and paired-offline devices,
+    # so a connected device can unpair without disconnecting first.
+    assert acts.count("key: 'unpair'") == 2
+    # The discovered-device "connect" button is labeled Pair (it starts the
+    # pairing handshake), not the misleading Connect.
+    assert "label: this.t('device.pair')" in acts
+
+
 # ── 14. Mac icon + friendly OS labels ────────────────────────────────────
 
 
@@ -359,7 +389,7 @@ def test_os_label_maps_darwin_to_macos_and_is_rendered():
     for brand in ("'macOS'", "'Windows'", "'Linux'", "'Android'", "'iOS'"):
         assert ("return " + brand) in label
     # The card renders the friendly label, not the raw platform string.
-    assert "device-card__os\">{{ osLabel }}</span>" in card
+    assert 'device-card__os">{{ osLabel }}</span>' in card
 
 
 def test_local_device_os_is_friendly_name():
@@ -420,8 +450,7 @@ def test_old_remove_confirm_locale_keys_removed():
         assert key not in en
         assert key not in zh
     # The unified forget keys (shared with the context menu) are live.
-    for key in ("devices.forget_title", "devices.forget_message",
-                "context.device_forgotten"):
+    for key in ("devices.forget_title", "devices.forget_message", "context.device_forgotten"):
         assert key in en and key in zh
 
 
@@ -431,7 +460,12 @@ def test_old_remove_confirm_locale_keys_removed():
 def test_node_check_touched_files():
     if not _has_node():
         pytest.skip("node not available")
-    for rel in ("js/store.js", "js/ws.js", "components/device-panel.js", "components/device-card.js"):
+    for rel in (
+        "js/store.js",
+        "js/ws.js",
+        "components/device-panel.js",
+        "components/device-card.js",
+    ):
         subprocess.run(
             ["node", "--check", os.path.join(_STATIC, rel)],
             check=True,

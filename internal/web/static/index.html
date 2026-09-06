@@ -5385,6 +5385,25 @@
       max-width: 480px;
     }
 
+    /* Which watch root a top-level row came from.  Only rendered when one tool
+       watches several roots (Claude Code: skills/ + commands/ + agents/), where
+       the same rel_path can legitimately appear twice. */
+    .aiconfig-panel__root-hint {
+      display: inline-block;
+      flex-shrink: 0;
+      margin-left: 6px;
+      padding: 0 6px;
+      vertical-align: middle;
+      font-family: var(--clipsync-font-mono);
+      font-size: 10px;
+      line-height: 1.6;
+      color: var(--clipsync-fg-muted);
+      background: var(--clipsync-panel-2);
+      border-radius: var(--clipsync-radius-full);
+      cursor: default;
+      white-space: nowrap;
+    }
+
     .aiconfig-panel__path-btn {
       display: inline-block;
       max-width: 340px;
@@ -7800,6 +7819,7 @@
   <script>window.__CLIPSYNC_DEVICE_ID__ = __DEVICE_ID__; window.__CLIPSYNC_DEVICE_NAME__ = __DEVICE_NAME__;</script>
   <script>window.__CLIPSYNC_FRESH__ = __FRESH__; window.__CLIPSYNC_RESET__ = __RESET__;</script>
   <!-- ClipSync JS -->
+  <script src="js/format.js?token=__TOKEN__"></script>
   <script src="js/store.js?token=__TOKEN__"></script>
   <script src="js/api.js?token=__TOKEN__"></script>
   <script src="js/sound.js?token=__TOKEN__"></script>

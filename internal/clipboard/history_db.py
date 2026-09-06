@@ -10,6 +10,7 @@ Auto-creates tables on first use.  Auto-migrates from the legacy
 """
 
 import base64
+import contextlib
 import json
 import logging
 import os
@@ -23,8 +24,10 @@ from internal.clipboard.dedup import (
     CONTENT_TYPE_LABELS,
     adds_new_flavors,
     labels_to_types,
-    make_dedup_key as _make_dedup_key,
     merge_types,
+)
+from internal.clipboard.dedup import (
+    make_dedup_key as _make_dedup_key,
 )
 from internal.clipboard.format import ClipboardContent, ContentType, strip_html
 from internal.config.config import _config_dir
@@ -33,6 +36,7 @@ if TYPE_CHECKING:
     from internal.security.encryption import EncryptionManager
 
 logger = logging.getLogger(__name__)
+
 
 def _safe_decode(data: bytes) -> str:
     """Decode bytes to string, trying common encodings.
@@ -57,8 +61,6 @@ def _safe_decode(data: bytes) -> str:
         except (UnicodeDecodeError, UnicodeEncodeError):
             continue
     return data.decode("utf-8", errors="replace")
-
-
 
 
 # Dedup hash algorithm now lives in internal.clipboard.dedup.DEDUP_ALGO
@@ -145,8 +147,12 @@ class ClipboardHistoryDB:
         );
     """
 
-    def __init__(self, storage_path: str | None = None, max_entries: int = 50,
-                 enc_mgr: "EncryptionManager | None" = None):
+    def __init__(
+        self,
+        storage_path: str | None = None,
+        max_entries: int = 50,
+        enc_mgr: "EncryptionManager | None" = None,
+    ):
         if storage_path:
             self._db_path = Path(storage_path)
         else:
@@ -211,8 +217,7 @@ class ClipboardHistoryDB:
             self._init_schema(conn)
             self._conn = conn
             logger.warning(
-                "History DB was corrupt and has been quarantined; "
-                "starting a fresh database"
+                "History DB was corrupt and has been quarantined; starting a fresh database"
             )
         except Exception as exc:
             logger.error("Fresh history DB also failed to initialize: %s", exc)
@@ -257,13 +262,9 @@ class ClipboardHistoryDB:
         try:
             cols = {row[1] for row in conn.execute("PRAGMA table_info(history)").fetchall()}
             if "status" not in cols:
-                conn.execute(
-                    "ALTER TABLE history ADD COLUMN status TEXT NOT NULL DEFAULT ''"
-                )
+                conn.execute("ALTER TABLE history ADD COLUMN status TEXT NOT NULL DEFAULT ''")
             if "image_fmt" not in cols:
-                conn.execute(
-                    "ALTER TABLE history ADD COLUMN image_fmt TEXT NOT NULL DEFAULT ''"
-                )
+                conn.execute("ALTER TABLE history ADD COLUMN image_fmt TEXT NOT NULL DEFAULT ''")
         except Exception as exc:
             logger.warning("Failed to migrate history schema: %s", exc)
 
@@ -276,10 +277,8 @@ class ClipboardHistoryDB:
             Path(str(self._db_path) + "-wal"),
             Path(str(self._db_path) + "-shm"),
         ):
-            try:
+            with contextlib.suppress(OSError):
                 os.chmod(path, 0o600)
-            except OSError:
-                pass
 
     @staticmethod
     def _parse_types_json(raw) -> dict:
@@ -323,7 +322,7 @@ class ClipboardHistoryDB:
                 conn.execute(
                     "INSERT INTO history "
                     "(entry_id, timestamp, content_type, text_preview, types, "
-                    "source_device, source_app, source_title, pinned, paste_count, status, image_fmt) "
+                    "source_device, source_app, source_title, pinned, paste_count, status, image_fmt) "  # noqa: E501
                     "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                     self._entry_row(entry),
                 )
@@ -405,9 +404,9 @@ class ClipboardHistoryDB:
         try:
             conn = self._get_conn()
             old_ids = [
-                r[0] for r in conn.execute(
-                    "SELECT entry_id FROM history "
-                    "WHERE pinned = 0 AND timestamp < ?",
+                r[0]
+                for r in conn.execute(
+                    "SELECT entry_id FROM history WHERE pinned = 0 AND timestamp < ?",
                     (cutoff,),
                 ).fetchall()
             ]
@@ -416,10 +415,7 @@ class ClipboardHistoryDB:
             self._delete_rows(old_ids)
             with self._lock:
                 id_keys = {str(i) for i in old_ids}
-                self._entries = [
-                    e for e in self._entries
-                    if str(e.get("entry_id")) not in id_keys
-                ]
+                self._entries = [e for e in self._entries if str(e.get("entry_id")) not in id_keys]
             logger.debug("Age-pruned %d history row(s)", len(old_ids))
         except Exception as exc:
             logger.debug("Age-based history prune failed: %s", exc)
@@ -428,14 +424,10 @@ class ClipboardHistoryDB:
         """Delete oldest unpinned rows beyond MAX_ENTRIES (pinned preserved)."""
         try:
             conn = self._get_conn()
-            total = conn.execute(
-                "SELECT COUNT(*) FROM history"
-            ).fetchone()[0]
+            total = conn.execute("SELECT COUNT(*) FROM history").fetchone()[0]
             if total <= self.MAX_ENTRIES:
                 return
-            pinned = conn.execute(
-                "SELECT COUNT(*) FROM history WHERE pinned = 1"
-            ).fetchone()[0]
+            pinned = conn.execute("SELECT COUNT(*) FROM history WHERE pinned = 1").fetchone()[0]
             allowed_unpinned = max(0, self.MAX_ENTRIES - pinned)
             with conn:
                 # Order by timestamp (then entry_id as a tiebreaker) so the
@@ -457,8 +449,7 @@ class ClipboardHistoryDB:
     # Public API (identical to ClipboardHistory)
     # ------------------------------------------------------------------
 
-    def add(self, content: ClipboardContent,
-            source_app: dict | None = None) -> None:
+    def add(self, content: ClipboardContent, source_app: dict | None = None) -> None:
         """Add a clipboard entry. Silently ignores empty content.
 
         Deduplicates: entries with the same primary content (text body or
@@ -484,16 +475,20 @@ class ClipboardHistoryDB:
         captured_at = now
 
         with self._lock:
-            if (dedup_key == self._last_dedup_key
-                    and now - self._last_dedup_time < self.DEDUP_WINDOW):
+            if (
+                dedup_key == self._last_dedup_key
+                and now - self._last_dedup_time < self.DEDUP_WINDOW
+            ):
                 # Same primary content within the tight coalesce window.
                 # A capture that adds a format the surviving entry lacks
                 # must upgrade the entry, not be dropped (that drop used to
                 # lose the rich flavor forever); a true duplicate stays dropped.
                 top = self._entries[0] if self._entries else None
-                if (top is not None
-                        and self._stored_text_key(top) == dedup_key
-                        and adds_new_flavors(top.get("types"), content.types)):
+                if (
+                    top is not None
+                    and self._stored_text_key(top) == dedup_key
+                    and adds_new_flavors(top.get("types"), content.types)
+                ):
                     self._merge_into_top(top, content, source_app, captured_at)
                 return
             self._last_dedup_key = dedup_key
@@ -506,9 +501,10 @@ class ClipboardHistoryDB:
             # different hash there is genuinely different content.
             if dedup_key.startswith("text:") and self._entries:
                 top = self._entries[0]
-                if (self._stored_text_key(top) == dedup_key
-                        and now - (top.get("timestamp") or 0.0)
-                        < self.FLAVOR_MERGE_WINDOW):
+                if (
+                    self._stored_text_key(top) == dedup_key
+                    and now - (top.get("timestamp") or 0.0) < self.FLAVOR_MERGE_WINDOW
+                ):
                     self._merge_into_top(top, content, source_app, captured_at)
                     return
 
@@ -551,10 +547,10 @@ class ClipboardHistoryDB:
                 # skew arrival order.  Kept entries stay in their existing
                 # display positions.
                 keep_ids = {
-                    id(e) for e in sorted(
+                    id(e)
+                    for e in sorted(
                         unpinned,
-                        key=lambda e: (e.get("timestamp") or 0.0,
-                                       e.get("entry_id") or 0),
+                        key=lambda e: (e.get("timestamp") or 0.0, e.get("entry_id") or 0),
                         reverse=True,
                     )[:allowed_unpinned]
                 }
@@ -576,8 +572,9 @@ class ClipboardHistoryDB:
             return ""
         return _make_dedup_key(ClipboardContent(types=types))
 
-    def _merge_into_top(self, entry: dict, content: ClipboardContent,
-                        source_app: dict | None, captured_at: float) -> None:
+    def _merge_into_top(
+        self, entry: dict, content: ClipboardContent, source_app: dict | None, captured_at: float
+    ) -> None:
         """Fold a same-text re-capture into *entry*, preserving flavors.
 
         The union of formats keeps every flavor either side had (rich text
@@ -596,18 +593,15 @@ class ClipboardHistoryDB:
             if best is not None:
                 entry["content_type"] = _map_type_to_label(best[0])
             entry["text_preview"] = _build_preview(merged_ct)
-        entry["source_device"] = (content.source_device
-                                  or entry.get("source_device", ""))
+        entry["source_device"] = content.source_device or entry.get("source_device", "")
         if source_app:
             entry["source_app"] = source_app.get("name", "")
             entry["source_title"] = source_app.get("title", "")
         # Never move backwards: a sender's clock skew must not reorder
         # history relative to entries captured in between.
         entry["timestamp"] = max(captured_at, entry.get("timestamp") or 0.0)
-        try:
+        with contextlib.suppress(ValueError):
             self._entries.remove(entry)
-        except ValueError:
-            pass
         self._entries.insert(0, entry)
         self._persist_entry_update(entry)
 
@@ -619,8 +613,7 @@ class ClipboardHistoryDB:
         them (a raw UPDATE would leave those cells as the only plaintext on
         an otherwise-encrypted at-rest store).
         """
-        text_fields = ("types", "text_preview",
-                       "source_device", "source_app", "source_title")
+        text_fields = ("types", "text_preview", "source_device", "source_app", "source_title")
         fields = {
             "timestamp": entry.get("timestamp", 0.0),
             "content_type": entry.get("content_type", ""),
@@ -628,12 +621,10 @@ class ClipboardHistoryDB:
         }
         if self._enc_mgr:
             enc = self._encrypt_entry(
-                {k: (entry.get(k) or ({} if k == "types" else ""))
-                 for k in text_fields},
+                {k: (entry.get(k) or ({} if k == "types" else "")) for k in text_fields},
             )
         else:
-            enc = {k: (entry.get(k) or ({} if k == "types" else ""))
-                   for k in text_fields}
+            enc = {k: (entry.get(k) or ({} if k == "types" else "")) for k in text_fields}
         fields["text_preview"] = enc["text_preview"]
         fields["source_device"] = enc["source_device"]
         fields["source_app"] = enc["source_app"]
@@ -656,16 +647,13 @@ class ClipboardHistoryDB:
         """
         q = query.lower()
         with self._lock:
-            matches = [
-                e for e in self._entries
-                if q in e.get("text_preview", "").lower()
-            ]
+            matches = [e for e in self._entries if q in e.get("text_preview", "").lower()]
             pinned = [e for e in matches if e.get("pinned")]
             unpinned = [e for e in matches if not e.get("pinned")]
             return pinned + unpinned
 
     def get(self, index: int) -> dict | None:
-        """Get a single entry by display index (matching get_all() order). Returns None if out of bounds."""
+        """Get a single entry by display index (matching get_all() order). Returns None if out of bounds."""  # noqa: E501
         with self._lock:
             internal = self._display_to_internal(index)
             if internal is not None:
@@ -706,7 +694,7 @@ class ClipboardHistoryDB:
             return False
 
     def pin(self, index: int) -> bool:
-        """Pin an entry by display index (matching get_all() order). Pinned items stay at the top."""
+        """Pin an entry by display index (matching get_all() order). Pinned items stay at the top."""  # noqa: E501
         with self._lock:
             internal = self._display_to_internal(index)
             if internal is not None:
@@ -803,14 +791,10 @@ class ClipboardHistoryDB:
         id_keys = {str(i) for i in entry_ids}
         with self._lock:
             removed_ids = [
-                e.get("entry_id") for e in self._entries
-                if str(e.get("entry_id")) in id_keys
+                e.get("entry_id") for e in self._entries if str(e.get("entry_id")) in id_keys
             ]
             before = len(self._entries)
-            self._entries = [
-                e for e in self._entries
-                if str(e.get("entry_id")) not in id_keys
-            ]
+            self._entries = [e for e in self._entries if str(e.get("entry_id")) not in id_keys]
             removed = before - len(self._entries)
             if removed:
                 self._delete_rows(removed_ids)
@@ -830,9 +814,7 @@ class ClipboardHistoryDB:
             conn = self._get_conn()
             self._init_schema(conn)
 
-            row_count = conn.execute(
-                "SELECT COUNT(*) FROM history"
-            ).fetchone()[0]
+            row_count = conn.execute("SELECT COUNT(*) FROM history").fetchone()[0]
 
             if row_count == 0:
                 # Check for legacy JSON and auto-migrate
@@ -878,9 +860,7 @@ class ClipboardHistoryDB:
             self._entries = self._entries[: self.MAX_ENTRIES]
 
             if self._entries:
-                self._next_id = max(
-                    e.get("entry_id", 0) for e in self._entries
-                ) + 1
+                self._next_id = max(e.get("entry_id", 0) for e in self._entries) + 1
 
             if self._enc_mgr:
                 for entry in self._entries:
@@ -918,35 +898,13 @@ class ClipboardHistoryDB:
                 conn.executemany(
                     "INSERT INTO history "
                     "(entry_id, timestamp, content_type, text_preview, types, "
-                    "source_device, source_app, source_title, pinned, paste_count, status, image_fmt) "
+                    "source_device, source_app, source_title, pinned, paste_count, status, image_fmt) "  # noqa: E501
                     "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                     (self._entry_row(e) for e in self._entries),
                 )
             self._secure_db_files()
         except Exception as exc:
             logger.error("Failed to save history to DB: %s", exc)
-
-    def migrate_from_json(self) -> int:
-        """Public migration entry point.
-
-        Import entries from the legacy ``clipboard_history.json`` file
-        into the SQLite database.  Returns the number of entries migrated.
-        Safe to call multiple times — skips if no JSON file exists or
-        the database already has entries.
-        """
-        try:
-            conn = self._get_conn()
-            self._init_schema(conn)
-            row_count = conn.execute(
-                "SELECT COUNT(*) FROM history"
-            ).fetchone()[0]
-            if row_count > 0:
-                logger.debug("DB already has %d entries, skipping migration", row_count)
-                return 0
-            return self._migrate_from_json_file(conn)
-        except Exception as exc:
-            logger.error("Failed to migrate from JSON: %s", exc)
-            return 0
 
     def _migrate_from_json_file(self, conn: sqlite3.Connection) -> int:
         """Read the legacy JSON file and insert its entries into the DB.
@@ -974,9 +932,7 @@ class ClipboardHistoryDB:
         if self._enc_mgr:
             for entry in entries:
                 self._decrypt_entry(entry)
-            logger.debug(
-                "Migration: decrypted %d entries from legacy JSON", len(entries)
-            )
+            logger.debug("Migration: decrypted %d entries from legacy JSON", len(entries))
             # Re-encrypt so migrated data is stored encrypted at rest,
             # matching what _save() writes for newly added entries.
             entries = [self._encrypt_entry(e) for e in entries]
@@ -1013,7 +969,8 @@ class ClipboardHistoryDB:
 
         logger.info(
             "Migrated %d entries from %s to SQLite",
-            len(entries), self._json_path.name,
+            len(entries),
+            self._json_path.name,
         )
         return len(entries)
 
@@ -1030,9 +987,7 @@ class ClipboardHistoryDB:
         for field in self._ENCRYPTED_FIELDS:
             if field in e:
                 if field == "types":
-                    e["types"] = {
-                        k: enc.encrypt_storage(v) for k, v in e["types"].items()
-                    }
+                    e["types"] = {k: enc.encrypt_storage(v) for k, v in e["types"].items()}
                 else:
                     val = e[field]
                     if isinstance(val, str):

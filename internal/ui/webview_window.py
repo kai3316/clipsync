@@ -4,6 +4,7 @@ Uses the system's default browser in "app mode" (no browser chrome) via
 subprocess.  Zero external dependencies — relies only on the standard library.
 """
 
+import contextlib
 import logging
 import os
 import platform
@@ -19,17 +20,17 @@ logger = logging.getLogger(__name__)
 # On macOS, the first arg is the app name, args are passed separately to open -a.
 _BROWSERS = [
     # ── Windows ───────────────────────────────────────────────────────
-    ("msedge",    ["--app={url}", "--window-size={width},{height}"], ["Windows"]),
-    ("chrome",    ["--app={url}", "--window-size={width},{height}"], ["Windows"]),
-    ("chromium",  ["--app={url}", "--window-size={width},{height}"], ["Windows"]),
-    ("brave",     ["--app={url}", "--window-size={width},{height}"], ["Windows"]),
+    ("msedge", ["--app={url}", "--window-size={width},{height}"], ["Windows"]),
+    ("chrome", ["--app={url}", "--window-size={width},{height}"], ["Windows"]),
+    ("chromium", ["--app={url}", "--window-size={width},{height}"], ["Windows"]),
+    ("brave", ["--app={url}", "--window-size={width},{height}"], ["Windows"]),
     # Firefox has no --app mode; --new-window opens a chrome-ful window.
     # The legacy -width/-height options were removed from Firefox (modern
     # builds only support --window-size for --screenshot), and even on old
     # builds they were ignored whenever an existing Firefox instance took
     # over the command line — so no size flags are passed at all.
     # (Single vs double dash is equivalent in Firefox per its own docs.)
-    ("firefox",   ["--new-window", "{url}"], ["Windows"]),
+    ("firefox", ["--new-window", "{url}"], ["Windows"]),
     # ── macOS ─────────────────────────────────────────────────────────
     # Chrome-based browsers are launched directly via their bundle binary
     # with `--app` (see _launch_browser): `open -a ... --args --app={url}`
@@ -44,14 +45,14 @@ _BROWSERS = [
     ("Brave Browser", ["--app={url}", "--window-size={width},{height}"], ["Darwin"]),
     ("Safari", ["{url}"], ["Darwin"]),  # Safari doesn't support --app, opens normally
     # ── Linux ─────────────────────────────────────────────────────────
-    ("google-chrome",     ["--app={url}", "--window-size={width},{height}"], ["Linux"]),
+    ("google-chrome", ["--app={url}", "--window-size={width},{height}"], ["Linux"]),
     ("google-chrome-stable", ["--app={url}", "--window-size={width},{height}"], ["Linux"]),
-    ("chromium-browser",  ["--app={url}", "--window-size={width},{height}"], ["Linux"]),
-    ("chromium",          ["--app={url}", "--window-size={width},{height}"], ["Linux"]),
-    ("microsoft-edge",    ["--app={url}", "--window-size={width},{height}"], ["Linux"]),
-    ("brave-browser",     ["--app={url}", "--window-size={width},{height}"], ["Linux"]),
+    ("chromium-browser", ["--app={url}", "--window-size={width},{height}"], ["Linux"]),
+    ("chromium", ["--app={url}", "--window-size={width},{height}"], ["Linux"]),
+    ("microsoft-edge", ["--app={url}", "--window-size={width},{height}"], ["Linux"]),
+    ("brave-browser", ["--app={url}", "--window-size={width},{height}"], ["Linux"]),
     # No size flags for Firefox — see the Windows entry above.
-    ("firefox",           ["--new-window", "{url}"], ["Linux"]),
+    ("firefox", ["--new-window", "{url}"], ["Linux"]),
 ]
 
 
@@ -155,13 +156,45 @@ class WebViewWindow:
 
         result = _find_browser()
         if result is None:
-            logger.warning("WebViewWindow: no supported browser found, "
-                           "falling back to default browser")
+            logger.warning(
+                "WebViewWindow: no supported browser found, falling back to default browser"
+            )
             self._start_fallback()
             return
 
         self._browser_name, self._browser_args = result
-        self._launch_browser()
+        try:
+            self._launch_browser()
+        except Exception:
+            # _find_browser() only proves a path was DISCOVERED (registry key,
+            # standard install location) — not that it can be executed.  A
+            # moved, renamed or permission-denied binary made Popen raise
+            # straight out of start(), so the caller got an exception and the
+            # user got no dashboard at all — even though the default-browser
+            # fallback right here would have opened it fine.
+            logger.warning(
+                "WebViewWindow: launching %s failed, falling back to the default browser",
+                self._browser_name,
+                exc_info=True,
+            )
+            self._process = None
+            self._start_fallback()
+
+    def _start_fallback(self) -> None:
+        """Fallback: open URL in the default system browser."""
+        import webbrowser
+
+        logger.info("WebViewWindow: opening in default browser (fallback)")
+        try:
+            webbrowser.open_new(self._url)
+        except Exception:
+            # Headless / no BROWSER set / xdg-open missing.  This is the last
+            # resort, so there is nothing left to try — but raising here would
+            # take down the caller (tray click, Tk callback) for something the
+            # user can still work around by typing the URL.
+            logger.warning(
+                "WebViewWindow: default browser could not be opened either", exc_info=True
+            )
 
     def stop(self) -> None:
         """Close the browser window if it was launched by us."""
@@ -169,8 +202,7 @@ class WebViewWindow:
         proc = self._process
         self._process = None
         if proc is not None:
-            logger.info("WebViewWindow: terminating browser process (PID %d)",
-                        proc.pid)
+            logger.info("WebViewWindow: terminating browser process (PID %d)", proc.pid)
             try:
                 if platform.system() == "Windows":
                     # Browsers fork a whole tree (GPU, renderer, crashpad,
@@ -194,8 +226,7 @@ class WebViewWindow:
                         proc.kill()
                         proc.wait(timeout=2)
             except Exception:
-                logger.debug("WebViewWindow: failed to terminate browser process",
-                             exc_info=True)
+                logger.debug("WebViewWindow: failed to terminate browser process", exc_info=True)
 
     def is_running(self) -> bool:
         """Return True if the browser process is still alive."""
@@ -203,13 +234,6 @@ class WebViewWindow:
         if proc is None:
             return False
         return proc.poll() is None
-
-    # ── Browser detection ───────────────────────────────────────────
-
-    @staticmethod
-    def find_browser() -> str | None:
-        """Return the name of the first available browser, or None."""
-        return find_available_browser()
 
     # ── Internal helpers ────────────────────────────────────────────
 
@@ -268,12 +292,6 @@ class WebViewWindow:
         # Start a monitor thread that clears self._process when it exits
         self._start_monitor()
 
-    def _start_fallback(self) -> None:
-        """Fallback: open URL in the default system browser."""
-        import webbrowser
-        logger.info("WebViewWindow: opening in default browser (fallback)")
-        webbrowser.open_new(self._url)
-
     def _start_monitor(self) -> None:
         """Start a background thread that watches the browser process."""
         proc = self._process
@@ -281,34 +299,19 @@ class WebViewWindow:
             return
 
         def _watch():
-            try:
+            with contextlib.suppress(Exception):
                 proc.wait()
-            except Exception:
-                pass
             if self._process is proc:
                 self._process = None
                 logger.debug("WebViewWindow: browser process exited")
 
         self._monitor_thread = threading.Thread(
-            target=_watch, daemon=True, name="webview-monitor",
+            target=_watch,
+            daemon=True,
+            name="webview-monitor",
         )
         self._monitor_thread.start()
 
     def _stop_monitor(self) -> None:
         """Signal the monitor thread to stop (it exits when the process dies)."""
         self._monitor_thread = None
-
-
-# ── Convenience function ─────────────────────────────────────────────
-
-
-def open_webview(url: str, title: str = "ClipSync",
-                 width: int = 900, height: int = 700) -> WebViewWindow:
-    """Create and start a WebViewWindow, returning it for lifecycle control.
-
-    The caller is responsible for keeping a reference and calling ``stop()``
-    when done.
-    """
-    win = WebViewWindow(url=url, title=title, width=width, height=height)
-    win.start()
-    return win

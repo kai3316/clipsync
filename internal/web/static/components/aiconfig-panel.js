@@ -37,10 +37,14 @@
   // APPEND_EXTS: .txt / .md / .markdown).
   var TEXT_EXT_RE = /\.(md|markdown|txt)$/i;
 
-  // Tree-node keys join tool + path; '' cannot appear in either.
+  // Tree-node keys join tool + root + path; '' cannot appear in any of the
+  // three.  The root id is part of the key because rel_path is relative to its
+  // OWN root: skills/ and commands/ can each hold a `foo/x.md`, and keying on
+  // (tool, path) alone merged those into one node — hiding one of the files.
   var NODE_SEP = '';
-  function nodeKey(tool, path) {
-    return String(tool || 'custom') + NODE_SEP + String(path || '');
+  function nodeKey(tool, root, path) {
+    return String(tool || 'custom') + NODE_SEP + String(root || '') +
+      NODE_SEP + String(path || '');
   }
 
   var MODES = [
@@ -66,11 +70,11 @@
         localCollapsed: {},        // local tree nodes explicitly collapsed
         preview: {
           visible: false, loading: false, failed: false,
-          relPath: '', tool: '', rootIndex: 0, content: '', truncated: false,
+          relPath: '', tool: '', root: '', rootIndex: 0, content: '', truncated: false,
         },
         localPreview: {
           visible: false, loading: false, failed: false, error: '',
-          editing: false, saving: false, tool: '', relPath: '',
+          editing: false, saving: false, tool: '', root: '', relPath: '',
           content: '', truncated: false,
         },
       };
@@ -326,6 +330,17 @@
 
       rowsForGroup: function (entries, tool, collapsedMap, searchQ) {
         var out = [];
+        // One tool can watch several roots (Claude Code: skills/, commands/,
+        // agents/).  rel_path is relative to its own root, so two roots can
+        // report the same rel — show the root id next to depth-0 rows so the
+        // two are told apart.  A single-root group needs no hint.
+        var rootSeen = {};
+        var rootN = 0;
+        entries.forEach(function (e) {
+          var r = String((e && e.root) || '');
+          if (!rootSeen[r]) { rootSeen[r] = true; rootN++; }
+        });
+        var hintFor = function (root) { return rootN > 1 ? String(root || '') : ''; };
         var q = (searchQ || '').toLowerCase().trim();
         if (q) {
           entries.forEach(function (e) {
@@ -333,9 +348,13 @@
             out.push({
               key: H.keyOf(e), label: e.rel_path, depth: 0,
               isDir: !!e.is_dir, entry: e, node: null, tool: tool,
+              root: String(e.root || ''), rootHint: hintFor(e.root),
             });
           });
-          out.sort(function (a, b) { return a.label.localeCompare(b.label); });
+          out.sort(function (a, b) {
+            return a.label.localeCompare(b.label) ||
+              String(a.root).localeCompare(String(b.root));
+          });
           return out;
         }
         var nodes = {};
@@ -343,15 +362,16 @@
         entries.forEach(function (e) {
           var rel = String(e.rel_path || '').replace(/\/+$/, '');
           if (!rel) return;
+          var root = String(e.root || '');
           var parts = rel.split('/');
           var parent = null, leaf = null;
           for (var j = 0; j < parts.length; j++) {
-            var key = nodeKey(tool, parts.slice(0, j + 1).join('/'));
+            var key = nodeKey(tool, root, parts.slice(0, j + 1).join('/'));
             if (j === 0) {
               leaf = nodes[key];
               if (!leaf) {
                 leaf = nodes[key] = {
-                  key: key, tool: tool, name: parts[0], path: parts[0],
+                  key: key, tool: tool, root: root, name: parts[0], path: parts[0],
                   is_dir: parts.length > 1 || !!e.is_dir, entry: null, children: [],
                 };
                 roots.push(leaf);
@@ -364,7 +384,8 @@
               }
               if (!child) {
                 child = {
-                  key: key, tool: tool, name: parts[j], path: parts.slice(0, j + 1).join('/'),
+                  key: key, tool: tool, root: root, name: parts[j],
+                  path: parts.slice(0, j + 1).join('/'),
                   is_dir: j < parts.length - 1 || !!e.is_dir, entry: null, children: [],
                 };
                 parent.children.push(child);
@@ -380,6 +401,8 @@
             out.push({
               key: node.key, label: node.name, depth: depth,
               isDir: node.is_dir, entry: node.entry, node: node, tool: node.tool,
+              root: String(node.root || ''),
+              rootHint: depth === 0 ? hintFor(node.root) : '',
             });
             if (node.is_dir && !collapsedMap[node.key]) walk(node.children, depth + 1);
           }
@@ -459,25 +482,30 @@
         this.checked = next;
       },
 
-      // Descendant FILE selection keys under (tool, rel).  Folder selects
-      // operate at file granularity: checking a folder checks every file the
-      // peer's (recursive) inventory reports under it.
-      descendantFileKeys: function (tool, rel) {
+      // Descendant FILE selection keys under (tool, root, rel).  Folder
+      // selects operate at file granularity: checking a folder checks every
+      // file the peer's (recursive) inventory reports under it.  The root must
+      // match too — a folder belongs to exactly one root, so a same-named
+      // folder under a sibling root (skills/foo/ vs commands/foo/) is a
+      // different folder and must not be swept in.
+      descendantFileKeys: function (tool, root, rel) {
         var peer = this.currentPeer;
         if (!peer) return [];
         var prefix = String(rel || '').replace(/\/+$/, '') + '/';
+        var want = String(root || '');
         var keys = [];
         peer.entries.forEach(function (e) {
           if (e.is_dir) return;
           if (String(e.tool || 'custom') !== String(tool || 'custom')) return;
+          if (String(e.root || '') !== want) return;
           var r = String(e.rel_path || '');
           if (r === rel || r.indexOf(prefix) === 0) keys.push(H.keyOf(e));
         });
         return keys;
       },
 
-      folderState: function (tool, rel) {
-        var keys = this.descendantFileKeys(tool, rel);
+      folderState: function (tool, root, rel) {
+        var keys = this.descendantFileKeys(tool, root, rel);
         var checkedN = 0;
         var self = this;
         keys.forEach(function (k) { if (self.checked[k]) checkedN++; });
@@ -489,8 +517,8 @@
         };
       },
 
-      toggleFolder: function (tool, rel) {
-        var st = this.folderState(tool, rel);
+      toggleFolder: function (tool, root, rel) {
+        var st = this.folderState(tool, root, rel);
         var target = !st.checked;
         var next = Object.assign({}, this.checked);
         st.keys.forEach(function (k) {
@@ -517,7 +545,7 @@
         Object.keys(this.checked).forEach(function (k) {
           if (!self.checked[k]) return;
           var e = byKey[k];
-          if (e && !e.is_dir) items.push({ tool: String(e.tool || 'custom'), rel_path: e.rel_path });
+          if (e && !e.is_dir) items.push({ tool: String(e.tool || 'custom'), root: String(e.root || ''), rel_path: e.rel_path });
         });
         if (items.length === 0) return;
         if (this.mode === 'append' && this.hasNonTextSelection(items)) {
@@ -573,7 +601,7 @@
         var items = [];
         b.results.forEach(function (r) {
           if (r && r.status === 'error' && r.rel_path) {
-            items.push({ tool: String(r.tool || 'custom'), rel_path: r.rel_path });
+            items.push({ tool: String(r.tool || 'custom'), root: String(r.root || ''), rel_path: r.rel_path });
           }
         });
         if (items.length === 0) return;
@@ -589,12 +617,21 @@
       },
 
       /* ── Pull-result badges ───────────────────────────────────── */
+      // The pull result for one row.  Matched on (peer, tool, root, rel) so a
+      // result never badges the wrong row: rel_path is relative to its own
+      // root, so skills/x.md and commands/x.md share a rel_path.  Legacy peers
+      // send no tool/root, so their results still match on rel_path alone.
       resultFor: function (entry) {
         var list = this.store.aiConfigResults || [];
         var id = this.selectedDevice;
+        var tool = String(entry.tool || 'custom');
+        var root = String(entry.root || '');
         for (var i = 0; i < list.length; i++) {
           var r = list[i];
-          if (r.peer_id === id && r.rel_path === entry.rel_path) return r;
+          if (r.peer_id !== id || r.rel_path !== entry.rel_path) continue;
+          if (r.tool && r.tool !== 'legacy' &&
+              (r.tool !== tool || String(r.root || '') !== root)) continue;
+          return r;
         }
         return null;
       },
@@ -624,12 +661,12 @@
         if (!peer) return;
         this.preview = {
           visible: true, loading: true, failed: false,
-          relPath: entry.rel_path, tool: entry.tool, rootIndex: entry.root_index,
+          relPath: entry.rel_path, tool: entry.tool, root: entry.root || '', rootIndex: entry.root_index,
           content: '', truncated: false,
         };
         var p = peer.legacy
           ? ClipsyncAPI.previewAiConfigLegacy(peer.id, entry.root_index, entry.rel_path)
-          : ClipsyncAPI.previewAiConfigFile(peer.id, String(entry.tool || 'custom'), entry.rel_path);
+          : ClipsyncAPI.previewAiConfigFile(peer.id, String(entry.tool || 'custom'), entry.rel_path, entry.root || '');
         p.then(function (res) {
           self.preview.loading = false;
           self.preview.content = (res && res.content) || '';
@@ -682,10 +719,10 @@
         this.localPreview = {
           visible: true, loading: true, failed: false, error: '',
           editing: false, saving: false,
-          tool: String(entry.tool || 'custom'), relPath: entry.rel_path,
+          tool: String(entry.tool || 'custom'), root: String(entry.root || ''), relPath: entry.rel_path,
           content: '', truncated: false,
         };
-        ClipsyncAPI.getAiConfigLocalItem(entry.tool, entry.rel_path)
+        ClipsyncAPI.getAiConfigLocalItem(entry.tool, entry.rel_path, entry.root || '')
           .then(function (res) {
             if (!res || !res.ok) {
               self.localPreview.loading = false;
@@ -723,7 +760,7 @@
         var p = this.localPreview;
         if (p.saving) return;
         p.saving = true;
-        ClipsyncAPI.saveAiConfigLocal(p.tool, p.relPath, p.content)
+        ClipsyncAPI.saveAiConfigLocal(p.tool, p.relPath, p.content, p.root || '')
           .then(function (res) {
             p.saving = false;
             if (res && res.ok) {
@@ -748,16 +785,20 @@
           this.t('aiconfig.local_trash_title'),
           this.t('aiconfig.local_trash_confirm', { path: entry.rel_path })
         ).then(function () {
-          return ClipsyncAPI.trashAiConfigLocal(entry.tool, entry.rel_path);
+          return ClipsyncAPI.trashAiConfigLocal(entry.tool, entry.rel_path, entry.root || '');
         }).then(function (res) {
           if (res && res.ok) {
             var dest = (res && res.trashed_to) || '';
             self.store.showToast(self.t('aiconfig.local_trashed_toast', { dest: dest }), 3200, 'success');
             var prefix = String(entry.rel_path || '').replace(/\/+$/, '') + '/';
+            var root = String(entry.root || '');
             var cur = self.store.aiConfigLocal.entries.slice();
             for (var i = cur.length - 1; i >= 0; i--) {
               var rp = String(cur[i].rel_path || '');
+              // Root must match: rel_path is relative to its own root, so a
+              // same-named folder under a sibling root is a different folder.
               if (cur[i].tool === entry.tool &&
+                  String(cur[i].root || '') === root &&
                   (rp === entry.rel_path ||
                    (entry.is_dir && rp.indexOf(prefix) === 0))) {
                 cur.splice(i, 1);
@@ -766,6 +807,7 @@
             self.store.aiConfigLocal.entries = cur;
             if (self.localPreview.visible &&
                 self.localPreview.tool === entry.tool &&
+                String(self.localPreview.root || '') === root &&
                 (self.localPreview.relPath === entry.rel_path ||
                  (entry.is_dir &&
                   String(self.localPreview.relPath || '').indexOf(prefix) === 0))) {
@@ -785,7 +827,7 @@
 
       openEntryDir: function (entry) {
         var self = this;
-        ClipsyncAPI.openAiConfigLocal(entry.tool, entry.rel_path)
+        ClipsyncAPI.openAiConfigLocal(entry.tool, entry.rel_path, entry.root || '')
           .then(function (res) {
             if (!res || !res.ok) {
               self.store.showToast(self.t('aiconfig.local_open_failed',
@@ -906,10 +948,10 @@
                         '<span v-if="row.isDir && row.node" class="aiconfig-panel__tree-chevron" :class="{ \'aiconfig-panel__tree-chevron--open\': isDirExpanded(row.node, collapsed) }" role="button" tabindex="0" :aria-label="row.label" :aria-expanded="isDirExpanded(row.node, collapsed)" @click.stop="toggleDir(row.node, collapsed)" @keydown.enter.space.stop.prevent="toggleDir(row.node, collapsed)">▸</span>' +
                         '<span v-else class="aiconfig-panel__tree-chevron aiconfig-panel__tree-chevron--spacer"></span>' +
                         '<span v-if="row.isDir && row.node" class="aiconfig-panel__folder-check">' +
-                          '<input type="checkbox" :checked="folderState(row.tool, row.node.path).checked"' +
-                            ' @change="toggleFolder(row.tool, row.node.path)"' +
-                            ' :title="folderState(row.tool, row.node.path).count ? t(\'aiconfig.folder_select_count\', { count: folderState(row.tool, row.node.path).count }) : \'\'"' +
-                            ' :aria-label="t(\'aiconfig.folder_select_count\', { count: folderState(row.tool, row.node.path).count })">' +
+                          '<input type="checkbox" :checked="folderState(row.tool, row.root, row.node.path).checked"' +
+                            ' @change="toggleFolder(row.tool, row.root, row.node.path)"' +
+                            ' :title="folderState(row.tool, row.root, row.node.path).count ? t(\'aiconfig.folder_select_count\', { count: folderState(row.tool, row.root, row.node.path).count }) : \'\'"' +
+                            ' :aria-label="t(\'aiconfig.folder_select_count\', { count: folderState(row.tool, row.root, row.node.path).count })">' +
                         '</span>' +
                         '<input v-else-if="!row.isDir" type="checkbox" :checked="isChecked(row.entry)" @change="toggleCheck(row.entry)" :aria-label="row.entry.rel_path">' +
                       '</td>' +
@@ -918,6 +960,7 @@
                         '<span v-else-if="row.isDir" class="aiconfig-panel__path-btn aiconfig-panel__path-btn--dir selectable">📁 {{ row.label }}</span>' +
                         '<template v-else>' +
                           '<button class="aiconfig-panel__path-btn selectable" @click="openPreview(row.entry)" :title="t(\'aiconfig.preview_title\')">{{ row.label }}</button>' +
+                          '<span v-if="row.rootHint" class="aiconfig-panel__root-hint" :title="t(\'aiconfig.root_hint_title\', { root: row.rootHint })">{{ row.rootHint }}</span>' +
                           '<span v-if="compareState(row.entry)" class="aiconfig-panel__ver-badge"' +
                             ' :class="\'aiconfig-panel__ver-badge--\' + compareState(row.entry)"' +
                             ' :title="compareTitle(row.entry)">{{ t(verKey(compareState(row.entry))) }}</span>' +
@@ -1048,12 +1091,18 @@
                         '<td class="aiconfig-panel__cell-path" :style="row.depth ? { paddingLeft: (12 + row.depth * 18) + \'px\' } : {}">' +
                           '<span v-if="row.isDir && row.node" class="aiconfig-panel__tree-chevron" :class="{ \'aiconfig-panel__tree-chevron--open\': isDirExpanded(row.node, localCollapsed) }" role="button" tabindex="0" :aria-label="row.label" :aria-expanded="isDirExpanded(row.node, localCollapsed)" @click.stop="toggleDir(row.node, localCollapsed)" @keydown.enter.space.stop.prevent="toggleDir(row.node, localCollapsed)">▸</span>' +
                           '<span v-else class="aiconfig-panel__tree-chevron aiconfig-panel__tree-chevron--spacer"></span>' +
-                          '<button class="aiconfig-panel__path-btn selectable" :class="{ \'aiconfig-panel__path-btn--dir\': row.isDir }" @click="onRowClick(row)" @dblclick.prevent="row.isDir && openEntryDir(row.entry || { tool: row.tool, rel_path: row.path + \'/\' })" :title="row.isDir ? t(\'aiconfig.local_open_dir\') : t(\'aiconfig.preview_title\')">{{ row.isDir ? \'📁 \' : \'\' }}{{ row.label }}</button>' +
+                          '<button class="aiconfig-panel__path-btn selectable" :class="{ \'aiconfig-panel__path-btn--dir\': row.isDir }" @click="onRowClick(row)" @dblclick.prevent="row.isDir && openEntryDir(row.entry || { tool: row.tool, root: row.root, rel_path: row.path + \'/\' })" :title="row.isDir ? t(\'aiconfig.local_open_dir\') : t(\'aiconfig.preview_title\')">{{ row.isDir ? \'📁 \' : \'\' }}{{ row.label }}</button>' +
+                          '<span v-if="row.rootHint" class="aiconfig-panel__root-hint" :title="t(\'aiconfig.root_hint_title\', { root: row.rootHint })">{{ row.rootHint }}</span>' +
                         '</td>' +
-                        '<td class="aiconfig-panel__cell-size">{{ row.isDir ? \'\' : fmtSize(row.entry.size) }}</td>' +
-                        '<td class="aiconfig-panel__cell-time">{{ fmtTime(row.entry.mtime) }}</td>' +
+                        // A synthetic tree row (a directory the tree builder
+                        // invented for a path segment) carries no `entry`, so
+                        // both cells have to tolerate its absence -- reading
+                        // .mtime off null throws inside the render and blanks
+                        // the whole panel.
+                        '<td class="aiconfig-panel__cell-size">{{ (row.isDir || !row.entry) ? \'\' : fmtSize(row.entry.size) }}</td>' +
+                        '<td class="aiconfig-panel__cell-time">{{ (row.isDir || !row.entry) ? \'\' : fmtTime(row.entry.mtime) }}</td>' +
                         '<td class="aiconfig-panel__local-actions">' +
-                          '<button class="settings-btn settings-btn--sm aiconfig-panel__icon-btn" @click="openEntryDir(row.entry || { tool: row.tool, rel_path: row.path + \'/\' })" :title="t(\'aiconfig.local_open_dir\')" :aria-label="t(\'aiconfig.local_open_dir\')">📂</button>' +
+                          '<button class="settings-btn settings-btn--sm aiconfig-panel__icon-btn" @click="openEntryDir(row.entry || { tool: row.tool, root: row.root, rel_path: row.path + \'/\' })" :title="t(\'aiconfig.local_open_dir\')" :aria-label="t(\'aiconfig.local_open_dir\')">📂</button>' +
                           '<button v-if="row.entry" class="settings-btn settings-btn--sm aiconfig-panel__icon-btn aiconfig-panel__icon-btn--danger" @click="trashEntry(row.entry)" :title="t(\'aiconfig.local_trash_title\')" :aria-label="t(\'aiconfig.local_trash_title\')">🗑</button>' +
                         '</td>' +
                       '</tr>' +

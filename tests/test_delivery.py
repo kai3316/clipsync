@@ -22,10 +22,11 @@ import pytest
 
 from internal.protocol import codec
 from internal.protocol.codec import decode_message, encode_frame
-from internal.transport import relay as R
+from internal.transport import relay as R  # noqa: N812
 from src.main import Application  # noqa: E402
 
 # ------------------------------------------------------------------ codec
+
 
 def test_relay_ack_frame_roundtrip():
     raw = {"msg_type": "relay_ack", "msg_id": "abc123", "ts": 1234.5}
@@ -45,23 +46,30 @@ def test_relay_ack_is_paired_only():
 
 # ------------------------------------------------------------------ stub
 
+
 def _clipboard_frame(device_id, text="hello"):
     import base64 as _b
-    return encode_frame({
-        "msg_type": "clipboard",
-        "types": {"TEXT": _b.b64encode(text.encode("utf-8")).decode("ascii")},
-        "timestamp": 1.0,
-    }, source_device=device_id)
+
+    return encode_frame(
+        {
+            "msg_type": "clipboard",
+            "types": {"TEXT": _b.b64encode(text.encode("utf-8")).decode("ascii")},
+            "timestamp": 1.0,
+        },
+        source_device=device_id,
+    )
 
 
-def _chat_frame(device_id, text="hi", msg_type="chat_text",
-                session_id="0123456789abcdef"):
-    return encode_frame({
-        "msg_type": msg_type,
-        "session_id": session_id,
-        "text": text,
-        "ts": 1.0,
-    }, source_device=device_id)
+def _chat_frame(device_id, text="hi", msg_type="chat_text", session_id="0123456789abcdef"):
+    return encode_frame(
+        {
+            "msg_type": msg_type,
+            "session_id": session_id,
+            "text": text,
+            "ts": 1.0,
+        },
+        source_device=device_id,
+    )
 
 
 def make_app_stub(**attrs):
@@ -83,8 +91,7 @@ def make_app_stub(**attrs):
                 device_name=p.get("device_name", pid),
             )
         else:
-            peers[pid] = types.SimpleNamespace(
-                device_id=pid, paired=bool(p), device_name=pid)
+            peers[pid] = types.SimpleNamespace(device_id=pid, paired=bool(p), device_name=pid)
     app.cfg = types.SimpleNamespace(
         device_id=device_id,
         device_name=attrs.get("device_name", "DevA"),
@@ -109,6 +116,7 @@ def make_app_stub(**attrs):
 
         def refresh_channels(self):
             pass
+
     app._relay = Relay()
 
     class WSManager:
@@ -122,6 +130,7 @@ def make_app_stub(**attrs):
     class WS:
         def __init__(self):
             self.ws_manager = WSManager()
+
     app.web_server = WS()
 
     class SyncMgr:
@@ -132,6 +141,7 @@ def make_app_stub(**attrs):
         def handle_remote_message(self, msg):
             self.calls += 1
             return self.accepted
+
     app.sync_mgr = SyncMgr(attrs.get("remote_accepted", True))
 
     class ChatMgr:
@@ -142,6 +152,7 @@ def make_app_stub(**attrs):
         def handle_message(self, msg_type, payload, sender, fp, send_fn):
             self.handled.append((msg_type, payload, sender))
             return self.accepted
+
     app.chat_mgr = ChatMgr(attrs.get("chat_accepted", True))
 
     class TM:
@@ -153,6 +164,7 @@ def make_app_stub(**attrs):
 
         def broadcast(self, data):
             return True
+
     app.transport_mgr = TM()
 
     # Round 17 delivery state + round-15 netpair runtime state.
@@ -168,14 +180,14 @@ def make_app_stub(**attrs):
 
 
 def _delivery_events(app, status=None):
-    evs = [d for m, d in app.web_server.ws_manager.broadcasts
-           if m == "internet_delivery"]
+    evs = [d for m, d in app.web_server.ws_manager.broadcasts if m == "internet_delivery"]
     if status is not None:
         evs = [d for d in evs if d.get("status") == status]
     return evs
 
 
 # ------------------------------------------------ ledger sent → ack → delivered
+
 
 def test_publish_records_sent_and_ack_marks_delivered():
     secret = R.generate_netpair_secret()
@@ -194,8 +206,7 @@ def test_publish_records_sent_and_ack_marks_delivered():
     assert ev[0]["content_hash"] == led["content_hash"]
 
     # ack arrives → delivered
-    Application._handle_relay_ack(app, {"msg_id": msg_id, "ts": time.time()},
-                                  "bbbbbbbbbbbb")
+    Application._handle_relay_ack(app, {"msg_id": msg_id, "ts": time.time()}, "bbbbbbbbbbbb")
     assert app._delivery_ledger["bbbbbbbbbbbb"][msg_id]["status"] == "delivered"
     ev = _delivery_events(app, "delivered")
     assert ev and ev[0]["msg_id"] == msg_id
@@ -207,8 +218,9 @@ def test_ack_via_on_peer_message_routes_relay_ack():
     frame = _clipboard_frame(app.cfg.device_id)
     app._relay_publish_frame(frame)
     msg_id = decode_message(frame).msg_id
-    ack = encode_frame({"msg_type": "relay_ack", "msg_id": msg_id,
-                        "ts": time.time()}, source_device="bbbbbbbbbbbb")
+    ack = encode_frame(
+        {"msg_type": "relay_ack", "msg_id": msg_id, "ts": time.time()}, source_device="bbbbbbbbbbbb"
+    )
     app._on_peer_message(decode_message(ack), "bbbbbbbbbbbb")
     assert app._delivery_ledger["bbbbbbbbbbbb"][msg_id]["status"] == "delivered"
 
@@ -217,8 +229,12 @@ def test_ack_unknown_msg_id_ignored():
     app = make_app_stub()
     app._delivery_ledger["peer-x"] = OrderedDict()
     app._delivery_ledger["peer-x"]["known"] = {
-        "msg_id": "known", "content_hash": "h", "ts": time.time(),
-        "status": "sent", "deadline": time.time() + 15, "preview": "x",
+        "msg_id": "known",
+        "content_hash": "h",
+        "ts": time.time(),
+        "status": "sent",
+        "deadline": time.time() + 15,
+        "preview": "x",
     }
     Application._handle_relay_ack(app, {"msg_id": "ghost", "ts": 1.0}, "peer-x")
     assert app._delivery_ledger["peer-x"]["known"]["status"] == "sent"
@@ -226,6 +242,7 @@ def test_ack_unknown_msg_id_ignored():
 
 
 # ------------------------------------------------------ timeout → failed
+
 
 def test_ack_timeout_marks_failed():
     app = make_app_stub()
@@ -265,13 +282,18 @@ def test_same_content_delivered_not_marked_failed():
 
 # ------------------------------------------------------------ ack sending
 
+
 def test_received_clipboard_sends_ack_over_relay():
     secret = R.generate_netpair_secret()
     app = make_app_stub(netpair_secrets={"bbbbbbbbbbbb": secret})
-    frame = encode_frame({
-        "msg_type": "clipboard", "types": {"TEXT": "aGVsbG8="},
-        "timestamp": 1.0,
-    }, source_device="bbbbbbbbbbbb")
+    frame = encode_frame(
+        {
+            "msg_type": "clipboard",
+            "types": {"TEXT": "aGVsbG8="},
+            "timestamp": 1.0,
+        },
+        source_device="bbbbbbbbbbbb",
+    )
     app._on_peer_message(decode_message(frame), "bbbbbbbbbbbb")
     assert app.sync_mgr.calls == 1
     assert len(app._relay.published) == 1
@@ -285,12 +307,15 @@ def test_received_clipboard_sends_ack_over_relay():
 
 def test_rejected_clipboard_sends_no_ack():
     secret = R.generate_netpair_secret()
-    app = make_app_stub(netpair_secrets={"bbbbbbbbbbbb": secret},
-                        remote_accepted=False)
-    frame = encode_frame({
-        "msg_type": "clipboard", "types": {"TEXT": "aGVsbG8="},
-        "timestamp": 1.0,
-    }, source_device="bbbbbbbbbbbb")
+    app = make_app_stub(netpair_secrets={"bbbbbbbbbbbb": secret}, remote_accepted=False)
+    frame = encode_frame(
+        {
+            "msg_type": "clipboard",
+            "types": {"TEXT": "aGVsbG8="},
+            "timestamp": 1.0,
+        },
+        source_device="bbbbbbbbbbbb",
+    )
     app._on_peer_message(decode_message(frame), "bbbbbbbbbbbb")
     assert app.sync_mgr.calls == 1
     assert app._relay.published == []  # rejected → no receipt
@@ -299,30 +324,41 @@ def test_rejected_clipboard_sends_no_ack():
 def test_ack_not_sent_for_unknown_peer():
     # A peer with no relay channel must not produce an ack.
     app = make_app_stub()  # no netpair / relay-enroll peers
-    frame = encode_frame({
-        "msg_type": "clipboard", "types": {"TEXT": "aGVsbG8="},
-        "timestamp": 1.0,
-    }, source_device="ghost")
+    frame = encode_frame(
+        {
+            "msg_type": "clipboard",
+            "types": {"TEXT": "aGVsbG8="},
+            "timestamp": 1.0,
+        },
+        source_device="ghost",
+    )
     app._on_peer_message(decode_message(frame), "ghost")
     assert app._relay.published == []
 
 
 def test_ack_not_sent_for_unpaired_lan_peer():
-    app = make_app_stub(peers={"bbbbbbbbbbbb": {"paired": False}},
-                        peer_relay_secrets={"bbbbbbbbbbbb": "dd" * 32})
-    frame = encode_frame({
-        "msg_type": "clipboard", "types": {"TEXT": "aGVsbG8="},
-        "timestamp": 1.0,
-    }, source_device="bbbbbbbbbbbb")
+    app = make_app_stub(
+        peers={"bbbbbbbbbbbb": {"paired": False}}, peer_relay_secrets={"bbbbbbbbbbbb": "dd" * 32}
+    )
+    frame = encode_frame(
+        {
+            "msg_type": "clipboard",
+            "types": {"TEXT": "aGVsbG8="},
+            "timestamp": 1.0,
+        },
+        source_device="bbbbbbbbbbbb",
+    )
     app._on_peer_message(decode_message(frame), "bbbbbbbbbbbb")
     assert app._relay.published == []
 
 
 # -------------------------------------------- offline queue + persistence
 
+
 @pytest.fixture()
 def isolated_config(tmp_path, monkeypatch):
     from internal.config import config as cfg_mod
+
     monkeypatch.setattr(cfg_mod, "_config_dir", lambda: tmp_path)
     yield cfg_mod
 
@@ -373,6 +409,7 @@ def test_online_enqueue_does_not_persist(isolated_config, tmp_path):
 
 # --------------------------------------------- retransmission triggers
 
+
 def test_relay_online_trigger_flushes_queue(isolated_config, tmp_path):
     secret = R.generate_netpair_secret()
     app = make_app_stub(netpair_secrets={"bbbbbbbbbbbb": secret}, relay_ok=False)
@@ -382,8 +419,7 @@ def test_relay_online_trigger_flushes_queue(isolated_config, tmp_path):
     assert msg_id in app._delivery_queue["bbbbbbbbbbbb"]
     # relay comes online → flush: switch the stub relay to online behaviour
     app._relay.published.clear()
-    app._relay.publish = lambda f, t, k, qos=0: (app._relay.published.append(
-        (f, t, k)) or True)
+    app._relay.publish = lambda f, t, k, qos=0: app._relay.published.append((f, t, k)) or True
     Application._on_relay_state(app, "online")
     assert msg_id not in app._delivery_queue.get("bbbbbbbbbbbb", {})
     assert app._delivery_ledger["bbbbbbbbbbbb"][msg_id]["status"] == "sent"
@@ -402,12 +438,15 @@ def test_peer_active_trigger_flushes_queue(isolated_config, tmp_path):
     assert msg_id in app._delivery_queue["bbbbbbbbbbbb"]
     # a frame from the peer arrives (active signal) while relay now online
     app._relay.published.clear()
-    app._relay.publish = lambda f, t, k, qos=0: (app._relay.published.append(
-        (f, t, k)) or True)
-    incoming = encode_frame({
-        "msg_type": "clipboard", "types": {"TEXT": "aGVsbG8="},
-        "timestamp": 2.0,
-    }, source_device="bbbbbbbbbbbb")
+    app._relay.publish = lambda f, t, k, qos=0: app._relay.published.append((f, t, k)) or True
+    incoming = encode_frame(
+        {
+            "msg_type": "clipboard",
+            "types": {"TEXT": "aGVsbG8="},
+            "timestamp": 2.0,
+        },
+        source_device="bbbbbbbbbbbb",
+    )
     app._on_peer_message(decode_message(incoming), "bbbbbbbbbbbb")
     assert msg_id not in app._delivery_queue.get("bbbbbbbbbbbb", {})
     assert app._delivery_ledger["bbbbbbbbbbbb"][msg_id]["status"] == "sent"
@@ -420,8 +459,7 @@ def test_timer_retry_flushes_queue(isolated_config, tmp_path):
     app._relay_publish_frame(frame)
     msg_id = decode_message(frame).msg_id
     app._relay.published.clear()
-    app._relay.publish = lambda f, t, k, qos=0: (app._relay.published.append(
-        (f, t, k)) or True)
+    app._relay.publish = lambda f, t, k, qos=0: app._relay.published.append((f, t, k)) or True
     app._delivery_retry_queue()
     assert msg_id not in app._delivery_queue.get("bbbbbbbbbbbb", {})
     assert app._delivery_ledger["bbbbbbbbbbbb"][msg_id]["status"] == "sent"
@@ -435,8 +473,9 @@ def test_retry_limit_marks_failed_and_removes(isolated_config, tmp_path):
     msg_id = decode_message(frame).msg_id
     for _ in range(5):
         app._delivery_retry_peer("bbbbbbbbbbbb")
-    assert "bbbbbbbbbbbb" not in app._delivery_queue or \
-        msg_id not in app._delivery_queue.get("bbbbbbbbbbbb", {})
+    assert "bbbbbbbbbbbb" not in app._delivery_queue or msg_id not in app._delivery_queue.get(
+        "bbbbbbbbbbbb", {}
+    )
     assert app._delivery_ledger["bbbbbbbbbbbb"][msg_id]["status"] == "failed"
     assert _delivery_events(app, "failed")
     # queue file no longer contains the exhausted row
@@ -446,6 +485,7 @@ def test_retry_limit_marks_failed_and_removes(isolated_config, tmp_path):
 
 
 # ---------------------------------------------------------------- REST
+
 
 def test_delivery_status_shape_and_content_hash():
     secret = R.generate_netpair_secret()
@@ -477,13 +517,15 @@ def test_delivery_counts_per_peer_badges(isolated_config, tmp_path):
 
 def test_api_routes_with_bound_app(isolated_config, tmp_path):
     from internal.web.api import internetdelivery as api
+
     secret = R.generate_netpair_secret()
     app = make_app_stub(netpair_secrets={"bbbbbbbbbbbb": secret}, relay_ok=False)
     app._relay_publish_frame(_clipboard_frame(app.cfg.device_id))
     api.bind(app)
     try:
         data, status = api.handle(
-            "GET", "/api/internetdelivery", {"peer_id": ["bbbbbbbbbbbb"]}, b"")
+            "GET", "/api/internetdelivery", {"peer_id": ["bbbbbbbbbbbb"]}, b""
+        )
         assert status == 200 and data["pending"] == 1
         assert data["sends"][0]["content_hash"]
         data, status = api.handle("GET", "/api/internetdelivery/counts", {}, b"")
@@ -496,6 +538,7 @@ def test_api_routes_with_bound_app(isolated_config, tmp_path):
 
 def test_api_unbound_returns_503():
     from internal.web.api import internetdelivery as api
+
     api.bind(None)
     try:
         data, status = api.handle("GET", "/api/internetdelivery", {}, b"")
@@ -505,6 +548,7 @@ def test_api_unbound_returns_503():
 
 
 # ------------------------------------------- chat delivery over the relay
+
 
 def test_relay_chat_frame_ledgered_sent():
     secret = R.generate_netpair_secret()
@@ -531,8 +575,7 @@ def test_relay_chat_ack_marks_delivered():
     frame = _chat_frame(app.cfg.device_id)
     Application._relay_publish_to_peer(app, frame, "bbbbbbbbbbbb")
     msg_id = decode_message(frame).msg_id
-    Application._handle_relay_ack(app, {"msg_id": msg_id, "ts": time.time()},
-                                  "bbbbbbbbbbbb")
+    Application._handle_relay_ack(app, {"msg_id": msg_id, "ts": time.time()}, "bbbbbbbbbbbb")
     assert app._delivery_ledger["bbbbbbbbbbbb"][msg_id]["status"] == "delivered"
     assert _delivery_events(app, "delivered")[0]["kind"] == "chat_text"
 
@@ -566,8 +609,7 @@ def test_relay_chat_received_ack_is_published():
 
 
 def test_relay_chat_no_ack_when_rejected():
-    app = make_app_stub(chat_accepted=False,
-                        netpair_secrets={"a1b2c3d4e5f6": "ABCDEFG"})
+    app = make_app_stub(chat_accepted=False, netpair_secrets={"a1b2c3d4e5f6": "ABCDEFG"})
     frame = _chat_frame("a1b2c3d4e5f6")
     app._on_peer_message(decode_message(frame), "a1b2c3d4e5f6")
     assert app.chat_mgr.handled and app._relay.published == []
@@ -587,8 +629,7 @@ def test_relay_chat_offline_not_queued(isolated_config, tmp_path):
 def test_delivery_status_includes_chat_kind_and_session():
     secret = R.generate_netpair_secret()
     app = make_app_stub(netpair_secrets={"bbbbbbbbbbbb": secret})
-    Application._relay_publish_to_peer(
-        app, _chat_frame(app.cfg.device_id), "bbbbbbbbbbbb")
+    Application._relay_publish_to_peer(app, _chat_frame(app.cfg.device_id), "bbbbbbbbbbbb")
     data = app._delivery_status("bbbbbbbbbbbb")
     assert data["pending"] == 0
     row = data["sends"][0]
@@ -600,10 +641,12 @@ def test_delivery_status_includes_chat_kind_and_session():
 def test_full_chat_delivery_chain_over_relay(isolated_config, tmp_path):
     """A relay-sends chat_text → B's chat layer accepts → B acks → A delivered."""
     secret = R.generate_netpair_secret()
-    a = make_app_stub(device_id="a1b2c3d4e5f6", device_name="DevA",
-                      netpair_secrets={"bbbbbbbbbbbb": secret})
-    b = make_app_stub(device_id="bbbbbbbbbbbb", device_name="DevB",
-                      netpair_secrets={"a1b2c3d4e5f6": secret})
+    a = make_app_stub(
+        device_id="a1b2c3d4e5f6", device_name="DevA", netpair_secrets={"bbbbbbbbbbbb": secret}
+    )
+    b = make_app_stub(
+        device_id="bbbbbbbbbbbb", device_name="DevB", netpair_secrets={"a1b2c3d4e5f6": secret}
+    )
     frame = _chat_frame(a.cfg.device_id, text="hi over relay")
     Application._relay_publish_to_peer(a, frame, "bbbbbbbbbbbb")
     msg_id = decode_message(frame).msg_id
@@ -626,18 +669,24 @@ def test_chat_entry_msg_id_matches_frame(tmp_path):
     # ledger / internet_delivery events use, so the frontend can match a
     # receipt to the exact bubble.
     from internal.sync.nearby_chat import ChatManager
+
     dev_b = "bbbbbbbbbbbb"
     secret = R.generate_netpair_secret()
-    app = make_app_stub(device_id=dev_b,
-                        netpair_secrets={"a1b2c3d4e5f6": secret})
+    app = make_app_stub(device_id=dev_b, netpair_secrets={"a1b2c3d4e5f6": secret})
     cm = ChatManager(dev_b, "DevB", receive_dir=str(tmp_path / "chat"))
     app.chat_mgr = cm
     try:
         sid = "0123456789abcdef"
-        invite = encode_frame({
-            "msg_type": "chat_invite", "session_id": sid,
-            "from_name": "DevA", "fingerprint_short": "", "greeting": "",
-        }, source_device="a1b2c3d4e5f6")
+        invite = encode_frame(
+            {
+                "msg_type": "chat_invite",
+                "session_id": sid,
+                "from_name": "DevA",
+                "fingerprint_short": "",
+                "greeting": "",
+            },
+            source_device="a1b2c3d4e5f6",
+        )
         app._on_relay_frame(invite, R.netpair_topic(secret))
         assert cm.accept_invitation(sid, lambda data: True) is True
         send_fn = Application._chat_send_fn(app, "a1b2c3d4e5f6")
@@ -647,8 +696,7 @@ def test_chat_entry_msg_id_matches_frame(tmp_path):
         assert len(app._relay.published) == 1
         msg_id = decode_message(app._relay.published[0][0]).msg_id
         entries = cm.get_messages(sid)
-        entry = next(e for e in entries if e.get("kind") == "text"
-                     and e.get("outgoing"))
+        entry = next(e for e in entries if e.get("kind") == "text" and e.get("outgoing"))
         assert entry["msg_id"] == msg_id
         assert app._delivery_ledger["a1b2c3d4e5f6"][msg_id]["status"] == "sent"
     finally:
@@ -657,13 +705,16 @@ def test_chat_entry_msg_id_matches_frame(tmp_path):
 
 # ------------------------------------------------------------ full chain
 
+
 def test_full_delivery_chain_over_relay(isolated_config, tmp_path):
     """A publishes (relay online) → B receives clipboard → B acks → A delivered."""
     secret = R.generate_netpair_secret()
-    a = make_app_stub(device_id="a1b2c3d4e5f6", device_name="DevA",
-                      netpair_secrets={"bbbbbbbbbbbb": secret})
-    b = make_app_stub(device_id="bbbbbbbbbbbb", device_name="DevB",
-                      netpair_secrets={"a1b2c3d4e5f6": secret})
+    a = make_app_stub(
+        device_id="a1b2c3d4e5f6", device_name="DevA", netpair_secrets={"bbbbbbbbbbbb": secret}
+    )
+    b = make_app_stub(
+        device_id="bbbbbbbbbbbb", device_name="DevB", netpair_secrets={"a1b2c3d4e5f6": secret}
+    )
     # A mirrors a clipboard frame to B over the netpair channel.
     frame = _clipboard_frame(a.cfg.device_id, text="over the internet")
     a._relay_publish_frame(frame)
@@ -971,13 +1022,10 @@ def test_touched_js_passes_node_check(tmp_path):
         path = os.path.join(_STATIC, *parts)
         proc = subprocess.run(
             [node, "--check", path],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
+            capture_output=True,
             text=True,
         )
-        assert proc.returncode == 0, (
-            f"{os.path.join(*parts)} fails node --check:\n{proc.stderr}"
-        )
+        assert proc.returncode == 0, f"{os.path.join(*parts)} fails node --check:\n{proc.stderr}"
 
 
 def test_no_nul_bytes_in_touched_js():

@@ -151,10 +151,7 @@ def _translate_libretranslate(
         logger.warning("LibreTranslate connection error: %s", e.reason)
         return {
             "ok": False,
-            "error": (
-                "Translation service is not reachable. "
-                "Check your internet connection."
-            ),
+            "error": ("Translation service is not reachable. Check your internet connection."),
         }
 
     except (json.JSONDecodeError, UnicodeDecodeError) as e:
@@ -185,11 +182,7 @@ def _translate_mymemory(text: str, target_lang: str, source_lang: str) -> dict:
     src = _MYMMEMORY_LANGMAP.get(source_lang, source_lang)
     tgt = _MYMMEMORY_LANGMAP.get(target_lang, target_lang)
 
-    url = (
-        MYMEMORY_URL
-        + "?"
-        + urllib.parse.urlencode({"q": text, "langpair": f"{src}|{tgt}"})
-    )
+    url = MYMEMORY_URL + "?" + urllib.parse.urlencode({"q": text, "langpair": f"{src}|{tgt}"})
 
     try:
         req = urllib.request.Request(url, method="GET")
@@ -207,9 +200,7 @@ def _translate_mymemory(text: str, target_lang: str, source_lang: str) -> dict:
                 "error": details or "Translation service unavailable",
             }
 
-        logger.info(
-            "Translated %d chars %s → %s (MyMemory)", len(text), source_lang, target_lang
-        )
+        logger.info("Translated %d chars %s → %s (MyMemory)", len(text), source_lang, target_lang)
         return {
             "ok": True,
             "translated": translated,
@@ -226,10 +217,7 @@ def _translate_mymemory(text: str, target_lang: str, source_lang: str) -> dict:
         logger.warning("MyMemory connection error: %s", e.reason)
         return {
             "ok": False,
-            "error": (
-                "Translation service is not reachable. "
-                "Check your internet connection."
-            ),
+            "error": ("Translation service is not reachable. Check your internet connection."),
         }
 
     except (json.JSONDecodeError, UnicodeDecodeError) as e:

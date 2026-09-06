@@ -50,8 +50,13 @@ gdi32.DeleteDC.restype = ctypes.c_int
 gdi32.SelectObject.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
 gdi32.SelectObject.restype = ctypes.c_void_p
 gdi32.GetDIBits.argtypes = [
-    ctypes.c_void_p, ctypes.c_void_p, ctypes.c_uint, ctypes.c_uint,
-    ctypes.c_void_p, ctypes.c_void_p, ctypes.c_uint,
+    ctypes.c_void_p,
+    ctypes.c_void_p,
+    ctypes.c_uint,
+    ctypes.c_uint,
+    ctypes.c_void_p,
+    ctypes.c_void_p,
+    ctypes.c_uint,
 ]
 gdi32.GetDIBits.restype = ctypes.c_int
 
@@ -88,14 +93,28 @@ user32.AddClipboardFormatListener.restype = ctypes.c_int
 user32.RemoveClipboardFormatListener.argtypes = [ctypes.c_void_p]
 user32.RemoveClipboardFormatListener.restype = ctypes.c_int
 user32.CreateWindowExW.argtypes = [
-    ctypes.c_uint, ctypes.c_wchar_p, ctypes.c_wchar_p, ctypes.c_uint,
-    ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_int,
-    ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p,
+    ctypes.c_uint,
+    ctypes.c_wchar_p,
+    ctypes.c_wchar_p,
+    ctypes.c_uint,
+    ctypes.c_int,
+    ctypes.c_int,
+    ctypes.c_int,
+    ctypes.c_int,
+    ctypes.c_void_p,
+    ctypes.c_void_p,
+    ctypes.c_void_p,
+    ctypes.c_void_p,
 ]
 user32.CreateWindowExW.restype = ctypes.c_void_p
 user32.DestroyWindow.argtypes = [ctypes.c_void_p]
 user32.DestroyWindow.restype = ctypes.c_int
-user32.DefWindowProcW.argtypes = [ctypes.c_void_p, ctypes.c_uint, ctypes.c_ulonglong, ctypes.c_longlong]
+user32.DefWindowProcW.argtypes = [
+    ctypes.c_void_p,
+    ctypes.c_uint,
+    ctypes.c_ulonglong,
+    ctypes.c_longlong,
+]
 user32.DefWindowProcW.restype = ctypes.c_longlong
 user32.GetMessageW.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_uint, ctypes.c_uint]
 user32.GetMessageW.restype = ctypes.c_int
@@ -105,7 +124,12 @@ user32.DispatchMessageW.argtypes = [ctypes.c_void_p]
 user32.DispatchMessageW.restype = ctypes.c_longlong
 user32.PostQuitMessage.argtypes = [ctypes.c_int]
 user32.PostQuitMessage.restype = None
-user32.PostMessageW.argtypes = [ctypes.c_void_p, ctypes.c_uint, ctypes.c_ulonglong, ctypes.c_longlong]
+user32.PostMessageW.argtypes = [
+    ctypes.c_void_p,
+    ctypes.c_uint,
+    ctypes.c_ulonglong,
+    ctypes.c_longlong,
+]
 user32.PostMessageW.restype = ctypes.c_int
 user32.RegisterClassW.argtypes = [ctypes.c_void_p]
 user32.RegisterClassW.restype = ctypes.c_uint
@@ -127,11 +151,14 @@ CF_RTF = user32.RegisterClipboardFormatW("Rich Text Format")
 WM_CLIPBOARDUPDATE = 0x031D
 WM_DESTROY = 0x0002
 
-WNDPROC = ctypes.WINFUNCTYPE(ctypes.c_longlong, ctypes.c_void_p, ctypes.c_uint, ctypes.c_ulonglong, ctypes.c_longlong)
+WNDPROC = ctypes.WINFUNCTYPE(
+    ctypes.c_longlong, ctypes.c_void_p, ctypes.c_uint, ctypes.c_ulonglong, ctypes.c_longlong
+)
 
 
 class _BITMAP(ctypes.Structure):
     """GDI BITMAP structure (filled by GetObjectW on an HBITMAP)."""
+
     _fields_ = [
         ("bmType", ctypes.c_long),
         ("bmWidth", ctypes.c_long),
@@ -145,6 +172,7 @@ class _BITMAP(ctypes.Structure):
 
 class _BITMAPINFOHEADER(ctypes.Structure):
     """GDI BITMAPINFOHEADER (40 bytes)."""
+
     _fields_ = [
         ("biSize", ctypes.c_uint),
         ("biWidth", ctypes.c_long),
@@ -162,6 +190,7 @@ class _BITMAPINFOHEADER(ctypes.Structure):
 
 class _BITMAPINFO(ctypes.Structure):
     """GDI BITMAPINFO: header plus a scratch color-table slot."""
+
     _fields_ = [
         ("bmiHeader", _BITMAPINFOHEADER),
         ("bmiColors", ctypes.c_uint * 1),
@@ -198,7 +227,11 @@ class _ClipboardReader(ClipboardReader):
                     if data:
                         content_type = self._map_format(fmt)
                         if content_type:
-                            if content_type == ContentType.TEXT and fmt == CF_TEXT and ContentType.TEXT in content.types:
+                            if (
+                                content_type == ContentType.TEXT
+                                and fmt == CF_TEXT
+                                and ContentType.TEXT in content.types
+                            ):
                                 continue  # prefer CF_UNICODETEXT already read, skip ANSI
                             content.types[content_type] = data
                             if content_type == ContentType.IMAGE_PNG:
@@ -269,7 +302,7 @@ class _ClipboardReader(ClipboardReader):
         start = html.find(start_marker)
         end = html.find(end_marker)
         if start != -1 and end != -1 and end > start:
-            return html[start + len(start_marker):end].encode("utf-8")
+            return html[start + len(start_marker) : end].encode("utf-8")
 
         # No fragment markers — drop the header (up to the first line that
         # begins with '<') and any <html>/<body> wrapper.
@@ -392,8 +425,13 @@ class _ClipboardReader(ClipboardReader):
                 pixel_size = stride * height
                 pixel_buf = ctypes.create_string_buffer(pixel_size)
                 lines = gdi32.GetDIBits(
-                    hdc, handle, 0, height, pixel_buf,
-                    ctypes.byref(bmi), 0,  # DIB_RGB_COLORS
+                    hdc,
+                    handle,
+                    0,
+                    height,
+                    pixel_buf,
+                    ctypes.byref(bmi),
+                    0,  # DIB_RGB_COLORS
                 )
                 if lines == 0:
                     return b""
@@ -402,9 +440,12 @@ class _ClipboardReader(ClipboardReader):
                 bf_size = bf_off_bits + pixel_size
                 buf = BytesIO()
                 buf.write(struct.pack("<HIHHI", 0x4D42, bf_size, 0, 0, bf_off_bits))
-                buf.write(ctypes.string_at(
-                    ctypes.byref(bmi.bmiHeader), ctypes.sizeof(_BITMAPINFOHEADER),
-                ))
+                buf.write(
+                    ctypes.string_at(
+                        ctypes.byref(bmi.bmiHeader),
+                        ctypes.sizeof(_BITMAPINFOHEADER),
+                    )
+                )
                 buf.write(pixel_buf.raw[:pixel_size])
 
                 self._image_fmt = "bmp"
@@ -491,15 +532,13 @@ class _ClipboardReader(ClipboardReader):
             return b""
 
     def _map_format(self, fmt: int) -> ContentType | None:
-        if fmt == CF_UNICODETEXT or fmt == CF_TEXT:
+        if fmt in (CF_UNICODETEXT, CF_TEXT):
             return ContentType.TEXT
         elif fmt == CF_HTML:
             return ContentType.HTML
         elif fmt == CF_RTF:
             return ContentType.RTF
-        elif fmt in (CF_DIB, CF_DIBV5):
-            return ContentType.IMAGE_PNG
-        elif fmt == CF_BITMAP:
+        elif fmt in (CF_DIB, CF_DIBV5) or fmt == CF_BITMAP:
             return ContentType.IMAGE_PNG
         elif fmt == CF_ENHMETAFILE:
             return ContentType.IMAGE_EMF
@@ -591,8 +630,8 @@ class _ClipboardWriter(ClipboardWriter):
     def _build_cf_html(html_bytes: bytes) -> bytes:
         """Wrap raw HTML in the CF_HTML envelope Windows expects."""
         html = html_bytes.decode("utf-8", errors="replace")
-        MARKER = "<!--StartFragment-->"
-        END_MARKER = "<!--EndFragment-->"
+        MARKER = "<!--StartFragment-->"  # noqa: N806
+        END_MARKER = "<!--EndFragment-->"  # noqa: N806
         if MARKER not in html:
             html = f"{MARKER}{html}{END_MARKER}"
         header_tmpl = (
@@ -603,7 +642,10 @@ class _ClipboardWriter(ClipboardWriter):
             "EndFragment:{end_frag:010d}\r\n"
         )
         dummy_header = header_tmpl.format(
-            start_html=0, end_html=0, start_frag=0, end_frag=0,
+            start_html=0,
+            end_html=0,
+            start_frag=0,
+            end_frag=0,
         )
         prefix = "<html><body>\r\n"
         suffix = "\r\n</body></html>"
@@ -614,12 +656,19 @@ class _ClipboardWriter(ClipboardWriter):
         suffix_encoded = suffix.encode("utf-8")
         frag_start_idx = html.find(MARKER)
         frag_end_idx = html.find(END_MARKER)
-        start_frag = header_len + len(prefix_encoded) + len(html[:frag_start_idx].encode("utf-8")) + len(MARKER.encode("utf-8"))
+        start_frag = (
+            header_len
+            + len(prefix_encoded)
+            + len(html[:frag_start_idx].encode("utf-8"))
+            + len(MARKER.encode("utf-8"))
+        )
         end_frag = header_len + len(prefix_encoded) + len(html[:frag_end_idx].encode("utf-8"))
         end_html = header_len + len(prefix_encoded) + len(html_encoded) + len(suffix_encoded)
         header = header_tmpl.format(
-            start_html=start_html, end_html=end_html,
-            start_frag=start_frag, end_frag=end_frag,
+            start_html=start_html,
+            end_html=end_html,
+            start_frag=start_frag,
+            end_frag=end_frag,
         )
         return (header + prefix + html + suffix).encode("utf-8")
 
@@ -761,10 +810,20 @@ class WindowsClipboardMonitor(ClipboardMonitor):
             return
 
         # Create message-only window
-        HWND_MESSAGE = -3
+        HWND_MESSAGE = -3  # noqa: N806
         self._hwnd = user32.CreateWindowExW(
-            0, class_name, class_name, 0,
-            0, 0, 0, 0, HWND_MESSAGE, None, hinstance, None,
+            0,
+            class_name,
+            class_name,
+            0,
+            0,
+            0,
+            0,
+            0,
+            HWND_MESSAGE,
+            None,
+            hinstance,
+            None,
         )
 
         if not self._hwnd:

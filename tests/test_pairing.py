@@ -71,6 +71,40 @@ class TestPeerManagement:
         mgr.add_peer("peer-2", "Peer Two", identity.certificate_pem, paired=False)
         assert not mgr.is_peer_paired("peer-2")
 
+    def test_add_peer_tolerates_empty_certificate(self):
+        """A peer with no pinned certificate yet must survive add_peer.
+
+        restore_peer leaves certificate_pem empty on purpose (it is re-pinned
+        on the next handshake) and _save_cfg_and_peers persists that empty
+        value, so the startup reload feeds "" back in.  Feeding "" to
+        fingerprint_pem raised MalformedFraming, which made the startup loop
+        log "Skipping peer <name>" and DROP the peer — a restored device
+        silently half-vanished after a restart.
+        """
+        mgr = PairingManager("self", "self-name")
+        mgr.load_or_create_identity("", "")
+
+        mgr.add_peer("peer-3", "Restored Box", "", paired=False)
+
+        ids = {p.device_id for p in mgr.get_known_peers()}
+        assert "peer-3" in ids, "an unpinned peer must not be dropped"
+        assert mgr.get_peer_certificate("peer-3") == ""
+
+    def test_add_peer_empty_certificate_keeps_existing_pin(self):
+        """An empty incoming PEM means "not pinned yet", never "forget the pin".
+
+        Overwriting a real pin with "" would silently disable certificate
+        pinning for an already-paired peer.
+        """
+        mgr = PairingManager("self", "self-name")
+        identity = mgr.load_or_create_identity("", "")
+        mgr.add_peer("peer-4", "Pinned Box", identity.certificate_pem, paired=True)
+
+        mgr.add_peer("peer-4", "Pinned Box", "", paired=True)
+
+        assert mgr.get_peer_certificate("peer-4") == identity.certificate_pem
+        assert mgr.get_peer_fingerprint("peer-4")
+
     def test_certificate_change_detection(self):
         """Certificate change for a paired peer should raise CertificateChangedError."""
         mgr1 = PairingManager("peer-a", "Peer A")
@@ -138,6 +172,10 @@ class TestPairingCode:
 
         code = mgr.generate_pairing_code("peer")
         assert mgr.confirm_pairing("peer", code)
+        # Single-sided confirm does not pair yet — it waits for the peer's
+        # confirmation (two-sided handshake).
+        assert not mgr.is_peer_paired("peer")
+        mgr.mark_peer_confirmed("peer")
         assert mgr.is_peer_paired("peer")
 
     def test_confirm_pairing_wrong_code(self):
@@ -167,7 +205,7 @@ class TestPairingCode:
         assert "peer-1" in peer_ids
         assert "peer-2" in peer_ids
         # Codes should be 8-digit strings
-        for pid, code, _name, _status in pending:
+        for _pid, code, _name, _status in pending:
             assert len(code) == 8
             assert code.isdigit()
 
@@ -246,7 +284,8 @@ def test_local_confirm_waits_for_peer(mgr):
     assert mgr.get_pairing_status("device-b") == PAIRING_STATUS_PENDING
 
     assert mgr.confirm_pairing("device-b", code) is True
-    assert mgr.is_peer_paired("device-b") is True
+    # Single-sided confirm awaits the peer — not paired yet.
+    assert mgr.is_peer_paired("device-b") is False
     assert mgr.get_pairing_status("device-b") == PAIRING_STATUS_CONFIRMED_WAITING
     # The pending entry stays so the UI can show "waiting for the other device".
     assert "device-b" in [p[0] for p in mgr.get_pending_pairings()]
@@ -282,6 +321,7 @@ def test_peer_reject_cancels(mgr):
 def test_peer_unpair_after_pairing(mgr):
     code = mgr.generate_pairing_code("device-b")
     mgr.confirm_pairing("device-b", code)
+    assert mgr.mark_peer_confirmed("device-b") == PAIRING_STATUS_PAIRED
     assert mgr.is_peer_paired("device-b") is True
 
     mgr.mark_peer_unpaired("device-b")
@@ -328,7 +368,6 @@ import sys
 import pytest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-
 
 
 def _two_certs():
@@ -441,6 +480,7 @@ if __name__ == "__main__":
 # split from test_round3_core.py — pairing confirm lifecycle
 # ══════════════════════════════════════════════════
 
+
 class TestPairingConfirmLifecycle:
     def _mgr(self) -> PairingManager:
         return PairingManager("device-a", "Device A")
@@ -472,6 +512,7 @@ class TestPairingConfirmLifecycle:
         assert mgr.confirm_pairing("peer-d", "00000000") is False
         assert mgr.confirm_pairing("peer-d", code) is True
 
+
 from internal.security.fingerprint import normalize_fingerprint, sas_code
 
 # ══════════════════════════════════════════════════
@@ -497,8 +538,9 @@ def test_sas_code_is_symmetric():
 def test_sas_code_matches_reference_digest():
     # Pin the exact formula: sha256(sorted-normalized concat)[:8] as 4-4 hex.
     import hashlib
-    a = normalize_fingerprint("ab:cd:ef")   # ABCDEF
-    b = normalize_fingerprint("012345")     # 012345
+
+    a = normalize_fingerprint("ab:cd:ef")  # ABCDEF
+    b = normalize_fingerprint("012345")  # 012345
     lo, hi = sorted([a, b])
     digest = hashlib.sha256((lo + hi).encode("ascii")).hexdigest()
     expected = digest[:8].upper()
@@ -518,14 +560,9 @@ def test_sas_code_format_and_normalization():
 
 
 def test_sas_code_differs_across_device_pairs():
-    seen = {
-        sas_code(f"device-{i}", f"peer-{j}")
-        for i in range(8) for j in range(8)
-    }
+    seen = {sas_code(f"device-{i}", f"peer-{j}") for i in range(8) for j in range(8)}
     # 64 distinct pairs must not collide on an 8-hex-char code.
     assert len(seen) == 64
-
-
 
 
 # ── 3. Devices API surfaces the pairing SAS ────────────────────────────
@@ -536,14 +573,15 @@ def _minimal_cfg():
         device_id = "self"
         device_name = "Self"
         peers = {}
+
     return _Cfg()
 
 
 def test_devices_pending_pairings_tuple_with_sas():
     from internal.web.api.devices import get_devices
+
     pending = [("peer-abc", "12345678", "Phone", "pending", "3A2F-91C4")]
-    res, status = get_devices(
-        _minimal_cfg(), lambda: [], get_pending_pairings=lambda: pending)
+    res, status = get_devices(_minimal_cfg(), lambda: [], get_pending_pairings=lambda: pending)
     assert status == 200
     row = res["pending_pairings"][0]
     assert row["sas"] == "3A2F-91C4"
@@ -553,24 +591,27 @@ def test_devices_pending_pairings_tuple_with_sas():
 
 def test_devices_pending_pairings_without_sas_defaults_empty():
     from internal.web.api.devices import get_devices
+
     pending = [("peer-abc", "12345678", "Phone", "pending")]
-    res, _ = get_devices(
-        _minimal_cfg(), lambda: [], get_pending_pairings=lambda: pending)
+    res, _ = get_devices(_minimal_cfg(), lambda: [], get_pending_pairings=lambda: pending)
     assert res["pending_pairings"][0]["sas"] == ""
     # dict-shaped entries carry it under the same key
     res, _ = get_devices(
-        _minimal_cfg(), lambda: [],
-        get_pending_pairings=lambda: [{"peer_id": "p", "sas": "AAAA-BBBB"}])
+        _minimal_cfg(),
+        lambda: [],
+        get_pending_pairings=lambda: [{"peer_id": "p", "sas": "AAAA-BBBB"}],
+    )
     assert res["pending_pairings"][0]["sas"] == "AAAA-BBBB"
+
 
 # ══════════════════════════════════════════════════
 # split from test_round13_wrapup.py — Tk SAS display
 # ══════════════════════════════════════════════════
 
 
-
 def test_tk_sas_locale_keys_exist_in_desktop_i18n():
     import internal.i18n as i18n
+
     for key in ("devices.sas_label", "devices.sas_verify_hint"):
         assert key in i18n._EN, f"missing from _EN: {key}"
         assert key in i18n._ZH, f"missing from _ZH: {key}"
@@ -613,6 +654,7 @@ def test_sas_code_shape_via_main_same_source():
     import inspect
 
     import src.main as main_mod
+
     src = inspect.getsource(main_mod.Application._pairing_sas)
     assert "sas_code" in src
     assert "get_peer_fingerprint" in src

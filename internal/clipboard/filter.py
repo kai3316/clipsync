@@ -9,53 +9,53 @@ from internal.clipboard.format import ClipboardContent, ContentType
 # ---------------------------------------------------------------------------
 
 _CREDIT_CARD_RE = re.compile(
-    r'\b'
-    r'(?:'
+    r"\b"
+    r"(?:"
     # Visa: 13 or 16 digits, starts with 4
-    r'4\d{3}[-\s]?\d{4}[-\s]?\d{4}[-\s]?\d{4}'      # 16 digits
-    r'|4\d{3}[-\s]?\d{4}[-\s]?\d{4}[-\s]?\d{1}'      # 13 digits
+    r"4\d{3}[-\s]?\d{4}[-\s]?\d{4}[-\s]?\d{4}"  # 16 digits
+    r"|4\d{3}[-\s]?\d{4}[-\s]?\d{4}[-\s]?\d{1}"  # 13 digits
     # MasterCard: 16 digits, starts with 51-55 or 2221-2720
-    r'|5[1-5]\d{2}[-\s]?\d{4}[-\s]?\d{4}[-\s]?\d{4}'
-    r'|2(?:2[2-9]\d|[3-6]\d{2}|7[01]\d|720)'
-    r'[-\s]?\d{4}[-\s]?\d{4}[-\s]?\d{4}'
+    r"|5[1-5]\d{2}[-\s]?\d{4}[-\s]?\d{4}[-\s]?\d{4}"
+    r"|2(?:2[2-9]\d|[3-6]\d{2}|7[01]\d|720)"
+    r"[-\s]?\d{4}[-\s]?\d{4}[-\s]?\d{4}"
     # Amex: 15 digits, starts with 34 or 37
-    r'|3[47]\d{2}[-\s]?\d{6}[-\s]?\d{5}'
+    r"|3[47]\d{2}[-\s]?\d{6}[-\s]?\d{5}"
     # Discover: 16-19 digits, starts with 6011, 65, or 644-649
-    r'|6(?:011|5\d{2})[-\s]?\d{4}[-\s]?\d{4}[-\s]?\d{4}'  # 16 digits
-    r'|6(?:011|5\d{2})[-\s]?\d{4}[-\s]?\d{4}[-\s]?\d{4}[-\s]?\d{1,3}'  # 17-19
-    r')\b'
+    r"|6(?:011|5\d{2})[-\s]?\d{4}[-\s]?\d{4}[-\s]?\d{4}"  # 16 digits
+    r"|6(?:011|5\d{2})[-\s]?\d{4}[-\s]?\d{4}[-\s]?\d{4}[-\s]?\d{1,3}"  # 17-19
+    r")\b"
 )
 
-_SSN_RE = re.compile(r'\b\d{3}-\d{2}-\d{4}\b')
+_SSN_RE = re.compile(r"\b\d{3}-\d{2}-\d{4}\b")
 
 _API_KEY_RE = re.compile(
-    r'(?:'
+    r"(?:"
     # OpenAI / Stripe style: sk-...
-    r'sk-[a-zA-Z0-9_\-]{16,}'
+    r"sk-[a-zA-Z0-9_\-]{16,}"
     # GitHub tokens
-    r'|gh[pousr]_[a-zA-Z0-9]{16,}'
-    r'|github_pat_[a-zA-Z0-9_]{16,}'
+    r"|gh[pousr]_[a-zA-Z0-9]{16,}"
+    r"|github_pat_[a-zA-Z0-9_]{16,}"
     # Slack tokens
-    r'|xox[baprs]-[a-zA-Z0-9\-]{16,}'
+    r"|xox[baprs]-[a-zA-Z0-9\-]{16,}"
     # AWS access key id
-    r'|AKIA[0-9A-Z]{16}'
+    r"|AKIA[0-9A-Z]{16}"
     # JWT / session tokens (three base64url segments)
-    r'|eyJ[a-zA-Z0-9_\-]{8,}\.[a-zA-Z0-9_\-]{8,}\.[a-zA-Z0-9_\-]{8,}'
+    r"|eyJ[a-zA-Z0-9_\-]{8,}\.[a-zA-Z0-9_\-]{8,}\.[a-zA-Z0-9_\-]{8,}"
     # name=value / name:value secret assignments
     r'|(?:api[_-]?key|access[_-]?key|auth[_-]?token|client[_-]?secret|\bsecret|\btoken|\bkey)\s*[=:]\s*["\']?\s*[a-zA-Z0-9_\-\.]{16,}["\']?'
     # Authorization / Bearer headers
-    r'|authorization\s*[=:]\s*(?:Bearer\s+)?[a-zA-Z0-9_\-\.]{16,}'
-    r'|Bearer\s+[a-zA-Z0-9_\-\.]{16,}'
+    r"|authorization\s*[=:]\s*(?:Bearer\s+)?[a-zA-Z0-9_\-\.]{16,}"
+    r"|Bearer\s+[a-zA-Z0-9_\-\.]{16,}"
     # Generic key- prefix (e.g. key-...)
-    r'|key-[a-zA-Z0-9_\-]{16,}'
-    r')',
+    r"|key-[a-zA-Z0-9_\-]{16,}"
+    r")",
     re.IGNORECASE,
 )
 
 _PRIVATE_KEY_RE = re.compile(
-    r'-----BEGIN\s+(?:RSA\s+)?PRIVATE\s+KEY-----'
-    r'[\s\S]*?'
-    r'-----END\s+(?:RSA\s+)?PRIVATE\s+KEY-----',
+    r"-----BEGIN\s+(?:RSA\s+)?PRIVATE\s+KEY-----"
+    r"[\s\S]*?"
+    r"-----END\s+(?:RSA\s+)?PRIVATE\s+KEY-----",
 )
 
 _PASSWORD_RE = re.compile(
@@ -65,7 +65,7 @@ _PASSWORD_RE = re.compile(
 
 # Bare email addresses (PII caught even without a key= prefix).
 _EMAIL_RE = re.compile(
-    r'\b[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}\b',
+    r"\b[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}\b",
 )
 
 
@@ -99,15 +99,13 @@ def _rtf_to_text(data: bytes) -> str:
     text = re.sub(r"\{\\\*[^{}]*\}", " ", text)
     # Escaped literals first (sentineled) so the generic passes cannot eat
     # their backslashes the wrong way.
-    text = (text.replace("\\\\", "\x00")
-                .replace("\\{", "\x01")
-                .replace("\\}", "\x02"))
+    text = text.replace("\\\\", "\x00").replace("\\{", "\x01").replace("\\}", "\x02")
     text = _RTF_HEX_ESCAPE_RE.sub(" ", text)
     text = _RTF_BREAK_RE.sub(" ", text)
     text = _RTF_CONTROL_WORD_RE.sub(" ", text)
     text = _RTF_CONTROL_SYMBOL_RE.sub(" ", text)
     text = text.replace("{", " ").replace("}", " ")
-    text = (text.replace("\x00", "\\").replace("\x01", "{").replace("\x02", "}"))
+    text = text.replace("\x00", "\\").replace("\x01", "{").replace("\x02", "}")
     return re.sub(r"\s+", " ", text).strip()
 
 
@@ -181,8 +179,9 @@ class ContentFilter:
         # enables just that subset; an EMPTY list means the user explicitly
         # disabled redaction (distinct from the None default).
         if enabled_categories is None:
-            self._enabled = [c for c in dict.fromkeys(c for c, _ in self._all_patterns)
-                             if c != "email"]
+            self._enabled = [
+                c for c in dict.fromkeys(c for c, _ in self._all_patterns) if c != "email"
+            ]
         else:
             self._enabled = list(enabled_categories)
 
@@ -194,8 +193,9 @@ class ContentFilter:
     def enabled_categories(self, categories: list[str] | None) -> None:
         if categories is None:
             # Not configured → every category except opt-in "email" (default).
-            self._enabled = [c for c in dict.fromkeys(c for c, _ in self._all_patterns)
-                             if c != "email"]
+            self._enabled = [
+                c for c in dict.fromkeys(c for c, _ in self._all_patterns) if c != "email"
+            ]
         else:
             self._enabled = list(categories)
 
@@ -328,18 +328,18 @@ class ContentFilter:
                 if not self._rtf_is_sensitive(data):
                     filtered_types[ct] = data  # clean RTF passes through
                 continue
-            filtered_types[ct] = self._redact(
-                self._inspectable_text(ct, data)
-            ).encode("utf-8")
+            filtered_types[ct] = self._redact(self._inspectable_text(ct, data)).encode("utf-8")
 
         for ct, data in content.types.items():
             if ct not in self._textual_types():
                 filtered_types[ct] = data
 
-        if (ContentType.RTF in content.types
-                and ContentType.RTF not in filtered_types
-                and ContentType.TEXT not in filtered_types
-                and ContentType.HTML not in filtered_types):
+        if (
+            ContentType.RTF in content.types
+            and ContentType.RTF not in filtered_types
+            and ContentType.TEXT not in filtered_types
+            and ContentType.HTML not in filtered_types
+        ):
             plain = self._redact(_rtf_to_text(content.types[ContentType.RTF]))
             if plain:
                 filtered_types[ContentType.TEXT] = plain.encode("utf-8")

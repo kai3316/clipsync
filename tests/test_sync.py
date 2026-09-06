@@ -2,6 +2,7 @@
 
 import os
 import sys
+import threading
 import time
 
 import pytest
@@ -51,6 +52,7 @@ class MockClipboardWriter:
     def write(self, content: ClipboardContent):
         self.last_written = content
         self.write_count += 1
+        return True
 
 
 class TestSyncManager:
@@ -61,7 +63,8 @@ class TestSyncManager:
         self.sent: list[SyncMessage] = []
         # Use dependency injection — bypasses platform-specific factories
         self.mgr = SyncManager(
-            "test-device", "Test Device",
+            "test-device",
+            "Test Device",
             reader=self.reader,
             writer=self.writer,
             monitor=self.monitor,
@@ -247,7 +250,6 @@ from internal.clipboard import source_tracker
 from internal.clipboard.clipboard import strip_rich_formats
 from internal.clipboard.filter import ContentFilter
 from internal.clipboard.format import ClipboardContent
-from internal.clipboard.history import ClipboardHistory
 from internal.clipboard.history_db import (
     ClipboardHistoryDB,
     _make_dedup_key,
@@ -258,15 +260,13 @@ from internal.clipboard.history_db import (
 
 CARD_TEXT = "Pay 4111 1111 1111 1111 today"
 CARD_HTML = b"<html><body><p>Pay 4111 1111 1111 1111 today</p></body></html>"
-RTF_CARD = (
-    b"{\\rtf1\\ansi\\deff0 {\\*\\generator ClipSync}"
-    b"\\par Pay 4111 1111 1111 1111 today}"
-)
+RTF_CARD = b"{\\rtf1\\ansi\\deff0 {\\*\\generator ClipSync}\\par Pay 4111 1111 1111 1111 today}"
 PNG_BYTES = b"\x89PNG-fake-image-bytes"
 
 
-def _send_pipeline(content: ClipboardContent, plain_text_only: bool,
-                   filter_on: bool) -> ClipboardContent:
+def _send_pipeline(
+    content: ClipboardContent, plain_text_only: bool, filter_on: bool
+) -> ClipboardContent:
     """Mirror src/main.py _on_local_sync: strip FIRST, then filter."""
     msg_content = strip_rich_formats(content) if plain_text_only else content
     if filter_on:
@@ -276,8 +276,7 @@ def _send_pipeline(content: ClipboardContent, plain_text_only: bool,
     return msg_content
 
 
-def _receive_pipeline(content: ClipboardContent,
-                      plain_text_only: bool = True) -> ClipboardContent:
+def _receive_pipeline(content: ClipboardContent, plain_text_only: bool = True) -> ClipboardContent:
     """Mirror src/main.py _on_peer_message: strip only, before the manager."""
     if plain_text_only:
         return strip_rich_formats(content)
@@ -294,13 +293,16 @@ def _default_max_age_disabled():
 
 # ── 1. strip x filter pipelines ────────────────────────────────────────
 
+
 def _rich_clip() -> ClipboardContent:
-    return ClipboardContent(types={
-        ContentType.TEXT: CARD_TEXT.encode("utf-8"),
-        ContentType.HTML: CARD_HTML,
-        ContentType.RTF: RTF_CARD,
-        ContentType.IMAGE_PNG: PNG_BYTES,
-    })
+    return ClipboardContent(
+        types={
+            ContentType.TEXT: CARD_TEXT.encode("utf-8"),
+            ContentType.HTML: CARD_HTML,
+            ContentType.RTF: RTF_CARD,
+            ContentType.IMAGE_PNG: PNG_BYTES,
+        }
+    )
 
 
 def test_peer_result_identical_regardless_of_sender_plain_text_toggle():
@@ -344,6 +346,7 @@ def test_rtf_only_sensitive_clip_survives_double_processing():
 
 # ── 2. [FILTERED] x dedup ──────────────────────────────────────────────
 
+
 def test_two_secrets_local_two_entries_but_peer_one(tmp_path):
     db = ClipboardHistoryDB(storage_path=str(tmp_path / "h.db"))
     secret1 = ("sk-" + "a" * 24).encode("utf-8")
@@ -373,8 +376,10 @@ def test_two_secrets_local_two_entries_but_peer_one(tmp_path):
 
 # ── 3. max-age x pinned x id types ─────────────────────────────────────
 
+
 def test_string_id_pin_protects_entry_from_age_prune(tmp_path):
     from unittest.mock import patch
+
     db = ClipboardHistoryDB(storage_path=str(tmp_path / "h.db"))
     # The DB stamps local receipt time, so inject genuine age by freezing
     # the clock back 5 days while the entries are added.
@@ -407,6 +412,7 @@ def test_string_id_pin_protects_entry_from_age_prune(tmp_path):
 
 # ── 4. remote apply x loop-back ────────────────────────────────────────
 
+
 class _FakeMonitor:
     _poll_interval = 0.0
 
@@ -429,6 +435,7 @@ class _FakeWriter:
 
     def write(self, content):
         self.written.append(content)
+        return True
 
 
 class _FakeHistory:
@@ -447,14 +454,63 @@ class _StaticReader:
         return self.content
 
 
+class _IdleBackoffMonitor:
+    """Monitor that backs off to a longer idle poll interval (like Linux)."""
+
+    _poll_interval = 1.0
+    _idle_poll_interval = 2.5
+
+    def __init__(self):
+        self.suppress_until = 0.0
+        self.last_suppress_duration = 0.0
+
+    def start(self, cb):
+        pass
+
+    def stop(self):
+        pass
+
+    def suppress_for(self, seconds):
+        self.suppress_until = time.time() + seconds
+        self.last_suppress_duration = seconds
+
+
+def test_suppression_covers_idle_poll_interval():
+    # A re-encoded read-back (BMP/TIFF -> PNG on Linux) must not be re-detected
+    # as a fresh local copy: the write-suppression window has to outlast the
+    # monitor's IDLE poll interval, not just the active one.
+    mon = _IdleBackoffMonitor()
+    mgr = SyncManager(
+        device_id="dev-a",
+        device_name="A",
+        reader=_StaticReader(ClipboardContent(types={ContentType.TEXT: b"x"})),
+        writer=_FakeWriter(),
+        monitor=mon,
+        retry_enabled=False,
+    )
+    assert mgr._max_poll_interval == 2.5
+
+    mgr.handle_remote_message(
+        SyncMessage(content=ClipboardContent(types={ContentType.TEXT: b"x"}), source_device="dev-b")
+    )
+    # Window = debounce + idle interval + 0.2 buffer.
+    assert mon.last_suppress_duration >= mgr._sync_debounce + 2.5 + 0.2
+
+
 def test_remote_clip_lands_identically_without_echo_or_duplicate():
     text = b"shared plain note"
     stripped = ClipboardContent(types={ContentType.TEXT: text})
     reader = _StaticReader(stripped)  # what a read-back of the write returns
     writer, history = _FakeWriter(), _FakeHistory()
-    mgr = SyncManager(device_id="dev-a", device_name="A", reader=reader,
-                      writer=writer, monitor=_FakeMonitor(),
-                      history=history, retry_enabled=False)
+    mgr = SyncManager(
+        device_id="dev-a",
+        device_name="A",
+        reader=reader,
+        writer=writer,
+        monitor=_FakeMonitor(),
+        history=history,
+        retry_enabled=False,
+    )
     sent = []
     mgr.on_send = lambda msg: sent.append(msg)
 
@@ -470,12 +526,12 @@ def test_remote_clip_lands_identically_without_echo_or_duplicate():
     mgr._do_read_and_send_locked()
     assert sent == []
     # ...and an exact duplicate delivery is dropped by loop prevention.
-    mgr.handle_remote_message(SyncMessage(content=stripped,
-                                          source_device="dev-b"))
+    mgr.handle_remote_message(SyncMessage(content=stripped, source_device="dev-b"))
     assert len(writer.written) == 1
 
 
 # ── 5. retry capture x pause ───────────────────────────────────────────
+
 
 def test_pause_mid_retry_capture_blocks_broadcast_and_history():
     writer, history = _FakeWriter(), _FakeHistory()
@@ -489,9 +545,15 @@ def test_pause_mid_retry_capture_blocks_broadcast_and_history():
             return ClipboardContent(types={ContentType.TEXT: b"mid-pause copy"})
 
     reader = _PausingReader()
-    mgr = SyncManager(device_id="dev-a", device_name="A", reader=reader,
-                      writer=writer, monitor=_FakeMonitor(),
-                      history=history, retry_enabled=True)
+    mgr = SyncManager(
+        device_id="dev-a",
+        device_name="A",
+        reader=reader,
+        writer=writer,
+        monitor=_FakeMonitor(),
+        history=history,
+        retry_enabled=True,
+    )
     reader.mgr = mgr
     sent = []
     mgr.on_send = lambda msg: sent.append(msg)
@@ -504,18 +566,20 @@ def test_pause_mid_retry_capture_blocks_broadcast_and_history():
 
 # ── 6. Linux/macOS capture shapes x RTF filter branch ──────────────────
 
+
 def _linux_shaped_clip(card_in_body: bool) -> ClipboardContent:
     body = CARD_TEXT if card_in_body else "release notes body"
-    return ClipboardContent(types={
-        ContentType.TEXT: body.encode("utf-8"),
-        ContentType.HTML: ("<p>%s</p>" % body).encode("utf-8"),
-        # xclip -t text/rtf / pbpaste RTF really emit this off-Windows.
-        ContentType.RTF: RTF_CARD if card_in_body
-        else b"{\\rtf1\\ansi\\deff0 Release notes}",
-        ContentType.FILE: b"/home/u/a.txt\n/home/u/b.txt",
-        ContentType.URL: b"https://example.com/x",
-        ContentType.IMAGE_PNG: PNG_BYTES,
-    })
+    return ClipboardContent(
+        types={
+            ContentType.TEXT: body.encode("utf-8"),
+            ContentType.HTML: (f"<p>{body}</p>").encode(),
+            # xclip -t text/rtf / pbpaste RTF really emit this off-Windows.
+            ContentType.RTF: RTF_CARD if card_in_body else b"{\\rtf1\\ansi\\deff0 Release notes}",
+            ContentType.FILE: b"/home/u/a.txt\n/home/u/b.txt",
+            ContentType.URL: b"https://example.com/x",
+            ContentType.IMAGE_PNG: PNG_BYTES,
+        }
+    )
 
 
 def test_clean_multiformat_clip_passes_filter_byte_identical():
@@ -535,6 +599,7 @@ def test_sensitive_multiformat_clip_drops_only_rtf():
 
 
 # ── 7. corrupt row x capture persistence ───────────────────────────────
+
 
 def test_corrupt_types_row_degrades_and_captures_still_persist(tmp_path):
     path = str(tmp_path / "h.db")
@@ -567,8 +632,9 @@ def test_corrupt_types_row_degrades_and_captures_still_persist(tmp_path):
 
 # ── 8. legacy JSON history parity ──────────────────────────────────────
 
+
 def test_legacy_json_history_type_tolerant_batch_ops(tmp_path):
-    h = ClipboardHistory(storage_path=str(tmp_path / "legacy.json"))
+    h = ClipboardHistoryDB(storage_path=str(tmp_path / "h.db"))
     h.add(ClipboardContent(types={ContentType.TEXT: b"a note"}))
     eid = h.get_all()[0]["entry_id"]
     assert isinstance(eid, int)
@@ -583,13 +649,13 @@ def test_legacy_json_history_type_tolerant_batch_ops(tmp_path):
 
 # ── 9. darwin source tracker title split ───────────────────────────────
 
+
 def test_darwin_window_title_with_commas_stays_intact(monkeypatch):
     class _Result:
         returncode = 0
         stdout = b"Finder, 123, My Doc, final v2"
 
-    monkeypatch.setattr(source_tracker.subprocess, "run",
-                        lambda *a, **k: _Result())
+    monkeypatch.setattr(source_tracker.subprocess, "run", lambda *a, **k: _Result())
     info = source_tracker._get_active_app_info_darwin()
     assert info["name"] == "Finder"
     assert info["title"] == "My Doc, final v2"  # split(", ", 2) kept it whole
@@ -620,10 +686,12 @@ RICH_HTML = b"<html><body><b>same body</b></body></html>"
 
 
 def _rich() -> ClipboardContent:
-    return ClipboardContent(types={
-        ContentType.TEXT: BODY,
-        ContentType.HTML: RICH_HTML,
-    })
+    return ClipboardContent(
+        types={
+            ContentType.TEXT: BODY,
+            ContentType.HTML: RICH_HTML,
+        }
+    )
 
 
 def _plain(device: str = "") -> ClipboardContent:
@@ -737,6 +805,7 @@ class _MockWriter:
     def write(self, content):
         self.last_written = content
         self.count += 1
+        return True
 
 
 class TestRemoteSameTextReachesReceiver:
@@ -747,8 +816,9 @@ class TestRemoteSameTextReachesReceiver:
     def test_remote_plain_variant_passes_loop_checks(self, tmp_path):
         monitor, reader, writer = _MockMonitor(), _MockReader(), _MockWriter()
         hist = ClipboardHistoryDB(storage_path=str(tmp_path / "h.db"))
-        mgr = SyncManager("self-dev", "Self", reader=reader, writer=writer,
-                          monitor=monitor, history=hist)
+        mgr = SyncManager(
+            "self-dev", "Self", reader=reader, writer=writer, monitor=monitor, history=hist
+        )
         sent = []
         mgr.on_send = lambda msg: sent.append(msg)
 
@@ -843,12 +913,15 @@ class TestAgePruneXPinnedXMerge:
         h.add(again)
 
         previews = [e["text_preview"] for e in h._entries]
-        assert previews.count("recopied") == 1, \
+        assert previews.count("recopied") == 1, (
             "stale row must be gone despite the same-text re-copy"
-        assert h.find_by_id(str(stale_id))[0] is None, \
+        )
+        assert h.find_by_id(str(stale_id))[0] is None, (
             "the surviving 'recopied' row is the fresh one, not the stale one"
-        assert time.time() - h._entries[0]["timestamp"] < 90, \
+        )
+        assert time.time() - h._entries[0]["timestamp"] < 90, (
             "the fresh copy carries its own new timestamp"
+        )
 
 
 # ═════════════════════════════════════════════════════════════════════════
@@ -877,10 +950,14 @@ class TestTimedPausePersistenceConfig:
         assert loaded.timed_pause_until == pytest.approx(1770000000.5)
 
     def test_invalid_type_keeps_default(self, tmp_path, monkeypatch):
-        _point_config_at(tmp_path, monkeypatch, {
-            "timed_pause_until": "soon",
-            "sync_enabled": False,
-        })
+        _point_config_at(
+            tmp_path,
+            monkeypatch,
+            {
+                "timed_pause_until": "soon",
+                "sync_enabled": False,
+            },
+        )
         cfg = config_module.load()
         assert cfg.timed_pause_until == 0.0
         assert cfg.sync_enabled is False, "other fields still load"
@@ -961,12 +1038,12 @@ class TestTimedPauseLifecycle:
         app.cfg.timed_pause_until = time.time() + 500
         before = len(app._pause_saves)
         app._clear_pause_state()
-        assert app.cfg.timed_pause_until > time.time(), \
+        assert app.cfg.timed_pause_until > time.time(), (
             "shutdown clear keeps the persisted deadline"
+        )
         assert len(app._pause_saves) == before, "no extra save during shutdown"
 
-    def test_restore_rearms_remaining_and_expired_resumes(
-            self, tmp_path, monkeypatch):
+    def test_restore_rearms_remaining_and_expired_resumes(self, tmp_path, monkeypatch):
         app = _bare_app(monkeypatch)
 
         # Expired while closed → sync returns ON, deadline cleared.
@@ -985,8 +1062,9 @@ class TestTimedPauseLifecycle:
             app2.cfg.timed_pause_until = time.time() + 20 * 60
             app2.cfg.sync_enabled = False
             app2._restore_timed_pause()
-            assert app2.cfg.timed_pause_until > time.time(), \
+            assert app2.cfg.timed_pause_until > time.time(), (
                 "deadline must be re-persisted for the next potential restart"
+            )
             assert app2.cfg.sync_enabled is False
             assert app2._pause_deadline is not None
             left = _minutes_left(app2._pause_deadline)
@@ -1003,6 +1081,7 @@ class TestTimedPauseLifecycle:
 
 def _minutes_left(deadline):
     from internal.ui.systray import SystrayApp
+
     return SystrayApp.pause_left_minutes(deadline)
 
 
@@ -1030,8 +1109,7 @@ class TestFileRequestIdempotencyXReject:
         it registers a fresh pending offer and prompts again."""
         mgr = FileTransferManager(device_id="self", output_dir=str(tmp_path))
         dialogs = []
-        mgr.set_on_transfer_request(
-            lambda tid, n, s, m, fn: dialogs.append(tid))
+        mgr.set_on_transfer_request(lambda tid, n, s, m, fn: dialogs.append(tid))
         sends = []
         send_fn = lambda data: sends.append(data)  # noqa: E731
 
@@ -1043,8 +1121,7 @@ class TestFileRequestIdempotencyXReject:
 
         # Same-id retry (sender resend / broadcast replay after reject).
         sends.clear()
-        mgr.handle_message("file_request", dict(self._request()), send_fn,
-                           "peerA")
+        mgr.handle_message("file_request", dict(self._request()), send_fn, "peerA")
         assert dialogs == [TID, TID], "legitimate retry must prompt again"
         assert mgr._transfers[TID]["state"] == "pending"
 
@@ -1052,20 +1129,21 @@ class TestFileRequestIdempotencyXReject:
 
     def test_duplicate_request_mid_receive_resets_nothing(self, tmp_path):
         mgr = FileTransferManager(device_id="self", output_dir=str(tmp_path))
-        mgr.handle_message("file_request", self._request(),
-                           lambda d: True, "peerA")
+        mgr.handle_message("file_request", self._request(), lambda d: True, "peerA")
         mgr.accept_transfer(TID, lambda d: True)
-        chunk0 = {"msg_type": "file_chunk", "transfer_id": TID,
-                  "chunk_index": 0, "total_chunks": 3,
-                  "_raw_data": b"\x01" * CHUNK_SIZE}
+        chunk0 = {
+            "msg_type": "file_chunk",
+            "transfer_id": TID,
+            "chunk_index": 0,
+            "total_chunks": 3,
+            "_raw_data": b"\x01" * CHUNK_SIZE,
+        }
         mgr.handle_message("file_chunk", chunk0, lambda d: True, "peerA")
-        before = (mgr._transfers[TID]["received_bytes"],
-                  mgr._transfers[TID]["received_chunks"])
+        before = (mgr._transfers[TID]["received_bytes"], mgr._transfers[TID]["received_chunks"])
 
         # Replay of the request mid-transfer: must not zero the receive window
         # nor reopen a second temp handle.
-        mgr.handle_message("file_request", dict(self._request()),
-                           lambda d: True, "peerA")
+        mgr.handle_message("file_request", dict(self._request()), lambda d: True, "peerA")
         t = mgr._transfers[TID]
         assert (t["received_bytes"], t["received_chunks"]) == before
         assert t["state"] == "receiving"
@@ -1106,20 +1184,27 @@ class TestRateSampleLifecycle:
     def test_paused_receiver_records_no_samples_then_completes(self, tmp_path):
         total = 3
         mgr = FileTransferManager(device_id="self", output_dir=str(tmp_path))
-        req = {"msg_type": "file_request", "transfer_id": TID,
-               "file_name": "paused.bin",
-               "file_size": CHUNK_SIZE * total,
-               "mime_type": "application/octet-stream", "kind": "file"}
+        req = {
+            "msg_type": "file_request",
+            "transfer_id": TID,
+            "file_name": "paused.bin",
+            "file_size": CHUNK_SIZE * total,
+            "mime_type": "application/octet-stream",
+            "kind": "file",
+        }
         done = []
-        mgr.set_on_transfer_complete(
-            lambda tid, ok, canc, status: done.append(status))
+        mgr.set_on_transfer_complete(lambda tid, ok, canc, status: done.append(status))
         mgr.handle_message("file_request", req, lambda d: True, "peerA")
         mgr.accept_transfer(TID, lambda d: True)
 
         mgr.pause_transfer(TID, lambda d: True)
-        chunk = {"msg_type": "file_chunk", "transfer_id": TID,
-                 "chunk_index": 0, "total_chunks": total,
-                 "_raw_data": b"\x05" * CHUNK_SIZE}
+        chunk = {
+            "msg_type": "file_chunk",
+            "transfer_id": TID,
+            "chunk_index": 0,
+            "total_chunks": total,
+            "_raw_data": b"\x05" * CHUNK_SIZE,
+        }
         mgr.handle_message("file_chunk", chunk, lambda d: True, "peerA")
         t = mgr._transfers[TID]
         assert t["received_chunks"] == 0, "paused chunks are dropped"
@@ -1128,8 +1213,7 @@ class TestRateSampleLifecycle:
 
         mgr.resume_transfer(TID, lambda d: True)
         for i in range(total):
-            mgr.handle_message("file_chunk", {**chunk, "chunk_index": i},
-                               lambda d: True, "peerA")
+            mgr.handle_message("file_chunk", {**chunk, "chunk_index": i}, lambda d: True, "peerA")
 
         deadline = time.time() + 5
         while TID in mgr._transfers and time.time() < deadline:
@@ -1149,8 +1233,7 @@ class TestBackupHotkeysXMigration:
         cfg = Config()
         cfg.hotkeys = {"paste_1": "F2"}
         cfg.hotkeys_enabled = True
-        zip_path = backup_mod.create_backup(cfg, hist,
-                                            backup_dir=str(tmp_path / "bk"))
+        zip_path = backup_mod.create_backup(cfg, hist, backup_dir=str(tmp_path / "bk"))
         assert zipfile.is_zipfile(zip_path)
         with zipfile.ZipFile(zip_path) as zf:
             exported = json.loads(zf.read("config.json").decode("utf-8"))
@@ -1171,28 +1254,25 @@ class TestBackupHotkeysXMigration:
         with zipfile.ZipFile(legacy, "w") as zf:
             zf.writestr("config.json", json.dumps(config_payload))
         target = Config()
-        summary = backup_mod.restore_backup(str(legacy), target,
-                                            ClipboardHistoryDB(
-                                                storage_path=str(
-                                                    tmp_path / "h.db")))
+        summary = backup_mod.restore_backup(
+            str(legacy), target, ClipboardHistoryDB(storage_path=str(tmp_path / "h.db"))
+        )
         assert summary["config"] is True
         assert target.device_name == "OldBackupBox"
-        assert target.hotkeys.get("paste_1") == "Ctrl+1", \
-            "defaults must survive a keyless backup"
+        assert target.hotkeys.get("paste_1") == "Ctrl+1", "defaults must survive a keyless backup"
         assert target.hotkeys_enabled is False
 
     def test_malformed_hotkey_pairs_filtered_on_restore(self, tmp_path):
         crafted = tmp_path / "bad.zip"
         # JSON object keys are always strings; non-string VALUES are what the
         # strdict filter must drop.
-        payload = {"hotkeys": {"paste_1": "F9", "evil": 123,
-                               "bad2": None}}
+        payload = {"hotkeys": {"paste_1": "F9", "evil": 123, "bad2": None}}
         with zipfile.ZipFile(crafted, "w") as zf:
             zf.writestr("config.json", json.dumps(payload))
         target = Config()
-        backup_mod.restore_backup(str(crafted), target,
-                                  ClipboardHistoryDB(
-                                      storage_path=str(tmp_path / "h.db")))
+        backup_mod.restore_backup(
+            str(crafted), target, ClipboardHistoryDB(storage_path=str(tmp_path / "h.db"))
+        )
         assert target.hotkeys.get("paste_1") == "F9"
         assert "evil" not in target.hotkeys
         assert "bad2" not in target.hotkeys
@@ -1206,14 +1286,17 @@ class TestBackupHotkeysXMigration:
         from src.main import Application
 
         src = inspect.getsource(Application._do_factory_reset)
-        for needle in ('"clipboard_history.db-wal"',
-                       '"clipboard_history.db-shm"',
-                       '"clipboard_history.db"'):
+        for needle in (
+            '"clipboard_history.db-wal"',
+            '"clipboard_history.db-shm"',
+            '"clipboard_history.db"',
+        ):
             assert needle in src, (
-                f"factory reset must delete {needle} (stale WAL resurrects "
-                "the deleted history)")
-        assert ".corrupt-*" in src, \
+                f"factory reset must delete {needle} (stale WAL resurrects the deleted history)"
+            )
+        assert ".corrupt-*" in src, (
             "quarantine copies keep the old identity — reset must sweep them"
+        )
 
 
 # ═════════════════════════════════════════════════════════════════════════
@@ -1223,3 +1306,173 @@ class TestBackupHotkeysXMigration:
 # refreshed off-thread).  Neither exposes testable logic headlessly without
 # a full CTk/Tk display harness.
 # ═════════════════════════════════════════════════════════════════════════
+
+
+# ═════════════════════════════════════════════════════════════════════════
+# Stage 6 — receive path: no ghost history, no clipboard lost mid-capture
+# ═════════════════════════════════════════════════════════════════════════
+
+
+class _FailingWriter:
+    """Clipboard writer that reports (or raises) failure."""
+
+    def __init__(self, mode="false"):
+        self.mode = mode
+        self.calls = 0
+
+    def write(self, content):
+        self.calls += 1
+        if self.mode == "raise":
+            raise RuntimeError("clipboard busy")
+        return False
+
+
+class _RecordingHistory:
+    def __init__(self):
+        self.added = []
+
+    def add(self, content):
+        self.added.append(content)
+
+
+class TestFailedRemoteWriteLeavesNoGhost:
+    """A remote message whose clipboard write fails must leave no trace: the
+    user cannot tell a history row that landed from one that didn't, and
+    clicking the ghost pastes something else entirely."""
+
+    def _mgr(self, writer):
+        hist = _RecordingHistory()
+        notified = []
+        mgr = SyncManager(
+            "test-device",
+            "Test Device",
+            reader=MockClipboardReader(),
+            writer=writer,
+            monitor=MockClipboardMonitor(),
+            history=hist,
+        )
+        mgr.on_history_change = lambda: notified.append(True)
+        return mgr, hist, notified
+
+    def _msg(self, text=b"remote text"):
+        return SyncMessage(
+            content=ClipboardContent(types={ContentType.TEXT: text}),
+            msg_id="m-ghost",
+            source_device="peerX",
+        )
+
+    def test_write_returning_false_writes_no_history(self):
+        writer = _FailingWriter("false")
+        mgr, hist, notified = self._mgr(writer)
+        assert mgr.handle_remote_message(self._msg()) is False
+        assert writer.calls == 1
+        assert hist.added == [], "no clipboard, no history row"
+        assert notified == [], "and no history_updated push to the web UI"
+
+    def test_write_raising_writes_no_history(self):
+        writer = _FailingWriter("raise")
+        mgr, hist, notified = self._mgr(writer)
+        assert mgr.handle_remote_message(self._msg()) is False
+        assert hist.added == []
+        assert notified == []
+
+    def test_successful_write_still_records_history(self):
+        writer = MockClipboardWriter()
+        mgr, hist, notified = self._mgr(writer)
+        assert mgr.handle_remote_message(self._msg()) is True
+        assert writer.write_count == 1
+        assert len(hist.added) == 1
+        assert notified == [True]
+
+    def test_clipboard_is_written_before_history(self):
+        """Ordering, not just the outcome: history must follow the write."""
+        order = []
+
+        class _OrderWriter:
+            def write(self, content):
+                order.append("clipboard")
+                return True
+
+        class _OrderHistory:
+            def add(self, content):
+                order.append("history")
+
+        mgr = SyncManager(
+            "test-device",
+            "Test Device",
+            reader=MockClipboardReader(),
+            writer=_OrderWriter(),
+            monitor=MockClipboardMonitor(),
+            history=_OrderHistory(),
+        )
+        assert mgr.handle_remote_message(self._msg()) is True
+        assert order == ["clipboard", "history"]
+
+
+class TestRemoteMessageLosesToAnInFlightLocalCapture:
+    """capture_with_retry can spend ~1.4s on rich content, and the debounce
+    window is measured from the change event — long expired by then.  A
+    remote message arriving in that gap used to overwrite the copy the user
+    had just made, so their clipboard content vanished."""
+
+    def test_remote_write_dropped_while_capture_runs(self):
+        monitor, reader, writer = (
+            MockClipboardMonitor(),
+            MockClipboardReader(),
+            MockClipboardWriter(),
+        )
+        mgr = SyncManager(
+            "test-device", "Test Device", reader=reader, writer=writer, monitor=monitor
+        )
+
+        capture_started = threading.Event()
+        release = threading.Event()
+        verdicts = []
+
+        real_locked = mgr._do_read_and_send_locked
+
+        def _slow_capture():
+            capture_started.set()
+            release.wait(timeout=5)
+            return real_locked()
+
+        mgr._do_read_and_send_locked = _slow_capture
+        reader.content = ClipboardContent(types={ContentType.TEXT: b"local"})
+        mgr.on_send = lambda msg: None
+        mgr.start()
+        try:
+            monitor.fire()
+            assert capture_started.wait(timeout=5), "capture should have begun"
+            # The debounce window from the change event has already elapsed —
+            # only the in-flight flag stands between the peer and the user's
+            # clipboard.
+            msg = SyncMessage(
+                content=ClipboardContent(types={ContentType.TEXT: b"remote"}),
+                msg_id="m-race",
+                source_device="peerX",
+            )
+            verdicts.append(mgr.handle_remote_message(msg))
+        finally:
+            release.set()
+            mgr.stop()
+
+        assert verdicts == [False], "the local copy in progress must win"
+        assert writer.write_count == 0, "the user's clipboard must be untouched"
+
+    def test_flag_is_released_even_when_the_capture_raises(self):
+        """A capture that blows up must not wedge the receive path shut."""
+        mgr = SyncManager(
+            "test-device",
+            "Test Device",
+            reader=MockClipboardReader(),
+            writer=MockClipboardWriter(),
+            monitor=MockClipboardMonitor(),
+        )
+
+        def _boom():
+            raise RuntimeError("reader exploded")
+
+        mgr._do_read_and_send_locked = _boom
+        with pytest.raises(RuntimeError):
+            mgr._do_read_and_send()
+        assert mgr._local_capture_active == 0

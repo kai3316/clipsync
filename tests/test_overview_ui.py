@@ -85,9 +85,9 @@ def test_overview_connected_count_filters_to_paired():
     # The raw connection list is filtered down to paired peer ids so the
     # overview's connected_count agrees with the frontend's paired-only
     # connectedCount (chat-only / mid-pairing connections excluded).
-    assert "paired_ids = {getattr(p, \"device_id\", \"\") for p in paired}" in ov
+    assert 'paired_ids = {getattr(p, "device_id", "") for p in paired}' in ov
     assert "connected = [pid for pid in connected if pid in paired_ids]" in ov
-    assert "'connected_count': len(connected)," in ov
+    assert '"connected_count": len(connected),' in ov
     # The connected-device chips come from the same filtered set.
     assert "if pid in paired_ids" in ov
 
@@ -167,11 +167,22 @@ def test_transfers_card_leads_with_active_count():
 
 def test_dead_overview_locale_keys_removed():
     en, zh = _locales()
-    for dead in ("overview.activity", "overview.browsing", "overview.connection",
-                 "overview.copied", "overview.discovery_status", "overview.items",
-                 "overview.none_active", "overview.scan_hint", "overview.send_hint",
-                 "overview.settings", "overview.this_device_label", "overview.title",
-                 "overview.visibility_status", "overview.active"):
+    for dead in (
+        "overview.activity",
+        "overview.browsing",
+        "overview.connection",
+        "overview.copied",
+        "overview.discovery_status",
+        "overview.items",
+        "overview.none_active",
+        "overview.scan_hint",
+        "overview.send_hint",
+        "overview.settings",
+        "overview.this_device_label",
+        "overview.title",
+        "overview.visibility_status",
+        "overview.active",
+    ):
         assert dead not in en, f"{dead} still present in en.json"
         assert dead not in zh, f"{dead} still present in zh-CN.json"
     # The completed key the Transfers card now shows survives and is non-empty.

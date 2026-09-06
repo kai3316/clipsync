@@ -69,13 +69,29 @@ var ClipsyncWS = (function () {
      * Disconnect and stop auto-reconnecting.
      */
     disconnect: function () {
-      _intentionalClose = true;
       this._clearReconnectTimer();
-      if (ws) {
-        try { ws.close(1000, 'Client disconnect'); } catch (e) { /* ignore */ }
-        ws = null;
-      }
+      var dead = ws;
+      ws = null;
       _connected = false;
+      if (dead) {
+        // Detach BEFORE closing: onclose fires asynchronously, and by then a
+        // connect() (token change, server switch) may already have installed
+        // a new socket.  The old handler would then null out that live
+        // socket, play the disconnect chime and schedule a reconnect on top
+        // of a connection that is perfectly fine.
+        dead.onopen = null;
+        dead.onmessage = null;
+        dead.onclose = null;
+        dead.onerror = null;
+        try { dead.close(1000, 'Client disconnect'); } catch (e) { /* ignore */ }
+      }
+      // Clear the flag here, unconditionally.  It used to be cleared only by
+      // the onclose handler — which we just detached, and which never ran at
+      // all when ws was already null (never connected, or a second
+      // disconnect()).  Left stuck at true it makes the NEXT genuine drop
+      // look intentional: no 'disconnected' event, no reconnect, a UI that
+      // just quietly stops updating.
+      _intentionalClose = false;
     },
 
     /**
@@ -127,6 +143,7 @@ var ClipsyncWS = (function () {
       }
 
       var self = this;
+      var socket = ws;
 
       ws.onopen = function () {
         console.log('[ClipsyncWS] Connected');
@@ -153,6 +170,10 @@ var ClipsyncWS = (function () {
       };
 
       ws.onclose = function (event) {
+        // A socket that has already been superseded (connect() called again
+        // before this one finished closing) must not speak for the live one:
+        // nulling ws here would strand a perfectly good connection.
+        if (ws !== null && ws !== socket) return;
         _connected = false;
         ws = null;
 
@@ -185,12 +206,20 @@ var ClipsyncWS = (function () {
     _scheduleReconnect: function () {
       this._clearReconnectTimer();
       var self = this;
+      var delay = reconnectDelay;
+      // Advance the backoff NOW, before the attempt — not after _doConnect()
+      // returns.  When the WebSocket constructor throws synchronously (CSP
+      // block, bad URL, no network stack) _doConnect calls straight back into
+      // here from inside the timer callback, so the doubling that used to sit
+      // below the call had not run yet: every retry was scheduled with the
+      // same delay the failed one used, and the client hammered away at ~1s
+      // forever instead of backing off to 30s.
+      reconnectDelay = Math.min(reconnectDelay * 2, maxReconnectDelay);
       reconnectTimer = setTimeout(function () {
+        reconnectTimer = null;
         console.log('[ClipsyncWS] Reconnecting...');
         self._doConnect();
-        // Exponential backoff: double the delay, cap at max
-        reconnectDelay = Math.min(reconnectDelay * 2, maxReconnectDelay);
-      }, reconnectDelay);
+      }, delay);
     },
 
     /**
@@ -297,6 +326,8 @@ var ClipsyncWS = (function () {
           if (data.removed && Array.isArray(data.removed)) {
             store.syncRemovedDevices(data.removed);
           }
+          // Let an in-flight /api/devices GET know its snapshot is now stale.
+          store.devicesMutationTick += 1;
           break;
 
         case 'history_updated':
@@ -689,6 +720,15 @@ var ClipsyncWS = (function () {
           }
           break;
 
+        case 'aiconfig_inventory':
+          // A peer answered our inventory_refresh. GET ?refresh=1 only *asks*
+          // the peers and returns the still-stale cache, so this event is the
+          // only signal that fresh entries are now available to read.
+          if (data && data.peer_id && store.applyAiConfigInventoryEvent) {
+            store.applyAiConfigInventoryEvent(data);
+          }
+          break;
+
         case 'connect_rejected':
           // A peer refused our connection attempt (it sent its rejection
           // marker after its identity frame — its user removed/forgot us).
@@ -697,6 +737,15 @@ var ClipsyncWS = (function () {
           // language-neutral.
           if (data && data.peer_id) {
             store.showToast(store.t('device.connect_rejected', { name: data.name || '' }), 3500, 'error');
+          }
+          break;
+
+        case 'connect_unreachable':
+          // We had nowhere to connect: the peer is not advertising on mDNS and
+          // no saved address is known.  The route only answers {ok:false},
+          // which the card renders as a bare "action failed" — say why instead.
+          if (data && data.peer_id) {
+            store.showToast(store.t('device.connect_unreachable', { name: data.name || '' }), 4000, 'error');
           }
           break;
 

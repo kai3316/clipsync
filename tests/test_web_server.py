@@ -26,6 +26,8 @@ import pytest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+import contextlib
+
 from internal.clipboard.format import ClipboardContent, ContentType
 from internal.clipboard.history_db import ClipboardHistoryDB
 from internal.web.dialog import DialogManager
@@ -34,13 +36,15 @@ from internal.web.ws import WebSocketClient, WebSocketManager
 
 # ── Helpers ────────────────────────────────────────────────────────────
 
+
 def _body(obj) -> bytes:
     return json.dumps(obj).encode("utf-8")
 
 
 def _make_db(tmp_path) -> ClipboardHistoryDB:
     db = ClipboardHistoryDB(
-        storage_path=str(tmp_path / "history.db"), max_entries=50,
+        storage_path=str(tmp_path / "history.db"),
+        max_entries=50,
     )
     db.add(
         ClipboardContent(types={ContentType.TEXT: b"hello"}, timestamp=1000.0),
@@ -51,7 +55,10 @@ def _make_db(tmp_path) -> ClipboardHistoryDB:
 
 def _dispatch_post(path, body_bytes, history, dialog_mgr):
     return dispatch(
-        "POST", path, {}, body_bytes,
+        "POST",
+        path,
+        {},
+        body_bytes,
         cfg=object(),
         history=history,
         sync_mgr=None,
@@ -108,12 +115,16 @@ def _read_frame(sock):
 
 # ── #2: history mutations broadcast ────────────────────────────────────
 
+
 def test_dispatch_delete_broadcasts_deleted(tmp_path):
     db = _make_db(tmp_path)
     eid = db.get_all()[0]["entry_id"]
     ws = FakeWSManager()
     status, _ct, _body_b = _dispatch_post(
-        "/api/delete", _body({"entry_id": eid}), db, FakeDialogMgr(ws),
+        "/api/delete",
+        _body({"entry_id": eid}),
+        db,
+        FakeDialogMgr(ws),
     )
     assert status == 200
     assert ws.calls == [("history_item_deleted", [eid])]
@@ -132,7 +143,10 @@ def test_dispatch_pin_broadcasts_history_updated(tmp_path):
     eid = db.get_all()[0]["entry_id"]
     ws = FakeWSManager()
     status, _ct, _body_b = _dispatch_post(
-        "/api/pin", _body({"entry_id": eid}), db, FakeDialogMgr(ws),
+        "/api/pin",
+        _body({"entry_id": eid}),
+        db,
+        FakeDialogMgr(ws),
     )
     assert status == 200
     assert ws.calls == [("history_updated",)]
@@ -140,12 +154,14 @@ def test_dispatch_pin_broadcasts_history_updated(tmp_path):
 
 def test_dispatch_batch_delete_broadcasts_deleted(tmp_path):
     db = _make_db(tmp_path)
-    db.add(ClipboardContent(types={ContentType.TEXT: b"two"}, timestamp=2000.0),
-           source_app=None)
+    db.add(ClipboardContent(types={ContentType.TEXT: b"two"}, timestamp=2000.0), source_app=None)
     ids = [e["entry_id"] for e in db.get_all()]
     ws = FakeWSManager()
     status, _ct, _body_b = _dispatch_post(
-        "/api/batch-delete", _body({"entry_ids": ids}), db, FakeDialogMgr(ws),
+        "/api/batch-delete",
+        _body({"entry_ids": ids}),
+        db,
+        FakeDialogMgr(ws),
     )
     assert status == 200
     assert ws.calls == [("history_item_deleted", ids)]
@@ -155,7 +171,10 @@ def test_dispatch_clear_broadcasts_clear(tmp_path):
     db = _make_db(tmp_path)
     ws = FakeWSManager()
     status, _ct, _body_b = _dispatch_post(
-        "/api/history/clear", b"", db, FakeDialogMgr(ws),
+        "/api/history/clear",
+        b"",
+        db,
+        FakeDialogMgr(ws),
     )
     assert status == 200
     assert json.loads(_body_b)["ok"] is True
@@ -163,6 +182,7 @@ def test_dispatch_clear_broadcasts_clear(tmp_path):
 
 
 # ── #3: WS keepalive + delivery counts ─────────────────────────────────
+
 
 def test_ws_send_ping_writes_ping_frame():
     a, b = socket.socketpair()
@@ -179,8 +199,7 @@ def test_ws_send_ping_writes_ping_frame():
 
 def test_ws_broadcast_returns_delivered_count():
     a, b = socket.socketpair()
-    mgr = WebSocketManager(cfg=None, history=None, sync_mgr=None,
-                           get_connected_ids=lambda: [])
+    mgr = WebSocketManager(cfg=None, history=None, sync_mgr=None, get_connected_ids=lambda: [])
     try:
         client = WebSocketClient(a, ("127.0.0.1", 0))
         with mgr._lock:
@@ -200,8 +219,7 @@ def test_ws_broadcast_returns_delivered_count():
 
 def test_ws_broadcast_history_deleted_payload():
     a, b = socket.socketpair()
-    mgr = WebSocketManager(cfg=None, history=None, sync_mgr=None,
-                           get_connected_ids=lambda: [])
+    mgr = WebSocketManager(cfg=None, history=None, sync_mgr=None, get_connected_ids=lambda: [])
     try:
         client = WebSocketClient(a, ("127.0.0.1", 0))
         with mgr._lock:
@@ -222,8 +240,7 @@ def test_ws_heartbeat_drops_dead_and_silent_clients():
     a1, b1 = socket.socketpair()
     a2, b2 = socket.socketpair()
     a3, b3 = socket.socketpair()
-    mgr = WebSocketManager(cfg=None, history=None, sync_mgr=None,
-                           get_connected_ids=lambda: [])
+    mgr = WebSocketManager(cfg=None, history=None, sync_mgr=None, get_connected_ids=lambda: [])
     try:
         dead = WebSocketClient(a1, ("127.0.0.1", 0))
         dead._closed = True  # connection already gone
@@ -246,13 +263,12 @@ def test_ws_heartbeat_drops_dead_and_silent_clients():
     finally:
         mgr.shutdown()
         for s in (a1, a2, a3, b1, b2, b3):
-            try:
+            with contextlib.suppress(OSError):
                 s.close()
-            except OSError:
-                pass
 
 
 # ── #9: dialog delivery-based broadcast + queued-window timing ─────────
+
 
 def test_dialog_broadcast_uses_delivery_count():
     class ZeroMgr:
@@ -303,7 +319,9 @@ def test_dialog_flush_pending_marks_shown_and_strips_keys():
     shown = threading.Event()
     with dm._lock:
         dm._pending["abc"] = {
-            "event": threading.Event(), "response": {}, "shown_event": shown,
+            "event": threading.Event(),
+            "response": {},
+            "shown_event": shown,
         }
 
     dm.flush_pending()
@@ -372,8 +390,8 @@ def test_dialog_queued_flushed_response_window_starts_at_flush():
     time.sleep(2.0)  # let the dialog sit queued (client absent) — flush at ~2s
     state["deliver"] = True
     dm.flush_pending()  # shown at ~2s; response window = [2s, 5s]
-    time.sleep(2.0)     # handle at ~4s — past the 3s creation deadline, within
-                        # the post-flush window (proves flush-based timing).
+    time.sleep(2.0)  # handle at ~4s — past the 3s creation deadline, within
+    # the post-flush window (proves flush-based timing).
 
     ok = dm.handle_response(dialog_id, "ok")
     t.join(timeout=6.0)
@@ -385,9 +403,13 @@ def test_dialog_queued_flushed_response_window_starts_at_flush():
 
 # ── #7: DELETE /api/files (mobile file delete) ───────────────────────
 
+
 def _dispatch_delete(path, body_bytes, upload_dir):
     return dispatch(
-        "DELETE", path, {}, body_bytes,
+        "DELETE",
+        path,
+        {},
+        body_bytes,
         cfg=object(),
         history=None,
         sync_mgr=None,
@@ -402,7 +424,9 @@ def test_dispatch_delete_file_removes_uploaded_file(tmp_path):
     f = tmp_path / "photo.jpg"
     f.write_bytes(b"jpg-bytes")
     status, _ct, body_b = _dispatch_delete(
-        "/api/files", _body({"name": "photo.jpg"}), str(tmp_path),
+        "/api/files",
+        _body({"name": "photo.jpg"}),
+        str(tmp_path),
     )
     assert status == 200
     assert json.loads(body_b)["ok"] is True
@@ -415,7 +439,9 @@ def test_dispatch_delete_file_rejects_traversal(tmp_path):
     evil = tmp_path / "evil.txt"  # sibling of uploads — outside the upload dir
     evil.write_bytes(b"evil")
     status, _ct, body_b = _dispatch_delete(
-        "/api/files", _body({"name": "../evil.txt"}), str(uploads),
+        "/api/files",
+        _body({"name": "../evil.txt"}),
+        str(uploads),
     )
     # basename strips the traversal, so the request can only ever target an
     # in-dir name (missing here -> 404) — never the outside file.  Either a
@@ -432,7 +458,9 @@ def test_dispatch_delete_file_rejects_absolute_path(tmp_path):
     # An absolute path is basename-stripped and confined to the upload dir, so
     # it can never target the outside file — the outside file must survive.
     status, _ct, _body_b = _dispatch_delete(
-        "/api/files", _body({"name": str(keep)}), str(uploads),
+        "/api/files",
+        _body({"name": str(keep)}),
+        str(uploads),
     )
     assert status in (400, 404)
     assert keep.exists()
@@ -440,7 +468,9 @@ def test_dispatch_delete_file_rejects_absolute_path(tmp_path):
 
 def test_dispatch_delete_file_not_found(tmp_path):
     status, _ct, body_b = _dispatch_delete(
-        "/api/files", _body({"name": "missing.txt"}), str(tmp_path),
+        "/api/files",
+        _body({"name": "missing.txt"}),
+        str(tmp_path),
     )
     assert status == 404
     assert json.loads(body_b)["ok"] is False
@@ -456,13 +486,16 @@ def test_dispatch_delete_file_rejects_directory(tmp_path):
     d = tmp_path / "subdir"
     d.mkdir()
     status, _ct, body_b = _dispatch_delete(
-        "/api/files", _body({"name": "subdir"}), str(tmp_path),
+        "/api/files",
+        _body({"name": "subdir"}),
+        str(tmp_path),
     )
     assert status == 400
     assert d.is_dir(), "a directory must not be deleted"
 
 
 # ── Frontend fix guards (reconnect merge) ──────────────────────────
+
 
 def _read_repo_file(rel: str) -> str:
     root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -518,7 +551,9 @@ def test_dispatch_delete_file_preserves_leading_trailing_spaces(tmp_path):
         f = uploads / name
         f.write_bytes(b"jpg-bytes")
         status, _ct, body_b = _dispatch_delete(
-            "/api/files", _body({"name": name}), str(uploads),
+            "/api/files",
+            _body({"name": name}),
+            str(uploads),
         )
         assert status == 200
         assert json.loads(body_b)["ok"] is True
@@ -539,12 +574,15 @@ def test_chat_expire_stale_receives_defers_fire_outside_lock():
     them when the caller requests inline firing — the heartbeat passes
     defer_fire=True so a slow WS/UI callback can't freeze the chat lock."""
     from internal.sync.nearby_chat import ChatManager
+
     mgr = ChatManager("x", "X")
     try:
         mgr.handle_message(
             "chat_invite",
             {"session_id": "f" * 16, "from_name": "A", "fingerprint_short": "A1"},
-            "peer-a", "A1", None,
+            "peer-a",
+            "A1",
+            None,
         )
         sid = mgr.get_sessions()[0]["session_id"]
         # A working channel: since the honest-accept fix, activation only
@@ -556,13 +594,18 @@ def test_chat_expire_stale_receives_defers_fire_outside_lock():
         )
         mgr.handle_message(
             "chat_file_offer",
-            {"session_id": sid, "transfer_id": "b" * 32,
-             "file_name": "x.bin", "file_size": 100, "mime": ""},
-            "peer-a", "A1", None,
+            {
+                "session_id": sid,
+                "transfer_id": "b" * 32,
+                "file_name": "x.bin",
+                "file_size": 100,
+                "mime": "",
+            },
+            "peer-a",
+            "A1",
+            None,
         )
-        mgr._receives["b" * 32]["entry"].ts -= (
-            ChatManager.INVITE_ACCEPT_TIMEOUT + 10
-        )
+        mgr._receives["b" * 32]["entry"].ts -= ChatManager.INVITE_ACCEPT_TIMEOUT + 10
         with mgr._lock:
             done, changed = mgr._expire_stale_receives(defer_fire=True)
         assert done == [(sid, "b" * 32, "declined")]
@@ -585,6 +628,7 @@ def test_dashboard_history_reconnect_merge_present():
 
 
 # ── v1.0.29-regression guards (#1 mobile pruning, #2 ghost cursor, #3 done) ──
+
 
 def test_mobile_paged_poll_does_not_prune_loaded_pages():
     """#1: a page-1 poll while more pages are loaded must NOT prune them — the
@@ -643,11 +687,11 @@ def test_history_api_limit_total_returns_authoritative_list(tmp_path):
     every remaining history item — the authoritative list that replaces ghost
     rows when the client has loaded past the true count."""
     from internal.web.api.history import get_history
+
     db = _make_db(tmp_path)
     for i in range(5):
         db.add(
-            ClipboardContent(types={ContentType.TEXT: ("t%d" % i).encode()},
-                             timestamp=2000.0 + i),
+            ClipboardContent(types={ContentType.TEXT: ("t%d" % i).encode()}, timestamp=2000.0 + i),  # noqa: UP031
             source_app=None,
         )
 
@@ -670,10 +714,7 @@ def test_main_chat_accept_file_annotated_bool_or_none():
     (offer expired) is a documented, first-class return — never collapsed into
     False, which means "offer exists but can't accept right now"."""
     src = _read_repo_file("src/main.py")
-    assert (
-        "def _chat_accept_file(self, session_id: str, transfer_id: str) -> bool | None:"
-        in src
-    )
+    assert "def _chat_accept_file(self, session_id: str, transfer_id: str) -> bool | None:" in src
     assert "return self.chat_mgr.accept_file(" in src
 
 
@@ -685,6 +726,7 @@ def test_dashboard_chat_do_accept_file_handles_none_expired():
     assert "if result is None:" in src
     assert 'self._chat_show_hint(T("pairing.state.expired"))' in src
 
+
 def test_chat_panel_toasts_expired_not_generic():
     """#4 frontend guard: the chat file-accept failure toast distinguishes the
     backend's {error:'expired'} (offer lapsed under the stale-receive reaper
@@ -695,6 +737,7 @@ def test_chat_panel_toasts_expired_not_generic():
 
 
 # ── v1.0.32 adversarial-self-review fixes (#1–#10) ─────────────────────────
+
 
 def test_calibrate_history_all_terminal_states_consume_budget_and_advance_gen():
     """Core calibration semantics (#2/#6): every terminal state of a
@@ -719,14 +762,18 @@ def test_calibrate_history_all_terminal_states_consume_budget_and_advance_gen():
     # timeout path.
     assert store.count("self._calibrationGen += 1;") >= 3
     # The timeout block clears the lock + stamps budget but leaves gen alone.
-    timeout_block = store[store.index("var calibTimer = setTimeout"):
-                         store.index("return window.ClipsyncAPI.getHistory")]
+    timeout_block = store[
+        store.index("var calibTimer = setTimeout") : store.index(
+            "return window.ClipsyncAPI.getHistory"
+        )
+    ]
     assert "self._calibrationGen += 1;" not in timeout_block
     assert "self._historyCalibrating = false;" in timeout_block
     assert "self._lastCalibration = Date.now();" in timeout_block
     # The raced-abandon path consumes the budget AND advances the gen.
-    race_abandon = store[store.index("if (self.historyMutationTick !== startTick)"):
-                         store.index("var calItems")]
+    race_abandon = store[
+        store.index("if (self.historyMutationTick !== startTick)") : store.index("var calItems")
+    ]
     assert "self._lastCalibration = Date.now();" in race_abandon
     assert "self._calibrationGen += 1;" in race_abandon
 
@@ -791,8 +838,11 @@ def test_ws_history_updated_bumps_tick_on_new_data():
     store = _read_repo_file("internal/web/static/js/store.js")
     assert "replaceHistory: function (items)" in store
     assert "_rowDiffer: function (a, b)" in store
-    rh_block = store[store.index("replaceHistory: function (items)"):
-                     store.index("removeHistoryItems: function (ids)")]
+    rh_block = store[
+        store.index("replaceHistory: function (items)") : store.index(
+            "removeHistoryItems: function (ids)"
+        )
+    ]
     assert "if (!changed) {\n        return false;\n      }" in rh_block
     assert "this.historyMutationTick += 1;" in rh_block
     assert "if (items[ri] == null) continue;" in rh_block
@@ -883,6 +933,7 @@ def _ct(boundary="testboundary123"):
 
 # ── 1. Multipart parsing ───────────────────────────────────────────────
 
+
 def test_parse_multipart_roundtrip_preserves_trailing_crlf():
     """A file whose content ends with newlines must arrive byte-for-byte:
     the old parser rstripped the part after cutting at the closing boundary
@@ -916,8 +967,7 @@ def test_parse_multipart_rejects_missing_boundary_header():
 
 
 def test_parse_multipart_empty_form_returns_no_fields():
-    assert _parse_multipart(
-        b"--testboundary123--\r\n", _ct()) == {}
+    assert _parse_multipart(b"--testboundary123--\r\n", _ct()) == {}
 
 
 def test_parse_multipart_filename_with_semicolon():
@@ -940,11 +990,13 @@ def test_parse_multipart_boundary_like_bytes_inside_file_survive():
 
 
 def test_parse_multipart_extra_text_fields_decoded():
-    body = _mp_body([
-        ("file", "photo.jpg", b"JPGDATA"),
-        ("device_id", None, b"peer-42"),
-        ("purpose", None, b"chat"),
-    ])
+    body = _mp_body(
+        [
+            ("file", "photo.jpg", b"JPGDATA"),
+            ("device_id", None, b"peer-42"),
+            ("purpose", None, b"chat"),
+        ]
+    )
     fields = _parse_multipart(body, _ct())
     assert fields["device_id"] == ("", b"peer-42")
     assert fields["purpose"] == ("", b"chat")
@@ -962,6 +1014,7 @@ def test_check_declared_length_flags_short_read():
 
 # ── 2. GET /api/logs tail semantics ───────────────────────────────────
 
+
 class _Cfg:
     device_id = "dev1"
     device_name = "Dev"
@@ -976,7 +1029,10 @@ def _write_log(tmp_path, n_lines):
 
 def _get_logs(query_params):
     return dispatch(
-        "GET", "/api/logs", query_params, b"",
+        "GET",
+        "/api/logs",
+        query_params,
+        b"",
         cfg=_Cfg(),
         history=None,
         sync_mgr=None,
@@ -989,8 +1045,9 @@ def _get_logs(query_params):
 
 def test_api_logs_returns_last_n_lines(monkeypatch, tmp_path):
     from internal.config import config as config_module
+
     monkeypatch.setattr(config_module, "_log_dir", lambda: tmp_path)
-    lines = _write_log(tmp_path, 300)
+    _write_log(tmp_path, 300)
 
     status, _ct_, body_b = _get_logs({"lines": ["5"]})
     assert status == 200
@@ -1002,6 +1059,7 @@ def test_api_logs_returns_last_n_lines(monkeypatch, tmp_path):
 
 def test_api_logs_tail_alias_param(monkeypatch, tmp_path):
     from internal.config import config as config_module
+
     monkeypatch.setattr(config_module, "_log_dir", lambda: tmp_path)
     _write_log(tmp_path, 50)
 
@@ -1012,6 +1070,7 @@ def test_api_logs_tail_alias_param(monkeypatch, tmp_path):
 
 def test_api_logs_invalid_value_falls_back_to_200(monkeypatch, tmp_path):
     from internal.config import config as config_module
+
     monkeypatch.setattr(config_module, "_log_dir", lambda: tmp_path)
     _write_log(tmp_path, 250)
 
@@ -1021,6 +1080,7 @@ def test_api_logs_invalid_value_falls_back_to_200(monkeypatch, tmp_path):
 
 def test_api_logs_clamped_to_1000(monkeypatch, tmp_path):
     from internal.config import config as config_module
+
     monkeypatch.setattr(config_module, "_log_dir", lambda: tmp_path)
     _write_log(tmp_path, 1200)
 
@@ -1030,9 +1090,11 @@ def test_api_logs_clamped_to_1000(monkeypatch, tmp_path):
 
 def test_api_logs_redacts_web_token(monkeypatch, tmp_path):
     from internal.config import config as config_module
+
     monkeypatch.setattr(config_module, "_log_dir", lambda: tmp_path)
     (tmp_path / "clipsync.log").write_text(
-        "INFO request used token sekret-token ok\n", encoding="utf-8")
+        "INFO request used token sekret-token ok\n", encoding="utf-8"
+    )
 
     _status, _ct_, body_b = _get_logs({"lines": ["10"]})
     logs = json.loads(body_b)["logs"]
@@ -1043,6 +1105,7 @@ def test_api_logs_redacts_web_token(monkeypatch, tmp_path):
 
 def test_api_logs_missing_file_returns_empty(monkeypatch, tmp_path):
     from internal.config import config as config_module
+
     monkeypatch.setattr(config_module, "_log_dir", lambda: tmp_path)
 
     status, _ct_, body_b = _get_logs({})
@@ -1052,22 +1115,24 @@ def test_api_logs_missing_file_returns_empty(monkeypatch, tmp_path):
 
 # ── 3. Favorites export (new feature) ────────────────────────────────
 
+
 @pytest.fixture()
 def fav_db(tmp_path, monkeypatch):
     from internal.web.api import favorites as favorites_api
-    monkeypatch.setattr(favorites_api, "_FAV_DB_PATH",
-                        str(tmp_path / "favorites.db"))
+
+    monkeypatch.setattr(favorites_api, "_FAV_DB_PATH", str(tmp_path / "favorites.db"))
     # Keep a legacy JSON on this machine from migrating into the test DB.
-    monkeypatch.setattr(favorites_api, "_get_json_path",
-                        lambda: str(tmp_path / "no_legacy.json"))
+    monkeypatch.setattr(favorites_api, "_get_json_path", lambda: str(tmp_path / "no_legacy.json"))
     return favorites_api
 
 
 def _seed_two_favorites(favorites_api):
-    favorites_api.add_favorite(json.dumps(
-        {"title": "Alpha note", "content": "alpha-content", "group": "Work"}).encode())
-    favorites_api.add_favorite(json.dumps(
-        {"title": "", "content": "ungrouped-content", "group": ""}).encode())
+    favorites_api.add_favorite(
+        json.dumps({"title": "Alpha note", "content": "alpha-content", "group": "Work"}).encode()
+    )
+    favorites_api.add_favorite(
+        json.dumps({"title": "", "content": "ungrouped-content", "group": ""}).encode()
+    )
 
 
 def test_export_favorites_markdown_groups_and_content(fav_db, tmp_path):
@@ -1078,7 +1143,7 @@ def test_export_favorites_markdown_groups_and_content(fav_db, tmp_path):
     assert status == 200 and data["ok"] is True
     assert data["count"] == 2
     assert data["filename"].endswith(".md")
-    text = open(data["filepath"], encoding="utf-8").read()
+    text = open(data["filepath"], encoding="utf-8").read()  # noqa: SIM115
     assert "# ClipSync Favorites" in text
     assert "## Work" in text
     assert "**Alpha note**" in text
@@ -1096,19 +1161,19 @@ def test_export_favorites_text_format(fav_db, tmp_path):
     data, status = api.export_favorites(body, dest_dir=str(tmp_path))
     assert status == 200 and data["ok"] is True
     assert data["filename"].endswith(".txt")
-    text = open(data["filepath"], encoding="utf-8").read()
+    text = open(data["filepath"], encoding="utf-8").read()  # noqa: SIM115
     assert "[Work] Alpha note" in text
     assert "ungrouped-content" in text
 
 
 def test_export_favorites_fence_grows_past_backticks(fav_db, tmp_path):
     api = fav_db
-    api.add_favorite(json.dumps(
-        {"title": "code", "content": "```python\nprint(1)\n```",
-         "group": ""}).encode())
+    api.add_favorite(
+        json.dumps({"title": "code", "content": "```python\nprint(1)\n```", "group": ""}).encode()
+    )
     body = json.dumps({"format": "markdown"}).encode("utf-8")
     data, _status = api.export_favorites(body, dest_dir=str(tmp_path))
-    text = open(data["filepath"], encoding="utf-8").read()
+    text = open(data["filepath"], encoding="utf-8").read()  # noqa: SIM115
     # The fence around the content must be LONGER than any backtick run in
     # the content itself so the block cannot be broken open.
     assert "\n````\n```python\nprint(1)\n```\n````\n" in text
@@ -1116,14 +1181,14 @@ def test_export_favorites_fence_grows_past_backticks(fav_db, tmp_path):
 
 def test_export_favorites_invalid_format_400(fav_db, tmp_path):
     data, status = fav_db.export_favorites(
-        json.dumps({"format": "pdf"}).encode("utf-8"), dest_dir=str(tmp_path))
+        json.dumps({"format": "pdf"}).encode("utf-8"), dest_dir=str(tmp_path)
+    )
     assert status == 400
     assert data["ok"] is False
 
 
 def test_export_favorites_empty_list_ok(fav_db, tmp_path):
-    data, status = fav_db.export_favorites(
-        json.dumps({}).encode("utf-8"), dest_dir=str(tmp_path))
+    data, status = fav_db.export_favorites(json.dumps({}).encode("utf-8"), dest_dir=str(tmp_path))
     assert status == 200
     assert data["ok"] is True and data["count"] == 0
 
@@ -1158,7 +1223,8 @@ def test_favorites_panel_lifecycle_hooks_at_component_top_level():
     # object, right after the methods block closes (comment lines allowed
     # in between).
     assert re.search(
-        r"\n    \},\n\n(?:    //[^\n]*\n)*    mounted: function \(\) \{", src,
+        r"\n    \},\n\n(?:    //[^\n]*\n)*    mounted: function \(\) \{",
+        src,
     ), "mounted must be a top-level component option (4-space indent)"
     assert re.search(r"\n    beforeUnmount: function \(\) \{", src)
     # No lifecycle hook left nested inside methods (6-space indent).
@@ -1175,10 +1241,9 @@ def test_export_endpoint_wiring_end_to_end():
     api_js = _read_repo_file("internal/web/static/js/api.js")
     assert "exportFavorites: function (format)" in api_js
     assert "'/api/favorites/export'" in api_js
-    panel = _read_repo_file(
-        "internal/web/static/components/favorites-panel.js")
+    panel = _read_repo_file("internal/web/static/components/favorites-panel.js")
     assert "ClipsyncAPI.exportFavorites('markdown')" in panel
-    assert "@click=\"exportFavorites\"" in panel
+    assert '@click="exportFavorites"' in panel
 
 
 def test_mobile_page_export_parity():
@@ -1225,7 +1290,9 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 _STATIC = os.path.join(
     os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-    "internal", "web", "static",
+    "internal",
+    "web",
+    "static",
 )
 
 _PAGES = ("mobile.html",)
@@ -1270,3 +1337,314 @@ def test_index_page_uses_correct_pattern_too():
         raw = f.read()
     assert "window.__I18N_LOCALE__ = __CLIPSYNC_I18N_LOCALE__;" in raw
     assert 'window."' not in _interpolate(raw)
+
+
+# ════════════════════════════════════════════════════════════════════════
+# Localized subprocess output must not crash the reader thread (GBK)
+# ════════════════════════════════════════════════════════════════════════
+
+
+def test_localized_subprocess_calls_do_not_use_ansi_text_mode():
+    """Localized Windows tool output is decoded by sniffing, never by text=True.
+
+    text=True decodes with the ANSI codepage, but netsh and PowerShell emit the
+    *console output* codepage — UTF-8 on plenty of Windows 11 boxes whose
+    GetACP() still reports 936.  That mismatch first crashed subprocess's
+    reader THREAD (traceback, EMPTY stdout/stderr, so a failing netsh reported
+    no reason at all) and then, once forced to errors="replace", turned the
+    elevation error into mojibake: "璇锋眰鐨勬搷浣�" is UTF-8
+    "请求的操作需要提升" read as GBK.
+    """
+    import inspect
+    import re
+
+    from internal.transport import discovery as disc
+    from internal.web import server as srv
+
+    for mod, label in ((srv, "web/server.py"), (disc, "transport/discovery.py")):
+        src = inspect.getsource(mod)
+        calls = re.findall(r"subprocess\.run\((?:[^()]|\([^()]*\))*\)", src)
+        localized = [c for c in calls if "netsh" in c or "Get-NetIPAddress" in c]
+        assert localized, f"{label}: no localized subprocess.run found"
+        for call in localized:
+            # Comments inside these calls explain the very flag we forbid, so
+            # match against code only.
+            code = "\n".join(ln.split("#")[0] for ln in call.splitlines())
+            assert "text=True" not in code, (
+                f"{label}: localized subprocess.run decodes with the ANSI codepage: {call[:120]}"
+            )
+        assert "decode_console_output" in src, (
+            f"{label}: captured bytes are never decoded by sniffing"
+        )
+
+
+def test_decode_console_output_handles_both_codepages():
+    """The same message must come out right whether netsh spoke UTF-8 or GBK."""
+    from internal.platform import decode_console_output
+
+    msg = "请求的操作需要提升(作为管理员运行)。"
+    # The bug that started this: netsh spoke UTF-8, we read GBK.
+    assert decode_console_output(msg.encode("utf-8")) == msg
+    # The reverse case only has a right answer where the platform owns a
+    # codepage that can represent these bytes (Chinese Windows).  Anywhere
+    # else no decoder could recover them, so all we require is no raise —
+    # this helper runs on a failure path and must never add a second failure.
+    gbk = msg.encode("gbk")
+    try:
+        recoverable = gbk.decode("oem") == msg or gbk.decode("mbcs") == msg
+    except (UnicodeDecodeError, LookupError):
+        recoverable = False
+    if recoverable:
+        assert decode_console_output(gbk) == msg
+    else:
+        assert decode_console_output(gbk)
+    # Degenerate inputs must never raise — this runs on a failure path.
+    assert decode_console_output(b"") == ""
+    assert decode_console_output(None) == ""
+    assert decode_console_output("already text") == "already text"
+    assert decode_console_output(b"\xff\xfe\x00garbage")
+
+
+def test_firewall_failure_log_names_a_cause():
+    """An empty netsh output is itself the signal (no admin rights), so the
+    warning must say so rather than printing a bare, reasonless message."""
+    import inspect
+
+    from internal.web import server as srv
+
+    src = inspect.getsource(srv)
+    assert "Failed to create firewall rule (exit %s)" in src
+    assert "not running as administrator" in src
+
+
+# ── Stage 4: web backend hardening ─────────────────────────────────────
+
+
+class TestRequestPathAliasesRoute:
+    """``//api/push`` must reach the same handler as ``/api/push``.
+
+    ``posixpath.normpath`` preserves exactly two leading slashes by design
+    (POSIX reserves ``//foo``), so the old canonicalisation left the alias
+    untouched and it fell through to a 404 — while every browser, proxy and
+    naive ``base + "/" + path`` join produces exactly that form.
+    """
+
+    def test_double_leading_slash_collapses(self):
+        from internal.web.server import _canonical_request_path as canon
+
+        assert canon("//api/push") == "/api/push"
+        assert canon("///api/push") == "/api/push"
+        assert canon("//") == "/"
+
+    def test_canonical_paths_are_unchanged(self):
+        from internal.web.server import _canonical_request_path as canon
+
+        assert canon("/api/push") == "/api/push"
+        assert canon("/") == "/"
+        assert canon("") == ""
+
+    def test_other_aliases_still_fold(self):
+        from internal.web.server import _canonical_request_path as canon
+
+        assert canon("/a//b") == "/a/b"
+        assert canon("/./index.html") == "/index.html"
+
+    def test_every_handler_uses_the_helper(self):
+        """All four verb handlers must canonicalise identically — a route that
+        skipped it would answer 404 for the same alias the others accept."""
+        import inspect
+
+        from internal.web import server as srv
+
+        src = inspect.getsource(srv)
+        assert src.count("path = _canonical_request_path(path)") == 4
+        assert "path = posixpath.normpath(path) if path else path" not in src
+
+
+class TestBadFieldTypesAre400NotCrash:
+    """``req.get("peer_id", "").strip()`` raised AttributeError on a non-string.
+
+    The outer safety net turned that into a 500 + traceback, which reads like
+    a server fault when it is really bad client input.
+    """
+
+    def test_str_field_reports_non_strings_as_absent(self):
+        from internal.web.routes import _str_field
+
+        assert _str_field({"peer_id": "  abc  "}, "peer_id") == "abc"
+        assert _str_field({"peer_id": 123}, "peer_id") == ""
+        assert _str_field({"peer_id": None}, "peer_id") == ""
+        assert _str_field({"peer_id": True}, "peer_id") == ""
+        assert _str_field({"peer_id": ["a"]}, "peer_id") == ""
+        assert _str_field({}, "peer_id") == ""
+
+    def test_str_field_does_not_coerce(self):
+        """Turning 123 into "123" would let a mistyped client keep working by
+        accident right up until it hit a peer_id that mattered."""
+        from internal.web.routes import _str_field
+
+        assert _str_field({"code": 4711}, "code") == ""
+
+    def test_numeric_peer_id_answers_400(self):
+        from internal.web.routes import dispatch
+
+        status, _ctype, raw = dispatch(
+            "POST",
+            "/api/device/forget",
+            {},
+            _body({"peer_id": 123}),
+            cfg=None,
+            history=None,
+            sync_mgr=None,
+            get_connected_ids=lambda: [],
+            on_nav_url=None,
+            on_forward_file=None,
+            upload_dir="",
+            on_device_action=lambda *a, **k: True,
+        )
+        assert status == 400
+        assert json.loads(raw)["error"] == "peer_id required"
+
+    def test_no_raw_strip_calls_survive_in_routes(self):
+        import inspect
+
+        from internal.web import routes
+
+        src = inspect.getsource(routes)
+        for field in ("peer_id", "action", "path", "dialog_id", "note", "code"):
+            assert f'req.get("{field}", "").strip()' not in src
+
+
+class TestWebSocketCloseActuallyCloses:
+    """``close()`` returned early whenever ``_closed`` was already True — and
+    the normal disconnect path sets it before close() is ever called, so the
+    socket was never released."""
+
+    def test_close_releases_socket_even_when_already_marked_closed(self):
+        a, b = socket.socketpair()
+        try:
+            client = WebSocketClient(a, ("127.0.0.1", 0))
+            client._closed = True  # what recv_frame does on EOF
+            client.close()
+            assert client._sock_closed is True
+            with pytest.raises(OSError):
+                a.send(b"x")
+        finally:
+            for s in (a, b):
+                with contextlib.suppress(OSError):
+                    s.close()
+
+    def test_close_sends_a_close_frame_while_peer_is_live(self):
+        a, b = socket.socketpair()
+        try:
+            client = WebSocketClient(a, ("127.0.0.1", 0))
+            client.close()
+            opcode, _payload = _read_frame(b)
+            assert opcode == 0x8  # CLOSE
+            assert client.closed is True
+        finally:
+            for s in (a, b):
+                with contextlib.suppress(OSError):
+                    s.close()
+
+    def test_close_is_idempotent(self):
+        a, b = socket.socketpair()
+        try:
+            client = WebSocketClient(a, ("127.0.0.1", 0))
+            client.close()
+            client.close()  # must not raise on the already-closed socket
+        finally:
+            for s in (a, b):
+                with contextlib.suppress(OSError):
+                    s.close()
+
+    def test_serve_closes_the_socket_when_the_peer_vanishes(self):
+        a, b = socket.socketpair()
+        try:
+            client = WebSocketClient(a, ("127.0.0.1", 0))
+            b.close()  # peer disconnects -> recv_frame sets _closed
+            client.serve()
+            assert client._sock_closed is True
+        finally:
+            for s in (a, b):
+                with contextlib.suppress(OSError):
+                    s.close()
+
+
+class TestKeepaliveDropsOnFailedPing:
+    """``send_ping()`` swallows OSError and returns False rather than raising,
+    so the old bare ``try/except`` around it never fired."""
+
+    def test_failed_ping_is_collected_immediately(self):
+        a, b = socket.socketpair()
+        mgr = WebSocketManager(cfg=None, history=None, sync_mgr=None, get_connected_ids=lambda: [])
+        try:
+            client = WebSocketClient(a, ("127.0.0.1", 0))
+            # Fresh client: it would survive the 90s silence window.
+            client.last_recv = time.monotonic()
+            a.close()  # sending now fails -> send_ping() returns False
+            with mgr._lock:
+                mgr._clients.append(client)
+            stale = mgr._ping_and_collect_stale()
+            assert client in stale
+        finally:
+            mgr.shutdown()
+            for s in (a, b):
+                with contextlib.suppress(OSError):
+                    s.close()
+
+    def test_live_client_is_not_collected(self):
+        a, b = socket.socketpair()
+        mgr = WebSocketManager(cfg=None, history=None, sync_mgr=None, get_connected_ids=lambda: [])
+        try:
+            client = WebSocketClient(a, ("127.0.0.1", 0))
+            client.last_recv = time.monotonic()
+            with mgr._lock:
+                mgr._clients.append(client)
+            assert mgr._ping_and_collect_stale() == []
+        finally:
+            mgr.shutdown()
+            for s in (a, b):
+                with contextlib.suppress(OSError):
+                    s.close()
+
+
+class TestUploadCollisionIsAtomic:
+    """The exists()-then-open() loop was a TOCTOU: two uploads racing on one
+    filename both saw the name free and the second overwrote the first."""
+
+    def test_upload_uses_o_excl_not_exists_probe(self):
+        import inspect
+
+        from internal.web import server as srv
+
+        src = inspect.getsource(srv)
+        assert "os.O_EXCL" in src
+        assert "while os.path.exists(dest):" not in src
+
+    def test_o_excl_refuses_an_existing_name(self, tmp_path):
+        """The property the fix relies on: the kernel, not a prior probe,
+        decides who owns the name."""
+        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_BINARY", 0)
+        target = tmp_path / "note.txt"
+        fd = os.open(str(target), flags, 0o644)
+        os.close(fd)
+        with pytest.raises(FileExistsError):
+            os.open(str(target), flags, 0o644)
+
+
+class TestFactoryResetMarkerSurvivesAssetRequests:
+    """The marker is one-shot and only the HTML branch interpolates the flag,
+    yet it was unlinked while serving .js/.css too — and the browser fetches
+    those alongside (often before) the page, so the reset never reached the UI."""
+
+    def test_marker_consumption_is_gated_on_is_html(self):
+        import inspect
+
+        from internal.web import server as srv
+
+        src = inspect.getsource(srv)
+        assert "if is_html and marker.exists():" in src
+        assert "if is_html and fresh_marker.exists():" in src
+        assert "if marker.exists():" not in src
+        assert "if fresh_marker.exists():" not in src

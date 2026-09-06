@@ -195,8 +195,102 @@ def test_locale_key_sets_identical():
 def test_node_check_touched_files():
     if not _has_node():
         pytest.skip("node not available")
-    for rel in ("js/store.js", "js/app.js", "components/history-item.js",
-                "components/history-panel.js"):
+    for rel in (
+        "js/store.js",
+        "js/app.js",
+        "components/history-item.js",
+        "components/history-panel.js",
+    ):
+        subprocess.run(
+            ["node", "--check", os.path.join(_STATIC, rel)],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+
+
+# ═════════════════════════════════════════════════════════════════════════
+# Stage 6 — frontend: stale-snapshot guard, confirm parity, cancel handling
+# ═════════════════════════════════════════════════════════════════════════
+
+
+def test_app_load_devices_drops_a_stale_snapshot():
+    """devices_updated is edge-triggered on the server, so a GET response that
+    overwrites a fresher WS push would never be corrected — the list stays
+    wrong until the NEXT real change, which may never come.  device-panel's
+    refresh() already guards this; app.js's loadDevices did not."""
+    app = _read("js", "app.js")
+    body = app.split("loadDevices: function")[1].split("loadFavorites: function")[0]
+    assert "var startTick = store.devicesMutationTick;" in body, (
+        "the tick must be recorded before the request goes out"
+    )
+    assert "store.devicesMutationTick !== startTick" in body, (
+        "and re-checked before the snapshot is written"
+    )
+    # The guard has to come before the write, or it guards nothing.
+    assert body.index("devicesMutationTick !== startTick") < body.index("store.devices.push("), (
+        "the check must precede the list write"
+    )
+
+
+def test_keyboard_delete_confirms_like_every_other_delete_path():
+    """history-item.js already claims "the inline trash and the
+    Delete/Backspace key are permanent... every other delete path confirms
+    first" — the Delete/Backspace path was the one that didn't, so a
+    mis-aimed keypress wiped a row with no way back."""
+    app = _read("js", "app.js")
+    body = app.split("_deleteKbdItem: function")[1]
+    assert "store.confirm(" in body, "the keyboard delete must confirm first"
+    assert body.index("store.confirm(") < body.index("ClipsyncAPI.deleteItem("), (
+        "the confirm must gate the request, not follow it"
+    )
+    assert "history.delete_title" in body and "history.delete_confirm" in body, (
+        "reuse the same strings as the inline trash so the two agree"
+    )
+
+
+def test_cancelling_a_confirm_is_not_an_unhandled_rejection():
+    """store.confirm() REJECTS on cancel.  A chain with no tail .catch turns
+    every "no, don't delete that" into an unhandled promise rejection —
+    console noise in the browser, and a hard failure under any page that
+    treats unhandled rejections as errors."""
+    for rel, marker in (
+        (("js", "app.js"), "_deleteKbdItem: function"),
+        (("components", "history-item.js"), "deleteItem: function"),
+        (("components", "favorite-item.js"), "removeFavorite: function"),
+    ):
+        body = _read(*rel).split(marker)[1].split("\n      },")[0]
+        assert ".catch(function () {})" in body, (
+            f"{rel[-1]} {marker}: the confirm chain needs a tail .catch "
+            "(pattern: history-panel.js clearAll)"
+        )
+
+
+def test_chat_panel_cleans_up_its_typing_timer():
+    """The peer-typing deadline is a 4.5s timer that writes component state.
+    Switching tabs unmounts the panel while it is still armed, so it fired
+    against a dead instance — and on a fast tab-flip the stale timer from the
+    previous mount could clear the indicator the new mount had just set."""
+    panel = _read("components", "chat-panel.js")
+    assert "beforeUnmount: function" in panel, "chat-panel must clean up on unmount"
+    body = panel.split("beforeUnmount: function")[1].split("\n    template:")[0]
+    assert "clearTimeout(this._peerTypingTimer)" in body
+    assert "this._peerTypingTimer = null" in body
+    # Leaving the tab must also retract our own "typing…" flag, or the peer
+    # stares at it until the server-side deadline expires.
+    assert "sendTypingState(false)" in body
+
+
+def test_node_check_stage6_touched_files():
+    if not _has_node():
+        pytest.skip("node not available")
+    for rel in (
+        "js/app.js",
+        "js/ws.js",
+        "components/history-item.js",
+        "components/favorite-item.js",
+        "components/chat-panel.js",
+    ):
         subprocess.run(
             ["node", "--check", os.path.join(_STATIC, rel)],
             check=True,

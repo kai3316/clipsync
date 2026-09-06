@@ -38,7 +38,11 @@
     data: function () {
       return {
         refreshing: false,
-        pairingResponding: null,
+        // {peer_id: true} for every pairing response still in flight.  Two
+        // requests can be pending at once, so a single scalar would let the
+        // second one re-enable the first one's buttons (and the first reply
+        // to finish would re-enable the other, still-running one).
+        pairingResponding: {},
         // True when the last device-list fetch rejected — distinguishes
         // "loaded and empty" from "could not load at all".
         loadFailed: false,
@@ -51,7 +55,7 @@
         netpairConfirming: false,
         netpairError: '',
         netpairBusy: false,       // a rename/unpair request is in flight
-        netpairTesting: false,    // the "test connection" probe is in flight
+        netpairTestingId: '',     // peer_id whose "test connection" probe is in flight
         netpairExpanded: true,    // default expanded; fold it if the page is busy
         _netpairLoadInFlight: false,
         netpairClockTimer: null,  // refreshes relative "last sync" times
@@ -232,14 +236,14 @@
                   '<span class="pairing-request-card__hint">{{ t(\'devices.pairing_expiry_hint\') }}</span>' +
                 '</div>' +
                 '<div class="pairing-request-card__actions">' +
-                  '<button v-if="pr.status !== \'confirmed_waiting\' && pr.status !== \'expired\'" class="device-card__action device-card__action--accent" @click="acceptPairing(pr)" :disabled="pairingResponding === pr.peer_id">' +
-                    '{{ pairingResponding === pr.peer_id ? \'...\' : t(\'ui.confirm\') }}' +
+                  '<button v-if="pr.status !== \'confirmed_waiting\' && pr.status !== \'expired\'" class="device-card__action device-card__action--accent" @click="acceptPairing(pr)" :disabled="!!pairingResponding[pr.peer_id]">' +
+                    '{{ pairingResponding[pr.peer_id] ? \'...\' : t(\'ui.confirm\') }}' +
                   '</button>' +
                   // Expired is not "confirmed, waiting for the other device" —
                   // label it honestly as expired (same state the hint shows).
                   '<span v-else class="pairing-request-card__waiting">⏳ {{ t(pr.status === \'expired\' ? \'pairing.state.expired\' : \'pairing.state.confirmed_waiting\') }}</span>' +
-                  '<button class="device-card__action device-card__action--danger" @click="rejectPairing(pr)" :disabled="pairingResponding === pr.peer_id">' +
-                    '{{ pairingResponding === pr.peer_id ? \'...\' : t(\'ui.reject\') }}' +
+                  '<button class="device-card__action device-card__action--danger" @click="rejectPairing(pr)" :disabled="!!pairingResponding[pr.peer_id]">' +
+                    '{{ pairingResponding[pr.peer_id] ? \'...\' : t(\'ui.reject\') }}' +
                   '</button>' +
                 '</div>' +
               '</div>' +
@@ -421,7 +425,7 @@
                     '<span class="netpair-peer__last-seen">· {{ lastSeenText(peer) }}</span>' +
                   '</div>' +
                   '<div class="netpair-peer__actions">' +
-                    '<button class="btn-ghost" @click="testNetpairPeer(peer)" :disabled="netpairBusy || netpairTesting">{{ netpairTesting ? \'...\' : t(\'device.test_connection\') }}</button>' +
+                    '<button class="btn-ghost" @click="testNetpairPeer(peer)" :disabled="netpairBusy || netpairTestingId === peer.peer_id">{{ netpairTestingId === peer.peer_id ? \'...\' : t(\'device.test_connection\') }}</button>' +
                     '<button class="btn-ghost" @click="renamePeer(peer)" :disabled="netpairBusy">{{ t(\'devices.netpair_rename\') }}</button>' +
                     '<button class="btn-ghost btn-danger" @click="unpairPeer(peer)" :disabled="netpairBusy">{{ t(\'devices.netpair_unpair\') }}</button>' +
                   '</div>' +
@@ -685,22 +689,12 @@
             self.netpairConfirming = false;
             if (res && res.ok) {
               self.netpairCodeInput = '';
-              var peerId = res.peer_id;
-              // Refresh the list, then toast with the peer's name once known
-              // (fall back to its id on a degraded backend).
-              self.store.fetchInternetPairStatus().finally(function () {
-                var name = peerId;
-                var list = self.store.internetPairPeers || [];
-                for (var i = 0; i < list.length; i++) {
-                  if (String(list[i].peer_id) === String(peerId)) {
-                    name = list[i].name || peerId;
-                    break;
-                  }
-                }
-                self.store.showToast(
-                  self.t('settings_window.netpair_paired_toast', { name: name }),
-                  3000, 'success');
-              });
+              // The paired peer + its name arrive via the WS netpair_peer
+              // broadcast (→ store.applyNetpairPeer), which fires the single
+              // "paired" toast for BOTH sides.  Refresh the list here so the
+              // new peer row appears without waiting on the broadcast; no
+              // local toast — it would duplicate the WS one.
+              self.store.fetchInternetPairStatus();
             } else {
               self._setNetpairError(self.t('devices.netpair_error_invalid'));
             }
@@ -726,12 +720,17 @@
       // The endpoint + result formatting live in the shared store helper,
       // which the LAN device card's test action also delegates to — this
       // method only owns the busy flag.
+      //
+      // The flag holds the peer_id being probed, not a bare boolean: a shared
+      // boolean made ONE click grey out and spin the test button on EVERY row
+      // in the list, so several devices looked stuck when only one was busy.
       testNetpairPeer: function (peer) {
         var self = this;
-        if (self.netpairTesting) return;
-        self.netpairTesting = true;
+        if (!peer || !peer.peer_id) return;
+        if (self.netpairTestingId) return;
+        self.netpairTestingId = peer.peer_id;
         self.store.testPeerConnection(peer.peer_id).finally(function () {
-          self.netpairTesting = false;
+          self.netpairTestingId = '';
         });
       },
 
@@ -856,10 +855,16 @@
       refresh: function () {
         var self = this;
         this.refreshing = true;
+        // devices_updated is edge-triggered on the server (it only fires when
+        // the device fingerprint changes), so a stale GET response that
+        // overwrites a fresher WS push would never be corrected.  Record the
+        // tick now and drop our snapshot if a push landed while we waited.
+        var startTick = this.store.devicesMutationTick;
         ClipsyncAPI.getDevices()
           .then(function (res) {
             self.loadFailed = false;
             self.store.devicesLoadFailed = false;
+            if (self.store.devicesMutationTick !== startTick) return;
             if (res && res.devices) {
               self.store.devices = res.devices;
             }
@@ -907,9 +912,18 @@
           self.t('device.pairing_confirm_msg')
         )
           .then(function () {
-            self.pairingResponding = pr.peer_id;
+            self.pairingResponding[pr.peer_id] = true;
             ClipsyncAPI.sendPairingResponse(pr.peer_id, 'confirm', pr.code || '')
-              .then(function () {
+              .then(function (res) {
+                if (!res || !res.ok) {
+                  // {ok:false} (expired / code mismatch / peer cancelled) must
+                  // not look like a successful confirm.  Re-read the server
+                  // state too, or the card keeps showing the stale request
+                  // that just failed.
+                  self.store.showToast(self.t('device.pairing_failed'), 2000);
+                  self.refresh();
+                  return;
+                }
                 // Do NOT splice the card here: confirmation is two-sided, so
                 // the server keeps it in "waiting for the other device" until
                 // the peer confirms.  Refresh re-renders it with the waiting
@@ -920,19 +934,29 @@
                 self.store.showToast(self.t('device.pairing_failed'), 2000);
               })
               .finally(function () {
-                self.pairingResponding = null;
+                delete self.pairingResponding[pr.peer_id];
               });
           })
-          .catch(function () {
-            // User cancelled the confirm dialog — do nothing.
+          .catch(function (reason) {
+            // A deliberate cancel is a no-op.  Anything else means the dialog
+            // was torn down under the user (a server-pushed dialog superseded
+            // it), so the Confirm click would otherwise vanish with no sign.
+            if (reason && reason !== 'cancel') {
+              self.store.showToast(self.t('device.pairing_failed'), 2000);
+            }
           });
       },
 
       rejectPairing: function (pr) {
-        this.pairingResponding = pr.peer_id;
+        this.pairingResponding[pr.peer_id] = true;
         var self = this;
         ClipsyncAPI.sendPairingResponse(pr.peer_id, 'reject', '')
-          .then(function () {
+          .then(function (res) {
+            if (!res || !res.ok) {
+              self.store.showToast(self.t('device.pairing_failed'), 2000);
+              self.refresh();
+              return;
+            }
             var idx = self.store.pairingRequests.findIndex(function (r) {
               return r.peer_id === pr.peer_id;
             });
@@ -944,7 +968,7 @@
             self.store.showToast(self.t('device.pairing_failed'), 2000);
           })
           .finally(function () {
-            self.pairingResponding = null;
+            delete self.pairingResponding[pr.peer_id];
           });
       },
     },

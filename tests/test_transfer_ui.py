@@ -109,8 +109,7 @@ def test_transfers_poll_runs_while_active():
 
 def test_transfer_controls_honour_ok_false():
     src = _read("components", "transfer-panel.js")
-    for method in ("cancelTransfer", "pauseTransfer", "resumeTransfer",
-                   "retryTransfer", "cancelAllTransfers"):
+    for method in ("cancelTransfer", "pauseTransfer", "resumeTransfer", "cancelAllTransfers"):
         assert method + ": function" in src
         chunk = src.split(method + ": function")[1]
         assert "res.ok === false" in chunk, method
@@ -126,8 +125,17 @@ def test_cancel_transfer_does_not_mutate_on_failure():
 
 
 def test_retry_uses_dedicated_failure_toast():
-    src = _read("components", "transfer-panel.js")
-    assert "transfer.retry_failed" in src
+    # The API call + ok:false guard + failure toast live in the SHARED store
+    # helper, because the history row's context menu ("重新发送") delegates to
+    # the same code path as the row's Retry button — one source, no drift.
+    store = _read("js", "store.js")
+    retry = store.split("retryTransfer: function")[1]
+    assert "res.ok === false" in retry
+    assert "transfer.retry_failed" in retry
+    # The panel keeps only the double-click guard and delegates the rest.
+    panel = _read("components", "transfer-panel.js")
+    assert "store.retryTransfer(id)" in panel
+    assert "retryBusyId" in panel
 
 
 # ── 5. Single source for transfer reconcile ─────────────────────────────
@@ -183,11 +191,19 @@ def test_dead_transfer_locale_keys_removed_and_parity():
 
 def test_dead_transfer_card_css_removed():
     html = _read("index.html")
-    for dead in ("transfer-card__icon", "transfer-card__info", "transfer-card__name",
-                 "transfer-card__meta", "transfer-card__peer", "transfer-card__speed",
-                 "transfer-card__size", "transfer-card__progress-track",
-                 "transfer-card__progress-fill", "transfer-card__pct",
-                 "transfer-card--done"):
+    for dead in (
+        "transfer-card__icon",
+        "transfer-card__info",
+        "transfer-card__name",
+        "transfer-card__meta",
+        "transfer-card__peer",
+        "transfer-card__speed",
+        "transfer-card__size",
+        "transfer-card__progress-track",
+        "transfer-card__progress-fill",
+        "transfer-card__pct",
+        "transfer-card--done",
+    ):
         assert dead not in html, f"dead CSS {dead} still present"
     # The two classes the current panel actually uses survive.
     assert "transfer-card__header" in html

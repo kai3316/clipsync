@@ -99,13 +99,8 @@ body::before {
     radial-gradient(ellipse 60% 45% at 12% -10%, var(--violet-glow), transparent),
     radial-gradient(ellipse 60% 45% at 88% -10%, var(--pink-glow), transparent),
     radial-gradient(ellipse 80% 55% at 50% -20%, var(--accent-glow), transparent);
-  animation: mAurora 18s ease-in-out infinite alternate;
-}
-
-@keyframes mAurora {
-  0%   { transform: translate3d(0,0,0) scale(1); }
-  50%  { transform: translate3d(-3%,2%,0) scale(1.06); }
-  100% { transform: translate3d(3%,-2%,0) scale(1.04); }
+  /* Static wash — the drift animation is removed on mobile to save battery
+     (a phone repaints the full-screen fixed layer every frame for 18s loops). */
 }
 
 .app { position: relative; z-index: 1; display: flex; flex-direction: column; height: 100%; }
@@ -393,8 +388,8 @@ body::before {
 
 .f-item__delete {
   flex-shrink: 0;
-  width: 40px;
-  height: 40px;
+  width: 44px;
+  height: 44px;
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -441,7 +436,7 @@ body::before {
 
 .upload-progress__cancel {
   flex-shrink: 0;
-  min-height: 36px;
+  min-height: 44px;
   padding: 10px 14px;
   font-size: 12px;
   font-weight: 600;
@@ -469,10 +464,14 @@ body.light {
   --fg: #18233A;
   --fg-muted: #46536E;
   --fg-subtle: #72809C;
-  --accent-glow: rgba(8,145,178,0.16);
-  --accent-glow-strong: rgba(8,145,178,0.30);
+  --accent: #0E7490;
+  --accent-2: #7C3AED;
+  --accent-glow: rgba(14,116,144,0.16);
+  --accent-glow-strong: rgba(14,116,144,0.30);
   --violet-glow: rgba(124,58,237,0.14);
   --pink-glow: rgba(219,39,119,0.12);
+  --success: #047857;
+  --danger: #BE123C;
   --border: rgba(30,50,90,0.10);
   --border-strong: rgba(30,50,90,0.18);
 }
@@ -542,7 +541,7 @@ body.light .upload-btn {
 
 .chat-btn {
   flex-shrink: 0;
-  min-height: 36px;
+  min-height: 44px;
   padding: 8px 14px;
   border: none;
   border-radius: var(--radius-sm);
@@ -681,7 +680,7 @@ body.light .upload-btn {
 .chat-file__actions { display: flex; gap: 6px; flex-shrink: 0; flex-wrap: wrap; }
 
 .chat-action-btn {
-  min-height: 34px;
+  min-height: 44px;
   padding: 6px 12px;
   border: none;
   border-radius: var(--radius-sm);
@@ -726,7 +725,7 @@ body.light .upload-btn {
 .chat-composer__input:focus { border-color: var(--accent); }
 .chat-composer__send {
   flex-shrink: 0;
-  min-height: 42px;
+  min-height: 44px;
   padding: 0 18px;
   border: none;
   border-radius: 21px;
@@ -788,7 +787,7 @@ body.light .upload-btn {
 .tr-item__actions { display: flex; flex-direction: column; gap: 6px; flex-shrink: 0; }
 
 .tr-btn {
-  min-height: 36px;
+  min-height: 44px;
   padding: 7px 13px;
   border: none;
   border-radius: var(--radius-sm);
@@ -875,7 +874,7 @@ body.light .upload-btn {
 }
 
 .hist-clear {
-  min-height: 34px;
+  min-height: 44px;
   padding: 6px 14px;
   border: 1px solid var(--border);
   border-radius: 17px;
@@ -930,7 +929,7 @@ body.light .upload-btn {
 }
 
 .tr-cancelall {
-  min-height: 34px;
+  min-height: 44px;
   padding: 6px 13px;
   border: 1px solid rgba(255,64,96,0.35);
   border-radius: 17px;
@@ -1115,7 +1114,7 @@ body.light .upload-btn {
 .set-row__value { color: var(--fg-muted); text-align: right; min-width: 0; word-break: break-all; }
 
 .set-toggle {
-  min-height: 36px;
+  min-height: 44px;
   padding: 7px 16px;
   border: none;
   border-radius: 18px;
@@ -1419,6 +1418,11 @@ body.light .upload-btn {
 <!-- Chat attachment picker — separate from the Files-tab input so an
      in-flight chat send never disturbs the files upload queue state. -->
 <input type="file" id="chatFileInput" style="display:none">
+
+<!-- Shared size/speed/ETA formatting, same module the dashboard uses.  It is a
+     plain IIFE with no framework dependency, so this vanilla-JS page can load
+     it directly instead of keeping its own copy of the same three functions. -->
+<script src="js/format.js?token=__TOKEN__"></script>
 
 <script>
 (function () {
@@ -2644,18 +2648,11 @@ body.light .upload-btn {
   /* ── Shared formatting helpers ──────────────────────────────── */
 
   function fmtSize(bytes) {
-    if (!bytes && bytes !== 0) return '';
-    if (bytes < 1024) return bytes + ' B';
-    if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + ' KB';
-    if (bytes < 1024 * 1024 * 1024) return (bytes / (1024 * 1024)).toFixed(1) + ' MB';
-    return (bytes / (1024 * 1024 * 1024)).toFixed(2) + ' GB';
+    return ClipsyncFormat.size(bytes);
   }
 
   function fmtSpeed(bytesPerSec) {
-    if (!bytesPerSec || bytesPerSec <= 0) return '';
-    if (bytesPerSec < 1024) return Math.round(bytesPerSec) + ' B/s';
-    if (bytesPerSec < 1024 * 1024) return (bytesPerSec / 1024).toFixed(1) + ' KB/s';
-    return (bytesPerSec / (1024 * 1024)).toFixed(1) + ' MB/s';
+    return ClipsyncFormat.speed(bytesPerSec);
   }
 
   function pad2(n) { return (n < 10 ? '0' : '') + n; }
@@ -3814,7 +3811,12 @@ body.light .upload-btn {
   }
 
   function applyTheme() {
-    document.body.classList.toggle('light', isLightTheme());
+    var light = isLightTheme();
+    document.body.classList.toggle('light', light);
+    // Keep the browser UI chrome (address-bar tint on Android, iOS status
+    // bar) in step with the app theme instead of always using the dark value.
+    var meta = document.querySelector('meta[name="theme-color"]');
+    if (meta) meta.setAttribute('content', light ? '#E9EDF5' : '#05060D');
   }
 
   function themeLabel() {

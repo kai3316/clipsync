@@ -298,20 +298,28 @@
 
       removeFavorite: function () {
         var self = this;
-        ClipsyncAPI.deleteFavorite(this.item.id).then(function (res) {
-          if (res && res.ok !== false) {
-            var idx = self.store.favorites.findIndex(function (f) {
-              return f.id === self.item.id;
+        // Confirm — removing a saved favorite is destructive and permanent,
+        // matching the favorite-group delete and history-delete paths.
+        this.store.confirm(this.t('favorites.remove_title'), this.t('favorites.remove_confirm'))
+          .then(function () {
+            ClipsyncAPI.deleteFavorite(self.item.id).then(function (res) {
+              if (res && res.ok !== false) {
+                var idx = self.store.favorites.findIndex(function (f) {
+                  return f.id === self.item.id;
+                });
+                if (idx !== -1) {
+                  self.store.favorites.splice(idx, 1);
+                }
+                self.store.showToast(self.t('favorites.removed'), 1500);
+              } else {
+                self.store.showToast(self.t('favorites.remove_failed'), 2000);
+              }
+            }).catch(function (e) {
+              console.error('[ClipSync] Remove favorite failed:', e);
+              self.store.showToast(self.t('favorites.remove_failed'), 2000);
             });
-            if (idx !== -1) {
-              self.store.favorites.splice(idx, 1);
-            }
-            self.store.showToast(self.t('favorites.removed'), 1500);
-          }
-        }).catch(function (e) {
-          console.error('[ClipSync] Remove favorite failed:', e);
-          self.store.showToast(self.t('favorites.remove_failed'), 2000);
-        });
+          })
+          .catch(function () {});  // cancelled — not an error
       },
 
       toggleGroupDropdown: function () {
@@ -360,6 +368,8 @@
             }
             var label = isUngrouped ? self.t('favorites.ungrouped') : group;
             self.store.showToast(self.t('favorites.moved_to', { group: label }), 1500);
+          } else {
+            self.store.showToast(self.t('favorites.move_failed'), 2000);
           }
         }).catch(function (e) {
           console.error('[ClipSync] Change group failed:', e);

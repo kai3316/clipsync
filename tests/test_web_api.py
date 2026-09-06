@@ -53,7 +53,8 @@ def _isolate(monkeypatch):
     # update_settings persists through this helper (enc_mgr is None on this
     # path); a no-op keeps the stub _Cfg from overwriting real config data.
     monkeypatch.setattr(
-        settings_api, "_persist_preserving_at_rest_private_key",
+        settings_api,
+        "_persist_preserving_at_rest_private_key",
         lambda cfg: None,
     )
     yield
@@ -66,26 +67,40 @@ def _noop_persist(monkeypatch):
 
 def _post_pause(cfg, minutes=15, on_settings_change=None):
     return dispatch(
-        "POST", "/api/sync/pause",
-        {}, json.dumps({"minutes": minutes}).encode("utf-8"),
-        cfg=cfg, history=None, sync_mgr=None,
-        get_connected_ids=lambda: [], upload_dir=".",
-        on_nav_url=None, on_forward_file=None,
+        "POST",
+        "/api/sync/pause",
+        {},
+        json.dumps({"minutes": minutes}).encode("utf-8"),
+        cfg=cfg,
+        history=None,
+        sync_mgr=None,
+        get_connected_ids=lambda: [],
+        upload_dir=".",
+        on_nav_url=None,
+        on_forward_file=None,
         on_settings_change=on_settings_change,
     )
 
 
 def _post_resume(cfg, on_settings_change=None):
     return dispatch(
-        "POST", "/api/sync/resume", {}, b"{}",
-        cfg=cfg, history=None, sync_mgr=None,
-        get_connected_ids=lambda: [], upload_dir=".",
-        on_nav_url=None, on_forward_file=None,
+        "POST",
+        "/api/sync/resume",
+        {},
+        b"{}",
+        cfg=cfg,
+        history=None,
+        sync_mgr=None,
+        get_connected_ids=lambda: [],
+        upload_dir=".",
+        on_nav_url=None,
+        on_forward_file=None,
         on_settings_change=on_settings_change,
     )
 
 
 # ── 1a. Pause endpoint ────────────────────────────────────────────────
+
 
 def test_pause_disables_sync_and_sets_deadline(monkeypatch):
     cfg = _Cfg()
@@ -93,9 +108,9 @@ def test_pause_disables_sync_and_sets_deadline(monkeypatch):
     applied = []
 
     status, _ct, body_b = _post_pause(
-        cfg, minutes=15,
-        on_settings_change=lambda updated, special: applied.append(
-            dict(updated)),
+        cfg,
+        minutes=15,
+        on_settings_change=lambda updated, special: applied.append(dict(updated)),
     )
     data = json.loads(body_b)
 
@@ -118,9 +133,9 @@ def test_pause_when_already_paused_attaches_timer_without_flip(monkeypatch):
     applied = []
 
     status, _ct, body_b = _post_pause(
-        cfg, minutes=30,
-        on_settings_change=lambda updated, special: applied.append(
-            dict(updated)),
+        cfg,
+        minutes=30,
+        on_settings_change=lambda updated, special: applied.append(dict(updated)),
     )
 
     assert status == 200
@@ -161,16 +176,24 @@ def test_pause_rejects_out_of_range_minutes(monkeypatch, minutes):
 def test_pause_invalid_json_400():
     cfg = _Cfg()
     status, _ct, body_b = dispatch(
-        "POST", "/api/sync/pause", {}, b"{not-json",
-        cfg=cfg, history=None, sync_mgr=None,
-        get_connected_ids=lambda: [], upload_dir=".",
-        on_nav_url=None, on_forward_file=None,
+        "POST",
+        "/api/sync/pause",
+        {},
+        b"{not-json",
+        cfg=cfg,
+        history=None,
+        sync_mgr=None,
+        get_connected_ids=lambda: [],
+        upload_dir=".",
+        on_nav_url=None,
+        on_forward_file=None,
     )
     assert status == 400
     assert json.loads(body_b)["ok"] is False
 
 
 # ── 1b. Resume endpoint ───────────────────────────────────────────────
+
 
 def test_resume_reenables_sync_via_live_apply(monkeypatch):
     cfg = _Cfg()
@@ -181,8 +204,7 @@ def test_resume_reenables_sync_via_live_apply(monkeypatch):
 
     status, _ct, body_b = _post_resume(
         cfg,
-        on_settings_change=lambda updated, special: applied.append(
-            dict(updated)),
+        on_settings_change=lambda updated, special: applied.append(dict(updated)),
     )
     data = json.loads(body_b)
 
@@ -201,8 +223,7 @@ def test_resume_with_sync_already_on_only_clears_deadline(monkeypatch):
 
     status, _ct, body_b = _post_resume(
         cfg,
-        on_settings_change=lambda updated, special: applied.append(
-            dict(updated)),
+        on_settings_change=lambda updated, special: applied.append(dict(updated)),
     )
 
     assert status == 200
@@ -213,17 +234,17 @@ def test_resume_with_sync_already_on_only_clears_deadline(monkeypatch):
 
 # ── 1c. Stale-timer guard ─────────────────────────────────────────────
 
+
 def test_stale_timer_is_noop_after_explicit_toggle(monkeypatch):
     """An explicit toggle anywhere zeroes timed_pause_until; a stale armed
     timer firing later must not resurrect/kill that state."""
     cfg = _Cfg()
-    cfg.timed_pause_until = 12345.0   # some other (newer/cleared) state
-    cfg.sync_enabled = True           # user re-enabled manually meanwhile
+    cfg.timed_pause_until = 12345.0  # some other (newer/cleared) state
+    cfg.sync_enabled = True  # user re-enabled manually meanwhile
     _noop_persist(monkeypatch)
     calls = []
 
-    sync_control._fire_resume(
-        cfg, lambda u, s: calls.append(dict(u)), deadline=999.0)
+    sync_control._fire_resume(cfg, lambda u, s: calls.append(dict(u)), deadline=999.0)
 
     assert calls == []
 
@@ -236,7 +257,8 @@ def test_timer_fires_resume_only_for_matching_deadline(monkeypatch):
     calls = []
 
     sync_control._fire_resume(
-        cfg, lambda u, s: calls.append(dict(u)),
+        cfg,
+        lambda u, s: calls.append(dict(u)),
         deadline=cfg.timed_pause_until,
     )
 
@@ -279,7 +301,8 @@ def test_superseded_timer_does_not_fire(monkeypatch):
     _noop_persist(monkeypatch)
     seen = []
     monkeypatch.setattr(
-        sync_control, "resume_sync",
+        sync_control,
+        "resume_sync",
         lambda body, c, cb=None: seen.append(True) or ({"ok": True}, 200),
     )
 
@@ -290,6 +313,7 @@ def test_superseded_timer_does_not_fire(monkeypatch):
 
 
 # ── 1d. Settings exposure ─────────────────────────────────────────────
+
 
 def test_get_settings_exposes_timed_pause_until_readonly():
     cfg = _Cfg()
@@ -309,6 +333,7 @@ def test_get_settings_exposes_timed_pause_until_readonly():
 
 
 # ── 1e. Onboarding wizard freshness bug (user-reported) ──────────────
+
 
 class _RecordingWsManager:
     def __init__(self):
@@ -342,17 +367,25 @@ def test_restore_broadcasts_onboarding_when_config_goes_fresh(monkeypatch):
     dlg = _FakeDialogMgr()
 
     status, _ct, body_b = dispatch(
-        "POST", "/api/restore", {},
+        "POST",
+        "/api/restore",
+        {},
         json.dumps({"backup_path": "whatever.zip"}).encode("utf-8"),
-        cfg=cfg, history=None, sync_mgr=None,
-        get_connected_ids=lambda: [], upload_dir=".",
-        on_nav_url=None, on_forward_file=None, dialog_mgr=dlg,
+        cfg=cfg,
+        history=None,
+        sync_mgr=None,
+        get_connected_ids=lambda: [],
+        upload_dir=".",
+        on_nav_url=None,
+        on_forward_file=None,
+        dialog_mgr=dlg,
     )
 
     assert status == 200
     assert json.loads(body_b)["ok"] is True
     assert dlg.ws_manager.calls == [("onboarding_required", None)] or [
-        c[0] for c in dlg.ws_manager.calls] == ["onboarding_required"]
+        c[0] for c in dlg.ws_manager.calls
+    ] == ["onboarding_required"]
 
 
 def test_restore_no_broadcast_when_config_stays_chosen(monkeypatch):
@@ -370,11 +403,18 @@ def test_restore_no_broadcast_when_config_stays_chosen(monkeypatch):
     dlg = _FakeDialogMgr()
 
     dispatch(
-        "POST", "/api/restore", {},
+        "POST",
+        "/api/restore",
+        {},
         json.dumps({"backup_path": "whatever.zip"}).encode("utf-8"),
-        cfg=cfg, history=None, sync_mgr=None,
-        get_connected_ids=lambda: [], upload_dir=".",
-        on_nav_url=None, on_forward_file=None, dialog_mgr=dlg,
+        cfg=cfg,
+        history=None,
+        sync_mgr=None,
+        get_connected_ids=lambda: [],
+        upload_dir=".",
+        on_nav_url=None,
+        on_forward_file=None,
+        dialog_mgr=dlg,
     )
 
     assert dlg.ws_manager.calls == []
@@ -390,7 +430,8 @@ def test_web_language_choice_marks_language_chosen():
     cfg.language_chosen = False
 
     data, status = settings_api.update_settings(
-        json.dumps({"language": "zh-CN"}).encode(), cfg, None)
+        json.dumps({"language": "zh-CN"}).encode(), cfg, None
+    )
 
     assert status == 200
     assert data["updated"]["language"] == "zh-CN"
@@ -402,8 +443,7 @@ def test_web_language_choice_idempotent_when_already_chosen():
     cfg.language = "en"
     cfg.language_chosen = True
 
-    settings_api.update_settings(
-        json.dumps({"language": "en"}).encode(), cfg, None)
+    settings_api.update_settings(json.dumps({"language": "en"}).encode(), cfg, None)
 
     assert cfg.language_chosen is True
 
@@ -463,8 +503,7 @@ def test_device_test_connection_ui_wired():
 
 
 def test_overview_panel_pause_ui_wired():
-    panel = _read_repo_file(
-        "internal/web/static/components/overview-panel.js")
+    panel = _read_repo_file("internal/web/static/components/overview-panel.js")
     # Countdown computed from the exposed setting + local tick.
     assert "timed_pause_until" in panel
     assert "pauseLeftMin" in panel
@@ -475,8 +514,7 @@ def test_overview_panel_pause_ui_wired():
 
 
 def test_settings_search_box_wired():
-    panel = _read_repo_file(
-        "internal/web/static/components/settings-panel.js")
+    panel = _read_repo_file("internal/web/static/components/settings-panel.js")
     assert "searchQuery" in panel
     assert "SETTINGS_SEARCH_KEYS" in panel
     assert "onSearchEnter" in panel
@@ -536,6 +574,7 @@ from internal.web.ws import WebSocketClient, WebSocketManager
 
 # ── Helpers ────────────────────────────────────────────────────────────
 
+
 def _body(obj) -> bytes:
     return json.dumps(obj).encode("utf-8")
 
@@ -543,7 +582,10 @@ def _body(obj) -> bytes:
 def _dispatch(method, path, body_bytes=b"", history=None, **callbacks):
     """POST/GET a JSON route straight through the dispatcher."""
     return dispatch(
-        method, path, {}, body_bytes,
+        method,
+        path,
+        {},
+        body_bytes,
         cfg=object(),
         history=history,
         sync_mgr=None,
@@ -557,7 +599,8 @@ def _dispatch(method, path, body_bytes=b"", history=None, **callbacks):
 
 def _make_db(tmp_path, text="hello") -> ClipboardHistoryDB:
     db = ClipboardHistoryDB(
-        storage_path=str(tmp_path / "history.db"), max_entries=50,
+        storage_path=str(tmp_path / "history.db"),
+        max_entries=50,
     )
     db.add(
         ClipboardContent(types={ContentType.TEXT: text.encode()}, timestamp=1000.0),
@@ -605,9 +648,12 @@ def _read_frame(sock):
 
 # ── 1a. POST /api/transfer/retry ───────────────────────────────────────
 
+
 def test_retry_route_without_handler_is_503():
     status, _ct, body_b = _dispatch(
-        "POST", "/api/transfer/retry", _body({"transfer_id": "abc"}),
+        "POST",
+        "/api/transfer/retry",
+        _body({"transfer_id": "abc"}),
     )
     assert status == 503
     assert json.loads(body_b)["ok"] is False
@@ -616,7 +662,9 @@ def test_retry_route_without_handler_is_503():
 def test_retry_route_rejects_invalid_json():
     calls = []
     status, _ct, body_b = _dispatch(
-        "POST", "/api/transfer/retry", b"{not json",
+        "POST",
+        "/api/transfer/retry",
+        b"{not json",
         on_transfer_action=lambda action, tid: calls.append((action, tid)),
     )
     assert status == 400
@@ -626,7 +674,9 @@ def test_retry_route_rejects_invalid_json():
 def test_retry_route_requires_transfer_id():
     calls = []
     status, _ct, body_b = _dispatch(
-        "POST", "/api/transfer/retry", _body({}),
+        "POST",
+        "/api/transfer/retry",
+        _body({}),
         on_transfer_action=lambda action, tid: calls.append((action, tid)),
     )
     assert status == 400
@@ -637,7 +687,9 @@ def test_retry_route_requires_transfer_id():
 def test_retry_route_invokes_host_retry_action():
     calls = []
     status, _ct, body_b = _dispatch(
-        "POST", "/api/transfer/retry", _body({"transfer_id": "deadbeef" * 4}),
+        "POST",
+        "/api/transfer/retry",
+        _body({"transfer_id": "deadbeef" * 4}),
         on_transfer_action=lambda action, tid: calls.append((action, tid)) or True,
     )
     assert status == 200
@@ -647,13 +699,90 @@ def test_retry_route_invokes_host_retry_action():
 
 def test_retry_route_only_exists_for_post():
     status, _ct, _body_b = _dispatch(
-        "GET", "/api/transfer/retry",
+        "GET",
+        "/api/transfer/retry",
         on_transfer_action=lambda action, tid: True,
     )
     assert status == 404
 
 
-# ── 1b. POST /api/transfer/cancel-all (new feature) ────────────────────
+# ── 1b. POST /api/transfer/history/delete ──────────────────────────────
+
+
+def test_history_delete_route_without_handler_is_503():
+    status, _ct, body_b = _dispatch(
+        "POST",
+        "/api/transfer/history/delete",
+        _body({"transfer_id": "abc"}),
+    )
+    assert status == 503
+    assert json.loads(body_b)["ok"] is False
+
+
+def test_history_delete_route_rejects_invalid_json():
+    calls = []
+    status, _ct, _body_b = _dispatch(
+        "POST",
+        "/api/transfer/history/delete",
+        b"{not json",
+        on_transfer_action=lambda action, tid: calls.append((action, tid)),
+    )
+    assert status == 400
+    assert calls == []
+
+
+def test_history_delete_route_requires_transfer_id():
+    calls = []
+    status, _ct, body_b = _dispatch(
+        "POST",
+        "/api/transfer/history/delete",
+        _body({}),
+        on_transfer_action=lambda action, tid: calls.append((action, tid)),
+    )
+    assert status == 400
+    assert json.loads(body_b)["error"] == "transfer_id required"
+    assert calls == []
+
+
+def test_history_delete_route_invokes_history_delete_action():
+    # Distinct action name from "retry"/"cancel": the host must not confuse a
+    # bookkeeping history delete with cancelling a live transfer.
+    calls = []
+    status, _ct, body_b = _dispatch(
+        "POST",
+        "/api/transfer/history/delete",
+        _body({"transfer_id": "cafe1234"}),
+        on_transfer_action=lambda action, tid: calls.append((action, tid)) or True,
+    )
+    assert status == 200
+    assert json.loads(body_b)["ok"] is True
+    assert calls == [("history_delete", "cafe1234")]
+
+
+def test_history_delete_route_reports_a_missing_row_as_not_ok():
+    # An id that is no longer in the history must answer ok:false rather than
+    # pretending the delete happened, so the UI can surface the failure.
+    status, _ct, body_b = _dispatch(
+        "POST",
+        "/api/transfer/history/delete",
+        _body({"transfer_id": "gone"}),
+        on_transfer_action=lambda action, tid: False,
+    )
+    assert status == 200
+    assert json.loads(body_b)["ok"] is False
+
+
+def test_history_delete_route_only_exists_for_post():
+    status, _ct, _body_b = _dispatch(
+        "GET",
+        "/api/transfer/history/delete",
+        on_transfer_action=lambda action, tid: True,
+    )
+    assert status == 404
+
+
+# ── 1c. POST /api/transfer/cancel-all (new feature) ────────────────────
+
 
 def test_cancel_all_cancels_every_active_transfer():
     calls = []
@@ -671,7 +800,8 @@ def test_cancel_all_cancels_every_active_transfer():
         return action == "cancel"
 
     status, _ct, body_b = _dispatch(
-        "POST", "/api/transfer/cancel-all",
+        "POST",
+        "/api/transfer/cancel-all",
         on_get_transfers=on_get_transfers,
         on_transfer_action=on_transfer_action,
     )
@@ -693,7 +823,8 @@ def test_cancel_all_survives_a_failing_state_callback():
         raise RuntimeError("host gone")
 
     status, _ct, body_b = _dispatch(
-        "POST", "/api/transfer/cancel-all",
+        "POST",
+        "/api/transfer/cancel-all",
         on_get_transfers=boom,
         on_transfer_action=lambda action, tid: True,
     )
@@ -703,7 +834,8 @@ def test_cancel_all_survives_a_failing_state_callback():
 
 def test_cancel_all_with_no_active_transfers():
     status, _ct, body_b = _dispatch(
-        "POST", "/api/transfer/cancel-all",
+        "POST",
+        "/api/transfer/cancel-all",
         on_get_transfers=lambda: ([], []),
         on_transfer_action=lambda action, tid: True,
     )
@@ -713,19 +845,31 @@ def test_cancel_all_with_no_active_transfers():
 
 # ── 2. transfers history carries peer_id ───────────────────────────────
 
+
 def test_transfer_history_rows_map_peer_id():
     history = [
         {
-            "transfer_id": "t-up", "file_name": "doc.pdf", "file_size": 10,
-            "direction": "up", "success": False, "cancelled": False,
-            "status": "peer_offline", "state": "awaiting_ack",
-            "source_path": "C:/docs/doc.pdf", "peer_id": "0123456789abcdef",
+            "transfer_id": "t-up",
+            "file_name": "doc.pdf",
+            "file_size": 10,
+            "direction": "up",
+            "success": False,
+            "cancelled": False,
+            "status": "peer_offline",
+            "state": "awaiting_ack",
+            "source_path": "C:/docs/doc.pdf",
+            "peer_id": "0123456789abcdef",
             "timestamp": 100.0,
         },
         {
-            "transfer_id": "t-old", "file_name": "old.bin", "file_size": 1,
-            "direction": "down", "success": True, "cancelled": False,
-            "status": "success", "saved_path": "C:/out/old.bin",
+            "transfer_id": "t-old",
+            "file_name": "old.bin",
+            "file_size": 1,
+            "direction": "down",
+            "success": True,
+            "cancelled": False,
+            "status": "success",
+            "saved_path": "C:/out/old.bin",
             # Legacy row written before peer_id existed -> empty string.
             "timestamp": 90.0,
         },
@@ -742,11 +886,16 @@ def test_transfer_history_rows_map_peer_id():
 
 # ── 3. devices reconnecting fields ─────────────────────────────────────
 
+
 def test_devices_attach_reconnect_state_by_real_id():
     cfg = _DevCfg({"p1": _Peer("p1", "Offline One")})
 
     data, status = get_devices(
-        cfg, lambda: [], None, None, None,
+        cfg,
+        lambda: [],
+        None,
+        None,
+        None,
         get_reconnect_states=lambda: {"p1": {"attempts": 2, "max_attempts": 10}},
     )
     assert status == 200
@@ -765,7 +914,11 @@ def test_devices_attach_reconnect_state_by_hashed_mdns_id():
     cfg = _DevCfg({"p2": _Peer("p2", "Offline Two")})
 
     data, _status = get_devices(
-        cfg, lambda: [], None, None, None,
+        cfg,
+        lambda: [],
+        None,
+        None,
+        None,
         get_reconnect_states=lambda: {hashed: {"attempts": 1, "max_attempts": 5}},
     )
     off = next(d for d in data["devices"] if d["device_id"] == "p2")
@@ -775,15 +928,21 @@ def test_devices_attach_reconnect_state_by_hashed_mdns_id():
 
 
 def test_devices_ignore_garbage_reconnect_states():
-    cfg = _DevCfg({
-        "p3": _Peer("p3", "Junk State"),
-        "p4": _Peer("p4", "Bad Attempts"),
-    })
+    cfg = _DevCfg(
+        {
+            "p3": _Peer("p3", "Junk State"),
+            "p4": _Peer("p4", "Bad Attempts"),
+        }
+    )
 
     data, _status = get_devices(
-        cfg, lambda: [], None, None, None,
+        cfg,
+        lambda: [],
+        None,
+        None,
+        None,
         get_reconnect_states=lambda: {
-            "p3": "garbage",                       # not a dict
+            "p3": "garbage",  # not a dict
             "p4": {"attempts": "many", "max": 3},  # non-int attempts
         },
     )
@@ -806,7 +965,9 @@ def test_ws_device_snapshot_carries_reconnect_fields(tmp_path):
 
     db = _make_db(tmp_path)
     mgr = WebSocketManager(
-        cfg=SnapCfg(), history=db, sync_mgr=None,
+        cfg=SnapCfg(),
+        history=db,
+        sync_mgr=None,
         get_connected_ids=lambda: [],
         get_reconnect_states=lambda: {"p1": {"attempts": 3, "max_attempts": 9}},
     )
@@ -829,15 +990,19 @@ def test_ws_device_snapshot_carries_reconnect_fields(tmp_path):
 
 # ── 4a. markdown export ────────────────────────────────────────────────
 
+
 @pytest.fixture()
 def isolated_downloads(monkeypatch, tmp_path):
     """Point Path.home() at tmp with an existing Downloads dir so exports
     land inside the test sandbox instead of the user's real Downloads."""
     import pathlib
+
     downloads = tmp_path / "Downloads"
     downloads.mkdir()
     monkeypatch.setattr(
-        pathlib.Path, "home", classmethod(lambda cls: tmp_path),
+        pathlib.Path,
+        "home",
+        classmethod(lambda cls: tmp_path),
     )
     return downloads
 
@@ -867,6 +1032,7 @@ def test_export_markdown_unsupported_format_is_400(tmp_path):
 
 # ── 4b. settings whitelist bounds for history_max_age_days ─────────────
 
+
 class _SettingsCfg:
     def __init__(self):
         self.device_id = "dev1"
@@ -880,11 +1046,16 @@ class _SettingsCfg:
 def sandboxed_persist(monkeypatch, tmp_path):
     """Redirect config persistence into the test sandbox."""
     from internal.web.api import settings as settings_api
+
     monkeypatch.setattr(
-        settings_api, "_config_path", lambda: tmp_path / "config.json",
+        settings_api,
+        "_config_path",
+        lambda: tmp_path / "config.json",
     )
     monkeypatch.setattr(
-        settings_api, "save_config", lambda cfg, enc_mgr=None: None,
+        settings_api,
+        "save_config",
+        lambda cfg, enc_mgr=None: None,
     )
 
 
@@ -893,7 +1064,8 @@ def test_history_max_age_days_out_of_range_rejected():
     cfg = _SettingsCfg()
     for bad in (-1, 36501, 999999):
         data, status = update_settings(
-            _body({"history_max_age_days": bad}), cfg,
+            _body({"history_max_age_days": bad}),
+            cfg,
         )
         # Rejected -> nothing valid remains -> 400, value untouched.
         assert status == 400, bad
@@ -906,7 +1078,8 @@ def test_history_max_age_days_boundaries_accepted():
     cfg = _SettingsCfg()
     for good in (0, 1, 36500):
         data, status = update_settings(
-            _body({"history_max_age_days": good}), cfg,
+            _body({"history_max_age_days": good}),
+            cfg,
         )
         assert status == 200, good
         assert data["updated"]["history_max_age_days"] == good
@@ -917,7 +1090,8 @@ def test_history_max_age_days_boundaries_accepted():
 def test_history_max_age_days_string_type_mismatch_rejected():
     cfg = _SettingsCfg()
     data, status = update_settings(
-        _body({"history_max_age_days": "30"}), cfg,
+        _body({"history_max_age_days": "30"}),
+        cfg,
     )
     assert status == 400
     assert cfg.history_max_age_days == 0
@@ -929,7 +1103,8 @@ def test_plain_text_only_bool_roundtrip_and_type_guard():
     # Bool values are accepted and persisted on the cfg object.
     for good in (True, False):
         data, status = update_settings(
-            _body({"plain_text_only": good}), cfg,
+            _body({"plain_text_only": good}),
+            cfg,
         )
         assert status == 200, good
         assert data["updated"]["plain_text_only"] is good
@@ -937,7 +1112,8 @@ def test_plain_text_only_bool_roundtrip_and_type_guard():
     # A non-bool value against a bool field is a type mismatch -> rejected.
     cfg.plain_text_only = False
     data, status = update_settings(
-        _body({"plain_text_only": "yes"}), cfg,
+        _body({"plain_text_only": "yes"}),
+        cfg,
     )
     assert status == 400
     assert cfg.plain_text_only is False
@@ -951,25 +1127,26 @@ _STRONG_PW = "Passw0rd!123"
 @pytest.mark.usefixtures("sandboxed_persist")
 def test_netpair_password_set_then_cleared():
     cfg = _SettingsCfg()
-    data, status = update_settings(
-        _body({"netpair_password": _STRONG_PW}), cfg)
+    data, status = update_settings(_body({"netpair_password": _STRONG_PW}), cfg)
     assert status == 200
     assert cfg.netpair_password == _STRONG_PW
     # an empty string clears the passphrase (back to the code-only key)
-    data, status = update_settings(
-        _body({"netpair_password": ""}), cfg)
+    data, status = update_settings(_body({"netpair_password": ""}), cfg)
     assert status == 200
     assert cfg.netpair_password == ""
 
 
 @pytest.mark.usefixtures("sandboxed_persist")
-@pytest.mark.parametrize("bad", [
-    "tooshort1",        # <12
-    "password1!ab",     # missing uppercase
-    "PASSWORD1!AB",     # missing lowercase
-    "Password!!ab",     # missing digit
-    "Password1abc",     # missing special
-])
+@pytest.mark.parametrize(
+    "bad",
+    [
+        "tooshort1",  # <12
+        "password1!ab",  # missing uppercase
+        "PASSWORD1!AB",  # missing lowercase
+        "Password!!ab",  # missing digit
+        "Password1abc",  # missing special
+    ],
+)
 def test_netpair_password_strength_rejected(bad):
     cfg = _SettingsCfg()
     data, status = update_settings(_body({"netpair_password": bad}), cfg)
@@ -993,13 +1170,16 @@ def test_netpair_password_non_string_rejected():
 
 
 @pytest.mark.usefixtures("sandboxed_persist")
-@pytest.mark.parametrize("bad,tag", [
-    ("tooshort1", "length"),        # <12
-    ("password1!ab", "upper"),      # missing uppercase
-    ("PASSWORD1!AB", "lower"),      # missing lowercase
-    ("Password!!ab", "digit"),      # missing digit
-    ("Password1abc", "special"),    # missing special
-])
+@pytest.mark.parametrize(
+    "bad,tag",
+    [
+        ("tooshort1", "length"),  # <12
+        ("password1!ab", "upper"),  # missing uppercase
+        ("PASSWORD1!AB", "lower"),  # missing lowercase
+        ("Password!!ab", "digit"),  # missing digit
+        ("Password1abc", "special"),  # missing special
+    ],
+)
 def test_password_special_action_strength_rejected(bad, tag):
     cfg = _SettingsCfg()
     data, status = update_settings(_body({"password": bad}), cfg)
@@ -1054,8 +1234,7 @@ def test_get_settings_exposes_only_netpair_set_flag():
 def test_relay_credentials_saved_and_echoed_username_only():
     cfg = _SettingsCfg()
     data, status = update_settings(
-        _body({"relay_username": "clipsync_mqtt",
-               "relay_password": "s3cret!"}),
+        _body({"relay_username": "clipsync_mqtt", "relay_password": "s3cret!"}),
         cfg,
     )
     assert status == 200
@@ -1098,6 +1277,7 @@ def test_get_settings_exposes_relay_username_and_password_flag():
 
 # ── 4d. /api/device/test (test-connection probe route) ─────────────────
 
+
 def test_device_test_route_probes_and_reports_per_channel():
     called = {}
 
@@ -1107,13 +1287,14 @@ def test_device_test_route_probes_and_reports_per_channel():
             "ok": True,
             "results": [
                 {"channel": "lan", "ok": True, "latency_ms": 1.2, "error": None},
-                {"channel": "relay", "ok": False, "latency_ms": None,
-                 "error": "timeout"},
+                {"channel": "relay", "ok": False, "latency_ms": None, "error": "timeout"},
             ],
         }
 
     status, _ct, body_b = _dispatch(
-        "POST", "/api/device/test", _body({"peer_id": "peer-1"}),
+        "POST",
+        "/api/device/test",
+        _body({"peer_id": "peer-1"}),
         on_device_test=on_device_test,
     )
     data = json.loads(body_b)
@@ -1125,7 +1306,9 @@ def test_device_test_route_probes_and_reports_per_channel():
 
 def test_device_test_route_requires_peer_id():
     status, _ct, body_b = _dispatch(
-        "POST", "/api/device/test", _body({}),
+        "POST",
+        "/api/device/test",
+        _body({}),
         on_device_test=lambda pid: {"ok": True},
     )
     assert status == 400
@@ -1134,7 +1317,9 @@ def test_device_test_route_requires_peer_id():
 
 def test_device_test_route_invalid_json_is_400():
     status, _ct, body_b = _dispatch(
-        "POST", "/api/device/test", b"not-json",
+        "POST",
+        "/api/device/test",
+        b"not-json",
         on_device_test=lambda pid: {"ok": True},
     )
     assert status == 400
@@ -1142,13 +1327,13 @@ def test_device_test_route_invalid_json_is_400():
 
 
 def test_device_test_route_without_handler_is_503():
-    status, _ct, body_b = _dispatch(
-        "POST", "/api/device/test", _body({"peer_id": "peer-1"}))
+    status, _ct, body_b = _dispatch("POST", "/api/device/test", _body({"peer_id": "peer-1"}))
     assert status == 503
     assert json.loads(body_b)["error"] == "not available"
 
 
 # ── 5. failure-history regressions in FileTransferManager ──────────────
+
 
 def _outgoing_mgr(tmp_path, source_text=b"data"):
     src = tmp_path / "source.bin"
@@ -1156,7 +1341,8 @@ def _outgoing_mgr(tmp_path, source_text=b"data"):
     mgr = FileTransferManager("dev1", output_dir=str(tmp_path / "out"))
     sent = []
     tid = mgr.send_file(
-        str(src), lambda data, pid="0123456789abcdef": sent.append(data),
+        str(src),
+        lambda data, pid="0123456789abcdef": sent.append(data),
     )
     return mgr, tid
 
@@ -1235,16 +1421,20 @@ def test_accept_temp_open_failure_records_error_disk(tmp_path):
 
 # ── 6. locale parity guard for the new keys ────────────────────────────
 
+
 def test_new_locale_keys_present_in_both_languages():
     root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     locales = {}
     for name in ("en.json", "zh-CN.json"):
-        with open(os.path.join(root, "internal/web/static/locales", name),
-                  encoding="utf-8") as f:
+        with open(os.path.join(root, "internal/web/static/locales", name), encoding="utf-8") as f:
             locales[name] = json.load(f)
     en, zh = locales["en.json"], locales["zh-CN.json"]
-    for key in ("transfer.cancel_all", "settings.export_markdown",
-                "device.reconnecting", "common.retry"):
+    for key in (
+        "transfer.cancel_all",
+        "settings.export_markdown",
+        "device.reconnecting",
+        "common.retry",
+    ):
         assert key in en and key in zh, key
 
 
@@ -1254,12 +1444,10 @@ def test_swjs_and_index_still_carry_v177_fixes():
     pages forever after an update (SW cache-first), or flashes the raw
     onboarding markup on refresh."""
     root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    with open(os.path.join(root, "internal/web/static/sw.js"),
-              encoding="utf-8") as f:
+    with open(os.path.join(root, "internal/web/static/sw.js"), encoding="utf-8") as f:
         sw = f.read()
     assert "clipsync-shell-v2" in sw
-    with open(os.path.join(root, "internal/web/static/index.html"),
-              encoding="utf-8") as f:
+    with open(os.path.join(root, "internal/web/static/index.html"), encoding="utf-8") as f:
         index = f.read()
     assert "v-cloak" in index
 
@@ -1280,7 +1468,9 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 _STATIC = os.path.join(
     os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-    "internal", "web", "static",
+    "internal",
+    "web",
+    "static",
 )
 
 
@@ -1367,18 +1557,21 @@ class TestChatParity:
         assert "'🔕' : '🔔'" in html
 
     def test_close_session_with_confirm_and_back(self, html):
-        assert "id=\"chatCloseBtn\"" in html
+        assert 'id="chatCloseBtn"' in html
         assert "apiFetch('/api/chat/close'" in html
         # Destructive-ish action gated behind a confirm, and success returns
         # to the session list instead of leaving a dead conversation open.
         assert "window.confirm(T.chatCloseConfirm)" in html
-        assert "chatCloseConfirm: ZH ? '关闭并移除这个会话？' : 'Close and remove this conversation?'," in html
+        assert (
+            "chatCloseConfirm: ZH ? '关闭并移除这个会话？' : 'Close and remove this conversation?',"
+            in html
+        )
         assert "chatBack();" in html
 
     def test_attachment_uses_chat_purpose_upload_then_send(self, html):
         # Hidden picker + composer button.
         assert 'id="chatFileInput"' in html
-        assert "id=\"chatAttachBtn\"" in html
+        assert 'id="chatAttachBtn"' in html
         # Step 1: purpose=chat upload (lands in the server temp dir, skips
         # receive notification/Files record).
         assert "form.append('purpose', 'chat');" in html
@@ -1423,7 +1616,9 @@ class TestHistoryParity:
         # clipboard — the phone-side copy button only writes the phone's.
         assert "apiFetch('/api/paste-rich'" in html
         assert "histPushBtn" in html
-        assert "histPushOk: ZH ? '✓ 已写入电脑剪贴板' : '✓ Written to the computer clipboard'," in html
+        assert (
+            "histPushOk: ZH ? '✓ 已写入电脑剪贴板' : '✓ Written to the computer clipboard'," in html
+        )
 
     def test_favorite_fetches_full_text_first(self, html):
         # List previews are truncated — favorites must come from the detail
@@ -1441,7 +1636,10 @@ class TestHistoryParity:
 
     def test_modal_actions_resolve_by_entry_id_not_index(self, html):
         # List indices shift between polls; the modal tracks entry_id.
-        assert "modalEntryId = (item.entry_id !== undefined && item.entry_id !== null) ? item.entry_id : null;" in html
+        assert (
+            "modalEntryId = (item.entry_id !== undefined && item.entry_id !== null) ? item.entry_id : null;"  # noqa: E501
+            in html
+        )
         assert "function findHistById(eid)" in html
 
     def test_favorite_disabled_for_image_only_clips(self, html):
@@ -1477,9 +1675,17 @@ class TestDiagnosticsCard:
         assert "'firewall'" in html
 
     def test_check_labels_cover_server_ids(self, html):
-        for check_id in ("server_port", "discovery", "advertising",
-                         "web_companion", "network", "firewall",
-                         "permissions", "mdns", "clipboard_tool"):
+        for check_id in (
+            "server_port",
+            "discovery",
+            "advertising",
+            "web_companion",
+            "network",
+            "firewall",
+            "permissions",
+            "mdns",
+            "clipboard_tool",
+        ):
             assert f"{check_id}: T.diag" in html
 
     def test_summary_states_bilingual(self, html):
@@ -1505,20 +1711,56 @@ class TestDiagnosticsCard:
 # ═════════════════════════════════════════════════════════════════════════
 
 _NEW_T_KEYS = [
-    "histClear", "histClearConfirm", "histCleared", "histClearFail",
-    "histPin", "histUnpin", "histPinnedToast", "histUnpinnedToast",
-    "histPinFail", "histPush", "histPushOk", "histPushFail",
-    "histFav", "histFavOk", "histFavFail",
-    "histDel", "histDeleteConfirm", "histDeleted", "histDelFail",
-    "trCancelAll", "trCancelAllDone", "trRetry", "trRetryFail",
-    "chatMute", "chatUnmute", "chatMuteFail",
-    "chatCloseSession", "chatCloseConfirm",
-    "chatAttach", "chatFileSentOk", "chatFileSendFail",
-    "diagTitle", "diagHint", "diagRun", "diagScanning", "diagScanFail",
-    "diagAllOk", "diagWarn", "diagFail",
-    "diagFix", "diagFixDone", "diagFixFail",
-    "diagServerPort", "diagDiscovery", "diagAdvertising", "diagWeb",
-    "diagNetwork", "diagFirewall", "diagPermissions", "diagMdns",
+    "histClear",
+    "histClearConfirm",
+    "histCleared",
+    "histClearFail",
+    "histPin",
+    "histUnpin",
+    "histPinnedToast",
+    "histUnpinnedToast",
+    "histPinFail",
+    "histPush",
+    "histPushOk",
+    "histPushFail",
+    "histFav",
+    "histFavOk",
+    "histFavFail",
+    "histDel",
+    "histDeleteConfirm",
+    "histDeleted",
+    "histDelFail",
+    "trCancelAll",
+    "trCancelAllDone",
+    "trRetry",
+    "trRetryFail",
+    "chatMute",
+    "chatUnmute",
+    "chatMuteFail",
+    "chatCloseSession",
+    "chatCloseConfirm",
+    "chatAttach",
+    "chatFileSentOk",
+    "chatFileSendFail",
+    "diagTitle",
+    "diagHint",
+    "diagRun",
+    "diagScanning",
+    "diagScanFail",
+    "diagAllOk",
+    "diagWarn",
+    "diagFail",
+    "diagFix",
+    "diagFixDone",
+    "diagFixFail",
+    "diagServerPort",
+    "diagDiscovery",
+    "diagAdvertising",
+    "diagWeb",
+    "diagNetwork",
+    "diagFirewall",
+    "diagPermissions",
+    "diagMdns",
     "diagClipboardTool",
 ]
 
@@ -1559,8 +1801,227 @@ class TestScriptSyntax:
                 f.write(block)
             proc = subprocess.run(
                 [node, "--check", path],
-                capture_output=True, text=True, timeout=30,
+                capture_output=True,
+                text=True,
+                timeout=30,
             )
             assert proc.returncode == 0, (
                 f"inline <script> block {i} fails node --check:\n{proc.stderr}"
             )
+
+
+# ═════════════════════════════════════════════════════════════════════════
+# 7. Stage 4: handlers must not lie, crash, or mutate shared state
+# ═════════════════════════════════════════════════════════════════════════
+
+# Captured at import time: the autouse ``_isolate`` fixture replaces this
+# helper with a no-op for every test in the file, so the tests that exercise
+# the helper itself need a handle to the real one.
+_REAL_PERSIST = settings_api._persist_preserving_at_rest_private_key
+
+
+class _FakeWriter:
+    """Stand-in for the platform clipboard writer."""
+
+    def __init__(self, result=True):
+        self.result = result
+        self.calls = 0
+
+    def write(self, content):
+        self.calls += 1
+        if isinstance(self.result, Exception):
+            raise self.result
+        return self.result
+
+
+class _FakeHistory:
+    def __init__(self):
+        self.added = []
+
+    def add(self, content):
+        self.added.append(content)
+
+
+class _FakeSyncMgr:
+    def __init__(self):
+        self.sent = []
+        self.suppressed = []
+
+        class _Monitor:
+            def __init__(self, outer):
+                self.outer = outer
+
+            def suppress_for(self, seconds):
+                self.outer.suppressed.append(seconds)
+
+        self._monitor = _Monitor(self)
+        self.on_send = self.sent.append
+
+
+class TestPushTextTellsTheTruth:
+    """``writer.write()`` returns False when the platform clipboard refused
+    (Win32 OpenClipboard held by another app, no xclip on Linux).  Discarding
+    that and answering {"ok": true} told the user their text was on the
+    clipboard when pasting would produce whatever was there before."""
+
+    def _cfg(self):
+        class _Cfg:
+            device_id = "me"
+
+        return _Cfg()
+
+    def test_failed_clipboard_write_reports_failure(self, monkeypatch):
+        from internal.web.api import history as history_api
+
+        writer = _FakeWriter(result=False)
+        monkeypatch.setattr("internal.clipboard.platform.create_writer", lambda: writer)
+        sync = _FakeSyncMgr()
+        hist = _FakeHistory()
+        data, status = history_api.push_text(_body({"text": "hello"}), self._cfg(), sync, hist)
+        assert status == 500
+        assert data["ok"] is False
+        assert "clipboard" in data["error"]
+
+    def test_failed_write_does_not_broadcast_or_record(self, monkeypatch):
+        """Peers must not receive text the host itself never got: the user's
+        natural retry would then send it twice."""
+        from internal.web.api import history as history_api
+
+        monkeypatch.setattr(
+            "internal.clipboard.platform.create_writer", lambda: _FakeWriter(result=False)
+        )
+        sync = _FakeSyncMgr()
+        hist = _FakeHistory()
+        history_api.push_text(_body({"text": "hello"}), self._cfg(), sync, hist)
+        assert sync.sent == []
+        assert hist.added == []
+
+    def test_raising_writer_is_a_failure_not_a_500(self, monkeypatch):
+        from internal.web.api import history as history_api
+
+        monkeypatch.setattr(
+            "internal.clipboard.platform.create_writer",
+            lambda: _FakeWriter(result=OSError("clipboard busy")),
+        )
+        data, status = history_api.push_text(
+            _body({"text": "hi"}), self._cfg(), _FakeSyncMgr(), _FakeHistory()
+        )
+        assert status == 500
+        assert data["ok"] is False
+
+    def test_successful_write_still_broadcasts(self, monkeypatch):
+        from internal.web.api import history as history_api
+
+        monkeypatch.setattr(
+            "internal.clipboard.platform.create_writer", lambda: _FakeWriter(result=True)
+        )
+        sync = _FakeSyncMgr()
+        hist = _FakeHistory()
+        data, status = history_api.push_text(_body({"text": "  hello  "}), self._cfg(), sync, hist)
+        assert status == 200
+        assert data == {"ok": True, "len": 5}
+        assert len(sync.sent) == 1
+        assert len(hist.added) == 1
+        assert sync.suppressed == [2.0]
+
+    def test_sync_disabled_does_not_crash(self, monkeypatch):
+        """``sync_mgr`` is None when sync is off — the suppress_for call was
+        guarded but ``sync_mgr.on_send`` right below it was not, so a push with
+        sync disabled raised AttributeError after the clipboard already had
+        the text."""
+        from internal.web.api import history as history_api
+
+        monkeypatch.setattr(
+            "internal.clipboard.platform.create_writer", lambda: _FakeWriter(result=True)
+        )
+        data, status = history_api.push_text(
+            _body({"text": "hi"}), self._cfg(), None, _FakeHistory()
+        )
+        assert status == 200
+        assert data["ok"] is True
+
+
+class TestOneBadTransferRowDoesNotHideThePanel:
+    """The mapping ran outside the try/except, so a single malformed row from
+    the host's FileTransferManager answered 500 for the whole panel."""
+
+    def test_unmappable_active_row_is_skipped(self):
+        active = [
+            {"transfer_id": "good", "file_name": "a.bin", "progress": 0.5},
+            {"transfer_id": "bad", "progress": "not-a-number"},
+        ]
+        data, status = get_transfers(lambda: (active, []))
+        assert status == 200
+        assert [t["id"] for t in data["active"]] == ["good"]
+
+    def test_non_dict_row_is_skipped(self):
+        data, status = get_transfers(lambda: (["oops", None], ["nope"]))
+        assert status == 200
+        assert data == {"active": [], "history": []}
+
+    def test_healthy_rows_survive_a_bad_neighbour(self):
+        history = [
+            "garbage",
+            {"transfer_id": "t1", "file_name": "x", "success": True},
+            {"transfer_id": "t2", "file_name": "y", "success": False},
+        ]
+        data, status = get_transfers(lambda: ([], history))
+        assert status == 200
+        assert [t["id"] for t in data["history"]] == ["t1", "t2"]
+
+
+class TestPersistDoesNotMutateSharedConfig:
+    """The persist helper blanked ``cfg.private_key_pem`` in place while
+    saving.  cfg is the one live object every thread reads, so a peer
+    handshake signing during that window got "" instead of the key.
+
+    The autouse ``_isolate`` fixture stubs this very helper out (so other
+    tests never touch the real config.json), hence the module-level handle to
+    the real implementation captured at import time.
+    """
+
+    def test_shared_cfg_is_never_written_to(self, tmp_path, monkeypatch):
+        import json as _json
+
+        from internal.web.api import settings as s_api
+
+        cfg_file = tmp_path / "config.json"
+        cfg_file.write_text(_json.dumps({"private_key_pem": "ENCRYPTED-BLOB"}), encoding="utf-8")
+        monkeypatch.setattr(s_api, "_config_path", lambda: cfg_file)
+
+        seen = []
+        monkeypatch.setattr(s_api, "save_config", lambda c, enc_mgr=None: seen.append(c))
+
+        class _Cfg:
+            private_key_pem = "PLAINTEXT-KEY"
+            device_name = "laptop"
+
+        cfg = _Cfg()
+        _REAL_PERSIST(cfg)
+
+        # The live object is untouched, at every moment.
+        assert cfg.private_key_pem == "PLAINTEXT-KEY"
+        # What went to disk is the encrypted blob, from a copy.
+        assert len(seen) == 1
+        assert seen[0] is not cfg
+        assert seen[0].private_key_pem == "ENCRYPTED-BLOB"
+        assert seen[0].device_name == "laptop"
+
+    def test_unreadable_config_still_does_not_blank_the_live_key(self, tmp_path, monkeypatch):
+        from internal.web.api import settings as s_api
+
+        monkeypatch.setattr(s_api, "_config_path", lambda: tmp_path / "missing.json")
+        seen = []
+        monkeypatch.setattr(s_api, "save_config", lambda c, enc_mgr=None: seen.append(c))
+
+        class _Cfg:
+            private_key_pem = "PLAINTEXT-KEY"
+
+        cfg = _Cfg()
+        _REAL_PERSIST(cfg)
+        assert cfg.private_key_pem == "PLAINTEXT-KEY"
+        # No at-rest blob to preserve (the file is missing), so the save copy
+        # keeps the in-memory key rather than blanking identity: the safest
+        # reading of a missing/corrupt store is "there is no key to downgrade",
+        # not "erase the device's key".
+        assert seen[0].private_key_pem == "PLAINTEXT-KEY"

@@ -24,7 +24,10 @@ hiddenimports += [
     "zeroconf",
     "cryptography",
     "paho.mqtt.client",
-    "websockets",
+    # NOTE: no "websockets" here.  The WebSocket server is hand-rolled in
+    # internal/web/ws.py on top of socket/struct/base64/hashlib; the library is
+    # not imported anywhere and is not a declared dependency, so listing it
+    # only made the build fail loudly or bloat when it happened to be present.
     "PIL",
     "pystray",
     "customtkinter",
@@ -34,35 +37,14 @@ hiddenimports += [
     "tkinter.messagebox",
     "logging.handlers",
 ]
-# Fallback: explicit internal modules in case collect_submodules misses them
-hiddenimports += [
-    "internal.clipboard.clipboard",
-    "internal.clipboard.clipboard_windows",
-    "internal.clipboard.clipboard_darwin",
-    "internal.clipboard.clipboard_linux",
-    "internal.clipboard.filter",
-    "internal.clipboard.format",
-    "internal.clipboard.history",
-    "internal.clipboard.platform",
-    "internal.config.config",
-    "internal.platform.autostart",
-    "internal.platform.notify",
-    "internal.protocol.codec",
-    "internal.security.pairing",
-    "internal.sync.file_transfer",
-    "internal.sync.manager",
-    "internal.sync.nearby_chat",
-    "internal.system.updater",
-    "internal.clipboard.history_db",
-    "internal.transport.connection",
-    "internal.transport.discovery",
-    "internal.ui.dashboard",
-    "internal.ui.dialogs",
-    "internal.ui.onboarding",
-    "internal.ui.settings_window",
-    "internal.ui.systray",
-    "internal.security.encryption",
-]
+# collect_submodules("internal") above walks the package and picks up every
+# internal.* module.  There used to be an explicit "fallback" list here as
+# insurance against that missing something, but it had silently gone stale:
+# it named 27 of the 71 modules that actually exist and omitted every
+# internal.web.api.* handler, so it insured nothing while looking like it did.
+# A wrong safety net is worse than none — if collect_submodules ever does miss
+# a module, add that module here deliberately rather than restoring a list
+# nobody keeps in sync.
 
 # Bundle the web UI by filesystem path. Do NOT use collect_data_files("internal.web")
 # here: for a dotted package it checks the package in an isolated subprocess whose

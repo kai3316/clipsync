@@ -30,8 +30,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from internal.sync.ai_profiles import DEFAULT_TOOL_KEYS
 from src.main import Application  # noqa: E402
 
-_GROUPS = ("system", "network", "internet", "ai_config", "chat", "transfer",
-           "filesystem")
+_GROUPS = ("system", "network", "internet", "ai_config", "chat", "transfer", "filesystem")
 _STATUSES = ("ok", "warn", "fail")
 
 
@@ -77,7 +76,8 @@ def _assert_shape(data):
     groups = data.get("groups")
     assert isinstance(groups, dict), "groups must be a dict"
     assert set(groups.keys()) == set(_GROUPS), (
-        f"expected groups {_GROUPS}, got {sorted(groups.keys())}")
+        f"expected groups {_GROUPS}, got {sorted(groups.keys())}"
+    )
     for gid in _GROUPS:
         g = groups[gid]
         assert isinstance(g, dict) and "items" in g, gid
@@ -106,9 +106,19 @@ def test_minimal_stub_returns_full_group_shape(monkeypatch):
 def test_legacy_top_level_fields_preserved(monkeypatch):
     monkeypatch.setattr("platform.system", lambda: "Windows")
     data = _minimal_app()._get_diagnostics()
-    for key in ("summary", "checks", "discovery_running", "server_running",
-                "connected_count", "paired_count", "web_companion_running",
-                "web_port", "lan_ip", "os", "version"):
+    for key in (
+        "summary",
+        "checks",
+        "discovery_running",
+        "server_running",
+        "connected_count",
+        "paired_count",
+        "web_companion_running",
+        "web_port",
+        "lan_ip",
+        "os",
+        "version",
+    ):
         assert key in data, f"legacy field missing: {key}"
     assert isinstance(data["checks"], list)
     assert isinstance(data["summary"], str) and data["summary"] in _STATUSES
@@ -165,6 +175,7 @@ def _full_app(tmp_path, monkeypatch):
 
     class Relay:
         state = "online"
+
     app._relay = Relay()
     app._delivery_lock = __import__("threading").RLock()
     app._delivery_queue = {}
@@ -182,11 +193,13 @@ def _full_app(tmp_path, monkeypatch):
 
         def get_reconnect_states(self):
             return {}
+
     app.transport_mgr = Transport()
 
     class Discovery:
         is_browsing = True
         is_advertising = True
+
     app.discovery = Discovery()
 
     class WebServer:
@@ -199,26 +212,30 @@ def _full_app(tmp_path, monkeypatch):
         @staticmethod
         def check_firewall_rule(ports):
             return True, "No firewall blockage detected"
+
     app.web_server = WebServer()
 
     class Pairing:
         def get_paired_peers(self):
             return []
+
     app.pairing_mgr = Pairing()
 
     class Chat:
         def get_sessions(self):
             return []
+
     app.chat_mgr = Chat()
 
     class AICfg:
         def local_summary(self):
             import time
-            return {"collected_at": time.time(), "entry_count": 4,
-                    "paths": ["~/claude"]}
+
+            return {"collected_at": time.time(), "entry_count": 4, "paths": ["~/claude"]}
 
         def _trash_base(self):
             return tmp_path / "aiconfig_trash"
+
     app.aicfg_mgr = AICfg()
 
     class FileTransfer:
@@ -227,10 +244,12 @@ def _full_app(tmp_path, monkeypatch):
 
         def get_history(self):
             return [{"success": True}, {"success": False}]
+
     app.file_transfer_mgr = FileTransfer()
 
     class History:
         _db_path = tmp_path / "clipboard_history.db"
+
     (tmp_path / "clipboard_history.db").write_bytes(b"x" * 2048)
     app.clipboard_history = History()
 
@@ -309,8 +328,7 @@ def _read(*parts) -> str:
 
 def test_panel_declares_all_group_defs():
     src = _read("components", "diagnostics-panel.js")
-    for gid in ("system", "network", "internet", "ai_config", "chat",
-                "transfer", "filesystem"):
+    for gid in ("system", "network", "internet", "ai_config", "chat", "transfer", "filesystem"):
         assert f"id: '{gid}'" in src, f"missing group def: {gid}"
     # Group defs are exposed to the template through data().
     assert "diagGroupDefs: DIAG_GROUP_DEFS" in src
@@ -322,7 +340,7 @@ def test_panel_has_group_collapse_expand():
     assert "isCollapsed" in src
     assert "diagCollapsed" in src
     assert "diag-group__header" in src
-    assert "@click=\"toggleGroup(def.id)\"" in src
+    assert '@click="toggleGroup(def.id)"' in src
 
 
 def test_panel_maps_three_way_status():
@@ -346,8 +364,8 @@ def test_panel_renders_unavailable_group_placeholder():
 def test_panel_keeps_legacy_fallback():
     src = _read("components", "diagnostics-panel.js")
     assert "_applyLegacyChecks" in src
-    assert "res.groups" in src          # v2 branch
-    assert "res.checks" in src          # legacy branch
+    assert "res.groups" in src  # v2 branch
+    assert "res.checks" in src  # legacy branch
     # The panel prefers groups when present, otherwise falls back.
     assert "if (res && res.groups)" in src
 
@@ -369,13 +387,31 @@ def test_panel_summary_counts_unavailable_groups_as_warn():
 
 def test_panel_item_label_map_covers_new_items():
     src = _read("components", "diagnostics-panel.js")
-    for item in ("app_version", "uptime", "data_dir", "log_path", "lan_ip",
-                 "tcp_port", "mdns_service", "web_service", "firewall",
-                 "internet_enabled", "relay_state", "brokers", "netpair_count",
-                 "pending_count", "watch_roots", "local_entries",
-                 "last_collected", "trash_size", "chat_sessions",
-                 "active_transfers", "transfer_failures", "history_db_size",
-                 "disk_free"):
+    for item in (
+        "app_version",
+        "uptime",
+        "data_dir",
+        "log_path",
+        "lan_ip",
+        "tcp_port",
+        "mdns_service",
+        "web_service",
+        "firewall",
+        "internet_enabled",
+        "relay_state",
+        "brokers",
+        "netpair_count",
+        "pending_count",
+        "watch_roots",
+        "local_entries",
+        "last_collected",
+        "trash_size",
+        "chat_sessions",
+        "active_transfers",
+        "transfer_failures",
+        "history_db_size",
+        "disk_free",
+    ):
         assert f"{item}: 'diag.v2.item.{item}'" in src, f"missing label: {item}"
 
 
@@ -384,10 +420,17 @@ def test_panel_item_label_map_covers_new_items():
 
 def test_group_css_present():
     css = _read("index.html")
-    for cls in (".diag-groups {", ".diag-group {", ".diag-group__header {",
-                ".diag-group__title {", ".diag-group__status--ok {",
-                ".diag-group__status--warn {", ".diag-group__status--fail {",
-                ".diag-group__unavailable {", ".diag-check--warn {"):
+    for cls in (
+        ".diag-groups {",
+        ".diag-group {",
+        ".diag-group__header {",
+        ".diag-group__title {",
+        ".diag-group__status--ok {",
+        ".diag-group__status--warn {",
+        ".diag-group__status--fail {",
+        ".diag-group__unavailable {",
+        ".diag-check--warn {",
+    ):
         assert cls in css, f"missing CSS rule: {cls}"
 
 
@@ -403,7 +446,7 @@ def test_panel_mounted_in_both_layouts():
     # layout, and app.js maps the diagnostics tab to diagnostics-panel there.
     # (The old hand-maintained per-layout v-else-if chain is gone.)
     html = _read("index.html")
-    assert html.count("<component :is=\"panelComponent\"") == 2
+    assert html.count('<component :is="panelComponent"') == 2
     app = _read("js", "app.js")
     chunk = app.split("var PANEL_COMPONENTS = {")[1].split("};")[0]
     assert "diagnostics: 'diagnostics-panel'" in chunk
@@ -440,12 +483,19 @@ def test_v2_keys_present_and_nonempty_in_both_locales():
 
 def test_group_and_status_keys_present():
     en, _zh = _locales()
-    for key in ("diag.v2.group.system", "diag.v2.group.network",
-                "diag.v2.group.internet", "diag.v2.group.ai_config",
-                "diag.v2.group.chat", "diag.v2.group.transfer",
-                "diag.v2.group.filesystem", "diag.v2.group.unavailable",
-                "diag.v2.status.ok", "diag.v2.status.warn",
-                "diag.v2.status.fail"):
+    for key in (
+        "diag.v2.group.system",
+        "diag.v2.group.network",
+        "diag.v2.group.internet",
+        "diag.v2.group.ai_config",
+        "diag.v2.group.chat",
+        "diag.v2.group.transfer",
+        "diag.v2.group.filesystem",
+        "diag.v2.group.unavailable",
+        "diag.v2.status.ok",
+        "diag.v2.status.warn",
+        "diag.v2.status.fail",
+    ):
         assert key in en, key
 
 
@@ -481,15 +531,13 @@ def test_diagnostics_panel_passes_node_check(tmp_path):
     path = os.path.join(_STATIC, "components", "diagnostics-panel.js")
     proc = subprocess.run(
         [node, "--check", path],
-        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+        capture_output=True,
+        text=True,
     )
-    assert proc.returncode == 0, (
-        f"diagnostics-panel.js fails node --check:\n{proc.stderr}"
-    )
+    assert proc.returncode == 0, f"diagnostics-panel.js fails node --check:\n{proc.stderr}"
 
 
 def test_no_nul_bytes_in_diagnostics_panel():
-    with open(os.path.join(_STATIC, "components", "diagnostics-panel.js"),
-              "rb") as f:
+    with open(os.path.join(_STATIC, "components", "diagnostics-panel.js"), "rb") as f:
         data = f.read()
     assert b"\x00" not in data

@@ -1,3 +1,7 @@
+# ruff: noqa: E501  # a big JS-assert script lives as a triple-quoted string below,
+#                   # so long "lines" are JS statements, not Python — reflowing them
+#                   # would change the string content, not just formatting.
+
 """Refactor round 1 — AI-config web UI layer (unified tool-profile model).
 
 The 「配置」 tab is now ONE unified panel (aiconfig-panel.js) driven by TOOL
@@ -64,7 +68,7 @@ def _has_node():
     return shutil.which("node") is not None
 
 
-def _T(src: str) -> str:
+def _T(src: str) -> str:  # noqa: N802
     """Un-escape template-string quotes so t('key') tokens are searchable.
 
     Components embed their templates as single-quoted JS strings, which means
@@ -95,11 +99,16 @@ def test_panel_mounted_in_both_layouts():
     app_src = _read("js", "app.js")
     assert "aiconfig: 'aiconfig-panel'" in app_src
     assert "panelComponent: function ()" in app_src
-    for tab, name in (("overview", "overview-panel"), ("history", "history-panel"),
-                      ("devices", "device-panel"), ("transfers", "transfer-panel"),
-                      ("chat", "chat-panel"), ("favorites", "favorites-panel"),
-                      ("aiconfig", "aiconfig-panel"),
-                      ("diagnostics", "diagnostics-panel")):
+    for tab, name in (
+        ("overview", "overview-panel"),
+        ("history", "history-panel"),
+        ("devices", "device-panel"),
+        ("transfers", "transfer-panel"),
+        ("chat", "chat-panel"),
+        ("favorites", "favorites-panel"),
+        ("aiconfig", "aiconfig-panel"),
+        ("diagnostics", "diagnostics-panel"),
+    ):
         assert f"{tab}: '{name}'" in app_src, f"missing mapping {tab} → {name}"
 
 
@@ -144,10 +153,8 @@ def test_index_html_has_unified_panel_css():
 def test_device_panel_component_is_deleted():
     # The old browse/pull UI was merged into the unified panel; the separate
     # component file must be gone (not merely unused).
-    assert not os.path.exists(os.path.join(_STATIC, "components",
-                                           "aiconfig-device-panel.js"))
-    assert not os.path.exists(os.path.join(_STATIC, "components",
-                                           "aiconfig-helpers.js"))
+    assert not os.path.exists(os.path.join(_STATIC, "components", "aiconfig-device-panel.js"))
+    assert not os.path.exists(os.path.join(_STATIC, "components", "aiconfig-helpers.js"))
 
 
 # ── 2. aiconfig-helpers.js: shared pure logic ───────────────────────────
@@ -155,8 +162,17 @@ def test_device_panel_component_is_deleted():
 
 def test_helpers_export_table():
     src = _read("js", "aiconfig-helpers.js")
-    for fn in ("fmtSize", "fmtTime", "mtimeMs", "keyOf", "legacyKeyOf",
-               "buildLocalIndex", "compareState", "diffCounts", "toolLabel"):
+    for fn in (
+        "fmtSize",
+        "fmtTime",
+        "mtimeMs",
+        "keyOf",
+        "legacyKeyOf",
+        "buildLocalIndex",
+        "compareState",
+        "diffCounts",
+        "toolLabel",
+    ):
         assert f"{fn}:" in src, fn
     assert "KEY_SEP" in src
     assert "__CLIPSYNC_AICONFIG_HELPERS__" in src
@@ -165,55 +181,77 @@ def test_helpers_export_table():
 _NODE_HELPERS = textwrap.dedent(r"""
     const fs = require('fs');
     global.window = {};
+    // aiconfig-helpers delegates fmtSize/fmtSpeed to the ClipsyncFormat global
+    // defined in format.js; load that first, mirroring index.html's <script>
+    // order, so the bare `ClipsyncFormat` reference resolves in Node too.
+    eval(fs.readFileSync(process.argv[3], 'utf8'));
     eval(fs.readFileSync(process.argv[2], 'utf8'));
     const H = global.window.__CLIPSYNC_AICONFIG_HELPERS__;
 
     const assert = (cond, msg) => { if (!cond) { console.error('FAIL ' + msg); process.exit(1); } };
-    const E = (tool, rel_path, sha256, mtime) => ({ tool, rel_path, sha256, mtime });
+    // root is the stable watch-root id a rel_path is relative to (v3).
+    const E = (tool, root, rel_path, sha256, mtime) =>
+      ({ tool, root, rel_path, sha256, mtime });
 
     const localEntries = [
-      E('claude_code', 'CLAUDE.md', 'aaaa', 1000),
-      E('claude_code', 'settings.json', 'bbbb', 2000),
-      E('custom', 'notes.md', 'cccc', 3000),
-      { tool: 'claude_code', rel_path: 'skills/x/', is_dir: true }, // excluded
+      E('claude_code', 'memory', 'CLAUDE.md', 'aaaa', 1000),
+      E('claude_code', 'settings', 'settings.json', 'bbbb', 2000),
+      E('custom', 'r0', 'notes.md', 'cccc', 3000),
+      // Same rel under two dir roots of ONE tool: distinct files, and the
+      // whole reason root is part of the identity.
+      E('claude_code', 'skills', 'x.md', 'sk11', 1000),
+      E('claude_code', 'commands', 'x.md', 'cm22', 1000),
+      { tool: 'claude_code', root: 'skills', rel_path: 'x/', is_dir: true },
     ];
     const idx = H.buildLocalIndex(localEntries);
 
-    // keyOf: tool + rel_path, joined by a separator that can't collide.
-    assert(H.keyOf(E('claude_code', 'CLAUDE.md')) === 'claude_codeCLAUDE.md', 'keyOf shape');
+    // keyOf: tool + root + rel_path, joined by a separator that can't collide.
+    assert(H.keyOf(E('claude_code', 'memory', 'CLAUDE.md')) ===
+      'claude_codememoryCLAUDE.md', 'keyOf shape');
+    // Two roots of one tool never collapse to one key.
+    assert(H.keyOf(E('claude_code', 'skills', 'x.md')) !==
+      H.keyOf(E('claude_code', 'commands', 'x.md')), 'keyOf root distinct');
     assert(H.legacyKeyOf({ root_index: 2, rel_path: 'x' }) === 'legacy2x', 'legacyKeyOf shape');
-    // buildLocalIndex keys by (tool, rel_path); directories are dropped.
-    assert(idx.byKey['claude_codeCLAUDE.md'].sha256 === 'aaaa', 'byKey lookup');
-    assert(idx.byKey['claude_codeskills/x/'] === undefined, 'dirs excluded');
+    // buildLocalIndex keys by (tool, root, rel_path); directories are dropped.
+    assert(idx.byKey['claude_codememoryCLAUDE.md'].sha256 === 'aaaa', 'byKey lookup');
+    assert(idx.byKey['claude_codeskillsx.md'].sha256 === 'sk11', 'byKey skills root');
+    assert(idx.byKey['claude_codecommandsx.md'].sha256 === 'cm22', 'byKey commands root');
+    assert(idx.byKey['claude_codeskillsx/'] === undefined, 'dirs excluded');
     assert(idx.byPath['notes.md'].tool === 'custom', 'byPath fallback');
 
     // compareState: same / missing / local_newer / remote_newer.
-    assert(H.compareState(idx, E('claude_code', 'CLAUDE.md', 'aaaa', 1000)) === 'same', 'same');
-    assert(H.compareState(idx, E('claude_code', 'NEW.md', 'dddd', 1)) === 'missing', 'missing');
-    assert(H.compareState(idx, E('claude_code', 'CLAUDE.md', 'zzzz', 500)) === 'local_newer', 'local_newer');
-    assert(H.compareState(idx, E('claude_code', 'CLAUDE.md', 'zzzz', 5000)) === 'remote_newer', 'remote_newer');
+    assert(H.compareState(idx, E('claude_code', 'memory', 'CLAUDE.md', 'aaaa', 1000)) === 'same', 'same');
+    assert(H.compareState(idx, E('claude_code', 'memory', 'NEW.md', 'dddd', 1)) === 'missing', 'missing');
+    assert(H.compareState(idx, E('claude_code', 'memory', 'CLAUDE.md', 'zzzz', 500)) === 'local_newer', 'local_newer');
+    assert(H.compareState(idx, E('claude_code', 'memory', 'CLAUDE.md', 'zzzz', 5000)) === 'remote_newer', 'remote_newer');
     // Equal mtime with differing hash falls through to "remote is newer".
-    assert(H.compareState(idx, E('claude_code', 'CLAUDE.md', 'zzzz', 1000)) === 'remote_newer', 'equal mtime');
+    assert(H.compareState(idx, E('claude_code', 'memory', 'CLAUDE.md', 'zzzz', 1000)) === 'remote_newer', 'equal mtime');
+    // Each root compares against ITS OWN local file, never the sibling root's.
+    assert(H.compareState(idx, E('claude_code', 'skills', 'x.md', 'sk11', 1000)) === 'same', 'skills root same');
+    assert(H.compareState(idx, E('claude_code', 'commands', 'x.md', 'sk11', 1000)) !== 'same', 'commands root not same');
+    // A root this device does not watch is "missing", NOT a byPath match
+    // against a same-named file under some other root.
+    assert(H.compareState(idx, E('claude_code', 'agents', 'x.md', 'sk11', 1000)) === 'missing', 'unknown root missing');
     // Directory rows and an unloaded local index produce no badge.
-    assert(H.compareState(idx, { tool: 'claude_code', rel_path: 'skills/x/', is_dir: true }) === null, 'dir null');
-    assert(H.compareState(null, E('claude_code', 'CLAUDE.md', 'aaaa', 1000)) === null, 'no local null');
+    assert(H.compareState(idx, { tool: 'claude_code', root: 'skills', rel_path: 'x/', is_dir: true }) === null, 'dir null');
+    assert(H.compareState(null, E('claude_code', 'memory', 'CLAUDE.md', 'aaaa', 1000)) === null, 'no local null');
 
     // mtime unit invariance: seconds below ~1e12, anything bigger is ms.
-    const msIdx = H.buildLocalIndex([E('custom', 'a.md', 's1', 2000000000000)]);
-    assert(H.compareState(msIdx, E('custom', 'a.md', 's2', 1500000000000)) === 'local_newer', 'ms local_newer');
-    assert(H.compareState(msIdx, E('custom', 'a.md', 's2', 3000000000000)) === 'remote_newer', 'ms remote_newer');
+    const msIdx = H.buildLocalIndex([E('custom', 'r0', 'a.md', 's1', 2000000000000)]);
+    assert(H.compareState(msIdx, E('custom', 'r0', 'a.md', 's2', 1500000000000)) === 'local_newer', 'ms local_newer');
+    assert(H.compareState(msIdx, E('custom', 'r0', 'a.md', 's2', 3000000000000)) === 'remote_newer', 'ms remote_newer');
 
     // A legacy remote row (root_index) compares against local by rel_path only.
     assert(H.compareState(idx, { root_index: 0, rel_path: 'notes.md', sha256: 'cccc', mtime: 1 }, true) === 'same', 'legacy same');
-    // A v2 remote whose tool is not local still falls back to byPath.
-    assert(H.compareState(idx, E('codex', 'notes.md', 'cccc', 1)) === 'same', 'byPath fallback');
+    // A v2 remote sends no root at all, so it still falls back to byPath.
+    assert(H.compareState(idx, { tool: 'codex', rel_path: 'notes.md', sha256: 'cccc', mtime: 1 }) === 'same', 'byPath fallback');
 
     // diffCounts aggregates the four states.
     const cnt = H.diffCounts(idx, [
-      E('claude_code', 'CLAUDE.md', 'aaaa', 1),        // same
-      E('claude_code', 'NEW.md', 'x', 1),             // missing
-      E('claude_code', 'settings.json', 'zzzz', 1),   // local_newer
-      E('claude_code', 'settings.json', 'zzzz', 9e6), // remote_newer
+      E('claude_code', 'memory', 'CLAUDE.md', 'aaaa', 1),        // same
+      E('claude_code', 'memory', 'NEW.md', 'x', 1),             // missing
+      E('claude_code', 'settings', 'settings.json', 'zzzz', 1),   // local_newer
+      E('claude_code', 'settings', 'settings.json', 'zzzz', 9e6), // remote_newer
     ]);
     assert(cnt.same === undefined && cnt.total === 3, 'diffCounts total');
     assert(cnt.missing === 1 && cnt.local_newer === 1 && cnt.remote_newer === 1, 'diffCounts buckets');
@@ -235,12 +273,15 @@ def test_helpers_behavior_via_node(tmp_path):
         pytest.skip("node not available")
     script = tmp_path / "helpers_check.js"
     script.write_text(_NODE_HELPERS, encoding="utf-8")
-    path = os.path.join(_STATIC, "js", "aiconfig-helpers.js")
-    proc = subprocess.run([shutil.which("node"), str(script), path],
-                          stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                          text=True)
-    assert proc.returncode == 0, (
-        f"helpers script failed:\n{proc.stdout}\n{proc.stderr}")
+    helpers = os.path.join(_STATIC, "js", "aiconfig-helpers.js")
+    # aiconfig-helpers delegates fmtSize/fmtSpeed to the ClipsyncFormat global
+    # in format.js; hand both to the script (as argv[2] and argv[3]) so the
+    # Node run sees the same global the browser does.
+    fmt = os.path.join(_STATIC, "js", "format.js")
+    proc = subprocess.run(
+        [shutil.which("node"), str(script), helpers, fmt], capture_output=True, text=True
+    )
+    assert proc.returncode == 0, f"helpers script failed:\n{proc.stdout}\n{proc.stderr}"
     assert "ALL_OK" in proc.stdout
 
 
@@ -252,7 +293,7 @@ def test_api_profiles_wrappers():
     assert "getAiConfigProfiles" in src
     assert "'/api/aiconfig/profiles'" in src
     body = src.split("setAiConfigProfiles")[1].split("previewAiConfigFile")[0]
-    assert "'/api/aiconfig/profiles'" in body          # POST
+    assert "'/api/aiconfig/profiles'" in body  # POST
     for field in ("tools", "custom_paths"):
         assert field in body, field
 
@@ -293,12 +334,9 @@ def test_api_local_wrappers_use_tool_query():
     assert "encodeURIComponent(relPath)" in body
     # local save / trash / open carry the tool field, never root_index.
     for method, url, fields in (
-        ("saveAiConfigLocal", "/api/aiconfig/local/save",
-         ("tool", "rel_path", "content")),
-        ("trashAiConfigLocal", "/api/aiconfig/local/trash",
-         ("tool", "rel_path")),
-        ("openAiConfigLocal", "/api/aiconfig/open",
-         ("tool", "rel_path")),
+        ("saveAiConfigLocal", "/api/aiconfig/local/save", ("tool", "rel_path", "content")),
+        ("trashAiConfigLocal", "/api/aiconfig/local/trash", ("tool", "rel_path")),
+        ("openAiConfigLocal", "/api/aiconfig/open", ("tool", "rel_path")),
     ):
         body = src.split(f"{method}: function")[1]
         assert f"'{url}'" in body, method
@@ -339,8 +377,7 @@ def test_store_declares_unified_aiconfig_state():
 
 def test_store_inventory_fetch_normalizes_defensively():
     src = _read("js", "store.js")
-    chunk = src.split("fetchAiConfigInventory: function")[1].split(
-        "applyAiConfigFileResult")[0]
+    chunk = src.split("fetchAiConfigInventory: function")[1].split("applyAiConfigFileResult")[0]
     assert "typeof res.peers === 'object'" in chunk
     assert "Array.isArray(p.entries)" in chunk
     # The wire keys each entry's path as `path`; the store normalizes to the
@@ -352,8 +389,7 @@ def test_store_inventory_fetch_normalizes_defensively():
 
 def test_store_local_fetch_normalizes_defensively():
     src = _read("js", "store.js")
-    chunk = src.split("fetchAiConfigLocal: function")[1].split(
-        "openAiConfigMigrate")[0]
+    chunk = src.split("fetchAiConfigLocal: function")[1].split("openAiConfigMigrate")[0]
     # The local manager must work with zero paired devices — no peer gate.
     assert "getAiConfigLocal" in chunk
     # Malformed roots/entries degrade to empty lists, never a crash.
@@ -365,8 +401,7 @@ def test_store_local_fetch_normalizes_defensively():
 
 def test_store_apply_batch_tracks_progress():
     src = _read("js", "store.js")
-    chunk = src.split("applyAiConfigFileResult: function")[1].split(
-        "startAiConfigBatch")[0]
+    chunk = src.split("applyAiConfigFileResult: function")[1].split("startAiConfigBatch")[0]
     # Rolling results list, capped.
     assert "aiConfigResults.unshift" in chunk
     # Batch tracking: a batch_id on the WS event folds into aiConfigBatches
@@ -375,15 +410,18 @@ def test_store_apply_batch_tracks_progress():
     assert "batch.done += 1" in chunk
     assert "batch.finished = true" in chunk
     # The toast key maps each status vocabulary.
-    for key in ("aiconfig.result_error", "aiconfig.result_copied",
-                "aiconfig.result_appended", "aiconfig.result_saved"):
+    for key in (
+        "aiconfig.result_error",
+        "aiconfig.result_copied",
+        "aiconfig.result_appended",
+        "aiconfig.result_saved",
+    ):
         assert key in chunk, key
 
 
 def test_store_batch_lifecycle():
     src = _read("js", "store.js")
-    chunk = src.split("startAiConfigBatch: function")[1].split(
-        "openAiConfigMigrate")[0]
+    chunk = src.split("startAiConfigBatch: function")[1].split("openAiConfigMigrate")[0]
     assert "total: total" in chunk and "done: 0" in chunk
     assert "results: []" in chunk and "finished: false" in chunk
     assert "peerId: peerId || ''" in chunk
@@ -432,9 +470,16 @@ def test_panel_uses_shared_helpers():
     src = _read("components", "aiconfig-panel.js")
     # The panel binds the helpers into the Vue instance; every diff/format
     # decision goes through them.
-    for token in ("H.fmtSize", "H.fmtTime", "H.mtimeMs",
-                  "H.keyOf", "H.buildLocalIndex", "H.compareState",
-                  "H.diffCounts", "H.toolLabel"):
+    for token in (
+        "H.fmtSize",
+        "H.fmtTime",
+        "H.mtimeMs",
+        "H.keyOf",
+        "H.buildLocalIndex",
+        "H.compareState",
+        "H.diffCounts",
+        "H.toolLabel",
+    ):
         assert token in src, token
 
 
@@ -459,7 +504,9 @@ def test_panel_folder_whole_select_and_batch():
 def test_panel_migrate_mount_and_local_view():
     src = _T(_read("components", "aiconfig-panel.js"))
     # The wizard is mounted from the unified panel, gated on the store flag.
-    assert '<aiconfig-migrate-panel v-if="store.aiConfigMigrateOpen"></aiconfig-migrate-panel>' in src
+    assert (
+        '<aiconfig-migrate-panel v-if="store.aiConfigMigrateOpen"></aiconfig-migrate-panel>' in src
+    )
     assert "openMigrate: function" in src
     assert "t('aiconfig.migrate_title')" in src
     # Local manage sub-view survives inside the unified tab.
@@ -491,8 +538,12 @@ def test_panel_has_no_legacy_watch_path_or_device_panel_tokens():
     # The unified panel lives in ONE file — the deleted device-panel component
     # is not referenced, and the raw watch-path API is not touched.  (root_index
     # may legitimately appear: legacy peers are still browsable/previewable.)
-    for token in ("getAiConfigPaths", "setAiConfigPaths",
-                  "aiconfig-device-panel", "peersList === null"):
+    for token in (
+        "getAiConfigPaths",
+        "setAiConfigPaths",
+        "aiconfig-device-panel",
+        "peersList === null",
+    ):
         assert token not in src, token
 
 
@@ -505,9 +556,11 @@ def test_migrate_panel_component_structure():
     assert "inject: ['store']" in src
     # Three landing strategies, all surfaced through the locale.
     assert "STRATEGIES" in src
-    for value, label in (("skip", "aiconfig.migrate_strategy_skip"),
-                         ("overwrite", "aiconfig.migrate_strategy_overwrite"),
-                         ("copy", "aiconfig.migrate_strategy_copy")):
+    for _value, label in (
+        ("skip", "aiconfig.migrate_strategy_skip"),
+        ("overwrite", "aiconfig.migrate_strategy_overwrite"),
+        ("copy", "aiconfig.migrate_strategy_copy"),
+    ):
         assert f"'{label}'" in src, label
     # Only v2 peers are migratable (legacy peers are read-only).
     assert "v2Peers: function" in src
@@ -556,7 +609,7 @@ def test_settings_panel_ai_config_section_wiring():
     assert "removeAiConfigCustomPath" in src
     assert "saveAiConfigProfiles: function" in src
     # The template renders the fetched profile cards as checkboxes.
-    assert "class=\"settings-checkbox\"" in src
+    assert 'class="settings-checkbox"' in src
     assert "toolEnabled(prof.key)" in src
     assert "profilePaths(prof)" in src
 
@@ -711,8 +764,12 @@ def test_removed_watch_path_keys_are_gone():
 def test_locale_placeholders_present():
     en, zh = _locales()
     # {count} interpolations.
-    for key in ("aiconfig.folder_select_count", "aiconfig.migrate_diff_count",
-                "aiconfig.migrate_apply", "aiconfig.local_skills_count"):
+    for key in (
+        "aiconfig.folder_select_count",
+        "aiconfig.migrate_diff_count",
+        "aiconfig.migrate_apply",
+        "aiconfig.local_skills_count",
+    ):
         assert "{count}" in en[key], key
         assert "{count}" in zh[key], key
     # Batch progress interpolates done/total.
@@ -735,8 +792,12 @@ def test_locale_placeholders_present():
     assert "{dest}" in zh["aiconfig.local_trashed_toast"]
     # The saved toast has no slot (it names the .bak backup verbatim).
     assert "{path}" not in en["aiconfig.local_saved_toast"]
-    for key in ("aiconfig.local_save_failed", "aiconfig.local_trash_failed",
-                "aiconfig.local_open_failed", "aiconfig.local_preview_failed"):
+    for key in (
+        "aiconfig.local_save_failed",
+        "aiconfig.local_trash_failed",
+        "aiconfig.local_open_failed",
+        "aiconfig.local_preview_failed",
+    ):
         assert "{reason}" in en[key], key
         assert "{reason}" in zh[key], key
     # Version tooltip interpolates both sides.
@@ -772,12 +833,8 @@ def test_touched_js_passes_node_check(tmp_path):
     for parts in _TOUCHED_JS:
         path = os.path.join(_STATIC, *parts)
         assert os.path.exists(path), f"missing touched JS: {os.path.join(*parts)}"
-        proc = subprocess.run([node, "--check", path],
-                              stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                              text=True)
-        assert proc.returncode == 0, (
-            f"{os.path.join(*parts)} fails node --check:\n{proc.stderr}"
-        )
+        proc = subprocess.run([node, "--check", path], capture_output=True, text=True)
+        assert proc.returncode == 0, f"{os.path.join(*parts)} fails node --check:\n{proc.stderr}"
 
 
 def test_no_nul_bytes_in_touched_js():
@@ -801,3 +858,30 @@ def test_no_hardcoded_preset_table_anywhere():
     for name in ("store.js", "api.js"):
         src = _read("js", name)
         assert "AICONFIG_PRESETS" not in src, f"presets in {name}"
+
+
+def test_local_table_size_and_time_cells_guard_identically():
+    """Paired value cells must apply the same guard.
+
+    The size and time cells sit side by side and read off the same
+    `row.entry`, so whatever protects one has to protect the other.  The
+    local file table synthesises folder rows for path segments that have no
+    inventory entry of their own (see the `row.entry || {...}` fallback on
+    its open-dir button); reading `.mtime` off that missing entry throws
+    inside the render and blanks the whole panel.  The time cell only
+    checked `row.entry` while the size cell next to it checked
+    `row.isDir || !row.entry`.
+    """
+    src = _read("components", "aiconfig-panel.js")
+    lines = src.splitlines()
+    sizes = [ln for ln in lines if "aiconfig-panel__cell-size" in ln]
+    times = [ln for ln in lines if "aiconfig-panel__cell-time" in ln]
+    assert sizes and len(sizes) == len(times)
+    for size_line, time_line in zip(sizes, times, strict=False):
+        size_guard = size_line.split("{{")[1].split("?")[0].strip()
+        time_guard = time_line.split("{{")[1].split("?")[0].strip()
+        assert size_guard == time_guard, (
+            f"size cell guards on {size_guard!r} but the time cell beside it "
+            f"guards on {time_guard!r}"
+        )
+        assert "row.isDir" in time_guard

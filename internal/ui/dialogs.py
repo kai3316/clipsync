@@ -3,6 +3,8 @@
 Uses CTkToplevel for consistent look with the rest of the app.
 """
 
+import contextlib
+
 import customtkinter as ctk
 
 from internal.i18n import T
@@ -28,8 +30,10 @@ def _system_prefers_dark() -> bool:
     """
     try:
         import sys
+
         if sys.platform == "win32":
             import winreg
+
             key = winreg.OpenKey(
                 winreg.HKEY_CURRENT_USER,
                 r"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize",
@@ -41,22 +45,32 @@ def _system_prefers_dark() -> bool:
                 winreg.CloseKey(key)
         if sys.platform == "darwin":
             import subprocess
+
             out = subprocess.run(
                 ["defaults", "read", "-g", "AppleInterfaceStyle"],
-                capture_output=True, text=True, timeout=3,
+                capture_output=True,
+                text=True,
+                timeout=3,
             ).stdout.strip()
             return out == "Dark"
         # Linux (GTK/GNOME-based). Both keys are tried, then we bail.
         import subprocess
+
         for schema, key in (
             ("org.gnome.desktop.interface", "color-scheme"),
             ("org.gnome.desktop.interface", "gtk-theme"),
         ):
             try:
-                out = subprocess.run(
-                    ["gsettings", "get", schema, key],
-                    capture_output=True, text=True, timeout=3,
-                ).stdout.strip().lower()
+                out = (
+                    subprocess.run(
+                        ["gsettings", "get", schema, key],
+                        capture_output=True,
+                        text=True,
+                        timeout=3,
+                    )
+                    .stdout.strip()
+                    .lower()
+                )
                 if "dark" in out:
                     return True
             except Exception:
@@ -111,19 +125,24 @@ def _dialog(parent, title, message, icon, accent_color, buttons):
     title_row.pack(fill="x", pady=(0, 10))
 
     ctk.CTkLabel(
-        title_row, text=icon, font=ctk.CTkFont(size=24, weight="bold"),
+        title_row,
+        text=icon,
+        font=ctk.CTkFont(size=24, weight="bold"),
         text_color=accent_color,
     ).pack(side="left", padx=(0, 10))
 
     ctk.CTkLabel(
-        title_row, text=title,
+        title_row,
+        text=title,
         font=ctk.CTkFont(size=15, weight="bold"),
         text_color=accent_color,
     ).pack(side="left")
 
     # Message
     ctk.CTkLabel(
-        body, text=message, justify="left",
+        body,
+        text=message,
+        justify="left",
         font=ctk.CTkFont(size=12),
         text_color=("gray30", "gray80"),
         wraplength=370,
@@ -145,7 +164,10 @@ def _dialog(parent, title, message, icon, accent_color, buttons):
         else:
             hover = color
         btn = ctk.CTkButton(
-            btn_row, text=label, width=90, height=32,
+            btn_row,
+            text=label,
+            width=90,
+            height=32,
             fg_color=color,
             hover_color=hover,
             font=ctk.CTkFont(size=12),
@@ -158,17 +180,15 @@ def _dialog(parent, title, message, icon, accent_color, buttons):
     def _close(value):
         try:
             if dlg.winfo_exists():
-                result[0] = (value == 0)
+                result[0] = value == 0
                 dlg.destroy()
         except Exception:
             pass
 
     dlg.update()
     dlg.transient(parent)
-    try:
+    with contextlib.suppress(Exception):
         dlg.grab_set()
-    except Exception:
-        pass
 
     # Keyboard handling: Enter triggers the primary button, Escape the cancel
     # (last) button. Return "break" so a focused child widget can't also fire.
@@ -204,26 +224,29 @@ def _darken(hex_color, amount):
 
 def show_info(parent, title, message):
     """Show an info dialog with an OK button."""
-    return _dialog(parent, title, message, _INFO_ICON, _INFO_COLOR,
-                   [(T("ui.ok"), _INFO_COLOR)])
+    return _dialog(parent, title, message, _INFO_ICON, _INFO_COLOR, [(T("ui.ok"), _INFO_COLOR)])
 
 
 def show_warning(parent, title, message):
     """Show a warning dialog with an OK button."""
-    return _dialog(parent, title, message, _WARN_ICON, _WARN_COLOR,
-                   [(T("ui.ok"), _WARN_COLOR)])
+    return _dialog(parent, title, message, _WARN_ICON, _WARN_COLOR, [(T("ui.ok"), _WARN_COLOR)])
 
 
 def show_error(parent, title, message):
     """Show an error dialog with an OK button."""
-    return _dialog(parent, title, message, _ERROR_ICON, _ERROR_COLOR,
-                   [(T("ui.ok"), _ERROR_COLOR)])
+    return _dialog(parent, title, message, _ERROR_ICON, _ERROR_COLOR, [(T("ui.ok"), _ERROR_COLOR)])
 
 
 def ask_yesno(parent, title, message):
     """Show a confirmation dialog with Yes/No buttons. Returns True if Yes."""
-    return _dialog(parent, title, message, _WARN_ICON, _WARN_COLOR,
-                   [(T("ui.yes"), _INFO_COLOR), (T("ui.no"), ("gray65", "gray45"))])
+    return _dialog(
+        parent,
+        title,
+        message,
+        _WARN_ICON,
+        _WARN_COLOR,
+        [(T("ui.yes"), _INFO_COLOR), (T("ui.no"), ("gray65", "gray45"))],
+    )
 
 
 def ask_string(parent, title, prompt, initial_value="", show=""):
@@ -255,7 +278,9 @@ def ask_string(parent, title, prompt, initial_value="", show=""):
     body.pack(fill="both", expand=True, padx=24, pady=(20, 12))
 
     ctk.CTkLabel(
-        body, text=prompt, justify="left",
+        body,
+        text=prompt,
+        justify="left",
         font=ctk.CTkFont(size=12),
         text_color=("gray30", "gray80"),
         wraplength=350,
@@ -264,10 +289,15 @@ def ask_string(parent, title, prompt, initial_value="", show=""):
     if show:
         # Use tkinter Entry for password masking (CTkEntry doesn't support show=)
         import tkinter as tk
+
         entry_var = tk.StringVar(value=initial_value)
         entry = tk.Entry(
-            body, textvariable=entry_var, show=show,
-            font=("TkDefaultFont", 13), relief="solid", borderwidth=1,
+            body,
+            textvariable=entry_var,
+            show=show,
+            font=("TkDefaultFont", 13),
+            relief="solid",
+            borderwidth=1,
         )
         entry.pack(fill="x", ipady=6)
         entry.select_range(0, "end")
@@ -275,7 +305,9 @@ def ask_string(parent, title, prompt, initial_value="", show=""):
     else:
         entry_var = ctk.StringVar(value=initial_value)
         entry = ctk.CTkEntry(
-            body, textvariable=entry_var, height=34,
+            body,
+            textvariable=entry_var,
+            height=34,
             font=ctk.CTkFont(size=13),
         )
         entry.pack(fill="x")
@@ -286,14 +318,21 @@ def ask_string(parent, title, prompt, initial_value="", show=""):
     btn_row.pack(fill="x", padx=24, pady=(0, 20))
 
     default_btn = ctk.CTkButton(
-        btn_row, text=T("ui.save"), width=90, height=32,
+        btn_row,
+        text=T("ui.save"),
+        width=90,
+        height=32,
         fg_color=_INFO_COLOR,
         font=ctk.CTkFont(size=12),
         command=lambda: _on_close(entry_var.get()),
     )
     ctk.CTkButton(
-        btn_row, text=T("ui.cancel"), width=90, height=32,
-        fg_color="transparent", border_width=1,
+        btn_row,
+        text=T("ui.cancel"),
+        width=90,
+        height=32,
+        fg_color="transparent",
+        border_width=1,
         text_color=("gray40", "gray60"),
         border_color=("gray60", "gray50"),
         hover_color=("gray85", "gray25"),
@@ -319,10 +358,8 @@ def ask_string(parent, title, prompt, initial_value="", show=""):
 
     dlg.update()
     dlg.transient(parent)
-    try:
+    with contextlib.suppress(Exception):
         dlg.grab_set()
-    except Exception:
-        pass
 
     try:
         dlg.bind("<Return>", lambda e: (_on_close(entry_var.get()), "break")[1])

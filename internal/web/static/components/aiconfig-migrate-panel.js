@@ -29,6 +29,13 @@
     { value: 'copy', labelKey: 'aiconfig.migrate_strategy_copy', hintKey: 'aiconfig.migrate_strategy_copy_hint' },
   ];
 
+  // Turn a key list into a {key: true} map for merging into `touched`.
+  function mark(keys) {
+    var out = {};
+    for (var i = 0; i < keys.length; i++) out[keys[i]] = true;
+    return out;
+  }
+
   window.__CLIPSYNC_COMPONENTS__['aiconfig-migrate-panel'] = {
     inject: ['store'],
 
@@ -38,6 +45,7 @@
         strategy: 'skip',
         strategies: STRATEGIES,
         checked: {},           // selection key -> true
+        touched: {},           // selection key -> true once the user toggled it
         batchId: '',
         running: false,
       };
@@ -92,6 +100,10 @@
           if (!groups[t]) { groups[t] = []; groupOrder.push(t); }
           groups[t].push({
             tool: t,
+            // Carried so the row's identity survives into rowKey()/applyItems():
+            // rel_path is relative to its own root, so two roots of one tool can
+            // report the same rel and the tool alone is not an identity.
+            root: String(e.root || ''),
             rel_path: String(e.rel_path || ''),
             state: state,
             size: e.size,
@@ -157,12 +169,28 @@
         }
         return '';
       },
+
+      // The landing mode the chosen strategy maps to.  'skip' also lands as
+      // 'copy', but its item list is filtered to files this device is missing —
+      // and the backend writes a missing file under its real name, so "skip
+      // existing" genuinely means "fill the gaps".
+      landingMode: function () {
+        return this.strategy === 'overwrite' ? 'overwrite' : 'copy';
+      },
     },
 
     watch: {
       sourcePeerId: function () {
         // Fresh source → re-check every diff (migration default).
-        this.checked = this.defaultChecks();
+        this.touched = {};
+        this.syncChecks();
+      },
+
+      // The diff arrives asynchronously (peer inventory + local index land in
+      // either order, and an inventory refresh can change it later), so the
+      // selection has to follow it instead of being computed once on open.
+      diffGroups: function () {
+        this.syncChecks();
       },
     },
 
@@ -171,12 +199,13 @@
       var self = this;
       this.$nextTick(function () {
         self.checked = {};
+        self.touched = {};
         self.batchId = '';
         self.running = false;
         if (self.v2Peers.length && !self.sourcePeerId) {
           self.sourcePeerId = self.v2Peers[0].id;
         }
-        self.checked = self.defaultChecks();
+        self.syncChecks();
       });
     },
 
@@ -191,12 +220,46 @@
       defaultChecks: function () {
         var next = {};
         var self = this;
-        // Await the local index: if the local inventory hasn't loaded yet the
-        // diff is empty and nothing gets pre-checked — harmless.
         this.diffGroups.forEach(function (g) {
           g.rows.forEach(function (row) { next[self.rowKey(row)] = true; });
         });
         return next;
+      },
+
+      // Select-all / deselect-all.  Both directions count as an explicit user
+      // choice, so every visible row is marked touched — otherwise the next
+      // inventory refresh would re-check everything the user just cleared.
+      toggleAll: function () {
+        if (this.diffCount === 0) return;
+        var keys = [];
+        var self = this;
+        this.diffGroups.forEach(function (g) {
+          g.rows.forEach(function (row) { keys.push(self.rowKey(row)); });
+        });
+        this.checked = (this.checkedCount === this.diffCount) ? {} : mark(keys);
+        this.touched = Object.assign({}, this.touched, mark(keys));
+      },
+
+      // Re-derive the selection against the current diff, honouring anything
+      // the user explicitly toggled.  Needed because diffGroups starts empty:
+      // it depends on store.aiConfigLocal.loaded, so on a cold open
+      // defaultChecks() ran against nothing and the panel sat there with every
+      // row visible, nothing selected and Apply refusing to fire until the
+      // user re-picked the source peer.
+      syncChecks: function () {
+        var next = {};
+        var self = this;
+        this.diffGroups.forEach(function (g) {
+          g.rows.forEach(function (row) {
+            var k = self.rowKey(row);
+            // Untouched rows default to checked; a row the user unchecked
+            // stays unchecked across an inventory refresh.  Rows that vanished
+            // from the diff are dropped by virtue of not being visited.
+            next[k] = self.touched[k] ? !!self.checked[k] : true;
+            if (!next[k]) delete next[k];
+          });
+        });
+        this.checked = next;
       },
 
       isChecked: function (row) {
@@ -209,6 +272,7 @@
         if (next[k]) delete next[k];
         else next[k] = true;
         this.checked = next;
+        this.touched = Object.assign({}, this.touched, mark([k]));
       },
 
       groupChecked: function (g) {
@@ -220,12 +284,15 @@
         var target = !this.groupChecked(g);
         var next = Object.assign({}, this.checked);
         var self = this;
+        var keys = [];
         g.rows.forEach(function (row) {
           var k = self.rowKey(row);
+          keys.push(k);
           if (target) next[k] = true;
           else delete next[k];
         });
         this.checked = next;
+        this.touched = Object.assign({}, this.touched, mark(keys));
       },
 
       selectSource: function (id) {
@@ -249,10 +316,10 @@
           g.rows.forEach(function (row) {
             if (!self.checked[self.rowKey(row)]) return;
             if (self.strategy === 'skip' && row.state !== 'missing') return;
-            items.push({ tool: row.tool, rel_path: row.rel_path });
+            items.push({ tool: row.tool, root: row.root, rel_path: row.rel_path });
           });
         });
-        var mode = this.strategy === 'overwrite' ? 'overwrite' : 'copy';
+        var mode = this.landingMode;
         return { items: items, mode: mode };
       },
 
@@ -304,13 +371,21 @@
         var items = [];
         b.results.forEach(function (r) {
           if (r && r.status === 'error' && r.rel_path) {
-            items.push({ tool: String(r.tool || 'custom'), rel_path: r.rel_path });
+            items.push({
+              tool: String(r.tool || 'custom'),
+              root: String(r.root || ''),
+              rel_path: r.rel_path,
+            });
           }
         });
         if (items.length === 0) return;
         this.batchId = 'aiconfig_migrate_' + Date.now() + '_r_' + Math.random().toString(36).slice(2, 8);
         this.store.startAiConfigBatch(this.batchId, items.length, peer.id);
-        ClipsyncAPI.pullAiConfigFiles(peer.id, items, 'copy', this.batchId)
+        // Retry under the SAME landing mode the user chose, not a hardcoded
+        // 'copy': retrying an "Overwrite" migration used to silently downgrade
+        // to side-by-side copies, so the files the user asked to replace were
+        // left in place with ".from.<device>" siblings next to them.
+        ClipsyncAPI.pullAiConfigFiles(peer.id, items, this.landingMode, this.batchId)
           .catch(function () {
             self.store.clearAiConfigBatch(self.batchId);
             self.batchId = '';
@@ -369,7 +444,7 @@
               '<div class="aiconfig-migrate__diffbar">' +
                 '<span class="aiconfig-migrate__diffcount">{{ t(\'aiconfig.migrate_diff_count\', { count: diffCount }) }}</span>' +
                 '<label class="aiconfig-panel__selectall">' +
-                  '<input type="checkbox" :checked="checkedCount > 0 && checkedCount === diffCount" @change="diffCount === 0 ? null : (checkedCount === diffCount ? (checked = {}) : (checked = defaultChecks()))"> {{ t(\'aiconfig.select_all\') }}' +
+                  '<input type="checkbox" :checked="checkedCount > 0 && checkedCount === diffCount" @change="toggleAll()"> {{ t(\'aiconfig.select_all\') }}' +
                 '</label>' +
               '</div>' +
 

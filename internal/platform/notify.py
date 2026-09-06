@@ -42,7 +42,8 @@ class NotificationManager:
         self._pipe = pipe
         self._send_queue = queue.Queue()
         self._send_thread = threading.Thread(
-            target=self._pipe_sender, daemon=True,
+            target=self._pipe_sender,
+            daemon=True,
             name="notify-pipe-sender",
         )
         self._send_thread.start()
@@ -54,7 +55,7 @@ class NotificationManager:
         self._send_thread = None
         self._send_queue = None
         if thread is not None and q is not None and thread.is_alive():
-            try:
+            try:  # noqa: SIM105
                 q.put((None, None))  # sentinel stops the loop
             except Exception:
                 pass
@@ -70,8 +71,10 @@ class NotificationManager:
         """
         pipe = self._pipe
         if pipe is None:
-            logger.debug("send_pipe called before set_pipe — dropping %r",
-                         msg[0] if isinstance(msg, tuple) else msg)
+            logger.debug(
+                "send_pipe called before set_pipe — dropping %r",
+                msg[0] if isinstance(msg, tuple) else msg,
+            )
             return
         with self._pipe_lock:
             pipe.send(msg)
@@ -110,7 +113,7 @@ class NotificationManager:
         if not self._enabled:
             return
         if self._send_queue is not None:
-            try:
+            try:  # noqa: SIM105
                 self._send_queue.put_nowait((title, message))
             except queue.Full:
                 pass  # drop notification if the queue is full (shouldn't happen)
@@ -129,22 +132,6 @@ class NotificationManager:
             # the notification is simply dropped.
             self._fallback_notify(title, message)
 
-    def is_available(self) -> bool:
-        """Return True if this platform can deliver desktop notifications.
-
-        macOS/Windows deliver through the pystray icon (always available once
-        the tray runs); Linux requires the ``notify-send`` command.  Callers
-        use this to surface a one-time warning when the user enabled
-        notifications but the OS cannot actually show them.
-        """
-        import sys
-
-        if sys.platform == "linux":
-            import shutil
-
-            return shutil.which("notify-send") is not None
-        return True
-
     @staticmethod
     def _fallback_notify(title: str, message: str):
         """Fallback desktop notification via system command (Linux).
@@ -155,16 +142,16 @@ class NotificationManager:
         import shutil
         import subprocess
         import sys
+
         if sys.platform == "linux":
             if shutil.which("notify-send") is None:
-                logger.warning(
-                    "notify-send is not installed; desktop notifications unavailable"
-                )
+                logger.warning("notify-send is not installed; desktop notifications unavailable")
                 return
             try:
                 result = subprocess.run(
                     ["notify-send", title, message],
-                    capture_output=True, timeout=5,
+                    capture_output=True,
+                    timeout=5,
                 )
                 if result.returncode != 0:
                     # notify-send exists but no notification daemon is running
@@ -188,25 +175,28 @@ class NotificationManager:
         """
         import subprocess
         import sys
+
         try:
             if sys.platform == "win32":
                 import winsound
+
                 # SystemNotification is the Windows "you got something" sound;
                 # async so it doesn't block the caller.
-                winsound.PlaySound("SystemNotification",
-                                   winsound.SND_ALIAS | winsound.SND_ASYNC)
+                winsound.PlaySound("SystemNotification", winsound.SND_ALIAS | winsound.SND_ASYNC)
             elif sys.platform == "darwin":
                 subprocess.run(
-                    ["afplay", "/System/Library/Sounds/Ping.aiff"],
-                    capture_output=True, timeout=5)
+                    ["afplay", "/System/Library/Sounds/Ping.aiff"], capture_output=True, timeout=5
+                )
             else:
                 # Linux: try the freedesktop complete sound via a few tools.
                 # Only stop at the first tool that actually succeeds — a tool
                 # may exist yet fail (missing sound file, no audio server), in
                 # which case the next one should get a chance.
-                for cmd in (["paplay", "/usr/share/sounds/freedesktop/stereo/complete.oga"],
-                            ["canberra-gtk-play", "-i", "complete"],
-                            ["aplay", "/usr/share/sounds/alsa/Front_Center.wav"]):
+                for cmd in (
+                    ["paplay", "/usr/share/sounds/freedesktop/stereo/complete.oga"],
+                    ["canberra-gtk-play", "-i", "complete"],
+                    ["aplay", "/usr/share/sounds/alsa/Front_Center.wav"],
+                ):
                     try:
                         r = subprocess.run(cmd, capture_output=True, timeout=5)
                         if r.returncode == 0:

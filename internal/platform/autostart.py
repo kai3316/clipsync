@@ -11,6 +11,7 @@ Platform support:
 
 from __future__ import annotations
 
+import contextlib
 import os
 import platform as _platform
 import sys
@@ -18,6 +19,7 @@ import sys
 # ---------------------------------------------------------------------------
 # Internal helpers
 # ---------------------------------------------------------------------------
+
 
 def _get_executable_info():
     """Return ``(executable_path, arguments)`` for the auto-start command.
@@ -47,6 +49,7 @@ def _get_display_name():
 # ---------------------------------------------------------------------------
 # Windows (Registry Run key)
 # ---------------------------------------------------------------------------
+
 
 def _enable_windows():
     """Create ``HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run\\ClipSync``."""
@@ -118,11 +121,10 @@ def _is_enabled_windows():
 # macOS (LaunchAgent plist)
 # ---------------------------------------------------------------------------
 
+
 def _plist_path():
     """Absolute path to the LaunchAgent plist."""
-    return os.path.expanduser(
-        "~/Library/LaunchAgents/com.clipsync.plist"
-    )
+    return os.path.expanduser("~/Library/LaunchAgents/com.clipsync.plist")
 
 
 def _enable_macos():
@@ -159,10 +161,8 @@ def _enable_macos():
 def _disable_macos():
     """Remove the LaunchAgent plist file."""
     path = _plist_path()
-    try:
+    with contextlib.suppress(FileNotFoundError):
         os.remove(path)
-    except FileNotFoundError:
-        pass
 
 
 def _is_enabled_macos():
@@ -180,6 +180,7 @@ def _is_enabled_macos():
         return False
     try:
         import plistlib
+
         with open(path, "rb") as fh:
             pl = plistlib.load(fh)
         args = pl.get("ProgramArguments", [])
@@ -207,11 +208,10 @@ def _xml_escape(text: str) -> str:
 # Linux (XDG autostart .desktop file)
 # ---------------------------------------------------------------------------
 
+
 def _desktop_path():
     """Absolute path to the XDG autostart .desktop file."""
-    return os.path.expanduser(
-        "~/.config/autostart/clipsync.desktop"
-    )
+    return os.path.expanduser("~/.config/autostart/clipsync.desktop")
 
 
 def _xdg_quote(token: str) -> str:
@@ -222,10 +222,7 @@ def _xdg_quote(token: str) -> str:
     parsed back into the correct argv by the desktop environment.
     """
     escaped = (
-        token.replace("\\", "\\\\")
-        .replace('"', '\\"')
-        .replace("`", "\\`")
-        .replace("$", "\\$")
+        token.replace("\\", "\\\\").replace('"', '\\"').replace("`", "\\`").replace("$", "\\$")
     )
     return f'"{escaped}"'
 
@@ -252,10 +249,8 @@ X-GNOME-Autostart-enabled=true
 def _disable_linux():
     """Remove the XDG autostart .desktop file."""
     path = _desktop_path()
-    try:
+    with contextlib.suppress(FileNotFoundError):
         os.remove(path)
-    except FileNotFoundError:
-        pass
 
 
 def _is_enabled_linux():
@@ -266,6 +261,7 @@ def _is_enabled_linux():
 # ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
+
 
 def enable_autostart():
     """Enable ClipSync to start automatically on user login.

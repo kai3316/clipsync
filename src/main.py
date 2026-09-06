@@ -25,15 +25,25 @@ from urllib.parse import quote, urlparse
 if not getattr(sys, "frozen", False):
     sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+import contextlib
+
 from internal.clipboard.clipboard import strip_rich_formats
 from internal.clipboard.filter import ContentFilter
 from internal.clipboard.format import ClipboardContent
-from internal.clipboard.format import ContentType as _CT
-from internal.clipboard.history import ClipboardHistory
+from internal.clipboard.format import ContentType as _CT  # noqa: N814
 from internal.clipboard.history_db import ClipboardHistoryDB
 from internal.clipboard.platform import create_monitor, create_reader, create_writer
 from internal.clipboard.source_tracker import is_app_allowed
 from internal.config.config import Config, PeerInfo, _config_dir, config_lock, load, save
+from internal.fsutil import (
+    mask_file_name as _mask_file_name,
+)
+from internal.fsutil import (
+    mask_path as _mask_path,
+)
+from internal.fsutil import (
+    safe_remove as _safe_remove,
+)
 from internal.i18n import T, set_locale
 from internal.platform import friendly_platform_name
 from internal.platform.autostart import disable_autostart, enable_autostart, is_autostart_enabled
@@ -68,7 +78,7 @@ from internal.security.pairing import (
 from internal.sync.ai_config import AIConfigManager
 from internal.sync.file_transfer import FileTransferManager
 from internal.sync.manager import SyncManager
-from internal.sync.nearby_chat import ChatFileTooLarge, ChatManager
+from internal.sync.nearby_chat import ChatFileTooLargeError, ChatManager
 from internal.system.hotkey import HotkeyManager
 from internal.transport.connection import MAX_FRAME_SIZE, PortInUseError, TransportManager
 from internal.transport.discovery import Discovery
@@ -88,12 +98,12 @@ _console_handler: logging.StreamHandler | None = None
 NETPAIR_ONLINE_WINDOW = 90.0
 
 # Round 17: internet delivery ("已送达" receipt + offline retransmission).
-ACK_WINDOW = 15.0              # how long a relayed clipboard send waits for ack
-DELIVERY_SCAN_INTERVAL = 2.0   # background scan cadence for timed-out sends
-QUEUE_RETRY_INTERVAL = 60.0    # periodic offline-queue retry cadence
-MAX_QUEUE_RETRIES = 5          # per-message retry budget before marking failed
-DELIVERY_LEDGER_MAX = 50       # in-memory send rows kept per peer (REST shows 20)
-DELIVERY_QUEUE_MAX = 100       # persisted offline rows kept per peer (hard cap)
+ACK_WINDOW = 15.0  # how long a relayed clipboard send waits for ack
+DELIVERY_SCAN_INTERVAL = 2.0  # background scan cadence for timed-out sends
+QUEUE_RETRY_INTERVAL = 60.0  # periodic offline-queue retry cadence
+MAX_QUEUE_RETRIES = 5  # per-message retry budget before marking failed
+DELIVERY_LEDGER_MAX = 50  # in-memory send rows kept per peer (REST shows 20)
+DELIVERY_QUEUE_MAX = 100  # persisted offline rows kept per peer (hard cap)
 RELAY_PENDING_FILE = "relay_pending.json"
 
 # Device-connectivity probe ("test connection" on a device card): how long we
@@ -104,18 +114,6 @@ DEVICE_PING_TIMEOUT = 4.0
 # ═══════════════════════════════════════════════════════════════════════════════
 # Module-level helpers (must be picklable for macOS multiprocessing)
 # ═══════════════════════════════════════════════════════════════════════════════
-
-
-def _mask_file_name(file_name: str) -> str:
-    if not file_name or file_name == "?":
-        return file_name
-    ext = os.path.splitext(file_name)[1]
-    return f"*{ext}" if ext else "*"
-
-
-def _mask_path(path: str) -> str:
-    parent = os.path.basename(os.path.dirname(path))
-    return f"{parent}/***" if parent else "***"
 
 
 def _get_log_dir() -> "Path":
@@ -149,7 +147,7 @@ def _hide_dock():
     try:
         from rubicon.objc import ObjCClass
 
-        NSApp = ObjCClass("NSApplication").sharedApplication()
+        NSApp = ObjCClass("NSApplication").sharedApplication()  # noqa: N806
         # NSApplicationActivationPolicyAccessory == 1
         NSApp.setActivationPolicy_(1)
         return
@@ -176,7 +174,10 @@ def _hide_dock():
         app = proto0(("objc_msgSend", objc))(cls, sel_shared)
 
         proto1 = ctypes.CFUNCTYPE(
-            ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_long,
+            ctypes.c_void_p,
+            ctypes.c_void_p,
+            ctypes.c_void_p,
+            ctypes.c_long,
         )
         # NSApplicationActivationPolicyAccessory == 1
         proto1(("objc_msgSend", objc))(app, sel_policy, 1)
@@ -244,12 +245,18 @@ def _detect_network_type() -> tuple[str, str]:
     Uses the default-route interface so VPN/loopback don't fool it.
     """
     import subprocess
+
     try:
         if sys.platform == "darwin":
-            out = subprocess.run(
-                ["route", "-n", "get", "default"],
-                capture_output=True, text=True, timeout=3,
-            ).stdout or ""
+            out = (
+                subprocess.run(
+                    ["route", "-n", "get", "default"],
+                    capture_output=True,
+                    text=True,
+                    timeout=3,
+                ).stdout
+                or ""
+            )
             iface = ""
             for line in out.splitlines():
                 if line.strip().startswith("interface:"):
@@ -257,10 +264,15 @@ def _detect_network_type() -> tuple[str, str]:
                     break
             if not iface:
                 return "lan", ""
-            hp = subprocess.run(
-                ["networksetup", "-listallhardwareports"],
-                capture_output=True, text=True, timeout=3,
-            ).stdout or ""
+            hp = (
+                subprocess.run(
+                    ["networksetup", "-listallhardwareports"],
+                    capture_output=True,
+                    text=True,
+                    timeout=3,
+                ).stdout
+                or ""
+            )
             for block in hp.split("\n\n"):
                 if f"Device: {iface}" in block:
                     if "Wi-Fi" in block or "AirPort" in block:
@@ -295,16 +307,22 @@ def _pid_alive(pid: int) -> bool:
         try:
             import ctypes
             from ctypes import wintypes
+
             kernel32 = ctypes.windll.kernel32
             handle = kernel32.OpenProcess(
-                0x0400 | 0x0010, False, pid,
+                0x0400 | 0x0010,
+                False,
+                pid,
             )  # PROCESS_QUERY_INFORMATION | PROCESS_VM_READ
             if not handle:
                 return False
             buf = ctypes.create_unicode_buffer(260)
             size = wintypes.DWORD(260)
             ok = kernel32.QueryFullProcessImageNameW(
-                handle, 0, buf, ctypes.byref(size),
+                handle,
+                0,
+                buf,
+                ctypes.byref(size),
             )
             kernel32.CloseHandle(handle)
             if not ok:
@@ -332,10 +350,16 @@ def _pid_alive(pid: int) -> bool:
             # on the safe side (True), exactly like the Linux fall-through.
             try:
                 import subprocess
-                out = subprocess.run(
-                    ["ps", "-p", str(pid), "-o", "comm="],
-                    capture_output=True, text=True, timeout=3,
-                ).stdout or ""
+
+                out = (
+                    subprocess.run(
+                        ["ps", "-p", str(pid), "-o", "comm="],
+                        capture_output=True,
+                        text=True,
+                        timeout=3,
+                    ).stdout
+                    or ""
+                )
                 name = out.strip().lower()
                 if not name:
                     return True  # can't verify, err on safe side
@@ -344,8 +368,22 @@ def _pid_alive(pid: int) -> bool:
                 return True  # can't verify, err on safe side
         try:
             from pathlib import Path
-            cmdline = Path(f"/proc/{pid}/cmdline").read_text()
-            return ("python" in cmdline and "clipsync" in cmdline) or "clipsync" in cmdline
+
+            # /proc/<pid>/cmdline is NUL-separated argv, so join it back into
+            # something substring checks can work on.
+            raw = Path(f"/proc/{pid}/cmdline").read_bytes()
+            cmdline = raw.decode("utf-8", "replace").replace("\x00", " ").lower()
+            if not cmdline.strip():
+                return True  # kernel threads / permission denied: can't verify
+            if "clipsync" in cmdline:
+                return True
+            # A source checkout is not required to live in a directory called
+            # "clipsync" -- the repo folder is commonly "copyboard", and then
+            # the argv is just "python .../src/main.py" with the word clipsync
+            # nowhere in it.  The old check demanded "clipsync" unconditionally
+            # and so reported every live source run as dead, which let a second
+            # instance start and clear the first one's lock.
+            return "python" in cmdline and "main.py" in cmdline
         except Exception:
             return True  # can't verify, err on safe side
 
@@ -376,6 +414,7 @@ def _check_and_cleanup_stale_lock() -> bool:
         logger.info("Killing orphaned tray process (PID %d)", tray_pid)
         try:
             import signal
+
             os.kill(tray_pid, signal.SIGKILL)
         except Exception:
             pass  # SIGKILL not available on Windows, but tray subprocess is macOS-only
@@ -386,7 +425,7 @@ def _check_and_cleanup_stale_lock() -> bool:
 
 
 def _run_tray(device_name: str, pipe, parent_pid: int, locale: str = "en"):
-    """Run the system tray in a subprocess (macOS only). Must be module-level for multiprocessing."""
+    """Run the system tray in a subprocess (macOS only). Must be module-level for multiprocessing."""  # noqa: E501
     Application.setup_logging()
     set_locale(locale)  # tray menu must follow the app language
     _hide_dock()
@@ -418,28 +457,20 @@ def _run_tray(device_name: str, pipe, parent_pid: int, locale: str = "en"):
                         continue
                     _kind = msg[0]
                     if _kind == "show_notification" and child_systray._tray:
-                        try:
+                        with contextlib.suppress(Exception):
                             child_systray._tray.notify(msg[2], title=msg[1])
-                        except Exception:
-                            pass
                     elif _kind == "set_peers":
                         # Parent pushes the live peer list so the child's
                         # menu stays in sync (the parent's own SystrayApp is
                         # dormant and cannot update the child's menu).
-                        try:
+                        with contextlib.suppress(Exception):
                             child_systray.set_peers(list(msg[1] or []))
-                        except Exception:
-                            pass
                     elif _kind == "set_web_enabled":
-                        try:
+                        with contextlib.suppress(Exception):
                             child_systray.set_web_enabled(bool(msg[1]))
-                        except Exception:
-                            pass
                     elif _kind == "set_syncing":
-                        try:
+                        with contextlib.suppress(Exception):
                             child_systray.set_syncing(bool(msg[1]))
-                        except Exception:
-                            pass
                     elif _kind == "set_pause_deadline":
                         try:
                             deadline = msg[1]
@@ -473,6 +504,15 @@ def _run_tray(device_name: str, pipe, parent_pid: int, locale: str = "en"):
 # ═══════════════════════════════════════════════════════════════════════════════
 
 
+def _is_provisional_netpair_key(pid) -> bool:
+    """True for the 4-char base32 device tag ``_netpair_enter`` stores before
+    the partner's confirmation hello re-keys it to a real id.  A real 12-hex
+    device id can never match that shape."""
+    from internal.transport.relay import NETPAIR_ALPHABET
+
+    return isinstance(pid, str) and len(pid) == 4 and all(c in NETPAIR_ALPHABET for c in pid)
+
+
 class Application:
     """Central controller for ClipSync lifecycle.
 
@@ -492,6 +532,7 @@ class Application:
 
     def __init__(self) -> None:
         import time as _time
+
         self._start_time = int(_time.time())
 
         # ── Config ──────────────────────────────────────────────────
@@ -501,7 +542,7 @@ class Application:
         self.content_filter: ContentFilter | None = None
         self.enc_mgr: EncryptionManager | None = None
         self.pairing_mgr: PairingManager | None = None
-        self.clipboard_history: ClipboardHistory | None = None
+        self.clipboard_history: ClipboardHistoryDB | None = None
         self.sync_mgr: SyncManager | None = None
         self.transport_mgr: TransportManager | None = None
         self.file_transfer_mgr: FileTransferManager | None = None
@@ -544,6 +585,11 @@ class Application:
         # mirrored clipboard frame).  Runtime-only — the device page derives
         # "online" from `now - last_seen <= 90s`; nothing here is persisted.
         self._netpair_last_seen: dict[str, float] = {}
+        # A provisional tag-keyed netpair entry (see _netpair_enter) is only
+        # meant to live for the seconds between our hello and the partner's
+        # reply.  One that survived a restart never got that reply, so it is a
+        # phantom the status list hides and the UI offers no way to remove —
+        # the sweep itself runs in load_config(), once self.cfg exists.
         # Device-connectivity probe state (device card "test connection"):
         # ping_id -> {results, replied, event} for in-flight probes.  Runtime
         # only — a probe is a button-press check, nothing is persisted.
@@ -558,8 +604,8 @@ class Application:
         # Both are guarded by ``_delivery_lock`` and touched by the main thread
         # (send), the relay receive thread (acks), web threads (REST) and a
         # background scanner (timeouts + retries).
-        self._delivery_ledger: dict[str, "OrderedDict[str, dict]"] = {}
-        self._delivery_queue: dict[str, "OrderedDict[str, dict]"] = {}
+        self._delivery_ledger: dict[str, OrderedDict[str, dict]] = {}
+        self._delivery_queue: dict[str, OrderedDict[str, dict]] = {}
         self._delivery_lock = threading.RLock()
         self._delivery_thread: threading.Thread | None = None
         self._delivery_stop_evt = threading.Event()
@@ -650,8 +696,12 @@ class Application:
         log_dir.mkdir(parents=True, exist_ok=True)
 
         raw = os.environ.get("CLIPSYNC_LOG_LEVEL", "").upper()
-        level_map = {"DEBUG": logging.DEBUG, "INFO": logging.INFO,
-                     "WARNING": logging.WARNING, "ERROR": logging.ERROR}
+        level_map = {
+            "DEBUG": logging.DEBUG,
+            "INFO": logging.INFO,
+            "WARNING": logging.WARNING,
+            "ERROR": logging.ERROR,
+        }
         console_level = level_map.get(raw, logging.INFO)
 
         file_fmt = logging.Formatter(
@@ -696,12 +746,20 @@ class Application:
         # Remember whether this is a truly-first run BEFORE any save() below
         # creates the config file (bootstrap writes the device identity).
         from internal.config.config import _config_path
+
         self._first_run = not _config_path().exists()
         self.cfg = load()
+        # Must run HERE, not in __init__: the sweep reads
+        # ``self.cfg.netpair_secrets``, and in __init__ cfg is still None, so
+        # the getattr chain returned None and the sweep silently did nothing
+        # on every launch -- a provisional placeholder held its relay
+        # subscription forever with no way for the user to see or remove it.
+        self._netpair_drop_provisional()
         set_locale(self.cfg.language)
         logger.info("=" * 72)
-        logger.info("  ClipSync v%s — session start  %s",
-                    __version__, time.strftime("%Y-%m-%d %H:%M:%S"))
+        logger.info(
+            "  ClipSync v%s — session start  %s", __version__, time.strftime("%Y-%m-%d %H:%M:%S")
+        )
         logger.info("  Platform: %s  |  PID: %d", sys.platform, os.getpid())
         logger.info("=" * 72)
         logger.info("ClipSync starting...")
@@ -730,6 +788,7 @@ class Application:
         self._onboarding_shown = True
         try:
             from internal.ui.onboarding import show_language_onboarding
+
             chosen = show_language_onboarding(self.root)
         except Exception:
             logger.exception("Failed to show first-run language onboarding")
@@ -772,8 +831,7 @@ class Application:
                 logger.warning("Failed to derive fingerprint from cert: %s", exc)
 
         # ── Prompt for encryption password (if hash stored) ─────
-        if (cfg.encryption_enabled and cfg.encryption_password_hash
-                and not cfg.encryption_password):
+        if cfg.encryption_enabled and cfg.encryption_password_hash and not cfg.encryption_password:
             tmp_root = tk.Tk()
             tmp_root.withdraw()
             try:
@@ -786,7 +844,9 @@ class Application:
             finally:
                 tmp_root.destroy()
             if entered and _verify_password(
-                entered, device_fingerprint, cfg.encryption_password_hash,
+                entered,
+                device_fingerprint,
+                cfg.encryption_password_hash,
             ):
                 cfg.encryption_password = entered
                 logger.info("Encryption password verified")
@@ -867,7 +927,8 @@ class Application:
 
         self.pairing_mgr = PairingManager(cfg.device_id, cfg.device_name)
         identity = self.pairing_mgr.load_or_create_identity(
-            cfg.private_key_pem, cfg.certificate_pem,
+            cfg.private_key_pem,
+            cfg.certificate_pem,
         )
         is_new = cfg.private_key_pem != identity.private_key_pem
         if is_new:
@@ -883,10 +944,10 @@ class Application:
             )
 
         # Migrate old plaintext password to verification hash
-        if (cfg.encryption_enabled and cfg.encryption_password
-                and not cfg.encryption_password_hash):
+        if cfg.encryption_enabled and cfg.encryption_password and not cfg.encryption_password_hash:
             cfg.encryption_password_hash = _make_password_hash(
-                cfg.encryption_password, identity.fingerprint,
+                cfg.encryption_password,
+                identity.fingerprint,
             )
             logger.info("Migrated plaintext encryption password to verification hash")
 
@@ -904,11 +965,19 @@ class Application:
         # (device_id, device_name) pairs for peers whose certificate changed
         # vs. the pinned one — surfaced to the user after startup completes.
         self._cert_warnings: list[tuple[str, str]] = []
+        # Repair a config that already carries a peer row keyed by a hashed mDNS
+        # id, BEFORE any of them reach the pairing manager — otherwise the
+        # phantom registers as a peer of its own and the same physical device
+        # stays split across two cards forever (see _merge_hashed_peer_rows).
+        with config_lock:
+            self._merge_hashed_peer_rows()
         for peer in cfg.peers.values():
             try:
                 self.pairing_mgr.add_peer(
-                    peer.device_id, peer.device_name,
-                    peer.public_key_pem, peer.paired,
+                    peer.device_id,
+                    peer.device_name,
+                    peer.public_key_pem,
+                    peer.paired,
                 )
             except CertificateChangedError:
                 self._cert_warnings.append((peer.device_id, peer.device_name))
@@ -936,8 +1005,11 @@ class Application:
         writer = create_writer()
         self._monitor = monitor
         self.sync_mgr = SyncManager(
-            cfg.device_id, cfg.device_name,
-            reader=reader, writer=writer, monitor=monitor,
+            cfg.device_id,
+            cfg.device_name,
+            reader=reader,
+            writer=writer,
+            monitor=monitor,
             history=self.clipboard_history,
             sync_debounce=cfg.sync_debounce,
             retry_enabled=cfg.retry_capture_enabled,
@@ -946,10 +1018,12 @@ class Application:
         # Wire the dedup hash algorithm (sha256 default / simple=md5).  It
         # lives in internal.clipboard.dedup so both history backends share it.
         from internal.clipboard import dedup as _dedup_mod
+
         _dedup_mod.DEDUP_ALGO = cfg.dedup_method or "sha256"
         # Expire unpinned history rows older than the configured max age
         # (0 disables the limit).
         from internal.clipboard import history_db as _history_db
+
         _history_db.set_max_age_days(cfg.history_max_age_days or 0)
 
         # ── Source tracking / app filter ────────────────────────
@@ -962,7 +1036,10 @@ class Application:
 
         # ── Transport ───────────────────────────────────────────
         self.transport_mgr = TransportManager(
-            cfg.device_id, cfg.device_name, cfg.port, self.pairing_mgr,
+            cfg.device_id,
+            cfg.device_name,
+            cfg.port,
+            self.pairing_mgr,
             max_reconnect_attempts=cfg.max_reconnect_attempts,
         )
         if cfg.encryption_enabled:
@@ -985,7 +1062,9 @@ class Application:
             else str(Path.home() / "Downloads" / "ClipSync")
         )
         self.chat_mgr = ChatManager(
-            cfg.device_id, cfg.device_name, receive_dir=chat_receive_dir,
+            cfg.device_id,
+            cfg.device_name,
+            receive_dir=chat_receive_dir,
         )
         # Per-peer chat mutes, persisted in config.  The desktop notification
         # path consults this so a muted device never rings; the web chat UI
@@ -1006,38 +1085,45 @@ class Application:
             self.cfg,
             send_fn=lambda pid, frame: (
                 self.transport_mgr.send_to_peer(pid, frame)
-                if self.transport_mgr is not None else False
+                if self.transport_mgr is not None
+                else False
             ),
             connected_fn=lambda: (
-                self.transport_mgr.get_connected_peers()
-                if self.transport_mgr is not None else []
+                self.transport_mgr.get_connected_peers() if self.transport_mgr is not None else []
             ),
             event_fn=self._push_aiconfig_event,
             save_fn=self._save_cfg_encrypted,
         )
         from internal.web.api import aiconfig as _aiconfig_api
+
         _aiconfig_api.bind(self.aicfg_mgr)
 
         # ── Internet pairing code (Round 14) ─────────────────────
         # Self-contained REST branch; the Application itself is the bound
         # manager (all netpair logic lives in the methods below).
         from internal.web.api import internetpair as _internetpair_api
+
         _internetpair_api.bind(self)
         # ── Internet delivery (Round 17) ──────────────────────────
         # Self-contained REST branch over the delivery ledger + queue; the
         # Application itself is the bound manager.
         from internal.web.api import internetdelivery as _internetdelivery_api
+
         _internetdelivery_api.bind(self)
 
         # ── Discovery ───────────────────────────────────────────
         self.discovery = Discovery(
-            cfg.device_id, cfg.device_name, cfg.port, cfg.service_type,
+            cfg.device_id,
+            cfg.device_name,
+            cfg.port,
+            cfg.service_type,
         )
 
         # ── Web Companion ───────────────────────────────────────
         def _on_web_nav_url(url: str, device_id: str):
-            data = encode_frame({"msg_type": "nav_url", "url": url},
-                                source_device=self.cfg.device_id)
+            data = encode_frame(
+                {"msg_type": "nav_url", "url": url}, source_device=self.cfg.device_id
+            )
             self.transport_mgr.send_to_peer(device_id, data)
             logger.info("Web nav forwarded to peer %s: %s", device_id[:12], url[:80])
 
@@ -1056,12 +1142,16 @@ class Application:
 
             def _send_fn(data: bytes):
                 self.transport_mgr.send_to_peer(device_id, data)
+
             try:
                 transfer_id = self.file_transfer_mgr.send_file(file_path, _send_fn)
                 if transfer_id:
                     self._transfer_directions[transfer_id] = "outgoing"
-                logger.info("Web upload forwarded to peer %s: %s",
-                            device_id[:12], os.path.basename(file_path))
+                logger.info(
+                    "Web upload forwarded to peer %s: %s",
+                    device_id[:12],
+                    os.path.basename(file_path),
+                )
                 return True
             except Exception as e:
                 logger.error("Failed to forward uploaded file: %s", e)
@@ -1078,13 +1168,14 @@ class Application:
             self._webview_client_seen = False
 
         self.web_server = WebServer(
-            cfg, self.clipboard_history, self.sync_mgr,
+            cfg,
+            self.clipboard_history,
+            self.sync_mgr,
             get_connected_ids=lambda: self.transport_mgr.get_connected_peers(),
             # Reconnect progress for offline device cards ("reconnecting N/M");
             # empty dict when the transport layer is gone (shutdown ordering).
             get_reconnect_states=lambda: (
-                self.transport_mgr.get_reconnect_states()
-                if self.transport_mgr is not None else {}
+                self.transport_mgr.get_reconnect_states() if self.transport_mgr is not None else {}
             ),
             on_nav_url=_on_web_nav_url,
             on_forward_file=_on_web_forward_file,
@@ -1093,14 +1184,24 @@ class Application:
             on_device_test=self._device_test_connection,
             on_transfer_action=self._handle_web_transfer_action,
             on_get_transfers=lambda: (
-                self.file_transfer_mgr.get_transfers(),
-                self.file_transfer_mgr.get_history(),
-            ) if self.file_transfer_mgr else ([], []),
-            on_speed_test_start=lambda: self.file_transfer_mgr.start_speed_test(
-                self.transport_mgr.broadcast,
-                has_peers_fn=lambda: bool(self.transport_mgr.get_connected_peers()),
-            ) if self.file_transfer_mgr else False,
-            on_speed_test_poll=lambda: self.file_transfer_mgr.get_speed_test() if self.file_transfer_mgr else {},
+                (
+                    self.file_transfer_mgr.get_transfers(),
+                    self.file_transfer_mgr.get_history(),
+                )
+                if self.file_transfer_mgr
+                else ([], [])
+            ),
+            on_speed_test_start=lambda: (
+                self.file_transfer_mgr.start_speed_test(
+                    self.transport_mgr.broadcast,
+                    has_peers_fn=lambda: bool(self.transport_mgr.get_connected_peers()),
+                )
+                if self.file_transfer_mgr
+                else False
+            ),
+            on_speed_test_poll=lambda: (
+                self.file_transfer_mgr.get_speed_test() if self.file_transfer_mgr else {}
+            ),
             on_window_close=_on_web_window_close,
             on_toggle_discovery=self._on_toggle_discovery,
             on_toggle_visibility=self._on_toggle_visibility,
@@ -1135,8 +1236,10 @@ class Application:
         # The web sync-pause API delegates to the host's single timed-pause
         # implementation instead of arming a second auto-resume timer.
         from internal.web.api import sync_control as _sync_control
+
         _sync_control.set_host_pause_hooks(
-            self._pause_sync_for_minutes, self._resume_timed_pause,
+            self._pause_sync_for_minutes,
+            self._resume_timed_pause,
         )
 
         # ── Live history push to web clients ────────────────────────
@@ -1228,8 +1331,9 @@ class Application:
         path so the web chat tab always reflects the current sessions.
         """
         try:
-            sessions = self.chat_mgr.get_sessions() \
-                if getattr(self, "chat_mgr", None) is not None else []
+            sessions = (
+                self.chat_mgr.get_sessions() if getattr(self, "chat_mgr", None) is not None else []
+            )
             self._push_web("broadcast_chat_sessions", sessions)
         except Exception:
             logger.debug("Failed to push chat sessions to web", exc_info=True)
@@ -1239,18 +1343,22 @@ class Application:
         self._push_web_chat_sessions()
         self._chat_event_from_worker()
 
-    def _chat_file_progress(self, session_id: str, transfer_id: str,
-                            fraction: float) -> None:
+    def _chat_file_progress(self, session_id: str, transfer_id: str, fraction: float) -> None:
         """File progress on a worker thread: push to web + refresh desktop."""
         self._push_web("broadcast_chat_progress", session_id, transfer_id, fraction)
         self._chat_event_from_worker()
 
-    def _chat_file_done(self, session_id: str, transfer_id: str, success: bool,
-                        saved_path: str, status: str) -> None:
+    def _chat_file_done(
+        self, session_id: str, transfer_id: str, success: bool, saved_path: str, status: str
+    ) -> None:
         """File done on a worker thread: push to web + refresh desktop."""
         self._push_web(
-            "broadcast_chat_file_done", session_id, transfer_id, success,
-            saved_path or "", status or "",
+            "broadcast_chat_file_done",
+            session_id,
+            transfer_id,
+            success,
+            saved_path or "",
+            status or "",
         )
         self._push_web_chat_sessions()
         self._chat_event_from_worker()
@@ -1315,8 +1423,11 @@ class Application:
         # it (and the web row) so chatting alone never surfaces as "wants to
         # pair".  Paired peers have nothing pending to drop.
         try:
-            if peer_id and self.pairing_mgr is not None \
-                    and not self.pairing_mgr.is_peer_paired(peer_id):
+            if (
+                peer_id
+                and self.pairing_mgr is not None
+                and not self.pairing_mgr.is_peer_paired(peer_id)
+            ):
                 # Cancel the debounced pairing notification before it fires so
                 # the other device never SEES a pairing prompt for a chat (the
                 # code was generated at connect time, before this invite frame).
@@ -1347,15 +1458,19 @@ class Application:
             message += "\n" + T("chat.invite_greeting", greeting=greeting)
         message += "\n" + T("chat.invite_prompt")
         if self._is_webview():
+
             def _on_result(result):
-                accepted = bool(
-                    result is not None and result.get("action") == "accept"
-                )
+                accepted = bool(result is not None and result.get("action") == "accept")
                 self._chat_respond_invite(sid, accepted)
+
             try:
                 self._web_dialog_async(
-                    "confirm", _on_result, title=title, message=message,
-                    accept_label=T("chat.accept"), reject_label=T("chat.decline"),
+                    "confirm",
+                    _on_result,
+                    title=title,
+                    message=message,
+                    accept_label=T("chat.accept"),
+                    reject_label=T("chat.decline"),
                     timeout=120,
                 )
             except Exception:
@@ -1376,7 +1491,8 @@ class Application:
             try:
                 self._web_toast(
                     f"{title} · "
-                    + T("chat.notify_invite_msg", name=peer_name, fingerprint=fp or "—"))
+                    + T("chat.notify_invite_msg", name=peer_name, fingerprint=fp or "—")
+                )
             except Exception:
                 logger.debug("chat invite toast failed", exc_info=True)
             self._chat_event_on_main()
@@ -1393,8 +1509,7 @@ class Application:
             logger.debug("chat invite response failed", exc_info=True)
         self._chat_event_on_main()
 
-    def _on_chat_invite_response(self, session_id: str, peer_id: str,
-                                 accepted: bool) -> None:
+    def _on_chat_invite_response(self, session_id: str, peer_id: str, accepted: bool) -> None:
         # Answer to OUR invitation — nothing special to show right now; just
         # refresh the dashboard so the session status updates.
         self._chat_event_from_worker()
@@ -1406,7 +1521,8 @@ class Application:
         self._push_web_chat_sessions()
         try:
             self.root.after(
-                0, lambda: self._chat_message_on_main(session_id, entry_dict),
+                0,
+                lambda: self._chat_message_on_main(session_id, entry_dict),
             )
         except Exception:
             logger.debug("chat message marshal failed", exc_info=True)
@@ -1421,13 +1537,13 @@ class Application:
             # orphaned session doesn't silently go quiet.
             peer_id = self._chat_peer_id_for_sid(session_id) or ""
             muted = bool(peer_id and peer_id in self._chat_muted)
-            if (kind == "text" and not outgoing and not self._dashboard_visible()
-                    and not muted):
+            if kind == "text" and not outgoing and not self._dashboard_visible() and not muted:
                 peer_name = self._chat_peer_name_for_sid(session_id) or "?"
                 text = (entry_dict.get("text") or "")[:120]
                 self._web_toast(
                     f"{T('chat.notify_message_title')}: "
-                    + T("chat.notify_message_msg", name=peer_name, text=text))
+                    + T("chat.notify_message_msg", name=peer_name, text=text)
+                )
         except Exception:
             logger.debug("chat message toast failed", exc_info=True)
         self._chat_event_on_main()
@@ -1478,18 +1594,20 @@ class Application:
                 # relay path already records inside _relay_publish_to_peer).
                 try:
                     from internal.protocol.codec import decode_message
+
                     decoded = decode_message(data)
-                    if getattr(decoded, "msg_type", "") in CHAT_MSG_TYPES \
-                            and hasattr(self, "_delivery_ledger") \
-                            and self._peer_is_internet_reachable(peer_id):
+                    if (
+                        getattr(decoded, "msg_type", "") in CHAT_MSG_TYPES
+                        and hasattr(self, "_delivery_ledger")
+                        and self._peer_is_internet_reachable(peer_id)
+                    ):
                         payload = getattr(decoded, "_raw_payload", {}) or {}
                         sid = payload.get("session_id", "")
                         self._delivery_on_sent(
                             peer_id,
                             getattr(decoded, "msg_id", "") or "",
                             "",
-                            self._delivery_chat_preview(
-                                getattr(decoded, "msg_type", ""), payload),
+                            self._delivery_chat_preview(getattr(decoded, "msg_type", ""), payload),
                             kind=getattr(decoded, "msg_type", "chat"),
                             session_id=str(sid) if isinstance(sid, str) else "",
                         )
@@ -1497,6 +1615,7 @@ class Application:
                     logger.debug("chat delivery ledger failed", exc_info=True)
                 return True
             return self._relay_publish_to_peer(data, peer_id)
+
         # Internet-only peer (internet-reachable but with no live LAN P2P
         # connection): every file byte must ride the relay, so tell
         # ChatManager to chunk the file relay-safe and refuse files past the
@@ -1550,19 +1669,13 @@ class Application:
         ``connected`` means a live TCP/TLS connection, which is NOT the same as
         ``paired`` (trusted) — a device mid-pairing is connected but not paired.
         """
-        from internal.transport.discovery import Discovery
+        from internal.transport.peer_id import hashed_id
 
         try:
             connected = set(self.transport_mgr.get_connected_peers() or [])
             resolved = self.transport_mgr.get_resolved_hashes() or {}
         except Exception:
             connected, resolved = set(), {}
-
-        def _hash(real: str) -> str:
-            try:
-                return Discovery._hash_device_id(real)
-            except Exception:
-                return ""
 
         devices: dict[str, dict] = {}
         seen_hashes: set[str] = set()
@@ -1571,13 +1684,18 @@ class Application:
             d = devices.get(real)
             if d is None:
                 d = {
-                    "peer_id": real, "name": real, "paired": False,
-                    "pairing": False, "connected": False,
-                    "address": "", "port": 0, "fingerprint_short": "",
+                    "peer_id": real,
+                    "name": real,
+                    "paired": False,
+                    "pairing": False,
+                    "connected": False,
+                    "address": "",
+                    "port": 0,
+                    "fingerprint_short": "",
                     "session": "",
                 }
                 devices[real] = d
-                h = _hash(real)
+                h = hashed_id(real)
                 if h:
                     seen_hashes.add(h)
             return d
@@ -1655,8 +1773,9 @@ class Application:
         #    plainly offline.  Reconnect bookkeeping is keyed by whichever id
         #    form scheduling used — try the real id, then its hash.
         try:
-            reconnect_states = self.transport_mgr.get_reconnect_states() \
-                if self.transport_mgr is not None else {}
+            reconnect_states = (
+                self.transport_mgr.get_reconnect_states() if self.transport_mgr is not None else {}
+            )
         except Exception:
             reconnect_states = {}
         if reconnect_states:
@@ -1665,7 +1784,7 @@ class Application:
                     continue
                 st = reconnect_states.get(d["peer_id"])
                 if st is None:
-                    st = reconnect_states.get(_hash(d["peer_id"]))
+                    st = reconnect_states.get(hashed_id(d["peer_id"]))
                 if st is not None:
                     d["reconnecting"] = True
                     d["reconnect_attempt"] = int(st.get("attempts", 0))
@@ -1681,19 +1800,55 @@ class Application:
                 except Exception:
                     d["fingerprint_short"] = ""
             if not d["address"]:
-                try:
+                with contextlib.suppress(Exception):
                     d["address"], d["port"] = self._chat_device_address(real)
-                except Exception:
-                    pass
 
         result = list(devices.values())
-        result.sort(key=lambda x: (
-            not x["paired"], not x["connected"], (x["name"] or "").lower(),
-        ))
+        result.sort(
+            key=lambda x: (
+                not x["paired"],
+                not x["connected"],
+                (x["name"] or "").lower(),
+            )
+        )
         return result
 
     def _get_chat_devices(self) -> list[dict]:
-        """Merge PAIRED peers (always shown) with UNPAIRED discovered peers."""
+        """Merge PAIRED peers (always shown) with UNPAIRED discovered peers.
+
+        Each row also carries the three reachability flags the chat picker
+        needs so it stops OFFERING a conversation that cannot be opened:
+
+          ``connected``       a live LAN session right now;
+          ``discovered``      mDNS sees the device on this LAN this moment, so
+                              the connect-first invite has a real chance (a
+                              paired peer keeps its canonical row even when
+                              discovery re-found it, so ``address`` alone is no
+                              presence signal — it falls back to a stale
+                              ``last_ip``);
+          ``relay_reachable`` an internet path exists, gated on
+                              ``internet_sync_enabled`` exactly like
+                              ``_relay_publish_to_peer`` gates the send.
+
+        The list itself is unchanged (paired-offline peers are still returned,
+        the desktop dashboard shows them); only the web picker filters.
+        """
+        from internal.transport.peer_id import is_on_network
+
+        try:
+            live = set(self._snapshot_discovered_peers().keys())
+        except Exception:
+            live = set()
+        sync_on = bool(getattr(self.cfg, "internet_sync_enabled", False))
+
+        def _relay(peer_id: str) -> bool:
+            if not sync_on:
+                return False
+            try:
+                return bool(self._peer_is_internet_reachable(peer_id))
+            except Exception:
+                return False
+
         return [
             {
                 "peer_id": d["peer_id"],
@@ -1702,6 +1857,9 @@ class Application:
                 "port": d["port"],
                 "paired": d["paired"],
                 "fingerprint_short": d["fingerprint_short"],
+                "connected": bool(d.get("connected")),
+                "discovered": is_on_network(d["peer_id"], live),
+                "relay_reachable": _relay(d["peer_id"]),
             }
             for d in self.get_device_states()
         ]
@@ -1713,8 +1871,7 @@ class Application:
         except Exception:
             hashed = peer_id
         with self._discovered_lock:
-            info = (self._discovered_peers.get(peer_id)
-                    or self._discovered_peers.get(hashed))
+            info = self._discovered_peers.get(peer_id) or self._discovered_peers.get(hashed)
         if info:
             return info["address"], info["port"]
         try:
@@ -1728,8 +1885,9 @@ class Application:
             return peer_cfg.last_ip, peer_cfg.last_port or self.cfg.port
         return "", 0
 
-    def _chat_start_session(self, peer_id: str, peer_name: str,
-                            fingerprint_short: str) -> str | None:
+    def _chat_start_session(
+        self, peer_id: str, peer_name: str, fingerprint_short: str
+    ) -> str | None:
         """Open a chat session, connecting first if the peer is offline."""
         try:
             resolved = self.transport_mgr.get_resolved_hashes() or {}
@@ -1742,7 +1900,9 @@ class Application:
             connected = set()
         if real_id in connected or peer_id in connected:
             return self.chat_mgr.start_session(
-                real_id, peer_name, fingerprint_short or "",
+                real_id,
+                peer_name,
+                fingerprint_short or "",
                 self._chat_send_fn(real_id),
             )
         address, port = self._chat_device_address(peer_id)
@@ -1754,24 +1914,31 @@ class Application:
             if self._peer_is_internet_reachable(peer_id):
                 try:
                     return self.chat_mgr.start_session(
-                        real_id, peer_name, fingerprint_short or "",
+                        real_id,
+                        peer_name,
+                        fingerprint_short or "",
                         self._chat_send_fn(real_id),
                     )
                 except Exception:
                     logger.debug("chat start: relay session failed", exc_info=True)
                     return None
             logger.warning("chat start: no address for peer %s", peer_id[:12])
-            try:
-                self.root.after(0, lambda: self._notify_info(
-                    T("chat.title"),
-                    T("chat.err_connect_timeout", name=peer_name),
-                ))
-            except Exception:
-                pass
+            with contextlib.suppress(Exception):
+                self.root.after(
+                    0,
+                    lambda: self._notify_info(
+                        T("chat.title"),
+                        T("chat.err_connect_timeout", name=peer_name),
+                    ),
+                )
             return None
         try:
             self.transport_mgr.connect_to_peer(
-                peer_id, peer_name, address, port, no_auto_pairing=True,
+                peer_id,
+                peer_name,
+                address,
+                port,
+                no_auto_pairing=True,
             )
         except Exception as e:
             logger.debug("chat start: connect failed: %s", e)
@@ -1789,7 +1956,9 @@ class Application:
                 if real_now in now_connected or peer_id in now_connected:
                     try:
                         sid = self.chat_mgr.start_session(
-                            real_now, peer_name, fingerprint_short or "",
+                            real_now,
+                            peer_name,
+                            fingerprint_short or "",
                             self._chat_send_fn(real_now),
                         )
                     except Exception:
@@ -1802,13 +1971,14 @@ class Application:
                         self.root.after(0, lambda s=sid: self._chat_select_session(s))
                     return
                 time.sleep(0.3)
-            try:
-                self.root.after(0, lambda: self._notify_info(
-                    T("chat.title"),
-                    T("chat.err_connect_timeout", name=peer_name),
-                ))
-            except Exception:
-                pass
+            with contextlib.suppress(Exception):
+                self.root.after(
+                    0,
+                    lambda: self._notify_info(
+                        T("chat.title"),
+                        T("chat.err_connect_timeout", name=peer_name),
+                    ),
+                )
 
         threading.Thread(target=_poll, daemon=True, name="chat-connect").start()
         return None
@@ -1835,15 +2005,14 @@ class Application:
             return []
 
     def _chat_mark_read(self, session_id: str) -> None:
-        try:
+        with contextlib.suppress(Exception):
             self.chat_mgr.mark_session_read(session_id)
-        except Exception:
-            pass
 
     def _chat_send_text(self, session_id: str, text: str) -> bool:
         try:
             return self.chat_mgr.send_text(
-                session_id, text,
+                session_id,
+                text,
                 self._chat_send_fn(self._chat_peer_id_for_sid(session_id)),
             )
         except Exception:
@@ -1852,7 +2021,8 @@ class Application:
     def _chat_resend_text(self, session_id: str, entry_id: str) -> bool:
         try:
             return self.chat_mgr.resend_text(
-                session_id, entry_id,
+                session_id,
+                entry_id,
                 self._chat_send_fn(self._chat_peer_id_for_sid(session_id)),
             )
         except Exception:
@@ -1861,10 +2031,11 @@ class Application:
     def _chat_send_file(self, session_id: str, file_path: str):
         try:
             return self.chat_mgr.send_file(
-                session_id, file_path,
+                session_id,
+                file_path,
                 self._chat_send_fn(self._chat_peer_id_for_sid(session_id)),
             )
-        except ChatFileTooLarge:
+        except ChatFileTooLargeError:
             logger.info("chat: refusing file above internet relay cap")
             return None
         except Exception:
@@ -1907,7 +2078,8 @@ class Application:
         # desktop UI can tell the user the offer expired instead of failing.
         try:
             return self.chat_mgr.accept_file(
-                session_id, transfer_id,
+                session_id,
+                transfer_id,
                 self._chat_send_fn(self._chat_peer_id_for_sid(session_id)),
             )
         except Exception:
@@ -1916,7 +2088,8 @@ class Application:
     def _chat_decline_file(self, session_id: str, transfer_id: str) -> bool:
         try:
             return self.chat_mgr.decline_file(
-                session_id, transfer_id,
+                session_id,
+                transfer_id,
                 self._chat_send_fn(self._chat_peer_id_for_sid(session_id)),
             )
         except Exception:
@@ -1953,7 +2126,10 @@ class Application:
             connected = set()
         if real_id in connected or peer_id in connected:
             sid = self.chat_mgr.start_session(
-                real_id, peer_name, "", self._chat_send_fn(real_id),
+                real_id,
+                peer_name,
+                "",
+                self._chat_send_fn(real_id),
             )
             if sid:
                 return {"session_id": sid}
@@ -1964,7 +2140,11 @@ class Application:
             return {"ok": False, "error": "peer_unreachable"}
         try:
             self.transport_mgr.connect_to_peer(
-                peer_id, peer_name, address, port, no_auto_pairing=True,
+                peer_id,
+                peer_name,
+                address,
+                port,
+                no_auto_pairing=True,
             )
         except Exception:
             logger.debug("web chat start: connect failed", exc_info=True)
@@ -1982,20 +2162,24 @@ class Application:
                 if real_now in now_connected or peer_id in now_connected:
                     try:
                         self.chat_mgr.start_session(
-                            real_now, peer_name, "", self._chat_send_fn(real_now),
+                            real_now,
+                            peer_name,
+                            "",
+                            self._chat_send_fn(real_now),
                         )
                     except Exception:
                         logger.debug("web chat start: start_session failed", exc_info=True)
                     self._chat_event_from_worker()
                     return
                 time.sleep(0.3)
-            try:
-                self.root.after(0, lambda: self._notify_info(
-                    T("chat.title"),
-                    T("chat.err_connect_timeout", name=peer_name),
-                ))
-            except Exception:
-                pass
+            with contextlib.suppress(Exception):
+                self.root.after(
+                    0,
+                    lambda: self._notify_info(
+                        T("chat.title"),
+                        T("chat.err_connect_timeout", name=peer_name),
+                    ),
+                )
 
         threading.Thread(target=_poll, daemon=True, name="web-chat-connect").start()
         return {"connecting": True}
@@ -2112,7 +2296,6 @@ class Application:
         except Exception:
             logger.debug("Could not surface hotkey failure dialog", exc_info=True)
 
-
     def _paste_nth(self, n: int) -> None:
         """Paste the nth history item (1-indexed) directly to the clipboard."""
         import base64
@@ -2129,10 +2312,13 @@ class Application:
             return
 
         _type_map = {
-            "TEXT": _CT.TEXT, "HTML": _CT.HTML,
-            "IMAGE": _CT.IMAGE_PNG, "IMAGE_EMF": _CT.IMAGE_EMF,
+            "TEXT": _CT.TEXT,
+            "HTML": _CT.HTML,
+            "IMAGE": _CT.IMAGE_PNG,
+            "IMAGE_EMF": _CT.IMAGE_EMF,
             "RTF": _CT.RTF,
-            "FILE": _CT.FILE, "URL": _CT.URL,
+            "FILE": _CT.FILE,
+            "URL": _CT.URL,
         }
         ctypes: dict = {}
         for key, b64_data in types.items():
@@ -2180,8 +2366,11 @@ class Application:
         self.cfg.sync_enabled = enabled
         self._save_cfg_encrypted()
         self._set_systray_syncing(enabled)
-        self._notify("notify_sync", T("ui.clipboard_sync"),
-                     T("notify.sync_active") if enabled else T("notify.sync_paused"))
+        self._notify(
+            "notify_sync",
+            T("ui.clipboard_sync"),
+            T("notify.sync_active") if enabled else T("notify.sync_paused"),
+        )
         logger.info("Sync %s (toggle_monitor hotkey)", "enabled" if enabled else "paused")
 
     # ── Callback implementations ──────────────────────────────────
@@ -2209,14 +2398,14 @@ class Application:
                 if self._web_has_clients():
                     self._web_toast(T("filter.sender_blocked"), 3000)
                 else:
-                    self._notify("notify_sync", T("ui.clipboard_sync"),
-                                 T("filter.sender_blocked"))
+                    self._notify("notify_sync", T("ui.clipboard_sync"), T("filter.sender_blocked"))
         data = encode_message(msg)
         if len(data) > MAX_FRAME_SIZE:
             size_mb = len(data) / (1024 * 1024)
             logger.warning(
                 "Clipboard content too large to sync: %.1f MB (limit: %d MB)",
-                size_mb, MAX_FRAME_SIZE // (1024 * 1024),
+                size_mb,
+                MAX_FRAME_SIZE // (1024 * 1024),
             )
             self._notify(
                 "notify_sync",
@@ -2230,8 +2419,7 @@ class Application:
         # receivers' dedup collapses double deliveries).
         self._relay_publish_frame(data)
 
-    def _on_peer_message(self, msg, peer_id: str | None = None,
-                         *, via_relay: bool = False) -> None:
+    def _on_peer_message(self, msg, peer_id: str | None = None, *, via_relay: bool = False) -> None:
         """Route one decoded frame.  *via_relay* marks frames that arrived
         over the public relay so a device_pong echoes back on the same channel
         (device_* probes answer on the transport they came in on)."""
@@ -2245,8 +2433,8 @@ class Application:
         if msg_type in DEVICE_PROBE_MSG_TYPES:
             try:
                 self._handle_device_probe(
-                    msg_type, getattr(msg, "_raw_payload", {}) or {},
-                    peer_id or "", via_relay)
+                    msg_type, getattr(msg, "_raw_payload", {}) or {}, peer_id or "", via_relay
+                )
             except Exception:
                 logger.debug("device probe handling failed", exc_info=True)
             return
@@ -2257,6 +2445,7 @@ class Application:
             parsed = urlparse(url)
             if parsed.scheme in ("http", "https") and parsed.netloc:
                 import webbrowser
+
                 logger.info("Opening URL from peer: %s", url[:80])
                 webbrowser.open(url)
                 self._web_toast(f"{T('nav_url.title')}: {url[:120]}")
@@ -2282,7 +2471,11 @@ class Application:
             except Exception:
                 fp_short = ""
             accepted = self.chat_mgr.handle_message(
-                msg_type, raw_payload, peer_id or "", fp_short, send_fn,
+                msg_type,
+                raw_payload,
+                peer_id or "",
+                fp_short,
+                send_fn,
             )
             # Round 17: a chat frame the chat layer processed earns a relay_ack
             # so the internet sender can mark its message delivered.
@@ -2294,7 +2487,9 @@ class Application:
         if msg_type == "file_chunk":
             raw_payload = getattr(msg, "_raw_payload", {})
             if peer_id:
-                send_fn = (lambda data, pid=peer_id: self.transport_mgr.send_to_peer(pid, data))
+
+                def send_fn(data, pid=peer_id):
+                    return self.transport_mgr.send_to_peer(pid, data)
             else:
                 send_fn = self.transport_mgr.broadcast
             try:
@@ -2307,20 +2502,32 @@ class Application:
             # Respond only to the sending peer (acks, rejections, progress,
             # chunks) instead of broadcasting to every connected device.
             if peer_id:
-                send_fn = (lambda data, pid=peer_id: self.transport_mgr.send_to_peer(pid, data))
+
+                def send_fn(data, pid=peer_id):
+                    return self.transport_mgr.send_to_peer(pid, data)
             else:
                 send_fn = self.transport_mgr.broadcast
             self.file_transfer_mgr.handle_message(
-                msg_type, raw_payload, send_fn, peer_id or "",
+                msg_type,
+                raw_payload,
+                send_fn,
+                peer_id or "",
             )
             return
         if msg_type in PAIRING_MSG_TYPES:
+            # Pairing belongs to the LAN handshake alone: those frames ride a
+            # TLS connection whose certificate is pinned, and send_to_peer
+            # never falls back to the relay, so this side never emits one
+            # there.  A pairing frame off the relay is therefore always
+            # forged — drop it before it can flip trust state.
+            if via_relay:
+                logger.warning("Dropping %s frame received over the relay", msg_type)
+                return
             raw_payload = getattr(msg, "_raw_payload", {})
             self._handle_pairing_message(msg_type, raw_payload, peer_id)
             return
         if msg_type == "relay_enroll":
-            self._handle_relay_enroll(
-                getattr(msg, "_raw_payload", {}), peer_id)
+            self._handle_relay_enroll(getattr(msg, "_raw_payload", {}), peer_id)
             return
         # Round 17: internet "delivered" receipt.  Routed here so a relay_ack
         # arriving over the relay OR the LAN (same frame stream) both resolve.
@@ -2329,8 +2536,7 @@ class Application:
             return
         # AI-config sync (Round 12): paired-only inventory / pull frames.
         if msg_type in AICONFIG_MSG_TYPES:
-            self.aicfg_mgr.handle_message(
-                msg_type, getattr(msg, "_raw_payload", {}), peer_id or "")
+            self.aicfg_mgr.handle_message(msg_type, getattr(msg, "_raw_payload", {}), peer_id or "")
             return
         # "Plain text only": enforce THIS device's preference on incoming
         # clips too (a peer with the toggle off still sends rich text).
@@ -2376,8 +2582,7 @@ class Application:
         # convenience method folds it into the transfer_progress event.
         direction = self._transfer_directions.get(transfer_id, "outgoing")
         direction = "up" if direction == "outgoing" else "down"
-        self._push_web("broadcast_transfer_progress",
-                       transfer_id, progress, state, direction)
+        self._push_web("broadcast_transfer_progress", transfer_id, progress, state, direction)
 
     def _reject_incoming_transfer(self, transfer_id: str, send_fn) -> None:
         """Reject an incoming transfer and forget its direction entry.
@@ -2390,11 +2595,16 @@ class Application:
         self._transfer_directions.pop(transfer_id, None)
         self.file_transfer_mgr.reject_transfer(transfer_id, send_fn)
 
-    def _on_transfer_complete(self, transfer_id: str, success: bool, cancelled: bool = False,
-                              status: str = "") -> None:
-        logger.info("File transfer %s: %s (status=%s, cancelled=%s)",
-                    transfer_id[:8], "complete" if success else "failed",
-                    status or "unknown", cancelled)
+    def _on_transfer_complete(
+        self, transfer_id: str, success: bool, cancelled: bool = False, status: str = ""
+    ) -> None:
+        logger.info(
+            "File transfer %s: %s (status=%s, cancelled=%s)",
+            transfer_id[:8],
+            "complete" if success else "failed",
+            status or "unknown",
+            cancelled,
+        )
         # Send confirmations are only meaningful for OUTGOING transfers.  The
         # receiver of an incoming file already gets "File received" from
         # _on_file_received; a failed download must not be reported as if this
@@ -2407,16 +2617,17 @@ class Application:
             if direction == "outgoing":
                 self._notify("notify_transfer", T("ui.file_transfer"), T("transfer.send_success"))
         else:
-            self._notify("notify_transfer", T("ui.file_transfer"),
-                         self._transfer_failure_message(status, direction))
+            self._notify(
+                "notify_transfer",
+                T("ui.file_transfer"),
+                self._transfer_failure_message(status, direction),
+            )
         self._last_transfer_progress.pop(transfer_id, None)
         # Remove any temp zip archive created for a folder/multi-file send.
         tmp = self._zip_cleanup.pop(transfer_id, None)
         if tmp:
-            try:
+            with contextlib.suppress(OSError):
                 os.unlink(tmp)
-            except OSError:
-                pass
         self._push_web("broadcast_transfer_complete", transfer_id, success, cancelled)
 
     def _transfer_failure_message(self, status: str, direction: str) -> str:
@@ -2436,7 +2647,9 @@ class Application:
         }.get(status)
         if key:
             return T(key)
-        return T("transfer.send_failed") if direction == "outgoing" else T("transfer.receive_failed")
+        return (
+            T("transfer.send_failed") if direction == "outgoing" else T("transfer.receive_failed")
+        )
 
     def _on_file_received(self, transfer_id: str, saved_path: str, file_name: str) -> None:
         if self.file_transfer_mgr.take_received_kind(transfer_id) == "update":
@@ -2447,31 +2660,37 @@ class Application:
             # update half-applied until the next manual quit.
             try:
                 self.root.after(
-                    0, lambda p=saved_path: self._finish_update_install(
-                        p, None, "p2p"),
+                    0,
+                    lambda p=saved_path: self._finish_update_install(p, None, "p2p"),
                 )
             except Exception:
                 logger.debug("Could not schedule update install", exc_info=True)
             return
-        logger.info("File received: %s -> %s",
-                    _mask_file_name(file_name), _mask_path(saved_path))
-        self._notify("notify_transfer", T("notify.file_received"),
-                     T("transfer.received", name=file_name))
+        logger.info("File received: %s -> %s", _mask_file_name(file_name), _mask_path(saved_path))
+        self._notify(
+            "notify_transfer", T("notify.file_received"), T("transfer.received", name=file_name)
+        )
         self._play_transfer_sound()
 
     def _on_web_upload(self, file_name: str, file_size: int, saved_path: str) -> None:
         """A phone uploaded a file to this computer via the web companion."""
-        logger.info("Web upload received: %s (%d bytes) -> %s",
-                    _mask_file_name(file_name), file_size, _mask_path(saved_path))
+        logger.info(
+            "Web upload received: %s (%d bytes) -> %s",
+            _mask_file_name(file_name),
+            file_size,
+            _mask_path(saved_path),
+        )
         transfer_id = ""
         if self.file_transfer_mgr is not None:
             try:
                 transfer_id = self.file_transfer_mgr.record_web_upload(
-                    file_name, file_size, saved_path)
+                    file_name, file_size, saved_path
+                )
             except Exception:
                 logger.debug("record_web_upload failed", exc_info=True)
-        self._notify("notify_transfer", T("notify.file_received"),
-                     T("transfer.received", name=file_name))
+        self._notify(
+            "notify_transfer", T("notify.file_received"), T("transfer.received", name=file_name)
+        )
         self._play_transfer_sound()
         # Tell connected web clients so the transfers panel refreshes without
         # a manual reload (the web upload never ran through the P2P manager,
@@ -2495,8 +2714,9 @@ class Application:
         except Exception:
             logger.debug("play_sound failed", exc_info=True)
 
-    def _on_transfer_request(self, transfer_id: str, file_name: str, file_size: int,
-                             mime_type: str, send_fn) -> None:
+    def _on_transfer_request(
+        self, transfer_id: str, file_name: str, file_size: int, mime_type: str, send_fn
+    ) -> None:
         logger.info("File request: %s (%d bytes, %s)", file_name, file_size, mime_type)
         self._transfer_directions[transfer_id] = "incoming"
         sender = self._sender_name_for_send_fn(send_fn)
@@ -2511,8 +2731,12 @@ class Application:
         else:
             body = T("transfer.incoming_title")
         self._notify("notify_transfer", T("transfer.incoming"), body)
-        self.root.after(0, lambda: self._show_transfer_request_dialog(
-            transfer_id, file_name, file_size, mime_type, send_fn, sender_name=sender))
+        self.root.after(
+            0,
+            lambda: self._show_transfer_request_dialog(
+                transfer_id, file_name, file_size, mime_type, send_fn, sender_name=sender
+            ),
+        )
 
     def _sender_name_for_send_fn(self, send_fn) -> str:
         """Best-effort resolve the sending peer's display name from a send_fn.
@@ -2538,8 +2762,9 @@ class Application:
             logger.debug("Could not resolve sender name from send_fn", exc_info=True)
         return ""
 
-    def _show_transfer_request_dialog(self, transfer_id, file_name, file_size,
-                                       mime_type, send_fn, sender_name: str = ""):
+    def _show_transfer_request_dialog(
+        self, transfer_id, file_name, file_size, mime_type, send_fn, sender_name: str = ""
+    ):
         # ── Webview mode: push dialog to web UI ────────────────────
         if self._is_webview():
             # The dialog round-trip waits up to two minutes for a human;
@@ -2551,8 +2776,7 @@ class Application:
                     if self.file_transfer_mgr.is_transfer_available(transfer_id):
                         self.file_transfer_mgr.accept_transfer(transfer_id, send_fn)
                     else:
-                        self._notify_info(T("transfer.incoming"),
-                                          T("transfer.no_longer_available"))
+                        self._notify_info(T("transfer.incoming"), T("transfer.no_longer_available"))
                 else:
                     self._reject_incoming_transfer(transfer_id, send_fn)
 
@@ -2571,21 +2795,21 @@ class Application:
             if manager.is_transfer_available(transfer_id):
                 manager.accept_transfer(transfer_id, send_fn)
             else:
-                self._notify_info(T("transfer.incoming"),
-                                  T("transfer.no_longer_available"))
+                self._notify_info(T("transfer.incoming"), T("transfer.no_longer_available"))
             dlg.destroy()
 
         import platform as _platform
+
         _is_macos = _platform.system() == "Darwin"
         _is_linux = _platform.system() == "Linux"
 
         def _fmt_size(n):
             if n >= 1_000_000_000:
-                return f"{n/1_000_000_000:.1f} GB"
+                return f"{n / 1_000_000_000:.1f} GB"
             if n >= 1_000_000:
-                return f"{n/1_000_000:.1f} MB"
+                return f"{n / 1_000_000:.1f} MB"
             if n >= 1_000:
-                return f"{n/1_000:.1f} KB"
+                return f"{n / 1_000:.1f} KB"
             return f"{n} B"
 
         dw, dh = 400, 240
@@ -2607,47 +2831,69 @@ class Application:
             body = tk.Frame(dlg)
             body.pack(fill="both", expand=True, padx=24, pady=20)
 
-            tk.Label(body, text=T("transfer.incoming_title"),
-                     font=("Helvetica", 16, "bold")).pack(anchor="w", pady=(0, 12))
+            tk.Label(body, text=T("transfer.incoming_title"), font=("Helvetica", 16, "bold")).pack(
+                anchor="w", pady=(0, 12)
+            )
 
-            tk.Label(body, text=file_name,
-                     font=("Helvetica", 14, "bold")).pack(anchor="w", pady=(0, 4))
+            tk.Label(body, text=file_name, font=("Helvetica", 14, "bold")).pack(
+                anchor="w", pady=(0, 4)
+            )
 
             if sender_name:
-                tk.Label(body, text=T("transfer.from_device", name=sender_name),
-                         font=("Helvetica", 12), fg="#2980B9").pack(anchor="w", pady=(0, 4))
+                tk.Label(
+                    body,
+                    text=T("transfer.from_device", name=sender_name),
+                    font=("Helvetica", 12),
+                    fg="#2980B9",
+                ).pack(anchor="w", pady=(0, 4))
 
-            tk.Label(body, text=T("transfer.incoming_detail",
-                                  name=file_name, size=_fmt_size(file_size)),
-                     font=("Helvetica", 12), fg="gray").pack(anchor="w", pady=(0, 16))
+            tk.Label(
+                body,
+                text=T("transfer.incoming_detail", name=file_name, size=_fmt_size(file_size)),
+                font=("Helvetica", 12),
+                fg="gray",
+            ).pack(anchor="w", pady=(0, 16))
 
             btn_row = tk.Frame(body)
             btn_row.pack(fill="x")
 
-            tk.Button(btn_row, text=T("transfer.reject"), width=12,
-                      relief="solid", bd=1, fg="#E74C3C",
-                      command=lambda: (
-                          self._reject_incoming_transfer(transfer_id, send_fn),
-                          dlg.destroy(),
-                      )).pack(side="left")
+            tk.Button(
+                btn_row,
+                text=T("transfer.reject"),
+                width=12,
+                relief="solid",
+                bd=1,
+                fg="#E74C3C",
+                command=lambda: (
+                    self._reject_incoming_transfer(transfer_id, send_fn),
+                    dlg.destroy(),
+                ),
+            ).pack(side="left")
 
-            tk.Button(btn_row, text=T("transfer.accept"), width=12,
-                      bg="#27AE60", fg="white",
-                      command=lambda: _accept(self.file_transfer_mgr, dlg)).pack(side="right")
+            tk.Button(
+                btn_row,
+                text=T("transfer.accept"),
+                width=12,
+                bg="#27AE60",
+                fg="white",
+                command=lambda: _accept(self.file_transfer_mgr, dlg),
+            ).pack(side="right")
 
             dlg.update()
             dlg.transient(self.root)
-            try:
+            with contextlib.suppress(Exception):
                 dlg.grab_set()
-            except Exception:
-                pass
-            dlg.protocol("WM_DELETE_WINDOW", lambda: (
-                self._reject_incoming_transfer(transfer_id, send_fn),
-                dlg.destroy(),
-            ))
+            dlg.protocol(
+                "WM_DELETE_WINDOW",
+                lambda: (
+                    self._reject_incoming_transfer(transfer_id, send_fn),
+                    dlg.destroy(),
+                ),
+            )
             dlg.wait_window()
         else:
             import customtkinter as ctk
+
             dlg = ctk.CTkToplevel(self.root)
             dlg.title(T("transfer.incoming"))
             dlg.resizable(False, False)
@@ -2657,24 +2903,28 @@ class Application:
             body.pack(fill="both", expand=True, padx=24, pady=20)
 
             ctk.CTkLabel(
-                body, text=T("transfer.incoming_title"),
+                body,
+                text=T("transfer.incoming_title"),
                 font=ctk.CTkFont(size=16, weight="bold"),
             ).pack(anchor="w", pady=(0, 12))
 
             ctk.CTkLabel(
-                body, text=file_name,
+                body,
+                text=file_name,
                 font=ctk.CTkFont(size=14, weight="bold"),
             ).pack(anchor="w", pady=(0, 4))
 
             if sender_name:
                 ctk.CTkLabel(
-                    body, text=T("transfer.from_device", name=sender_name),
+                    body,
+                    text=T("transfer.from_device", name=sender_name),
                     font=ctk.CTkFont(size=12),
                     text_color=("#2980B9", "#5DADE2"),
                 ).pack(anchor="w", pady=(0, 4))
 
             ctk.CTkLabel(
-                body, text=T("transfer.incoming_detail", name=file_name, size=_fmt_size(file_size)),
+                body,
+                text=T("transfer.incoming_detail", name=file_name, size=_fmt_size(file_size)),
                 font=ctk.CTkFont(size=12),
                 text_color=("gray50", "gray60"),
             ).pack(anchor="w", pady=(0, 16))
@@ -2683,8 +2933,12 @@ class Application:
             btn_row.pack(fill="x")
 
             ctk.CTkButton(
-                btn_row, text=T("transfer.reject"), width=90, height=34,
-                fg_color="transparent", border_width=1,
+                btn_row,
+                text=T("transfer.reject"),
+                width=90,
+                height=34,
+                fg_color="transparent",
+                border_width=1,
                 text_color=("#E74C3C", "#C0392B"),
                 border_color=("#E74C3C", "#C0392B"),
                 hover_color=("#FADBD8", "#5B2C2C"),
@@ -2695,7 +2949,10 @@ class Application:
             ).pack(side="left")
 
             ctk.CTkButton(
-                btn_row, text=T("transfer.accept"), width=90, height=34,
+                btn_row,
+                text=T("transfer.accept"),
+                width=90,
+                height=34,
                 fg_color=("#27AE60", "#2ECC71"),
                 hover_color=("#1E8449", "#27AE60"),
                 command=lambda: _accept(self.file_transfer_mgr, dlg),
@@ -2703,14 +2960,15 @@ class Application:
 
             dlg.update()
             dlg.transient(self.root)
-            try:
+            with contextlib.suppress(Exception):
                 dlg.grab_set()
-            except Exception:
-                pass
-            dlg.protocol("WM_DELETE_WINDOW", lambda: (
-                self._reject_incoming_transfer(transfer_id, send_fn),
-                dlg.destroy(),
-            ))
+            dlg.protocol(
+                "WM_DELETE_WINDOW",
+                lambda: (
+                    self._reject_incoming_transfer(transfer_id, send_fn),
+                    dlg.destroy(),
+                ),
+            )
             dlg.wait_window()
 
     def _on_peer_found(self, peer_id: str, peer_name: str, address: str, port: int) -> None:
@@ -2721,14 +2979,20 @@ class Application:
             # targets the stale address, so clear the dedup guard here or the
             # _maybe_auto_connect below would return early and leave the peer
             # stuck "waiting for pairing" at its new address.
-            if prev is not None and (prev.get("address") != address
-                                     or prev.get("port") != port):
+            if prev is not None and (prev.get("address") != address or prev.get("port") != port):
                 self._auto_connect_pending.discard(peer_id)
             self._discovered_peers[peer_id] = {
-                "name": peer_name, "address": address, "port": port,
+                "name": peer_name,
+                "address": address,
+                "port": port,
             }
-        logger.info("Peer discovered: %s (%s) at %s:%d",
-                    peer_name, peer_id, address, port)
+        logger.info("Peer discovered: %s (%s) at %s:%d", peer_name, peer_id, address, port)
+        # The device page is a live view of the network, so an arriving peer has
+        # to reach it immediately.  Nothing pushed on discovery events before
+        # this, which meant a newly-appeared device only showed up on the next
+        # manual refresh or unrelated broadcast.  Called from the zeroconf
+        # thread; the WebSocketManager broadcast is thread-safe.
+        self._push_web("broadcast_devices")
         self._maybe_auto_connect(peer_id, peer_name, address, port)
 
     def _maybe_auto_connect(self, hashed_id: str, peer_name: str, address: str, port: int) -> None:
@@ -2756,8 +3020,13 @@ class Application:
             if hashed_id in self._auto_connect_pending:
                 return
             self._auto_connect_pending.add(hashed_id)
-        logger.info("Auto-connecting to paired peer %s (%s) at %s:%d",
-                    peer_name, real_id[:12], address, port)
+        logger.info(
+            "Auto-connecting to paired peer %s (%s) at %s:%d",
+            peer_name,
+            real_id[:12],
+            address,
+            port,
+        )
         self.transport_mgr.connect_to_peer(real_id, peer_name, address, port)
 
     def _on_peer_lost(self, peer_id: str) -> None:
@@ -2790,6 +3059,10 @@ class Application:
                 self.chat_mgr.mark_peer_disconnected(resolved_id)
             except Exception:
                 logger.debug("chat mark_peer_disconnected failed", exc_info=True)
+        # A peer leaving the network must drop off the page at once: an unpaired
+        # peer's card is only justified by its live presence, so without this
+        # push it lingered until some unrelated broadcast happened to refresh.
+        self._push_web("broadcast_devices")
 
     def _snapshot_discovered_peers(self) -> dict:
         """Return a thread-safe snapshot of the discovered peers dict.
@@ -2838,7 +3111,8 @@ class Application:
         # instead of letting the row vanish silently after the 5-minute window.
         try:
             self._pairing_req_track[peer_id] = {
-                "code": code, "peer_name": peer_name,
+                "code": code,
+                "peer_name": peer_name,
                 "first_seen": time.time(),
             }
         except Exception:
@@ -2851,18 +3125,23 @@ class Application:
         # With desktop notifications off, the request is invisible in classic
         # mode and would expire silently — open the dashboard once (or toast in
         # webview mode) so the user actually sees it.
-        notifications_active = (
-            getattr(self.cfg, "notify_pairing", True)
-            and getattr(notification_mgr, "enabled", True)
+        notifications_active = getattr(self.cfg, "notify_pairing", True) and getattr(
+            notification_mgr, "enabled", True
         )
         if not notifications_active:
             self._pairing_notify_fallback(peer_name, code)
-        self._push_web("broadcast", "pairing_request", {
-            "peer_id": peer_id, "peer_name": peer_name, "code": code,
-            # SAS shown on BOTH devices during pairing — the user compares
-            # them before confirming (defeats pairing-code MITM).
-            "sas": self._pairing_sas(peer_id),
-        })
+        self._push_web(
+            "broadcast",
+            "pairing_request",
+            {
+                "peer_id": peer_id,
+                "peer_name": peer_name,
+                "code": code,
+                # SAS shown on BOTH devices during pairing — the user compares
+                # them before confirming (defeats pairing-code MITM).
+                "sas": self._pairing_sas(peer_id),
+            },
+        )
         # Do NOT force-open the dashboard here: that pops a new window on
         # every pairing request even when the user is already in the web UI.
         # The pairing request is pushed over WebSocket and shown in the
@@ -2927,8 +3206,9 @@ class Application:
                 self._set_systray_syncing(enabled)
         if "internet_sync_enabled" in updated:
             self._apply_internet_sync_enabled(updated["internet_sync_enabled"])
-        elif ("relay_brokers" in updated or "relay_private_brokers" in updated) \
-                and self._relay is not None:
+        elif (
+            "relay_brokers" in updated or "relay_private_brokers" in updated
+        ) and self._relay is not None:
             # Broker list(s) edited while the relay is live — recycle it so the
             # new endpoints take effect immediately (no restart needed).
             # restart() alone re-runs the worker but still reads the OLD
@@ -2941,10 +3221,10 @@ class Application:
                 )
                 self._relay.restart()
             except Exception:
-                logger.debug("relay restart after broker change failed",
-                             exc_info=True)
-        elif ("relay_username" in updated or "relay_password" in updated) \
-                and self._relay is not None:
+                logger.debug("relay restart after broker change failed", exc_info=True)
+        elif (
+            "relay_username" in updated or "relay_password" in updated
+        ) and self._relay is not None:
             # Broker credentials edited while the relay is live — swap them
             # into the existing clients (including pending reconnects).
             try:
@@ -2954,9 +3234,7 @@ class Application:
                 )
                 self._relay.restart()
             except Exception:
-                logger.debug(
-                    "relay restart after credential change failed",
-                    exc_info=True)
+                logger.debug("relay restart after credential change failed", exc_info=True)
         if "netpair_password" in updated and self._relay is not None:
             # Pairing passphrase set/cleared — re-derive the netpair channel
             # keys so the change applies to live traffic immediately.
@@ -2964,8 +3242,8 @@ class Application:
                 self._relay.refresh_channels()
             except Exception:
                 logger.debug(
-                    "relay refresh_channels after netpair_password change "
-                    "failed", exc_info=True)
+                    "relay refresh_channels after netpair_password change failed", exc_info=True
+                )
         if "filter_enabled_categories" in updated and self.content_filter is not None:
             self.content_filter.enabled_categories = updated["filter_enabled_categories"]
         if "source_tracking_enabled" in updated and getattr(self, "_monitor", None) is not None:
@@ -2980,6 +3258,7 @@ class Application:
         if "appearance_mode" in updated:
             try:
                 from customtkinter import set_appearance_mode
+
                 set_appearance_mode(updated["appearance_mode"])
             except Exception:
                 logger.debug("Failed to apply appearance_mode live", exc_info=True)
@@ -3013,18 +3292,17 @@ class Application:
                     # companion's job) — WebServer._companion_client_ok()
                     # enforces that. Otherwise the dashboard breaks the moment
                     # the companion is turned off.
-                    logger.info("Web companion off; keeping server up for the "
-                                "local webview dashboard")
+                    logger.info(
+                        "Web companion off; keeping server up for the local webview dashboard"
+                    )
                 elif self.web_server.is_running:
                     self.web_server.stop()
             except Exception:
                 logger.debug("Failed to apply web_enabled live", exc_info=True)
 
         if "sync_debounce" in updated and self.sync_mgr is not None:
-            try:
+            with contextlib.suppress(TypeError, ValueError):
                 self.sync_mgr._sync_debounce = max(0.05, float(updated["sync_debounce"]))
-            except (TypeError, ValueError):
-                pass
 
         if "retry_capture_enabled" in updated and self.sync_mgr is not None:
             self.sync_mgr._retry_enabled = bool(updated["retry_capture_enabled"])
@@ -3065,42 +3343,47 @@ class Application:
 
         if "dedup_method" in updated:
             from internal.clipboard import dedup as _dedup_mod
+
             _dedup_mod.DEDUP_ALGO = updated["dedup_method"] or "sha256"
         if "history_max_age_days" in updated and self.clipboard_history is not None:
             try:
                 from internal.clipboard import history_db as _history_db
+
                 _history_db.set_max_age_days(updated.get("history_max_age_days") or 0)
             except (TypeError, ValueError):
-                logger.debug("Invalid history_max_age_days: %s",
-                             updated.get("history_max_age_days"))
+                logger.debug(
+                    "Invalid history_max_age_days: %s", updated.get("history_max_age_days")
+                )
 
         if "max_reconnect_attempts" in updated and self.transport_mgr is not None:
-            try:
-                self.transport_mgr._max_reconnect_attempts = max(1, int(updated["max_reconnect_attempts"]))
-            except (TypeError, ValueError):
-                pass
+            with contextlib.suppress(TypeError, ValueError):
+                self.transport_mgr._max_reconnect_attempts = max(
+                    1, int(updated["max_reconnect_attempts"])
+                )
 
         # AI-config sync: the enabled tool profiles / custom paths changed via
         # web settings — recollect and rebroadcast the inventory.  (The
         # dedicated profiles editor also triggers on_watch_list_changed itself;
         # this branch covers the same fields arriving through the main
         # POST /api/settings form.)
-        if ("ai_config_tools" in updated or "ai_config_custom_paths" in updated) \
-                and self.aicfg_mgr is not None:
+        if (
+            "ai_config_tools" in updated or "ai_config_custom_paths" in updated
+        ) and self.aicfg_mgr is not None:
             try:
                 self.aicfg_mgr.on_watch_list_changed()
             except Exception:
                 logger.debug("aiconfig watch-list refresh failed", exc_info=True)
 
         if "transfer_timeout" in updated and self.file_transfer_mgr is not None:
-            try:
-                self.file_transfer_mgr._transfer_timeout = max(30.0, float(updated["transfer_timeout"]))
-            except (TypeError, ValueError):
-                pass
+            with contextlib.suppress(TypeError, ValueError):
+                self.file_transfer_mgr._transfer_timeout = max(
+                    30.0, float(updated["transfer_timeout"])
+                )
 
         if "file_receive_dir" in updated and self.file_transfer_mgr is not None:
             try:
                 from pathlib import Path
+
                 new_dir = (updated["file_receive_dir"] or "").strip()
                 if new_dir:
                     d = Path(new_dir)
@@ -3123,6 +3406,7 @@ class Application:
         # ── Special actions (not plain config fields) ────────────
         if "regenerate_web_token" in special:
             import secrets
+
             self.cfg.web_token = secrets.token_urlsafe(16)
             self._save_cfg_encrypted()
             # Echo the fresh token back so the client can re-initialize its API
@@ -3164,13 +3448,11 @@ class Application:
         # only cfg was mutated, so traffic kept the startup key state — the UI
         # showed encryption on while frames still went out plaintext, or a peer
         # on a different key state tore the connection down after ~5 frames.
-        if ("encryption_enabled" in updated or "password" in special
-                or "clear_password" in special):
+        if "encryption_enabled" in updated or "password" in special or "clear_password" in special:
             try:
                 self.enc_mgr = EncryptionManager(
                     self.pairing_mgr.get_identity().fingerprint,
-                    password=(self.cfg.encryption_password
-                              if self.cfg.encryption_enabled else ""),
+                    password=(self.cfg.encryption_password if self.cfg.encryption_enabled else ""),
                 )
                 if self.transport_mgr is not None:
                     self.transport_mgr.set_encryption_manager(
@@ -3217,28 +3499,33 @@ class Application:
         Runs on the Tk main thread (scheduled via ``root.after``) so the
         process can cleanly relaunch itself after deleting its own config.
         """
-        import subprocess
         import sys
 
         from internal.config.config import _config_dir
+
         config_dir = _config_dir()
         deleted = []
         # favorites.json is the legacy favorites store: the web API migrates it
         # into an empty favorites.db, so deleting only the DB would let a stale
         # legacy file resurrect every favorite (and its groups) on the next
         # launch.  Delete it here too for a truly clean slate.
-        for fname in ("config.json", "clipboard_history.json",
-                      "clipboard_history.db",
-                      # WAL sidecars MUST go with the DB: the history DB runs
-                      # in WAL mode with one long-lived connection, so both
-                      # files exist while the app is running.  Deleting only
-                      # the .db leaves the stale -wal behind; SQLite then
-                      # replays its committed frames into the fresh empty DB
-                      # on next start — resurrecting the very history the
-                      # factory reset was supposed to destroy.
-                      "clipboard_history.db-wal", "clipboard_history.db-shm",
-                      "favorites.db",
-                      "favorites.json", "clipsync.log"):
+        for fname in (
+            "config.json",
+            "clipboard_history.json",
+            "clipboard_history.db",
+            # WAL sidecars MUST go with the DB: the history DB runs
+            # in WAL mode with one long-lived connection, so both
+            # files exist while the app is running.  Deleting only
+            # the .db leaves the stale -wal behind; SQLite then
+            # replays its committed frames into the fresh empty DB
+            # on next start — resurrecting the very history the
+            # factory reset was supposed to destroy.
+            "clipboard_history.db-wal",
+            "clipboard_history.db-shm",
+            "favorites.db",
+            "favorites.json",
+            "clipsync.log",
+        ):
             fpath = config_dir / fname
             try:
                 if fpath.exists():
@@ -3246,16 +3533,17 @@ class Application:
                     deleted.append(fname)
             except OSError as e:
                 logger.warning("Factory reset: failed to delete %s: %s", fpath, e)
-        for pattern in (".config_tmp_*.json", ".history_tmp_*.json",
-                        # Quarantine copies hold the OLD identity / private
-                        # key / clipboard rows — a clean slate removes them.
-                        "config.json.corrupt-*",
-                        "clipboard_history.db.corrupt-*"):
+        for pattern in (
+            ".config_tmp_*.json",
+            ".history_tmp_*.json",
+            # Quarantine copies hold the OLD identity / private
+            # key / clipboard rows — a clean slate removes them.
+            "config.json.corrupt-*",
+            "clipboard_history.db.corrupt-*",
+        ):
             for tmpf in list(config_dir.glob(pattern)):
-                try:
+                with contextlib.suppress(OSError):
                     tmpf.unlink()
-                except OSError:
-                    pass
         logger.info("Factory reset: deleted %s; restarting", deleted or "no files")
 
         # Browser-side state (webview localStorage: group registry, mutes,
@@ -3274,10 +3562,8 @@ class Application:
 
         # Remove the single-instance lock so the new process can start,
         # spawn a fresh instance, then exit this one without re-saving config.
-        try:
+        with contextlib.suppress(OSError):
             (config_dir / ".lock").unlink()
-        except OSError:
-            pass
         # Factory reset exits WITHOUT calling shutdown(), so anything shutdown
         # would normally tear down must be cleaned here — close the dashboard
         # window so the restart opens a fresh one.
@@ -3316,12 +3602,16 @@ class Application:
         this process.
         """
         import subprocess
+
         if getattr(sys, "frozen", False):
             import os
             import secrets
             import tempfile as _tf
+
             child_temp = os.path.join(
-                _tf.gettempdir(), "clipsync_restart", secrets.token_hex(6),
+                _tf.gettempdir(),
+                "clipsync_restart",
+                secrets.token_hex(6),
             )
             try:
                 os.makedirs(child_temp, exist_ok=True)
@@ -3336,7 +3626,8 @@ class Application:
                     subprocess.Popen(args, env=env)
                 except Exception:
                     logger.warning(
-                        "Restart: failed to spawn new process (isolated temp)", exc_info=True,
+                        "Restart: failed to spawn new process (isolated temp)",
+                        exc_info=True,
                     )
                     subprocess.Popen(args)  # fall back to a normal spawn
                 return
@@ -3354,10 +3645,8 @@ class Application:
         """
         # Unlink the single-instance lock BEFORE spawning: the new process may
         # read it while this PID is still alive and bail with "already running".
-        try:
+        with contextlib.suppress(OSError):
             (_config_dir() / ".lock").unlink()
-        except OSError:
-            pass
         # A restart also skips shutdown(): close the dashboard window so the
         # relaunched instance opens a fresh one.
         if self.webview_win is not None:
@@ -3430,8 +3719,7 @@ class Application:
 
                 set_default_color_theme(theme_file_path())
             except Exception:
-                logger.debug("Custom CTk theme not found; using stock blue",
-                             exc_info=True)
+                logger.debug("Custom CTk theme not found; using stock blue", exc_info=True)
 
         # ── Platform UI font (CTk dialogs exist in both backends) ─────
         # CTk defaults every font to "Roboto", which is missing on most
@@ -3476,7 +3764,8 @@ class Application:
             on_resume_sync=lambda: self.root.after(0, self._resume_timed_pause),
             on_quit=lambda: self.root.after(0, self.shutdown),
             on_tray_failed=lambda: self._web_toast(
-                f"{T('tray.failed_title')}: {T('tray.failed_msg')}"),
+                f"{T('tray.failed_title')}: {T('tray.failed_msg')}"
+            ),
         )
         # Seed the parent's tray state so the initial menu matches the config
         # (the macOS subprocess receives it via _push_tray_state once spawned).
@@ -3491,9 +3780,12 @@ class Application:
         # On Linux, warn if no clipboard tool (xclip/wl-clipboard) is installed
         if sys.platform == "linux":
             from internal.clipboard.clipboard_linux import check_clipboard_tools
+
             msg = check_clipboard_tools()
             if msg:
-                self.root.after(800, lambda: show_warning(self.root, T("ui.clipboard_unavailable"), msg))
+                self.root.after(
+                    800, lambda: show_warning(self.root, T("ui.clipboard_unavailable"), msg)
+                )
 
         self.sync_mgr.start()
         try:
@@ -3522,9 +3814,14 @@ class Application:
                         self._save_cfg_encrypted()
                         break
             if not started:
-                msg = (
-                    T("ui.web_start_failed", port=base_port, lo=base_port, hi=base_port + 5)
-                )
+                # Every candidate failed, and cfg.web_port is still sitting on
+                # the LAST one tried.  Left there it gets persisted by the next
+                # save (the webview downgrade two lines down does exactly
+                # that), so the next launch starts scanning from base+5 and
+                # drifts another +5 every failed run — while the settings page
+                # and diagnostics report a port nothing ever listened on.
+                self.cfg.web_port = base_port
+                msg = T("ui.web_start_failed", port=base_port, lo=base_port, hi=base_port + 5)
                 show_error(self.root, T("ui.web_companion"), msg)
                 self.cfg.web_enabled = False
                 self._set_systray_web_enabled(False)
@@ -3536,8 +3833,11 @@ class Application:
             # stays up for the local dashboard even when the companion is off
             # (non-local clients are refused by WebServer._companion_client_ok),
             # so don't force it back on here.
-            logger.info("Web companion ready (ui_backend=%s, web_enabled=%s)",
-                        self.cfg.ui_backend, self.cfg.web_enabled)
+            logger.info(
+                "Web companion ready (ui_backend=%s, web_enabled=%s)",
+                self.cfg.ui_backend,
+                self.cfg.web_enabled,
+            )
 
     # ═══════════════════════════════════════════════════════════════
     # Phase 10: Background threads
@@ -3557,6 +3857,10 @@ class Application:
                 logger.debug("Internet sync startup failed", exc_info=True)
         updater = threading.Thread(target=self._update_peers_loop, daemon=True)
         updater.start()
+        # Housekeeping: our own leftovers in %TEMP% (see _sweep_stale_temp).
+        # Off the main thread — %TEMP% can hold thousands of entries and the
+        # scan must not delay the tray appearing.
+        threading.Thread(target=self._sweep_stale_temp, daemon=True, name="temp-sweep").start()
         # AI-config sync (Round 12): collect the watch-list inventory once at
         # startup; it is broadcast to connected paired peers and re-sent on
         # each peer connect / watch-list change.
@@ -3577,7 +3881,9 @@ class Application:
         self.root.after(1200, self._prompt_cert_warnings_startup)
         # Probe the hotkey backend once (macOS Accessibility failure kills the
         # listener thread immediately after start()).
-        if getattr(self, "_hotkey_running", False) and not getattr(self, "_hotkey_failure_notified", False):
+        if getattr(self, "_hotkey_running", False) and not getattr(
+            self, "_hotkey_failure_notified", False
+        ):
             self.root.after(1500, self._check_hotkey_health)
 
         if sys.platform == "darwin":
@@ -3668,7 +3974,8 @@ class Application:
         self._macos_tray_restarts += 1
         logger.warning(
             "macOS tray subprocess died; restarting (%d/%d)",
-            self._macos_tray_restarts, self._macos_tray_max_restarts,
+            self._macos_tray_restarts,
+            self._macos_tray_max_restarts,
         )
         try:
             self.root.after(10000, self._spawn_macos_tray)
@@ -3759,6 +4066,85 @@ class Application:
         elif cmd == "quit":
             self.shutdown()
 
+    # Anything we drop in %TEMP% that is older than this is nobody's business
+    # any more: an update download that never got installed, a chat upload
+    # whose send finished (or failed) sessions ago.
+    _TEMP_SWEEP_AGE = 24 * 60 * 60
+
+    def _sweep_stale_temp(self) -> None:
+        """Delete our own abandoned scratch files in %TEMP%.
+
+        Two of our temp artefacts have no owner once the operation that made
+        them ends:
+
+        * ``clipsync_update_*`` directories — created by the updater to stage a
+          downloaded installer.  A crash, a "not now", or a failed install
+          leaves the whole installer sitting there forever; over months of
+          auto-update checks that is tens of MB per abandoned download.
+        * files under ``clipsync_chat_uploads`` — a chat attachment is staged
+          there and then read by the transfer; nothing deletes it afterwards.
+
+        Deliberately NOT swept: ``clipsync_restart/<hex>``.  A frozen restart
+        hands that directory to a child process whose PyInstaller ``_MEI``
+        extraction lives inside it, and removing it out from under a live child
+        is exactly the race documented at the restart site.  Age is no defence
+        there — a long-running child keeps a young-looking directory in use.
+
+        Best effort throughout: this is housekeeping, not a feature, so any
+        entry we cannot stat or remove is simply left for next time.
+        """
+        import tempfile
+
+        try:
+            tmp = tempfile.gettempdir()
+            now = time.time()
+        except Exception:
+            logger.debug("Temp sweep: cannot resolve temp dir", exc_info=True)
+            return
+
+        def _stale(path: str) -> bool:
+            try:
+                return (now - os.path.getmtime(path)) > self._TEMP_SWEEP_AGE
+            except OSError:
+                return False
+
+        removed = 0
+        try:
+            entries = os.listdir(tmp)
+        except OSError:
+            logger.debug("Temp sweep: cannot list %s", tmp, exc_info=True)
+            entries = []
+
+        for name in entries:
+            if not name.startswith("clipsync_update_"):
+                continue
+            path = os.path.join(tmp, name)
+            if not os.path.isdir(path) or not _stale(path):
+                continue
+            try:
+                shutil.rmtree(path, ignore_errors=True)
+                removed += 1
+            except Exception:
+                logger.debug("Temp sweep: could not remove %s", path, exc_info=True)
+
+        chat_dir = os.path.join(tmp, "clipsync_chat_uploads")
+        try:
+            chat_entries = os.listdir(chat_dir)
+        except OSError:
+            chat_entries = []
+        for name in chat_entries:
+            path = os.path.join(chat_dir, name)
+            if os.path.isdir(path) or not _stale(path):
+                continue
+            try:
+                os.remove(path)
+                removed += 1
+            except OSError:
+                logger.debug("Temp sweep: could not remove %s", path, exc_info=True)
+
+        if removed:
+            logger.info("Temp sweep: removed %d stale item(s) from %s", removed, tmp)
+
     def _update_peers_loop(self) -> None:
         prev_display: list[str] = []
         prev_web_fp: str = ""
@@ -3806,36 +4192,36 @@ class Application:
                 for pid in connected_set - prev_connected:
                     found = next((p for p in known_peers if p.device_id == pid), None)
                     name = found.device_name if found else pid[:12]
-                    self._notify("notify_device_connect",
-                                 T("notify.device_connected_title"),
-                                 T("notify.device_connected", name=name))
+                    self._notify(
+                        "notify_device_connect",
+                        T("notify.device_connected_title"),
+                        T("notify.device_connected", name=name),
+                    )
                     # AI-config sync: a freshly connected paired peer missed
                     # our startup inventory broadcast — send it now (the
                     # transport has no on-connect callback; this 3s poll loop
                     # is the existing "peer came up" hook).
                     peer_cfg = self.cfg.peers.get(pid)
-                    if peer_cfg is not None and peer_cfg.paired \
-                            and self.aicfg_mgr is not None:
+                    if peer_cfg is not None and peer_cfg.paired and self.aicfg_mgr is not None:
                         try:
                             self.aicfg_mgr.send_inventory_to(pid)
                         except Exception:
-                            logger.debug("aiconfig inv on connect failed",
-                                         exc_info=True)
+                            logger.debug("aiconfig inv on connect failed", exc_info=True)
                 for pid in prev_connected - connected_set:
                     found = next((p for p in known_peers if p.device_id == pid), None)
                     name = found.device_name if found else pid[:12]
-                    self._notify("notify_device_connect",
-                                 T("notify.device_disconnected_title"),
-                                 T("notify.device_disconnected", name=name))
+                    self._notify(
+                        "notify_device_connect",
+                        T("notify.device_disconnected_title"),
+                        T("notify.device_disconnected", name=name),
+                    )
                 prev_connected = connected_set
 
                 cleanup_counter += 1
                 if cleanup_counter >= 10:
                     cleanup_counter = 0
-                    try:
+                    with contextlib.suppress(Exception):
                         self.file_transfer_mgr.cleanup_stale_transfers()
-                    except Exception:
-                        pass
 
                 # Periodic auto-update check (once per ~6 hours, silent unless an
                 # update is available).  Fully gated by the auto_update_check
@@ -3902,23 +4288,43 @@ class Application:
         # Cancel any debounced pairing notifications still in flight (they'd
         # fire against a half-torn-down app otherwise).
         for _pid, timer in list(self._pairing_notify_timers.items()):
-            try:
+            with contextlib.suppress(Exception):
                 timer.cancel()
-            except Exception:
-                pass
         self._pairing_notify_timers.clear()
 
         if not self._skip_save_on_shutdown:
-            for peer in self.pairing_mgr.get_known_peers():
-                self.cfg.peers[peer.device_id] = PeerInfo(
-                    device_id=peer.device_id,
-                    device_name=peer.device_name,
-                    public_key_pem=peer.certificate_pem,
-                    paired=peer.paired,
-                )
-            with config_lock:
-                self._persist_peer_addresses()
-                self._save_cfg_encrypted()
+            # Everything below this block is teardown that MUST happen: the
+            # hotkey/tray release and, above all, _remove_lock().  An
+            # exception escaping the save (disk full, permission denied, a
+            # peer row that won't serialise) skipped all of it and left the
+            # single-instance lock file behind, so the next launch refused to
+            # start with "ClipSync is already running".  Losing the final save
+            # costs the addresses learned this session; losing the unlock
+            # costs the user their app.
+            try:
+                with config_lock:
+                    # Merge first: this mirror is derived from pairing_mgr, so a
+                    # phantom hash-keyed peer still parked there would be written
+                    # straight back into cfg.peers on the way out.
+                    self._merge_hashed_peer_rows()
+                    for peer in self.pairing_mgr.get_known_peers():
+                        # Carry the config-only fields across: pairing_mgr does not
+                        # track them, so rebuilding the row from it alone wiped the
+                        # user's note and the last address on every clean exit.
+                        existing = self.cfg.peers.get(peer.device_id)
+                        self.cfg.peers[peer.device_id] = PeerInfo(
+                            device_id=peer.device_id,
+                            device_name=peer.device_name,
+                            public_key_pem=peer.certificate_pem,
+                            paired=peer.paired,
+                            notes=existing.notes if existing else "",
+                            last_ip=existing.last_ip if existing else "",
+                            last_port=existing.last_port if existing else 0,
+                        )
+                    self._persist_peer_addresses()
+                    self._save_cfg_encrypted()
+            except Exception:
+                logger.exception("Failed to save config on shutdown — continuing teardown")
 
         # Release OS-level resources: Windows message-only window + registered
         # hotkeys, macOS CGEvent tap, Linux pynput listener.
@@ -3976,13 +4382,12 @@ class Application:
         sure the grab is dropped and the GC-guard reference cleared however
         the dialog goes away.
         """
+
         def _on_destroy(event):
             if event.widget is not dlg:
                 return  # child widgets destroy first; only react to the dialog
-            try:
+            with contextlib.suppress(Exception):
                 dlg.grab_release()
-            except Exception:
-                pass
             if getattr(self, "_active_dialog", None) is dlg:
                 self._active_dialog = None
 
@@ -4015,6 +4420,7 @@ class Application:
             from io import BytesIO
 
             import qrcode
+
             img = qrcode.make(url)
             img = img.convert("RGB")
             img = img.resize((220, 220))
@@ -4056,7 +4462,8 @@ class Application:
         body.pack(fill="both", expand=True, padx=24, pady=20)
 
         ctk.CTkLabel(
-            body, text=T("web.qr_title"),
+            body,
+            text=T("web.qr_title"),
             font=ctk.CTkFont(size=16, weight="bold"),
         ).pack(pady=(0, 12))
 
@@ -4070,15 +4477,19 @@ class Application:
             qr_label.pack(pady=(0, 12))
         else:
             ctk.CTkLabel(
-                body, text=T("web.no_token"),
-                font=ctk.CTkFont(size=14), text_color=("gray50", "gray60"),
+                body,
+                text=T("web.no_token"),
+                font=ctk.CTkFont(size=14),
+                text_color=("gray50", "gray60"),
             ).pack(pady=(0, 12))
 
         url_row = ctk.CTkFrame(body, corner_radius=8, fg_color=("gray90", "gray17"))
         url_row.pack(fill="x", pady=(0, 10))
         url_label = ctk.CTkLabel(
-            url_row, text=url,
-            font=ctk.CTkFont(size=11, family="monospace"), wraplength=200,
+            url_row,
+            text=url,
+            font=ctk.CTkFont(size=11, family="monospace"),
+            wraplength=200,
             text_color=("gray50", "gray70"),
         )
         url_label.pack(side="left", padx=(12, 6), pady=10)
@@ -4090,7 +4501,10 @@ class Application:
             dlg.after(2000, lambda: copy_btn.configure(text=T("ui.copy")))
 
         copy_btn = ctk.CTkButton(
-            url_row, text=T("ui.copy"), width=50, height=28,
+            url_row,
+            text=T("ui.copy"),
+            width=50,
+            height=28,
             font=ctk.CTkFont(size=11),
             command=_copy_url,
         )
@@ -4100,7 +4514,10 @@ class Application:
         # directory the phone page lists, so the phone downloads it from its
         # Files tab within ~5s — no pairing required.
         ctk.CTkButton(
-            body, text=T("web.send_file_to_phone"), width=190, height=34,
+            body,
+            text=T("web.send_file_to_phone"),
+            width=190,
+            height=34,
             font=ctk.CTkFont(size=12),
             fg_color=("#0891B2", "#0E1328"),
             hover_color=("#0EA5C4", "#1A2542"),
@@ -4108,7 +4525,10 @@ class Application:
         ).pack(pady=(0, 8))
 
         ctk.CTkButton(
-            body, text=T("ui.close"), width=100, height=38,
+            body,
+            text=T("ui.close"),
+            width=100,
+            height=38,
             font=ctk.CTkFont(size=13),
             fg_color=("gray85", "gray20"),
             hover_color=("gray75", "gray30"),
@@ -4117,10 +4537,8 @@ class Application:
 
         dlg.update()
         dlg.transient(self.root)
-        try:
+        with contextlib.suppress(Exception):
             dlg.grab_set()
-        except Exception:
-            pass
         self._track_modal_dialog(dlg)
 
     def _send_file_to_phone(self, parent=None) -> None:
@@ -4133,6 +4551,7 @@ class Application:
         """
         try:
             import tkinter.filedialog
+
             path = tkinter.filedialog.askopenfilename(parent=parent)
         except Exception:
             logger.debug("send-to-phone file dialog failed", exc_info=True)
@@ -4141,8 +4560,10 @@ class Application:
             return
         try:
             import shutil
+
             from internal.sync.file_transfer import _sanitize_file_name
             from internal.web.server import _get_upload_dir
+
             dest_dir = _get_upload_dir(self.cfg)
             name = _sanitize_file_name(os.path.basename(path))
             dest = os.path.join(dest_dir, name)
@@ -4158,12 +4579,11 @@ class Application:
             )
         except Exception:
             logger.warning("send-to-phone copy failed", exc_info=True)
-            try:
+            with contextlib.suppress(Exception):
                 self._notify_error(
-                    T("web.send_file_to_phone"), T("web.send_file_to_phone_fail"),
+                    T("web.send_file_to_phone"),
+                    T("web.send_file_to_phone_fail"),
                 )
-            except Exception:
-                pass
 
     def _on_web_action(self, action: dict) -> None:
         """Handle web server control actions from dashboard / settings."""
@@ -4258,6 +4678,7 @@ class Application:
 
         def _worker():
             from internal.system.updater import check_for_update
+
             try:
                 result = check_for_update()
             except Exception as exc:
@@ -4276,8 +4697,7 @@ class Application:
                     )
                     self._offer_update_install(result)
                 elif result.get("latest"):
-                    _present(T("tray.up_to_date"),
-                             f"ClipSync {result.get('current', '')}")
+                    _present(T("tray.up_to_date"), f"ClipSync {result.get('current', '')}")
                 else:
                     _present(T("tray.update_failed"), "ClipSync")
 
@@ -4309,8 +4729,9 @@ class Application:
         from internal.system.updater import download_latest_release
 
         self._web_toast(T("notify.update_downloading"))
-        self._set_update_state({"phase": "downloading", "fraction": 0,
-                                "downloaded": 0, "total": 0, "error": ""})
+        self._set_update_state(
+            {"phase": "downloading", "fraction": 0, "downloaded": 0, "total": 0, "error": ""}
+        )
         self._update_downloading = True
 
         if from_peers:
@@ -4320,23 +4741,25 @@ class Application:
 
         def _progress(downloaded: int, total: int) -> None:
             fraction = (downloaded / total) if total > 0 else 0
-            self._set_update_state({
-                "fraction": fraction, "downloaded": downloaded, "total": total,
-            })
+            self._set_update_state(
+                {
+                    "fraction": fraction,
+                    "downloaded": downloaded,
+                    "total": total,
+                }
+            )
 
         def _worker():
             dest_dir = tempfile.mkdtemp(prefix="clipsync_update_")
             try:
-                path, reason, version = download_latest_release(
-                    dest_dir, progress_cb=_progress)
+                path, reason, version = download_latest_release(dest_dir, progress_cb=_progress)
             except Exception as exc:
                 logger.exception("Update download failed")
                 path, reason, version = None, str(exc), ""
             finally:
                 self._update_downloading = False
             self._pending_update_version = version
-            self.root.after(
-                0, lambda: self._finish_update_install(path, reason, "github"))
+            self.root.after(0, lambda: self._finish_update_install(path, reason, "github"))
 
         threading.Thread(target=_worker, daemon=True, name="update-install").start()
 
@@ -4345,12 +4768,13 @@ class Application:
         try:
             os.remove(path)
         except OSError:
-            logger.debug("Could not remove rejected update blob %s", path,
-                         exc_info=True)
-        key = ("notify.update_rejected_hash" if verdict == "hash_mismatch"
-               else "notify.update_rejected_old")
-        logger.warning("Update blob discarded (%s): %s", verdict,
-                       _mask_path(path))
+            logger.debug("Could not remove rejected update blob %s", path, exc_info=True)
+        key = (
+            "notify.update_rejected_hash"
+            if verdict == "hash_mismatch"
+            else "notify.update_rejected_old"
+        )
+        logger.warning("Update blob discarded (%s): %s", verdict, _mask_path(path))
         self._web_toast(T(key))
 
     def _finish_update_install(self, path, reason, source: str = "github") -> None:
@@ -4368,15 +4792,14 @@ class Application:
         replace the old install (see ``_prepare_update_ready_archive``).
         """
         if getattr(self, "_updating", False):
-            logger.info("Update install already in progress — skipping %s "
-                        "arrival", source)
+            logger.info("Update install already in progress — skipping %s arrival", source)
             return
 
         if not path:
-            self._set_update_state({"phase": "failed", "error":
-                                    reason or T("tray.update_install_failed")})
-            show_error(self.root, T("ui.app_name"),
-                       reason or T("tray.update_install_failed"))
+            self._set_update_state(
+                {"phase": "failed", "error": reason or T("tray.update_install_failed")}
+            )
+            show_error(self.root, T("ui.app_name"), reason or T("tray.update_install_failed"))
             return
 
         from internal.system.updater import (
@@ -4396,8 +4819,7 @@ class Application:
             except Exception as exc:  # defensive — the helper never raises
                 logger.debug("Release info lookup failed: %s", exc)
         try:
-            ok, verdict = verify_update_blob(
-                path, release_info, __version__, source=source)
+            ok, verdict = verify_update_blob(path, release_info, __version__, source=source)
         except Exception:
             logger.exception("Update verification crashed")
             verdict = "hash_mismatch"
@@ -4407,8 +4829,10 @@ class Application:
                 # A peer-sent blob has no authoritative reference to check
                 # against — never install it.  Fall back to the GitHub
                 # download path (without re-broadcasting to peers).
-                logger.warning("P2P update rejected: no release info available "
-                               "to verify against — falling back to GitHub")
+                logger.warning(
+                    "P2P update rejected: no release info available "
+                    "to verify against — falling back to GitHub"
+                )
                 self._download_and_install_update(from_peers=False)
                 return
             self._discard_update_blob(path, verdict)
@@ -4469,20 +4893,21 @@ class Application:
         except Exception:
             logger.exception("Stashing ready update archive failed")
             self._updating = False
-            self._set_update_state({"phase": "failed",
-                                    "error": T("tray.update_install_failed")})
-            show_error(self.root, T("ui.app_name"),
-                       T("tray.update_install_failed"))
+            self._set_update_state({"phase": "failed", "error": T("tray.update_install_failed")})
+            show_error(self.root, T("ui.app_name"), T("tray.update_install_failed"))
             return
 
         self._updating = False
         version = getattr(self, "_pending_update_version", "") or ""
-        self._set_update_state({
-            "phase": "ready", "version": version, "path": str(dest),
-            "fraction": 1,
-        })
-        self.root.after(
-            0, lambda: self._notify_update_ready(version, str(dest)))
+        self._set_update_state(
+            {
+                "phase": "ready",
+                "version": version,
+                "path": str(dest),
+                "fraction": 1,
+            }
+        )
+        self.root.after(0, lambda: self._notify_update_ready(version, str(dest)))
 
     def _notify_update_ready(self, version: str, path: str) -> None:
         """Tell the user the new version is downloaded and ready to run.
@@ -4533,6 +4958,7 @@ class Application:
         (kind="update"), which _on_file_received then stages + applies.
         """
         from internal.protocol.codec import encode_frame
+
         try:
             self.transport_mgr.broadcast(encode_frame({"msg_type": "update_request"}))
             logger.info("Broadcast update_request to peers")
@@ -4544,11 +4970,15 @@ class Application:
         if not peer_id:
             return
         from internal.system.updater import get_cached_asset
+
         cached = get_cached_asset()
         if not cached:
             logger.info("Peer %s asked for an update, but none is cached", peer_id[:12])
             return
-        send_fn = (lambda data, pid=peer_id: self.transport_mgr.send_to_peer(pid, data))
+
+        def send_fn(data, pid=peer_id):
+            return self.transport_mgr.send_to_peer(pid, data)
+
         try:
             self.file_transfer_mgr.send_file(cached, send_fn, kind="update")
         except Exception:
@@ -4563,6 +4993,7 @@ class Application:
         Settings window (the tray About is a quick look, not a settings dive)."""
         try:
             from internal.version import __version__
+
             show_info(
                 self.root,
                 T("tray.about_title"),
@@ -4610,13 +5041,15 @@ class Application:
             clip_text = self.root.clipboard_get()
             if clip_text and self._is_webview() is False:
                 import re
-                if clip_text and re.match(r'^https?://', clip_text.strip()):
+
+                if clip_text and re.match(r"^https?://", clip_text.strip()):
                     prefill = clip_text.strip()
         except Exception:
             pass
 
         # ── Webview mode: push URL input dialog to web UI ──────────
         if self._is_webview():
+
             def _on_url_result(result):
                 if result is None or result.get("action") != "send":
                     return
@@ -4630,11 +5063,13 @@ class Application:
                 # tray polling, timers) never stalls.  Only the result
                 # handling hops back onto the main thread.
                 self._web_dialog_async(
-                    "url_input", _on_url_result,
+                    "url_input",
+                    _on_url_result,
                     title=T("nav_url.title"),
                     message=T("nav_url.prompt"),
                     prefill=prefill,
                 )
+
             self._run_when_webview_ready(_show_url_input)
             return
 
@@ -4642,6 +5077,7 @@ class Application:
         import re
 
         import customtkinter as ctk
+
         dlg = ctk.CTkToplevel(self.root)
         dlg.title(T("nav_url.title"))
         dlg.resizable(False, False)
@@ -4661,13 +5097,13 @@ class Application:
         body.pack(fill="both", expand=True, padx=20, pady=16)
 
         ctk.CTkLabel(
-            body, text=T("nav_url.prompt"),
+            body,
+            text=T("nav_url.prompt"),
             font=ctk.CTkFont(size=13),
         ).pack(anchor="w", pady=(0, 8))
 
         url_var = tk.StringVar(value=prefill)
-        entry = ctk.CTkEntry(body, textvariable=url_var, height=36,
-                             font=ctk.CTkFont(size=12))
+        entry = ctk.CTkEntry(body, textvariable=url_var, height=36, font=ctk.CTkFont(size=12))
         entry.pack(fill="x", pady=(0, 12))
         entry.focus_set()
         entry.icursor(len(prefill))
@@ -4676,8 +5112,12 @@ class Application:
         btn_row.pack(fill="x")
 
         ctk.CTkButton(
-            btn_row, text=T("ui.cancel"), width=80, height=32,
-            fg_color="transparent", border_width=1,
+            btn_row,
+            text=T("ui.cancel"),
+            width=80,
+            height=32,
+            fg_color="transparent",
+            border_width=1,
             text_color=("gray40", "gray70"),
             border_color=("gray60", "gray50"),
             hover_color=("gray85", "gray25"),
@@ -4689,12 +5129,15 @@ class Application:
             dlg.destroy()
             if not url:
                 return
-            if not re.match(r'^https?://', url):
+            if not re.match(r"^https?://", url):
                 url = "https://" + url
             self.root.after(0, lambda u=url: self._send_url_to_peer(u))
 
         ctk.CTkButton(
-            btn_row, text=T("transfer.send"), width=80, height=32,
+            btn_row,
+            text=T("transfer.send"),
+            width=80,
+            height=32,
             command=_send,
         ).pack(side="right")
 
@@ -4710,11 +5153,13 @@ class Application:
 
     def _send_url_to_peer(self, url: str) -> None:
         """Pick a peer and send the URL (deferred from dialog callback)."""
+
         def _deliver(peer_id):
             if peer_id is None:
                 return
-            data = encode_frame({"msg_type": "nav_url", "url": url},
-                                source_device=self.cfg.device_id)
+            data = encode_frame(
+                {"msg_type": "nav_url", "url": url}, source_device=self.cfg.device_id
+            )
             self.transport_mgr.send_to_peer(peer_id, data)
             logger.info("Sent URL to peer %s: %s", peer_id[:12], url[:80])
             self._web_toast(f"{T('nav_url.title')}: {url[:120]}")
@@ -4752,7 +5197,8 @@ class Application:
                 on_picked(None)
 
         self._web_dialog_async(
-            "pick_peer", _on_result,
+            "pick_peer",
+            _on_result,
             title=T("transfer.select_peer"),
             peers=peer_list,
         )
@@ -4780,6 +5226,7 @@ class Application:
 
         # Multiple peers — show selection dialog
         import platform as _platform
+
         _is_macos = _platform.system() == "Darwin"
         _is_linux = _platform.system() == "Linux"
 
@@ -4812,22 +5259,25 @@ class Application:
             body = tk.Frame(dlg)
             body.pack(fill="both", expand=True, padx=20, pady=16)
 
-            tk.Label(body, text=T("transfer.select_peer"),
-                     font=("Helvetica", 14, "bold")).pack(anchor="w", pady=(0, 10))
+            tk.Label(body, text=T("transfer.select_peer"), font=("Helvetica", 14, "bold")).pack(
+                anchor="w", pady=(0, 10)
+            )
 
             for pid, name in peers:
-                tk.Radiobutton(body, text=name, variable=selected, value=pid,
-                               font=("Helvetica", 12)).pack(anchor="w", pady=3)
+                tk.Radiobutton(
+                    body, text=name, variable=selected, value=pid, font=("Helvetica", 12)
+                ).pack(anchor="w", pady=3)
 
             btn_row = tk.Frame(body)
             btn_row.pack(fill="x", pady=(12, 0))
 
-            tk.Button(btn_row, text=T("ui.cancel"), width=10,
-                      relief="solid", bd=1,
-                      command=dlg.destroy).pack(side="left")
+            tk.Button(
+                btn_row, text=T("ui.cancel"), width=10, relief="solid", bd=1, command=dlg.destroy
+            ).pack(side="left")
 
-            tk.Button(btn_row, text=T("transfer.send"), width=10,
-                      command=_confirm).pack(side="right")
+            tk.Button(btn_row, text=T("transfer.send"), width=10, command=_confirm).pack(
+                side="right"
+            )
 
             dlg.update()
             dlg.transient(self.root)
@@ -4838,6 +5288,7 @@ class Application:
                 pass
         else:
             import customtkinter as ctk
+
             dlg = ctk.CTkToplevel(self.root)
             dlg.title(T("transfer.select_peer"))
             dlg.resizable(False, False)
@@ -4847,13 +5298,17 @@ class Application:
             body.pack(fill="both", expand=True, padx=20, pady=16)
 
             ctk.CTkLabel(
-                body, text=T("transfer.select_peer"),
+                body,
+                text=T("transfer.select_peer"),
                 font=ctk.CTkFont(size=14, weight="bold"),
             ).pack(anchor="w", pady=(0, 10))
 
             for pid, name in peers:
                 ctk.CTkRadioButton(
-                    body, text=name, variable=selected, value=pid,
+                    body,
+                    text=name,
+                    variable=selected,
+                    value=pid,
                     font=ctk.CTkFont(size=13),
                 ).pack(anchor="w", pady=3)
 
@@ -4861,8 +5316,12 @@ class Application:
             btn_row.pack(fill="x", pady=(12, 0))
 
             ctk.CTkButton(
-                btn_row, text=T("ui.cancel"), width=80, height=32,
-                fg_color="transparent", border_width=1,
+                btn_row,
+                text=T("ui.cancel"),
+                width=80,
+                height=32,
+                fg_color="transparent",
+                border_width=1,
                 text_color=("gray40", "gray70"),
                 border_color=("gray60", "gray50"),
                 hover_color=("gray85", "gray25"),
@@ -4870,7 +5329,10 @@ class Application:
             ).pack(side="left")
 
             ctk.CTkButton(
-                btn_row, text=T("transfer.send"), width=80, height=32,
+                btn_row,
+                text=T("transfer.send"),
+                width=80,
+                height=32,
                 command=_confirm,
             ).pack(side="right")
 
@@ -4908,7 +5370,8 @@ class Application:
         body.pack(fill="both", expand=True, padx=24, pady=20)
 
         ctk.CTkLabel(
-            body, text=T("transfer.phone_title"),
+            body,
+            text=T("transfer.phone_title"),
             font=ctk.CTkFont(size=16, weight="bold"),
         ).pack(anchor="w", pady=(0, 10))
 
@@ -4916,17 +5379,23 @@ class Application:
         msg_frame.pack(fill="x", pady=(0, 16))
 
         ctk.CTkLabel(
-            msg_frame, text=T("transfer.phone_msg"),
+            msg_frame,
+            text=T("transfer.phone_msg"),
             font=ctk.CTkFont(size=12),
-            justify="left", wraplength=370,
+            justify="left",
+            wraplength=370,
         ).pack(anchor="w")
 
         btn_row = ctk.CTkFrame(body, fg_color="transparent")
         btn_row.pack(fill="x")
 
         ctk.CTkButton(
-            btn_row, text=T("ui.cancel"), width=90, height=34,
-            fg_color="transparent", border_width=1,
+            btn_row,
+            text=T("ui.cancel"),
+            width=90,
+            height=34,
+            fg_color="transparent",
+            border_width=1,
             text_color=("gray40", "gray70"),
             border_color=("gray60", "gray50"),
             hover_color=("gray85", "gray25"),
@@ -4934,7 +5403,10 @@ class Application:
         ).pack(side="left")
 
         ctk.CTkButton(
-            btn_row, text=T("transfer.phone_action"), width=130, height=34,
+            btn_row,
+            text=T("transfer.phone_action"),
+            width=130,
+            height=34,
             command=lambda: (
                 dlg.destroy(),
                 self._show_web_qr(),
@@ -4962,6 +5434,7 @@ class Application:
 
     def _transmit_file_to_peer(self, peer_id: str, file_path: str) -> None:
         """Send one file to an already-resolved peer."""
+
         def _send_fn(data: bytes):
             self.transport_mgr.send_to_peer(peer_id, data)
 
@@ -4970,13 +5443,15 @@ class Application:
             if transfer_id:
                 self._transfer_directions[transfer_id] = "outgoing"
             logger.info("File transfer initiated: %s", transfer_id[:8])
-            self._notify("notify_transfer", T("ui.file_transfer"),
-                         T("transfer.sending_file", name=os.path.basename(file_path)))
+            self._notify(
+                "notify_transfer",
+                T("ui.file_transfer"),
+                T("transfer.sending_file", name=os.path.basename(file_path)),
+            )
         except FileNotFoundError:
             self._notify_error(T("ui.error_title"), f"{T('ui.file_not_found_msg')}{file_path}")
         except PermissionError:
-            self._notify_error("Error",
-                       f"Permission denied reading:\n{file_path}")
+            self._notify_error("Error", f"Permission denied reading:\n{file_path}")
         except OSError as e:
             self._notify_error(T("ui.error_title"), f"{T('ui.send_failed_msg')}{e}")
             logger.error("Failed to send file: %s", e)
@@ -5001,13 +5476,6 @@ class Application:
         import tempfile
         import zipfile
         from pathlib import Path
-
-        def _safe_remove(path):
-            try:
-                if path and path.exists():
-                    path.unlink()
-            except OSError:
-                pass
 
         # ── Count files for progress tracking ──────────────────────
         total_files = 0
@@ -5060,8 +5528,11 @@ class Application:
                                 file_count += 1
                                 frac = file_count / total_files
                                 cur = file_count
-                                mgr.update_progress(dialog_id, frac,
-                                    T("transfer.zipping_progress", current=cur, total=total_files))
+                                mgr.update_progress(
+                                    dialog_id,
+                                    frac,
+                                    T("transfer.zipping_progress", current=cur, total=total_files),
+                                )
                             elif p.is_dir():
                                 for fpath in sorted(p.rglob("*")):
                                     if mgr.is_cancelled(dialog_id):
@@ -5072,8 +5543,15 @@ class Application:
                                         file_count += 1
                                         frac = file_count / total_files
                                         cur = file_count
-                                        mgr.update_progress(dialog_id, frac,
-                                            T("transfer.zipping_progress", current=cur, total=total_files))
+                                        mgr.update_progress(
+                                            dialog_id,
+                                            frac,
+                                            T(
+                                                "transfer.zipping_progress",
+                                                current=cur,
+                                                total=total_files,
+                                            ),
+                                        )
 
                     if mgr.is_cancelled(dialog_id):
                         _safe_remove(tmp_path)
@@ -5081,9 +5559,12 @@ class Application:
                         return
 
                     transfer_id = self.file_transfer_mgr.send_file(
-                        str(tmp_path), _send_fn,
+                        str(tmp_path),
+                        _send_fn,
                     )
-                    logger.info("Zip transfer initiated: %s (%d files)", transfer_id[:8], total_files)
+                    logger.info(
+                        "Zip transfer initiated: %s (%d files)", transfer_id[:8], total_files
+                    )
                     if transfer_id:
                         self._transfer_directions[transfer_id] = "outgoing"
                         # Unlink the temp archive when the transfer finishes
@@ -5127,6 +5608,7 @@ class Application:
             y = (self.root.winfo_screenheight() - dh) // 2
 
         import platform as _platform
+
         _is_macos = _platform.system() == "Darwin"
         _is_linux = _platform.system() == "Linux"
 
@@ -5140,8 +5622,9 @@ class Application:
             dlg.geometry(f"{dw}x{dh}+{x}+{y}")
             dlg.protocol("WM_DELETE_WINDOW", lambda: cancel_event.set())
 
-            _tk.Label(dlg, text=T("transfer.zipping", name=zip_name),
-                      font=("Helvetica", 13, "bold")).pack(pady=(20, 10))
+            _tk.Label(
+                dlg, text=T("transfer.zipping", name=zip_name), font=("Helvetica", 13, "bold")
+            ).pack(pady=(20, 10))
 
             progress_bar = _ttk.Progressbar(dlg, length=370, mode="determinate")
             progress_bar.pack(pady=(0, 8))
@@ -5149,20 +5632,20 @@ class Application:
             status_var = tk.StringVar(value=T("transfer.preparing"))
             _tk.Label(dlg, textvariable=status_var, font=("Helvetica", 11)).pack()
 
-            _tk.Button(dlg, text=T("ui.cancel"),
-                       command=lambda: cancel_event.set()).pack(pady=(12, 16))
+            _tk.Button(dlg, text=T("ui.cancel"), command=lambda: cancel_event.set()).pack(
+                pady=(12, 16)
+            )
 
             def _set_progress(val):
                 progress_bar["value"] = val * 100
+
             def _set_status(text):
                 status_var.set(text)
 
             dlg.update()
             dlg.transient(self.root)
-            try:
+            with contextlib.suppress(Exception):
                 dlg.grab_set()
-            except Exception:
-                pass
         else:
             dlg = _ctk.CTkToplevel(self.root)
             dlg.title(T("transfer.creating_archive"))
@@ -5174,7 +5657,8 @@ class Application:
             body.pack(fill="both", expand=True, padx=24, pady=(20, 12))
 
             _ctk.CTkLabel(
-                body, text=T("transfer.zipping", name=zip_name),
+                body,
+                text=T("transfer.zipping", name=zip_name),
                 font=_ctk.CTkFont(size=13, weight="bold"),
             ).pack(anchor="w", pady=(0, 12))
 
@@ -5184,14 +5668,19 @@ class Application:
 
             status_var = tk.StringVar(value=T("transfer.preparing"))
             _ctk.CTkLabel(
-                body, textvariable=status_var,
+                body,
+                textvariable=status_var,
                 font=_ctk.CTkFont(size=11),
                 text_color=("gray50", "gray60"),
             ).pack(anchor="w")
 
             _ctk.CTkButton(
-                dlg, text=T("ui.cancel"), width=90, height=30,
-                fg_color="transparent", border_width=1,
+                dlg,
+                text=T("ui.cancel"),
+                width=90,
+                height=30,
+                fg_color="transparent",
+                border_width=1,
                 text_color=("gray40", "gray60"),
                 border_color=("gray60", "gray50"),
                 hover_color=("gray85", "gray25"),
@@ -5201,15 +5690,14 @@ class Application:
 
             def _set_progress(val):
                 progress_bar.set(val)
+
             def _set_status(text):
                 status_var.set(text)
 
             dlg.update()
             dlg.transient(self.root)
-            try:
+            with contextlib.suppress(Exception):
                 dlg.grab_set()
-            except Exception:
-                pass
 
         # Keep a reference to prevent premature garbage collection on macOS
         self._active_dialog = dlg
@@ -5232,11 +5720,15 @@ class Application:
                             file_count += 1
                             frac = file_count / total_files
                             cur = file_count
-                            self.root.after(0, lambda f=frac, c=cur: (
-                                _set_progress(f),
-                                _set_status(
-                                    T("transfer.zipping_progress", current=c, total=total_files)),
-                            ))
+                            self.root.after(
+                                0,
+                                lambda f=frac, c=cur: (
+                                    _set_progress(f),
+                                    _set_status(
+                                        T("transfer.zipping_progress", current=c, total=total_files)
+                                    ),
+                                ),
+                            )
                         elif p.is_dir():
                             for fpath in sorted(p.rglob("*")):
                                 if cancel_event.is_set():
@@ -5247,11 +5739,19 @@ class Application:
                                     file_count += 1
                                     frac = file_count / total_files
                                     cur = file_count
-                                    self.root.after(0, lambda f=frac, c=cur: (
-                                        _set_progress(f),
-                                        _set_status(
-                                            T("transfer.zipping_progress", current=c, total=total_files)),
-                                    ))
+                                    self.root.after(
+                                        0,
+                                        lambda f=frac, c=cur: (
+                                            _set_progress(f),
+                                            _set_status(
+                                                T(
+                                                    "transfer.zipping_progress",
+                                                    current=c,
+                                                    total=total_files,
+                                                )
+                                            ),
+                                        ),
+                                    )
 
                 if cancel_event.is_set():
                     _safe_remove(tmp_path)
@@ -5259,7 +5759,8 @@ class Application:
                     return
 
                 transfer_id = self.file_transfer_mgr.send_file(
-                    str(tmp_path), _send_fn,
+                    str(tmp_path),
+                    _send_fn,
                 )
                 logger.info("Zip transfer initiated: %s (%d files)", transfer_id[:8], total_files)
                 if transfer_id:
@@ -5269,24 +5770,45 @@ class Application:
                     self._zip_cleanup[transfer_id] = str(tmp_path)
                 else:
                     _safe_remove(tmp_path)
-                self.root.after(0, lambda: (
-                    dlg.destroy(),
-                    self._notify("notify_transfer", T("ui.file_transfer"),
-                                 T("transfer.sending_file", name=zip_name)),
-                ))
+                self.root.after(
+                    0,
+                    lambda: (
+                        dlg.destroy(),
+                        self._notify(
+                            "notify_transfer",
+                            T("ui.file_transfer"),
+                            T("transfer.sending_file", name=zip_name),
+                        ),
+                    ),
+                )
             except FileNotFoundError:
                 _safe_remove(tmp_path)
-                self.root.after(0, lambda: (dlg.destroy(), self._notify_error(
-                    T("ui.error_title"), T("ui.file_not_found"))))
+                self.root.after(
+                    0,
+                    lambda: (
+                        dlg.destroy(),
+                        self._notify_error(T("ui.error_title"), T("ui.file_not_found")),
+                    ),
+                )
             except PermissionError:
                 _safe_remove(tmp_path)
-                self.root.after(0, lambda: (dlg.destroy(), self._notify_error(
-                    T("ui.error_title"), T("ui.permission_denied"))))
+                self.root.after(
+                    0,
+                    lambda: (
+                        dlg.destroy(),
+                        self._notify_error(T("ui.error_title"), T("ui.permission_denied")),
+                    ),
+                )
             except OSError as e:
                 logger.error("Failed to zip and send: %s", e)
                 _safe_remove(tmp_path)
-                self.root.after(0, lambda e=e: (dlg.destroy(), self._notify_error(
-                    "Error", f"Failed to create archive:\n{e}")))
+                self.root.after(
+                    0,
+                    lambda e=e: (
+                        dlg.destroy(),
+                        self._notify_error("Error", f"Failed to create archive:\n{e}"),
+                    ),
+                )
 
         threading.Thread(target=_worker, daemon=True, name="zip-sender").start()
 
@@ -5318,13 +5840,18 @@ class Application:
             on_export_logs=self.export_logs,
             get_filter_categories=lambda: self.content_filter.enabled_categories,
             set_filter_categories=lambda cats: (
-                setattr(self.content_filter, 'enabled_categories', cats),
-                setattr(self.cfg, 'filter_enabled_categories', cats),
+                setattr(self.content_filter, "enabled_categories", cats),
+                setattr(self.cfg, "filter_enabled_categories", cats),
             ),
-            get_log_text=lambda: _get_log_path().read_text(encoding="utf-8")
-            if _get_log_path().exists() else "No log file yet.",
+            get_log_text=lambda: (
+                _get_log_path().read_text(encoding="utf-8")
+                if _get_log_path().exists()
+                else "No log file yet."
+            ),
             set_skip_save_on_shutdown=lambda v: setattr(
-                self, "_skip_save_on_shutdown", v,
+                self,
+                "_skip_save_on_shutdown",
+                v,
             ),
             on_web_action=self._on_web_action,
         )
@@ -5348,12 +5875,12 @@ class Application:
         (dialogs, open_settings) are silently dropped, so tray actions fired
         before the window opened must wait for the client to attach.
         """
+
         def _drain() -> None:
             if self._shutting_down:
                 return
             try:
-                ready = (self.web_server is not None
-                         and self.web_server.ws_manager.client_count > 0)
+                ready = self.web_server is not None and self.web_server.ws_manager.client_count > 0
             except Exception:
                 ready = False
             if ready:
@@ -5392,6 +5919,7 @@ class Application:
         wait on a worker keeps the main loop responsive, and only the result
         handling (which may touch widgets) hops back onto the main thread.
         """
+
         def _worker():
             result = self._web_dialog(dialog_type, **kwargs)
             try:
@@ -5400,7 +5928,9 @@ class Application:
                 logger.debug("web-dialog callback scheduling failed", exc_info=True)
 
         threading.Thread(
-            target=_worker, daemon=True, name=f"web-dialog-{dialog_type}",
+            target=_worker,
+            daemon=True,
+            name=f"web-dialog-{dialog_type}",
         ).start()
 
     def _web_toast(self, message: str, duration: int = 3000) -> None:
@@ -5427,10 +5957,7 @@ class Application:
         notification instead.
         """
         try:
-            return (
-                self.web_server is not None
-                and self.web_server.ws_manager.client_count > 0
-            )
+            return self.web_server is not None and self.web_server.ws_manager.client_count > 0
         except Exception:
             logger.debug("web_has_clients check failed", exc_info=True)
             return False
@@ -5505,50 +6032,55 @@ class Application:
         web UI so the "Connect" click that was refused gets honest feedback
         (before this, the device just stayed in the list with no signal)."""
         self._push_web(
-            "broadcast", "connect_rejected",
+            "broadcast",
+            "connect_rejected",
             {"peer_id": peer_id, "name": peer_name},
         )
-
-
 
     def _handle_diagnostics_request(self, action: str) -> dict:
         """Open the relevant OS permission / firewall settings, or re-apply a Windows rule."""
         try:
             import platform as _platform
             import subprocess as _sp
+
             if action == "firewall":
                 if _platform.system() == "Darwin":
                     # macOS has no CLI to grant the Application Firewall, and
                     # the Local Network permission (macOS 15+) can only be
                     # toggled in System Settings — so open the exact pane.
                     if self._macos_open_settings(
-                            "x-apple.systempreferences:com.apple.preference.security?Firewall"):
+                        "x-apple.systempreferences:com.apple.preference.security?Firewall"
+                    ):
                         return {"ok": True}
-                    return {"ok": False,
-                            "error": "Could not open the macOS firewall settings."}
+                    return {"ok": False, "error": "Could not open the macOS firewall settings."}
                 if _platform.system() == "Windows":
                     # Prefer re-applying the allow rule (idempotent). netsh needs
                     # admin rights — retry elevated via a UAC prompt, then fall
                     # back to opening the firewall settings page so the user can
                     # allow the ports manually.
-                    if (self.web_server is not None
-                            and self.web_server._open_firewall(self.cfg.port, self.cfg.web_port)):
+                    if self.web_server is not None and self.web_server._open_firewall(
+                        self.cfg.port, self.cfg.web_port
+                    ):
                         return {"ok": True}
-                    if (self.web_server is not None
-                            and self.web_server._open_firewall_elevated(self.cfg.port, self.cfg.web_port)):
+                    if self.web_server is not None and self.web_server._open_firewall_elevated(
+                        self.cfg.port, self.cfg.web_port
+                    ):
                         return {"ok": True}
                     if self._open_windows_settings("ms-settings:network-firewall"):
                         return {"ok": True}
-                    return {"ok": False,
-                            "error": "Could not create the firewall rule (admin rights may be "
-                                     "required) or open the firewall settings."}
+                    return {
+                        "ok": False,
+                        "error": "Could not create the firewall rule (admin rights may be "
+                        "required) or open the firewall settings.",
+                    }
                 if _platform.system() == "Linux":
                     # Grant both ports on the active firewall (ufw / firewalld)
                     # via a PolicyKit GUI auth prompt — the Linux equivalent of
                     # the Windows UAC repair. If pkexec is unavailable, surface
                     # the exact command so the user can run it as root.
                     fw_name, script = self._linux_firewall_allow_script(
-                        self.cfg.port, self.cfg.web_port)
+                        self.cfg.port, self.cfg.web_port
+                    )
                     if not fw_name:
                         # No active firewall detected — nothing to request.
                         return {"ok": True}
@@ -5556,25 +6088,29 @@ class Application:
                         _sp.Popen(["pkexec", "sh", "-c", script])
                         return {"ok": True}
                     except Exception:
-                        return {"ok": False,
-                                "error": f"Allow the ports manually as root: {script}"}
+                        return {"ok": False, "error": f"Allow the ports manually as root: {script}"}
                 return {"ok": False, "error": "Firewall settings are not supported on this OS."}
             if action == "local_network":
                 if _platform.system() == "Darwin":
                     # The macOS 15+ Local Network permission is OS-enforced and
                     # cannot be granted by CLI — open the exact pane for it.
                     if self._macos_open_settings(
-                            "x-apple.systempreferences:com.apple.preference.security?Privacy_LocalNetwork"):
+                        "x-apple.systempreferences:com.apple.preference.security?Privacy_LocalNetwork"
+                    ):
                         return {"ok": True}
-                    return {"ok": False,
-                            "error": "Could not open the macOS Local Network permission settings."}
+                    return {
+                        "ok": False,
+                        "error": "Could not open the macOS Local Network permission settings.",
+                    }
                 if _platform.system() == "Windows":
                     # Windows has no dedicated local-network permission page on most
                     # builds — the firewall & network settings is the closest target.
                     if self._open_windows_settings("ms-settings:network-firewall"):
                         return {"ok": True}
-                    return {"ok": False,
-                            "error": "Could not open the Windows network/firewall settings."}
+                    return {
+                        "ok": False,
+                        "error": "Could not open the Windows network/firewall settings.",
+                    }
                 if _platform.system() == "Linux":
                     # No local-network permission exists on Linux — nothing to do.
                     return {"ok": True}
@@ -5592,8 +6128,11 @@ class Application:
         needs to run. Returns (None, None) when no firewall is active.
         """
         import subprocess as _sp
-        for cmd, name in ((["ufw", "status"], "ufw"),
-                          (["systemctl", "is-active", "firewalld"], "firewalld")):
+
+        for cmd, name in (
+            (["ufw", "status"], "ufw"),
+            (["systemctl", "is-active", "firewalld"], "firewalld"),
+        ):
             try:
                 _out = _sp.run(cmd, capture_output=True, text=True, timeout=3).stdout or ""
             except Exception:
@@ -5603,10 +6142,12 @@ class Application:
             if "active" in _out.split():
                 if name == "ufw":
                     return ("ufw", f"ufw allow {port}/tcp && ufw allow {web_port}/tcp")
-                return ("firewalld",
-                        f"firewall-cmd --permanent --add-port={port}/tcp && "
-                        f"firewall-cmd --permanent --add-port={web_port}/tcp && "
-                        f"firewall-cmd --reload")
+                return (
+                    "firewalld",
+                    f"firewall-cmd --permanent --add-port={port}/tcp && "
+                    f"firewall-cmd --permanent --add-port={web_port}/tcp && "
+                    f"firewall-cmd --reload",
+                )
         return (None, None)
 
     @staticmethod
@@ -5614,6 +6155,7 @@ class Application:
         """Open a macOS System Settings pane (best-effort)."""
         try:
             import subprocess as _sp
+
             _sp.Popen(["open", uri])
             return True
         except Exception:
@@ -5629,6 +6171,7 @@ class Application:
         """
         import os as _os
         import subprocess as _sp
+
         try:
             _os.startfile(uri)
             return True
@@ -5640,9 +6183,16 @@ class Application:
         except Exception:
             pass
         try:
-            _sp.Popen([_os.path.join(
-                _os.environ.get("WINDIR", r"C:\Windows"),
-                "ImmersiveControlPanel", "SystemSettings.exe"), uri])
+            _sp.Popen(
+                [
+                    _os.path.join(
+                        _os.environ.get("WINDIR", r"C:\Windows"),
+                        "ImmersiveControlPanel",
+                        "SystemSettings.exe",
+                    ),
+                    uri,
+                ]
+            )
             return True
         except Exception:
             return False
@@ -5651,8 +6201,11 @@ class Application:
         """Return aggregated dashboard overview data for the web UI."""
         import platform as _platform
         import time as _time
+
         connected = self.transport_mgr.get_connected_peers() if self.transport_mgr else []
-        paired = getattr(self.pairing_mgr, 'get_paired_peers', lambda: [])() if self.pairing_mgr else []
+        paired = (
+            getattr(self.pairing_mgr, "get_paired_peers", lambda: [])() if self.pairing_mgr else []
+        )
         # "Connected" in the overview means an active *sync session*: filter to
         # paired peers so the count agrees with the frontend's paired-only
         # connectedCount and the ring's connected/paired-offline math stays
@@ -5664,38 +6217,44 @@ class Application:
         active_tx = 0
         try:
             tx_list = self.file_transfer_mgr.get_transfers() if self.file_transfer_mgr else []
-            active_tx = sum(1 for t in tx_list if t.get('status') not in ('completed', 'cancelled', 'failed'))
+            active_tx = sum(
+                1 for t in tx_list if t.get("status") not in ("completed", "cancelled", "failed")
+            )
         except Exception:
             pass
         # Uptime
-        uptime = int(_time.time()) - getattr(self, '_start_time', int(_time.time()))
+        uptime = int(_time.time()) - getattr(self, "_start_time", int(_time.time()))
         # ── History stats ──────────────────────────────────────────
         hist = self.clipboard_history.get_all() if self.clipboard_history else []
         import datetime as _dt
+
         _today = _dt.date.today()
+
         def _is_today(ts):
             try:
                 return _dt.datetime.fromtimestamp(float(ts)).date() == _today
             except Exception:
                 return False
+
         history_today = sum(1 for e in hist if _is_today(e.get("timestamp", 0)))
         history_pinned = sum(1 for e in hist if e.get("pinned"))
         history_images = sum(
-            1 for e in hist
-            if str(e.get("content_type", "")).upper() in ("IMAGE", "IMAGE_PNG", "IMAGE_EMF", "PICTURE")
+            1
+            for e in hist
+            if str(e.get("content_type", "")).upper()
+            in ("IMAGE", "IMAGE_PNG", "IMAGE_EMF", "PICTURE")
         )
         # ── Transfer stats ─────────────────────────────────────────
         tx_hist = self.file_transfer_mgr.get_history() if self.file_transfer_mgr else []
         transfer_completed = sum(1 for t in tx_hist if t.get("success"))
         # ── Connected peers (names for the live device chips) ─────
         connected_names = []
-        try:
+        with contextlib.suppress(Exception):
             connected_names = [
-                name for pid, name in self.transport_mgr.get_connected_peers_with_names()
+                name
+                for pid, name in self.transport_mgr.get_connected_peers_with_names()
                 if pid in paired_ids
             ]
-        except Exception:
-            pass
         # ── Recent clipboard activity feed ─────────────────────────
         recent_items = [
             {
@@ -5708,57 +6267,75 @@ class Application:
         ]
         ntype, niface = _detect_network_type()
         return {
-            'connected_count': len(connected),
-            'paired_count': len(paired),
-            'discovered_count': len(self._snapshot_discovered_peers()),
-            'connected_names': connected_names,
-            'history_count': len(hist),
-            'history_today': history_today,
-            'history_pinned': history_pinned,
-            'history_images': history_images,
-            'active_transfers': active_tx,
-            'transfer_completed': transfer_completed,
-            'discovering': bool(self.discovery and self.discovery.is_browsing),
-            'visible': bool(self.discovery and self.discovery.is_advertising),
-            'sync_enabled': self.cfg.sync_enabled if self.cfg else True,
-            'web_enabled': self.cfg.web_enabled if self.cfg else True,
-            'uptime_seconds': uptime,
-            'local_ip': WebServer._get_lan_ip(),
-            'port': self.cfg.web_port if self.cfg else 0,
-            'platform': friendly_platform_name(_platform.system()),
-            'version': __version__,
-            'network_type': ntype,
-            'network_detail': niface,
-            'recent_items': recent_items,
+            "connected_count": len(connected),
+            "paired_count": len(paired),
+            "discovered_count": len(self._snapshot_discovered_peers()),
+            "connected_names": connected_names,
+            "history_count": len(hist),
+            "history_today": history_today,
+            "history_pinned": history_pinned,
+            "history_images": history_images,
+            "active_transfers": active_tx,
+            "transfer_completed": transfer_completed,
+            "discovering": bool(self.discovery and self.discovery.is_browsing),
+            "visible": bool(self.discovery and self.discovery.is_advertising),
+            "sync_enabled": self.cfg.sync_enabled if self.cfg else True,
+            "web_enabled": self.cfg.web_enabled if self.cfg else True,
+            "uptime_seconds": uptime,
+            "local_ip": WebServer._get_lan_ip(),
+            "port": self.cfg.web_port if self.cfg else 0,
+            "platform": friendly_platform_name(_platform.system()),
+            "version": __version__,
+            "network_type": ntype,
+            "network_detail": niface,
+            "recent_items": recent_items,
         }
 
     def _handle_web_device_action(self, action: str, peer_id: str, *args) -> bool:
         """Handle device actions from the web UI."""
         try:
-            if action == 'pair':
-                code = args[0] if args else ''
+            if action == "pair":
+                code = args[0] if args else ""
                 return self._on_pair(peer_id, code)
-            elif action == 'unpair':
+            elif action == "unpair":
                 self._on_unpair(peer_id)
                 return True
-            elif action == 'reject':
+            elif action == "reject":
                 self.pairing_mgr.reject_pairing(peer_id)
+                self._clear_pairing_notice(peer_id)
+                # Tell the peer we rejected — the accept path sends
+                # pairing_confirm, but reject never notified the peer, so its
+                # pairing request stayed stuck in "pending / peer_confirmed"
+                # until it expired (the two devices disagreed about state).
+                self._send_pairing_msg(peer_id, "pairing_reject")
+                # Tear down the temporary connection the pairing handshake
+                # opened, so a rejected peer doesn't linger as a "temporary
+                # connection" (the desktop reject tears down too).
+                self.transport_mgr.disconnect_peer(peer_id, reject=True)
+                # Persist the peer as known-but-unpaired.  The TLS handshake
+                # already registered it in pairing_mgr (add_peer with
+                # paired=was_paired), but cfg.peers — what the device snapshot
+                # reads — only syncs from pairing_mgr here, and the reject path
+                # had no sync point.  Without this the rejected device vanished
+                # from the device list entirely instead of staying listed as
+                # unpaired.
+                self._save_cfg_and_peers()
                 self._push_web("broadcast", "pairing_resolved", {"peer_id": peer_id})
                 return True
-            elif action == 'connect':
+            elif action == "connect":
                 return self._on_connect(peer_id)
-            elif action == 'disconnect':
+            elif action == "disconnect":
                 self._on_disconnect(peer_id)
                 return True
-            elif action == 'forget':
+            elif action == "forget":
                 self._on_remove(peer_id)
                 return True
-            elif action == 'restore':
+            elif action == "restore":
                 return self._on_restore_remove(peer_id)
-            elif action == 'purge':
+            elif action == "purge":
                 return self._on_purge_remove(peer_id)
-            elif action == 'edit_note':
-                note = args[0] if args else ''
+            elif action == "edit_note":
+                note = args[0] if args else ""
                 self._on_edit_note(peer_id, note)
                 return True
         except Exception as e:
@@ -5778,21 +6355,27 @@ class Application:
                 self.file_transfer_mgr.get_transfer_send_fn(transfer_id)
                 or self.transport_mgr.broadcast
             )
-            if action == 'cancel':
+            if action == "cancel":
                 self.file_transfer_mgr.cancel_transfer(transfer_id, send_fn)
-            elif action == 'pause':
+            elif action == "pause":
                 self.file_transfer_mgr.pause_transfer(transfer_id, send_fn)
-            elif action == 'resume':
+            elif action == "resume":
                 self.file_transfer_mgr.resume_transfer(transfer_id, send_fn)
-            elif action == 'accept':
+            elif action == "accept":
                 self.file_transfer_mgr.accept_transfer(transfer_id, send_fn)
-            elif action == 'reject':
+            elif action == "reject":
                 self.file_transfer_mgr.reject_transfer(transfer_id, send_fn)
-            elif action == 'retry':
+            elif action == "retry":
                 # Re-send a FAILED outgoing transfer from history to its
                 # original peer (the transfers panel offers Retry on failed
                 # rows; failed rows persist in history with source + peer).
                 return self._retry_transfer_from_history(transfer_id)
+            elif action == "history_delete":
+                # Drop one completed/failed row from the transfer history
+                # (the web transfers panel's per-row context menu).  Purely a
+                # bookkeeping delete — no peer is notified and no file on disk
+                # is touched, so a received file stays where it was saved.
+                return self.file_transfer_mgr.delete_history_by_id(transfer_id)
             else:
                 return False
             return True
@@ -5810,8 +6393,11 @@ class Application:
         if self.file_transfer_mgr is None:
             return False
         entry = next(
-            (e for e in self.file_transfer_mgr.get_history()
-             if e.get("transfer_id") == transfer_id),
+            (
+                e
+                for e in self.file_transfer_mgr.get_history()
+                if e.get("transfer_id") == transfer_id
+            ),
             None,
         )
         if entry is None or entry.get("direction") != "up":
@@ -5821,7 +6407,9 @@ class Application:
         if not source_path or not peer_id or not os.path.isfile(source_path):
             logger.debug(
                 "Retry transfer %s: missing source (%s) or peer (%s)",
-                transfer_id[:8], _mask_path(source_path), peer_id[:12],
+                transfer_id[:8],
+                _mask_path(source_path),
+                peer_id[:12],
             )
             return False
 
@@ -5836,8 +6424,9 @@ class Application:
         if not new_id:
             return False
         self._transfer_directions[new_id] = "outgoing"
-        logger.info("Retried transfer %s as %s to peer %s",
-                    transfer_id[:8], new_id[:8], peer_id[:12])
+        logger.info(
+            "Retried transfer %s as %s to peer %s", transfer_id[:8], new_id[:8], peer_id[:12]
+        )
         return True
 
     def open_dashboard(self) -> None:
@@ -5890,7 +6479,8 @@ class Application:
         # (same process re-open) is reused.
         size = getattr(self, "_webview_size", None)
         self.webview_win = WebViewWindow(
-            url=url, title=T("ui.app_name"),
+            url=url,
+            title=T("ui.app_name"),
             width=size[0] if size and size[0] else 1152,
             height=size[1] if size and size[1] else 648,
         )
@@ -5920,14 +6510,14 @@ class Application:
             # Reconnect progress for offline paired rows ("reconnecting N/M");
             # empty dict when the transport layer is gone (shutdown ordering).
             get_reconnect_states=lambda: (
-                self.transport_mgr.get_reconnect_states()
-                if self.transport_mgr is not None else {}
+                self.transport_mgr.get_reconnect_states() if self.transport_mgr is not None else {}
             ),
             on_quit=self.shutdown,
             get_sync_enabled=lambda: self.cfg.sync_enabled,
             set_sync_enabled=lambda v: (
                 self._clear_pause_state(),
-                self.sync_mgr.set_enabled(v), self._set_systray_syncing(v),
+                self.sync_mgr.set_enabled(v),
+                self._set_systray_syncing(v),
             ),
             get_discovering=lambda: self.discovery.is_browsing,
             get_visible=lambda: self.discovery.is_advertising,
@@ -5941,13 +6531,16 @@ class Application:
             ),
             get_transfers=lambda: self.file_transfer_mgr.get_transfers(),
             on_cancel_transfer=lambda tid: self.file_transfer_mgr.cancel_transfer(
-                tid, self.file_transfer_mgr.get_transfer_send_fn(tid) or self.transport_mgr.broadcast,
+                tid,
+                self.file_transfer_mgr.get_transfer_send_fn(tid) or self.transport_mgr.broadcast,
             ),
             on_pause_transfer=lambda tid: self.file_transfer_mgr.pause_transfer(
-                tid, self.file_transfer_mgr.get_transfer_send_fn(tid) or self.transport_mgr.broadcast,
+                tid,
+                self.file_transfer_mgr.get_transfer_send_fn(tid) or self.transport_mgr.broadcast,
             ),
             on_resume_transfer=lambda tid: self.file_transfer_mgr.resume_transfer(
-                tid, self.file_transfer_mgr.get_transfer_send_fn(tid) or self.transport_mgr.broadcast,
+                tid,
+                self.file_transfer_mgr.get_transfer_send_fn(tid) or self.transport_mgr.broadcast,
             ),
             get_pending_pairings=self._get_pending,
             on_pair=self._on_pair,
@@ -6016,10 +6609,101 @@ class Application:
         except Exception:
             logger.debug("Failed to persist peer addresses", exc_info=True)
 
+    def _real_peer_id(self, peer_id: str) -> str:
+        """Map a hashed mDNS id back to the real device_id when we can.
+
+        Discovery advertises ``Discovery._hash_device_id(device_id)`` so the
+        real id never crosses the LAN in plaintext, which means a device first
+        seen by discovery is known ONLY by its hash.  Anything that PERSISTS a
+        peer must key it by the real id: the hash is one-way, so a hash-keyed
+        row can never be folded into the real one afterwards and lingers as a
+        phantom duplicate of the same physical machine — one card under the
+        broadcast name (``pc-zhao-b190``) and one under the certificate's name
+        (``USER-20240325OS``).
+
+        Two resolution routes: the transport's hash→real map, learned from the
+        peer's certificate at handshake time, and — because the hash is
+        deterministic — hashing every real id we already know and looking for a
+        match, which still works before any connection happens this run.
+        Returns ``peer_id`` unchanged when it is already real, or when it is a
+        hash whose real id we have never seen.
+        """
+        try:
+            resolved = self.transport_mgr.get_resolved_hashes()
+        except Exception:
+            resolved = {}
+        real = resolved.get(peer_id)
+        if real and real != peer_id:
+            return real
+        candidates = set(self.cfg.peers) | set(self.cfg.removed_peers)
+        try:
+            candidates.update(p.device_id for p in self.pairing_mgr.get_known_peers())
+        except Exception:
+            logger.debug("_real_peer_id: known peers unavailable", exc_info=True)
+        for rid in candidates:
+            if rid == peer_id:
+                continue
+            try:
+                if Discovery._hash_device_id(rid) == peer_id:
+                    return rid
+            except Exception:
+                continue
+        return peer_id
+
+    def _merge_hashed_peer_rows(self) -> None:
+        """Collapse peer rows keyed by a hashed mDNS id into the real-id row.
+
+        Repairs configs that already carry such a phantom (restoring a
+        discovered-only card used to create one, see ``_on_restore_remove``)
+        and is cheap enough to run on every save.  Address and note are carried
+        over — they may be all the phantom row learned — but ``paired`` is NOT:
+        trust is bound to the certificate's CN, i.e. the real id, so a paired
+        flag on a hash row is non-functional and copying it would grant a
+        pairing the peer never actually completed.
+
+        Caller holds ``config_lock``.
+        """
+        try:
+            reals = {p.device_id for p in self.pairing_mgr.get_known_peers()}
+        except Exception:
+            reals = set()
+        reals |= set(self.cfg.peers)
+        for real in sorted(reals):
+            try:
+                hashed = Discovery._hash_device_id(real)
+            except Exception:
+                continue
+            if hashed == real:
+                continue
+            phantom = self.cfg.peers.pop(hashed, None)
+            target = self.cfg.peers.get(real)
+            if phantom is not None and target is not None:
+                if not target.last_ip and phantom.last_ip:
+                    target.last_ip = phantom.last_ip
+                    target.last_port = phantom.last_port or target.last_port
+                if not target.notes and phantom.notes:
+                    target.notes = phantom.notes
+            in_pairing = False
+            with contextlib.suppress(Exception):
+                in_pairing = any(p.device_id == hashed for p in self.pairing_mgr.get_known_peers())
+            if in_pairing:
+                # Leaving it here would re-mirror the phantom into cfg.peers on
+                # the very next save (cfg.peers is derived from pairing_mgr).
+                try:
+                    self.pairing_mgr.remove_peer(hashed)
+                except Exception:
+                    logger.debug("Could not drop hashed peer %s", hashed[:12], exc_info=True)
+            if phantom is not None or in_pairing:
+                logger.info("Merged hashed peer row %s into real id %s", hashed[:12], real[:12])
+
     def _save_cfg_and_peers(self) -> None:
         # Hold the shared config lock so web-server threads can't concurrently
         # iterate/mutate cfg.peers while we snapshot it (avoids RuntimeError).
         with config_lock:
+            # Before mirroring pairing_mgr into cfg.peers, not after: the
+            # mirror would otherwise re-create any phantom still sitting in
+            # pairing_mgr under a hashed id.
+            self._merge_hashed_peer_rows()
             known_ids: set[str] = set()
             for peer in self.pairing_mgr.get_known_peers():
                 known_ids.add(peer.device_id)
@@ -6030,6 +6714,13 @@ class Application:
                     public_key_pem=peer.certificate_pem,
                     paired=peer.paired,
                     notes=existing.notes if existing else "",
+                    # pairing_mgr has no address, and _persist_peer_addresses
+                    # below only refreshes peers the transport currently knows —
+                    # so dropping these blanked the last known address of every
+                    # OFFLINE peer, killing the last_ip fallback that gives the
+                    # Pair button somewhere to dial.
+                    last_ip=existing.last_ip if existing else "",
+                    last_port=existing.last_port if existing else 0,
                 )
             # Drop stale archive rows for peers that are known again (re-paired
             # or restored after a forget).  A discovered-only forget archives
@@ -6038,13 +6729,10 @@ class Application:
             if self.cfg.removed_peers:
                 hashed_known = set()
                 for rid in known_ids:
-                    try:
+                    with contextlib.suppress(Exception):
                         hashed_known.add(Discovery._hash_device_id(rid))
-                    except Exception:
-                        pass
                 stale = [
-                    rid for rid in self.cfg.removed_peers
-                    if rid in known_ids or rid in hashed_known
+                    rid for rid in self.cfg.removed_peers if rid in known_ids or rid in hashed_known
                 ]
                 for rid in stale:
                     self.cfg.removed_peers.pop(rid, None)
@@ -6088,10 +6776,7 @@ class Application:
             # full name by its truncated prefix.
             if len(dl) > 5 and dl[-5] == "-" and all(c in "0123456789abcdef" for c in dl[-4:]):
                 dl = dl[:-5]
-            for kn in known_names:
-                if dl == kn or dl.startswith(kn) or kn.startswith(dl):
-                    return True
-            return False
+            return any(dl == kn or dl.startswith(kn) or kn.startswith(dl) for kn in known_names)
 
         with self._discovered_lock:
             for peer_id, info in list(self._discovered_peers.items()):
@@ -6117,13 +6802,15 @@ class Application:
             return []
         result = []
         for peer in peers:
-            result.append({
-                "device_id": getattr(peer, "device_id", ""),
-                "device_name": getattr(peer, "device_name", ""),
-                "fingerprint_short": getattr(peer, "fingerprint_short", ""),
-                "fingerprint": getattr(peer, "fingerprint", ""),
-                "paired": bool(getattr(peer, "paired", False)),
-            })
+            result.append(
+                {
+                    "device_id": getattr(peer, "device_id", ""),
+                    "device_name": getattr(peer, "device_name", ""),
+                    "fingerprint_short": getattr(peer, "fingerprint_short", ""),
+                    "fingerprint": getattr(peer, "fingerprint", ""),
+                    "paired": bool(getattr(peer, "paired", False)),
+                }
+            )
         return result
 
     @staticmethod
@@ -6148,16 +6835,25 @@ class Application:
         passes.
         """
         if not lan_ip or lan_ip.startswith("127."):
-            return (False, "No LAN address detected",
-                    "No LAN address detected — check that WiFi/Ethernet is connected to a network.")
+            return (
+                False,
+                "No LAN address detected",
+                "No LAN address detected — check that WiFi/Ethernet is connected to a network.",
+            )
         if lan_ip.startswith("169.254."):
-            return (False, "Link-local address (169.254.x.x)",
-                    "No DHCP address (169.254 link-local) — check that WiFi/Ethernet is connected to a network.")
+            return (
+                False,
+                "Link-local address (169.254.x.x)",
+                "No DHCP address (169.254 link-local) — check that WiFi/Ethernet is connected to a network.",  # noqa: E501
+            )
         if Application._is_private_ip(lan_ip):
             return (True, f"Private LAN ({lan_ip})", None)
-        return (False, f"Public/routable IP ({lan_ip})",
-                "This device appears to be on a public/routable IP — you may be behind a VPN or on an "
-                "isolated network. VPNs and client isolation prevent LAN discovery.")
+        return (
+            False,
+            f"Public/routable IP ({lan_ip})",
+            "This device appears to be on a public/routable IP — you may be behind a VPN or on an "
+            "isolated network. VPNs and client isolation prevent LAN discovery.",
+        )
 
     # ═══════════════════════════════════════════════════════════════
     # Round 19 — comprehensive diagnostics groups
@@ -6167,9 +6863,16 @@ class Application:
     # always gets a complete, renderable shape even on a degraded app.
 
     @staticmethod
-    def _diag_item(item_id, status, detail, hint=None,
-                   detail_key=None, detail_params=None,
-                   hint_key=None, hint_params=None) -> dict:
+    def _diag_item(
+        item_id,
+        status,
+        detail,
+        hint=None,
+        detail_key=None,
+        detail_params=None,
+        hint_key=None,
+        hint_params=None,
+    ) -> dict:
         """One diagnostic item: ``{id, status, detail, hint, *_key/*_params}``.
 
         ``status`` is one of "ok" | "warn" | "fail".  ``detail``/``hint`` are
@@ -6270,61 +6973,101 @@ class Application:
             from internal.version import __version__ as _ver
         except Exception:
             _ver = "?"
-        items.append(self._diag_item(
-            "app_version", "ok", f"Version {_ver}",
-            detail_key="diag.v2.item.app_version.detail",
-            detail_params={"version": _ver}))
+        items.append(
+            self._diag_item(
+                "app_version",
+                "ok",
+                f"Version {_ver}",
+                detail_key="diag.v2.item.app_version.detail",
+                detail_params={"version": _ver},
+            )
+        )
         try:
             uptime = max(int(time.time()) - int(getattr(self, "_start_time", 0) or 0), 0)
         except Exception:
             uptime = 0
         _up = self._diag_fmt_duration(uptime)
-        items.append(self._diag_item(
-            "uptime", "ok", f"Running for {_up}",
-            detail_key="diag.v2.item.uptime.detail",
-            detail_params={"uptime": _up}))
+        items.append(
+            self._diag_item(
+                "uptime",
+                "ok",
+                f"Running for {_up}",
+                detail_key="diag.v2.item.uptime.detail",
+                detail_params={"uptime": _up},
+            )
+        )
         # Data directory + writability.
         try:
             data_dir = self._diag_effective_data_dir(self.cfg)
             writable = self._diag_dir_writable(data_dir)
             if writable:
-                items.append(self._diag_item(
-                    "data_dir", "ok", str(data_dir),
-                    detail_key="diag.v2.item.data_dir.detail",
-                    detail_params={"dir": str(data_dir)}))
+                items.append(
+                    self._diag_item(
+                        "data_dir",
+                        "ok",
+                        str(data_dir),
+                        detail_key="diag.v2.item.data_dir.detail",
+                        detail_params={"dir": str(data_dir)},
+                    )
+                )
             else:
-                items.append(self._diag_item(
-                    "data_dir", "warn", f"{data_dir} (not writable)",
-                    detail_key="diag.v2.item.data_dir.warn.detail",
-                    detail_params={"dir": str(data_dir)},
-                    hint="Data directory is not writable — backups and history may fail.",
-                    hint_key="diag.v2.item.data_dir.warn.hint"))
+                items.append(
+                    self._diag_item(
+                        "data_dir",
+                        "warn",
+                        f"{data_dir} (not writable)",
+                        detail_key="diag.v2.item.data_dir.warn.detail",
+                        detail_params={"dir": str(data_dir)},
+                        hint="Data directory is not writable — backups and history may fail.",
+                        hint_key="diag.v2.item.data_dir.warn.hint",
+                    )
+                )
         except Exception:
-            items.append(self._diag_item(
-                "data_dir", "fail", "Data directory unavailable",
-                detail_key="diag.v2.item.data_dir.fail.detail",
-                hint="Could not access the data directory.",
-                hint_key="diag.v2.item.data_dir.fail.hint"))
+            items.append(
+                self._diag_item(
+                    "data_dir",
+                    "fail",
+                    "Data directory unavailable",
+                    detail_key="diag.v2.item.data_dir.fail.detail",
+                    hint="Could not access the data directory.",
+                    hint_key="diag.v2.item.data_dir.fail.hint",
+                )
+            )
         # Log path + writability.
         try:
             log_path = _get_log_path()
             log_writable = self._diag_dir_writable(log_path.parent)
             if log_writable:
-                items.append(self._diag_item(
-                    "log_path", "ok", str(log_path),
-                    detail_key="diag.v2.item.log_path.detail",
-                    detail_params={"path": str(log_path)}))
+                items.append(
+                    self._diag_item(
+                        "log_path",
+                        "ok",
+                        str(log_path),
+                        detail_key="diag.v2.item.log_path.detail",
+                        detail_params={"path": str(log_path)},
+                    )
+                )
             else:
-                items.append(self._diag_item(
-                    "log_path", "warn", str(log_path),
-                    detail_key="diag.v2.item.log_path.warn.detail",
-                    detail_params={"path": str(log_path)},
-                    hint="Log directory is not writable — logging may fail.",
-                    hint_key="diag.v2.item.log_path.warn.hint"))
+                items.append(
+                    self._diag_item(
+                        "log_path",
+                        "warn",
+                        str(log_path),
+                        detail_key="diag.v2.item.log_path.warn.detail",
+                        detail_params={"path": str(log_path)},
+                        hint="Log directory is not writable — logging may fail.",
+                        hint_key="diag.v2.item.log_path.warn.hint",
+                    )
+                )
         except Exception:
-            items.append(self._diag_item(
-                "log_path", "warn", "Log path unavailable",
-                detail_key="diag.v2.item.log_path.unavailable.detail"))
+            items.append(
+                self._diag_item(
+                    "log_path",
+                    "warn",
+                    "Log path unavailable",
+                    detail_key="diag.v2.item.log_path.unavailable.detail",
+                )
+            )
         return {"label_key": "diag.v2.group.system", "items": items}
 
     def _diag_group_network(self, ctx: dict) -> dict:
@@ -6332,157 +7075,276 @@ class Application:
         lan_ip = ctx.get("lan_ip", "")
         # LAN IP (cached).
         if not lan_ip or lan_ip.startswith("127."):
-            items.append(self._diag_item(
-                "lan_ip", "fail", "No LAN address detected",
-                detail_key="diag.v2.item.lan_ip.nolan.detail",
-                hint="No LAN address detected — check that WiFi/Ethernet is connected to a network.",
-                hint_key="diag.v2.item.lan_ip.warn.hint"))
+            items.append(
+                self._diag_item(
+                    "lan_ip",
+                    "fail",
+                    "No LAN address detected",
+                    detail_key="diag.v2.item.lan_ip.nolan.detail",
+                    hint="No LAN address detected — check that WiFi/Ethernet is connected to a network.",  # noqa: E501
+                    hint_key="diag.v2.item.lan_ip.warn.hint",
+                )
+            )
         elif lan_ip.startswith("169.254."):
-            items.append(self._diag_item(
-                "lan_ip", "warn", f"Link-local address ({lan_ip})",
-                detail_key="diag.v2.item.lan_ip.linklocal.detail",
-                detail_params={"lan_ip": lan_ip},
-                hint="No DHCP address (169.254 link-local) — check that WiFi/Ethernet is connected to a network.",
-                hint_key="diag.v2.item.lan_ip.warn.hint"))
+            items.append(
+                self._diag_item(
+                    "lan_ip",
+                    "warn",
+                    f"Link-local address ({lan_ip})",
+                    detail_key="diag.v2.item.lan_ip.linklocal.detail",
+                    detail_params={"lan_ip": lan_ip},
+                    hint="No DHCP address (169.254 link-local) — check that WiFi/Ethernet is connected to a network.",  # noqa: E501
+                    hint_key="diag.v2.item.lan_ip.warn.hint",
+                )
+            )
         elif self._is_private_ip(lan_ip):
-            items.append(self._diag_item(
-                "lan_ip", "ok", f"{lan_ip} (private LAN)",
-                detail_key="diag.v2.item.lan_ip.ok.detail",
-                detail_params={"lan_ip": lan_ip}))
+            items.append(
+                self._diag_item(
+                    "lan_ip",
+                    "ok",
+                    f"{lan_ip} (private LAN)",
+                    detail_key="diag.v2.item.lan_ip.ok.detail",
+                    detail_params={"lan_ip": lan_ip},
+                )
+            )
         else:
-            items.append(self._diag_item(
-                "lan_ip", "warn", f"{lan_ip} (public/routable)",
-                detail_key="diag.v2.item.lan_ip.public.detail",
-                detail_params={"lan_ip": lan_ip},
-                hint="This device appears to be on a public/routable IP — you may be behind a VPN or on an isolated network.",
-                hint_key="diag.v2.item.lan_ip.warn.hint"))
+            items.append(
+                self._diag_item(
+                    "lan_ip",
+                    "warn",
+                    f"{lan_ip} (public/routable)",
+                    detail_key="diag.v2.item.lan_ip.public.detail",
+                    detail_params={"lan_ip": lan_ip},
+                    hint="This device appears to be on a public/routable IP — you may be behind a VPN or on an isolated network.",  # noqa: E501
+                    hint_key="diag.v2.item.lan_ip.warn.hint",
+                )
+            )
         # TCP port listening.
         port = ctx.get("port", 0)
         if ctx.get("server_running"):
-            items.append(self._diag_item(
-                "tcp_port", "ok", f"Listening on port {port}",
-                detail_key="diag.v2.item.tcp_port.ok.detail",
-                detail_params={"port": port}))
+            items.append(
+                self._diag_item(
+                    "tcp_port",
+                    "ok",
+                    f"Listening on port {port}",
+                    detail_key="diag.v2.item.tcp_port.ok.detail",
+                    detail_params={"port": port},
+                )
+            )
         else:
-            items.append(self._diag_item(
-                "tcp_port", "fail", f"Not listening on port {port}",
-                detail_key="diag.v2.item.tcp_port.fail.detail",
-                detail_params={"port": port},
-                hint="Another app may be using the port, or the firewall blocks it. Try a different port in Settings → Network.",
-                hint_key="diag.v2.item.tcp_port.fail.hint"))
+            items.append(
+                self._diag_item(
+                    "tcp_port",
+                    "fail",
+                    f"Not listening on port {port}",
+                    detail_key="diag.v2.item.tcp_port.fail.detail",
+                    detail_params={"port": port},
+                    hint="Another app may be using the port, or the firewall blocks it. Try a different port in Settings → Network.",  # noqa: E501
+                    hint_key="diag.v2.item.tcp_port.fail.hint",
+                )
+            )
         # mDNS service registration.
         if ctx.get("discovery_running"):
-            items.append(self._diag_item(
-                "mdns_service", "ok", "mDNS discovery active",
-                detail_key="diag.v2.item.mdns_service.ok.detail"))
+            items.append(
+                self._diag_item(
+                    "mdns_service",
+                    "ok",
+                    "mDNS discovery active",
+                    detail_key="diag.v2.item.mdns_service.ok.detail",
+                )
+            )
         else:
-            items.append(self._diag_item(
-                "mdns_service", "fail", "mDNS discovery not active",
-                detail_key="diag.v2.item.mdns_service.fail.detail",
-                hint="mDNS discovery isn't active. If you're on a guest/enterprise WiFi, AP/client isolation blocks discovery.",
-                hint_key="diag.v2.item.mdns_service.fail.hint"))
+            items.append(
+                self._diag_item(
+                    "mdns_service",
+                    "fail",
+                    "mDNS discovery not active",
+                    detail_key="diag.v2.item.mdns_service.fail.detail",
+                    hint="mDNS discovery isn't active. If you're on a guest/enterprise WiFi, AP/client isolation blocks discovery.",  # noqa: E501
+                    hint_key="diag.v2.item.mdns_service.fail.hint",
+                )
+            )
         # Web service (enabled / port / running).
         web_enabled = bool(getattr(self.cfg, "web_enabled", False))
         web_port = ctx.get("web_port", 0)
         if not web_enabled:
-            items.append(self._diag_item(
-                "web_service", "warn", "Disabled",
-                detail_key="diag.v2.item.web_service.off.detail",
-                hint="Enable remote access in Settings → Remote access to control this device from a phone or browser.",
-                hint_key="diag.v2.item.web_service.off.hint"))
+            items.append(
+                self._diag_item(
+                    "web_service",
+                    "warn",
+                    "Disabled",
+                    detail_key="diag.v2.item.web_service.off.detail",
+                    hint="Enable remote access in Settings → Remote access to control this device from a phone or browser.",  # noqa: E501
+                    hint_key="diag.v2.item.web_service.off.hint",
+                )
+            )
         elif ctx.get("web_running"):
-            items.append(self._diag_item(
-                "web_service", "ok", f"Enabled on :{web_port}",
-                detail_key="diag.v2.item.web_service.ok.detail",
-                detail_params={"web_port": web_port}))
+            items.append(
+                self._diag_item(
+                    "web_service",
+                    "ok",
+                    f"Enabled on :{web_port}",
+                    detail_key="diag.v2.item.web_service.ok.detail",
+                    detail_params={"web_port": web_port},
+                )
+            )
         else:
-            items.append(self._diag_item(
-                "web_service", "fail", "Enabled but not running",
-                detail_key="diag.v2.item.web_service.fail.detail"))
+            items.append(
+                self._diag_item(
+                    "web_service",
+                    "fail",
+                    "Enabled but not running",
+                    detail_key="diag.v2.item.web_service.fail.detail",
+                )
+            )
         # Firewall recommendation (reuses the flat-check probe result).
         if ctx.get("fw_ok"):
-            items.append(self._diag_item(
-                "firewall", "ok", ctx.get("fw_detail") or "No firewall blockage detected",
-                detail_key=ctx.get("fw_detail_key") or "diag.v2.item.firewall.ok.detail",
-                detail_params=ctx.get("fw_detail_params") or {}))
+            items.append(
+                self._diag_item(
+                    "firewall",
+                    "ok",
+                    ctx.get("fw_detail") or "No firewall blockage detected",
+                    detail_key=ctx.get("fw_detail_key") or "diag.v2.item.firewall.ok.detail",
+                    detail_params=ctx.get("fw_detail_params") or {},
+                )
+            )
         else:
-            items.append(self._diag_item(
-                "firewall", "fail", ctx.get("fw_detail") or "Firewall may be blocking",
-                detail_key=ctx.get("fw_detail_key") or "diag.v2.item.firewall.fail.detail",
-                detail_params=ctx.get("fw_detail_params") or {},
-                hint=ctx.get("fw_guidance") or "The firewall may be blocking ClipSync.",
-                hint_key=ctx.get("fw_guidance_key") or "diag.v2.item.firewall.fail.hint",
-                hint_params=ctx.get("fw_guidance_params") or {}))
+            items.append(
+                self._diag_item(
+                    "firewall",
+                    "fail",
+                    ctx.get("fw_detail") or "Firewall may be blocking",
+                    detail_key=ctx.get("fw_detail_key") or "diag.v2.item.firewall.fail.detail",
+                    detail_params=ctx.get("fw_detail_params") or {},
+                    hint=ctx.get("fw_guidance") or "The firewall may be blocking ClipSync.",
+                    hint_key=ctx.get("fw_guidance_key") or "diag.v2.item.firewall.fail.hint",
+                    hint_params=ctx.get("fw_guidance_params") or {},
+                )
+            )
         return {"label_key": "diag.v2.group.network", "items": items}
 
     def _diag_group_internet(self) -> dict:
         items = []
         enabled = bool(getattr(self.cfg, "internet_sync_enabled", False))
         if enabled:
-            items.append(self._diag_item(
-                "internet_enabled", "ok", "Enabled",
-                detail_key="diag.v2.item.internet_enabled.ok.detail"))
+            items.append(
+                self._diag_item(
+                    "internet_enabled",
+                    "ok",
+                    "Enabled",
+                    detail_key="diag.v2.item.internet_enabled.ok.detail",
+                )
+            )
         else:
-            items.append(self._diag_item(
-                "internet_enabled", "warn", "Disabled",
-                detail_key="diag.v2.item.internet_enabled.off.detail",
-                hint="Enable internet sync in Settings → Internet sync to sync across networks.",
-                hint_key="diag.v2.item.internet_enabled.off.hint"))
+            items.append(
+                self._diag_item(
+                    "internet_enabled",
+                    "warn",
+                    "Disabled",
+                    detail_key="diag.v2.item.internet_enabled.off.detail",
+                    hint="Enable internet sync in Settings → Internet sync to sync across networks.",  # noqa: E501
+                    hint_key="diag.v2.item.internet_enabled.off.hint",
+                )
+            )
         # Relay state.
         try:
             relay_state = self._get_relay_state()
         except Exception:
             relay_state = "off"
         if relay_state == "online":
-            items.append(self._diag_item(
-                "relay_state", "ok", "Connected to relay",
-                detail_key="diag.v2.item.relay_state.online.detail"))
+            items.append(
+                self._diag_item(
+                    "relay_state",
+                    "ok",
+                    "Connected to relay",
+                    detail_key="diag.v2.item.relay_state.online.detail",
+                )
+            )
         elif relay_state == "connecting":
-            items.append(self._diag_item(
-                "relay_state", "warn", "Connecting to relay…",
-                detail_key="diag.v2.item.relay_state.connecting.detail"))
+            items.append(
+                self._diag_item(
+                    "relay_state",
+                    "warn",
+                    "Connecting to relay…",
+                    detail_key="diag.v2.item.relay_state.connecting.detail",
+                )
+            )
         elif relay_state == "error":
-            items.append(self._diag_item(
-                "relay_state", "fail", "Relay connection error",
-                detail_key="diag.v2.item.relay_state.error.detail",
-                hint="The relay could not be reached. Check your internet connection.",
-                hint_key="diag.v2.item.relay_state.error.hint"))
+            items.append(
+                self._diag_item(
+                    "relay_state",
+                    "fail",
+                    "Relay connection error",
+                    detail_key="diag.v2.item.relay_state.error.detail",
+                    hint="The relay could not be reached. Check your internet connection.",
+                    hint_key="diag.v2.item.relay_state.error.hint",
+                )
+            )
         else:
-            items.append(self._diag_item(
-                "relay_state", "warn", "Relay off (internet sync disabled)",
-                detail_key="diag.v2.item.relay_state.off.detail"))
+            items.append(
+                self._diag_item(
+                    "relay_state",
+                    "warn",
+                    "Relay off (internet sync disabled)",
+                    detail_key="diag.v2.item.relay_state.off.detail",
+                )
+            )
         # Broker list — inferred from config + relay state (no real connect).
-        brokers = [b for b in getattr(self.cfg, "relay_brokers", [])
-                   if isinstance(b, str) and b]
+        brokers = [b for b in getattr(self.cfg, "relay_brokers", []) if isinstance(b, str) and b]
         if not brokers:
-            items.append(self._diag_item(
-                "brokers", "fail", "No brokers configured",
-                detail_key="diag.v2.item.brokers.fail.detail",
-                hint="Add at least one public MQTT relay in Settings → Internet sync.",
-                hint_key="diag.v2.item.brokers.fail.hint"))
+            items.append(
+                self._diag_item(
+                    "brokers",
+                    "fail",
+                    "No brokers configured",
+                    detail_key="diag.v2.item.brokers.fail.detail",
+                    hint="Add at least one public MQTT relay in Settings → Internet sync.",
+                    hint_key="diag.v2.item.brokers.fail.hint",
+                )
+            )
         elif relay_state == "online":
-            items.append(self._diag_item(
-                "brokers", "ok", f"{len(brokers)} broker(s) configured, reachable",
-                detail_key="diag.v2.item.brokers.ok.detail",
-                detail_params={"count": len(brokers)}))
+            items.append(
+                self._diag_item(
+                    "brokers",
+                    "ok",
+                    f"{len(brokers)} broker(s) configured, reachable",
+                    detail_key="diag.v2.item.brokers.ok.detail",
+                    detail_params={"count": len(brokers)},
+                )
+            )
         elif relay_state == "error":
-            items.append(self._diag_item(
-                "brokers", "fail", f"{len(brokers)} broker(s) configured, none reachable",
-                detail_key="diag.v2.item.brokers.fail_reachable.detail",
-                detail_params={"count": len(brokers)},
-                hint="None of the configured relays could be reached. Check your internet connection.",
-                hint_key="diag.v2.item.brokers.fail_reachable.hint"))
+            items.append(
+                self._diag_item(
+                    "brokers",
+                    "fail",
+                    f"{len(brokers)} broker(s) configured, none reachable",
+                    detail_key="diag.v2.item.brokers.fail_reachable.detail",
+                    detail_params={"count": len(brokers)},
+                    hint="None of the configured relays could be reached. Check your internet connection.",  # noqa: E501
+                    hint_key="diag.v2.item.brokers.fail_reachable.hint",
+                )
+            )
         else:
-            items.append(self._diag_item(
-                "brokers", "warn", f"{len(brokers)} broker(s) configured",
-                detail_key="diag.v2.item.brokers.warn.detail",
-                detail_params={"count": len(brokers)}))
+            items.append(
+                self._diag_item(
+                    "brokers",
+                    "warn",
+                    f"{len(brokers)} broker(s) configured",
+                    detail_key="diag.v2.item.brokers.warn.detail",
+                    detail_params={"count": len(brokers)},
+                )
+            )
         # Internet-paired (netpair) device count.
         netpair = getattr(self.cfg, "netpair_secrets", {}) or {}
-        items.append(self._diag_item(
-            "netpair_count", "ok", f"{len(netpair)} internet-paired device(s)",
-            detail_key="diag.v2.item.netpair_count.detail",
-            detail_params={"count": len(netpair)}))
+        items.append(
+            self._diag_item(
+                "netpair_count",
+                "ok",
+                f"{len(netpair)} internet-paired device(s)",
+                detail_key="diag.v2.item.netpair_count.detail",
+                detail_params={"count": len(netpair)},
+            )
+        )
         # Pending offline-queue sends.
         try:
             counts = self._delivery_counts()
@@ -6490,111 +7352,196 @@ class Application:
         except Exception:
             pending = -1
         if pending < 0:
-            items.append(self._diag_item(
-                "pending_count", "warn", "Delivery stats unavailable",
-                detail_key="diag.v2.item.pending_count.unavailable.detail"))
+            items.append(
+                self._diag_item(
+                    "pending_count",
+                    "warn",
+                    "Delivery stats unavailable",
+                    detail_key="diag.v2.item.pending_count.unavailable.detail",
+                )
+            )
         elif pending == 0:
-            items.append(self._diag_item(
-                "pending_count", "ok", "No pending sends",
-                detail_key="diag.v2.item.pending_count.ok.detail"))
+            items.append(
+                self._diag_item(
+                    "pending_count",
+                    "ok",
+                    "No pending sends",
+                    detail_key="diag.v2.item.pending_count.ok.detail",
+                )
+            )
         else:
-            items.append(self._diag_item(
-                "pending_count", "warn", f"{pending} pending send(s)",
-                detail_key="diag.v2.item.pending_count.warn.detail",
-                detail_params={"count": pending},
-                hint="Some clipboard items are queued and will be sent when the peer reconnects.",
-                hint_key="diag.v2.item.pending_count.warn.hint"))
+            items.append(
+                self._diag_item(
+                    "pending_count",
+                    "warn",
+                    f"{pending} pending send(s)",
+                    detail_key="diag.v2.item.pending_count.warn.detail",
+                    detail_params={"count": pending},
+                    hint="Some clipboard items are queued and will be sent when the peer reconnects.",  # noqa: E501
+                    hint_key="diag.v2.item.pending_count.warn.hint",
+                )
+            )
         return {"label_key": "diag.v2.group.internet", "items": items}
 
     def _diag_group_aiconfig(self) -> dict:
         items = []
         mgr = getattr(self, "aicfg_mgr", None)
-        tools = [t for t in (getattr(self.cfg, "ai_config_tools", []) or [])
-                 if isinstance(t, str) and t]
-        custom = [c for c in (getattr(self.cfg, "ai_config_custom_paths", []) or [])
-                  if isinstance(c, str) and c]
+        tools = [
+            t for t in (getattr(self.cfg, "ai_config_tools", []) or []) if isinstance(t, str) and t
+        ]
+        custom = [
+            c
+            for c in (getattr(self.cfg, "ai_config_custom_paths", []) or [])
+            if isinstance(c, str) and c
+        ]
         roots = tools + custom
         if roots:
-            items.append(self._diag_item(
-                "watch_roots", "ok", f"{len(roots)} profile root(s)",
-                detail_key="diag.v2.item.watch_roots.ok.detail",
-                detail_params={"count": len(roots)}))
+            items.append(
+                self._diag_item(
+                    "watch_roots",
+                    "ok",
+                    f"{len(roots)} profile root(s)",
+                    detail_key="diag.v2.item.watch_roots.ok.detail",
+                    detail_params={"count": len(roots)},
+                )
+            )
         else:
-            items.append(self._diag_item(
-                "watch_roots", "warn", "No watch roots",
-                detail_key="diag.v2.item.watch_roots.warn.detail",
-                hint="Enable AI tool profiles in AI config settings to inventory AI tool configs.",
-                hint_key="diag.v2.item.watch_roots.warn.hint"))
+            items.append(
+                self._diag_item(
+                    "watch_roots",
+                    "warn",
+                    "No watch roots",
+                    detail_key="diag.v2.item.watch_roots.warn.detail",
+                    hint="Enable AI tool profiles in AI config settings to inventory AI tool configs.",  # noqa: E501
+                    hint_key="diag.v2.item.watch_roots.warn.hint",
+                )
+            )
         if mgr is None:
             for it in ("local_entries", "last_collected", "trash_size"):
-                items.append(self._diag_item(
-                    it, "warn", "Unavailable",
-                    detail_key="diag.v2.item.unavailable.detail",
-                    hint="This data isn't available in the current state.",
-                    hint_key="diag.v2.item.unavailable.hint"))
+                items.append(
+                    self._diag_item(
+                        it,
+                        "warn",
+                        "Unavailable",
+                        detail_key="diag.v2.item.unavailable.detail",
+                        hint="This data isn't available in the current state.",
+                        hint_key="diag.v2.item.unavailable.hint",
+                    )
+                )
             return {"label_key": "diag.v2.group.ai_config", "items": items}
         try:
             summary = mgr.local_summary()
             entry_count = int(summary.get("entry_count", 0) or 0)
-            items.append(self._diag_item(
-                "local_entries", "ok", f"{entry_count} local file(s)",
-                detail_key="diag.v2.item.local_entries.detail",
-                detail_params={"count": entry_count}))
+            items.append(
+                self._diag_item(
+                    "local_entries",
+                    "ok",
+                    f"{entry_count} local file(s)",
+                    detail_key="diag.v2.item.local_entries.detail",
+                    detail_params={"count": entry_count},
+                )
+            )
             collected = float(summary.get("collected_at", 0.0) or 0.0)
             if collected > 0:
                 ago = self._diag_fmt_duration(int(time.time() - collected))
-                items.append(self._diag_item(
-                    "last_collected", "ok", f"{ago} ago",
-                    detail_key="diag.v2.item.last_collected.ok.detail",
-                    detail_params={"ago": ago}))
+                items.append(
+                    self._diag_item(
+                        "last_collected",
+                        "ok",
+                        f"{ago} ago",
+                        detail_key="diag.v2.item.last_collected.ok.detail",
+                        detail_params={"ago": ago},
+                    )
+                )
             else:
-                items.append(self._diag_item(
-                    "last_collected", "warn", "Never collected",
-                    detail_key="diag.v2.item.last_collected.warn.detail",
-                    hint="Run a collection from the AI config panel, or add watch roots.",
-                    hint_key="diag.v2.item.last_collected.warn.hint"))
+                items.append(
+                    self._diag_item(
+                        "last_collected",
+                        "warn",
+                        "Never collected",
+                        detail_key="diag.v2.item.last_collected.warn.detail",
+                        hint="Run a collection from the AI config panel, or add watch roots.",
+                        hint_key="diag.v2.item.last_collected.warn.hint",
+                    )
+                )
         except Exception:
-            items.append(self._diag_item(
-                "local_entries", "warn", "Unavailable",
-                detail_key="diag.v2.item.unavailable.detail"))
-            items.append(self._diag_item(
-                "last_collected", "warn", "Unavailable",
-                detail_key="diag.v2.item.unavailable.detail"))
+            items.append(
+                self._diag_item(
+                    "local_entries",
+                    "warn",
+                    "Unavailable",
+                    detail_key="diag.v2.item.unavailable.detail",
+                )
+            )
+            items.append(
+                self._diag_item(
+                    "last_collected",
+                    "warn",
+                    "Unavailable",
+                    detail_key="diag.v2.item.unavailable.detail",
+                )
+            )
         try:
             trash_size = self._diag_trash_size(mgr)
-            items.append(self._diag_item(
-                "trash_size", "ok" if trash_size == 0 else "warn",
-                self._diag_fmt_bytes(trash_size),
-                detail_key="diag.v2.item.trash_size.detail",
-                detail_params={"size": self._diag_fmt_bytes(trash_size)},
-                hint=None if trash_size == 0 else "Recycle bin is non-empty — restore or clear it from the AI config panel.",
-                hint_key=None if trash_size == 0 else "diag.v2.item.trash_size.warn.hint"))
+            items.append(
+                self._diag_item(
+                    "trash_size",
+                    "ok" if trash_size == 0 else "warn",
+                    self._diag_fmt_bytes(trash_size),
+                    detail_key="diag.v2.item.trash_size.detail",
+                    detail_params={"size": self._diag_fmt_bytes(trash_size)},
+                    hint=None
+                    if trash_size == 0
+                    else "Recycle bin is non-empty — restore or clear it from the AI config panel.",
+                    hint_key=None if trash_size == 0 else "diag.v2.item.trash_size.warn.hint",
+                )
+            )
         except Exception:
-            items.append(self._diag_item(
-                "trash_size", "warn", "Unavailable",
-                detail_key="diag.v2.item.unavailable.detail"))
+            items.append(
+                self._diag_item(
+                    "trash_size",
+                    "warn",
+                    "Unavailable",
+                    detail_key="diag.v2.item.unavailable.detail",
+                )
+            )
         return {"label_key": "diag.v2.group.ai_config", "items": items}
 
     def _diag_group_chat(self) -> dict:
         items = []
         mgr = getattr(self, "chat_mgr", None)
         if mgr is None:
-            items.append(self._diag_item(
-                "chat_sessions", "warn", "Unavailable",
-                detail_key="diag.v2.item.unavailable.detail",
-                hint="This data isn't available in the current state.",
-                hint_key="diag.v2.item.unavailable.hint"))
+            items.append(
+                self._diag_item(
+                    "chat_sessions",
+                    "warn",
+                    "Unavailable",
+                    detail_key="diag.v2.item.unavailable.detail",
+                    hint="This data isn't available in the current state.",
+                    hint_key="diag.v2.item.unavailable.hint",
+                )
+            )
         else:
             try:
                 count = len(mgr.get_sessions())
-                items.append(self._diag_item(
-                    "chat_sessions", "ok", f"{count} active session(s)",
-                    detail_key="diag.v2.item.chat_sessions.detail",
-                    detail_params={"count": count}))
+                items.append(
+                    self._diag_item(
+                        "chat_sessions",
+                        "ok",
+                        f"{count} active session(s)",
+                        detail_key="diag.v2.item.chat_sessions.detail",
+                        detail_params={"count": count},
+                    )
+                )
             except Exception:
-                items.append(self._diag_item(
-                    "chat_sessions", "warn", "Unavailable",
-                    detail_key="diag.v2.item.unavailable.detail"))
+                items.append(
+                    self._diag_item(
+                        "chat_sessions",
+                        "warn",
+                        "Unavailable",
+                        detail_key="diag.v2.item.unavailable.detail",
+                    )
+                )
         return {"label_key": "diag.v2.group.chat", "items": items}
 
     def _diag_group_transfer(self) -> dict:
@@ -6602,83 +7549,143 @@ class Application:
         mgr = getattr(self, "file_transfer_mgr", None)
         if mgr is None:
             for it in ("active_transfers", "transfer_failures"):
-                items.append(self._diag_item(
-                    it, "warn", "Unavailable",
-                    detail_key="diag.v2.item.unavailable.detail",
-                    hint="This data isn't available in the current state.",
-                    hint_key="diag.v2.item.unavailable.hint"))
+                items.append(
+                    self._diag_item(
+                        it,
+                        "warn",
+                        "Unavailable",
+                        detail_key="diag.v2.item.unavailable.detail",
+                        hint="This data isn't available in the current state.",
+                        hint_key="diag.v2.item.unavailable.hint",
+                    )
+                )
             return {"label_key": "diag.v2.group.transfer", "items": items}
         try:
-            active = sum(1 for t in mgr.get_transfers()
-                         if t.get("status") not in ("completed", "cancelled", "failed"))
-            items.append(self._diag_item(
-                "active_transfers", "ok", f"{active} in progress",
-                detail_key="diag.v2.item.active_transfers.detail",
-                detail_params={"count": active}))
+            active = sum(
+                1
+                for t in mgr.get_transfers()
+                if t.get("status") not in ("completed", "cancelled", "failed")
+            )
+            items.append(
+                self._diag_item(
+                    "active_transfers",
+                    "ok",
+                    f"{active} in progress",
+                    detail_key="diag.v2.item.active_transfers.detail",
+                    detail_params={"count": active},
+                )
+            )
         except Exception:
-            items.append(self._diag_item(
-                "active_transfers", "warn", "Unavailable",
-                detail_key="diag.v2.item.unavailable.detail"))
+            items.append(
+                self._diag_item(
+                    "active_transfers",
+                    "warn",
+                    "Unavailable",
+                    detail_key="diag.v2.item.unavailable.detail",
+                )
+            )
         try:
             hist = mgr.get_history()
             failures = sum(1 for t in hist if not t.get("success"))
             if failures:
-                items.append(self._diag_item(
-                    "transfer_failures", "warn", f"{failures} failed transfer(s)",
-                    detail_key="diag.v2.item.transfer_failures.warn.detail",
-                    detail_params={"count": failures},
-                    hint="Check the Transfers panel and retry any failed transfers.",
-                    hint_key="diag.v2.item.transfer_failures.warn.hint"))
+                items.append(
+                    self._diag_item(
+                        "transfer_failures",
+                        "warn",
+                        f"{failures} failed transfer(s)",
+                        detail_key="diag.v2.item.transfer_failures.warn.detail",
+                        detail_params={"count": failures},
+                        hint="Check the Transfers panel and retry any failed transfers.",
+                        hint_key="diag.v2.item.transfer_failures.warn.hint",
+                    )
+                )
             else:
-                items.append(self._diag_item(
-                    "transfer_failures", "ok", "No recent failures",
-                    detail_key="diag.v2.item.transfer_failures.ok.detail"))
+                items.append(
+                    self._diag_item(
+                        "transfer_failures",
+                        "ok",
+                        "No recent failures",
+                        detail_key="diag.v2.item.transfer_failures.ok.detail",
+                    )
+                )
         except Exception:
-            items.append(self._diag_item(
-                "transfer_failures", "warn", "Unavailable",
-                detail_key="diag.v2.item.unavailable.detail"))
+            items.append(
+                self._diag_item(
+                    "transfer_failures",
+                    "warn",
+                    "Unavailable",
+                    detail_key="diag.v2.item.unavailable.detail",
+                )
+            )
         return {"label_key": "diag.v2.group.transfer", "items": items}
 
     def _diag_group_filesystem(self) -> dict:
         items = []
         # History database file size.
         try:
-            db_path = (getattr(self.clipboard_history, "_db_path", None)
-                       if self.clipboard_history is not None else None)
+            db_path = (
+                getattr(self.clipboard_history, "_db_path", None)
+                if self.clipboard_history is not None
+                else None
+            )
             if db_path and Path(db_path).exists():
                 size = Path(db_path).stat().st_size
-                items.append(self._diag_item(
-                    "history_db_size", "ok", self._diag_fmt_bytes(size),
-                    detail_key="diag.v2.item.history_db_size.detail",
-                    detail_params={"size": self._diag_fmt_bytes(size)}))
+                items.append(
+                    self._diag_item(
+                        "history_db_size",
+                        "ok",
+                        self._diag_fmt_bytes(size),
+                        detail_key="diag.v2.item.history_db_size.detail",
+                        detail_params={"size": self._diag_fmt_bytes(size)},
+                    )
+                )
             else:
-                items.append(self._diag_item(
-                    "history_db_size", "warn", "Missing or unreadable",
-                    detail_key="diag.v2.item.history_db_size.warn.detail",
-                    hint="History database is missing or unreadable — history may be lost.",
-                    hint_key="diag.v2.item.history_db_size.warn.hint"))
+                items.append(
+                    self._diag_item(
+                        "history_db_size",
+                        "warn",
+                        "Missing or unreadable",
+                        detail_key="diag.v2.item.history_db_size.warn.detail",
+                        hint="History database is missing or unreadable — history may be lost.",
+                        hint_key="diag.v2.item.history_db_size.warn.hint",
+                    )
+                )
         except Exception:
-            items.append(self._diag_item(
-                "history_db_size", "warn", "Unavailable",
-                detail_key="diag.v2.item.unavailable.detail"))
+            items.append(
+                self._diag_item(
+                    "history_db_size",
+                    "warn",
+                    "Unavailable",
+                    detail_key="diag.v2.item.unavailable.detail",
+                )
+            )
         # Free disk space on the data directory.
         try:
             data_dir = self._diag_effective_data_dir(self.cfg)
             usage = shutil.disk_usage(str(data_dir))
             free = int(getattr(usage, "free", 0) or 0)
             low = free < 500 * 1024 * 1024  # < 500 MB
-            items.append(self._diag_item(
-                "disk_free", "warn" if low else "ok",
-                f"{self._diag_fmt_bytes(free)} free" + (" (low)" if low else ""),
-                detail_key=("diag.v2.item.disk_free.warn.detail" if low
-                            else "diag.v2.item.disk_free.ok.detail"),
-                detail_params={"free": self._diag_fmt_bytes(free)},
-                hint="Low disk space — history and transfers may fail." if low else None,
-                hint_key="diag.v2.item.disk_free.warn.hint" if low else None))
+            items.append(
+                self._diag_item(
+                    "disk_free",
+                    "warn" if low else "ok",
+                    f"{self._diag_fmt_bytes(free)} free" + (" (low)" if low else ""),
+                    detail_key=(
+                        "diag.v2.item.disk_free.warn.detail"
+                        if low
+                        else "diag.v2.item.disk_free.ok.detail"
+                    ),
+                    detail_params={"free": self._diag_fmt_bytes(free)},
+                    hint="Low disk space — history and transfers may fail." if low else None,
+                    hint_key="diag.v2.item.disk_free.warn.hint" if low else None,
+                )
+            )
         except Exception:
-            items.append(self._diag_item(
-                "disk_free", "warn", "Unavailable",
-                detail_key="diag.v2.item.unavailable.detail"))
+            items.append(
+                self._diag_item(
+                    "disk_free", "warn", "Unavailable", detail_key="diag.v2.item.unavailable.detail"
+                )
+            )
         return {"label_key": "diag.v2.group.filesystem", "items": items}
 
     def _get_diagnostics(self) -> dict:
@@ -6696,12 +7703,11 @@ class Application:
         discovery = getattr(self, "discovery", None)
         web_server = getattr(self, "web_server", None)
 
-        server_running = bool(transport_mgr is not None
-                              and getattr(transport_mgr, "_running", False))
-        discovery_running = bool(discovery is not None
-                                 and getattr(discovery, "is_browsing", False))
-        advertising = bool(discovery is not None
-                           and getattr(discovery, "is_advertising", False))
+        server_running = bool(
+            transport_mgr is not None and getattr(transport_mgr, "_running", False)
+        )
+        discovery_running = bool(discovery is not None and getattr(discovery, "is_browsing", False))
+        advertising = bool(discovery is not None and getattr(discovery, "is_advertising", False))
         web_running = bool(web_server is not None and web_server.is_running)
 
         try:
@@ -6713,58 +7719,106 @@ class Application:
 
         # 1. TCP server port
         if server_running:
-            checks.append({"id": "server_port", "ok": True,
-                           "detail": f"TCP server listening on {port}",
-                           "detail_key": "diag.server_port.ok.detail",
-                           "detail_params": {"port": port}, "guidance": None})
+            checks.append(
+                {
+                    "id": "server_port",
+                    "ok": True,
+                    "detail": f"TCP server listening on {port}",
+                    "detail_key": "diag.server_port.ok.detail",
+                    "detail_params": {"port": port},
+                    "guidance": None,
+                }
+            )
         else:
-            checks.append({"id": "server_port", "ok": False,
-                           "detail": f"TCP server not listening on {port}",
-                           "detail_key": "diag.server_port.fail.detail",
-                           "detail_params": {"port": port},
-                           "guidance": (f"Port {port} is not listening — another app may be using it, "
-                                        "or the firewall blocks it. Try a different port in Settings → Network."),
-                           "guidance_key": "diag.server_port.fail.guidance",
-                           "guidance_params": {"port": port}})
+            checks.append(
+                {
+                    "id": "server_port",
+                    "ok": False,
+                    "detail": f"TCP server not listening on {port}",
+                    "detail_key": "diag.server_port.fail.detail",
+                    "detail_params": {"port": port},
+                    "guidance": (
+                        f"Port {port} is not listening — another app may be using it, "
+                        "or the firewall blocks it. Try a different port in Settings → Network."
+                    ),
+                    "guidance_key": "diag.server_port.fail.guidance",
+                    "guidance_params": {"port": port},
+                }
+            )
 
         # 2. mDNS discovery
         if discovery_running:
-            checks.append({"id": "discovery", "ok": True,
-                           "detail": "mDNS discovery active",
-                           "detail_key": "diag.discovery.ok.detail", "guidance": None})
+            checks.append(
+                {
+                    "id": "discovery",
+                    "ok": True,
+                    "detail": "mDNS discovery active",
+                    "detail_key": "diag.discovery.ok.detail",
+                    "guidance": None,
+                }
+            )
         else:
-            checks.append({"id": "discovery", "ok": False,
-                           "detail": "mDNS discovery not active",
-                           "detail_key": "diag.discovery.fail.detail",
-                           "guidance": ("mDNS discovery isn't active. If you're on a guest/enterprise WiFi, "
-                                        "AP/client isolation blocks discovery — connect both devices to the "
-                                        "same private network."),
-                           "guidance_key": "diag.discovery.fail.guidance"})
+            checks.append(
+                {
+                    "id": "discovery",
+                    "ok": False,
+                    "detail": "mDNS discovery not active",
+                    "detail_key": "diag.discovery.fail.detail",
+                    "guidance": (
+                        "mDNS discovery isn't active. If you're on a guest/enterprise WiFi, "
+                        "AP/client isolation blocks discovery — connect both devices to the "
+                        "same private network."
+                    ),
+                    "guidance_key": "diag.discovery.fail.guidance",
+                }
+            )
 
         # 3. Advertising (device visible on network)
         if advertising:
-            checks.append({"id": "advertising", "ok": True,
-                           "detail": "device visible on network",
-                           "detail_key": "diag.advertising.ok.detail", "guidance": None})
+            checks.append(
+                {
+                    "id": "advertising",
+                    "ok": True,
+                    "detail": "device visible on network",
+                    "detail_key": "diag.advertising.ok.detail",
+                    "guidance": None,
+                }
+            )
         else:
-            checks.append({"id": "advertising", "ok": False,
-                           "detail": "device not advertising",
-                           "detail_key": "diag.advertising.fail.detail",
-                           "guidance": "This device isn't advertising — enable 'Visible' in the overview.",
-                           "guidance_key": "diag.advertising.fail.guidance"})
+            checks.append(
+                {
+                    "id": "advertising",
+                    "ok": False,
+                    "detail": "device not advertising",
+                    "detail_key": "diag.advertising.fail.detail",
+                    "guidance": "This device isn't advertising — enable 'Visible' in the overview.",
+                    "guidance_key": "diag.advertising.fail.guidance",
+                }
+            )
 
         # 4. Web companion
         if web_running:
-            checks.append({"id": "web_companion", "ok": True,
-                           "detail": f"Remote access on :{web_port}",
-                           "detail_key": "diag.web_companion.ok.detail",
-                           "detail_params": {"web_port": web_port}, "guidance": None})
+            checks.append(
+                {
+                    "id": "web_companion",
+                    "ok": True,
+                    "detail": f"Remote access on :{web_port}",
+                    "detail_key": "diag.web_companion.ok.detail",
+                    "detail_params": {"web_port": web_port},
+                    "guidance": None,
+                }
+            )
         else:
-            checks.append({"id": "web_companion", "ok": False,
-                           "detail": "Remote access not running",
-                           "detail_key": "diag.web_companion.fail.detail",
-                           "guidance": "Remote access isn't running — enable it in Settings → Remote access.",
-                           "guidance_key": "diag.web_companion.fail.guidance"})
+            checks.append(
+                {
+                    "id": "web_companion",
+                    "ok": False,
+                    "detail": "Remote access not running",
+                    "detail_key": "diag.web_companion.fail.detail",
+                    "guidance": "Remote access isn't running — enable it in Settings → Remote access.",  # noqa: E501
+                    "guidance_key": "diag.web_companion.fail.guidance",
+                }
+            )
 
         # 5. Network classification
         network_ok, network_detail, network_guidance = self._classify_network(lan_ip)
@@ -6781,11 +7835,18 @@ class Application:
                 network_detail_key = "diag.network.public.detail"
                 network_guidance_key = "diag.network.public.guidance"
                 network_params = {"lan_ip": lan_ip}
-        checks.append({"id": "network", "ok": network_ok,
-                       "detail": network_detail, "guidance": network_guidance,
-                       "detail_key": network_detail_key, "detail_params": network_params,
-                       "guidance_key": network_guidance_key,
-                       "guidance_params": network_params})
+        checks.append(
+            {
+                "id": "network",
+                "ok": network_ok,
+                "detail": network_detail,
+                "guidance": network_guidance,
+                "detail_key": network_detail_key,
+                "detail_params": network_params,
+                "guidance_key": network_guidance_key,
+                "guidance_params": network_params,
+            }
+        )
 
         # 6. Firewall — best-effort OS-level check with a "request" action.
         fw_ok, fw_detail, fw_guidance = True, "No firewall blockage detected", None
@@ -6793,17 +7854,25 @@ class Application:
         fw_guidance_key, fw_guidance_params = None, {}
         try:
             import subprocess as _sp
+
             if _platform.system() == "Darwin":
-                _out = _sp.run(
-                    ["/usr/libexec/ApplicationFirewall/socketfilterfw", "--getglobalstate"],
-                    capture_output=True, text=True, timeout=3,
-                ).stdout or ""
+                _out = (
+                    _sp.run(
+                        ["/usr/libexec/ApplicationFirewall/socketfilterfw", "--getglobalstate"],
+                        capture_output=True,
+                        text=True,
+                        timeout=3,
+                    ).stdout
+                    or ""
+                )
                 if "enabled" in _out.lower():
                     fw_detail = "macOS firewall is enabled"
                     fw_detail_key = "diag.firewall.macos_ok.detail"
-                    fw_guidance = ("The macOS firewall is on. If other devices can't reach this "
-                                   "computer, allow ClipSync: System Settings → Network → Firewall → "
-                                   "Options, or tap 'Request permission' to open it.")
+                    fw_guidance = (
+                        "The macOS firewall is on. If other devices can't reach this "
+                        "computer, allow ClipSync: System Settings → Network → Firewall → "
+                        "Options, or tap 'Request permission' to open it."
+                    )
                     fw_guidance_key = "diag.firewall.macos_ok.guidance"
                     # Only fail the check when discovery is also failing (strong signal).
                     fw_ok = discovery_running
@@ -6813,20 +7882,29 @@ class Application:
                     # to be open — a single-port rule would otherwise show up
                     # as a "wrong port" mismatch.
                     fw_ports = [self.cfg.port, self.cfg.web_port]
-                    ok, detail = web_server.check_firewall_rule(fw_ports) if web_server is not None else (True, "")
+                    ok, detail = (
+                        web_server.check_firewall_rule(fw_ports)
+                        if web_server is not None
+                        else (True, "")
+                    )
                     if not ok:
                         fw_ok, fw_detail = False, detail
-                        fw_guidance = ("The Windows firewall may be blocking ClipSync. Tap "
-                                       "'Request permission' to add an allow rule for ports "
-                                       f"{self.cfg.port} and {self.cfg.web_port}.")
+                        fw_guidance = (
+                            "The Windows firewall may be blocking ClipSync. Tap "
+                            "'Request permission' to add an allow rule for ports "
+                            f"{self.cfg.port} and {self.cfg.web_port}."
+                        )
                         fw_guidance_key = "diag.firewall.win_fail.guidance"
                         fw_guidance_params = {"port": f"{self.cfg.port}, {self.cfg.web_port}"}
                         if detail.startswith("Wrong port"):
                             # Stale rule with the wrong port — surface both values.
                             import re as _re
+
                             _m = _re.search(r"\(got ([^)]+), needs ([^)]+)\)", detail)
                             fw_detail_key = "diag.firewall.wrongport.detail"
-                            fw_detail_params = {"actual": _m.group(1), "port": _m.group(2)} if _m else {}
+                            fw_detail_params = (
+                                {"actual": _m.group(1), "port": _m.group(2)} if _m else {}
+                            )
                         else:
                             fw_detail_key = "diag.firewall.win_blocked.detail"
                 except Exception:
@@ -6835,8 +7913,10 @@ class Application:
                 # ufw / firewalld detection + port allow check (best-effort).
                 fw_detail = "No Linux firewall detected"
                 fw_detail_key = "diag.firewall.linux_none.detail"
-                for cmd, name in ((["ufw", "status"], "ufw"),
-                                  (["systemctl", "is-active", "firewalld"], "firewalld")):
+                for cmd, name in (
+                    (["ufw", "status"], "ufw"),
+                    (["systemctl", "is-active", "firewalld"], "firewalld"),
+                ):
                     try:
                         _out = _sp.run(cmd, capture_output=True, text=True, timeout=3).stdout or ""
                     except Exception:
@@ -6847,21 +7927,34 @@ class Application:
                         fw_detail = f"{name} firewall is active"
                         fw_detail_key = "diag.firewall.linux_active.detail"
                         fw_detail_params = {"name": name}
-                        fw_guidance = (f"The {name} firewall is on. If other devices can't reach "
-                                       f"this computer, allow ports {self.cfg.port} and "
-                                       f"{self.cfg.web_port}: 'sudo ufw allow {self.cfg.port}/tcp' and "
-                                       f"'sudo ufw allow {self.cfg.web_port}/tcp' (or the firewalld equivalent).")
+                        fw_guidance = (
+                            f"The {name} firewall is on. If other devices can't reach "
+                            f"this computer, allow ports {self.cfg.port} and "
+                            f"{self.cfg.web_port}: 'sudo ufw allow {self.cfg.port}/tcp' and "
+                            f"'sudo ufw allow {self.cfg.web_port}/tcp' (or the firewalld equivalent)."  # noqa: E501
+                        )
                         fw_guidance_key = "diag.firewall.linux_active.guidance"
-                        fw_guidance_params = {"name": name, "port": self.cfg.port,
-                                              "web_port": self.cfg.web_port}
+                        fw_guidance_params = {
+                            "name": name,
+                            "port": self.cfg.port,
+                            "web_port": self.cfg.web_port,
+                        }
                         fw_ok = discovery_running
                         break
         except Exception:
             pass
-        checks.append({"id": "firewall", "ok": fw_ok, "detail": fw_detail,
-                       "detail_key": fw_detail_key, "detail_params": fw_detail_params,
-                       "guidance": fw_guidance,
-                       "guidance_key": fw_guidance_key, "guidance_params": fw_guidance_params})
+        checks.append(
+            {
+                "id": "firewall",
+                "ok": fw_ok,
+                "detail": fw_detail,
+                "detail_key": fw_detail_key,
+                "detail_params": fw_detail_params,
+                "guidance": fw_guidance,
+                "guidance_key": fw_guidance_key,
+                "guidance_params": fw_guidance_params,
+            }
+        )
 
         # 7. Permissions — macOS Local Network (15+) is required for LAN discovery.
         perm_ok, perm_detail, perm_guidance = True, "No permission issues detected", None
@@ -6875,52 +7968,94 @@ class Application:
                         perm_ok = False
                         perm_detail = "Local Network permission may be missing (macOS 15+)"
                         perm_detail_key = "diag.permissions.fail.detail"
-                        perm_guidance = ("macOS 15+ needs 'Local Network' permission to discover other "
-                                         "devices. Tap 'Request permission' to open System Settings → "
-                                         "Privacy & Security → Local Network and allow ClipSync.")
+                        perm_guidance = (
+                            "macOS 15+ needs 'Local Network' permission to discover other "
+                            "devices. Tap 'Request permission' to open System Settings → "
+                            "Privacy & Security → Local Network and allow ClipSync."
+                        )
                         perm_guidance_key = "diag.permissions.fail.guidance"
                     else:
                         perm_detail = "Local Network permission granted"
                         perm_detail_key = "diag.permissions.ok_macos.detail"
         except Exception:
             pass
-        checks.append({"id": "permissions", "ok": perm_ok, "detail": perm_detail,
-                       "detail_key": perm_detail_key, "detail_params": perm_detail_params,
-                       "guidance": perm_guidance,
-                       "guidance_key": perm_guidance_key, "guidance_params": perm_guidance_params})
+        checks.append(
+            {
+                "id": "permissions",
+                "ok": perm_ok,
+                "detail": perm_detail,
+                "detail_key": perm_detail_key,
+                "detail_params": perm_detail_params,
+                "guidance": perm_guidance,
+                "guidance_key": perm_guidance_key,
+                "guidance_params": perm_guidance_params,
+            }
+        )
 
         # 8. mDNS service (Linux: avahi-daemon is required for discovery).
         mdns_ok, mdns_detail, mdns_guidance = True, "mDNS service available", None
         mdns_detail_key, mdns_guidance_key = "diag.mdns.ok.detail", None
         try:
             if _platform.system() == "Linux":
-                _out = _sp.run(["systemctl", "is-active", "avahi-daemon"],
-                               capture_output=True, text=True, timeout=3).stdout or ""
+                _out = (
+                    _sp.run(
+                        ["systemctl", "is-active", "avahi-daemon"],
+                        capture_output=True,
+                        text=True,
+                        timeout=3,
+                    ).stdout
+                    or ""
+                )
                 if "active" not in _out.lower():
                     mdns_ok = False
                     mdns_detail = "avahi-daemon is not running"
                     mdns_detail_key = "diag.mdns.fail.detail"
-                    mdns_guidance = ("mDNS discovery needs avahi-daemon. Install/start it: "
-                                     "'sudo apt install avahi-daemon' then 'sudo systemctl start avahi-daemon'.")
+                    mdns_guidance = (
+                        "mDNS discovery needs avahi-daemon. Install/start it: "
+                        "'sudo apt install avahi-daemon' then 'sudo systemctl start avahi-daemon'."
+                    )
                     mdns_guidance_key = "diag.mdns.fail.guidance"
         except Exception:
             pass
-        checks.append({"id": "mdns", "ok": mdns_ok, "detail": mdns_detail,
-                       "detail_key": mdns_detail_key, "guidance": mdns_guidance,
-                       "guidance_key": mdns_guidance_key})
+        checks.append(
+            {
+                "id": "mdns",
+                "ok": mdns_ok,
+                "detail": mdns_detail,
+                "detail_key": mdns_detail_key,
+                "guidance": mdns_guidance,
+                "guidance_key": mdns_guidance_key,
+            }
+        )
 
         # 9. Clipboard tool (Linux: xclip / wl-paste needed to read the clipboard).
         if _platform.system() == "Linux":
-            _clip_ok = bool(_sp.run(["sh", "-c", "command -v xclip || command -v wl-paste"],
-                                    capture_output=True, text=True, timeout=3).stdout.strip())
-            checks.append({"id": "clipboard_tool", "ok": _clip_ok,
-                           "detail": "clipboard tool present" if _clip_ok else "no xclip / wl-paste",
-                           "detail_key": "diag.clipboard_tool.ok.detail" if _clip_ok
-                                        else "diag.clipboard_tool.fail.detail",
-                           "guidance": None if _clip_ok else ("Clipboard capture needs xclip (X11) or "
-                                                             "wl-paste (Wayland). Install one: "
-                                                             "'sudo apt install xclip' or 'sudo apt install wl-clipboard'."),
-                           "guidance_key": None if _clip_ok else "diag.clipboard_tool.fail.guidance"})
+            _clip_ok = bool(
+                _sp.run(
+                    ["sh", "-c", "command -v xclip || command -v wl-paste"],
+                    capture_output=True,
+                    text=True,
+                    timeout=3,
+                ).stdout.strip()
+            )
+            checks.append(
+                {
+                    "id": "clipboard_tool",
+                    "ok": _clip_ok,
+                    "detail": "clipboard tool present" if _clip_ok else "no xclip / wl-paste",
+                    "detail_key": "diag.clipboard_tool.ok.detail"
+                    if _clip_ok
+                    else "diag.clipboard_tool.fail.detail",
+                    "guidance": None
+                    if _clip_ok
+                    else (
+                        "Clipboard capture needs xclip (X11) or "
+                        "wl-paste (Wayland). Install one: "
+                        "'sudo apt install xclip' or 'sudo apt install wl-clipboard'."
+                    ),
+                    "guidance_key": None if _clip_ok else "diag.clipboard_tool.fail.guidance",
+                }
+            )
         # summary: "fail" if a critical check (server/discovery/network) is down,
         # "warn" if only advertising/web is down, else "ok".
         critical_ids = ("server_port", "discovery", "network", "mdns")
@@ -6933,29 +8068,29 @@ class Application:
 
         transport_mgr = getattr(self, "transport_mgr", None)
         pairing_mgr = getattr(self, "pairing_mgr", None)
-        connected = (transport_mgr.get_connected_peers()
-                     if transport_mgr is not None else [])
-        paired = (pairing_mgr.get_paired_peers()
-                  if pairing_mgr is not None else [])
+        connected = transport_mgr.get_connected_peers() if transport_mgr is not None else []
+        paired = pairing_mgr.get_paired_peers() if pairing_mgr is not None else []
 
         # Round 19: comprehensive grouped diagnostics.  Reuses the probe
         # results computed above so the flat checks and the groups agree.
-        groups = self._build_diag_groups({
-            "port": port,
-            "web_port": web_port,
-            "server_running": server_running,
-            "discovery_running": discovery_running,
-            "advertising": advertising,
-            "web_running": web_running,
-            "lan_ip": lan_ip,
-            "fw_ok": fw_ok,
-            "fw_detail": fw_detail,
-            "fw_detail_key": fw_detail_key,
-            "fw_detail_params": fw_detail_params,
-            "fw_guidance": fw_guidance,
-            "fw_guidance_key": fw_guidance_key,
-            "fw_guidance_params": fw_guidance_params,
-        })
+        groups = self._build_diag_groups(
+            {
+                "port": port,
+                "web_port": web_port,
+                "server_running": server_running,
+                "discovery_running": discovery_running,
+                "advertising": advertising,
+                "web_running": web_running,
+                "lan_ip": lan_ip,
+                "fw_ok": fw_ok,
+                "fw_detail": fw_detail,
+                "fw_detail_key": fw_detail_key,
+                "fw_detail_params": fw_detail_params,
+                "fw_guidance": fw_guidance,
+                "fw_guidance_key": fw_guidance_key,
+                "fw_guidance_params": fw_guidance_params,
+            }
+        )
 
         return {
             "v2": True,
@@ -7018,6 +8153,7 @@ class Application:
         """
         try:
             from internal.security.fingerprint import sas_code
+
             mine = ""
             theirs = ""
             if self.pairing_mgr is not None:
@@ -7026,17 +8162,46 @@ class Application:
             if mine and theirs:
                 return sas_code(mine, theirs)
         except Exception:
-            logger.debug("SAS derivation failed for %s", (peer_id or "")[:12],
-                         exc_info=True)
+            logger.debug("SAS derivation failed for %s", (peer_id or "")[:12], exc_info=True)
         return ""
+
+    def _persist_expiry_rollbacks(self) -> None:
+        """Save the un-pairings that a pending-request expiry did in memory.
+
+        ``get_pending_pairings`` rolls a half-confirmed peer back to unpaired
+        when its request times out, but the pairing manager owns no config — so
+        without this the flag was only ever in RAM and a restart resurrected the
+        peer as fully paired.  Mirrors the ``pairing_reject`` path.
+        """
+        try:
+            mgr = getattr(self, "pairing_mgr", None)
+            drain = getattr(mgr, "drain_expiry_rollbacks", None)
+            if drain is None:
+                return
+            rolled = drain() or []
+            if not rolled:
+                return
+            peers = getattr(self.cfg, "peers", {}) or {}
+            for pid in rolled:
+                if pid in peers:
+                    peers[pid].paired = False
+                logger.info(
+                    "Pairing request from %s expired — peer left unpaired", (pid or "")[:12]
+                )
+            self._save_cfg_and_peers()
+            self._push_web("broadcast_devices")
+        except Exception:
+            logger.debug("persisting pairing expiry rollback failed", exc_info=True)
 
     def _get_pending(self) -> list:
         pending = self.pairing_mgr.get_pending_pairings() if self.pairing_mgr else []
+        self._persist_expiry_rollbacks()
         # Attach the pairing SAS as a 5th element so the web devices API can
         # surface it on the confirmation card (see internal/web/api/devices.py).
         result = [
             tuple(p) + (self._pairing_sas(p[0]),)
-            for p in pending if isinstance(p, (tuple, list)) and p
+            for p in pending
+            if isinstance(p, (tuple, list)) and p
         ]
         # The pairing manager drops expired requests entirely, so a request that
         # times out silently vanishes from the devices refresh.  Surface an
@@ -7044,11 +8209,11 @@ class Application:
         if not self._pairing_req_track:
             return result
         try:
-            _PAIRING_TIMEOUT_SECS = 300  # matches internal.security.pairing.PAIRING_TIMEOUT
+            _PAIRING_TIMEOUT_SECS = (  # noqa: N806  # camel-case local matching config.PAIRING_TIMEOUT
+                300  # matches internal.security.pairing.PAIRING_TIMEOUT
+            )
             now = time.time()
-            live_ids = {
-                p[0] for p in pending if isinstance(p, (tuple, list)) and p
-            }
+            live_ids = {p[0] for p in pending if isinstance(p, (tuple, list)) and p}
             for pid, info in list(self._pairing_req_track.items()):
                 if pid in live_ids:
                     continue  # still pending
@@ -7059,9 +8224,14 @@ class Application:
                     continue
                 if now - info.get("first_seen", now) >= _PAIRING_TIMEOUT_SECS:
                     info["surfaced_expired"] = True
-                    result.append((
-                        pid, info.get("code", ""), info.get("peer_name", pid), "expired",
-                    ))
+                    result.append(
+                        (
+                            pid,
+                            info.get("code", ""),
+                            info.get("peer_name", pid),
+                            "expired",
+                        )
+                    )
                     self._notify("notify_pairing", "Pairing", T("pairing.state.expired"))
                 self._pairing_req_track.pop(pid, None)
         except Exception:
@@ -7074,14 +8244,21 @@ class Application:
             status = self.pairing_mgr.get_pairing_status(peer_id)
             # Two-sided handshake: tell the peer we confirmed, so its UI can
             # move out of "pending" (and prompt the user there if needed).
-            self._send_pairing_msg(peer_id, "pairing_confirm")
+            # send_to_peer only reaches a LIVE connection — when the handshake's
+            # temporary connection has already been torn down the confirm was
+            # silently dropped and the peer sat in "pending" until it timed
+            # out.  Reconnect first and deliver it once the link is back up.
+            if peer_id in self.transport_mgr.get_connected_peers():
+                self._send_pairing_msg(peer_id, "pairing_confirm")
+            else:
+                self._on_connect(peer_id)
+                self._send_pairing_msg_when_connected(peer_id, "pairing_confirm")
             if status == PAIRING_STATUS_PAIRED:
                 self._notify("notify_pairing", "Pairing", T("pairing.notify.completed"))
+                self._clear_pairing_notice(peer_id)
             else:
                 self._notify("notify_pairing", "Pairing", T("pairing.state.confirmed_waiting"))
             self._save_cfg_and_peers()
-            if peer_id not in self.transport_mgr.get_connected_peers():
-                self._on_connect(peer_id)
             self._push_web("broadcast", "pairing_resolved", {"peer_id": peer_id, "status": status})
             # Refresh the device list so the paired device shows its new
             # status immediately instead of waiting for the next poll cycle.
@@ -7091,6 +8268,7 @@ class Application:
     def _on_unpair(self, peer_id: str) -> None:
         self.pairing_mgr.unpair_peer(peer_id)
         self.pairing_mgr.reject_pairing(peer_id)
+        self._clear_pairing_notice(peer_id)
         # An unpaired peer is no longer trusted — close any live chat.
         self._close_chat_for_peer(peer_id)
         if peer_id in self.cfg.peers:
@@ -7111,6 +8289,54 @@ class Application:
         except Exception:
             logger.debug("Could not send %s to peer %s", msg_type, peer_id[:12], exc_info=True)
 
+    # How long a deferred pairing message waits for the link to come up.
+    PAIRING_SEND_WAIT = 12.0
+
+    def _send_pairing_msg_when_connected(self, peer_id: str, msg_type: str) -> None:
+        """Deliver a pairing message once *peer_id* is actually connected.
+
+        ``connect_to_peer`` runs the TLS handshake on its own thread, so the
+        link is not up when it returns — sending right away hands the frame to
+        ``send_to_peer`` with no live peer, which drops it silently.
+        """
+
+        def _wait() -> None:
+            deadline = time.monotonic() + self.PAIRING_SEND_WAIT
+            while time.monotonic() < deadline:
+                try:
+                    if peer_id in self.transport_mgr.get_connected_peers():
+                        self._send_pairing_msg(peer_id, msg_type)
+                        return
+                except Exception:
+                    logger.debug("deferred pairing send check failed", exc_info=True)
+                    return
+                time.sleep(0.25)
+            logger.debug("Deferred %s to %s dropped — peer never connected", msg_type, peer_id[:12])
+
+        threading.Thread(target=_wait, daemon=True, name="pairing-msg-wait").start()
+
+    def _clear_pairing_notice(self, peer_id: str) -> None:
+        """Forget that we already notified about *peer_id*'s pairing code.
+
+        The shared code is derived from the two fingerprints, so the SAME pair
+        of devices always produces the SAME code.  ``_on_new_pairing``
+        de-duplicates on it, which means that once a pairing is resolved
+        (paired, rejected, unpaired, removed) a later genuine request from that
+        device would be silently swallowed forever.  Call this wherever the
+        pairing reaches a terminal state — never on plain expiry, or an ignored
+        peer would re-prompt every five minutes.
+        """
+        if not peer_id:
+            return
+        try:
+            timer = self._pairing_notify_timers.pop(peer_id, None)
+            if timer is not None:
+                timer.cancel()
+            self._notified_pairings.pop(peer_id, None)
+            self._pairing_req_track.pop(peer_id, None)
+        except Exception:
+            logger.debug("clearing pairing notice failed", exc_info=True)
+
     def _close_chat_for_peer(self, peer_id: str) -> None:
         """End any nearby-chat session with *peer_id* (e.g. after unpair)."""
         cm = getattr(self, "chat_mgr", None)
@@ -7119,7 +8345,9 @@ class Application:
         try:
             for sess in cm.get_sessions():
                 if sess.get("peer_id") == peer_id and sess["status"] in (
-                    "inviting", "invited", "active",
+                    "inviting",
+                    "invited",
+                    "active",
                 ):
                     cm.close_session(sess["session_id"], notify_peer=False)
         except Exception:
@@ -7133,6 +8361,7 @@ class Application:
             status = self.pairing_mgr.mark_peer_confirmed(peer_id)
             if status == PAIRING_STATUS_PAIRED:
                 self._notify("notify_pairing", "Pairing", T("pairing.notify.completed"))
+                self._clear_pairing_notice(peer_id)
                 self._save_cfg_and_peers()
             elif status == PAIRING_STATUS_PEER_CONFIRMED:
                 name = self._cfg_peer_name(peer_id)
@@ -7145,15 +8374,22 @@ class Application:
             self._push_web("broadcast_devices")
         elif msg_type == "pairing_reject":
             self.pairing_mgr.mark_peer_rejected(peer_id)
+            self._clear_pairing_notice(peer_id)
             name = self._cfg_peer_name(peer_id)
             self._notify(
                 "notify_pairing",
                 T("pairing.notify.peer_rejected"),
                 T("pairing.notify.peer_rejected_msg", name=name),
             )
+            # mark_peer_rejected rolls the peer back to unpaired; persist that
+            # so a restart doesn't resurrect the half-completed pairing.
+            if peer_id in self.cfg.peers:
+                self.cfg.peers[peer_id].paired = False
+            self._save_cfg_and_peers()
             self._push_web("broadcast_devices")
         elif msg_type == "pairing_unpair":
             self.pairing_mgr.mark_peer_unpaired(peer_id)
+            self._clear_pairing_notice(peer_id)
             # The peer dropped the trust relationship; end the chat too.
             self._close_chat_for_peer(peer_id)
             name = self._cfg_peer_name(peer_id)
@@ -7196,7 +8432,10 @@ class Application:
                     # Peer not known to the pairing manager (e.g. skipped at
                     # startup) — (re)add it now, keeping it paired.
                     self.pairing_mgr.add_peer(
-                        peer_id, peer_name or peer_id, new_cert, paired=True,
+                        peer_id,
+                        peer_name or peer_id,
+                        new_cert,
+                        paired=True,
                     )
                 peer_cfg = self.cfg.peers.get(peer_id)
                 if peer_cfg:
@@ -7208,7 +8447,9 @@ class Application:
                 peer_cfg = self.cfg.peers.get(peer_id)
                 if peer_cfg:
                     self.pairing_mgr.add_peer(
-                        peer_id, peer_cfg.device_name, peer_cfg.public_key_pem,
+                        peer_id,
+                        peer_cfg.device_name,
+                        peer_cfg.public_key_pem,
                         paired=peer_cfg.paired,
                     )
                     peer_cfg.paired = True
@@ -7245,6 +8486,9 @@ class Application:
                 self.chat_mgr.mark_peer_disconnected(peer_id)
             except Exception:
                 logger.debug("chat mark_peer_disconnected failed", exc_info=True)
+        # Reflect the disconnect immediately (other actions broadcast; this one
+        # relied on the ~3s fingerprint poll before).
+        self._push_web("broadcast_devices")
 
     def _on_connect(self, peer_id: str) -> bool:
         info = None
@@ -7267,11 +8511,12 @@ class Application:
             if not info:
                 peers = self.pairing_mgr.get_known_peers()
                 target = next(
-                    (p for p in peers if p.device_id == peer_id), None,
+                    (p for p in peers if p.device_id == peer_id),
+                    None,
                 )
                 if target:
                     with self._discovered_lock:
-                        for pid, pinfo in self._discovered_peers.items():
+                        for _pid, pinfo in self._discovered_peers.items():
                             pname = pinfo["name"].lower()
                             tname = target.device_name.lower()
                             if pname == tname or tname.startswith(pname):
@@ -7298,21 +8543,45 @@ class Application:
                     "port": peer_cfg.last_port or self.cfg.port,
                 }
         if info:
-            logger.info("User initiated pairing with %s (peer_id=%s)",
-                        info["name"], peer_id[:12])
+            logger.info("User initiated pairing with %s (peer_id=%s)", info["name"], peer_id[:12])
             peer_cfg = self.cfg.peers.get(peer_id)
             if peer_cfg:
                 peer_cfg.last_ip = info["address"]
                 peer_cfg.last_port = info["port"]
             self.transport_mgr.connect_to_peer(
-                peer_id, info["name"], info["address"], info["port"],
+                peer_id,
+                info["name"],
+                info["address"],
+                info["port"],
             )
             # True means "connection attempt initiated" — the peer was found
             # on the network.  The TCP/TLS handshake itself completes
             # asynchronously and its result is reported via the transport.
             return True
-        logger.warning("Cannot connect: peer %s not in discovered list",
-                      peer_id[:12])
+        logger.warning("Cannot connect: peer %s not in discovered list", peer_id[:12])
+        # Tell the user WHY.  The route only returns {ok:false}, which the card
+        # renders as a bare "操作失败" — useless for the real cause: the device
+        # is not advertising on mDNS and we have no saved address for it, so
+        # there is nowhere to connect.  Mirrors the connect_rejected push.
+        peer_cfg = self.cfg.peers.get(peer_id)
+        name = peer_cfg.device_name if peer_cfg else ""
+        if not name:
+            try:
+                name = next(
+                    (
+                        p.device_name
+                        for p in self.pairing_mgr.get_known_peers()
+                        if p.device_id == peer_id
+                    ),
+                    "",
+                )
+            except Exception:
+                name = ""
+        self._push_web(
+            "broadcast",
+            "connect_unreachable",
+            {"peer_id": peer_id, "name": name or peer_id[:12]},
+        )
         return False
 
     def _peer_removal_info(self, peer_id: str) -> tuple:
@@ -7327,8 +8596,7 @@ class Application:
             d = self._discovered_peers.get(peer_id)
             if d is None:
                 try:
-                    d = self._discovered_peers.get(
-                        Discovery._hash_device_id(peer_id))
+                    d = self._discovered_peers.get(Discovery._hash_device_id(peer_id))
                 except Exception:
                     d = None
         if d:
@@ -7350,32 +8618,51 @@ class Application:
         # to be forgotten with no trace: the Removed section stayed empty and
         # the device could not be found again ("点移除后无法找回").  Archive it
         # under whatever we know so the archive is the universal recovery path.
-        peer_cfg = self.cfg.peers.get(peer_id)
-        if peer_id not in self.cfg.removed_peers:
-            if peer_cfg is not None:
-                archived = PeerInfo(
-                    device_id=peer_cfg.device_id,
-                    device_name=peer_cfg.device_name,
-                    public_key_pem=peer_cfg.public_key_pem,
-                    paired=peer_cfg.paired,
-                    notes=peer_cfg.notes,
-                    last_ip=peer_cfg.last_ip,
-                    last_port=peer_cfg.last_port,
-                    removed_at=time.time(),
-                )
-            else:
-                name, address, port = self._peer_removal_info(peer_id)
-                archived = PeerInfo(
-                    device_id=peer_id,
-                    device_name=name or peer_id,
-                    paired=False,
-                    last_ip=address,
-                    last_port=port,
-                    removed_at=time.time(),
-                )
-            self.cfg.removed_peers[peer_id] = archived
+        #
+        # Key the archive by the REAL device id whenever it can be resolved: a
+        # discovered-only card carries the hashed mDNS id, and archiving that
+        # made the later Restore materialise a hash-keyed peer that nothing
+        # could ever merge (see _merge_hashed_peer_rows).
+        peer_id = self._real_peer_id(peer_id)
+        # Hold the shared config lock across the cfg.peers / cfg.removed_peers
+        # edits.  Web-server threads iterate those dicts (device list, export,
+        # the shutdown mirror), and mutating them unlocked raised "dictionary
+        # changed size during iteration" in whichever thread happened to be
+        # walking them -- a 500 on the device panel, or a half-written config.
+        with config_lock:
+            peer_cfg = self.cfg.peers.get(peer_id)
+            if peer_id not in self.cfg.removed_peers:
+                if peer_cfg is not None:
+                    archived = PeerInfo(
+                        device_id=peer_cfg.device_id,
+                        device_name=peer_cfg.device_name,
+                        public_key_pem=peer_cfg.public_key_pem,
+                        paired=peer_cfg.paired,
+                        notes=peer_cfg.notes,
+                        last_ip=peer_cfg.last_ip,
+                        last_port=peer_cfg.last_port,
+                        removed_at=time.time(),
+                    )
+                else:
+                    name, address, port = self._peer_removal_info(peer_id)
+                    archived = PeerInfo(
+                        device_id=peer_id,
+                        device_name=name or peer_id,
+                        paired=False,
+                        last_ip=address,
+                        last_port=port,
+                        removed_at=time.time(),
+                    )
+                self.cfg.removed_peers[peer_id] = archived
         self.pairing_mgr.remove_peer(peer_id)
-        self.transport_mgr.disconnect_peer(peer_id)
+        self._clear_pairing_notice(peer_id)
+        # Mirror _on_unpair's teardown: end any live chat, tell the peer we
+        # removed it (so its side un-pairs instead of keeping auto-reconnect),
+        # reject its future connections, and clear its relay retries.
+        self._close_chat_for_peer(peer_id)
+        self._send_pairing_msg(peer_id, "pairing_unpair")
+        self.transport_mgr.forget_peer(peer_id)
+        getattr(self, "_delivery_clear_peer", lambda pid: None)(peer_id)
         with self._discovered_lock:
             # _discovered_peers is keyed by the HASHED mDNS id (see
             # _on_peer_found), so popping only the real id is a no-op and the
@@ -7383,40 +8670,81 @@ class Application:
             # both — the same dual-lookup _on_connect uses.
             self._discovered_peers.pop(peer_id, None)
             try:
-                self._discovered_peers.pop(
-                    Discovery._hash_device_id(peer_id), None)
+                self._discovered_peers.pop(Discovery._hash_device_id(peer_id), None)
             except Exception:
-                logger.debug("Failed to hash device id in _on_remove",
-                             exc_info=True)
-        self.cfg.peers.pop(peer_id, None)
+                logger.debug("Failed to hash device id in _on_remove", exc_info=True)
+        with config_lock:
+            self.cfg.peers.pop(peer_id, None)
+            # A phantom row keyed by the hashed mDNS id must go with it, or the
+            # "removed" device stays on the page under its broadcast name.
+            try:
+                hashed = Discovery._hash_device_id(peer_id)
+                self.cfg.peers.pop(hashed, None)
+                # Only if it is genuinely registered — the hash form normally is
+                # not, and remove_peer would otherwise churn pairing state for an
+                # id that never existed.
+                if hashed != peer_id and any(
+                    p.device_id == hashed for p in self.pairing_mgr.get_known_peers()
+                ):
+                    self.pairing_mgr.remove_peer(hashed)
+            except Exception:
+                logger.debug("Failed to drop hashed row for %s", peer_id[:12], exc_info=True)
         self._save_cfg_encrypted()
+        self._push_web("broadcast_devices")
         self._push_web("broadcast_devices")
 
     def _on_restore_remove(self, peer_id: str) -> bool:
         """Restore a removed device from the archive back to the known list.
 
-        Preserves the archived paired flag (the other side usually still has us
-        paired, so a reconnect via the saved address resumes sync directly) and
-        attempts a best-effort reconnect through the archived address.
+        Restores it as KNOWN BUT UNPAIRED, never re-pairing on its own: the
+        forget already told the peer to un-pair (``_on_remove`` sends
+        ``pairing_unpair``), so replaying the archived ``paired`` flag would
+        re-create one-sided trust the user never consented to.  No connection
+        is opened either — connecting while unpaired only fires an unsolicited
+        pairing request at the peer.  The archived address is kept so the
+        card's Pair button has somewhere to go (``_on_connect`` falls back to
+        ``cfg.peers[...].last_ip``), and the forget-time rejection is lifted so
+        the peer can also initiate the pairing from its own side.
         """
         archived = self.cfg.removed_peers.get(peer_id)
         if archived is None:
             return False
-        self.cfg.peers[peer_id] = archived
+        # Persist under the REAL device id when it can be resolved.  The archive
+        # of a discovered-only card is keyed by the hashed mDNS id, and writing
+        # that hash into cfg.peers/pairing_mgr created a row nothing could ever
+        # fold into the real one — that is precisely how one PC turned into two
+        # cards (pc-zhao-b190 + USER-20240325OS).  See _merge_hashed_peer_rows.
+        real_id = self._real_peer_id(peer_id)
+        if real_id != peer_id and real_id in self.cfg.peers:
+            # Already known under its real id — the archive row is a duplicate,
+            # so drop it rather than overwriting the live entry with it.
+            self.cfg.removed_peers.pop(peer_id, None)
+            self._save_cfg_encrypted()
+            self._push_web("broadcast_devices")
+            return True
+        self.cfg.peers[real_id] = PeerInfo(
+            device_id=real_id,
+            device_name=archived.device_name,
+            public_key_pem=archived.public_key_pem,
+            paired=False,
+            notes=archived.notes,
+            last_ip=archived.last_ip,
+            last_port=archived.last_port,
+            removed_at=0,
+        )
         self.cfg.removed_peers.pop(peer_id, None)
         self.pairing_mgr.restore_peer(
-            peer_id, archived.device_name, paired=archived.paired,
+            real_id,
+            archived.device_name,
+            paired=False,
         )
+        # forget_peer parked this peer in the transport's reject set; without
+        # lifting it, a pairing the peer initiates would be silently refused.
+        try:
+            self.transport_mgr.allow_peer(real_id)
+        except Exception:
+            logger.debug("Restore could not lift rejection for %s", real_id[:12], exc_info=True)
         self._save_cfg_encrypted()
-        if archived.last_ip and archived.last_port:
-            try:
-                self.transport_mgr.connect_to_peer(
-                    peer_id, archived.device_name,
-                    archived.last_ip, archived.last_port,
-                )
-            except Exception:
-                logger.debug("Restore reconnect to %s failed",
-                             peer_id[:12], exc_info=True)
         self._push_web("broadcast_devices")
         return True
 
@@ -7455,10 +8783,13 @@ class Application:
             return False
         types: dict = {}
         _type_map = {
-            "TEXT": _CT.TEXT, "HTML": _CT.HTML,
-            "IMAGE": _CT.IMAGE_PNG, "IMAGE_EMF": _CT.IMAGE_EMF,
+            "TEXT": _CT.TEXT,
+            "HTML": _CT.HTML,
+            "IMAGE": _CT.IMAGE_PNG,
+            "IMAGE_EMF": _CT.IMAGE_EMF,
             "RTF": _CT.RTF,
-            "FILE": _CT.FILE, "URL": _CT.URL,
+            "FILE": _CT.FILE,
+            "URL": _CT.URL,
         }
         for key, b64_data in entry["types"].items():
             ct = _type_map.get(key)
@@ -7493,10 +8824,12 @@ class Application:
         """Open a file with the default OS application."""
         import subprocess
         import sys as _sys
+
         resolved = os.path.abspath(file_path) if file_path else ""
         if not os.path.isfile(resolved):
-            self._notify_error(T("ui.file_not_found_title"),
-                       T("ui.file_not_found_msg", path=file_path))
+            self._notify_error(
+                T("ui.file_not_found_title"), T("ui.file_not_found_msg", path=file_path)
+            )
             return
         try:
             if _sys.platform == "win32":
@@ -7507,25 +8840,27 @@ class Application:
                 subprocess.run(["xdg-open", resolved], check=True)
         except Exception as e:
             logger.error("Failed to open file %s: %s", resolved, e)
-            self._notify_error(T("ui.open_failed_title"),
-                       T("ui.open_failed_msg", path=resolved))
+            self._notify_error(T("ui.open_failed_title"), T("ui.open_failed_msg", path=resolved))
 
     def _open_folder(self, file_path: str) -> None:
         """Open the containing folder in the OS file manager."""
         import subprocess
         import sys as _sys
+
         resolved = os.path.abspath(file_path) if file_path else ""
         if os.path.isfile(resolved):
             folder = os.path.dirname(resolved)
         elif os.path.isdir(resolved):
             folder = resolved
         else:
-            self._notify_error(T("ui.file_not_found_title"),
-                       T("ui.file_not_found_msg", path=file_path))
+            self._notify_error(
+                T("ui.file_not_found_title"), T("ui.file_not_found_msg", path=file_path)
+            )
             return
         if not os.path.isdir(folder):
-            self._notify_error(T("ui.folder_not_found_title"),
-                       T("ui.folder_not_found_msg", path=folder))
+            self._notify_error(
+                T("ui.folder_not_found_title"), T("ui.folder_not_found_msg", path=folder)
+            )
             return
         try:
             if _sys.platform == "win32":
@@ -7539,8 +8874,7 @@ class Application:
                 subprocess.run(["xdg-open", folder], check=True)
         except Exception as e:
             logger.error("Failed to open folder %s: %s", folder, e)
-            self._notify_error(T("ui.open_failed_title"),
-                       T("ui.open_failed_msg", path=folder))
+            self._notify_error(T("ui.open_failed_title"), T("ui.open_failed_msg", path=folder))
 
     def _retry_file_transfer(self, file_path: str) -> None:
         """Retry sending a file that previously failed."""
@@ -7557,8 +8891,11 @@ class Application:
                 if transfer_id:
                     self._transfer_directions[transfer_id] = "outgoing"
                 logger.info("Retried file transfer: %s (%s)", file_path, transfer_id[:8])
-                self._notify("notify_transfer", T("ui.file_transfer"),
-                             T("transfer.sending_file", name=os.path.basename(file_path)))
+                self._notify(
+                    "notify_transfer",
+                    T("ui.file_transfer"),
+                    T("transfer.sending_file", name=os.path.basename(file_path)),
+                )
             except OSError as e:
                 logger.error("Failed to retry sending file %s: %s", file_path, e)
 
@@ -7580,8 +8917,9 @@ class Application:
         else:
             self.discovery.stop_advertising()
 
-    def _on_security_alert(self, peer_name: str, peer_id: str, expected: str,
-                           received: str, new_cert_pem: str) -> None:
+    def _on_security_alert(
+        self, peer_name: str, peer_id: str, expected: str, received: str, new_cert_pem: str
+    ) -> None:
         """Handle a certificate-change alert from the transport (any thread).
 
         Records the newly-presented certificate so it can be re-trusted, and
@@ -7600,9 +8938,9 @@ class Application:
         if new_cert_pem:
             self._pending_cert_peers[peer_id] = (peer_name, new_cert_pem)
         logger.warning(
-            "Certificate changed for %s (%s) — prompting user "
-            "(expected=%s..., got=%s...)",
-            peer_name, peer_id[:12],
+            "Certificate changed for %s (%s) — prompting user (expected=%s..., got=%s...)",
+            peer_name,
+            peer_id[:12],
             expected[:16] if expected else "n/a",
             received[:16] if received else "n/a",
         )
@@ -7621,8 +8959,7 @@ class Application:
                 # No interactive UI available — inform via notification/toast
                 # and leave the peer's state unchanged (throttle prevents
                 # prompt spam).
-                logger.info("No UI to prompt for cert change of %s — notifying only",
-                            peer_id[:12])
+                logger.info("No UI to prompt for cert change of %s — notifying only", peer_id[:12])
                 self._notify_info(T("cert.changed_title"), message)
 
         self._ask_retrust_choice(message, _apply)
@@ -7670,14 +9007,16 @@ class Application:
                 return
 
             def _on_result(result):
-                on_choice(None if result is None
-                          else result.get("action") == "accept")
+                on_choice(None if result is None else result.get("action") == "accept")
 
             # The confirm dialog waits up to two minutes for a human; run it
             # on a worker so the Tk main loop keeps servicing hotkeys, tray
             # polling and timers while the dialog is open.
             self._web_dialog_async(
-                "confirm", _on_result, title=title, message=message,
+                "confirm",
+                _on_result,
+                title=title,
+                message=message,
                 accept_label=T("cert.trust_again"),
                 reject_label=T("cert.keep_unpaired"),
                 timeout=120,
@@ -7713,17 +9052,22 @@ class Application:
         body.pack(fill="both", expand=True, padx=24, pady=20)
 
         ctk.CTkLabel(
-            body, text="⚠️", font=ctk.CTkFont(size=22),
+            body,
+            text="⚠️",
+            font=ctk.CTkFont(size=22),
         ).pack(anchor="w", pady=(0, 6))
 
         ctk.CTkLabel(
-            body, text=title,
+            body,
+            text=title,
             font=ctk.CTkFont(size=15, weight="bold"),
             text_color="#F39C12",
         ).pack(anchor="w", pady=(0, 10))
 
         ctk.CTkLabel(
-            body, text=message, justify="left",
+            body,
+            text=message,
+            justify="left",
             font=ctk.CTkFont(size=12),
             text_color=("gray30", "gray80"),
             wraplength=390,
@@ -7737,8 +9081,12 @@ class Application:
             dlg.destroy()
 
         ctk.CTkButton(
-            btn_row, text=T("cert.keep_unpaired"), width=110, height=32,
-            fg_color="transparent", border_width=1,
+            btn_row,
+            text=T("cert.keep_unpaired"),
+            width=110,
+            height=32,
+            fg_color="transparent",
+            border_width=1,
             text_color=("gray40", "gray60"),
             border_color=("gray60", "gray50"),
             hover_color=("gray85", "gray25"),
@@ -7747,7 +9095,10 @@ class Application:
         ).pack(side="left")
 
         ctk.CTkButton(
-            btn_row, text=T("cert.trust_again"), width=110, height=32,
+            btn_row,
+            text=T("cert.trust_again"),
+            width=110,
+            height=32,
             fg_color="#F39C12",
             font=ctk.CTkFont(size=12),
             command=lambda: _close(True),
@@ -7755,10 +9106,8 @@ class Application:
 
         dlg.update()
         dlg.transient(self.root)
-        try:
+        with contextlib.suppress(Exception):
             dlg.grab_set()
-        except Exception:
-            pass
         dlg.protocol("WM_DELETE_WINDOW", lambda: _close(False))
         dlg.wait_window()
         return result[0]
@@ -7799,8 +9148,7 @@ class Application:
                     cfg.timed_pause_until = 0.0
                     self._save_cfg_encrypted()
             except Exception:
-                logger.debug("Failed to persist cleared pause deadline",
-                             exc_info=True)
+                logger.debug("Failed to persist cleared pause deadline", exc_info=True)
 
     def _pause_sync_for_minutes(self, minutes: int) -> None:
         """Pause clipboard sync for *minutes*, then auto-resume.
@@ -7835,12 +9183,12 @@ class Application:
             except Exception:
                 logger.debug("Failed to show tray pause countdown", exc_info=True)
         self._pause_timer = threading.Timer(
-            minutes * 60.0, self._fire_auto_resume,
+            minutes * 60.0,
+            self._fire_auto_resume,
         )
         self._pause_timer.daemon = True
         self._pause_timer.start()
-        self._notify("notify_sync", T("ui.clipboard_sync"),
-                     T("tray.paused_left", minutes=minutes))
+        self._notify("notify_sync", T("ui.clipboard_sync"), T("tray.paused_left", minutes=minutes))
         logger.info("Sync paused for %d minute(s)", minutes)
 
     def _fire_auto_resume(self) -> None:
@@ -7849,8 +9197,7 @@ class Application:
             self.root.after(0, self._auto_resume_from_pause)
         except Exception:
             # Root already destroyed (app quit during the pause window).
-            logger.debug("Auto-resume scheduling failed (UI closed)",
-                         exc_info=True)
+            logger.debug("Auto-resume scheduling failed (UI closed)", exc_info=True)
 
     def _auto_resume_from_pause(self) -> None:
         self._pause_timer = None
@@ -7871,8 +9218,7 @@ class Application:
         self._clear_pause_state()
         if self.cfg.sync_enabled:
             return  # nothing to do; state already consistent
-        logger.info("Sync resumed via tray (%s)",
-                    "timed pause" if had_pause else "manual")
+        logger.info("Sync resumed via tray (%s)", "timed pause" if had_pause else "manual")
         self._on_systray_toggle(True)
 
     # ═══════════════════════════════════════════════════════════════
@@ -7887,6 +9233,7 @@ class Application:
         """
         if not self.cfg.relay_secret:
             from internal.transport.relay import generate_relay_secret
+
             self.cfg.relay_secret = generate_relay_secret()
             try:
                 self._save_cfg_and_peers()
@@ -7903,23 +9250,25 @@ class Application:
         from their two secrets without ever transmitting them again.
         """
         from internal.transport.relay import (
-            derive_key, derive_topic, netpair_key, netpair_topic,
+            derive_key,
+            derive_topic,
+            netpair_key,
+            netpair_topic,
         )
+
         my_secret = self._ensure_relay_secret()
         channels: dict[str, bytes] = {}
         for pid, peer_secret in list(self.cfg.peer_relay_secrets.items()):
             peer = self.cfg.peers.get(pid)
             if peer is None or not peer.paired or not peer_secret:
                 continue
-            channels[derive_topic(my_secret, peer_secret)] = derive_key(
-                my_secret, peer_secret)
+            channels[derive_topic(my_secret, peer_secret)] = derive_key(my_secret, peer_secret)
         for pid, secret in self._netpair_secrets_all().items():
             if not secret:
                 continue
             if pid == self.cfg.device_id or pid == f"pending:{self.cfg.device_id}":
                 continue  # never listen on a channel derived from our own code
-            channels[netpair_topic(secret)] = netpair_key(
-                secret, self._netpair_pw())
+            channels[netpair_topic(secret)] = netpair_key(secret, self._netpair_pw())
         return channels
 
     def _netpair_pw(self) -> str:
@@ -7934,8 +9283,12 @@ class Application:
         Read fresh from cfg on every call so a settings change applies to the
         channel keys immediately, without a restart.
         """
-        return (getattr(self.cfg, "encryption_password", "") or ""
-                or getattr(self.cfg, "netpair_password", "") or "")
+        return (
+            getattr(self.cfg, "encryption_password", "")
+            or ""
+            or getattr(self.cfg, "netpair_password", "")
+            or ""
+        )
 
     # ------------------------------------------- internet pairing code state
 
@@ -7950,14 +9303,98 @@ class Application:
             out.setdefault(f"pending:{code}", v)
         return out
 
+    def _netpair_drop_provisional(self) -> None:
+        """Drop tag-keyed netpair entries left over from a previous run.
+
+        The tag is a few-seconds-long placeholder; one that outlived a restart
+        means the partner's reply hello never arrived, so the pairing was never
+        confirmed.  Nothing persists it deliberately and the UI cannot show or
+        remove it, so clear it at startup rather than keep subscribing to a
+        channel no confirmed peer is on.  Re-entering the code pairs again.
+        """
+        try:
+            secrets = getattr(getattr(self, "cfg", None), "netpair_secrets", None)
+            if not secrets:
+                return
+            for pid in [k for k in secrets if _is_provisional_netpair_key(k)]:
+                secrets.pop(pid, None)
+                logger.info("Dropped unconfirmed internet pairing placeholder %s", pid)
+        except Exception:
+            logger.debug("netpair provisional sweep failed", exc_info=True)
+
     def _netpair_secret_for_topic(self, topic: str) -> str | None:
         """Map a received relay topic back to the netpair secret behind it."""
         if not topic:
             return None
         from internal.transport.relay import netpair_topic
+
         for secret in self._netpair_secrets_all().values():
             if secret and netpair_topic(secret) == topic:
                 return secret
+        return None
+
+    # A mismatched encryption password is reported at most once per interval —
+    # the failing peer republishes on every clipboard change.
+    RELAY_DECRYPT_WARN_INTERVAL = 300.0
+
+    def _on_relay_undecryptable(self, topic: str) -> None:
+        """A frame arrived on one of our channels but would not decrypt.
+
+        A netpair TOPIC is derived from the shared secret alone while the
+        channel KEY also mixes in the encryption password — so this is exactly
+        what a password mismatch looks like from the receiving side: the pair
+        reports "paired", the peer publishes, and nothing ever syncs.  Say so
+        instead of dropping every frame in silence.
+        """
+        try:
+            if self._netpair_secret_for_topic(topic or "") is None:
+                return  # not a pairing-code channel — nothing actionable
+            now = time.monotonic()
+            if (
+                now - getattr(self, "_last_relay_decrypt_warn", 0.0)
+                < self.RELAY_DECRYPT_WARN_INTERVAL
+            ):
+                return
+            self._last_relay_decrypt_warn = now
+            logger.warning(
+                "Relay frames on an internet-pairing channel will not decrypt "
+                "— the two devices most likely have different encryption "
+                "passwords"
+            )
+            self._web_toast(T("netpair.decrypt_failed"), 6000)
+        except Exception:
+            logger.debug("relay undecryptable notice failed", exc_info=True)
+
+    def _relay_topic_identity(self, topic: str) -> str | None:
+        """The identity a relay topic is bound to, or None when unknown.
+
+        Every topic is derived from a shared secret, so the channel itself —
+        not a frame's self-declared ``source_device`` — says who may publish
+        on it.  Returns the peer's full device id for a confirmed channel
+        (LAN relay pair or netpair entry keyed by a real id), the 4-char
+        base32 device tag for a provisional netpair channel (see
+        ``_netpair_enter``), or None for a channel with no bound identity yet
+        (our own ``pending:CODE`` channel) or one that is not ours at all.
+        """
+        if not topic:
+            return None
+        try:
+            from internal.transport.relay import derive_topic, netpair_topic
+        except Exception:
+            return None
+        my_secret = getattr(self.cfg, "relay_secret", "") or ""
+        if my_secret:
+            for pid, secret in list((getattr(self.cfg, "peer_relay_secrets", {}) or {}).items()):
+                if secret and derive_topic(my_secret, secret) == topic:
+                    return pid
+        for pid, secret in self._netpair_secrets_all().items():
+            if not secret or netpair_topic(secret) != topic:
+                continue
+            if pid.startswith("pending:"):
+                # A code we generated: the partner's id is only established
+                # by its confirmation hello, which validates itself.
+                return None
+            return pid
         return None
 
     def _get_current_relay_broker(self) -> str:
@@ -7999,8 +9436,7 @@ class Application:
             try:
                 self._delivery_on_relay_online()
             except Exception:
-                logger.debug("delivery retry on relay-online failed",
-                             exc_info=True)
+                logger.debug("delivery retry on relay-online failed", exc_info=True)
 
     def _get_relay_state(self) -> str:
         """Current internet-sync state for late-joining web clients.
@@ -8021,8 +9457,9 @@ class Application:
         except Exception:
             return "connecting"
 
-    def _on_relay_frame(self, frame_bytes: bytes,
-                        topic: str | None = None, *, now: float | None = None) -> None:
+    def _on_relay_frame(
+        self, frame_bytes: bytes, topic: str | None = None, *, now: float | None = None
+    ) -> None:
         """A clipboard frame arrived through the public relay.
 
         It is a standard ClipSync frame — decode and feed the very same
@@ -8034,6 +9471,7 @@ class Application:
         """
         try:
             from internal.protocol.codec import decode_message
+
             sync_msg = decode_message(frame_bytes)
         except Exception:
             logger.debug("Relay frame failed to decode", exc_info=True)
@@ -8051,8 +9489,7 @@ class Application:
         # "seen" (both the netpair_hello handshake and mirrored clipboard
         # frames), so the device page can show online / last-synced state.
         if source and source in (getattr(self.cfg, "netpair_secrets", {}) or {}):
-            getattr(self, "_netpair_last_seen", {})[source] = (
-                time.time() if now is None else now)
+            getattr(self, "_netpair_last_seen", {})[source] = time.time() if now is None else now
         elif source:
             # Self-heal (F04): the ENTERER stores the provisional base32 tag
             # as the netpair key before the confirmation hello, and a lost
@@ -8062,26 +9499,24 @@ class Application:
             # done — so the phantom "paired" entry disappears on its own.
             try:
                 from internal.transport.relay import netpair_device_tag
+
                 tag = netpair_device_tag(source)
                 secrets = getattr(self.cfg, "netpair_secrets", {}) or {}
                 if tag and tag in secrets and tag != source:
                     secret = secrets.pop(tag)
                     secrets[source] = secret
                     getattr(self, "_netpair_last_seen", {})[source] = (
-                        time.time() if now is None else now)
+                        time.time() if now is None else now
+                    )
                     try:
                         self._save_cfg_and_peers()
                     except Exception:
-                        logger.debug(
-                            "Failed persisting netpair self-heal re-key",
-                            exc_info=True)
+                        logger.debug("Failed persisting netpair self-heal re-key", exc_info=True)
                     if self._relay is not None:
                         try:
                             self._relay.refresh_channels()
                         except Exception:
-                            logger.debug(
-                                "netpair refresh after self-heal failed",
-                                exc_info=True)
+                            logger.debug("netpair refresh after self-heal failed", exc_info=True)
             except Exception:
                 logger.debug("netpair self-heal re-key failed", exc_info=True)
         # Round 17: any frame from a peer is an "active" signal — retry that
@@ -8101,6 +9536,33 @@ class Application:
             except Exception:
                 logger.debug("netpair hello handling failed", exc_info=True)
             return
+        # Bind the frame's self-declared source to the channel it arrived on.
+        # A topic is derived from a shared secret, so holding that secret only
+        # entitles a peer to speak AS the identity bound to that channel — it
+        # must not let one paired peer impersonate another device id.
+        ident = getattr(self, "_relay_topic_identity", lambda _t: None)(topic or "")
+        if ident is not None and source:
+            from internal.transport.relay import netpair_device_tag
+
+            if _is_provisional_netpair_key(ident):
+                # Provisional netpair channel: the real id is unknown, but the
+                # code carried the peer's 4-char tag, so the source must at
+                # least hash to it.  (A matching source was already re-keyed
+                # to a confirmed entry by the self-heal above.)
+                if netpair_device_tag(source) != ident:
+                    logger.warning(
+                        "Dropping relay frame: source %s does not match the channel's device tag",
+                        source[:12],
+                    )
+                    return
+            elif source != ident:
+                logger.warning(
+                    "Relay frame claims source %s but its channel belongs to "
+                    "%s — attributing it to the channel owner",
+                    source[:12],
+                    ident[:12],
+                )
+                source = ident
         try:
             self._on_peer_message(sync_msg, source, via_relay=True)
         except Exception:
@@ -8110,13 +9572,14 @@ class Application:
         if self._relay is not None:
             return
         from internal.transport.relay import RelayTransport, build_paho_client
+
         transport = RelayTransport(
             brokers=list(self.cfg.relay_brokers),
-            private_brokers=list(getattr(
-                self.cfg, "relay_private_brokers", None) or []),
+            private_brokers=list(getattr(self.cfg, "relay_private_brokers", None) or []),
             get_channels=self._relay_channels,
             on_frame=self._on_relay_frame,
             on_state=self._on_relay_state,
+            on_undecryptable=getattr(self, "_on_relay_undecryptable", None),
             client_factory=build_paho_client,
             username=getattr(self.cfg, "relay_username", "") or "",
             password=getattr(self.cfg, "relay_password", "") or "",
@@ -8159,8 +9622,9 @@ class Application:
         try:
             self.transport_mgr.send_to_peer(
                 peer_id,
-                encode_frame({"msg_type": "relay_enroll",
-                              "relay_secret": self._ensure_relay_secret()}),
+                encode_frame(
+                    {"msg_type": "relay_enroll", "relay_secret": self._ensure_relay_secret()}
+                ),
             )
         except Exception:
             logger.debug("relay enroll to %s failed", peer_id[:12], exc_info=True)
@@ -8170,10 +9634,12 @@ class Application:
         if not peer_id or not isinstance(payload, dict):
             return
         secret = payload.get("relay_secret")
-        if (not isinstance(secret, str) or len(secret) != 64
-                or any(c not in "0123456789abcdef" for c in secret)):
-            logger.debug("Ignoring invalid relay_enroll from %s",
-                         (peer_id or "")[:12])
+        if (
+            not isinstance(secret, str)
+            or len(secret) != 64
+            or any(c not in "0123456789abcdef" for c in secret)
+        ):
+            logger.debug("Ignoring invalid relay_enroll from %s", (peer_id or "")[:12])
             return
         known = self.cfg.peer_relay_secrets.get(peer_id)
         if known != secret:
@@ -8214,18 +9680,19 @@ class Application:
         delivery = None
         try:
             from internal.protocol.codec import decode_message
+
             _d = decode_message(frame_bytes)
             if _d is not None and getattr(_d, "msg_type", "clipboard") == "clipboard":
                 delivery = {
                     "msg_id": getattr(_d, "msg_id", "") or "",
-                    "content_hash": (_d.content.hash_key()
-                                     if getattr(_d, "content", None) else ""),
+                    "content_hash": (_d.content.hash_key() if getattr(_d, "content", None) else ""),
                     "preview": self._delivery_preview(_d),
                 }
         except Exception:
             logger.debug("delivery metadata decode failed", exc_info=True)
         netpair_secrets = getattr(self.cfg, "netpair_secrets", {}) or {}
         from internal.transport.relay import derive_key, derive_topic
+
         my_secret = self._ensure_relay_secret()
         for pid, peer_secret in list(self.cfg.peer_relay_secrets.items()):
             if pid in netpair_secrets:
@@ -8238,43 +9705,53 @@ class Application:
             try:
                 ok = transport.publish(frame_bytes, topic, key)
             except Exception:
-                logger.debug("relay publish to %s failed", pid[:12],
-                             exc_info=True)
+                logger.debug("relay publish to %s failed", pid[:12], exc_info=True)
                 ok = False
             if delivery:
                 if ok:
                     self._delivery_on_sent(
-                        pid, delivery["msg_id"], delivery["content_hash"],
-                        delivery["preview"])
+                        pid, delivery["msg_id"], delivery["content_hash"], delivery["preview"]
+                    )
                 else:
                     self._delivery_enqueue(
-                        pid, delivery["msg_id"], delivery["content_hash"],
-                        delivery["preview"], frame_bytes)
+                        pid,
+                        delivery["msg_id"],
+                        delivery["content_hash"],
+                        delivery["preview"],
+                        frame_bytes,
+                    )
         # Netpair channels: mirror to every CONFIRMED pairing-code peer too.
         # (Generated-but-unconfirmed codes stay subscribed but are not used for
         # clipboard mirroring — nothing has been confirmed yet.)
         from internal.transport.relay import netpair_key, netpair_topic
-        for pid, peer_secret in (getattr(self.cfg, "netpair_secrets", {}) or {}).items():
+
+        for pid, peer_secret in list(netpair_secrets.items()):
             if not isinstance(peer_secret, str) or not peer_secret:
                 continue
             if pid == self.cfg.device_id:
                 continue  # a stray self-entry must never mirror to ourselves
             try:
-                ok = transport.publish(frame_bytes,
-                                       netpair_topic(peer_secret),
-                                       netpair_key(peer_secret, self._netpair_pw()))
+                ok = transport.publish(
+                    frame_bytes,
+                    netpair_topic(peer_secret),
+                    netpair_key(peer_secret, self._netpair_pw()),
+                )
             except Exception:
                 logger.debug("netpair publish failed", exc_info=True)
                 ok = False
             if delivery:
                 if ok:
                     self._delivery_on_sent(
-                        pid, delivery["msg_id"], delivery["content_hash"],
-                        delivery["preview"])
+                        pid, delivery["msg_id"], delivery["content_hash"], delivery["preview"]
+                    )
                 else:
                     self._delivery_enqueue(
-                        pid, delivery["msg_id"], delivery["content_hash"],
-                        delivery["preview"], frame_bytes)
+                        pid,
+                        delivery["msg_id"],
+                        delivery["content_hash"],
+                        delivery["preview"],
+                        frame_bytes,
+                    )
 
     def _relay_publish_to_peer(self, frame_bytes: bytes, peer_id: str) -> bool:
         """Mirror one chat frame to a single internet-reachable peer.
@@ -8316,40 +9793,42 @@ class Application:
         is_chunk = False
         try:
             from internal.protocol.codec import decode_message
+
             decoded = decode_message(frame_bytes)
             is_chunk = getattr(decoded, "msg_type", "") == "file_chunk"
         except Exception:
-            logger.debug("relay publish to peer: frame decode failed",
-                         exc_info=True)
+            logger.debug("relay publish to peer: frame decode failed", exc_info=True)
         from internal.transport.relay import (
-            derive_key, derive_topic, netpair_key, netpair_topic,
+            derive_key,
+            derive_topic,
+            netpair_key,
+            netpair_topic,
         )
+
         secret = (getattr(self.cfg, "netpair_secrets", {}) or {}).get(peer_id)
         if isinstance(secret, str) and secret:
             topic, key = netpair_topic(secret), netpair_key(secret, self._netpair_pw())
         else:
-            peer_secret = (
-                getattr(self.cfg, "peer_relay_secrets", {}) or {}).get(peer_id)
+            peer_secret = (getattr(self.cfg, "peer_relay_secrets", {}) or {}).get(peer_id)
             peer = self.cfg.peers.get(peer_id)
-            if not peer_secret or peer is None \
-                    or not getattr(peer, "paired", False):
+            if not peer_secret or peer is None or not getattr(peer, "paired", False):
                 return False
             my_secret = self._ensure_relay_secret()
-            topic, key = (derive_topic(my_secret, peer_secret),
-                          derive_key(my_secret, peer_secret))
+            topic, key = (derive_topic(my_secret, peer_secret), derive_key(my_secret, peer_secret))
         try:
-            ok = transport.publish(
-                frame_bytes, topic, key, qos=1 if is_chunk else 0) is True
+            ok = transport.publish(frame_bytes, topic, key, qos=1 if is_chunk else 0) is True
         except Exception:
-            logger.debug("relay publish to %s failed", str(peer_id)[:12],
-                         exc_info=True)
+            logger.debug("relay publish to %s failed", str(peer_id)[:12], exc_info=True)
             return False
         # Round 17: relayed CHAT frames get a delivery receipt too (ledger
         # sent → ack → delivered / failed), same relay_ack mechanism as
         # clipboard.  No offline queue for chat — that stays clipboard-only.
-        if ok and decoded is not None \
-                and getattr(decoded, "msg_type", "") in CHAT_MSG_TYPES \
-                and hasattr(self, "_delivery_ledger"):
+        if (
+            ok
+            and decoded is not None
+            and getattr(decoded, "msg_type", "") in CHAT_MSG_TYPES
+            and hasattr(self, "_delivery_ledger")
+        ):
             try:
                 payload = getattr(decoded, "_raw_payload", {}) or {}
                 sid = payload.get("session_id", "")
@@ -8357,8 +9836,7 @@ class Application:
                     peer_id,
                     getattr(decoded, "msg_id", "") or "",
                     "",
-                    self._delivery_chat_preview(getattr(decoded, "msg_type", ""),
-                                                payload),
+                    self._delivery_chat_preview(getattr(decoded, "msg_type", ""), payload),
                     kind=getattr(decoded, "msg_type", "chat"),
                     session_id=str(sid) if isinstance(sid, str) else "",
                 )
@@ -8377,11 +9855,18 @@ class Application:
     def _delivery_queue_path(self) -> "Path":
         """Path of the persisted offline-queue file (atomic-write target)."""
         from internal.config.config import _config_dir
+
         return _config_dir() / RELAY_PENDING_FILE
 
-    def _delivery_ws(self, peer_id: str, msg_id: str, status: str,
-                     content_hash: str = "", kind: str = "clipboard",
-                     session_id: str = "") -> None:
+    def _delivery_ws(
+        self,
+        peer_id: str,
+        msg_id: str,
+        status: str,
+        content_hash: str = "",
+        kind: str = "clipboard",
+        session_id: str = "",
+    ) -> None:
         """Broadcast an ``internet_delivery`` WS event to every web client.
 
         ``kind`` discriminates clipboard ("clipboard") from relayed chat frames
@@ -8391,14 +9876,17 @@ class Application:
         """
         try:
             if getattr(self, "web_server", None) is not None:
-                self.web_server.ws_manager.broadcast("internet_delivery", {
-                    "peer_id": peer_id,
-                    "msg_id": msg_id,
-                    "status": status,
-                    "content_hash": content_hash or "",
-                    "kind": kind or "clipboard",
-                    "session_id": session_id or "",
-                })
+                self.web_server.ws_manager.broadcast(
+                    "internet_delivery",
+                    {
+                        "peer_id": peer_id,
+                        "msg_id": msg_id,
+                        "status": status,
+                        "content_hash": content_hash or "",
+                        "kind": kind or "clipboard",
+                        "session_id": session_id or "",
+                    },
+                )
         except Exception:
             logger.debug("internet_delivery WS broadcast failed", exc_info=True)
 
@@ -8457,13 +9945,18 @@ class Application:
                 if led is not None and _mid in led:
                     led[_mid]["status"] = "failed"
                     led[_mid]["deadline"] = None
-                    self._delivery_ws(peer_id, _mid, "failed",
-                                      oldest.get("content_hash", ""),
-                                      oldest.get("kind", "clipboard"),
-                                      oldest.get("session_id", ""))
+                    self._delivery_ws(
+                        peer_id,
+                        _mid,
+                        "failed",
+                        oldest.get("content_hash", ""),
+                        oldest.get("kind", "clipboard"),
+                        oldest.get("session_id", ""),
+                    )
 
-    def _delivery_content_delivered(self, peer_id: str, content_hash: str,
-                                    skip_msg_id: str | None = None) -> bool:
+    def _delivery_content_delivered(
+        self, peer_id: str, content_hash: str, skip_msg_id: str | None = None
+    ) -> bool:
         """True when the same content_hash already reached ``peer_id``.
 
         Content-level ack fallback: a broker redelivery / re-copy of content
@@ -8475,14 +9968,19 @@ class Application:
         for e in (self._delivery_ledger.get(peer_id) or {}).values():
             if e.get("msg_id") == skip_msg_id:
                 continue
-            if e.get("content_hash") == content_hash \
-                    and e.get("status") == "delivered":
+            if e.get("content_hash") == content_hash and e.get("status") == "delivered":
                 return True
         return False
 
-    def _delivery_on_sent(self, peer_id: str, msg_id: str, content_hash: str,
-                          preview: str, kind: str = "clipboard",
-                          session_id: str = "") -> None:
+    def _delivery_on_sent(
+        self,
+        peer_id: str,
+        msg_id: str,
+        content_hash: str,
+        preview: str,
+        kind: str = "clipboard",
+        session_id: str = "",
+    ) -> None:
         """Record a freshly-published send (clipboard or relayed chat) in the ledger."""
         if not peer_id or not msg_id:
             return
@@ -8500,7 +9998,8 @@ class Application:
                 "session_id": session_id or "",
             }
             if content_hash and self._delivery_content_delivered(
-                    peer_id, content_hash, skip_msg_id=msg_id):
+                peer_id, content_hash, skip_msg_id=msg_id
+            ):
                 led[msg_id]["status"] = "delivered"
                 led[msg_id]["deadline"] = None
                 status = "delivered"
@@ -8508,18 +10007,26 @@ class Application:
                 status = "sent"
             q = self._delivery_queue.get(peer_id)
             if q and msg_id in q:
-                del q[msg_id]          # defensive: never double-track a msg
+                del q[msg_id]  # defensive: never double-track a msg
                 self._delivery_persist_queue()
             self._delivery_bounded(peer_id)
         self._delivery_ws(peer_id, msg_id, status, content_hash, kind, session_id)
 
-    def _delivery_enqueue(self, peer_id: str, msg_id: str, content_hash: str,
-                          preview: str, frame_bytes: bytes,
-                          kind: str = "clipboard", session_id: str = "") -> None:
+    def _delivery_enqueue(
+        self,
+        peer_id: str,
+        msg_id: str,
+        content_hash: str,
+        preview: str,
+        frame_bytes: bytes,
+        kind: str = "clipboard",
+        session_id: str = "",
+    ) -> None:
         """Persist a clipboard frame that could not be published right now."""
         if not peer_id or not msg_id:
             return
         import base64 as _b
+
         with self._delivery_lock:
             q = self._delivery_queue.setdefault(peer_id, OrderedDict())
             if msg_id in q:
@@ -8553,6 +10060,7 @@ class Application:
         """Atomically write the offline queue to disk (crash-safe)."""
         try:
             import json as _json
+
             path = self._delivery_queue_path()
             # Nothing to persist and no stale file to clear — skip the write so
             # a fresh install doesn't create an empty relay_pending.json.
@@ -8561,8 +10069,7 @@ class Application:
             path.parent.mkdir(parents=True, exist_ok=True)
             tmp = path.with_name(path.name + ".tmp")
             tmp.write_text(
-                _json.dumps({"version": 1, "peers": self._delivery_queue},
-                            ensure_ascii=False),
+                _json.dumps({"version": 1, "peers": self._delivery_queue}, ensure_ascii=False),
                 encoding="utf-8",
             )
             os.replace(tmp, path)
@@ -8573,6 +10080,7 @@ class Application:
         """Load a previously persisted offline queue into memory at startup."""
         try:
             import json as _json
+
             path = self._delivery_queue_path()
             if not path.exists():
                 return
@@ -8591,8 +10099,7 @@ class Application:
                     if not od:
                         continue
                     self._delivery_queue[peer_id] = od
-                    led = self._delivery_ledger.setdefault(
-                        peer_id, OrderedDict())
+                    led = self._delivery_ledger.setdefault(peer_id, OrderedDict())
                     for msg_id, e in od.items():
                         led[msg_id] = {
                             "msg_id": msg_id,
@@ -8618,7 +10125,8 @@ class Application:
                 return
             content_hash = entry.get("content_hash", "")
             if content_hash and self._delivery_content_delivered(
-                    peer_id, content_hash, skip_msg_id=msg_id):
+                peer_id, content_hash, skip_msg_id=msg_id
+            ):
                 entry["status"] = "delivered"
                 entry["deadline"] = None
                 status = "delivered"
@@ -8637,8 +10145,7 @@ class Application:
             expired = []
             for peer_id, led in list(self._delivery_ledger.items()):
                 for msg_id, e in list(led.items()):
-                    if e.get("status") == "sent" and e.get("deadline") \
-                            and e["deadline"] <= now:
+                    if e.get("status") == "sent" and e.get("deadline") and e["deadline"] <= now:
                         expired.append((peer_id, msg_id))
         for peer_id, msg_id in expired:
             try:
@@ -8664,11 +10171,11 @@ class Application:
         for msg_id, entry in items:
             try:
                 import base64 as _b
+
                 frame_bytes = _b.b64decode(entry.get("frame_b64", "") or "")
                 ok = self._relay_publish_to_peer(frame_bytes, peer_id)
             except Exception:
-                logger.debug("delivery republish to %s failed",
-                             str(peer_id)[:12], exc_info=True)
+                logger.debug("delivery republish to %s failed", str(peer_id)[:12], exc_info=True)
                 ok = False
             with self._delivery_lock:
                 q2 = self._delivery_queue.get(peer_id)
@@ -8677,8 +10184,7 @@ class Application:
                 content_hash = entry.get("content_hash", "")
                 if ok:
                     del q2[msg_id]
-                    led = self._delivery_ledger.setdefault(
-                        peer_id, OrderedDict())
+                    led = self._delivery_ledger.setdefault(peer_id, OrderedDict())
                     now = time.time()
                     led[msg_id] = {
                         "msg_id": msg_id,
@@ -8691,23 +10197,31 @@ class Application:
                         "session_id": entry.get("session_id", ""),
                     }
                     changed = True
-                    self._delivery_ws(peer_id, msg_id, "sent", content_hash,
-                                      entry.get("kind", "clipboard"),
-                                      entry.get("session_id", ""))
+                    self._delivery_ws(
+                        peer_id,
+                        msg_id,
+                        "sent",
+                        content_hash,
+                        entry.get("kind", "clipboard"),
+                        entry.get("session_id", ""),
+                    )
                 else:
                     q2[msg_id]["retries"] = entry.get("retries", 0) + 1
                     if q2[msg_id]["retries"] >= MAX_QUEUE_RETRIES:
                         del q2[msg_id]
-                        led = self._delivery_ledger.setdefault(
-                            peer_id, OrderedDict())
+                        led = self._delivery_ledger.setdefault(peer_id, OrderedDict())
                         if msg_id in led:
                             led[msg_id]["status"] = "failed"
                             led[msg_id]["deadline"] = None
                         changed = True
-                        self._delivery_ws(peer_id, msg_id, "failed",
-                                          content_hash,
-                                          entry.get("kind", "clipboard"),
-                                          entry.get("session_id", ""))
+                        self._delivery_ws(
+                            peer_id,
+                            msg_id,
+                            "failed",
+                            content_hash,
+                            entry.get("kind", "clipboard"),
+                            entry.get("session_id", ""),
+                        )
                 if not q2:
                     self._delivery_queue.pop(peer_id, None)
         if changed:
@@ -8724,8 +10238,7 @@ class Application:
             try:
                 self._delivery_retry_peer(pid)
             except Exception:
-                logger.debug("delivery retry for %s failed",
-                             str(pid)[:12], exc_info=True)
+                logger.debug("delivery retry for %s failed", str(pid)[:12], exc_info=True)
 
     def _delivery_peer_active(self, peer_id: str) -> None:
         """Retry a peer's queue when any frame from it arrives (active signal)."""
@@ -8749,7 +10262,8 @@ class Application:
         self._delivery_stop_evt.clear()
         self._delivery_load_queue()
         self._delivery_thread = threading.Thread(
-            target=self._delivery_run, name="internet-delivery", daemon=True)
+            target=self._delivery_run, name="internet-delivery", daemon=True
+        )
         self._delivery_thread.start()
 
     def _delivery_stop(self) -> None:
@@ -8796,8 +10310,7 @@ class Application:
         """Lightweight loop: 2s timeout scan, 60s queue retry, 1s granularity."""
         last_scan = time.monotonic()
         last_retry = time.monotonic()
-        while not getattr(self, "_delivery_stop_evt",
-                          threading.Event()).wait(1.0):
+        while not getattr(self, "_delivery_stop_evt", threading.Event()).wait(1.0):
             now = time.monotonic()
             if now - last_scan >= DELIVERY_SCAN_INTERVAL:
                 try:
@@ -8838,8 +10351,7 @@ class Application:
             if q and msg_id in q:
                 del q[msg_id]
                 self._delivery_persist_queue()
-        self._delivery_ws(peer_id, msg_id, "delivered", content_hash,
-                          kind, session_id)
+        self._delivery_ws(peer_id, msg_id, "delivered", content_hash, kind, session_id)
 
     def _maybe_send_relay_ack(self, msg, peer_id: str | None) -> None:
         """Ack a relayed clipboard / chat frame that the receiver accepted.
@@ -8857,17 +10369,16 @@ class Application:
             if not self._peer_is_internet_reachable(peer_id):
                 return
             ack_frame = encode_frame(
-                {"msg_type": "relay_ack",
-                 "msg_id": getattr(msg, "msg_id", ""),
-                 "ts": time.time()},
+                {"msg_type": "relay_ack", "msg_id": getattr(msg, "msg_id", ""), "ts": time.time()},
                 source_device=self.cfg.device_id,
             )
             self._relay_publish_to_peer(ack_frame, peer_id)
         except Exception:
             logger.debug("relay ack send failed", exc_info=True)
 
-    def _delivery_render_sends(self, peer_id: str, led: dict,
-                               queue: dict, now: float) -> list[dict]:
+    def _delivery_render_sends(
+        self, peer_id: str, led: dict, queue: dict, now: float
+    ) -> list[dict]:
         """REST row list for one peer's ledger, newest first, capped at 20."""
         out: list[dict] = []
         for msg_id, e in led.items():
@@ -8877,15 +10388,17 @@ class Application:
             else:
                 status = e.get("status", "sent")
                 ts = e.get("ts", now)
-            out.append({
-                "msg_id": msg_id,
-                "ts": ts,
-                "status": status,
-                "preview": e.get("preview", ""),
-                "content_hash": e.get("content_hash", ""),
-                "kind": e.get("kind", "clipboard"),
-                "session_id": e.get("session_id", ""),
-            })
+            out.append(
+                {
+                    "msg_id": msg_id,
+                    "ts": ts,
+                    "status": status,
+                    "preview": e.get("preview", ""),
+                    "content_hash": e.get("content_hash", ""),
+                    "kind": e.get("kind", "clipboard"),
+                    "session_id": e.get("session_id", ""),
+                }
+            )
         out.sort(key=lambda s: float(s.get("ts", 0.0) or 0.0), reverse=True)
         return out[:20]
 
@@ -8910,8 +10423,7 @@ class Application:
                 queue = self._delivery_queue.get(pid, {})
                 total_pending += len(queue)
                 sends.extend(self._delivery_render_sends(pid, led, queue, now))
-            sends.sort(key=lambda s: float(s.get("ts", 0.0) or 0.0),
-                       reverse=True)
+            sends.sort(key=lambda s: float(s.get("ts", 0.0) or 0.0), reverse=True)
             return {"pending": total_pending, "sends": sends[:20]}
 
     def _delivery_counts(self) -> dict:
@@ -8924,8 +10436,10 @@ class Application:
     def _netpair_generate(self) -> tuple[dict, int]:
         """Generate a fresh internet pairing code for THIS device (REST)."""
         from internal.transport.relay import (
-            generate_netpair_code, generate_netpair_secret,
+            generate_netpair_code,
+            generate_netpair_secret,
         )
+
         if not self.cfg.internet_sync_enabled:
             return {"ok": False, "error": "internet sync is off"}, 400
         secret = generate_netpair_secret()
@@ -8948,6 +10462,7 @@ class Application:
     def _netpair_enter(self, code: str) -> tuple[dict, int]:
         """Enter a pairing code from another device and send our hello (REST)."""
         from internal.transport.relay import decode_netpair_code
+
         decoded = decode_netpair_code(code)
         if decoded is None:
             return {"ok": False, "error": "invalid pairing code"}, 400
@@ -8957,9 +10472,15 @@ class Application:
         # Entering a code we generated ourselves is a no-op: the code's
         # device tag is our own, so this would only pair us with ourselves.
         from internal.transport.relay import netpair_device_tag
+
         if peer_id == netpair_device_tag(self.cfg.device_id):
-            return {"ok": False,
-                    "error": "cannot pair with this device"}, 400
+            return {"ok": False, "error": "cannot pair with this device"}, 400
+        # The hello rides the relay — if it isn't actually online the code
+        # would persist but the pairing would silently never complete.  Read
+        # the transport directly (mocks may not bind _get_relay_state).
+        relay = getattr(self, "_relay", None)
+        if relay is None or getattr(relay, "state", "online") != "online":
+            return {"ok": False, "error": "relay not connected"}, 503
         self.cfg.netpair_secrets[peer_id] = secret
         try:
             self._save_cfg_and_peers()
@@ -8987,16 +10508,13 @@ class Application:
         if now is None:
             now = time.time()
         peers = []
-        from internal.transport.relay import NETPAIR_ALPHABET
-        for pid in (getattr(self.cfg, "netpair_secrets", {}) or {}):
+        for pid in getattr(self.cfg, "netpair_secrets", {}) or {}:
             # A provisional base32 tag key (see _netpair_enter) is NOT a
             # confirmed pair — it only means "we entered a code and haven't
             # confirmed the peer's identity yet".  Skipping it here prevents
-            # the phantom "paired" entry the F04 self-heal is cleaning up.
-            # The tag is exactly a 4-char string from the code alphabet; a
-            # real 12-hex device id can never match that shape.
-            if isinstance(pid, str) and len(pid) == 4 \
-                    and all(c in NETPAIR_ALPHABET for c in pid):
+            # the phantom "paired" entry the F04 self-heal is cleaning up
+            # (and _netpair_drop_provisional sweeps at startup).
+            if _is_provisional_netpair_key(pid):
                 continue
             alias = (getattr(self.cfg, "netpair_aliases", {}) or {}).get(pid, "")
             name = getattr(self, "_netpair_names", {}).get(pid, "")
@@ -9005,21 +10523,21 @@ class Application:
                 if peer is not None:
                     name = getattr(peer, "device_name", "")
             last_seen = getattr(self, "_netpair_last_seen", {}).get(pid)
-            online = (last_seen is not None
-                      and (now - last_seen) <= NETPAIR_ONLINE_WINDOW)
-            peers.append({
-                "peer_id": pid,
-                "name": name,
-                "alias": alias,
-                "online": bool(online),
-                "last_seen": last_seen,
-                "paired": True,
-            })
+            online = last_seen is not None and (now - last_seen) <= NETPAIR_ONLINE_WINDOW
+            peers.append(
+                {
+                    "peer_id": pid,
+                    "name": name,
+                    "alias": alias,
+                    "online": bool(online),
+                    "last_seen": last_seen,
+                    "paired": True,
+                }
+            )
         peers.sort(key=lambda p: p["peer_id"])
         return {"generated_code": code, "peers": peers}, 200
 
-    def _netpair_rename(self, peer_id: str,
-                        name: str | None = None) -> tuple[dict, int]:
+    def _netpair_rename(self, peer_id: str, name: str | None = None) -> tuple[dict, int]:
         """Set or clear this device's alias for an internet-paired peer (REST).
 
         Local-only: the peer is never told.  ``name`` empty (or whitespace)
@@ -9080,7 +10598,8 @@ class Application:
         try:
             if getattr(self, "web_server", None) is not None:
                 self.web_server.ws_manager.broadcast(
-                    "netpair_peer", {"peer_id": peer_id, "status": "unpaired"})
+                    "netpair_peer", {"peer_id": peer_id, "status": "unpaired"}
+                )
         except Exception:
             logger.debug("netpair_peer unpair WS broadcast failed", exc_info=True)
         return {"ok": True}, 200
@@ -9096,6 +10615,7 @@ class Application:
         saving them).
         """
         from internal.transport.relay import probe_relay_endpoint
+
         brokers = None
         if isinstance(body, dict):
             cand = body.get("brokers")
@@ -9113,25 +10633,28 @@ class Application:
             with _lock:
                 results.append(r)
 
-        threads = [
-            threading.Thread(target=_probe, args=(b,), daemon=True) for b in brokers
-        ]
+        threads = [threading.Thread(target=_probe, args=(b,), daemon=True) for b in brokers]
         for t in threads:
             t.start()
         for t in threads:
             t.join(timeout=6.0)
         ok_count = sum(1 for r in results if r.get("ok"))
-        results.sort(key=lambda r: (
-            not r.get("ok"), r.get("latency_ms") is None, r.get("latency_ms") or 0,
-        ))
+        results.sort(
+            key=lambda r: (
+                not r.get("ok"),
+                r.get("latency_ms") is None,
+                r.get("latency_ms") or 0,
+            )
+        )
         return {
             "ok": True,
             "results": results,
             "summary": f"{ok_count}/{len(brokers)} reachable",
         }, 200
 
-    def _handle_device_probe(self, msg_type: str, payload: dict,
-                             peer_id: str, via_relay: bool) -> None:
+    def _handle_device_probe(
+        self, msg_type: str, payload: dict, peer_id: str, via_relay: bool
+    ) -> None:
         """A ``device_ping``/``device_pong`` from a paired peer.
 
         A ping is answered with a pong echoing the same ping_id + ts, sent back
@@ -9178,6 +10701,10 @@ class Application:
         ``channel`` is ``lan`` and/or ``relay`` — whichever the peer is
         reachable through.  Each channel gets its own device_ping; a pong must
         echo the same ping_id back within ``DEVICE_PING_TIMEOUT`` seconds.
+
+        The timeout is only spent on channels whose ping actually went out: a
+        send that fails up-front is decided immediately, so a peer that cannot
+        be reached at all answers right away rather than after a pointless wait.
         """
         lan_channels: list[str] = []
         try:
@@ -9185,14 +10712,12 @@ class Application:
             if peer_id in connected:
                 lan_channels = ["lan"]
         except Exception:
-            logger.debug("device test: LAN connectivity check failed",
-                         exc_info=True)
+            logger.debug("device test: LAN connectivity check failed", exc_info=True)
         relay_ok = False
         try:
             relay_ok = bool(self._peer_is_internet_reachable(peer_id))
         except Exception:
-            logger.debug("device test: relay reachability check failed",
-                         exc_info=True)
+            logger.debug("device test: relay reachability check failed", exc_info=True)
         channels = lan_channels + (["relay"] if relay_ok else [])
         if not channels:
             return {
@@ -9209,7 +10734,8 @@ class Application:
                     "send_ts": time.monotonic(),
                     "latency_ms": None,
                     "error": "timeout",
-                } for c in channels
+                }
+                for c in channels
             },
             "replied": set(),
             "event": threading.Event(),
@@ -9223,21 +10749,41 @@ class Application:
             {"msg_type": "device_ping", "ping_id": ping_id, "ts": ts},
             source_device=self.cfg.device_id,
         )
+        unsent: set[str] = set()
         for c in channels:
             try:
                 if c == "lan":
-                    self.transport_mgr.send_to_peer(peer_id, frame)
+                    # send_to_peer RETURNS False on failure (it does not raise),
+                    # so the return value is the only signal that the frame never
+                    # left this machine — ignoring it made a dead LAN peer wait
+                    # out the full timeout and then lie about the reason.
+                    sent = bool(self.transport_mgr.send_to_peer(peer_id, frame))
+                    if not sent:
+                        entry["results"][c]["error"] = "send_failed"
                 else:
                     # publish returns False when the relay client is absent /
                     # not connected / internet_sync off — that is a distinct
                     # "relay offline" result, not a timeout (no pong can ever
                     # arrive for a frame that was never handed to the broker).
-                    if not self._relay_publish_to_peer(frame, peer_id):
+                    sent = bool(self._relay_publish_to_peer(frame, peer_id))
+                    if not sent:
                         entry["results"][c]["error"] = "relay_offline"
             except Exception:
-                logger.debug("device test: %s ping send failed", c,
-                             exc_info=True)
+                logger.debug("device test: %s ping send failed", c, exc_info=True)
                 entry["results"][c]["error"] = "send_failed"
+                sent = False
+            if not sent:
+                unsent.add(c)
+        # A channel whose ping never went out can never be ponged, so it is
+        # already decided — record it as resolved (``replied`` gates the wait
+        # below, i.e. "no longer waiting on this channel").  Without this the
+        # probe burned the whole DEVICE_PING_TIMEOUT waiting for a reply to a
+        # frame that was never sent; when EVERY channel failed to send, the
+        # loop's first check now breaks immediately and the probe returns at
+        # once instead of freezing the button for 4 seconds.
+        if unsent:
+            with self._device_probes_lock:
+                entry["replied"].update(unsent)
         # Wait for every channel to pong (or the timeout to elapse).
         deadline = time.monotonic() + DEVICE_PING_TIMEOUT
         while time.monotonic() < deadline:
@@ -9269,6 +10815,7 @@ class Application:
             return
         try:
             from internal.transport.relay import netpair_key, netpair_topic
+
             payload = {
                 "msg_type": "netpair_hello",
                 "peer_id": target_peer_id,
@@ -9280,9 +10827,9 @@ class Application:
         except Exception:
             logger.debug("netpair hello publish failed", exc_info=True)
 
-    def _handle_netpair_hello(self, payload: dict,
-                              source_device: str | None,
-                              topic: str | None) -> None:
+    def _handle_netpair_hello(
+        self, payload: dict, source_device: str | None, topic: str | None
+    ) -> None:
         """A netpair_hello arrived on one of our netpair channels.
 
         Two roles, distinguished by the hello's ``peer_id`` field:
@@ -9302,6 +10849,7 @@ class Application:
         if secret is None:
             return
         from internal.transport.relay import netpair_device_tag
+
         incoming_tag = payload.get("peer_id")
         peer_id = source_device if isinstance(source_device, str) else ""
         # A frame from ourselves (e.g. entering our own code on the same
@@ -9315,8 +10863,11 @@ class Application:
             if not peer_id:
                 return
             # Re-key the provisional tag entry for this secret to the real id.
-            for k in [k for k, v in (getattr(self.cfg, "netpair_secrets", {}) or {}).items()
-                      if v == secret and k != peer_id]:
+            for k in [
+                k
+                for k, v in (getattr(self.cfg, "netpair_secrets", {}) or {}).items()
+                if v == secret and k != peer_id
+            ]:
                 self.cfg.netpair_secrets.pop(k, None)
             self.cfg.netpair_secrets[peer_id] = secret
             name = payload.get("device_name") or peer_id
@@ -9329,8 +10880,9 @@ class Application:
             name = payload.get("device_name") or peer_id
             self._netpair_names[peer_id] = name
             # The pairing is confirmed — drop the pending code entry.
-            for code in [c for c, s in getattr(self, "_netpair_pending", {}).items()
-                         if s == secret]:
+            for code in [
+                c for c, s in getattr(self, "_netpair_pending", {}).items() if s == secret
+            ]:
                 self._netpair_pending.pop(code, None)
             # Reply so the enterer also confirms identity.
             self._send_netpair_hello(peer_id, secret)
@@ -9364,10 +10916,15 @@ class Application:
                 # applyNetpairPeer sets online/last_seen from these and nothing
                 # refetches while the Devices tab is open.
                 self.web_server.ws_manager.broadcast(
-                    "netpair_peer", {"peer_id": peer_id, "name": name,
-                                     "status": "paired",
-                                     "online": True,
-                                     "last_seen": int(time.time())})
+                    "netpair_peer",
+                    {
+                        "peer_id": peer_id,
+                        "name": name,
+                        "status": "paired",
+                        "online": True,
+                        "last_seen": int(time.time()),
+                    },
+                )
         except Exception:
             logger.debug("netpair_peer WS broadcast failed", exc_info=True)
 
@@ -9423,8 +10980,11 @@ class Application:
         self.cfg.sync_enabled = actual
         self._save_cfg_encrypted()
         self._set_systray_syncing(actual)
-        self._notify("notify_sync", T("ui.clipboard_sync"),
-                     T("notify.sync_active") if actual else T("notify.sync_paused"))
+        self._notify(
+            "notify_sync",
+            T("ui.clipboard_sync"),
+            T("notify.sync_active") if actual else T("notify.sync_paused"),
+        )
         logger.info("Sync %s", "enabled" if actual else "paused")
 
 
@@ -9449,10 +11009,24 @@ def _prewarm_codecs() -> None:
     import locale
 
     _names = {
-        "ascii", "latin-1", "utf-8", "utf-8-sig", "utf-16", "utf-16-le",
-        "utf-16-be", "utf-32", "utf-32-le", "utf-32-be",
-        "unicode_escape", "raw_unicode_escape", "hex", "base64_codec",
-        "idna", "punycode", "cp1252", "cp437",
+        "ascii",
+        "latin-1",
+        "utf-8",
+        "utf-8-sig",
+        "utf-16",
+        "utf-16-le",
+        "utf-16-be",
+        "utf-32",
+        "utf-32-le",
+        "utf-32-be",
+        "unicode_escape",
+        "raw_unicode_escape",
+        "hex",
+        "base64_codec",
+        "idna",
+        "punycode",
+        "cp1252",
+        "cp437",
     }
     # Path.read_text()/write_text() without an explicit encoding fall back to
     # the locale's preferred encoding (e.g. cp936/gbk on zh-CN Windows), which
@@ -9468,10 +11042,8 @@ def _prewarm_codecs() -> None:
         if _enc:
             _names.add(_enc)
     for _name in _names:
-        try:
+        with contextlib.suppress(Exception):
             codecs.lookup(_name)
-        except Exception:
-            pass
 
 
 def main():

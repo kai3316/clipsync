@@ -12,12 +12,20 @@ import pytest
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from internal.protocol.codec import decode_message, encode_frame
+from internal.sync import file_transfer as file_transfer_mod
 from internal.sync.file_transfer import (
     CHUNK_SIZE,
     FileTransferManager,
     _guess_mime_type,
     _safe_remove,
 )
+
+
+@pytest.fixture
+def fast_stall_grace(monkeypatch):
+    """Shrink the receiver's stall grace so gap tests do not sleep 5 s."""
+    monkeypatch.setattr(file_transfer_mod, "STALL_GRACE", 0.1)
+    return 0.1
 
 
 class TestMimeType:
@@ -119,10 +127,7 @@ class TestFileTransferManager:
         time.sleep(0.3)
 
         # Find the file_chunk message
-        chunks = [
-            self._decode_sent(i)
-            for i in range(len(self.sent_frames))
-        ]
+        chunks = [self._decode_sent(i) for i in range(len(self.sent_frames))]
         chunk_msgs = [c for c in chunks if c.get("msg_type") == "file_chunk"]
         assert len(chunk_msgs) == 1
         assert chunk_msgs[0]["chunk_index"] == 0
@@ -250,7 +255,12 @@ class TestFileTransferManager:
         # First create a pending incoming transfer
         self.mgr.handle_message(
             "file_request",
-            {"transfer_id": "rej001", "file_name": "x.txt", "file_size": 10, "mime_type": "text/plain"},
+            {
+                "transfer_id": "rej001",
+                "file_name": "x.txt",
+                "file_size": 10,
+                "mime_type": "text/plain",
+            },
             self._broadcast_fn,
         )
 
@@ -316,10 +326,7 @@ class TestFileTransferManager:
             for i in range(len(self.sent_frames))
             if self._decode_sent(i).get("msg_type") == "file_complete"
         ]
-        assert any(
-            c["transfer_id"] == tid and c["status"] == "success"
-            for c in completes
-        )
+        assert any(c["transfer_id"] == tid and c["status"] == "success" for c in completes)
 
     def test_receive_file_multi_chunk_out_of_order(self):
         """Chunks arrive in reverse order — should still assemble correctly."""
@@ -339,10 +346,7 @@ class TestFileTransferManager:
         )
 
         # Encode all chunks
-        chunks = [
-            file_data[i:i + chunk_size]
-            for i in range(0, len(file_data), chunk_size)
-        ]
+        chunks = [file_data[i : i + chunk_size] for i in range(0, len(file_data), chunk_size)]
 
         # Send in reverse order
         for idx in reversed(range(len(chunks))):
@@ -374,7 +378,12 @@ class TestFileTransferManager:
 
         self.mgr.handle_message(
             "file_request",
-            {"transfer_id": tid, "file_name": "collision.txt", "file_size": len(file_data), "mime_type": "text/plain"},
+            {
+                "transfer_id": tid,
+                "file_name": "collision.txt",
+                "file_size": len(file_data),
+                "mime_type": "text/plain",
+            },
             self._broadcast_fn,
         )
 
@@ -399,15 +408,24 @@ class TestFileTransferManager:
         received_args: list[tuple] = []
 
         self.mgr.set_on_transfer_progress(lambda tid, p: progress_vals.append(p))
-        self.mgr.set_on_transfer_complete(lambda tid, ok, cancelled, status: complete_args.append((tid, ok)))
-        self.mgr.set_on_file_received(lambda tid, path, name: received_args.append((tid, path, name)))
+        self.mgr.set_on_transfer_complete(
+            lambda tid, ok, cancelled, status: complete_args.append((tid, ok))
+        )
+        self.mgr.set_on_file_received(
+            lambda tid, path, name: received_args.append((tid, path, name))
+        )
 
         file_data = b"callback test data"
         tid = "cb_test"
 
         self.mgr.handle_message(
             "file_request",
-            {"transfer_id": tid, "file_name": "cb.txt", "file_size": len(file_data), "mime_type": "text/plain"},
+            {
+                "transfer_id": tid,
+                "file_name": "cb.txt",
+                "file_size": len(file_data),
+                "mime_type": "text/plain",
+            },
             self._broadcast_fn,
         )
 
@@ -437,7 +455,12 @@ class TestFileTransferManager:
 
         self.mgr.handle_message(
             "file_request",
-            {"transfer_id": tid, "file_name": "bad.txt", "file_size": 9999, "mime_type": "text/plain"},
+            {
+                "transfer_id": tid,
+                "file_name": "bad.txt",
+                "file_size": 9999,
+                "mime_type": "text/plain",
+            },
             self._broadcast_fn,
         )
 
@@ -461,15 +484,23 @@ class TestFileTransferManager:
         ]
         assert any(c.get("status") == "error_size_mismatch" for c in completes)
 
-    def test_missing_chunk_detected(self):
-        """Missing chunks trigger file_chunk_ack retransmit request, not immediate failure."""
+    def test_missing_chunk_detected(self, fast_stall_grace):
+        """A gap triggers a file_chunk_ack retransmit request, not immediate failure.
+
+        The sender never announces the end of its first pass, so the request is
+        emitted by the receiver's stall watchdog once the sender goes quiet with
+        chunks still missing -- not eagerly on the second-to-last chunk (which
+        used to strand any transfer missing two or more chunks).
+        """
         tid = "missing_chunk"
 
         self.mgr.handle_message(
             "file_request",
             {
-                "transfer_id": tid, "file_name": "gap.bin",
-                "file_size": CHUNK_SIZE * 2, "mime_type": "application/octet-stream",
+                "transfer_id": tid,
+                "file_name": "gap.bin",
+                "file_size": CHUNK_SIZE * 2,
+                "mime_type": "application/octet-stream",
             },
             self._broadcast_fn,
         )
@@ -482,7 +513,15 @@ class TestFileTransferManager:
                 self._broadcast_fn,
             )
 
-        time.sleep(0.1)
+        # Wait for the stall watchdog (grace shrunk to 0.1 s by the fixture).
+        deadline = time.time() + 5.0
+        while time.time() < deadline:
+            if any(
+                self._decode_sent(i).get("msg_type") == "file_chunk_ack"
+                for i in range(len(self.sent_frames))
+            ):
+                break
+            time.sleep(0.05)
 
         # File should NOT have been saved
         assert not (Path(self.output_dir) / "gap.bin").exists()
@@ -538,7 +577,9 @@ class TestFileTransferManager:
 
     def test_file_reject_cleans_up_outgoing(self):
         complete_calls: list[tuple] = []
-        self.mgr.set_on_transfer_complete(lambda tid, ok, cancelled, status: complete_calls.append((tid, ok)))
+        self.mgr.set_on_transfer_complete(
+            lambda tid, ok, cancelled, status: complete_calls.append((tid, ok))
+        )
 
         path = self._create_temp_file("reject_me.txt", 100)
         tid = self.mgr.send_file(path, self._broadcast_fn)
@@ -551,7 +592,9 @@ class TestFileTransferManager:
 
     def test_file_complete_success(self):
         complete_calls: list[tuple] = []
-        self.mgr.set_on_transfer_complete(lambda tid, ok, cancelled, status: complete_calls.append((tid, ok)))
+        self.mgr.set_on_transfer_complete(
+            lambda tid, ok, cancelled, status: complete_calls.append((tid, ok))
+        )
 
         path = self._create_temp_file("ok.txt", 50)
         tid = self.mgr.send_file(path, self._broadcast_fn)
@@ -567,7 +610,9 @@ class TestFileTransferManager:
 
     def test_file_complete_error_status(self):
         complete_calls: list[tuple] = []
-        self.mgr.set_on_transfer_complete(lambda tid, ok, cancelled, status: complete_calls.append((tid, ok)))
+        self.mgr.set_on_transfer_complete(
+            lambda tid, ok, cancelled, status: complete_calls.append((tid, ok))
+        )
 
         path = self._create_temp_file("err.txt", 50)
         tid = self.mgr.send_file(path, self._broadcast_fn)
@@ -624,7 +669,12 @@ class TestFileTransferManager:
     def test_get_transfers_incoming(self):
         self.mgr.handle_message(
             "file_request",
-            {"transfer_id": "snap_in", "file_name": "incoming.png", "file_size": 200, "mime_type": "image/png"},
+            {
+                "transfer_id": "snap_in",
+                "file_name": "incoming.png",
+                "file_size": 200,
+                "mime_type": "image/png",
+            },
             self._broadcast_fn,
         )
         transfers = self.mgr.get_transfers()
@@ -639,7 +689,12 @@ class TestFileTransferManager:
         # This requires manipulating start_time directly
         self.mgr.handle_message(
             "file_request",
-            {"transfer_id": "stale001", "file_name": "old.txt", "file_size": 10, "mime_type": "text/plain"},
+            {
+                "transfer_id": "stale001",
+                "file_name": "old.txt",
+                "file_size": 10,
+                "mime_type": "text/plain",
+            },
             self._broadcast_fn,
         )
 
@@ -650,7 +705,9 @@ class TestFileTransferManager:
                 self.mgr._transfers["stale001"]["_last_activity"] = 0  # epoch
 
         complete_calls: list[tuple] = []
-        self.mgr.set_on_transfer_complete(lambda tid, ok, cancelled, status: complete_calls.append((tid, ok)))
+        self.mgr.set_on_transfer_complete(
+            lambda tid, ok, cancelled, status: complete_calls.append((tid, ok))
+        )
 
         self.mgr.cleanup_stale_transfers()
 
@@ -679,7 +736,12 @@ class TestFileTransferManager:
         bad_mgr._output_dir = Path(bad_dir)  # bypass mkdir in __init__
         bad_mgr.handle_message(
             "file_request",
-            {"transfer_id": "diskerr", "file_name": "f.txt", "file_size": 10, "mime_type": "text/plain"},
+            {
+                "transfer_id": "diskerr",
+                "file_name": "f.txt",
+                "file_size": 10,
+                "mime_type": "text/plain",
+            },
             self._broadcast_fn,
         )
         # accept_transfer will fail to open temp file and send file_reject
@@ -702,7 +764,12 @@ class TestFileTransferManager:
         """Accepting a transfer that's already in 'receiving' state is a no-op."""
         self.mgr.handle_message(
             "file_request",
-            {"transfer_id": "twice", "file_name": "t.txt", "file_size": 10, "mime_type": "text/plain"},
+            {
+                "transfer_id": "twice",
+                "file_name": "t.txt",
+                "file_size": 10,
+                "mime_type": "text/plain",
+            },
             self._broadcast_fn,
         )
         # Already auto-accepted above, try accepting again
@@ -729,7 +796,9 @@ class TestFileTransferManager:
         os.unlink(path)
 
         complete_calls: list[tuple] = []
-        self.mgr.set_on_transfer_complete(lambda tid, ok, cancelled, status: complete_calls.append((tid, ok)))
+        self.mgr.set_on_transfer_complete(
+            lambda tid, ok, cancelled, status: complete_calls.append((tid, ok))
+        )
 
         self.mgr.handle_message("file_ack", {"transfer_id": tid}, self._broadcast_fn)
         time.sleep(0.2)
@@ -756,7 +825,12 @@ class TestFileTransferManager:
         """An ack for an incoming transfer should be a no-op."""
         self.mgr.handle_message(
             "file_request",
-            {"transfer_id": "inc", "file_name": "i.txt", "file_size": 10, "mime_type": "text/plain"},
+            {
+                "transfer_id": "inc",
+                "file_name": "i.txt",
+                "file_size": 10,
+                "mime_type": "text/plain",
+            },
             self._broadcast_fn,
         )
         sent_before = len(self.sent_frames)
@@ -773,7 +847,12 @@ class TestFileTransferManager:
         self.mgr.set_on_transfer_request(lambda *a: None)  # suppress auto-accept
         self.mgr.handle_message(
             "file_request",
-            {"transfer_id": "pend", "file_name": "p.txt", "file_size": 10, "mime_type": "text/plain"},
+            {
+                "transfer_id": "pend",
+                "file_name": "p.txt",
+                "file_size": 10,
+                "mime_type": "text/plain",
+            },
             self._broadcast_fn,
         )
         # Transfer is still "pending", chunk should be dropped
@@ -813,7 +892,12 @@ class TestFileTransferManager:
         tid = "zero_len"
         self.mgr.handle_message(
             "file_request",
-            {"transfer_id": tid, "file_name": "empty.txt", "file_size": 0, "mime_type": "text/plain"},
+            {
+                "transfer_id": tid,
+                "file_name": "empty.txt",
+                "file_size": 0,
+                "mime_type": "text/plain",
+            },
             self._broadcast_fn,
         )
 
@@ -905,11 +989,13 @@ class TestCodecMalformedTolerance:
         assert decode_message(frame) is None
 
     def test_bad_base64_type_skipped_message_survives(self):
-        frame = encode_frame({
-            "msg_type": "clipboard",
-            "types": {"TEXT": "!!!not-base64!!!"},
-            "timestamp": 1.0,
-        })
+        frame = encode_frame(
+            {
+                "msg_type": "clipboard",
+                "types": {"TEXT": "!!!not-base64!!!"},
+                "timestamp": 1.0,
+            }
+        )
         msg = decode_message(frame)
         assert msg is not None
         assert msg.msg_type == "clipboard"
@@ -1008,7 +1094,8 @@ class TestRealtimeSpeed:
 
         tid = mgr.send_file(str(src), lambda data: True)
         thread = threading.Thread(
-            target=mgr._send_chunks, args=(tid, lambda data: time.sleep(0.08)),
+            target=mgr._send_chunks,
+            args=(tid, lambda data: time.sleep(0.08)),
             daemon=True,
         )
         thread.start()
@@ -1055,9 +1142,7 @@ class TestRealtimeSpeed:
         # instead of showing a stale number.
         t = mgr._transfers[TID]
         old = time.monotonic() - (SPEED_STALE_AFTER + 1.0)
-        t["_rate_samples"] = type(t["_rate_samples"])(
-            (old, b) for _, b in t["_rate_samples"]
-        )
+        t["_rate_samples"] = type(t["_rate_samples"])((old, b) for _, b in t["_rate_samples"])
         row = mgr.get_transfers()[0]
         assert row["speed_bytes_per_sec"] == 0.0
         assert row["eta_seconds"] == 0.0
@@ -1127,7 +1212,8 @@ class TestSlowRetry:
         assert fake_timer.instances[-1].interval == MIN_RECONNECT_DELAY
         tm._schedule_reconnect("p")
         assert fake_timer.instances[-1].interval == max(
-            MIN_RECONNECT_DELAY, min(2 ** 1, MAX_RECONNECT_BACKOFF))
+            MIN_RECONNECT_DELAY, min(2**1, MAX_RECONNECT_BACKOFF)
+        )
 
     def test_no_permanent_giveup_past_max_attempts(self, fake_timer):
         tm = self._make_tm()
@@ -1166,12 +1252,15 @@ class TestSlowRetry:
 
 
 class TestPeerIdHashLinkage:
-    @pytest.mark.parametrize("device_id", [
-        "0123456789abcdef",
-        "device-with-dash-and-digits-42",
-        "unicode-ü-идентификатор",
-        "x",
-    ])
+    @pytest.mark.parametrize(
+        "device_id",
+        [
+            "0123456789abcdef",
+            "device-with-dash-and-digits-42",
+            "unicode-ü-идентификатор",
+            "x",
+        ],
+    )
     def test_matches_discovery_formula(self, device_id):
         from internal.transport.discovery import Discovery
 
@@ -1179,3 +1268,308 @@ class TestPeerIdHashLinkage:
 
     def test_is_sha256_prefix(self):
         assert peer_id_hash("abc") == hashlib.sha256(b"abc").hexdigest()[:12]
+
+
+# ---------------------------------------------------------------------------
+# file_transfer: history deletion by id
+# ---------------------------------------------------------------------------
+
+
+class TestDeleteHistoryById:
+    """The web UI's transfer-history context menu carries only a transfer_id.
+
+    ``delete_history_item`` matches on dict equality, so it only works for a
+    caller holding the very entry object ``get_history`` returned — a remote
+    caller cannot.  ``delete_history_by_id`` resolves the id under the lock.
+    """
+
+    def _mgr(self, tmp_path, *ids):
+        mgr = FileTransferManager(device_id="self", output_dir=str(tmp_path))
+        mgr._history = [{"transfer_id": i, "file_name": i + ".txt"} for i in ids]
+        return mgr
+
+    def test_deletes_the_matching_entry_only(self, tmp_path):
+        mgr = self._mgr(tmp_path, "a", "b", "c")
+        assert mgr.delete_history_by_id("b") is True
+        assert [e["transfer_id"] for e in mgr.get_history()] == ["a", "c"]
+
+    def test_unknown_id_reports_false_and_changes_nothing(self, tmp_path):
+        mgr = self._mgr(tmp_path, "a", "b")
+        assert mgr.delete_history_by_id("zzz") is False
+        assert [e["transfer_id"] for e in mgr.get_history()] == ["a", "b"]
+
+    def test_empty_id_is_rejected_rather_than_matching_a_row(self, tmp_path):
+        # A row with no transfer_id must not be swept away by a blank request.
+        mgr = FileTransferManager(device_id="self", output_dir=str(tmp_path))
+        mgr._history = [{"file_name": "orphan.txt"}]
+        assert mgr.delete_history_by_id("") is False
+        assert len(mgr.get_history()) == 1
+
+    def test_deleting_twice_reports_false_the_second_time(self, tmp_path):
+        mgr = self._mgr(tmp_path, "a")
+        assert mgr.delete_history_by_id("a") is True
+        assert mgr.delete_history_by_id("a") is False
+        assert mgr.get_history() == []
+
+    def test_removes_only_the_first_of_duplicate_ids(self, tmp_path):
+        # Duplicate ids shouldn't happen, but one call must delete one row.
+        mgr = self._mgr(tmp_path, "dup", "dup")
+        assert mgr.delete_history_by_id("dup") is True
+        assert len(mgr.get_history()) == 1
+
+
+class TestStalledIncomingTransfer:
+    """Receiver-side recovery when the sender's first pass leaves gaps.
+
+    The sender sends every chunk once, then waits ~150 s polling its
+    retransmit queue -- it never announces "first pass done".  So the receiver
+    must notice the silence.  The old trigger fired finalization when
+    ``received >= total - 1``, which meant a transfer missing two or more
+    chunks was never finalized at all: no ``file_chunk_ack`` was ever emitted
+    and the transfer sat until the stale sweep deleted the .part file.
+    """
+
+    def setup_method(self):
+        self.tmp_dir = tempfile.mkdtemp()
+        self.output_dir = os.path.join(self.tmp_dir, "output")
+        self.mgr = FileTransferManager("test-device", self.output_dir)
+        self.sent_frames: list[bytes] = []
+
+    def teardown_method(self):
+        self.mgr.cleanup_stale_transfers()
+
+    def _broadcast_fn(self, data):
+        self.sent_frames.append(data)
+
+    def _sent(self) -> list[dict]:
+        out = []
+        for frame in list(self.sent_frames):
+            msg = decode_message(frame)
+            if msg is not None:
+                out.append(getattr(msg, "_raw_payload", {}))
+        return out
+
+    def _of_type(self, msg_type: str) -> list[dict]:
+        return [m for m in self._sent() if m.get("msg_type") == msg_type]
+
+    def _wait_for(self, msg_type: str, timeout: float = 5.0) -> list[dict]:
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            found = self._of_type(msg_type)
+            if found:
+                return found
+            time.sleep(0.02)
+        return self._of_type(msg_type)
+
+    def _begin(self, tid: str, name: str, total: int):
+        self.chunks = [os.urandom(CHUNK_SIZE) for _ in range(total - 1)]
+        self.chunks.append(os.urandom(1024))  # short tail chunk
+        self.file_data = b"".join(self.chunks)
+        self.mgr.handle_message(
+            "file_request",
+            {
+                "transfer_id": tid,
+                "file_name": name,
+                "file_size": len(self.file_data),
+                "mime_type": "application/octet-stream",
+            },
+            self._broadcast_fn,
+        )
+
+    def _feed(self, tid: str, idx: int, total: int):
+        self.mgr.handle_message(
+            "file_chunk",
+            {
+                "transfer_id": tid,
+                "chunk_index": idx,
+                "total_chunks": total,
+                "data": base64.b64encode(self.chunks[idx]).decode("ascii"),
+            },
+            self._broadcast_fn,
+        )
+
+    def test_two_missing_chunks_are_requested_and_recovered(self, fast_stall_grace):
+        tid = "gap2"
+        total = 5
+        self._begin(tid, "twogaps.bin", total)
+
+        for idx in (0, 1, 4):  # 2 and 3 lost in flight
+            self._feed(tid, idx, total)
+
+        acks = self._wait_for("file_chunk_ack")
+        assert acks, "stall watchdog never requested the missing chunks"
+        assert acks[0]["missing_chunks"] == [2, 3]
+        assert not (Path(self.output_dir) / "twogaps.bin").exists()
+
+        for idx in (2, 3):
+            self._feed(tid, idx, total)
+
+        deadline = time.time() + 5.0
+        out = Path(self.output_dir) / "twogaps.bin"
+        while time.time() < deadline and not out.exists():
+            time.sleep(0.02)
+        assert out.exists()
+        assert out.read_bytes() == self.file_data
+
+    def test_complete_transfer_needs_no_retransmit_round(self, fast_stall_grace):
+        """A healthy transfer must not spend an ack round on its own last chunk."""
+        tid = "clean"
+        total = 3
+        self._begin(tid, "clean.bin", total)
+        for idx in range(total):
+            self._feed(tid, idx, total)
+
+        out = Path(self.output_dir) / "clean.bin"
+        deadline = time.time() + 5.0
+        while time.time() < deadline and not out.exists():
+            time.sleep(0.02)
+        assert out.read_bytes() == self.file_data
+        # The watchdog should have exited quietly, not asked for anything.
+        time.sleep(fast_stall_grace * 4)
+        assert self._of_type("file_chunk_ack") == []
+
+    def test_resume_re_requests_chunks_dropped_while_paused(self):
+        """Chunks arriving during a pause are discarded, so resume must re-ask.
+
+        Nothing on the sender re-sends them on its own -- the resume path used
+        to just send file_resume and rely on a retransmit that never came.
+        """
+        tid = "paused1"
+        total = 4
+        self._begin(tid, "paused.bin", total)
+        self._feed(tid, 0, total)
+
+        assert self.mgr.pause_transfer(tid, self._broadcast_fn) is True
+        for idx in (1, 2):  # dropped: receiver is paused
+            self._feed(tid, idx, total)
+        assert self.mgr.resume_transfer(tid, self._broadcast_fn) is True
+
+        acks = self._of_type("file_chunk_ack")
+        assert acks, "resume did not re-request the chunks lost during the pause"
+        assert acks[-1]["missing_chunks"] == [1, 2, 3]
+
+        for idx in (1, 2, 3):
+            self._feed(tid, idx, total)
+        out = Path(self.output_dir) / "paused.bin"
+        deadline = time.time() + 5.0
+        while time.time() < deadline and not out.exists():
+            time.sleep(0.02)
+        assert out.read_bytes() == self.file_data
+
+    def test_pause_does_not_delete_the_partial_file(self, fast_stall_grace):
+        """Finalization while paused must not burn a round or drop the .part."""
+        tid = "paused2"
+        total = 4
+        self._begin(tid, "keepme.bin", total)
+        for idx in (0, 1, 2):
+            self._feed(tid, idx, total)
+        assert self.mgr.pause_transfer(tid, self._broadcast_fn) is True
+
+        time.sleep(fast_stall_grace * 6)  # long enough to stall, if it counted
+
+        part = Path(self.output_dir) / f".{tid}.part"
+        assert part.exists(), "partial file was discarded during a pause"
+        with self.mgr._lock:
+            assert tid in self.mgr._transfers
+            assert self.mgr._transfers[tid].get("_ack_rounds", 0) == 0
+
+    def test_pause_is_exempt_from_the_idle_timeout(self):
+        tid = "paused3"
+        total = 3
+        self._begin(tid, "still-here.bin", total)
+        self._feed(tid, 0, total)
+        assert self.mgr.pause_transfer(tid, self._broadcast_fn) is True
+
+        with self.mgr._lock:
+            self.mgr._transfers[tid]["_last_activity"] = 0.0  # ancient
+        self.mgr.cleanup_stale_transfers()
+        with self.mgr._lock:
+            assert tid in self.mgr._transfers
+
+    def test_pause_past_the_absolute_cap_is_reaped(self, monkeypatch):
+        """An abandoned pause must not pin a thread, an fd and the .part forever."""
+        monkeypatch.setattr(file_transfer_mod, "PAUSED_MAX_SECONDS", 0.05)
+        tid = "paused4"
+        total = 3
+        self._begin(tid, "abandoned.bin", total)
+        self._feed(tid, 0, total)
+        assert self.mgr.pause_transfer(tid, self._broadcast_fn) is True
+
+        time.sleep(0.1)
+        self.mgr.cleanup_stale_transfers()
+        with self.mgr._lock:
+            assert tid not in self.mgr._transfers
+        assert not (Path(self.output_dir) / f".{tid}.part").exists()
+
+
+# ═════════════════════════════════════════════════════════════════════════
+# Stage 6 — two same-named files arriving at once must both survive
+# ═════════════════════════════════════════════════════════════════════════
+
+
+class TestDestinationNameIsClaimedAtomically:
+    """The old "while dest.exists(): bump counter" was a check followed by an
+    unprotected use.  Two transfers of the same name finishing together both
+    settled on the same "(1)" path, and one of the two files the user was
+    sent was silently lost (POSIX) or the transfer failed as error_disk
+    (Windows, where rename onto an existing path raises)."""
+
+    def test_free_name_is_used_as_is(self, tmp_path):
+        from internal.sync.file_transfer import _reserve_dest_name
+
+        got = _reserve_dest_name(tmp_path / "photo.png")
+        assert got == tmp_path / "photo.png"
+        assert got.exists(), "the name must be claimed, not merely chosen"
+
+    def test_each_caller_gets_a_distinct_name(self, tmp_path):
+        from internal.sync.file_transfer import _reserve_dest_name
+
+        names = [_reserve_dest_name(tmp_path / "photo.png") for _ in range(3)]
+        assert len(set(names)) == 3, "no two transfers may claim one path"
+        assert names[0].name == "photo.png"
+        assert names[1].name == "photo (1).png"
+        assert names[2].name == "photo (2).png"
+
+    def test_concurrent_claims_never_collide(self, tmp_path):
+        import threading
+
+        from internal.sync.file_transfer import _reserve_dest_name
+
+        claimed = []
+        lock = threading.Lock()
+        start = threading.Event()
+
+        def _claim():
+            start.wait(timeout=5)
+            got = _reserve_dest_name(tmp_path / "report.pdf")
+            with lock:
+                claimed.append(got)
+
+        threads = [threading.Thread(target=_claim) for _ in range(8)]
+        for t in threads:
+            t.start()
+        start.set()
+        for t in threads:
+            t.join(timeout=10)
+
+        assert len(claimed) == 8
+        assert len(set(claimed)) == 8, "every concurrent claim must be unique"
+
+    def test_gives_up_rather_than_spinning_forever(self, tmp_path):
+        from internal.sync.file_transfer import _reserve_dest_name
+
+        (tmp_path / "x.bin").write_bytes(b"")
+        for i in range(1, 1000):
+            (tmp_path / f"x ({i}).bin").write_bytes(b"")
+        with pytest.raises(OSError):
+            _reserve_dest_name(tmp_path / "x.bin")
+
+    def test_finalize_moves_the_payload_onto_its_own_placeholder(self, tmp_path):
+        """End to end: the reservation must not leave an empty file where the
+        received file should be."""
+        import inspect
+
+        src = inspect.getsource(FileTransferManager._finalize_received_file)
+        assert "_reserve_dest_name(dest_path)" in src
+        assert "os.replace(str(temp_path), str(dest_path))" in src
+        assert "os.rename(str(temp_path)" not in src

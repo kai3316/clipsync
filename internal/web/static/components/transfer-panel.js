@@ -270,6 +270,7 @@
             :key="tr.id"
             class="transfer-history-item card"
             :class="'transfer-history-item--' + (tr.direction === 'up' ? 'up' : 'down')"
+            @contextmenu.prevent="openTransferMenu(tr, $event)"
           >
             <div
               class="transfer-history-item__icon"
@@ -396,17 +397,10 @@
         uploadNext(0);
       },
       formatSpeed: function (bytesPerSec) {
-        if (!bytesPerSec || bytesPerSec === 0) return '';
-        if (bytesPerSec < 1024) return Math.round(bytesPerSec) + ' B/s';
-        if (bytesPerSec < 1024 * 1024) return (bytesPerSec / 1024).toFixed(1) + ' KB/s';
-        return (bytesPerSec / (1024 * 1024)).toFixed(1) + ' MB/s';
+        return ClipsyncFormat.speed(bytesPerSec);
       },
       formatSize: function (bytes) {
-        if (!bytes || bytes === 0) return '';
-        if (bytes < 1024) return bytes + ' B';
-        if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + ' KB';
-        if (bytes < 1024 * 1024 * 1024) return (bytes / (1024 * 1024)).toFixed(1) + ' MB';
-        return (bytes / (1024 * 1024 * 1024)).toFixed(2) + ' GB';
+        return ClipsyncFormat.size(bytes);
       },
       formatTimestamp: function (ts) {
         if (!ts) return '';
@@ -630,18 +624,11 @@
         // must not fire a duplicate transfer to the same peer.
         if (self.retryBusyId === id) return;
         self.retryBusyId = id;
-        ClipsyncAPI.retryTransfer(id).then(function (res) {
+        // The API call + failure toast + post-success refresh live in the
+        // shared store helper (the row's context menu delegates to it too);
+        // this method only owns the button's busy guard.
+        self.store.retryTransfer(id).then(function () {
           self.retryBusyId = '';
-          if (!res || res.ok === false) {
-            self.store.showToast(self.t('transfer.retry_failed'), 2000);
-            return;
-          }
-          // The fresh transfer shows up under Active via the reconcile below
-          // (plus the transfer_progress pushes that follow).
-          self._refreshTransfers().catch(function () {});
-        }).catch(function () {
-          self.retryBusyId = '';
-          self.store.showToast(self.t('transfer.retry_failed'), 2000);
         });
       },
       cancelAllTransfers: function () {
@@ -667,32 +654,31 @@
           self.store.showToast(self.t('transfer.cancel_failed'), 2000);
         });
       },
+      // Open / reveal both delegate to the shared store helpers, which the
+      // history row's context menu uses as well — one implementation each, so
+      // the button and the menu entry cannot drift apart.
       openFile: function (path) {
-        var self = this;
-        // /api/nav only accepts http/https URLs, so local file paths must go
-        // through the dedicated file-open endpoint on the host.
-        ClipsyncAPI.openFile(path)
-          .then(function (res) {
-            if (!res || res.ok !== true) {
-              self.store.showToast(self.t('ui.open_failed_title'), 2000);
-            }
-          })
-          .catch(function () {
-            self.store.showToast(self.t('ui.open_failed_title'), 2000);
-          });
+        this.store.openTransferFile(path);
       },
 
       revealFile: function (path) {
-        var self = this;
-        ClipsyncAPI.revealFile(path)
-          .then(function (res) {
-            if (!res || res.ok !== true) {
-              self.store.showToast(self.t('ui.open_failed_title'), 2000);
-            }
-          })
-          .catch(function () {
-            self.store.showToast(self.t('ui.open_failed_title'), 2000);
-          });
+        this.store.revealTransferFile(path);
+      },
+
+      // Right-click on a transfer-history row.  Without this the row had no
+      // menu at all: app.js suppresses the native context menu everywhere
+      // outside editable/.selectable regions, so right-clicking a row did
+      // nothing whatsoever.
+      openTransferMenu: function (tr, e) {
+        if (!tr) return;
+        this.store.contextMenu = {
+          visible: true,
+          x: e.clientX,
+          y: e.clientY,
+          mode: 'transfer',
+          target: tr,
+          opener: e.currentTarget || e.target,
+        };
       },
     },
   };

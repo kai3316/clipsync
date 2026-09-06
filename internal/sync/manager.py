@@ -16,7 +16,6 @@ from collections import deque
 from collections.abc import Callable
 
 from internal.clipboard.format import ContentType, SyncMessage
-from internal.clipboard.history import ClipboardHistory
 from internal.clipboard.history_db import ClipboardHistoryDB
 from internal.clipboard.platform import create_monitor, create_reader, create_writer
 
@@ -35,10 +34,6 @@ DEDUP_RING_SIZE = 64
 # to remember history: past this window a repeated hash is treated as a
 # deliberate new copy and flows into history/broadcast normally.
 DEDUP_RING_TTL = 90.0
-# A local clipboard change within this window (s) counts as "newer" than an
-# incoming remote message, so near-simultaneous copies resolve by copy time
-# rather than by arrival order (crossed writes).
-CROSSED_WRITE_WINDOW = 0.1
 # Receive-side rate limit: cap distinct remote clipboard writes per window so
 # a peer cannot flood the local clipboard.  A small burst is allowed (covers
 # out-of-order network delivery of a few rapid messages) but the sustained
@@ -48,11 +43,17 @@ REMOTE_RATE_MAX = 5
 
 
 class SyncManager:
-    def __init__(self, device_id: str, device_name: str,
-                 reader=None, writer=None, monitor=None,
-                 history: ClipboardHistory | ClipboardHistoryDB | None = None,
-                 sync_debounce: float = 0.3,
-                 retry_enabled: bool = True):
+    def __init__(
+        self,
+        device_id: str,
+        device_name: str,
+        reader=None,
+        writer=None,
+        monitor=None,
+        history: ClipboardHistoryDB | None = None,
+        sync_debounce: float = 0.3,
+        retry_enabled: bool = True,
+    ):
         self._device_id = device_id
         self._device_name = device_name
         self._reader = reader if reader is not None else create_reader()
@@ -82,7 +83,28 @@ class SyncManager:
         # instance; fall back to 0.0 for event-driven (Windows) / mocked
         # monitors, where there is no poll to cover.
         self._poll_interval = getattr(monitor, "_poll_interval", 0.0)
+        # The monitor may back off to a longer idle poll interval (Linux does:
+        # _idle_poll_interval = max(poll*2, 2.0s)).  The write-suppression
+        # window must cover that too, or a re-encoded read-back (BMP/TIFF ->
+        # PNG on Linux) lands after suppression expires and is re-broadcast as
+        # a fresh local copy.  Fall back to the active interval for event-driven
+        # (Windows) / mocked monitors that have no idle backoff.
+        self._max_poll_interval = getattr(
+            monitor,
+            "_idle_poll_interval",
+            self._poll_interval,
+        )
         self._last_local_copy_time: float = 0.0
+        # Non-zero while a local capture is in flight.  The crossed-write
+        # check below reads it: the debounce window is measured from the
+        # change event, so it has already expired by the time the capture
+        # actually runs -- and capture_with_retry can spend ~1.4s on rich
+        # content.  For that whole stretch a remote message won the tie and
+        # overwrote a local copy the user had just made, which then vanished
+        # from under them.  The flag extends the window over exactly the
+        # capture, and not a millisecond past it (a legitimate remote message
+        # arriving right after must still land).
+        self._local_capture_active: int = 0
         self._remote_apply_times: deque = deque(maxlen=REMOTE_RATE_MAX)
         self._retry_enabled = retry_enabled
         # Optional predicate: source-app info -> bool (True = allowed).
@@ -191,7 +213,14 @@ class SyncManager:
             # Crossed writes: near-simultaneous copies should resolve by copy
             # time, not arrival order.  If the local clipboard changed very
             # recently, the local copy is probably newer — drop this message.
-            if time.time() - self._last_local_copy_time < CROSSED_WRITE_WINDOW:
+            # The window must cover the debounce period (a local copy is still
+            # "pending" until its timer fires), otherwise a remote message
+            # arriving mid-debounce overwrites the newer local copy.
+            if self._local_capture_active:
+                # ...and the debounce alone does not cover the capture that
+                # follows it, which is the slowest part of the local path.
+                return False
+            if time.time() - self._last_local_copy_time < self._sync_debounce:
                 return False
 
         content = msg.content
@@ -216,38 +245,26 @@ class SyncManager:
             # local clipboard with writes.  Drop messages once the per-window
             # budget of distinct writes is exhausted.
             now = time.time()
-            while (self._remote_apply_times
-                   and now - self._remote_apply_times[0] > REMOTE_RATE_WINDOW):
+            while (
+                self._remote_apply_times and now - self._remote_apply_times[0] > REMOTE_RATE_WINDOW
+            ):
                 self._remote_apply_times.popleft()
             if len(self._remote_apply_times) >= REMOTE_RATE_MAX:
                 return False
 
-            self._dedup_ring_remember(content_hash)
-
-            # Set _last_local_hash/_last_content_hash so the clipboard monitor
-            # ignores the write we're about to make (prevents re-broadcasting
-            # remote content).  Suppress the platform monitor for at least one
-            # poll interval so the write — and any re-encoded read-back
-            # (e.g. BMP/TIFF -> PNG on Linux/macOS) — is not re-detected.
-            self._last_local_hash = content_hash
-            self._last_content_hash = content_hash
-            self._last_hash_ts = time.monotonic()
-            self._monitor.suppress_for(self._sync_debounce + self._poll_interval + 0.2)
+            # Suppress the platform monitor for its longest (idle) poll interval
+            # so the write — and any re-encoded read-back (e.g. BMP/TIFF -> PNG
+            # on Linux/macOS) — is not re-detected.  The loop-prevention
+            # bookkeeping (_dedup_ring_remember / _last_*_hash) happens AFTER
+            # the write lands (see below), so a failed write cannot poison the
+            # dedup state and silently drop the sender's retry.
+            self._monitor.suppress_for(self._sync_debounce + self._max_poll_interval + 0.2)
 
             # Cancel any pending local timer so it doesn't fire with
             # the remote content we're about to write.
             if self._pending_timer is not None:
                 self._pending_timer.cancel()
                 self._pending_timer = None
-
-        # Record in local clipboard history
-        if self._history is not None:
-            try:
-                self._history.add(content)
-            except Exception:
-                logger.debug("Failed to add remote content to history", exc_info=True)
-
-        self._notify_history_change()
 
         # Re-check enabled immediately before writing so a disable that
         # happened while we were processing is honored.
@@ -257,10 +274,18 @@ class SyncManager:
 
         # Write to local clipboard.  Guarded so a clipboard-writer failure
         # drops this one message instead of killing the peer connection.
+        #
+        # The clipboard comes FIRST and history only follows a successful
+        # write.  Recording history first meant a failed write still left a
+        # row in the list (and broadcast a history_updated to every web
+        # client) for content that never reached the clipboard: the user saw
+        # the item arrive, clicked it, and got something else -- a ghost entry
+        # with no way to tell it apart from a real one.
         try:
             logger.info(
                 "Writing remote clipboard from %s: %d format(s)",
-                msg.source_device, len(content.types),
+                msg.source_device,
+                len(content.types),
             )
             wrote = self._writer.write(content)
         except Exception:
@@ -281,10 +306,24 @@ class SyncManager:
             # and do not acknowledge the message to the peer.
             return False
 
-        # The message was accepted (history + clipboard write applied).
-        # Count this write toward the rate limit only now that it landed.
+        # The write landed — now it is real, so record it in history.
+        if self._history is not None:
+            try:
+                self._history.add(content)
+            except Exception:
+                logger.debug("Failed to add remote content to history", exc_info=True)
+
+        self._notify_history_change()
+
+        # The message was accepted (clipboard write applied + history).
+        # Count this write toward the rate limit AND record loop-prevention
+        # state only now that it actually landed.
         with self._lock:
             self._remote_apply_times.append(time.time())
+            self._dedup_ring_remember(content_hash)
+            self._last_local_hash = content_hash
+            self._last_content_hash = content_hash
+            self._last_hash_ts = time.monotonic()
 
         return True
 
@@ -329,15 +368,20 @@ class SyncManager:
         broadcasts stale content out of order (or drops the newest copy).
         """
         with self._read_lock:
-            self._do_read_and_send_locked()
+            with self._lock:
+                self._local_capture_active += 1
+            try:
+                self._do_read_and_send_locked()
+            finally:
+                with self._lock:
+                    self._local_capture_active -= 1
 
     def _dedup_seen(self, content_hash: str) -> bool:
         """TTL-bounded ring lookup: True if *content_hash* was processed
         within ``DEDUP_RING_TTL``.  Expired entries are pruned here so the
         ring stays bounded in time, not only in count."""
         now = time.monotonic()
-        self._dedup_ring = [(h, ts) for h, ts in self._dedup_ring
-                            if now - ts <= DEDUP_RING_TTL]
+        self._dedup_ring = [(h, ts) for h, ts in self._dedup_ring if now - ts <= DEDUP_RING_TTL]
         return any(h == content_hash for h, _ in self._dedup_ring)
 
     def _dedup_ring_remember(self, content_hash: str) -> None:
@@ -368,6 +412,7 @@ class SyncManager:
         # Use multi-round retry capture when enabled
         if self._retry_enabled:
             from internal.clipboard.retry import capture_with_retry
+
             content = capture_with_retry(self._reader)
         else:
             content = self._reader.read()
@@ -395,7 +440,7 @@ class SyncManager:
 
         # Retrieve source-app info once (captured by the monitor before the
         # callback fired) for both app filtering and history attribution.
-        source_app = getattr(self._monitor, 'last_source_app', None)
+        source_app = getattr(self._monitor, "last_source_app", None)
 
         # App filter: drop content from disallowed source applications.
         if self._app_filter_fn is not None and not self._app_filter_fn(source_app):
@@ -416,14 +461,18 @@ class SyncManager:
             # Bounded by the same TTL as the dedup ring, so a deliberate
             # re-copy of the last content after DEDUP_RING_TTL is treated as
             # new instead of being suppressed forever.
-            if (content_hash == self._last_content_hash
-                    and time.monotonic() - self._last_hash_ts <= DEDUP_RING_TTL):
+            if (
+                content_hash == self._last_content_hash
+                and time.monotonic() - self._last_hash_ts <= DEDUP_RING_TTL
+            ):
                 return
             # Skip if we just sent this content (loop prevention) — same TTL
             # bound, so an echoed-back remote write stops suppressing once the
             # ring window has passed.
-            if (content_hash == self._last_local_hash
-                    and time.monotonic() - self._last_hash_ts <= DEDUP_RING_TTL):
+            if (
+                content_hash == self._last_local_hash
+                and time.monotonic() - self._last_hash_ts <= DEDUP_RING_TTL
+            ):
                 return
             # Skip if recently seen (e.g. a remote write reflected back whose
             # read-back was not re-encoded)
@@ -456,6 +505,7 @@ class SyncManager:
         # Don't broadcast content that carries no encodable formats (e.g. a
         # FILE/URL-only capture) — it would produce an empty frame on the wire.
         from internal.protocol.codec import has_syncable_types
+
         if not has_syncable_types(content):
             logger.debug("Clipboard content has no syncable formats — not broadcasting")
             return

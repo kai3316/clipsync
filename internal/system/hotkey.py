@@ -5,15 +5,23 @@ macOS:   CGEvent via ctypes (CoreGraphics framework)
 Linux:   pynput global hotkey listener
 """
 
+import contextlib
 import itertools
 import logging
 import threading
 import time
 from collections.abc import Callable
 
+# Single source of truth lives in config.DEFAULT_HOTKEYS — re-export under
+# the historic name so existing imports (and tests) keep working.
+from internal.config.config import (
+    DEFAULT_HOTKEYS as DEFAULT_SHORTCUTS,  # noqa: F401  (intentional re-export)
+)
+
 logger = logging.getLogger(__name__)
 
 # ── Platform detection ──────────────────────────────────────────────
+
 
 def _platform() -> str:
     import sys
@@ -135,15 +143,15 @@ _MAC_VK: dict[str, int] = {
     "]": 30,
     "backslash": 42,  # kVK_ANSI_Backslash
     "\\": 42,
-    "f1": 122,   # kVK_F1
-    "f2": 120,   # kVK_F2
-    "f3": 99,    # kVK_F3
-    "f4": 118,   # kVK_F4
-    "f5": 96,    # kVK_F5
-    "f6": 97,    # kVK_F6
-    "f7": 98,    # kVK_F7
-    "f8": 100,   # kVK_F8
-    "f9": 101,   # kVK_F9
+    "f1": 122,  # kVK_F1
+    "f2": 120,  # kVK_F2
+    "f3": 99,  # kVK_F3
+    "f4": 118,  # kVK_F4
+    "f5": 96,  # kVK_F5
+    "f6": 97,  # kVK_F6
+    "f7": 98,  # kVK_F7
+    "f8": 100,  # kVK_F8
+    "f9": 101,  # kVK_F9
     "f10": 109,  # kVK_F10
     "f11": 103,  # kVK_F11
     "f12": 111,  # kVK_F12
@@ -151,27 +159,52 @@ _MAC_VK: dict[str, int] = {
 
 # macOS letter keycodes (ADB layout, independent of keyboard locale)
 _MAC_LETTER_VK: dict[str, int] = {
-    "A": 0, "B": 11, "C": 8, "D": 2, "E": 14, "F": 3, "G": 5, "H": 4,
-    "I": 34, "J": 38, "K": 40, "L": 37, "M": 46, "N": 45, "O": 31,
-    "P": 35, "Q": 12, "R": 15, "S": 1, "T": 17, "U": 32, "V": 9,
-    "W": 13, "X": 7, "Y": 16, "Z": 6,
+    "A": 0,
+    "B": 11,
+    "C": 8,
+    "D": 2,
+    "E": 14,
+    "F": 3,
+    "G": 5,
+    "H": 4,
+    "I": 34,
+    "J": 38,
+    "K": 40,
+    "L": 37,
+    "M": 46,
+    "N": 45,
+    "O": 31,
+    "P": 35,
+    "Q": 12,
+    "R": 15,
+    "S": 1,
+    "T": 17,
+    "U": 32,
+    "V": 9,
+    "W": 13,
+    "X": 7,
+    "Y": 16,
+    "Z": 6,
 }
 
 # macOS digit keycodes (kVK_ANSI_* — non-contiguous, unlike the letters)
 _MAC_DIGIT_VK: dict[str, int] = {
-    "0": 29, "1": 18, "2": 19, "3": 20, "4": 21,
-    "5": 23, "6": 22, "7": 26, "8": 28, "9": 25,
+    "0": 29,
+    "1": 18,
+    "2": 19,
+    "3": 20,
+    "4": 21,
+    "5": 23,
+    "6": 22,
+    "7": 26,
+    "8": 28,
+    "9": 25,
 }
 
 
 # ══════════════════════════════════════════════════════════════════════
 # Default shortcuts
 # ══════════════════════════════════════════════════════════════════════
-
-# Single source of truth lives in config.DEFAULT_HOTKEYS — re-export under
-# the historic name so existing imports (and tests) keep working.
-from internal.config.config import DEFAULT_HOTKEYS as DEFAULT_SHORTCUTS
-
 
 # ══════════════════════════════════════════════════════════════════════
 # HotkeyManager
@@ -269,11 +302,7 @@ class HotkeyManager:
         combo = (modifiers, self._canonical_key(shortcut))
         with self._lock:
             conflict = next(
-                (
-                    hid
-                    for hid, c in self._combo_index.items()
-                    if hid != hotkey_id and c == combo
-                ),
+                (hid for hid, c in self._combo_index.items() if hid != hotkey_id and c == combo),
                 None,
             )
             if conflict is not None:
@@ -332,8 +361,7 @@ class HotkeyManager:
             return [
                 (
                     hid,
-                    self._failure_strings.get(hid)
-                    or self._shortcut_strings.get(hid, ""),
+                    self._failure_strings.get(hid) or self._shortcut_strings.get(hid, ""),
                 )
                 for hid in sorted(self._register_failures)
             ]
@@ -350,9 +378,7 @@ class HotkeyManager:
         if self._running:
             return
         self._running = True
-        self._thread = threading.Thread(
-            target=self._run_loop, daemon=True, name="hotkey-mgr"
-        )
+        self._thread = threading.Thread(target=self._run_loop, daemon=True, name="hotkey-mgr")
         self._thread.start()
         logger.info("Hotkey manager started on %s", self._platform)
 
@@ -459,16 +485,12 @@ class HotkeyManager:
             # listener), so restart the listener thread instead of leaving the
             # old one signalled-off.
             self._running = True
-            self._thread = threading.Thread(
-                target=self._run_loop, daemon=True, name="hotkey-mgr"
-            )
+            self._thread = threading.Thread(target=self._run_loop, daemon=True, name="hotkey-mgr")
             self._thread.start()
             self._platform_start()
 
         if failed:
-            logger.warning(
-                "%d hotkey(s) skipped during reload: %s", len(failed), ", ".join(failed)
-            )
+            logger.warning("%d hotkey(s) skipped during reload: %s", len(failed), ", ".join(failed))
         logger.info("Reloaded %d hotkeys from config", len(shortcuts) - len(failed))
 
     # ── Shortcut parsing ───────────────────────────────────────────
@@ -489,9 +511,7 @@ class HotkeyManager:
         # rejected here so the hotkey is simply not registered instead of
         # raising AttributeError inside the caller's loop.
         if not isinstance(shortcut, str):
-            raise ValueError(
-                f"Shortcut must be a string, got {type(shortcut).__name__}"
-            )
+            raise ValueError(f"Shortcut must be a string, got {type(shortcut).__name__}")
         parts = [p.strip() for p in shortcut.split("+")]
         if len(parts) < 2:
             raise ValueError("Shortcut must have at least one modifier and one key")
@@ -663,15 +683,15 @@ if _platform() == "windows":
     # WNDCLASSW is not in ctypes.wintypes — define it here
     class _WNDCLASSW(ctypes.Structure):
         _fields_ = [
-            ("style",         wintypes.UINT),
-            ("lpfnWndProc",   _WNDPROC),
-            ("cbClsExtra",    ctypes.c_int),
-            ("cbWndExtra",    ctypes.c_int),
-            ("hInstance",     wintypes.HINSTANCE),
-            ("hIcon",         wintypes.HICON),
-            ("hCursor",       ctypes.c_void_p),
+            ("style", wintypes.UINT),
+            ("lpfnWndProc", _WNDPROC),
+            ("cbClsExtra", ctypes.c_int),
+            ("cbWndExtra", ctypes.c_int),
+            ("hInstance", wintypes.HINSTANCE),
+            ("hIcon", wintypes.HICON),
+            ("hCursor", ctypes.c_void_p),
             ("hbrBackground", ctypes.c_void_p),
-            ("lpszMenuName",  wintypes.LPCWSTR),
+            ("lpszMenuName", wintypes.LPCWSTR),
             ("lpszClassName", wintypes.LPCWSTR),
         ]
 
@@ -710,9 +730,7 @@ if _platform() == "windows":
         # from its window procedure.
         with self._lock:
             if self._win_hwnd is None:
-                logger.warning(
-                    "Cannot register hotkey '%s': window not created yet", hotkey_id
-                )
+                logger.warning("Cannot register hotkey '%s': window not created yet", hotkey_id)
                 return
             # Re-binding an existing id must first release its previous OS
             # registration -- otherwise the old combination stays live (both
@@ -776,31 +794,25 @@ if _platform() == "windows":
             self._win_id_rev.clear()
         for int_id in int_ids:
             if hwnd is not None:
-                try:
+                with contextlib.suppress(Exception):
                     _user32.UnregisterHotKey(hwnd, int_id)
-                except Exception:
-                    pass
 
         # DestroyWindow posts WM_DESTROY -> PostQuitMessage; by this point the
         # message loop has already exited, which is fine.
         if hwnd is not None:
-            try:
+            with contextlib.suppress(Exception):
                 _user32.DestroyWindow(hwnd)
-            except Exception:
-                pass
         self._win_hwnd = None
 
         class_name = self._win_class_name
         self._win_class_name = None
         self._win_class_atom = None
         if class_name:
-            try:
+            with contextlib.suppress(Exception):
                 _user32.UnregisterClassW(
                     ctypes.c_wchar_p(class_name),
                     _kernel32.GetModuleHandleW(None),
                 )
-            except Exception:
-                pass
 
     def _run_windows(self: HotkeyManager) -> None:
         global _win_mgr
@@ -846,8 +858,7 @@ if _platform() == "windows":
             # Register all currently-stored hotkeys with the new window.
             with self._lock:
                 initial = [
-                    (hotkey_id, mods, vk)
-                    for hotkey_id, (mods, vk, _cb) in self._hotkeys.items()
+                    (hotkey_id, mods, vk) for hotkey_id, (mods, vk, _cb) in self._hotkeys.items()
                 ]
             for hotkey_id, mods, vk in initial:
                 _win_register_one(self, hotkey_id, mods, vk)
@@ -913,9 +924,7 @@ elif _platform() == "macos":
     _cf_path = ctypes.util.find_library("CoreFoundation")
 
     if _cg_path is None or _cf_path is None:
-        logger.error(
-            "CoreGraphics/CoreFoundation not found -- global hotkeys disabled on macOS"
-        )
+        logger.error("CoreGraphics/CoreFoundation not found -- global hotkeys disabled on macOS")
     else:
         _cg = ctypes.cdll.LoadLibrary(_cg_path)
         _cf = ctypes.cdll.LoadLibrary(_cf_path)
@@ -931,11 +940,11 @@ elif _platform() == "macos":
         _CFRunLoopRef = ctypes.c_void_p
 
         # ── Constants ─────────────────────────────────────────────
-        _kCGEventKeyDown = 10  # NX_KEYDOWN
-        _kCGEventTapOptionDefault = 0
-        _kCGHeadInsertEventTap = 0
-        _kCGSessionEventTap = 1
-        _kCGKeyboardEventKeycode = 9
+        _kCGEventKeyDown = 10  # NX_KEYDOWN  # noqa: N816
+        _kCGEventTapOptionDefault = 0  # noqa: N816
+        _kCGHeadInsertEventTap = 0  # noqa: N816
+        _kCGSessionEventTap = 1  # noqa: N816
+        _kCGKeyboardEventKeycode = 9  # noqa: N816
 
         # CGEvent flags for modifiers
         #   kCGEventFlagMaskControl   = 0x00000001
@@ -946,10 +955,10 @@ elif _platform() == "macos":
         # Flags that ride along on ordinary key events but are not one of the
         # named modifiers a shortcut can require.  They must be stripped
         # before comparing, so the comparison can demand an exact match.
-        _kCGEventFlagMaskNonCoalesced = 0x00000100
-        _kCGEventFlagMaskAlphaShift = 0x00010000  # CapsLock "alpha shift" lock
-        _kCGEventFlagMaskNumericPad = 0x00200000
-        _kCGEventFlagMaskIrrelevant = (
+        _kCGEventFlagMaskNonCoalesced = 0x00000100  # noqa: N816
+        _kCGEventFlagMaskAlphaShift = 0x00010000  # CapsLock "alpha shift" lock  # noqa: N816
+        _kCGEventFlagMaskNumericPad = 0x00200000  # noqa: N816
+        _kCGEventFlagMaskIrrelevant = (  # noqa: N816
             _kCGEventFlagMaskNonCoalesced
             | _kCGEventFlagMaskAlphaShift
             | _kCGEventFlagMaskNumericPad
@@ -1011,7 +1020,7 @@ elif _platform() == "macos":
         # kCFRunLoopDefaultMode is a CFString constant, NOT NULL.  Passing
         # NULL as the mode makes CoreFoundation call CFHash(NULL) and abort
         # with "*** CFHash() called with NULL ***".
-        _kCFRunLoopDefaultMode = ctypes.c_void_p.in_dll(_cf, "kCFRunLoopDefaultMode")
+        _kCFRunLoopDefaultMode = ctypes.c_void_p.in_dll(_cf, "kCFRunLoopDefaultMode")  # noqa: N816
 
         _cf.CFRunLoopAddSource.restype = None
         _cf.CFRunLoopAddSource.argtypes = [
@@ -1130,39 +1139,29 @@ elif _platform() == "macos":
 
         tap = self._mac_tap
         if tap is not None:
-            try:
+            with contextlib.suppress(Exception):
                 _cg.CGEventTapEnable(tap, False)
-            except Exception:
-                pass
             # CGEventTapCreate returns a +1 reference; invalidate + release so
             # start/stop cycles don't leave the tap registered for process
             # lifetime.
-            try:
+            with contextlib.suppress(Exception):
                 _cf.CFMachPortInvalidate(tap)
-            except Exception:
-                pass
-            try:
+            with contextlib.suppress(Exception):
                 _cf.CFRelease(tap)
-            except Exception:
-                pass
             self._mac_tap = None
 
         rl = self._mac_run_loop
         if rl is not None:
-            try:
+            with contextlib.suppress(Exception):
                 _cf.CFRunLoopStop(rl)
-            except Exception:
-                pass
             self._mac_run_loop = None
 
         source = self._mac_source
         if source is not None:
             # CFMachPortCreateRunLoopSource returns a +1 reference; release it
             # (the run loop's own retain keeps it alive until the thread exits).
-            try:
+            with contextlib.suppress(Exception):
                 _cf.CFRelease(source)
-            except Exception:
-                pass
             self._mac_source = None
 
     def _macos_is_trusted(self: HotkeyManager) -> bool:
@@ -1187,8 +1186,7 @@ elif _platform() == "macos":
             services.AXIsProcessTrusted.argtypes = []
             return bool(services.AXIsProcessTrusted())
         except Exception:
-            logger.debug("AXIsProcessTrusted check failed; assuming trusted",
-                         exc_info=True)
+            logger.debug("AXIsProcessTrusted check failed; assuming trusted", exc_info=True)
             return True
 
     # Attach macOS methods
@@ -1232,7 +1230,12 @@ else:  # linux
                 converted.append("<cmd>")
             elif pl in ("`", "~", "grave"):
                 converted.append("<grave>")
-            elif pl in ("space", "tab", "enter", "escape", "backspace", "delete") or pl.startswith("f") and len(pl) >= 2 and pl[1:].isdigit():
+            elif (
+                pl in ("space", "tab", "enter", "escape", "backspace", "delete")
+                or pl.startswith("f")
+                and len(pl) >= 2
+                and pl[1:].isdigit()
+            ):
                 converted.append(f"<{pl}>")
             elif len(part) == 1 and part.isascii():
                 converted.append(part.lower())
@@ -1267,7 +1270,7 @@ else:  # linux
         # Stop existing listener
         old = self._linux_listener
         if old is not None:
-            try:
+            try:  # noqa: SIM105
                 old.stop()  # type: ignore[union-attr]
             except Exception:
                 pass
@@ -1288,7 +1291,7 @@ else:  # linux
     def _linux_stop(self: HotkeyManager) -> None:
         listener = self._linux_listener
         if listener is not None:
-            try:
+            try:  # noqa: SIM105
                 listener.stop()  # type: ignore[union-attr]
             except Exception:
                 pass

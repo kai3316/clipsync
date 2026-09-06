@@ -54,7 +54,8 @@ def _create_icon_image(size: int = 32) -> Image.Image:
     bar_y1 = y0 + padding // 2
     draw.rounded_rectangle(
         [bar_x0, bar_y0, bar_x1, bar_y1],
-        radius=size // 12, fill=(60, 110, 180),
+        radius=size // 12,
+        fill=(60, 110, 180),
     )
 
     # Paper lines
@@ -65,7 +66,8 @@ def _create_icon_image(size: int = 32) -> Image.Image:
         ly = y0 + padding + i * line_spacing
         draw.line(
             [x0 + line_margin, ly, x1 - line_margin, ly],
-            fill=line_color, width=max(1, size // 20),
+            fill=line_color,
+            width=max(1, size // 20),
         )
 
     return img
@@ -127,8 +129,7 @@ class SystrayApp:
         if sys.platform == "win32" and getattr(self, "_WM_UPDATE_MENU", None):
             hwnd = getattr(self._tray, "_hwnd", None)
             if hwnd:
-                ctypes.windll.user32.PostMessageW(
-                    hwnd, self._WM_UPDATE_MENU, 0, 0)
+                ctypes.windll.user32.PostMessageW(hwnd, self._WM_UPDATE_MENU, 0, 0)
                 return
         # On non-Windows, update_menu() may be invoked from a non-tray thread,
         # which races the GTK/AppIndicator event loop. Rebuild via the same
@@ -157,8 +158,7 @@ class SystrayApp:
         if sys.platform == "win32" and getattr(self, "_WM_UPDATE_MENU", None):
             hwnd = getattr(self._tray, "_hwnd", None)
             if hwnd:
-                ctypes.windll.user32.PostMessageW(
-                    hwnd, self._WM_UPDATE_MENU, 0, 0)
+                ctypes.windll.user32.PostMessageW(hwnd, self._WM_UPDATE_MENU, 0, 0)
                 return
         self._schedule_menu_rebuild()
 
@@ -177,8 +177,7 @@ class SystrayApp:
         if sys.platform == "win32" and getattr(self, "_WM_UPDATE_MENU", None):
             hwnd = getattr(self._tray, "_hwnd", None)
             if hwnd:
-                ctypes.windll.user32.PostMessageW(
-                    hwnd, self._WM_UPDATE_MENU, 0, 0)
+                ctypes.windll.user32.PostMessageW(hwnd, self._WM_UPDATE_MENU, 0, 0)
                 return
         menu = self._build_full_menu()
         try:
@@ -206,10 +205,7 @@ class SystrayApp:
             return pystray.Menu(
                 pystray.MenuItem(T("tray.no_devices"), None, enabled=False),
             )
-        items = [
-            pystray.MenuItem(peer, None, enabled=False)
-            for peer in self._peers
-        ]
+        items = [pystray.MenuItem(peer, None, enabled=False) for peer in self._peers]
         return pystray.Menu(*items)
 
     @staticmethod
@@ -239,17 +235,21 @@ class SystrayApp:
             return [
                 pystray.MenuItem(
                     "⏸  " + T("tray.paused_left", minutes=max(1, minutes_left)),
-                    None, enabled=False,
+                    None,
+                    enabled=False,
                 ),
                 pystray.MenuItem(
-                    T("tray.resume_now"), self._on_resume_now_click,
+                    T("tray.resume_now"),
+                    self._on_resume_now_click,
                 ),
             ]
+
         def _pause_action(minutes: int):
             # pystray validates action arity via co_argcount: exactly
             # (icon, item), no extra defaults.
             def _run(icon, item):
                 self._fire_pause_minutes(minutes)
+
             return _run
 
         return [
@@ -268,7 +268,9 @@ class SystrayApp:
         menu_items = [
             pystray.MenuItem("📋  " + T("ui.app_name"), None, enabled=False),
             pystray.MenuItem(
-                T("tray.device", name=self._device_name), None, enabled=False,
+                T("tray.device", name=self._device_name),
+                None,
+                enabled=False,
             ),
             pystray.Menu.SEPARATOR,
             # Sync toggle (checkbox)
@@ -279,15 +281,19 @@ class SystrayApp:
             ),
         ]
         menu_items.extend(self._build_pause_items())
-        menu_items.extend([
-            pystray.Menu.SEPARATOR,
-            pystray.MenuItem(
-                "🖥  " + T("tray.show_dashboard"), self._on_open_dashboard_click,
-            ),
-            pystray.MenuItem(
-                "📤  " + T("tray.send_url"), self._on_send_url_click,
-            ),
-        ])
+        menu_items.extend(
+            [
+                pystray.Menu.SEPARATOR,
+                pystray.MenuItem(
+                    "🖥  " + T("tray.show_dashboard"),
+                    self._on_open_dashboard_click,
+                ),
+                pystray.MenuItem(
+                    "📤  " + T("tray.send_url"),
+                    self._on_send_url_click,
+                ),
+            ]
+        )
         if self._web_enabled:
             menu_items.append(
                 pystray.MenuItem("📱  " + T("tray.show_web_qr"), self._on_show_web_qr_click),
@@ -307,62 +313,85 @@ class SystrayApp:
         menu_items.append(
             pystray.MenuItem("⚙  " + T("tray.settings"), self._on_open_settings_click),
         )
-        menu_items.extend([
-            pystray.MenuItem("📝  " + T("tray.export_logs"), self._on_export_logs_click),
-            pystray.Menu.SEPARATOR,
-            pystray.MenuItem("🔍  " + T("tray.check_update"), self._on_check_update_click),
-            pystray.MenuItem("ℹ️  " + T("tray.about"), self._on_about),
-            pystray.MenuItem("⏻  " + T("tray.quit"), self._on_quit),
-        ])
+        menu_items.extend(
+            [
+                pystray.MenuItem("📝  " + T("tray.export_logs"), self._on_export_logs_click),
+                pystray.Menu.SEPARATOR,
+                pystray.MenuItem("🔍  " + T("tray.check_update"), self._on_check_update_click),
+                pystray.MenuItem("ℹ️  " + T("tray.about"), self._on_about),
+                pystray.MenuItem("⏻  " + T("tray.quit"), self._on_quit),
+            ]
+        )
         return pystray.Menu(*menu_items)
+
+    def _notify_tray_failed(self):
+        """Tell the app the tray is not there, so it can toast the user."""
+        if self._on_tray_failed is None:
+            return
+        try:
+            self._on_tray_failed()
+        except Exception:
+            logger.debug("Tray-failure toast could not be shown", exc_info=True)
 
     def run(self):
         """Run the system tray. Blocks until quit."""
-        menu = self._build_full_menu()
+        if pystray is None:
+            # X11-less Linux (headless box, Wayland-only container, SSH
+            # session) makes the module-level ``import pystray`` fail, leaving
+            # the name bound to None.  _build_full_menu() then raised
+            # AttributeError from OUTSIDE the try below -- escaping the very
+            # handler written for "the tray backend isn't available", so the
+            # user got a traceback instead of the "dashboard is your UI" hint.
+            logger.warning(
+                "System tray unavailable: pystray could not be imported "
+                "(no display?) — the dashboard is the only UI this session"
+            )
+            self._notify_tray_failed()
+            return
 
-        logger.info("Starting system tray")
-        self._tray = pystray.Icon(
-            "clipsync",
-            self._icon_image,
-            T("ui.app_name"),
-            menu,
-        )
+        try:
+            menu = self._build_full_menu()
 
-        # Left-click opens dashboard on Windows/macOS; on Linux the menu is
-        # always shown — AppIndicator ignores __call__ entirely, and on GTK
-        # the dashboard may fail to restore after withdraw (CTkToplevel issue).
-        if sys.platform != "linux":
-            _orig_call = self._tray.__call__
-            def _left_click():
-                if self._on_open_dashboard:
-                    self._on_open_dashboard()
-                else:
-                    _orig_call()
-            self._tray.__call__ = _left_click
-
-        # Register custom message handler so set_peers() can safely
-        # trigger menu updates from the peer updater thread.
-        if sys.platform == "win32" and getattr(self, "_WM_UPDATE_MENU", None):
-            self._tray._message_handlers[self._WM_UPDATE_MENU] = (
-                lambda w, l: self._apply_pending_menu() or 0
+            logger.info("Starting system tray")
+            self._tray = pystray.Icon(
+                "clipsync",
+                self._icon_image,
+                T("ui.app_name"),
+                menu,
             )
 
-        notification_mgr.set_tray(self._tray)
-        try:
+            # Left-click opens dashboard on Windows/macOS; on Linux the menu is
+            # always shown — AppIndicator ignores __call__ entirely, and on GTK
+            # the dashboard may fail to restore after withdraw (CTkToplevel issue).
+            if sys.platform != "linux":
+                _orig_call = self._tray.__call__
+
+                def _left_click():
+                    if self._on_open_dashboard:
+                        self._on_open_dashboard()
+                    else:
+                        _orig_call()
+
+                self._tray.__call__ = _left_click
+
+            # Register custom message handler so set_peers() can safely
+            # trigger menu updates from the peer updater thread.
+            if sys.platform == "win32" and getattr(self, "_WM_UPDATE_MENU", None):
+                self._tray._message_handlers[self._WM_UPDATE_MENU] = lambda w, msg: (
+                    self._apply_pending_menu() or 0
+                )
+
+            notification_mgr.set_tray(self._tray)
             self._tray.run()
         except Exception:
             # The tray backend can be missing or fail to start (e.g. Linux
             # without an AppIndicator/GTK status-notifier host).  Never crash
             # the app — log clearly and tell the user the dashboard is the
             # only UI, so a silently-absent tray isn't mistaken for a working
-            # one.
+            # one.  The menu build is inside this try for the same reason: a
+            # translation or icon fault there is just as fatal to the tray.
             logger.exception("System tray failed to start or crashed")
-            if self._on_tray_failed is not None:
-                try:
-                    self._on_tray_failed()
-                except Exception:
-                    logger.debug("Tray-failure toast could not be shown",
-                                 exc_info=True)
+            self._notify_tray_failed()
         finally:
             self._tray = None
 

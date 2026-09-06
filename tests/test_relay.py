@@ -8,9 +8,10 @@ import time
 
 import pytest
 
-from internal.transport import relay as R
+from internal.transport import relay as R  # noqa: N812
 
 # ---------------------------------------------------------------- pure crypto
+
 
 def test_topic_derivation_is_deterministic_and_symmetric():
     t1 = R.derive_topic("aaa", "bbb")
@@ -73,6 +74,7 @@ def test_missing_secrets_raise():
 
 # ------------------------------------------------------------ probe
 
+
 def test_probe_relay_endpoint_invalid_never_raises():
     """probe_relay_endpoint (v1.0.75 SSL fix) is a pure connectivity check that
     never raises — clicking 'test connection' must not disturb a live
@@ -105,6 +107,7 @@ def test_probe_relay_endpoint_reports_connect_failures(monkeypatch):
 def test_probe_relay_endpoint_reports_tcp_reachable():
     """A plain TCP endpoint that accepts the connection is 'reachable'."""
     import socket
+
     listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     listener.bind(("127.0.0.1", 0))
@@ -171,7 +174,11 @@ def test_parse_endpoint_scheme_default_ports():
     """_parse_endpoint: native MQTT defaults to 1883, WebSocket to 8884."""
     t, _, _, _ = make_transport({})
     assert t._parse_endpoint("mqtt://broker.example") == ("broker.example", 1883, "/mqtt")
-    assert t._parse_endpoint("mqtts://broker.example:9000/custom") == ("broker.example", 9000, "/custom")
+    assert t._parse_endpoint("mqtts://broker.example:9000/custom") == (
+        "broker.example",
+        9000,
+        "/custom",
+    )
     assert t._parse_endpoint("ws://broker.example") == ("broker.example", 8884, "/mqtt")
     assert t._parse_endpoint("wss://broker.example/mqtt") == ("broker.example", 8884, "/mqtt")
 
@@ -192,6 +199,7 @@ def test_build_paho_client_scheme_selects_transport_and_tls(monkeypatch):
     class FakeModule:
         class CallbackAPIVersion:
             VERSION2 = 2
+
         MQTTv311 = 4
         Client = FakePahoClient
 
@@ -226,8 +234,8 @@ def test_build_paho_client_returns_none_without_paho(monkeypatch):
     assert R.build_paho_client("wss://broker.example:8884/mqtt") is None
 
 
-
 # ------------------------------------------------------------- fake client
+
 
 class FakeClient:
     """paho-shaped stand-in: captures calls, lets tests drive callbacks."""
@@ -268,6 +276,7 @@ class FakeClient:
 
         class Info:
             rc = 0
+
         return Info()
 
     def disconnect(self):
@@ -284,6 +293,7 @@ class FakeClient:
     def fire_message(self, transport, topic, payload):
         class Msg:
             pass
+
         m = Msg()
         m.topic = topic
         m.payload = payload
@@ -333,6 +343,7 @@ def make_transport(channels_dict, brokers=None, private_brokers=None):
 
 # ------------------------------------------------------------ lifecycle
 
+
 def test_offline_states_and_subscribe_on_connect(channels):
     t, clients, _, states = make_transport(channels)
     t.start()
@@ -372,7 +383,7 @@ def test_receive_delivers_and_dedupes(channels):
     blob = R.pack_envelope(b"inner-frame", key, time.time())
     clients[0].fire_connect(0, t)
     clients[0].fire_message(t, topic, blob)
-    clients[0].fire_message(t, topic, blob)          # duplicate dropped
+    clients[0].fire_message(t, topic, blob)  # duplicate dropped
     clients[0].fire_message(t, "unknown/topic", blob)  # not subscribed pair
     assert received == [b"inner-frame"]
     t.stop()
@@ -402,8 +413,7 @@ def test_netpair_channel_rejects_passphrase_keyed_envelope():
     t, clients, received, _ = make_transport(no_pw)
     t.start()
     clients[0].fire_connect(0, t)
-    wrong = R.pack_envelope(
-        b"x", R.netpair_key(secret, "Passw0rd!123"), time.time())
+    wrong = R.pack_envelope(b"x", R.netpair_key(secret, "Passw0rd!123"), time.time())
     clients[0].fire_message(t, topic, wrong)
     right = R.pack_envelope(b"y", R.netpair_key(secret), time.time())
     clients[0].fire_message(t, topic, right)
@@ -432,8 +442,8 @@ def test_failover_to_next_broker():
 def test_credentials_apply_to_new_clients(channels):
     """set_credentials is anonymous by default, applied once per client —
     and only to private endpoints, never to free public brokers."""
-    PRIV = "wss://broker.example:8884/mqtt"
-    FREE = "wss://free.example:8884/mqtt"
+    PRIV = "wss://broker.example:8884/mqtt"  # noqa: N806
+    FREE = "wss://free.example:8884/mqtt"  # noqa: N806
     t, clients, _, _ = make_transport(channels, private_brokers=[PRIV])
     anon = t._new_client(PRIV)
     assert not hasattr(anon, "broker_username")
@@ -480,8 +490,7 @@ def test_credentials_from_init_survive_start(channels):
 
 def test_credentials_swap_before_restart(channels):
     """set_credentials + restart() must build the reconnect with new creds."""
-    t, clients, _, _ = make_transport(
-        channels, private_brokers=["wss://broker.example:8884/mqtt"])
+    t, clients, _, _ = make_transport(channels, private_brokers=["wss://broker.example:8884/mqtt"])
     t.start()
     assert t._test_wait_clients(1)
     assert not hasattr(clients[0], "broker_username")
@@ -500,13 +509,13 @@ def test_private_brokers_are_preferred_primary(channels):
         brokers=["wss://free.example:8884/mqtt"],
         private_brokers=["wss://broker.example:8884/mqtt"],
     )
-    assert t._brokers == [
-        "wss://broker.example:8884/mqtt", "wss://free.example:8884/mqtt"]
+    assert t._brokers == ["wss://broker.example:8884/mqtt", "wss://free.example:8884/mqtt"]
     assert "wss://broker.example:8884/mqtt" in t._private_endpoints
     assert "wss://free.example:8884/mqtt" not in t._private_endpoints
     # An exact duplicate across sections collapses to a single connection.
-    t.set_brokers(brokers=["wss://dup.example:8884/mqtt"],
-                  private_brokers=["wss://dup.example:8884/mqtt"])
+    t.set_brokers(
+        brokers=["wss://dup.example:8884/mqtt"], private_brokers=["wss://dup.example:8884/mqtt"]
+    )
     assert t._brokers == ["wss://dup.example:8884/mqtt"]
     t.stop()
 
@@ -605,6 +614,7 @@ from internal.protocol.codec import decode_message, encode_frame
 
 # ------------------------------------------------------------------ codec
 
+
 def test_relay_enroll_frame_roundtrip():
     raw = {"msg_type": "relay_enroll", "relay_secret": "ab" * 32}
     data = encode_frame(raw, source_device="device-A")
@@ -622,13 +632,14 @@ def test_relay_enroll_is_paired_only():
 
 # ------------------------------------------------------------------ config
 
+
 @pytest.fixture()
 def isolated_config(tmp_path, monkeypatch):
     """Point the config module at a throwaway directory."""
     from internal.config import config as cfg_mod
+
     monkeypatch.setattr(cfg_mod, "_config_dir", lambda: tmp_path)
-    monkeypatch.setattr(cfg_mod, "_config_path",
-                        lambda: tmp_path / "config.json")
+    monkeypatch.setattr(cfg_mod, "_config_path", lambda: tmp_path / "config.json")
     yield cfg_mod
 
 
@@ -653,12 +664,16 @@ def test_config_relay_bad_types_fall_back_to_defaults(isolated_config):
     cfg_mod = isolated_config
     path = cfg_mod._config_path()
     path.parent.mkdir(parents=True, exist_ok=True)
-    base = json.loads(json.dumps({
-        "internet_sync_enabled": "yes",       # wrong type
-        "relay_brokers": "not-a-list",        # wrong type
-        "relay_secret": 123,                  # wrong type
-        "peer_relay_secrets": {"p": 5},       # non-str value
-    }))
+    base = json.loads(
+        json.dumps(
+            {
+                "internet_sync_enabled": "yes",  # wrong type
+                "relay_brokers": "not-a-list",  # wrong type
+                "relay_secret": 123,  # wrong type
+                "peer_relay_secrets": {"p": 5},  # non-str value
+            }
+        )
+    )
     path.write_text(json.dumps(base), encoding="utf-8")
     loaded = cfg_mod.load()
     assert loaded.internet_sync_enabled is False
@@ -669,17 +684,17 @@ def test_config_relay_bad_types_fall_back_to_defaults(isolated_config):
 
 # ------------------------------------------- Application handler behaviour
 
+
 class FakePeers(dict):
     pass
 
 
 def make_app_stub(**attrs):
     app = types.SimpleNamespace()
-    cfg_opts = {k: attrs[k] for k in ("enabled", "secret", "secrets", "peers")
-                if k in attrs}
+    cfg_opts = {k: attrs[k] for k in ("enabled", "secret", "secrets", "peers") if k in attrs}
     app.cfg = attrs.get("cfg") or cfg_stub(**cfg_opts)
     app._relay = attrs.get("_relay")
-    with_relay = attrs.get("with_relay", False)
+    attrs.get("with_relay", False)
     app.peers_sent = []
     app.frames_published = []
 
@@ -689,9 +704,11 @@ def make_app_stub(**attrs):
 
         def broadcast(self, data):
             pass
+
     app.transport_mgr = T()
 
     if attrs.get("with_relay"):
+
         class Relay:
             def __init__(self):
                 self.published = []
@@ -702,26 +719,23 @@ def make_app_stub(**attrs):
 
             def refresh_channels(self):
                 self.refreshed += 1
+
         app._relay = Relay()
     saved = {"n": 0}
 
     app._save_cfg_and_peers = lambda: saved.__setitem__("n", saved["n"] + 1)
     app._saved = saved
     # bind the real Application methods the handlers delegate to
-    app._send_relay_enroll = (
-        lambda pid, _a=app: Application._send_relay_enroll(_a, pid))
-    app._ensure_relay_secret = (
-        lambda _a=app: Application._ensure_relay_secret(_a))
-    app._relay_channels = (
-        lambda _a=app: Application._relay_channels(_a))
+    app._send_relay_enroll = lambda pid, _a=app: Application._send_relay_enroll(_a, pid)
+    app._ensure_relay_secret = lambda _a=app: Application._ensure_relay_secret(_a)
+    app._relay_channels = lambda _a=app: Application._relay_channels(_a)
     # Round 14 netpair surface: _relay_channels now folds netpair channels in.
-    app._netpair_secrets_all = (
-        lambda _a=app: Application._netpair_secrets_all(_a))
-    app._netpair_secret_for_topic = (
-        lambda topic, _a=app: Application._netpair_secret_for_topic(_a, topic))
+    app._netpair_secrets_all = lambda _a=app: Application._netpair_secrets_all(_a)
+    app._netpair_secret_for_topic = lambda topic, _a=app: Application._netpair_secret_for_topic(
+        _a, topic
+    )
     app._on_relay_state = lambda state, _a=app: None
-    app._on_relay_frame = (
-        lambda frame, _a=app: Application._on_relay_frame(_a, frame))
+    app._on_relay_frame = lambda frame, _a=app: Application._on_relay_frame(_a, frame)
     return app
 
 
@@ -746,8 +760,7 @@ from src.main import Application  # noqa: E402
 def test_handle_relay_enroll_stores_and_replies():
     app = make_app_stub(with_relay=True)
     secret = "bb" * 32
-    Application._handle_relay_enroll(
-        app, {"relay_secret": secret}, "p1")
+    Application._handle_relay_enroll(app, {"relay_secret": secret}, "p1")
     assert app.cfg.peer_relay_secrets["p1"] == secret
     assert app._saved["n"] == 1
     assert app._relay.refreshed == 1
@@ -761,8 +774,7 @@ def test_handle_relay_enroll_stores_and_replies():
 
 def test_handle_relay_enroll_rejects_garbage():
     app = make_app_stub()
-    for bad in ({}, {"relay_secret": 5}, {"relay_secret": "zz" * 32},
-                {"relay_secret": "ab" * 31}):
+    for bad in ({}, {"relay_secret": 5}, {"relay_secret": "zz" * 32}, {"relay_secret": "ab" * 31}):
         Application._handle_relay_enroll(app, bad, "p1")
     assert app.peers_sent == []
     assert app.cfg.peer_relay_secrets == {}
@@ -777,29 +789,29 @@ def test_handle_relay_enroll_ignores_unpaired_and_missing_peer():
 
 
 def test_relay_publish_skips_when_disabled_or_unpaired():
-    app = make_app_stub(enabled=False, with_relay=True,
-                        secrets={"p1": "dd" * 32})
+    app = make_app_stub(enabled=False, with_relay=True, secrets={"p1": "dd" * 32})
     Application._relay_publish_frame(app, b"frame")
     assert app._relay.published == []
 
-    app2 = make_app_stub(enabled=True, with_relay=True,
-                         secrets={"p1": "dd" * 32},
-                         peers={"p1": False})   # paired=False
+    app2 = make_app_stub(
+        enabled=True, with_relay=True, secrets={"p1": "dd" * 32}, peers={"p1": False}
+    )  # paired=False
     Application._relay_publish_frame(app2, b"frame")
     assert app2._relay.published == []
 
 
 def test_relay_publish_targets_each_enrolled_pair():
-    app = make_app_stub(enabled=True, with_relay=True,
-                        secrets={"p1": "dd" * 32, "p2": "ee" * 32},
-                        peers={"p1": True, "p2": True, "p3": True})
+    app = make_app_stub(
+        enabled=True,
+        with_relay=True,
+        secrets={"p1": "dd" * 32, "p2": "ee" * 32},
+        peers={"p1": True, "p2": True, "p3": True},
+    )
     Application._relay_publish_frame(app, b"frame-bytes")
     got = {(topic, key) for _, topic, key in app._relay.published}
     expected = {
-        (R.derive_topic("aa" * 32, "dd" * 32),
-         R.derive_key("aa" * 32, "dd" * 32)),
-        (R.derive_topic("aa" * 32, "ee" * 32),
-         R.derive_key("aa" * 32, "ee" * 32)),
+        (R.derive_topic("aa" * 32, "dd" * 32), R.derive_key("aa" * 32, "dd" * 32)),
+        (R.derive_topic("aa" * 32, "ee" * 32), R.derive_key("aa" * 32, "ee" * 32)),
     }
     # p3 is paired but never enrolled -> no channel for it
     assert got == expected
@@ -814,17 +826,27 @@ def test_relay_channels_match_derivation_and_skip_unknowns():
     app2 = make_app_stub(secret="", secrets={})
     ch2 = Application._relay_channels(app2)
     assert ch2 == {}
-    assert len(app2.cfg.relay_secret) == 64          # lazily generated
-    assert app2._saved["n"] == 1                     # …and persisted
+    assert len(app2.cfg.relay_secret) == 64  # lazily generated
+    assert app2._saved["n"] == 1  # …and persisted
 
 
 def test_start_internet_sync_enrolls_paired_peers_only(monkeypatch):
     started = {}
 
     class FakeTransport:
-        def __init__(self, brokers, get_channels, on_frame, on_state,
-                     client_factory=None, sleeper=None,
-                     username="", password="", private_brokers=None):
+        def __init__(
+            self,
+            brokers,
+            get_channels,
+            on_frame,
+            on_state,
+            client_factory=None,
+            sleeper=None,
+            username="",
+            password="",
+            private_brokers=None,
+            on_undecryptable=None,
+        ):
             started["args"] = (brokers, get_channels, on_frame, on_state)
 
         def start(self):
@@ -833,7 +855,8 @@ def test_start_internet_sync_enrolls_paired_peers_only(monkeypatch):
         def stop(self):
             started["stopped"] = True
 
-    from internal.transport import relay as R
+    from internal.transport import relay as R  # noqa: N812
+
     monkeypatch.setattr(R, "RelayTransport", FakeTransport)
 
     app = make_app_stub(peers={"p1": True, "off": False})
@@ -854,8 +877,9 @@ def test_stop_internet_sync_stops_transport():
     assert app._relay is None
     Application._stop_internet_sync(app)  # idempotent
 
+
 _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-_STATIC = os.path.join(_ROOT, 'internal', 'web', 'static')
+_STATIC = os.path.join(_ROOT, "internal", "web", "static")
 
 
 # ══════════════════════════════════════════════════
@@ -880,11 +904,16 @@ class _SettingsCfg:
 def sandboxed_persist(monkeypatch, tmp_path):
     """Redirect config persistence into the test sandbox."""
     from internal.web.api import settings as settings_api
+
     monkeypatch.setattr(
-        settings_api, "_config_path", lambda: tmp_path / "config.json",
+        settings_api,
+        "_config_path",
+        lambda: tmp_path / "config.json",
     )
     monkeypatch.setattr(
-        settings_api, "save_config", lambda cfg, enc_mgr=None: None,
+        settings_api,
+        "save_config",
+        lambda cfg, enc_mgr=None: None,
     )
 
 
@@ -895,24 +924,24 @@ def _body(obj) -> bytes:
 @pytest.mark.usefixtures("sandboxed_persist")
 def test_settings_internet_sync_toggle_roundtrip():
     from internal.web.api.settings import update_settings
+
     cfg = _SettingsCfg()
     data, status = update_settings(_body({"internet_sync_enabled": True}), cfg)
     assert status == 200
     assert data["ok"] is True
     assert data["updated"]["internet_sync_enabled"] is True
     assert cfg.internet_sync_enabled is True
-    data, status = update_settings(
-        _body({"internet_sync_enabled": False}), cfg)
+    data, status = update_settings(_body({"internet_sync_enabled": False}), cfg)
     assert status == 200 and cfg.internet_sync_enabled is False
 
 
 @pytest.mark.usefixtures("sandboxed_persist")
 def test_settings_internet_sync_bad_type_rejected():
     from internal.web.api.settings import update_settings
+
     cfg = _SettingsCfg()
     for bad in ("yes", 1, None, [True]):
-        data, status = update_settings(
-            _body({"internet_sync_enabled": bad}), cfg)
+        data, status = update_settings(_body({"internet_sync_enabled": bad}), cfg)
         assert status == 400, bad
         assert cfg.internet_sync_enabled is False
 
@@ -920,9 +949,9 @@ def test_settings_internet_sync_bad_type_rejected():
 @pytest.mark.usefixtures("sandboxed_persist")
 def test_settings_relay_brokers_roundtrip():
     from internal.web.api.settings import update_settings
+
     cfg = _SettingsCfg()
-    brokers = ["wss://broker.hivemq.com:8884/mqtt",
-               "wss://test.mosquitto.org:8081/mqtt"]
+    brokers = ["wss://broker.hivemq.com:8884/mqtt", "wss://test.mosquitto.org:8081/mqtt"]
     data, status = update_settings(_body({"relay_brokers": brokers}), cfg)
     assert status == 200
     assert cfg.relay_brokers == brokers
@@ -931,6 +960,7 @@ def test_settings_relay_brokers_roundtrip():
 @pytest.mark.usefixtures("sandboxed_persist")
 def test_settings_relay_brokers_bad_type_rejected():
     from internal.web.api.settings import update_settings
+
     cfg = _SettingsCfg()
     original = list(cfg.relay_brokers)
     for bad in ("wss://single.example", 42, {"url": True}, None):
@@ -942,6 +972,7 @@ def test_settings_relay_brokers_bad_type_rejected():
 @pytest.mark.usefixtures("sandboxed_persist")
 def test_settings_relay_private_brokers_roundtrip():
     from internal.web.api.settings import update_settings
+
     cfg = _SettingsCfg()
     priv = ["mqtt://priv1.example:1883", "ws://priv1.example:8083/mqtt"]
     data, status = update_settings(_body({"relay_private_brokers": priv}), cfg)
@@ -952,17 +983,18 @@ def test_settings_relay_private_brokers_roundtrip():
 @pytest.mark.usefixtures("sandboxed_persist")
 def test_settings_relay_private_brokers_bad_type_rejected():
     from internal.web.api.settings import update_settings
+
     cfg = _SettingsCfg()
     original = list(cfg.relay_private_brokers)
     for bad in ("mqtt://single.example", 42, {"url": True}, None):
-        data, status = update_settings(
-            _body({"relay_private_brokers": bad}), cfg)
+        data, status = update_settings(_body({"relay_private_brokers": bad}), cfg)
         assert status == 400, bad
         assert cfg.relay_private_brokers == original
 
 
 def test_get_settings_exposes_relay_keys_but_never_secrets():
     from internal.web.api.settings import get_settings
+
     cfg = _SettingsCfg()
     cfg.internet_sync_enabled = True
     cfg.relay_secret = "ab" * 32
@@ -983,6 +1015,7 @@ def test_get_settings_exposes_relay_keys_but_never_secrets():
 
 def test_get_settings_state_disabled_off_and_callback_fallback():
     from internal.web.api.settings import get_settings
+
     cfg = _SettingsCfg()  # internet_sync_enabled = False
     s = get_settings(cfg, get_internet_sync_state=lambda: "online")[0]["settings"]
     assert s["internet_sync_state"] == "off"  # callback ignored when off
@@ -1000,13 +1033,13 @@ def test_get_settings_state_disabled_off_and_callback_fallback():
 def test_routes_threads_state_callback_into_settings_get():
     """The dispatcher passes get_relay_state into GET /api/settings."""
     from internal.web.routes import dispatch
+
     captured = {}
 
     def _state():
         return "error"
 
-    def _fake_get_settings(cfg, get_internet_sync_state=None,
-                           get_current_relay_broker=None):
+    def _fake_get_settings(cfg, get_internet_sync_state=None, get_current_relay_broker=None):
         captured["fn"] = get_internet_sync_state
         captured["broker"] = get_current_relay_broker
         return {"settings": {}}, 200
@@ -1015,13 +1048,23 @@ def test_routes_threads_state_callback_into_settings_get():
         return "wss://b0:8884/mqtt"
 
     import internal.web.routes as routes_mod
+
     original = routes_mod.get_settings
     routes_mod.get_settings = _fake_get_settings
     try:
         status, ctype, raw = dispatch(
-            "GET", "/api/settings", {}, b"", cfg=object(), history=None,
-            sync_mgr=None, get_connected_ids=lambda: [], on_nav_url=None,
-            on_forward_file=None, upload_dir=".", get_relay_state=_state,
+            "GET",
+            "/api/settings",
+            {},
+            b"",
+            cfg=object(),
+            history=None,
+            sync_mgr=None,
+            get_connected_ids=lambda: [],
+            on_nav_url=None,
+            on_forward_file=None,
+            upload_dir=".",
+            get_relay_state=_state,
             get_current_relay_broker=_broker,
         )
     finally:
@@ -1031,8 +1074,6 @@ def test_routes_threads_state_callback_into_settings_get():
     assert captured["fn"]() == "error"
     assert captured["broker"] is _broker
     assert captured["broker"]() == "wss://b0:8884/mqtt"
-
-
 
 
 # ── 4. Static wiring: WS event → store → settings panel ────────────────
@@ -1073,8 +1114,6 @@ def test_settings_panel_consumes_relay_keys():
     assert "relayStateKey" in panel
     # empty broker list is refused client-side before any request
     assert "relay_brokers_empty" in panel
-
-
 
 
 # ── 5. Locale parity ───────────────────────────────────────────────────
@@ -1126,6 +1165,7 @@ def test_new_round11_keys_present_and_nonempty_in_both_locales():
         assert isinstance(en[key], str) and en[key].strip(), key
         assert isinstance(zh[key], str) and zh[key].strip(), key
 
+
 # ══════════════════════════════════════════════════
 # split from test_round13_wrapup.py — message buckets + relay envelope
 # ══════════════════════════════════════════════════
@@ -1139,9 +1179,13 @@ def test_message_type_buckets_disjoint():
         PAIRING_MSG_TYPES,
         RELAY_MSG_TYPES,
     )
+
     buckets = [
-        AICONFIG_MSG_TYPES, CHAT_MSG_TYPES, FILE_TRANSFER_MSG_TYPES,
-        PAIRING_MSG_TYPES, RELAY_MSG_TYPES,
+        AICONFIG_MSG_TYPES,
+        CHAT_MSG_TYPES,
+        FILE_TRANSFER_MSG_TYPES,
+        PAIRING_MSG_TYPES,
+        RELAY_MSG_TYPES,
     ]
     # A frame's msg_type must route to exactly one handler bucket — no frame
     # can be both an aiconfig frame and a relay/chat/pairing/transfer frame.
@@ -1157,6 +1201,7 @@ def test_aiconfig_and_relay_frames_stay_paired_only():
         RELAY_MSG_TYPES,
         UNPAIRED_GATE_MSG_TYPES,
     )
+
     # Both carry real content/identity and must never reach the app router
     # from an unpaired connection (the transport gate drops them; the
     # app-layer handlers re-check pairing as defense in depth).
@@ -1202,20 +1247,19 @@ def test_relay_rejects_stale_or_tampered_envelope():
     )
 
     key = derive_key("secret-a", "secret-b")
-    frame = encode_frame({"msg_type": "clipboard", "content": "x"},
-                         source_device="dev-1")
+    frame = encode_frame({"msg_type": "clipboard", "content": "x"}, source_device="dev-1")
     env = pack_envelope(frame, key, 1_700_000_000.0)
 
     # Envelope from outside the tolerated clock window is dropped.
     assert open_envelope(env, key, 1_700_000_000.0 + RELAY_TS_WINDOW * 2) is None
     # Wrong key cannot be opened.
-    assert open_envelope(env, derive_key("secret-a", "secret-c"),
-                         1_700_000_000.0) is None
+    assert open_envelope(env, derive_key("secret-a", "secret-c"), 1_700_000_000.0) is None
 
 
 # ══════════════════════════════════════════════════
 # v1.0.82 — mirror publishing (broker-split fix)
 # ══════════════════════════════════════════════════
+
 
 class SyncFakeClient(FakeClient):
     """Fake whose connect() fires CONNACK synchronously.
@@ -1316,7 +1360,7 @@ def test_mirror_publish_fans_out_to_all_connected_brokers():
     t, clients, _, _, _ = make_sync_transport(ch, brokers)
     t.start()
     assert _wait_mirrors_connected(t, 2)
-    assert set(t._mirror_clients) == {1, 2}      # primary is on #0
+    assert set(t._mirror_clients) == {1, 2}  # primary is on #0
     assert t.current_broker == brokers[0]
     topic, key = next(iter(ch.items()))
     frame = b"\x43\x53\x02" + b"mirror-me"
@@ -1343,8 +1387,8 @@ def test_mirrors_never_subscribe():
     t, clients, _, _, _ = make_sync_transport(ch, brokers)
     t.start()
     assert _wait_mirrors_connected(t, 2)
-    assert clients[0].subscribed == [next(iter(ch))]   # primary subscribed
-    for idx, conn in t._mirror_clients.items():
+    assert clients[0].subscribed == [next(iter(ch))]  # primary subscribed
+    for _idx, conn in t._mirror_clients.items():
         assert conn.client.subscribed == []
     t.stop()
 
@@ -1362,7 +1406,7 @@ def test_mirror_set_reorders_on_primary_failover():
     assert set(t._mirror_clients) == {1, 2}
     assert t.current_broker == brokers[0]
 
-    down.add("b0")                              # broker #0 goes away
+    down.add("b0")  # broker #0 goes away
     clients[0].on_disconnect(clients[0], None, None)  # primary loses its link
     # The worker's failover loop walks b0 (refused) then b1 (ok).
     deadline = time.time() + 2
@@ -1383,7 +1427,7 @@ def test_publish_returns_true_via_mirror_when_primary_offline():
     ch = _channel()
     brokers = ["wss://b0:8884/mqtt", "wss://b1:8884/mqtt"]
     t, clients, _, _, _ = make_sync_transport(ch, brokers)
-    t._connected_on_broker = None                # primary offline
+    t._connected_on_broker = None  # primary offline
     t._client = None
     conn = R._MirrorConnection(t, 1, brokers[1])
     t._mirror_clients[1] = conn
@@ -1411,11 +1455,11 @@ def test_mirror_reconnects_after_its_own_disconnect():
     brokers = ["wss://b0:8884/mqtt", "wss://b1:8884/mqtt"]
     t, clients, _, _, _ = make_sync_transport(ch, brokers)
     t.start()
-    assert _wait_mirrors_connected(t, 1)             # mirror #1 connected
+    assert _wait_mirrors_connected(t, 1)  # mirror #1 connected
     conn = t._mirror_clients[1]
     mc = conn.client
 
-    mc.on_disconnect(mc, None)                       # its broker drops
+    mc.on_disconnect(mc, None)  # its broker drops
     assert conn.connected is False
     # The mirror thread leaves _wait_until_lost (wakes within 0.5s), tears the
     # old client down, and reconnects on a fresh one.
@@ -1427,7 +1471,7 @@ def test_mirror_reconnects_after_its_own_disconnect():
         assert time.time() < deadline, "mirror never recreated its client"
         time.sleep(0.005)
     new = conn.client
-    assert new is not mc                             # fresh client, not a reuse
+    assert new is not mc  # fresh client, not a reuse
     # SyncFakeClient fires the reconnect CONNACK inside connect().
     deadline = time.time() + 2
     while not conn.connected and time.time() < deadline:
@@ -1450,13 +1494,13 @@ def test_single_broker_has_no_mirrors():
     assert t._mirror_clients == {}
     topic, key = next(iter(ch.items()))
     assert t.publish(b"x", topic, key) is True
-    assert len(clients[0].published) == 1            # only the primary sent
+    assert len(clients[0].published) == 1  # only the primary sent
     t.stop()
 
 
 def test_current_broker_empty_when_offline():
     t, clients, _, _ = make_transport(_channel())
-    assert t.current_broker == ""                    # never started
+    assert t.current_broker == ""  # never started
     t.start()
     assert t._test_wait_clients(1)
     # Client created but CONNACK not yet fired -> still offline.
@@ -1464,5 +1508,3 @@ def test_current_broker_empty_when_offline():
     clients[0].fire_connect(0, t)
     assert t.current_broker == "wss://broker.example:8884/mqtt"
     t.stop()
-
-

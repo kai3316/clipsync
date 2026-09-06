@@ -99,6 +99,7 @@ def is_app_allowed(app_info: dict | None, cfg) -> bool:
 
 # ---- platform implementations --------------------------------------
 
+
 def _get_active_app_info_impl() -> dict | None:
     if _SYSTEM == "Windows":
         return _get_active_app_info_windows()
@@ -109,6 +110,7 @@ def _get_active_app_info_impl() -> dict | None:
 
 
 # -- Windows ---------------------------------------------------------
+
 
 def _get_active_app_info_windows() -> dict | None:
     try:
@@ -134,21 +136,25 @@ def _get_active_app_info_windows() -> dict | None:
         user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
 
         # OpenProcess + QueryFullProcessImageNameW
-        PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
-        h_process = kernel32.OpenProcess(
-            PROCESS_QUERY_LIMITED_INFORMATION, False, pid.value
-        )
+        PROCESS_QUERY_LIMITED_INFORMATION = 0x1000  # noqa: N806
+        h_process = kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid.value)
         if not h_process:
             return {"name": title or "", "process": "", "title": title or ""}
 
         buf_path = ctypes.create_unicode_buffer(1024)
         size = wintypes.DWORD(1024)
         kernel32.QueryFullProcessImageNameW.argtypes = [
-            wintypes.HANDLE, wintypes.DWORD, wintypes.LPWSTR, ctypes.POINTER(wintypes.DWORD),
+            wintypes.HANDLE,
+            wintypes.DWORD,
+            wintypes.LPWSTR,
+            ctypes.POINTER(wintypes.DWORD),
         ]
         kernel32.QueryFullProcessImageNameW.restype = wintypes.BOOL
         success = kernel32.QueryFullProcessImageNameW(
-            h_process, 0, buf_path, ctypes.byref(size),
+            h_process,
+            0,
+            buf_path,
+            ctypes.byref(size),
         )
         kernel32.CloseHandle(h_process)
 
@@ -165,6 +171,7 @@ def _get_active_app_info_windows() -> dict | None:
 
 # -- macOS -----------------------------------------------------------
 
+
 def _get_active_app_info_darwin() -> dict | None:
     try:
         script = (
@@ -174,7 +181,8 @@ def _get_active_app_info_darwin() -> dict | None:
         )
         result = subprocess.run(
             ["osascript", "-e", script],
-            capture_output=True, timeout=2,
+            capture_output=True,
+            timeout=2,
         )
         if result.returncode != 0:
             return None
@@ -199,12 +207,14 @@ def _get_active_app_info_darwin() -> dict | None:
 
 # -- Linux -----------------------------------------------------------
 
+
 def _get_active_app_info_linux() -> dict | None:
     try:
         # Get active window PID
         pid_result = subprocess.run(
             ["xdotool", "getactivewindow", "getwindowpid"],
-            capture_output=True, timeout=2,
+            capture_output=True,
+            timeout=2,
         )
         if pid_result.returncode != 0:
             return None
@@ -221,7 +231,8 @@ def _get_active_app_info_linux() -> dict | None:
         # Try to get window title
         title_result = subprocess.run(
             ["xdotool", "getactivewindow", "getwindowname"],
-            capture_output=True, timeout=2,
+            capture_output=True,
+            timeout=2,
         )
         title = title_result.stdout.decode("utf-8").strip() if title_result.returncode == 0 else ""
 
@@ -233,6 +244,7 @@ def _get_active_app_info_linux() -> dict | None:
 
 
 # ---- helpers --------------------------------------------------------
+
 
 def _friendly_name(process: str, title: str = "") -> str:
     """Derive a human-friendly app name from the process name."""

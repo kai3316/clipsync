@@ -29,6 +29,7 @@
           '  store.activeTab === tab.id ? (mode === \'vertical\' ? \'tab-nav-vertical__btn--active\' : \'tab-nav__btn--active\') : \'\']"' +
           ' @click="store.activeTab = tab.id"' +
           ' :title="tab.label"' +
+          ' :aria-current="store.activeTab === tab.id ? \'page\' : null"' +
         '>' +
           '<span :class="mode === \'vertical\' ? \'tab-nav-vertical__icon\' : \'tab-nav__icon\'">{{ tab.icon }}</span>' +
           '<span :class="mode === \'vertical\' ? \'tab-nav-vertical__label\' : \'tab-nav__label\'">{{ tab.label }}</span>' +

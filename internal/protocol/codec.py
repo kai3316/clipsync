@@ -43,9 +43,9 @@ import uuid
 import zlib
 from io import BytesIO
 
-logger = logging.getLogger(__name__)
-
 from internal.clipboard.format import ClipboardContent, ContentType, SyncMessage
+
+logger = logging.getLogger(__name__)
 
 MAGIC = 0x4353  # "CS" for ClipSync (JSON frames)
 BINARY_MAGIC = 0x4253  # "BS" for binary payload frames (file chunks)
@@ -77,34 +77,57 @@ def has_syncable_types(content: ClipboardContent) -> bool:
 
 
 # Valid message types for file transfer routing
-FILE_TRANSFER_MSG_TYPES = frozenset({
-    "file_request", "file_chunk", "file_ack", "file_reject", "file_complete",
-    "file_chunk_ack", "file_pause", "file_resume",
-    "speed_test_data", "speed_test_result",
-})
+FILE_TRANSFER_MSG_TYPES = frozenset(
+    {
+        "file_request",
+        "file_chunk",
+        "file_ack",
+        "file_reject",
+        "file_complete",
+        "file_chunk_ack",
+        "file_pause",
+        "file_resume",
+        "speed_test_data",
+        "speed_test_result",
+    }
+)
 
 # Pairing lifecycle messages sent over the sync transport.  These keep both
 # devices' pairing state in sync: confirmation is a two-sided commitment, so
 # each side tells the other when it confirms, rejects, or un-pairs.
-PAIRING_MSG_TYPES = frozenset({
-    "pairing_confirm", "pairing_reject", "pairing_unpair",
-})
+PAIRING_MSG_TYPES = frozenset(
+    {
+        "pairing_confirm",
+        "pairing_reject",
+        "pairing_unpair",
+    }
+)
 
 # Nearby-chat messages for consent-gated communication with UNPAIRED devices
 # discovered on the LAN.  These are the only frames (besides pairing) that the
 # transport gate lets through from unpaired peers; every other type still
 # requires an established (paired) trust relationship.
-CHAT_MSG_TYPES = frozenset({
-    "chat_invite", "chat_accept", "chat_decline", "chat_close",
-    "chat_text", "chat_ping", "chat_pong",
-    "chat_file_offer", "chat_file_accept", "chat_file_reject",
-    "chat_file_cancel", "chat_file_complete",
-    # Typing indicator ({session_id, typing}).  Backward compatible: older
-    # peers drop unknown msg_types at the unpaired gate (logged, connection
-    # kept) or fall through to clipboard handling where the empty "types"
-    # payload is discarded by SyncManager's content.is_empty() check.
-    "chat_typing",
-})
+CHAT_MSG_TYPES = frozenset(
+    {
+        "chat_invite",
+        "chat_accept",
+        "chat_decline",
+        "chat_close",
+        "chat_text",
+        "chat_ping",
+        "chat_pong",
+        "chat_file_offer",
+        "chat_file_accept",
+        "chat_file_reject",
+        "chat_file_cancel",
+        "chat_file_complete",
+        # Typing indicator ({session_id, typing}).  Backward compatible: older
+        # peers drop unknown msg_types at the unpaired gate (logged, connection
+        # kept) or fall through to clipboard handling where the empty "types"
+        # payload is discarded by SyncManager's content.is_empty() check.
+        "chat_typing",
+    }
+)
 
 # Frame types an UNPAIRED peer may send at the transport gate.  Chat file
 # BYTES ride the generic ``file_chunk`` binary frame (not a ``chat_*`` type),
@@ -133,9 +156,14 @@ RELAY_MSG_TYPES = frozenset({"relay_enroll", "relay_ack"})
 # are paired-only by construction — deliberately NOT in UNPAIRED_GATE_MSG_TYPES
 # (the transport gate already drops them from unpaired peers; the app-layer
 # handler re-checks pairing as defense in depth).
-AICONFIG_MSG_TYPES = frozenset({
-    "aiconfig_inv", "aiconfig_req", "aiconfig_data",
-})
+AICONFIG_MSG_TYPES = frozenset(
+    {
+        "aiconfig_inv",
+        "aiconfig_req",
+        "aiconfig_data",
+        "aiconfig_err",
+    }
+)
 
 # Internet pairing-code handshake (Round 14): ``netpair_hello`` rides the
 # encrypted public-relay channel on a topic derived from a shared pairing code,
@@ -217,8 +245,9 @@ def encode_message(msg: SyncMessage, msg_type: str = "clipboard") -> bytes:
     return encode_frame(payload, msg.msg_id, msg.source_device)
 
 
-def encode_binary_chunk(transfer_id: str, chunk_index: int,
-                        total_chunks: int, raw_data: bytes) -> bytes:
+def encode_binary_chunk(
+    transfer_id: str, chunk_index: int, total_chunks: int, raw_data: bytes
+) -> bytes:
     """Encode a file chunk as a compact binary frame (no base64/JSON overhead).
 
     Binary frame format::
@@ -248,11 +277,13 @@ def encode_binary_chunk(transfer_id: str, chunk_index: int,
 
 def _decode_binary_frame(data: bytes):
     """Decode a binary frame into a SyncMessage, or return None."""
-    BIN_HEADER_SIZE = 2 + 32 + 4 + 4 + 4  # 46 bytes
+    BIN_HEADER_SIZE = 2 + 32 + 4 + 4 + 4  # 46 bytes  # noqa: N806
     if len(data) < BIN_HEADER_SIZE:
         return None
     magic, tid_bytes, chunk_index, total_chunks, data_len = struct.unpack_from(
-        ">H32sIII", data, 0,
+        ">H32sIII",
+        data,
+        0,
     )
     if magic != BINARY_MAGIC:
         return None
@@ -262,7 +293,7 @@ def _decode_binary_frame(data: bytes):
         transfer_id = tid_bytes.decode("ascii")
     except (UnicodeDecodeError, ValueError):
         return None
-    raw_data = data[BIN_HEADER_SIZE:BIN_HEADER_SIZE + data_len]
+    raw_data = data[BIN_HEADER_SIZE : BIN_HEADER_SIZE + data_len]
 
     content = ClipboardContent(timestamp=time.time())
     result = SyncMessage(content=content, msg_id=transfer_id, source_device="")
@@ -317,7 +348,7 @@ def decode_message(data: bytes) -> SyncMessage | None:
     if offset + msg_id_len > len(data):
         return None
     try:
-        msg_id = data[offset:offset + msg_id_len].decode("ascii")
+        msg_id = data[offset : offset + msg_id_len].decode("ascii")
     except (UnicodeDecodeError, ValueError):
         return None
     offset += msg_id_len
@@ -330,14 +361,14 @@ def decode_message(data: bytes) -> SyncMessage | None:
     if offset + src_len > len(data):
         return None
     try:
-        source_device = data[offset:offset + src_len].decode("utf-8")
+        source_device = data[offset : offset + src_len].decode("utf-8")
     except (UnicodeDecodeError, ValueError):
         return None
     offset += src_len
 
     if offset + payload_len > len(data):
         return None
-    payload_bytes = data[offset:offset + payload_len]
+    payload_bytes = data[offset : offset + payload_len]
 
     try:
         payload = json.loads(payload_bytes.decode("utf-8"))
@@ -370,8 +401,11 @@ def decode_message(data: bytes) -> SyncMessage | None:
     # (string, null, list, NaN/Infinity literal) would poison downstream
     # age/sort arithmetic.
     raw_ts = payload.get("timestamp", 0.0)
-    if isinstance(raw_ts, bool) or not isinstance(raw_ts, (int, float)) \
-            or not (-1e15 < raw_ts < 1e15):
+    if (
+        isinstance(raw_ts, bool)
+        or not isinstance(raw_ts, (int, float))
+        or not (-1e15 < raw_ts < 1e15)
+    ):
         raw_ts = 0.0
 
     content = ClipboardContent(
@@ -400,7 +434,8 @@ def decode_message(data: bytes) -> SyncMessage | None:
                             # Decompressed output would exceed the sane cap —
                             # drop this content type.
                             logger.debug(
-                                "Image payload exceeds decompression cap for %s", name,
+                                "Image payload exceeds decompression cap for %s",
+                                name,
                             )
                             continue
                     except zlib.error:

@@ -109,7 +109,7 @@
       'settings.export_markdown', 'settings.import', 'settings.create_backup',
       'settings.backup_list', 'settings.restore_backup',
       'settings.open_data_folder', 'settings.open_backups_folder',
-      'settings.data_dir', 'settings.favorites_path', 'settings.save_data_paths',
+      'settings.data_dir', 'settings.save_data_paths',
       // Danger zone merged into data management.
       'settings_window.danger_zone', 'settings_window.danger_zone_desc',
       'settings_window.restart_app', 'settings_window.factory_reset',
@@ -228,7 +228,6 @@
 
         // Data locations
         dataDir: '',
-        favoritesPath: '',
         dataSaving: false,
 
         // AI-config sync: enabled tool profiles (Claude Code / Codex / Cursor /
@@ -598,7 +597,6 @@
         if (s.plain_text_only !== undefined) this.plainTextOnly = !!s.plain_text_only;
         if (s.auto_update_check !== undefined) this.autoUpdateCheck = !!s.auto_update_check;
         if (s.data_dir !== undefined) this.dataDir = s.data_dir || '';
-        if (s.favorites_path !== undefined) this.favoritesPath = s.favorites_path || '';
         if (s.hotkeys) this.hotkeys = Object.assign({}, s.hotkeys);
         if (s.hotkeys_enabled !== undefined) this.hotkeysEnabled = !!s.hotkeys_enabled;
         // Re-enable dirty tracking on the next tick so the watchers fired by
@@ -1173,15 +1171,13 @@
         self.dataSaving = true;
         var cache = self.store.settingsCache || {};
         var dirChanged = (cache.data_dir || '') !== (self.dataDir || '').trim();
-        var favChanged = (cache.favorites_path || '') !== (self.favoritesPath || '').trim();
         ClipsyncAPI.updateSettings({
           data_dir: (self.dataDir || '').trim(),
-          favorites_path: (self.favoritesPath || '').trim(),
         }).then(function (res) {
           if (res && res.updated) self.store.mergeSettings(res.updated);
           self.dirtySections['data'] = false;
           var msg = self.t('settings.data_saved');
-          if (dirChanged || favChanged) {
+          if (dirChanged) {
             msg += ' ' + self.t('settings_window.data_restart_note');
           }
           self.store.showToast(msg, 4000);
@@ -1800,7 +1796,6 @@
         handler: function () { this.markDirty('advanced'); },
       },
       dataDir: function () { this.markDirty('data'); },
-      favoritesPath: function () { this.markDirty('data'); },
       aiConfigTools: {
         deep: true,
         handler: function () { this.markDirty('aiconfig'); },
@@ -2425,11 +2420,6 @@
                     '<label class="settings-field__label">{{ t(\'settings.data_dir\') }}</label>' +
                     '<input type="text" class="settings-input" v-model="dataDir" :placeholder="t(\'settings.data_dir_placeholder\')">' +
                     '<span class="settings-hint">{{ t(\'settings.data_dir_hint\') }}</span>' +
-                  '</div>' +
-                  '<div class="settings-field">' +
-                    '<label class="settings-field__label">{{ t(\'settings.favorites_path\') }}</label>' +
-                    '<input type="text" class="settings-input" v-model="favoritesPath" :placeholder="t(\'settings.favorites_path_placeholder\')">' +
-                    '<span class="settings-hint">{{ t(\'settings.favorites_path_hint\') }}</span>' +
                   '</div>' +
                   '<button class="settings-btn settings-btn--accent" @click="saveDataPaths" :disabled="dataSaving" style="width:100%;margin-top:8px">' +
                     '{{ dataSaving ? \'...\' : t(\'settings.save_data_paths\') }}' +

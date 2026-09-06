@@ -21,6 +21,8 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from internal.security.encryption import EncryptionManager
 
+import contextlib
+
 from internal.sync import ai_profiles as _ai_profiles
 
 logger = logging.getLogger(__name__)
@@ -113,17 +115,17 @@ class Config:
     chat_muted_peers: list[str] = field(default_factory=list)
     # Security
     encryption_enabled: bool = True
-    encryption_password: str = ""       # runtime only — never persisted
+    encryption_password: str = ""  # runtime only — never persisted
     encryption_password_hash: str = ""  # persisted verification token
     # UI preferences
-    appearance_mode: str = "system"     # "system", "light", "dark"
-    language: str = "zh-CN"             # locale code: "en", "zh-CN" (default Chinese)
-    language_chosen: bool = False       # True once the user picked a language (first-run onboarding)
+    appearance_mode: str = "system"  # "system", "light", "dark"
+    language: str = "zh-CN"  # locale code: "en", "zh-CN" (default Chinese)
+    language_chosen: bool = False  # True once the user picked a language (first-run onboarding)
     # Clipboard behavior
-    paste_to_top: bool = True           # move pasted item to top
-    low_memory_mode: bool = False       # reduce polling frequency / disable previews
+    paste_to_top: bool = True  # move pasted item to top
+    low_memory_mode: bool = False  # reduce polling frequency / disable previews
     retry_capture_enabled: bool = True  # multi-round retry capture
-    dedup_method: str = "sha256"        # "sha256" or "simple"
+    dedup_method: str = "sha256"  # "sha256" or "simple"
     # Strip rich-text formats (HTML/RTF) from every local clipboard write —
     # remote receives and pastes land as plain text only.  Images and file
     # lists are content, not formatting, and are kept.
@@ -143,7 +145,7 @@ class Config:
     source_tracking_enabled: bool = True  # track which app produced clipboard content
 
     # UI preferences
-    ui_backend: str = "webview"        # "webview" or "ctk"
+    ui_backend: str = "webview"  # "webview" or "ctk"
     ui_animation_enabled: bool = True
     # "通知提示音" — the user-facing master notification switch.  On some
     # platforms a notification always plays a sound, so OFF means no
@@ -152,8 +154,14 @@ class Config:
     sound_enabled: bool = True
 
     # Data management
-    favorites_path: str = ""           # empty = default location
-    data_dir: str = ""                 # custom data directory (empty = default)
+    favorites_path: str = ""  # empty = default location
+    # NOTE: nothing reads favorites_path.  Favorites live in SQLite and both
+    # backup.py:_get_favorites_path() and favorites.py resolve the location
+    # from _config_dir() directly, so setting this never moved anything.  The
+    # field is kept only so an existing config.json carrying it still loads;
+    # it was removed from the settings UI and API because it silently did
+    # nothing.  Do not surface it again without wiring it up first.
+    data_dir: str = ""  # custom data directory (empty = default)
 
     # Web companion
     web_enabled: bool = False
@@ -165,7 +173,7 @@ class Config:
     # public LibreTranslate instance; when both url and key are empty the
     # translate endpoint falls back to a free anonymous service.
     translate_url: str = ""
-    translate_api_key: str = ""   # never exposed to web clients
+    translate_api_key: str = ""  # never exposed to web clients
 
     # Hotkeys
     hotkeys: dict[str, str] = field(default_factory=lambda: dict(DEFAULT_HOTKEYS))
@@ -183,19 +191,23 @@ class Config:
     # Kept separate from the credentialed private relay below so the two
     # groups are managed independently: free/public endpoints must never be
     # handed the private broker's password.
-    relay_brokers: list[str] = field(default_factory=lambda: [
-        "wss://broker.emqx.io:8084/mqtt",
-        "wss://broker.hivemq.com:8884/mqtt",
-        "wss://test.mosquitto.org:8081/mqtt",
-    ])
+    relay_brokers: list[str] = field(
+        default_factory=lambda: [
+            "wss://broker.emqx.io:8084/mqtt",
+            "wss://broker.hivemq.com:8884/mqtt",
+            "wss://test.mosquitto.org:8081/mqtt",
+        ]
+    )
     # Private credentialed relay(s) — these authenticate with
     # relay_username/relay_password below.  Preconfigured with mqttyyc.top,
     # which is preferred as the primary; the free list becomes mirrors +
     # failover.
-    relay_private_brokers: list[str] = field(default_factory=lambda: [
-        "mqtt://mqttyyc.top:1883",
-        "ws://mqttyyc.top:8083/mqtt",
-    ])
+    relay_private_brokers: list[str] = field(
+        default_factory=lambda: [
+            "mqtt://mqttyyc.top:1883",
+            "ws://mqttyyc.top:8083/mqtt",
+        ]
+    )
     # Default broker credentials for the private relay above — filled in so
     # the default server "just works" with no typing.  Stored in the config
     # file, which is encrypted at rest when an app password is set — same
@@ -448,15 +460,13 @@ def _validate_field(key: str, value: object):
     if kind == "hotkeys":
         if not isinstance(value, dict):
             return _SKIP_FIELD
-        if not all(isinstance(k, str) and isinstance(v, str)
-                   for k, v in value.items()):
+        if not all(isinstance(k, str) and isinstance(v, str) for k, v in value.items()):
             return _SKIP_FIELD
         return value
     if kind == "strdict":
         if not isinstance(value, dict):
             return _SKIP_FIELD
-        if not all(isinstance(k, str) and isinstance(v, str)
-                   for k, v in value.items()):
+        if not all(isinstance(k, str) and isinstance(v, str) for k, v in value.items()):
             return _SKIP_FIELD
         return value
     return _SKIP_FIELD
@@ -497,7 +507,8 @@ def _parse_peer_list(data: dict, key: str) -> dict[str, PeerInfo]:
     if not isinstance(peers_data, list):
         logger.warning(
             "Config '%s' has invalid type %s — ignoring",
-            key, type(peers_data).__name__,
+            key,
+            type(peers_data).__name__,
         )
         return {}
     result: dict[str, PeerInfo] = {}
@@ -563,37 +574,65 @@ def load() -> Config:
                 return Config()
             cfg = Config()
             for key in (
-                "device_id", "device_name", "port", "service_type",
-                "sync_enabled", "timed_pause_until", "auto_start",
+                "device_id",
+                "device_name",
+                "port",
+                "service_type",
+                "sync_enabled",
+                "timed_pause_until",
+                "auto_start",
                 "filter_enabled_categories",
-                "private_key_pem", "certificate_pem",
-                "history_max_entries", "history_max_age_days",
+                "private_key_pem",
+                "certificate_pem",
+                "history_max_entries",
+                "history_max_age_days",
                 "file_receive_dir",
-                "sync_debounce", "clipboard_poll_interval",
-                "max_reconnect_attempts", "transfer_timeout",
-                "log_level", "notifications_enabled",
-                "notify_device_connect", "notify_transfer",
-                "notify_pairing", "notify_sync",
+                "sync_debounce",
+                "clipboard_poll_interval",
+                "max_reconnect_attempts",
+                "transfer_timeout",
+                "log_level",
+                "notifications_enabled",
+                "notify_device_connect",
+                "notify_transfer",
+                "notify_pairing",
+                "notify_sync",
                 "chat_muted_peers",
                 "encryption_enabled",
                 "encryption_password_hash",
                 "appearance_mode",
                 "language",
                 "language_chosen",
-                "paste_to_top", "low_memory_mode", "retry_capture_enabled",
-                "dedup_method", "plain_text_only", "auto_update_check",
-                "app_filter_enabled", "app_filter_mode",
-                "app_filter_list", "source_tracking_enabled",
-                "ui_backend", "ui_animation_enabled", "sound_enabled",
-                "favorites_path", "data_dir",
-                "web_enabled", "web_port",
-                "web_token", "web_history_limit",
-                "translate_url", "translate_api_key",
-                "hotkeys", "hotkeys_enabled",
-                "internet_sync_enabled", "relay_brokers",
+                "paste_to_top",
+                "low_memory_mode",
+                "retry_capture_enabled",
+                "dedup_method",
+                "plain_text_only",
+                "auto_update_check",
+                "app_filter_enabled",
+                "app_filter_mode",
+                "app_filter_list",
+                "source_tracking_enabled",
+                "ui_backend",
+                "ui_animation_enabled",
+                "sound_enabled",
+                "favorites_path",
+                "data_dir",
+                "web_enabled",
+                "web_port",
+                "web_token",
+                "web_history_limit",
+                "translate_url",
+                "translate_api_key",
+                "hotkeys",
+                "hotkeys_enabled",
+                "internet_sync_enabled",
+                "relay_brokers",
                 "relay_private_brokers",
-                "relay_username", "relay_password",
-                "relay_secret", "peer_relay_secrets",
+                "relay_username",
+                "relay_password",
+                "relay_secret",
+                "peer_relay_secrets",
                 "netpair_secrets",
                 "netpair_aliases",
                 "ai_config_tools",
@@ -604,7 +643,8 @@ def load() -> Config:
                     if value is _SKIP_FIELD:
                         logger.warning(
                             "Config field '%s' has invalid type %s — keeping default",
-                            key, type(data[key]).__name__,
+                            key,
+                            type(data[key]).__name__,
                         )
                         continue
                     setattr(cfg, key, value)
@@ -612,9 +652,15 @@ def load() -> Config:
             if "encryption_password" in data and data["encryption_password"]:
                 cfg.encryption_password = data["encryption_password"]
             # Migrate from old filter_sensitive bool
-            if "filter_sensitive" in data and not data.get("filter_enabled_categories"):
+            if "filter_sensitive" in data and not data.get("filter_enabled_categories"):  # noqa: SIM102
                 if data["filter_sensitive"]:
-                    cfg.filter_enabled_categories = ["credit_card", "ssn", "api_key", "private_key", "password"]
+                    cfg.filter_enabled_categories = [
+                        "credit_card",
+                        "ssn",
+                        "api_key",
+                        "private_key",
+                        "password",
+                    ]
             # Config v1 stored filter_enabled_categories=[] to mean "all
             # categories enabled"; v2 distinguishes None=all from []=disabled.
             # Preserve the old default for existing configs by upgrading []→None
@@ -631,8 +677,7 @@ def load() -> Config:
             # tool profile or becomes a user custom path.  Persisted on the
             # next save() like the other one-way migrations above.
             if "ai_config_paths" in data and "ai_config_tools" not in data:
-                keys, custom = _ai_profiles.migrate_watch_paths(
-                    data.get("ai_config_paths"))
+                keys, custom = _ai_profiles.migrate_watch_paths(data.get("ai_config_paths"))
                 cfg.ai_config_tools = keys
                 cfg.ai_config_custom_paths = custom
             return cfg
@@ -651,6 +696,29 @@ def save(cfg: Config, enc_mgr: "EncryptionManager | None" = None):
         if cfg.encryption_enabled and enc_mgr and cfg.private_key_pem:
             private_key_to_save = enc_mgr.encrypt_storage(cfg.private_key_pem)
             logger.debug("Config save: private_key_pem encrypted for at-rest storage")
+
+        # Last-resort guard: never let a save replace a stored device key with
+        # an empty one.  The key IS this device's identity -- blanking it makes
+        # every paired peer see a changed certificate and forces the user to
+        # re-pair everything, and nothing in the app legitimately clears it.
+        if not private_key_to_save:
+            try:
+                previous = json.loads(config_path.read_text(encoding="utf-8"))
+                kept = previous.get("private_key_pem") if isinstance(previous, dict) else None
+                if isinstance(kept, str) and kept:
+                    logger.warning(
+                        "Config save carried an empty private_key_pem; keeping "
+                        "the stored key instead of erasing this device's identity."
+                    )
+                    private_key_to_save = kept
+            except FileNotFoundError:
+                pass
+            except (OSError, json.JSONDecodeError):
+                logger.warning(
+                    "Config save carried an empty private_key_pem and %s could "
+                    "not be read to recover the stored key.",
+                    config_path,
+                )
 
         data = {
             "config_version": cfg.config_version,
@@ -745,7 +813,9 @@ def save(cfg: Config, enc_mgr: "EncryptionManager | None" = None):
         }
         # Atomic save: write to temp file then rename
         tmp_fd, tmp_path = tempfile.mkstemp(
-            dir=str(config_dir), prefix=".config_tmp_", suffix=".json",
+            dir=str(config_dir),
+            prefix=".config_tmp_",
+            suffix=".json",
         )
         try:
             with os.fdopen(tmp_fd, "w", encoding="utf-8") as f:
@@ -757,14 +827,10 @@ def save(cfg: Config, enc_mgr: "EncryptionManager | None" = None):
             # inode, so the final file is already private. Re-assert it for
             # filesystems where replace may reset perms (non-Windows guard).
             if os.name != "nt":
-                try:
+                with contextlib.suppress(OSError):
                     os.chmod(config_path, 0o600)
-                except OSError:
-                    pass
             logger.debug("Config saved to %s", config_path)
         except Exception:
-            try:
+            with contextlib.suppress(OSError):
                 os.unlink(tmp_path)
-            except OSError:
-                pass
             raise

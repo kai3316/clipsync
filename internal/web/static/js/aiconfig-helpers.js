@@ -19,12 +19,7 @@
   var KEY_SEP = '';
 
   function fmtSize(n) {
-    var v = Number(n);
-    if (!isFinite(v) || v < 0) return '';
-    if (v < 1024) return v + ' B';
-    if (v < 1048576) return (v / 1024).toFixed(1) + ' KB';
-    if (v < 1073741824) return (v / 1048576).toFixed(1) + ' MB';
-    return (v / 1073741824).toFixed(2) + ' GB';
+    return ClipsyncFormat.size(n);
   }
 
   // mtime units are whatever the backend serializes — treat values below
@@ -50,8 +45,15 @@
     return num > 1e12 ? num : num * 1000;
   }
 
+  // Identity of one entry: (tool, root, rel_path).  The root id is part of the
+  // key because a rel_path is relative to its own root, so two dir roots of
+  // one tool (Claude Code's skills / commands / agents) can legitimately hold
+  // the same rel_path as two different files.  A v2 peer sends no root, which
+  // collapses to the old (tool, rel_path) key — still consistent within that
+  // peer's own inventory.
   function keyOf(entry) {
     return String((entry && entry.tool) || 'custom') +
+      KEY_SEP + String((entry && entry.root) || '') +
       KEY_SEP + String((entry && entry.rel_path) || '');
   }
 
@@ -62,10 +64,10 @@
 
   /**
    * Index local entries for diff comparison.
-   *   byKey   v2 entries by (tool, rel_path)
-   *   byPath  every file entry by rel_path (fallback match, and what legacy
-   *           remote entries compare against — root indices are per-device
-   *           and mean nothing on the local side)
+   *   byKey   v3 entries by (tool, root, rel_path)
+   *   byPath  every file entry by rel_path (what legacy and v2 remote entries
+   *           compare against — a legacy root index is per-device and means
+   *           nothing locally, and a v2 peer sends no root at all)
    * Directory entries are excluded: a folder compares through its files, and
    * an empty-sha256 folder row would otherwise always read "same".
    * @returns {{byKey: Object, byPath: Object}}
@@ -105,9 +107,13 @@
     // local list settles).
     if (!local) return null;
     var rel = String(entry.rel_path || entry.path || '');
-    var localEntry = legacy
+    // A v3 entry names its root, so it must match the local file under THAT
+    // root exactly — falling back to byPath would happily compare
+    // commands/x.md against a local rules/x.md and report a bogus "same".
+    // Legacy and v2 peers carry no usable root, so they still match by path.
+    var localEntry = (legacy || !entry.root)
       ? (local && local.byPath || {})[rel]
-      : ((local && local.byKey || {})[keyOf(entry)] || (local && local.byPath || {})[rel]);
+      : (local && local.byKey || {})[keyOf(entry)];
     if (!localEntry) return 'missing';
     if (String(localEntry.sha256 || '') === String(entry.sha256 || '')) return 'same';
     return (mtimeMs(localEntry.mtime) > mtimeMs(entry.mtime))

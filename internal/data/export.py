@@ -1,10 +1,10 @@
 """Clipboard history export / import (JSON and CSV).
 
-All functions operate on the ClipboardHistory model (thread-safe, lock-based).
-Accepts both ``ClipboardHistory`` and ``ClipboardHistoryDB`` instances.
+All functions operate on the ClipboardHistoryDB model (thread-safe, lock-based).
 """
 
 import base64
+import contextlib
 import csv
 import json
 import logging
@@ -12,9 +12,7 @@ import os
 import time
 from datetime import datetime
 from pathlib import Path
-from typing import Union
 
-from internal.clipboard.history import ClipboardHistory
 from internal.clipboard.history_db import ClipboardHistoryDB
 from internal.i18n import T
 
@@ -22,7 +20,7 @@ logger = logging.getLogger(__name__)
 
 _DEDUP_WINDOW = 5.0  # seconds
 
-_HistoryType = Union[ClipboardHistory, ClipboardHistoryDB]
+_HistoryType = ClipboardHistoryDB
 
 
 def _coerce_csv_float(value, default: float) -> float:
@@ -89,17 +87,19 @@ def export_history_json(history: _HistoryType, filepath: str) -> int:
     entries = history.get_all()
     export_list = []
     for entry in entries:
-        export_list.append({
-            "timestamp": entry.get("timestamp", 0),
-            "content_type": entry.get("content_type", ""),
-            "text_preview": entry.get("text_preview", ""),
-            "types": _decode_types(entry),
-            "source_device": entry.get("source_device", ""),
-            "source_app": entry.get("source_app", ""),
-            "source_title": entry.get("source_title", ""),
-            "pinned": entry.get("pinned", False),
-            "paste_count": entry.get("paste_count", 0),
-        })
+        export_list.append(
+            {
+                "timestamp": entry.get("timestamp", 0),
+                "content_type": entry.get("content_type", ""),
+                "text_preview": entry.get("text_preview", ""),
+                "types": _decode_types(entry),
+                "source_device": entry.get("source_device", ""),
+                "source_app": entry.get("source_app", ""),
+                "source_title": entry.get("source_title", ""),
+                "pinned": entry.get("pinned", False),
+                "paste_count": entry.get("paste_count", 0),
+            }
+        )
 
     out = Path(filepath)
     out.parent.mkdir(parents=True, exist_ok=True)
@@ -116,16 +116,12 @@ def export_history_json(history: _HistoryType, filepath: str) -> int:
             f.write("]")
         os.replace(part, out)
     except Exception:
-        try:
+        with contextlib.suppress(OSError):
             part.unlink(missing_ok=True)
-        except OSError:
-            pass
         raise
     # Clipboard content is sensitive; don't leave the export world-readable.
-    try:
+    with contextlib.suppress(OSError):
         os.chmod(out, 0o600)
-    except OSError:
-        pass
     logger.info("Exported %d history entries to %s", len(export_list), filepath)
     return len(export_list)
 
@@ -203,40 +199,46 @@ def export_history_csv(history: _HistoryType, filepath: str) -> int:
         with part.open("w", encoding="utf-8", newline="") as f:
             writer = csv.DictWriter(
                 f,
-                fieldnames=["timestamp", "time_iso", "content_type",
-                            "text_preview", "source_device", "source_app",
-                            "source_title", "pinned", "paste_count",
-                            "byte_size"],
+                fieldnames=[
+                    "timestamp",
+                    "time_iso",
+                    "content_type",
+                    "text_preview",
+                    "source_device",
+                    "source_app",
+                    "source_title",
+                    "pinned",
+                    "paste_count",
+                    "byte_size",
+                ],
                 extrasaction="ignore",
             )
             writer.writeheader()
             for entry in entries:
                 ts = entry.get("timestamp", 0) or 0
-                writer.writerow({
-                    "timestamp": ts,
-                    "time_iso": _iso_timestamp(ts),
-                    "content_type": entry.get("content_type", ""),
-                    "text_preview": entry.get("text_preview", ""),
-                    "source_device": entry.get("source_device", ""),
-                    "source_app": entry.get("source_app", ""),
-                    "source_title": entry.get("source_title", ""),
-                    "pinned": entry.get("pinned", False),
-                    "paste_count": entry.get("paste_count", 0),
-                    "byte_size": _types_byte_size(entry.get("types", {})),
-                })
+                writer.writerow(
+                    {
+                        "timestamp": ts,
+                        "time_iso": _iso_timestamp(ts),
+                        "content_type": entry.get("content_type", ""),
+                        "text_preview": entry.get("text_preview", ""),
+                        "source_device": entry.get("source_device", ""),
+                        "source_app": entry.get("source_app", ""),
+                        "source_title": entry.get("source_title", ""),
+                        "pinned": entry.get("pinned", False),
+                        "paste_count": entry.get("paste_count", 0),
+                        "byte_size": _types_byte_size(entry.get("types", {})),
+                    }
+                )
         os.replace(part, out)
     except Exception:
-        try:
+        with contextlib.suppress(OSError):
             part.unlink(missing_ok=True)
-        except OSError:
-            pass
         raise
 
     # Clipboard content is sensitive; don't leave the export world-readable.
-    try:
+    with contextlib.suppress(OSError):
         os.chmod(out, 0o600)
-    except OSError:
-        pass
     logger.info("Exported %d history entries to %s", len(entries), filepath)
     return len(entries)
 
@@ -323,31 +325,23 @@ def export_history_markdown(history: _HistoryType, filepath: str) -> int:
                     entry.get("content_type", ""),
                     entry.get("content_type", "") or "Clip",
                 )
-                source = (entry.get("source_app", "")
-                          or entry.get("source_device", ""))
+                source = entry.get("source_app", "") or entry.get("source_device", "")
                 origin = f" · {source}" if source else ""
                 pastes = entry.get("paste_count", 0) or 0
                 pasted = f" · {pastes} paste(s)" if pastes else ""
-                preview = (entry.get("text_preview", "") or "")
+                preview = entry.get("text_preview", "") or ""
                 preview = preview.replace("\r", " ").replace("\n", " ").strip()
-                f.write(
-                    f"- {dt.strftime('%H:%M')} · {ctype}{origin}{pasted}: "
-                    f"{preview}\n"
-                )
+                f.write(f"- {dt.strftime('%H:%M')} · {ctype}{origin}{pasted}: {preview}\n")
                 count += 1
         os.replace(part, out)
     except Exception:
-        try:
+        with contextlib.suppress(OSError):
             part.unlink(missing_ok=True)
-        except OSError:
-            pass
         raise
 
     # Clipboard content is sensitive; don't leave the export world-readable.
-    try:
+    with contextlib.suppress(OSError):
         os.chmod(out, 0o600)
-    except OSError:
-        pass
     logger.info("Exported %d history entries to %s", count, filepath)
     return count
 
@@ -464,9 +458,7 @@ def _encode_types(types: dict) -> dict:
         if isinstance(val, dict) and isinstance(val.get("_b64"), str):
             encoded[key] = val["_b64"]
         elif isinstance(val, str):
-            encoded[key] = base64.b64encode(
-                val.encode("utf-8", errors="replace")
-            ).decode("ascii")
+            encoded[key] = base64.b64encode(val.encode("utf-8", errors="replace")).decode("ascii")
         else:
             # Unknown / malformed value — drop it rather than crash the import.
             continue

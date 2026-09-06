@@ -181,16 +181,16 @@
   --clipsync-fg-subtle: #5B6B85;       /* Subtle (raised for ≥4.5:1 on light) */
 
   /* Accent — deepened neon triad (contrast-safe on white) */
-  --clipsync-accent: #0891B2;          /* Deep cyan */
+  --clipsync-accent: #0E7490;          /* Deep cyan */
   --clipsync-accent-2: #7C3AED;        /* Deep violet */
   --clipsync-accent-3: #DB2777;        /* Deep pink */
-  --clipsync-accent-hover: #0EA5C4;
-  --clipsync-accent-glow: rgba(8, 145, 178, 0.12);
-  --clipsync-accent-glow-strong: rgba(8, 145, 178, 0.20);
+  --clipsync-accent-hover: #0891B2;
+  --clipsync-accent-glow: rgba(14, 116, 144, 0.12);
+  --clipsync-accent-glow-strong: rgba(14, 116, 144, 0.20);
   --clipsync-accent-text: #FFFFFF;
 
   /* Aurora gradient — deep enough to carry white text */
-  --clipsync-gradient: linear-gradient(135deg, #0891B2, #7C3AED 55%, #DB2777);
+  --clipsync-gradient: linear-gradient(135deg, #0E7490, #7C3AED 55%, #DB2777);
 
   --clipsync-violet-glow: rgba(124, 58, 237, 0.12);
   --clipsync-violet-glow-strong: rgba(124, 58, 237, 0.20);
@@ -209,30 +209,30 @@
   --clipsync-danger-text: #BE123C;
   --clipsync-danger-bg: rgba(225, 29, 72, 0.08);
   --clipsync-danger-glow: rgba(225, 29, 72, 0.16);
-  --clipsync-info: #0891B2;
-  --clipsync-info-bg: rgba(8, 145, 178, 0.08);
-  --clipsync-info-glow: rgba(8, 145, 178, 0.14);
+  --clipsync-info: #0E7490;
+  --clipsync-info-bg: rgba(14, 116, 144, 0.08);
+  --clipsync-info-glow: rgba(14, 116, 144, 0.14);
 
   --clipsync-purple: #7C3AED;
-  --clipsync-cyan: #0891B2;
+  --clipsync-cyan: #0E7490;
   --clipsync-pink: #DB2777;
 
   /* Borders */
   --clipsync-border: rgba(16, 20, 42, 0.08);
   --clipsync-border-strong: rgba(16, 20, 42, 0.14);
-  --clipsync-border-glow: rgba(8, 145, 178, 0.18);
-  --clipsync-border-glow-strong: rgba(8, 145, 178, 0.30);
+  --clipsync-border-glow: rgba(14, 116, 144, 0.18);
+  --clipsync-border-glow-strong: rgba(14, 116, 144, 0.30);
 
   /* Interactive */
   --clipsync-hover: rgba(16, 20, 42, 0.04);
-  --clipsync-active: rgba(8, 145, 178, 0.08);
+  --clipsync-active: rgba(14, 116, 144, 0.08);
 
   /* Shadows — soft, diffuse */
   --clipsync-shadow-sm: 0 1px 2px rgba(15, 23, 42, 0.06);
-  --clipsync-shadow: 0 1px 3px rgba(15, 23, 42, 0.06), 0 0 1px rgba(8, 145, 178, 0.05);
-  --clipsync-shadow-md: 0 4px 12px rgba(15, 23, 42, 0.08), 0 0 2px rgba(8, 145, 178, 0.06);
+  --clipsync-shadow: 0 1px 3px rgba(15, 23, 42, 0.06), 0 0 1px rgba(14, 116, 144, 0.05);
+  --clipsync-shadow-md: 0 4px 12px rgba(15, 23, 42, 0.08), 0 0 2px rgba(14, 116, 144, 0.06);
   --clipsync-shadow-lg: 0 8px 30px rgba(15, 23, 42, 0.12);
-  --clipsync-shadow-glow: 0 0 18px rgba(8, 145, 178, 0.16);
+  --clipsync-shadow-glow: 0 0 18px rgba(14, 116, 144, 0.16);
 }
 
 /* Light theme: the internet-pairing switch's off-track uses --clipsync-panel-2,

@@ -21,6 +21,7 @@ from internal.transport.connection import (
 # Mocks
 # ---------------------------------------------------------------------------
 
+
 class MockPairingManager:
     """Minimal mock of PairingManager with the interface TransportManager needs.
 
@@ -37,9 +38,11 @@ class MockPairingManager:
         from cryptography.x509.oid import NameOID
 
         private_key = ed25519.Ed25519PrivateKey.generate()
-        subject = issuer = x509.Name([
-            x509.NameAttribute(NameOID.COMMON_NAME, "test-device"),
-        ])
+        subject = issuer = x509.Name(
+            [
+                x509.NameAttribute(NameOID.COMMON_NAME, "test-device"),
+            ]
+        )
         certificate = (
             x509.CertificateBuilder()
             .subject_name(subject)
@@ -47,10 +50,7 @@ class MockPairingManager:
             .public_key(private_key.public_key())
             .serial_number(12345)
             .not_valid_before(datetime.datetime.now(datetime.UTC))
-            .not_valid_after(
-                datetime.datetime.now(datetime.UTC)
-                + datetime.timedelta(days=365)
-            )
+            .not_valid_after(datetime.datetime.now(datetime.UTC) + datetime.timedelta(days=365))
             .sign(private_key, None)
         )
         cert_pem = certificate.public_bytes(serialization.Encoding.PEM).decode()
@@ -61,6 +61,7 @@ class MockPairingManager:
         ).decode()
 
         from internal.security.pairing import DeviceIdentity, fingerprint_short
+
         self._identity = DeviceIdentity(
             device_id="test-device",
             device_name="Test Device",
@@ -116,6 +117,7 @@ class MockSocket:
 # TransportManager
 # ---------------------------------------------------------------------------
 
+
 class TestTransportManagerInit:
     """TransportManager.__init__ stores constructor arguments."""
 
@@ -170,6 +172,7 @@ class TestConnectRejectedCallback:
     def test_setter_stores_callback(self):
         def cb(name, pid):
             pass
+
         self.tm.set_on_connect_rejected(cb)
         assert self.tm._on_connect_rejected is cb
 
@@ -187,6 +190,7 @@ class TestConnectRejectedCallback:
     def test_throwing_callback_does_not_propagate(self):
         def boom(name, pid):
             raise RuntimeError("boom")
+
         self.tm.set_on_connect_rejected(boom)
         # The connect thread must survive a misbehaving callback.
         self.tm._notify_connect_rejected("Kais-Mac", "peer-123")
@@ -212,14 +216,17 @@ class TestTransportManagerOperations:
     def test_set_on_peer_message_sets_callback(self):
         def cb(msg):
             pass
+
         self.tm.set_on_peer_message(cb)
         assert self.tm._on_peer_message is cb
 
     def test_set_on_peer_message_overwrites_previous(self):
         def cb1(msg):
             pass
+
         def cb2(msg):
             pass
+
         self.tm.set_on_peer_message(cb1)
         self.tm.set_on_peer_message(cb2)
         assert self.tm._on_peer_message is cb2
@@ -245,6 +252,7 @@ class TestTransportManagerOperations:
 # ---------------------------------------------------------------------------
 # PeerConnection
 # ---------------------------------------------------------------------------
+
 
 class TestPeerConnectionInit:
     """PeerConnection.__init__ stores constructor arguments."""
@@ -279,6 +287,7 @@ class TestPeerConnectionInit:
 
     def test_send_lock_is_initialized(self):
         import threading
+
         assert isinstance(self.conn._send_lock, type(threading.Lock()))
 
 
@@ -292,20 +301,24 @@ class TestPeerConnectionCallbacks:
     def test_set_on_message_stores_callback(self):
         def cb(msg):
             pass
+
         self.conn.set_on_message(cb)
         assert self.conn._on_message is cb
 
     def test_set_on_disconnect_stores_callback(self):
         def cb(peer_id):
             pass
+
         self.conn.set_on_disconnect(cb)
         assert self.conn._on_disconnect is cb
 
     def test_set_on_message_replaces_previous(self):
         def cb1(msg):
             pass
+
         def cb2(msg):
             pass
+
         self.conn.set_on_message(cb1)
         self.conn.set_on_message(cb2)
         assert self.conn._on_message is cb2
@@ -313,8 +326,10 @@ class TestPeerConnectionCallbacks:
     def test_set_on_disconnect_replaces_previous(self):
         def cb1(peer_id):
             pass
+
         def cb2(peer_id):
             pass
+
         self.conn.set_on_disconnect(cb1)
         self.conn.set_on_disconnect(cb2)
         assert self.conn._on_disconnect is cb2
@@ -336,6 +351,7 @@ class TestPeerConnectionSend:
 # Constants
 # ---------------------------------------------------------------------------
 
+
 class TestConstants:
     """Protocol constants are what the rest of the stack expects."""
 
@@ -352,6 +368,7 @@ class TestConstants:
 # ---------------------------------------------------------------------------
 # _secure_scratch_dir / _cleanup_stale_scratch
 # ---------------------------------------------------------------------------
+
 
 class TestSecureScratchDir:
     """_secure_scratch_dir() returns a per-user, secure scratch directory."""
@@ -377,7 +394,8 @@ class TestCleanupStaleScratch:
 
     def test_removes_pem_files(self, monkeypatch, tmp_path):
         monkeypatch.setattr(
-            TransportManager, "_secure_scratch_dir",
+            TransportManager,
+            "_secure_scratch_dir",
             staticmethod(lambda: tmp_path),
         )
 
@@ -400,7 +418,8 @@ class TestCleanupStaleScratch:
 
     def test_handles_empty_scratch_dir(self, monkeypatch, tmp_path):
         monkeypatch.setattr(
-            TransportManager, "_secure_scratch_dir",
+            TransportManager,
+            "_secure_scratch_dir",
             staticmethod(lambda: tmp_path),
         )
         # tmp_path is empty — should not raise
@@ -409,7 +428,8 @@ class TestCleanupStaleScratch:
     def test_handles_missing_scratch_dir(self, monkeypatch, tmp_path):
         missing = tmp_path / "does_not_exist"
         monkeypatch.setattr(
-            TransportManager, "_secure_scratch_dir",
+            TransportManager,
+            "_secure_scratch_dir",
             staticmethod(lambda: missing),
         )
         # The method catches all exceptions internally — should not propagate

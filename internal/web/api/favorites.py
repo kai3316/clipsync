@@ -12,6 +12,7 @@ version so existing callers (routes, batch_favorite) work without
 modification.
 """
 
+import contextlib
 import json
 import logging
 import os
@@ -128,7 +129,7 @@ def _maybe_migrate() -> int:
                 fav_id = item.get("id", uuid.uuid4().hex[:12])
                 conn.execute(
                     "INSERT OR IGNORE INTO favorites "
-                    "(id, title, content, \"group\", position, created, updated) "
+                    '(id, title, content, "group", position, created, updated) '
                     "VALUES (?, ?, ?, ?, ?, ?, ?)",
                     (
                         fav_id,
@@ -144,7 +145,9 @@ def _maybe_migrate() -> int:
 
         if count > 0:
             logger.info(
-                "Migrated %d favorites from %s to SQLite", count, json_path,
+                "Migrated %d favorites from %s to SQLite",
+                count,
+                json_path,
             )
         return count
     except (json.JSONDecodeError, OSError) as exc:
@@ -172,7 +175,7 @@ def _load_favorites() -> list:
     conn = _get_conn()
     try:
         rows = conn.execute(
-            "SELECT id, title, content, \"group\", position, created, updated "
+            'SELECT id, title, content, "group", position, created, updated '
             "FROM favorites ORDER BY position ASC, created DESC"
         ).fetchall()
         favorites = []
@@ -192,39 +195,6 @@ def _load_favorites() -> list:
     except Exception as exc:
         logger.error("Failed to load favorites from DB: %s", exc)
         return []
-    finally:
-        conn.close()
-
-
-def _save_favorites(favorites: list) -> None:
-    """Replace all favorites in the database with the given list.
-
-    Maintained for backward compatibility — called by batch_favorite
-    in ``internal/web/api/history.py``.
-    """
-    _ensure_db()
-
-    conn = _get_conn()
-    try:
-        with conn:
-            conn.execute("DELETE FROM favorites")
-            for entry in favorites:
-                conn.execute(
-                    "INSERT OR REPLACE INTO favorites "
-                    "(id, title, content, \"group\", position, created, updated) "
-                    "VALUES (?, ?, ?, ?, ?, ?, ?)",
-                    (
-                        entry.get("id", uuid.uuid4().hex[:12]),
-                        entry.get("title", ""),
-                        entry.get("content", ""),
-                        entry.get("group", ""),
-                        entry.get("position", 0),
-                        entry.get("created", time.time()),
-                        entry.get("updated"),
-                    ),
-                )
-    except Exception as exc:
-        logger.error("Failed to save favorites to DB: %s", exc)
     finally:
         conn.close()
 
@@ -266,16 +236,20 @@ def add_favorite(body):
     try:
         # Append to the end (max position + 1) so insertion order is preserved
         # even after drag-reorder assigns explicit non-zero positions.
-        row = conn.execute(
-            "SELECT COALESCE(MAX(position), -1) FROM favorites"
-        ).fetchone()
+        row = conn.execute("SELECT COALESCE(MAX(position), -1) FROM favorites").fetchone()
         position = (row[0] + 1) if row else 0
         entry["position"] = position
         conn.execute(
-            "INSERT INTO favorites (id, title, content, \"group\", position, created) "
+            'INSERT INTO favorites (id, title, content, "group", position, created) '
             "VALUES (?, ?, ?, ?, ?, ?)",
-            (entry["id"], entry["title"], entry["content"],
-             entry["group"], position, entry["created"]),
+            (
+                entry["id"],
+                entry["title"],
+                entry["content"],
+                entry["group"],
+                position,
+                entry["created"],
+            ),
         )
         conn.commit()
     except Exception as exc:
@@ -303,9 +277,7 @@ def delete_favorite(body):
 
     conn = _get_conn()
     try:
-        cursor = conn.execute(
-            "DELETE FROM favorites WHERE id = ?", (fav_id,)
-        )
+        cursor = conn.execute("DELETE FROM favorites WHERE id = ?", (fav_id,))
         conn.commit()
         if cursor.rowcount == 0:
             return {"ok": False, "error": "not found"}, 404
@@ -335,8 +307,9 @@ def update_favorite(body):
     conn = _get_conn()
     try:
         row = conn.execute(
-            "SELECT id, title, content, \"group\", position, created, updated "
-            "FROM favorites WHERE id = ?", (fav_id,)
+            'SELECT id, title, content, "group", position, created, updated '
+            "FROM favorites WHERE id = ?",
+            (fav_id,),
         ).fetchone()
 
         if row is None:
@@ -367,10 +340,16 @@ def update_favorite(body):
         entry["updated"] = time.time()
 
         conn.execute(
-            "UPDATE favorites SET title = ?, content = ?, \"group\" = ?, "
+            'UPDATE favorites SET title = ?, content = ?, "group" = ?, '
             "position = ?, updated = ? WHERE id = ?",
-            (entry["title"], entry["content"], entry["group"],
-             entry["position"], entry["updated"], fav_id),
+            (
+                entry["title"],
+                entry["content"],
+                entry["group"],
+                entry["position"],
+                entry["updated"],
+                fav_id,
+            ),
         )
         conn.commit()
 
@@ -426,8 +405,7 @@ def _build_favorites_export(favorites: list, fmt: str) -> str:
         return "\n".join(lines) + "\n"
 
     # Plain text
-    lines.append(
-        f"ClipSync Favorites — exported {stamp} ({len(favorites)} items)")
+    lines.append(f"ClipSync Favorites — exported {stamp} ({len(favorites)} items)")
     lines.append("=" * 48)
     for fav in favorites:
         lines.append("")
@@ -456,16 +434,16 @@ def export_favorites(body, dest_dir=None):
         data = {}
     fmt = str(data.get("format", "markdown")).lower()
     if fmt not in ("markdown", "text"):
-        return {"ok": False,
-                "error": "unsupported format (use markdown or text)"}, 400
+        return {"ok": False, "error": "unsupported format (use markdown or text)"}, 400
 
     favorites = _load_favorites()
 
     from pathlib import Path
+
     suffix = ".md" if fmt == "markdown" else ".txt"
     downloads = Path.home() / "Downloads"
-    target_dir = Path(dest_dir) if dest_dir else (
-        downloads if downloads.is_dir() else Path(_config_dir())
+    target_dir = (
+        Path(dest_dir) if dest_dir else (downloads if downloads.is_dir() else Path(_config_dir()))
     )
     try:
         target_dir.mkdir(parents=True, exist_ok=True)
@@ -485,10 +463,8 @@ def export_favorites(body, dest_dir=None):
             f.write(text)
         # Plaintext clipboard content on disk — match the history export's
         # owner-only permissions where the OS supports it.
-        try:
+        with contextlib.suppress(OSError):
             os.chmod(dest_path, 0o600)
-        except OSError:
-            pass
     except OSError as exc:
         logger.error("Failed to write favorites export: %s", exc)
         return {"ok": False, "error": str(exc)}, 500

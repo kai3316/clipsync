@@ -21,7 +21,7 @@ from internal.protocol.codec import (
     encode_binary_chunk,
     encode_frame,
 )
-from internal.sync.nearby_chat import ChatFileTooLarge, ChatManager
+from internal.sync.nearby_chat import ChatFileTooLargeError, ChatManager
 from internal.transport.connection import PeerConnection, TransportManager
 from internal.transport.relay import MAX_RELAY_PAYLOAD
 
@@ -100,6 +100,7 @@ class TestInviteLifecycle:
     def setup_method(self):
         # Dirs are only needed once files flow; create throwaway ones here.
         import tempfile
+
         self._tmp = tempfile.TemporaryDirectory()
         base = __import__("pathlib").Path(self._tmp.name)
         self.pair = LinkedPair(base / "a", base / "b")
@@ -129,10 +130,12 @@ class TestInviteLifecycle:
     def test_close_notifies_peer_with_system_entry(self):
         sid = self.pair.establish()
         assert self.pair.a.close_session(sid)
-        assert _wait_until(lambda: any(
-            e["kind"] == "system" and e["text_key"] == "chat.system.session_closed_by_peer"
-            for e in self.pair.b.get_messages(sid)
-        ))
+        assert _wait_until(
+            lambda: any(
+                e["kind"] == "system" and e["text_key"] == "chat.system.session_closed_by_peer"
+                for e in self.pair.b.get_messages(sid)
+            )
+        )
 
     def test_duplicate_invite_over_active_session_is_idempotent(self):
         sid = self.pair.establish()
@@ -186,6 +189,7 @@ class TestTextMessaging:
     def setup_method(self):
         import tempfile
         from pathlib import Path
+
         self._tmp = tempfile.TemporaryDirectory()
         base = Path(self._tmp.name)
         self.pair = LinkedPair(base / "a", base / "b")
@@ -197,9 +201,9 @@ class TestTextMessaging:
 
     def test_text_roundtrip_and_unread_count(self):
         assert self.pair.a.send_text(self.sid, "hello nearby", self.pair.send_from_a)
-        assert _wait_until(lambda: any(
-            e["text"] == "hello nearby" for e in self.pair.b.get_messages(self.sid)
-        ))
+        assert _wait_until(
+            lambda: any(e["text"] == "hello nearby" for e in self.pair.b.get_messages(self.sid))
+        )
         sess_b = self.pair.b.get_sessions()[0]
         assert sess_b["unread"] == 1
         assert sess_b["last_preview"].startswith("hello nearby")
@@ -250,8 +254,7 @@ class TestTextMessaging:
         drop = lambda data: False  # noqa: E731
         assert self.pair.a.send_text(self.sid, "will not arrive", drop) is False
         entry = next(
-            e for e in self.pair.a.get_messages(self.sid)
-            if e["text"] == "will not arrive"
+            e for e in self.pair.a.get_messages(self.sid) if e["text"] == "will not arrive"
         )
         assert entry["status"] == "failed"
 
@@ -260,6 +263,7 @@ class TestAbuseCaps:
     def setup_method(self):
         import tempfile
         from pathlib import Path
+
         self._tmp = tempfile.TemporaryDirectory()
         base = Path(self._tmp.name)
         self.pair = LinkedPair(base / "a", base / "b")
@@ -319,6 +323,7 @@ class TestAbuseCaps:
     def test_oversized_offer_rejected_without_entry(self):
         sid = self.pair.establish()
         from internal.sync.file_transfer import MAX_FILE_SIZE
+
         self.pair.b.handle_message(
             "chat_file_offer",
             {
@@ -339,6 +344,7 @@ class TestFileTransfer:
     def setup_method(self):
         import tempfile
         from pathlib import Path
+
         self._tmp = tempfile.TemporaryDirectory()
         base = Path(self._tmp.name)
         self.dir_a, self.dir_b = base / "a", base / "b"
@@ -365,11 +371,9 @@ class TestFileTransfer:
         assert _wait_until(lambda: (self._b_entry(tid) or {}).get("status") == "await_accept")
         assert self.pair.b.accept_file(self.sid, tid, self.pair.send_from_b)
         assert _wait_until(lambda: (self._b_entry(tid) or {}).get("status") == "done")
-        received = next(
-            e for e in self.pair.b.get_messages(self.sid) if e["transfer_id"] == tid
-        )
+        received = next(e for e in self.pair.b.get_messages(self.sid) if e["transfer_id"] == tid)
         assert received["saved_path"]
-        assert open(received["saved_path"], "rb").read() == src.read_bytes()
+        assert open(received["saved_path"], "rb").read() == src.read_bytes()  # noqa: SIM115
 
     def test_collision_rename_avoids_overwrite(self):
         src = self._make_source(2048)
@@ -379,11 +383,9 @@ class TestFileTransfer:
         (self.dir_b / "source.bin").write_bytes(b"precious")
         assert self.pair.b.accept_file(self.sid, tid, self.pair.send_from_b)
         assert _wait_until(lambda: (self._b_entry(tid) or {}).get("status") == "done")
-        received = next(
-            e for e in self.pair.b.get_messages(self.sid) if e["transfer_id"] == tid
-        )
+        received = next(e for e in self.pair.b.get_messages(self.sid) if e["transfer_id"] == tid)
         assert received["saved_path"] != str(self.dir_b / "source.bin")
-        assert open(self.dir_b / "source.bin", "rb").read() == b"precious"
+        assert open(self.dir_b / "source.bin", "rb").read() == b"precious"  # noqa: SIM115
 
     def test_decline_file_marks_entry_declined(self):
         src = self._make_source(1024)
@@ -391,9 +393,12 @@ class TestFileTransfer:
         assert _wait_until(lambda: (self._b_entry(tid) or {}).get("status") == "await_accept")
         assert self.pair.b.decline_file(self.sid, tid, self.pair.send_from_b)
         assert _wait_until(
-            lambda: next(
-                e for e in self.pair.a.get_messages(self.sid) if e["transfer_id"] == tid
-            )["status"] == "declined",
+            lambda: (
+                next(e for e in self.pair.a.get_messages(self.sid) if e["transfer_id"] == tid)[
+                    "status"
+                ]
+                == "declined"
+            ),
         )
 
     def test_empty_file_transfers_via_completion_frame(self):
@@ -403,25 +408,28 @@ class TestFileTransfer:
         assert _wait_until(lambda: (self._b_entry(tid) or {}).get("status") == "await_accept")
         assert self.pair.b.accept_file(self.sid, tid, self.pair.send_from_b)
         assert _wait_until(lambda: (self._b_entry(tid) or {}).get("status") == "done")
-        received = next(
-            e for e in self.pair.b.get_messages(self.sid) if e["transfer_id"] == tid
-        )
-        assert open(received["saved_path"], "rb").read() == b""
+        received = next(e for e in self.pair.b.get_messages(self.sid) if e["transfer_id"] == tid)
+        assert open(received["saved_path"], "rb").read() == b""  # noqa: SIM115
 
     def test_unknown_transfer_id_returns_false_for_chat_router(self):
         # No active session for this peer -> dropped, so no relay_ack is sent.
-        assert self.pair.b.handle_message(
-            "chat_text", {"session_id": "x" * 16}, DEV_A, FP_A, None
-        ) is False
+        assert (
+            self.pair.b.handle_message("chat_text", {"session_id": "x" * 16}, DEV_A, FP_A, None)
+            is False
+        )
         # A foreign chunk id must fall through (False) to clipboard transfers.
-        assert self.pair.b.handle_binary_chunk(
-            {"transfer_id": "e" * 32, "chunk_index": 0, "total_chunks": 1, "_raw_data": b""},
-            DEV_A,
-            None,
-        ) is False
+        assert (
+            self.pair.b.handle_binary_chunk(
+                {"transfer_id": "e" * 32, "chunk_index": 0, "total_chunks": 1, "_raw_data": b""},
+                DEV_A,
+                None,
+            )
+            is False
+        )
 
     def test_outgoing_file_cap(self):
         from pathlib import Path
+
         sent = []
         for i in range(ChatManager.MAX_CONCURRENT_OUTGOING_FILES + 1):
             src = Path(self.dir_a) / f"f{i}.bin"
@@ -445,6 +453,7 @@ class TestInternetRelayFileTransfers:
     def setup_method(self):
         import tempfile
         from pathlib import Path
+
         self._tmp = tempfile.TemporaryDirectory()
         base = Path(self._tmp.name)
         self.dir_a, self.dir_b = base / "a", base / "b"
@@ -494,20 +503,19 @@ class TestInternetRelayFileTransfers:
             msg = decode_message(frame)
             if getattr(msg, "msg_type", "") == "file_chunk":
                 assert len(frame) <= MAX_RELAY_PAYLOAD, (
-                    f"chunk frame {len(frame)}B exceeds relay cap")
-        received = next(
-            e for e in self.pair.b.get_messages(self.sid) if e["transfer_id"] == tid
-        )
-        assert open(received["saved_path"], "rb").read() == src.read_bytes()
+                    f"chunk frame {len(frame)}B exceeds relay cap"
+                )
+        received = next(e for e in self.pair.b.get_messages(self.sid) if e["transfer_id"] == tid)
+        assert open(received["saved_path"], "rb").read() == src.read_bytes()  # noqa: SIM115
 
     def test_internet_file_cap_refused(self):
         src = self._source(ChatManager.RELAY_FILE_CAP + 1)
         try:
             self.pair.a.send_file(self.sid, str(src), self._relay_fn())
-        except ChatFileTooLarge:
+        except ChatFileTooLargeError:
             pass
         else:
-            raise AssertionError("expected ChatFileTooLarge")
+            raise AssertionError("expected ChatFileTooLargeError")
         # No offer frame should have left the sender.
         assert not any(
             (getattr(decode_message(f), "_raw_payload", {}) or {}).get("msg_type")
@@ -526,6 +534,7 @@ class TestInternetRelayFileTransfers:
         # A corrupted/attacker-advertised chunk_size must not be trusted for
         # seeks; the receiver falls back to CHUNK_SIZE when parsing the offer.
         import math
+
         payload = {
             "msg_type": "chat_file_offer",
             "session_id": self.sid,
@@ -535,11 +544,13 @@ class TestInternetRelayFileTransfers:
             "chunk_size": "not-a-number",
             "mime": "",
         }
-        assert self.pair.b.handle_message(
-            "chat_file_offer", payload, DEV_A, FP_A, self.pair.send_from_b) is True
-        entry = next(
-            e for e in self.pair.b.get_messages(self.sid) if e["transfer_id"] == "f" * 32
+        assert (
+            self.pair.b.handle_message(
+                "chat_file_offer", payload, DEV_A, FP_A, self.pair.send_from_b
+            )
+            is True
         )
+        entry = next(e for e in self.pair.b.get_messages(self.sid) if e["transfer_id"] == "f" * 32)
         assert entry["status"] == "await_accept"
         recv = self.pair.b._receives.get("f" * 32)
         assert recv is not None
@@ -552,11 +563,14 @@ class TestInternetRelayFileTransfers:
         # freed afterwards so a later iteration isn't rejected by the
         # MAX_CONCURRENT_INCOMING_FILES guard either.
         for i, bogus in enumerate((0, -7, ChatManager.CHUNK_SIZE + 1)):
-            tid = ("%02x" % i).ljust(32, "e")[:32]  # unique per iteration
+            tid = (f"{i:02x}").ljust(32, "e")[:32]  # unique per iteration
             recv2_payload = dict(payload, chunk_size=bogus, transfer_id=tid)
-            assert self.pair.b.handle_message(
-                "chat_file_offer", recv2_payload, DEV_A, FP_A,
-                self.pair.send_from_b) is True
+            assert (
+                self.pair.b.handle_message(
+                    "chat_file_offer", recv2_payload, DEV_A, FP_A, self.pair.send_from_b
+                )
+                is True
+            )
             recv2 = self.pair.b._receives.get(tid)
             assert recv2 is not None and recv2["chunk_size"] == ChatManager.CHUNK_SIZE
             self.pair.b._receives.pop(tid, None)
@@ -566,6 +580,7 @@ class TestDisconnectAndSnapshots:
     def setup_method(self):
         import tempfile
         from pathlib import Path
+
         self._tmp = tempfile.TemporaryDirectory()
         base = Path(self._tmp.name)
         self.pair = LinkedPair(base / "a", base / "b")
@@ -589,14 +604,32 @@ class TestDisconnectAndSnapshots:
         assert _wait_until(lambda: self.pair.b.get_sessions())
         sess = self.pair.b.get_sessions()[0]
         assert set(sess) >= {
-            "session_id", "peer_id", "peer_name", "fingerprint_short",
-            "status", "last_activity_ts", "unread", "online", "last_preview",
+            "session_id",
+            "peer_id",
+            "peer_name",
+            "fingerprint_short",
+            "status",
+            "last_activity_ts",
+            "unread",
+            "online",
+            "last_preview",
         }
         entry = self.pair.b.get_messages(sess["session_id"])[-1]
         assert set(entry) >= {
-            "entry_id", "kind", "outgoing", "ts", "text", "text_key", "fmt",
-            "file_name", "file_size", "mime", "status", "fraction",
-            "saved_path", "transfer_id",
+            "entry_id",
+            "kind",
+            "outgoing",
+            "ts",
+            "text",
+            "text_key",
+            "fmt",
+            "file_name",
+            "file_size",
+            "mime",
+            "status",
+            "fraction",
+            "saved_path",
+            "transfer_id",
         }
 
     def test_handle_binary_chunk_ignores_foreign_ids(self):
@@ -608,9 +641,7 @@ class _ScriptedSocket:
     """Socket stub that replays pre-baked frames then EOF."""
 
     def __init__(self, frames):
-        self._buf = b"".join(
-            struct.pack(">I", len(f)) + f for f in frames
-        )
+        self._buf = b"".join(struct.pack(">I", len(f)) + f for f in frames)
         self._pos = 0
 
     def settimeout(self, timeout):
@@ -628,7 +659,7 @@ class _ScriptedSocket:
     def recv(self, n):
         if self._pos >= len(self._buf):
             return b""
-        chunk = self._buf[self._pos:self._pos + n]
+        chunk = self._buf[self._pos : self._pos + n]
         self._pos += len(chunk)
         return chunk
 
@@ -651,7 +682,9 @@ class TestTransportGate:
             encode_binary_chunk("a" * 32, 0, 1, b"bytes"),
         ]
         conn = PeerConnection(
-            "peer-1", "Peer One", _ScriptedSocket(frames),
+            "peer-1",
+            "Peer One",
+            _ScriptedSocket(frames),
             pairing_mgr=_UnpairedPairingMgr(),
         )
         received = []
@@ -691,7 +724,9 @@ class TestReceiveExpiry:
             mgr.handle_message(
                 "chat_invite",
                 {"session_id": "f" * 16, "from_name": "A", "fingerprint_short": "A1"},
-                "peer-a", "A1", None,
+                "peer-a",
+                "A1",
+                None,
             )
             sid = mgr.get_sessions()[0]["session_id"]
             # A working channel: since the honest-accept fix, activation only
@@ -699,13 +734,20 @@ class TestReceiveExpiry:
             mgr.accept_invitation(sid, lambda data: True)
             mgr.handle_message(
                 "chat_file_offer",
-                {"session_id": sid, "transfer_id": "b" * 32,
-                 "file_name": "x.bin", "file_size": 100, "mime": ""},
-                "peer-a", "A1", None,
+                {
+                    "session_id": sid,
+                    "transfer_id": "b" * 32,
+                    "file_name": "x.bin",
+                    "file_size": 100,
+                    "mime": "",
+                },
+                "peer-a",
+                "A1",
+                None,
             )
             assert mgr.get_messages(sid)[-1]["status"] == "await_accept"
             # Age the offer past the timeout and sweep.
-            mgr._receives["b" * 32]["entry"].ts -= (ChatManager.INVITE_ACCEPT_TIMEOUT + 10)
+            mgr._receives["b" * 32]["entry"].ts -= ChatManager.INVITE_ACCEPT_TIMEOUT + 10
             with mgr._lock:
                 mgr._expire_stale_receives()
             assert "b" * 32 not in mgr._receives
@@ -718,6 +760,7 @@ class TestOfflineSendGuard:
     def setup_method(self):
         import tempfile
         from pathlib import Path
+
         self._tmp = tempfile.TemporaryDirectory()
         base = Path(self._tmp.name)
         self.pair = LinkedPair(base / "a", base / "b")
@@ -732,12 +775,17 @@ class TestOfflineSendGuard:
         assert self.pair.b.get_sessions()[0]["online"] is False
         assert self.pair.b.send_text(self.sid, "nope", self.pair.send_from_b) is False
         from pathlib import Path
+
         src = Path(self._tmp.name) / "f.bin"
         src.write_bytes(b"data" * 64)
         assert self.pair.b.send_file(self.sid, str(src), self.pair.send_from_b) is None
         # Peer comes back (a ping from A restores liveness).
         self.pair.b.handle_message(
-            "chat_ping", {"session_id": self.sid}, DEV_A, FP_A, self.pair.send_from_b,
+            "chat_ping",
+            {"session_id": self.sid},
+            DEV_A,
+            FP_A,
+            self.pair.send_from_b,
         )
         assert self.pair.b.get_sessions()[0]["online"] is True
         assert self.pair.b.send_text(self.sid, "hi again", self.pair.send_from_b) is True
@@ -751,7 +799,9 @@ class TestStalledTransferSweep:
         mgr.handle_message(
             "chat_invite",
             {"session_id": "f" * 16, "from_name": "A", "fingerprint_short": "A1"},
-            "peer-a", "A1", None,
+            "peer-a",
+            "A1",
+            None,
         )
         sid = mgr.get_sessions()[0]["session_id"]
         mgr.accept_invitation(sid, lambda data: True)  # honest-accept fix: ack must go out
@@ -759,6 +809,7 @@ class TestStalledTransferSweep:
 
     def test_stalled_receive_is_failed_and_temp_file_removed(self):
         import tempfile
+
         mgr = ChatManager("x", "X")
         tmp = tempfile.TemporaryDirectory()
         tid = "b" * 32
@@ -767,9 +818,16 @@ class TestStalledTransferSweep:
             sid = self._active_session(mgr)
             mgr.handle_message(
                 "chat_file_offer",
-                {"session_id": sid, "transfer_id": tid,
-                 "file_name": "x.bin", "file_size": 100, "mime": ""},
-                "peer-a", "A1", None,
+                {
+                    "session_id": sid,
+                    "transfer_id": tid,
+                    "file_name": "x.bin",
+                    "file_size": 100,
+                    "mime": "",
+                },
+                "peer-a",
+                "A1",
+                None,
             )
             # Accepting opens the temp file; the wire ack itself is not needed.
             # Use a working send_fn so the accept succeeds and the receive
@@ -779,8 +837,8 @@ class TestStalledTransferSweep:
             temp_path = mgr._receives[tid]["temp_path"]
             assert temp_path is not None and temp_path.exists()
             # Age the receive past the stall timeout so the sweep fails it.
-            mgr._receives[tid]["last_progress_mono"] = (
-                time.monotonic() - (ChatManager.TRANSFER_STALL_TIMEOUT + 10)
+            mgr._receives[tid]["last_progress_mono"] = time.monotonic() - (
+                ChatManager.TRANSFER_STALL_TIMEOUT + 10
             )
             fired: list = []
             with mgr._lock:
@@ -802,7 +860,9 @@ class TestTextRateBudget:
         mgr.handle_message(
             "chat_invite",
             {"session_id": "f" * 16, "from_name": "A", "fingerprint_short": "A1"},
-            "peer-a", "A1", None,
+            "peer-a",
+            "A1",
+            None,
         )
         sid = mgr.get_sessions()[0]["session_id"]
         mgr.accept_invitation(sid, lambda data: True)  # honest-accept fix: ack must go out
@@ -817,13 +877,17 @@ class TestTextRateBudget:
                 mgr.handle_message(
                     "chat_text",
                     {"session_id": sid, "text": f"in-{i}", "ts": time.time()},
-                    "peer-a", "A1", None,
+                    "peer-a",
+                    "A1",
+                    None,
                 )
             # The 31st incoming text is consumed by the router but dropped.
             mgr.handle_message(
                 "chat_text",
                 {"session_id": sid, "text": "flooded-out", "ts": time.time()},
-                "peer-a", "A1", None,
+                "peer-a",
+                "A1",
+                None,
             )
             assert not any(e["text"] == "flooded-out" for e in mgr.get_messages(sid))
             # The OUTGOING budget is untouched, so our own send still works.
@@ -854,7 +918,9 @@ class TestR6AuditRegressions:
         mgr.handle_message(
             "chat_invite",
             {"session_id": "f" * 16, "from_name": "A", "fingerprint_short": "A1"},
-            "peer-a", "A1", None,
+            "peer-a",
+            "A1",
+            None,
         )
         sid = mgr.get_sessions()[0]["session_id"]
         mgr.accept_invitation(sid, lambda data: True)  # honest-accept fix: ack must go out
@@ -867,15 +933,22 @@ class TestR6AuditRegressions:
             sid = self._active_session(mgr)
             mgr.handle_message(
                 "chat_file_offer",
-                {"session_id": sid, "transfer_id": "a" * 32,
-                 "file_name": "x.bin", "file_size": 100, "mime": ""},
-                "peer-a", "A1", None,
+                {
+                    "session_id": sid,
+                    "transfer_id": "a" * 32,
+                    "file_name": "x.bin",
+                    "file_size": 100,
+                    "mime": "",
+                },
+                "peer-a",
+                "A1",
+                None,
             )
             sess = mgr._sessions["peer-a"]
             # Stale progress -> NOT an active transfer -> offline detection
             # is allowed to proceed instead of waiting out the stall window.
-            mgr._receives["a" * 32]["last_progress_mono"] = (
-                time.monotonic() - (ChatManager.TRANSFER_STALL_TIMEOUT + 10)
+            mgr._receives["a" * 32]["last_progress_mono"] = time.monotonic() - (
+                ChatManager.TRANSFER_STALL_TIMEOUT + 10
             )
             with mgr._lock:
                 assert mgr._session_has_active_transfer(sess) is False
@@ -898,13 +971,18 @@ class TestR6AuditRegressions:
             )
             mgr.handle_message(
                 "chat_file_offer",
-                {"session_id": sid, "transfer_id": "b" * 32,
-                 "file_name": "x.bin", "file_size": 100, "mime": ""},
-                "peer-a", "A1", None,
+                {
+                    "session_id": sid,
+                    "transfer_id": "b" * 32,
+                    "file_name": "x.bin",
+                    "file_size": 100,
+                    "mime": "",
+                },
+                "peer-a",
+                "A1",
+                None,
             )
-            mgr._receives["b" * 32]["entry"].ts -= (
-                ChatManager.INVITE_ACCEPT_TIMEOUT + 10
-            )
+            mgr._receives["b" * 32]["entry"].ts -= ChatManager.INVITE_ACCEPT_TIMEOUT + 10
             with mgr._lock:
                 mgr._expire_stale_receives()
             assert "b" * 32 not in mgr._receives
@@ -922,9 +1000,16 @@ class TestR6AuditRegressions:
             mgr._latest_send_fn["peer-a"] = sent.append
             mgr.handle_message(
                 "chat_file_offer",
-                {"session_id": sid, "transfer_id": "c" * 32,
-                 "file_name": "x.bin", "file_size": 100, "mime": ""},
-                "peer-a", "A1", None,
+                {
+                    "session_id": sid,
+                    "transfer_id": "c" * 32,
+                    "file_name": "x.bin",
+                    "file_size": 100,
+                    "mime": "",
+                },
+                "peer-a",
+                "A1",
+                None,
             )
             with mgr._lock:
                 mgr._fail_receive_locked("c" * 32, "error_disk")
@@ -932,6 +1017,7 @@ class TestR6AuditRegressions:
             assert sent, "receiver emitted no chat_file_complete error frame"
 
             from internal.protocol.codec import decode_message
+
             decoded = decode_message(sent[0])
             assert decoded._raw_payload["status"] == "error_disk"
         finally:
@@ -1010,7 +1096,11 @@ class _Stack:
             return self.chat.handle_binary_chunk(msg._raw_payload, peer_id, send_fn)
         if msg_type in CHAT_MSG_TYPES:
             return self.chat.handle_message(
-                msg_type, msg._raw_payload, peer_id, fp_short, send_fn,
+                msg_type,
+                msg._raw_payload,
+                peer_id,
+                fp_short,
+                send_fn,
             )
         return False
 
@@ -1058,10 +1148,12 @@ class TestNearbyChatE2E:
         # A dials B directly over 127.0.0.1 (no mDNS in this test).
         a.transport.connect_to_peer(DEV_B, NAME_B, "127.0.0.1", b.port)
         assert _deadline(
-            lambda: DEV_B in a.transport.get_connected_peers(), timeout=10,
+            lambda: DEV_B in a.transport.get_connected_peers(),
+            timeout=10,
         ), "A never connected to B"
         assert _deadline(
-            lambda: DEV_A in b.transport.get_connected_peers(), timeout=10,
+            lambda: DEV_A in b.transport.get_connected_peers(),
+            timeout=10,
         ), "B never saw A as connected"
 
         rig = SimpleNamespace(a=a, b=b, dir_a=dir_a, dir_b=dir_b)
@@ -1100,23 +1192,28 @@ class TestNearbyChatE2E:
         # --- 1. invite → accept, both sessions active ---------------------
         sid = a.chat.start_session(DEV_B, NAME_B, "", a.send_fn_to(DEV_B))
         assert sid, "start_session returned None"
-        assert _deadline(lambda: len(b.incoming_invites) == 1), \
+        assert _deadline(lambda: len(b.incoming_invites) == 1), (
             "chat invite never reached B over TLS"
+        )
         invite = b.incoming_invites[0]
         assert invite["peer_id"] == DEV_A
         assert invite["session_id"] == sid
         assert b.chat.accept_invitation(invite["session_id"], b.send_fn_to(DEV_A))
-        assert _deadline(lambda: self._status(a, DEV_B) == "active"), \
+        assert _deadline(lambda: self._status(a, DEV_B) == "active"), (
             "A session never became active"
-        assert _deadline(lambda: self._status(b, DEV_A) == "active"), \
+        )
+        assert _deadline(lambda: self._status(b, DEV_A) == "active"), (
             "B session never became active"
+        )
 
         # --- 2. text roundtrip ---------------------------------------------
         assert a.chat.send_text(sid, "hello over TLS", a.send_fn_to(DEV_B))
-        assert _deadline(lambda: any(
-            e["kind"] == "text" and e["text"] == "hello over TLS"
-            for e in b.chat.get_messages(sid)
-        )), "chat text never reached B"
+        assert _deadline(
+            lambda: any(
+                e["kind"] == "text" and e["text"] == "hello over TLS"
+                for e in b.chat.get_messages(sid)
+            )
+        ), "chat text never reached B"
 
         # --- 3. multi-chunk file roundtrip ---------------------------------
         payload = (bytes(range(256)) * (FILE_BYTES // 256)) + b"e2e-tail"
@@ -1125,11 +1222,13 @@ class TestNearbyChatE2E:
 
         tid = a.chat.send_file(sid, str(src), a.send_fn_to(DEV_B))
         assert tid, "send_file returned None"
-        assert _deadline(lambda: (self._entry(b, sid, tid) or {}).get("status") == "await_accept"), \
-            "file offer never reached B"
+        assert _deadline(
+            lambda: (self._entry(b, sid, tid) or {}).get("status") == "await_accept"
+        ), "file offer never reached B"
         assert b.chat.accept_file(sid, tid, b.send_fn_to(DEV_A))
-        assert _deadline(lambda: (self._entry(b, sid, tid) or {}).get("status") == "done", timeout=20), \
-            "B never finalized the received file"
+        assert _deadline(
+            lambda: (self._entry(b, sid, tid) or {}).get("status") == "done", timeout=20
+        ), "B never finalized the received file"
         saved = (self._entry(b, sid, tid) or {}).get("saved_path")
         assert saved, "B did not record a saved path"
         assert os.path.getsize(saved) == len(payload)
@@ -1137,8 +1236,9 @@ class TestNearbyChatE2E:
             assert fh.read() == payload, "received file bytes differ from source"
 
         # Sender converges to "done" once the receiver's completion ack lands.
-        assert _deadline(lambda: (self._entry(a, sid, tid) or {}).get("status") == "done", timeout=10), \
-            "A never marked the send done"
+        assert _deadline(
+            lambda: (self._entry(a, sid, tid) or {}).get("status") == "done", timeout=10
+        ), "A never marked the send done"
 
         # --- 4. never paired, anywhere, at any point -----------------------
         assert not a.pairing.is_peer_paired(DEV_B)
@@ -1172,7 +1272,9 @@ def _active_mgr() -> ChatManager:
     mgr.handle_message(
         "chat_invite",
         {"session_id": "f" * 16, "from_name": "B", "fingerprint_short": "B1"},
-        PEER, "B1", None,
+        PEER,
+        "B1",
+        None,
     )
     sid = mgr.get_sessions()[0]["session_id"]
     assert mgr.accept_invitation(sid, lambda data: True)
@@ -1182,6 +1284,7 @@ def _active_mgr() -> ChatManager:
 # ══════════════════════════════════════════════════════════════════
 # Codec: wire format + old-peer compatibility
 # ══════════════════════════════════════════════════════════════════
+
 
 class TestCodecChatTyping:
     def test_roundtrip(self):
@@ -1218,6 +1321,7 @@ class TestCodecChatTyping:
 # Sender side: report_typing throttle
 # ══════════════════════════════════════════════════════════════════
 
+
 class TestReportTyping:
     def setup_method(self):
         self.sent = []
@@ -1241,7 +1345,9 @@ class TestReportTyping:
         frames = self._typing_frames()
         assert len(frames) == 1
         assert frames[0]._raw_payload == {
-            "msg_type": "chat_typing", "session_id": self.sid, "typing": True,
+            "msg_type": "chat_typing",
+            "session_id": self.sid,
+            "typing": True,
         }
 
     def test_duplicate_same_state_within_throttle_suppressed(self):
@@ -1277,6 +1383,7 @@ class TestReportTyping:
 # Receiver side: snapshot flag, lazy expiry, clear-on-text, no push storm
 # ══════════════════════════════════════════════════════════════════
 
+
 class TestReceiveTyping:
     def setup_method(self):
         self.mgr = _active_mgr()
@@ -1292,7 +1399,11 @@ class TestReceiveTyping:
 
     def _send_typing(self, typing):
         self.mgr.handle_message(
-            "chat_typing", {"session_id": self.sid, "typing": typing}, PEER, "B1", None,
+            "chat_typing",
+            {"session_id": self.sid, "typing": typing},
+            PEER,
+            "B1",
+            None,
         )
 
     def test_flag_visible_in_snapshot_and_flips_fire_once(self):
@@ -1322,16 +1433,22 @@ class TestReceiveTyping:
         self._send_typing(True)
         assert self._snapshot()["peer_typing"] is True
         self.mgr.handle_message(
-            "chat_text", {"session_id": self.sid, "text": "hi", "ts": time.time()},
-            PEER, "B1", None,
+            "chat_text",
+            {"session_id": self.sid, "text": "hi", "ts": time.time()},
+            PEER,
+            "B1",
+            None,
         )
         assert self._snapshot()["peer_typing"] is False
 
     def test_unknown_peer_cannot_raise_flag(self):
         before = len(self.pushes)
         self.mgr.handle_message(
-            "chat_typing", {"session_id": "0" * 16, "typing": True},
-            "stranger-dev", "S1", None,
+            "chat_typing",
+            {"session_id": "0" * 16, "typing": True},
+            "stranger-dev",
+            "S1",
+            None,
         )
         assert self._snapshot()["peer_typing"] is False
         assert len(self.pushes) == before
@@ -1341,7 +1458,11 @@ class TestReceiveTyping:
         # re-invite can desync the two sides, and a typing frame must not be
         # lost to it (same resolution order as text/ping/close).
         self.mgr.handle_message(
-            "chat_typing", {"session_id": "0" * 16, "typing": True}, PEER, "B1", None,
+            "chat_typing",
+            {"session_id": "0" * 16, "typing": True},
+            PEER,
+            "B1",
+            None,
         )
         assert self._snapshot()["peer_typing"] is True
 
@@ -1350,11 +1471,12 @@ class TestReceiveTyping:
 # End-to-end over the real codec (two managers wired in memory)
 # ══════════════════════════════════════════════════════════════════
 
+
 class TestEndToEndPair:
     def test_typing_flows_between_two_managers(self):
         import tempfile
 
-        with tempfile.TemporaryDirectory() as tmp:
+        with tempfile.TemporaryDirectory():
             # Two managers wired through the real codec: every frame one side
             # sends is decoded and fed into the other side's handlers.
             mgr_a = ChatManager("dev-a", "A")
@@ -1363,20 +1485,29 @@ class TestEndToEndPair:
             def deliver_b(data: bytes) -> bool:
                 msg = decode_message(data)
                 return mgr_b.handle_message(
-                    getattr(msg, "msg_type", ""), msg._raw_payload, "dev-a", "FP", None,
+                    getattr(msg, "msg_type", ""),
+                    msg._raw_payload,
+                    "dev-a",
+                    "FP",
+                    None,
                 )
 
             def deliver_a(data: bytes) -> bool:
                 msg = decode_message(data)
                 return mgr_a.handle_message(
-                    getattr(msg, "msg_type", ""), msg._raw_payload, "dev-b", "FP", None,
+                    getattr(msg, "msg_type", ""),
+                    msg._raw_payload,
+                    "dev-b",
+                    "FP",
+                    None,
                 )
+
             try:
                 sid = mgr_a.start_session("dev-b", "B", "FP", deliver_b)
                 assert mgr_b.accept_invitation(sid, deliver_a)
-                assert any(
-                    s["status"] == "active" for s in mgr_a.get_sessions()
-                ), "pair never activated"
+                assert any(s["status"] == "active" for s in mgr_a.get_sessions()), (
+                    "pair never activated"
+                )
 
                 # A types -> B sees the flag.
                 assert mgr_a.report_typing(sid, True, deliver_b) is True
@@ -1385,8 +1516,7 @@ class TestEndToEndPair:
 
                 # B's view lives only while refreshed: expire it artificially,
                 # then A's text arrives and would clear it anyway.
-                mgr_b._session_by_sid[sid].peer_typing_until_mono = \
-                    time.monotonic() - 0.01
+                mgr_b._session_by_sid[sid].peer_typing_until_mono = time.monotonic() - 0.01
                 assert mgr_a.send_text(sid, "hello", deliver_b) is True
                 sess_b = [s for s in mgr_b.get_sessions() if s["session_id"] == sid][0]
                 assert sess_b["peer_typing"] is False
@@ -1401,6 +1531,7 @@ class TestEndToEndPair:
 # /api/chat/typing sits in the same authenticated dispatch chain as
 # its sibling /api/chat/* routes)
 # ══════════════════════════════════════════════════════════════════
+
 
 class _FakeChat:
     def __init__(self, ok=True):
@@ -1434,7 +1565,9 @@ class TestSetTypingApi:
         assert fake.calls == [("s1", True)]  # typing defaults to True
 
         data, status = chat_api.set_typing(
-            fake, json.dumps({"session_id": "s2", "typing": False}).encode(), None,
+            fake,
+            json.dumps({"session_id": "s2", "typing": False}).encode(),
+            None,
         )
         assert status == 200 and data == {"ok": True}
         assert fake.calls[-1] == ("s2", False)
@@ -1443,11 +1576,18 @@ class TestSetTypingApi:
 def test_dispatch_post_chat_typing():
     cm = _FakeChat()
     status, _ct, body_b = dispatch(
-        "POST", "/api/chat/typing", {},
+        "POST",
+        "/api/chat/typing",
+        {},
         json.dumps({"session_id": "s1", "typing": True}).encode(),
-        object(), None, None,
-        get_connected_ids=lambda: [], on_nav_url=None, on_forward_file=None,
-        upload_dir=".", chat_mgr=cm,
+        object(),
+        None,
+        None,
+        get_connected_ids=lambda: [],
+        on_nav_url=None,
+        on_forward_file=None,
+        upload_dir=".",
+        chat_mgr=cm,
         chat_send_fn=lambda peer_id: lambda data: True,
     )
     assert status == 200
@@ -1457,9 +1597,18 @@ def test_dispatch_post_chat_typing():
 
 def test_dispatch_get_chat_typing_is_404():
     status, _ct, _body = dispatch(
-        "GET", "/api/chat/typing", {}, b"", object(), None, None,
-        get_connected_ids=lambda: [], on_nav_url=None, on_forward_file=None,
-        upload_dir=".", chat_mgr=_FakeChat(),
+        "GET",
+        "/api/chat/typing",
+        {},
+        b"",
+        object(),
+        None,
+        None,
+        get_connected_ids=lambda: [],
+        on_nav_url=None,
+        on_forward_file=None,
+        upload_dir=".",
+        chat_mgr=_FakeChat(),
     )
     assert status == 404
 
@@ -1468,6 +1617,7 @@ def test_dispatch_get_chat_typing_is_404():
 # Robustness: non-string text is refused cleanly (was an AttributeError
 # caught one layer up as a generic failure)
 # ══════════════════════════════════════════════════════════════════
+
 
 def test_send_text_refuses_non_string():
     mgr = _active_mgr()
@@ -1501,7 +1651,9 @@ def _active_mgr_resend() -> ChatManager:
     mgr.handle_message(
         "chat_invite",
         {"session_id": "f" * 16, "from_name": "A", "fingerprint_short": "A1"},
-        PEER_RESEND, "A1", None,
+        PEER_RESEND,
+        "A1",
+        None,
     )
     sid = mgr.get_sessions()[0]["session_id"]
     # Honest-accept: activation only commits when the ack frame goes out.
@@ -1513,9 +1665,10 @@ def _offer(mgr: ChatManager, sid: str, tid: str) -> None:
     """Put one incoming file offer in flight for the session."""
     mgr.handle_message(
         "chat_file_offer",
-        {"session_id": sid, "transfer_id": tid,
-         "file_name": "x.bin", "file_size": 100, "mime": ""},
-        PEER_RESEND, "A1", None,
+        {"session_id": sid, "transfer_id": tid, "file_name": "x.bin", "file_size": 100, "mime": ""},
+        PEER_RESEND,
+        "A1",
+        None,
     )
 
 
@@ -1530,6 +1683,7 @@ def _failed_text(mgr: ChatManager, sid: str) -> dict:
 # ══════════════════════════════════════════════════════════════════
 # resend_text API
 # ══════════════════════════════════════════════════════════════════
+
 
 class TestResendText:
     def test_resend_success_flips_entry_and_delivers(self):
@@ -1563,8 +1717,7 @@ class TestResendText:
 
             # A done entry can't be resent again (no double-send).
             assert mgr.resend_text(sid, entry["entry_id"], peer_wire) is False
-            assert len([m for m in delivered
-                        if getattr(m, "msg_type", "") == "chat_text"]) == 1
+            assert len([m for m in delivered if getattr(m, "msg_type", "") == "chat_text"]) == 1
         finally:
             mgr.shutdown()
 
@@ -1576,7 +1729,9 @@ class TestResendText:
             mgr.handle_message(
                 "chat_text",
                 {"session_id": sid, "text": "from them", "ts": time.time()},
-                PEER_RESEND, "A1", None,
+                PEER_RESEND,
+                "A1",
+                None,
             )
             incoming = mgr.get_messages(sid)[-1]
             assert mgr.resend_text(sid, incoming["entry_id"], lambda d: True) is False
@@ -1639,15 +1794,20 @@ class TestResendText:
 # REST endpoint + route dispatch
 # ══════════════════════════════════════════════════════════════════
 
+
 class _FakeChatResend:
     """Minimal chat_mgr for handler/dispatch tests."""
 
     def __init__(self):
         self.calls = []
-        self.sessions = [{
-            "session_id": "s1", "peer_id": "p1", "peer_name": "Alice",
-            "status": "active",
-        }]
+        self.sessions = [
+            {
+                "session_id": "s1",
+                "peer_id": "p1",
+                "peer_name": "Alice",
+                "status": "active",
+            }
+        ]
 
     def get_sessions(self):
         return self.sessions
@@ -1678,10 +1838,10 @@ def test_api_resend_refused_maps_to_ok_false():
 def test_api_resend_validation():
     cm = _FakeChatResend()
     bad = [
-        b"",                                     # empty body
-        b"not json",                             # invalid json
-        json.dumps({"session_id": "s1"}).encode(),   # missing entry_id
-        json.dumps({"entry_id": "e9"}).encode(),     # missing session_id
+        b"",  # empty body
+        b"not json",  # invalid json
+        json.dumps({"session_id": "s1"}).encode(),  # missing entry_id
+        json.dumps({"entry_id": "e9"}).encode(),  # missing session_id
     ]
     for raw in bad:
         data, status = chat_api.resend_text(cm, raw, None)
@@ -1698,11 +1858,18 @@ def test_dispatch_post_chat_resend():
     cm = _FakeChatResend()
     cm._ok = True
     status, _ct, body_b = dispatch(
-        "POST", "/api/chat/resend", {},
+        "POST",
+        "/api/chat/resend",
+        {},
         json.dumps({"session_id": "s1", "entry_id": "e9"}).encode(),
-        object(), None, None,
-        get_connected_ids=lambda: [], on_nav_url=None, on_forward_file=None,
-        upload_dir=".", chat_mgr=cm,
+        object(),
+        None,
+        None,
+        get_connected_ids=lambda: [],
+        on_nav_url=None,
+        on_forward_file=None,
+        upload_dir=".",
+        chat_mgr=cm,
         chat_send_fn=lambda peer_id: lambda data: True,
     )
     assert status == 200
@@ -1712,9 +1879,18 @@ def test_dispatch_post_chat_resend():
 
 def test_dispatch_post_chat_resend_unknown_route_shape():
     status, _ct, body_b = dispatch(
-        "GET", "/api/chat/resend", {}, b"", object(), None, None,
-        get_connected_ids=lambda: [], on_nav_url=None, on_forward_file=None,
-        upload_dir=".", chat_mgr=_FakeChatResend(),
+        "GET",
+        "/api/chat/resend",
+        {},
+        b"",
+        object(),
+        None,
+        None,
+        get_connected_ids=lambda: [],
+        on_nav_url=None,
+        on_forward_file=None,
+        upload_dir=".",
+        chat_mgr=_FakeChatResend(),
     )
     assert status == 404
 
@@ -1723,15 +1899,19 @@ def test_dispatch_post_chat_resend_unknown_route_shape():
 # Defer unification: file-done callbacks fire OUTSIDE the lock
 # ══════════════════════════════════════════════════════════════════
 
+
 class TestDeferFileDone:
     def _probe(self, mgr: ChatManager, sink: list):
         def cb(session_id, transfer_id, ok, path, status):
-            sink.append({
-                "args": (session_id, transfer_id, ok, path, status),
-                # RLock._is_owned(): True when the callback ran under the
-                # chat lock — which is exactly what defer forbids.
-                "in_lock": bool(mgr._lock._is_owned()),
-            })
+            sink.append(
+                {
+                    "args": (session_id, transfer_id, ok, path, status),
+                    # RLock._is_owned(): True when the callback ran under the
+                    # chat lock — which is exactly what defer forbids.
+                    "in_lock": bool(mgr._lock._is_owned()),
+                }
+            )
+
         mgr.set_on_file_done(cb)
 
     def test_close_session_fires_outside_lock(self):
@@ -1781,9 +1961,16 @@ class TestDeferFileDone:
             _offer(mgr, sid, tid)
             fired = []
             self._probe(mgr, fired)
-            assert mgr.handle_message(
-                "chat_close", {"session_id": sid}, PEER_RESEND, "FP", None,
-            ) is True
+            assert (
+                mgr.handle_message(
+                    "chat_close",
+                    {"session_id": sid},
+                    PEER_RESEND,
+                    "FP",
+                    None,
+                )
+                is True
+            )
             assert len(fired) == 1
             assert fired[0]["args"][4] == "peer_offline"
             assert fired[0]["in_lock"] is False
@@ -1822,13 +2009,19 @@ class TestDeferFileDone:
 # i18n parity for the new web copy
 # ══════════════════════════════════════════════════════════════════
 
+
 def test_web_locales_have_resend_keys_in_both_languages():
     base = os.path.join(
         os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-        "internal", "web", "static", "locales",
+        "internal",
+        "web",
+        "static",
+        "locales",
     )
     needed = {
-        "chat.text_failed", "chat.resend", "chat.err_resend_failed",
+        "chat.text_failed",
+        "chat.resend",
+        "chat.err_resend_failed",
     }
     for name in ("en.json", "zh-CN.json"):
         with open(os.path.join(base, name), encoding="utf-8") as fh:
@@ -1859,6 +2052,8 @@ def _deliver_invite(mgr: ChatManager, send_fn) -> str:
     }
     assert mgr.handle_message("chat_invite", payload, "device-b", "FP", send_fn)
     return INVITE_SID
+
+
 class TestChatInviteLifecycleResidue:
     def test_refused_invite_leaves_no_phantom_session(self, tmp_path):
         """The transport refusing the invite frame must tear the session down
@@ -1866,12 +2061,16 @@ class TestChatInviteLifecycleResidue:
         the MAX_SESSIONS slots) for the whole 300 s accept timeout."""
         chat = _make_chat(str(tmp_path))
         try:
+
             def refusing_send(data: bytes) -> bool:
                 return False
 
             for _ in range(6):  # more than INVITE_RATE_LIMIT attempts
                 sid = chat.start_session(
-                    "device-b", "Device B", "FP1234", refusing_send,
+                    "device-b",
+                    "Device B",
+                    "FP1234",
+                    refusing_send,
                 )
                 assert sid is None
                 assert chat.get_sessions() == []
@@ -1927,4 +2126,3 @@ class TestChatInviteLifecycleResidue:
         chat.shutdown()
         assert accept_event.is_set()
         assert complete_event.is_set()
-

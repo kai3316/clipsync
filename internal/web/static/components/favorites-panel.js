@@ -283,11 +283,23 @@
       </div>
 
       <!-- Add to Favorites modal -->
-      <div v-if="showAddModal" class="favorites-add-modal" @click.self="closeAddModal">
+      <div
+        v-if="showAddModal"
+        class="favorites-add-modal"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="favorites-add-modal-title"
+        @click.self="closeAddModal"
+      >
         <div class="favorites-add-modal__card glass-neo animate-holo-reveal">
           <div class="favorites-add-modal__header">
-            <span class="favorites-add-modal__title">{{ t('context.favorite') }}</span>
-            <button class="favorites-add-modal__close" @click="closeAddModal">&times;</button>
+            <span class="favorites-add-modal__title" id="favorites-add-modal-title">{{ t('context.favorite') }}</span>
+            <button
+              class="favorites-add-modal__close"
+              @click="closeAddModal"
+              :aria-label="t('ui.close')"
+              :title="t('ui.close')"
+            >&times;</button>
           </div>
 
           <!-- Tab switcher -->
@@ -315,7 +327,11 @@
                 v-for="hitem in historyForAdd"
                 :key="hitem.entry_id"
                 class="favorites-add-modal__history-item"
+                role="button"
+                tabindex="0"
                 @click="addFromHistory(hitem)"
+                @keydown.enter.prevent="addFromHistory(hitem)"
+                @keydown.space.prevent="addFromHistory(hitem)"
               >
                 <span class="favorites-add-modal__history-icon">{{ historyIcon(hitem) }}</span>
                 <span class="favorites-add-modal__history-text text-ellipsis">{{ hitem.text_preview || t('history.empty_preview') }}</span>
@@ -438,6 +454,24 @@
           this.loadHistoryForAdd();
           this.store.favoriteSearch = ''; // reset search when opening modal
           this.searchInput = '';          // keep the search box in sync (debounced)
+          // Move focus into the dialog (and remember where it was) so screen
+          // readers and keyboard users land inside the modal on open.
+          var self = this;
+          this.$nextTick(function () {
+            self._prevAddFocus = document.activeElement;
+            var card = self.$el.querySelector('.favorites-add-modal__card');
+            if (card) {
+              var focusables = card.querySelectorAll(
+                'button, input, select, textarea, [tabindex]:not([tabindex="-1"])');
+              if (focusables.length) focusables[0].focus();
+            }
+          });
+        } else if (this._prevAddFocus) {
+          var prev = this._prevAddFocus;
+          this._prevAddFocus = null;
+          if (prev.focus && document.contains(prev)) {
+            prev.focus();
+          }
         }
       },
 
@@ -633,6 +667,28 @@
 
       closeAddModal: function () {
         this.showAddModal = false;
+      },
+
+      // Keep Tab focus cycling inside the open add-modal (a simple focus trap):
+      // wrap forward at the last control and backward at the first.
+      _trapFocus: function (e) {
+        var card = this.$el.querySelector('.favorites-add-modal__card');
+        if (!card) return;
+        var focusables = card.querySelectorAll(
+          'button, input, select, textarea, [tabindex]:not([tabindex="-1"])');
+        if (!focusables.length) return;
+        var first = focusables[0];
+        var last = focusables[focusables.length - 1];
+        var active = document.activeElement;
+        if (e.shiftKey) {
+          if (active === first || !card.contains(active)) {
+            e.preventDefault();
+            last.focus();
+          }
+        } else if (active === last || !card.contains(active)) {
+          e.preventDefault();
+          first.focus();
+        }
       },
 
       closeContextMenu: function () {
@@ -943,10 +999,16 @@
       };
       document.addEventListener('click', this._onDocClick);
 
-      // Close context menu on Escape
+      // Close context menu / add modal on Escape; trap Tab inside the modal.
       this._onKeyDown = function (e) {
         if (e.key === 'Escape') {
+          if (self.showAddModal) {
+            self.closeAddModal();
+            return;
+          }
           self.closeContextMenu();
+        } else if (e.key === 'Tab' && self.showAddModal) {
+          self._trapFocus(e);
         }
       };
       document.addEventListener('keydown', this._onKeyDown);

@@ -453,9 +453,14 @@
         textarea.style.opacity = '0';
         document.body.appendChild(textarea);
         textarea.select();
-        try { document.execCommand('copy'); } catch (e) { /* ignore */ }
+        var ok = false;
+        try { ok = document.execCommand('copy'); } catch (e) { ok = false; }
         document.body.removeChild(textarea);
-        if (done) done();
+        if (ok) {
+          if (done) done();
+        } else {
+          this.store.showToast(this.t('history.copy_failed'), 2000);
+        }
       },
 
       showQr: function () {

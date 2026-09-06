@@ -161,7 +161,7 @@
           // The app-level handler deletes the keyboard-CURSOR row, but it is
           // gated off when the focused element is a [role="button"] card —
           // so a card that actually has focus must own Delete itself,
-          // mirroring the same single-item delete (no confirm).
+          // mirroring the same single-item delete (confirm applies inside).
           e.preventDefault();
           this.deleteItem();
         }
@@ -275,25 +275,32 @@
         if (eid === undefined || eid === null) return;
 
         var self = this;
-        ClipsyncAPI.deleteItem(eid).then(function (res) {
-          if (res && res.ok !== false) {
-            // Removal via the shared helper — it bumps the mutation tick so an
-            // in-flight calibration (store.js) abandons its write-back instead
-            // of resurrecting this row, and prunes it from the selection
-            // (mirrors the ws.js history_item_deleted handler).
-            var removed = store.removeHistoryItems([eid]);
-            // Shrink the pagination cursor with the array (matching the batch
-            // delete) so "Load more" doesn't skip the item that just shifted
-            // into the deleted slot.
-            if (removed > 0) {
-              store.historyOffset = Math.max(0, store.historyOffset - 1);
-            }
-            store.showToast(self.t('history.deleted_toast'), 1200);
-          }
-        }).catch(function (e) {
-          console.error('[ClipSync] Delete failed:', e);
-          store.showToast(self.t('history.delete_failed'), 2000);
-        });
+        // Confirm before deleting — the inline trash and the Delete/Backspace
+        // key are permanent, and every other delete path (context menu, batch,
+        // clear-all, mobile) confirms first.
+        store.confirm(this.t('history.delete_title'), this.t('history.delete_confirm'))
+          .then(function () {
+            ClipsyncAPI.deleteItem(eid).then(function (res) {
+              if (res && res.ok !== false) {
+                // Removal via the shared helper — it bumps the mutation tick so an
+                // in-flight calibration (store.js) abandons its write-back instead
+                // of resurrecting this row, and prunes it from the selection
+                // (mirrors the ws.js history_item_deleted handler).
+                var removed = store.removeHistoryItems([eid]);
+                // Shrink the pagination cursor with the array (matching the batch
+                // delete) so "Load more" doesn't skip the item that just shifted
+                // into the deleted slot.
+                if (removed > 0) {
+                  store.historyOffset = Math.max(0, store.historyOffset - 1);
+                }
+                store.showToast(self.t('history.deleted_toast'), 1200);
+              }
+            }).catch(function (e) {
+              console.error('[ClipSync] Delete failed:', e);
+              store.showToast(self.t('history.delete_failed'), 2000);
+            });
+          })
+          .catch(function () {});  // cancelled — not an error
       },
 
       onMouseEnter: function (e) {

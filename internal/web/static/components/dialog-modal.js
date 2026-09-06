@@ -15,12 +15,12 @@
 
     template:
       '<transition name="dialog-fade">' +
-        '<div v-if="store.activeDialog" class="dialog-overlay" role="dialog" aria-modal="true" @click.self="onOverlayClick">' +
+        '<div v-if="store.activeDialog" class="dialog-overlay" role="dialog" aria-modal="true" :aria-labelledby="\'dialog-modal-title\'" @click.self="onOverlayClick">' +
           '<div class="dialog-card" :class="\'dialog-card--\' + store.activeDialog.dialog_type">' +
 
             '<!-- Header -->' +
             '<div class="dialog-card__header">' +
-              '<h3 class="dialog-card__title">{{ store.activeDialog.title }}</h3>' +
+              '<h3 class="dialog-card__title" id="dialog-modal-title">{{ store.activeDialog.title }}</h3>' +
               '<p v-if="store.activeDialog.message" class="dialog-card__message">{{ store.activeDialog.message }}</p>' +
             '</div>' +
 
@@ -284,10 +284,11 @@
       copyUrl: function () {
         var dlg = this.store.activeDialog;
         if (!dlg || !dlg.url) return;
+        var self = this;
+        var done = function () { self.store.showToast(self.t('toast.url_copied'), 1500); };
+        var failed = function () { self.store.showToast(self.t('history.copy_failed'), 2000); };
         if (navigator.clipboard && navigator.clipboard.writeText) {
-          navigator.clipboard.writeText(dlg.url).then(function () {
-            // brief feedback
-          }).catch(function () { /* ignore */ });
+          navigator.clipboard.writeText(dlg.url).then(done).catch(failed);
         } else {
           var textarea = document.createElement('textarea');
           textarea.value = dlg.url;
@@ -295,8 +296,10 @@
           textarea.style.opacity = '0';
           document.body.appendChild(textarea);
           textarea.select();
-          try { document.execCommand('copy'); } catch (e) { /* ignore */ }
+          var ok = false;
+          try { ok = document.execCommand('copy'); } catch (e) { ok = false; }
           document.body.removeChild(textarea);
+          if (ok) { done(); } else { failed(); }
         }
       },
 
@@ -337,11 +340,7 @@
       },
 
       formatSize: function (bytes) {
-        if (!bytes) return '';
-        if (bytes < 1024) return bytes + ' B';
-        if (bytes < 1048576) return (bytes / 1024).toFixed(1) + ' KB';
-        if (bytes < 1073741824) return (bytes / 1048576).toFixed(1) + ' MB';
-        return (bytes / 1073741824).toFixed(2) + ' GB';
+        return ClipsyncFormat.size(bytes);
       },
     },
 

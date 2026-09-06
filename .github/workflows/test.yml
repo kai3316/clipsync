@@ -9,6 +9,40 @@ on:
   workflow_dispatch:
 
 jobs:
+  # Lint and the web-UI tests are platform-independent, so they run once each
+  # rather than across the OS matrix below.
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install ruff
+        run: pip install ruff
+
+      - name: Ruff
+        run: ruff check .
+
+  web:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Install web test dependencies
+        run: npm install
+
+      - name: Run web UI tests
+        run: npm run test:web
+
   test:
     strategy:
       fail-fast: false

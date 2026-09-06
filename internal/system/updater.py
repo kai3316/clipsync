@@ -5,12 +5,13 @@ dependency.  The check is best-effort and never raises: any network or
 parse failure simply returns "no update available".
 """
 
+import contextlib
 import json
 import logging
 import os
 import ssl
 import urllib.request
-from typing import Callable
+from collections.abc import Callable
 
 from internal.version import __version__
 
@@ -32,6 +33,7 @@ def _https_context() -> ssl.SSLContext:
     """
     try:
         import certifi
+
         return ssl.create_default_context(cafile=certifi.where())
     except Exception:
         return ssl.create_default_context()
@@ -85,13 +87,13 @@ def _fetch_latest_release(timeout: float = 6.0) -> dict | None:
                     "User-Agent": "clipsync",
                 },
             )
-            with urllib.request.urlopen(
-                    req, timeout=timeout, context=_https_context()) as resp:
+            with urllib.request.urlopen(req, timeout=timeout, context=_https_context()) as resp:
                 return json.loads(resp.read().decode("utf-8"))
         except Exception as exc:
             last_exc = exc
             if attempt < 2:
                 import time as _time
+
                 _time.sleep(0.5 * (attempt + 1))
     logger.debug("Update check failed after 3 attempts: %s", last_exc)
     return None
@@ -184,7 +186,7 @@ def fetch_latest_asset_info(timeout: float = 10.0) -> dict | None:
         return {
             "version": tag,
             "asset": asset_name,
-            "sha256": digest[len("sha256:"):].lower(),
+            "sha256": digest[len("sha256:") :].lower(),
         }
     logger.info("Latest release %s has no asset named %s", tag, asset_name)
     return None
@@ -259,9 +261,9 @@ def download_latest_release(
     (localized) message describing the problem — e.g. that no release asset
     exists for this platform.  Never raises.
     """
-    from internal.i18n import T
-
     import os
+
+    from internal.i18n import T
 
     try:
         data = _fetch_latest_release(timeout=60.0)
@@ -293,8 +295,7 @@ def download_latest_release(
         temp_path = dest_path + ".part"
         req = urllib.request.Request(browser_url, headers={"User-Agent": "clipsync"})
         try:
-            with urllib.request.urlopen(
-                    req, timeout=60.0, context=_https_context()) as resp:
+            with urllib.request.urlopen(req, timeout=60.0, context=_https_context()) as resp:
                 # Total size: prefer the response Content-Length, fall back to
                 # the release API's asset size (a few servers omit the header).
                 total = None
@@ -318,8 +319,7 @@ def download_latest_release(
                             try:
                                 progress_cb(downloaded, total or 0)
                             except Exception:
-                                logger.debug("Update progress callback failed",
-                                             exc_info=True)
+                                logger.debug("Update progress callback failed", exc_info=True)
             # Verify the downloaded size AND SHA-256 against the release API, so
             # a truncated, corrupted, or tampered asset is rejected before it is
             # exposed as a valid installer. The API digest is "sha256:<hex>".
@@ -333,16 +333,14 @@ def download_latest_release(
             digest = matched.get("digest") or ""
             if digest.startswith("sha256:"):
                 actual_sha = sha256_file(temp_path)
-                if actual_sha != digest[len("sha256:"):]:
+                if actual_sha != digest[len("sha256:") :]:
                     raise RuntimeError(
                         f"download checksum mismatch: expected {digest}, got sha256:{actual_sha}"
                     )
             os.replace(temp_path, dest_path)
         except Exception:
-            try:
+            with contextlib.suppress(OSError):
                 os.remove(temp_path)
-            except OSError:
-                pass
             raise
         logger.info("Downloaded release asset to %s", dest_path)
         return dest_path, None, version

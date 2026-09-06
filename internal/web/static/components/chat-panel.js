@@ -37,12 +37,35 @@
     },
 
     computed: {
+      // LAN rows a conversation can actually be STARTED with: connected, or
+      // visible on this LAN right now (the invite connects first), or
+      // reachable over the relay.  A paired-but-offline device is dropped —
+      // /api/chat/devices keeps returning it (the desktop view wants it), but
+      // offering "start chat" on it could only ever fail with a timeout.
+      lanTargets: function () {
+        var rows = this.chatDevices || [];
+        var out = [];
+        for (var i = 0; i < rows.length; i++) {
+          var d = rows[i];
+          if (!d) continue;
+          // A host that predates the flags sends none of them — keep such a
+          // row rather than rendering an empty picker (fail open).
+          if (d.connected === undefined && d.discovered === undefined
+              && d.relay_reachable === undefined) {
+            out.push(d);
+            continue;
+          }
+          if (d.connected || d.discovered || d.relay_reachable) out.push(d);
+        }
+        return out;
+      },
+
       // LAN chat targets, each augmented with `internet` when the SAME peer
       // is also internet-paired — a dual-online device appears once (under
       // LAN) with a 🌐 badge instead of twice.  The name prefers the internet
       // alias (alias||name) so the target label matches the Devices page.
       deviceList: function () {
-        var lan = this.chatDevices || [];
+        var lan = this.lanTargets;
         var net = this.store.internetPairPeers || [];
         var out = [];
         for (var i = 0; i < lan.length; i++) {
@@ -63,12 +86,14 @@
         return out;
       },
 
-      // Internet-ONLY chat targets: internet-paired peers that are NOT also
-      // listed by /api/chat/devices (deduped against deviceList).  Rendered
-      // under the "Internet devices" group.  A peer whose `paired` flag is
-      // explicitly false is a stale/in-progress row, not a chat target.
+      // Internet-ONLY chat targets: internet-paired peers that are NOT also a
+      // LAN chat target (deduped against deviceList, i.e. against the FILTERED
+      // LAN list — so an internet-paired peer that went LAN-offline moves into
+      // this group instead of vanishing from both).  Rendered under the
+      // "Internet devices" group.  A peer whose `paired` flag is explicitly
+      // false is a stale/in-progress row, not a chat target.
       internetDeviceList: function () {
-        var lan = this.chatDevices || [];
+        var lan = this.lanTargets;
         var lanIds = {};
         for (var i = 0; i < lan.length; i++) lanIds[String(lan[i].peer_id)] = true;
         var out = [];
@@ -206,6 +231,31 @@
         this.loadMessages();
         this.markRead();
         this._armPeerTyping(this.activeSession);
+      }
+    },
+
+    beforeUnmount: function () {
+      // The peer-typing deadline is a 4.5s timer that writes this.
+      // peerTypingLocal when it fires.  Switching tabs unmounts the panel
+      // while it is still armed, so it fired against a dead component
+      // instance — a Vue warning in the console, and on a fast tab-flip the
+      // stale timer from the previous mount could clear the indicator the
+      // new mount had just set.  Report typing=false on the way out too, so
+      // the peer doesn't see us "typing…" forever after we leave the tab.
+      if (this._peerTypingTimer) {
+        clearTimeout(this._peerTypingTimer);
+        this._peerTypingTimer = null;
+      }
+      if (this._typingLastState) {
+        // Bypass the 2s throttle: this is our last chance to say it, and a
+        // suppressed "stopped typing" leaves the peer staring at a typing
+        // indicator that only expires on the server's own deadline.
+        this._typingLastSent = 0;
+        try {
+          this.sendTypingState(false);
+        } catch (e) {
+          /* best effort — we are going away regardless */
+        }
       }
     },
 
@@ -1041,11 +1091,7 @@
       },
 
       formatSize: function (bytes) {
-        if (!bytes && bytes !== 0) return '';
-        if (bytes < 1024) return bytes + ' B';
-        if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + ' KB';
-        if (bytes < 1024 * 1024 * 1024) return (bytes / (1024 * 1024)).toFixed(1) + ' MB';
-        return (bytes / (1024 * 1024 * 1024)).toFixed(2) + ' GB';
+        return ClipsyncFormat.size(bytes);
       },
 
       formatTime: function (ts) {

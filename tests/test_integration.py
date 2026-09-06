@@ -24,6 +24,7 @@ from internal.sync.manager import SyncManager
 
 # ── Test infrastructure: two-node setup ──────────────────────────────────
 
+
 class MockClipboardMonitor:
     def __init__(self):
         self._callback = None
@@ -63,11 +64,13 @@ class MockClipboardWriter:
     def write(self, content: ClipboardContent):
         self.last_written = content
         self.write_count += 1
+        return True
 
 
 @dataclass
 class _SimDevice:
     """A simulated ClipSync node representing one platform."""
+
     mgr: SyncManager
     reader: MockClipboardReader
     writer: MockClipboardWriter
@@ -85,8 +88,7 @@ def _make_device(device_id: str, device_name: str, platform_label: str):
     pairing = PairingManager(device_id, device_name)
     pairing.load_or_create_identity("", "")
 
-    mgr = SyncManager(device_id, device_name,
-                      reader=reader, writer=writer, monitor=monitor)
+    mgr = SyncManager(device_id, device_name, reader=reader, writer=writer, monitor=monitor)
 
     sent: list[SyncMessage] = []
     received: list[SyncMessage] = []
@@ -98,8 +100,13 @@ def _make_device(device_id: str, device_name: str, platform_label: str):
     mgr.start()
 
     return _SimDevice(
-        mgr=mgr, reader=reader, writer=writer, monitor=monitor,
-        pairing=pairing, sent=sent, received=received,
+        mgr=mgr,
+        reader=reader,
+        writer=writer,
+        monitor=monitor,
+        pairing=pairing,
+        sent=sent,
+        received=received,
     )
 
 
@@ -132,6 +139,7 @@ def _simulate_copy(dev: _SimDevice, content: ClipboardContent, pause: float = 0.
 # Cross-platform text sync
 # ══════════════════════════════════════════════════════════════════════════
 
+
 class TestWinToMacTextSync:
     """Windows user copies text → macOS user pastes it."""
 
@@ -144,9 +152,12 @@ class TestWinToMacTextSync:
         self.mac.mgr.stop()
 
     def test_plain_english(self):
-        _simulate_copy(self.win, ClipboardContent(
-            types={ContentType.TEXT: b"Hello from Windows"},
-        ))
+        _simulate_copy(
+            self.win,
+            ClipboardContent(
+                types={ContentType.TEXT: b"Hello from Windows"},
+            ),
+        )
         _bridge(self.win, self.mac)
 
         assert self.mac.writer.write_count == 1
@@ -155,9 +166,12 @@ class TestWinToMacTextSync:
     def test_chinese_text(self):
         """Chinese text must survive Windows UTF-16-LE → macOS UTF-8 journey."""
         text = "你好世界！复制粘贴测试"
-        _simulate_copy(self.win, ClipboardContent(
-            types={ContentType.TEXT: text.encode("utf-8")},
-        ))
+        _simulate_copy(
+            self.win,
+            ClipboardContent(
+                types={ContentType.TEXT: text.encode("utf-8")},
+            ),
+        )
         _bridge(self.win, self.mac)
 
         received = self.mac.writer.last_written.types[ContentType.TEXT]
@@ -165,19 +179,27 @@ class TestWinToMacTextSync:
 
     def test_emoji_and_special_chars(self):
         text = "Emoji 🌍 🎉 émoji ñoño 日本語"
-        _simulate_copy(self.win, ClipboardContent(
-            types={ContentType.TEXT: text.encode("utf-8")},
-        ))
+        _simulate_copy(
+            self.win,
+            ClipboardContent(
+                types={ContentType.TEXT: text.encode("utf-8")},
+            ),
+        )
         _bridge(self.win, self.mac)
 
         received = self.mac.writer.last_written.types[ContentType.TEXT].decode("utf-8")
         assert received == text
 
     def test_html_with_formatting(self):
-        _simulate_copy(self.win, ClipboardContent(types={
-            ContentType.TEXT: b"Bold Text",
-            ContentType.HTML: b"<b>Bold Text</b>",
-        }))
+        _simulate_copy(
+            self.win,
+            ClipboardContent(
+                types={
+                    ContentType.TEXT: b"Bold Text",
+                    ContentType.HTML: b"<b>Bold Text</b>",
+                }
+            ),
+        )
         _bridge(self.win, self.mac)
 
         assert self.mac.writer.last_written.types[ContentType.HTML] == b"<b>Bold Text</b>"
@@ -196,11 +218,16 @@ class TestMacToWinTextSync:
         self.win.mgr.stop()
 
     def test_mac_to_windows_richtext(self):
-        _simulate_copy(self.mac, ClipboardContent(types={
-            ContentType.TEXT: b"Rich text example",
-            ContentType.RTF: b"{\\rtf1\\ansi Rich text example}",
-            ContentType.HTML: b"<p>Rich text example</p>",
-        }))
+        _simulate_copy(
+            self.mac,
+            ClipboardContent(
+                types={
+                    ContentType.TEXT: b"Rich text example",
+                    ContentType.RTF: b"{\\rtf1\\ansi Rich text example}",
+                    ContentType.HTML: b"<p>Rich text example</p>",
+                }
+            ),
+        )
         _bridge(self.mac, self.win)
 
         assert self.win.writer.write_count == 1
@@ -221,9 +248,12 @@ class TestLinuxToMacTextSync:
 
     def test_unicode_from_linux(self):
         text = "Привет мир\n日本語テキスト\n🌟✨"
-        _simulate_copy(self.linux, ClipboardContent(
-            types={ContentType.TEXT: text.encode("utf-8")},
-        ))
+        _simulate_copy(
+            self.linux,
+            ClipboardContent(
+                types={ContentType.TEXT: text.encode("utf-8")},
+            ),
+        )
         _bridge(self.linux, self.mac)
 
         received = self.mac.writer.last_written.types[ContentType.TEXT].decode("utf-8")
@@ -233,6 +263,7 @@ class TestLinuxToMacTextSync:
 # ══════════════════════════════════════════════════════════════════════════
 # Cross-platform image sync
 # ══════════════════════════════════════════════════════════════════════════
+
 
 class TestImageSync:
     """Image clipboard sharing between platforms."""
@@ -248,37 +279,57 @@ class TestImageSync:
 
     def test_png_windows_to_mac(self):
         png = b"\x89PNG\r\n\x1a\n" + b"\x00" * 200
-        _simulate_copy(self.win, ClipboardContent(types={
-            ContentType.IMAGE_PNG: png,
-        }))
+        _simulate_copy(
+            self.win,
+            ClipboardContent(
+                types={
+                    ContentType.IMAGE_PNG: png,
+                }
+            ),
+        )
         _bridge(self.win, self.mac)
 
         assert self.mac.writer.last_written.types[ContentType.IMAGE_PNG] == png
 
     def test_png_mac_to_linux(self):
         png = b"\x89PNG\r\n\x1a\n" + b"mac-screenshot-sim" + b"\x00" * 100
-        _simulate_copy(self.mac, ClipboardContent(types={
-            ContentType.IMAGE_PNG: png,
-        }))
+        _simulate_copy(
+            self.mac,
+            ClipboardContent(
+                types={
+                    ContentType.IMAGE_PNG: png,
+                }
+            ),
+        )
         _bridge(self.mac, self.linux)
 
         assert self.linux.writer.last_written.types[ContentType.IMAGE_PNG] == png
 
     def test_png_linux_to_windows(self):
         png = b"\x89PNG\r\n\x1a\n" + b"linux-screenshot" + b"\x00" * 100
-        _simulate_copy(self.linux, ClipboardContent(types={
-            ContentType.IMAGE_PNG: png,
-        }))
+        _simulate_copy(
+            self.linux,
+            ClipboardContent(
+                types={
+                    ContentType.IMAGE_PNG: png,
+                }
+            ),
+        )
         _bridge(self.linux, self.win)
 
         assert self.win.writer.last_written.types[ContentType.IMAGE_PNG] == png
 
     def test_image_with_text_mixed(self):
         """Screenshot with fallback text description."""
-        _simulate_copy(self.win, ClipboardContent(types={
-            ContentType.IMAGE_PNG: b"\x89PNG\x00\x00",
-            ContentType.TEXT: b"[Screenshot: error dialog]",
-        }))
+        _simulate_copy(
+            self.win,
+            ClipboardContent(
+                types={
+                    ContentType.IMAGE_PNG: b"\x89PNG\x00\x00",
+                    ContentType.TEXT: b"[Screenshot: error dialog]",
+                }
+            ),
+        )
         _bridge(self.win, self.mac)
 
         assert ContentType.IMAGE_PNG in self.mac.writer.last_written.types
@@ -288,6 +339,7 @@ class TestImageSync:
 # ══════════════════════════════════════════════════════════════════════════
 # Real-time bidirectional sync
 # ══════════════════════════════════════════════════════════════════════════
+
 
 class TestBidirectionalSync:
     """Two devices syncing back and forth in real time."""
@@ -302,9 +354,12 @@ class TestBidirectionalSync:
 
     def test_two_way_text_exchange(self):
         # Windows copies text
-        _simulate_copy(self.win, ClipboardContent(
-            types={ContentType.TEXT: b"From Windows"},
-        ))
+        _simulate_copy(
+            self.win,
+            ClipboardContent(
+                types={ContentType.TEXT: b"From Windows"},
+            ),
+        )
         _bridge(self.win, self.mac)
         assert self.mac.writer.last_written.types[ContentType.TEXT] == b"From Windows"
 
@@ -313,9 +368,12 @@ class TestBidirectionalSync:
         time.sleep(0.8)
 
         # Now macOS copies something else
-        _simulate_copy(self.mac, ClipboardContent(
-            types={ContentType.TEXT: b"From Mac"},
-        ))
+        _simulate_copy(
+            self.mac,
+            ClipboardContent(
+                types={ContentType.TEXT: b"From Mac"},
+            ),
+        )
         _bridge(self.mac, self.win)
         assert self.win.writer.last_written.types[ContentType.TEXT] == b"From Mac"
 
@@ -351,11 +409,14 @@ class TestBidirectionalSync:
 
         for i in range(5):
             # Windows copies
-            _simulate_copy(self.win, ClipboardContent(
-                types={ContentType.TEXT: f"win-{i}".encode()},
-            ))
+            _simulate_copy(
+                self.win,
+                ClipboardContent(
+                    types={ContentType.TEXT: f"win-{i}".encode()},
+                ),
+            )
             _bridge(self.win, self.mac)
-            expected_mac_count += 1
+            expected_mac_count += 1  # noqa: SIM113
             assert self.mac.writer.write_count == expected_mac_count
 
             # Let the remote-write suppression window expire before the
@@ -363,11 +424,14 @@ class TestBidirectionalSync:
             time.sleep(0.6)
 
             # Mac copies
-            _simulate_copy(self.mac, ClipboardContent(
-                types={ContentType.TEXT: f"mac-{i}".encode()},
-            ))
+            _simulate_copy(
+                self.mac,
+                ClipboardContent(
+                    types={ContentType.TEXT: f"mac-{i}".encode()},
+                ),
+            )
             _bridge(self.mac, self.win)
-            expected_win_count += 1
+            expected_win_count += 1  # noqa: SIM113
             assert self.win.writer.write_count == expected_win_count
 
             time.sleep(0.6)
@@ -376,6 +440,7 @@ class TestBidirectionalSync:
 # ══════════════════════════════════════════════════════════════════════════
 # Pairing exchange simulation
 # ══════════════════════════════════════════════════════════════════════════
+
 
 class TestPairingExchange:
     """Simulate the full pairing flow between two devices."""
@@ -404,9 +469,14 @@ class TestPairingExchange:
         assert len(win_code) == 8 and win_code.isdigit()
         assert len(mac_code) == 8 and mac_code.isdigit()
 
-        # Each side confirms with its OWN generated code (current behaviour)
+        # Each side confirms with its OWN generated code.
         assert win_pairing.confirm_pairing("mac-device", win_code)
         assert mac_pairing.confirm_pairing("win-device", mac_code)
+
+        # Two-sided handshake: each side's pairing_confirm crosses over to the
+        # peer, completing the pairing (confirm alone is only one side).
+        win_pairing.mark_peer_confirmed("mac-device")
+        mac_pairing.mark_peer_confirmed("win-device")
 
         # Both should now be paired
         assert win_pairing.is_peer_paired("mac-device")
@@ -449,21 +519,28 @@ class TestPairingExchange:
             for other_name, other_mgr in devices.items():
                 if other_name == name:
                     continue
-                mgr.add_peer(other_name, other_mgr._device_name,
-                            identities[other_name].certificate_pem, paired=False)
+                mgr.add_peer(
+                    other_name,
+                    other_mgr._device_name,
+                    identities[other_name].certificate_pem,
+                    paired=False,
+                )
 
         # Generate codes for all directional pairings
         codes: dict[tuple, str] = {}
         for a_name, a_mgr in devices.items():
-            for b_name, b_mgr in devices.items():
+            for b_name, _b_mgr in devices.items():
                 if a_name == b_name:
                     continue
                 codes[(a_name, b_name)] = a_mgr.generate_pairing_code(b_name)
 
-        # Each device confirms with its OWN generated code for each peer
+        # Each device confirms with its OWN generated code for each peer, then
+        # the peer's pairing_confirm crosses over to complete the handshake.
         for (a_name, b_name), code in codes.items():
-            assert devices[a_name].confirm_pairing(b_name, code), \
+            assert devices[a_name].confirm_pairing(b_name, code), (
                 f"{a_name} should confirm pairing with {b_name}"
+            )
+            devices[a_name].mark_peer_confirmed(b_name)
 
         # Verify all are paired
         for name, mgr in devices.items():
@@ -475,15 +552,18 @@ class TestPairingExchange:
 # Wire format compatibility
 # ══════════════════════════════════════════════════════════════════════════
 
+
 class TestWireFormatCompatibility:
     """Ensure the wire format is truly platform-independent."""
 
     def test_wire_format_is_ascii_safe(self):
         """All metadata in the wire format must be ASCII — zero-byte payload is fine."""
         msg = SyncMessage(
-            content=ClipboardContent(types={
-                ContentType.TEXT: "你好".encode(),  # binary payload
-            }),
+            content=ClipboardContent(
+                types={
+                    ContentType.TEXT: "你好".encode(),  # binary payload
+                }
+            ),
             msg_id="test123",
             source_device="test-device",
         )
@@ -495,9 +575,11 @@ class TestWireFormatCompatibility:
         """100 KB text must survive encode → decode on any platform."""
         large_text = "ABCDEFGHIJ" * 10000  # 100 KB
         msg = SyncMessage(
-            content=ClipboardContent(types={
-                ContentType.TEXT: large_text.encode("utf-8"),
-            }),
+            content=ClipboardContent(
+                types={
+                    ContentType.TEXT: large_text.encode("utf-8"),
+                }
+            ),
             msg_id="large",
             source_device="test",
         )
@@ -533,6 +615,7 @@ class TestWireFormatCompatibility:
 # Network failure resilience
 # ══════════════════════════════════════════════════════════════════════════
 
+
 class TestNetworkResilience:
     """Behavior under simulated network issues."""
 
@@ -548,7 +631,8 @@ class TestNetworkResilience:
         """Corrupted frames must not crash the receiver."""
         msg = SyncMessage(
             content=ClipboardContent(types={ContentType.TEXT: b"hello"}),
-            msg_id="test", source_device="win",
+            msg_id="test",
+            source_device="win",
         )
         wire = encode_message(msg)
 
@@ -566,11 +650,12 @@ class TestNetworkResilience:
     def test_truncated_frame_handling(self):
         msg = SyncMessage(
             content=ClipboardContent(types={ContentType.TEXT: b"hello"}),
-            msg_id="test", source_device="win",
+            msg_id="test",
+            source_device="win",
         )
         wire = encode_message(msg)
         # Send only first half
-        half = wire[:len(wire) // 2]
+        half = wire[: len(wire) // 2]
         result = decode_message(half)
         assert result is None  # must reject truncated frames
 
@@ -579,7 +664,8 @@ class TestNetworkResilience:
         msgs = [
             SyncMessage(
                 content=ClipboardContent(types={ContentType.TEXT: f"msg-{i}".encode()}),
-                msg_id=str(i), source_device="sender",
+                msg_id=str(i),
+                source_device="sender",
             )
             for i in range(3)
         ]
@@ -601,7 +687,8 @@ class TestNetworkResilience:
         """Same message arriving twice should only write once."""
         msg = SyncMessage(
             content=ClipboardContent(types={ContentType.TEXT: b"dup"}),
-            msg_id="dup", source_device="sender",
+            msg_id="dup",
+            source_device="sender",
         )
         wire = encode_message(msg)
 

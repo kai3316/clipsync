@@ -9,6 +9,7 @@ Clipboard monitoring polls NSPasteboard.changeCount via the ctypes bridge,
 since macOS provides no event-driven clipboard API.
 """
 
+import contextlib
 import ctypes
 import ctypes.util
 import hashlib
@@ -35,12 +36,20 @@ _nspasteboard_objc = None
 _nspasteboard_instance = None
 _objc_lock = threading.Lock()
 
-_IMAGE_UTIS = frozenset({
-    b"public.tiff", b"public.png", b"public.jpeg",
-    b"public.jpeg-2000", b"com.apple.pasteboard.image",
-    b"NSTIFFPboardType", b"com.compuserve.gif",
-    b"public.heic", b"public.heif", b"public.avci",
-})
+_IMAGE_UTIS = frozenset(
+    {
+        b"public.tiff",
+        b"public.png",
+        b"public.jpeg",
+        b"public.jpeg-2000",
+        b"com.apple.pasteboard.image",
+        b"NSTIFFPboardType",
+        b"com.compuserve.gif",
+        b"public.heic",
+        b"public.heif",
+        b"public.avci",
+    }
+)
 
 
 def _init_nspasteboard():
@@ -139,7 +148,9 @@ def _pb_types() -> set[bytes]:
             result = set()
             for i in range(count):
                 objc.objc_msgSend.argtypes = [
-                    ctypes.c_void_p, ctypes.c_void_p, ctypes.c_ulong,
+                    ctypes.c_void_p,
+                    ctypes.c_void_p,
+                    ctypes.c_ulong,
                 ]
                 objc.objc_msgSend.restype = ctypes.c_void_p
                 ns_str = objc.objc_msgSend(types_arr, sel_object, i)
@@ -296,7 +307,10 @@ def _pb_set_data_for_type(uti: bytes, data: bytes) -> bool:
             sel_data_with_bytes = objc.sel_registerName(b"dataWithBytes:length:")
             ns_data_cls = objc.objc_getClass(b"NSData")
             objc.objc_msgSend.argtypes = [
-                ctypes.c_void_p, ctypes.c_void_p, ctypes.c_char_p, ctypes.c_ulong,
+                ctypes.c_void_p,
+                ctypes.c_void_p,
+                ctypes.c_char_p,
+                ctypes.c_ulong,
             ]
             objc.objc_msgSend.restype = ctypes.c_void_p
             ns_data = objc.objc_msgSend(ns_data_cls, sel_data_with_bytes, data, len(data))
@@ -305,7 +319,10 @@ def _pb_set_data_for_type(uti: bytes, data: bytes) -> bool:
 
             sel_set_data = objc.sel_registerName(b"setData:forType:")
             objc.objc_msgSend.argtypes = [
-                ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p,
+                ctypes.c_void_p,
+                ctypes.c_void_p,
+                ctypes.c_void_p,
+                ctypes.c_void_p,
             ]
             objc.objc_msgSend.restype = ctypes.c_void_p
             objc.objc_msgSend(pb, sel_set_data, ns_data, ns_uti)
@@ -321,6 +338,7 @@ def _pb_set_data_for_type(uti: bytes, data: bytes) -> bool:
 # ---------------------------------------------------------------------------
 # Clipboard reader
 # ---------------------------------------------------------------------------
+
 
 class _ClipboardReader(ClipboardReader):
     def read(self) -> ClipboardContent:
@@ -368,7 +386,8 @@ class _ClipboardReader(ClipboardReader):
         try:
             result = subprocess.run(
                 ["pbpaste", "-Prefer", "txt"],
-                capture_output=True, timeout=2,
+                capture_output=True,
+                timeout=2,
             )
             if result.returncode == 0 and result.stdout:
                 return result.stdout
@@ -381,7 +400,8 @@ class _ClipboardReader(ClipboardReader):
         try:
             result = subprocess.run(
                 ["pbpaste", "-Prefer", "html"],
-                capture_output=True, timeout=2,
+                capture_output=True,
+                timeout=2,
             )
             if result.returncode == 0 and result.stdout.strip():
                 data = result.stdout
@@ -403,21 +423,22 @@ class _ClipboardReader(ClipboardReader):
         try:
             script = (
                 'use framework "AppKit"\n'
-                'set pb to current application\'s NSPasteboard\'s generalPasteboard()\n'
+                "set pb to current application's NSPasteboard's generalPasteboard()\n"
                 'set htmlData to pb\'s dataForType:"public.html"\n'
-                'if htmlData = missing value then\n'
+                "if htmlData = missing value then\n"
                 '    return "CLIPSYNC_NO_HTML"\n'
-                'end if\n'
-                'set htmlStr to current application\'s NSString\'s alloc()\'s '
-                'initWithData:htmlData encoding:current application\'s NSUTF8StringEncoding\n'
-                'if htmlStr = missing value then\n'
+                "end if\n"
+                "set htmlStr to current application's NSString's alloc()'s "
+                "initWithData:htmlData encoding:current application's NSUTF8StringEncoding\n"
+                "if htmlStr = missing value then\n"
                 '    return "CLIPSYNC_NO_HTML"\n'
-                'end if\n'
-                'return htmlStr as text'
+                "end if\n"
+                "return htmlStr as text"
             )
             result = subprocess.run(
                 ["osascript", "-e", script],
-                capture_output=True, timeout=3,
+                capture_output=True,
+                timeout=3,
             )
             if result.returncode == 0 and result.stdout:
                 data = result.stdout
@@ -432,7 +453,8 @@ class _ClipboardReader(ClipboardReader):
         try:
             result = subprocess.run(
                 ["pbpaste", "-Prefer", "rtf"],
-                capture_output=True, timeout=2,
+                capture_output=True,
+                timeout=2,
             )
             if result.returncode == 0 and result.stdout.strip():
                 data = result.stdout
@@ -456,6 +478,7 @@ class _ClipboardReader(ClipboardReader):
         # Method 2: PIL.ImageGrab.grabclipboard()
         try:
             from PIL import ImageGrab
+
             img = ImageGrab.grabclipboard()
             if img is not None:
                 buf = BytesIO()
@@ -490,11 +513,10 @@ class _ClipboardReader(ClipboardReader):
             if not raw:
                 continue
             fmt = "png" if uti == b"public.png" else "tiff"
-            if fmt == "png" and raw[:8] != b'\x89PNG\r\n\x1a\n':
+            if fmt == "png" and raw[:8] != b"\x89PNG\r\n\x1a\n":
                 continue  # not valid PNG, try next UTI
             self._image_fmt = fmt
-            logger.info("Read raw %s image via ctypes NSPasteboard (%d bytes)",
-                       fmt, len(raw))
+            logger.info("Read raw %s image via ctypes NSPasteboard (%d bytes)", fmt, len(raw))
             return raw
         return b""
 
@@ -516,23 +538,26 @@ class _ClipboardReader(ClipboardReader):
 
             script = (
                 f'set f to open for access (POSIX file "{tmp_path}") '
-                'with write permission\n'
-                'set eof f to 0\n'
-                'write (the clipboard as «class TIFF») to f\n'
-                'close access f\n'
+                "with write permission\n"
+                "set eof f to 0\n"
+                "write (the clipboard as «class TIFF») to f\n"
+                "close access f\n"
                 'return "OK"'
             )
             result = subprocess.run(
                 ["osascript", "-e", script],
-                capture_output=True, timeout=5,
+                capture_output=True,
+                timeout=5,
             )
             if result.returncode != 0:
                 stderr = (result.stderr or b"").decode("utf-8", errors="replace").strip()
                 if "-1700" in stderr:
                     logger.debug("AppleScript: no image on clipboard (expected)")
                 else:
-                    logger.warning("AppleScript image read failed (permissions?): %s",
-                                  stderr[:200] if stderr else "unknown error")
+                    logger.warning(
+                        "AppleScript image read failed (permissions?): %s",
+                        stderr[:200] if stderr else "unknown error",
+                    )
                 return b""
 
             file_size = os.path.getsize(tmp_path)
@@ -551,10 +576,8 @@ class _ClipboardReader(ClipboardReader):
             return b""
         finally:
             if tmp_path:
-                try:
+                with contextlib.suppress(OSError):
                     os.unlink(tmp_path)
-                except OSError:
-                    pass
 
     def _get_image_via_nspasteboard(self) -> bytes:
         """Read image from NSPasteboard via AppleScript-ObjC bridge.
@@ -574,38 +597,41 @@ class _ClipboardReader(ClipboardReader):
 
             script = (
                 'use framework "AppKit"\n'
-                'set pb to current application\'s NSPasteboard\'s generalPasteboard()\n'
-                'set theClasses to current application\'s NSArray\'s '
-                'arrayWithObject:(current application\'s NSImage\'s class)\n'
-                'set results to pb\'s readObjectsForClasses:theClasses '
-                'options:(missing value)\n'
-                'if results\'s |count|() = 0 then\n'
+                "set pb to current application's NSPasteboard's generalPasteboard()\n"
+                "set theClasses to current application's NSArray's "
+                "arrayWithObject:(current application's NSImage's class)\n"
+                "set results to pb's readObjectsForClasses:theClasses "
+                "options:(missing value)\n"
+                "if results's |count|() = 0 then\n"
                 '    return "NO_IMAGE"\n'
-                'end if\n'
-                'set img to results\'s firstObject()\n'
-                'set tiffRep to img\'s TIFFRepresentation()\n'
-                'set pngRep to current application\'s NSBitmapImageRep\'s '
-                'imageRepWithData:tiffRep\n'
-                'if pngRep = missing value then\n'
+                "end if\n"
+                "set img to results's firstObject()\n"
+                "set tiffRep to img's TIFFRepresentation()\n"
+                "set pngRep to current application's NSBitmapImageRep's "
+                "imageRepWithData:tiffRep\n"
+                "if pngRep = missing value then\n"
                 '    return "NO_IMAGE"\n'
-                'end if\n'
-                'set pngData to pngRep\'s representationUsingType:'
-                '(current application\'s NSPNGFileType) |properties|:(missing value)\n'
-                'if pngData = missing value then\n'
+                "end if\n"
+                "set pngData to pngRep's representationUsingType:"
+                "(current application's NSPNGFileType) |properties|:(missing value)\n"
+                "if pngData = missing value then\n"
                 '    return "NO_IMAGE"\n'
-                'end if\n'
+                "end if\n"
                 f'set tmpPath to "{tmp_path}"\n'
-                'pngData\'s writeToFile:tmpPath atomically:true\n'
+                "pngData's writeToFile:tmpPath atomically:true\n"
                 'return "OK"'
             )
             result = subprocess.run(
                 ["osascript", "-e", script],
-                capture_output=True, timeout=5,
+                capture_output=True,
+                timeout=5,
             )
             if result.returncode != 0:
                 stderr = (result.stderr or b"").decode("utf-8", errors="replace").strip()
-                logger.warning("NSPasteboard osascript failed (permissions?): %s",
-                              stderr[:200] if stderr else "unknown error")
+                logger.warning(
+                    "NSPasteboard osascript failed (permissions?): %s",
+                    stderr[:200] if stderr else "unknown error",
+                )
                 return b""
             if b"NO_IMAGE" in (result.stdout or b""):
                 return b""
@@ -626,11 +652,8 @@ class _ClipboardReader(ClipboardReader):
             return b""
         finally:
             if tmp_path:
-                try:
+                with contextlib.suppress(OSError):
                     os.unlink(tmp_path)
-                except OSError:
-                    pass
-
 
     # -- file paths via NSPasteboard -------------------------------------
 
@@ -646,6 +669,7 @@ class _ClipboardReader(ClipboardReader):
             try:
                 url_str = raw.decode("utf-8", errors="replace").strip()
                 from urllib.parse import unquote, urlparse
+
                 parsed = urlparse(url_str)
                 path = unquote(parsed.path)
                 if path:
@@ -659,6 +683,7 @@ class _ClipboardReader(ClipboardReader):
             try:
                 # Property list serialization — array of file path strings
                 import plistlib
+
                 paths = plistlib.loads(raw)
                 if isinstance(paths, list) and paths:
                     return "\n".join(str(p) for p in paths).encode("utf-8")
@@ -669,7 +694,8 @@ class _ClipboardReader(ClipboardReader):
         try:
             result = subprocess.run(
                 ["pbpaste", "-Prefer", "public.file-url"],
-                capture_output=True, timeout=2,
+                capture_output=True,
+                timeout=2,
             )
             if result.returncode == 0 and result.stdout.strip():
                 return result.stdout.strip()
@@ -730,7 +756,7 @@ class _ClipboardWriter(ClipboardWriter):
         # Fallback: write formats individually (best-effort, TEXT last).
         # Each subprocess call replaces the entire clipboard, so write
         # the most important format (TEXT) last so it survives.
-        _TEXT_LAST = {ContentType.TEXT: 1}
+        _TEXT_LAST = {ContentType.TEXT: 1}  # noqa: N806
         for fmt_type, data in sorted(
             content.types.items(),
             key=lambda item: _TEXT_LAST.get(item[0], 0),
@@ -775,6 +801,7 @@ class _ClipboardWriter(ClipboardWriter):
                 elif content.image_fmt == "bmp":
                     try:
                         from PIL import Image
+
                         img = Image.open(BytesIO(data))
                         buf = BytesIO()
                         img.save(buf, format="PNG")
@@ -801,6 +828,7 @@ class _ClipboardWriter(ClipboardWriter):
                     return False
                 if paths:
                     from urllib.parse import quote as urllib_quote_path
+
                     encoded = ("file://" + urllib_quote_path(paths[0])).encode("utf-8")
                     write_ops.append((b"public.file-url", encoded))
             elif fmt_type == ContentType.URL:
@@ -833,103 +861,94 @@ class _ClipboardWriter(ClipboardWriter):
         tmp_path = None
         try:
             with tempfile.NamedTemporaryFile(
-                mode="wb", suffix=".html", delete=False,
+                mode="wb",
+                suffix=".html",
+                delete=False,
             ) as f:
                 f.write(data)
                 tmp_path = f.name
 
-            script = (
-                f'set the clipboard to (read (POSIX file "{tmp_path}") '
-                f'as «class HTML»)'
-            )
+            script = f'set the clipboard to (read (POSIX file "{tmp_path}") as «class HTML»)'
             subprocess.run(
                 ["osascript", "-e", script],
-                capture_output=True, timeout=3,
+                capture_output=True,
+                timeout=3,
             )
         except Exception:
             logger.debug("osascript html write failed", exc_info=True)
         finally:
             if tmp_path:
-                try:
+                with contextlib.suppress(OSError):
                     os.unlink(tmp_path)
-                except OSError:
-                    pass
 
     def _set_rtf(self, data: bytes):
         tmp_path = None
         try:
             with tempfile.NamedTemporaryFile(
-                mode="wb", suffix=".rtf", delete=False,
+                mode="wb",
+                suffix=".rtf",
+                delete=False,
             ) as f:
                 f.write(data)
                 tmp_path = f.name
 
-            script = (
-                f'set the clipboard to (read (POSIX file "{tmp_path}") '
-                f'as «class RTF »)'
-            )
+            script = f'set the clipboard to (read (POSIX file "{tmp_path}") as «class RTF »)'
             subprocess.run(
                 ["osascript", "-e", script],
-                capture_output=True, timeout=3,
+                capture_output=True,
+                timeout=3,
             )
         except Exception:
             logger.debug("osascript rtf write failed", exc_info=True)
         finally:
             if tmp_path:
-                try:
+                with contextlib.suppress(OSError):
                     os.unlink(tmp_path)
-                except OSError:
-                    pass
 
     def _set_image(self, data: bytes, image_fmt: str = ""):
         tmp_path = None
         try:
             if image_fmt == "tiff":
                 with tempfile.NamedTemporaryFile(
-                    suffix=".tiff", delete=False,
+                    suffix=".tiff",
+                    delete=False,
                 ) as f:
                     f.write(data)
                     tmp_path = f.name
-                script = (
-                    f'set the clipboard to (read (POSIX file "{tmp_path}") '
-                    f'as «class TIFF»)'
-                )
+                script = f'set the clipboard to (read (POSIX file "{tmp_path}") as «class TIFF»)'
             elif image_fmt == "bmp":
                 from PIL import Image
+
                 img = Image.open(BytesIO(data))
                 with tempfile.NamedTemporaryFile(
-                    suffix=".png", delete=False,
+                    suffix=".png",
+                    delete=False,
                 ) as f:
                     img.save(f, format="PNG")
                     tmp_path = f.name
-                script = (
-                    f'set the clipboard to (read (POSIX file "{tmp_path}") '
-                    f'as «class PNGf»)'
-                )
+                script = f'set the clipboard to (read (POSIX file "{tmp_path}") as «class PNGf»)'
             else:
                 from PIL import Image
+
                 Image.open(BytesIO(data))
                 with tempfile.NamedTemporaryFile(
-                    suffix=".png", delete=False,
+                    suffix=".png",
+                    delete=False,
                 ) as f:
                     f.write(data)
                     tmp_path = f.name
-                script = (
-                    f'set the clipboard to (read (POSIX file "{tmp_path}") '
-                    f'as «class PNGf»)'
-                )
+                script = f'set the clipboard to (read (POSIX file "{tmp_path}") as «class PNGf»)'
             subprocess.run(
                 ["osascript", "-e", script],
-                capture_output=True, timeout=3,
+                capture_output=True,
+                timeout=3,
             )
         except Exception:
             logger.debug("osascript image write failed", exc_info=True)
         finally:
             if tmp_path:
-                try:
+                with contextlib.suppress(OSError):
                     os.unlink(tmp_path)
-                except OSError:
-                    pass
 
     def _set_files(self, data: bytes):
         """Write file paths to pasteboard via osascript.
@@ -954,24 +973,25 @@ class _ClipboardWriter(ClipboardWriter):
         # list of strings; strip the marker added by _osascript_argv_cmd
         # from each entry to recover the original path.
         script = (
-            'on run argv\n'
-            'if class of argv is not list then set argv to {argv}\n'
-            'set theFiles to {}\n'
-            'repeat with rawPath in argv\n'
-            '    set end of theFiles to text 2 thru -1 of (rawPath as text)\n'
-            'end repeat\n'
-            'set pb to current application\'s NSPasteboard\'s generalPasteboard()\n'
-            'pb\'s clearContents()\n'
-            'repeat with f in theFiles\n'
-            '    set fileURL to current application\'s NSURL\'s fileURLWithPath:f\n'
-            '    pb\'s writeObjects:{fileURL}\n'
-            'end repeat\n'
-            'end run'
+            "on run argv\n"
+            "if class of argv is not list then set argv to {argv}\n"
+            "set theFiles to {}\n"
+            "repeat with rawPath in argv\n"
+            "    set end of theFiles to text 2 thru -1 of (rawPath as text)\n"
+            "end repeat\n"
+            "set pb to current application's NSPasteboard's generalPasteboard()\n"
+            "pb's clearContents()\n"
+            "repeat with f in theFiles\n"
+            "    set fileURL to current application's NSURL's fileURLWithPath:f\n"
+            "    pb's writeObjects:{fileURL}\n"
+            "end repeat\n"
+            "end run"
         )
         try:
             subprocess.run(
                 _osascript_argv_cmd(script, *paths),
-                capture_output=True, timeout=3,
+                capture_output=True,
+                timeout=3,
             )
         except Exception:
             logger.debug("osascript file write failed", exc_info=True)
@@ -995,19 +1015,20 @@ class _ClipboardWriter(ClipboardWriter):
         # 'on run argv' receives the trailing command-line value as a list
         # of strings; strip the marker added by _osascript_argv_cmd from it.
         script = (
-            'on run argv\n'
-            'if class of argv is not list then set argv to {argv}\n'
-            'set theURL to text 2 thru -1 of ((item 1 of argv) as text)\n'
-            'set the clipboard to theURL\n'
-            'set pb to current application\'s NSPasteboard\'s generalPasteboard()\n'
-            'set nsStr to current application\'s NSString\'s stringWithString:theURL\n'
+            "on run argv\n"
+            "if class of argv is not list then set argv to {argv}\n"
+            "set theURL to text 2 thru -1 of ((item 1 of argv) as text)\n"
+            "set the clipboard to theURL\n"
+            "set pb to current application's NSPasteboard's generalPasteboard()\n"
+            "set nsStr to current application's NSString's stringWithString:theURL\n"
             'pb\'s setString:nsStr forType:"public.url"\n'
-            'end run'
+            "end run"
         )
         try:
             subprocess.run(
                 _osascript_argv_cmd(script, url),
-                capture_output=True, timeout=3,
+                capture_output=True,
+                timeout=3,
             )
         except Exception:
             logger.debug("osascript URL write failed", exc_info=True)
@@ -1016,6 +1037,7 @@ class _ClipboardWriter(ClipboardWriter):
 # ---------------------------------------------------------------------------
 # Clipboard monitor
 # ---------------------------------------------------------------------------
+
 
 class DarwinClipboardMonitor(ClipboardMonitor):
     """Poll-based clipboard monitor for macOS.
@@ -1051,10 +1073,7 @@ class DarwinClipboardMonitor(ClipboardMonitor):
             logger.debug("Monitor using ctypes NSPasteboard.changeCount")
             self._poll_change_count(last_cc)
         else:
-            logger.debug(
-                "Monitor falling back to content hashing "
-                "(ctypes bridge unavailable)"
-            )
+            logger.debug("Monitor falling back to content hashing (ctypes bridge unavailable)")
             self._poll_hash()
 
     def _poll_change_count(self, last_cc: int):
@@ -1092,7 +1111,8 @@ class DarwinClipboardMonitor(ClipboardMonitor):
                 self._callback()
             except Exception:
                 logger.warning(
-                    "Clipboard change callback failed", exc_info=True,
+                    "Clipboard change callback failed",
+                    exc_info=True,
                 )
 
     # -- fallback content hash --------------------------------------------
@@ -1105,11 +1125,13 @@ class DarwinClipboardMonitor(ClipboardMonitor):
         try:
             text = subprocess.run(
                 ["pbpaste", "-Prefer", "txt"],
-                capture_output=True, timeout=3,
+                capture_output=True,
+                timeout=3,
             )
             html = subprocess.run(
                 ["pbpaste", "-Prefer", "html"],
-                capture_output=True, timeout=3,
+                capture_output=True,
+                timeout=3,
             )
             txt_data = text.stdout if text.returncode == 0 else b""
             html_data = html.stdout if html.returncode == 0 else b""
@@ -1135,6 +1157,7 @@ class DarwinClipboardMonitor(ClipboardMonitor):
 # ---------------------------------------------------------------------------
 # Factory helpers
 # ---------------------------------------------------------------------------
+
 
 def create_monitor(poll_interval: float = POLL_INTERVAL) -> ClipboardMonitor:
     return DarwinClipboardMonitor(poll_interval=poll_interval)

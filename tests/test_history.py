@@ -27,7 +27,6 @@ from internal.clipboard.dedup import (
     types_to_labels,
 )
 from internal.clipboard.format import ClipboardContent, ContentType
-from internal.clipboard.history import ClipboardHistory
 from internal.clipboard.history_db import ClipboardHistoryDB
 
 RICH_HTML = b"<html><body><b>same body</b></body></html>"
@@ -53,12 +52,12 @@ def _age_last_add(h, seconds: float) -> None:
     h._entries[0]["timestamp"] = time.time() - seconds
 
 
-# ── 1a. Flavor merge: JSON backend ────────────────────────────────────
+# ── 1a. Flavor merge: extra edge cases (SQLite backend) ───────────────
 
 
-class TestFlavorMergeJson:
+class TestFlavorMergeDbExtra:
     def _hist(self, tmp_path):
-        return ClipboardHistory(storage_path=str(tmp_path / "h.json"))
+        return ClipboardHistoryDB(storage_path=str(tmp_path / "h.db"))
 
     def test_plain_recopy_keeps_rich_flavor(self, tmp_path):
         """The round-6 quirk: re-copying the same text as plain-only within
@@ -203,7 +202,7 @@ class TestDedupPrimitives:
             {ContentType.TEXT: b"new"},
         )
         assert changed is True
-        assert merged[ContentType.TEXT] == b"new"       # newer bytes win
+        assert merged[ContentType.TEXT] == b"new"  # newer bytes win
         assert merged[ContentType.HTML] == b"<i>old</i>"  # richer flavor kept
 
     def test_merge_types_noop_is_unchanged(self):
@@ -224,8 +223,7 @@ class TestDedupPrimitives:
     def test_adds_new_flavors(self):
         existing = {"TEXT": base64.b64encode(b"x").decode()}
         assert adds_new_flavors(existing, {ContentType.TEXT: b"x"}) is False
-        assert adds_new_flavors(existing, {ContentType.TEXT: b"x",
-                                           ContentType.HTML: b"h"}) is True
+        assert adds_new_flavors(existing, {ContentType.TEXT: b"x", ContentType.HTML: b"h"}) is True
 
 
 # ── 1d. Preview decode: UTF-16-BOM raw bytes (v1.0.76) ───────────────
@@ -237,8 +235,8 @@ def test_utf16_bom_text_preview_decodes_cleanly(tmp_path):
     them as UTF-16 instead of falling through to the CJK single-byte attempts
     and rendering mojibake — the 'history became garbled after update' report.
     """
-    wide = "剪贴板乱码修复".encode("utf-16")   # includes the BOM
-    h = ClipboardHistory(storage_path=str(tmp_path / "h.json"))
+    wide = "剪贴板乱码修复".encode("utf-16")  # includes the BOM
+    h = ClipboardHistoryDB(storage_path=str(tmp_path / "h.db"))
     h.add(_content({ContentType.TEXT: wide}))
     preview = h.get_all()[0]["text_preview"]
     assert preview == "剪贴板乱码修复"
@@ -267,8 +265,7 @@ class TestConfigFsync:
         monkeypatch.setattr(config_module.os, "fsync", fake_fsync)
         monkeypatch.setattr(config_module.os, "replace", fake_replace)
         monkeypatch.setattr(config_module, "_config_dir", lambda: tmp_path)
-        monkeypatch.setattr(config_module, "_config_path",
-                            lambda: tmp_path / "config.json")
+        monkeypatch.setattr(config_module, "_config_path", lambda: tmp_path / "config.json")
 
         cfg = config_module.Config()
         cfg.device_name = "durability probe"
@@ -290,22 +287,26 @@ class TestConfigFsync:
 class TestNotifyHardening:
     def test_send_pipe_without_pipe_is_noop(self):
         from internal.platform.notify import NotificationManager
+
         m = NotificationManager()
         m.send_pipe(("show_notification", "t", "m"))  # must not raise
 
     def test_show_without_tray_falls_back_without_raising(self):
         from internal.platform.notify import NotificationManager
+
         m = NotificationManager()
         m.show("title", "message")  # no pipe, no tray → fallback path
 
     def test_disabled_manager_shows_nothing(self):
         from internal.platform.notify import NotificationManager
+
         m = NotificationManager()
         m.enabled = False
         m.show("title", "message")
 
     def test_set_pipe_swap_stops_previous_sender(self):
         from internal.platform.notify import NotificationManager
+
         m = NotificationManager()
 
         class FakePipe:
@@ -317,7 +318,6 @@ class TestNotifyHardening:
 
         p1, p2 = FakePipe(), FakePipe()
         m.set_pipe(p1)
-        q1 = m._send_queue
         m.set_pipe(p2)  # swapping pipes must stop the first sender thread
         m.show("t1", "m1")
         deadline = time.time() + 2
@@ -357,6 +357,7 @@ class TestTrayPause:
     def tray_app(self):
         pystray = pytest.importorskip("pystray")
         from internal.ui.systray import SystrayApp
+
         return pystray, SystrayApp(device_name="T")
 
     def _texts(self, menu):
@@ -386,7 +387,7 @@ class TestTrayPause:
         app.set_pause_deadline(time.time() + 20 * 60)
         texts = self._texts(app._build_full_menu())
         joined = " | ".join(t or "" for t in texts)
-        assert "Paused" in joined          # countdown status line
+        assert "Paused" in joined  # countdown status line
         assert "Resume Sync Now" in joined
         assert "Pause Sync" not in joined  # submenu replaced by status
 
@@ -411,15 +412,21 @@ class TestTrayPause:
 
 def test_pause_i18n_complete():
     from internal.i18n import LOCALES
+
     keys = [
-        "tray.pause_for", "tray.pause_15m", "tray.pause_30m", "tray.pause_1h",
-        "tray.paused_left", "tray.resume_now",
+        "tray.pause_for",
+        "tray.pause_15m",
+        "tray.pause_30m",
+        "tray.pause_1h",
+        "tray.paused_left",
+        "tray.resume_now",
     ]
     for locale, table in LOCALES.items():
         for key in keys:
             assert key in table, f"{key} missing in {locale}"
     # Placeholders render.
     from internal.i18n import T
+
     assert "7" in T("tray.paused_left", minutes=7)
 
 
@@ -437,6 +444,7 @@ from internal.web import routes
 from internal.web.server import _escape_script_json, _js_string
 
 # ── History: id-based lookup must be type-tolerant ────────────────────
+
 
 @pytest.fixture
 def history_db(tmp_path):
@@ -474,6 +482,7 @@ def test_delete_by_id_removes_only_target(history_db):
 
 # ── Content filter: image format hint must survive filtering ──────────
 
+
 def test_filter_content_preserves_image_fmt():
     content = ClipboardContent(
         types={
@@ -488,6 +497,7 @@ def test_filter_content_preserves_image_fmt():
 
 
 # ── Inline-script escaping (stored XSS via device name) ───────────────
+
 
 def test_js_string_cannot_break_out_of_script():
     evil = "</script><script>alert(1)</script>"
@@ -507,13 +517,21 @@ def test_escape_script_json_keeps_valid_json():
 
 # ── Web API: non-object JSON bodies → 400 (not 500) ───────────────────
 
+
 def _dispatch_bare(method, path, body):
     """Call routes.dispatch with just enough args for the pre-handler check."""
     return routes.dispatch(
-        method, path, {}, body,
-        cfg=object(), history=None, sync_mgr=None,
-        get_connected_ids=lambda: [], on_nav_url=lambda *a, **k: None,
-        on_forward_file=lambda *a, **k: None, upload_dir="",
+        method,
+        path,
+        {},
+        body,
+        cfg=object(),
+        history=None,
+        sync_mgr=None,
+        get_connected_ids=lambda: [],
+        on_nav_url=lambda *a, **k: None,
+        on_forward_file=lambda *a, **k: None,
+        upload_dir="",
     )
 
 
@@ -533,6 +551,7 @@ def test_invalid_json_body_still_reaches_handler_flow():
 
 # ── /api/logs redaction ───────────────────────────────────────────────
 
+
 class _FakeCfg:
     web_token = "secret-token-abc"
 
@@ -548,8 +567,10 @@ def test_redact_sensitive_line_strips_home_and_token():
 
 # ── First-run language flag round-trips through config ────────────────
 
+
 def test_language_chosen_round_trip(tmp_path, monkeypatch):
     import internal.config.config as config_mod
+
     monkeypatch.setattr(config_mod, "_config_dir", lambda: Path(tmp_path))
 
     cfg = config_mod.Config()
@@ -595,10 +616,7 @@ ONE_LINE_HTML = (
 CARD_TEXT = "Pay 4111 1111 1111 1111 today"
 CARD_TEXT_BYTES = CARD_TEXT.encode("utf-8")
 
-RTF_CARD = (
-    b"{\\rtf1\\ansi\\deff0 {\\*\\generator ClipSync}"
-    b"\\par Pay 4111 1111 1111 1111 today}"
-)
+RTF_CARD = b"{\\rtf1\\ansi\\deff0 {\\*\\generator ClipSync}\\par Pay 4111 1111 1111 1111 today}"
 
 
 def _mk_content(types_map) -> ClipboardContent:
@@ -607,12 +625,15 @@ def _mk_content(types_map) -> ClipboardContent:
 
 # ── 1. strip_rich_formats unit tests ──────────────────────────────────
 
+
 def test_strip_drops_html_and_rtf_keeps_text():
-    c = _mk_content({
-        ContentType.TEXT: b"Hello World & more",
-        ContentType.HTML: ONE_LINE_HTML,
-        ContentType.RTF: b"{\\rtf1\\ansi Hello}",
-    })
+    c = _mk_content(
+        {
+            ContentType.TEXT: b"Hello World & more",
+            ContentType.HTML: ONE_LINE_HTML,
+            ContentType.RTF: b"{\\rtf1\\ansi Hello}",
+        }
+    )
     s = strip_rich_formats(c)
     assert set(s.types) == {ContentType.TEXT}
     # The existing TEXT payload is kept verbatim, not re-derived from HTML.
@@ -628,12 +649,14 @@ def test_strip_converts_html_only_clip_to_plain_text():
 
 def test_strip_keeps_image_file_and_url():
     png, file_list, url = b"\x89PNG fake", b"C:\\a.txt\nC:\\b.txt", b"https://x.y"
-    c = _mk_content({
-        ContentType.IMAGE_PNG: png,
-        ContentType.FILE: file_list,
-        ContentType.URL: url,
-        ContentType.HTML: ONE_LINE_HTML,
-    })
+    c = _mk_content(
+        {
+            ContentType.IMAGE_PNG: png,
+            ContentType.FILE: file_list,
+            ContentType.URL: url,
+            ContentType.HTML: ONE_LINE_HTML,
+        }
+    )
     s = strip_rich_formats(c)
     assert s.types[ContentType.IMAGE_PNG] == png
     assert s.types[ContentType.FILE] == file_list
@@ -678,6 +701,7 @@ def test_rtf_to_text_extraction_for_detection():
 
 # ── 2. strip x sensitive-filter interaction ───────────────────────────
 
+
 def test_filter_detects_sensitive_rtf():
     f = ContentFilter()
     c = _mk_content({ContentType.RTF: RTF_CARD})
@@ -687,10 +711,12 @@ def test_filter_detects_sensitive_rtf():
 
 def test_filter_drops_sensitive_rtf_keeps_redacted_text():
     f = ContentFilter()
-    c = _mk_content({
-        ContentType.TEXT: CARD_TEXT_BYTES,
-        ContentType.RTF: RTF_CARD,
-    })
+    c = _mk_content(
+        {
+            ContentType.TEXT: CARD_TEXT_BYTES,
+            ContentType.RTF: RTF_CARD,
+        }
+    )
     out = f.filter_content(c)
     # The unredactable RTF payload must not ride along next to [FILTERED].
     assert ContentType.RTF not in out.types
@@ -721,8 +747,7 @@ def test_strip_first_order_makes_tagged_card_detectable():
     # Digits split across inline tags are invisible to the filter on raw
     # markup but detectable after the plain-text strip — this locks in the
     # strip-then-filter order of the outgoing sync path.
-    html = (b"<span>4111</span><span>1111</span>"
-            b"<span>1111</span><span>1111</span>")
+    html = b"<span>4111</span><span>1111</span><span>1111</span><span>1111</span>"
     f = ContentFilter()
     raw = _mk_content({ContentType.HTML: html})
     assert f.is_sensitive(raw) is False
@@ -733,12 +758,15 @@ def test_strip_first_order_makes_tagged_card_detectable():
 
 # ── 3. strip x dedup interaction ──────────────────────────────────────
 
+
 def test_stripped_clip_shares_dedup_key_with_plain_text():
-    rich = _mk_content({
-        ContentType.TEXT: b"same body",
-        ContentType.HTML: b"<b>same body</b>",
-        ContentType.RTF: b"{\\rtf1 same body}",
-    })
+    rich = _mk_content(
+        {
+            ContentType.TEXT: b"same body",
+            ContentType.HTML: b"<b>same body</b>",
+            ContentType.RTF: b"{\\rtf1 same body}",
+        }
+    )
     stripped = strip_rich_formats(rich)
     plain = _mk_content({ContentType.TEXT: b"same body"})
     # The dedup key hashes the TEXT body first, so a stripped message and a
@@ -749,8 +777,10 @@ def test_stripped_clip_shares_dedup_key_with_plain_text():
 
 # ── 4. history_max_age_days cleanup x pinned / favorites ──────────────
 
+
 def test_age_prune_spares_pinned_entries(tmp_path):
     from unittest.mock import patch
+
     db = ClipboardHistoryDB(storage_path=str(tmp_path / "h.db"), max_entries=50)
     # The DB stamps local receipt time (a sender's clock must not reorder
     # history), so inject genuine age by freezing the clock back 5 days
@@ -809,20 +839,23 @@ def test_batch_favorite_snapshot_survives_history_cleanup(tmp_path, monkeypatch)
 
 # ── 5. i18n consistency ───────────────────────────────────────────────
 
+
 def test_desktop_i18n_en_zh_key_parity():
     from internal import i18n
+
     en_keys, zh_keys = set(i18n._EN), set(i18n._ZH)
     assert en_keys == zh_keys, (
-        f"only in EN: {sorted(en_keys - zh_keys)}; "
-        f"only in ZH: {sorted(zh_keys - en_keys)}"
+        f"only in EN: {sorted(en_keys - zh_keys)}; only in ZH: {sorted(zh_keys - en_keys)}"
     )
 
 
 def _load_web_locales():
-    en = json.load(open(os.path.join(ROOT, "internal/web/static/locales/en.json"),
-                        encoding="utf-8"))
-    zh = json.load(open(os.path.join(ROOT, "internal/web/static/locales/zh-CN.json"),
-                        encoding="utf-8"))
+    en = json.load(
+        open(os.path.join(ROOT, "internal/web/static/locales/en.json"), encoding="utf-8")  # noqa: SIM115
+    )
+    zh = json.load(
+        open(os.path.join(ROOT, "internal/web/static/locales/zh-CN.json"), encoding="utf-8")  # noqa: SIM115
+    )
     return en, zh
 
 
@@ -851,14 +884,21 @@ def _placeholder_tokens(text):
 # is a real inconsistency — device.reconnecting formats {n}/{m} in desktop
 # dialogs but {attempt}/{max} on the web, and the chat/pairing entries carry a
 # placeholder on exactly one side.  Pinned explicitly so only NEW drift fails.
-_PLACEHOLDER_GAP_KEYS = frozenset({
-    "device.reconnecting",
-    "pairing.notify.unpaired_by_peer", "pairing.notify.repair_prompt",
-    "chat.invite_banner_title", "chat.invite_fingerprint",
-    "chat.invite_greeting", "chat.connecting",
-    "chat.system.peer_offline", "chat.system.session_closed_by_peer",
-    "chat.system.file_cancelled", "chat.err_connect_timeout",
-})
+_PLACEHOLDER_GAP_KEYS = frozenset(
+    {
+        "device.reconnecting",
+        "pairing.notify.unpaired_by_peer",
+        "pairing.notify.repair_prompt",
+        "chat.invite_banner_title",
+        "chat.invite_fingerprint",
+        "chat.invite_greeting",
+        "chat.connecting",
+        "chat.system.peer_offline",
+        "chat.system.session_closed_by_peer",
+        "chat.system.file_cancelled",
+        "chat.err_connect_timeout",
+    }
+)
 
 
 def test_python_i18n_placeholder_parity_with_web_locales():
@@ -868,6 +908,7 @@ def test_python_i18n_placeholder_parity_with_web_locales():
     side rendering a literal "{n}".  The known divergences are pinned in
     _PLACEHOLDER_GAP_KEYS so only new drift fails."""
     from internal import i18n
+
     en, zh = _load_web_locales()
     for py, web in ((i18n._EN, en), (i18n._ZH, zh)):
         for key, val in py.items():
@@ -876,7 +917,8 @@ def test_python_i18n_placeholder_parity_with_web_locales():
             py_tokens = _placeholder_tokens(val)
             web_tokens = _placeholder_tokens(web[key])
             assert py_tokens == web_tokens, (
-                f"{key}: python {sorted(py_tokens)} != web {sorted(web_tokens)}")
+                f"{key}: python {sorted(py_tokens)} != web {sorted(web_tokens)}"
+            )
 
 
 def test_python_i18n_web_locales_are_fully_mirrored():
@@ -901,14 +943,33 @@ def test_python_i18n_web_locales_are_fully_mirrored():
     into the context menu's devices.forget_title/forget_message), but they were
     mirrored in the Python dicts too, so the gap never moved; the test-connection
     feedback pass added 1 more — device.test_connecting (the store's immediate
-    "正在测试连接…" toast, web-only)) that has
+    "正在测试连接…" toast, web-only); the AI-config root-identity pass added 1
+    more — aiconfig.root_hint_title (the watch-root badge on a tree row,
+    web-only); the 2026-08-28 UX pass added 3 more — chat.close_failed
+    (context-menu close-session toast) and favorites.remove_title /
+    favorites.remove_confirm (single-favorite remove confirm); the
+    restore/reject fix added 1 more — device.not_paired (badge for a
+    known-but-unpaired device, web-only); the unreachable-peer feedback added
+    1 more — device.connect_unreachable (toast when Pair has no address to
+    dial, web-only); the transfer-history context menu added 7 more —
+    context.copy_filename / copy_path / resend / remove_from_history and
+    transfer.no_path / history_removed / history_remove_failed (all web-only:
+    the Tk transfers view has no per-row menu)); the AI-config pull-timeout net
+    added 1 more — aiconfig.batch_timeout (the toast shown when a peer never
+    answers for the rest of a batch, web-only: the Tk UI has no batch view)) that has
     its own server-side mitigation, so its SIZE is pinned here: a NEW web-only
     key — the regression class this guards — changes the count and fails the
     suite."""
     from internal import i18n
+
     en, zh = _load_web_locales()
-    assert len(set(en) - set(i18n._EN)) == 695
-    assert len(set(zh) - set(i18n._ZH)) == 695
+    # 710 -> 706 on the 2026-09 dead-i18n sweep: carousel.dismiss and the
+    # settings.favorites_path* triplet were removed from the web locales
+    # while the sync/device/chat/transfer context-menu keys (already
+    # web-only, never Python-mirrored) surfaced once their dead Python
+    # duplicates were dropped — the gap now reflects reality.
+    assert len(set(en) - set(i18n._EN)) == 706
+    assert len(set(zh) - set(i18n._ZH)) == 706
 
 
 def test_web_t_literals_resolve_in_both_locales():
@@ -930,7 +991,7 @@ def test_web_t_literals_resolve_in_both_locales():
         rel = os.path.relpath(fp, ROOT).replace("\\", "/")
         if rel.endswith("js/i18n.js"):
             continue
-        src = open(fp, encoding="utf-8").read()
+        src = open(fp, encoding="utf-8").read()  # noqa: SIM115
         for m in pattern.finditer(src):
             key = m.group(1)
             if key.endswith("."):  # dynamic prefix, resolved at runtime
@@ -965,7 +1026,7 @@ def _ctk_classes_used_in_code():
     names = set()
     for dir_name in ("internal/ui", "src"):
         for fp in glob.glob(os.path.join(ROOT, dir_name, "**", "*.py"), recursive=True):
-            src = open(fp, encoding="utf-8").read()
+            src = open(fp, encoding="utf-8").read()  # noqa: SIM115
             names.update(re.findall(r"\bctk\.(CTk[A-Za-z]+)\b", src))
     return names
 
@@ -973,7 +1034,7 @@ def _ctk_classes_used_in_code():
 def test_theme_covers_every_ctk_widget_class_used():
     """A missing widget key crashes construction: customtkinter reads
     ThemeManager.theme[class][prop] directly with no default fallback."""
-    theme = json.load(open(_THEME_PATH, encoding="utf-8"))
+    theme = json.load(open(_THEME_PATH, encoding="utf-8"))  # noqa: SIM115
     used = _ctk_classes_used_in_code()
     assert used, "code scan found no CTk classes"
     absent = sorted(n for n in used if n not in theme and n not in _CTK_NON_THEMED)
@@ -991,20 +1052,32 @@ def test_theme_has_no_unknown_or_malformed_entries():
     hide typos; stock-widget sections stay defined even where today's code
     does not instantiate the widget yet.
     """
-    theme = json.load(open(_THEME_PATH, encoding="utf-8"))
+    theme = json.load(open(_THEME_PATH, encoding="utf-8"))  # noqa: SIM115
     expected = {
         # Structural pseudo-classes read by customtkinter itself.
-        "CTk", "CTkToplevel", "DropdownMenu",
+        "CTk",
+        "CTkToplevel",
+        "DropdownMenu",
         # Widget classes (themed surface of the whole stock toolkit).
-        "CTkFrame", "CTkButton", "CTkLabel", "CTkEntry",
-        "CTkComboBox", "CTkOptionMenu", "CTkCheckBox", "CTkSwitch",
-        "CTkRadioButton", "CTkProgressBar", "CTkSlider",
-        "CTkSegmentedButton", "CTkTextbox", "CTkScrollableFrame",
-        "CTkScrollbar", "CTkFont",
+        "CTkFrame",
+        "CTkButton",
+        "CTkLabel",
+        "CTkEntry",
+        "CTkComboBox",
+        "CTkOptionMenu",
+        "CTkCheckBox",
+        "CTkSwitch",
+        "CTkRadioButton",
+        "CTkProgressBar",
+        "CTkSlider",
+        "CTkSegmentedButton",
+        "CTkTextbox",
+        "CTkScrollableFrame",
+        "CTkScrollbar",
+        "CTkFont",
     }
     assert set(theme) == expected, (
-        f"unknown: {sorted(set(theme) - expected)}; "
-        f"missing: {sorted(expected - set(theme))}"
+        f"unknown: {sorted(set(theme) - expected)}; missing: {sorted(expected - set(theme))}"
     )
     # Color values: either a string ("transparent"/named color) or a
     # [light, dark] pair of exactly two entries.  Geometry props carry
@@ -1016,16 +1089,21 @@ def test_theme_has_no_unknown_or_malformed_entries():
             ok = (
                 isinstance(value, str)
                 or (isinstance(value, int) and not isinstance(value, bool))
-                or (isinstance(value, list) and len(value) == 2
-                    and all(isinstance(v, str) for v in value))
+                or (
+                    isinstance(value, list)
+                    and len(value) == 2
+                    and all(isinstance(v, str) for v in value)
+                )
             )
             assert ok, f"{widget}.{prop} is not a valid light/dark color pair: {value!r}"
 
 
 # ── 7. webview_window Firefox flags ───────────────────────────────────
 
+
 def test_firefox_templates_carry_no_dead_size_flags():
     from internal.ui.webview_window import _BROWSERS
+
     firefox = [tmpl for name, tmpl, plats in _BROWSERS if name == "firefox"]
     assert firefox, "firefox entries missing from browser table"
     for tmpl in firefox:
@@ -1040,8 +1118,12 @@ def test_chromium_templates_keep_app_mode_and_size():
     """Every desktop non-Firefox entry is Chromium-family and must keep its
     --app window plus --window-size sizing."""
     from internal.ui.webview_window import _BROWSERS
-    desktop = [(name, tmpl) for name, tmpl, plats in _BROWSERS
-               if "Darwin" not in plats and name != "firefox"]
+
+    desktop = [
+        (name, tmpl)
+        for name, tmpl, plats in _BROWSERS
+        if "Darwin" not in plats and name != "firefox"
+    ]
     assert desktop
     for name, tmpl in desktop:
         assert any(a.startswith("--app={url}") for a in tmpl), name
@@ -1056,11 +1138,14 @@ def test_app_startup_dedup_and_age_wiring_bindings_resolve():
     present and ordered so the real startup path can't silently lose one.
     """
     import inspect
+
     import src.main as main_mod
+
     src = inspect.getsource(main_mod.Application._create_services)
     assert "from internal.clipboard import dedup as _dedup_mod" in src
     assert "from internal.clipboard import history_db as _history_db" in src
     assert "_history_db.set_max_age_days(" in src
     # The history_db binding must be established before set_max_age_days runs.
-    assert src.index("from internal.clipboard import history_db as _history_db") \
-        < src.index("_history_db.set_max_age_days(")
+    assert src.index("from internal.clipboard import history_db as _history_db") < src.index(
+        "_history_db.set_max_age_days("
+    )

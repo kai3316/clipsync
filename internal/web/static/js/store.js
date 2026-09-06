@@ -39,6 +39,12 @@
   // vs. newer data is the mutation tick's job, not the timer's).
   var CALIBRATION_TIMEOUT_MS = 16000;
 
+  // An AI-config pull reports one WS event per file, so a batch finishes when
+  // done === total. If a peer never answers for one file the backend abandons
+  // its pending record after PENDING_TTL (60s) and reports it — this is the
+  // client-side net for the case where even that report never arrives.
+  var AICONFIG_BATCH_TIMEOUT_MS = 75000;
+
   // Local i18n helper — the store is a plain object (not a Vue component),
   // so it reaches the global translator directly. Falls back to the key when
   // i18n hasn't been initialised yet.
@@ -127,12 +133,15 @@
     mutedChatPeers: new Set(), // peer_ids muted in the chat UI (no unread badge)
 
     /* ═══════════════════════════════════════════════════════════════
-       AI-config sync (refactor round 1 — tool profiles)
+       AI-config sync (tool profiles + v3 root ids)
        aiConfigInventory mirrors GET /api/aiconfig/inventory:
        { peers: { pid: {name, legacy, entries[], fetchedAt} }, fetchedAt }.
-       v2 entries are {tool, rel_path, sha256, size, mtime, is_dir}; legacy
-       peers' entries are {root_index, path, ...} and read-only (browse +
-       preview only).  aiConfigResults is the rolling list of WS
+       v3 entries are {tool, root, rel_path, sha256, size, mtime, is_dir} —
+       `root` is the stable profile-entry id, needed because a rel_path is
+       relative to its own root, so one tool's several dir roots can hold the
+       same rel_path as different files.  v2 peers send no `root` ('');
+       legacy peers' entries are {root_index, path, ...} and read-only
+       (browse + preview only).  aiConfigResults is the rolling list of WS
        `aiconfig_file` per-file pull results (newest first, capped).
        aiConfigBatches tracks folder/batch pulls by batch_id so the panel can
        show "N/M done" progress and retry failures.
@@ -278,6 +287,11 @@
     initialLoad: true,          // true until first data fetch completes
     loadError: false,           // true when the initial load fails or times out
     devicesLoadFailed: false,   // true when the device-list fetch rejected
+    // Bumped by every devices_updated WS broadcast.  An in-flight /api/devices
+    // GET records it at request time and abandons its own (older) snapshot if
+    // the tick moved while it was in flight — the broadcast is edge-triggered,
+    // so a stale response that clobbers it would never self-heal.
+    devicesMutationTick: 0,
     // Stacked toasts — [{id, message, type, leaving}]. Several notifications
     // can be visible at once; showToast caps the stack so a burst of events
     // can't flood the screen.
@@ -287,8 +301,8 @@
     contextMenu: {
       visible: false,
       x: 0, y: 0,
-      mode: 'history-item',  // 'history-item' | 'device' | 'chat-session' | 'chat-message'
-      target: null           // the item or device object
+      mode: 'history-item',  // 'history-item' | 'device' | 'chat-session' | 'chat-message' | 'transfer'
+      target: null           // the item, device or transfer-history row object
     },
 
     /* ═══════════════════════════════════════════════════════════════
@@ -511,13 +525,19 @@
      * Wizard (and settings panel) theme picker: apply + persist appearance_mode.
      * @param {'light'|'dark'|'system'} t
      */
-    selectAppearanceTheme: function (t) {
+    selectAppearanceTheme: function (theme) {
       var self = this;
-      this.setTheme(t);
+      var previous = this.theme;
+      this.setTheme(theme);
       if (window.ClipsyncAPI && window.ClipsyncAPI.updateSettings) {
-        window.ClipsyncAPI.updateSettings({ appearance_mode: t }).then(function (res) {
-          if (res && res.updated) self.settingsCache.appearance_mode = t;
+        window.ClipsyncAPI.updateSettings({ appearance_mode: theme }).then(function (res) {
+          if (res && res.updated) self.settingsCache.appearance_mode = theme;
         }).catch(function () {
+          // Roll the optimistic theme change back on failure so the UI and
+          // server appearance_mode don't silently desync (setTheme also
+          // writes localStorage, which loadTheme prefers over the server).
+          self.setTheme(previous);
+          if (self.settingsCache) self.settingsCache.appearance_mode = previous;
           self.showToast(t('dialog.failed'), 2000, 'error');
         });
       }
@@ -825,7 +845,7 @@
       // prompt/alert — reject the pending client dialog so its promise
       // doesn't hang forever under a hidden overlay (mirrors how confirm()/
       // prompt() close prior client dialogs).
-      this.closeClientDialog();
+      this.closeClientDialog('superseded');
       // Only one server dialog can be visible at a time. If one is already
       // up, queue the newcomer so it is shown after the current one closes
       // instead of silently clobbering it — a clobbered dialog would sit in
@@ -881,7 +901,7 @@
      */
     confirm: function (title, message) {
       var self = this;
-      self.closeClientDialog();  // reject any pending dialog first
+      self.closeClientDialog('superseded');  // reject any pending dialog first
       return new Promise(function (resolve, reject) {
         self.clientDialog = { type: 'confirm', title: title, message: message, resolve: resolve, reject: reject };
       });
@@ -896,7 +916,7 @@
      */
     prompt: function (title, message, defaultValue) {
       var self = this;
-      self.closeClientDialog();  // reject any pending dialog first
+      self.closeClientDialog('superseded');  // reject any pending dialog first
       return new Promise(function (resolve, reject) {
         self.clientDialog = { type: 'prompt', title: title, message: message, defaultValue: defaultValue || '', resolve: resolve, reject: reject };
       });
@@ -910,18 +930,23 @@
      */
     alert: function (title, message) {
       var self = this;
-      self.closeClientDialog();  // reject any pending dialog first
+      self.closeClientDialog('superseded');  // reject any pending dialog first
       return new Promise(function (resolve) {
         self.clientDialog = { type: 'alert', title: title, message: message, resolve: resolve };
       });
     },
 
     /**
-     * Close the client-side dialog.
+     * Close the client-side dialog, rejecting its promise with a reason so
+     * callers can tell a deliberate cancel from a dialog that was torn down
+     * underneath them (a server-pushed dialog, or another confirm/prompt,
+     * supersedes whatever is on screen).
+     * @param {string} [reason='cancel'] - 'cancel' (user dismissed) or
+     *   'superseded' (replaced by another dialog).
      */
-    closeClientDialog: function () {
+    closeClientDialog: function (reason) {
       if (this.clientDialog && this.clientDialog.reject) {
-        this.clientDialog.reject();
+        this.clientDialog.reject(reason || 'cancel');
       }
       this.clientDialog = null;
     },
@@ -1147,6 +1172,106 @@
       return window.ClipsyncAPI.getTransfers().then(function (res) {
         self.reconcileTransfers(res);
         return res;
+      });
+    },
+
+    /**
+     * Open a transferred file with the host's default application.
+     * Single implementation shared by the transfer-history row buttons and the
+     * row's context menu, so the two paths cannot drift.
+     * /api/nav only accepts http(s) URLs, so local paths go through the
+     * dedicated file-open endpoint on the host.
+     * @param {string} path - absolute path on the HOST machine
+     * @returns {Promise<void>} always resolves (failures are toasted)
+     */
+    openTransferFile: function (path) {
+      var self = this;
+      if (!path) {
+        self.showToast(t('transfer.no_path'), 2000);
+        return Promise.resolve();
+      }
+      return window.ClipsyncAPI.openFile(path)
+        .then(function (res) {
+          if (!res || res.ok !== true) {
+            self.showToast(t('ui.open_failed_title'), 2000);
+          }
+        })
+        .catch(function () {
+          self.showToast(t('ui.open_failed_title'), 2000);
+        });
+    },
+
+    /**
+     * Reveal a transferred file in the host's file manager.
+     * @param {string} path - absolute path on the HOST machine
+     * @returns {Promise<void>} always resolves (failures are toasted)
+     */
+    revealTransferFile: function (path) {
+      var self = this;
+      if (!path) {
+        self.showToast(t('transfer.no_path'), 2000);
+        return Promise.resolve();
+      }
+      return window.ClipsyncAPI.revealFile(path)
+        .then(function (res) {
+          if (!res || res.ok !== true) {
+            self.showToast(t('ui.open_failed_title'), 2000);
+          }
+        })
+        .catch(function () {
+          self.showToast(t('ui.open_failed_title'), 2000);
+        });
+    },
+
+    /**
+     * Re-send a failed outgoing transfer to its original peer.  The fresh
+     * transfer shows up under Active via the refresh below (plus the
+     * transfer_progress pushes that follow).  Callers own their own
+     * double-click guard.
+     * @param {string} id - the original transfer_id
+     * @returns {Promise<boolean>} true when the re-send started
+     */
+    retryTransfer: function (id) {
+      var self = this;
+      return window.ClipsyncAPI.retryTransfer(id).then(function (res) {
+        if (!res || res.ok === false) {
+          self.showToast(t('transfer.retry_failed'), 2000);
+          return false;
+        }
+        self.refreshTransfers().catch(function () {});
+        return true;
+      }).catch(function () {
+        self.showToast(t('transfer.retry_failed'), 2000);
+        return false;
+      });
+    },
+
+    /**
+     * Drop one row from the transfer history.  Bookkeeping only — the file on
+     * disk is untouched, so a received file stays where it was saved.  The row
+     * is spliced out optimistically and then reconciled against the server, so
+     * a delete the host refused reappears instead of vanishing on a lie.
+     * @param {string} id - the transfer_id of the history row
+     * @returns {Promise<boolean>} true when the row was removed
+     */
+    deleteTransferHistoryItem: function (id) {
+      var self = this;
+      if (!id) return Promise.resolve(false);
+      return window.ClipsyncAPI.deleteTransferHistoryItem(id).then(function (res) {
+        if (!res || res.ok === false) {
+          self.showToast(t('transfer.history_remove_failed'), 2000);
+          return false;
+        }
+        var idx = self.transferHistory.findIndex(function (tr) {
+          return tr && tr.id === id;
+        });
+        if (idx !== -1) self.transferHistory.splice(idx, 1);
+        self.showToast(t('transfer.history_removed'), 1500);
+        self.refreshTransfers().catch(function () {});
+        return true;
+      }).catch(function () {
+        self.showToast(t('transfer.history_remove_failed'), 2000);
+        return false;
       });
     },
 
@@ -1551,15 +1676,15 @@
             self.history[idx].paste_count = (self.history[idx].paste_count || 0) + 1;
           }
           self.showToast(
-            opts.coarse ? self.t('history.copy_to_desktop_toast') : self.t('history.copied'),
+            opts.coarse ? t('history.copy_to_desktop_toast') : t('history.copied'),
             1500
           );
           return true;
         }
-        self.showToast(self.t('history.copy_failed'), 2000);
+        self.showToast(t('history.copy_failed'), 2000);
         return false;
       }).catch(function () {
-        self.showToast(self.t('history.copy_failed'), 2000);
+        self.showToast(t('history.copy_failed'), 2000);
         return false;
       });
     },
@@ -1576,7 +1701,7 @@
       // backend ping timeout), so without this the button can feel dead even
       // though it shows "...".  The result toast (per-channel latency, or the
       // failure reason) lands on top when the probe answers.
-      self.showToast(self.t('device.test_connecting'), 1800);
+      self.showToast(t('device.test_connecting'), 1800);
       return window.ClipsyncAPI.testDeviceConnection(peerId)
         .then(function (res) {
           // A successful probe always carries per-channel rows; an empty
@@ -1584,34 +1709,34 @@
           // "no_channel" — fall through so the reason actually shows.
           if (res && res.results && res.results.length > 0) {
             var parts = res.results.map(function (r) {
-              var channel = self.t(r.channel === 'relay'
+              var channel = t(r.channel === 'relay'
                 ? 'device.test_channel_relay' : 'device.test_channel_lan');
               if (r.ok && r.latency_ms != null) {
-                return self.t('device.test_channel_ok',
+                return t('device.test_channel_ok',
                   { channel: channel, latency: Math.round(r.latency_ms) });
               }
-              return self.t('device.test_channel_fail',
+              return t('device.test_channel_fail',
                 { channel: channel, reason: self._testErrorReason(r) });
             });
             var key2 = res.ok ? 'device.test_success' : 'device.test_failed';
-            self.showToast(self.t(key2, { detail: parts.join(' · ') }), 4500);
+            self.showToast(t(key2, { detail: parts.join(' · ') }), 4500);
           } else {
             var reason = (res && res.error === 'no_channel')
-              ? self.t('device.test_no_channel') : self.t('device.test_failed');
-            self.showToast(self.t('device.test_failed', { detail: reason }), 3500);
+              ? t('device.test_no_channel') : t('device.test_failed');
+            self.showToast(t('device.test_failed', { detail: reason }), 3500);
           }
         })
         .catch(function () {
-          self.showToast(self.t('device.test_failed'), 3000);
+          self.showToast(t('device.test_failed'), 3000);
         });
     },
 
     // Localize one per-channel failure reason from a probe result.
     _testErrorReason: function (r) {
-      if (r.error === 'timeout') return this.t('device.test_timeout');
-      if (r.error === 'send_failed') return this.t('device.test_send_failed');
-      if (r.error === 'relay_offline') return this.t('device.test_relay_offline');
-      return r.error || this.t('device.test_failed');
+      if (r.error === 'timeout') return t('device.test_timeout');
+      if (r.error === 'send_failed') return t('device.test_send_failed');
+      if (r.error === 'relay_offline') return t('device.test_relay_offline');
+      return r.error || t('device.test_failed');
     },
 
     /**
@@ -2117,9 +2242,13 @@
                     is_dir: !!e.is_dir,
                   };
                 }
-                // v2 shape — deterministic tool key + rel_path.
+                // v3 shape — deterministic tool key + stable root id +
+                // rel_path.  A v2 peer sends no root; '' keeps its entries
+                // self-consistent and the backend falls back to tool-only
+                // resolution for them.
                 return {
                   tool: String(e.tool || 'custom'),
+                  root: String(e.root || ''),
                   rel_path: String(e.rel_path || e.path),
                   sha256: e.sha256 || '',
                   size: (typeof e.size === 'number') ? e.size : Number(e.size) || 0,
@@ -2228,6 +2357,7 @@
             if (!e || typeof e !== 'object' || !(e.rel_path || e.path)) continue;
             cleanEntries.push({
               tool: String(e.tool || 'custom'),
+              root: String(e.root || ''),
               rel_path: String(e.rel_path || e.path),
               sha256: e.sha256 || '',
               size: (typeof e.size === 'number') ? e.size : Number(e.size) || 0,
@@ -2410,8 +2540,16 @@
       };
       entry.loaded = false;
       entry.loadFailed = false;
+      this._internetDeliveryTick = this._internetDeliveryTick || {};
+      var tickAtStart = this._internetDeliveryTick[pid] || 0;
       return window.ClipsyncAPI.getInternetDelivery(pid)
         .then(function (res) {
+          // A live WS `internet_delivery` event that lands while this fetch is
+          // in flight mutates the same entry object. If one did, abandon the
+          // stale snapshot write-back so it can't clobber fresher state.
+          if ((self._internetDeliveryTick[pid] || 0) !== tickAtStart) {
+            return false;
+          }
           var qCount = 0;
           var lastStatus = null;
           var msgStatus = {};
@@ -2441,6 +2579,9 @@
         .catch(function () {
           // 404 (older backend) / network error — settle so the card can
           // hide the row; a later WS delivery event still surfaces live data.
+          if ((self._internetDeliveryTick[pid] || 0) !== tickAtStart) {
+            return false;
+          }
           entry.loaded = true;
           entry.loadFailed = true;
           self.internetDelivery[pid] = entry;
@@ -2499,6 +2640,10 @@
       }
       entry.lastStatus = status;
       this.internetDelivery[pid] = entry;
+      // Bump the per-peer tick so any in-flight fetchInternetDelivery snapshot
+      // sees a change and abandons its (now stale) write-back.
+      this._internetDeliveryTick = this._internetDeliveryTick || {};
+      this._internetDeliveryTick[pid] = (this._internetDeliveryTick[pid] || 0) + 1;
 
       // A sent/delivered event means the peer was reachable — refresh the
       // card's "last sync" time so it never looks stale next to a fresh ✅.
@@ -2517,12 +2662,17 @@
      * Record one WS `aiconfig_file` per-file pull result: keep it in the
      * rolling badge list and toast it. Only called by ws.js after it has
      * validated the status vocabulary.
-     * @param {{peer_id: string, rel_path: string, status: string}} data
+     * @param {{peer_id: string, tool: string, root: string,
+     *           rel_path: string, status: string}} data
      */
     applyAiConfigFileResult: function (data) {
       var entry = {
         peer_id: (data.peer_id !== undefined && data.peer_id !== null) ? String(data.peer_id) : '',
         tool: data.tool || '',
+        // Which watch root the file came from — needed to match the result
+        // back to its row when one tool watches several roots.  Legacy peers
+        // have no root id and send ''.
+        root: data.root || '',
         rel_path: data.rel_path || '',
         status: data.status,
         reason: data.reason || '',
@@ -2542,6 +2692,11 @@
         batch.results.push(entry);
         if (batch.done >= batch.total) {
           batch.finished = true;
+          // Every file reported — the safety-net timer has nothing left to do.
+          if (this._aiConfigBatchTimers && this._aiConfigBatchTimers[batchId]) {
+            clearTimeout(this._aiConfigBatchTimers[batchId]);
+            delete this._aiConfigBatchTimers[batchId];
+          }
         }
       }
       var key = entry.status === 'error' ? 'aiconfig.result_error'
@@ -2550,6 +2705,24 @@
         : 'aiconfig.result_saved';
       this.showToast(t(key, { path: entry.rel_path }), 2800,
         entry.status === 'error' ? 'error' : 'success');
+    },
+
+    /**
+     * A peer's inventory just landed (WS `aiconfig_inventory`). The REST
+     * refresh only *asks* the peers and returns the stale cache, so without
+     * this the panel keeps showing the old diff until the user clicks again.
+     * Several peers answer at once, so re-fetch on a short trailing debounce
+     * rather than once per event.
+     * @param {{peer_id: string}} data
+     */
+    applyAiConfigInventoryEvent: function (data) {
+      var self = this;
+      if (!data || !data.peer_id) return;
+      if (this._aiConfigInvTimer) clearTimeout(this._aiConfigInvTimer);
+      this._aiConfigInvTimer = setTimeout(function () {
+        self._aiConfigInvTimer = null;
+        self.fetchAiConfigInventory();
+      }, 300);
     },
 
     /**
@@ -2563,6 +2736,7 @@
      */
     startAiConfigBatch: function (batchId, total, peerId) {
       if (!batchId || !(total > 0)) return;
+      var self = this;
       this.aiConfigBatches[batchId] = {
         total: total,
         done: 0,
@@ -2570,6 +2744,24 @@
         finished: false,
         peerId: peerId || '',
       };
+      // A reply can never arrive (peer drops off mid-pull, or an old peer that
+      // refuses silently). The backend gives up on its pending records after
+      // PENDING_TTL=60s, so stop the progress bar a little after that rather
+      // than leaving "3/5" on screen forever.
+      if (this._aiConfigBatchTimers && this._aiConfigBatchTimers[batchId]) {
+        clearTimeout(this._aiConfigBatchTimers[batchId]);
+      }
+      if (!this._aiConfigBatchTimers) this._aiConfigBatchTimers = {};
+      this._aiConfigBatchTimers[batchId] = setTimeout(function () {
+        delete self._aiConfigBatchTimers[batchId];
+        var batch = self.aiConfigBatches[batchId];
+        if (!batch || batch.finished) return;
+        batch.finished = true;
+        batch.timedOut = true;
+        self.showToast(t('aiconfig.batch_timeout', {
+          done: batch.done, total: batch.total,
+        }), 4000, 'error');
+      }, AICONFIG_BATCH_TIMEOUT_MS);
     },
 
     /**
@@ -2590,6 +2782,10 @@
     clearAiConfigBatch: function (batchId) {
       if (batchId && this.aiConfigBatches[batchId]) {
         delete this.aiConfigBatches[batchId];
+      }
+      if (this._aiConfigBatchTimers && this._aiConfigBatchTimers[batchId]) {
+        clearTimeout(this._aiConfigBatchTimers[batchId]);
+        delete this._aiConfigBatchTimers[batchId];
       }
     },
 

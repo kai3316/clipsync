@@ -5,19 +5,25 @@ All handlers return a (data_dict, status_code) tuple.
 
 import logging
 
+from internal.i18n import T
+
 logger = logging.getLogger(__name__)
 
 
 def _format_eta(seconds: float) -> str:
-    """Format an ETA in seconds as a short human-readable string."""
+    """Format an ETA in seconds as a short localized string.
+
+    Long transfers need an hours unit: without one, a two-hour estimate
+    renders as "120m 0s".
+    """
     if not seconds or seconds <= 0:
         return ""
     seconds = int(seconds)
     if seconds < 60:
-        return f"{seconds}s"
-    minutes = seconds // 60
-    secs = seconds % 60
-    return f"{minutes}m {secs}s"
+        return T("transfer.eta_seconds", seconds=seconds)
+    if seconds < 3600:
+        return T("transfer.eta_minutes", minutes=seconds // 60, seconds=seconds % 60)
+    return T("transfer.eta_hours", hours=seconds // 3600, minutes=(seconds % 3600) // 60)
 
 
 def _map_active(t: dict) -> dict:
@@ -47,7 +53,9 @@ def _map_history(t: dict) -> dict:
         # (error_disk, error_size_mismatch, error_missing_chunks, error_security,
         # rejected, peer_offline, timeout, cancelled) so the UI can render the
         # exact failure cause instead of a generic "Failed".
-        "status": "cancelled" if t.get("cancelled") else ("completed" if t.get("success") else "failed"),
+        "status": "cancelled"
+        if t.get("cancelled")
+        else ("completed" if t.get("success") else "failed"),
         "reason": reason,
         "path": t.get("saved_path") or t.get("source_path") or "",
         # Destination/source peer — failed OUTGOING rows carry it so the UI's
@@ -56,6 +64,24 @@ def _map_history(t: dict) -> dict:
         "direction": t.get("direction", "down"),
         "timestamp": t.get("timestamp", 0),
     }
+
+
+def _map_all(rows, mapper, what: str) -> list:
+    """Map *rows* with *mapper*, dropping any record that cannot be mapped.
+
+    The raw dicts come from the host's FileTransferManager, where a field can
+    be missing or the wrong type (``progress`` as a string, a row that is not
+    a dict at all).  ``float(...)`` / ``.get(...)`` then raised out of the
+    handler and the whole transfers panel answered 500 -- one malformed row
+    hid every healthy transfer.  Skip the bad row instead.
+    """
+    out = []
+    for row in rows or []:
+        try:
+            out.append(mapper(row))
+        except Exception:
+            logger.debug("Skipping unmappable %s transfer row", what, exc_info=True)
+    return out
 
 
 def get_transfers(on_get_transfers=None):
@@ -74,8 +100,8 @@ def get_transfers(on_get_transfers=None):
         logger.exception("Failed to read transfer state")
         return {"active": [], "history": []}, 200
     return {
-        "active": [_map_active(t) for t in (active or [])],
-        "history": [_map_history(t) for t in (history or [])],
+        "active": _map_all(active, _map_active, "active"),
+        "history": _map_all(history, _map_history, "history"),
     }, 200
 
 

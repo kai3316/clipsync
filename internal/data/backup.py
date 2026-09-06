@@ -5,6 +5,7 @@ and favorites.json.  Favorites are exported from SQLite when the DB is
 in use, falling back to the legacy JSON file when the DB doesn't exist.
 """
 
+import contextlib
 import json
 import logging
 import os
@@ -18,7 +19,6 @@ from typing import TYPE_CHECKING
 from internal.config.config import Config, PeerInfo
 
 if TYPE_CHECKING:
-    from internal.clipboard.history import ClipboardHistory
     from internal.clipboard.history_db import ClipboardHistoryDB
 
 logger = logging.getLogger(__name__)
@@ -29,6 +29,7 @@ DEFAULT_BACKUP_DIR_NAME = "backups"
 def _get_backup_dir(backup_dir: str | None = None) -> Path:
     """Return the backup directory, creating it if necessary."""
     from internal.config.config import _config_dir
+
     base = Path(backup_dir) if backup_dir else _config_dir() / DEFAULT_BACKUP_DIR_NAME
     base.mkdir(parents=True, exist_ok=True)
     return base
@@ -37,12 +38,14 @@ def _get_backup_dir(backup_dir: str | None = None) -> Path:
 def _get_favorites_path() -> Path:
     """Return the path to the legacy favorites JSON file."""
     from internal.config.config import _config_dir
+
     return _config_dir() / "favorites.json"
 
 
 def _get_favorites_db_path() -> Path:
     """Return the path to the SQLite favorites database."""
     from internal.config.config import _config_dir
+
     return _config_dir() / "favorites.db"
 
 
@@ -53,6 +56,7 @@ def _export_favorites_to_json(filepath: Path) -> bool:
     empty or inaccessible.
     """
     import sqlite3
+
     db_path = _get_favorites_db_path()
     if not db_path.exists():
         return False
@@ -60,7 +64,7 @@ def _export_favorites_to_json(filepath: Path) -> bool:
         conn = sqlite3.connect(str(db_path))
         try:
             rows = conn.execute(
-                "SELECT id, title, content, \"group\", position, created, updated "
+                'SELECT id, title, content, "group", position, created, updated '
                 "FROM favorites ORDER BY created DESC"
             ).fetchall()
         finally:
@@ -98,6 +102,7 @@ def _import_favorites_from_json(filepath: Path) -> int:
     Returns the number of imported entries.
     """
     import sqlite3
+
     if not filepath.is_file():
         return 0
 
@@ -132,7 +137,7 @@ def _import_favorites_from_json(filepath: Path) -> int:
             for item in data:
                 conn.execute(
                     "INSERT OR REPLACE INTO favorites "
-                    "(id, title, content, \"group\", position, created, updated) "
+                    '(id, title, content, "group", position, created, updated) '
                     "VALUES (?, ?, ?, ?, ?, ?, ?)",
                     (
                         # id-less legacy entries would all collapse onto the
@@ -160,7 +165,7 @@ def _import_favorites_from_json(filepath: Path) -> int:
 
 def create_backup(
     cfg: Config,
-    history: "ClipboardHistory | ClipboardHistoryDB",
+    history: "ClipboardHistoryDB",
     backup_dir: str | None = None,
 ) -> str:
     """Create a timestamped backup zip file.
@@ -202,18 +207,21 @@ def create_backup(
             "relay_password": cfg.relay_password,
             "relay_secret": cfg.relay_secret,
             "peer_relay_secrets": {
-                k: v for k, v in (cfg.peer_relay_secrets or {}).items()
+                k: v
+                for k, v in (cfg.peer_relay_secrets or {}).items()
                 if isinstance(k, str) and isinstance(v, str)
             },
             "netpair_secrets": {
-                k: v for k, v in (cfg.netpair_secrets or {}).items()
+                k: v
+                for k, v in (cfg.netpair_secrets or {}).items()
                 if isinstance(k, str) and isinstance(v, str)
             },
             # Round 15: user-assigned per-peer aliases ride along so a
             # backup→restore cycle keeps the friendly names users set on the
             # device page (strictly local — never sent to the peer).
             "netpair_aliases": {
-                k: v for k, v in (cfg.netpair_aliases or {}).items()
+                k: v
+                for k, v in (cfg.netpair_aliases or {}).items()
                 if isinstance(k, str) and isinstance(v, str)
             },
             "ai_config_tools": list(cfg.ai_config_tools),
@@ -250,7 +258,8 @@ def create_backup(
             # Keep only well-formed str→str pairs (json.dumps would otherwise
             # stringify non-string keys and bake junk into the archive).
             "hotkeys": {
-                k: v for k, v in (cfg.hotkeys or {}).items()
+                k: v
+                for k, v in (cfg.hotkeys or {}).items()
                 if isinstance(k, str) and isinstance(v, str)
             },
             "hotkeys_enabled": bool(getattr(cfg, "hotkeys_enabled", False)),
@@ -268,7 +277,8 @@ def create_backup(
             ],
         }
         (tmpdir / "config.json").write_text(
-            json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8",
+            json.dumps(data, indent=2, ensure_ascii=False),
+            encoding="utf-8",
         )
 
         # --- history.json ---
@@ -293,6 +303,7 @@ def create_backup(
             leg_path = _get_favorites_path()
             if leg_path.is_file():
                 import shutil
+
                 shutil.copy2(str(leg_path), str(fav_json_path))
 
         # --- Create zip ---
@@ -306,18 +317,14 @@ def create_backup(
                     zf.write(str(child), arcname=child.name)
             os.replace(zip_part, zip_path)
         except Exception:
-            try:
+            with contextlib.suppress(OSError):
                 zip_part.unlink(missing_ok=True)
-            except OSError:
-                pass
             raise
 
     # The archive contains plaintext clipboard history and config data; keep
     # it private (not world-readable).
-    try:
+    with contextlib.suppress(OSError):
         os.chmod(str(zip_path), 0o600)
-    except OSError:
-        pass
 
     logger.info("Backup created: %s", zip_path)
     return str(zip_path)
@@ -326,7 +333,7 @@ def create_backup(
 def restore_backup(
     backup_path: str,
     cfg: Config,
-    history: "ClipboardHistory | ClipboardHistoryDB",
+    history: "ClipboardHistoryDB",
 ) -> dict:
     """Restore from a backup zip file.
 
@@ -400,6 +407,7 @@ def restore_backup(
             else:
                 # Fall back: copy to legacy JSON file
                 import shutil
+
                 target = _get_favorites_path()
                 try:
                     shutil.copy2(str(fav_file), str(target))
@@ -428,14 +436,16 @@ def list_backups(backup_dir: str | None = None) -> list[dict]:
         try:
             st = f.stat()
             dt = datetime.fromtimestamp(st.st_mtime)
-            backups.append({
-                "filename": f.name,
-                # Absolute path so the frontend can pass it straight back to
-                # restore_backup() without relying on the process CWD.
-                "path": str(f),
-                "size": st.st_size,
-                "date": dt.strftime("%Y-%m-%d %H:%M:%S"),
-            })
+            backups.append(
+                {
+                    "filename": f.name,
+                    # Absolute path so the frontend can pass it straight back to
+                    # restore_backup() without relying on the process CWD.
+                    "path": str(f),
+                    "size": st.st_size,
+                    "date": dt.strftime("%Y-%m-%d %H:%M:%S"),
+                }
+            )
         except OSError:
             continue
 
@@ -584,10 +594,7 @@ def _validate_config_value(value: object, rule: tuple):
         # live bindings with {} from invalid input.
         if not isinstance(value, dict):
             return _SKIP
-        cleaned = {
-            k: v for k, v in value.items()
-            if isinstance(k, str) and isinstance(v, str)
-        }
+        cleaned = {k: v for k, v in value.items() if isinstance(k, str) and isinstance(v, str)}
         if value and not cleaned:
             return _SKIP
         return cleaned
@@ -630,12 +637,14 @@ def _validate_peer_entries(value: object) -> list[dict] | None:
         if device_id in seen:
             continue
         seen.add(device_id)
-        peers.append({
-            "device_id": device_id,
-            "device_name": device_name,
-            "paired": paired,
-            "notes": notes,
-        })
+        peers.append(
+            {
+                "device_id": device_id,
+                "device_name": device_name,
+                "paired": paired,
+                "notes": notes,
+            }
+        )
     return peers
 
 
@@ -677,7 +686,8 @@ def _apply_config(data: dict, cfg: Config) -> None:
         if validated is _SKIP:
             logger.warning(
                 "Backup restore skipped invalid config field '%s' (%s)",
-                key, type(value).__name__,
+                key,
+                type(value).__name__,
             )
             continue
         setattr(cfg, key, validated)

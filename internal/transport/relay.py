@@ -43,17 +43,20 @@ import ssl
 import threading
 import time
 from collections import OrderedDict
-from typing import Callable
+from collections.abc import Callable
 
-from internal.security.encryption import decrypt, encrypt
+from internal.security.encryption import _hkdf_expand, decrypt, encrypt
 
 logger = logging.getLogger(__name__)
 
 TOPIC_PREFIX = "clipsync/v1/"
 ENVELOPE_VERSION = 1
-RELAY_TS_WINDOW = 300          # seconds of tolerated clock skew either way
+RELAY_TS_WINDOW = 1800  # seconds of tolerated clock skew either way.
+# Kept generous (30 min) so real-world clock
+# drift can't silently break internet pairing /
+# relay sync — the window still bounds replay.
 MAX_RELAY_PAYLOAD = 256 * 1024  # refuse to carry anything larger than this
-_SEEN_CAP = 512                 # recent ciphertext hashes remembered
+_SEEN_CAP = 512  # recent ciphertext hashes remembered
 
 # ── Internet pairing code (Round 14) ──────────────────────────────────────
 # A self-contained shared-secret bootstrap for devices that have NEVER met:
@@ -68,9 +71,9 @@ NETPAIR_TOPIC_PREFIX = "clipsync/net/v1/"
 # code typed by hand fails loudly on a typo (checksum catches the rest).
 NETPAIR_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
 _NETPAIR_ALPHA_INDEX = {c: i for i, c in enumerate(NETPAIR_ALPHABET)}
-NETPAIR_CODE_CHARS = 12        # "XXXX-XXXX-XXXX"
-NETPAIR_DEVICE_CHARS = 4       # chars [0:4]  -> 20-bit device tag
-NETPAIR_SECRET_CHARS = 7       # chars [4:11] -> 35-bit shared secret
+NETPAIR_CODE_CHARS = 12  # "XXXX-XXXX-XXXX"
+NETPAIR_DEVICE_CHARS = 4  # chars [0:4]  -> 20-bit device tag
+NETPAIR_SECRET_CHARS = 7  # chars [4:11] -> 35-bit shared secret
 NETPAIR_SECRET_BITS = NETPAIR_SECRET_CHARS * 5
 # Optional user-set pairing passphrase layered on top of the code secret: the
 # code still routes (topic) while the key strength becomes the passphrase's.
@@ -83,6 +86,10 @@ BACKOFF_SEQUENCE = (1, 2, 4, 8, 15, 30, 60)
 CONNECT_TIMEOUT = 10.0
 # How long stop() waits for the worker thread to exit before giving up.
 STOP_JOIN_TIMEOUT = 5.0
+# A session shorter than this counts as a failed attempt, not a success, so
+# the backoff keeps escalating against a broker that accepts the connection
+# and drops it immediately instead of hammering it once a second forever.
+MIN_USABLE_SESSION = 30.0
 
 STATE_OFF = "off"
 STATE_CONNECTING = "connecting"
@@ -98,6 +105,7 @@ except Exception:  # pragma: no cover - exercised only without paho installed
 def generate_relay_secret() -> str:
     """A fresh per-device relay secret (hex, stored in config)."""
     import secrets as _secrets
+
     return _secrets.token_hex(32)
 
 
@@ -113,6 +121,7 @@ def _ca_bundle_path() -> str | None:
     """
     try:
         import certifi
+
         return certifi.where()
     except Exception:
         return None
@@ -151,8 +160,9 @@ def build_paho_client(endpoint: str | None = None):
     scheme = _endpoint_scheme(endpoint)
     transport = "websockets" if scheme in ("ws", "wss") else "tcp"
     try:
-        client = _mqtt.Client(_mqtt.CallbackAPIVersion.VERSION2,
-                              protocol=_mqtt.MQTTv311, transport=transport)
+        client = _mqtt.Client(
+            _mqtt.CallbackAPIVersion.VERSION2, protocol=_mqtt.MQTTv311, transport=transport
+        )
     except AttributeError:  # paho 1.x
         client = _mqtt.Client(protocol=_mqtt.MQTTv311, transport=transport)
     if scheme in ("wss", "ssl", "tls", "mqtts"):
@@ -183,18 +193,15 @@ def derive_topic(secret_a: str, secret_b: str) -> str:
 def derive_key(secret_a: str, secret_b: str) -> bytes:
     """AES-256 key both ends derive independently (HKDF-like, HMAC-SHA256)."""
     a, b = _sorted_pair(secret_a, secret_b)
-    prk = hmac.new(b"clipsync-relay-salt", (a + "|" + b).encode("ascii"),
-                   hashlib.sha256).digest()
-    key = b""
-    i = 1
-    while len(key) < 32:
-        key = hmac.new(prk, b"clipsync-relay-key" + bytes([i]),
-                       hashlib.sha256).digest()
-        i += 1
-    return key[:32]
+    prk = hmac.new(b"clipsync-relay-salt", (a + "|" + b).encode("ascii"), hashlib.sha256).digest()
+    # This is HKDF-Expand with a one-block (32-byte) output — identical to
+    # the home-rolled loop below for exactly 32 bytes, so pairing stays
+    # compatible with already-paired peers.
+    return _hkdf_expand(prk, b"clipsync-relay-key", 32)
 
 
 # --------------------------------------------------- internet pairing code
+
 
 def _int_to_b32(value: int, nchars: int) -> str:
     """Render ``value`` (at most nchars*5 bits) as nchars base32 chars."""
@@ -204,20 +211,9 @@ def _int_to_b32(value: int, nchars: int) -> str:
     return "".join(out)
 
 
-def _b32_to_int(chars: str) -> int | None:
-    value = 0
-    for c in chars:
-        i = _NETPAIR_ALPHA_INDEX.get(c)
-        if i is None:
-            return None
-        value = (value << 5) | i
-    return value
-
-
 def _checksum_char(data11: str) -> str:
     """One base32 char derived from the first 11 code chars (typo detection)."""
-    digest = hashlib.sha256(
-        b"clipsync-netpair-check|" + data11.encode("ascii")).digest()
+    digest = hashlib.sha256(b"clipsync-netpair-check|" + data11.encode("ascii")).digest()
     return NETPAIR_ALPHABET[digest[0] & 0x1F]
 
 
@@ -229,28 +225,29 @@ def netpair_device_tag(device_id: str) -> str:
     tag).
     """
     digest = hashlib.sha256(
-        b"clipsync-netpair-device|"
-        + str(device_id or "").strip().lower().encode("ascii"),
+        b"clipsync-netpair-device|" + str(device_id or "").strip().lower().encode("ascii"),
     ).digest()
-    return _int_to_b32(int.from_bytes(digest[:3], "big") >> 4,
-                       NETPAIR_DEVICE_CHARS)
+    return _int_to_b32(int.from_bytes(digest[:3], "big") >> 4, NETPAIR_DEVICE_CHARS)
 
 
 def generate_netpair_secret() -> str:
     """A fresh 35-bit shared secret, rendered as 7 base32 chars."""
     import secrets as _secrets
-    return _int_to_b32(_secrets.randbits(NETPAIR_SECRET_BITS),
-                       NETPAIR_SECRET_CHARS)
+
+    return _int_to_b32(_secrets.randbits(NETPAIR_SECRET_BITS), NETPAIR_SECRET_CHARS)
 
 
 def generate_netpair_code(device_id: str, secret: str) -> str:
     """Encode (device tag, secret) into a 12-char ``XXXX-XXXX-XXXX`` code."""
     tag = netpair_device_tag(device_id)
-    if (not isinstance(secret, str) or len(secret) != NETPAIR_SECRET_CHARS
-            or any(c not in _NETPAIR_ALPHA_INDEX for c in secret)):
+    if (
+        not isinstance(secret, str)
+        or len(secret) != NETPAIR_SECRET_CHARS
+        or any(c not in _NETPAIR_ALPHA_INDEX for c in secret)
+    ):
         raise ValueError("invalid netpair secret")
-    data = tag + secret                      # 11 chars: tag(4) + secret(7)
-    code = data + _checksum_char(data)       # 12 chars: data(11) + checksum
+    data = tag + secret  # 11 chars: tag(4) + secret(7)
+    code = data + _checksum_char(data)  # 12 chars: data(11) + checksum
     return f"{code[0:4]}-{code[4:8]}-{code[8:12]}"
 
 
@@ -268,15 +265,13 @@ def decode_netpair_code(code: str) -> tuple[str, str] | None:
     if norm[11] != _checksum_char(data):
         return None
     tag = data[:NETPAIR_DEVICE_CHARS]
-    secret = data[NETPAIR_DEVICE_CHARS:
-                  NETPAIR_DEVICE_CHARS + NETPAIR_SECRET_CHARS]
+    secret = data[NETPAIR_DEVICE_CHARS : NETPAIR_DEVICE_CHARS + NETPAIR_SECRET_CHARS]
     return tag, secret
 
 
 def netpair_topic(secret: str) -> str:
     """Unguessable MQTT topic for one netpair shared secret."""
-    digest = hashlib.sha256(
-        b"clipsync-netpair-topic|" + secret.encode("ascii")).hexdigest()
+    digest = hashlib.sha256(b"clipsync-netpair-topic|" + secret.encode("ascii")).hexdigest()
     return NETPAIR_TOPIC_PREFIX + digest[:24]
 
 
@@ -294,13 +289,11 @@ def netpair_key(secret: str, password: str = "") -> bytes:
     keying = secret.encode("utf-8")
     if password:
         keying = keying + b"\x00" + password.encode("utf-8")
-    prk = hmac.new(b"clipsync-netpair-salt", keying,
-                   hashlib.sha256).digest()
+    prk = hmac.new(b"clipsync-netpair-salt", keying, hashlib.sha256).digest()
     key = b""
     i = 1
     while len(key) < 32:
-        key = hmac.new(prk, b"clipsync-netpair-key" + bytes([i]),
-                       hashlib.sha256).digest()
+        key = hmac.new(prk, b"clipsync-netpair-key" + bytes([i]), hashlib.sha256).digest()
         i += 1
     return key[:32]
 
@@ -329,8 +322,7 @@ def netpair_passphrase_error(pw: str) -> str | None:
 def pack_envelope(frame_bytes: bytes, key: bytes, now: float) -> bytes:
     """Wrap an encoded ClipSync frame into an encrypted relay envelope."""
     if len(frame_bytes) > MAX_RELAY_PAYLOAD:
-        raise ValueError(
-            f"frame too large for relay: {len(frame_bytes)} > {MAX_RELAY_PAYLOAD}")
+        raise ValueError(f"frame too large for relay: {len(frame_bytes)} > {MAX_RELAY_PAYLOAD}")
     ct = encrypt(frame_bytes, key)
     env = {
         "v": ENVELOPE_VERSION,
@@ -340,23 +332,35 @@ def pack_envelope(frame_bytes: bytes, key: bytes, now: float) -> bytes:
     return json.dumps(env, separators=(",", ":")).encode("ascii")
 
 
-def open_envelope(blob: bytes, key: bytes, now: float) -> bytes | None:
-    """Decrypt+validate an envelope. Returns the inner frame bytes, or None."""
+def open_envelope_ex(blob: bytes, key: bytes, now: float) -> tuple[bytes | None, str]:
+    """Decrypt+validate an envelope, also reporting why it failed.
+
+    Returns ``(frame, "")`` on success, else ``(None, reason)`` where reason is
+    ``"format"`` (not one of our envelopes), ``"window"`` (timestamp too far
+    from now) or ``"auth"`` (right envelope, wrong key — what a mismatched
+    encryption password looks like from the receiving side).
+    """
     try:
         env = json.loads(blob.decode("ascii"))
     except Exception:
-        return None
+        return None, "format"
     if not isinstance(env, dict) or env.get("v") != ENVELOPE_VERSION:
-        return None
+        return None, "format"
     ts = env.get("ts")
     if not isinstance(ts, (int, float)) or abs(now - float(ts)) > RELAY_TS_WINDOW:
         logger.debug("Relay envelope rejected (timestamp out of window)")
-        return None
+        return None, "window"
     try:
         ct = base64.b64decode(env.get("data", ""))
     except Exception:
-        return None
-    return decrypt(ct, key)
+        return None, "format"
+    frame = decrypt(ct, key)
+    return (frame, "") if frame is not None else (None, "auth")
+
+
+def open_envelope(blob: bytes, key: bytes, now: float) -> bytes | None:
+    """Decrypt+validate an envelope. Returns the inner frame bytes, or None."""
+    return open_envelope_ex(blob, key, now)[0]
 
 
 def probe_relay_endpoint(endpoint: str, timeout: float = 4.0) -> dict:
@@ -372,9 +376,15 @@ def probe_relay_endpoint(endpoint: str, timeout: float = 4.0) -> dict:
         host_port, _, _path = rest.partition("/")
         host, _, port = host_port.partition(":")
         # Scheme-aware default port, matching _parse_endpoint: native MQTT
-        # defaults to 1883, WebSocket keeps the historical 8884.
-        default_port = (1883 if scheme.lower() in ("mqtt", "mqtts", "tcp", "tls", "ssl")
-                        else 8884)
+        # plaintext defaults to 1883, native MQTT+TLS to 8883, WebSocket keeps
+        # the historical 8884.
+        s = scheme.lower()
+        if s in ("mqtt", "tcp"):
+            default_port = 1883
+        elif s in ("mqtts", "tls", "ssl"):
+            default_port = 8883
+        else:
+            default_port = 8884
         port = int(port or default_port)
     except Exception:
         return {"endpoint": endpoint, "ok": False, "latency_ms": None, "detail": "invalid endpoint"}
@@ -394,7 +404,7 @@ def probe_relay_endpoint(endpoint: str, timeout: float = 4.0) -> dict:
                     pass  # handshake completed — reachable
         latency_ms = round((time.time() - started) * 1000.0, 1)
         return {"endpoint": endpoint, "ok": True, "latency_ms": latency_ms, "detail": "reachable"}
-    except socket.timeout:
+    except TimeoutError:
         return {"endpoint": endpoint, "ok": False, "latency_ms": None, "detail": "timeout"}
     except Exception as e:
         detail = str(e) or type(e).__name__
@@ -420,8 +430,7 @@ class _MirrorConnection:
         self._connected = False
         self._stop = threading.Event()
         self._wakeup = threading.Event()
-        self._thread = threading.Thread(
-            target=self._run, name=f"relay-mirror-{index}", daemon=True)
+        self._thread = threading.Thread(target=self._run, name=f"relay-mirror-{index}", daemon=True)
 
     # ------------------------------------------------------------- state --
     @property
@@ -451,11 +460,25 @@ class _MirrorConnection:
                 attempt = 0
                 self._wait_until_lost()
             else:
-                delay = BACKOFF_SEQUENCE[min(
-                    attempt, len(BACKOFF_SEQUENCE) - 1)]
+                delay = BACKOFF_SEQUENCE[min(attempt, len(BACKOFF_SEQUENCE) - 1)]
                 attempt += 1
-                self._transport._sleeper(delay)
+                self._sleep_backoff(delay)
         self._teardown()
+
+    def _sleep_backoff(self, delay: float) -> None:
+        """Back off, but wake up on THIS mirror's stop().
+
+        ``_transport._sleeper`` waits on (and clears) the transport's own
+        ``_wakeup``, which both ignores this mirror's stop() and swallows the
+        main worker's stop signal.  A caller-injected sleeper is still honoured
+        so tests can shorten the backoff.
+        """
+        sleeper = self._transport._sleeper
+        if sleeper != self._transport._interruptible_sleep:
+            sleeper(delay)
+            return
+        self._wakeup.wait(timeout=delay)
+        self._wakeup.clear()
 
     def _connect_once(self) -> bool:
         parsed = self._transport._parse_endpoint(self._endpoint)
@@ -540,6 +563,10 @@ class RelayTransport:
                            frames; the topic lets the owner map a frame back to
                            the channel/secret it arrived on (netpair handshake)
       on_state          -- called with one of STATE_* on every change
+      on_undecryptable  -- called with the topic when a frame arrives on a
+                           subscribed channel but will not decrypt (the two
+                           devices derived different keys — usually mismatched
+                           encryption passwords)
       client_factory    -- returns a paho-compatible client, or None when the
                            optional dependency is missing (tests inject fakes)
       sleeper           -- called between retries (tests inject instant sleep);
@@ -557,20 +584,20 @@ class RelayTransport:
         username: str = "",
         password: str = "",
         private_brokers: list[str] | None = None,
+        on_undecryptable: Callable[[str], None] | None = None,
     ):
         self._free_brokers = [b for b in brokers if isinstance(b, str) and b]
-        self._private_brokers = [
-            b for b in (private_brokers or []) if isinstance(b, str) and b]
+        self._private_brokers = [b for b in (private_brokers or []) if isinstance(b, str) and b]
         # Private endpoints first: a self-hosted broker is the preferred
         # primary; the free/public list becomes mirrors + failover.  The same
         # endpoint may legitimately appear in both sections (e.g. mqtt:// vs
         # ws:// differ, but an exact duplicate must not be connected twice).
-        self._brokers = list(dict.fromkeys(
-            self._private_brokers + self._free_brokers))
+        self._brokers = list(dict.fromkeys(self._private_brokers + self._free_brokers))
         self._private_endpoints = frozenset(self._private_brokers)
         self._get_channels = get_channels
         self._on_frame = on_frame
         self._on_state = on_state
+        self._on_undecryptable = on_undecryptable
         self._client_factory = client_factory or build_paho_client
         self._username = username or ""
         self._password = password or ""
@@ -621,12 +648,18 @@ class RelayTransport:
             if not self._brokers:
                 self._set_state(STATE_ERROR)
                 return
-            self._stop.clear()
-            self._wakeup.clear()   # a prior stop() left it set; don't let the
-                                   # fresh worker inherit a spurious wakeup
+            # A fresh event per worker rather than clearing the shared one:
+            # stop()'s join is bounded, so the previous worker may still be
+            # inside a blocking broker call.  Clearing the event it is watching
+            # would un-stop it and leave two workers fighting over _client.
+            self._stop = threading.Event()
+            worker_stop = self._stop
+            self._wakeup.clear()  # a prior stop() left it set; don't let the
+            # fresh worker inherit a spurious wakeup
             self._set_state(STATE_CONNECTING)
             self._thread = threading.Thread(
-                target=self._run, name="relay-sync", daemon=True)
+                target=self._run, args=(worker_stop,), name="relay-sync", daemon=True
+            )
 
         self._thread.start()
 
@@ -651,8 +684,7 @@ class RelayTransport:
             try:
                 conn.stop()
             except Exception:
-                logger.debug("relay mirror stop during stop failed",
-                             exc_info=True)
+                logger.debug("relay mirror stop during stop failed", exc_info=True)
         if thread is not None:
             # Wait (bounded) for the worker to notice _stop and exit before a
             # rapid stop() → start() restart can spawn a second worker running
@@ -668,8 +700,7 @@ class RelayTransport:
         self.stop()
         self.start()
 
-    def set_brokers(self, brokers: list | None = None,
-                    private_brokers: list | None = None) -> None:
+    def set_brokers(self, brokers: list | None = None, private_brokers: list | None = None) -> None:
         """Replace the broker list(s) *before* a restart.
 
         ``restart()`` alone only re-runs the worker — it still reads the
@@ -682,13 +713,10 @@ class RelayTransport:
         """
         with self._lock:
             if brokers is not None:
-                self._free_brokers = [
-                    b for b in brokers if isinstance(b, str) and b]
+                self._free_brokers = [b for b in brokers if isinstance(b, str) and b]
             if private_brokers is not None:
-                self._private_brokers = [
-                    b for b in private_brokers if isinstance(b, str) and b]
-            self._brokers = list(dict.fromkeys(
-                self._private_brokers + self._free_brokers))
+                self._private_brokers = [b for b in private_brokers if isinstance(b, str) and b]
+            self._brokers = list(dict.fromkeys(self._private_brokers + self._free_brokers))
             self._private_endpoints = frozenset(self._private_brokers)
 
     def set_credentials(self, username: str, password: str) -> None:
@@ -716,12 +744,15 @@ class RelayTransport:
         if client is None:
             return
         channels = self._safe_channels()
-        for topic, key in channels.items():
+        for topic, _key in channels.items():
             if topic in self._subscribed:
                 continue
             try:
                 client.subscribe(topic)
-                self._subscribed.add(topic)
+                # _on_connect reassigns self._subscribed under the lock, so
+                # guard the mutation to avoid a lost update on a reconnect race.
+                with self._lock:
+                    self._subscribed.add(topic)
             except Exception:
                 logger.debug("subscribe %s failed", topic, exc_info=True)
         for topic in list(self._subscribed):
@@ -731,10 +762,10 @@ class RelayTransport:
                 client.unsubscribe(topic)
             except Exception:
                 logger.debug("unsubscribe %s failed", topic, exc_info=True)
-            self._subscribed.discard(topic)
+            with self._lock:
+                self._subscribed.discard(topic)
 
-    def publish(self, frame_bytes: bytes, topic: str, key: bytes,
-                qos: int = 0) -> bool:
+    def publish(self, frame_bytes: bytes, topic: str, key: bytes, qos: int = 0) -> bool:
         """Publish one encoded frame to ``topic`` on every connected broker.
 
         The primary client sends on the broker we are currently subscribed to;
@@ -757,11 +788,8 @@ class RelayTransport:
             # last remembered state: after a disconnect the state may lag until
             # the worker reconnects, and publish() must not report frames as
             # sent into a dead link.
-            primary_online = (
-                self._connected_on_broker is not None and client is not None)
-            mirrors = [
-                conn for conn in self._mirror_clients.values() if conn.connected
-            ]
+            primary_online = self._connected_on_broker is not None and client is not None
+            mirrors = [conn for conn in self._mirror_clients.values() if conn.connected]
         if not primary_online and not mirrors:
             return False
         try:
@@ -809,31 +837,53 @@ class RelayTransport:
         self._wakeup.wait(timeout=delay)
         self._wakeup.clear()
 
-    def _run(self) -> None:
+    def _run(self, stop: threading.Event | None = None) -> None:
+        # Each worker holds the stop event it was started with, so a worker
+        # that outlived stop()'s bounded join (blocking broker call) keeps
+        # seeing "stopping" instead of inheriting the fresh event start()
+        # installed for its replacement -- two live workers on one client
+        # churn failover against each other.
+        if stop is None:
+            stop = self._stop
         attempt = 0
-        while not self._stop.is_set():
-            for index, endpoint in enumerate(self._brokers):
-                if self._stop.is_set():
+        while not stop.is_set():
+            for index, _endpoint in enumerate(self._brokers):
+                if stop.is_set():
                     return
                 try:
-                    ok = self._connect_one(index)
+                    ok = self._connect_one(index, stop)
                 except Exception:
                     # Never let an unexpected setup/connect error kill the
                     # worker thread silently (a dead thread leaves the state
                     # stuck on "connecting" with no recovery path).
-                    logger.warning("relay broker #%d raised during connect",
-                                   index, exc_info=True)
+                    logger.warning("relay broker #%d raised during connect", index, exc_info=True)
                     ok = False
                 if ok:
-                    attempt = 0
-                    self._serve_until_lost(index)
-                    if self._stop.is_set():
+                    served_from = time.monotonic()
+                    self._serve_until_lost(index, stop)
+                    if stop.is_set():
                         return
+                    # Reset the backoff only for a session that was actually
+                    # usable.  A broker that answers CONNACK and drops the
+                    # socket a second later used to reset `attempt` on every
+                    # cycle, pinning the delay at BACKOFF_SEQUENCE[0] == 1s --
+                    # an endless once-a-second reconnect storm that never
+                    # escalated and never failed over for long.
+                    if time.monotonic() - served_from >= MIN_USABLE_SESSION:
+                        attempt = 0
+                    else:
+                        attempt += 1
+                        logger.debug(
+                            "broker #%d dropped after %.1fs -- backoff step %d",
+                            index,
+                            time.monotonic() - served_from,
+                            attempt,
+                        )
                     break  # connection lost — restart from the first broker
             else:
                 attempt += 1
             delay = BACKOFF_SEQUENCE[min(attempt, len(BACKOFF_SEQUENCE) - 1)]
-            if not self._stop.is_set():
+            if not stop.is_set():
                 self._set_state(STATE_CONNECTING)
                 self._sleeper(delay)
         # all brokers failing permanently is signalled by the owner via stop()
@@ -847,10 +897,14 @@ class RelayTransport:
             if not host:
                 return None
             # Scheme-aware default ports (only when the URL omits one):
-            # native MQTT defaults to 1883, WebSocket keeps the historical
-            # 8884.
-            default_port = (1883 if scheme in ("mqtt", "mqtts", "tcp", "tls", "ssl")
-                            else 8884)
+            # native MQTT plaintext defaults to 1883, native MQTT+TLS to 8883,
+            # WebSocket keeps the historical 8884.
+            if scheme in ("mqtt", "tcp"):
+                default_port = 1883
+            elif scheme in ("mqtts", "tls", "ssl"):
+                default_port = 8883
+            else:
+                default_port = 8884
             return host, int(port or default_port), "/" + path.lstrip("/") if path else "/mqtt"
         except Exception:
             return None
@@ -872,12 +926,17 @@ class RelayTransport:
             client = factory()
         # Credentials go ONLY to private endpoints — an anonymous public broker
         # must never be handed the private broker's password.
-        if (client is not None and endpoint in self._private_endpoints
-                and (self._username or self._password)):
+        if (
+            client is not None
+            and endpoint in self._private_endpoints
+            and (self._username or self._password)
+        ):
             client.username_pw_set(self._username, self._password)
         return client
 
-    def _connect_one(self, index: int) -> bool:
+    def _connect_one(self, index: int, stop: threading.Event | None = None) -> bool:
+        if stop is None:
+            stop = self._stop
         endpoint = self._brokers[index]
         parsed = self._parse_endpoint(endpoint)
         if parsed is None:
@@ -931,14 +990,14 @@ class RelayTransport:
         except OSError as exc:
             # Same for refused/reset/unreachable — expected when the endpoint
             # is down, not a code bug worth a stack trace for.
-            logger.warning("relay connect to %s:%s failed (%s: %s)",
-                           host, port, type(exc).__name__, exc)
+            logger.warning(
+                "relay connect to %s:%s failed (%s: %s)", host, port, type(exc).__name__, exc
+            )
             with self._lock:
                 self._client = None
             return False
         except Exception:
-            logger.warning("relay connect to %s:%s failed", host, port,
-                           exc_info=True)
+            logger.warning("relay connect to %s:%s failed", host, port, exc_info=True)
             with self._lock:
                 self._client = None
             return False
@@ -950,7 +1009,7 @@ class RelayTransport:
             with self._lock:
                 if self._connected_on_broker == index:
                     return True
-                if self._client is not client or self._stop.is_set():
+                if self._client is not client or stop.is_set():
                     return False  # stop()/restart replaced us
             time.sleep(0.05)
         logger.debug("relay handshake timeout to broker #%d (%s:%s)", index, host, port)
@@ -964,8 +1023,10 @@ class RelayTransport:
             logger.debug("cleanup after handshake timeout failed", exc_info=True)
         return False
 
-    def _serve_until_lost(self, index: int) -> None:
-        while not self._stop.is_set():
+    def _serve_until_lost(self, index: int, stop: threading.Event | None = None) -> None:
+        if stop is None:
+            stop = self._stop
+        while not stop.is_set():
             with self._lock:
                 connected = self._connected_on_broker == index
             if connected:
@@ -984,6 +1045,13 @@ class RelayTransport:
         two devices landed on different brokers after their own failovers.
         A broker the primary just moved to is dropped from the mirror set so
         the same frame is never handed to one broker twice.
+
+        Called from paho's ``on_connect``/``on_disconnect``, i.e. on the
+        network-loop thread of the primary client -- so nothing here may block.
+        Retiring a mirror joins its thread for up to ``STOP_JOIN_TIMEOUT``,
+        which on that thread stalls keepalive long enough to cause the very
+        disconnect it is reacting to, so the teardown is handed to a throwaway
+        thread instead.
         """
         with self._lock:
             primary_idx = self._connected_on_broker
@@ -995,12 +1063,11 @@ class RelayTransport:
                 targets.discard(primary_idx)
             stale = [i for i in self._mirror_clients if i not in targets]
             missing = [i for i in targets if i not in self._mirror_clients]
-            for idx in stale:
-                conn = self._mirror_clients.pop(idx)
-                try:
-                    conn.stop()
-                except Exception:
-                    logger.debug("relay mirror stop failed", exc_info=True)
+            # Detach the stale mirrors here, but stop them OUTSIDE the lock:
+            # stop() joins the mirror thread for up to STOP_JOIN_TIMEOUT, and
+            # holding _lock across that blocks publish() and every connect
+            # callback for as long as the join takes.
+            dying = [self._mirror_clients.pop(i) for i in stale]
             for idx in missing:
                 conn = _MirrorConnection(self, idx, self._brokers[idx])
                 self._mirror_clients[idx] = conn
@@ -1009,6 +1076,21 @@ class RelayTransport:
                 except Exception:
                     logger.debug("relay mirror start failed", exc_info=True)
                     self._mirror_clients.pop(idx, None)
+        if dying:
+            threading.Thread(
+                target=self._retire_mirrors,
+                args=(dying,),
+                name="relay-mirror-retire",
+                daemon=True,
+            ).start()
+
+    @staticmethod
+    def _retire_mirrors(dying: list) -> None:
+        for conn in dying:
+            try:
+                conn.stop()
+            except Exception:
+                logger.debug("relay mirror stop failed", exc_info=True)
 
     # ----------------------------------------------------------- callbacks --
     def _make_on_connect(self, index: int):
@@ -1027,8 +1109,7 @@ class RelayTransport:
                 # superseded by a restart or dropped during failover) must not
                 # claim the broker slot for a connection that is no longer
                 # installed — it would overwrite the healthy client's state.
-                logger.debug(
-                    "broker #%d on_connect ignored: stale client", index)
+                logger.debug("broker #%d on_connect ignored: stale client", index)
                 return
             with self._lock:
                 self._connected_on_broker = index
@@ -1041,6 +1122,7 @@ class RelayTransport:
             logger.info("Relay online via broker #%d", index)
             self._set_state(STATE_ONLINE)
             self._sync_mirrors()
+
         return _on_connect
 
     def _make_on_disconnect(self, index: int):
@@ -1064,6 +1146,7 @@ class RelayTransport:
                 # mirror every broker so publishing keeps reaching the peer.
                 self._sync_mirrors()
             logger.debug("relay disconnected from broker #%d", index)
+
         return _on_disconnect
 
     def _on_message(self, client, userdata, msg):
@@ -1078,9 +1161,16 @@ class RelayTransport:
             self._seen[blob_hash] = None
             while len(self._seen) > _SEEN_CAP:
                 self._seen.popitem(last=False)
-        frame = open_envelope(bytes(msg.payload), key, time.time())
+        frame, why = open_envelope_ex(bytes(msg.payload), key, time.time())
         if frame is None:
-            logger.debug("relay frame dropped (auth/window/format)")
+            logger.debug("relay frame dropped (%s)", why)
+            if why == "auth" and self._on_undecryptable is not None:
+                # Right envelope on a channel we subscribe to, wrong key — the
+                # owner can tell the user (mismatched encryption password).
+                try:
+                    self._on_undecryptable(msg.topic)
+                except Exception:
+                    logger.debug("on_undecryptable callback failed", exc_info=True)
             return
         try:
             self._on_frame(frame, msg.topic)

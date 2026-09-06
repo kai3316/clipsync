@@ -32,11 +32,11 @@
 
     template:
       '<transition name="dialog-fade">' +
-        '<div v-if="store.clientDialog" class="dialog-overlay" role="dialog" aria-modal="true" @click.self="onOverlayClick" @contextmenu.prevent>' +
+        '<div v-if="store.clientDialog" class="dialog-overlay" role="dialog" aria-modal="true" :aria-labelledby="\'client-dialog-title\'" @click.self="onOverlayClick" @contextmenu.prevent>' +
           '<div class="dialog-card dialog-card--small" :class="\'dialog-card--client-\' + store.clientDialog.type">' +
 
             '<div class="dialog-card__header">' +
-              '<h3 class="dialog-card__title">{{ store.clientDialog.title }}</h3>' +
+              '<h3 class="dialog-card__title" id="client-dialog-title">{{ store.clientDialog.title }}</h3>' +
               '<p v-if="store.clientDialog.message" class="dialog-card__message">{{ store.clientDialog.message }}</p>' +
             '</div>' +
 

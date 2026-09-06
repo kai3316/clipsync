@@ -6,11 +6,39 @@ All handlers return a (data_dict, status_code) tuple.
 import platform
 
 from internal.platform import friendly_platform_name
+from internal.transport.peer_id import expand_id_forms, hashed_id, is_on_network
 
 
-def get_devices(cfg, get_connected_ids, get_discovered=None,
-                get_resolved_hashes=None, get_pending_pairings=None,
-                get_reconnect_states=None):
+def _relay_reachable(cfg, peer_id: str) -> bool:
+    """True when this peer can be reached over the public relay right now.
+
+    Mirrors ``Application._peer_is_internet_reachable`` plus the
+    ``internet_sync_enabled`` gate that ``_relay_publish_to_peer`` applies —
+    everything it needs lives on ``cfg``, so no host callback is threaded in.
+
+    The device page needs this to stop OFFERING actions that cannot work: chat
+    and the connectivity probe both reach a LAN-offline peer only through the
+    relay, so on a paired-but-offline device with no relay path they were
+    buttons that could do nothing but fail.
+    """
+    if not peer_id or not getattr(cfg, "internet_sync_enabled", False):
+        return False
+    if peer_id in (getattr(cfg, "netpair_secrets", {}) or {}):
+        return True
+    if peer_id in (getattr(cfg, "peer_relay_secrets", {}) or {}):
+        peer = (getattr(cfg, "peers", {}) or {}).get(peer_id)
+        return peer is not None and bool(getattr(peer, "paired", False))
+    return False
+
+
+def get_devices(
+    cfg,
+    get_connected_ids,
+    get_discovered=None,
+    get_resolved_hashes=None,
+    get_pending_pairings=None,
+    get_reconnect_states=None,
+):
     """Return list of connected devices with status.
 
     Replicates the existing GET /api/devices logic from server.py
@@ -28,21 +56,50 @@ def get_devices(cfg, get_connected_ids, get_discovered=None,
     ``reconnecting/reconnect_attempt/reconnect_max`` for the UI.
     """
     connected_ids = set(get_connected_ids()) if get_connected_ids else set()
-    devices = [{
-        "device_id": cfg.device_id,
-        "device_name": cfg.device_name,
-        "connected": True,
-        "paired": True,
-        # The local device has no peer connection to encrypt; its OS is known
-        # directly from the host platform so the UI can show the right icon.
-        "encrypted": False,
-        "os": friendly_platform_name(platform.system()),
-        "note": "",
-    }]
+    # Live mDNS sightings, fetched up front: the known-peer loop below needs
+    # them to decide whether a cfg.peers row still has ANY presence on the
+    # network right now.  Keyed by the HASHED device id (discovery never puts a
+    # real id on the wire), so membership is tested through _on_network.
+    try:
+        discovered = (get_discovered() or {}) if get_discovered is not None else {}
+    except Exception:
+        discovered = {}
+    live_ids = set(discovered)
+
+    def _on_network(peer_id: str) -> bool:
+        """True when this peer is advertising on the LAN at this moment."""
+        return is_on_network(peer_id, live_ids)
+
+    devices = [
+        {
+            "device_id": cfg.device_id,
+            "device_name": cfg.device_name,
+            "connected": True,
+            "paired": True,
+            # The local device has no peer connection to encrypt; its OS is known
+            # directly from the host platform so the UI can show the right icon.
+            "encrypted": False,
+            "os": friendly_platform_name(platform.system()),
+            "note": "",
+            "known": True,
+        }
+    ]
+    # A paired peer is ALWAYS listed — it is a trust relationship the user
+    # established, not cache, so it stays visible (offline, with its last known
+    # address) until explicitly removed.  Everything else must earn its place on
+    # the page from LIVE network state: a row that is neither paired, nor
+    # connected, nor advertising on mDNS right now is stale config cache and is
+    # dropped.  That is what kept phantom cards around for devices long gone
+    # from the LAN.  Note this is NOT the old `if is_conn or peer.paired` filter
+    # it replaces: a device the user just rejected keeps its card for as long as
+    # it is really on the network (it lands in the Discovered section), instead
+    # of vanishing the instant the socket closed.
     for peer in list(cfg.peers.values()):
         is_conn = peer.device_id in connected_ids
-        if is_conn or peer.paired:
-            devices.append({
+        if not peer.paired and not is_conn and not _on_network(peer.device_id):
+            continue
+        devices.append(
+            {
                 "device_id": peer.device_id,
                 "device_name": peer.device_name,
                 "connected": is_conn,
@@ -54,7 +111,15 @@ def get_devices(cfg, get_connected_ids, get_discovered=None,
                 # frontend falls back to the generic 💻 icon.
                 "os": getattr(peer, "os", "") or None,
                 "note": getattr(peer, "notes", "") or "",
-            })
+                # Known to us (in cfg.peers) rather than a bare mDNS sighting, so
+                # the UI can badge an unpaired one "Not paired" instead of the
+                # misleading "🔍 Discovered" (it may not be on mDNS at all).
+                "known": True,
+                # Can we still reach it while it is LAN-offline?  Gates the card's
+                # chat + test-connection actions, which have no other transport.
+                "relay_reachable": _relay_reachable(cfg, peer.device_id),
+            }
+        )
 
     # Attach auto-reconnect progress to offline known peers so the UI can
     # show "reconnecting (attempt N/M)" instead of a bare offline badge.
@@ -67,18 +132,12 @@ def get_devices(cfg, get_connected_ids, get_discovered=None,
         except Exception:
             reconnect_states = {}
         if reconnect_states:
-            def _hashed(peer_id):
-                try:
-                    from internal.transport.discovery import Discovery
-                    return Discovery._hash_device_id(peer_id)
-                except Exception:
-                    return ""
             for dev in devices:
                 if dev.get("connected") or not dev.get("device_id"):
                     continue
                 st = reconnect_states.get(dev["device_id"])
                 if st is None:
-                    st = reconnect_states.get(_hashed(dev["device_id"]))
+                    st = reconnect_states.get(hashed_id(dev["device_id"]))
                 if isinstance(st, dict) and st:
                     dev["reconnecting"] = True
                     try:
@@ -88,8 +147,19 @@ def get_devices(cfg, get_connected_ids, get_discovered=None,
                         dev["reconnect_attempt"] = 0
                         dev["reconnect_max"] = 0
 
-    seen_ids = {d["device_id"] for d in devices}
-    known_names = {d["device_name"].lower() for d in devices}
+    # Every id form each listed row can be sighted under.  Discovery only ever
+    # puts the HASHED device id on the wire while these rows are keyed by the
+    # real one, so without the hashed forms the sweep below cannot recognise its
+    # own peer and lists it a SECOND time as a bare "Discovered" card under a
+    # different device_id.  This is the only *exact* dedup for a known peer:
+    # rev_resolved covers just the peers the transport manager has resolved a
+    # hash for (ones we connected to since start-up), and the name heuristic
+    # further down silently misses a device renamed on either side.
+    seen_ids = expand_id_forms(d["device_id"] for d in devices)
+    # Exclude the local device's own name: it is never in get_discovered()
+    # (discovery filters self by device_id hash), so including it only hides a
+    # genuinely different device that happens to share our name/prefix.
+    known_names = {d["device_name"].lower() for d in devices if d["device_id"] != cfg.device_id}
 
     # Removed/archived devices (the forget action) so the device page can
     # offer a Restore management surface.  Read here (before the discovered
@@ -97,7 +167,11 @@ def get_devices(cfg, get_connected_ids, get_discovered=None,
     # NOT re-surfaced as a fresh "Discovered" device — it lives only in the
     # Removed archive until restored or purged.  Newest removal first.
     removed_peers = getattr(cfg, "removed_peers", None) or {}
-    removed_ids = {getattr(p, "device_id", "") for p in removed_peers.values()}
+    # A forgotten device keeps advertising under its HASHED mDNS id, while the
+    # archive keys it by the REAL device_id — so match on both forms, or a
+    # forgotten device reappears as "Discovered" while also sitting in the
+    # Removed archive.
+    removed_ids = expand_id_forms(getattr(p, "device_id", "") for p in removed_peers.values())
 
     # Resolve hashed discovery ids to real peer ids (desktop _get_peers
     # ~2724): a hashed id that maps to a known/paired device is "seen".
@@ -139,24 +213,27 @@ def get_devices(cfg, get_connected_ids, get_discovered=None,
 
     # Include discovered-but-unpaired peers so the web UI's "Discovered"
     # section is populated and users can initiate pairing from the phone.
+    # `discovered` was already fetched at the top (the known-peer filter needs
+    # it), so re-reading it here would risk a second, inconsistent snapshot.
     if get_discovered is not None:
-        try:
-            discovered = get_discovered() or {}
-        except Exception:
-            discovered = {}
         for peer_id, info in discovered.items():
             name = info.get("name", peer_id) if isinstance(info, dict) else str(info)
             if peer_id in seen_ids or peer_id in removed_ids or _name_matches_known(name):
                 continue
-            devices.append({
-                "device_id": peer_id,
-                "device_name": name,
-                "connected": False,
-                "paired": False,
-                "encrypted": False,
-                "os": None,
-                "note": "",
-            })
+            devices.append(
+                {
+                    "device_id": peer_id,
+                    "device_name": name,
+                    "connected": False,
+                    "paired": False,
+                    "encrypted": False,
+                    "os": None,
+                    "note": "",
+                    # A bare mDNS sighting — genuinely "Discovered", unlike the
+                    # known peers above.
+                    "known": False,
+                }
+            )
 
     result = {"devices": devices}
 
@@ -172,28 +249,32 @@ def get_devices(cfg, get_connected_ids, get_discovered=None,
         pending_list = []
         for p in pending:
             if isinstance(p, dict):
-                pending_list.append({
-                    "peer_id": p.get("peer_id", ""),
-                    "peer_name": p.get("peer_name", p.get("device_name", "")),
-                    "code": p.get("code", ""),
-                    "status": p.get("status", "pending"),
-                    # Short Authentication String derived from both devices'
-                    # certificate fingerprints; empty when unknown, in which
-                    # case the UI omits the row.
-                    "sas": p.get("sas", ""),
-                })
+                pending_list.append(
+                    {
+                        "peer_id": p.get("peer_id", ""),
+                        "peer_name": p.get("peer_name", p.get("device_name", "")),
+                        "code": p.get("code", ""),
+                        "status": p.get("status", "pending"),
+                        # Short Authentication String derived from both devices'
+                        # certificate fingerprints; empty when unknown, in which
+                        # case the UI omits the row.
+                        "sas": p.get("sas", ""),
+                    }
+                )
             elif isinstance(p, (tuple, list)) and len(p) >= 3:
-                pending_list.append({
-                    "peer_id": p[0],
-                    "code": p[1],
-                    "peer_name": p[2],
-                    # transient pairing lifecycle status: pending /
-                    # confirmed_waiting / peer_confirmed / paired / cancelled
-                    "status": p[3] if len(p) > 3 else "pending",
-                    # 5th element (optional): the pairing SAS to display on
-                    # the confirmation card for cross-device comparison.
-                    "sas": p[4] if len(p) > 4 else "",
-                })
+                pending_list.append(
+                    {
+                        "peer_id": p[0],
+                        "code": p[1],
+                        "peer_name": p[2],
+                        # transient pairing lifecycle status: pending /
+                        # confirmed_waiting / peer_confirmed / paired / cancelled
+                        "status": p[3] if len(p) > 3 else "pending",
+                        # 5th element (optional): the pairing SAS to display on
+                        # the confirmation card for cross-device comparison.
+                        "sas": p[4] if len(p) > 4 else "",
+                    }
+                )
         result["pending_pairings"] = pending_list
 
     # Removed/archived devices (the forget action) so the device page can

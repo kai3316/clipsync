@@ -21,7 +21,7 @@ _EN: dict[str, str] = {
     # Clipboard sync notifications
     "sync.oversize": "Clipboard content too large ({size:.1f} MB), sync skipped",
     "sync.write_failed_title": "Clipboard write failed",
-    "sync.write_failed_msg": "The received clipboard content could not be written to the system clipboard",
+    "sync.write_failed_msg": "The received clipboard content could not be written to the system clipboard",  # noqa: E501
     # History cards
     "history.source.remote": "Synced from {name}",
     "history.source.local": "This device",
@@ -50,9 +50,9 @@ _EN: dict[str, str] = {
     "device.unpair": "Unpair",
     "device.remove": "Remove",
     "device.unpair_confirm_title": "Unpair Device",
-    "device.unpair_confirm_msg": "Unpair device \"{name}\"?\n\nYou will need to re-pair to sync again.",
+    "device.unpair_confirm_msg": 'Unpair device "{name}"?\n\nYou will need to re-pair to sync again.',  # noqa: E501
     "device.remove_confirm_title": "Remove Device",
-    "device.remove_confirm_msg": "Remove device \"{name}\" from known list?",
+    "device.remove_confirm_msg": 'Remove device "{name}" from known list?',
     "device.test_connection": "Test connection",
     "device.test_success": "Connection OK · {detail}",
     "device.test_failed": "Connection failed · {detail}",
@@ -81,6 +81,12 @@ _EN: dict[str, str] = {
     # File transfer
     "transfer.send_success": "File sent successfully",
     "transfer.send_failed": "File transfer failed",
+    # Remaining-time estimate shown next to an in-flight transfer.  Three
+    # separate forms rather than composable units, because word order and
+    # spacing around numbers differ by language.
+    "transfer.eta_seconds": "{seconds}s",
+    "transfer.eta_minutes": "{minutes}m {seconds}s",
+    "transfer.eta_hours": "{hours}h {minutes}m",
     "transfer.receive_failed": "File receive failed",
     "transfer.received": "Received: {name}",
     "transfer.sending_file": "Sending: {name}",
@@ -92,7 +98,7 @@ _EN: dict[str, str] = {
     "transfer.speed_test.result": "{mbps:.1f} MB/s ({quality})",
     "transfer.speed_test.failed": "Speed test failed",
     "transfer.speed_test.no_peer": "Connect a device first",
-    "transfer.speed_test.lan_only": "Speed test only works over the local network — put both devices on the same Wi-Fi or LAN",
+    "transfer.speed_test.lan_only": "Speed test only works over the local network — put both devices on the same Wi-Fi or LAN",  # noqa: E501
     "transfer.speed_test.idle": "Click to test LAN transfer speed",
     "transfer.speed.fast": "fast",
     "transfer.speed.good": "good",
@@ -122,7 +128,7 @@ _EN: dict[str, str] = {
     "transfer.no_peers": "No connected devices to send to.",
     "transfer.error": "Transfer Error",
     "transfer.phone_title": "Send to Phone",
-    "transfer.phone_msg": "Your phone connects via Remote access, not as a P2P peer.\n\nTo transfer files between your PC and phone:\n\n1. Open the Remote access QR code from the tray menu\n2. Scan it with your phone camera\n3. Use the web page to upload or download files\n\nThe phone can also push text to your clipboard and view clipboard history.",
+    "transfer.phone_msg": "Your phone connects via Remote access, not as a P2P peer.\n\nTo transfer files between your PC and phone:\n\n1. Open the Remote access QR code from the tray menu\n2. Scan it with your phone camera\n3. Use the web page to upload or download files\n\nThe phone can also push text to your clipboard and view clipboard history.",  # noqa: E501
     "transfer.phone_action": "Show QR Code",
     "transfer.cancelled": "Transfer cancelled",
     "transfer.err_disk": "Not enough disk space on the receiving device",
@@ -150,27 +156,24 @@ _EN: dict[str, str] = {
     "notify.update_downloading": "Downloading update…",
     "notify.update_rejected_hash": "Update discarded: checksum mismatch",
     "notify.update_rejected_old": "Update discarded: not newer than the running version",
-    "ui.web_start_failed2": "Failed to start on port {port}. Another process may already be using this port.",
+    "ui.web_start_failed2": "Failed to start on port {port}. Another process may already be using this port.",  # noqa: E501
     "ui.web_companion": "Remote access",
-    "ui.web_start_failed": "Failed to start Remote access on port {port}.\n\nAnother process may already be using this port, or the server failed to bind.\n\nTried ports: {lo} - {hi}",
+    "ui.web_start_failed": "Failed to start Remote access on port {port}.\n\nAnother process may already be using this port, or the server failed to bind.\n\nTried ports: {lo} - {hi}",  # noqa: E501
     "ui.clipboard_unavailable": "Clipboard Unavailable",
     "ui.port_in_use": "Port Already in Use",
-    "ui.port_in_use_msg": "Port {port} is already in use by another process.\n\nThis usually means another instance is still running.\n\nRun this command to find and stop it:\n  {find_cmd}\n\nClipSync will now exit.",
+    "ui.port_in_use_msg": "Port {port} is already in use by another process.\n\nThis usually means another instance is still running.\n\nRun this command to find and stop it:\n  {find_cmd}\n\nClipSync will now exit.",  # noqa: E501
     "ui.already_running": "Another instance is already running.",
     "ui.send_failed_msg": "Failed to send file:\n",
     "ui.export_failed_msg": "Failed to export log:\n",
-
     "log.exported_title": "Exported",
     "log.exported_msg": "Log saved to:\n{dest}",
     "log.not_found_title": "Not Found",
     "log.not_found_msg": "No log file found at:\n{path}\n\n"
-        "ClipSync may not have been running long enough to generate logs.",
+    "ClipSync may not have been running long enough to generate logs.",
     "log.permission_error_msg": "Permission denied writing to:\n{dest}",
-
     "ui.error_title": "Error",
     "notify.device_connected_title": "Device Connected",
     "notify.device_disconnected_title": "Device Disconnected",
-
     # File type labels (dashboard history cards)
     "history.type_file": "File",
     "history.type_url": "Link",
@@ -186,16 +189,14 @@ _EN: dict[str, str] = {
     "encryption.password_title": "Encryption Password",
     "encryption.password_prompt": "Enter the pre-shared encryption password:",
     "encryption.wrong_password_title": "Wrong Password",
-    "encryption.wrong_password_msg": "The encryption password you entered is incorrect.\n\nClipSync cannot start without the correct password because your device identity (private key) is encrypted with it.\n\nThe application will now exit.",
-    "encryption.password_required_msg": "The encryption password is required to start ClipSync.\n\nYour device identity (private key) is encrypted with it.\n\nThe application will now exit.",
+    "encryption.wrong_password_msg": "The encryption password you entered is incorrect.\n\nClipSync cannot start without the correct password because your device identity (private key) is encrypted with it.\n\nThe application will now exit.",  # noqa: E501
+    "encryption.password_required_msg": "The encryption password is required to start ClipSync.\n\nYour device identity (private key) is encrypted with it.\n\nThe application will now exit.",  # noqa: E501
     "notify.sync_skipped": "Sync Skipped",
-    "notify.oversize": "Clipboard content too large to sync: {size:.1f} MB (limit: {limit} MB)",
-
     # UI labels
     "ui.app_name": "ClipSync",
-    "ui.app_title": "\U0001F4CB  ClipSync",
+    "ui.app_title": "\U0001f4cb  ClipSync",
     "hotkey.failed_title": "Global Hotkeys Unavailable",
-    "hotkey.failed_msg": "Global hotkeys failed to start.\n\nOn macOS, enable ClipSync in:\nSystem Settings → Privacy & Security → Accessibility.",
+    "hotkey.failed_msg": "Global hotkeys failed to start.\n\nOn macOS, enable ClipSync in:\nSystem Settings → Privacy & Security → Accessibility.",  # noqa: E501
     "ui.theme_dark": "☾  Dark",
     "ui.theme_light": "☀  Light",
     "ui.overview": "Overview",
@@ -259,19 +260,19 @@ _EN: dict[str, str] = {
     "ui.yes": "Yes",
     "ui.no": "No",
     # Sidebar nav (with icons)
-    "nav.overview": "\U0001F3E0  Overview",
-    "nav.devices": "\U0001F4F1  Devices",
-    "nav.history": "\U0001F4CB  History",
-    "nav.transfers": "\U0001F4E4  Transfers",
-    "nav.web_companion": "\U0001F4F1  Web",
+    "nav.overview": "\U0001f3e0  Overview",
+    "nav.devices": "\U0001f4f1  Devices",
+    "nav.history": "\U0001f4cb  History",
+    "nav.transfers": "\U0001f4e4  Transfers",
+    "nav.web_companion": "\U0001f4f1  Web",
     "nav.settings": "⚙  Settings",
     # Settings nav
-    "settings_nav.network": "\U0001F310  Network",
-    "settings_nav.filter": "\U0001F6E1  Content Filter",
-    "settings_nav.security": "\U0001F512  Security",
+    "settings_nav.network": "\U0001f310  Network",
+    "settings_nav.filter": "\U0001f6e1  Content Filter",
+    "settings_nav.security": "\U0001f512  Security",
     "settings_nav.advanced": "⚙  Advanced",
-    "settings_nav.appearance": "\U0001F3A8  Appearance",
-    "settings_nav.logs": "\U0001F4C4  Logs",
+    "settings_nav.appearance": "\U0001f3a8  Appearance",
+    "settings_nav.logs": "\U0001f4c4  Logs",
     "settings_nav.about": "ℹ️  About",
     # Footer
     "footer.ready": "Ready",
@@ -279,10 +280,10 @@ _EN: dict[str, str] = {
     "footer.copy_failed": "Failed to copy",
     "footer.name_updated": "Device name updated (restart for network discovery)",
     "footer.paired": "Device paired successfully",
-    "footer.settings_saved": "Security settings saved. Restart required for changes to take effect.",
+    "footer.settings_saved": "Security settings saved. Restart required for changes to take effect.",  # noqa: E501
     "footer.advanced_saved": "Advanced settings saved",
     # Empty states
-    "empty.no_devices": "Searching for devices on your LAN...\n\nDevices running ClipSync will appear here.\nMake sure they are on the same network.",
+    "empty.no_devices": "Searching for devices on your LAN...\n\nDevices running ClipSync will appear here.\nMake sure they are on the same network.",  # noqa: E501
     "empty.no_history": "No clipboard history yet.\nCopied items will appear here.",
     "empty.no_results": "No results for '{query}'",
     "empty.no_transfers": "No active transfers.",
@@ -333,8 +334,8 @@ _EN: dict[str, str] = {
     "security.password_set": "Password is set (hash stored)",
     "security.no_password": "No password set",
     "security.cert_changed_title": "Security Alert",
-    "security.cert_changed_message": "Certificate for \"{name}\" has changed!\n\nThis could indicate a man-in-the-middle attack.\nThe connection has been rejected for your safety.",
-    "security.cert_changed_startup": "Certificate changed for: {names}\n\nThese peers have been skipped for your safety.\nCheck your network and re-pair if needed.\n\nThis could indicate a man-in-the-middle attack.",
+    "security.cert_changed_message": 'Certificate for "{name}" has changed!\n\nThis could indicate a man-in-the-middle attack.\nThe connection has been rejected for your safety.',  # noqa: E501
+    "security.cert_changed_startup": "Certificate changed for: {names}\n\nThese peers have been skipped for your safety.\nCheck your network and re-pair if needed.\n\nThis could indicate a man-in-the-middle attack.",  # noqa: E501
     # Dialog titles
     "dialog.error": "Error",
     "dialog.warning": "Warning",
@@ -353,33 +354,32 @@ _EN: dict[str, str] = {
     # Devices panel
     "devices.title": "Network Devices",
     "devices.subtitle": "Auto-discovered via mDNS/Bonjour on your LAN",
-    "devices.known": "\U0001F4CB  Known Devices",
-    "devices.discovered_section": "\U0001F50D  Discovered Devices",
+    "devices.known": "\U0001f4cb  Known Devices",
+    "devices.discovered_section": "\U0001f50d  Discovered Devices",
     "devices.pairing_requests": "Pairing Requests",
-    "devices.pairing_instructions": "Click 'Connect' on a discovered device. Both devices will show the same 8-digit code.\nVerify the codes match, then click Confirm.",
+    "devices.pairing_instructions": "Click 'Connect' on a discovered device. Both devices will show the same 8-digit code.\nVerify the codes match, then click Confirm.",  # noqa: E501
     "devices.unpair_title": "Unpair",
     "devices.unpair_message": "Unpair this device?\n\n{name}",
     "devices.forget_title": "Forget Device",
     "devices.forget_message": "Remove this device from known list?\n\n{name}",
     "devices.this_device": "This Device",
     "devices.no_devices_found": "No devices found",
-    "devices.auto_discover_hint": "Install ClipSync on another device on the same network. They will appear here automatically.",
+    "devices.auto_discover_hint": "Install ClipSync on another device on the same network. They will appear here automatically.",  # noqa: E501
     "devices.removed_title": "Removed devices",
     "devices.removed_at": "Removed {time}",
     "devices.restore_confirm_title": "Restore Device",
-    "devices.restore_confirm_msg": "Restore device \"{name}\" to the known list and reconnect it?",
+    "devices.restore_confirm_msg": 'Restore device "{name}" to the known list and reconnect it?',
     "devices.restored_toast": "Restored {name}",
     "devices.purge_confirm_title": "Delete Permanently",
-    "devices.purge_confirm_msg": "Permanently delete \"{name}\"? This cannot be undone.",
+    "devices.purge_confirm_msg": 'Permanently delete "{name}"? This cannot be undone.',
     "devices.purged_toast": "Deleted {name}",
     "devices.status_connected": "Connected",
     "devices.status_paired_offline": "Paired · offline",
     "devices.status_discovered": "Discovered · not paired",
     "devices.sas_label": "Security code",
-    "devices.sas_verify_hint": "Compare this code with the one shown on the other device before confirming.",
+    "devices.sas_verify_hint": "Compare this code with the one shown on the other device before confirming.",  # noqa: E501
     "pairing.guidance": "Confirm this code matches on the other device before accepting",
     "pairing.verify_title": "Verify the code",
-    "pairing.verify_message": "Confirm the other device shows the same code:\n\n{code}\n\nClick Confirm if they match.",
     "pairing.verify_input_prompt": "Enter the 8-digit code shown on the other device:",
     "pairing.code_mismatch": "The code does not match — pairing cancelled.",
     "pairing.accepted": "Paired with {name}",
@@ -390,19 +390,16 @@ _EN: dict[str, str] = {
     "pairing.state.cancelled": "Pairing cancelled",
     "pairing.state.expired": "Request expired",
     "pairing.notify.peer_confirmed": "The other device confirmed the pairing",
-    "pairing.notify.peer_confirmed_msg": "{name} confirmed the pairing. Please confirm the code here too.",
+    "pairing.notify.peer_confirmed_msg": "{name} confirmed the pairing. Please confirm the code here too.",  # noqa: E501
     "pairing.notify.peer_rejected": "Pairing rejected",
     "pairing.notify.peer_rejected_msg": "{name} rejected the pairing request.",
     "pairing.notify.unpaired_by_peer": "Unpaired by the other device",
     "pairing.notify.unpaired_by_peer_msg": "{name} unpaired from this device.",
     "pairing.notify.repair_prompt": "Re-pair requested",
-    "pairing.notify.repair_prompt_msg": "Device {name} unpaired from you. Re-pair?",
     "pairing.notify.completed": "Pairing complete",
-    "pairing.notify.disconnected": "Pairing incomplete · connection lost",
-    "pairing.notify.verify_failed": "Codes do not match",
-    "pairing.confirm_pair": "Confirm pairing",
+    "netpair.decrypt_failed": "Internet sync: the paired device's data could not be decrypted — check that both devices use the same encryption password.",  # noqa: E501
     "cert.changed_title": "Device identity changed",
-    "cert.changed_message": "Device “{name}” has a new certificate (likely reinstalled or reset).\n\nDo you trust this device?",
+    "cert.changed_message": "Device “{name}” has a new certificate (likely reinstalled or reset).\n\nDo you trust this device?",  # noqa: E501
     "cert.trust_again": "Trust again",
     "cert.keep_unpaired": "Keep unpaired",
     # History panel
@@ -445,46 +442,49 @@ _EN: dict[str, str] = {
     "tray.update_install_failed": "Failed to install the update",
     "tray.update_ready_prompt": (
         "ClipSync {version} is ready. Quit ClipSync, then replace the old "
-        "version with the contents of:\n{path}"),
+        "version with the contents of:\n{path}"
+    ),
     "tray.up_to_date": "ClipSync is up to date",
     "tray.update_failed": "Update check failed",
     "settings_window.auto_update_check": "Check for updates automatically",
     "settings_window.auto_update_check_hint": (
         "Periodically checks GitHub releases (about every 6 hours). "
-        "Off = no background update requests."),
+        "Off = no background update requests."
+    ),
     "settings_window.update_downloading_progress": "Downloading… {pct}%",
     "settings_window.update_ready": "New version {version} is ready",
     "settings_window.update_ready_hint": (
         "Quit ClipSync, then replace the old version with the file below. "
-        "Your clips and devices stay on this computer."),
+        "Your clips and devices stay on this computer."
+    ),
     "settings_window.update_open_folder": "Open containing folder",
     "tray.about": "About ClipSync",
     "tray.quit": "Quit",
     "tray.no_devices": "(no devices connected)",
-    "tray.about_message": "ClipSync — Cross-platform clipboard sharing\nShare your clipboard between Windows and Mac in real time.",
+    "tray.about_message": "ClipSync — Cross-platform clipboard sharing\nShare your clipboard between Windows and Mac in real time.",  # noqa: E501
     "tray.about_title": "About ClipSync",
     "tray.failed_title": "System Tray Unavailable",
-    "tray.failed_msg": "The system tray could not be started, so the dashboard is the only interface. Re-run ClipSync to try the tray again.",
+    "tray.failed_msg": "The system tray could not be started, so the dashboard is the only interface. Re-run ClipSync to try the tray again.",  # noqa: E501
     # Settings window
     "settings_window.title": "ClipSync Settings",
     "settings_window.search_placeholder": "Search settings...",
-    "settings_window.search_matches": "{count} section(s) match \"{query}\"",
-    "settings_window.search_no_matches": "No settings match \"{query}\"",
+    "settings_window.search_matches": '{count} section(s) match "{query}"',
+    "settings_window.search_no_matches": 'No settings match "{query}"',
     "settings_window.network_title": "Network Settings",
     "settings_window.save_network": "Save Network Settings",
-    "settings_window.network_saved": "Network settings saved.\nRestart ClipSync for changes to take effect.",
+    "settings_window.network_saved": "Network settings saved.\nRestart ClipSync for changes to take effect.",  # noqa: E501
     "settings_window.port_hint": "(1024–65535, restart required)",
-    "settings_window.relay_hint": "Leave blank for LAN-only sync. Set a relay server URL for cross-network sync.",
+    "settings_window.relay_hint": "Leave blank for LAN-only sync. Set a relay server URL for cross-network sync.",  # noqa: E501
     "settings_window.current_relay_broker": "Current relay server",
-    "settings_window.relay_free_label": "Anonymous free relays — one address per line (no account needed)",
-    "settings_window.relay_free_hint": "Fallback path: used when the private relay is unreachable, and as a mirror so devices on a different broker still talk. These accept any client and never see your broker password. Changes apply immediately.",
+    "settings_window.relay_free_label": "Anonymous free relays — one address per line (no account needed)",  # noqa: E501
+    "settings_window.relay_free_hint": "Fallback path: used when the private relay is unreachable, and as a mirror so devices on a different broker still talk. These accept any client and never see your broker password. Changes apply immediately.",  # noqa: E501
     "settings_window.relay_private_label": "Private relay with login — one address per line",
-    "settings_window.relay_private_hint": "Primary path: your clipboard data goes through these first, using the username/password below. A login-protected relay is preconfigured. Leave empty to use only the free relays.",
+    "settings_window.relay_private_hint": "Primary path: your clipboard data goes through these first, using the username/password below. A login-protected relay is preconfigured. Leave empty to use only the free relays.",  # noqa: E501
     "settings_window.relay_username_label": "Broker username (optional)",
     "settings_window.relay_password_label": "Broker password",
     "settings_window.relay_password_placeholder": "Not set",
     "settings_window.relay_password_clear": "Clear",
-    "settings_window.relay_password_hint": "Authenticates to a private relay. Anonymous public relays don't need one — leave it unset to use them. Set or change it with the button next to the status.",
+    "settings_window.relay_password_hint": "Authenticates to a private relay. Anonymous public relays don't need one — leave it unset to use them. Set or change it with the button next to the status.",  # noqa: E501
     "settings_window.relay_pw_status_set": "Set",
     "settings_window.relay_pw_status_unset": "Not set",
     "settings_window.relay_pw_set_btn": "Set password",
@@ -494,7 +494,7 @@ _EN: dict[str, str] = {
     "settings_window.relay_pw_confirm": "Set password",
     "settings_window.relay_pw_cancel": "Cancel",
     "settings_window.relay_pw_required": "Enter the password in both fields.",
-    "settings_window.relay_pw_mismatch": "The two entries don't match — the password is saved only when they match.",
+    "settings_window.relay_pw_mismatch": "The two entries don't match — the password is saved only when they match.",  # noqa: E501
     "settings.relay_password_saved": "Relay password set",
     "settings.relay_password_cleared": "Relay password cleared",
     "settings_window.appearance_title": "Appearance",
@@ -505,11 +505,11 @@ _EN: dict[str, str] = {
     "settings_window.theme_dark": "Dark",
     "settings_window.theme_hint": "Changes take effect immediately.",
     "settings_window.filter_title": "Content Filter",
-    "settings_window.filter_desc": "When enabled, sensitive content is replaced with [FILTERED] before syncing to other devices.",
+    "settings_window.filter_desc": "When enabled, sensitive content is replaced with [FILTERED] before syncing to other devices.",  # noqa: E501
     "settings_window.filter_categories": "Sensitive Content Categories",
     "settings_window.save_filter": "Save Filter Settings",
     "settings_window.filter_saved": "Content filter settings saved.",
-    "settings_window.security_desc": "Encryption settings protect your data at rest and in transit.",
+    "settings_window.security_desc": "Encryption settings protect your data at rest and in transit.",  # noqa: E501
     "settings_window.security_features": [
         "Private key encrypted at rest in config file",
         "Clipboard history encrypted on disk",
@@ -517,10 +517,10 @@ _EN: dict[str, str] = {
     ],
     "settings_window.enable_encryption": "Enable encryption",
     "settings_window.encryption_title": "Encryption",
-    "settings_window.password_hint": "Set the same password on both devices for stronger\napp-layer encryption. Leave blank to auto-derive keys\nfrom device certificates — without a password the\nstored private key is only obfuscated, not truly encrypted.",
-    "settings_window.encryption_hint": "Transfers are always encrypted in transit with TLS 1.3. This optional pre-shared password adds a second layer: even a paired device must know it to decrypt your content.",
-    "settings_window.auto_start_hint": "Start ClipSync automatically when you log in to this computer.",
-    "settings_window.sound_hint": "Master notification switch. Turning this off disables ALL notifications, sounds included — on some platforms a notification always plays a sound.",
+    "settings_window.password_hint": "Set the same password on both devices for stronger\napp-layer encryption. Leave blank to auto-derive keys\nfrom device certificates — without a password the\nstored private key is only obfuscated, not truly encrypted.",  # noqa: E501
+    "settings_window.encryption_hint": "Transfers are always encrypted in transit with TLS 1.3. This optional pre-shared password adds a second layer: even a paired device must know it to decrypt your content.",  # noqa: E501
+    "settings_window.auto_start_hint": "Start ClipSync automatically when you log in to this computer.",  # noqa: E501
+    "settings_window.sound_hint": "Master notification switch. Turning this off disables ALL notifications, sounds included — on some platforms a notification always plays a sound.",  # noqa: E501
     "settings_window.password_placeholder": "Enter new password to set or change",
     "settings_window.clear_password": "Clear",
     "settings_window.password_cleared": "Password cleared.",
@@ -534,41 +534,41 @@ _EN: dict[str, str] = {
     "settings_window.show": "Show",
     "settings_window.hide": "Hide",
     "settings_window.save_security": "Save Security Settings",
-    "settings_window.security_saved": "Security settings saved. Restart required for changes to take effect.",
+    "settings_window.security_saved": "Security settings saved. Restart required for changes to take effect.",  # noqa: E501
     "settings_window.advanced_title": "Advanced Settings",
     "settings_window.advanced_hint": "Some changes require a restart to take effect.",
     "settings_window.clipboard_sync_section": "Clipboard & Sync",
     "settings_window.history_max": "History Max Entries",
     "settings_window.history_max_desc": "Maximum clipboard history entries to keep (10–1000)",
     "settings_window.history_max_age": "History Retention (days)",
-    "settings_window.history_max_age_desc": "Automatically delete unpinned entries older than this many days (0 = keep forever)",
+    "settings_window.history_max_age_desc": "Automatically delete unpinned entries older than this many days (0 = keep forever)",  # noqa: E501
     "settings_window.val_history_max_age": "Retention days must be 0–36500",
     "settings_window.plain_text_only": "Sync as plain text only",
-    "settings_window.plain_text_only_desc": "Strip rich formatting (HTML/RTF) so other devices receive plain text only — images and file lists still sync",
+    "settings_window.plain_text_only_desc": "Strip rich formatting (HTML/RTF) so other devices receive plain text only — images and file lists still sync",  # noqa: E501
     "settings_window.sync_debounce": "Sync Debounce (seconds)",
     "settings_window.sync_debounce_desc": "Minimum interval between outgoing syncs (0.1–5.0)",
     "settings_window.poll_interval": "Poll Interval (seconds)",
-    "settings_window.poll_interval_desc": "Clipboard change detection frequency (0.1–5.0). macOS/Linux only. Restart required.",
+    "settings_window.poll_interval_desc": "Clipboard change detection frequency (0.1–5.0). macOS/Linux only. Restart required.",  # noqa: E501
     "settings_window.file_transfer_section": "File Transfer",
     "settings_window.receive_dir": "Receive Directory",
-    "settings_window.receive_dir_desc": "Where received files are saved. Leave blank for default. Restart required.",
+    "settings_window.receive_dir_desc": "Where received files are saved. Leave blank for default. Restart required.",  # noqa: E501
     "settings_window.transfer_timeout": "Transfer Timeout (seconds)",
-    "settings_window.transfer_timeout_desc": "Maximum time for a file transfer before it's considered stale (30–3600)",
+    "settings_window.transfer_timeout_desc": "Maximum time for a file transfer before it's considered stale (30–3600)",  # noqa: E501
     "settings_window.connection_section": "Connection",
     "settings_window.max_reconnect": "Max Reconnect Attempts",
-    "settings_window.max_reconnect_desc": "How many times to retry connecting to a lost peer (1–100). Restart required.",
+    "settings_window.max_reconnect_desc": "How many times to retry connecting to a lost peer (1–100). Restart required.",  # noqa: E501
     "settings_window.logging_section": "Logging & Notifications",
     "settings_window.log_level": "Log Level",
     "settings_window.enable_notifications": "Enable desktop notifications",
     "settings_window.save_advanced": "Save Advanced Settings",
-    "settings_window.advanced_saved": "Advanced settings saved.\n\nSettings marked 'Restart required' will take effect\nafter restarting ClipSync.",
+    "settings_window.advanced_saved": "Advanced settings saved.\n\nSettings marked 'Restart required' will take effect\nafter restarting ClipSync.",  # noqa: E501
     "settings_window.danger_zone": "Danger Zone",
-    "settings_window.danger_zone_desc": "Restart the application or reset all data to factory defaults. Use with caution.",
+    "settings_window.danger_zone_desc": "Restart the application or reset all data to factory defaults. Use with caution.",  # noqa: E501
     "settings_window.restart_app": "Restart App",
     "settings_window.restart_confirm": "Restart ClipSync now?\n\nUnsaved changes will be lost.",
-    "settings_window.quit_confirm": "Quit ClipSync?\n\nClipboard sync will stop until you restart the app.",
+    "settings_window.quit_confirm": "Quit ClipSync?\n\nClipboard sync will stop until you restart the app.",  # noqa: E501
     "settings_window.factory_reset": "Factory Reset",
-    "settings_window.factory_reset_confirm": "This will delete all ClipSync data — including device identity, paired devices, clipboard history, and all settings.\n\nThis cannot be undone. Continue?",
+    "settings_window.factory_reset_confirm": "This will delete all ClipSync data — including device identity, paired devices, clipboard history, and all settings.\n\nThis cannot be undone. Continue?",  # noqa: E501
     "settings_window.factory_reset_error": "Some files could not be deleted:\n",
     "settings_window.validation_error": "Validation Error",
     "settings_window.val_history_entries": "History entries must be 10–1000",
@@ -581,7 +581,7 @@ _EN: dict[str, str] = {
     "settings_window.port_invalid": "Port must be 1024–65535.",
     "settings_window.logs_title": "Application Logs",
     "settings_window.about_version": f"v{__version__}",
-    "settings_window.about_desc": "Cross-platform clipboard sharing\nbetween Windows, macOS, and Linux.",
+    "settings_window.about_desc": "Cross-platform clipboard sharing\nbetween Windows, macOS, and Linux.",  # noqa: E501
     "settings_window.about_features": [
         "Automatic peer discovery on LAN (mDNS/Bonjour)",
         "TLS 1.3 encrypted transport + certificate pinning",
@@ -590,7 +590,7 @@ _EN: dict[str, str] = {
         "8-digit pairing code, rate-limited",
         "File sharing between devices",
     ],
-    "settings_window.show_data_folder": "\U0001F4C2  Show Data Folder",
+    "settings_window.show_data_folder": "\U0001f4c2  Show Data Folder",
     "settings_window.no_logs": "No log entries yet.",
     # Remote access
     "web.page_title": "ClipSync Web",
@@ -621,14 +621,14 @@ _EN: dict[str, str] = {
     "web.pinned": "Pinned",
     "web.unpinned": "Unpinned",
     "web.unpin": "Unpin",
-    "settings_nav.web_companion": "\U0001F4F1  Remote access",
+    "settings_nav.web_companion": "\U0001f4f1  Remote access",
     "settings_window.web_companion_title": "Remote access",
-    "settings_window.web_companion_desc": "Access your clipboard from any phone browser on the same LAN. Scan QR code to connect.",
+    "settings_window.web_companion_desc": "Access your clipboard from any phone browser on the same LAN. Scan QR code to connect.",  # noqa: E501
     "settings_window.web_enable": "Enable Remote access",
     "settings_window.web_port": "Port",
     "settings_window.web_port_hint": "(1024–65535, restart required)",
     "settings_window.web_history_limit": "History items shown",
-    "settings_window.web_history_limit_desc": "How many recent clipboard items to show on the web page (1–500)",
+    "settings_window.web_history_limit_desc": "How many recent clipboard items to show on the web page (1–500)",  # noqa: E501
     "settings_window.web_token": "Token",
     "settings_window.web_token_regenerate": "Regenerate",
     "settings_window.web_token_clear": "Clear",
@@ -638,17 +638,16 @@ _EN: dict[str, str] = {
     "settings_window.web_local_url": "Local URL",
     "settings_window.save_web": "Save Web Settings",
     "settings_window.web_saved": "Remote access settings saved.",
-    "settings_window.web_restart_note": "需重启生效 / Restart required — remote access will start after restarting ClipSync.",
     "settings_window.web_token_none_hint": "(no token — enable and save to generate)",
     "settings_window.web_qr_unavailable": "(QR unavailable)",
-    "settings_window.password_change_confirm": "A new pre-shared password was entered.\n\nYour private key (device identity) will be re-encrypted with the new password.\n\nContinue?",
+    "settings_window.password_change_confirm": "A new pre-shared password was entered.\n\nYour private key (device identity) will be re-encrypted with the new password.\n\nContinue?",  # noqa: E501
     "settings_window.ui_backend_label": "UI Mode",
     "settings_window.ui_modern": "Modern  — web-based UI (recommended)",
     "settings_window.ui_classic": "Classic  — native desktop UI",
-    "settings_window.ui_backend_hint": "Switch between modern web UI and classic native UI. Restart required.",
-    "settings_window.ui_backend_restart": "UI mode changed.\n\nRestart ClipSync for the change to take effect.",
+    "settings_window.ui_backend_hint": "Switch between modern web UI and classic native UI. Restart required.",  # noqa: E501
+    "settings_window.ui_backend_restart": "UI mode changed.\n\nRestart ClipSync for the change to take effect.",  # noqa: E501
     "settings_window.translation_title": "Translation",
-    "settings_window.translation_hint": "Optional LibreTranslate-compatible endpoint. Leave empty to use the free anonymous service (source language auto-detection is then best-effort).",
+    "settings_window.translation_hint": "Optional LibreTranslate-compatible endpoint. Leave empty to use the free anonymous service (source language auto-detection is then best-effort).",  # noqa: E501
     "settings_window.translate_url": "Translation service URL",
     "settings_window.translate_url_placeholder": "https://libretranslate.com/translate",
     "settings_window.translate_api_key": "API key",
@@ -663,7 +662,7 @@ _EN: dict[str, str] = {
     "tray.show_web_qr": "Show Web QR Code",
     "web.qr_title": "Scan to Connect",
     "web.send_file_to_phone": "Send file to phone",
-    "web.send_file_to_phone_msg": "Sent to phone: {name}. Open the Files tab on your phone's web page to download it.",
+    "web.send_file_to_phone_msg": "Sent to phone: {name}. Open the Files tab on your phone's web page to download it.",  # noqa: E501
     "web.send_file_to_phone_fail": "Could not copy the file to the phone-visible folder.",
     # Filter categories
     "filter.credit_card": "Credit card numbers",
@@ -674,7 +673,6 @@ _EN: dict[str, str] = {
     # Sensitive-content filter feedback
     "filter.sender_blocked": "Sensitive content was not synced",
     "filter.receiver_note": "Some sensitive content was replaced with [FILTERED]",
-
     # ── Webview UI specific ────────────────────────────────────────
     # History item
     "history.empty_preview": "(empty)",
@@ -775,21 +773,21 @@ _EN: dict[str, str] = {
     "carousel.why_clipsync": "Why ClipSync?",
     "carousel.tagline": "The last clipboard manager you'll ever need",
     "carousel.instant_sync": "Instant Sync",
-    "carousel.instant_sync_desc": "Real-time clipboard sharing across all your devices. Copy on one, paste on any — zero delay.",
+    "carousel.instant_sync_desc": "Real-time clipboard sharing across all your devices. Copy on one, paste on any — zero delay.",  # noqa: E501
     "carousel.e2e_encrypted": "End-to-End Encrypted",
-    "carousel.e2e_encrypted_desc": "TLS 1.3 transport + app-layer encryption with certificate pinning. Your data stays private.",
+    "carousel.e2e_encrypted_desc": "TLS 1.3 transport + app-layer encryption with certificate pinning. Your data stays private.",  # noqa: E501
     "carousel.rich_format": "Rich Format Support",
-    "carousel.rich_format_desc": "Preserves text, HTML, RTF, images, and files. Paste exactly what you copied — formatting intact.",
+    "carousel.rich_format_desc": "Preserves text, HTML, RTF, images, and files. Paste exactly what you copied — formatting intact.",  # noqa: E501
     "carousel.cross_platform": "Cross-Platform",
-    "carousel.cross_platform_desc": "Windows, macOS, and Linux — all work together seamlessly. One app, every desktop.",
+    "carousel.cross_platform_desc": "Windows, macOS, and Linux — all work together seamlessly. One app, every desktop.",  # noqa: E501
     "carousel.web_companion": "Remote access",
-    "carousel.web_companion_desc": "Access your clipboard from any phone browser on the same LAN. Scan QR code to connect instantly.",
+    "carousel.web_companion_desc": "Access your clipboard from any phone browser on the same LAN. Scan QR code to connect instantly.",  # noqa: E501
     "carousel.zero_config": "Zero Configuration",
-    "carousel.zero_config_desc": "Just run it. Auto-discovers devices on your LAN via mDNS/Bonjour. No setup required.",
+    "carousel.zero_config_desc": "Just run it. Auto-discovers devices on your LAN via mDNS/Bonjour. No setup required.",  # noqa: E501
     "carousel.smart_dedup": "Smart Dedup",
-    "carousel.smart_dedup_desc": "SHA256 content hashing with multi-round retry capture. Never lose complex formats from Office or Photoshop.",
+    "carousel.smart_dedup_desc": "SHA256 content hashing with multi-round retry capture. Never lose complex formats from Office or Photoshop.",  # noqa: E501
     "carousel.smart_favorites": "Smart Favorites",
-    "carousel.smart_favorites_desc": "Pin frequently used clips, organize with groups, drag to reorder. Your essential snippets always at hand.",
+    "carousel.smart_favorites_desc": "Pin frequently used clips, organize with groups, drag to reorder. Your essential snippets always at hand.",  # noqa: E501
     # Settings panel (web UI)
     "settings.title": "Settings",
     "settings.appearance": "Appearance",
@@ -816,7 +814,7 @@ _EN: dict[str, str] = {
     "web.upload_peer_offline": "Target device is not connected",
     "web.import_unsupported_format": "Unsupported file format (use .json or .csv)",
     "web.import_invalid_content": "The selected file is not a valid ClipSync export",
-    "web.import_path_not_allowed": "Import is limited to files in your Downloads folder or the ClipSync data directory",
+    "web.import_path_not_allowed": "Import is limited to files in your Downloads folder or the ClipSync data directory",  # noqa: E501
     "web.update_no_release": "No release download is available for this platform ({name})",
     "web.update_server_unreachable": "Could not reach the release server",
     "web.update_no_assets": "The latest release has no downloadable assets",
@@ -839,14 +837,14 @@ _EN: dict[str, str] = {
     "ui.loading": "Loading...",
     "ui.load_failed": "Failed to load data",
     # Nearby chat
-    "nav.nearby_chat": "\U0001F4AC  Nearby Chat",
+    "nav.nearby_chat": "\U0001f4ac  Nearby Chat",
     "chat.title": "Nearby Chat",
     "chat.subtitle": "Chat with devices on your LAN — paired or not.",
     "chat.devices_header": "Devices",
     "chat.sessions_header": "Sessions",
     "chat.paired_tag": "Paired",
     "chat.unpaired_tag": "Unpaired",
-    "chat.empty_no_devices": "No nearby devices found.\nEnable discovery and make sure devices share the same network.",
+    "chat.empty_no_devices": "No nearby devices found.\nEnable discovery and make sure devices share the same network.",  # noqa: E501
     "chat.empty_no_session": "Select a device or a session to start chatting.",
     "chat.status.inviting": "Inviting…",
     "chat.status.pending": "Pending",
@@ -887,7 +885,7 @@ _EN: dict[str, str] = {
     "chat.err_file_too_large": "This file is too large to send via chat.",
     "chat.err_internet_file_cap": "Files over the internet relay are limited to 5 MB.",
     "chat.err_message_too_long": "Message is too long.",
-    "chat.err_send_failed": "Message not delivered — the peer is offline or the connection dropped.",
+    "chat.err_send_failed": "Message not delivered — the peer is offline or the connection dropped.",  # noqa: E501
     "chat.text_failed": "Not delivered",
     "chat.resend": "Resend",
     "chat.err_resend_failed": "Could not resend the message.",
@@ -895,7 +893,6 @@ _EN: dict[str, str] = {
     "chat.notify_invite_msg": "{name} ({fingerprint}) invites you to chat.",
     "chat.notify_message_title": "Nearby Chat",
     "chat.notify_message_msg": "{name}: {text}",
-    "aiconfig.skills_count": "{count} skills",
     "aiconfig.local_skills_count": "{count} skills",
 }
 
@@ -929,9 +926,9 @@ _ZH: dict[str, str] = {
     "device.unpair": "取消配对",
     "device.remove": "移除",
     "device.unpair_confirm_title": "取消配对",
-    "device.unpair_confirm_msg": "取消与 \"{name}\" 的配对？\n\n需要重新配对才能同步。",
+    "device.unpair_confirm_msg": '取消与 "{name}" 的配对？\n\n需要重新配对才能同步。',
     "device.remove_confirm_title": "移除设备",
-    "device.remove_confirm_msg": "将 \"{name}\" 从已知列表中移除？",
+    "device.remove_confirm_msg": '将 "{name}" 从已知列表中移除？',
     "device.test_connection": "测试连接",
     "device.test_success": "连接正常 · {detail}",
     "device.test_failed": "连接失败 · {detail}",
@@ -956,6 +953,9 @@ _ZH: dict[str, str] = {
     "settings.language_hint": "更改将在重新加载页面后生效。",
     "transfer.send_success": "文件发送成功",
     "transfer.send_failed": "文件传输失败",
+    "transfer.eta_seconds": "{seconds} 秒",
+    "transfer.eta_minutes": "{minutes} 分 {seconds} 秒",
+    "transfer.eta_hours": "{hours} 小时 {minutes} 分",
     "transfer.receive_failed": "文件接收失败",
     "transfer.received": "已接收：{name}",
     "transfer.sending_file": "正在发送：{name}",
@@ -997,7 +997,7 @@ _ZH: dict[str, str] = {
     "transfer.no_peers": "没有已连接的设备可以发送。",
     "transfer.error": "传输错误",
     "transfer.phone_title": "发送到手机",
-    "transfer.phone_msg": "手机通过远程访问连接，而非 P2P 直连。\n\n在电脑和手机之间传输文件：\n\n1. 从托盘菜单打开远程访问二维码\n2. 用手机相机扫描二维码\n3. 在网页中上传或下载文件\n\n手机还可以推送文字到你的剪贴板，以及查看剪贴板历史。",
+    "transfer.phone_msg": "手机通过远程访问连接，而非 P2P 直连。\n\n在电脑和手机之间传输文件：\n\n1. 从托盘菜单打开远程访问二维码\n2. 用手机相机扫描二维码\n3. 在网页中上传或下载文件\n\n手机还可以推送文字到你的剪贴板，以及查看剪贴板历史。",  # noqa: E501
     "transfer.phone_action": "查看二维码",
     "transfer.cancelled": "传输已取消",
     "transfer.err_disk": "接收设备磁盘空间不足",
@@ -1012,7 +1012,7 @@ _ZH: dict[str, str] = {
     "tray.send_url": "发送链接到设备",
     "nav_url.title": "发送链接",
     "nav_url.prompt": "输入要发送的链接：",
-    "notify.pairing_request": "设备 \"{name}\" 请求配对 — 代码：{code}",
+    "notify.pairing_request": '设备 "{name}" 请求配对 — 代码：{code}',
     "notify.device_connected": "{name} 已连接",
     "notify.device_disconnected": "{name} 已断开",
     "notify.paired_success": "设备配对成功！",
@@ -1025,25 +1025,21 @@ _ZH: dict[str, str] = {
     "notify.update_rejected_old": "已丢弃更新包：版本不高于当前版本",
     "ui.web_start_failed2": "无法在端口 {port} 启动。可能另一个进程已占用该端口。",
     "ui.web_companion": "远程访问",
-    "ui.web_start_failed": "无法在端口 {port} 启动 远程访问。\n\n可能另一个进程已占用该端口，或服务器绑定失败。\n\n尝试过的端口：{lo} - {hi}",
+    "ui.web_start_failed": "无法在端口 {port} 启动 远程访问。\n\n可能另一个进程已占用该端口，或服务器绑定失败。\n\n尝试过的端口：{lo} - {hi}",  # noqa: E501
     "ui.clipboard_unavailable": "剪贴板不可用",
     "ui.port_in_use": "端口已被占用",
-    "ui.port_in_use_msg": "端口 {port} 已被另一个进程占用。\n\n这通常意味着另一个实例正在运行。\n\n运行以下命令查找并停止它：\n  {find_cmd}\n\nClipSync 即将退出。",
+    "ui.port_in_use_msg": "端口 {port} 已被另一个进程占用。\n\n这通常意味着另一个实例正在运行。\n\n运行以下命令查找并停止它：\n  {find_cmd}\n\nClipSync 即将退出。",  # noqa: E501
     "ui.already_running": "另一个实例已在运行。",
     "ui.send_failed_msg": "发送文件失败：\n",
     "ui.export_failed_msg": "导出日志失败：\n",
-
     "log.exported_title": "已导出",
     "log.exported_msg": "日志已保存到：\n{dest}",
     "log.not_found_title": "未找到",
-    "log.not_found_msg": "未找到日志文件：\n{path}\n\n"
-        "ClipSync 可能运行时间过短，尚未生成日志。",
+    "log.not_found_msg": "未找到日志文件：\n{path}\n\nClipSync 可能运行时间过短，尚未生成日志。",
     "log.permission_error_msg": "写入时权限不足：\n{dest}",
-
     "ui.error_title": "错误",
     "notify.device_connected_title": "设备已连接",
     "notify.device_disconnected_title": "设备已断开",
-
     # File type labels (dashboard history cards)
     "history.type_file": "文件",
     "history.type_url": "链接",
@@ -1059,15 +1055,13 @@ _ZH: dict[str, str] = {
     "encryption.password_title": "加密密码",
     "encryption.password_prompt": "请输入预共享加密密码：",
     "encryption.wrong_password_title": "密码错误",
-    "encryption.wrong_password_msg": "你输入的加密密码不正确。\n\n没有正确的密码，ClipSync 无法启动，因为你的设备身份（私钥）是用它加密的。\n\n应用即将退出。",
-    "encryption.password_required_msg": "启动 ClipSync 需要加密密码。\n\n你的设备身份（私钥）是用它加密的。\n\n应用即将退出。",
+    "encryption.wrong_password_msg": "你输入的加密密码不正确。\n\n没有正确的密码，ClipSync 无法启动，因为你的设备身份（私钥）是用它加密的。\n\n应用即将退出。",  # noqa: E501
+    "encryption.password_required_msg": "启动 ClipSync 需要加密密码。\n\n你的设备身份（私钥）是用它加密的。\n\n应用即将退出。",  # noqa: E501
     "notify.sync_skipped": "已跳过同步",
-    "notify.oversize": "剪贴板内容过大无法同步：{size:.1f} MB（上限：{limit} MB）",
-
     "ui.app_name": "剪贴同步",
-    "ui.app_title": "\U0001F4CB  剪贴同步",
+    "ui.app_title": "\U0001f4cb  剪贴同步",
     "hotkey.failed_title": "全局快捷键不可用",
-    "hotkey.failed_msg": "全局快捷键启动失败。\n\n在 macOS 上，请在：\n系统设置 → 隐私与安全 → 辅助功能\n中允许 ClipSync。",
+    "hotkey.failed_msg": "全局快捷键启动失败。\n\n在 macOS 上，请在：\n系统设置 → 隐私与安全 → 辅助功能\n中允许 ClipSync。",  # noqa: E501
     "ui.theme_dark": "☾  深色",
     "ui.theme_light": "☀  浅色",
     "ui.overview": "概览",
@@ -1130,18 +1124,18 @@ _ZH: dict[str, str] = {
     "ui.ok": "确定",
     "ui.yes": "是",
     "ui.no": "否",
-    "nav.overview": "\U0001F3E0  概览",
-    "nav.devices": "\U0001F4F1  设备",
-    "nav.history": "\U0001F4CB  历史记录",
-    "nav.transfers": "\U0001F4E4  文件传输",
-    "nav.web_companion": "\U0001F4F1  手机",
+    "nav.overview": "\U0001f3e0  概览",
+    "nav.devices": "\U0001f4f1  设备",
+    "nav.history": "\U0001f4cb  历史记录",
+    "nav.transfers": "\U0001f4e4  文件传输",
+    "nav.web_companion": "\U0001f4f1  手机",
     "nav.settings": "⚙  设置",
-    "settings_nav.network": "\U0001F310  网络",
-    "settings_nav.filter": "\U0001F6E1  内容过滤",
-    "settings_nav.security": "\U0001F512  安全",
-    "settings_nav.appearance": "\U0001F3A8  外观",
+    "settings_nav.network": "\U0001f310  网络",
+    "settings_nav.filter": "\U0001f6e1  内容过滤",
+    "settings_nav.security": "\U0001f512  安全",
+    "settings_nav.appearance": "\U0001f3a8  外观",
     "settings_nav.advanced": "⚙  高级",
-    "settings_nav.logs": "\U0001F4C4  日志",
+    "settings_nav.logs": "\U0001f4c4  日志",
     "settings_nav.about": "ℹ️  关于",
     "footer.ready": "就绪",
     "footer.copied": "已复制到剪贴板",
@@ -1150,7 +1144,7 @@ _ZH: dict[str, str] = {
     "footer.paired": "设备配对成功",
     "footer.settings_saved": "安全设置已保存。重启后生效。",
     "footer.advanced_saved": "高级设置已保存",
-    "empty.no_devices": "正在搜索局域网设备...\n\n运行 ClipSync 的设备将显示在这里。\n请确保它们在同一网络中。",
+    "empty.no_devices": "正在搜索局域网设备...\n\n运行 ClipSync 的设备将显示在这里。\n请确保它们在同一网络中。",  # noqa: E501
     "empty.no_history": "暂无剪贴板历史记录。\n复制的内容将显示在这里。",
     "empty.no_results": "未找到 '{query}'",
     "empty.no_transfers": "没有进行中的传输。",
@@ -1197,8 +1191,8 @@ _ZH: dict[str, str] = {
     "security.password_set": "密码已设置（存储哈希）",
     "security.no_password": "未设置密码",
     "security.cert_changed_title": "安全警告",
-    "security.cert_changed_message": "设备 \"{name}\" 的证书已变更！\n\n这可能表明存在中间人攻击。\n为保障安全，连接已被拒绝。",
-    "security.cert_changed_startup": "以下设备的证书已变更：{names}\n\n为保障安全，已跳过这些设备。\n请检查网络环境，必要时重新配对。\n\n这可能表明存在中间人攻击。",
+    "security.cert_changed_message": '设备 "{name}" 的证书已变更！\n\n这可能表明存在中间人攻击。\n为保障安全，连接已被拒绝。',  # noqa: E501
+    "security.cert_changed_startup": "以下设备的证书已变更：{names}\n\n为保障安全，已跳过这些设备。\n请检查网络环境，必要时重新配对。\n\n这可能表明存在中间人攻击。",  # noqa: E501
     "dialog.error": "错误",
     "dialog.warning": "警告",
     "dialog.info": "提示",
@@ -1214,10 +1208,10 @@ _ZH: dict[str, str] = {
     "overview.settings": "快捷控制",
     "devices.title": "网络设备",
     "devices.subtitle": "通过 mDNS/Bonjour 自动发现局域网设备",
-    "devices.known": "\U0001F4CB  已知设备",
-    "devices.discovered_section": "\U0001F50D  发现的设备",
+    "devices.known": "\U0001f4cb  已知设备",
+    "devices.discovered_section": "\U0001f50d  发现的设备",
     "devices.pairing_requests": "配对请求",
-    "devices.pairing_instructions": "点击已发现设备上的“连接”。两台设备将显示相同的 8 位验证码。\n确认码匹配后点击“确认”。",
+    "devices.pairing_instructions": "点击已发现设备上的“连接”。两台设备将显示相同的 8 位验证码。\n确认码匹配后点击“确认”。",  # noqa: E501
     "devices.unpair_title": "取消配对",
     "devices.unpair_message": "取消配对此设备？\n\n{name}",
     "devices.forget_title": "移除设备",
@@ -1228,10 +1222,10 @@ _ZH: dict[str, str] = {
     "devices.removed_title": "已移除设备",
     "devices.removed_at": "移除于 {time}",
     "devices.restore_confirm_title": "恢复设备",
-    "devices.restore_confirm_msg": "将设备 \"{name}\" 恢复到已知列表并重新连接？",
+    "devices.restore_confirm_msg": '将设备 "{name}" 恢复到已知列表并重新连接？',
     "devices.restored_toast": "已恢复 {name}",
     "devices.purge_confirm_title": "彻底删除",
-    "devices.purge_confirm_msg": "彻底删除 \"{name}\"？此操作不可撤销。",
+    "devices.purge_confirm_msg": '彻底删除 "{name}"？此操作不可撤销。',
     "devices.purged_toast": "已删除 {name}",
     "devices.status_connected": "已连接",
     "devices.status_paired_offline": "已配对 · 离线",
@@ -1240,7 +1234,6 @@ _ZH: dict[str, str] = {
     "devices.sas_verify_hint": "确认前，请与对方设备上显示的代码核对一致。",
     "pairing.guidance": "请先在两台设备上核对此验证码一致，再点击接受",
     "pairing.verify_title": "核对验证码",
-    "pairing.verify_message": "请确认另一台设备上也显示相同的验证码：\n\n{code}\n\n一致后点击“确认”。",
     "pairing.verify_input_prompt": "请输入另一台设备上显示的 8 位验证码：",
     "pairing.code_mismatch": "验证码不匹配，配对已取消。",
     "pairing.accepted": "已与 {name} 配对",
@@ -1257,13 +1250,10 @@ _ZH: dict[str, str] = {
     "pairing.notify.unpaired_by_peer": "对方已取消配对",
     "pairing.notify.unpaired_by_peer_msg": "{name} 已取消与你的配对。",
     "pairing.notify.repair_prompt": "对方请求重新配对",
-    "pairing.notify.repair_prompt_msg": "设备 {name} 已取消与你的配对。是否重新配对？",
     "pairing.notify.completed": "配对完成",
-    "pairing.notify.disconnected": "配对未完成 · 连接已断开",
-    "pairing.notify.verify_failed": "验证码不一致",
-    "pairing.confirm_pair": "确认配对",
+    "netpair.decrypt_failed": "互联网同步：无法解密对方发来的数据 — 请确认两台设备使用相同的加密密码。",  # noqa: E501
     "cert.changed_title": "设备身份变更",
-    "cert.changed_message": "设备“{name}”的证书已变更（可能已重装或重置）。\n\n这是您信任的设备吗？",
+    "cert.changed_message": "设备“{name}”的证书已变更（可能已重装或重置）。\n\n这是您信任的设备吗？",  # noqa: E501
     "cert.trust_again": "重新信任",
     "cert.keep_unpaired": "保持不配对",
     "history.title": "剪贴板历史记录",
@@ -1302,17 +1292,19 @@ _ZH: dict[str, str] = {
     "tray.update_install_prompt": "现在下载新版本吗？",
     "tray.update_install_failed": "安装更新失败",
     "tray.update_ready_prompt": (
-        "ClipSync {version} 已就绪。请退出应用，然后用下方压缩包替换旧版本：\n{path}"),
+        "ClipSync {version} 已就绪。请退出应用，然后用下方压缩包替换旧版本：\n{path}"
+    ),
     "tray.up_to_date": "ClipSync 已是最新版本",
     "tray.update_failed": "检查更新失败",
     "settings_window.auto_update_check": "自动检查更新",
     "settings_window.auto_update_check_hint": (
-        "定期检查 GitHub 新版本（约每 6 小时一次）。关闭后不再发起任何后台更新请求。"),
+        "定期检查 GitHub 新版本（约每 6 小时一次）。关闭后不再发起任何后台更新请求。"
+    ),
     "settings_window.update_downloading_progress": "正在下载… {pct}%",
     "settings_window.update_ready": "新版本 {version} 已就绪",
     "settings_window.update_ready_hint": (
-        "请退出当前应用，然后用下方文件替换旧版本。"
-        "剪贴板历史与设备仍保留在本机。"),
+        "请退出当前应用，然后用下方文件替换旧版本。剪贴板历史与设备仍保留在本机。"
+    ),
     "settings_window.update_open_folder": "打开所在文件夹",
     "tray.about": "关于 ClipSync",
     "tray.quit": "退出",
@@ -1332,14 +1324,14 @@ _ZH: dict[str, str] = {
     "settings_window.relay_hint": "留空仅局域网同步。设置中继服务器地址以跨网络同步。",
     "settings_window.current_relay_broker": "当前中继服务器",
     "settings_window.relay_free_label": "匿名免费中继——每行一个地址(无需账号密码)",
-    "settings_window.relay_free_hint": "兜底通道：私有中继不可达时启用，并作为镜像让落在不同 broker 的设备仍能互通。公共中继接受任何客户端，也绝不会拿到你的 broker 密码。修改立即生效。",
+    "settings_window.relay_free_hint": "兜底通道：私有中继不可达时启用，并作为镜像让落在不同 broker 的设备仍能互通。公共中继接受任何客户端，也绝不会拿到你的 broker 密码。修改立即生效。",  # noqa: E501
     "settings_window.relay_private_label": "需登录的私有中继——每行一个地址",
-    "settings_window.relay_private_hint": "主通道：剪贴板数据优先走这些端点，用下方用户名/密码登录。已预置一个需登录的中继，可按需修改。留空则只使用上面的免费中继。",
+    "settings_window.relay_private_hint": "主通道：剪贴板数据优先走这些端点，用下方用户名/密码登录。已预置一个需登录的中继，可按需修改。留空则只使用上面的免费中继。",  # noqa: E501
     "settings_window.relay_username_label": "Broker 用户名(可选)",
     "settings_window.relay_password_label": "Broker 密码",
     "settings_window.relay_password_placeholder": "未设置",
     "settings_window.relay_password_clear": "清除",
-    "settings_window.relay_password_hint": "用于连接私有中继的鉴权；公共匿名中继无需设置密码。点击状态旁的按钮即可设置或修改。",
+    "settings_window.relay_password_hint": "用于连接私有中继的鉴权；公共匿名中继无需设置密码。点击状态旁的按钮即可设置或修改。",  # noqa: E501
     "settings_window.relay_pw_status_set": "已设置",
     "settings_window.relay_pw_status_unset": "未设置",
     "settings_window.relay_pw_set_btn": "设置密码",
@@ -1372,10 +1364,10 @@ _ZH: dict[str, str] = {
     ],
     "settings_window.enable_encryption": "启用加密",
     "settings_window.encryption_title": "加密",
-    "settings_window.password_hint": "在两台设备上设置相同密码以增强应用层加密。\n留空则自动从设备证书派生密钥——注意：\n不设密码时，存储的私钥仅被混淆，并非真正加密。",
-    "settings_window.encryption_hint": "传输始终通过 TLS 1.3 加密。这个可选的预共享密码再叠加一层:即使设备已配对,也必须知道密码才能解密你的内容。",
+    "settings_window.password_hint": "在两台设备上设置相同密码以增强应用层加密。\n留空则自动从设备证书派生密钥——注意：\n不设密码时，存储的私钥仅被混淆，并非真正加密。",  # noqa: E501
+    "settings_window.encryption_hint": "传输始终通过 TLS 1.3 加密。这个可选的预共享密码再叠加一层:即使设备已配对,也必须知道密码才能解密你的内容。",  # noqa: E501
     "settings_window.auto_start_hint": "登录此电脑时自动启动 ClipSync。",
-    "settings_window.sound_hint": "通知总开关。关闭后不再有任何通知(包括声音)——在某些平台上,有通知就有声音。",
+    "settings_window.sound_hint": "通知总开关。关闭后不再有任何通知(包括声音)——在某些平台上,有通知就有声音。",  # noqa: E501
     "settings_window.password_placeholder": "输入新密码以设置或更改",
     "settings_window.clear_password": "清除",
     "settings_window.password_cleared": "密码已清除。",
@@ -1399,7 +1391,7 @@ _ZH: dict[str, str] = {
     "settings_window.history_max_age_desc": "自动清理超过该天数的未固定历史（0 = 永久保留）",
     "settings_window.val_history_max_age": "历史保留天数必须在 0–36500 范围内",
     "settings_window.plain_text_only": "仅同步纯文本",
-    "settings_window.plain_text_only_desc": "剥离富文本格式（HTML/RTF），其他设备只收到纯文本——图片与文件列表仍会同步",
+    "settings_window.plain_text_only_desc": "剥离富文本格式（HTML/RTF），其他设备只收到纯文本——图片与文件列表仍会同步",  # noqa: E501
     "settings_window.sync_debounce": "同步去抖（秒）",
     "settings_window.sync_debounce_desc": "两次发送同步之间的最小间隔（0.1–5.0）",
     "settings_window.poll_interval": "轮询间隔（秒）",
@@ -1416,14 +1408,14 @@ _ZH: dict[str, str] = {
     "settings_window.log_level": "日志级别",
     "settings_window.enable_notifications": "启用桌面通知",
     "settings_window.save_advanced": "保存高级设置",
-    "settings_window.advanced_saved": "高级设置已保存。\n\n标有“需重启”的设置将在\n重启 ClipSync 后生效。",
+    "settings_window.advanced_saved": "高级设置已保存。\n\n标有“需重启”的设置将在\n重启 ClipSync 后生效。",  # noqa: E501
     "settings_window.danger_zone": "危险区域",
     "settings_window.danger_zone_desc": "重启应用或将所有数据恢复为出厂默认状态。请谨慎操作。",
     "settings_window.restart_app": "重启应用",
     "settings_window.restart_confirm": "确定要重启 ClipSync 吗？\n\n未保存的更改将丢失。",
-    "settings_window.quit_confirm": "确定要退出 ClipSync 吗？\n\n剪贴板同步将停止，重新启动应用后恢复。",
+    "settings_window.quit_confirm": "确定要退出 ClipSync 吗？\n\n剪贴板同步将停止，重新启动应用后恢复。",  # noqa: E501
     "settings_window.factory_reset": "恢复出厂设置",
-    "settings_window.factory_reset_confirm": "此操作将删除 ClipSync 的全部数据，包括设备身份、已配对设备、剪贴板历史和所有设置。\n\n此操作不可撤销。确认继续？",
+    "settings_window.factory_reset_confirm": "此操作将删除 ClipSync 的全部数据，包括设备身份、已配对设备、剪贴板历史和所有设置。\n\n此操作不可撤销。确认继续？",  # noqa: E501
     "settings_window.factory_reset_error": "部分文件无法删除：\n",
     "settings_window.validation_error": "验证错误",
     "settings_window.val_history_entries": "历史条数必须在 10–1000 范围内",
@@ -1445,7 +1437,7 @@ _ZH: dict[str, str] = {
         "8 位配对码，限速保护",
         "设备间文件共享",
     ],
-    "settings_window.show_data_folder": "\U0001F4C2  显示数据文件夹",
+    "settings_window.show_data_folder": "\U0001f4c2  显示数据文件夹",
     "settings_window.no_logs": "暂无日志条目。",
     # Remote access
     "web.page_title": "ClipSync Web",
@@ -1477,7 +1469,7 @@ _ZH: dict[str, str] = {
     "web.unpinned": "已取消固定",
     "web.unpin": "取消固定",
     # Settings — Remote access
-    "settings_nav.web_companion": "\U0001F4F1  远程访问",
+    "settings_nav.web_companion": "\U0001f4f1  远程访问",
     "settings_window.web_companion_title": "远程访问",
     "settings_window.web_companion_desc": "用手机浏览器访问同一局域网的剪贴板。扫码即可连接。",
     "settings_window.web_enable": "启用远程访问",
@@ -1494,17 +1486,16 @@ _ZH: dict[str, str] = {
     "settings_window.web_local_url": "本地链接",
     "settings_window.save_web": "保存 Web 设置",
     "settings_window.web_saved": "远程访问设置已保存。",
-    "settings_window.web_restart_note": "需重启生效 — 重启 ClipSync 后远程访问才会启动。",
     "settings_window.web_token_none_hint": "（无令牌 — 启用并保存后生成）",
     "settings_window.web_qr_unavailable": "（二维码不可用）",
-    "settings_window.password_change_confirm": "已输入新的预共享密码。\n\n你的私钥（设备身份）将使用新密码重新加密。\n\n是否继续？",
+    "settings_window.password_change_confirm": "已输入新的预共享密码。\n\n你的私钥（设备身份）将使用新密码重新加密。\n\n是否继续？",  # noqa: E501
     "settings_window.ui_backend_label": "界面模式",
     "settings_window.ui_modern": "现代  — 基于 Web 的界面（推荐）",
     "settings_window.ui_classic": "经典  — 原生桌面界面",
     "settings_window.ui_backend_hint": "在现代 Web 界面和经典原生界面之间切换。需要重启。",
     "settings_window.ui_backend_restart": "界面模式已更改。\n\n重启 ClipSync 后生效。",
     "settings_window.translation_title": "翻译",
-    "settings_window.translation_hint": "可选：LibreTranslate 兼容的服务地址。留空则使用免费匿名服务（源语言自动检测为尽力而为）。",
+    "settings_window.translation_hint": "可选：LibreTranslate 兼容的服务地址。留空则使用免费匿名服务（源语言自动检测为尽力而为）。",  # noqa: E501
     "settings_window.translate_url": "翻译服务地址",
     "settings_window.translate_url_placeholder": "https://libretranslate.com/translate",
     "settings_window.translate_api_key": "API 密钥",
@@ -1530,7 +1521,6 @@ _ZH: dict[str, str] = {
     # Sensitive-content filter feedback
     "filter.sender_blocked": "敏感内容未同步",
     "filter.receiver_note": "部分敏感内容已被替换为 [FILTERED]",
-
     # ── Webview UI specific ────────────────────────────────────────
     "history.empty_preview": "（空）",
     "history.paste_singular": "次粘贴",
@@ -1630,19 +1620,19 @@ _ZH: dict[str, str] = {
     "carousel.why_clipsync": "为什么选择 ClipSync？",
     "carousel.tagline": "你需要的最后一款剪贴板管理器",
     "carousel.instant_sync": "即时同步",
-    "carousel.instant_sync_desc": "在所有设备间实时共享剪贴板。在一台设备复制，在任意设备粘贴 — 零延迟。",
+    "carousel.instant_sync_desc": "在所有设备间实时共享剪贴板。在一台设备复制，在任意设备粘贴 — 零延迟。",  # noqa: E501
     "carousel.e2e_encrypted": "端到端加密",
-    "carousel.e2e_encrypted_desc": "TLS 1.3 传输 + 应用层加密，搭配证书固定。你的数据始终保持私密。",
+    "carousel.e2e_encrypted_desc": "TLS 1.3 传输 + 应用层加密，搭配证书固定。你的数据始终保持私密。",  # noqa: E501
     "carousel.rich_format": "丰富格式支持",
     "carousel.rich_format_desc": "保留文本、HTML、RTF、图片和文件。粘贴时保持原样 — 格式完整。",
     "carousel.cross_platform": "跨平台",
-    "carousel.cross_platform_desc": "Windows、macOS、Linux — 无缝协作。一个应用，覆盖所有桌面系统。",
+    "carousel.cross_platform_desc": "Windows、macOS、Linux — 无缝协作。一个应用，覆盖所有桌面系统。",  # noqa: E501
     "carousel.web_companion": "远程访问",
     "carousel.web_companion_desc": "在同一局域网内，用任意手机浏览器访问剪贴板。扫码即连。",
     "carousel.zero_config": "零配置",
     "carousel.zero_config_desc": "即装即用。通过 mDNS/Bonjour 自动发现局域网设备，无需任何设置。",
     "carousel.smart_dedup": "智能去重",
-    "carousel.smart_dedup_desc": "SHA256 内容哈希 + 多轮重试捕获。绝不丢失 Office 或 Photoshop 的复杂格式。",
+    "carousel.smart_dedup_desc": "SHA256 内容哈希 + 多轮重试捕获。绝不丢失 Office 或 Photoshop 的复杂格式。",  # noqa: E501
     "carousel.smart_favorites": "智能收藏",
     "carousel.smart_favorites_desc": "固定常用片段，用分组管理，拖拽排序。你的常用片段随时可用。",
     # Settings panel (web UI)
@@ -1694,7 +1684,7 @@ _ZH: dict[str, str] = {
     "ui.loading": "加载中...",
     "ui.load_failed": "加载数据失败",
     # 附近聊天
-    "nav.nearby_chat": "\U0001F4AC  附近聊天",
+    "nav.nearby_chat": "\U0001f4ac  附近聊天",
     "chat.title": "附近聊天",
     "chat.subtitle": "与局域网中的设备聊天——无论是否已配对。",
     "chat.devices_header": "附近设备",
@@ -1750,7 +1740,6 @@ _ZH: dict[str, str] = {
     "chat.notify_invite_msg": "{name}（{fingerprint}）邀请你聊天。",
     "chat.notify_message_title": "附近聊天",
     "chat.notify_message_msg": "{name}：{text}",
-    "aiconfig.skills_count": "{count} 个技能",
     "aiconfig.local_skills_count": "{count} 个技能",
 }
 
@@ -1793,10 +1782,7 @@ class LocaleManager:
     def active(self, locale: str) -> None:
         # Normalize case: "zh-cn" → "zh-CN", "en-us" → "en-US"
         parts = locale.split("-", 1)
-        if len(parts) == 2:
-            normalized = f"{parts[0].lower()}-{parts[1].upper()}"
-        else:
-            normalized = locale.lower()
+        normalized = f"{parts[0].lower()}-{parts[1].upper()}" if len(parts) == 2 else locale.lower()
         if normalized not in LOCALES and locale not in LOCALES:
             logger.warning("Unknown locale '%s', falling back to '%s'", locale, DEFAULT_LOCALE)
             normalized = DEFAULT_LOCALE
@@ -1839,16 +1825,11 @@ def set_locale(locale: str) -> None:
     _locale_mgr.active = locale
 
 
-def get_locale() -> str:
-    """Return the currently active locale code."""
-    return _locale_mgr.active
-
-
 def available_locales() -> list[str]:
     """Return list of available locale codes."""
     return _locale_mgr.available
 
 
-def T(key: str, **fmt: Any) -> str:
+def T(key: str, **fmt: Any) -> str:  # noqa: N802
     """Translate a key into the current locale. Usage: T('key.name', name='foo')."""
     return _locale_mgr.t(key, **fmt)

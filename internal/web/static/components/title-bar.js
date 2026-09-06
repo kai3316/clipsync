@@ -75,7 +75,8 @@
             ' v-if="searchInput"' +
             ' class="title-bar__search-clear"' +
             ' @click="clearSearch"' +
-            ' :title="t(\'ui.cancel\')"' +
+            ' :title="t(\'favorites.clear_search\')"' +
+            ' :aria-label="t(\'favorites.clear_search\')"' +
           '>&#10006;&#65039;</button>' +
         '</div>' +
         '<div class="title-bar__actions" style="-webkit-app-region:no-drag">' +

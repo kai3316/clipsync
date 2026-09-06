@@ -15,7 +15,7 @@ the desktop connect-first logic (see ``src/main.py:_chat_start_session``).
 import json
 import logging
 
-from internal.sync.nearby_chat import ChatFileTooLarge
+from internal.sync.nearby_chat import ChatFileTooLargeError
 
 logger = logging.getLogger(__name__)
 
@@ -74,6 +74,7 @@ def _require_fields(data, *fields) -> str | None:
 
 
 # ── Reads ──────────────────────────────────────────────────────────
+
 
 def get_chat_devices(get_devices_cb):
     """GET /api/chat/devices → {devices: [...]}.
@@ -147,6 +148,7 @@ def find_saved_path(chat_mgr, transfer_id: str) -> str | None:
 
 
 # ── Actions ────────────────────────────────────────────────────────
+
 
 def invite(chat_mgr, body, chat_start_session):
     """POST /api/chat/invite {peer_id, peer_name} → {session_id}.
@@ -285,7 +287,7 @@ def send_file(chat_mgr, body, send_fn_for_peer):
     send_fn = _send_fn_for(chat_mgr, session_id, send_fn_for_peer)
     try:
         transfer_id = chat_mgr.send_file(session_id, file_path, send_fn)
-    except ChatFileTooLarge:
+    except ChatFileTooLargeError:
         # The peer is internet-only and the file exceeds the relay cap; tell
         # the UI so it can show a specific message instead of a generic one.
         return {"ok": False, "error": "internet_file_cap"}, 400

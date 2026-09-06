@@ -33,10 +33,10 @@ def _html_to_plain_text(data: bytes) -> bytes:
     """Reduce an HTML payload to its visible text (best effort)."""
     import html as _html
     import re
+
     text = data.decode("utf-8", errors="replace")
     # Drop style/script blocks with their content, then remaining tags.
-    text = re.sub(r"<(style|script)[^>]*>.*?</\1>", "", text,
-                  flags=re.DOTALL | re.IGNORECASE)
+    text = re.sub(r"<(style|script)[^>]*>.*?</\1>", "", text, flags=re.DOTALL | re.IGNORECASE)
     text = re.sub(r"<[^>]*>", " ", text)
     text = _html.unescape(text)
     return re.sub(r"[ \t]+", " ", text).strip().encode("utf-8")
@@ -58,10 +58,7 @@ def strip_rich_formats(content: ClipboardContent) -> ClipboardContent:
     its clipboard, so message and written content stay identical and the
     receiver's read-back dedup cannot echo the stripped clip back.
     """
-    types = {
-        t: d for t, d in content.types.items()
-        if t not in (ContentType.HTML, ContentType.RTF)
-    }
+    types = {t: d for t, d in content.types.items() if t not in (ContentType.HTML, ContentType.RTF)}
     if ContentType.TEXT not in types:
         html_data = content.types.get(ContentType.HTML)
         if html_data is not None:
@@ -118,6 +115,7 @@ class ClipboardMonitor(ABC):
             return None
         try:
             from internal.clipboard.source_tracker import get_active_app_info
+
             return get_active_app_info()
         except Exception:
             return None

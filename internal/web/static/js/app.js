@@ -82,40 +82,41 @@
       } catch (e) { /* ignore — normal tabs / blocked resize */ }
 
       // Track layout width for sidebar vs horizontal tabs
-      var mq = window.matchMedia('(min-width: 768px)');
-      this.isWideLayout = mq.matches;
-      mq.addEventListener('change', function (e) {
+      this._mq = window.matchMedia('(min-width: 768px)');
+      this.isWideLayout = this._mq.matches;
+      this._onMqChange = function (e) {
         self.isWideLayout = e.matches;
-      });
+      };
+      this._mq.addEventListener('change', this._onMqChange);
 
       // Prevent browser native context menu — we use our own.  Editable
       // fields and anything explicitly marked .selectable keep the native
       // menu so right-click copy/paste still works there.
-      document.addEventListener('contextmenu', function (e) {
-        if (isEditable(e.target)) return;
-        if (e.target && e.target.closest && e.target.closest('.selectable')) return;
-        e.preventDefault();
-      });
-
-      // Prevent middle-click auto-scroll and stray text selection so the
-      // app never behaves like a browsable document.  Form fields stay
-      // fully editable and selectable.
       function isEditable(el) {
         return !!(el && el.closest && el.closest('input, textarea, [contenteditable]'));
       }
-      document.addEventListener('mousedown', function (e) {
+      this._onContextMenu = function (e) {
+        if (isEditable(e.target)) return;
+        if (e.target && e.target.closest && e.target.closest('.selectable')) return;
+        e.preventDefault();
+      };
+      this._onMouseDown = function (e) {
+        // Prevent middle-click auto-scroll on non-editable regions.
         if (e.button === 1 && !isEditable(e.target)) {
           e.preventDefault();
         }
-      });
-      document.addEventListener('selectstart', function (e) {
+      };
+      this._onSelectStart = function (e) {
         // Allow text selection in form fields and anything explicitly marked
         // .selectable (clip preview text is selectable on purpose — it's a
         // clipboard manager, so dragging out part of a clip must work).
         if (isEditable(e.target)) return;
         if (e.target && e.target.closest && e.target.closest('.selectable')) return;
         e.preventDefault();
-      });
+      };
+      document.addEventListener('contextmenu', this._onContextMenu);
+      document.addEventListener('mousedown', this._onMouseDown);
+      document.addEventListener('selectstart', this._onSelectStart);
 
       // Parse server URL and token from the current page
       var url = window.location.origin;
@@ -348,6 +349,18 @@
       if (this._themeQuery && this._onThemeChange) {
         this._themeQuery.removeEventListener('change', this._onThemeChange);
       }
+      if (this._mq && this._onMqChange) {
+        this._mq.removeEventListener('change', this._onMqChange);
+      }
+      if (this._onContextMenu) {
+        document.removeEventListener('contextmenu', this._onContextMenu);
+      }
+      if (this._onMouseDown) {
+        document.removeEventListener('mousedown', this._onMouseDown);
+      }
+      if (this._onSelectStart) {
+        document.removeEventListener('selectstart', this._onSelectStart);
+      }
     },
 
     methods: {
@@ -414,7 +427,7 @@
               if (store.history.length === 0 && store.favorites.length === 0) {
                 store.loadError = true;
               }
-              store.showToast(self.t('ui.load_failed'), 3000);
+              store.showToast(self.t('ui.load_failed'), 3000, 'error');
             })
             .finally(function () {
               clearTimeout(failsafeTimer);
@@ -487,10 +500,18 @@
       },
 
       loadDevices: function () {
+        // Same race the device panel's refresh() guards against: the
+        // devices_updated broadcast is edge-triggered on the server, so if a
+        // push lands while this GET is in flight, writing our older snapshot
+        // over it leaves the list wrong until the *next* real change — which
+        // may never come.  Record the tick at request time and drop our own
+        // result if it moved.
+        var startTick = store.devicesMutationTick;
         return ClipsyncAPI.getDevices().then(function (res) {
           store.devicesLoadFailed = false;
-          store.devices.splice(0, store.devices.length);
           var devs = (res && res.devices) ? res.devices : [];
+          if (store.devicesMutationTick !== startTick) return devs;
+          store.devices.splice(0, store.devices.length);
           for (var i = 0; i < devs.length; i++) {
             store.devices.push(devs[i]);
           }
@@ -742,30 +763,39 @@
 
       /**
        * Delete the keyboard-focused item. Mirrors history-item's delete:
-       * shared removal helper + pagination-cursor shrink, then keep the
-       * cursor clamped to the shorter list so continued Del presses walk
-       * down without skipping an entry.
+       * confirm first, then the shared removal helper + pagination-cursor
+       * shrink, then keep the cursor clamped to the shorter list so continued
+       * Del presses walk down without skipping an entry.
        * @param {Object} item
        */
       _deleteKbdItem: function (item) {
         var self = this;
         if (!item || item.entry_id === undefined || item.entry_id === null) return;
         var eid = item.entry_id;
-        ClipsyncAPI.deleteItem(eid).then(function (res) {
-          if (res && res.ok !== false) {
-            var removed = store.removeHistoryItems([eid]);
-            if (removed > 0) {
-              store.historyOffset = Math.max(0, store.historyOffset - 1);
-            }
-            var len = store.filteredHistory().length;
-            if (len > 0 && store.kbdIndex > len - 1) {
-              store.kbdIndex = len - 1;
-            }
-            store.showToast(self.t('history.deleted_toast'), 1200);
-          }
-        }).catch(function () {
-          store.showToast(self.t('history.delete_failed'), 2000);
-        });
+        // Confirm, like every other delete path.  history-item.js already
+        // claims "the inline trash and the Delete/Backspace key are
+        // permanent... every other delete path confirms first" — but this,
+        // the Delete/Backspace key path, was the one that didn't, so a
+        // mis-aimed keypress wiped a row with no way back.
+        store.confirm(self.t('history.delete_title'), self.t('history.delete_confirm'))
+          .then(function () {
+            return ClipsyncAPI.deleteItem(eid).then(function (res) {
+              if (res && res.ok !== false) {
+                var removed = store.removeHistoryItems([eid]);
+                if (removed > 0) {
+                  store.historyOffset = Math.max(0, store.historyOffset - 1);
+                }
+                var len = store.filteredHistory().length;
+                if (len > 0 && store.kbdIndex > len - 1) {
+                  store.kbdIndex = len - 1;
+                }
+                store.showToast(self.t('history.deleted_toast'), 1200);
+              }
+            }).catch(function () {
+              store.showToast(self.t('history.delete_failed'), 2000);
+            });
+          })
+          .catch(function () {});  // cancelled — nothing to report
       },
     },
   });

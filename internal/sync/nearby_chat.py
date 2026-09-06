@@ -30,21 +30,25 @@ thread, or a transfer thread) -- UI layers MUST marshal onto their own main
 loop (Tk: ``root.after(0, ...)``).
 """
 
+import contextlib
 import logging
 import math
 import threading
 import time
 import uuid
 from collections import deque
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
+from internal.fsutil import safe_remove as _safe_remove
 from internal.protocol.codec import (
     CHAT_MSG_TYPES,
     encode_binary_chunk,
     encode_frame,
 )
+
 # Same-package reuse: received-file names MUST be sanitized exactly like
 # clipboard file transfers, so share the one implementation.
 from internal.sync.file_transfer import MAX_FILE_SIZE, _sanitize_file_name
@@ -54,7 +58,7 @@ logger = logging.getLogger(__name__)
 SendFn = Callable[[bytes], Any]
 
 
-class ChatFileTooLarge(Exception):
+class ChatFileTooLargeError(Exception):
     """A file was refused because it exceeds the internet-relay payload cap."""
 
 
@@ -62,31 +66,21 @@ def _default_receive_dir() -> Path:
     return Path.home() / "Downloads" / "ClipSync" / "Chat"
 
 
-def _safe_remove(path: Path | None) -> None:
-    """Best-effort removal of a temp file; never raises."""
-    if path is None:
-        return
-    try:
-        path.unlink(missing_ok=True)
-    except OSError:
-        logger.debug("Could not remove temp file %s", path, exc_info=True)
-
-
 @dataclass
 class ChatEntry:
     """One row in a conversation: text, file card, or system notice."""
 
     entry_id: str
-    kind: str                      # "text" | "file" | "system"
+    kind: str  # "text" | "file" | "system"
     outgoing: bool
     ts: float
     text: str = ""
-    text_key: str = ""             # i18n key for system entries (never literals)
+    text_key: str = ""  # i18n key for system entries (never literals)
     fmt: dict = field(default_factory=dict)
     file_name: str = ""
     file_size: int = 0
     mime: str = ""
-    status: str = "pending"        # pending|await_accept|sending|done|failed|declined|cancelled
+    status: str = "pending"  # pending|await_accept|sending|done|failed|declined|cancelled
     fraction: float = 0.0
     saved_path: str = ""
     transfer_id: str = ""
@@ -121,13 +115,13 @@ class ChatEntry:
 class ChatSession:
     """Conversation state for one remote peer (at most one live session)."""
 
-    session_id: str                # 16-hex, minted by the inviter, echoed by the acceptor
+    session_id: str  # 16-hex, minted by the inviter, echoed by the acceptor
     peer_id: str
     peer_name: str
-    fingerprint_short: str         # <=32 chars, displayed for out-of-band comparison
-    status: str                    # inviting|invited|active|declined_remote|closed
+    fingerprint_short: str  # <=32 chars, displayed for out-of-band comparison
+    status: str  # inviting|invited|active|declined_remote|closed
     created_ts: float
-    last_seen_mono: float = 0.0    # time.monotonic() of last inbound frame
+    last_seen_mono: float = 0.0  # time.monotonic() of last inbound frame
     last_activity_ts: float = 0.0
     unread: int = 0
     online: bool = True
@@ -192,14 +186,14 @@ class ChatManager:
     """
 
     # ---- anti-abuse caps ---------------------------------------------------
-    INVITE_RATE_LIMIT = 5             # invites per peer (each direction) per window
+    INVITE_RATE_LIMIT = 5  # invites per peer (each direction) per window
     INVITE_RATE_WINDOW = 300.0
-    TEXT_RATE_LIMIT = 30              # texts per active session per window
+    TEXT_RATE_LIMIT = 30  # texts per active session per window
     TEXT_RATE_WINDOW = 10.0
-    PENDING_INVITE_CAP = 3            # max simultaneous unanswered incoming invites
+    PENDING_INVITE_CAP = 3  # max simultaneous unanswered incoming invites
     MAX_TEXT_LEN = 16000
     MAX_GREETING_LEN = 200
-    MAX_SESSIONS = 8                  # simultaneously live sessions
+    MAX_SESSIONS = 8  # simultaneously live sessions
     # ---- transfer tuning (mirrors FileTransferManager) ----------------------
     CHUNK_SIZE = 256 * 1024
     # Chunks for internet-only peers must fit inside the relay payload cap
@@ -207,20 +201,20 @@ class ChatManager:
     # wire format stays byte-identical for pre-update LAN peers.
     RELAY_CHUNK_SIZE = 224 * 1024
     RELAY_FILE_CAP = 5 * 1024 * 1024  # internet-relay file size cap (bytes)
-    INVITE_ACCEPT_TIMEOUT = 300.0     # sender waits this long for chat_file_accept
+    INVITE_ACCEPT_TIMEOUT = 300.0  # sender waits this long for chat_file_accept
     COMPLETION_WAIT_TIMEOUT = 60.0
-    TRANSFER_STALL_TIMEOUT = 600.0    # no chunk progress this long => fail + remove .part
+    TRANSFER_STALL_TIMEOUT = 600.0  # no chunk progress this long => fail + remove .part
     MAX_CONCURRENT_INCOMING_FILES = 3
     MAX_CONCURRENT_OUTGOING_FILES = 3
     # ---- liveness ------------------------------------------------------------
     PING_INTERVAL = 45.0
-    OFFLINE_AFTER = 150.0             # silent for ~3 intervals => show offline
+    OFFLINE_AFTER = 150.0  # silent for ~3 intervals => show offline
     # ---- typing indicator ------------------------------------------------------
-    TYPING_THROTTLE = 2.0             # same-state frames closer than this: suppressed
-    TYPING_TIMEOUT = 4.0              # receiver clears the indicator after this silence
+    TYPING_THROTTLE = 2.0  # same-state frames closer than this: suppressed
+    TYPING_TIMEOUT = 4.0  # receiver clears the indicator after this silence
 
-    MESSAGE_HISTORY_MAX = 500         # entries kept per session (oldest trimmed)
-    SEND_FN_CACHE_MAX = 32            # most-recent peers kept in _latest_send_fn
+    MESSAGE_HISTORY_MAX = 500  # entries kept per session (oldest trimmed)
+    SEND_FN_CACHE_MAX = 32  # most-recent peers kept in _latest_send_fn
 
     def __init__(self, device_id: str, device_name: str, receive_dir: str = ""):
         self._device_id = device_id
@@ -228,16 +222,16 @@ class ChatManager:
         self._own_fp = ""
 
         self._lock = threading.RLock()
-        self._sessions: dict[str, ChatSession] = {}          # peer_id -> session
+        self._sessions: dict[str, ChatSession] = {}  # peer_id -> session
         self._session_by_sid: dict[str, ChatSession] = {}
-        self._invite_times_in: dict[str, deque] = {}         # peer_id -> mono timestamps
+        self._invite_times_in: dict[str, deque] = {}  # peer_id -> mono timestamps
         self._invite_times_out: dict[str, deque] = {}
-        self._text_times_out: dict[str, deque] = {}          # session_id -> outgoing mono timestamps
-        self._text_times_in: dict[str, deque] = {}           # session_id -> incoming mono timestamps
+        self._text_times_out: dict[str, deque] = {}  # session_id -> outgoing mono timestamps
+        self._text_times_in: dict[str, deque] = {}  # session_id -> incoming mono timestamps
         self._typing_out: dict[str, tuple[bool, float]] = {}  # sid -> (last state, last send mono)
-        self._receives: dict[str, dict] = {}                 # transfer_id -> receive state
-        self._sends: dict[str, dict] = {}                    # transfer_id -> send state
-        self._latest_send_fn: dict[str, SendFn] = {}         # peer_id -> newest send_fn
+        self._receives: dict[str, dict] = {}  # transfer_id -> receive state
+        self._sends: dict[str, dict] = {}  # transfer_id -> send state
+        self._latest_send_fn: dict[str, SendFn] = {}  # peer_id -> newest send_fn
         self._receive_dir: Path | None = None
         if receive_dir:
             self.set_receive_dir(receive_dir)
@@ -252,7 +246,9 @@ class ChatManager:
 
         self._heartbeat_stop = threading.Event()
         self._heartbeat_thread = threading.Thread(
-            target=self._heartbeat_loop, daemon=True, name="chat-heartbeat",
+            target=self._heartbeat_loop,
+            daemon=True,
+            name="chat-heartbeat",
         )
         self._heartbeat_thread.start()
 
@@ -309,8 +305,7 @@ class ChatManager:
         except Exception:
             logger.warning("chat callback %s raised", attr, exc_info=True)
 
-    def _send_frame(self, payload: dict, send_fn: SendFn | None,
-                    msg_id: str = "") -> bool:
+    def _send_frame(self, payload: dict, send_fn: SendFn | None, msg_id: str = "") -> bool:
         if send_fn is None:
             return False
         try:
@@ -322,8 +317,7 @@ class ChatManager:
             # ``internet_delivery`` events are keyed by the frame's protocol
             # msg_id, so text sends mint it here and stamp the ChatEntry with
             # the same value (empty → encode_frame auto-generates one).
-            data = encode_frame(payload, msg_id=msg_id,
-                                source_device=self._device_id)
+            data = encode_frame(payload, msg_id=msg_id, source_device=self._device_id)
         except Exception:
             logger.debug("chat: encode failed for %s", payload.get("msg_type"), exc_info=True)
             return False
@@ -343,8 +337,7 @@ class ChatManager:
 
     def _live_session_count(self) -> int:
         return sum(
-            1 for s in self._sessions.values()
-            if s.status in ("inviting", "invited", "active")
+            1 for s in self._sessions.values() if s.status in ("inviting", "invited", "active")
         )
 
     def _resolve_session(self, session_id: str, peer_id: str) -> ChatSession | None:
@@ -414,11 +407,11 @@ class ChatManager:
         terminal = ("done", "failed", "declined", "cancelled")
         now = time.monotonic()
         for state in self._sends.values():
-            if state["session"] is session and state["entry"].status not in terminal:
+            if state["session"] is session and state["entry"].status not in terminal:  # noqa: SIM102
                 if now - state.get("last_progress_mono", 0.0) < self.TRANSFER_STALL_TIMEOUT:
                     return True
         for state in self._receives.values():
-            if state["session"] is session and state["entry"].status not in terminal:
+            if state["session"] is session and state["entry"].status not in terminal:  # noqa: SIM102
                 if now - state.get("last_progress_mono", 0.0) < self.TRANSFER_STALL_TIMEOUT:
                     return True
         return False
@@ -428,7 +421,11 @@ class ChatManager:
     # ------------------------------------------------------------------
 
     def start_session(
-        self, peer_id: str, peer_name: str, fingerprint_short: str, send_fn: SendFn,
+        self,
+        peer_id: str,
+        peer_name: str,
+        fingerprint_short: str,
+        send_fn: SendFn,
     ) -> str | None:
         """Invite *peer_id* to chat.
 
@@ -468,13 +465,16 @@ class ChatManager:
             self._sessions[peer_id] = session
             self._session_by_sid[session.session_id] = session
             self._remember_send_fn(peer_id, send_fn)
-            sent = self._send_frame({
-                "msg_type": "chat_invite",
-                "session_id": session.session_id,
-                "from_name": self._device_name[:80],
-                "fingerprint_short": self.shorten_fingerprint(self._own_fp)[:32],
-                "greeting": "",
-            }, send_fn)
+            sent = self._send_frame(
+                {
+                    "msg_type": "chat_invite",
+                    "session_id": session.session_id,
+                    "from_name": self._device_name[:80],
+                    "fingerprint_short": self.shorten_fingerprint(self._own_fp)[:32],
+                    "greeting": "",
+                },
+                send_fn,
+            )
             refused = False
             if not sent:
                 # The transport refused the invite frame -- tear the session
@@ -504,7 +504,8 @@ class ChatManager:
                 return False
             fn = send_fn or self._latest_send_fn.get(session.peer_id)
             ok = self._send_frame(
-                {"msg_type": "chat_accept", "session_id": session.session_id}, fn,
+                {"msg_type": "chat_accept", "session_id": session.session_id},
+                fn,
             )
             if ok:
                 # Commit the activation only when the accept frame actually
@@ -528,11 +529,14 @@ class ChatManager:
             session.status = "closed"
             session.unread = 0
             fn = send_fn or self._latest_send_fn.get(session.peer_id)
-            self._send_frame({
-                "msg_type": "chat_decline",
-                "session_id": session.session_id,
-                "reason": (reason or "")[:100],
-            }, fn)
+            self._send_frame(
+                {
+                    "msg_type": "chat_decline",
+                    "session_id": session.session_id,
+                    "reason": (reason or "")[:100],
+                },
+                fn,
+            )
         self._fire("_on_sessions_changed")
         return True
 
@@ -586,18 +590,26 @@ class ChatManager:
             # and the relay delivery ledger/events match this exact bubble.
             frame_msg_id = uuid.uuid4().hex
             entry = ChatEntry(
-                entry_id=uuid.uuid4().hex[:16], kind="text", outgoing=True,
-                ts=time.time(), text=text, status="pending",
+                entry_id=uuid.uuid4().hex[:16],
+                kind="text",
+                outgoing=True,
+                ts=time.time(),
+                text=text,
+                status="pending",
                 msg_id=frame_msg_id,
             )
             self._append_entry(session, entry)
-            ok = self._send_frame({
-                "msg_type": "chat_text",
-                "session_id": session.session_id,
-                "text": text,
-                "ts": entry.ts,
-            }, fn, msg_id=frame_msg_id)
-            if not ok:
+            ok = self._send_frame(
+                {
+                    "msg_type": "chat_text",
+                    "session_id": session.session_id,
+                    "text": text,
+                    "ts": entry.ts,
+                },
+                fn,
+                msg_id=frame_msg_id,
+            )
+            if not ok:  # noqa: SIM102
                 # A failed send must not permanently consume a rate-limit slot:
                 # roll back the timestamp we just charged.
                 if dq and dq[-1] == now:
@@ -634,15 +646,17 @@ class ChatManager:
             if session is None or session.status != "active" or not session.online:
                 return False
             prev = self._typing_out.get(session.session_id)
-            if prev is not None and prev[0] == want \
-                    and now - prev[1] < self.TYPING_THROTTLE:
+            if prev is not None and prev[0] == want and now - prev[1] < self.TYPING_THROTTLE:
                 return False
             fn = send_fn or self._latest_send_fn.get(session.peer_id)
-            ok = self._send_frame({
-                "msg_type": "chat_typing",
-                "session_id": session.session_id,
-                "typing": want,
-            }, fn)
+            ok = self._send_frame(
+                {
+                    "msg_type": "chat_typing",
+                    "session_id": session.session_id,
+                    "typing": want,
+                },
+                fn,
+            )
             # Remember failed attempts too: a dead transport must not turn
             # every keystroke into an immediate retry; the next throttle
             # window retries naturally.
@@ -666,10 +680,15 @@ class ChatManager:
             if session is None or session.status != "active" or not session.online:
                 return False
             entry = next(
-                (e for e in session.entries if e.entry_id == entry_id), None,
+                (e for e in session.entries if e.entry_id == entry_id),
+                None,
             )
-            if entry is None or entry.kind != "text" or not entry.outgoing \
-                    or entry.status != "failed":
+            if (
+                entry is None
+                or entry.kind != "text"
+                or not entry.outgoing
+                or entry.status != "failed"
+            ):
                 return False
             dq = self._text_times_out.setdefault(session.session_id, deque())
             self._prune_times(dq, now, self.TEXT_RATE_WINDOW)
@@ -682,12 +701,16 @@ class ChatManager:
             # entry so the fresh delivery receipt matches this bubble.
             frame_msg_id = uuid.uuid4().hex
             entry.msg_id = frame_msg_id
-            ok = self._send_frame({
-                "msg_type": "chat_text",
-                "session_id": session.session_id,
-                "text": entry.text,
-                "ts": entry.ts,
-            }, fn, msg_id=frame_msg_id)
+            ok = self._send_frame(
+                {
+                    "msg_type": "chat_text",
+                    "session_id": session.session_id,
+                    "text": entry.text,
+                    "ts": entry.ts,
+                },
+                fn,
+                msg_id=frame_msg_id,
+            )
             if not ok:
                 # Same rollback rule as send_text: a failed retry must not
                 # permanently consume a rate-limit slot.
@@ -725,23 +748,27 @@ class ChatManager:
             # UI can tell the user why instead of hanging at 0%.
             internet_cap = getattr(fn, "internet_cap", None)
             if internet_cap and size > internet_cap:
-                raise ChatFileTooLarge(
+                raise ChatFileTooLargeError(
                     f"{path.name}: {size} bytes exceeds relay cap {internet_cap}"
                 )
             chunk_size = getattr(fn, "chunk_size", None) or self.CHUNK_SIZE
             # Mirror the incoming cap so a UI bug (or a fast-clicking user)
             # cannot spawn an unbounded number of chunk threads per session.
-            outgoing_inflight = sum(
-                1 for s in self._sends.values() if s["session"] is session
-            )
+            outgoing_inflight = sum(1 for s in self._sends.values() if s["session"] is session)
             if outgoing_inflight >= self.MAX_CONCURRENT_OUTGOING_FILES:
                 logger.info("chat: too many outgoing files for session %s", session_id[:8])
                 return None
             transfer_id = uuid.uuid4().hex
             entry = ChatEntry(
-                entry_id=transfer_id, kind="file", outgoing=True, ts=time.time(),
-                file_name=path.name[:255], file_size=size, mime="",
-                status="await_accept", transfer_id=transfer_id,
+                entry_id=transfer_id,
+                kind="file",
+                outgoing=True,
+                ts=time.time(),
+                file_name=path.name[:255],
+                file_size=size,
+                mime="",
+                status="await_accept",
+                transfer_id=transfer_id,
             )
             self._append_entry(session, entry)
             state = {
@@ -762,23 +789,28 @@ class ChatManager:
                 "last_progress_mono": time.monotonic(),
             }
             self._sends[transfer_id] = state
-            ok = self._send_frame({
-                "msg_type": "chat_file_offer",
-                "session_id": session.session_id,
-                "transfer_id": transfer_id,
-                "file_name": entry.file_name,
-                "file_size": size,
-                "chunk_size": chunk_size,
-                "mime": "",
-            }, fn)
+            ok = self._send_frame(
+                {
+                    "msg_type": "chat_file_offer",
+                    "session_id": session.session_id,
+                    "transfer_id": transfer_id,
+                    "file_name": entry.file_name,
+                    "file_size": size,
+                    "chunk_size": chunk_size,
+                    "mime": "",
+                },
+                fn,
+            )
             if not ok:
                 self._sends.pop(transfer_id, None)
                 entry.status = "failed"
                 return None
             self._remember_send_fn(session.peer_id, fn)
             threading.Thread(
-                target=self._file_sender, args=(transfer_id,),
-                daemon=True, name=f"chat-send-{transfer_id[:8]}",
+                target=self._file_sender,
+                args=(transfer_id,),
+                daemon=True,
+                name=f"chat-send-{transfer_id[:8]}",
             ).start()
         self._fire("_on_message", session_id, entry.to_dict())
         self._fire("_on_sessions_changed")
@@ -829,7 +861,7 @@ class ChatManager:
                 self._receives.pop(transfer_id, None)
                 return False
             try:
-                state["fh"] = open(temp_path, "wb")
+                state["fh"] = open(temp_path, "wb")  # noqa: SIM115
             except OSError:
                 logger.warning("chat: cannot open temp file %s", temp_path, exc_info=True)
                 state["entry"].status = "failed"
@@ -841,11 +873,14 @@ class ChatManager:
             state["chunks_remaining"] = set(range(state["total_chunks"]))
             state["entry"].status = "sending"
             state["last_progress_mono"] = time.monotonic()
-            ok = self._send_frame({
-                "msg_type": "chat_file_accept",
-                "session_id": session_id,
-                "transfer_id": transfer_id,
-            }, fn)
+            ok = self._send_frame(
+                {
+                    "msg_type": "chat_file_accept",
+                    "session_id": session_id,
+                    "transfer_id": transfer_id,
+                },
+                fn,
+            )
             if ok:
                 self._remember_send_fn(session.peer_id, fn)
             else:
@@ -855,10 +890,8 @@ class ChatManager:
                 # stale-transfer sweeper reclaims it minutes later.
                 fh = state.get("fh")
                 if fh is not None:
-                    try:
+                    with contextlib.suppress(OSError):
                         fh.close()
-                    except OSError:
-                        pass
                     state["fh"] = None
                 self._receives.pop(transfer_id, None)
                 _safe_remove(state.get("temp_path"))
@@ -871,7 +904,12 @@ class ChatManager:
                 notify_peer_offline = True
         if notify_peer_offline:
             self._fire(
-                "_on_file_done", session_id, transfer_id, False, "", "peer_offline",
+                "_on_file_done",
+                session_id,
+                transfer_id,
+                False,
+                "",
+                "peer_offline",
             )
         self._fire("_on_sessions_changed")
         return ok
@@ -884,11 +922,14 @@ class ChatManager:
                 return False
             state["entry"].status = "declined"
             fn = send_fn or self._latest_send_fn.get(state["session"].peer_id)
-            self._send_frame({
-                "msg_type": "chat_file_reject",
-                "session_id": session_id,
-                "transfer_id": transfer_id,
-            }, fn)
+            self._send_frame(
+                {
+                    "msg_type": "chat_file_reject",
+                    "session_id": session_id,
+                    "transfer_id": transfer_id,
+                },
+                fn,
+            )
         self._fire("_on_sessions_changed")
         return True
 
@@ -909,27 +950,34 @@ class ChatManager:
                 state["complete_event"].set()
             fh = state.get("fh")
             if fh is not None:
-                try:
+                with contextlib.suppress(OSError):
                     fh.close()
-                except OSError:
-                    pass
                 state["fh"] = None
             _safe_remove(state.get("temp_path"))
             entry.status = "cancelled"
             entry.fraction = 0.0
             self._sends.pop(entry_id, None)
             self._receives.pop(entry_id, None)
-            self._append_entry(session, ChatEntry(
-                entry_id=uuid.uuid4().hex[:16], kind="system", outgoing=False,
-                ts=time.time(), text_key="chat.system.file_cancelled",
-                fmt={"name": entry.file_name},
-            ))
-            self._send_frame({
-                "msg_type": "chat_file_cancel",
-                "session_id": session.session_id,
-                "transfer_id": entry_id,
-            }, self._latest_send_fn.get(session.peer_id))
-            sid, tid, name = session.session_id, entry_id, entry.file_name
+            self._append_entry(
+                session,
+                ChatEntry(
+                    entry_id=uuid.uuid4().hex[:16],
+                    kind="system",
+                    outgoing=False,
+                    ts=time.time(),
+                    text_key="chat.system.file_cancelled",
+                    fmt={"name": entry.file_name},
+                ),
+            )
+            self._send_frame(
+                {
+                    "msg_type": "chat_file_cancel",
+                    "session_id": session.session_id,
+                    "transfer_id": entry_id,
+                },
+                self._latest_send_fn.get(session.peer_id),
+            )
+            sid, tid = session.session_id, entry_id
         self._fire("_on_file_done", sid, tid, False, "", "cancelled")
         self._fire("_on_sessions_changed")
         return True
@@ -967,10 +1015,8 @@ class ChatManager:
             for state in self._receives.values():
                 fh = state.get("fh")
                 if fh is not None:
-                    try:
+                    with contextlib.suppress(OSError):
                         fh.close()
-                    except OSError:
-                        pass
                     state["fh"] = None
             self._receives.clear()
             self._sends.clear()
@@ -982,7 +1028,9 @@ class ChatManager:
     def get_sessions(self) -> list[dict]:
         with self._lock:
             sessions = sorted(
-                self._sessions.values(), key=lambda s: s.last_activity_ts, reverse=True,
+                self._sessions.values(),
+                key=lambda s: s.last_activity_ts,
+                reverse=True,
             )
             return [s.to_dict() for s in sessions]
 
@@ -1018,13 +1066,22 @@ class ChatManager:
         sender_device_id = (sender_device_id or "").strip()
         try:
             if msg_type == "chat_invite":
-                return bool(self._handle_chat_invite(
-                    payload, sender_device_id, sender_fp_short, send_fn,
-                ))
+                return bool(
+                    self._handle_chat_invite(
+                        payload,
+                        sender_device_id,
+                        sender_fp_short,
+                        send_fn,
+                    )
+                )
             elif msg_type == "chat_accept":
-                return bool(self._handle_chat_accept(
-                    payload, sender_device_id, sender_fp_short,
-                ))
+                return bool(
+                    self._handle_chat_accept(
+                        payload,
+                        sender_device_id,
+                        sender_fp_short,
+                    )
+                )
             elif msg_type == "chat_decline":
                 return bool(self._handle_chat_decline(payload, sender_device_id))
             elif msg_type == "chat_close":
@@ -1065,9 +1122,8 @@ class ChatManager:
         # any session teardown this invite triggers, and the outcome flags
         # decide which UI callbacks fire once the ``with`` block exits.
         done_fired: list[tuple[str, str, str]] = []
-        mutual_accepted: tuple[str, str] | None = None   # our invite lost the race
-        duplicate_declined = False                       # ours won / cap auto-decline
-        reaffirm_active = False                          # already chatting; converged
+        mutual_accepted: tuple[str, str] | None = None  # our invite lost the race
+        reaffirm_active = False  # already chatting; converged
         invite: dict | None = None
         with self._lock:
             dq = self._invite_times_in.setdefault(sender_id, deque())
@@ -1076,13 +1132,14 @@ class ChatManager:
                 logger.warning("chat: invite rate limit hit for %s -- ignoring", sender_id[:12])
                 return False
             dq.append(now)
+
             def _clean(s: str) -> str:
                 return "".join(ch for ch in s if ch.isprintable())
 
             mine = self._sessions.get(sender_id)
             # Control chars in peer-supplied strings reach OS notifications
             # and invite dialogs — strip them before use.
-            greeting = _clean(str(payload.get("greeting", "")))[:self.MAX_GREETING_LEN]
+            greeting = _clean(str(payload.get("greeting", "")))[: self.MAX_GREETING_LEN]
             from_name = _clean(str(payload.get("from_name", "")))[:80]
             peer_fp = self.shorten_fingerprint(
                 str(payload.get("fingerprint_short", "") or fp_short or ""),
@@ -1094,17 +1151,25 @@ class ChatManager:
                 if sid < mine.session_id:
                     self._drop_session_locked(mine, done_fired)
                     session = self._open_incoming_locked(
-                        sender_id, from_name or mine.peer_name, peer_fp, sid, send_fn,
+                        sender_id,
+                        from_name or mine.peer_name,
+                        peer_fp,
+                        sid,
+                        send_fn,
                         done_fired,
                     )
                     self._activate_locked(session)
                     mutual_accepted = (session.session_id, session.peer_id)
                 else:
                     # Ours wins; tell them to stop waiting on theirs.
-                    self._send_frame({
-                        "msg_type": "chat_decline", "session_id": sid, "reason": "duplicate",
-                    }, send_fn)
-                    duplicate_declined = True
+                    self._send_frame(
+                        {
+                            "msg_type": "chat_decline",
+                            "session_id": sid,
+                            "reason": "duplicate",
+                        },
+                        send_fn,
+                    )
 
             elif mine is not None and mine.status == "active":
                 # Already chatting.  If this invite carries a NEW session id
@@ -1139,14 +1204,24 @@ class ChatManager:
             else:
                 pending = sum(1 for s in self._sessions.values() if s.status == "invited")
                 if pending >= self.PENDING_INVITE_CAP:
-                    logger.info("chat: pending invite cap reached -- auto-declining %s", sender_id[:12])
-                    self._send_frame({
-                        "msg_type": "chat_decline", "session_id": sid, "reason": "busy",
-                    }, send_fn)
-                    duplicate_declined = True
+                    logger.info(
+                        "chat: pending invite cap reached -- auto-declining %s", sender_id[:12]
+                    )
+                    self._send_frame(
+                        {
+                            "msg_type": "chat_decline",
+                            "session_id": sid,
+                            "reason": "busy",
+                        },
+                        send_fn,
+                    )
                 else:
                     session = self._open_incoming_locked(
-                        sender_id, from_name or sender_id[:12], peer_fp, sid, send_fn,
+                        sender_id,
+                        from_name or sender_id[:12],
+                        peer_fp,
+                        sid,
+                        send_fn,
                         done_fired,
                     )
                     invite = {
@@ -1168,7 +1243,13 @@ class ChatManager:
         return True
 
     def _open_incoming_locked(
-        self, peer_id, peer_name, fp_short, sid, send_fn, done_fired: list,
+        self,
+        peer_id,
+        peer_name,
+        fp_short,
+        sid,
+        send_fn,
+        done_fired: list,
     ) -> ChatSession:
         session = ChatSession(
             session_id=sid,
@@ -1253,10 +1334,16 @@ class ChatManager:
             session.status = "closed"
             session.peer_typing_until_mono = 0.0
             self._fail_transfers_for_session(session, "peer_offline", done_fired)
-            self._append_entry(session, ChatEntry(
-                entry_id=uuid.uuid4().hex[:16], kind="system", outgoing=False,
-                ts=time.time(), text_key="chat.system.session_closed_by_peer",
-            ))
+            self._append_entry(
+                session,
+                ChatEntry(
+                    entry_id=uuid.uuid4().hex[:16],
+                    kind="system",
+                    outgoing=False,
+                    ts=time.time(),
+                    text_key="chat.system.session_closed_by_peer",
+                ),
+            )
             sid = session.session_id
             entry = session.entries[-1]
         for sid_d, tid_d, st_d in done_fired:
@@ -1286,8 +1373,9 @@ class ChatManager:
             # By-peer fallback like ping/close: a re-invite-adopted session
             # (or a lost chat_accept) can leave the sender's session_id out
             # of sync; the text must still land instead of being dropped.
-            session = self._resolve_session(str(payload.get("session_id", "")), sender_id) \
-                or self._sessions.get(sender_id)
+            session = self._resolve_session(
+                str(payload.get("session_id", "")), sender_id
+            ) or self._sessions.get(sender_id)
             if session is None or session.status != "active":
                 logger.debug("chat: text from %s without active session -- dropped", sender_id[:12])
                 return False
@@ -1308,8 +1396,12 @@ class ChatManager:
             if not (now_ts - 3600.0 <= raw_ts <= now_ts + 60.0):
                 raw_ts = now_ts
             entry = ChatEntry(
-                entry_id=uuid.uuid4().hex[:16], kind="text", outgoing=False,
-                ts=raw_ts, text=text, status="done",
+                entry_id=uuid.uuid4().hex[:16],
+                kind="text",
+                outgoing=False,
+                ts=raw_ts,
+                text=text,
+                status="done",
             )
             self._append_entry(session, entry)
             session.unread += 1
@@ -1338,8 +1430,9 @@ class ChatManager:
         with self._lock:
             # By-peer fallback like text/ping/close (re-invite adoption can
             # leave the sender's id out of sync).
-            session = self._resolve_session(str(payload.get("session_id", "")), sender_id) \
-                or self._sessions.get(sender_id)
+            session = self._resolve_session(
+                str(payload.get("session_id", "")), sender_id
+            ) or self._sessions.get(sender_id)
             if session is None or session.status != "active":
                 return False
             was = session.peer_typing_until_mono > now_mono
@@ -1355,8 +1448,9 @@ class ChatManager:
 
     def _handle_chat_ping(self, payload, sender_id, send_fn) -> bool:
         with self._lock:
-            session = self._resolve_session(str(payload.get("session_id", "")), sender_id) \
-                or self._sessions.get(sender_id)
+            session = self._resolve_session(
+                str(payload.get("session_id", "")), sender_id
+            ) or self._sessions.get(sender_id)
             if session is None or session.status != "active":
                 return False
             self._touch_seen(session)
@@ -1386,11 +1480,17 @@ class ChatManager:
         # (``.chat{transfer_id}.part``), so it must be strict hex — the same
         # validation session_id gets — to keep the receive path confined to
         # the receive directory.
-        if not isinstance(transfer_id, str) or len(transfer_id) != 32 \
-                or any(c not in "0123456789abcdef" for c in transfer_id) \
-                or not isinstance(size, int) or isinstance(size, bool) \
-                or size < 0 or size > MAX_FILE_SIZE \
-                or not isinstance(raw_name, str) or not raw_name:
+        if (
+            not isinstance(transfer_id, str)
+            or len(transfer_id) != 32
+            or any(c not in "0123456789abcdef" for c in transfer_id)
+            or not isinstance(size, int)
+            or isinstance(size, bool)
+            or size < 0
+            or size > MAX_FILE_SIZE
+            or not isinstance(raw_name, str)
+            or not raw_name
+        ):
             logger.debug("chat: rejecting malformed file offer from %s", sender_id[:12])
             return False
         with self._lock:
@@ -1405,22 +1505,28 @@ class ChatManager:
                 # refuse the duplicate and leave the live transfer untouched.
                 logger.info("chat: duplicate file offer %s -- dropping", transfer_id[:8])
                 return False
-            inflight = sum(
-                1 for s in self._receives.values() if s["session"] is session
-            )
+            inflight = sum(1 for s in self._receives.values() if s["session"] is session)
             if inflight >= self.MAX_CONCURRENT_INCOMING_FILES:
                 logger.info("chat: too many incoming files from %s -- rejecting", sender_id[:12])
-                self._send_frame({
-                    "msg_type": "chat_file_reject",
-                    "session_id": session.session_id,
-                    "transfer_id": transfer_id,
-                }, self._latest_send_fn.get(session.peer_id))
+                self._send_frame(
+                    {
+                        "msg_type": "chat_file_reject",
+                        "session_id": session.session_id,
+                        "transfer_id": transfer_id,
+                    },
+                    self._latest_send_fn.get(session.peer_id),
+                )
                 return False
             entry = ChatEntry(
-                entry_id=transfer_id, kind="file", outgoing=False, ts=time.time(),
-                file_name=_sanitize_file_name(raw_name), file_size=size,
+                entry_id=transfer_id,
+                kind="file",
+                outgoing=False,
+                ts=time.time(),
+                file_name=_sanitize_file_name(raw_name),
+                file_size=size,
                 mime=str(payload.get("mime", ""))[:100],
-                status="await_accept", transfer_id=transfer_id,
+                status="await_accept",
+                transfer_id=transfer_id,
             )
             # The sender advertises the chunk size it will use; internet-only
             # peers send smaller chunks to fit the relay cap.  Old senders omit
@@ -1484,11 +1590,17 @@ class ChatManager:
             state["accept_event"].set()
             state["complete_event"].set()
             session = state["session"]
-            self._append_entry(session, ChatEntry(
-                entry_id=uuid.uuid4().hex[:16], kind="system", outgoing=False,
-                ts=time.time(), text_key="chat.system.file_declined",
-                fmt={"name": entry.file_name},
-            ))
+            self._append_entry(
+                session,
+                ChatEntry(
+                    entry_id=uuid.uuid4().hex[:16],
+                    kind="system",
+                    outgoing=False,
+                    ts=time.time(),
+                    text_key="chat.system.file_declined",
+                    fmt={"name": entry.file_name},
+                ),
+            )
             sid, tid = session.session_id, transfer_id
             last = session.entries[-1]
         self._fire("_on_file_done", sid, tid, False, "", "rejected")
@@ -1512,21 +1624,25 @@ class ChatManager:
                 state["complete_event"].set()
             fh = state.get("fh")
             if fh is not None:
-                try:
+                with contextlib.suppress(OSError):
                     fh.close()
-                except OSError:
-                    pass
                 state["fh"] = None
             _safe_remove(state.get("temp_path"))
             entry.status = "cancelled"
             self._sends.pop(transfer_id, None)
             self._receives.pop(transfer_id, None)
             session = state["session"]
-            self._append_entry(session, ChatEntry(
-                entry_id=uuid.uuid4().hex[:16], kind="system", outgoing=False,
-                ts=time.time(), text_key="chat.system.file_cancelled",
-                fmt={"name": entry.file_name},
-            ))
+            self._append_entry(
+                session,
+                ChatEntry(
+                    entry_id=uuid.uuid4().hex[:16],
+                    kind="system",
+                    outgoing=False,
+                    ts=time.time(),
+                    text_key="chat.system.file_cancelled",
+                    fmt={"name": entry.file_name},
+                ),
+            )
             sid, tid = session.session_id, transfer_id
             last = session.entries[-1]
         self._fire("_on_file_done", sid, tid, False, "", "cancelled_by_peer")
@@ -1556,7 +1672,7 @@ class ChatManager:
             else:
                 # Case 2: we are the receiver; sender says all bytes are sent.
                 recv_state = self._receives.get(transfer_id)
-                if recv_state is not None and recv_state["session"].peer_id == sender_id:
+                if recv_state is not None and recv_state["session"].peer_id == sender_id:  # noqa: SIM102
                     if recv_state.get("accepted"):
                         file_done_fired = self._finalize_receive(transfer_id)
                         processed = True
@@ -1566,7 +1682,9 @@ class ChatManager:
             self._fire("_on_file_done", sid_f, tid_f, ok_f, path_f, st_f)
         return processed
 
-    def handle_binary_chunk(self, raw_payload: dict, sender_device_id: str, send_fn: SendFn) -> bool:
+    def handle_binary_chunk(
+        self, raw_payload: dict, sender_device_id: str, send_fn: SendFn
+    ) -> bool:
         """Consume a decoded ``file_chunk`` frame if it belongs to a chat
         receive-in-progress.  Returns False so the host router can fall back
         to clipboard file transfers."""
@@ -1581,7 +1699,8 @@ class ChatManager:
             if state["session"].peer_id != sender_device_id:
                 logger.warning(
                     "chat: chunk for %s from unexpected peer %s -- dropped",
-                    transfer_id[:8], sender_device_id[:12],
+                    transfer_id[:8],
+                    sender_device_id[:12],
                 )
                 return True
             if not state.get("accepted") or state.get("fh") is None:
@@ -1592,9 +1711,13 @@ class ChatManager:
             index = raw_payload.get("chunk_index")
             total = raw_payload.get("total_chunks")
             data = raw_payload.get("_raw_data")
-            if not isinstance(index, int) or not isinstance(total, int) \
-                    or not isinstance(data, (bytes, bytearray)) \
-                    or index < 0 or index >= state["total_chunks"]:
+            if (
+                not isinstance(index, int)
+                or not isinstance(total, int)
+                or not isinstance(data, (bytes, bytearray))
+                or index < 0
+                or index >= state["total_chunks"]
+            ):
                 logger.warning("chat: malformed chunk for %s -- dropped", transfer_id[:8])
                 return True
             try:
@@ -1625,8 +1748,11 @@ class ChatManager:
         self._fire("_on_file_progress", sid, tid, fraction)
         with self._lock:
             state = self._receives.get(transfer_id)
-            if state is not None and not state["chunks_remaining"] \
-                    and state["received_bytes"] >= state["file_size"]:
+            if (
+                state is not None
+                and not state["chunks_remaining"]
+                and state["received_bytes"] >= state["file_size"]
+            ):
                 file_done_fired = self._finalize_receive(transfer_id)
         for sid_f, tid_f, ok_f, path_f, st_f in file_done_fired:
             self._fire("_on_file_done", sid_f, tid_f, ok_f, path_f, st_f)
@@ -1650,10 +1776,8 @@ class ChatManager:
         entry = state["entry"]
         fh = state.get("fh")
         if fh is not None:
-            try:
+            with contextlib.suppress(OSError):
                 fh.close()
-            except OSError:
-                pass
             state["fh"] = None
         temp_path = state.get("temp_path")
         try:
@@ -1663,17 +1787,23 @@ class ChatManager:
         if actual != state["file_size"] or state["received_bytes"] != state["file_size"]:
             logger.error(
                 "chat: size mismatch for %s (promised %d, on disk %d, counted %d)",
-                transfer_id[:8], state["file_size"], actual, state["received_bytes"],
+                transfer_id[:8],
+                state["file_size"],
+                actual,
+                state["received_bytes"],
             )
             _safe_remove(temp_path)
             self._receives.pop(transfer_id, None)
             entry.status = "failed"
-            self._send_frame({
-                "msg_type": "chat_file_complete",
-                "session_id": session.session_id,
-                "transfer_id": transfer_id,
-                "status": "error_size_mismatch",
-            }, self._latest_send_fn.get(session.peer_id))
+            self._send_frame(
+                {
+                    "msg_type": "chat_file_complete",
+                    "session_id": session.session_id,
+                    "transfer_id": transfer_id,
+                    "status": "error_size_mismatch",
+                },
+                self._latest_send_fn.get(session.peer_id),
+            )
             fires.append((session.session_id, transfer_id, False, "", "error_size_mismatch"))
             return fires
 
@@ -1708,12 +1838,15 @@ class ChatManager:
         entry.status = "done"
         entry.fraction = 1.0
         entry.saved_path = str(dest_path)
-        self._send_frame({
-            "msg_type": "chat_file_complete",
-            "session_id": session.session_id,
-            "transfer_id": transfer_id,
-            "status": "ok",
-        }, self._latest_send_fn.get(session.peer_id))
+        self._send_frame(
+            {
+                "msg_type": "chat_file_complete",
+                "session_id": session.session_id,
+                "transfer_id": transfer_id,
+                "status": "ok",
+            },
+            self._latest_send_fn.get(session.peer_id),
+        )
         fires.append((session.session_id, transfer_id, True, str(dest_path), "success"))
         return fires
 
@@ -1733,18 +1866,19 @@ class ChatManager:
         if state is None:
             return fires
         session = state["session"]
-        self._send_frame({
-            "msg_type": "chat_file_complete",
-            "session_id": session.session_id,
-            "transfer_id": transfer_id,
-            "status": status,
-        }, self._latest_send_fn.get(session.peer_id))
+        self._send_frame(
+            {
+                "msg_type": "chat_file_complete",
+                "session_id": session.session_id,
+                "transfer_id": transfer_id,
+                "status": status,
+            },
+            self._latest_send_fn.get(session.peer_id),
+        )
         fh = state.get("fh")
         if fh is not None:
-            try:
+            with contextlib.suppress(OSError):
                 fh.close()
-            except OSError:
-                pass
         _safe_remove(state.get("temp_path"))
         entry = state["entry"]
         entry.status = "failed"
@@ -1758,7 +1892,6 @@ class ChatManager:
             if state is None:
                 return
             session = state["session"]
-            entry = state["entry"]
             accept_event = state["accept_event"]
             complete_event = state["complete_event"]
         if not accept_event.wait(timeout=self.INVITE_ACCEPT_TIMEOUT):
@@ -1774,7 +1907,7 @@ class ChatManager:
             state = self._sends.get(transfer_id)
             if state is None or state["cancel"]:
                 return
-            path, size = state["file_path"], state["file_size"]
+            path = state["file_path"]
             total_chunks = state["total_chunks"]
             chunk_size = state.get("chunk_size") or self.CHUNK_SIZE
             send_fn = state["send_fn"]
@@ -1821,12 +1954,15 @@ class ChatManager:
         # Tell the receiver the byte stream is finished (also the only
         # trigger an empty-file receive ever gets), then wait briefly for
         # the receiver's delivery ack.
-        self._send_frame({
-            "msg_type": "chat_file_complete",
-            "session_id": session.session_id,
-            "transfer_id": transfer_id,
-            "status": "sent",
-        }, send_fn)
+        self._send_frame(
+            {
+                "msg_type": "chat_file_complete",
+                "session_id": session.session_id,
+                "transfer_id": transfer_id,
+                "status": "sent",
+            },
+            send_fn,
+        )
         complete_event.wait(timeout=self.COMPLETION_WAIT_TIMEOUT)
         with self._lock:
             state = self._sends.pop(transfer_id, None)
@@ -1871,7 +2007,10 @@ class ChatManager:
     # ------------------------------------------------------------------
 
     def _fail_transfers_for_session(
-        self, session: ChatSession, status: str, done_fired: list,
+        self,
+        session: ChatSession,
+        status: str,
+        done_fired: list,
     ) -> None:
         """Fail all in-flight transfers bound to *session* (lock held).
 
@@ -1892,10 +2031,8 @@ class ChatManager:
             state = self._receives.pop(tid)
             fh = state.get("fh")
             if fh is not None:
-                try:
+                with contextlib.suppress(OSError):
                     fh.close()
-                except OSError:
-                    pass
             _safe_remove(state.get("temp_path"))
             state["entry"].status = "failed"
             done_fired.append((session.session_id, tid, status))
@@ -1912,10 +2049,16 @@ class ChatManager:
                     session.offline_announced = True
                     session.online = False
                     session.peer_typing_until_mono = 0.0
-                    self._append_entry(session, ChatEntry(
-                        entry_id=uuid.uuid4().hex[:16], kind="system", outgoing=False,
-                        ts=time.time(), text_key="chat.system.peer_offline",
-                    ))
+                    self._append_entry(
+                        session,
+                        ChatEntry(
+                            entry_id=uuid.uuid4().hex[:16],
+                            kind="system",
+                            outgoing=False,
+                            ts=time.time(),
+                            text_key="chat.system.peer_offline",
+                        ),
+                    )
                     sid = session.session_id
                     entry = session.entries[-1]
                     announced = True
@@ -1947,8 +2090,10 @@ class ChatManager:
                 for session in list(self._sessions.values()):
                     # Reap long-dead sessions so the map cannot grow without
                     # bound over a multi-day uptime.
-                    if session.status in ("closed", "declined_remote") \
-                            and time.time() - session.last_activity_ts > 3600.0:
+                    if (
+                        session.status in ("closed", "declined_remote")
+                        and time.time() - session.last_activity_ts > 3600.0
+                    ):
                         self._sessions.pop(session.peer_id, None)
                         self._session_by_sid.pop(session.session_id, None)
                         self._cleanup_rate_buckets_locked(session.peer_id, session.session_id)
@@ -1964,7 +2109,7 @@ class ChatManager:
                     if session.status != "active":
                         continue
                     # Offline edge detection
-                    if session.online and now - session.last_seen_mono > self.OFFLINE_AFTER:
+                    if session.online and now - session.last_seen_mono > self.OFFLINE_AFTER:  # noqa: SIM102
                         # A session with an in-flight transfer is still alive:
                         # on a slow link (TCP retransmits) a big file can take
                         # far longer than OFFLINE_AFTER without a ping.  Only
@@ -1974,13 +2119,21 @@ class ChatManager:
                             session.online = False
                             session.offline_announced = True
                             session.peer_typing_until_mono = 0.0
-                            self._append_entry(session, ChatEntry(
-                                entry_id=uuid.uuid4().hex[:16], kind="system", outgoing=False,
-                                ts=time.time(), text_key="chat.system.peer_offline",
-                            ))
+                            self._append_entry(
+                                session,
+                                ChatEntry(
+                                    entry_id=uuid.uuid4().hex[:16],
+                                    kind="system",
+                                    outgoing=False,
+                                    ts=time.time(),
+                                    text_key="chat.system.peer_offline",
+                                ),
+                            )
                             fired.append((session.session_id, session.entries[-1].to_dict()))
                             self._fail_transfers_for_session(
-                                session, "peer_offline", file_done_fired,
+                                session,
+                                "peer_offline",
+                                file_done_fired,
                             )
                             continue
                     if session.offline_announced and not session.online:
@@ -2031,10 +2184,8 @@ class ChatManager:
             if entry.status == "await_accept" and now - entry.ts > self.INVITE_ACCEPT_TIMEOUT:
                 fh = state.get("fh")
                 if fh is not None:
-                    try:
+                    with contextlib.suppress(OSError):
                         fh.close()
-                    except OSError:
-                        pass
                     state["fh"] = None
                 _safe_remove(state.get("temp_path"))
                 session = state["session"]
@@ -2092,10 +2243,16 @@ class ChatManager:
                 continue
             entry.status = "failed"
             session = state["session"]
-            self._append_entry(session, ChatEntry(
-                entry_id=uuid.uuid4().hex[:16], kind="system", outgoing=False,
-                ts=time.time(), text_key="chat.system.peer_offline",
-            ))
+            self._append_entry(
+                session,
+                ChatEntry(
+                    entry_id=uuid.uuid4().hex[:16],
+                    kind="system",
+                    outgoing=False,
+                    ts=time.time(),
+                    text_key="chat.system.peer_offline",
+                ),
+            )
             fired.append((session.session_id, session.entries[-1].to_dict()))
             done_fired.append((session.session_id, tid, "error_timeout"))
         for tid, state in list(self._receives.items()):
@@ -2104,10 +2261,8 @@ class ChatManager:
             self._receives.pop(tid, None)
             fh = state.get("fh")
             if fh is not None:
-                try:
+                with contextlib.suppress(OSError):
                     fh.close()
-                except OSError:
-                    pass
                 state["fh"] = None
             _safe_remove(state.get("temp_path"))
             entry = state["entry"]
@@ -2115,10 +2270,16 @@ class ChatManager:
                 continue
             entry.status = "failed"
             session = state["session"]
-            self._append_entry(session, ChatEntry(
-                entry_id=uuid.uuid4().hex[:16], kind="system", outgoing=False,
-                ts=time.time(), text_key="chat.system.peer_offline",
-            ))
+            self._append_entry(
+                session,
+                ChatEntry(
+                    entry_id=uuid.uuid4().hex[:16],
+                    kind="system",
+                    outgoing=False,
+                    ts=time.time(),
+                    text_key="chat.system.peer_offline",
+                ),
+            )
             fired.append((session.session_id, session.entries[-1].to_dict()))
             done_fired.append((session.session_id, tid, "error_timeout"))
         return done_fired

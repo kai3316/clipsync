@@ -20,8 +20,7 @@ RETRY_DELAYS_MS = [0, 40, 80, 140, 220, 360, 560]
 # window — reading (and re-hashing) them 7 times is wasteful for text.
 _TEXT_ONLY_ROUNDS = 2
 
-_RICH_FORMATS = (ContentType.IMAGE_PNG, ContentType.IMAGE_EMF,
-                 ContentType.HTML, ContentType.RTF)
+_RICH_FORMATS = (ContentType.IMAGE_PNG, ContentType.IMAGE_EMF, ContentType.HTML, ContentType.RTF)
 
 
 def _is_rich(content) -> bool:
@@ -71,6 +70,7 @@ def capture_with_retry(reader, max_rounds: int = 7):
         new_size = sum(len(data) for data in new_content.types.values())
         if new_size == prev_size:
             from internal.clipboard.dedup import content_hash
+
             if prev_hash is None and content is not None:
                 prev_hash = content_hash(content)  # deferred from an earlier round
             new_hash = content_hash(new_content)
@@ -98,5 +98,7 @@ def capture_with_retry(reader, max_rounds: int = 7):
         content = new_content
 
     if content:
-        logger.debug("Clipboard capture completed after %d round(s)", min(max_rounds, len(RETRY_DELAYS_MS)))
+        logger.debug(
+            "Clipboard capture completed after %d round(s)", min(max_rounds, len(RETRY_DELAYS_MS))
+        )
     return content

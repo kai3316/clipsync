@@ -221,14 +221,18 @@ def _windows_scale(root) -> float:
             # Fall back to the nearest monitor's effective DPI.
             try:
                 monitor = ctypes.windll.user32.MonitorFromWindow(
-                    int(root.winfo_id()), 2)  # MONITOR_DEFAULTTONEAREST
+                    int(root.winfo_id()), 2
+                )  # MONITOR_DEFAULTTONEAREST
                 if monitor:
                     shcore = ctypes.windll.shcore
                     dpi_x = ctypes.c_uint()
                     dpi_y = ctypes.c_uint()
-                    if shcore.GetDpiForMonitor(monitor, 0,
-                                               ctypes.byref(dpi_x),
-                                               ctypes.byref(dpi_y)) == 0:
+                    if (
+                        shcore.GetDpiForMonitor(
+                            monitor, 0, ctypes.byref(dpi_x), ctypes.byref(dpi_y)
+                        )
+                        == 0
+                    ):
                         dpi = float(dpi_x.value)
             except Exception:
                 pass

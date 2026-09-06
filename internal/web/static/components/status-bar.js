@@ -40,10 +40,6 @@
         return nd ? base + ' · ' + nd : base;
       },
 
-      wsConnected: function () {
-        return !!(ClipsyncWS && ClipsyncWS.connected);
-      },
-
       syncStatus: function () {
         // Same source + wording as the overview panel's status bar so the
         // top and bottom never disagree about sync state.

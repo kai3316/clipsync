@@ -27,7 +27,6 @@ transition.
 All handlers return (data_dict, status_code) and never raise.
 """
 
-import json
 import logging
 
 logger = logging.getLogger(__name__)
