@@ -611,9 +611,10 @@ def test_download_latest_release_reports_progress(monkeypatch, tmp_path):
             "tag_name": "v2.0.0",
             "assets": [
                 {
-                    # The downloader picks the asset by _platform_asset_name(), which
-                    # on this win32 host is clipsync-windows.zip.
-                    "name": "clipsync-windows.zip",
+                    # The downloader picks the asset by _platform_asset_name(), so the
+                    # mock must expose this host's asset: clipsync-windows.zip on win32,
+                    # clipsync-linux.tar.gz on Linux, clipsync-macos-arm64.zip on macOS.
+                    "name": updater_mod._platform_asset_name(),
                     "browser_download_url": "https://example.com/asset",
                     "size": total,
                     "digest": digest,
