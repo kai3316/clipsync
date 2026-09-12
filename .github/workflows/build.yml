@@ -15,6 +15,48 @@ permissions:
   contents: write
 
 jobs:
+  prepare:
+    # Create the release as soon as the tag lands, before any building.
+    #
+    # The Tauri workflow attaches the desktop installers to this same release
+    # and waits for it to appear.  That wait used to be satisfied only by the
+    # `release` job below, which cannot start until all four build legs finish
+    # -- and a macOS runner queue of 28 minutes blew straight past the Tauri
+    # side's 10-minute budget, failing its uploader permanently.  Creating the
+    # release up front means it exists within seconds, so neither uploader can
+    # race the other.  A release is briefly visible with no assets; that is the
+    # price of not having a timeout decide whether the desktop app ships.
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    steps:
+      - name: Create the release if it is missing
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TAG="${{ github.ref_name }}"
+          # Create only when missing; never delete.  A delete here would take
+          # the desktop installers with it.
+          NOTES=$(cat <<'EOF'
+          Automated build of both applications for this tag.
+
+          The Tauri desktop (unsigned, so macOS and Windows warn on first run):
+          - `ClipSync_<version>_x64-setup.exe` — Windows installer
+          - `ClipSync_<version>_aarch64.dmg` — macOS Apple Silicon
+          - `ClipSync_<version>_amd64.deb` / `.AppImage` — Linux x86_64
+
+          The previous Python application:
+          - `clipsync-windows.zip` — Windows `.exe`
+          - `clipsync-macos-arm64.zip` — macOS Apple Silicon `.app` bundle
+          - `clipsync-linux.tar.gz` — Linux x86_64 binary
+          - `clipsync-linux-arm64.tar.gz` — Linux ARM64 binary
+          EOF
+          )
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "Release $TAG already exists; leaving it in place."
+          else
+            gh release create "$TAG" --title "ClipSync $TAG" --notes "$NOTES"
+          fi
+
   build:
     strategy:
       fail-fast: false
@@ -135,10 +177,6 @@ jobs:
     needs: build
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-
       - name: Download Windows build
         uses: actions/download-artifact@v4
         with:
@@ -163,39 +201,15 @@ jobs:
           name: clipsync-linux-arm64
           path: dist
 
-      - name: Create Release
+      - name: Upload the legacy builds
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           TAG="${{ github.ref_name }}"
-          # Create the release only when it is missing; never delete it.  This
-          # step used to delete and re-create, which was safe while it was the
-          # only writer, but the Tauri workflow now attaches the desktop
-          # installers to this same release -- a delete here would silently take
-          # them with it.  The workflow concurrency group still serialises runs
-          # for one tag, and the uploads below use --clobber, so a re-pushed tag
-          # replaces its assets in place.
-          NOTES=$(cat <<'EOF'
-          Automated build of both applications for this tag.
-
-          The Tauri desktop (unsigned, so macOS and Windows warn on first run):
-          - `ClipSync_<version>_x64-setup.exe` — Windows installer
-          - `ClipSync_<version>_aarch64.dmg` — macOS Apple Silicon
-          - `ClipSync_<version>_amd64.deb` / `.AppImage` — Linux x86_64
-
-          The previous Python application:
-          - `clipsync-windows.zip` — Windows `.exe`
-          - `clipsync-macos-arm64.zip` — macOS Apple Silicon `.app` bundle
-          - `clipsync-linux.tar.gz` — Linux x86_64 binary
-          - `clipsync-linux-arm64.tar.gz` — Linux ARM64 binary
-          EOF
-          )
-          if gh release view "$TAG" >/dev/null 2>&1; then
-            echo "Release $TAG already exists; updating it in place."
-            gh release edit "$TAG" --title "ClipSync $TAG" --notes "$NOTES"
-          else
-            gh release create "$TAG" --title "ClipSync $TAG" --notes "$NOTES"
-          fi
+          # The release was created by the `prepare` job the moment the tag
+          # landed, so it is already there.  Uploads --clobber, so a re-pushed
+          # tag replaces its assets in place.
+          gh release view "$TAG" >/dev/null
           # Upload only the artifacts that actually exist, so a missing matrix
           # leg doesn't fail the whole release.
           for f in \
