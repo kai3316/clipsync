@@ -34,6 +34,11 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           TAG="${{ github.ref_name }}"
+          # --repo is not optional here: without a checkout there is no .git in
+          # the workspace, and gh resolves the repository from the working
+          # directory -- it fails with "fatal: not a git repository" otherwise.
+          # Passing it beats checking out a repo just to make one API call.
+          REPO="$GITHUB_REPOSITORY"
           # Create only when missing; never delete.  A delete here would take
           # the desktop installers with it.
           NOTES=$(cat <<'EOF'
@@ -51,10 +56,10 @@ jobs:
           - `clipsync-linux-arm64.tar.gz` — Linux ARM64 binary
           EOF
           )
-          if gh release view "$TAG" >/dev/null 2>&1; then
+          if gh release view "$TAG" --repo "$REPO" >/dev/null 2>&1; then
             echo "Release $TAG already exists; leaving it in place."
           else
-            gh release create "$TAG" --title "ClipSync $TAG" --notes "$NOTES"
+            gh release create "$TAG" --repo "$REPO" --title "ClipSync $TAG" --notes "$NOTES"
           fi
 
   build:
@@ -206,10 +211,13 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           TAG="${{ github.ref_name }}"
+          # --repo for the same reason as in `prepare`: this job has no
+          # checkout, so gh cannot infer the repository from the workspace.
+          REPO="$GITHUB_REPOSITORY"
           # The release was created by the `prepare` job the moment the tag
           # landed, so it is already there.  Uploads --clobber, so a re-pushed
           # tag replaces its assets in place.
-          gh release view "$TAG" >/dev/null
+          gh release view "$TAG" --repo "$REPO" >/dev/null
           # Upload only the artifacts that actually exist, so a missing matrix
           # leg doesn't fail the whole release.
           for f in \
@@ -219,7 +227,7 @@ jobs:
             dist/clipsync-linux-arm64.tar.gz
           do
             if [ -f "$f" ]; then
-              gh release upload "$TAG" "$f" --clobber
+              gh release upload "$TAG" "$f" --repo "$REPO" --clobber
             else
               echo "Skipping missing artifact: $f"
             fi
