@@ -43,6 +43,16 @@ class ClipboardContent:
     source_device: str = ""
     timestamp: float = 0.0
     image_fmt: str = ""  # "png", "tiff", "bmp", "" = legacy/unknown
+    # How a remote clip reached this device: "lan" for a peer on a direct
+    # connection, "relay" for one that came through the internet relay, "web"
+    # for a push from this machine's own web server, and "" when there is
+    # nothing to say — the clip was captured here, or the row predates the
+    # column.  History keeps it so a row can name the route it arrived on
+    # rather than only the device it came from, which is the pair a reader
+    # needs to tell "the machine next to me sent this" from "this came in over
+    # the internet" from "I pushed this from a browser"; see
+    # `internal.application.use_cases.history`.
+    transport: str = ""
 
     def hash_key(self) -> str:
         """Content-based dedup key."""

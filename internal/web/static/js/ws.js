@@ -436,6 +436,18 @@ var ClipsyncWS = (function () {
           _scheduleOverviewRefresh();
           break;
 
+        case 'favorites_updated':
+          // The favourites list changed somewhere other than this page — a
+          // clip favourited from the native window, a favourite edited or
+          // deleted there.  The payload is the same snapshot GET
+          // /api/favorites answers with (and accepts the older `items` key
+          // that loadFavorites still tolerates), applied through the same
+          // store helper so the two paths cannot drift.
+          if (Array.isArray(data.favorites) || Array.isArray(data.items)) {
+            store.replaceFavorites(data.favorites || data.items);
+          }
+          break;
+
         case 'transfer_progress':
           // Update or add to activeTransfers. The WS broadcasts progress as a
           // 0..1 fraction (matching FileTransferManager), but the transfer UI

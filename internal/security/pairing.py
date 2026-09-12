@@ -53,6 +53,10 @@ PAIRING_STATUS_CONFIRMED_WAITING = "confirmed_waiting"
 PAIRING_STATUS_PEER_CONFIRMED = "peer_confirmed"
 PAIRING_STATUS_PAIRED = "paired"
 PAIRING_STATUS_CANCELLED = "cancelled"
+# Not a lifecycle state so much as the absence of one: this peer has no pairing
+# in flight.  It is what a merely-discovered device reports, and it is spelled
+# with the same empty string the removed-device rows already use for the field.
+PAIRING_STATUS_NONE = ""
 
 logger = logging.getLogger(__name__)
 
@@ -427,9 +431,19 @@ class PairingManager:
             )
 
     def get_pairing_status(self, peer_id: str) -> str:
-        """Return the transient pairing lifecycle status for a peer."""
+        """Return the transient pairing lifecycle status for a peer.
+
+        A peer this manager has never run a pairing for has no lifecycle, and
+        that answers ``PAIRING_STATUS_NONE`` — not ``pending``.  The default used
+        to be ``pending``, which every reader took at face value: a device merely
+        discovered on the LAN was reported as mid-pairing, so the devices page
+        drew a confirm/reject card for it (with the confirm disabled, since no
+        request existed to carry a code) and the tray listed it under pairing.
+        Every status below is recorded by a real pairing and only cleared when one
+        ends, so reading one back means a real handshake is in flight.
+        """
         with self._lock:
-            return self._pairing_status.get(peer_id, PAIRING_STATUS_PENDING)
+            return self._pairing_status.get(peer_id, PAIRING_STATUS_NONE)
 
     def mark_peer_confirmed(self, peer_id: str) -> str:
         """Peer sent ``pairing_confirm``. Returns the new status.

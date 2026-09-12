@@ -255,6 +255,12 @@ class Config:
 
 
 def _config_dir() -> Path:
+    override = os.environ.get("CLIPSYNC_CONFIG_DIR")
+    if override:
+        path = Path(override).expanduser()
+        if not path.is_absolute():
+            raise ValueError("CLIPSYNC_CONFIG_DIR must be an absolute path")
+        return path
     system = platform.system()
     if system == "Windows":
         base = os.environ.get("APPDATA", os.path.expanduser("~"))

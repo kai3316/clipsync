@@ -74,6 +74,7 @@ def strip_rich_formats(content: ClipboardContent) -> ClipboardContent:
         source_device=content.source_device,
         timestamp=content.timestamp,
         image_fmt=content.image_fmt,
+        transport=content.transport,
     )
 
 

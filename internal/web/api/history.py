@@ -83,6 +83,12 @@ def get_history(history, cfg, limit_str=None, offset_str=None):
                 "source_name": _source_label(sid, device_names, cfg),
                 "source_app": entry.get("source_app", ""),
                 "source_title": entry.get("source_title", ""),
+                # Which link carried it ("lan"/"relay"), or "web" for a push
+                # from this machine's own web server, empty for a clip captured
+                # here.  The row already names the device, and the phone is the
+                # place the difference matters most: it is the device that can
+                # be on either side of the relay.
+                "transport": entry.get("transport", ""),
                 "entry_id": entry.get("entry_id"),
                 "pinned": entry.get("pinned", False),
                 "paste_count": entry.get("paste_count", 0),
@@ -131,10 +137,12 @@ def get_history_item(query_params, history, cfg):
 
 
 def push_text(body, cfg, sync_mgr, history):
-    """Push text to local clipboard and broadcast to peers.
+    """Push text to local clipboard, record it and broadcast to peers.
 
     Replicates the existing POST /api/push logic from server.py
-    (original lines 1333-1372).
+    (original lines 1333-1372), plus the announcement of the row it records:
+    a push is a change to the history every listener should hear about, and
+    ``sync_mgr`` is the object that carries that news.
     """
     try:
         data = json.loads(body.decode("utf-8"))
@@ -153,6 +161,16 @@ def push_text(body, cfg, sync_mgr, history):
     content = ClipboardContent(
         types={ContentType.TEXT: tee_bytes},
         source_device=WEB_SOURCE,
+        # ...and the route, which for a push is the third one: this is not a
+        # peer link at all but this machine's own web server answering a
+        # browser.  Recorded rather than left empty, because the row would
+        # otherwise carry a source name and no route, and a push from a phone
+        # is exactly the case where "which way did this come in" has an answer
+        # the device name cannot give.  The sender's own value for this field
+        # travels in the outgoing message (as its device id does) and is
+        # overwritten on arrival by the receiving sync manager, so no peer
+        # row can inherit it.
+        transport="web",
     )
 
     from internal.clipboard.platform import create_writer
@@ -184,6 +202,23 @@ def push_text(body, cfg, sync_mgr, history):
         history.add(content)
     except Exception:
         logger.debug("Failed to add web push to history", exc_info=True)
+    else:
+        # A pushed row is a history change like any other, and the sync
+        # manager's own notification hook is what says so — the same call it
+        # makes for a clip captured here or one that arrived from a peer.
+        # Without it the row existed and nothing announced it: the phone that
+        # pushed saw its own text only after a reload (legacy's panel polled,
+        # and the panel that replaced it does not), and the window learned of
+        # it only when the next unrelated event made it re-read.
+        #
+        # Only on a recorded row: a push whose history write failed still
+        # reached the clipboard, but announcing a row that is not there would
+        # send every listener after something that does not exist.
+        if sync_mgr is not None:
+            try:
+                sync_mgr._notify_history_change()
+            except Exception:
+                logger.debug("History change notification failed", exc_info=True)
 
     msg = SyncMessage(
         content=content,

@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-confirm-pairing"
+description = "Enables the confirm_pairing command without any pre-configured scope."
+commands.allow = ["confirm_pairing"]
+
+[[permission]]
+identifier = "deny-confirm-pairing"
+description = "Denies the confirm_pairing command without any pre-configured scope."
+commands.deny = ["confirm_pairing"]

@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-set-history-pinned"
+description = "Enables the set_history_pinned command without any pre-configured scope."
+commands.allow = ["set_history_pinned"]
+
+[[permission]]
+identifier = "deny-set-history-pinned"
+description = "Denies the set_history_pinned command without any pre-configured scope."
+commands.deny = ["set_history_pinned"]

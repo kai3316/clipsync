@@ -22,7 +22,10 @@ jobs:
           python-version: "3.12"
 
       - name: Install ruff
-        run: pip install ruff
+        # Pinned to the line the tree is verified against.  An unpinned install
+        # picks up each new release, and a new release that adds a rule turns
+        # this gate red without anything in the repository having changed.
+        run: pip install "ruff~=0.15.0"
 
       - name: Ruff
         run: ruff check .

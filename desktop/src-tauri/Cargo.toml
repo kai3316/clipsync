@@ -1,0 +1,26 @@
+[package]
+name = "clipsync-desktop"
+version = "0.1.0"
+description = "ClipSync native desktop host"
+edition = "2021"
+rust-version = "1.85"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = ["tray-icon"] }
+tauri-plugin-single-instance = "2"
+tauri-plugin-autostart = "2"
+tauri-plugin-notification = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["process", "io-util", "sync", "time", "macros", "rt-multi-thread"] }
+uuid = { version = "1", features = ["v4"] }
+rfd = "0.15"
+
+[target.'cfg(windows)'.dependencies]
+winreg = "0.10"
+
+[features]
+custom-protocol = ["tauri/custom-protocol"]

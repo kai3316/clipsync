@@ -5,25 +5,14 @@ All handlers return a (data_dict, status_code) tuple.
 
 import logging
 
-from internal.i18n import T
+from internal.application.use_cases.transfers import format_eta
 
 logger = logging.getLogger(__name__)
 
 
 def _format_eta(seconds: float) -> str:
-    """Format an ETA in seconds as a short localized string.
-
-    Long transfers need an hours unit: without one, a two-hour estimate
-    renders as "120m 0s".
-    """
-    if not seconds or seconds <= 0:
-        return ""
-    seconds = int(seconds)
-    if seconds < 60:
-        return T("transfer.eta_seconds", seconds=seconds)
-    if seconds < 3600:
-        return T("transfer.eta_minutes", minutes=seconds // 60, seconds=seconds % 60)
-    return T("transfer.eta_hours", hours=seconds // 3600, minutes=(seconds % 3600) // 60)
+    """The shared ETA formatter, under this module's historical name."""
+    return format_eta(seconds)
 
 
 def _map_active(t: dict) -> dict:

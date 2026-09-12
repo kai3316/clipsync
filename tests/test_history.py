@@ -956,7 +956,11 @@ def test_python_i18n_web_locales_are_fully_mirrored():
     transfer.no_path / history_removed / history_remove_failed (all web-only:
     the Tk transfers view has no per-row menu)); the AI-config pull-timeout net
     added 1 more — aiconfig.batch_timeout (the toast shown when a peer never
-    answers for the rest of a batch, web-only: the Tk UI has no batch view)) that has
+    answers for the rest of a batch, web-only: the Tk UI has no batch view)); the
+    phone-panel waiting pass added 4 more — devices.netpair_waiting_list /
+    _for / _cancel / _hint (the code we entered, shown while the partner has not
+    answered it: web-only, like the rest of the netpair panel family, because the
+    desktop window words its own row)) that has
     its own server-side mitigation, so its SIZE is pinned here: a NEW web-only
     key — the regression class this guards — changes the count and fails the
     suite."""
@@ -968,8 +972,14 @@ def test_python_i18n_web_locales_are_fully_mirrored():
     # while the sync/device/chat/transfer context-menu keys (already
     # web-only, never Python-mirrored) surfaced once their dead Python
     # duplicates were dropped — the gap now reflects reality.
-    assert len(set(en) - set(i18n._EN)) == 706
-    assert len(set(zh) - set(i18n._ZH)) == 706
+    # 706 -> 710 on the waiting pass: the four devices.netpair_waiting_* keys
+    # are the panel's own row, read nowhere else.
+    # 710 -> 713 on the pushed-row route pass: history.route_local /
+    # history.route_internet / history.route_web are the panel's own words for
+    # the link a row arrived on, drawn on a row the Python surfaces word for
+    # the window rather than for the page.
+    assert len(set(en) - set(i18n._EN)) == 713
+    assert len(set(zh) - set(i18n._ZH)) == 713
 
 
 def test_web_t_literals_resolve_in_both_locales():

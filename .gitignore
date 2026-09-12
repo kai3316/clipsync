@@ -45,3 +45,15 @@ htmlcov/
 
 # Per-run /kai round handoff (context compression)
 .kai-round.md
+
+# Tauri generated/build files
+desktop/src-tauri/target/
+desktop/src-tauri/gen/
+desktop/src-tauri/binaries/*
+!desktop/src-tauri/binaries/.gitkeep
+.tauri-dev-data/
+desktop/test-results/
+desktop/playwright-report/
+
+# Per-run migration probes, patch scripts and scratch CSS (not shipped)
+work/

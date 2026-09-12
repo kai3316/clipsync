@@ -1174,6 +1174,16 @@
       font-size: 10px;
     }
 
+    /* Which link carried it.  Muted rather than accent-tinted, so the device
+       name beside it still reads as the name of a device and not as one of two
+       identical chips. */
+    .history-item__route {
+      font-size: 10px;
+      color: var(--clipsync-fg-muted);
+      background: transparent;
+      border-color: var(--clipsync-border);
+    }
+
     .history-item__paste-count {
       font-size: 10px;
     }
@@ -6747,6 +6757,57 @@
       display: flex;
       gap: var(--clipsync-space-1);
       flex-shrink: 0;
+    }
+
+    /* ── Codes entered here, waiting for the partner (round 20) ─────
+       The window between submitting a pairing code and the partner's reply:
+       a row per wait, saying who it is waiting for, how long it has been, and
+       offering the way back out (a code typed for the wrong device). */
+
+    .netpair-waiting {
+      margin-top: var(--clipsync-space-3);
+    }
+
+    .netpair-waiting__title {
+      font-size: 0.75rem;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.06em;
+      color: var(--clipsync-fg-muted);
+      margin-bottom: var(--clipsync-space-2);
+    }
+
+    .netpair-waiting__row {
+      display: flex;
+      align-items: center;
+      gap: var(--clipsync-space-2);
+      padding: var(--clipsync-space-2) var(--clipsync-space-3);
+      margin-bottom: var(--clipsync-space-2);
+      border-left: 3px solid var(--clipsync-warning);
+    }
+
+    .netpair-waiting__spin {
+      flex-shrink: 0;
+    }
+
+    .netpair-waiting__text {
+      flex: 1;
+      min-width: 0;
+      font-size: 0.85rem;
+      font-weight: 600;
+      color: var(--clipsync-fg);
+    }
+
+    .netpair-waiting__since {
+      flex-shrink: 0;
+      font-size: 0.72rem;
+      color: var(--clipsync-fg-muted);
+      white-space: nowrap;
+    }
+
+    .netpair-waiting__hint {
+      font-size: 0.75rem;
+      color: var(--clipsync-fg-muted);
     }
 
     /* ── Internet delivery status (round 17) ────────────────────────

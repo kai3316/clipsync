@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-push-text"
+description = "Enables the push_text command without any pre-configured scope."
+commands.allow = ["push_text"]
+
+[[permission]]
+identifier = "deny-push-text"
+description = "Denies the push_text command without any pre-configured scope."
+commands.deny = ["push_text"]

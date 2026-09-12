@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-set-discovery-enabled"
+description = "Enables the set_discovery_enabled command without any pre-configured scope."
+commands.allow = ["set_discovery_enabled"]
+
+[[permission]]
+identifier = "deny-set-discovery-enabled"
+description = "Denies the set_discovery_enabled command without any pre-configured scope."
+commands.deny = ["set_discovery_enabled"]

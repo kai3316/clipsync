@@ -1,0 +1,46 @@
+name: Tauri Desktop
+
+on:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  desktop:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, macos-latest, ubuntu-24.04]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: desktop/package-lock.json
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Linux native build dependencies
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
+      - name: Rust toolchain
+        run: rustup toolchain install stable --profile minimal
+      - name: Install Python dependencies
+        run: python -m pip install -r requirements.txt pytest pytest-timeout
+      - name: Sidecar tests
+        run: python -m pytest tests/sidecar -q
+      - name: Frontend dependencies
+        working-directory: desktop
+        run: npm ci
+      - name: Frontend build and tests
+        working-directory: desktop
+        run: |
+          npm run build
+          npm test
+      - name: Rust IPC tests
+        working-directory: desktop/src-tauri
+        run: cargo test --locked

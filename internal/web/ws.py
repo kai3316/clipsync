@@ -549,6 +549,21 @@ class WebSocketManager:
         """Convenience: tell clients the entire history was wiped."""
         self.broadcast("history_clear", {})
 
+    def broadcast_favorites(self):
+        """Convenience: broadcast the full favourites list to all clients.
+
+        Snapshot-shaped like the history broadcast above, and built here rather
+        than passed in: the manager holds no favourites store, and the loader is
+        the same one behind ``GET /api/favorites``, so a single function decides
+        what a favourite looks like on the wire.  The client takes the whole
+        list — a favourite carries a user-edited title and a position, so a
+        partial update would have to re-state both.
+        """
+        from internal.web.api.favorites import get_favorites
+
+        data, _status = get_favorites()
+        self.broadcast("favorites_updated", data)
+
     def _devices_snapshot(self) -> dict:
         """Compute the authoritative web device snapshot.
 

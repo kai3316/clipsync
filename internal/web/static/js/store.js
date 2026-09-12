@@ -238,6 +238,24 @@
     internetPairCode: '',
 
     /* ═══════════════════════════════════════════════════════════════
+       Codes entered on THIS device that nobody has answered yet (round 20).
+       The other direction from internetPairCode: that is a code we generated
+       and are waiting for somebody to type, this is a code somebody generated
+       and we typed.  Each row is { peer_id: the 4-char tag the code carried,
+       name: the partner's name once its hello arrives, empty until then,
+       since: epoch seconds, or null after a restart -- the clock is lost, the
+       wait is not }.
+
+       The tag is not a device: it cannot be reached, sent to or renamed until
+       the partner's reply supplies its real device id, which is why these
+       rows are separate from internetPairPeers rather than in it.  They are
+       also the only thing the page can show in the window between submitting
+       a code and the pairing completing, which is what the reader is looking
+       for at exactly that moment.
+       ═══════════════════════════════════════════════════════════════ */
+    internetPairWaiting: [],
+
+    /* ═══════════════════════════════════════════════════════════════
        Internet delivery status (round 17)
        Two lightweight mirrors, both fed by the WS `internet_delivery` event
        ({peer_id, msg_id, status}) and seeded by GET /api/internetdelivery
@@ -1799,6 +1817,35 @@
        ═══════════════════════════════════════════════════════════════ */
 
     /**
+     * Replace the whole favorites list with an authoritative snapshot.
+     *
+     * Two callers, one rule: the page-1 load in app.js and the live
+     * `favorites_updated` broadcast.  Mutated in place (splice/push) rather
+     * than reassigned, like every other list here — components hold computed
+     * getters over this array and the acting client reads its own copy.
+     *
+     * A reset/deleted data folder leaves zero favorites but a stale
+     * clipsync_groups localStorage registry (groups are per-browser), so an
+     * empty snapshot clears the registry too — otherwise ghost groups
+     * resurrect in the sidebar with nothing in them.
+     *
+     * @param {Array} items - the authoritative list (`favorites` from the API)
+     * @returns {Array} the list that was applied
+     */
+    replaceFavorites: function (items) {
+      var favs = items || [];
+      this.favorites.splice(0, this.favorites.length);
+      for (var i = 0; i < favs.length; i++) {
+        this.favorites.push(favs[i]);
+      }
+      if (favs.length === 0 && this.groupNames.length > 0) {
+        this.groupNames = [];
+        this.persistGroups();
+      }
+      return favs;
+    },
+
+    /**
      * Get filtered + searched + sorted favorites list.
      * @returns {Array}
      */
@@ -2432,6 +2479,24 @@
           // one so the big code block disappears once a pairing confirms.
           self.internetPairCode = (res && res.generated_code)
             ? String(res.generated_code) : '';
+          // Codes we entered that are still unanswered.  Normalized the same
+          // way as the peer list, and *assigned* rather than merged: a fetch
+          // that no longer reports a row is the only notice that the wait is
+          // over, and an older backend sends no key at all, which must read as
+          // "nothing waiting" rather than as "keep whatever was there".
+          var waiting = [];
+          if (res && Array.isArray(res.waiting)) {
+            for (var w = 0; w < res.waiting.length; w++) {
+              var row = res.waiting[w];
+              if (!row || row.peer_id === undefined || row.peer_id === null) continue;
+              waiting.push({
+                peer_id: String(row.peer_id),
+                name: row.name || '',
+                since: (typeof row.since === 'number') ? row.since : null,
+              });
+            }
+          }
+          self.internetPairWaiting = waiting;
           return true;
         })
         .catch(function () {
@@ -2478,6 +2543,17 @@
       // pair — drop it so a stale/used code no longer sits in the "your
       // code" box (regenerate if another device still needs to pair).
       this.internetPairCode = '';
+      // A confirmation is also the end of any wait on this device: the
+      // provisional tag we had entered is re-keyed to the id this event
+      // carries, and only the backend knows when that has happened.  Refetch
+      // rather than infer it — the answer is what tells a wait that ended
+      // from one that is still going.
+      if (this.internetPairWaiting.length) {
+        this.internetPairWaiting = this.internetPairWaiting.filter(function (row) {
+          return String(row.peer_id) !== pid;
+        });
+        this.fetchInternetPairStatus();
+      }
       this.showToast(t('settings_window.netpair_paired_toast', { name: name }),
         3000, 'success');
     },

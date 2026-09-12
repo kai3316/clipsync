@@ -118,10 +118,13 @@ def _translate_libretranslate(
         with urllib.request.urlopen(req, timeout=REQUEST_TIMEOUT) as resp:
             result = json.loads(resp.read().decode("utf-8"))
 
-        translated = result.get("translatedText", "")
+        if not isinstance(result, dict) or not isinstance(result.get("translatedText"), str):
+            return {"ok": False, "error": "Invalid response from translation service."}
+        translated = result["translatedText"]
         detected_lang = result.get("detectedLanguage", {})
         if isinstance(detected_lang, dict):
-            src_lang = detected_lang.get("language", source_lang)
+            detected_code = detected_lang.get("language")
+            src_lang = detected_code if isinstance(detected_code, str) else source_lang
         else:
             src_lang = source_lang
 

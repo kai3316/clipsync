@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-export-favorites"
+description = "Enables the export_favorites command without any pre-configured scope."
+commands.allow = ["export_favorites"]
+
+[[permission]]
+identifier = "deny-export-favorites"
+description = "Denies the export_favorites command without any pre-configured scope."
+commands.deny = ["export_favorites"]

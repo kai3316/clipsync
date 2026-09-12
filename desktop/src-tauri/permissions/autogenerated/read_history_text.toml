@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-read-history-text"
+description = "Enables the read_history_text command without any pre-configured scope."
+commands.allow = ["read_history_text"]
+
+[[permission]]
+identifier = "deny-read-history-text"
+description = "Denies the read_history_text command without any pre-configured scope."
+commands.deny = ["read_history_text"]

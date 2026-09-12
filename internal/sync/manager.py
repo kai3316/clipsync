@@ -195,7 +195,7 @@ class SyncManager:
         self._monitor.stop()
         logger.info("SyncManager stopped")
 
-    def handle_remote_message(self, msg: SyncMessage) -> bool:
+    def handle_remote_message(self, msg: SyncMessage, via_relay: bool = False) -> bool:
         """Process a clipboard message received from a peer.
 
         Returns True when the message was ACCEPTED (recorded into history and
@@ -205,6 +205,12 @@ class SyncManager:
         caller uses the return value to decide whether to send an internet
         ``relay_ack`` receipt — only a message that actually landed on the
         clipboard earns a "已送达" confirmation.
+
+        ``via_relay`` says which of the two transports delivered the frame: the
+        relay router passes True, the LAN router leaves it False.  It is
+        recorded on the history row as the route the clip came in on, which a
+        reader needs because the same peer can be reachable both ways and the
+        device name alone cannot say which one carried this copy.
         """
         with self._lock:
             if not self._enabled:
@@ -229,6 +235,9 @@ class SyncManager:
 
         # Stamp the sender's device ID so history shows the correct source.
         content.source_device = msg.source_device
+        # ...and the route it arrived on, so the row can say "over the relay"
+        # or "over the local link" and not just who sent it.
+        content.transport = "relay" if via_relay else "lan"
 
         content_hash = content.hash_key()
 

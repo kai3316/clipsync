@@ -374,6 +374,21 @@ var ClipsyncAPI = (function () {
     },
 
     /**
+     * Change several favourites in one request.
+     *
+     * Every multi-item gesture in the panel used to be one updateFavorite per
+     * item — a drag, a group rename, a group delete — which is one round trip
+     * per item on a phone, and, since a write publishes, one multi-client
+     * snapshot per item behind a single gesture, each of them half applied.
+     * The same route accepts the whole batch at once.
+     * @param {Array<{id: string, position?: number, group?: string}>} updates
+     * @returns {Promise<{ok: boolean, updated: number}>}
+     */
+    updateFavoritesBatch: function (updates) {
+      return this._fetch('PATCH', '/api/favorites', { updates: updates });
+    },
+
+    /**
      * Export ALL favorites to a Markdown or plain-text file on the host
      * (same Downloads location the history export uses).
      * @param {string} format - "markdown" (default) or "text"

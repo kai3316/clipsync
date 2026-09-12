@@ -252,7 +252,9 @@ class TestFileTransferManager:
     # ------------------------------------------------------------------
 
     def test_reject_transfer_sends_file_reject(self):
-        # First create a pending incoming transfer
+        # First create a pending incoming transfer.  Without a callback the
+        # manager auto-accepts headlessly, which is no longer rejectable.
+        self.mgr.set_on_transfer_request(lambda *a: None)
         self.mgr.handle_message(
             "file_request",
             {

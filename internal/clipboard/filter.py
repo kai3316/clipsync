@@ -352,4 +352,7 @@ class ContentFilter:
             # re-labelled as PNG (and zlib-compressed) on the wire, so a
             # BMP/TIFF copy gets corrupted on Linux/macOS receivers.
             image_fmt=content.image_fmt,
+            # ...and the route it arrived on, which is stamped before filtering
+            # runs and would otherwise be lost by this rebuild.
+            transport=content.transport,
         )

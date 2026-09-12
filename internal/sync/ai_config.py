@@ -1636,9 +1636,18 @@ class AIConfigManager:
             return {"ok": False, "error": "io_error"}
         if b"\x00" in data:
             return {"ok": False, "error": "binary"}
+        # A bounded preview may end inside a UTF-8 sequence. Defer only that
+        # incomplete tail; malformed bytes must never become editable replacements.
+        import codecs
+        try:
+            content = codecs.getincrementaldecoder("utf-8")().decode(
+                data, final=size <= LOCAL_READ_MAX_BYTES
+            )
+        except UnicodeDecodeError:
+            return {"ok": False, "error": "invalid_encoding"}
         return {
             "ok": True,
-            "content": data.decode("utf-8", errors="replace"),
+            "content": content,
             "truncated": size > LOCAL_READ_MAX_BYTES,
         }
 

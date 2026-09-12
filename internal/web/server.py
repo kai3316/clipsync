@@ -443,6 +443,10 @@ class WebServer:
     """Lightweight HTTP server for the ClipSync web companion."""
 
     FW_RULE_NAME = "ClipSync Web Companion"
+    # The legacy status loop polled the device snapshot at this cadence and
+    # pushed the page whenever a rendered field changed; the fingerprint does
+    # the change detection, so a steady page stays quiet.
+    DEVICE_BROADCAST_INTERVAL = 3.0
 
     def __init__(
         self,
@@ -489,6 +493,8 @@ class WebServer:
         chat_start_session=None,
         get_chat_muted=None,
         set_chat_muted=None,
+        on_history_change=None,
+        on_favorites_change=None,
     ):
         self._cfg = cfg
         self._sync_mgr = sync_mgr
@@ -550,8 +556,18 @@ class WebServer:
         self._chat_start_session = chat_start_session
         self._get_chat_muted = get_chat_muted
         self._set_chat_muted = set_chat_muted
+        # The panel's own favourite routes write the shared store directly, so
+        # they have to say so: the host publishes the change on the event
+        # journal, which is what the native window's cached list listens to.
+        self._on_favorites_change = on_favorites_change
+        # Same seam, other event: the panel's history routes broadcast to the
+        # panels themselves, so a delete or a clear made on a phone published
+        # nothing the window hears about.
+        self._on_history_change = on_history_change
         self._httpd: ThreadingHTTPServer | None = None
         self._thread: threading.Thread | None = None
+        self._device_thread: threading.Thread | None = None
+        self._device_stop = threading.Event()
         self._firewall_ok: bool = False
         # Pre-generate PWA icons
         self._icon_192 = _make_icon(192)
@@ -681,7 +697,10 @@ class WebServer:
         except Exception:
             return (False, "Unknown")
 
-    def _open_firewall(self, port: int, web_port: int | None = None) -> bool:
+    @staticmethod
+    def _open_firewall(port: int, web_port: int | None = None) -> bool:
+        # Static: the rule is machine-wide, so diagnostics can repair it even
+        # when no companion instance exists (web access disabled).
         if sys.platform != "win32":
             return True
         # One rule must cover both the TCP sync port and the web companion
@@ -762,7 +781,8 @@ class WebServer:
             logger.warning("Firewall setup error: %s", e)
             return False
 
-    def _open_firewall_elevated(self, port: int, web_port: int | None = None) -> bool:
+    @staticmethod
+    def _open_firewall_elevated(port: int, web_port: int | None = None) -> bool:
         """Repair the firewall rule through a UAC-elevated netsh call.
 
         Deleting/creating rules via netsh needs admin rights, and most runs
@@ -862,6 +882,8 @@ class WebServer:
         chat_start_session = self._chat_start_session
         get_chat_muted = self._get_chat_muted
         set_chat_muted = self._set_chat_muted
+        on_history_change = self._on_history_change
+        on_favorites_change = self._on_favorites_change
         get_diagnostics = self._get_diagnostics
         on_update_download = self._on_update_download
         on_update_status = self._on_update_status
@@ -1673,6 +1695,8 @@ class WebServer:
                         chat_start_session=chat_start_session,
                         get_chat_muted=get_chat_muted,
                         set_chat_muted=set_chat_muted,
+                        on_history_change=on_history_change,
+                        on_favorites_change=on_favorites_change,
                     )
                     inner_self.send_response(status)
                     inner_self.send_header("Content-Type", content_type)
@@ -1924,6 +1948,8 @@ class WebServer:
                         get_chat_devices=get_chat_devices,
                         chat_send_fn=chat_send_fn,
                         chat_start_session=chat_start_session,
+                        on_history_change=on_history_change,
+                        on_favorites_change=on_favorites_change,
                     )
                     inner_self.send_response(status)
                     inner_self.send_header("Content-Type", content_type)
@@ -1980,6 +2006,8 @@ class WebServer:
                         on_window_close=on_window_close,
                         on_toggle_discovery=on_toggle_discovery,
                         on_toggle_visibility=on_toggle_visibility,
+                        on_history_change=on_history_change,
+                        on_favorites_change=on_favorites_change,
                     )
                     inner_self.send_response(status)
                     inner_self.send_header("Content-Type", content_type)
@@ -2036,6 +2064,8 @@ class WebServer:
                         on_window_close=on_window_close,
                         on_toggle_discovery=on_toggle_discovery,
                         on_toggle_visibility=on_toggle_visibility,
+                        on_history_change=on_history_change,
+                        on_favorites_change=on_favorites_change,
                     )
                     inner_self.send_response(status)
                     inner_self.send_header("Content-Type", content_type)
@@ -2059,10 +2089,44 @@ class WebServer:
             target=self._httpd.serve_forever, daemon=True, name="web-server"
         )
         self._thread.start()
+        self._device_stop.clear()
+        self._device_thread = threading.Thread(
+            target=self._device_broadcast_loop, daemon=True, name="web-devices"
+        )
+        self._device_thread.start()
         logger.info("Web companion listening on http://%s:%d", self._get_lan_ip(), port)
         return True
 
+    def _device_broadcast_loop(self) -> None:
+        """Push the device page when its rendered snapshot changes.
+
+        Legacy compared the same fingerprint every few seconds and broadcast
+        ``devices_updated`` on any change, so the phone's device page converged
+        without optimistic client state or a manual refresh.  A broadcast with
+        no attached client is dropped by the WS manager.
+        """
+        previous = ""
+        while not self._device_stop.wait(self.DEVICE_BROADCAST_INTERVAL):
+            if self._httpd is None:
+                return
+            try:
+                fingerprint = self._ws_manager.devices_fingerprint()
+            except Exception:
+                logger.debug("Device snapshot fingerprint failed", exc_info=True)
+                continue
+            if fingerprint and fingerprint != previous:
+                previous = fingerprint
+                try:
+                    self._ws_manager.broadcast_devices()
+                except Exception:
+                    logger.debug("Device broadcast failed", exc_info=True)
+
     def stop(self) -> None:
+        self._device_stop.set()
+        device_thread = self._device_thread
+        self._device_thread = None
+        if device_thread is not None:
+            device_thread.join(self.DEVICE_BROADCAST_INTERVAL)
         if self._httpd is not None:
             logger.info("Stopping web companion")
             self._ws_manager.shutdown()

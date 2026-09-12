@@ -209,6 +209,43 @@ def test_node_check_touched_files():
         )
 
 
+# ── 10. The route a clip arrived on ─────────────────────────────────────
+
+
+def test_history_item_draws_the_route_it_arrived_on():
+    """The row names the device; only the route can say which way the clip
+    came — and the phone is the device that can be on either side of the
+    relay, so the panel is where the question is asked."""
+    item = _read("components", "history-item.js")
+    assert (
+        '<span v-if="item.transport" class="history-item__route badge">{{ routeLabel }}</span>'
+        in item
+    )
+    # A chip with no rule of its own would be styled as an accent badge, the
+    # same as the device name beside it.
+    assert ".history-item__route {" in _read("index.html")
+
+
+def test_the_route_has_a_word_for_each_of_the_three_links():
+    item = _read("components", "history-item.js")
+    label = item.split("routeLabel: function")[1].split("isCoarse: function")[0]
+    assert "route === 'relay'" in label
+    assert "route === 'web'" in label
+    # Anything else that is not empty (a route this build does not know) falls
+    # to the local link, which is the only one the row can be showing without
+    # the relay or the panel.
+    assert "history.route_local" in label
+
+
+def test_the_route_words_exist_in_both_locales():
+    en, zh = _locales()
+    for key in ("history.route_local", "history.route_internet", "history.route_web"):
+        assert en[key], key
+        assert zh[key], key
+        # A key added to one file alone shows the other language's wording.
+        assert en[key] != zh[key], key
+
+
 # ═════════════════════════════════════════════════════════════════════════
 # Stage 6 — frontend: stale-snapshot guard, confirm parity, cancel handling
 # ═════════════════════════════════════════════════════════════════════════

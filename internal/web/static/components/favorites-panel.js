@@ -569,35 +569,28 @@
       },
 
       _saveOrder: function () {
-        // Save the new order by updating each favorite's position
+        // Save the new order as ONE request carrying every moved favourite.
+        // It was one PATCH per item, which is one round trip per item over a
+        // phone connection and — now that a favourite write is published to
+        // the other surfaces — one snapshot per item on the wire, each of them
+        // a half-applied order. The route takes the whole batch at once.
         var store = this.store;
         var self = this;
-        var attempts = [];
-        var failed = 0;
+        var updates = [];
         for (var i = 0; i < store.favorites.length; i++) {
           var fav = store.favorites[i];
-          // Only update if position has changed
+          // Only send what actually moved.
           if (fav.position !== i) {
             fav.position = i;
-            (function (favItem, idx) {
-              attempts.push(
-                ClipsyncAPI.updateFavorite(favItem.id, { position: idx }).then(function () {
-                  // ok
-                }).catch(function () {
-                  failed++;
-                })
-              );
-            })(fav, i);
+            updates.push({ id: fav.id, position: i });
           }
         }
 
-        if (attempts.length > 0) {
-          Promise.all(attempts).then(function () {
-            if (failed > 0) {
-              self.store.showToast(self.t('favorites.order_failed'), 2000);
-            } else {
-              self.store.showToast(self.t('favorites.order_saved'), 1500);
-            }
+        if (updates.length > 0) {
+          ClipsyncAPI.updateFavoritesBatch(updates).then(function () {
+            self.store.showToast(self.t('favorites.order_saved'), 1500);
+          }).catch(function () {
+            self.store.showToast(self.t('favorites.order_failed'), 2000);
           });
         }
       },
@@ -905,22 +898,22 @@
           return;
         }
 
-        var completed = 0;
-        var total = toUpdate.length;
+        // Rename the whole group in ONE request. It was one PATCH per member —
+        // N round trips on a phone, and, since a favourite write is published
+        // to the other surfaces, N snapshots of a half-renamed group behind one
+        // action. Same batch body the drag uses.
+        var updates = [];
+        for (var j = 0; j < toUpdate.length; j++) {
+          updates.push({ id: toUpdate[j].id, group: newName });
+        }
 
-        toUpdate.forEach(function (fav) {
-          ClipsyncAPI.updateFavorite(fav.id, { group: newName }).then(function (res) {
-            if (res && res.ok !== false && res.favorite) {
-              fav.group = res.favorite.group;
-            }
-            completed++;
-            if (completed === total) {
-              self.store.showToast(self.t('favorites.group_renamed', { name: newName }), 2000);
-            }
-          }).catch(function (e) {
-            completed++;
-            console.error('[ClipSync] Rename group item failed:', e);
-          });
+        ClipsyncAPI.updateFavoritesBatch(updates).then(function () {
+          for (var k = 0; k < toUpdate.length; k++) {
+            toUpdate[k].group = newName;
+          }
+          self.store.showToast(self.t('favorites.group_renamed', { name: newName }), 2000);
+        }).catch(function (e) {
+          console.error('[ClipSync] Rename group failed:', e);
         });
       },
 
@@ -951,27 +944,24 @@
             store.activeGroup = '';
           }
 
-          var completed = 0;
-          var total = toUpdate.length;
-
-          if (total === 0) {
+          if (toUpdate.length === 0) {
             self.store.showToast(self.t('favorites.group_deleted', { name: group }), 2000);
             return;
           }
 
-          toUpdate.forEach(function (fav) {
-            ClipsyncAPI.updateFavorite(fav.id, { group: '' }).then(function (res) {
-              if (res && res.ok !== false && res.favorite) {
-                fav.group = res.favorite.group;
-              }
-              completed++;
-              if (completed === total) {
-                self.store.showToast(self.t('favorites.group_deleted', { name: group }), 2000);
-              }
-            }).catch(function (e) {
-              completed++;
-              console.error('[ClipSync] Delete group item failed:', e);
-            });
+          // Ungroup the whole group in ONE request — see saveRenameGroup.
+          var updates = [];
+          for (var j = 0; j < toUpdate.length; j++) {
+            updates.push({ id: toUpdate[j].id, group: '' });
+          }
+
+          ClipsyncAPI.updateFavoritesBatch(updates).then(function () {
+            for (var k = 0; k < toUpdate.length; k++) {
+              toUpdate[k].group = '';
+            }
+            self.store.showToast(self.t('favorites.group_deleted', { name: group }), 2000);
+          }).catch(function (e) {
+            console.error('[ClipSync] Delete group failed:', e);
           });
         };
 

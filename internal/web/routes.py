@@ -11,6 +11,7 @@ import os
 import threading
 import time
 
+from internal.data.logs import read_log_tail, redact_sensitive_line
 from internal.web.api import (
     aiconfig as _aiconfig_api,  # Round 12 (self-contained; manager bound by src/main.py)
 )
@@ -27,7 +28,7 @@ from internal.web.api.favorites import (
     delete_favorite,
     export_favorites,
     get_favorites,
-    update_favorite,
+    update_favorites,
 )
 from internal.web.api.history import (
     batch_delete,
@@ -144,6 +145,24 @@ def _deleted_entry_ids(body):
     return []
 
 
+def _deleted_entry_id(body):
+    """The single ``entry_id`` a delete body named, or None.
+
+    Mirrors :func:`_deleted_entry_ids` for the one-item route: the web UI
+    always deletes by ``entry_id``, so it resolves directly, while the legacy
+    index path cannot be resolved after the deletion has already shifted the
+    list -- None then, and the caller falls back to a full-history broadcast.
+
+    Exactly one named id is what tells the single form from the batch one, and
+    the id is not type-checked: the panel deletes with the ``entry_id`` the
+    history list handed it, which is the store's own integer, and a route that
+    quietly fell back to a snapshot over that would answer worse than the
+    direct broadcast it replaced.
+    """
+    ids = _deleted_entry_ids(body)
+    return ids[0] if len(ids) == 1 else None
+
+
 def _broadcast_history_updated(dialog_mgr) -> None:
     """Broadcast the current full history snapshot to all WS clients."""
     mgr = _ws_manager_for(dialog_mgr)
@@ -177,33 +196,82 @@ def _broadcast_history_clear(dialog_mgr) -> None:
         logger.debug("history clear broadcast failed", exc_info=True)
 
 
-def _redact_sensitive_line(line: str, cfg) -> str:
-    """Strip locally-sensitive strings (user home, config dir, web token)
-    from a log line before it is served to a web client.
+def _notify_history_change(
+    on_history_change, dialog_mgr, entry_id=None, entry_ids=None, cleared=None
+) -> None:
+    """Tell the host a route changed the stored history.
 
-    The raw log contains absolute user paths (e.g. ``C:\\Users\\<name>
-    \\AppData\\Roaming\\ClipSync\\...``), stack traces and config values —
-    useful reconnaissance that should not leave the device.
+    These routes have broadcast straight to the panels since before the
+    migration (``dialog_mgr.ws_manager``), which is why the two surfaces were
+    wired differently here: the native window hears about a history change on
+    the event journal, and none of these published there.  A clip deleted or
+    the whole list cleared from a phone therefore left the desktop window
+    showing what it had loaded, until something else happened to refresh it --
+    the same seam as the favourites routes, in the other event.
+
+    With a host wired, it publishes ``history.changed`` on the journal: the
+    event the runtime's own history writes already publish, which the phone
+    bridge turns back into a panel broadcast and the window refreshes on.  One
+    event, both surfaces.  Without a host -- the legacy desktop, or a test --
+    the direct broadcast stays exactly as it was, because there is no journal
+    for the panel half to come back through.
+
+    The payload shapes are the runtime's own, and deliberately so: the
+    ``history.changed`` the runtime publishes for a delete of its own is
+    ``{"id": ...}`` for one row and ``{"ids": [...]}`` for a batch, so a
+    caller downstream cannot tell a change made from a phone from one made in
+    the window -- which is the point.  ``{"cleared": n}`` is a wipe, and ``{}``
+    is anything else (a pin, or a delete whose ids the legacy index path
+    cannot resolve, where the snapshot is the only honest answer).  A raising
+    host callback cannot fail a change that already landed: the row is gone
+    either way, and only its visibility elsewhere depends on this.
     """
-    redact: list[str] = []
-    home = os.path.expanduser("~")
-    if home:
-        redact.append(home)
+    if on_history_change is None:
+        if cleared is not None:
+            _broadcast_history_clear(dialog_mgr)
+        elif entry_id is not None:
+            _broadcast_history_deleted(dialog_mgr, [entry_id])
+        elif entry_ids:
+            _broadcast_history_deleted(dialog_mgr, entry_ids)
+        else:
+            _broadcast_history_updated(dialog_mgr)
+        return
+    if cleared is not None:
+        payload = {"cleared": cleared}
+    elif entry_id is not None:
+        payload = {"id": entry_id}
+    elif entry_ids:
+        payload = {"ids": list(entry_ids)}
+    else:
+        payload = {}
     try:
-        from internal.config.config import _config_dir
-
-        config_dir = str(_config_dir())
-        if config_dir and config_dir != home:
-            redact.append(config_dir)
+        on_history_change(payload)
     except Exception:
-        pass
-    token = getattr(cfg, "web_token", "")
-    if token:
-        redact.append(token)
-    for r in redact:
-        if r:
-            line = line.replace(r, "[redacted]")
-    return line
+        logger.exception("on_history_change callback failed")
+
+
+def _notify_favorites_change(on_favorites_change) -> None:
+    """Tell the host a route changed a stored favourite.
+
+    The host publishes ``favorites.changed`` on the event journal, which is
+    what the native window invalidates its cached list on and what the phone
+    bridge turns back into a broadcast for the panels — so the two surfaces
+    over one ``favorites.db`` converge whichever one was touched.  A host that
+    wired nothing (no companion, or a test) is simply silent, and a raising
+    callback must not fail a write that already succeeded: the favourite is
+    stored either way, and only its visibility elsewhere depends on this.
+    """
+    if on_favorites_change is None:
+        return
+    try:
+        on_favorites_change()
+    except Exception:
+        logger.exception("on_favorites_change callback failed")
+
+
+def _redact_sensitive_line(line: str, cfg) -> str:
+    """Kept as the route module's name for the shared redaction helper."""
+    return redact_sensitive_line(line, cfg)
 
 
 def dispatch(
@@ -255,6 +323,8 @@ def dispatch(
     chat_start_session=None,
     get_chat_muted=None,
     set_chat_muted=None,
+    on_history_change=None,
+    on_favorites_change=None,
 ):
     """Route an API request to the appropriate handler, never raising.
 
@@ -330,6 +400,8 @@ def dispatch(
             chat_start_session,
             get_chat_muted,
             set_chat_muted,
+            on_history_change,
+            on_favorites_change,
         )
     except Exception:
         logger.exception("Unhandled error in API route: %s %s", method, path)
@@ -385,6 +457,8 @@ def _dispatch(
     chat_start_session=None,
     get_chat_muted=None,
     set_chat_muted=None,
+    on_history_change=None,
+    on_favorites_change=None,
 ):
     """Route an API request to the appropriate handler.
 
@@ -515,32 +589,9 @@ def _dispatch(
                 # ?tail= is accepted as an alias for ?lines= — same semantics
                 # (number of trailing log lines to return).
                 lines_str = query_params.get("tail", ["200"])[0]
-            try:
-                n = int(lines_str)
-            except (TypeError, ValueError):
-                n = 200
-            n = max(1, min(n, 1000))
-            logs: list[str] = []
-            try:
-                from internal.config.config import _log_dir
-
-                log_path = _log_dir() / "clipsync.log"
-                if log_path.exists():
-                    # Read only the tail (last 256 KB) so an oversized log is
-                    # not fully loaded into memory.
-                    try:
-                        with open(log_path, "rb") as f:
-                            f.seek(0, 2)  # SEEK_END
-                            size = f.tell()
-                            f.seek(max(0, size - 256 * 1024))
-                            tail = f.read().decode("utf-8", errors="replace")
-                    except Exception:
-                        tail = ""
-                    logs = [_redact_sensitive_line(line, cfg) for line in tail.splitlines()[-n:]]
-            except Exception:
-                logger.exception("Failed to read log file for /api/logs")
-                logs = []
-            return _json_response({"logs": logs})
+            # Shared with the native logs.tail command so tail window and
+            # redaction cannot drift between the two clients.
+            return _json_response({"logs": read_log_tail(cfg, lines_str)})
 
         elif path == "/api/update/check":
             # Manual check for a newer release (the auto_update_check setting
@@ -657,14 +708,12 @@ def _dispatch(
 
         elif path == "/api/delete":
             data, status = delete_item(body, history)
-            # Broadcast the deletion so every client's list stays in sync —
-            # the client-side history_updated merge can't express deletions.
+            # Tell every client the row is gone — the client-side
+            # history_updated merge can't express deletions.
             if data.get("ok"):
-                ids = _deleted_entry_ids(body)
-                if ids:
-                    _broadcast_history_deleted(dialog_mgr, ids)
-                else:
-                    _broadcast_history_updated(dialog_mgr)
+                _notify_history_change(
+                    on_history_change, dialog_mgr, entry_id=_deleted_entry_id(body)
+                )
             return _json_response(data, status)
 
         elif path == "/api/pin":
@@ -672,7 +721,7 @@ def _dispatch(
             # A pin toggles an existing row's pinned flag — a full-history
             # snapshot lets every client update it in place (upsert path).
             if data.get("ok"):
-                _broadcast_history_updated(dialog_mgr)
+                _notify_history_change(on_history_change, dialog_mgr)
             return _json_response(data, status)
 
         elif path == "/api/paste":
@@ -688,22 +737,23 @@ def _dispatch(
             # Same sync requirement as single pin: refresh every client's
             # pinned flags from the authoritative snapshot.
             if data.get("ok"):
-                _broadcast_history_updated(dialog_mgr)
+                _notify_history_change(on_history_change, dialog_mgr)
             return _json_response(data, status)
 
         elif path == "/api/batch-delete":
             data, status = batch_delete(body, history)
-            # Broadcast the removed entry_ids so every client drops them.
+            # Tell every client to drop the removed rows.
             if data.get("ok"):
-                ids = _deleted_entry_ids(body)
-                if ids:
-                    _broadcast_history_deleted(dialog_mgr, ids)
-                else:
-                    _broadcast_history_updated(dialog_mgr)
+                _notify_history_change(
+                    on_history_change, dialog_mgr, entry_ids=_deleted_entry_ids(body)
+                )
             return _json_response(data, status)
 
         elif path == "/api/batch-favorite":
             data, status = batch_favorite(body, history)
+            # One publish for the whole batch, like `favorites.batch_add`.
+            if status == 200:
+                _notify_favorites_change(on_favorites_change)
             return _json_response(data, status)
 
         elif path == "/api/nav":
@@ -754,6 +804,8 @@ def _dispatch(
 
         elif path == "/api/favorites":
             data, status = add_favorite(body)
+            if status == 200:
+                _notify_favorites_change(on_favorites_change)
             return _json_response(data, status)
 
         elif path == "/api/favorites/export":
@@ -1182,7 +1234,7 @@ def _dispatch(
                 return _json_response({"ok": False, "error": str(e)}, 500)
             # Tell every client to wipe its local list too — otherwise only
             # the requesting tab empties and the others keep stale entries.
-            _broadcast_history_clear(dialog_mgr)
+            _notify_history_change(on_history_change, dialog_mgr, cleared=count)
             return _json_response({"ok": True, "count": count})
 
         elif path == "/api/window":
@@ -1361,6 +1413,8 @@ def _dispatch(
     elif method == "DELETE":
         if path == "/api/favorites":
             data, status = delete_favorite(body)
+            if status == 200:
+                _notify_favorites_change(on_favorites_change)
             return _json_response(data, status)
 
         elif path == "/api/files":
@@ -1406,7 +1460,9 @@ def _dispatch(
     # ── PATCH / PUT routes (for favorites update) ───────────────────
 
     elif method in ("PATCH", "PUT") and path == "/api/favorites":
-        data, status = update_favorite(body)
+        data, status = update_favorites(body)
+        if status == 200:
+            _notify_favorites_change(on_favorites_change)
         return _json_response(data, status)
 
     return _json_response({"error": "not found"}, 404)

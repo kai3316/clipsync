@@ -79,10 +79,11 @@ def export_history_json(history: _HistoryType, filepath: str) -> int:
     """Export all history entries to a JSON file.
 
     Each entry includes: timestamp, content_type, text_preview, types (base64
-    decoded to readable text), source_device/app/title, pinned, paste_count.
-    Entries are streamed to disk one json.dumps call at a time — building a
-    single payload string for a large image-heavy history peaked at several
-    times the exported size in RAM.  Returns the number of exported items.
+    decoded to readable text), source_device, transport, app/title, pinned,
+    paste_count.  Entries are streamed to disk one json.dumps call at a time —
+    building a single payload string for a large image-heavy history peaked at
+    several times the exported size in RAM.  Returns the number of exported
+    items.
     """
     entries = history.get_all()
     export_list = []
@@ -94,6 +95,10 @@ def export_history_json(history: _HistoryType, filepath: str) -> int:
                 "text_preview": entry.get("text_preview", ""),
                 "types": _decode_types(entry),
                 "source_device": entry.get("source_device", ""),
+                # Carried through the round trip: a restored history that lost
+                # the route would show rows whose chips changed meaning, and
+                # this file is the documented way to move one.
+                "transport": entry.get("transport", ""),
                 "source_app": entry.get("source_app", ""),
                 "source_title": entry.get("source_title", ""),
                 "pinned": entry.get("pinned", False),
@@ -161,6 +166,7 @@ def import_history_json(filepath: str, history: _HistoryType) -> int:
             "text_preview": item.get("text_preview", ""),
             "types": _encode_types(item.get("types", {})),
             "source_device": str(item.get("source_device", "") or ""),
+            "transport": str(item.get("transport", "") or ""),
             "source_app": str(item.get("source_app", "") or ""),
             "source_title": str(item.get("source_title", "") or ""),
             "pinned": item.get("pinned", False),
@@ -184,9 +190,9 @@ def export_history_csv(history: _HistoryType, filepath: str) -> int:
     """Export history entries to a CSV file.
 
     Columns: timestamp (epoch seconds), time_iso (local ISO-8601),
-    content_type, text_preview, source_device, source_app, source_title,
-    pinned, paste_count, byte_size (approximate decoded payload size).
-    Returns the number of exported items.
+    content_type, text_preview, source_device, transport, source_app,
+    source_title, pinned, paste_count, byte_size (approximate decoded payload
+    size).  Returns the number of exported items.
     """
     entries = history.get_all()
     out = Path(filepath)
@@ -205,6 +211,7 @@ def export_history_csv(history: _HistoryType, filepath: str) -> int:
                     "content_type",
                     "text_preview",
                     "source_device",
+                    "transport",
                     "source_app",
                     "source_title",
                     "pinned",
@@ -223,6 +230,7 @@ def export_history_csv(history: _HistoryType, filepath: str) -> int:
                         "content_type": entry.get("content_type", ""),
                         "text_preview": entry.get("text_preview", ""),
                         "source_device": entry.get("source_device", ""),
+                        "transport": entry.get("transport", ""),
                         "source_app": entry.get("source_app", ""),
                         "source_title": entry.get("source_title", ""),
                         "pinned": entry.get("pinned", False),
@@ -271,6 +279,10 @@ def import_history_csv(filepath: str, history: _HistoryType) -> int:
                 "text_preview": row.get("text_preview", ""),
                 "types": {},
                 "source_device": str(row.get("source_device", "") or ""),
+                # A CSV exported before this column existed simply has no key
+                # here, and the row comes back with no route — which is what
+                # an empty value means everywhere else.
+                "transport": str(row.get("transport", "") or ""),
                 "source_app": str(row.get("source_app", "") or ""),
                 "source_title": str(row.get("source_title", "") or ""),
                 "pinned": (row.get("pinned", "false").lower() == "true"),
@@ -326,7 +338,13 @@ def export_history_markdown(history: _HistoryType, filepath: str) -> int:
                     entry.get("content_type", "") or "Clip",
                 )
                 source = entry.get("source_app", "") or entry.get("source_device", "")
-                origin = f" · {source}" if source else ""
+                # The route joins the source on the same line: a reader
+                # comparing this file against the window's rows needs the same
+                # pair of facts, and the device name alone cannot say which
+                # path a clip took.
+                route = _TRANSPORT_LABELS.get(str(entry.get("transport", "")), "")
+                origin = " · ".join(part for part in (source, route) if part)
+                origin = f" · {origin}" if origin else ""
                 pastes = entry.get("paste_count", 0) or 0
                 pasted = f" · {pastes} paste(s)" if pastes else ""
                 preview = entry.get("text_preview", "") or ""
@@ -379,6 +397,18 @@ _CONTENT_LABELS: dict[str, str] = {
     "IMAGE_EMF": "Vector image",
     "FILE": "File",
     "URL": "Link",
+}
+
+#: How the Markdown report names each route a clip can arrive on.  Only routes
+#: that were recorded are listed: a clip captured here, and one whose route was
+#: never recorded, both say nothing rather than claiming a path.  "web" is the
+#: push from this machine's own web server — a route like the other two, and the
+#: one a reader would otherwise have to guess at, since its source name says
+#: "Web" and not where the browser was.
+_TRANSPORT_LABELS: dict[str, str] = {
+    "lan": "local link",
+    "relay": "internet relay",
+    "web": "web push",
 }
 
 

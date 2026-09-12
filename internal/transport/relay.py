@@ -411,6 +411,42 @@ def probe_relay_endpoint(endpoint: str, timeout: float = 4.0) -> dict:
         return {"endpoint": endpoint, "ok": False, "latency_ms": None, "detail": detail[:120]}
 
 
+def probe_relay_endpoints(brokers, timeout: float = 4.0, join_timeout: float = 6.0) -> list[dict]:
+    """Probe several relay brokers at once: one row per broker, never raising.
+
+    Each broker is probed in its own thread (see probe_relay_endpoint), so one
+    black-holed endpoint cannot delay the rest — the caller waits at most
+    ``join_timeout`` per thread and a straggler that is still running is left
+    behind (its own probe times out and reports itself).  Reachable brokers
+    come first, then by ascending latency, which is the order the settings
+    panel renders.
+    """
+    wanted = [b.strip() for b in (brokers or []) if isinstance(b, str) and b.strip()]
+    results: list[dict] = []
+    lock = threading.Lock()
+
+    def probe(endpoint: str) -> None:
+        try:
+            row = probe_relay_endpoint(endpoint, timeout=timeout)
+        except Exception:  # probe_relay_endpoint promises not to raise
+            logger.debug("relay probe crashed for %s", endpoint, exc_info=True)
+            row = {
+                "endpoint": endpoint, "ok": False, "latency_ms": None, "detail": "probe failed",
+            }
+        with lock:
+            results.append(row)
+
+    threads = [threading.Thread(target=probe, args=(b,), daemon=True) for b in wanted]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=join_timeout)
+    results.sort(
+        key=lambda r: (not r.get("ok"), r.get("latency_ms") is None, r.get("latency_ms") or 0)
+    )
+    return results
+
+
 class _MirrorConnection:
     """Publish-only connection to one non-primary broker.
 

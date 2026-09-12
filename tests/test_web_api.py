@@ -342,6 +342,18 @@ class _RecordingWsManager:
     def broadcast(self, message_type, data=None):
         self.calls.append((message_type, data))
 
+    # The panel's history routes reach the panels through these three, and the
+    # broadcast helpers swallow a missing one by design — so a recorder without
+    # them would silently record nothing at all.
+    def broadcast_history(self):
+        self.calls.append(("history_updated", None))
+
+    def broadcast_history_deleted(self, entry_ids):
+        self.calls.append(("history_item_deleted", list(entry_ids)))
+
+    def broadcast_history_clear(self):
+        self.calls.append(("history_clear", None))
+
 
 class _FakeDialogMgr:
     def __init__(self):
@@ -418,6 +430,25 @@ def test_restore_no_broadcast_when_config_stays_chosen(monkeypatch):
     )
 
     assert dlg.ws_manager.calls == []
+
+
+def test_get_settings_exposes_language_chosen_readonly():
+    """The desktop shell shows its first-run picker while language_chosen is
+    False, so the flag must reach the client — but only as a read."""
+    cfg = _Cfg()
+    cfg.language_chosen = False
+
+    data, status = settings_api.get_settings(cfg)
+    assert status == 200
+    assert data["settings"]["language_chosen"] is False
+
+    # Read-only: POST /api/settings cannot flip it; only a language choice can
+    # (see the test below).
+    _data, status2 = settings_api.update_settings(
+        json.dumps({"language_chosen": True}).encode(), cfg, None
+    )
+    assert cfg.language_chosen is False
+    assert status2 == 400
 
 
 def test_web_language_choice_marks_language_chosen():
@@ -954,6 +985,33 @@ def test_devices_ignore_garbage_reconnect_states():
     assert bad["reconnect_max"] == 0
 
 
+def test_ws_devices_fingerprint_follows_the_pending_pairing(tmp_path):
+    """The fingerprint is what the device-page push keys on (see the server's
+    broadcast loop), so dropping a pending pairing — a chat invite does that —
+    must change it."""
+    cfg = _DevCfg(peers={"p1": _Peer("p1", "One", paired=False)})
+    db = _make_db(tmp_path)
+    pending = [("p1", "12345678", "One", "pending")]
+    mgr = WebSocketManager(
+        cfg=cfg,
+        history=db,
+        sync_mgr=None,
+        get_connected_ids=lambda: [],
+        get_pending_pairings=lambda: list(pending),
+    )
+    try:
+        with_pairing = mgr.devices_fingerprint()
+        assert "12345678" in with_pairing
+        pending.clear()
+        without_pairing = mgr.devices_fingerprint()
+        assert without_pairing != with_pairing
+        assert "12345678" not in without_pairing
+        # A steady page keeps the same fingerprint, so the loop stays quiet.
+        assert mgr.devices_fingerprint() == without_pairing
+    finally:
+        db.close()
+
+
 def test_ws_device_snapshot_carries_reconnect_fields(tmp_path):
     a, b = socket.socketpair()
 
@@ -1020,6 +1078,37 @@ def test_export_markdown_writes_md_file(isolated_downloads, tmp_path):
     content = out_file.read_text(encoding="utf-8")
     assert "# ClipSync History Export" in content
     assert "hello export" in content
+
+
+def test_export_markdown_names_the_route_a_clip_came_in_on(isolated_downloads, tmp_path):
+    """The route is the other half of the pair a reader of the file needs: the
+    source name says which device, and only the route can say which way."""
+    db = ClipboardHistoryDB(storage_path=str(tmp_path / "history.db"), max_entries=50)
+    for transport, text in (
+        ("lan", "over the cable"),
+        ("relay", "over the relay"),
+        ("web", "from the panel"),
+        # A clip captured here is built with no route at all — the caller that
+        # records one is the clipboard monitor, which has nothing to pass.
+        (None, "typed here"),
+    ):
+        content = ClipboardContent(types={ContentType.TEXT: text.encode()}, timestamp=1000.0)
+        if transport is not None:
+            content.transport = transport
+        db.add(content, source_app=None)
+    data, status = export_data(_body({"format": "markdown"}), object(), db)
+    assert status == 200
+    content = (isolated_downloads / data["filename"]).read_text(encoding="utf-8")
+    lines = {
+        text: next(line for line in content.splitlines() if text in line)
+        for text in ("over the cable", "over the relay", "from the panel", "typed here")
+    }
+    assert "local link" in lines["over the cable"]
+    assert "internet relay" in lines["over the relay"]
+    assert "web push" in lines["from the panel"]
+    # A row whose route was never recorded claims nothing rather than guessing.
+    routes = ("local link", "internet relay", "web push")
+    assert not any(word in lines["typed here"] for word in routes)
 
 
 def test_export_markdown_unsupported_format_is_400(tmp_path):
@@ -1835,10 +1924,13 @@ class _FakeWriter:
 
 
 class _FakeHistory:
-    def __init__(self):
+    def __init__(self, fail=False):
         self.added = []
+        self.fail = fail
 
     def add(self, content):
+        if self.fail:
+            raise RuntimeError("history is closed")
         self.added.append(content)
 
 
@@ -1846,6 +1938,7 @@ class _FakeSyncMgr:
     def __init__(self):
         self.sent = []
         self.suppressed = []
+        self.notified = 0
 
         class _Monitor:
             def __init__(self, outer):
@@ -1856,6 +1949,9 @@ class _FakeSyncMgr:
 
         self._monitor = _Monitor(self)
         self.on_send = self.sent.append
+
+    def _notify_history_change(self):
+        self.notified += 1
 
 
 class TestPushTextTellsTheTruth:
@@ -1895,6 +1991,8 @@ class TestPushTextTellsTheTruth:
         history_api.push_text(_body({"text": "hello"}), self._cfg(), sync, hist)
         assert sync.sent == []
         assert hist.added == []
+        # A push nobody recorded is a push no listener should be told about.
+        assert sync.notified == 0
 
     def test_raising_writer_is_a_failure_not_a_500(self, monkeypatch):
         from internal.web.api import history as history_api
@@ -1923,6 +2021,54 @@ class TestPushTextTellsTheTruth:
         assert len(sync.sent) == 1
         assert len(hist.added) == 1
         assert sync.suppressed == [2.0]
+
+    def test_a_recorded_push_announces_the_change(self, monkeypatch):
+        """A pushed row is a history change like any other, and the sync
+        manager's notification hook is how every listener hears about it —
+        the panel's live list and the window's re-read both hang off it.  The
+        row used to exist silently, so the phone that pushed saw its own text
+        only after a reload."""
+        from internal.web.api import history as history_api
+
+        monkeypatch.setattr(
+            "internal.clipboard.platform.create_writer", lambda: _FakeWriter(result=True)
+        )
+        sync = _FakeSyncMgr()
+        hist = _FakeHistory()
+        history_api.push_text(_body({"text": "hi"}), self._cfg(), sync, hist)
+        assert sync.notified == 1
+
+    def test_a_push_whose_row_was_not_recorded_is_not_announced(self, monkeypatch):
+        """The text reached the clipboard, so the push did its job and still
+        reports success — but a listener told the history changed would go
+        looking for a row that was never written."""
+        from internal.web.api import history as history_api
+
+        monkeypatch.setattr(
+            "internal.clipboard.platform.create_writer", lambda: _FakeWriter(result=True)
+        )
+        sync = _FakeSyncMgr()
+        hist = _FakeHistory(fail=True)
+        data, status = history_api.push_text(_body({"text": "hi"}), self._cfg(), sync, hist)
+        assert (status, data["ok"]) == (200, True)
+        assert hist.added == []
+        assert sync.notified == 0
+
+    def test_the_row_a_push_records_carries_its_route(self, monkeypatch):
+        """A push arrives over this machine's own web server, not over a peer
+        link, and the row would otherwise carry a source and no route: "Web"
+        says nothing about where the browser was."""
+        from internal.web.api import history as history_api
+
+        monkeypatch.setattr(
+            "internal.clipboard.platform.create_writer", lambda: _FakeWriter(result=True)
+        )
+        sync = _FakeSyncMgr()
+        hist = _FakeHistory()
+        data, status = history_api.push_text(_body({"text": "hi"}), self._cfg(), sync, hist)
+        assert status == 200
+        assert data["ok"] is True
+        assert [content.transport for content in hist.added] == ["web"]
 
     def test_sync_disabled_does_not_crash(self, monkeypatch):
         """``sync_mgr`` is None when sync is off — the suppress_for call was
@@ -2025,3 +2171,284 @@ class TestPersistDoesNotMutateSharedConfig:
         # reading of a missing/corrupt store is "there is no key to downgrade",
         # not "erase the device's key".
         assert seen[0].private_key_pem == "PLAINTEXT-KEY"
+
+
+# ── Panel-owned favourites writes tell the host ───────────────────────
+#
+# The phone's panel writes the shared favourites store through its own routes
+# (internal/web/api/favorites.py), not through the native request adapter that
+# publishes `favorites.changed`.  The desktop window invalidates its cached
+# favourites list on that event, so without a publish from this path a
+# favourite added on a phone stayed invisible in the window — the two surfaces
+# legacy had as one.  These pin the host callback, and that it stays optional
+# and harmless.
+
+
+def _favorites_db(tmp_path, monkeypatch):
+    """Point the favourites API at a database of this test's own."""
+    from internal.web.api import favorites as favorites_api
+
+    monkeypatch.setattr(favorites_api, "_FAV_DB_PATH", None)
+    monkeypatch.setattr(favorites_api, "_config_dir", lambda: str(tmp_path))
+
+
+def _favorites_dispatch(method, path, payload, tmp_path, monkeypatch, on_favorites_change):
+    _favorites_db(tmp_path, monkeypatch)
+    body = json.dumps(payload).encode("utf-8") if payload is not None else b""
+    return dispatch(
+        method,
+        path,
+        {},
+        body,
+        cfg=_Cfg(),
+        history=None,
+        sync_mgr=None,
+        get_connected_ids=lambda: [],
+        upload_dir=".",
+        on_nav_url=None,
+        on_forward_file=None,
+        on_favorites_change=on_favorites_change,
+    )
+
+
+def _add_favorite(tmp_path, monkeypatch, title):
+    """Store one favourite through the panel's own route and return its id."""
+    status, _ct, body = _favorites_dispatch(
+        "POST", "/api/favorites", {"title": title, "content": title},
+        tmp_path, monkeypatch, None,
+    )
+    assert status == 200
+    return json.loads(body)["favorite"]["id"]
+
+
+def test_every_panel_favourite_write_tells_the_host(tmp_path, monkeypatch):
+    seen = []
+    notify = lambda: seen.append("changed")  # noqa: E731
+
+    favorite_id = _add_favorite(tmp_path, monkeypatch, "From the phone")
+    status, _ct, _body = _favorites_dispatch(
+        "PATCH", "/api/favorites", {"id": favorite_id, "title": "Renamed"},
+        tmp_path, monkeypatch, notify,
+    )
+    assert status == 200 and seen == ["changed"]
+
+    status, _ct, _body = _favorites_dispatch(
+        "DELETE", "/api/favorites", {"id": favorite_id}, tmp_path, monkeypatch, notify,
+    )
+    assert status == 200 and seen == ["changed", "changed"]
+
+
+def test_a_panel_batch_tells_the_host_once(tmp_path, monkeypatch):
+    """A multi-item gesture is one request and one publish, not one per item.
+
+    The panel used to patch every favourite a gesture touched — a drag, a group
+    rename, a group delete — so publishing per write would have put one
+    half-applied change on the wire per item.
+    """
+    ids = [_add_favorite(tmp_path, monkeypatch, title) for title in ("a", "b", "c")]
+    seen = []
+    status, _ct, body = _favorites_dispatch(
+        "PATCH",
+        "/api/favorites",
+        {"updates": [{"id": ids[0], "position": 2, "group": "work"},
+                     {"id": ids[1], "position": 0},
+                     {"id": ids[2], "group": "work"}]},
+        tmp_path, monkeypatch, lambda: seen.append("changed"),
+    )
+    assert status == 200
+    assert json.loads(body) == {"ok": True, "updated": 3}
+    assert seen == ["changed"]
+
+    from internal.web.api import favorites as favorites_api
+
+    stored = favorites_api.get_favorites()[0]["favorites"]
+    assert [f["title"] for f in stored] == ["b", "c", "a"]
+    assert {f["title"]: f["group"] for f in stored} == {"a": "work", "b": "", "c": "work"}
+
+
+@pytest.mark.parametrize(
+    "payload,status",
+    [
+        ({"title": "", "content": ""}, 400),
+        ({"id": "no-such-favourite", "title": "x"}, 404),
+        ({"updates": [{"id": "x", "position": "0"}]}, 400),
+    ],
+)
+def test_a_rejected_favourite_write_tells_the_host_nothing(
+    payload, status, tmp_path, monkeypatch
+):
+    """A 400/404 changed nothing, so no surface should hear about it."""
+    seen = []
+    got, _ct, _body = _favorites_dispatch(
+        "PATCH", "/api/favorites", payload, tmp_path, monkeypatch,
+        lambda: seen.append("changed"),
+    )
+    assert got == status
+    assert seen == []
+
+
+def test_a_failing_host_callback_does_not_fail_the_write(tmp_path, monkeypatch):
+    """The favourite is stored; only its visibility elsewhere depends on this."""
+    def explode():
+        raise RuntimeError("host is gone")
+
+    status, _ct, body = _favorites_dispatch(
+        "POST", "/api/favorites", {"title": "Kept", "content": "Kept"},
+        tmp_path, monkeypatch, explode,
+    )
+    assert status == 200
+    assert json.loads(body)["favorite"]["title"] == "Kept"
+
+    from internal.web.api import favorites as favorites_api
+
+    assert [f["title"] for f in favorites_api.get_favorites()[0]["favorites"]] == ["Kept"]
+
+
+def test_a_host_that_wired_nothing_is_silent(tmp_path, monkeypatch):
+    """No companion (or a test) leaves the callback unset: the write still lands."""
+    assert _add_favorite(tmp_path, monkeypatch, "No host") is not None
+
+
+# ── the panel's history routes and the host ────────────────────────────
+
+
+class _ClearableHistory:
+    """Just enough history for the clear route: it counts and empties.
+
+    Rows carry ``entry_id`` because the store's own do -- the clear route only
+    needs the length, but a fake that renamed the key would hide a route that
+    read the wrong one.
+    """
+
+    def __init__(self, ids=()):
+        self.ids = list(ids)
+
+    def get_all(self):
+        return [{"entry_id": entry_id} for entry_id in self.ids]
+
+    def clear(self):
+        count = len(self.ids)
+        self.ids = []
+        return count
+
+
+def _history_dispatch(path, payload, monkeypatch, on_history_change=None, dialog_mgr=None,
+                      ok=True, ids=("e1", "e2")):
+    """POST one panel history route with the api layer stubbed to succeed.
+
+    What is under test here is the routing: which route tells the host, with
+    which payload, and what it does when no host is wired.  The api functions
+    themselves are covered where they live.
+    """
+    from internal.web import routes as routes_module
+
+    result = {"ok": ok, "count": len(ids)}
+    for name in ("delete_item", "toggle_pin", "batch_pin", "batch_delete"):
+        monkeypatch.setattr(routes_module, name, lambda body, history: (dict(result), 200))
+    return dispatch(
+        "POST",
+        path,
+        {},
+        json.dumps(payload).encode("utf-8"),
+        cfg=_Cfg(),
+        history=_ClearableHistory(ids),
+        sync_mgr=None,
+        get_connected_ids=lambda: [],
+        upload_dir=".",
+        on_nav_url=None,
+        on_forward_file=None,
+        dialog_mgr=dialog_mgr,
+        on_history_change=on_history_change,
+    )
+
+
+def test_every_panel_history_change_tells_the_host(monkeypatch):
+    """A delete, a batch delete, a pin and a wipe each reach the journal.
+
+    The panel's history routes broadcast straight to the panels (that predates
+    the migration), so nothing published on the journal — which is where the
+    native window hears about a change.  The payloads are the ones the
+    runtime's own history writes publish, so the phone bridge answers the
+    panels exactly as it already does for a change made in the window.
+    """
+    seen = []
+    for path, payload, expected in [
+        ("/api/delete", {"entry_id": "e1"}, {"id": "e1"}),
+        ("/api/batch-delete", {"entry_ids": ["e1", "e2"]}, {"ids": ["e1", "e2"]}),
+        ("/api/pin", {"entry_id": "e1"}, {}),
+        ("/api/batch-pin", {"entry_ids": ["e1"]}, {}),
+        ("/api/history/clear", {}, {"cleared": 2}),
+    ]:
+        seen.clear()
+        status, _ct, _body = _history_dispatch(
+            path, payload, monkeypatch, on_history_change=seen.append
+        )
+        assert status == 200, path
+        assert seen == [expected], path
+
+
+def test_a_delete_the_body_cannot_name_tells_the_host_plainly(monkeypatch):
+    """The legacy index path cannot be resolved after the shift, so the body
+    carries no ids and the snapshot is the only honest thing to publish."""
+    seen = []
+    status, _ct, _body = _history_dispatch(
+        "/api/delete", {"index": 3}, monkeypatch, on_history_change=seen.append
+    )
+    assert status == 200
+    assert seen == [{}]
+
+
+def test_a_refused_history_change_tells_the_host_nothing(monkeypatch):
+    """A 400/404 changed nothing, so no surface should hear about it."""
+    seen = []
+    for path in ("/api/delete", "/api/pin", "/api/batch-delete", "/api/batch-pin"):
+        seen.clear()
+        status, _ct, _body = _history_dispatch(
+            path, {"entry_id": "gone"}, monkeypatch, on_history_change=seen.append, ok=False
+        )
+        assert status == 200, path
+        assert seen == [], path
+
+
+def test_a_failing_history_host_callback_does_not_fail_the_change(monkeypatch):
+    """The row is gone either way; only its visibility elsewhere depends on this."""
+
+    def explode(payload):
+        raise RuntimeError("host is gone")
+
+    status, _ct, body = _history_dispatch(
+        "/api/delete", {"entry_id": "e1"}, monkeypatch, on_history_change=explode
+    )
+    assert status == 200
+    assert json.loads(body)["ok"] is True
+
+
+def test_a_history_route_without_a_host_still_broadcasts(monkeypatch):
+    """The legacy desktop runs this server with no companion, so with no
+    callback wired the direct broadcast to the panels stays exactly as it was."""
+    dlg = _FakeDialogMgr()
+    for path, payload, expected in [
+        ("/api/delete", {"entry_id": "e1"}, [("history_item_deleted", ["e1"])]),
+        ("/api/delete", {"index": 3}, [("history_updated", None)]),
+        ("/api/batch-delete", {"entry_ids": ["e1", "e2"]},
+         [("history_item_deleted", ["e1", "e2"])]),
+        ("/api/pin", {"entry_id": "e1"}, [("history_updated", None)]),
+        ("/api/batch-pin", {"entry_ids": ["e1"]}, [("history_updated", None)]),
+        ("/api/history/clear", {}, [("history_clear", None)]),
+    ]:
+        dlg.ws_manager.calls.clear()
+        status, _ct, _body = _history_dispatch(path, payload, monkeypatch, dialog_mgr=dlg)
+        assert status == 200, path
+        assert dlg.ws_manager.calls == expected, path
+
+
+def test_a_wipe_publishes_the_count_the_response_reported(monkeypatch):
+    """The count is captured before the clear, so the payload and the response
+    describe the same number of rows."""
+    seen = []
+    status, _ct, body = _history_dispatch(
+        "/api/history/clear", {}, monkeypatch, on_history_change=seen.append, ids=("e1", "e2", "e3")
+    )
+    assert status == 200
+    assert json.loads(body)["count"] == 3
+    assert seen == [{"cleared": 3}]

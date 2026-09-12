@@ -143,7 +143,8 @@ class ClipboardHistoryDB:
             pinned       INTEGER NOT NULL DEFAULT 0,
             paste_count  INTEGER NOT NULL DEFAULT 0,
             status      TEXT    NOT NULL DEFAULT '',
-            image_fmt   TEXT    NOT NULL DEFAULT ''
+            image_fmt   TEXT    NOT NULL DEFAULT '',
+            transport   TEXT    NOT NULL DEFAULT ''
         );
     """
 
@@ -265,6 +266,11 @@ class ClipboardHistoryDB:
                 conn.execute("ALTER TABLE history ADD COLUMN status TEXT NOT NULL DEFAULT ''")
             if "image_fmt" not in cols:
                 conn.execute("ALTER TABLE history ADD COLUMN image_fmt TEXT NOT NULL DEFAULT ''")
+            # Every row already on disk predates the route being recorded, and
+            # the default is the honest answer for them: a row that says
+            # nothing about how it arrived is better than one guessing LAN.
+            if "transport" not in cols:
+                conn.execute("ALTER TABLE history ADD COLUMN transport TEXT NOT NULL DEFAULT ''")
         except Exception as exc:
             logger.warning("Failed to migrate history schema: %s", exc)
 
@@ -312,6 +318,7 @@ class ClipboardHistoryDB:
             e.get("paste_count", 0),
             e.get("status", ""),
             e.get("image_fmt", ""),
+            e.get("transport", ""),
         )
 
     def _insert_row(self, entry: dict) -> None:
@@ -322,8 +329,8 @@ class ClipboardHistoryDB:
                 conn.execute(
                     "INSERT INTO history "
                     "(entry_id, timestamp, content_type, text_preview, types, "
-                    "source_device, source_app, source_title, pinned, paste_count, status, image_fmt) "  # noqa: E501
-                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    "source_device, source_app, source_title, pinned, paste_count, status, image_fmt, transport) "  # noqa: E501
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                     self._entry_row(entry),
                 )
             self._secure_db_files()
@@ -526,6 +533,12 @@ class ClipboardHistoryDB:
                 # Wire-level image format hint ("png"/"bmp"/"tiff") so
                 # clients can pick the right MIME for the stored bytes.
                 "image_fmt": content.image_fmt or "",
+                # The route a remote clip arrived on ("lan"/"relay"), or "web"
+                # for a push from this machine's own web server, empty for one
+                # captured here: the row names the device it came from, and the
+                # same peer can be reachable both ways, so the name alone cannot
+                # say which one carried this copy.
+                "transport": content.transport or "",
             }
             self._next_id += 1
 
@@ -594,6 +607,10 @@ class ClipboardHistoryDB:
                 entry["content_type"] = _map_type_to_label(best[0])
             entry["text_preview"] = _build_preview(merged_ct)
         entry["source_device"] = content.source_device or entry.get("source_device", "")
+        # Same rule as the device: a re-copy made here carries no route of its
+        # own, so it keeps the one the content arrived on rather than blanking
+        # the row back to "we don't know".
+        entry["transport"] = content.transport or entry.get("transport", "")
         if source_app:
             entry["source_app"] = source_app.get("name", "")
             entry["source_title"] = source_app.get("title", "")
@@ -618,6 +635,9 @@ class ClipboardHistoryDB:
             "timestamp": entry.get("timestamp", 0.0),
             "content_type": entry.get("content_type", ""),
             "paste_count": entry.get("paste_count", 0),
+            # Plaintext like status and image_fmt, and written here because a
+            # merge can be the moment the route is first known.
+            "transport": entry.get("transport", ""),
         }
         if self._enc_mgr:
             enc = self._encrypt_entry(
@@ -638,6 +658,13 @@ class ClipboardHistoryDB:
             pinned = [e for e in self._entries if e.get("pinned")]
             unpinned = [e for e in self._entries if not e.get("pinned")]
             return pinned + unpinned
+
+    def close(self) -> None:
+        """Release the owned SQLite connection after all producers have stopped."""
+        with self._lock:
+            if self._conn is not None:
+                self._conn.close()
+                self._conn = None
 
     def search(self, query: str) -> list[dict]:
         """Case-insensitive search in text previews.
@@ -831,7 +858,7 @@ class ClipboardHistoryDB:
             rows = conn.execute(
                 "SELECT entry_id, timestamp, content_type, text_preview, "
                 "types, source_device, source_app, source_title, "
-                "pinned, paste_count, status, image_fmt "
+                "pinned, paste_count, status, image_fmt, transport "
                 "FROM history ORDER BY pinned DESC, timestamp DESC, entry_id DESC"
             ).fetchall()
 
@@ -850,6 +877,7 @@ class ClipboardHistoryDB:
                     "paste_count": row[9] if row[9] else 0,
                     "status": row[10] if len(row) > 10 else "",
                     "image_fmt": row[11] if len(row) > 11 else "",
+                    "transport": row[12] if len(row) > 12 else "",
                 }
                 self._entries.append(entry)
 
@@ -898,8 +926,8 @@ class ClipboardHistoryDB:
                 conn.executemany(
                     "INSERT INTO history "
                     "(entry_id, timestamp, content_type, text_preview, types, "
-                    "source_device, source_app, source_title, pinned, paste_count, status, image_fmt) "  # noqa: E501
-                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    "source_device, source_app, source_title, pinned, paste_count, status, image_fmt, transport) "  # noqa: E501
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                     (self._entry_row(e) for e in self._entries),
                 )
             self._secure_db_files()
@@ -946,8 +974,8 @@ class ClipboardHistoryDB:
             conn.executemany(
                 "INSERT INTO history "
                 "(entry_id, timestamp, content_type, text_preview, types, "
-                "source_device, source_app, source_title, pinned, paste_count, status, image_fmt) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "source_device, source_app, source_title, pinned, paste_count, status, image_fmt, transport) "  # noqa: E501
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     (
                         e.get("entry_id", 0),
@@ -962,6 +990,7 @@ class ClipboardHistoryDB:
                         e.get("paste_count", 0),
                         e.get("status", ""),
                         e.get("image_fmt", ""),
+                        e.get("transport", ""),
                     )
                     for e in entries
                 ),

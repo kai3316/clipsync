@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-copy-history"
+description = "Enables the copy_history command without any pre-configured scope."
+commands.allow = ["copy_history"]
+
+[[permission]]
+identifier = "deny-copy-history"
+description = "Denies the copy_history command without any pre-configured scope."
+commands.deny = ["copy_history"]

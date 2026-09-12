@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-close-chat"
+description = "Enables the close_chat command without any pre-configured scope."
+commands.allow = ["close_chat"]
+
+[[permission]]
+identifier = "deny-close-chat"
+description = "Denies the close_chat command without any pre-configured scope."
+commands.deny = ["close_chat"]

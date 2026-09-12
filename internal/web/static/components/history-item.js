@@ -2,8 +2,9 @@
    ClipSync History Item Component
    Renders a single clipboard history entry card with type icon,
    text preview (2-line clamp), relative timestamp, source device
-   badge, pin/copy/delete action buttons, paste count badge, and
-   multi-select support (Ctrl+Click / Shift+Click).
+   badge, the link the clip arrived on, pin/copy/delete action
+   buttons, paste count badge, and multi-select support
+   (Ctrl+Click / Shift+Click).
    ═══════════════════════════════════════════════════════════════════ */
 
 (function () {
@@ -63,6 +64,7 @@
           <span v-if="item.source_app" class="history-item__source badge badge--source-app">{{ item.source_app }}</span>
           <span v-if="item.source_title" class="history-item__source-title">{{ item.source_title }}</span>
           <span v-if="item.source_name" class="history-item__source badge">{{ item.source_name }}</span>
+          <span v-if="item.transport" class="history-item__route badge">{{ routeLabel }}</span>
           <span v-if="item.paste_count > 0" class="history-item__paste-count badge badge--success">
             {{ item.paste_count }} {{ item.paste_count === 1 ? t('history.paste_singular') : t('history.paste_plural') }}
           </span>
@@ -131,6 +133,18 @@
           return this.store.isSelected(id);
         }
         return false;
+      },
+
+      // Which link carried the clip, beside the name of the device it came
+      // from.  The name alone cannot say it: a peer reachable both ways sends
+      // over whichever is up, and a row pushed from this panel is named "Web"
+      // without saying where that browser was.  Empty (a clip captured here, or
+      // a row written before the route was recorded) draws no chip at all.
+      routeLabel: function () {
+        var route = this.item.transport;
+        if (route === 'relay') return this.t('history.route_internet');
+        if (route === 'web') return this.t('history.route_web');
+        return this.t('history.route_local');
       },
 
       // Coarse pointer (touch / phone) — the copy button actually pushes the

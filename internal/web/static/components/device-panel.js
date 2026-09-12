@@ -135,6 +135,14 @@
         return this.store.internetPairCode || '';
       },
 
+      // Codes entered here that the partner has not answered yet (round 20).
+      // Between submitting a code and the reply this is the only thing on the
+      // page that says anything happened, and it is deliberately not part of
+      // the paired list: a 4-char tag is not a device.
+      netpairWaiting: function () {
+        return this.store.internetPairWaiting || [];
+      },
+
       // The generated code grouped for display: ABCD-EFGH-IJKL.
       netpairDisplayCode: function () {
         var raw = this.netpairGeneratedCode || '';
@@ -409,6 +417,22 @@
                   '</button>' +
                 '</div>' +
                 '<span v-if="netpairError" class="netpair-error">{{ netpairError }}</span>' +
+              '</div>' +
+
+              // Codes entered here whose partner has not answered yet.  Shown
+              // above the paired list, because that is where the reader looks
+              // right after submitting one, and with a way back out: a code
+              // typed for the wrong device would otherwise sit here until it
+              // expires.
+              '<div v-if="netpairWaiting.length > 0" class="netpair-waiting">' +
+                '<div class="netpair-waiting__title">{{ t(\'devices.netpair_waiting_list\') }}</div>' +
+                '<div v-for="row in netpairWaiting" :key="row.peer_id" class="netpair-waiting__row card">' +
+                  '<span class="netpair-waiting__spin">⏳</span>' +
+                  '<span class="netpair-waiting__text text-ellipsis">{{ waitingText(row) }}</span>' +
+                  '<span v-if="waitingSinceText(row)" class="netpair-waiting__since">{{ waitingSinceText(row) }}</span>' +
+                  '<button class="btn-ghost" @click="unpairPeer(row)" :disabled="netpairBusy">{{ t(\'devices.netpair_waiting_cancel\') }}</button>' +
+                '</div>' +
+                '<div class="netpair-waiting__hint">{{ t(\'devices.netpair_waiting_hint\') }}</div>' +
               '</div>' +
 
               '<!-- Paired-over-internet device list -->' +
@@ -800,6 +824,22 @@
       openInternetSyncSettings: function () {
         this.store.settingsRequestedSection = 'remote';
         this.store.openSettingsPanel();
+      },
+
+      // "等待 {name} 确认" for a code we entered: the partner's name once its
+      // hello has arrived, and the tag the code carried until then — the tag
+      // is what the user has to compare against what they typed.
+      waitingText: function (row) {
+        var name = (row && row.name) ? row.name : this.shortId(row && row.peer_id);
+        return this.t('devices.netpair_waiting_for', { name: name });
+      },
+
+      // How long this wait has been going.  `since` is null after a restart
+      // (the clock is lost, the wait is not), so that renders as nothing
+      // rather than through relTime — which would say "尚未同步", a sync
+      // message about a pairing that has not happened yet.
+      waitingSinceText: function (row) {
+        return (row && row.since) ? this.relTime(row.since) : '';
       },
 
       // Display name: user alias wins, then the device's own name, then a

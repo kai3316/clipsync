@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-transfer-action"
+description = "Enables the transfer_action command without any pre-configured scope."
+commands.allow = ["transfer_action"]
+
+[[permission]]
+identifier = "deny-transfer-action"
+description = "Denies the transfer_action command without any pre-configured scope."
+commands.deny = ["transfer_action"]

@@ -1,0 +1,985 @@
+/* The design tokens every rule below is written against.  `--page` is the
+   window's own paper: a sticky bar needs an opaque colour to sit on, and
+   borrowing the host's would change with the platform.
+
+   Every colour a component paints belongs here, not in the rule that uses it:
+   the two dark-theme blocks at the end of this file can only redefine tokens,
+   so a component that hard-codes a colour keeps it in both themes. */
+:root {
+  color-scheme: light;
+  /* The UI face, per platform and in that platform's own order.  A stack that
+     names only "Segoe UI" — as this one did — reaches a dated default on macOS,
+     and on a Linux box with no CJK family before `system-ui` the Chinese UI
+     renders as tofu.  Each family here is the one the platform's own apps use,
+     with the CJK families after the Latin ones so a glyph missing from Segoe UI
+     or SF falls to YaHei or PingFang rather than to a fallback face.  The legacy
+     resolved exactly this list at runtime through Tk; CSS cannot look at what is
+     installed, so the order carries the same intent instead. */
+  --font-ui: "Segoe UI", -apple-system, "SF Pro Text", "PingFang SC",
+    "Hiragino Sans GB", "Microsoft YaHei UI", "Noto Sans", "Noto Sans CJK SC",
+    "Source Han Sans SC", "WenQuanYi Micro Hei", system-ui, sans-serif;
+  /* Fingerprints, log lines and translated code are read character by character:
+     a proportional face makes a colon-separated hex digest genuinely hard to
+     compare against the one on the other screen. */
+  --font-mono: ui-monospace, "Cascadia Mono", Consolas, "SF Mono", Menlo,
+    "DejaVu Sans Mono", "Liberation Mono", monospace;
+  font-family: var(--font-ui);
+  color: #262b2c;
+  background: #fff;
+  font-size: 14px;
+  letter-spacing: 0;
+  /* Surfaces, from the window down to the quietest fill: the page itself, the
+     sidebar beside it, anything raised over it, a resting fill (inputs, chips,
+     hovered rows) and the block a log or a clip is read in. */
+  --page: #fff;
+  --chrome: #f4f6f5;
+  --raised: #fff;
+  --surface: #f5f7f6;
+  --code: #f4f5f4;
+  --line: #e5e9e8;
+  --muted: #697371;
+  /* The accent as text, as a background, and as the border of that background:
+     the three are not one colour, and in dark mode they are not even close. */
+  --accent: #087c6b;
+  --accent-soft: #e0eee8;
+  --accent-text: #086956;
+  --accent-line: #cfe4dc;
+  /* A control filled with the accent, and the text that sits on that fill.
+     Neither follows `--accent`: the dark theme's accent is a light mint, which
+     is readable as type on a dark page and unreadable as a button under white
+     text.  The pair is not overridden in the dark blocks because the fill and
+     its own text are a contrast of their own, on whatever page they sit. */
+  --accent-solid: #087c6b;
+  --on-accent: #fff;
+  /* `--danger` fills a destructive button and takes white text on it;
+     `--danger-text` is red type on the page; the other two go with the error
+     band, which is a red card rather than a red word. */
+  --danger: #b3453b;
+  --danger-text: #98382f;
+  --danger-soft: #fff2ef;
+  --danger-line: #eed8d2;
+  --shadow: 0 8px 24px rgb(0 0 0 / 12%);
+  --shadow-soft: 0 6px 18px rgb(0 0 0 / 12%);
+  --radius: 5px;
+  --radius-lg: 8px;
+  /* One height for every control, so a row of them lines up whatever they are. */
+  --control: 36px;
+  /* The indent every page-level strip is placed by: the page header, the
+     toolbar, the lists and their filter rows and footers, the error band, the
+     settings panel.  Ten rules used to write `32px` out for themselves, and a
+     number ten rules each restate is a number two of them can disagree on —
+     the error band was inset 24px, and the filter row kept its wide-window
+     32px in a narrow one while the list beneath it dropped to 18px.  A narrow
+     window now moves this one number, and everything placed by it follows. */
+  --page-gutter: 32px;
+}
+* { box-sizing: border-box; }
+body { margin: 0; min-width: 320px; }
+button, input, select, textarea { font: inherit; color: inherit; }
+button { cursor: pointer; background: transparent; border: 1px solid var(--line); border-radius: var(--radius); min-height: var(--control); padding: 8px 14px; display: inline-flex; align-items: center; justify-content: center; gap: 8px; }
+button:hover:not(:disabled) { background: var(--surface); }
+button:disabled { opacity: .45; cursor: default; }
+button:focus-visible, input:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
+select:focus-visible, textarea:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
+h1, h2, p { margin: 0; }
+h1 { font-size: 23px; font-weight: 650; }
+h2 { font-size: 17px; font-weight: 600; }
+.muted { color: var(--muted); }
+.small { font-size: 12px; }
+/* The shell is a fixed frame with one scrolling region inside it: the sidebar,
+   the page header and the status bar all stay put while a page scrolls.  A
+   desktop window that scrolls its whole furniture away reads as a web page in
+   a frame — and it takes the status bar with it, which is the one strip that
+   has to stay readable while you work. */
+.application { height: 100vh; overflow: hidden; display: grid; grid-template-columns: 212px minmax(0, 1fr); }
+/* A file dragged in from the desktop can land anywhere on the window, so the
+   whole window says so while it is over the window — a hint drawn on one card
+   would be a target the reader cannot aim at.  It never takes a pointer event:
+   the drop belongs to the window, and an overlay that swallowed it would turn
+   the hint into the very thing that stops the drop landing.  The inset rule
+   says it in the window's own colours, over whatever page is underneath. */
+.drop-veil { position: fixed; inset: 0; z-index: 40; display: grid; place-items: center; pointer-events: none; padding: 24px; background: #0004; }
+.drop-veil-card { display: grid; justify-items: center; gap: 7px; padding: 24px 30px; text-align: center; background: var(--raised); border: 2px dashed var(--accent); border-radius: var(--radius-lg); box-shadow: var(--shadow); }
+.drop-veil-card svg { color: var(--accent-text); }
+.drop-veil-card strong { font-size: 15px; }
+.sidebar { background: var(--chrome); border-right: 1px solid var(--line); padding: 24px 14px 16px; display: flex; flex-direction: column; min-width: 0; overflow-y: auto; }
+.brand { display: flex; align-items: center; gap: 10px; padding: 0 10px 32px; font-size: 22px; font-weight: 650; }
+.brand img { width: 31px; height: 31px; object-fit: contain; }
+nav { display: grid; gap: 5px; }
+nav button { width: 100%; justify-content: flex-start; border-color: transparent; min-height: 43px; }
+nav button.active { color: var(--accent-text); background: var(--accent-soft); }
+/* The settings row is set apart from the pages above it by a rule, so the
+   sidebar reads as "five places to look, and the window's own settings"
+   rather than as six rows of the same kind.  The rule belongs to the row, not
+   to the row's button, which has a transparent border of its own. */
+.sidebar-settings { margin-top: 11px; padding-top: 11px; border-top: 1px solid var(--line); }
+.sidebar-footer { margin-top: auto; padding: 24px 10px 0; display: grid; gap: 12px; }
+.local-device { display: flex; gap: 9px; align-items: center; overflow-wrap: anywhere; }
+.local-device svg { flex-shrink: 0; }
+main { min-width: 0; display: flex; flex-direction: column; overflow: hidden; }
+/* Everything above and below this scrolls the window; this scrolls the page. */
+.content { flex: 1; min-height: 0; overflow-y: auto; display: flex; flex-direction: column; }
+header { display: flex; justify-content: space-between; align-items: center; gap: 15px; flex-shrink: 0; padding: 26px var(--page-gutter) 20px; border-bottom: 1px solid var(--line); }
+header p { margin-top: 7px; font-size: 12px; }
+.connection { display: flex; align-items: center; gap: 7px; font-size: 12px; white-space: nowrap; color: var(--muted); }
+.connected { color: var(--accent); }
+/* Search, refresh and the page's own controls ride the top of the scrolling
+   region: on a long history the search box is the one control worth never
+   scrolling back for.  Opaque, so rows pass under it rather than through it. */
+/* A toolbar wraps, and the rule that said so lived on one page's toolbar rather
+   than on the toolbar itself: the favorites row carried `flex-wrap: wrap` and the
+   transfers row — the one with five controls on it, four of them buttons whose
+   labels set the width they would like — did not.  Nothing says `nowrap` on a
+   button, so at the widths where that row stops fitting it is not cut off: the
+   labels break between characters and every button in the row becomes two lines
+   tall, against one tall line in a row that is allowed to wrap.  At the very
+   bottom of the window's range the row's controls stop fitting even so — four
+   buttons, an icon and a `<select>` cannot be squeezed below about 370px, and a
+   380px window leaves the row 282px — and the controls past the right edge are
+   the ones the row has run out of.  Centring the items rather than stretching
+   them keeps the controls at the height they have today, and keeps a line of
+   them centred once the row has become two. */
+.toolbar { position: sticky; top: 0; z-index: 4; padding: 20px var(--page-gutter); display: flex; flex-wrap: wrap; align-items: center; gap: 12px; background: var(--page); }
+/* A `<select>` in a toolbar takes the row's control height and what the row has
+   left rather than its own preferred width, because the row it sits in is the row
+   that wraps.  Both pages that have one wrote this rule out for themselves, with
+   the same declarations under two different selectors; it is the toolbar's. */
+.toolbar select { max-width: 100%; min-width: 0; min-height: var(--control); padding: 8px; background: var(--surface); border: 1px solid var(--line); border-radius: 4px; }
+.search { max-width: 420px; width: 100%; display: flex; align-items: center; gap: 8px; color: var(--muted); background: var(--surface); border: 1px solid var(--line); border-radius: 5px; padding: 0 12px; }
+.search input { border: 0; background: transparent; min-width: 0; width: 100%; height: var(--control); outline-offset: 0; }
+.icon-button { width: var(--control); height: var(--control); min-width: var(--control); padding: 0; flex-shrink: 0; }
+.history-list { margin: 0 var(--page-gutter); flex: 1; }
+/* The devices page is a list of rows and nothing else, so it carries the space
+   under its own last row: the archived list ends where the scroll does, and a
+   row sitting flush against the bottom bar reads as a list that was cut off. */
+.device-list { margin: 0 var(--page-gutter); flex: 1; padding-bottom: 28px; }
+.list-heading { display: flex; justify-content: space-between; padding: 10px 0; border-bottom: 1px solid var(--line); font-size: 12px; color: var(--muted); }
+.history-row { position: relative; display: grid; grid-template-columns: 36px minmax(0, 1fr) auto auto; align-items: center; gap: 13px; padding: 18px 0; border-bottom: 1px solid var(--line); }
+/* The full clip, for a row whose three clamped lines cut it off.  It overlays
+   the rows below, which is why it is capped and scrollable: the card is inside
+   the hovered row, so the pointer can move onto it and read to the end, and it
+   closes the moment the pointer reaches another row. */
+.history-preview { position: absolute; z-index: 6; left: 36px; top: calc(100% - 8px); max-width: min(620px, calc(100vw - 96px)); max-height: 42vh; overflow: auto; padding: 12px 14px; border: 1px solid var(--line); border-radius: 6px; background: var(--raised); box-shadow: var(--shadow); font-size: 12px; line-height: 1.6; white-space: pre-wrap; overflow-wrap: anywhere; user-select: text; }
+.history-content { min-width: 0; }
+.history-content p { white-space: pre-wrap; overflow-wrap: anywhere; display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; line-height: 1.6; margin-bottom: 6px; }
+.history-meta { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin-top: 6px; }
+.badge { background: var(--surface); border: 1px solid var(--line); border-radius: 999px; padding: 1px 8px; font-size: 11px; color: var(--muted); max-width: 220px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.badge--count { background: var(--accent-soft); border-color: var(--accent-line); color: var(--accent-text); }
+.history-source-title { font-size: 11px; color: var(--muted); max-width: 320px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* The route a record arrived on, beside the device it came from.  It wears the
+   device list's own chip for the same two links, at the size of the metadata
+   line it sits in rather than that list's, so one vocabulary covers both
+   pages.  Neither route is the exception — a clip that came over the relay is
+   not a fault — so the two differ by their glyph and never by a warning
+   colour. */
+.history-route { font-size: 11px; }
+/* The chip row under the search toolbar. */
+.history-filters { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; padding: 0 var(--page-gutter) 10px; }
+.chip { display: inline-flex; align-items: center; gap: 6px; padding: 4px 10px; border: 1px solid var(--line); border-radius: 999px; background: var(--page); color: var(--muted); font-size: 12px; }
+.chip:hover:not(:disabled) { border-color: var(--accent); color: var(--accent); }
+.chip:disabled { opacity: 0.45; }
+.chip--active { background: var(--accent-solid); border-color: var(--accent-solid); color: var(--on-accent); }
+.chip-count { font-size: 11px; color: inherit; opacity: 0.75; }
+.chip--sort { margin-left: auto; }
+time { font-size: 12px; color: var(--muted); }
+.row-actions { display: flex; align-items: center; gap: 2px; }
+/* Five buttons on every row is a page of buttons before a single clip is read,
+   so a history row keeps them until the row is pointed at or tabbed into — the
+   panel's own row did the same, and for the same reason.  `opacity` rather than
+   `display`, so the column is reserved: revealing them shifts nothing, and a
+   button stays reachable by keyboard, which is what brings them back.
+   A device's actions are the only way to act on it, so they never hide. */
+.history-row .row-actions { opacity: 0; transition: opacity 0.12s ease; }
+.history-row:hover .row-actions, .history-row:focus-within .row-actions { opacity: 1; }
+/* Nothing can point at a row here, so nothing may hide behind a pointer. */
+@media (hover: none) { .history-row .row-actions { opacity: 1; } }
+/* At the end of a list row the actions are a quiet strip, so their boxes go.
+   A device's are the only way to act on it, so they keep theirs. */
+.row-actions button { border: 0; }
+/* The device's own controls: the first row's right-hand column, and the one
+   thing in the row that never wraps to a second line of its own. */
+.device-row .row-actions { grid-row: 1; grid-column: 3; justify-self: end; gap: 5px; flex-wrap: wrap; justify-content: flex-end; }
+.device-row .row-actions button { border: 1px solid var(--line); }
+.history-selection { display: grid; place-items: center; width: 36px; height: 36px; }
+input[type="checkbox"] { width: 16px; height: 16px; flex-shrink: 0; accent-color: var(--accent); }
+.selection-toolbar { align-items: center; flex-wrap: wrap; gap: 8px 14px; }
+.select-visible { display: inline-flex; align-items: center; gap: 6px; }
+.batch-actions { display: flex; gap: 2px; margin-left: auto; }
+.pinned { color: var(--accent); }
+.empty { min-height: 310px; display: flex; flex-direction: column; align-items: center; justify-content: center; text-align: center; gap: 14px; padding: 30px; }
+.empty > svg { color: #8d9c96; }
+.empty p { max-width: 350px; line-height: 1.6; }
+.pagination { padding: 18px var(--page-gutter); display: flex; justify-content: flex-end; align-items: center; gap: 8px; font-size: 12px; color: var(--muted); }
+/* Except inside a list that carries the gutter itself, where the strip is the
+   last row of that list rather than another band of the page: the favorites
+   footer sits inside `.favorites-workspace`, so its own gutter was a second one
+   and its count and chevrons stood 32px in from the rows above them.  The
+   narrow block used to undo the padding at that one width, which is what a
+   strip placed by two rules looks like. */
+.favorites-list .pagination { padding-inline: 0; }
+.pagination > span { margin-right: 12px; }
+/* The window's last strip, and the box everything that floats above it is
+   measured from: a notice sits one gap over this bar's top edge, and the only
+   element that knows where that edge is is the bar itself.  `position: relative`
+   is what makes it that box. */
+.bottom-status { position: relative; flex-shrink: 0; display: flex; align-items: center; gap: 6px; padding: 11px 22px; border-top: 1px solid var(--line); color: var(--muted); font-size: 11px; }
+/* Only the runtime status text takes the free space, so the sync controls sit
+   together against the right edge; the pause countdown and the notice that
+   follow it must not each claim a share of that space. */
+.bottom-status span:first-of-type { margin-left: auto; }
+.pause-status, .pause-label { white-space: nowrap; }
+.error-band { display: flex; gap: 10px; align-items: center; padding: 14px var(--page-gutter); color: var(--danger-text); background: var(--danger-soft); border-bottom: 1px solid var(--danger-line); }
+.error-band > svg { flex-shrink: 0; }
+.error-band strong { font-weight: 550; }
+.error-band small { display: block; margin-top: 3px; overflow-wrap: anywhere; }
+.error-band button { margin-left: auto; }
+/* The same band, for a wait rather than a failure: an invite whose link is
+   still being dialed.  It borrows the geometry and drops the alarm — same shape,
+   so the eye finds it where an error would be, and no red, because nothing has
+   gone wrong yet. */
+.status-band { display: flex; gap: 10px; align-items: center; padding: 14px var(--page-gutter); color: var(--accent-text); background: var(--accent-soft); border-bottom: 1px solid var(--accent-line); }
+.unlock { margin: auto; width: min(360px, 100%); padding: 35px; display: grid; gap: 16px; }
+.unlock input { min-width: 0; border: 1px solid var(--line); border-radius: 4px; padding: 10px; background: transparent; }
+button.primary { background: var(--accent-solid); color: var(--on-accent); }
+/* A device is one row of three parts: who it is, everything you can do to it at
+   the row's right edge, and under both of those the facts about the *link*
+   rather than about the device — which routes are up, the note, a pairing in
+   progress.
+
+   It was one wrapping flex line, so the icon, the name, the state, the note
+   field and up to six buttons all competed for the same run: the buttons
+   dropped under the name at any window short of maximised, where they read as
+   belonging to the device below.  A grid puts the identity in a track that
+   absorbs the slack and the controls at a fixed edge, so the buttons sit on the
+   same vertical line down the whole list whatever the window is. */
+.device-row { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; align-items: center; gap: 8px 14px; padding: 16px 0; border-bottom: 1px solid var(--line); }
+/* Rows 1 and 2, so the glyph is centred against the name and its chips rather
+   than against the name alone — the note and the pairing fields start below it. */
+.device-icon { grid-area: 1 / 1 / 3 / 2; color: var(--muted); }
+.device-identity { grid-row: 1; grid-column: 2; min-width: 0; overflow-wrap: anywhere; }
+.device-row h2 { margin-bottom: 5px; }
+/* The second line of the row: the chips, the note and a pairing's own controls.
+   They start where the name starts and run to the row's right edge, so one
+   vertical line holds the identity, the chips and the note field together. */
+.device-channels, .device-note, .device-full, .device-row > .pairing-controls { grid-column: 2 / -1; }
+.device-channels { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+/* One chip is one answer about one route.  A glyph and a word carry it — the
+   colour only repeats what the word already says — because the two routes are
+   peers of each other and neither is the exception: 本地·在线 next to
+   互联网·未配对 is a normal state, not a fault. */
+.channel { display: inline-flex; align-items: center; gap: 4px; padding: 2px 8px; border: 1px solid var(--line); border-radius: 999px; background: var(--surface); color: var(--muted); font-size: 12px; white-space: nowrap; }
+.channel svg { flex-shrink: 0; }
+.channel--paired, .channel--online { border-color: var(--accent-line); background: var(--accent-soft); color: var(--accent-text); }
+/* 未配对 is not a fault to be warned about — it is the ordinary state of a
+   device on this network — so it is set apart by being *unfilled* rather than
+   by a second warning colour. */
+.channel--unpaired { border-style: dashed; background: transparent; }
+.channel--pending { border-color: var(--accent-line); color: var(--accent-text); }
+/* This row used to pin itself to the top of the scroll, the way the history
+   page's toolbar does.  It cannot any more: the tab strip sits at that offset
+   now, and where a second pinned row's own top would have to be is the strip's
+   height, which changes when the strip wraps.  The tabs are the page's pinned
+   row; this one scrolls with the list it acts on. */
+.device-toolbar { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; padding: 16px 0 10px; }
+/* A pairing in progress is a block inside the row rather than a row of its own:
+   the codes have to be read against the device they belong to, and the row is
+   still the one thing the reader is looking at. */
+.device-row > .pairing-controls { min-width: 0; display: grid; gap: 9px; padding: 12px 14px; background: var(--surface); border-radius: var(--radius); }
+.device-full { margin: 0; }
+/* The note is edited in place — it is a row of the device list, not something
+   behind an edit button — so it takes the width the column leaves, stopping at
+   the same right edge the controls above it do, and wears the same control
+   chrome as every field elsewhere. */
+.device-note { min-width: 0; min-height: var(--control); padding: 6px 10px; color: inherit; background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius); }
+/* Removed devices are kept but set apart: a rule and a heading, rather than
+   more rows of the same list. */
+.archived-devices { margin-top: 26px; border-top: 1px solid var(--line); }
+/* A page laid out as cards — the devices page's internet pairing and phone
+   service, the AI page's tools, its own inventory and another machine's.  Each
+   card is the same `.settings-section` the settings page draws, because it is
+   the same kind of thing: a titled card of labelled rows.  One rule for the
+   card, and one for the column of them, means the pages cannot drift apart.
+
+   Two columns only when there is room for two rows of a 168px name with its
+   control beside them; below that they stack.  The track's minimum is written
+   `min(560px, 100%)` so a column narrower than 560px — any window under about
+   1400px, where the rail and two gutters come off the top — shrinks to the
+   column rather than pushing the card out of the page.
+
+   `page-col` is the stack inside one column, for a page whose cards are not
+   all the same size: the AI page puts its own two cards beside the peer's one
+   rather than letting the grid drop the third under the first two. */
+.page-panels { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(560px, 100%), 1fr)); gap: 16px; align-items: start; margin: 26px 0 32px; }
+.page-panels > * { min-width: 0; }
+.page-col { display: grid; gap: 16px; align-content: start; }
+/* A long page drawn as a few questions that share one title.  The devices page
+   and the AI page were each a single scroll of three cards, so the card the
+   reader came for sat behind the whole of the one before it — and the AI page's
+   peer list, the half the page exists for, was last.
+
+   The strip stays pinned while the panel under it scrolls: switching panels is
+   how such a page is navigated, and the reader is usually part-way down a list
+   when they decide they wanted the other one.  It is the only pinned row on
+   these pages — the device toolbar used to pin itself to the same offset, and
+   two opaque strips at `top: 0` would sit on each other. */
+.page-tabs, .settings-nav { position: sticky; top: 0; z-index: 4; background: var(--page); border-bottom: 1px solid var(--line); }
+.page-tabs { display: flex; flex-wrap: wrap; align-items: center; gap: 4px; padding: 14px 0 0; }
+/* The settings page's strip is the one with two rows: the groups, then the
+   open group's own cards.  It stacks rather than runs, which is what lets the
+   second row be the only thing that changes when the reader moves between
+   groups. */
+.settings-nav { display: block; padding: 8px 0 0; }
+/* Two rules are undone from the sidebar's `nav button`: those buttons fill the
+   rail and sit flush left, and a strip of tabs reads as buttons that are only
+   as wide as their words. */
+.page-tabs button, .settings-nav button { width: auto; min-height: 0; border: 0; background: none; color: var(--muted); }
+/* The two rows are deliberately not one look.  A group is a place the reader is
+   in and the accent rule under it moves as they walk; a card inside it is what
+   is open there, so it reads as a chip of the page's own paper.  Two rows of
+   the same underline, one above the other, would read as two sets of siblings.
+   In a strip with one row there is nothing to tell apart, and it keeps the
+   rule. */
+.page-tabs button, .settings-nav-groups button { padding: 7px 11px 9px; border-bottom: 2px solid transparent; border-radius: 0; font-size: 13px; }
+.settings-nav-groups button { padding: 7px 2px 9px; font-size: 14px; font-weight: 550; }
+.page-tabs button:hover:not(:disabled), .settings-nav button:hover:not(:disabled) { color: inherit; background: none; }
+/* The third rule undone from the sidebar's `nav button`: its *active* state
+   fills the row with `--accent-soft`, and `.settings-nav` is a `<nav>` too, so
+   that rule matched the group tabs and painted the open one as a chip — the one
+   look the comment above says this row must not have.  The bare
+   `background: none` on line 335 covers the resting tabs and loses to it here,
+   because `nav button.active` is a class deeper than `nav button`; declaring it
+   again on the active selector settles it, since this one out-ranks both.  The
+   group row says where the reader is with the accent text and the underline
+   under it, and nothing else. */
+.page-tabs button.page-tab--active, .settings-nav-groups button.active { color: var(--accent-text); background: none; border-bottom-color: var(--accent-solid); }
+/* The panel under the strip keeps the distance the page's cards used to have
+   from the page's top edge; the strip supplies the space above itself. */
+.ai-page > .page-col, .device-list > .settings-section { margin: 20px 0 32px; }
+/* A page that is a card layout and nothing else takes the page gutter itself:
+   the settings page's own wrapper carries it, and this is the same gutter. */
+.ai-page { margin: 0 var(--page-gutter); }
+.cert-list { display: grid; gap: 10px; margin: 0 0 24px; padding: 0; list-style: none; }
+.cert-list li { display: flex; flex-wrap: wrap; gap: 10px; align-items: baseline; }
+.cert-list strong { overflow-wrap: anywhere; }
+/* The fingerprint exists to be compared against the one on the other screen, so
+   it is set in the monospace face: at a fixed advance the eye can check it in
+   groups instead of re-reading it, and every character occupies its own cell. */
+.cert-list .fingerprint { font-family: var(--font-mono); }
+.pairing-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+.sync-toggle { display: inline-flex; align-items: center; gap: 6px; white-space: nowrap; }
+.modal p { overflow-wrap: anywhere; }
+.modal { color: inherit; background: var(--raised); border: 1px solid var(--line); border-radius: 6px; width: min(420px, calc(100% - 36px)); padding: 28px; }
+.modal::backdrop { background: #0006; }
+.modal h2 { padding-right: 35px; }
+.modal p { margin: 16px 0 24px; line-height: 1.7; }
+.modal-close { position: absolute; right: 12px; top: 12px; border: 0; }
+/* A dialog's actions wrap for the same reason a toolbar's do, and this row is
+   the last place a control can be pushed out of reach: the dialog is as wide as
+   the window allows, and the about box's three buttons come to about 300px in
+   the 288px the minimum window leaves inside it. */
+.modal-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 10px; }
+/* A failed action reported inside a dialog: red type on the dialog's own
+   surface, not the full-width band the page uses. */
+.modal-error { color: var(--danger-text); }
+.log-view { max-height: 46vh; overflow: auto; margin: 12px 0 20px; padding: 10px; background: var(--code); border: 1px solid var(--line); border-radius: 4px; font-family: var(--font-mono); font-size: 12px; line-height: 1.55; white-space: pre-wrap; overflow-wrap: anywhere; }
+/* A clip's own text, read-only and selectable. It scrolls rather than growing
+   the dialog: a clip is not bounded by the dialog's height, and the text is the
+   reason the dialog is open, so it must not push the controls off the screen. */
+.translate-source { max-height: 30vh; overflow: auto; margin: 12px 0 16px; padding: 10px; background: var(--code); border: 1px solid var(--line); border-radius: 4px; font: inherit; line-height: 1.6; white-space: pre-wrap; overflow-wrap: anywhere; }
+.translate-source:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.translate-truncated { margin: 0 0 16px; }
+/* White in both themes on purpose: a QR code has to be dark-on-light to scan. */
+.qr-image { display: block; margin: 16px auto 12px; background: #fff; border: 1px solid var(--line); border-radius: 4px; }
+.about-version { font-size: 15px; font-weight: 600; }
+.modal-wide { width: min(560px, calc(100% - 36px)); }
+/* A field in a dialog: its name on one line and its control under it, both the
+   dialog's full width.  The cards put a name beside its control because a card is
+   over 700px wide; a dialog is 420, and a 168px name column beside a box leaves
+   both too narrow to read.  The `<label>` wraps the control, so the whole block
+   is a target and the name focuses the field it belongs to. */
+.modal label { display: grid; gap: 6px; margin: 14px 0 0; font-size: 13px; }
+/* The chrome the cards give their fields, restated for dialogs because a dialog
+   is not inside one.  The URL, the pushed text, the two language pickers and the
+   log line count were drawn with no border, no fill and no padding: each was a
+   line of text on the dialog's own surface with nothing saying it could be typed
+   into, and the label's words ran straight into the box beside them. */
+.modal input:not([type="checkbox"]):not([type="radio"]), .modal select, .modal textarea {
+  width: 100%; min-width: 0; border: 1px solid var(--line); border-radius: 4px;
+  background: var(--surface); padding: 8px 10px; color: inherit;
+}
+/* One height for the single-line controls, so a label followed by a picker and
+   one followed by a box are the same shape. */
+.modal input:not([type="checkbox"]):not([type="radio"]), .modal select { min-height: var(--control); }
+.modal textarea { resize: vertical; line-height: 1.55; }
+/* The migration wizard's rows carry the card's own row markup, so they take the
+   stacked shape as well rather than a name column this dialog has no room for.
+   Both parts are placed in the one column: a control still saying `grid-column:
+   2` would summon a second track and push the box off the dialog's edge. */
+.modal .setting { display: grid; grid-template-columns: minmax(0, 1fr); gap: 6px; margin: 0; }
+.modal .setting-name, .modal .setting-control { grid-column: 1; padding-top: 0; }
+.language-picker { text-align: center; }
+.language-picker h2 { font-size: 26px; }
+.language-picker-lead { margin: 6px 0 4px; font-size: 17px; font-weight: 600; }
+.language-picker > .muted { margin: 0 0 20px; }
+.language-choices { display: grid; gap: 10px; }
+.language-choice { display: grid; gap: 2px; padding: 14px 12px; border: 1px solid var(--line); border-radius: 8px; background: transparent; color: inherit; font: inherit; cursor: pointer; }
+.language-choice:hover, .language-choice:focus-visible { border-color: var(--accent); }
+.diag-list { max-height: 46vh; overflow: auto; margin: 12px 0 20px; padding: 0; list-style: none; display: grid; gap: 14px; }
+.diag-list h3 { margin: 0 0 8px; font-size: 13px; color: var(--muted); }
+.diag-list ul { margin: 0; padding: 0; list-style: none; display: grid; gap: 8px; }
+.diag-list ul li { display: grid; gap: 3px; padding-left: 10px; border-left: 3px solid var(--line); line-height: 1.55; overflow-wrap: anywhere; }
+.diag-list ul li.diag-ok { border-left-color: #4a8f5b; }
+.diag-list ul li.diag-warn { border-left-color: #c08a2e; }
+.diag-list ul li.diag-fail { border-left-color: var(--danger); }
+.diag-list ul li > .status-action { justify-self: start; }
+.diag-label { margin-right: 8px; font-weight: 600; }
+/* The check's name and what it found belong on one line, so they share a single
+   item of the surrounding grid instead of becoming two rows of it. */
+.diag-item { display: block; }
+.diag-summary--ok { color: #3f7a4f; }
+.diag-summary--warn { color: #9a6b1c; }
+.diag-summary--fail { color: var(--danger-text); }
+button.danger { color: #fff; background: var(--danger); border-color: var(--danger); }
+.spinning { animation: spin 1s linear infinite; }
+.favorites-view { flex: 1; min-width: 0; }
+.favorites-workspace { margin: 0 var(--page-gutter); display: grid; min-width: 0; }
+.favorites-workspace.has-editor { grid-template-columns: minmax(0, 1fr) minmax(260px, 1fr); gap: 24px; }
+.favorites-list { min-width: 0; }
+.favorite-row { padding: 18px 0; border-bottom: 1px solid var(--line); display: flex; flex-wrap: wrap; gap: 12px; align-items: center; }
+.favorite-row.selected { border-left: 3px solid var(--accent); padding-left: 10px; }
+.favorite-summary { flex: 1 1 160px; min-width: 0; overflow-wrap: anywhere; }
+.favorite-summary h2 { font-size: 15px; margin-bottom: 8px; }
+.favorite-summary p { white-space: pre-wrap; line-height: 1.6; margin-bottom: 8px; display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; }
+.favorite-editor { min-width: 0; padding: 12px 0 24px; }
+.editor-heading { display: flex; justify-content: space-between; align-items: center; gap: 10px; margin-bottom: 12px; }
+.favorite-editor fieldset { border: 0; padding: 0; margin: 12px 0 0; min-width: 0; display: grid; gap: 10px; }
+.favorite-editor input, .favorite-editor textarea { width: 100%; min-width: 0; border: 1px solid var(--line); border-radius: 4px; background: var(--surface); padding: 9px; }
+.favorite-editor textarea { resize: vertical; min-height: 180px; white-space: pre-wrap; overflow-wrap: anywhere; }
+.favorite-editor fieldset > button { justify-self: start; }
+.favorite-editor p { line-height: 1.6; overflow-wrap: anywhere; }
+/* Settings.
+   The page was one 620px column in which every field, hint, heading and button
+   shared a single 16px gap — so a hint sat as far from its own field as one
+   group sat from the next, nothing lined up, and the whole thing read as one
+   list of forty-odd controls.  It is now what the shape of the content asks
+   for: a strip to jump by, a card per group, and a two-column row per
+   setting. */
+.settings-panel { margin: 0 var(--page-gutter) 40px; min-width: 0; }
+/* The page is one column now: the search, the strip of sections, the card.  The
+   sections used to be a rail beside the card, which cost a 168px column of the
+   window to hold eleven short words and made the page read as two things at
+   once.  The strip is the same one the devices page and the AI page carry, so
+   "pick a section along the top, the content below is what you picked" is the
+   shape of every long page in the window. */
+.settings-layout { display: grid; grid-template-columns: minmax(0, 1fr); max-width: 1060px; padding: 22px 0 0; }
+/* The settings page's strip holds groups of tabs rather than one run of them,
+   so it is the only strip with a second level in it.  The upper row is the
+   groups, spaced out so four of them read as four choices rather than one
+   sentence; the lower row is the open group's cards in the page's chip
+   vocabulary, ruled off from the row above it because it is a different kind
+   of thing — where the reader is, and what is open there.  Only one run of
+   cards is ever on screen, so the row under the groups is always the same
+   width as it: the strip does not jump about as the reader moves. */
+.settings-nav-groups { display: flex; flex-wrap: wrap; align-items: center; gap: 0 16px; }
+.settings-nav-group { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; padding: 9px 0 8px; border-top: 1px solid var(--line); }
+.settings-nav-group button { padding: 4px 10px; border: 1px solid transparent; border-radius: 999px; }
+.settings-nav-group button:hover:not(:disabled) { border-color: var(--line); background: var(--surface); }
+.settings-nav-group button.active { border-color: var(--accent-line); background: var(--accent-soft); color: var(--accent-text); }
+/* The search.  It sits above the strip because it is about all eleven cards,
+   and it is not part of the strip: a reader with a query in mind should not
+   have to guess which section holds it.  The strip dims the cards the query
+   does not reach and counts the ones it does; the ones it reaches are the
+   cards the page shows while the query is up.  It scrolls away while the strip
+   stays, because the strip is the way back to a card and the box is a way to
+   find one. */
+.settings-search { display: grid; gap: 6px; padding: 0 0 12px; }
+.settings-search input { width: 100%; }
+.settings-search-clear { justify-self: start; }
+.settings-search-status { margin: 0; font-size: 12px; color: var(--muted); }
+.settings-nav button.has-match { color: var(--accent-text); }
+.settings-nav button.dimmed { opacity: 0.5; }
+.settings-match-count { color: var(--accent-text); }
+
+/* A card the reader has typed into and not saved.  The page shows one card, so
+   the Save bar can say something is pending without being able to say where;
+   this says where, beside the card's own name.  It is a dot rather than a
+   colour on the entry, because the entry's colour already means which card is
+   on screen. */
+.settings-nav button .settings-edited { margin-left: 6px; flex-shrink: 0; width: 7px; height: 7px; border-radius: 50%; background: var(--accent-solid); }
+/* What the query found inside a card.  The mark goes on the element whose own
+   text matched, so a row's name lights up rather than the whole row. */
+.settings-hit { color: var(--accent-text); }
+.settings-form { display: grid; gap: 16px; min-width: 0; }
+.settings-section {
+  /* The two column widths live on the card because three kinds of child have to
+     agree on them: the rows (`.setting`), the fieldsets, and the blocks that
+     belong under a row's controls rather than under its name.  Those blocks used
+     to say `grid-column: 2`, which did nothing — a card is not a grid — so a
+     card's button rows started at the card's own left edge while the controls
+     above them started 190px in.  The indent is derived from these two, so the
+     three cannot drift apart. */
+  --setting-name: 168px;
+  --setting-gap: 22px;
+  border: 1px solid var(--line); border-radius: var(--radius-lg);
+  padding: 0 22px 16px; min-width: 0; scroll-margin-top: 12px;
+}
+/* The card's own title, and the rule that closes it off from its rows.  Without
+   the rule the title and the first row read as two lines of one list, and a card
+   that opens with a note reads as a card that opens with a stray sentence. */
+.settings-section > h2 { font-size: 15px; padding: 17px 0 11px; border-bottom: 1px solid var(--line); }
+/* A heading for the blocks inside a section that are not settings of their own
+   — the danger zone, the available-backups list.  It spans the card and carries
+   the same rule the title does: what follows it is a new part of the card rather
+   than another row of the list above it.  Indented into the control column it
+   read as the first label of that new part. */
+.settings-section > h3 { font-size: 12px; font-weight: 600; letter-spacing: .02em; color: var(--muted); margin: 16px 0 0; padding: 14px 0 2px; border-top: 1px solid var(--line); }
+/* A heading that carries the control belonging to what it heads — "available
+   backups" and the button that asks for them again.  The rule and the heading
+   styling are the same as a heading on its own, so the two cannot drift. */
+.setting-heading { display: flex; align-items: center; gap: 6px; margin: 16px 0 0; padding-top: 14px; border-top: 1px solid var(--line); }
+.setting-heading > h3 { font-size: 12px; font-weight: 600; letter-spacing: .02em; color: var(--muted); margin: 0; }
+/* One setting: what it is called on the left, what you change on the right.
+   The two columns are fixed, so a long label — Chinese ones often are — and a
+   long hint each grow inside their own column, and every control on the page
+   starts at the same x.
+
+   The name is aligned with the control's *first line* rather than with the
+   middle of its box.  A row whose control carries a hint under it is taller than
+   its control, and a name centred in that height floats halfway between the two
+   — which is what every hinted row in this page did. */
+.setting { display: grid; grid-template-columns: minmax(0, var(--setting-name)) minmax(0, 1fr); gap: 2px var(--setting-gap); align-items: start; min-height: 44px; padding: 6px 0; font-size: 13px; }
+/* A 36px control holding one 13px line leaves 9px above that line: the label's
+   first line sits on the same line as the control's. */
+.setting-name { grid-column: 1; padding-top: 9px; line-height: 1.45; }
+.setting-control { grid-column: 2; min-width: 0; display: grid; gap: 5px; align-content: start; }
+.setting-hint { color: var(--muted); font-size: 12px; line-height: 1.5; }
+/* A checkbox has no name of its own, so its box goes in the column the controls
+   above it start in and the text follows the box: one vertical line of controls
+   down the card, whatever kind they are.  The template keeps both columns —
+   "one column, and the control says `grid-column: 2`" is a row that summons an
+   implicit second track, which is what pushed every checkbox in this page to the
+   far right edge of its card. */
+.setting--check { align-items: center; min-height: 40px; padding: 4px 0; }
+.setting--check .setting-control { display: flex; align-items: center; justify-content: flex-start; gap: 9px; }
+/* A row that is only buttons.  It starts where the controls start, not where the
+   names do: a button is an answer to the setting above it. */
+.setting-actions { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin: 10px 0 0; margin-inline-start: calc(var(--setting-name) + var(--setting-gap)); }
+/* A row of buttons that belongs to the card rather than to the row above it: the
+   actions that are the whole of a card, or the ones under a card's own
+   sub-heading.  They sit at the card's left edge, with the heading they belong
+   to, because they are not answers to any row. */
+.setting-actions--card { margin-inline-start: 0; }
+/* Any other block that belongs to a row's controls rather than to the card: a
+   list of the values behind a setting, a progress bar, the path an update landed
+   in, a line reporting what the last button did. */
+.setting-block { margin: 10px 0 0; margin-inline-start: calc(var(--setting-name) + var(--setting-gap)); }
+/* A block that is the card's own content rather than an answer to the row above
+   it.  The indent exists to hang a block under the control it belongs to; a
+   status line at the card's own left edge is not under any control. */
+.setting-block--card { margin-inline-start: 0; }
+/* The blocks that are card content wherever they appear, so they need no class
+   of their own: the inventory of internet peers, the list of backups, the
+   progress and the path of a download.  Each is either under a heading that is
+   already the card's own or the whole of what a card-level button produced, and
+   each is a list of long strings — a path per row held in the width the controls
+   leave wraps into a column of fragments. */
+.settings-section .peer-list, .settings-section .backup-list,
+.settings-section .update-progress, .settings-section .update-ready-path { margin-inline-start: 0; }
+/* A remark about the whole card rather than about one row, so it keeps the
+   card's own left edge while the rows above and below it are indented. */
+.setting-note { margin: 10px 0 0; }
+/* A row of buttons outside a settings card — the diagnostics panel. */
+.actions { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+/* A paired internet device: name and state on one line, and what the relay
+   holds for it on the next.  The line is the legacy device card's, which is
+   where the shell's own device list has no room for it. */
+.peer-list { padding-left: 0; list-style: none; }
+.peer-list > li { display: grid; gap: 4px; padding: 8px 0; border-bottom: 1px solid var(--line); }
+.peer-list > li:last-child { border-bottom: 0; }
+/* One backup per row: the name, then how old and how big it is, and the button
+   that restores it against the right edge — the shape the legacy panel gave the
+   same list.  A bare run of filenames said nothing about which was worth
+   restoring or how to restore it without a file dialog. */
+.backup-list { padding-left: 0; list-style: none; }
+.backup-list > li { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; padding: 9px 0; border-bottom: 1px solid var(--line); }
+.backup-list > li:last-child { border-bottom: 0; }
+.backup-name { min-width: 0; overflow-wrap: anywhere; }
+.backup-list > li .muted { flex: 1; min-width: 140px; }
+.peer-line { display: flex; align-items: center; gap: 8px; }
+.peer-line .muted { flex: 1; font-size: 12px; }
+.peer-delivery { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; font-size: 12px; }
+/* "待补发 N" — a count that only appears when there is one, so a device with
+   nothing queued shows no badge at all rather than a zero. */
+.delivery-badge { border: 1px solid var(--accent-line); background: var(--accent-soft); color: var(--accent-text); border-radius: 9px; padding: 1px 7px; font-size: 11px; }
+.delivery-result { display: inline-flex; align-items: center; gap: 4px; color: var(--muted); }
+.delivery-result--delivered { color: var(--accent-text); }
+.delivery-result--failed { color: var(--danger-text); }
+/* This machine's own link to the relay, the first line of the internet pairing
+   card.  Every other 在线 under it is the relay's view of *another* device, so
+   when our own link is down the whole list reads 离线 and nothing on screen says
+   whether they are away or we are.  The state is carried in colour for the same
+   reason the delivery rows carry theirs: it is one word, and it is the word the
+   rest of the card is read against. */
+.relay-state { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; font-size: 13px; }
+.relay-state--online { color: var(--accent-text); }
+.relay-state--connecting { color: var(--muted); }
+.relay-state--off, .relay-state--error { color: var(--danger-text); }
+/* A code that has been sent and not yet answered.  It sits where the peer rows
+   sit and has their shape, because it is the same question — is that machine
+   reachable — asked about a pairing that does not exist yet; it is not one of
+   them, and the clock says which of the two it is before the words do. */
+.pairing-wait { display: flex; align-items: center; gap: 6px; color: var(--muted); }
+.peer-list--waiting > li { border-bottom: 0; }
+/* Why a pairing code was refused.  It belongs to the form, not to the window:
+   a mistyped code and an offline relay are both answered at the box they came
+   from, rather than in the band at the top of the window in English. */
+.pairing-message { margin: 0; font-size: 13px; }
+.pairing-message--failed { color: var(--danger-text); }
+/* The chrome belongs to the card rather than to the page that holds it.  A
+   `.settings-section` is one card on the settings page and on the devices page
+   — and the two cards that moved to the devices page kept their rows and lost
+   their fields, because these rules named `.settings-panel` and the moved cards
+   are not inside it.  The panel's name is kept beside the card's: the panel
+   holds controls that are not in any card — the rail's search box among them —
+   and that one takes its width from its own rule. */
+.settings-panel input:not([type="checkbox"]), .settings-section input:not([type="checkbox"]),
+.settings-panel select, .settings-section select,
+.settings-panel textarea, .settings-section textarea {
+  width: 100%; min-width: 0; border: 1px solid var(--line); border-radius: 4px;
+  background: var(--surface); padding: 8px 10px; color: inherit;
+}
+/* One height for the single-line controls, so a select and an input beside
+   each other in a card line up the way the row grid means them to. */
+.settings-panel input:not([type="checkbox"]), .settings-section input:not([type="checkbox"]),
+.settings-panel select, .settings-section select { min-height: var(--control); }
+.settings-panel textarea, .settings-section textarea { resize: vertical; line-height: 1.55; }
+/* A control stops at a width that suits what goes in it rather than stretching
+   to the card's right edge.  The card is over 700px wide, and `width: 100%` on
+   every field meant a port number and a two-option select were the same 700px
+   as the textarea beside them — which is most of what made a card read as a
+   pile of boxes rather than as a list of settings.
+
+   Scoped to the control column's own children, so a filter box, a search box or
+   a checkbox inside a list keeps whatever width its own list gives it. */
+/* What is typed by hand and read back in full — a name, a code, a secret — is
+   about as wide as its own longest plausible value. */
+.settings-panel .setting-control > input:not([type="checkbox"]):not(.setting-wide),
+.settings-section .setting-control > input:not([type="checkbox"]):not(.setting-wide) { width: 340px; max-width: 100%; }
+/* A count, an interval, a port: the number is the whole of it, so the box is
+   only as wide as the widest number it holds. */
+.settings-panel .setting-control > input:not([type="checkbox"]):not(.setting-wide)[type="number"],
+.settings-section .setting-control > input:not([type="checkbox"]):not(.setting-wide)[type="number"] { width: 150px; }
+/* A list of short fixed choices — a language, a mode, a log level — is only as
+   wide as its longest entry needs. */
+.settings-panel .setting-control > select:not(.setting-wide),
+.settings-section .setting-control > select:not(.setting-wide) { width: 340px; max-width: 100%; }
+/* A path, a URL, a key: a value written once by hand and read a segment at a
+   time, so it takes the room the column leaves — which is what the base rule
+   already gives it.  The class is what says so at the field. */
+.settings-panel .setting-control > .setting-wide,
+.settings-section .setting-control > .setting-wide { width: 100%; }
+/* A group of rows inside a card — one fieldset per group.  It is *not* a grid:
+   its children are the rows, and every row carries the card's two columns
+   itself.  Given the two columns, a fieldset places its rows into them in
+   document order — the first label in the 168px name column, the next in the
+   control column — so half the rows in every group were squeezed into the width
+   of a label and the other half started at an x that depended on how many rows
+   came before them. */
+/* Where one group ends and the next begins.  No group in this page opens a card
+   — every one of them follows rows — so every one of them is opened by a rule.
+   Without it a card holding four groups showed fourteen unbroken rows. */
+.settings-panel fieldset { border: 0; border-top: 1px solid var(--line); margin: 14px 0 0; padding: 0; min-width: 0; display: grid; grid-template-columns: minmax(0, 1fr); gap: 0; }
+/* The group's name reads as a sub-heading of the card, like the card's own `h3`
+   — same size, same colour — rather than as a row's label. */
+.settings-panel fieldset > legend { padding: 15px 0 2px; font-size: 12px; font-weight: 600; letter-spacing: .02em; color: var(--muted); }
+/* A row that follows a group but belongs to none — 网络与高级's data directory,
+   which the legacy window never grouped.  It gets the same rule, so it reads as
+   a thing of its own rather than as the last row of the group above it. */
+.settings-panel fieldset + .setting { margin-top: 14px; border-top: 1px solid var(--line); padding-top: 9px; }
+/* The save bar rides the bottom of the scrolling area: the form is long enough
+   that a button at the end of it is a button nobody scrolls to find. */
+.settings-save { position: sticky; bottom: 0; display: flex; flex-wrap: wrap; gap: 10px 14px; align-items: center; padding: 13px 22px; background: var(--page); border: 1px solid var(--line); border-radius: var(--radius-lg); box-shadow: var(--shadow-soft); }
+/* What the bar has to say about the form: that something is pending, or that
+   nothing is.  It sits after the button, so the bar reads "save — and by the
+   way, there is something to save". */
+.settings-save-status { font-size: 12px; color: var(--muted); }
+.settings-section p { overflow-wrap: anywhere; line-height: 1.6; }
+.settings-section ul { margin: 10px 0 0; padding-left: 20px; }
+/* Live password checklist: each rule turns green as the typed value meets it. */
+.password-rules { list-style: none; padding-left: 0; display: grid; gap: 4px; font-size: 12px; }
+/* The list variants inside a card carry no marks of their own, so the section's
+   general `ul` rule must not put the bullet's indent back. */
+.settings-section .password-rules, .settings-section .ai-local-list { padding-left: 0; }
+.password-rules li::before { content: "•"; margin-right: 6px; }
+.password-rules li.met { color: var(--accent); }
+.password-rules li.met::before { content: "✓"; }
+.update-available { color: var(--accent); font-weight: 550; }
+.update-failed { color: var(--danger-text); }
+.update-progress { position: relative; margin-top: 12px; height: 22px; border: 1px solid var(--line); border-radius: 4px; background: var(--surface); overflow: hidden; }
+.update-progress__bar { height: 100%; background: var(--accent); transition: width .2s linear; }
+.update-progress__label { position: absolute; inset: 0; display: grid; place-items: center; font-size: 12px; }
+/* An installer's full path: one long machine-made string the reader checks, or
+   copies, a segment at a time. */
+.update-ready-path { font-family: var(--font-mono); font-size: 12px; user-select: text; overflow-wrap: anywhere; background: var(--surface); border: 1px solid var(--line); border-radius: 4px; padding: 8px; }
+/* A value whose only purpose is to be copied out — a path, a token, a code.
+   Selection is the point, so it is granted here rather than left to chance. */
+.selectable { user-select: text; }
+/* A button that reads as a link: the pairing name you click to rename. */
+.text-button { border-color: transparent; padding: 2px 5px; min-height: 0; color: var(--accent-text); }
+.text-button:hover:not(:disabled) { background: var(--accent-soft); }
+/* Translated text: read and copied, so it gets the block a clip is read in. */
+.translation-result { user-select: text; white-space: pre-wrap; overflow-wrap: anywhere; font-size: 13px; background: var(--code); border: 1px solid var(--line); border-radius: 4px; padding: 9px 11px; }
+/* The AI card's two inventories.  Each row is one file with its actions at the
+   right edge; without a row of its own the name and its three buttons ran
+   together into one unbroken line. */
+/* A bounded, self-scrolling list.  A tool-profile inventory runs to dozens of
+   files and each half of the AI card has one, so without a ceiling the second
+   half starts below a screenful of rows the reader is not looking at. */
+.ai-local-list { list-style: none; display: grid; gap: 0; font-size: 13px; max-height: 340px; overflow: auto; }
+.ai-local-list li { display: flex; align-items: center; gap: 6px; padding: 5px 0; border-bottom: 1px solid var(--line); }
+.ai-local-list li > span { flex: 1; min-width: 0; overflow-wrap: anywhere; }
+/* The tick box holds its size while the path beside it wraps. */
+.ai-local-list li > input[type="checkbox"] { flex: 0 0 auto; margin: 0; }
+/* A folder with nothing under it keeps the column: its marker sits where the
+   other rows' tick boxes do, so the paths stay in one line down the list. */
+.ai-folder-mark { flex: 0 0 13px; color: var(--muted); }
+/* A tool's name over its own rows.  The rows are paged and the groups are not, so
+   a page that begins inside a group still has to say which tool those rows
+   belong to — hence a header wherever the tool changes, not one per page. */
+.ai-local-list li.ai-group-head { gap: 6px; padding: 10px 0 4px; font-size: 12px; font-weight: 600; }
+.ai-local-list li.ai-group-head > span { flex: 0 0 auto; }
+.ai-group-count { color: var(--muted); font-weight: 400; }
+/* The fold control, in the column the tick boxes use, so a row's name starts in
+   the same place whether the row is a folder or a file.  A row with no folder
+   above it keeps an empty span of the same width rather than a hidden button: a
+   control a reader cannot see is still a tab stop, and tabbing through a list of
+   files should land on what the files offer. */
+.ai-local-list li > .ai-tree-chevron { flex: 0 0 13px; display: inline-flex; align-items: center; justify-content: center; width: 13px; height: 13px; min-height: 0; padding: 0; border: 0; background: none; color: var(--muted); transition: transform 0.12s ease; }
+.ai-local-list li > .ai-tree-chevron--open { transform: rotate(90deg); }
+/* A folder's name folds it too, which is what a reader tries first.  Plain text
+   so a file's name and a folder's are told apart without a colour to learn. */
+.ai-local-list li > .ai-path-btn { flex: 1; min-width: 0; justify-content: flex-start; gap: 0; min-height: 0; padding: 0; border: 0; background: none; font-size: 13px; text-align: left; overflow-wrap: anywhere; }
+/* Which root a row is under, where one tool watches more than one: two roots can
+   hold the same relative path, so without it the row is ambiguous. */
+.ai-root-hint { flex: 0 0 auto; color: var(--muted); font-size: 12px; }
+.ai-local-list .icon-button { width: 30px; height: 30px; min-width: 30px; }
+/* The editor a picked file opens into: a panel inside the card, not another row,
+   so it spans the card and stands on a surface of its own. */
+.ai-editor { display: grid; gap: 9px; margin: 14px 0 0; padding: 13px; border: 1px solid var(--line); border-radius: var(--radius); background: var(--surface); }
+.ai-editor strong { overflow-wrap: anywhere; font-size: 13px; }
+.ai-editor textarea { background: var(--page); }
+.ai-editor button { justify-self: start; }
+/* The filter spans the list it narrows, so which list is being filtered is
+   unmistakable at a glance. */
+.ai-filter { width: 100%; }
+/* A version badge sits between the path and the row's buttons.  "missing" is the
+   one state that needs a decision from the reader, so it carries the only
+   warning colour; the two "newer" states are mirror images of each other and are
+   told apart by their words, not by a colour to memorise. */
+.ai-version { flex: 0 0 auto; padding: 1px 6px; border-radius: 999px; border: 1px solid var(--line); background: var(--surface); color: var(--muted); font-size: 11px; white-space: nowrap; }
+.ai-version--missing { border-color: var(--danger-line); background: var(--danger-soft); color: var(--danger-text); }
+/* A folder's badge counts the files under it, so one row can carry several
+   states at once and each one needs its number told apart from its label: a
+   badge reading "缺失 3" has to be two things, not one glyph. */
+.ai-version-count { margin-left: 3px; font-weight: 600; }
+.ai-diff-ok { color: var(--accent); }
+/* How a pull is going and how it ended, on one line under the strategy picker.
+   It is a wait while it runs and a report when it stops, so the colour changes
+   with the outcome rather than the shape — a reader looking for the answer finds
+   it where the progress was. */
+.ai-pull-status { display: flex; align-items: center; gap: 6px; }
+.ai-pull-status--done { color: var(--accent-text); }
+.ai-pull-status--failed { color: var(--danger-text); }
+.transfers-view { flex: 1; min-width: 0; }
+/* The speed test and the cancel result sit between the toolbar and the list, so
+   they line up with the list rather than with the toolbar: they are part of the
+   page's column, not of the bar above it. */
+.transfer-list { margin: 0 var(--page-gutter) 28px; }
+.transfer-list h2 { padding: 12px 0; border-bottom: 1px solid var(--line); }
+/* A card's title and the one action that belongs to the whole card rather than
+   to a row: the rule under them is the title's, so the two sit on one line and
+   the button does not push the rule down. */
+.transfer-list-header { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 4px 12px; border-bottom: 1px solid var(--line); }
+.transfer-list-header h2 { border-bottom: 0; }
+/* The last bulk action's report — "cancel all" and clearing history write to
+   the same line, because it is the same question: what did that button do. */
+.bulk-status { margin: 0 var(--page-gutter); }
+/* What a drop brought, and the one question it left open.  It sits where the
+   bulk-status line sits — the page's own column — because it is the same kind of
+   thing: a statement about the file list, not a control on the toolbar. */
+.staged-drop { display: flex; align-items: center; gap: 12px; margin: 0 var(--page-gutter) 12px; padding: 12px 14px; background: var(--surface); border: 1px solid var(--line); border-left: 3px solid var(--accent); border-radius: 6px; }
+.staged-drop > svg { flex-shrink: 0; color: var(--accent-text); }
+.staged-drop-main { min-width: 0; display: grid; gap: 3px; flex: 1; }
+/* The names are one line however many were dropped: the count is already said,
+   and the row's height is the answer's, not the list's. */
+.staged-drop-names { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.speed-test { display: flex; align-items: center; gap: 8px; margin: 0 var(--page-gutter) 4px; font-size: 12px; color: var(--muted); }
+.transfer-row { display: grid; grid-template-columns: minmax(0, 1fr) minmax(120px, 240px) auto auto auto; gap: 12px; align-items: center; padding: 15px 0; border-bottom: 1px solid var(--line); }
+.transfer-main { min-width: 0; display: grid; gap: 5px; overflow-wrap: anywhere; }
+.transfer-row progress { width: 100%; accent-color: var(--accent); }
+/* The history card's rows are not the running card's rows.  A running row has a
+   progress bar, which is what the 120–240px second column is for; a history row
+   has no progress bar, so sharing that template put the first of its controls —
+   the tick of a completed row, or the retry button of a failed one — into the
+   progress bar's track, and every history row had a gap the width of a progress
+   bar between its name and its controls with one lone icon at the left edge of
+   it.  Sharing it also left the template's two trailing tracks empty, and their
+   two gaps held the buttons 24px short of the card's right edge while the
+   running card's buttons sat flush.  So the history row is the flex row the rest
+   of the shell's rows already are: the name takes the room, and whatever the row
+   offers — a tick, open, reveal, retry, delete — keeps its own size at the end.
+   Which controls a row has is what varies; how many columns there are is not a
+   thing a terminal row should have to fill. */
+.transfer-list--history .transfer-row { display: flex; align-items: center; gap: 12px; }
+.transfer-list--history .transfer-main { flex: 1 1 auto; }
+.transfer-list--history .transfer-row > :not(.transfer-main) { flex: 0 0 auto; }
+.transfer-ok { color: var(--accent); }
+.transfer-failed { color: var(--danger-text); }
+/* Legacy toasts: bottom-right, above the page, gone on their own timer.
+   "Above the page" is the whole of it, and it took two rules to say: the stack
+   was `position: fixed; bottom: 22px` — 22px above the window — and the window's
+   last strip is the status bar, so a toast landed on the bar's right end, which
+   is where the bar's own comment says the sync toggle and the pause presets
+   gather.  No number written in a fixed rule can clear that bar: its height is
+   not one number, because a narrow window wraps it, and a fixed element is
+   placed against the window rather than against the box below it.  So the stack
+   is a child of the bar and sits one gap above the bar's top edge
+   (`bottom: 100%`), which is the same place at every width.  Its right edge and
+   the width it may take are placed by the page gutter, like every other
+   page-level strip — and `100%` here is the page column, so at a narrow window
+   the toast stays beside the rail rather than over it. */
+.notice-stack { position: absolute; right: var(--page-gutter); bottom: calc(100% + 12px); z-index: 20; margin: 0; padding: 0; list-style: none; display: grid; gap: 10px; max-width: min(360px, calc(100% - var(--page-gutter) * 2)); }
+.notice { display: flex; gap: 10px; align-items: flex-start; padding: 12px 12px 12px 14px; background: var(--raised); border: 1px solid var(--line); border-left: 3px solid var(--accent); border-radius: 6px; box-shadow: var(--shadow-soft); }
+.notice > div { min-width: 0; }
+.notice p { margin-top: 4px; overflow-wrap: anywhere; line-height: 1.5; }
+.notice button { border: 0; flex-shrink: 0; }
+@keyframes spin { to { transform: rotate(360deg); } }
+/* A toast arrives on its own — nothing the user just clicked explains it — so
+   it fades in rather than appearing mid-sentence. */
+.notice-stack li { transition: opacity .16s ease, transform .16s ease; }
+.notice-enter-from, .notice-leave-to { opacity: 0; transform: translateY(6px); }
+/* The "Enable animations" setting, and the platform's own reduced-motion
+   preference.  Both leave the spinners alone: one that does not turn is how a
+   hung window looks, and neither switch is asking for that. */
+.no-motion * { transition: none !important; }
+@media (prefers-reduced-motion: reduce) { .spinning { animation: none; } }
+/* Desktop-window scrollbars.  A web view's default is a wide light trough with
+   stepper arrows — the one piece of chrome that gives away a page rendered in
+   a frame.  These are thin, take the theme's line colour, and darken under the
+   pointer so the trough itself stays out of the way. */
+* { scrollbar-width: thin; scrollbar-color: var(--line) transparent; }
+*::-webkit-scrollbar { width: 11px; height: 11px; }
+*::-webkit-scrollbar-track, *::-webkit-scrollbar-corner { background: transparent; }
+*::-webkit-scrollbar-thumb { background: var(--line); border: 3px solid transparent; background-clip: content-box; border-radius: 999px; }
+*::-webkit-scrollbar-thumb:hover { background: var(--muted); background-clip: content-box; }
+@media (max-width: 700px) {
+  /* The gutter is the one number a narrow window moves, and everything placed by
+     it moves with it: the page header, the toolbar, the lists and their filter
+     row and their footers, the error band, the settings panel.  The rules below
+     then only change what is actually different about a narrow page — a block
+     padding, a column that folds — rather than restating the indent. */
+  :root { --page-gutter: 18px; }
+  .application { grid-template-columns: 62px minmax(0, 1fr); }
+  .sidebar { padding: 23px 6px 12px; }
+  .brand { padding: 0 9px 25px; }
+  /* `nav span` alone reached every other nav in the window — the settings
+     strip's group tabs and the two page-tab strips — and hid the spans inside
+     them, which is the "has unsaved changes" dot and the search match count.
+     The other two selectors here are already the sidebar's, so this one is
+     scoped to match rather than dropped. */
+  .brand span, .sidebar nav span, .sidebar-footer { display: none; }
+  nav button { padding: 10px; justify-content: center; }
+  header { padding: 24px var(--page-gutter) 20px; flex-wrap: wrap; }
+  .toolbar { padding: 18px var(--page-gutter); }
+  .history-row { grid-template-columns: minmax(0, 1fr) auto; gap: 9px; }
+  .history-content { grid-column: 1 / -1; }
+  .history-row .history-selection { grid-column: 1; grid-row: 1; }
+  .history-row .history-content { grid-row: 2; }
+  .history-row:has(.history-selection) time { grid-row: 3; }
+  .history-row:has(.history-selection) .row-actions { grid-row: 3; }
+  .history-row time { grid-column: 1; grid-row: 2; }
+  .row-actions { grid-column: 2; grid-row: 2; }
+  .pagination { padding: 14px var(--page-gutter); }
+  .bottom-status { flex-wrap: wrap; }
+  .bottom-status span:first-of-type { margin-left: 0; width: 100%; }
+  .error-band, .status-band { padding: 12px var(--page-gutter); align-items: flex-start; }
+  .settings-panel { margin: 0 var(--page-gutter) 28px; }
+  /* Narrow: the two-column setting row folds to one, so a long label and a long
+     hint cannot squeeze each other into a column 40px wide.  The strip takes
+     the same 16px the folded card's own padding does, so the tabs and the
+     settings they switch between start on one line; it stays stuck, because it
+     is the only way between the cards and a narrow window has the least room to
+     scroll back in. */
+  .settings-nav { padding-left: 16px; padding-right: 16px; }
+  .settings-search { padding: 0 16px 12px; }
+  .settings-section { padding: 0 16px 14px; }
+  .setting { grid-template-columns: minmax(0, 1fr); gap: 6px; min-height: 0; padding: 7px 0; }
+  /* Folded to one column, both children have to be told so: the row's own
+     `grid-column: 1` / `grid-column: 2` would otherwise summon the second
+     column back as an implicit track and push every control off the right edge
+     of a narrow window. */
+  .setting-name, .setting-control { grid-column: 1; }
+  /* Stacked, the label is the line above the control, so it takes no top
+     padding and the control starts at the card's left edge with it. */
+  .setting-name { padding-top: 0; }
+  /* Folded to one column: there is no second column left to line up with, and
+     zeroing the two widths zeroes every indent derived from them. */
+  .settings-section { --setting-name: 0px; --setting-gap: 0px; }
+  .settings-save { padding: 13px 16px; }
+  /* Narrow: the name takes a line of its own and the progress bar the second, so
+     a long filename is not squeezed by the controls beside it.  The row needs
+     four columns rather than three, and that is arithmetic rather than taste:
+     beside the bar a running row has a percentage and *two* buttons — a
+     pause-or-resume and a cancel — which is three more cells, and a three-column
+     row put the second button on a third line of its own, at the far left.  Four
+     is the most a row carries, so a row with one button instead of two leaves the
+     last track empty; an empty track is zero-width and costs only its 12px gap. */
+  .transfer-row { grid-template-columns: minmax(0, 1fr) auto auto auto; }
+  .transfer-main { grid-column: 1 / -1; grid-row: 1; }
+  .transfer-row progress { grid-column: 1; grid-row: 2; }
+  .favorites-workspace.has-editor { grid-template-columns: minmax(0, 1fr); }
+  .favorite-editor { grid-row: 1; border-bottom: 1px solid var(--line); }
+  .favorites-list .pagination { flex-wrap: wrap; }
+}
+/* The dark theme is the same token list with the other values, in two blocks
+   because CSS cannot put a media query and an attribute selector in one rule
+   set.  Nothing below redefines a component: a rule that needs a colour of its
+   own in the dark theme is a rule that skipped the tokens above. */
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    color-scheme: dark;
+    color: #e4e7e5;
+    background: #202423;
+    --page: #202423;
+    --chrome: #252b28;
+    --raised: #252b28;
+    --surface: #2c322f;
+    --code: #1b1f1d;
+    --line: #3d4642;
+    --muted: #a6b1ab;
+    --accent: #65c6a6;
+    --accent-soft: #284a3b;
+    --accent-text: #a2e1bf;
+    --danger-text: #ffb1a8;
+    --danger-soft: #402b27;
+    --danger-line: #63453e;
+  }
+}
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  color: #e4e7e5;
+  background: #202423;
+  --page: #202423;
+  --chrome: #252b28;
+  --raised: #252b28;
+  --surface: #2c322f;
+  --code: #1b1f1d;
+  --line: #3d4642;
+  --muted: #a6b1ab;
+  --accent: #65c6a6;
+  --accent-soft: #284a3b;
+  --accent-text: #a2e1bf;
+  --danger-text: #ffb1a8;
+  --danger-soft: #402b27;
+  --danger-line: #63453e;
+}

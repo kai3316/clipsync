@@ -514,7 +514,14 @@ class TransportManager:
         self._running = False
         self._on_peer_message: Callable | None = None
         self._on_wake: Callable | None = None
-        self._lock = threading.Lock()
+        self._lock = threading.RLock()
+        self._stopped = threading.Event()
+        self._workers: set[threading.Thread] = set()
+        self._pending_sockets: dict[threading.Thread, set[socket.socket]] = {}
+        self._connections: set[PeerConnection] = set()
+        self._callbacks: dict[threading.Thread, int] = {}
+        self._callback_done = threading.Condition(self._lock)
+        self._stop_calls = 0
         self._last_health_tick = 0.0
         self._last_health_mono = 0.0
         self._peer_addresses: dict[str, tuple[str, str, int]] = {}
@@ -570,9 +577,101 @@ class TransportManager:
         if cb is None:
             return
         try:
-            cb(peer_name, peer_id)
+            self._invoke_callback(cb, peer_name, peer_id)
         except Exception:
             logger.debug("on_connect_rejected callback failed", exc_info=True)
+
+    def _invoke_callback(self, callback, *args):
+        """Admit callbacks atomically with stop, without holding a lock in user code."""
+        current = threading.current_thread()
+        with self._lock:
+            if self._stopped.is_set() or callback is None:
+                return
+            self._callbacks[current] = self._callbacks.get(current, 0) + 1
+        try:
+            return callback(*args)
+        finally:
+            with self._callback_done:
+                self._callbacks[current] -= 1
+                if not self._callbacks[current]:
+                    del self._callbacks[current]
+                self._callback_done.notify_all()
+
+    def _prune_workers(self):
+        # Called under _lock; retain even replaced connections until recv exits.
+        self._workers = {t for t in self._workers if t.is_alive()}
+        self._connections = {
+            c for c in self._connections if c._recv_thread and c._recv_thread.is_alive()
+        }
+
+    def _start_worker(self, target, args=(), name=None):
+        with self._lock:
+            if not self._running:
+                return None
+            self._prune_workers()
+
+            def run():
+                try:
+                    target(*args)
+                finally:
+                    with self._lock:
+                        self._pending_sockets.pop(threading.current_thread(), None)
+
+            worker = threading.Thread(target=run, daemon=True, name=name)
+            self._workers.add(worker)
+            try:
+                worker.start()
+            except BaseException:
+                self._workers.discard(worker)
+                raise
+            return worker
+
+    @staticmethod
+    def _close_socket(sock):
+        with contextlib.suppress(Exception):
+            sock.shutdown(socket.SHUT_RDWR)
+        with contextlib.suppress(Exception):
+            sock.close()
+
+    def _track_socket(self, sock):
+        with self._lock:
+            if self._running:
+                self._pending_sockets.setdefault(threading.current_thread(), set()).add(sock)
+                return
+        self._close_socket(sock)
+        raise OSError("Transport stopped")
+
+    def _wrap_socket(self, context, sock, **kwargs):
+        # Register the SSL wrapper before its blocking handshake: wrap_socket
+        # detaches the raw fd, so closing only the raw socket cannot interrupt it.
+        with self._lock:
+            if not self._running:
+                raise OSError("Transport stopped")
+            wrapped = context.wrap_socket(sock, do_handshake_on_connect=False, **kwargs)
+            self._pending_sockets.setdefault(threading.current_thread(), set()).add(wrapped)
+        try:
+            wrapped.do_handshake()
+        except BaseException:
+            self._close_socket(wrapped)
+            raise
+        return wrapped
+
+    def _start_peer(self, conn):
+        with self._lock:
+            if not self._running:
+                conn.stop()
+                return False
+            conn.set_on_message(lambda *args: self._invoke_callback(self._on_peer_message, *args))
+            conn.set_on_disconnect(self._on_peer_disconnected)
+            self._connections.add(conn)
+            try:
+                conn.start()
+            except BaseException:
+                conn.stop()
+                self._connections.discard(conn)
+                raise
+            self._workers.add(conn._recv_thread)
+            return True
 
     @staticmethod
     def _secure_scratch_dir() -> Path:
@@ -768,65 +867,92 @@ class TransportManager:
         return False, data
 
     def start_server(self):
-        self._cleanup_stale_scratch()
-        ssl_context = self._build_ssl_context(server_side=True)
-
-        self._server_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        self._server_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        attempted = False
         try:
-            self._server_sock.bind(("0.0.0.0", self._port))
-        except OSError as e:
-            self._server_sock.close()
-            self._server_sock = None
-            raise PortInUseError(self._port) from e
-        self._server_sock.listen(5)
-        self._server_sock.settimeout(1.0)
-
-        self._running = True
-        # Both clocks: wall time advances across system sleep (monotonic does
-        # not on macOS/Linux), while monotonic is immune to NTP steps and to
-        # the user changing the clock.  The detector below needs both to tell
-        # "we were suspended" apart from "someone moved the clock".
-        self._last_health_tick = time.time()
-        self._last_health_mono = time.monotonic()
-        self._health_thread = threading.Thread(
-            target=self._health_check_loop,
-            daemon=True,
-        )
-        self._health_thread.start()
-        self._server_thread = threading.Thread(
-            target=self._accept_loop,
-            args=(ssl_context,),
-            daemon=True,
-        )
-        self._server_thread.start()
+            with self._lock:
+                if self._stop_calls:
+                    raise RuntimeError("Transport shutdown is still in progress")
+                if self._running:
+                    return
+                self._prune_workers()
+                if self._workers or self._callbacks:
+                    raise RuntimeError("Transport shutdown is still in progress")
+                attempted = True
+                self._cleanup_stale_scratch()
+                ssl_context = self._build_ssl_context(server_side=True)
+                self._server_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                self._server_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+                try:
+                    self._server_sock.bind(("0.0.0.0", self._port))
+                except OSError as e:
+                    raise PortInUseError(self._port) from e
+                self._server_sock.listen(5)
+                self._server_sock.settimeout(1.0)
+                self._stopped.clear()
+                self._running = True
+                # Wall time advances across sleep; monotonic is immune to NTP.
+                self._last_health_tick = time.time()
+                self._last_health_mono = time.monotonic()
+                self._health_thread = self._start_worker(self._health_check_loop)
+                self._server_thread = self._start_worker(self._accept_loop, (ssl_context,))
+        except BaseException:
+            if attempted:
+                self.stop_server()
+            raise
         logger.info("TCP server listening on port %d", self._port)
 
-    def stop_server(self):
-        self._running = False
-        # Unblock accept() by connecting to our own port
-        if self._server_sock:
-            try:
-                unblocker = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-                with contextlib.suppress(Exception):
-                    unblocker.connect(("127.0.0.1", self._port))
-                unblocker.close()
-            except Exception:
-                pass
-        # Disconnect all peers (outside lock to avoid holding it during I/O)
+    def stop_server(self, timeout: float = 5.0) -> bool:
+        """Stop admitting work and drain it within one timeout budget.
+
+        True means all owned threads and admitted callbacks have exited. False
+        means the caller must retain ownership and retry (e.g. blocked user code
+        or DNS). Called inside a worker/callback, this signals stop without
+        joining: an external owner must call again after that callback unwinds.
+        Repeated calls are safe. Restart is refused until the drain completes.
+        """
+        deadline = time.monotonic() + max(0.0, timeout)
+        current = threading.current_thread()
         with self._lock:
-            peers = list(self._peers.values())
+            self._stop_calls += 1
+            self._running = False
+            self._stopped.set()
+            server, self._server_sock = self._server_sock, None
+            peers = set(self._peers.values()) | self._connections
             self._peers.clear()
-        for conn in peers:
-            conn.stop()
-        with self._lock:
             timers = list(self._reconnect_timers.values())
             self._reconnect_timers.clear()
-        for timer in timers:
-            timer.cancel()
-        if self._server_sock:
-            with contextlib.suppress(Exception):
-                self._server_sock.close()
+            self._reconnect_attempts.clear()
+            sockets = {s for group in self._pending_sockets.values() for s in group}
+            for conn in peers:
+                if conn._recv_thread is not None:
+                    self._workers.add(conn._recv_thread)
+            workers = set(self._workers)
+            inside = current in workers or current in self._callbacks
+        try:
+            for timer in timers:
+                timer.cancel()
+            if server is not None:
+                self._close_socket(server)
+            for sock in sockets:
+                self._close_socket(sock)
+            for conn in peers:
+                conn.stop()
+            if inside:
+                return False
+            for worker in workers:
+                if worker is not current and worker.ident is not None:
+                    worker.join(max(0.0, deadline - time.monotonic()))
+            with self._callback_done:
+                while self._callbacks:
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        return False
+                    self._callback_done.wait(remaining)
+                self._prune_workers()
+                return not self._workers and self._stop_calls == 1
+        finally:
+            with self._lock:
+                self._stop_calls -= 1
 
     def connect_to_peer(
         self, peer_id: str, peer_name: str, address: str, port: int, no_auto_pairing: bool = False
@@ -840,6 +966,8 @@ class TransportManager:
         the auto shared-code pairing offer.
         """
         with self._lock:
+            if not self._running:
+                return
             # Clear rejected status — user explicitly wants to connect now.
             # Also clear any related IDs (hashed or real) so the incoming
             # side of the connection won't be refused.
@@ -880,6 +1008,7 @@ class TransportManager:
             try:
                 logger.info("[%s] TCP connecting to %s:%d", peer_name, address, port)
                 sock = socket.create_connection((address, port), timeout=10)
+                self._track_socket(sock)
                 logger.info("[%s] TCP connected, starting TLS handshake", peer_name)
 
                 # Peers are stored under their real device id, but discovery may
@@ -895,7 +1024,7 @@ class TransportManager:
                     verify_id[:12] if verify_id else "None",
                 )
 
-                ssl_sock = ssl_context.wrap_socket(sock, server_hostname=peer_id)
+                ssl_sock = self._wrap_socket(ssl_context, sock, server_hostname=peer_id)
                 logger.info("[%s] TLS handshake complete", peer_name)
 
                 # Exchange identity at application level: send our cert,
@@ -996,9 +1125,8 @@ class TransportManager:
                     pairing_mgr=self._pairing_mgr,
                     pending_recv=probe_leftover,
                 )
-                conn.set_on_message(self._on_peer_message)
-                conn.set_on_disconnect(self._on_peer_disconnected)
-                conn.start()
+                if not self._start_peer(conn):
+                    return
 
                 # Socket shutdown/close and health checks do I/O — collect the
                 # connections to stop under the lock, then stop them outside it.
@@ -1067,6 +1195,9 @@ class TransportManager:
                     # (e.g. closed by peer during a previous race round).
                     # Keep our outgoing so we don't lose both connections.
                     with self._lock:
+                        if not self._running:
+                            conn.stop()
+                            return
                         if self._peers.get(real_peer_id) is existing:
                             logger.info(
                                 "[%s] tiebreaker: peer should win but existing is dead — keeping our outgoing",  # noqa: E501
@@ -1126,7 +1257,8 @@ class TransportManager:
                     received_fp[:16] if received_fp else "n/a",
                 )
                 if self._on_security_alert:
-                    self._on_security_alert(
+                    self._invoke_callback(
+                        self._on_security_alert,
                         peer_name,
                         real_peer_id,
                         expected_fp,
@@ -1164,7 +1296,8 @@ class TransportManager:
                         peer_name,
                     )
                     if self._on_security_alert:
-                        self._on_security_alert(
+                        self._invoke_callback(
+                            self._on_security_alert,
                             peer_name,
                             lookup,
                             expected_fp,
@@ -1187,7 +1320,7 @@ class TransportManager:
                         "[%s] connect failed and peer not paired — no auto-reconnect", peer_name
                     )
 
-        threading.Thread(target=_connect, daemon=True).start()
+        self._start_worker(_connect, name="clipsync-connect")
 
     def broadcast(self, data: bytes) -> bool:
         """Send *data* to every paired peer.  Returns True if at least one
@@ -1445,6 +1578,8 @@ class TransportManager:
 
     def _on_peer_disconnected(self, peer_id: str, conn=None):
         with self._lock:
+            if not self._running:
+                return
             current = self._peers.get(peer_id)
             if current is None and conn is not None:
                 # Anonymous connections are keyed by __anon__{addr} while their
@@ -1567,13 +1702,24 @@ class TransportManager:
             timer = threading.Timer(delay, self._try_reconnect, args=(peer_id,))
             timer.daemon = True
             self._reconnect_timers[peer_id] = timer
-        if old:
-            logger.debug("[%s] cancelled previous reconnect timer", peer_id[:12])
-            old.cancel()
-        timer.start()
+            if old:
+                logger.debug("[%s] cancelled previous reconnect timer", peer_id[:12])
+                old.cancel()
+            self._prune_workers()
+            if isinstance(timer, threading.Thread):
+                self._workers.add(timer)
+            try:
+                timer.start()
+            except BaseException:
+                self._workers.discard(timer)
+                self._reconnect_timers.pop(peer_id, None)
+                raise
 
     def _try_reconnect(self, peer_id: str):
         with self._lock:
+            current = threading.current_thread()
+            if current in self._workers and self._reconnect_timers.get(peer_id) is not current:
+                return
             # This timer just fired — remove it from the dict so it doesn't
             # linger (a later _schedule_reconnect would otherwise try to
             # cancel a timer that already ran).
@@ -1614,7 +1760,7 @@ class TransportManager:
     def _health_check_loop(self):
         """Periodically check connection health and detect sleep/wake events."""
         while self._running:
-            time.sleep(15)
+            self._stopped.wait(15)
             if not self._running:
                 break
 
@@ -1646,7 +1792,7 @@ class TransportManager:
                 self._handle_wake()
                 if self._on_wake:
                     try:
-                        self._on_wake()
+                        self._invoke_callback(self._on_wake)
                     except Exception as e:
                         logger.debug("on_wake callback error: %s", e)
             else:
@@ -1765,7 +1911,7 @@ class TransportManager:
                     # fd exhaustion) cannot spin this loop at 100% CPU.
                     failures += 1
                     if failures >= 3:
-                        time.sleep(min(failures, 10) * 0.1)
+                        self._stopped.wait(min(failures, 10) * 0.1)
                 continue
             failures = 0
             logger.info("TCP accepted from %s:%d", addr[0], addr[1])
@@ -1773,12 +1919,23 @@ class TransportManager:
             # the old inline path serialized every accepted connection behind
             # up to ~25 s of handshake/identity timeouts, so one stalled (or
             # half-open) client delayed every other peer trying to connect.
-            threading.Thread(
-                target=self._handle_accepted,
-                args=(client_sock, addr, ssl_context),
-                daemon=True,
-                name="clipsync-accept",
-            ).start()
+            try:
+                self._track_socket(client_sock)
+                if (
+                    self._start_worker(
+                        self._handle_accepted, (client_sock, addr, ssl_context), "clipsync-accept"
+                    )
+                    is None
+                ):
+                    self._close_socket(client_sock)
+            except Exception:
+                self._close_socket(client_sock)
+                if self._running:
+                    logger.warning("Could not start accepted connection", exc_info=True)
+            finally:
+                with self._lock:
+                    pending = self._pending_sockets.get(threading.current_thread(), set())
+                    pending.discard(client_sock)
 
     def _handle_accepted(
         self, client_sock: socket.socket, addr: tuple, ssl_context: ssl.SSLContext
@@ -1790,9 +1947,10 @@ class TransportManager:
         peer_name = ""
         peer_cert_pem = ""
         try:
+            self._track_socket(client_sock)
             client_sock.settimeout(15)  # TLS handshake timeout
             try:
-                ssl_sock = ssl_context.wrap_socket(client_sock, server_side=True)
+                ssl_sock = self._wrap_socket(ssl_context, client_sock, server_side=True)
                 logger.info("TLS handshake OK with %s:%d", addr[0], addr[1])
             except (ssl.SSLError, TimeoutError) as e:
                 logger.warning("TLS handshake failed from %s:%d: %s", addr[0], addr[1], e)
@@ -1890,9 +2048,8 @@ class TransportManager:
                 pairing_mgr=self._pairing_mgr,
                 is_anonymous=not bool(peer_id),
             )
-            conn.set_on_message(self._on_peer_message)
-            conn.set_on_disconnect(self._on_peer_disconnected)
-            conn.start()
+            if not self._start_peer(conn):
+                return
             # Prevent the outer except handler from closing client_sock
             # now that PeerConnection owns the ssl_sock (which wraps it).
             client_sock = None
@@ -1976,6 +2133,9 @@ class TransportManager:
                 # previous race round). Keep the incoming so
                 # we don't lose both connections.
                 with self._lock:
+                    if not self._running:
+                        conn.stop()
+                        return
                     if self._peers.get(peer_id) is existing:
                         logger.info(
                             "[%s] tiebreaker: we should win but existing is dead — keeping incoming",  # noqa: E501
@@ -2023,7 +2183,8 @@ class TransportManager:
                 received_fp[:16] if received_fp else "n/a",
             )
             if self._on_security_alert:
-                self._on_security_alert(
+                self._invoke_callback(
+                    self._on_security_alert,
                     peer_name or "unknown",
                     peer_id,
                     expected_fp,

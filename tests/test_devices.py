@@ -1754,3 +1754,85 @@ def test_local_device_hash_is_deduped_too():
     cfg = _dedupe_cfg()
     rows = _dedupe_rows(cfg, {Discovery._hash_device_id(cfg.device_id): {"name": "Me"}})
     assert list(rows) == [cfg.device_id]
+
+# ── Round 20: a code we entered shows as "waiting" until it is answered ───
+
+# The backend has reported `waiting` since the internet-pairing handshake fix
+# (codes entered here whose partner has not replied — the provisional 4-char
+# tag, the partner's name once its hello lands, and when the code was
+# submitted).  The phone's store dropped the key on the floor, so the Devices
+# page showed nothing at all in the one window where the user is looking for an
+# answer: between submitting a code and the pairing completing.
+
+_NETPAIR_WAITING_KEYS = [
+    "devices.netpair_waiting_list",
+    "devices.netpair_waiting_for",
+    "devices.netpair_waiting_cancel",
+    "devices.netpair_waiting_hint",
+]
+
+
+def test_round20_waiting_keys_present_and_nonempty_in_both_locales():
+    en, zh = _locales()
+    for key in _NETPAIR_WAITING_KEYS:
+        assert key in en, f"missing from en.json: {key}"
+        assert key in zh, f"missing from zh-CN.json: {key}"
+        assert isinstance(en[key], str) and en[key].strip(), key
+        assert isinstance(zh[key], str) and zh[key].strip(), key
+    # The row names the device it is waiting for, in both languages.
+    for key in ("devices.netpair_waiting_for",):
+        assert "{name}" in en[key] and "{name}" in zh[key], key
+
+
+def test_round20_store_mirrors_the_waiting_list():
+    src = _read("js", "store.js")
+    assert "internetPairWaiting: []" in src
+    # Normalized from the status payload, and *assigned* rather than merged: a
+    # fetch that no longer reports the row is the only notice the wait is over.
+    assert "res.waiting" in src
+    assert "self.internetPairWaiting = waiting;" in src
+    # A confirmation re-keys the tag to the peer's real id, which only the
+    # backend knows — so the wait ends by refetching, not by inference, and
+    # only when there was a wait to end.
+    assert "if (this.internetPairWaiting.length) {" in src
+    assert "this.internetPairWaiting.filter(function (row) {" in src
+
+
+def test_round20_panel_shows_the_wait_and_offers_a_way_out():
+    src = _read("components", "device-panel.js")
+    assert "netpairWaiting: function ()" in src
+    assert "store.internetPairWaiting" in src
+    for key in ("devices.netpair_waiting_list", "devices.netpair_waiting_for",
+                "devices.netpair_waiting_cancel", "devices.netpair_waiting_hint"):
+        assert key in src, key
+    # A tag is all we have to name the wait, so the row falls back to it.
+    assert "waitingText: function (row)" in src
+    # A wait with no clock (the entry survived a restart) shows no age rather
+    # than the "尚未同步" that relTime would answer with.
+    assert "waitingSinceText: function (row) {" in src
+    assert "this.relTime(row.since) : ''" in src
+    # Cancelling a code typed for the wrong device is the same unpair the peer
+    # rows offer: the tag is dropped on this side and nowhere else.
+    assert '@click="unpairPeer(row)"' in src
+
+
+def test_round20_waiting_css_present():
+    css = _read("index.html")
+    assert ".netpair-waiting__row {" in css
+    for cls in (".netpair-waiting {", ".netpair-waiting__title {", ".netpair-waiting__text {",
+                ".netpair-waiting__since {", ".netpair-waiting__hint {"):
+        assert cls in css, cls
+
+
+def test_round20_touched_js_passes_node_check(tmp_path):
+    import shutil
+    import subprocess
+
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("node not available")
+    for parts in (("components", "device-panel.js"), ("js", "store.js")):
+        path = os.path.join(_STATIC, *parts)
+        proc = subprocess.run([node, "--check", path], capture_output=True, text=True)
+        assert proc.returncode == 0, f"{os.path.join(*parts)} fails node --check:\n{proc.stderr}"
+

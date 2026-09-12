@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-read-logs"
+description = "Enables the read_logs command without any pre-configured scope."
+commands.allow = ["read_logs"]
+
+[[permission]]
+identifier = "deny-read-logs"
+description = "Denies the read_logs command without any pre-configured scope."
+commands.deny = ["read_logs"]

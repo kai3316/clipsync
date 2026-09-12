@@ -2,6 +2,17 @@
 
 > 目标：在不打断现有桌面端、Web 管理界面和局域网同步能力的前提下，将 ClipSync 从“集中式应用脚本”逐步演进为可测试、可扩展、可支持新客户端的同步平台。
 
+> 修订日期：2026-09-07。用户已确认 Tauri 路线并授权开始编码，当前进入实施；验证要求用于控制实现质量，不再作为是否迁移的二次决策。进度与实测证据见 `work/tauri-migration-ledger.md`。本文目标不等于已完成状态。
+
+### 审查结论与范围
+
+路线已确认，按“Python 核心解耦”和“Tauri 桌面壳迁移”两条相互依赖的工作线推进并分别验收；不能以换框架代替业务边界治理，也不能把最小壳可运行当作完整迁移完成。
+
+- 保留现有手机 Web Companion、必要 HTTP/WebSocket API 和局域网同步；桌面壳替换不等于取消浏览器客户端。
+- 第一阶段只抽生命周期及一个业务切片，不承诺两周内将约 1.1 万行的 `src/main.py` 变成薄入口。
+- 删除旧桌面路径须晚于新版本预览、升级/回退验证和功能覆盖；旧 Web 共享资源须逐文件证明无人使用才能删除。
+- 下文 Gate 按依赖和证据推进，周数与年度安排仅作估算；发布安全、隐私和恢复基线不得推迟到某个未来年份。
+
 ## 1. 现状与约束
 
 ### 已知现状
@@ -9,27 +20,29 @@
 - 项目是 Python 桌面应用，包含系统剪贴板监听、设备发现、加密配对、局域网/中继传输、文件与聊天同步，以及 Web 管理界面。
 - `src/main.py` 集中了应用生命周期、依赖创建、平台分支、UI 回调、网络控制和业务编排，是首要的复杂度热点。
 - Web 层同时有 `server.py`、`routes.py`、API 模块、WebSocket 模块和 Vue 静态组件；桌面 UI 与 Web UI 容易形成两套业务流程。
-- 现有代码已有较完整的 Python 与 Web 测试，并通过 Ruff 静态检查。重构应以“行为不变、测试先行、每步可回退”为原则。
+- 仓库存在 Python 与 Web 测试、Ruff 配置；“测试完整、检查通过”必须由对应 SHA 的实际运行结果证明，本次文档审查未运行全量测试。重构以“行为不变、测试先行、每步可回退”为原则。
+- `internal/ui/webview_window.py` 实际通过系统浏览器 app mode/默认浏览器打开页面，不是嵌入式 pywebview；不得凭文件名认定存在可移除的 pywebview 依赖。
+- `internal/web/server.py` 同时服务手机 Web Companion 与桌面页面；`internal/config/config.py` 的 `web_enabled` 默认关闭。Tauri 迁移须保留该用户控制项及手机侧能力。
 
 ### 当前工作树约束
 
-审查时工作树已有大量未提交的在制修改。正式启动重构前，应先将这些修改提交到独立分支，或建立独立工作树；不能将架构迁移与未定稿功能混在同一个提交中。
+最初审查时 `docs/ClipSync-重构方案.md` 已删除；这是既有用户变更，不恢复、不提交。2026-09-07 续审时工作树已包含 Tauri、sidecar、测试和构建脚本等未提交实现，不能再按“只有文档删除”的干净基线处理。实施基线为 `57a4818c007616473511e417908d1d8a4ad12e3c`，具体变更和验证记录见迁移账本。每次继续工作前重新检查状态，不自动 stash、提交或清理用户文件。
 
 建议的分支约定：
 
 ```text
 main
-└── refactor/application-boundary
-    ├── refactor/lifecycle
-    ├── refactor/sync-use-cases
-    └── refactor/web-adapter
+└── codex/refactor-application-boundary
+    ├── codex/refactor-lifecycle
+    ├── codex/refactor-sync-use-cases
+    └── codex/refactor-web-adapter
 ```
 
 ## 2. 目标架构
 
 ```text
 ┌────────────────────── 客户端适配层 ──────────────────────┐
-│ 桌面 UI（Tk/CTk） │ Web UI（HTTP/WebSocket） │ 未来移动端 │
+│ Tauri/Vue 桌面 UI │ Web UI（HTTP/WebSocket） │ 未来移动端 │
 └──────────────────────────┬───────────────────────────────┘
                            │ 命令、查询、领域事件
 ┌──────────────────────────▼───────────────────────────────┐
@@ -50,11 +63,13 @@ main
 
 ### 边界规则
 
+图示为最终目标。迁移期 Tk/CTk 作为兼容客户端保留；Tauri/Vue 经 Rust bridge 和 Python sidecar adapter 调用应用层，不能直接跨进程访问 Python 对象。
+
 1. 客户端适配层不得直接读写同步管理器、传输连接或数据库内部状态。
 2. 应用层负责调用顺序、事务边界、错误映射和事件广播；不负责协议细节或平台 API 调用。
 3. 领域层只表达业务规则和端口（接口）；不导入 Tk、HTTP、WebSocket、`sys.platform` 或具体数据库实现。
 4. 基础设施层实现端口，处理网络、文件、加密、数据库和操作系统差异。
-5. 所有跨模块状态变化都用不可变事件对象表达，而不是通过共享可变字典隐式传播。
+5. 需要结果或强一致的操作使用显式调用；已完成变化的通知使用不可变事件。禁止通过共享可变字典隐式传播，不能用事件监听顺序代替业务编排。
 
 ## 3. 推荐目录布局
 
@@ -109,8 +124,8 @@ internal/
 
 ### 具体步骤
 
-1. 将当前功能修改提交到独立分支，记录对应基线提交 SHA。
-2. 确认 `.gitattributes` 已纳入版本控制，并统一 Python、JavaScript、JSON、YAML 的换行规则；避免 LF/CRLF 警告覆盖真实 diff。
+1. 确认基线提交 SHA 与工作树范围；仅经用户授权提交已有功能修改。
+2. 保留现有 `.gitattributes` 的 `text=auto` 与 `.bat` CRLF 策略；它没有强制所有工作树文件为 LF。不要在架构迁移中全仓库重归一化。
 3. 在 CI 中固定执行：
 
    ```text
@@ -132,33 +147,30 @@ internal/
 
 ### 目的
 
-把 `src/main.py` 从“所有事情都做”的中心，变成一个只负责启动与退出的薄入口。
+先从 `src/main.py` 抽出生命周期与依赖装配，为后续业务切片迁移建立边界；只负责启动与退出的薄入口是全部切片完成后的终态。
 
 ### 新增对象
 
 ```python
 @dataclass
 class ApplicationServices:
-    config: Config
-    transport: TransportPort
-    sync: SyncService
-    pairing: PairingService
-    history: HistoryRepository
-    notifier: Notifier
-    event_bus: EventBus
+    clipboard: ClipboardSyncUseCase
+    devices: DevicePairingUseCase
+    history: HistoryUseCase
+    # 仅公开用例；资源句柄与关闭回调由组合根交给 lifecycle 持有。
 
 class ApplicationLifecycle:
     def start(self) -> None: ...
     def stop(self) -> None: ...
-    def recover(self) -> None: ...
+    def run(self) -> None: ...  # 宿主事件循环，具体调度由适配器负责
 ```
 
 ### 具体步骤
 
 1. 只抽取启动顺序：加载配置、创建服务、注册事件、启动传输、启动 UI/Web、启动监控。此步不改变业务调用关系。
-2. 为每一个可关闭资源登记显式的 `stop` 回调，并定义逆序关闭顺序：接受新请求 → 同步队列 → 传输 → 持久化 → UI/通知。
-3. 将锁文件、单实例检查、崩溃恢复和日志初始化迁入 `ApplicationLifecycle`。
-4. 入口收敛为：构建服务 → 创建生命周期对象 → `start()` → 在 `finally` 中 `stop()`。
+2. 登记资源所有者和关闭回调：先拒绝新命令、停止剪贴板/发现/重试生产者；等待在途工作至截止时间，持久化未完成项；关闭传输并等待回调退出，再关闭仓库，最后释放 UI、锁及日志。按实际依赖排序，不能机械逆序或无限等待离线队列发送成功。
+3. 进程入口负责最早期日志与锁，生命周期负责业务资源的部分启动回滚。Tauri 模式下 Rust 负责桌面单实例与子进程监管，Python 保留数据目录互斥，防止新旧版本同时写库；不要保留两套相互冲突的桌面单实例机制。
+4. 入口收敛为：构建生命周期 → 在 `try` 中 `start()` 与 `run()` → 在 `finally` 中幂等 `stop()`。构造阶段尽量无 IO；构造中取得的资源也必须登记失败清理。
 5. 通过依赖注入替代运行时从模块全局变量取对象；测试中可传入内存仓库、虚假传输器和事件记录器。
 
 ### 关键风险与控制
@@ -168,7 +180,7 @@ class ApplicationLifecycle:
 
 ### 验收条件
 
-- `src/main.py` 不再包含业务流程实现，只保留入口和少量兼容代码。
+- 本阶段仅移出生命周期与装配职责，业务回调暂留旧入口。薄入口是业务切片迁移全部完成后的终态，不作为 3–5 天硬性验收。
 - 进程可连续启动/退出两次，不留下锁、监听端口或后台线程。
 - 生命周期测试覆盖正常启动、部分启动失败和重复停止。
 
@@ -199,9 +211,9 @@ class HistoryRepository(Protocol):
 ### 具体步骤
 
 1. 先为现有 Windows、macOS、Linux 剪贴板实现套上 `ClipboardPort` 适配器，不改变平台代码内部逻辑。
-2. 抽取 `ClipboardSyncUseCase`：验证内容、去重、过滤、持久化、投递和结果事件全部在该 use case 内顺序完成。
+2. 抽取 `ClipboardSyncUseCase`，分别锁定本地采集与远端接收流程。保留现有过滤、去重窗口、写入失败处理、历史记录及 ACK 时机，不将两条不同流程强行统一顺序。
 3. 抽取 `DevicePairingUseCase`：发起、确认、证书变更、撤销、恢复分别成为可单测的命令。
-4. 抽取 `FileTransferUseCase` 与 `ChatUseCase`，复用同一 `TransportPort`、在线状态和重试策略。
+4. 抽取 `FileTransferUseCase` 与 `ChatUseCase`，按实际需要共享传输能力。保留聊天、文件分块与剪贴板不同的 ACK/超时/重试策略；现有离线持久化队列仅用于剪贴板，不能在纯重构中顺手扩展到聊天。
 5. 将 `SyncManager` 逐步降级为兼容门面，内部委托 use cases；等所有调用点完成迁移后再移除。
 
 ### 事件示例
@@ -220,11 +232,13 @@ class TransferFailed:
     retryable: bool
 ```
 
-事件先在进程内同步分发即可；不要在本阶段引入消息队列或微服务。目标是解耦，不是增加部署复杂度。
+端口示例不是可直接落地的完整协议。`TransportPort.send` 必须区分 accepted/sent/acknowledged/failed，socket 写入成功不等于对端已应用；`ClipboardDelivered` 仅在对应业务确认后发布。文件传输可保留分块专用端口，避免把全部传输塞进单一 `send`。
+
+事件先在进程内实现：短小监听器可在释放业务锁后同步调用，隔离订阅者异常；UI 更新调度到宿主线程，IPC/网络通知使用有界队列，慢订阅者不能阻塞采集与 ACK。明确线程归属和背压，不引入外部消息队列或微服务。
 
 ### 验收条件
 
-- 领域 use case 不导入 GUI、HTTP 或操作系统模块。
+- 应用 use case 不导入 GUI、HTTP 或具体平台 API；领域模块只保留业务规则。
 - 可用 fake transport 和内存 history repository 覆盖成功、离线、超时、重试与重复投递。
 - 平台剪贴板适配器的行为测试在各受支持操作系统上运行。
 
@@ -254,7 +268,7 @@ class TransferFailed:
 
 1. 历史记录、收藏、离线消息、传输任务和设备元数据通过 repository 访问。
 2. 为数据写入定义幂等键（内容 ID、传输 ID、消息 ID），避免重试造成重复记录。
-3. 数据迁移采用“新字段可选读取 → 双写/回填 → 强制新格式 → 删除旧字段”的四步策略。
+3. 仅在格式确需改变时增加版本化迁移。默认采用兼容读取、备份、事务/原子替换和幂等回填；双写必须另行证明一致性和恢复机制，不作为通用默认策略。旧版本不识别新 schema 时拒绝写入，不能仅回退二进制后继续写库。
 
 ### 安全层
 
@@ -297,16 +311,16 @@ refactor: retire legacy sync manager entry points
 
 ## 6. 不建议做的事
 
-- 不要在第一阶段引入微服务、外部消息队列或全新的前端框架。
+- Python 核心解耦阶段不要引入微服务或外部消息队列；已确认的 Tauri/Vue 壳可以作为独立工作线推进，但不要让其替代核心解耦，也不要再引入第二套前端框架。
 - 不要一次性移动所有文件或重写传输协议。
 - 不要让事件总线变成新的全局服务定位器；事件用于通知，命令仍应通过明确 use case 调用。
 - 不要为了消除文件行数而机械拆分；模块边界必须对应业务能力和依赖方向。
 
 ## 7. 首个两周迭代的可交付成果
 
-第 1 周：完成阶段 0 与阶段 1，交付薄入口、生命周期对象、服务容器、启动/停止测试和稳定 CI。
+第 1 周：完成基线盘点与生命周期最小抽取，交付服务装配边界、启动/停止测试和 CI 验证记录；不要求全部业务移出入口。
 
-第 2 周：完成剪贴板同步的端口与 use case 迁移，桌面与 Web 保持调用旧接口但由旧接口委托新 use case；交付离线、去重、过滤和重试的完整单测矩阵。
+第 2 周：选择剪贴板的一条窄路径建立端口与 use case，旧接口委托新用例，补齐该路径回归。离线投递/完整接收流程按复杂度后续推进；Tauri 最小验证可独立进行，不叠加为两周必达目标。
 
 迭代结束时的成功标准不是“目录变漂亮”，而是：新增一个客户端、替换一种传输方式或调整一个 UI 时，不需要修改剪贴板同步的核心业务规则。
 
@@ -323,7 +337,7 @@ refactor: retire legacy sync manager entry points
 禁止在同步、配对、Web 路由等业务代码中散落 `sys.platform`、注册表调用、`osascript` 或 Linux shell 命令。所有系统差异收敛为能力接口。
 
 ```text
-internal/platform/
+internal/infrastructure/platform/  # 目标位置；先适配现有 internal/platform/
   capabilities.py       # 能力探测：是否支持通知、全局快捷键、开机启动等
   window.py             # 窗口、最小化、聚焦、标题栏、置顶
   tray.py               # 托盘和上下文菜单
@@ -355,16 +369,16 @@ class FileDialogPort(Protocol):
 
 UI 不应根据操作系统名称决定功能是否显示，而应根据能力决定：例如 Linux 桌面环境不支持系统通知时，在 UI 中解释原因并提供应用内提示；某系统不支持全局快捷键时，不显示不可用的设置项。
 
-### 8.3 架构决策：采用 Tauri，弃用旧桌面 UI
+### 8.3 已确认架构：Tauri + Vue + Python Sidecar
 
-本项目确定采用 **Tauri 2 + Vue 前端 + Python sidecar** 的桌面架构。现有 Tk/CustomTkinter 窗口、现有 WebView 窗口、旧仪表盘与旧设置窗口不再继续开发；它们只在迁移期用于功能对照和紧急回退，最终从发布包和代码树中删除。
+采用 **Tauri 2 + Vue 前端 + Python sidecar**，已获用户确认并开始实现。持续记录包体积、启动/内存、剪贴板线程约束与三平台构建证据；技术验证失败时修复实现，而不是重新请求路线确认。旧桌面在迁移覆盖完成前保留回归与安全修复，手机 Web Companion 不在弃用范围内。
 
 选择 Tauri 的原因：
 
 - Python 继续承载剪贴板、局域网发现、配对、加密、传输、历史记录等成熟核心能力，避免重写高风险底层功能。
 - Tauri 负责窗口、托盘、菜单、通知、文件对话框、自动更新、深浅色和权限边界，形成真正的桌面宿主。
 - Vue 继续承担数据密集型的设备、历史、传输、聊天和设置页面，但只作为受限前端，不再直接访问本地 HTTP 管理接口或系统资源。
-- Rust 层以能力声明和命令白名单缩小攻击面；Python 后台进程不对局域网外或任意网页暴露管理端口。
+- Rust 层以能力声明和命令白名单缩小攻击面；桌面管理能力不暴露为任意网页可用的服务。显式开启的 Web Companion 仍可监听局域网，保留认证、来源检查与授权边界，不自动扩展到公网。
 
 ### 8.4 新壳与内容的重新分工
 
@@ -383,7 +397,7 @@ Vue 内容
   同步、配对、传输、历史、配置
 ```
 
-Bridge 只能暴露任务级 API，例如 `chooseFiles()`、`showInFolder(path)`、`setWindowMode(mode)`；禁止把任意 Python 对象、任意本地路径读取或 shell 执行能力暴露给页面。所有入参要校验，所有敏感动作应由原生层确认和审计。
+Bridge 只能暴露任务级 API，例如 `chooseFiles()`、`openInFolder(recordIdOrToken)`、`setWindowMode(mode)`；禁止把任意 Python 对象、任意本地路径读取或 shell 执行能力暴露给页面。所有入参要校验；敏感动作由原生层执行授权检查与脱敏审计，删除、覆盖、信任变更等不可逆或高风险操作按策略确认，不对每次正常同步弹窗。文件路径授权规则见 9.5。
 
 通信链路固定为：
 
@@ -391,12 +405,12 @@ Bridge 只能暴露任务级 API，例如 `chooseFiles()`、`showInFolder(path)`
 Vue 页面
   → Tauri invoke / event
 Rust command handler
-  → 版本化 JSON-RPC（stdio 或受认证的本地 socket）
+  → 版本化 ClipSync IPC v1（固定使用 stdio NDJSON）
 Python sidecar
   → application use cases / domain services
 ```
 
-不得继续让 UI 访问 `localhost` HTTP API 或直接持有 WebSocket 管理连接。若保留 HTTP/WebSocket，仅作为 Python 内部测试接口或受认证的远程控制接口，而不是桌面 UI 的主通道。
+新 Tauri 桌面页面不使用 `localhost` HTTP/WebSocket 作为主通道。独立浏览器/手机 Web Companion 继续使用既有 HTTP/WebSocket 适配器，并与桌面 IPC 复用同一应用用例；浏览器客户端不获得 Tauri 原生权限。
 
 ### 8.5 已选运行时路线：Tauri 2
 
@@ -410,7 +424,7 @@ desktop/
   src-tauri/
     src/
       main.rs                  # Tauri 启动与插件注册
-      bridge.rs                # invoke → sidecar JSON-RPC 映射
+      bridge.rs                # invoke → ClipSync IPC v1 映射
       sidecar.rs               # 子进程监管、重启、健康检查
       commands.rs              # 受白名单保护的原生命令
     capabilities/              # 每个窗口/平台的权限清单
@@ -434,14 +448,14 @@ internal/
 
 #### 旧 UI 的分三步退出
 
-1. **冻结**：不再为 `internal/ui/`、`internal/web/static/`、旧本地 Web server 增加任何功能；只修复阻断迁移的严重缺陷。
+1. **冻结**：技术验证通过后冻结旧桌面专属界面新增功能，继续安全/兼容性修复；共享 Web Companion 资源和服务仍正常维护。
 2. **替换**：新 Tauri 页面覆盖设备、配对、剪贴板历史、文件传输、聊天、设置、诊断等能力。每覆盖一个能力，将新旧操作共用同一 Python application use case，并用端到端测试对比结果。
-3. **删除**：当发布版在三平台连续通过完整回归后，删除旧桌面窗口、旧 Web 静态资源、仅为旧 UI 提供的路由/API、旧 WebView 依赖与相关打包资源。删除必须独立提交，并在删除前提供迁移清单。
+3. **删除**：新壳预览、升级/回退及受支持平台完整回归通过后，按消费者清单删除旧桌面专属窗口、路由和资源。保留手机/Web 仍使用的页面、API、WebSocket、测试与包资源。只移除实际声明且已无调用的依赖。
 
 #### 不迁移的内容
 
 - 旧 HTML/CSS 的视觉细节不作为兼容目标；只保留信息架构、功能和必要文案。
-- 旧本地 Web 管理入口默认不随桌面发行版提供。
+- 新桌面不再依赖旧本地 Web 管理入口，但发行版继续提供用户显式开启的 Web Companion。
 - 旧 UI 的直接状态读取、全局对象和页面内业务规则不得搬入 Vue；改为从 application use case 重建。
 
 ### 8.7 让应用具有桌面感的优先清单
@@ -453,16 +467,18 @@ internal/
 5. 离线、连接中、后台同步、错误重试应通过系统托盘状态、窗口 badge 和通知提供反馈，而不只依赖页面内 Toast。
 6. 将“关闭窗口”定义为平台策略：Windows 通常最小化至托盘，macOS 更符合关闭窗口但保留菜单栏进程，Linux 应提供可配置选项。
 
-### 8.8 Tauri 迁移的 12 周实施节奏
+### 8.8 Tauri 迁移的初步 12 周估算（非固定承诺）
+
+以下从基线可复现、核心可无 GUI 启动之后计时；取决于投入人数与平台测试条件。任何 Gate 未通过就延长该阶段，不按日历强行删除。
 
 | 周期 | 交付内容 | 验收结果 |
 | --- | --- | --- |
 | 1–2 周 | Tauri/Vite 骨架、Python sidecar 打包、协议草案、健康检查 | 三平台均能启动空壳并显示 sidecar 健康状态 |
 | 3–4 周 | Rust bridge、设备列表与配对页面、原生托盘/窗口行为 | Vue 不访问旧 HTTP UI API；可完成发现、配对、退出 |
-| 5–6 周 | 剪贴板历史、文件传输、聊天、事件推送 | 主要业务均经 JSON-RPC use case；断线与重启可恢复 |
+| 5–6 周 | 剪贴板历史、文件传输、聊天、事件推送 | 主要业务均经 IPC use case；断线与重启可恢复 |
 | 7–8 周 | 设置、诊断、通知、文件对话框、快捷键、平台主题 | 关键系统操作全由 Tauri 插件或 Rust command 提供 |
 | 9–10 周 | 移除旧 UI 调用点、跨平台端到端测试、签名与更新 | 新 UI 覆盖全部发布功能，旧 UI 仅保留在回退构建 |
-| 11–12 周 | 删除旧 UI、移除旧 Web UI 路由、预览发布与回归修复 | 发布包不再包含 Tk/WebView/旧静态 UI 依赖 |
+| 11–12 周及以后 | 先预览发布与回归修复，再决定删除旧桌面专属路径 | 新桌面不依赖 Tk/浏览器 app mode；Web Companion 可用 |
 
 ### 8.9 跨平台质量门槛
 
@@ -479,11 +495,11 @@ internal/
 
 ### 9.1 实施前的固定规则
 
-1. 从当前可运行提交创建 `refactor/tauri-shell` 分支；不要在包含未提交功能的工作树中开始迁移。
+1. 经用户授权，从已确认的可运行提交创建 `codex/tauri-shell` 分支/工作树，不混入未定稿功能。
 2. 每项任务开始前运行并记录基线：`python -m ruff check .`、`python -m pytest -q`、`npm run test:web`。
 3. 每项任务完成后重复上述检查；失败时只修复本项任务引入的问题，不顺手重构其他模块。
 4. 一个提交只包含一个编号任务。例如 `tauri-02` 只新增壳和 sidecar 监管，不能同时修改配对算法。
-5. 任何新 Tauri 命令都必须同时具备：Rust 单元测试、Vue 调用测试、Python 侧协议测试、权限配置和错误映射。
+5. 每个跨 sidecar 的命令具备 Rust/Vue/Python 契约测试与错误映射；纯原生命令只要求相关 Rust/Vue 测试，不编造 Python RPC。所有敏感命令具备权限拒绝测试。
 6. Python 业务层仍是唯一真相来源。Vue 永远不缓存设备、历史或传输状态的权威副本；它只保存显示状态，并以 sidecar 快照/事件刷新。
 
 ### 9.2 迁移期间的目录与归属
@@ -492,7 +508,7 @@ internal/
 
 ```text
 copyboard/
-  desktop/                         # 新 Tauri 桌面端；唯一的新 UI 开发位置
+  desktop/                         # 新 Tauri 桌面 UI；Web Companion 继续独立维护
     package.json
     vite.config.ts
     src/
@@ -517,8 +533,10 @@ copyboard/
         error.rs
       binaries/
   internal/
-    application/                   # 新增：仅业务编排与 RPC dispatcher
-      rpc.py
+    adapters/
+      sidecar/rpc.py               # NDJSON 读写、DTO、RPC dispatcher
+    application/                   # 业务编排，不解析 stdio
+      bootstrap.py
       lifecycle.py
       services.py
     ...                             # 现有 domain/infrastructure 逐步迁移
@@ -544,12 +562,13 @@ copyboard/
 
 #### 要新增的文件
 
-- `desktop/package.json`：仅包含 Vue、Vite、Tauri API、TypeScript、Vitest、Vue Test Utils。
+- `desktop/package.json`：包含 Vue、Vite、Vue Vite 插件、Tauri API/CLI、TypeScript、Vitest、Vue Test Utils 及实际所需依赖；提交锁文件和 scripts，不以缺工具的“最小清单”代替可构建骨架。
 - `desktop/src/main.ts`：挂载 Vue 应用；不得包含业务 HTTP 请求。
 - `desktop/src/App.vue`：仅显示 `Starting ClipSync…` 和只读健康状态。
 - `desktop/src-tauri/src/main.rs`：注册 Tauri 插件、创建主窗口、加载配置。
 - `desktop/src-tauri/tauri.conf.json`：定义应用名、标识符、窗口默认尺寸、图标和打包目标；标识符在发布后不可随意改变。
 - `desktop/src-tauri/capabilities/main.json`：只授权主窗口所需的 core/window/event 权限；第一步不得授予 shell、文件系统或任意命令执行权限。
+- 同时生成 `Cargo.toml`、`Cargo.lock`、`build.rs`、`src/lib.rs`（若脚手架使用）、`permissions/`、TypeScript 配置与前端 HTML 入口；工具链版本由构建验证锁定。
 
 #### 必须实现的行为
 
@@ -566,7 +585,9 @@ copyboard/
 构建产物中不包含旧 Tk/WebView 窗口启动入口。
 ```
 
-### 9.4 tauri-02：定义 Python sidecar 与 NDJSON-RPC 协议
+### 9.4 tauri-02：定义 Python sidecar 与 ClipSync IPC v1
+
+下述 `type/ok` 信封是自定义 NDJSON 协议，不是标准 JSON-RPC 2.0；全文 RPC 仅指远程调用。契约文档仍可命名为 `rpc-v1.md`，不得直接接入 JSON-RPC 2.0 库并宣称兼容。标准协议有 `jsonrpc:"2.0"` 及不同错误对象要求，参见文末核验依据。
 
 #### 进程模型
 
@@ -574,7 +595,7 @@ Tauri 启动一个经过 PyInstaller 打包的 Python sidecar。Rust 持有子�
 
 ```text
 Tauri starts sidecar
-  → Python sends {"type":"ready","protocol":1,"pid":...}
+  → Python sends ready with protocol, session_id, pid and core health
   → Rust enables UI commands
   → Vue invokes command
   → Rust validates and writes request line
@@ -585,35 +606,41 @@ Tauri starts sidecar
 #### 请求与响应的固定格式
 
 ```json
-{"type":"request","id":"uuid","method":"devices.list","params":{}}
+{"type":"request","id":"uuid","method":"devices.list","params":{},"correlation_id":"trace-uuid"}
 {"type":"response","id":"uuid","ok":true,"result":{"devices":[]}}
 {"type":"response","id":"uuid","ok":false,"error":{"code":"DEVICE_NOT_FOUND","message":"...","retryable":false}}
-{"type":"event","name":"device.changed","data":{"device":{}}}
-{"type":"ready","protocol":1,"pid":12345}
+{"type":"event","name":"device.changed","session_id":"session-uuid","seq":1,"event_id":"event-uuid","occurred_at":"2026-09-07T00:00:00Z","correlation_id":"trace-uuid","schema_version":1,"data":{"device":{}}}
+{"type":"ready","protocol":1,"session_id":"session-uuid","pid":12345,"health":"ready"}
 ```
 
 约束：
 
-- `id` 由 Rust 生成 UUID；Python 不生成、Vue 不传入。
+- 请求 `id` 由 Rust 生成，Python 原样回传；重启时重新生成 `session_id`，响应仅匹配当前子进程的 pending map。
 - `method` 只能是下文白名单中的精确字符串；未知方法返回 `METHOD_NOT_FOUND`。
 - `params` 必须是对象；缺字段返回 `VALIDATION_ERROR`；多余字段默认拒绝，除非该方法文档明确允许。
-- 单行协议上限为 1 MiB；文件内容不得走 RPC，只传已验证的本地路径和元数据。
-- 每个请求必须在 30 秒内返回响应；长任务须先返回任务 ID，再通过事件报告进度。
-- Rust 发现非 JSON、协议版本不匹配、重复 ID 或 sidecar 意外退出时，立即禁用相关 UI 操作并显示可操作错误。
+- 单行上限为 1 MiB（UTF-8 字节，不含换行），读写双方在积累整行前限制缓冲区；拒绝非法 UTF-8、重复 JSON key 和非有限数字。文件/图片正文不走 RPC；历史分页、预览截断，大图以有鉴权的按 ID 资源通道另行设计，不能塞进 base64 响应突破上限。
+- 普通请求默认 30 秒超时，超时只代表结果未知，不代表操作已取消。变更命令单独定义稳定 operation/idempotency key、状态查询与保留期；不得用每次重试新生成的 request ID 实现幂等，不自动重放非幂等命令。长任务先返回 ID，取消有显式状态。
+- 无效帧/不兼容版本进入协议故障并停止业务调用；超时后迟到响应应记录并丢弃，不触发整个 sidecar 重启。重复响应、未知 ID、崩溃分别定义策略和测试；不对确定性协议错误无限重试。
+- stdout 使用单写入器和有界队列，响应优先，进度可合并；队列溢出须通知客户端重新取快照。Rust 持续读取 stderr 并限量脱敏，避免管道满导致死锁。
+- Vue 先注册并缓冲事件，再请求带 `(session_id, seq)` 水位的快照，应用快照后仅回放更新事件；快照与水位须一致读取。序列缺口或 session 变化时重新同步，避免“先快照后监听”丢失事件。
 
 #### Python 文件改动
 
-新增 `internal/application/rpc.py`，只包含：读取一行、解析 DTO、调用 application service、序列化结果、写出一行。该文件不得导入 Tk、Web server 或 Vue 资源。
+新增 `internal/adapters/sidecar/rpc.py`，只包含：有界 framing、DTO 校验、调用 application service、结果序列化与事件转发。该文件不得导入 Tk、Web server 或 Vue 资源。
 
-新增 `src/sidecar_main.py`：初始化日志、加载现有配置、构建服务、启动生命周期、发出 `ready`、运行 RPC 循环、在 stdin EOF 或 `app.shutdown` 后逆序关闭服务。
+新增 `src/sidecar_main.py`：初始化日志、加载现有配置、构建服务、启动生命周期、发出 `ready`、运行 RPC 循环、在 stdin EOF 或 `app.shutdown` 后按阶段 1 定义的依赖顺序关闭服务。只有资源依赖严格符合后进先出时才逆序释放，不能机械逆序停止生产者、传输和仓库。
 
-将 `clipsync.spec` 拆分为 `clipsync-sidecar.spec`（仅 Python 核心、无旧 UI 静态资源）和后续的 Tauri 打包脚本引用。不要让 PyInstaller 再打包 `internal/web/static/`。
+前置要求：先抽取可无 Tk 启动的 `bootstrap`；禁止直接 import/实例化现有 `App` 充当无 UI 后台。RPC 阻塞读循环不能占用剪贴板适配器要求的主线程/平台事件循环；A02 明确每个平台线程模型后再实现调度。
+
+新增独立 `clipsync-sidecar.spec`，保留旧 spec 供回退构建。现有 spec 使用 `console=False` 和 `collect_submodules("internal")`，不能直接复制：stdio sidecar 要保留标准流，Windows 由 Rust 隐藏控制台窗口；按实际依赖收集并排除旧 Tk UI。仍被手机 Web Companion 使用的静态资源须保留或明确独立打包，不能整个目录排除。
 
 #### Rust 文件改动
 
-- `sidecar.rs`：启动、读取 stdout、写 stdin、等待、终止、退避重启；最多连续重启 3 次，间隔 1 秒、3 秒、10 秒。
+- `sidecar.rs`：启动、读取 stdout/stderr、写 stdin、等待、终止和退避；异常崩溃最多重启 3 次，间隔 1 秒、3 秒、10 秒，持续健康 5 分钟后才重置计数。用户退出/版本不兼容不重启；新实例启动前确认旧实例及其子进程已退出。
 - `bridge.rs`：维护 `request_id → oneshot sender` 映射；事件转发到前端；进程退出时使所有未完成请求失败为 `SIDECAR_UNAVAILABLE`。
 - `state.rs`：仅存储 bridge、窗口句柄和运行状态，禁止存储业务对象。
+
+正常退出：拒绝新业务命令，允许 shutdown 控制消息；限时请求 Python 持久化并退出，超时后终止进程树、wait/reap。Rust 非正常退出也必须通过 OS 监管机制与管道 EOF 清理子进程；不要仅依赖关闭回调。用打包产物验证真实进程树。
 
 #### 验收测试
 
@@ -623,7 +650,7 @@ Tauri starts sidecar
 
 ### 9.5 tauri-03：建立命令白名单与权限清单
 
-第一版只实现以下命令，严格按顺序开发；未列出的能力不得通过“通用调用”绕过。
+下表只是首个闭环的种子清单，不是全部功能契约。G1 列出完整迁移能力，G2/G3 先实现健康闭环；后续缺失命令经版本化增量批准后实现，禁止通用调用绕过白名单。
 
 | Tauri command | RPC method | 参数 | 返回值 | 原生权限 |
 | --- | --- | --- | --- | --- |
@@ -633,19 +660,20 @@ Tauri starts sidecar
 | `confirm_pairing` | `pairing.confirm` | `device_id`, `code` | 配对状态 | 无 |
 | `list_history` | `history.list` | 分页、筛选 | 历史分页 | 无 |
 | `send_clipboard` | `clipboard.send` | `device_ids`, `content_id` | 投递任务 ID | 无 |
-| `choose_transfer_files` | 无 | 文件类型、是否多选 | 已验证路径数组 | dialog、fs read scope |
-| `start_transfer` | `transfer.start` | `device_ids`, `paths` | 传输任务 ID | 无 |
-| `open_in_folder` | 无 | 已验证的应用管理路径 | 无 | opener、fs scope |
-| `set_autostart` | `settings.set_autostart` | `enabled` | 最终状态 | autostart |
+| `choose_transfer_files` | 无 | 文件类型、是否多选 | 文件 token、显示名、大小、到期时间 | 受限自定义 command，Rust 调用 dialog |
+| `start_transfer` | `transfer.start` | Vue: `device_ids`, `file_tokens`；Rust→Python: 已授权文件描述 | 传输任务 ID | 自定义 command 授权及 token 校验 |
+| `open_in_folder` | 无 | 记录 ID 或文件 token | 无 | 自定义 command，Rust 校验后调用 opener |
+| `set_autostart` | 配置结果持久化用例（契约待 G1 定义） | `enabled` | OS 实际状态及保存结果 | Rust 调用 autostart |
 | `quit_app` | `app.shutdown` | 无 | 无 | process lifecycle |
 
 实施要求：
 
-1. `choose_transfer_files` 只在 Rust 中调用原生对话框，返回的路径应使用 canonical path 规范化。
-2. `start_transfer` 仅接受由本进程最近一次 `choose_transfer_files` 产生、未过期且仍为普通文件的路径 token；前端不能伪造任意路径字符串。
+1. `choose_transfer_files` 只在 Rust 中调用对话框，将规范化路径保留在 Rust 授权表，向 Vue 返回不透明 token 和必要展示元数据。
+2. token 来自原生选择或经验证的拖放，绑定窗口/session、有效期及文件标识，不能因“最近一次选择”使前一批失效。撤销/重启失效；重试通过任务 ID 重新授权，不复用过期 token。发送前及 Python 实际打开时核验文件类型/标识，防止 symlink、Windows reparse point 和 TOCTOU 替换；高风险路径采用已打开句柄或受控暂存副本，不把 canonicalize 当成充分防护。
 3. `open_in_folder` 仅接受历史记录或应用导出目录中的白名单路径。
-4. Rust command 参数先由 TypeScript schema 校验，再由 Rust schema 校验；Python 仍进行第三次业务校验。
-5. 每个权限在 `capabilities/main.json` 单独声明。禁止使用含义过宽的 `shell:allow-execute` 或无限文件系统 scope。
+4. TypeScript 校验用于体验，不能作为安全边界；Rust 校验调用窗口、授权、参数和资源范围，Python 校验业务规则及实际文件。开机启动由 Rust 修改并查询 OS 状态，Python 只保存结果；保存失败须报告部分失败并对账，不让 Python 再创建启动项。
+5. capability 不自动约束任意自定义 Rust 代码。按照锁定版本使用 `AppManifest::commands`、自定义 permissions 和显式窗口 capability，将 app commands 纳入 ACL；测试未授权窗口调用被拒绝。Rust 后台调用插件不等于应给 Vue 授予该插件完整权限，更不能用 fs scope 代替 Python 路径授权。
+6. 明确 CSP、禁止远程导航与远程 IPC 授权；剪贴板/聊天内容按不可信文本处理，富文本须清洗，外链使用协议白名单。自定义 command 权限、路径授权与前端内容隔离是三个独立控制。
 
 ### 9.6 tauri-04：重建 Vue 前端，不搬运旧页面结构
 
@@ -656,10 +684,12 @@ Tauri starts sidecar
 | `OverviewPage` | 同步总开关、连接概况 | `app.status`、`devices.list` | `app.status.changed`、`device.changed` | 可启动/暂停同步并显示真实设备数量 |
 | `DevicesPage` | 发现、配对、撤销、连通性 | `devices.list` | `device.changed`、`pairing.changed` | 旧设备面板无需打开即可完成全流程 |
 | `HistoryPage` | 历史、收藏、复制、删除 | `history.list` | `history.changed` | 分页、筛选、空状态和错误状态完整 |
-| `TransfersPage` | 选文件、进度、重试、取消 | `transfers.list` | `transfer.progress`、`transfer.changed` | 大文件、失败重试、取消均通过测试 |
+| `TransfersPage` | 选文件、进度、重试、取消 | `transfer.list` | `transfer.progress`、`transfer.changed` | 大文件、失败重试、取消均通过测试 |
 | `ChatPage` | 对话、附件、已读/送达 | `chat.list` | `chat.message`、`chat.delivery` | 两设备双向会话完整 |
 | `SettingsPage` | 名称、语言、启动、通知、安全 | `settings.get` | `settings.changed` | 设置保存后重启仍持久化 |
 | `DiagnosticsPage` | 日志摘要、导出、健康状态 | `diagnostics.get` | `app.health.changed` | 不暴露密钥、完整路径或原始敏感日志 |
+
+功能清单还须覆盖现有 AI 配置/迁移、翻译、互联网配对与投递状态、备份/导出/恢复、定时暂停与安全确认等入口（依据 `internal/web/api/`、组件及 `src/main.py` 盘点）。可以合并到已有页面，但不能因表中未列出而遗漏；新增“已读”、新增队列等非既有行为单独作为功能需求。
 
 #### 前端强制约束
 
@@ -682,7 +712,7 @@ Tauri starts sidecar
 
 1. 单实例：第二次启动将焦点带回既有窗口，并把 deeplink/文件参数转交给首实例。
 2. 系统托盘：显示同步状态、最近错误、打开主窗口、暂停/恢复、退出；菜单文案通过现有 i18n 资源生成。
-3. 通知：只通过 Tauri 原生通知插件发送；点击通知必须回到对应页面或任务。
+3. 桌面通知由 Rust 统一提供。逐平台验证插件的通知点击/动作回调；不支持时使用原生补充实现或明确降级，不能把点击跳转当作全平台插件保证。
 4. 文件对话框与拖放：路径进入 Rust 白名单后再给 sidecar；拒绝目录、符号链接逃逸和不存在文件。
 5. 开机启动：只使用 Tauri autostart 能力，迁移旧配置开关；升级后不得产生重复启动项。
 6. 全局快捷键：先检测可用性；注册失败必须在设置页解释而不是静默失败。
@@ -692,32 +722,33 @@ Tauri starts sidecar
 
 #### Sidecar 构建
 
-1. `scripts/build-sidecar.ps1` 以当前锁定 Python 环境构建 sidecar，不包含旧 UI 资源。
-2. 每个平台和架构生成独立文件名；Tauri 配置中使用其目标三元组对应的 binary 名称。
+1. `scripts/build-sidecar.ps1` 以当前锁定 Python 环境构建 sidecar，排除旧桌面专属 UI；保留 Web Companion 实际使用的共享资源。锁定环境及资源清单须由构建记录验证，不能因存在构建脚本就视为已满足。
+2. 每个平台和架构原生构建独立产物；`externalBin` 配置基础路径，实际 sidecar 文件按 Tauri 要求追加目标三元组和平台扩展名。onefile/onedir 先验证，若 onedir 有配套运行库必须一起纳入包与签名，不把“一个 sidecar”理解成只能带一个文件。
 3. 构建脚本在产物生成后执行 `--self-test`：sidecar 必须在 10 秒内输出有效 `ready` 并可响应 `app.status`。
 
 #### Tauri 构建
 
 1. `scripts/build-tauri.ps1` 依次执行前端类型检查、前端测试、Rust 测试、sidecar 构建、Tauri 打包。
-2. 包中必须只存在一个 Python sidecar；不得同时携带旧 `main.py` 桌面入口和 Tk/WebView 依赖。
+2. 新桌面包只提供一套 Python 业务 sidecar，不启动旧 Tk/浏览器 app mode 桌面入口；保留 sidecar 必需运行库和 Web Companion 资源。旧桌面回退包独立构建。
 3. Windows、macOS、Linux 均由对应平台 CI runner 原生构建，不采用未经验证的交叉编译替代签名流程。
 4. 发布前检查应用标识符、签名证书、更新公钥、版本号和更新 feed 一致；这些字段变更必须人工复核。
 
 #### 更新回退
 
 - 新版启动 Python sidecar 失败三次后，显示恢复指引和诊断导出入口，不无限重启。
-- 升级不迁移或删除现有用户配置，直到 Tauri 版至少稳定一个小版本。
-- 若更新需要迁移数据，必须先备份，再写 migration journal，成功后才替换原文件。
+- 优先兼容读取现有配置，不覆盖原配置或执行破坏性迁移。稳定一个小版本不是允许删除旧数据的充分条件；仍须满足备份、恢复和兼容性门槛。
+- 若更新确需迁移数据，在首次写入前检查版本兼容性并创建可恢复备份，记录 migration journal；SQLite 使用一致性备份及迁移事务，文件配置使用临时文件和原子替换。不得直接复制仍在写入的数据库主文件作为可靠备份。
+- 回退前校验旧程序是否支持当前数据格式；不支持时恢复兼容备份或使用并存数据目录，并告知备份后新增数据的处理方式，不能只换回旧二进制继续写库。
 
-### 9.9 tauri-07：旧 UI 的精确删除清单
+### 9.9 tauri-07：旧桌面 UI 的条件删除清单
 
-只有满足 9.10 的全部发布门槛后，才允许删除。删除顺序固定如下：
+只有满足 9.10 的全部发布门槛后，才允许删除。每批先解除调用和打包引用，再删除对应文件，确保每个提交可构建；以下是范围清单，不是要求先删被引用模块的机械顺序：
 
 1. 删除旧桌面启动路径：`internal/ui/dashboard.py`、`internal/ui/settings_window.py`、`internal/ui/onboarding.py`、`internal/ui/systray.py`、`internal/ui/webview_window.py`、`internal/ui/dialogs.py` 及其仅被旧 UI 使用的依赖。
-2. 删除旧 Web 界面资源：`internal/web/static/` 下的页面、组件、样式、浏览器脚本与旧 UI 的前端测试。
-3. 删除旧本地 Web UI 宿主：`internal/web/server.py`、`internal/web/routes.py`、`internal/web/ws.py`、`internal/web/dialog.py` 以及仅给旧 UI 使用的 `internal/web/api/` 路由。
-4. 逐一删除 `src/main.py` 中创建旧窗口、启动旧 Web server、注册旧 UI 回调的代码；保留并迁移业务启动、单实例、配置和核心服务逻辑到 `src/sidecar_main.py`。
-5. 更新 `clipsync.spec`、`requirements.txt`、`pyproject.toml`、CI 工作流、README 和打包脚本，移除不再使用的 Tk/WebView/旧前端依赖。
+2. 逐文件检查 `internal/web/static/` 及其测试的消费者，仅删除旧桌面独占且已替代的资源；手机页面、共享组件、locale 与浏览器脚本保留。
+3. 保留 `internal/web/server.py`、`routes.py`、`ws.py` 及 Web Companion 使用的 API。`dialog.py` 和其他路由仅在确认没有浏览器/业务调用后删除。不得整目录删除 `internal/web/`。
+4. 移除 `src/main.py` 的旧桌面启动和回调；应用装配进入 `bootstrap`，业务进入对应用例，`src/sidecar_main.py` 仅为薄入口。Web Companion 仍由配置控制启动。同步更新根 `main.py`、`pyproject.toml` 的 `clipsync = "src.main:main"` 入口，明确 CLI/源码启动兼容或弃用策略。
+5. 更新实际使用的 spec、依赖声明、CI、README 和构建脚本。旧桌面回退 spec 随删除提交一起退役，回退工件来自已验证旧 tag；不要保留引用已删除模块的坏构建脚本，也不移除共享 Web 测试依赖。
 6. 使用 `rg` 验证已删除模块不存在任何 import、字符串路由或打包声明；确认 `git diff --check` 无误后再合并。
 
 不可删除的现有模块包括剪贴板实现、同步管理、传输、加密、配对、历史库和配置逻辑；它们须先通过 application service/RPC 适配后再考虑内部重构。
@@ -734,9 +765,11 @@ python -m pytest -q
 cd desktop && npm run typecheck
 cd desktop && npm run test
 cd desktop/src-tauri && cargo test
-scripts/build-sidecar.ps1 --self-test
-scripts/build-tauri.ps1 --verify-package
+pwsh -File scripts/build-sidecar.ps1 -SelfTest
+pwsh -File scripts/build-tauri.ps1 -VerifyPackage
 ```
+
+2026-09-07 工作树已包含以上脚本和参数，前端 scripts 也已定义；运行仍需安装对应依赖和平台工具链。当前 `-VerifyPackage` 仅调用 staged sidecar 冒烟测试，不验证安装器、代码签名、更新验签、安装/卸载或升级回退，不能据此判定发布门槛通过。A16 须补齐这些独立验证及产物证据；macOS/Linux runner 安装 `pwsh` 或提供等价平台脚本。保留根目录 `npm run test:web`，直至全部被其覆盖的 Web Companion/共享代码另有测试入口。
 
 #### Windows 冒烟路径
 
@@ -771,7 +804,7 @@ scripts/build-tauri.ps1 --verify-package
 - [ ] 新 command、RPC method、DTO、错误码、权限清单和测试一一对应。
 - [ ] Vue 未直接调用 Tauri API（除 `api/bridge.ts` 外）。
 - [ ] Rust 未暴露任意命令执行或无限文件系统访问。
-- [ ] Python stdout 仅输出 NDJSON-RPC。
+- [ ] Python stdout 仅输出 ClipSync IPC v1 帧。
 - [ ] 所有新事件都可在 sidecar 重启后通过快照恢复。
 - [ ] 三类既有检查与新增 Tauri 检查全部通过。
 - [ ] 更新说明和回退步骤已写入发布说明。
@@ -779,17 +812,17 @@ scripts/build-tauri.ps1 --verify-package
 
 ## 10. AI Agent 执行编排清单（本章为实施入口）
 
-本章将本方案改写为可由多个 AI Agent 协作执行的任务图。Agent 必须把第 9 章视为技术合同；本章定义执行顺序、并行边界和交付格式。**任何 Agent 都不得以“顺手优化”为理由扩大任务范围。**
+本章定义获授权后的实施任务图，不因阅读本文而自动执行。小团队或单 Agent 可以按相同 Gate 串行完成，不强制启动大量 Agent。**不得以“顺手优化”为理由扩大任务范围。**
 
 ### 10.1 总控 Agent 的固定职责
 
-总控 Agent 不直接进行大规模代码编辑。它只负责：
+总控负责以下事项，也可以在明确接管文件所有权并补充测试后做小范围集成修复，不必因角色划分制造阻塞：
 
-1. 创建或确认 `refactor/tauri-shell` 基线分支，并记录基线 SHA、当前 `git status`、三类既有检查的结果。
+1. 经授权创建或确认 `codex/tauri-shell` 基线分支，并记录 SHA、当前 `git status`、三类既有检查结果。
 2. 创建一个 `work/tauri-migration-ledger.md` 迁移账本，记录每个任务的负责人、输入提交、输出提交、验证命令、状态、阻塞原因和回退点。
 3. 为每个会编辑代码的 Agent 创建隔离工作树；绝不允许两个 Agent 同时编辑相同路径或共享当前脏工作树。
 4. 按本章的 Gate 顺序合并结果；Gate 未通过，不派发后续依赖任务。
-5. 在每次合并后执行全量验证，并将失败任务退回到原 Agent；总控 Agent 不自行“临时修补”他人的变更。
+5. 每次集成后执行相关验证，Gate 执行全量验证；失败交由所有者或明确接管的集成者修复，不绕过测试。
 
 账本记录格式固定如下：
 
@@ -834,9 +867,9 @@ A00 基线冻结
       └─ A04 前端信息架构与 DTO 清单（只读）
           └─ G1：接口与删除范围确认
               ├─ A05 Tauri/Vite 最小壳（编辑 desktop/）
-              ├─ A06 Python sidecar 入口与 RPC schema（编辑 internal/application/, src/）
+              ├─ A06 Python sidecar、无 GUI 装配与 RPC（编辑明确的 Python 文件）
               └─ A07 协议测试夹具（编辑 tests/，不改生产逻辑）
-                  └─ G2：壳、sidecar、协议可互通
+                  └─ G2：壳与 sidecar 分别可运行，夹具通过（尚不要求互通）
                       ├─ A08 Rust sidecar 监管与 bridge（编辑 desktop/src-tauri/）
                       ├─ A09 Vue bridge、types、stores 基座（编辑 desktop/src/）
                       └─ A10 Tauri 权限与安全审计（审查/最小编辑 capabilities）
@@ -849,17 +882,18 @@ A00 基线冻结
                                   └─ G4：功能覆盖
                                       ├─ A16 多平台打包/签名/更新
                                       ├─ A17 端到端回归与可访问性
-                                      └─ A18 旧 UI 删除（最后且串行）
+                                      └─ G4.5：签名预览、升级/回退、观察期与安全基线通过
+                                          └─ A18 旧桌面专属路径删除（串行）
                                           └─ G5：发布候选
 ```
 
 并行限制：
 
-- A01–A04 可并行，因为只读；它们不得修改代码或锁文件。
-- A05–A07 可并行，但必须分别处于隔离工作树；A05 只能写 `desktop/`，A06 只能写 Python sidecar/RPC 文件，A07 只能写测试夹具。
+- A01–A04 只读生产代码，可分别写各自唯一的盘点文档，不修改代码或锁文件。
+- A05–A07 使用隔离工作树和精确文件清单；A05 不写 `desktop/src-tauri/tests/`，A06 测试放 `tests/sidecar/`，A07 独占 `tests/tauri/` 与 `desktop/src-tauri/tests/` 夹具。
 - A08、A09、A10 可并行；A08 不改 Vue，A09 不改 Rust，A10 只能改 capability 文件和审计文档。
 - A11–A15 可以按“一个功能域一个 Agent”并行，但每个 Agent 只允许调用已合并的 bridge/DTO，不得私自增加通用 RPC 逃生口。
-- A16 与 A17 可并行；A18 必须在 A16、A17 都完成且 G4 通过后单独串行执行。
+- A16 与 A17 可并行；A18 必须在 G4.5 通过后串行执行，不能先删除再试预览版。
 
 ### 10.4 A00：冻结基线（串行，必须第一个）
 
@@ -867,8 +901,8 @@ A00 基线冻结
 **拥有文件**：仅 `work/tauri-migration-ledger.md`；不得修改项目代码。  
 **步骤**：
 
-1. 检查并记录 `git status --short`；若存在未提交改动，停止并要求总控将其提交、暂存到用户指定分支或明确排除。
-2. 创建 `refactor/tauri-shell`，记录起点 SHA。
+1. 检查并记录 `git status --short`；有未提交改动时保留原样，经用户确认纳入或从已确认 SHA 建独立工作树，不自动提交/stash。
+2. 经授权创建 `codex/tauri-shell`，记录起点 SHA。
 3. 执行 `python -m ruff check .`、`python -m pytest -q`、`npm run test:web`，分别记录退出状态和摘要。
 4. 在账本中登记 A01–A04 为 `queued`。
 
@@ -913,7 +947,7 @@ A00 基线冻结
 
 ### 10.7 G1：接口和删除范围确认（总控串行）
 
-总控 Agent 汇总 A01–A04，只创建以下三个不可变清单：
+总控汇总 A01–A04，创建以下三个受版本控制的清单；不是永远不可变，增量变更必须先审查再实施：
 
 1. `docs/tauri/rpc-v1.md`：首版 RPC methods、参数、结果、错误码、事件。
 2. `docs/tauri/legacy-removal-map.md`：旧文件 → 新能力 → 删除 Gate 的映射。
@@ -925,7 +959,7 @@ A00 基线冻结
 
 #### A05：Tauri 壳 Agent
 
-**拥有文件**：仅 `desktop/package.json`、`desktop/vite.config.ts`、`desktop/src/**`（不含具体业务页面）、`desktop/src-tauri/tauri.conf.json`、`desktop/src-tauri/src/main.rs`。  
+**拥有文件**：第 9.3 所需骨架、配置和锁文件、`desktop/src/**`（不含业务页面）；不拥有 A07 的 `desktop/src-tauri/tests/**`。完成后明确转交 Rust 入口/依赖配置给 A08，capability/permissions 给 A10。
 **依赖**：G1。  
 **任务**：完成第 9.3 的最小壳；只显示启动状态，不调用旧 HTTP API。  
 **验收**：前端类型检查、基础 Vue 测试、Tauri 开发启动成功。  
@@ -933,7 +967,7 @@ A00 基线冻结
 
 #### A06：Python Sidecar Agent
 
-**拥有文件**：`src/sidecar_main.py`、`internal/application/rpc.py`、`internal/application/lifecycle.py`、`internal/application/services.py`、sidecar spec 文件及它们的 Python 测试。  
+**拥有文件**：`src/sidecar_main.py`、`internal/adapters/sidecar/**`、`internal/application/bootstrap.py`、`lifecycle.py`、`services.py`、sidecar spec、`tests/sidecar/**`，以及 A02/G1 明确批准的旧装配抽取点（可能包括 `src/main.py`）。
 **依赖**：G1。  
 **任务**：实现第 9.4 的 NDJSON framing、`ready`、`app.status`、`app.shutdown`；复用现有业务启动，不修改同步协议。  
 **验收**：stdin/stdout 契约测试、EOF 关闭测试、stdout 污染测试。  
@@ -947,15 +981,15 @@ A00 基线冻结
 **验收**：夹具能在 A06/A08 未合并时独立运行。  
 **禁止**：不得为迁就未实现代码而降低断言强度。
 
-### 10.9 G2：基础互通（总控串行集成）
+### 10.9 G2：独立基础可运行（总控串行集成）
 
 总控按 A07 → A06 → A05 的顺序 cherry-pick/合并。完成后必须人工验证：
 
-1. Tauri 窗口启动 Python sidecar。
-2. sidecar `ready` 令界面从“启动中”切换到“可用”。
-3. `app.status` 的数据完整显示。
-4. 关闭 Tauri 窗口会干净关闭 sidecar。
-5. 人为杀死 sidecar 后界面不可继续发请求。
+1. Tauri 骨架独立启动，显示 sidecar 尚未连接，不冒充真实健康状态。
+2. Python sidecar 可无 GUI 独立启动并输出 `ready`。
+3. 测试 harness 通过真实 stdio 获取 `app.status`。
+4. EOF/`app.shutdown` 干净关闭 sidecar，核心线程无残留。
+5. 夹具独立通过；三端互通移到 A08/A09 合并后的 G3 验收。
 
 未通过时，只退回对应所有者；不得把模拟 sidecar 直接当成发布实现。
 
@@ -963,7 +997,7 @@ A00 基线冻结
 
 #### A08：Rust Bridge Agent
 
-**拥有文件**：`desktop/src-tauri/src/sidecar.rs`、`bridge.rs`、`commands.rs`、`state.rs`、`error.rs` 及 Rust 测试。  
+**拥有文件**：Rust sidecar/bridge/commands/state/error、入口 main/lib、Cargo 配置及专属单元测试；不修改 A07 夹具或 A10 的权限配置。共享集成测试修改由所有者串行接管。
 **任务**：实现第 9.4 的请求映射、30 秒 timeout、三次受限重启、事件转发、pending request 清理。  
 **禁止**：不得添加无限 shell 权限；不得把 Python stdout 原样交给 Vue。
 
@@ -975,7 +1009,7 @@ A00 基线冻结
 
 #### A10：权限审计 Agent
 
-**拥有文件**：`desktop/src-tauri/capabilities/**`、`docs/tauri/security-review.md`。  
+**拥有文件**：`desktop/src-tauri/capabilities/**`、`permissions/**`、`docs/tauri/security-review.md`；涉及 `build.rs`/命令注册的改动串行交接，不与 A08 并改。
 **任务**：为 A08/A09 暴露的每条命令建立最小 capability；编写“权限 → 命令 → 用例”矩阵。  
 **验收**：没有宽泛 shell 执行、无限 fs scope 或未经窗口限定的敏感权限。
 
@@ -985,6 +1019,7 @@ A00 基线冻结
 
 - Rust bridge 可通过 A07 假 sidecar 的所有异常测试；
 - Vue 可经唯一 bridge 调用 `app.status`；
+- Tauri 启动真实 sidecar、收到 ready 后启用命令，正常关闭与强制杀进程均符合 9.4 清理/恢复规则；
 - 任何 Vue 组件均无法直接取得任意文件路径或执行 sidecar；
 - sidecar 挂掉、超时、协议错误在 UI 中有不同且可操作的错误状态；
 - A10 的权限审计无 blocker。
@@ -992,6 +1027,8 @@ A00 基线冻结
 ### 10.12 A11–A15：功能域并行迁移批次
 
 每个 Agent 都必须先在 `rpc-v1.md` 提交增量，经总控批准后才可新增 RPC method。禁止多个 Agent 竞争编辑同一 RPC 文档；采用“提案 → 总控合并 → 实现”的串行接口门槛。
+
+业务所有者还须获准编辑对应 Python use case/port 及窄范围旧回调委托点，不能只改页面和 adapter 却要求完成业务抽取。共享 `bootstrap`、RPC registry、bridge/types 聚合入口和 locale 索引由指定集成者串行登记；接口按 feature 分文件，避免每个 Agent 争写全局表。
 
 | Task | 功能所有者 | 可以编辑 | 必须交付 | 不得编辑 |
 | --- | --- | --- | --- | --- |
@@ -1033,10 +1070,10 @@ A00 基线冻结
 
 #### A18：旧 UI 删除 Agent（唯一允许删除者）
 
-**前置条件**：G4 通过、A16 done、A17 done、总控书面确认可以删除。  
+**前置条件**：G4.5 通过：A16/A17 完成，签名预览已验证，观察期与错误率达到预先批准门槛，11 章发布安全/隐私/恢复基线通过，原版回退工件可用；总控书面确认删除范围。
 **拥有文件**：仅第 9.9 删除清单中的旧 UI 文件、其单元测试、依赖声明、打包声明和文档。  
-**执行顺序**：必须严格按照第 9.9 的 1 → 6 顺序；每一步单独提交并运行引用搜索。  
-**完成条件**：发布包不包含 Tk/WebView/旧静态 UI，核心 Python 测试及 Tauri 全量验证均通过。  
+**执行顺序**：按 9.9 范围逐批先移除调用/打包引用再删除，每个提交均可运行。
+**完成条件**：新桌面不依赖 Tk/浏览器 app mode，Web Companion 可用，Python、Web、Tauri 全量验证通过。
 **禁止**：不得删除业务核心、配置迁移逻辑或任何尚未存在替代路径的 API。
 
 ### 10.15 G5：发布候选决策
@@ -1081,11 +1118,11 @@ A00 基线冻结
 任务：A06 Python Sidecar Agent
 基线提交：<G1 合并后的 SHA>
 工作树：<独立 worktree 路径>
-拥有文件：src/sidecar_main.py、internal/application/rpc.py、internal/application/lifecycle.py、internal/application/services.py、tests/tauri/test_rpc.py
-禁止修改：src/main.py、internal/ui/**、internal/web/**、desktop/**、网络协议模块。
+拥有文件：src/sidecar_main.py、internal/adapters/sidecar/**、internal/application/{bootstrap,lifecycle,services}.py、tests/sidecar/**、G1 批准的旧装配抽取点
+禁止修改：未获批准的旧入口代码、internal/ui/**、internal/web/**、desktop/**、网络协议模块。
 依据：方案 9.4、10.8 及 docs/tauri/rpc-v1.md。
-目标：sidecar 只经 NDJSON-RPC 输出 ready、app.status、app.shutdown。
-遇到 stdout 已被现有日志写入、或需要改变同步协议时，立即 blocked，不以临时重定向掩盖问题。
+目标：sidecar 通过 ClipSync IPC v1 输出 ready，响应 app.status/app.shutdown。
+业务日志在组合根显式配置到 stderr 并测试；遇到第三方原生 stdout 污染无法隔离、或必须改变网络协议时，提出阻塞原因，不以全局临时重定向掩盖问题。
 ```
 
 ## 11. 2026–2030 产品工程就绪度轨道
@@ -1119,7 +1156,7 @@ A00 基线冻结
 **拥有文件**：`desktop/package-lock.json`/等效锁文件、Python 锁定清单、`docs/security/dependency-inventory.md`、`artifacts/sbom/` 的生成脚本。  
 **步骤**：
 
-1. 列出 Python、Node、Rust、Tauri plugin、PyInstaller、操作系统 native dependency 五类依赖。
+1. 盘点 Python、Node、Rust、Tauri plugin、PyInstaller 与操作系统 native dependency，区分运行依赖和构建依赖。
 2. 为每种语言保留机器可解析的锁定文件；没有锁文件的生态不得进入发布构建。
 3. 在 CI 生成每个发布工件对应的 CycloneDX 或 SPDX SBOM；SBOM 文件名包含应用版本、平台、架构和构建 SHA。
 4. 将 SBOM 与安装包、校验和一起作为 release artifact 发布；不得只保存在 CI 临时目录。
@@ -1136,7 +1173,7 @@ A00 基线冻结
 1. 仅允许受保护分支/tag 的 CI 生成正式安装包；开发机只能生成标记为 `dev` 的产物。
 2. CI 输出 provenance：源码 SHA、触发者、runner、构建命令、锁文件哈希、sidecar 哈希、Tauri 包哈希。
 3. 对 Windows、macOS、Linux 分别建立签名与验签步骤；私钥只存在受控密钥服务或 CI secret 中，绝不写入仓库、日志或 Agent 上下文。
-4. 发布前自动验证：安装包签名、sidecar 哈希、更新清单签名、SBOM 与包版本一致。
+4. 发布前验证 OS 包签名（适用平台）、Tauri 更新工件签名、受信构建清单中的 sidecar 哈希及 SBOM 版本。若另设计签名更新 manifest，独立验证；不能将 updater 工件签名等同于整个 feed 认证。
 5. 以 [SLSA provenance](https://slsa.dev/spec/v1.2/provenance) 为参考，第一目标是有可验证 provenance，下一目标是在受控 hosted CI 上生成签名 provenance。
 
 **验收**：下载者可独立验证发布包未被替换，并能确定其来源构建。  
@@ -1144,7 +1181,7 @@ A00 基线冻结
 
 ### 11.4 L02：漏洞、威胁建模与安全响应轨道
 
-**开始时间**：G2 后；**依赖**：稳定的 sidecar/Rust/Vue 边界。
+**开始时间**：G1 前完成初始威胁模型，G2/G3 随真实边界补测试；不能先实现敏感通信再考虑安全边界。
 
 #### Agent L02-A：威胁模型
 
@@ -1184,7 +1221,7 @@ A00 基线冻结
 1. 对每个数据项记录：名称、来源、是否个人/敏感数据、保存位置、加密状态、用途、默认保留期、删除方式、导出方式、谁能访问。
 2. 至少覆盖：剪贴板历史、文件传输元数据、聊天、设备名/IP、配对证书、日志、诊断包、崩溃报告和遥测。
 3. 默认关闭非必要遥测；任何遥测需明确 opt-in、用途说明、撤回入口和离线队列清理策略。
-4. 提供“清除历史”“撤销配对”“删除本地缓存”“导出我的数据”四个独立命令；每项执行后必须可验证结果且不得误删密钥/配置。
+4. 提供“清除历史”“撤销配对”“删除本地缓存”“导出我的数据”四个独立命令。撤销配对必须移除对应设备的信任/会话密钥、排队投递与授权，不误删本机身份或其他设备配置；其余操作不得越界删除。
 5. 诊断导出默认掩码文件路径、设备标识、IP、令牌、消息正文和剪贴板内容；用户若选择包含敏感信息，需二次确认。
 
 **验收**：任一数据项都能回答“为何保存、保存多久、在哪里、如何删除”。
@@ -1194,7 +1231,7 @@ A00 基线冻结
 **拥有文件**：迁移模块、备份/恢复测试、`docs/privacy/migration-policy.md`。  
 **步骤**：
 
-1. 所有持久化格式添加 schema version；读取旧数据时只向前兼容，不悄悄覆盖原文件。
+1. 先盘点现有版本字段；有必要时以兼容方式为缺失格式补版本。新版能读取已承诺支持的旧数据（向后兼容），旧版不得假装能写未知新 schema；纯 UI 迁移不强制改全部格式。
 2. 每次迁移先创建带版本/时间戳的备份，再写 migration journal，成功后标记完成。
 3. 中断恢复测试至少覆盖：迁移前中断、写一半中断、磁盘满、旧版本回退、重复执行。
 4. 迁移失败时应用以只读安全模式启动，展示恢复/导出/回退选择；不得直接清空历史。
@@ -1231,14 +1268,14 @@ A00 基线冻结
 
 ### 11.7 L05：无障碍、国际化与体验质量轨道
 
-目标为 WCAG 2.2 AA；WCAG 2.2 是当前 W3C Recommendation，且其要求可通过自动与人工组合验证。[W3C WCAG 2.2](https://www.w3.org/TR/WCAG22/)
+Web 内容以 WCAG 2.2 AA 为验收目标，原生窗口/菜单另补平台无障碍检查；执行时核对标准版本，不声称自动检查或采用该标准即可保证整个桌面产品合规。
 
 #### Agent L05-A：可访问性基线
 
 **拥有文件**：Vue 组件、a11y 测试、`docs/quality/accessibility.md`。  
 **步骤**：
 
-1. 自动检查语义结构、可见焦点、颜色对比、表单 label、按钮名称、ARIA 误用和键盘可达性。
+1. 自动检查能覆盖的语义、部分对比度、label、按钮名称和 ARIA；焦点顺序/遮挡、键盘完整路径、播报质量与拖放替代必须人工验证，自动扫描不能证明 AA 全部通过。
 2. 人工检查键盘完整路径：启动→设备→配对→历史→传输→设置→退出；不允许鼠标成为唯一完成路径。
 3. 对拖放操作提供键盘等价入口，符合 WCAG 2.2 对拖动操作的要求。
 4. 在 100%、125%、150%、200% 缩放及高对比度/深浅色下截图对比，记录溢出、裁剪和焦点遮挡。
@@ -1290,32 +1327,31 @@ A00 基线冻结
 
 | 时间 | 必须完成 | Gate | 不达标时的处理 |
 | --- | --- | --- | --- |
-| 2026 | Tauri 迁移、sidecar 协议、旧 UI 替换、R7 基础 | G5 Release Candidate | 保留旧 UI 回退构建，不删除核心兼容路径 |
-| 2027 | R1/R2/R3：SBOM、签名/provenance、威胁模型、数据目录、漏洞流程 | Security GA | 只能维持 beta/canary，不进入稳定企业发布 |
-| 2028 | R4/R5：SLO、发布环、故障演练、WCAG 2.2 AA、i18n CI | Reliability GA | 暂停扩大平台支持和新大功能 |
-| 2029 | R6：完整平台分级、长期兼容/迁移策略、企业运维材料 | Platform GA | 不承诺新增 OS/架构支持 |
-| 2030 | 每年复审法规、依赖、威胁模型、SLO 与支持矩阵；按证据续期 | Annual Readiness Review | 制定整改 backlog 与负责人/日期 |
+| 实施前，暂定 2026 年启动 | 技术验证、支持范围、基线、威胁模型、数据边界、R7 最小记录 | G0/G1 | 先修正验证失败项，不承诺当年完成迁移 |
+| 首个对外预览前，不按年份延期 | 更新验签、权限/敏感数据控制、依赖锁定、退出/恢复测试 | H1 / 预览准入 | 仅内部隔离测试，不把 canary 当安全豁免 |
+| 首个稳定版前，日期由 Gate 决定 | R1–R7 发布所需基线、支持矩阵、升级/回退、a11y/i18n 验收 | H2 + G4.5/G5 | 不发布 stable，不删除回退路径 |
+| 2027–2029 按产品规模推进 | 扩充 SLO 样本、平台覆盖、企业运维材料与自动化深度 | 增量评审 | 不为未验证平台/能力作承诺 |
+| 每年持续复审，包含 2030 年 | 法规适用性、依赖、威胁模型、SLO 与支持矩阵 | Annual Readiness Review | 整改 backlog、负责人和日期 |
 
 这不是承诺某个司法辖区自动合规的清单；它是让项目在出现新的要求时拥有可审计资产、稳定边界和持续整改能力的最低工程路径。
 
 ### 11.11 长期轨道的 Agent 并行与 Gate
 
 ```text
-L01 供应链 ─┐
-L02 安全   ├─ 可与 Tauri 功能域迁移并行
-L03 隐私   ┤
-L05 a11y   ┘
+L01 供应链 / L02 安全 / L03 隐私
+L04 恢复与健康 / L05 a11y / L06 平台 / L07 治理
+      └─ 从基础阶段按依赖启动最小版本，可与功能迁移并行
       ↓
 H1：Security/Privacy Baseline
       ↓
-L04 可靠性 + L06 平台支持 + L07 Agent 治理（可并行）
+补齐发布级测试、指标与审计证据（可并行）
       ↓
 H2：Stable Release Readiness
       ↓
 年度复审：依赖、法规适用性、威胁模型、平台矩阵、SLO
 ```
 
-并行规则：L01/L02/L03/L05 可同时工作，但不得并发编辑同一 CI workflow、依赖锁文件、权限清单或同一页面组件。L04/L06/L07 在 H1 后启动，因为它们依赖稳定的构建来源、错误码、数据边界和平台能力定义。
+并行规则：不得并发编辑同一 workflow、锁文件、权限清单或页面。平台范围、进程恢复、Agent 文件所有权在 G1 前就需定义，不能等 H1 后才启动；H1 后完善实现与证据。H2 的最小证据并入 G4.5/G5，不另建循环依赖。
 
 ### 11.12 年度复审 Agent 清单
 
@@ -1337,7 +1373,7 @@ H2：Stable Release Readiness
 
 Tauri 迁移完成不等于重构成功。重构成功必须同时满足：
 
-1. 新增一个功能时，改动集中在一个功能域及其明确接口内，而不是修改 `main.py`、全局状态、多个 UI 页面和多个传输模块。
+1. 新功能的业务改动集中在所属功能域，允许同步修改公开契约、组合根、适配器、UI 和测试；不以“只改一个目录”为目标，也不直接改其他模块私有状态。
 2. 替换 UI、传输实现、数据库或操作系统适配器时，核心业务规则和大多数测试不变。
 3. 任何模块的职责都可以用一句话描述；若需要“它负责各种杂项”，该模块必须继续拆分。
 4. 依赖方向可由自动检查验证；不能依赖“开发者自觉”。
@@ -1349,21 +1385,24 @@ Tauri 迁移完成不等于重构成功。重构成功必须同时满足：
 desktop/src (Vue 页面、组件、store)
             ↓ 仅 DTO / command name
 desktop/src-tauri (Rust adapter、权限、sidecar 监管)
-            ↓ 仅 NDJSON-RPC contract
+            ↓ 仅 ClipSync IPC v1 contract
 internal/adapters (sidecar RPC adapter)
             ↓
 internal/application (use cases、事务、事件编排)
             ↓
-internal/domain (实体、值对象、业务规则、ports)
+internal/domain (实体、值对象、业务规则) + internal/ports (抽象契约)
             ↑
 internal/infrastructure (SQLite、LAN/relay、OS 剪贴板、加密实现)
 ```
+
+采用第 3 章分层目录，同一 feature 在各层按同名子包组织。`ports` 可依赖 domain 的值对象，domain 不反向依赖 ports，避免环。桌面图之外保留 `internal/adapters/web`（迁移期为 `internal/web`）→ application 的浏览器路径。
 
 允许的依赖：
 
 | 模块 | 可以依赖 | 绝对禁止依赖 |
 | --- | --- | --- |
-| `domain` | 标准库、同一 domain、ports | Tauri、Vue、HTTP、SQLite 驱动、Tk、`sys.platform`、具体 transport |
+| `domain` | 标准库、同一 domain、明确公开的领域类型 | ports、Tauri、Vue、HTTP、SQLite 驱动、Tk、`sys.platform`、具体 transport |
+| `ports` | domain 值对象、标准库 | application、adapters、具体 infrastructure |
 | `application` | domain、ports、DTO、事件接口 | Vue、Rust/Tauri、HTTP handler、具体 OS API |
 | `infrastructure` | domain ports、标准库、具体第三方实现 | Vue、Rust/Tauri、application 的私有状态 |
 | `adapters` | application 的公开 use case、DTO | domain/infrastructure 私有对象、UI 状态 |
@@ -1374,23 +1413,22 @@ internal/infrastructure (SQLite、LAN/relay、OS 剪贴板、加密实现)
 
 ### 12.3 模块边界和公开 API
 
-每个功能域必须使用以下布局；没有公开入口的实现文件一律视为私有：
+沿用第 3 章分层布局，不再另建与之竞争的 `internal/<feature>/service.py` 树。以 transfer 为例：
 
 ```text
-internal/<feature>/
-  __init__.py                  # 仅导出该 feature 的公开 API
-  domain.py                    # 实体、值对象、领域规则
-  ports.py                     # Protocol / abstract interfaces
-  service.py                   # use case 或 application service
-  events.py                    # feature 对外事件
-  infrastructure.py            # 可替换实现；也可放入 infrastructure/<feature>/
-  tests/
+internal/domain/transfer/             # 值对象、不变式、领域事件
+internal/ports/transfer.py            # 传输/仓库抽象
+internal/application/use_cases/transfers.py
+internal/infrastructure/transport/    # 具体实现
+internal/adapters/sidecar/transfer.py # DTO 与协议映射
+tests/domain/transfer/
+tests/application/transfer/
 ```
 
 规则：
 
-1. 跨 feature 调用只能导入另一个 feature 的 `__init__.py` 中明确导出的类型、命令或事件；禁止跨目录 import 私有模块。
-2. `__init__.py` 必须维护 `__all__`，并有测试验证其导出对象可用；不得通过隐式 import 暴露内部实现。
+1. 跨 feature 调用仅使用依赖规则清单登记的公开模块/符号；公开契约可位于专用模块，不强迫所有层通过一个 `__init__.py` 导出。
+2. 使用 `__all__` 的包应测试导出稳定性；`__all__` 只描述导出约定，不会阻止直接 import，须由 import graph/规则测试检查。
 3. Feature 对外输入/输出只允许 DTO、值对象、事件或 port；不允许暴露数据库连接、线程、socket、全局 dict 或 GUI widget。
 4. 一份配置只能由一个 feature 写入；其他 feature 通过 settings use case 请求修改，不得直接写配置文件。
 5. 同一条业务规则只允许一个权威实现。例如文件大小限制由 transfer domain 定义，Vue 只做提示性预校验，Rust 只做安全范围校验。
@@ -1413,11 +1451,11 @@ class StartTransfer:
 
 实现要求：
 
-1. `internal/application/bootstrap.py` 是 Python 唯一可实例化具体 repository、transport、clipboard adapter、clock、notifier 的位置。
+1. 生产服务图统一在 `internal/application/bootstrap.py` 及其显式委托的工厂装配；基础设施内部资源工厂和测试可创建实现，不要求每次打开文件或连接都回到全局 bootstrap。
 2. `ApplicationServices` 只能包含公开 use case；不能成为任意对象仓库。
-3. 测试通过构造函数传入 fake/in-memory 实现，不通过 monkeypatch 模块全局变量实现隔离。
-4. 每个后台线程、timer、subscription 和 file handle 都由一个服务拥有，并提供 `start()`/`stop()`；所有权必须在 lifecycle 文档中登记。
-5. 无法注入的系统行为（时间、随机数、进程、文件系统、网络）必须包成 port，避免测试依赖真实环境。
+3. 新用例优先构造注入；遗留特征测试和平台适配器测试允许局部 monkeypatch，不为禁用测试技巧重写现有测试。
+4. 长期线程/timer/subscription 登记所属服务的关闭行为；短期文件句柄使用上下文管理器，不要求所有资源都实现 `start()`/`stop()`。
+5. 对影响业务可重复性的时间、随机数、网络等边界按需注入；仅用于适配器内部的标准库调用无需逐个包装为 port，真实 IO 由隔离集成测试覆盖。
 
 ### 12.5 同步调用、事件和状态的一致规则
 
@@ -1431,24 +1469,24 @@ class StartTransfer:
 
 事件规则：
 
-1. 事件名称使用 `<feature>.<noun>.<past-tense>`，如 `transfer.file.completed`、`pairing.device.revoked`。
+1. 新业务事件优先使用 `<feature>.<noun>.<past-tense>`；9.6 的 `device.changed`、`transfer.progress` 等首版契约名称显式登记。内部领域事件和对外 DTO 可经 adapter 映射，不为统一命名破坏现有 WebSocket 协议。
 2. 每个事件包含 `event_id`、`occurred_at`、`correlation_id`、`schema_version` 和最小必要数据。
 3. 事件必须可重复处理；订阅者不可假设恰好一次投递。
-4. 进程重启后 UI 先请求完整快照，再接受增量事件；事件不是唯一状态来源。
+4. 重启后按 9.4 的“先订阅缓冲 → 带水位快照 → 增量回放”恢复；不能裸用“先快照后监听”。事件不是唯一状态来源。
 5. 一项事件跨出 feature 边界前，必须写入 `docs/architecture/events.md`，包含发布者、订阅者、版本、幂等规则和错误处理。
 
 ### 12.6 扩展一个新功能的固定模板
 
-任何新功能（例如“分享链接”“OCR”“新的传输通道”“移动端配对”）必须按以下顺序实施：
+有新领域边界/协议/存储变化的功能按以下模板实施；局部修复或简单界面调整只需相称的设计说明和测试，不强制新增 ADR/port/四层文件：
 
 1. 创建 `docs/architecture/adr/NNNN-<feature>.md`，写明问题、非目标、所属 feature、依赖的 ports、数据变化、失败模式、隐私/安全影响和回滚方案。
-2. 在 domain 创建实体/值对象和 ports；先写纯业务测试，不能导入 UI 或具体基础设施。
+2. 按实际需要在 `internal/domain/` 创建实体/值对象，在 `internal/ports/` 定义端口；两者遵循 12.2 的依赖方向，不在 domain 内再建立第二套 ports。先写纯业务测试，不能导入 UI 或具体基础设施。
 3. 在 application 创建一个面向任务的 use case；输入/输出为 DTO，依赖全部从构造函数注入。
 4. 在 infrastructure 编写可替换实现，并通过 port contract test 验证。
 5. 仅在确认需要 UI 时，向 `rpc-vN.md` 申请新的 command/query/event；总控批准后再实现 adapter、Rust bridge、Vue bridge method。
 6. 新页面或组件只能调用 store action，不得直接操作其他 feature store 的私有状态。
-7. 增加最少四类测试：domain 单测、application use case 测试、adapter/RPC 契约测试、用户主路径端到端测试。
-8. 在功能 flag 下发布 canary；达到预先定义的可用性和错误率门槛后再稳定启用。
+7. 按实际变更层级选择 domain、application、adapter/RPC 和端到端测试；跨层高风险功能覆盖四类，局部变更避免重复测试堆叠。
+8. 高风险行为变化使用有退出期限的 flag/canary；纯内部重构不强制长期双实现，达到既定门槛再发布。
 
 如果一个功能在第 5 步之前就需要修改多个既有 feature 的私有代码，Agent 必须停止并先提出 ADR；这说明现有边界需要修正，不能用横向耦合强行落地。
 
@@ -1459,10 +1497,10 @@ class StartTransfer:
 | Guard | 检查内容 | 失败处理 |
 | --- | --- | --- |
 | `dependency-rules` | Python import 只沿 12.2 方向；Vue 仅 `api/bridge.ts` 导入 Tauri API | 阻止合并 |
-| `public-api` | 跨 feature import 只能命中 `__all__` 公共符号 | 阻止合并 |
+| `public-api` | 跨 feature import 命中已登记公开模块/符号（含 re-export 解析） | 阻止合并 |
 | `rpc-contract` | RPC 方法修改同时更新 DTO、Rust/Python/Vue 测试和文档 | 阻止合并 |
 | `capability-diff` | 权限变更必须附威胁模型条目、安全矩阵与人工批准 | 阻止合并 |
-| `dead-legacy-ui` | 新代码不允许 import `internal/ui` 或 `internal/web/static` | 阻止合并 |
+| `dead-legacy-ui` | 新领域/用例不依赖旧桌面 UI；迁移例外须显式登记；静态资源按消费者检查 | 阻止新增违规，保留合法 Web Companion |
 | `complexity-watch` | 超过团队约定复杂度/文件阈值的新增代码须 ADR 和拆分计划 | 标记 review，不能静默接受 |
 | `ownership` | 每个改动文件属于当前 Agent 的任务范围 | 阻止合并 |
 
@@ -1483,36 +1521,58 @@ docs/architecture/
   dependency-rules.md
 ```
 
-门禁必须以解析 AST/import graph 实现；不得使用简单字符串搜索作为唯一判断方式。字符串搜索可作为补充检查，用于删除旧模块后的残余引用扫描。
+依赖门禁以 AST/import graph 为主；权限、JSON 配置、包资源等按各自结构解析。不能靠字符串搜索证明没有动态导入或重复业务规则。先记录遗留基线，只阻止新增违规；迁移中的显式兼容层允许限期例外，禁止一上来因旧代码全面拦截合并。
 
 ### 12.8 技术债务与代码规模控制
 
 1. 不设置“文件不得超过 N 行”的机械规则；用职责和依赖决定拆分。
 2. 但当一个模块同时出现三类以上职责（业务规则、IO、线程管理、UI mapping、配置读写、协议编解码）时，必须创建拆分任务，不能继续扩展。
-3. 每个 feature 的 `service.py` 只处理一个业务能力组；若命令之间没有共同状态、不变式或事务边界，拆成多个 use case。
+3. 每个 use case 模块只处理一个业务能力组；若命令之间没有共同状态、不变式或事务边界，再拆分。
 4. `utils.py`、`helpers.py`、`common.py` 不得成为跨 feature 垃圾桶。共享代码必须有明确领域名称，如 `protocol/codec.py`、`security/fingerprint.py`。
 5. 每个 release 预留固定容量清偿技术债；账本中记录债务的来源、影响、到期版本和责任 Agent/负责人。
-6. 删除代码优先于新增抽象。只有至少两个真实调用点且变化维度一致时，才创建共享抽象。
+6. 删除冗余优先于新增抽象。共享工具通常应有两个真实调用点；用于隔离高风险 IO/测试或既定平台替换的 port 可以只有一个实现，不与第 2 章冲突。
 
 ### 12.9 Agent 并行开发时的防耦合规则
 
 1. 并行 Agent 只能共享已经合并并版本化的 contract；不得共享未合并分支中的内部实现假设。
-2. Interface Agent 与 Implementation Agent 分离：前者提交 ADR/RPC/port 草案，后者在 Gate 批准后实现。一个 Agent 不得在同一轮中同时定义模糊接口并让所有人依赖它。
+2. 接口定义与依赖它的并行实现分阶段：先批准契约再派发。可以由同一 Agent 分阶段完成，不强制为每个接口建立两个角色。
 3. 一次只允许一个 Agent 修改 `bootstrap.py`、RPC 方法表、capabilities、锁文件或发布工作流；它们是高扇入文件。
 4. 合并冲突不是“由总控手工拼接”就算完成；冲突必须回到各自 feature owner，明确契约归属后重新生成提交。
 5. Agent 任务结束时必须说明“我新增了哪些依赖”和“我移除了哪些依赖”；若无法说明，任务进入 architecture review。
-6. Agent 不得通过复制粘贴旧业务逻辑到新 UI/Rust sidecar 以缩短迁移；任何重复规则由 `test_no_duplicate_business_rules` 的 review 检查。
+6. 不得复制旧业务逻辑到 Vue/Rust 缩短迁移；通过业务规则清单、契约用例和代码审查检查重复，不能宣称一个名为 `test_no_duplicate_business_rules` 的测试能自动证明不存在语义重复。
 
 ### 12.10 维护性发布 Gate
 
 除第 10、11 章 Gate 外，合并到稳定分支前必须全部通过：
 
 - [ ] 依赖图没有违反 12.2 的反向引用。
-- [ ] 新功能有 ADR、feature owner、公开 API、错误模型和测试矩阵。
+- [ ] 涉及新边界/协议/数据的功能有 ADR，其余改动有相称的设计说明、所有者与测试。
 - [ ] 无新全局可变状态、service locator 或跨 feature 私有 import。
 - [ ] UI、Rust、Python 没有复制同一业务规则。
 - [ ] Sidecar 协议、事件和数据迁移都有版本与向后兼容策略。
 - [ ] Agent 任务账本记录了文件所有权、输入/输出 SHA、验证与剩余债务。
-- [ ] 删除旧 UI 后，任何新功能均可由独立 Agent 在单一 feature 工作树内完成，无需编辑遗留中心入口。
+- [ ] 删除旧桌面路径后，新增业务无需扩展遗留中心入口；允许修改所属 feature、公开契约、组合根与必要客户端适配器。
 
 达到本章门槛后，项目才具备“容易维护、容易扩展、高内聚、低耦合”的可验证基础，而不是仅仅完成了一次技术栈迁移。
+
+## 13. 核验依据与待验证项
+
+本次主要依据仓库中的 `src/main.py`、`internal/web/server.py`、`internal/web/ws.py`、`internal/ui/webview_window.py`、`internal/sync/manager.py`、`internal/config/config.py`、`clipsync.spec`、`pyproject.toml`、`package.json`、`.gitattributes` 和 `.github/workflows/build.yml`。现有 build matrix 包含 Windows、macOS arm64、Linux x64/arm64，但构建成功不等于交互兼容已验证；不要隐含承诺 Intel Mac 等未列目标。
+
+本次尝试访问官方资料未取得可用正文，因此下面仅列后续核验入口，不声称已在线验证锁定版本的 API/标准现状。实施前在 ADR 记录版本、核验日期和最小验证结果：
+
+```text
+Tauri capability / 自定义命令权限:
+https://v2.tauri.app/security/capabilities/
+https://v2.tauri.app/security/permissions/
+Tauri sidecar / 构建命名:
+https://v2.tauri.app/develop/sidecar/
+Tauri updater / 签名:
+https://v2.tauri.app/plugin/updater/
+JSON-RPC 2.0:
+https://www.jsonrpc.org/specification
+WCAG 2.2:
+https://www.w3.org/TR/WCAG22/
+```
+
+特别验证：自定义命令 ACL 是否覆盖实际注册入口；插件原生调用与前端权限的区别；各平台通知点击能力；Windows 标准流与隐藏控制台；macOS 剪贴板事件循环；Linux Wayland 限制；Tauri 更新工件验签与 OS 代码签名的区别。不要假设默认 updater 会签整个更新 feed、支持任意降级或自动验证自定义 sidecar manifest，这些须单独设计和测试。

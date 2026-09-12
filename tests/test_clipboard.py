@@ -555,6 +555,22 @@ def test_api_history_remote_clip_source_is_peer_name(history_db):
     assert item["source_name"] == "Phone"
 
 
+def test_api_history_ships_the_route_each_clip_arrived_on(history_db):
+    """The panel's row names the device; the route is the half of the pair the
+    name cannot give, and the panel had no way to learn it at all."""
+    from internal.web.api.history import get_history
+
+    for transport, text in (("lan", "cable"), ("relay", "internet"), ("web", "pushed")):
+        content = _text(text, 1003.0)
+        content.transport = transport
+        history_db.add(content)
+    history_db.add(_text("typed here", 1004.0))  # captured here: no route at all
+
+    payload, status = get_history(history_db, _StubCfg())
+    assert status == 200
+    assert [item["transport"] for item in payload["items"]] == ["", "web", "relay", "lan"]
+
+
 def test_legacy_db_without_image_fmt_column_migrates(tmp_path):
     """A pre-image_fmt database must ALTER-add the column, not fail."""
     path = tmp_path / "old.db"

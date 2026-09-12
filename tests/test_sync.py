@@ -1298,6 +1298,26 @@ class TestBackupHotkeysXMigration:
             "quarantine copies keep the old identity — reset must sweep them"
         )
 
+    def test_factory_reset_file_lists_cannot_drift(self):
+        """The sidecar's reset must delete exactly what the legacy host does.
+
+        ``internal/data/reset.py`` is the sidecar's copy of the file list (the
+        legacy method is Tk-bound and cannot be imported).  A new user-data
+        file added to one list but not the other silently survives a reset.
+        """
+        from internal.data.reset import DATA_FILES, MARKERS, QUARANTINE_GLOBS
+        from src.main import Application
+
+        src = inspect.getsource(Application._do_factory_reset)
+        for name in DATA_FILES:
+            assert f'"{name}"' in src, f"legacy factory reset no longer deletes {name}"
+        for pattern in QUARANTINE_GLOBS:
+            assert pattern.strip(".*") in src, (
+                f"legacy factory reset no longer sweeps {pattern}"
+            )
+        for marker in MARKERS:
+            assert f'"{marker}"' in src, f"legacy factory reset no longer writes {marker}"
+
 
 # ═════════════════════════════════════════════════════════════════════════
 # Pair 7/8 conclusions are documented in the round report (settings-search

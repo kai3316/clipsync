@@ -1825,6 +1825,11 @@ def set_locale(locale: str) -> None:
     _locale_mgr.active = locale
 
 
+def get_locale() -> str:
+    """Return the active locale code (e.g. 'en', 'zh-CN')."""
+    return _locale_mgr.active
+
+
 def available_locales() -> list[str]:
     """Return list of available locale codes."""
     return _locale_mgr.available

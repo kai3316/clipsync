@@ -25,6 +25,11 @@ _SAFE_FIELDS = {
     "device_id",
     "device_name",
     "language",
+    # Read-only: whether the user has ever picked a language.  The desktop
+    # shell shows its first-run picker while this is False; it is never
+    # mutable through this endpoint (see the language branch in
+    # update_settings, which is what marks the choice).
+    "language_chosen",
     "appearance_mode",
     "sync_enabled",
     "plain_text_only",

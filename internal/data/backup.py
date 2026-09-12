@@ -385,6 +385,7 @@ def restore_backup(
                 logger.info("Restored config from backup")
             except Exception as exc:
                 logger.warning("Failed to restore config: %s", exc)
+                result.setdefault("errors", []).append("config")
 
         # --- Restore history ---
         history_file = tmpdir / "history.json"
@@ -395,26 +396,25 @@ def restore_backup(
                 logger.info("Restored %d history entries from backup", count)
             except Exception as exc:
                 logger.warning("Failed to restore history: %s", exc)
+                result.setdefault("errors", []).append("history")
 
         # --- Restore favorites ---
         fav_file = tmpdir / "favorites.json"
         if fav_file.is_file():
-            # Try SQLite import first
-            imported = _import_favorites_from_json(fav_file)
-            if imported > 0:
+            try:
+                favorites_data = json.loads(fav_file.read_text(encoding="utf-8"))
+                if not isinstance(favorites_data, list) or any(
+                    not isinstance(item, dict) for item in favorites_data
+                ):
+                    raise ValueError("Invalid favorites backup structure")
+                imported = _import_favorites_from_json(fav_file)
+                if imported != len(favorites_data):
+                    raise ValueError("Favorites import incomplete")
                 result["favorites"] = imported
                 logger.info("Restored %d favorites from backup", imported)
-            else:
-                # Fall back: copy to legacy JSON file
-                import shutil
-
-                target = _get_favorites_path()
-                try:
-                    shutil.copy2(str(fav_file), str(target))
-                    result["favorites"] = 1
-                    logger.info("Restored favorites (legacy JSON) from backup")
-                except Exception as exc:
-                    logger.warning("Failed to restore favorites: %s", exc)
+            except Exception as exc:
+                logger.warning("Failed to restore favorites: %s", exc)
+                result.setdefault("errors", []).append("favorites")
 
     return result
 

@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-discovery-status"
+description = "Enables the discovery_status command without any pre-configured scope."
+commands.allow = ["discovery_status"]
+
+[[permission]]
+identifier = "deny-discovery-status"
+description = "Denies the discovery_status command without any pre-configured scope."
+commands.deny = ["discovery_status"]

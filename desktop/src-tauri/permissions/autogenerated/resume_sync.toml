@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-resume-sync"
+description = "Enables the resume_sync command without any pre-configured scope."
+commands.allow = ["resume_sync"]
+
+[[permission]]
+identifier = "deny-resume-sync"
+description = "Denies the resume_sync command without any pre-configured scope."
+commands.deny = ["resume_sync"]

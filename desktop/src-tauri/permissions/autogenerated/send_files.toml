@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-send-files"
+description = "Enables the send_files command without any pre-configured scope."
+commands.allow = ["send_files"]
+
+[[permission]]
+identifier = "deny-send-files"
+description = "Denies the send_files command without any pre-configured scope."
+commands.deny = ["send_files"]

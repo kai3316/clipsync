@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-reject-pairing"
+description = "Enables the reject_pairing command without any pre-configured scope."
+commands.allow = ["reject_pairing"]
+
+[[permission]]
+identifier = "deny-reject-pairing"
+description = "Denies the reject_pairing command without any pre-configured scope."
+commands.deny = ["reject_pairing"]

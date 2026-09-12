@@ -528,7 +528,11 @@ class FileTransferManager:
         that the user does not want to receive the file.
         """
         with self._lock:
-            transfer = self._transfers.pop(transfer_id, None)
+            transfer = self._transfers.get(transfer_id)
+            pending = transfer.get("state") == "pending" if transfer else False
+            if not transfer or transfer.get("type") != "incoming" or not pending:
+                return
+            self._transfers.pop(transfer_id)
 
         if transfer and transfer.get("temp_fh") is not None:
             with contextlib.suppress(Exception):
@@ -539,6 +543,7 @@ class FileTransferManager:
             {"msg_type": "file_reject", "transfer_id": transfer_id},
             send_fn,
         )
+        self._add_to_history(transfer, False, status="rejected")
         logger.info("Rejected file transfer: %s", transfer_id[:8])
 
     def _transfer_targets_peer(self, transfer: dict, peer_id: str) -> bool:
@@ -812,6 +817,11 @@ class FileTransferManager:
                 "state": "pending",
                 "start_time": now,
                 "_last_activity": now,
+                # Keep the authenticated peer-specific reply path alive
+                # until the user accepts or rejects the request.  Without
+                # this, a later UI action falls back to broadcast and the
+                # sender never receives the decision on routed transports.
+                "_send_fn": send_fn,
                 # Set of chunk indices still missing; drained as chunks arrive.
                 "chunks": set(range(total_chunks)),
             }

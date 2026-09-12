@@ -534,17 +534,10 @@
       loadFavorites: function () {
         return ClipsyncAPI.getFavorites().then(function (res) {
           var favs = (res && res.favorites) ? res.favorites : (res && res.items) ? res.items : [];
-          store.favorites.splice(0, store.favorites.length);
-          for (var i = 0; i < favs.length; i++) {
-            store.favorites.push(favs[i]);
-          }
-          // A reset/deleted data folder leaves zero favorites but a stale
-          // clipsync_groups localStorage registry (groups are per-browser).
-          // Clear the registry so ghost groups can't resurrect in the sidebar.
-          if (favs.length === 0 && store.groupNames.length > 0) {
-            store.groupNames = [];
-            store.persistGroups();
-          }
+          // The apply rule (in-place replace + the ghost-group registry) lives
+          // in the store, because the live `favorites_updated` broadcast
+          // applies the same snapshot and the two must not drift.
+          store.replaceFavorites(favs);
           return favs;
         });
       },
