@@ -168,17 +168,34 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           TAG="${{ github.ref_name }}"
-          # Re-create the release in place (delete then create). The workflow
-          # concurrency group cancels overlapping runs for the same tag, so we
-          # never interleave with a concurrent delete/create.
-          gh release delete "$TAG" --yes 2>/dev/null || true
-          gh release create "$TAG" \
-            --title "ClipSync $TAG" \
-            --notes "Automated build for $TAG.
-              - \`clipsync-windows.zip\` — Windows \`.exe\`
-              - \`clipsync-macos-arm64.zip\` — macOS Apple Silicon \`.app\` bundle
-              - \`clipsync-linux.tar.gz\` — Linux x86_64 binary
-              - \`clipsync-linux-arm64.tar.gz\` — Linux ARM64 binary"
+          # Create the release only when it is missing; never delete it.  This
+          # step used to delete and re-create, which was safe while it was the
+          # only writer, but the Tauri workflow now attaches the desktop
+          # installers to this same release -- a delete here would silently take
+          # them with it.  The workflow concurrency group still serialises runs
+          # for one tag, and the uploads below use --clobber, so a re-pushed tag
+          # replaces its assets in place.
+          NOTES=$(cat <<'EOF'
+          Automated build of both applications for this tag.
+
+          The Tauri desktop (unsigned, so macOS and Windows warn on first run):
+          - `ClipSync_<version>_x64-setup.exe` — Windows installer
+          - `ClipSync_<version>_aarch64.dmg` — macOS Apple Silicon
+          - `ClipSync_<version>_amd64.deb` / `.AppImage` — Linux x86_64
+
+          The previous Python application:
+          - `clipsync-windows.zip` — Windows `.exe`
+          - `clipsync-macos-arm64.zip` — macOS Apple Silicon `.app` bundle
+          - `clipsync-linux.tar.gz` — Linux x86_64 binary
+          - `clipsync-linux-arm64.tar.gz` — Linux ARM64 binary
+          EOF
+          )
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "Release $TAG already exists; updating it in place."
+            gh release edit "$TAG" --title "ClipSync $TAG" --notes "$NOTES"
+          else
+            gh release create "$TAG" --title "ClipSync $TAG" --notes "$NOTES"
+          fi
           # Upload only the artifacts that actually exist, so a missing matrix
           # leg doesn't fail the whole release.
           for f in \

@@ -28,6 +28,13 @@
   "bundle": {
     "active": true,
     "targets": "all",
-    "icon": ["../../assets/icon.ico", "../../assets/icon.icns"]
+    "icon": [
+      "../../assets/32x32.png",
+      "../../assets/128x128.png",
+      "../../assets/128x128@2x.png",
+      "../../assets/icon.png",
+      "../../assets/icon.ico",
+      "../../assets/icon.icns"
+    ]
   }
 }

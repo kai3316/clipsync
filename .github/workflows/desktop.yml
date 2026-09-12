@@ -2,6 +2,9 @@ name: Tauri Desktop
 
 on:
   pull_request:
+  push:
+    branches: [main, master]
+    tags: ['v*']
   workflow_dispatch:
 
 permissions:
@@ -44,3 +47,146 @@ jobs:
       - name: Rust IPC tests
         working-directory: desktop/src-tauri
         run: cargo test --locked
+
+  package:
+    # Unsigned bundles, on purpose: what this job establishes is that each
+    # platform turns the tree into an installable artifact at all.  Signing,
+    # notarization and updater verification are a separate release gate --
+    # docs/tauri, 9.8 -- and nothing here claims them.
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            bundles: nsis
+            artifact: clipsync-desktop-windows
+          # Apple Silicon only, matching build.yml: Intel Macs are not supported.
+          - os: macos-latest
+            bundles: app,dmg
+            artifact: clipsync-desktop-macos-arm64
+          - os: ubuntu-24.04
+            bundles: deb,appimage
+            artifact: clipsync-desktop-linux-x64
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: desktop/package-lock.json
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Linux native build dependencies
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
+      - name: Rust toolchain
+        run: rustup toolchain install stable --profile minimal
+      - name: Install Python dependencies
+        run: python -m pip install -r requirements.txt pyinstaller
+      - name: Frontend dependencies
+        working-directory: desktop
+        run: npm ci
+      - name: Build the Python sidecar
+        run: python -m PyInstaller --noconfirm clipsync-sidecar.spec
+      - name: Stage the sidecar under its target-triple name
+        # Bash on every runner: the Windows default shell would not run this.
+        shell: bash
+        run: |
+          set -euo pipefail
+          ext=""
+          if [ "$RUNNER_OS" = "Windows" ]; then ext=".exe"; fi
+          triple=$(rustc -vV | sed -n 's/^host: //p')
+          echo "host target: $triple"
+          mkdir -p desktop/src-tauri/binaries
+          cp "dist/clipsync-sidecar${ext}" "desktop/src-tauri/binaries/clipsync-sidecar-${triple}${ext}"
+          ls -l desktop/src-tauri/binaries
+      - name: Write the packaging config
+        # Mirrors scripts/build-tauri.ps1, without needing pwsh on macOS/Linux.
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p build
+          python - <<'PY'
+          import json
+          import sys
+
+          sys.path.insert(0, ".")
+          from internal.version import __version__
+
+          # externalBin is resolved against src-tauri, not against this file,
+          # and names the sidecar without its triple -- Tauri appends
+          # "-<target-triple><ext>" itself, which is why the staged file carries it.
+          with open("build/tauri-package.json", "w", encoding="utf-8") as handle:
+              json.dump(
+                  {
+                      "version": __version__,
+                      "bundle": {"externalBin": ["binaries/clipsync-sidecar"]},
+                  },
+                  handle,
+              )
+          PY
+          cat build/tauri-package.json
+      - name: Build the desktop bundles
+        working-directory: desktop
+        run: npm exec tauri build -- --config ../build/tauri-package.json --bundles ${{ matrix.bundles }}
+      - name: Upload the bundles
+        uses: actions/upload-artifact@v4
+        with:
+          # Installers only.  The macOS .app reaches an artifact zip without its
+          # symlinks, so the dmg is the one to hand a user there; a Linux
+          # AppImage needs a chmod +x after download; Windows' setup .exe runs
+          # as it is.
+          name: ${{ matrix.artifact }}
+          path: |
+            desktop/src-tauri/target/release/bundle/**/*-setup.exe
+            desktop/src-tauri/target/release/bundle/**/*.msi
+            desktop/src-tauri/target/release/bundle/**/*.dmg
+            desktop/src-tauri/target/release/bundle/**/*.deb
+            desktop/src-tauri/target/release/bundle/**/*.AppImage
+          if-no-files-found: error
+
+  release:
+    # build.yml owns the release on a tag and creates it from the legacy
+    # builds; this job waits for that release and adds the desktop installers
+    # to it, so one Releases page carries both apps.  Nothing is deleted here.
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: package
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: bundles
+      - name: Attach the desktop installers to the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          tag="${{ github.ref_name }}"
+
+          # The legacy builds finish first in practice, but this workflow does
+          # not depend on that: wait for the release rather than race it.
+          for _ in $(seq 1 30); do
+            if gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then break; fi
+            sleep 20
+          done
+          gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null
+
+          # Installers only -- a macOS .app would otherwise contribute one
+          # release asset per file inside the bundle.  Read with -print0 so a
+          # path with a space in it survives.
+          files=()
+          while IFS= read -r -d '' f; do
+            case "$f" in
+              *-setup.exe|*.msi|*.dmg|*.deb|*.AppImage) files+=("$f") ;;
+            esac
+          done < <(find bundles -type f -print0)
+          if [ "${#files[@]}" -eq 0 ]; then
+            echo "::error::No desktop installers were produced"
+            exit 1
+          fi
+          printf 'Attaching: %s\n' "${files[@]}"
+          gh release upload "$tag" --repo "$GITHUB_REPOSITORY" --clobber "${files[@]}"

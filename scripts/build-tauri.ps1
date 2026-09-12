@@ -18,9 +18,16 @@ try {
     & $Cargo test --manifest-path src-tauri/Cargo.toml --locked
     if ($LASTEXITCODE -ne 0) { throw "Rust tests failed" }
     $Version = (& $Python -c "import sys; sys.path.insert(0, '..'); from internal.version import __version__; print(__version__)").Trim()
+    New-Item -ItemType Directory -Force -Path (Join-Path $Root "build") | Out-Null
     $Config = Join-Path $Root "build/tauri-package.json"
-    @{ version = $Version; bundle = @{ externalBin = @("../desktop/src-tauri/binaries/clipsync-sidecar") } } |
-        ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $Config -Encoding utf8
+    # externalBin is resolved against src-tauri, not against this file, so the
+    # path is "binaries/..." -- spelling it "../desktop/src-tauri/binaries/..."
+    # made every build fail with "resource path ... doesn't exist".
+    # WriteAllText rather than Set-Content -Encoding utf8: under Windows
+    # PowerShell 5.1 that writes a BOM, and Tauri will not parse the config.
+    $Override = @{ version = $Version; bundle = @{ externalBin = @("binaries/clipsync-sidecar") } } |
+        ConvertTo-Json -Depth 4
+    [IO.File]::WriteAllText($Config, $Override)
     & npm exec tauri build -- --config $Config
     if ($LASTEXITCODE -ne 0) { throw "Tauri build failed" }
     if ($VerifyPackage) {
