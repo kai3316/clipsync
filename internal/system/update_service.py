@@ -88,7 +88,7 @@ class UpdateService:
         self._installing = False
         self._pending_version = ""
         self._last_progress = 0.0
-        self._last_auto_check = 0.0
+        self._last_auto_check: float | None = None
         self._shutting_down = False
         self._timer: threading.Thread | None = None
         self._wake = threading.Event()
@@ -347,7 +347,13 @@ class UpdateService:
         if cfg is None or not getattr(cfg, "auto_update_check", True):
             return False
         now = time.monotonic()
-        if now - self._last_auto_check < AUTO_CHECK_INTERVAL:
+        # None is "never checked", and it cannot be spelled 0.0: monotonic()'s
+        # zero is boot, not the epoch, so on a host up for less than
+        # AUTO_CHECK_INTERVAL the sentinel reads as "checked a moment ago" and
+        # silently suppresses the first automatic check -- which is why this
+        # passed on a dev box up for 85h and failed on every fresh CI runner.
+        last = self._last_auto_check
+        if last is not None and now - last < AUTO_CHECK_INTERVAL:
             return False
         self._last_auto_check = now
         threading.Thread(

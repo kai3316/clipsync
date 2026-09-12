@@ -283,13 +283,37 @@ def test_auto_check_respects_the_setting_and_the_window(published, monkeypatch):
     cfg = SimpleNamespace(auto_update_check=False)
     service = UpdateService(publish=lambda n, d: published.append((n, d)), config=lambda: cfg)
     assert service.maybe_auto_check() is False
-    assert service._last_auto_check == 0.0  # disabled must not arm the throttle
+    assert service._last_auto_check is None  # disabled must not arm the throttle
     cfg.auto_update_check = True
     assert service.maybe_auto_check() is True
     assert wait_for(lambda: published and published[0][0] == "update.available")
     assert published[0][1]["latest"] == "v2"
     assert service.maybe_auto_check() is False  # inside the 6h window
     assert len(checks) == 1
+    service.stop()
+
+
+def test_auto_check_fires_when_uptime_is_below_the_window(published, monkeypatch):
+    """A host up for a minute must still get its first automatic check.
+
+    This is the condition every fresh CI runner is in and no long-running dev
+    box ever is, which is why the bug below went unseen: ``_last_auto_check``
+    was seeded with 0.0 to mean "never checked", but ``time.monotonic()`` counts
+    from boot rather than the epoch.  On a host whose uptime is below
+    AUTO_CHECK_INTERVAL the sentinel read as "checked a moment ago", so the
+    throttle suppressed the very first check -- a laptop rebooted daily could
+    never run one at all.
+    """
+    monkeypatch.setattr(updater, "check_for_update", lambda timeout=None: {
+        "available": False, "latest": "1.0.1", "current": "1.0.1", "url": "",
+    })
+    service = UpdateService(publish=lambda n, d: published.append((n, d)),
+                            config=lambda: SimpleNamespace(auto_update_check=True))
+    assert service._last_auto_check is None  # not 0.0: see the docstring
+    with monkeypatch.context() as scoped:
+        # 42 seconds of uptime, far below the 6h window.
+        scoped.setattr(update_service.time, "monotonic", lambda: 42.0)
+        assert service.maybe_auto_check() is True
     service.stop()
 
 
