@@ -350,6 +350,31 @@ describe("desktop application store", () => {
     store.dispose();
   });
 
+  it("does not call a confirm that is waiting on the peer a failure", async () => {
+    // `paired: false` is also what a handshake in flight answers.  Read as
+    // failure it told the user the opposite of what was happening, while the
+    // row underneath already said 等待对方确认.
+    const device = { id: "peer", name: "Peer", paired: false, connection_state: "online",
+      pairing_status: "confirmed_waiting", pairing_code: "123456", sas: "ABCD" };
+    vi.mocked(bridge.devices).mockResolvedValueOnce({ items: [device] });
+    vi.mocked(bridge.confirmPairing).mockResolvedValueOnce({ paired: false, status: "confirmed_waiting" });
+    const store = createApplicationStore();
+    await store.confirmPairing(device);
+    expect(store.state.notices).toEqual([]);
+    store.dispose();
+  });
+
+  it("still says so when the confirm lands after the handshake is over", async () => {
+    const device = { id: "peer", name: "Peer", paired: false, connection_state: "online",
+      pairing_status: "cancelled", pairing_code: "123456", sas: "ABCD" };
+    vi.mocked(bridge.devices).mockResolvedValueOnce({ items: [device] });
+    vi.mocked(bridge.confirmPairing).mockResolvedValueOnce({ paired: false, status: "cancelled" });
+    const store = createApplicationStore();
+    await store.confirmPairing(device);
+    expect(store.state.notices.map((notice) => notice.title)).toEqual(["pairing.failed"]);
+    store.dispose();
+  });
+
   it("sends a URL to the chosen device and reports that the frame left", async () => {
     const store = createApplicationStore();
     vi.mocked(bridge.sendUrl).mockResolvedValueOnce({ sent: true, device_id: "peer" });
