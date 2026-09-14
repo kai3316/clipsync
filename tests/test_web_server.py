@@ -696,8 +696,20 @@ NO_RULES = "No rules match the specified criteria.\r\n"
 
 @pytest.fixture
 def on_windows(monkeypatch):
-    """The rule reader is a Windows-only path; the suite runs on every OS."""
+    """The rule reader is a Windows-only path; the suite runs on every OS.
+
+    `sys.platform` is not the only thing that path assumes.  It also passes
+    `subprocess.CREATE_NO_WINDOW`, which exists only on Windows and is read
+    while the probe is built -- so on a host that is not Windows the probe
+    raises before it can run, and the broad `except` that keeps a missing
+    netsh from being fatal turns that into "unreadable".  That is a true
+    answer about a real machine and not the one this simulation is asking
+    about, which is why the attribute is supplied here rather than dropped
+    from the implementation: on Windows it is always there.
+    """
     monkeypatch.setattr(sys, "platform", "win32")
+    if not hasattr(subprocess, "CREATE_NO_WINDOW"):
+        monkeypatch.setattr(subprocess, "CREATE_NO_WINDOW", 0x08000000, raising=False)
 
 
 @pytest.fixture
