@@ -307,7 +307,17 @@ impl Bridge {
         let startup = bridge.clone();
         let startup_app = app.clone();
         tauri::async_runtime::spawn(async move {
-            if tokio::time::timeout(Duration::from_secs(15), startup.wait_ready())
+            // Generous on purpose.  The sidecar is a PyInstaller onefile build,
+            // so the clock here covers unpacking its Python runtime to a temp
+            // directory, starting the interpreter, and only then bringing the
+            // LAN runtime up -- measured at ~15s warm and ~20s cold on an M-series
+            // laptop, against a 15s bound that the sidecar therefore lost by a
+            // fraction of a second.  Losing it is not a slow start: this branch
+            // terminates the sidecar, so the window reported SIDECAR_UNAVAILABLE
+            // for a process that was in fact still coming up.  A timeout only
+            // bounds a failure, so the cost of the headroom is paid by a sidecar
+            // that is genuinely wedged.
+            if tokio::time::timeout(Duration::from_secs(60), startup.wait_ready())
                 .await
                 .is_err()
             {
