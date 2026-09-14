@@ -624,6 +624,11 @@ def _dispatch(
                     "latest": result.get("latest", ""),
                     "current": result.get("current", ""),
                     "url": result.get("url", ""),
+                    # The check's own explanation of why it has no answer.  The
+                    # panel otherwise says "could not reach the update server"
+                    # for a rate limit, a blocked API host and a dead network
+                    # alike, which is the one thing all three are not.
+                    "error": result.get("error", ""),
                 },
                 200,
             )

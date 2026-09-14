@@ -2326,9 +2326,14 @@ async function checkForUpdate() {
   try {
     const result = await store.checkUpdate();
     // "unknown" and "up to date" must not look alike: only a real answer with
-    // no newer release claims the app is current.
+    // no newer release claims the app is current.  And "unknown" must say what
+    // it was: the reply carries the check's own reason, and without it a
+    // blocked API host, a rate limit and a dead network are one sentence.
     if (!result) announce(t("无法连接更新服务器"));
-    else if (!result.available) announce(result.latest ? t("已是最新版本") : t("无法连接更新服务器"));
+    else if (!result.available) {
+      if (result.latest) announce(t("已是最新版本"));
+      else announce(t("检查更新失败") + (result.error ? `：${result.error}` : ""));
+    }
   } finally { updateChecking.value = false; }
 }
 async function startUpdateDownload() {

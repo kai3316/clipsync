@@ -15,7 +15,10 @@ from internal.system import updater
 
 @pytest.fixture(autouse=True)
 def _offline_release_lookup(monkeypatch):
-    monkeypatch.setattr(updater, "_fetch_latest_release", lambda timeout=6.0: None)
+    # Signature matches the real one: callers that need to explain a failure
+    # pass a list to append the reason to, and a double that cannot accept it
+    # would fail rather than stand in.
+    monkeypatch.setattr(updater, "_fetch_latest_release", lambda timeout=6.0, failure=None: None)
 
 
 @pytest.fixture(autouse=True)

@@ -1070,7 +1070,15 @@
           } else {
             self.updateAvailable = null;
             self.updateLatest = '';
-            self.store.showToast(self.t('settings_window.update_check_failed'), 2500);
+            // Say what the check said.  One sentence for every failure left a
+            // rate limit, a blocked API host and a dead network looking alike,
+            // and only the last of those is the user's to fix.
+            self.store.showToast(
+              res && res.error
+                ? self.t('settings_window.update_check_error') + ': ' + res.error
+                : self.t('settings_window.update_check_failed'),
+              3000
+            );
           }
         }).catch(function () {
           self.updateChecking = false;

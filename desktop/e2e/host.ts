@@ -312,7 +312,7 @@ export const fixtures: Record<string, unknown> = {
   },
   autostart_status: true,
   update_status: { state: { phase: "idle", fraction: 0, downloaded: 0, total: 0, error: "", version: "", path: "" } },
-  update_check: { available: false, latest: "1.0.5", current: "1.0.5", url: "", installable: false },
+  update_check: { available: false, latest: "1.0.5", current: "1.0.5", url: "", installable: false, error: "" },
   // A reply at all means the install did not happen, so this is the shape the
   // preview shows when there is nothing newer to install.
   update_install: { ok: true, installed: false, reason: "up_to_date" },

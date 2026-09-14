@@ -456,6 +456,7 @@
   "settings_window.update_check_now": "Check for updates",
   "settings_window.up_to_date": "ClipSync is up to date",
   "settings_window.update_check_failed": "Could not reach the update server",
+  "settings_window.update_check_error": "The update check failed",
   "settings_window.update_available_found": "New version available: {version}",
   "settings_window.update_install_now": "Download and install",
   "settings_window.update_installing": "Installing the update — ClipSync will restart automatically.",

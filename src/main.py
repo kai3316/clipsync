@@ -4649,7 +4649,14 @@ class Application:
                 elif result.get("latest"):
                     _present(T("tray.up_to_date"), f"ClipSync {result.get('current', '')}")
                 else:
-                    _present(T("tray.update_failed"), "ClipSync")
+                    # The reason travels with the result, so say it.  "Failed"
+                    # on its own cannot tell a rate limit from a blocked host
+                    # from no network, and only the last is the user's to fix.
+                    detail = result.get("error") or ""
+                    _present(
+                        T("tray.update_failed"),
+                        f"ClipSync\n{detail}" if detail else "ClipSync",
+                    )
 
             self.root.after(0, _done)
 

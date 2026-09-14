@@ -302,3 +302,105 @@ def test_config_roundtrip_auto_update_check(tmp_path, monkeypatch):
     cfg2 = config_module.load()
     assert cfg2.auto_update_check is False
 
+
+
+# ══════════════════════════════════════════════════════════════════════
+# 5 — why a check has no answer
+#
+# "Could not reach the update server" used to be the whole of it: the reason
+# was known inside _fetch_latest_release and dropped one frame up, so a rate
+# limit, a blocked API host and no network at all were one sentence -- and
+# only the last of those is the user's to fix.
+# ══════════════════════════════════════════════════════════════════════
+
+
+class _Response:
+    """The part of urlopen's return value that the lookup uses."""
+
+    def __init__(self, payload):
+        self._body = json.dumps(payload).encode("utf-8")
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc_info):
+        return False
+
+    def read(self):
+        return self._body
+
+
+def _no_retry_delay(monkeypatch):
+    """Skip the backoff between attempts: three tries sleep 1.5s in total."""
+    monkeypatch.setattr(time, "sleep", lambda _seconds: None)
+
+
+def _urlopen_raises(monkeypatch, exc):
+    def explode(*args, **kwargs):
+        raise exc
+
+    monkeypatch.setattr(updater_mod.urllib.request, "urlopen", explode)
+    _no_retry_delay(monkeypatch)
+
+
+def test_a_network_failure_names_itself_in_the_answer(monkeypatch):
+    import urllib.error
+
+    _urlopen_raises(monkeypatch, urllib.error.URLError(OSError(10054, "reset by peer")))
+
+    result = updater_mod.check_for_update()
+
+    assert result["available"] is False
+    assert result["latest"] == ""
+    # Not just "it failed": the OS-level reason survived to the caller.
+    assert "10054" in result["error"]
+    assert result["url"] == updater_mod._RELEASES_PAGE
+
+
+def test_a_refused_request_reports_the_status_and_githubs_own_reason(monkeypatch):
+    import io
+    import urllib.error
+
+    # urllib's own text for this is "HTTP Error 403: Forbidden", which drops the
+    # body -- and the body is the whole answer: rate limit, not a bad request.
+    body = io.BytesIO(json.dumps({"message": "API rate limit exceeded for 1.2.3.4"}).encode())
+    _urlopen_raises(
+        monkeypatch,
+        urllib.error.HTTPError(updater_mod._LATEST_URL, 403, "Forbidden", {}, body),
+    )
+
+    result = updater_mod.check_for_update()
+
+    assert result["error"] == "HTTP 403: API rate limit exceeded for 1.2.3.4"
+
+
+def test_a_release_with_no_tag_is_not_reported_as_a_network_failure(monkeypatch):
+    # A 200 that says nothing useful is a different problem with a different
+    # answer, and calling it "could not reach the server" would send the user
+    # to look at a network that is working.
+    monkeypatch.setattr(
+        updater_mod.urllib.request, "urlopen", lambda *a, **k: _Response({"assets": []})
+    )
+
+    result = updater_mod.check_for_update()
+
+    assert result["available"] is False
+    assert result["error"] == "release has no tag_name"
+    assert "URLError" not in result["error"]
+
+
+def test_a_real_answer_carries_no_error(monkeypatch):
+    monkeypatch.setattr(
+        updater_mod.urllib.request,
+        "urlopen",
+        lambda *a, **k: _Response(
+            {"tag_name": "v99.0.0", "html_url": "https://example.invalid/rel"}
+        ),
+    )
+
+    result = updater_mod.check_for_update()
+
+    assert result["error"] == ""
+    assert result["available"] is True
+    assert result["latest"] == "v99.0.0"
+    assert result["url"] == "https://example.invalid/rel"

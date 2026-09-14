@@ -722,6 +722,7 @@ export const EN: Record<string, string> = {
   "自动下载最新版本，下载完成后提示你手动替换旧版本。":
     "Downloads the latest version automatically and then asks you to replace the old one manually.",
   "无法连接更新服务器": "Could not reach the update server",
+  "检查更新失败": "The update check failed",
   "请退出当前应用，然后用下方文件替换旧版本。剪贴板历史与设备仍保留在本机。":
     "Quit the app, then replace the old version with the file below. Your clipboard history and devices stay on this machine.",
 

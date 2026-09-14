@@ -10,6 +10,7 @@ import json
 import logging
 import os
 import ssl
+import urllib.error
 import urllib.request
 from collections.abc import Callable
 
@@ -70,12 +71,40 @@ def _is_newer(latest: str, current: str) -> bool:
     return lv > cv
 
 
-def _fetch_latest_release(timeout: float = 6.0) -> dict | None:
+def _describe(exc: Exception | None) -> str:
+    """One line naming why the release lookup failed.
+
+    An HTTP status is the failure whose cause is not in the exception's text:
+    urllib says "HTTP Error 403: Forbidden" and drops the body, and the body is
+    where GitHub puts "API rate limit exceeded for <ip>".  That sentence is the
+    difference between "wait an hour" and "something here is blocking the API",
+    so it is read back and included.
+    """
+    if isinstance(exc, urllib.error.HTTPError):
+        body = ""
+        with contextlib.suppress(Exception):
+            body = exc.read().decode("utf-8", "replace")[:400]
+        message = ""
+        with contextlib.suppress(Exception):
+            message = (json.loads(body).get("message") or "").strip()
+        return f"HTTP {exc.code}: {message}" if message else f"HTTP {exc.code}"
+    if exc is None:
+        return ""
+    return f"{type(exc).__name__}: {exc}"
+
+
+def _fetch_latest_release(timeout: float = 6.0, failure: list[str] | None = None) -> dict | None:
     """Fetch the latest GitHub release JSON, or None on any failure.
 
     Retried a couple of times with a short backoff so a single transient
     network blip (Wi-Fi dropout, DNS hiccup) doesn't surface as a hard
     "check failed" to a user who just clicked the tray item.
+
+    A caller that has to explain the failure passes ``failure`` -- a list it
+    owns, appended with one line saying what went wrong.  Without it the reason
+    is only logged, and that is how "could not reach the update server" reached
+    the user with no cause attached: the answer was known right here and
+    discarded one frame up.
     """
     last_exc: Exception | None = None
     for attempt in range(3):
@@ -96,6 +125,8 @@ def _fetch_latest_release(timeout: float = 6.0) -> dict | None:
 
                 _time.sleep(0.5 * (attempt + 1))
     logger.debug("Update check failed after 3 attempts: %s", last_exc)
+    if failure is not None:
+        failure.append(_describe(last_exc))
     return None
 
 
@@ -103,17 +134,35 @@ def check_for_update(timeout: float = 6.0) -> dict:
     """Query GitHub for the latest release and compare to our version.
 
     Returns a dict:
-        {"available": bool, "latest": str, "current": str, "url": str}
+        {"available": bool, "latest": str, "current": str, "url": str,
+         "error": str}
     On any failure (offline, rate-limited, parse error) returns
-    {"available": False, "latest": "", "current": __version__, "url": ""}.
+    {"available": False, "latest": "", "current": __version__,
+     "url": <the releases page>, "error": "<why>"}.
+
+    The reason is part of the answer rather than a log line.  A check the user
+    asked for that comes back "could not reach the update server" and nothing
+    else leaves them unable to tell a blocked network from a rate limit from a
+    bug in here -- and the first of those is theirs to fix, not ours.
     """
-    result = {"available": False, "latest": "", "current": __version__, "url": _RELEASES_PAGE}
-    data = _fetch_latest_release(timeout)
+    result = {
+        "available": False,
+        "latest": "",
+        "current": __version__,
+        "url": _RELEASES_PAGE,
+        "error": "",
+    }
+    failure: list[str] = []
+    data = _fetch_latest_release(timeout, failure)
     if not data:
+        result["error"] = failure[0] if failure else ""
         return result
 
     latest = (data.get("tag_name") or "").strip()
     if not latest:
+        # A 200 with no tag in it.  Nothing the user can act on, but it is not
+        # a network problem and must not be reported as one.
+        result["error"] = "release has no tag_name"
         return result
 
     result["latest"] = latest

@@ -163,6 +163,10 @@ class UpdateService:
             "latest": result.get("latest", ""),
             "current": result.get("current", ""),
             "url": result.get("url", ""),
+            # Travels with the answer so the client can say why there is none.
+            # The keys above are a projection, and a projection that drops the
+            # reason turns every failure into the same four-word sentence.
+            "error": result.get("error", ""),
         }
 
     # ── download ─────────────────────────────────────────────────────────
