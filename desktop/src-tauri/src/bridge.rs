@@ -273,7 +273,28 @@ impl Bridge {
             }
             Ok(command)
         }
-        #[cfg(not(debug_assertions))]
+        #[cfg(all(not(debug_assertions), target_os = "macos"))]
+        {
+            // A directory build, shipped as a bundle resource rather than as an
+            // `externalBin`: that field takes a single executable and embeds it
+            // beside this one, and what this sidecar needs is room for the
+            // `_internal` tree it unpacked into at build time.  Shipping the
+            // tree and starting it in place is what keeps macOS from having to
+            // re-validate a fresh extraction on every launch, which is the
+            // whole reason it is built this way on this platform.
+            let exe = std::env::current_exe().map_err(|_| BridgeError::unavailable())?;
+            let bundle = exe
+                .parent()
+                .and_then(|macos| macos.parent())
+                .ok_or_else(BridgeError::unavailable)?;
+            Ok(Command::new(
+                bundle
+                    .join("Resources")
+                    .join("sidecar")
+                    .join("clipsync-sidecar"),
+            ))
+        }
+        #[cfg(all(not(debug_assertions), not(target_os = "macos")))]
         {
             let exe = std::env::current_exe().map_err(|_| BridgeError::unavailable())?;
             let name = if cfg!(windows) {

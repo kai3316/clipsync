@@ -291,7 +291,7 @@ internal/                     Business logic shared by both interfaces
   web/                        Phone companion and the previous web panel (HTTP + WebSocket)
   ui/                         The previous CustomTkinter interface
 
-clipsync-sidecar.spec         Packs the Python service into one file (tkinter excluded)
+clipsync-sidecar.spec         Packs the Python service (a directory on macOS, one file elsewhere; tkinter excluded)
 docs/                         The landing page (GitHub Pages root)
 ```
 

@@ -76,18 +76,28 @@ jobs:
         # which never loads the executable at all.
         if: runner.os == 'Windows'
         run: python scripts/smoke_sidecar.py dist/clipsync-sidecar.exe
-      - name: Stage the sidecar under its target-triple name
+      - name: Stage the sidecar beside the host
         # Bash on every runner: the Windows default shell would not run this.
         shell: bash
         run: |
           set -euo pipefail
-          ext=""
-          if [ "$RUNNER_OS" = "Windows" ]; then ext=".exe"; fi
-          triple=$(rustc -vV | sed -n 's/^host: //p')
-          echo "host target: $triple"
-          mkdir -p desktop/src-tauri/binaries
-          cp "dist/clipsync-sidecar${ext}" "desktop/src-tauri/binaries/clipsync-sidecar-${triple}${ext}"
-          ls -l desktop/src-tauri/binaries
+          # macOS builds the sidecar as a directory (see clipsync-sidecar.spec)
+          # and ships it as a bundle resource, so what is staged is the tree
+          # itself.  Everywhere else it stays the onefile executable, staged
+          # under the target-triple name Tauri's `externalBin` expects.
+          if [ "$RUNNER_OS" = "macOS" ]; then
+            rm -rf desktop/src-tauri/sidecar
+            cp -R dist/clipsync-sidecar desktop/src-tauri/sidecar
+            ls -l desktop/src-tauri/sidecar
+          else
+            ext=""
+            if [ "$RUNNER_OS" = "Windows" ]; then ext=".exe"; fi
+            triple=$(rustc -vV | sed -n 's/^host: //p')
+            echo "host target: $triple"
+            mkdir -p desktop/src-tauri/binaries
+            cp "dist/clipsync-sidecar${ext}" "desktop/src-tauri/binaries/clipsync-sidecar-${triple}${ext}"
+            ls -l desktop/src-tauri/binaries
+          fi
       - name: Write the packaging config
         # Mirrors scripts/build-tauri.ps1, without needing pwsh on macOS/Linux.
         shell: bash
@@ -101,7 +111,14 @@ jobs:
           sys.path.insert(0, ".")
           from internal.version import __version__
 
-          bundle = {"externalBin": ["binaries/clipsync-sidecar"]}
+          # macOS ships the sidecar as a resource directory and starts it from
+          # `Contents/Resources/sidecar/`; a single externalBin has nowhere to
+          # put the `_internal` tree it needs beside it.  See the spec's
+          # docstring for what that buys.
+          if "${{ runner.os }}" == "macOS":
+              bundle = {"resources": ["sidecar"]}
+          else:
+              bundle = {"externalBin": ["binaries/clipsync-sidecar"]}
 
           # The updater's payloads and their detached signatures.  Asked for on
           # a release build only: tauri.conf.json carries the public key, so the
@@ -120,6 +137,23 @@ jobs:
               json.dump({"version": __version__, "bundle": bundle}, handle)
           PY
           cat build/tauri-package.json
+      - name: Sign the staged macOS sidecar
+        # Before the bundler copies it in, because resources are sealed as data:
+        # signing them afterwards would break the app's seal.
+        #
+        # PyInstaller already ad-hoc signs everything it writes, the `_internal`
+        # tree included, so this is one binary -- but it is signed without the
+        # hardened runtime, and this re-signs it *with* one plus the entitlement
+        # that lets it load the Python framework beside it.  Left as PyInstaller
+        # wrote it, the runtime would come up unhardened, which is a weaker
+        # process than the onefile build it replaces.
+        if: runner.os == 'macOS'
+        run: |
+          set -euo pipefail
+          codesign --force --options runtime \
+            --entitlements desktop/src-tauri/entitlements.plist \
+            --sign - desktop/src-tauri/sidecar/clipsync-sidecar
+          codesign --verify --strict --verbose=2 desktop/src-tauri/sidecar/clipsync-sidecar
       - name: Build the desktop bundles
         working-directory: desktop
         env:
@@ -154,23 +188,33 @@ jobs:
             echo "::error::$app does not carry an ad-hoc signature"
             exit 1
           fi
-          # The sidecar is embedded in the bundle and has to be signed too.
-          codesign --verify --strict --verbose=2 "$app/Contents/MacOS/clipsync-sidecar"
-          echo "OK: $app and its sidecar carry ad-hoc signatures"
+          # The sidecar ships as a resource, which `--deep` above does not
+          # reach: it is sealed as data rather than as nested code the bundler
+          # signed.  It carries its own signature, and the entitlement that
+          # lets it load the Python framework beside it -- without that the
+          # library-identity check refuses the load and the process dies before
+          # it can send its first frame, which is what the released 1.0.5 did.
+          sidecar="$app/Contents/Resources/sidecar/clipsync-sidecar"
+          test -x "$sidecar"
+          codesign --verify --strict --verbose=2 "$sidecar"
+          if ! codesign -d --entitlements - "$sidecar" 2>&1 | grep -q 'disable-library-validation'; then
+            echo "::error::$sidecar is missing the entitlement its Python runtime needs"
+            exit 1
+          fi
+          echo "OK: $app is ad-hoc signed and $sidecar carries its entitlement"
       - name: Run the bundled sidecar from inside the macOS bundle
-        # The signatures above are necessary but not sufficient.  The sidecar is
-        # a PyInstaller onefile build, so the Python framework is packed inside
-        # the executable and extracted to a temp directory at run time carrying
-        # whatever signature it had when the runner's Python was installed.
-        # macOS refuses to load a dylib whose Team ID differs from its
-        # process's, and that refusal happens after every check above has
-        # passed -- which is how build.yml came to re-sign the legacy bundle at
-        # all.  Running the sidecar from where the application will run it is
-        # the only test that reaches the extract-and-load path.
+        # The signatures above are necessary but not sufficient.  The sidecar
+        # loads a Python framework that PyInstaller signed separately from it,
+        # and macOS refuses to load a library whose signing identity differs
+        # from its process's unless the process carries the entitlement that
+        # waives the check.  That refusal happens after every check above has
+        # passed -- which is how the released 1.0.5 shipped a sidecar that
+        # could not start at all.  Running the sidecar from where the
+        # application will run it is the only test that reaches the load.
         if: runner.os == 'macOS'
         run: |
           set -euo pipefail
-          sidecar="desktop/src-tauri/target/release/bundle/macos/ClipSync.app/Contents/MacOS/clipsync-sidecar"
+          sidecar="desktop/src-tauri/target/release/bundle/macos/ClipSync.app/Contents/Resources/sidecar/clipsync-sidecar"
           data=$(mktemp -d)
           # --history-only opens no sockets and starts no background services;
           # EOF on stdin ends the session and returns 0.  A dyld failure to load
