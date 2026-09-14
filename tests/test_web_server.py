@@ -685,6 +685,9 @@ EN_RULE = (
 
 # What the PowerShell fallback prints: a sentinel, then one line per rule.
 CIM_PORTS = "CLIPSYNC-RULE\r\n19990,19991\r\n"
+# A rule that was read successfully and allows the wrong port -- readable, and
+# therefore safe to replace, unlike the unreadable rule below.
+CIM_OTHER_PORT = "CLIPSYNC-RULE\r\n1234\r\n"
 # The sentinel with no rules under it -- the rule is genuinely absent.
 CIM_NONE = "CLIPSYNC-RULE\r\n"
 # netsh's answer when the rule is gone.
@@ -810,16 +813,16 @@ class TestTheFirewallRuleIsReadInAnyLanguage:
 
         return run
 
-    def test_repairing_an_unreadable_rule_replaces_it_instead_of_stacking_a_second(
+    def test_a_rule_read_as_wrong_is_replaced_instead_of_stacked(
         self, monkeypatch, on_windows
     ):
         # netsh creates a SECOND rule under the same name rather than updating
-        # one, so adding without deleting first leaves duplicates behind on
-        # every repair.  An unreadable rule is now repaired too, so it has to
-        # take the same delete-then-add path the wrong-port case did.
+        # one, so a repair that only adds leaves a duplicate behind every time.
+        # A rule whose ports were read and found wrong is the one case where
+        # deleting first costs nothing: it is not serving the ports we need.
         commands = []
         monkeypatch.setattr(
-            subprocess, "run", self._recording_run(commands, "", CN_RULE)
+            subprocess, "run", self._recording_run(commands, CIM_OTHER_PORT, CN_RULE)
         )
         assert web_server.WebServer._open_firewall(19990, 19991) is True
         assert [argv[3] for argv in commands if argv[0] == "netsh"] == [
@@ -827,6 +830,26 @@ class TestTheFirewallRuleIsReadInAnyLanguage:
             "delete",
             "add",
         ]
+
+    def test_a_rule_that_could_not_be_read_is_never_deleted(
+        self, monkeypatch, on_windows
+    ):
+        # Unreadable is not the same answer as wrong, and this delete is the
+        # one that cannot be taken back: netsh needs elevation to add a rule,
+        # so a refused add after a successful delete leaves the machine with no
+        # rule at all.  That is not hypothetical -- the localized-label misread
+        # deleted a correct rule on every launch and then failed to put it back
+        # with "the requested operation requires elevation".
+        #
+        # Adding beside a rule we could not read is the recoverable mistake:
+        # duplicates allow the port twice, which is a blemish, where a delete
+        # that cannot be undone is a loss.
+        commands = []
+        monkeypatch.setattr(
+            subprocess, "run", self._recording_run(commands, "", CN_RULE)
+        )
+        assert web_server.WebServer._open_firewall(19990, 19991) is True
+        assert [argv[3] for argv in commands if argv[0] == "netsh"] == ["show", "add"]
 
     def test_an_already_correct_rule_is_not_repaired(self, monkeypatch, on_windows):
         # The other half of the same contract: nothing to fix must mean no UAC

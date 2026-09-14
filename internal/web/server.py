@@ -887,12 +887,17 @@ class WebServer:
         ok, detail = WebServer.check_firewall_rule(ports)
         if ok:
             return True
-        if detail.startswith("Wrong port") or detail == "Unknown":
-            # Delete before adding: netsh will happily create a second rule
-            # under the same name, so re-adding over an existing one piles up
-            # duplicates.  "Unknown" is included because the rule may well be
-            # there and merely unreadable — the replace is correct either way,
-            # and leaving a stale rule beside the new one is not.
+        if detail.startswith("Wrong port"):
+            # Delete before adding: netsh would otherwise create a *second*
+            # rule under the same name rather than update the first.
+            #
+            # Only a rule that was read and found wrong is in this branch.
+            # "Unknown" deliberately is not: unreadable means unread, not
+            # wrong, and this delete is how a working rule gets destroyed --
+            # the add that follows needs elevation, so if that is refused the
+            # machine is left with no rule at all.  A rule readable enough to
+            # say "wrong ports" is not serving what we need, so removing it
+            # costs nothing.
             logger.info("Replacing the firewall rule (%s)", detail)
             try:  # noqa: SIM105
                 subprocess.run(
