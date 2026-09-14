@@ -10,7 +10,9 @@
   * GET /api/logs (tail semantics and token redaction) and the favourites
     export endpoint's file output;
   * two request-path/field-type hardening cases that decide the status a
-    client sees.
+    client sees;
+  * that starting the companion resolves no names -- binding its socket must
+    not make the OS look this machine up.
 """
 
 import contextlib
@@ -21,6 +23,7 @@ import struct
 import sys
 import threading
 import time
+from types import SimpleNamespace
 
 import pytest
 
@@ -28,6 +31,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from internal.clipboard.format import ClipboardContent, ContentType
 from internal.clipboard.history_db import ClipboardHistoryDB
+from internal.web import server as web_server
 from internal.web.dialog import DialogManager
 from internal.web.routes import dispatch
 from internal.web.ws import WebSocketClient, WebSocketManager
@@ -748,3 +752,45 @@ class TestKeepaliveDropsOnFailedPing:
             for s in (a, b):
                 with contextlib.suppress(OSError):
                     s.close()
+
+
+# ── Starting the companion ─────────────────────────────────────────────
+
+
+def test_starting_the_companion_resolves_no_names(monkeypatch):
+    """Binding the socket must not make the OS look this machine up.
+
+    ``ThreadingHTTPServer`` inherits ``HTTPServer.server_bind()``, which fills
+    ``server_name`` with ``socket.getfqdn(bound_address)`` -- and ``getfqdn``
+    turns the wildcard into ``gethostbyaddr(gethostname())``, a reverse lookup
+    of this machine's own name.  That call is on the thread the user waits on
+    while the companion starts, and where the name is in no zone (a macOS CI
+    runner, a laptop that has just joined a guest network, anything behind a VPN
+    that took the name server away) it does not fail fast: the resolver's own
+    timeout is tens of seconds, and the app sits there for all of it.  macOS is
+    where it is reliably fatal -- Linux answers its own name from /etc/hosts and
+    Windows from the local DNS client, while macOS delegates to mDNSResponder,
+    which waits out its full timeout.
+
+    The fake resolver raises instead of sleeping, so this measures the call and
+    not the clock: a bind that does the lookup fails here at once, and one that
+    does not cannot be slow.  ``_get_lan_ip`` is stubbed for the same reason --
+    it reaches the resolver through ``discovery.get_all_local_addresses``, which
+    has its own bound and its own case in test_transport_recovery.py.
+    """
+
+    def _no_reverse_lookup(*args, **kwargs):
+        raise AssertionError("the companion resolved a name while binding its socket")
+
+    monkeypatch.setattr(socket, "getfqdn", _no_reverse_lookup)
+    monkeypatch.setattr(web_server.WebServer, "_open_firewall", staticmethod(lambda *a, **k: True))
+    monkeypatch.setattr(web_server.WebServer, "_get_lan_ip", staticmethod(lambda: "127.0.0.1"))
+
+    # Port 0 asks the OS for a free port, so this can never collide with a real
+    # companion on the developer's machine or with another test.
+    cfg = SimpleNamespace(port=0, web_port=0, file_receive_dir=".")
+    server = web_server.WebServer(cfg, None, None)
+    try:
+        assert server.start() is True
+    finally:
+        server.stop()

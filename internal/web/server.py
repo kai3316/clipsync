@@ -16,6 +16,7 @@ import mimetypes
 import os
 import posixpath
 import socket
+import socketserver
 import sys
 import threading
 import time
@@ -437,6 +438,43 @@ def _build_file_response(filepath: str, mime: str = "application/octet-stream"):
 # ═══════════════════════════════════════════════════════════════════
 # ── WEB SERVER ────────────────────────────────────────────────────
 # ═══════════════════════════════════════════════════════════════════
+
+
+class _CompanionHTTPServer(ThreadingHTTPServer):
+    """`ThreadingHTTPServer` with the name lookup taken out of `server_bind`.
+
+    The stock class fills in `server_name` with `socket.getfqdn(bound_address)`,
+    and `getfqdn` throws the address away when it is the wildcard::
+
+        if not name or name in ('0.0.0.0', '::'):
+            name = gethostname()
+        hostname, aliases, ipaddrs = gethostbyaddr(name)
+
+    So binding ``"0.0.0.0"`` is a *reverse lookup of this machine's own name* --
+    on the thread that starts the companion, which is the thread the user is
+    waiting on.  Where that name is in no zone (a macOS CI runner, a laptop that
+    just joined a guest network, anything behind a VPN that took the name server
+    away with it) the resolver does not fail fast, and the app sits in
+    ``start()`` for the resolver's own timeout -- tens of seconds, with the
+    window already up.  macOS is where it is reliably fatal: Linux answers its
+    own name out of /etc/hosts and Windows out of the local DNS client, while
+    macOS hands it to mDNSResponder, which waits out its full timeout.  It is
+    the same misbehaviour ``discovery.get_all_local_addresses`` bounds, reached
+    through the standard library instead of through this project's code, which
+    is why bounding that one did not cover this.
+
+    Nothing needs the value it computes.  ``server_name`` is read nowhere in
+    this project, and the two places the stdlib would have used it are both out
+    of play: ``BaseHTTPRequestHandler.address_string()`` no longer does a
+    reverse lookup (it returns the client IP), and this project's handler
+    overrides ``log_message`` to a no-op.
+    """
+
+    def server_bind(self) -> None:
+        socketserver.TCPServer.server_bind(self)
+        host, port = self.server_address[:2]
+        self.server_name = host
+        self.server_port = port
 
 
 class WebServer:
@@ -2109,7 +2147,7 @@ class WebServer:
 
         # ── Create and start the HTTP server ──────────────────────
         try:
-            self._httpd = ThreadingHTTPServer((host, port), _Handler)
+            self._httpd = _CompanionHTTPServer((host, port), _Handler)
         except OSError as e:
             logger.warning("Web server failed to bind %s:%d: %s", host, port, e)
             return False
