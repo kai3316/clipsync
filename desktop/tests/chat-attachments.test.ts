@@ -6,7 +6,7 @@ import { bridge } from "../src/api/bridge";
 vi.mock("../src/api/bridge", () => ({
   bridge: {
     chatDevices: vi.fn(), chatSessions: vi.fn(), chatMessages: vi.fn(),
-    openChatFile: vi.fn(), markChatRead: vi.fn(),
+    openChatFile: vi.fn(), revealChatFile: vi.fn(), markChatRead: vi.fn(),
   },
 }));
 
@@ -21,6 +21,7 @@ const attachment = (extra = {}) => ({
 });
 let wrapper: ReturnType<typeof mount>;
 const openButton = () => wrapper.findAll("button").find(button => button.text() === "打开");
+const revealButton = () => wrapper.findAll("button").find(button => button.text() === "打开所在文件夹");
 
 beforeEach(() => {
   vi.useFakeTimers();
@@ -29,6 +30,7 @@ beforeEach(() => {
   vi.mocked(bridge.chatSessions).mockResolvedValue({ sessions: [session("one")] } as any);
   vi.mocked(bridge.chatMessages).mockResolvedValue({ messages: [attachment()] } as any);
   vi.mocked(bridge.openChatFile).mockResolvedValue({ ok: true });
+  vi.mocked(bridge.revealChatFile).mockResolvedValue({ ok: true, folder: "C:\\received" });
 });
 afterEach(() => {
   wrapper?.unmount();
@@ -100,5 +102,32 @@ describe("saved chat attachments", () => {
     await flushPromises();
     expect(openButton()).toBeUndefined();
     expect(bridge.openChatFile).not.toHaveBeenCalled();
+  });
+});
+
+describe("revealing where a saved attachment went", () => {
+  it("sits beside 打开 and reveals the same file by the same IDs", async () => {
+    // The legacy chat panel offered both on a saved attachment and the new page
+    // had only the first; the second resolves the folder host-side, so the
+    // renderer still passes ids and never a path.
+    wrapper = mount(ChatView);
+    await flushPromises();
+    await revealButton()!.trigger("click");
+    await flushPromises();
+    expect(bridge.revealChatFile).toHaveBeenCalledExactlyOnceWith("one", "transfer");
+  });
+
+  it("is offered only where 打开 is: received, finished and actually saved", async () => {
+    vi.mocked(bridge.chatMessages).mockResolvedValue({ messages: [
+      attachment({ entry_id: "a", outgoing: true }),
+      attachment({ entry_id: "b", status: "await_accept" }),
+      attachment({ entry_id: "c", saved_path: "" }),
+      attachment({ entry_id: "d", transfer_id: "" }),
+      attachment({ entry_id: "e", status: "failed" }),
+    ] } as any);
+    wrapper = mount(ChatView);
+    await flushPromises();
+    expect(revealButton()).toBeUndefined();
+    expect(bridge.revealChatFile).not.toHaveBeenCalled();
   });
 });

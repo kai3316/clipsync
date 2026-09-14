@@ -1145,6 +1145,27 @@ def _dispatch(
             ok = on_transfer_action("cancel", transfer_id)
             return _json_response({"ok": ok})
 
+        elif path in ("/api/transfer/accept", "/api/transfer/reject"):
+            # Answer an INCOMING transfer request.  The phone renders 接受/拒绝
+            # for a row in state "pending" (mobile.html:3447-3448) and posts
+            # here, and the host has handled both actions all along
+            # (``_handle_web_transfer_action``, ``lan.web_transfer_action``,
+            # whose allow-list names them) -- but the two routes were never
+            # registered, so every tap fell through to the 404 tail and the
+            # request stayed pending forever unless the desktop answered it.
+            # The action word is taken from the path, so the pair shares a body.
+            if on_transfer_action is None:
+                return _json_response({"ok": False, "error": "not available"}, 503)
+            try:
+                req = json.loads(body.decode("utf-8"))
+            except (json.JSONDecodeError, UnicodeDecodeError):
+                return _json_response({"ok": False, "error": "invalid json"}, 400)
+            transfer_id = req.get("transfer_id", "")
+            if not transfer_id:
+                return _json_response({"ok": False, "error": "transfer_id required"}, 400)
+            ok = on_transfer_action(path.rsplit("/", 1)[-1], transfer_id)
+            return _json_response({"ok": ok})
+
         elif path == "/api/transfer/pause":
             if on_transfer_action is None:
                 return _json_response({"ok": False, "error": "not available"}, 503)

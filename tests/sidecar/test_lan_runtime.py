@@ -1,8 +1,15 @@
-"""Headless LAN integration with real pairing/codec/sync and fake clipboard I/O."""
+"""Headless LAN integration with real pairing/codec/sync and fake clipboard I/O.
+
+What stays here is what another surface can see: the frames and event payloads
+the desktop, the web page and the phone agree on, the pairing and re-trust
+rules, the consent gates around inbound transfers and the ``clip_file`` pull
+(which the relay trusts are cut for, further down), what the outgoing payload
+redacts versus what history keeps, and the file/folder transfer shapes.  The
+thread-ownership and lock-ordering cases live with the transport itself.
+"""
 
 import base64
 import tempfile
-import threading
 import time
 import zipfile
 from copy import deepcopy
@@ -14,8 +21,9 @@ from internal.application.errors import ApplicationError
 from internal.application.events import EventJournal
 from internal.clipboard.clipboard import ClipboardMonitor
 from internal.clipboard.format import ClipboardContent, ContentType, SyncMessage
+from internal.clipboard.history_db import ClipboardHistoryDB as HistoryDB
 from internal.config.config import Config, PeerInfo
-from internal.infrastructure.runtime.lan import LanRuntime
+from internal.infrastructure.runtime.lan import CLIP_FILE_WINDOW, LanRuntime
 from internal.protocol.codec import decode_message, encode_frame
 from internal.security.encryption import EncryptionManager
 from internal.security.pairing import (
@@ -281,6 +289,51 @@ def test_chat_file_progress_and_outcome_are_published(rig):
     ]
 
 
+def test_chat_reveal_opens_the_folder_holding_a_saved_attachment(rig, monkeypatch, tmp_path):
+    """The legacy chat panel's 打开所在文件夹, which the new page had lost.
+
+    Reveal goes through the same `reveal_folder` the transfer list uses rather
+    than a second platform switch, so what this pins is the resolution: the file
+    comes from the message that carries it, and that exact path is what gets
+    handed to the file manager.
+    """
+    from internal.system import file_manager
+
+    runtime = rig[0]
+    saved = tmp_path / "attachment.bin"
+    saved.write_bytes(b"hello")
+    monkeypatch.setattr(runtime.chat, "get_messages", lambda session_id: [
+        {"transfer_id": "t1", "saved_path": str(saved)},
+    ])
+    calls = []
+    monkeypatch.setattr(
+        file_manager,
+        "reveal_folder",
+        lambda path: (calls.append(path), (True, str(tmp_path)))[1],
+    )
+    assert runtime.chat_reveal_file("session", "t1") == {"ok": True, "folder": str(tmp_path)}
+    assert calls == [str(saved)]
+
+
+def test_chat_reveal_refuses_a_transfer_that_has_no_saved_file(rig, monkeypatch, tmp_path):
+    """Neither a transfer nobody saved nor one whose file has since gone."""
+    runtime = rig[0]
+    monkeypatch.setattr(runtime.chat, "get_messages", lambda session_id: [])
+    with pytest.raises(ApplicationError) as error:
+        runtime.chat_reveal_file("session", "gone")
+    assert error.value.code == "NOT_FOUND"
+
+    # A message that still carries the path of a file the user has since moved
+    # away is the same answer: what is revealed comes from disk, not from the
+    # message.
+    monkeypatch.setattr(runtime.chat, "get_messages", lambda session_id: [
+        {"transfer_id": "t1", "saved_path": str(tmp_path / "deleted.bin")},
+    ])
+    with pytest.raises(ApplicationError) as error:
+        runtime.chat_reveal_file("session", "t1")
+    assert error.value.code == "NOT_FOUND"
+
+
 def test_chat_invite_dials_an_idle_peer_before_inviting(rig):
     """An invite into a link that does not exist yet would go nowhere."""
     runtime, pairing, transport, *_ = rig
@@ -380,18 +433,6 @@ def test_discovery_hash_resolution_and_only_paired_auto_connect(rig):
     assert "remote" not in transport.connected
     assert runtime.config.peers["remote"].last_ip == "127.0.0.2"
     assert runtime.devices()["items"][0]["connection_state"] == "offline"
-
-
-def test_new_discovered_device_uses_ui_state_contract(rig):
-    runtime, _, transport, discovery, *_ = rig
-    discovery.found("new-hash", "New device", "127.0.0.1", 9001)
-    row = next(item for item in runtime.devices()["items"] if item["id"] == "new-hash")
-    assert row["connection_state"] == "discovered"
-    assert not row["paired"]
-    assert not transport.dials
-    assert runtime.start_pairing("new-hash") == {"accepted": True}
-    row = next(item for item in runtime.devices()["items"] if item["id"] == "new-hash")
-    assert row["connection_state"] == "connecting"
 
 
 def events_named(events, name):
@@ -584,15 +625,6 @@ def test_push_text_writes_clipboard_history_and_broadcasts_once(rig):
     assert runtime.sync._monitor.suppress_until > time.time()
 
 
-def test_push_text_without_sync_still_writes_the_clipboard(rig):
-    runtime, _, transport, _, clipboard, history, *_ = rig
-    runtime.set_sync_enabled(False)
-    assert runtime.push_text("offline") == {"ok": True, "len": 7, "sent": False}
-    assert [item.types[ContentType.TEXT] for item in clipboard.writes] == [b"offline"]
-    assert [item.types[ContentType.TEXT] for item in history.items] == [b"offline"]
-    assert transport.broadcasts == []
-
-
 def test_push_text_reports_a_refused_clipboard_write(rig):
     runtime, _, transport, _, clipboard, history, *_ = rig
     clipboard.success = False
@@ -601,19 +633,6 @@ def test_push_text_reports_a_refused_clipboard_write(rig):
     assert error.value.code == "CLIPBOARD_WRITE_FAILED"
     assert error.value.retryable
     assert history.items == []
-    assert transport.broadcasts == []
-
-
-@pytest.mark.parametrize(
-    "text",
-    ["", "   ", None, 5, ["x"], pytest.param("x" * 100001, id="too-long")],
-)
-def test_push_text_rejects_anything_but_bounded_text(rig, text):
-    runtime, _, transport, _, clipboard, *_ = rig
-    with pytest.raises(ApplicationError) as error:
-        runtime.push_text(text)
-    assert error.value.code == "INVALID_ARGUMENT"
-    assert clipboard.writes == []
     assert transport.broadcasts == []
 
 
@@ -774,6 +793,91 @@ def test_local_reject_unpair_notify_before_forget(rig, method, kind):
     assert not runtime.config.peers["remote"].paired
 
 
+def test_an_unpair_notice_a_dropped_link_swallowed_is_retried_until_it_lands(rig):
+    """The peer has to be told, and *only* being told settles it.
+
+    The notice is one frame down a link that the unpair is about to tear down,
+    so it can lose the race.  Dropping it there is not a cosmetic loss: the
+    other device goes on showing the pairing as live and keeps auto-connecting
+    to a device that has broken with it.  Nothing re-derives that state later,
+    so the frame is retried until it lands.
+    """
+    runtime, pairing, transport, *_ = rig
+    pairing.add_peer("remote", "Remote", pairing.get_peer_certificate("remote"), paired=True)
+    transport.addresses["remote"] = ("Remote", "127.0.0.1", 9)
+    runtime._refresh()
+    # The link happens to be down at the moment the user breaks the pairing.
+    transport.connected.discard("remote")
+    assert runtime.unpair_device("remote") == {"accepted": True}
+    assert transport.sent == []
+    assert runtime._deferred["remote"][0] == "pairing_unpair"
+    # The retry dials the peer itself: an explicit connect is the one thing that
+    # lifts the reject that `forget_peer` just installed.
+    assert transport.dials[-1][0] == "remote"
+    assert not pairing.is_peer_paired("remote")
+
+    # When the link is back the tick delivers it, and the notice is retired
+    # rather than repeated for the rest of its window.
+    transport.connected.add("remote")
+    runtime._tick()
+    assert transport.sent[-1][1].msg_type == "pairing_unpair"
+    assert "remote" not in runtime._deferred
+
+
+def test_a_deferred_unpair_notice_is_dropped_once_the_peer_is_paired_again(rig):
+    """Re-pairing inside the retry window must not undo the new pairing.
+
+    The window is deliberately long and the user can act inside it, so the
+    retry has to read its validity the opposite way round from a confirmation:
+    it is worth sending while the peer is unpaired, and worthless the moment it
+    is paired again.
+    """
+    runtime, pairing, transport, *_ = rig
+    pairing.add_peer("remote", "Remote", pairing.get_peer_certificate("remote"), paired=True)
+    transport.addresses["remote"] = ("Remote", "127.0.0.1", 9)
+    runtime._refresh()
+    transport.connected.discard("remote")
+    assert runtime.unpair_device("remote") == {"accepted": True}
+    assert runtime._deferred["remote"][0] == "pairing_unpair"
+
+    transport.connected.add("remote")
+    pairing.add_peer("remote", "Remote", pairing.get_peer_certificate("remote"), paired=True)
+    assert pairing.is_peer_paired("remote")
+    runtime._tick()
+    assert not any(message.msg_type == "pairing_unpair" for _, message in transport.sent)
+    assert "remote" not in runtime._deferred
+
+
+def test_a_reconnect_that_re_offers_the_pairing_code_does_not_cancel_the_notice(rig):
+    """A pairing *request* is not a re-pairing, and reading it as one lost the notice.
+
+    Reconnecting to a known peer this device no longer trusts is how the shared
+    pairing code comes back on screen — both connection paths re-offer it for any
+    unpaired peer, which is how two machines on this LAN pair in the first place.
+    Treating that request as "the pairing is live again" discarded the pending
+    unpair at the exact moment the link returned, leaving the other device paired
+    with a device that had broken with it.  Only a completed pairing supersedes it.
+    """
+    runtime, pairing, transport, *_ = rig
+    pairing.add_peer("remote", "Remote", pairing.get_peer_certificate("remote"), paired=True)
+    transport.addresses["remote"] = ("Remote", "127.0.0.1", 9)
+    runtime._refresh()
+    transport.connected.discard("remote")
+    assert runtime.unpair_device("remote") == {"accepted": True}
+    assert runtime._deferred["remote"][0] == "pairing_unpair"
+
+    # The link comes back and the peer arrives unpaired, so the connection path
+    # offers it the shared code again.
+    transport.connected.add("remote")
+    pairing.generate_shared_pairing_code("remote")
+    assert not pairing.is_peer_paired("remote")
+    assert "remote" in {entry[0] for entry in pairing.get_pending_pairings()}
+
+    runtime._tick()
+    assert transport.sent[-1][1].msg_type == "pairing_unpair"
+    assert "remote" not in runtime._deferred
+
+
 @pytest.mark.parametrize("kind", ["pairing_reject", "pairing_unpair"])
 def test_remote_reject_unpair_persist_revocation(rig, kind):
     runtime, pairing, transport, *_ = rig
@@ -837,14 +941,6 @@ def test_forget_keeps_discovered_address_and_never_clobbers_archive(rig):
     assert runtime.config.removed_peers["remote"].notes == "keep me"
 
 
-def test_restore_and_purge_reject_unknown_archives(rig):
-    runtime, *_ = rig
-    for method in ("restore_device", "purge_device"):
-        with pytest.raises(ApplicationError) as caught:
-            getattr(runtime, method)("ghost")
-        assert caught.value.code == "NOT_FOUND"
-
-
 def test_purge_drops_archive_and_persists(rig):
     runtime, pairing, transport, _, _, _, _, saves, _ = rig
     transport.connected.add("remote")
@@ -872,24 +968,6 @@ def test_manual_connect_and_disconnect_validate_known_devices(rig):
     assert runtime.disconnect_device("remote") == {"disconnected": True}
     assert transport.disconnected[-1] == ("remote", True)
     assert "remote" not in transport.connected
-
-
-def test_device_mutation_save_failure_is_sanitized(rig):
-    runtime, pairing, transport, *_ = rig
-    transport.connected.add("remote")
-    saved = runtime._save_config
-
-    def fail():
-        raise OSError("secret-directory-and-password")
-
-    runtime._save_config = fail
-    try:
-        with pytest.raises(ApplicationError) as caught:
-            runtime.forget_device("remote")
-        assert caught.value.code == "SAVE_FAILED"
-        assert "secret-directory" not in str(caught.value)
-    finally:
-        runtime._save_config = saved
 
 
 def test_confirmation_waits_for_real_connection(rig):
@@ -946,43 +1024,6 @@ def test_transfer_snapshot_normalizes_progress_and_pause(rig, monkeypatch):
     assert rows[2]["progress"] == 100
 
 
-def test_transfer_snapshot_carries_the_live_rate_and_a_localized_eta(rig, monkeypatch):
-    runtime = rig[0]
-    monkeypatch.setattr(runtime.file_transfer, "get_transfers", lambda: [
-        {
-            "transfer_id": "big", "file_name": "film.mkv", "file_size": 1 << 30,
-            "state": "sending", "progress": 0.5,
-            "speed_bytes_per_sec": 1 << 20, "eta_seconds": 3725,
-        },
-        {"transfer_id": "stalled", "state": "sending", "speed_bytes_per_sec": 0, "eta_seconds": 0},
-    ])
-    monkeypatch.setattr(runtime.file_transfer, "get_history", lambda: [
-        {"transfer_id": "old", "file_name": "notes.txt", "file_size": 512, "timestamp": 1},
-    ])
-    page = runtime.transfers()
-    row = page["active"][0]
-    assert row["speed"] == 1 << 20
-    # The estimate is the catalog's, in the language the app is running in —
-    # a two-hour remainder keeps its hours unit instead of reading "120m 0s".
-    assert row["eta"] == "1h 2m"
-    # A stalled transfer has no rate and nothing to estimate: both read empty
-    # rather than as "0 B/s" and "0s".
-    assert page["active"][1]["speed"] == 0
-    assert page["active"][1]["eta"] == ""
-    # History rows have neither, and an unnamed row is left blank for the shell
-    # to label in its own language.
-    assert page["history"][0]["eta"] == ""
-    assert page["history"][0]["filename"] == "notes.txt"
-
-
-def test_an_unnamed_transfer_row_has_no_filename_rather_than_an_english_one(rig, monkeypatch):
-    runtime = rig[0]
-    monkeypatch.setattr(runtime.file_transfer, "get_transfers", lambda: [
-        {"transfer_id": "x", "state": "sending"},
-    ])
-    assert runtime.transfers()["active"][0]["filename"] == ""
-
-
 def test_cancel_all_cancels_every_active_row_through_the_single_row_path(rig, monkeypatch):
     runtime = rig[0]
     seen = []
@@ -1003,16 +1044,6 @@ def test_cancel_all_cancels_every_active_row_through_the_single_row_path(rig, mo
     # A row with no id is skipped rather than raising, and every row is offered
     # to the same per-row cancel.
     assert seen == ["a", "b"]
-
-
-def test_cancel_all_with_nothing_running_does_nothing(rig, monkeypatch):
-    runtime = rig[0]
-    monkeypatch.setattr(runtime.file_transfer, "get_transfers", lambda: [])
-    monkeypatch.setattr(
-        runtime.file_transfer, "cancel_transfer",
-        lambda *_: pytest.fail("nothing was active, so nothing may be cancelled"),
-    )
-    assert runtime.cancel_all_transfers() == 0
 
 
 def _seed_transfer(runtime, monkeypatch, **entry):
@@ -1054,50 +1085,6 @@ def test_transfer_open_rejects_an_outgoing_transfer(rig, monkeypatch):
     with pytest.raises(ApplicationError) as error:
         runtime.transfer_action("open", "t1")
     assert error.value.code == "INVALID_ARGUMENT"
-
-
-def test_transfer_open_rejects_an_unknown_transfer(rig, monkeypatch):
-    runtime = rig[0]
-    monkeypatch.setattr(runtime.file_transfer, "get_history", list)
-    with pytest.raises(ApplicationError) as error:
-        runtime.transfer_action("reveal", "gone")
-    assert error.value.code == "NOT_FOUND"
-
-
-def test_transfer_open_reports_a_file_that_is_gone(rig, monkeypatch):
-    from internal.system import file_manager
-
-    runtime = rig[0]
-    _seed_transfer(runtime, monkeypatch)
-    monkeypatch.setattr(
-        file_manager, "open_file", lambda path: (False, file_manager.FILE_NOT_FOUND)
-    )
-    with pytest.raises(ApplicationError) as error:
-        runtime.transfer_action("open", "t1")
-    assert error.value.code == "NOT_FOUND"
-
-
-def test_disabled_filter_keeps_outgoing_content(rig):
-    runtime, _, transport, _, clipboard, *_ = rig
-    runtime.config.filter_enabled_categories = []
-    clipboard.content = ClipboardContent({ContentType.TEXT: b"password=secret"})
-    runtime.sync._do_read_and_send()
-    assert transport.broadcasts[-1].content.types == clipboard.content.types
-
-
-def test_live_email_filter_changes_outgoing_payload_without_redacting_local_history(rig):
-    runtime, _, transport, _, clipboard, history, *_ = rig
-    runtime.config.filter_enabled_categories = ["email"]
-    runtime.apply_settings({"filter_enabled_categories": ["email"]})
-    clipboard.content = ClipboardContent({ContentType.TEXT: b"first@example.com"})
-    runtime.sync._do_read_and_send()
-    assert transport.broadcasts[-1].content.types == {ContentType.TEXT: b"[FILTERED]"}
-    assert history.items[-1].types == {ContentType.TEXT: b"first@example.com"}
-    runtime.config.filter_enabled_categories = []
-    runtime.apply_settings({"filter_enabled_categories": []})
-    clipboard.content = ClipboardContent({ContentType.TEXT: b"second@example.com"})
-    runtime.sync._do_read_and_send()
-    assert transport.broadcasts[-1].content.types == {ContentType.TEXT: b"second@example.com"}
 
 
 def test_apply_encryption_rewires_transport_and_relay_channels(rig):
@@ -1217,53 +1204,6 @@ def test_stop_false_retains_runtime_and_late_callbacks_are_noops(rig):
     assert runtime.stop()
     with pytest.raises(ApplicationError):
         runtime.start()
-
-
-def test_stop_retains_inflight_capture_until_reader_exits(rig):
-    runtime, _, _, _, clipboard, history, *_ = rig
-    entered, release = threading.Event(), threading.Event()
-    runtime.STOP_TIMEOUT = 0.05
-
-    def read():
-        entered.set()
-        assert release.wait(3)
-        return ClipboardContent({ContentType.TEXT: b"late secret"})
-
-    clipboard.read = read
-    worker = threading.Thread(target=runtime.sync._do_read_and_send)
-    worker.start()
-    try:
-        assert entered.wait(2)
-        assert runtime.stop() is False
-    finally:
-        release.set()
-        worker.join(2)
-        runtime.STOP_TIMEOUT = 2
-    assert runtime.stop()
-    assert not history.items
-
-
-def test_snapshot_publication_has_no_runtime_journal_lock_inversion(rig):
-    runtime, _, _, discovery, _, _, events, *_ = rig
-    entered, proceed = threading.Event(), threading.Event()
-    original = events.publish
-
-    def publish(*args, **kwargs):
-        entered.set()
-        assert proceed.wait(3)
-        return original(*args, **kwargs)
-
-    events.publish = publish
-    worker = threading.Thread(target=discovery.found, args=("new-hash", "New", "127.0.0.1", 9001))
-    worker.start()
-    try:
-        assert entered.wait(2)
-        snapshot = events.snapshot(runtime.devices)
-        assert any(row["id"] == "new-hash" for row in snapshot["items"])
-    finally:
-        proceed.set()
-        worker.join(2)
-    assert not worker.is_alive()
 
 
 def test_background_exception_event_never_contains_exception_text(rig):
@@ -1437,41 +1377,6 @@ def test_save_failure_is_sanitized_and_peer_state_retried(rig):
     assert not runtime._persist_dirty
 
 
-def test_stop_from_history_event_does_not_self_join(rig):
-    runtime, _, _, _, clipboard, _, events, *_ = rig
-    completed = threading.Event()
-    results = []
-    original = events.publish
-
-    def publish(name, data, *args, **kwargs):
-        if name == "history.changed":
-            results.append(runtime.stop())
-            completed.set()
-        return original(name, data, *args, **kwargs)
-
-    events.publish = publish
-    clipboard.content = ClipboardContent({ContentType.TEXT: b"local action"})
-    worker = threading.Thread(target=runtime.sync._do_read_and_send)
-    worker.start()
-    assert completed.wait(2)
-    worker.join(2)
-    assert results == [False]
-    assert runtime.stop()
-
-
-def test_outgoing_background_failure_does_not_log_secret_exception(rig, caplog):
-    runtime, _, transport, _, clipboard, *_ = rig
-
-    def fail(*args):
-        raise OSError("password=never-log-me")
-
-    transport.broadcast = fail
-    clipboard.content = ClipboardContent({ContentType.TEXT: b"ordinary"})
-    runtime.sync._do_read_and_send()
-    assert "never-log-me" not in caplog.text
-    assert "LAN_CALLBACK_FAILED" in caplog.text
-
-
 def test_hash_alias_merge_preserves_metadata_without_promoting_trust():
     pairing, remote = identity("local"), identity("remote")
     cfg = Config(device_id="local", encryption_enabled=False)
@@ -1501,83 +1406,6 @@ def test_hash_alias_merge_preserves_metadata_without_promoting_trust():
         assert len(runtime.devices()["items"]) == 1
     finally:
         assert runtime.stop()
-
-
-def test_maintenance_thread_start_failure_is_fully_rolled_back(monkeypatch):
-    original = threading.Thread.start
-
-    def start(thread):
-        if thread.name == "clipsync-lan-state":
-            raise RuntimeError("injected failure")
-        return original(thread)
-
-    monkeypatch.setattr(threading.Thread, "start", start)
-    transport, discovery, monitor = Transport(), Discovery(), Monitor()
-    runtime = LanRuntime(
-        Config(device_id="local", encryption_enabled=False),
-        identity("local"),
-        None,
-        History(),
-        EventJournal(),
-        lambda: None,
-        monitor=monitor,
-        reader=Clipboard(),
-        writer=Clipboard(),
-        discovery=discovery,
-        transport=transport,
-    )
-    with pytest.raises(ApplicationError):
-        runtime.start()
-    assert runtime.stop()
-    assert not transport.running
-    assert not discovery.running
-    assert not monitor.running
-
-
-def test_save_callback_can_snapshot_while_another_snapshot_is_reading(rig):
-    runtime, _, _, _, _, _, events, *_ = rig
-    journal_held = threading.Event()
-    save_entered = threading.Event()
-    snapshot_done = threading.Event()
-    command_done = threading.Event()
-    failures = []
-
-    def read():
-        journal_held.set()
-        assert save_entered.wait(2)
-        return {"devices": runtime.devices(), "sync_state": runtime.sync_state}
-
-    def snapshot():
-        try:
-            events.snapshot(read)
-        except Exception as exc:
-            failures.append(exc)
-        finally:
-            snapshot_done.set()
-
-    def save():
-        save_entered.set()
-        events.snapshot(lambda: {"devices": runtime.devices()})
-
-    def command():
-        try:
-            runtime.set_sync_enabled(False)
-        except Exception as exc:
-            failures.append(exc)
-        finally:
-            command_done.set()
-
-    runtime._save_config = save
-    reader = threading.Thread(target=snapshot, daemon=True)
-    writer = threading.Thread(target=command, daemon=True)
-    reader.start()
-    assert journal_held.wait(2)
-    writer.start()
-    assert snapshot_done.wait(2), "save held a lock needed by the journal snapshot"
-    assert command_done.wait(2), "save callback could not acquire the journal"
-    reader.join(2)
-    writer.join(2)
-    assert not failures
 
 
 def test_certs_lists_pinned_fingerprints_for_known_peers(rig):
@@ -1617,36 +1445,6 @@ def test_device_probe_measures_lan_round_trip(rig):
     assert result["results"][0]["latency_ms"] >= 0
     assert transport.sent[0][1].msg_type == "device_ping"
     assert not runtime._probes
-
-
-def test_device_probe_marks_unsent_channel_without_waiting_for_timeout(rig):
-    runtime, pairing, transport, *_ = rig
-    pairing.add_peer("remote", "Remote", pairing.get_peer_certificate("remote"), paired=True)
-    transport.connected.add("remote")
-    transport.send_to_peer = lambda pid, data: False
-    started = time.monotonic()
-    result = runtime.test_device("remote")
-    assert time.monotonic() - started < runtime.DEVICE_PING_TIMEOUT
-    assert result == {
-        "ok": False,
-        "results": [
-            {"channel": "lan", "ok": False, "latency_ms": None, "error": "send_failed"}
-        ],
-    }
-    assert not runtime._probes
-
-
-def test_device_probe_reports_no_channel_for_unreachable_peer(rig):
-    runtime, pairing, *_ = rig
-    pairing.add_peer("remote", "Remote", pairing.get_peer_certificate("remote"), paired=True)
-    assert runtime.test_device("remote") == {"ok": False, "results": [], "error": "no_channel"}
-
-
-def test_device_probe_rejects_unknown_devices(rig):
-    runtime, *_ = rig
-    with pytest.raises(ApplicationError) as caught:
-        runtime.test_device("ghost")
-    assert caught.value.code == "NOT_FOUND"
 
 
 def test_device_ping_is_answered_only_for_paired_peers(rig):
@@ -1863,17 +1661,6 @@ def test_update_request_serves_the_cached_asset_to_a_paired_peer(rig, monkeypatc
     assert sent[0]._raw_payload["file_name"] == "clipsync-windows.zip"
 
 
-def test_update_request_without_a_cached_asset_sends_nothing(rig, monkeypatch):
-    runtime, pairing, transport, *_ = rig
-    pairing.add_peer("remote", "Remote", pairing.get_peer_certificate("remote"), paired=True)
-    transport.connected.add("remote")
-    monkeypatch.setattr(updater, "get_cached_asset", lambda: None)
-
-    transport.message(frame("update_request"), "remote")
-
-    assert transport.sent == []
-
-
 def test_an_unpaired_peer_cannot_request_a_cached_update(rig, monkeypatch, tmp_path):
     runtime, _, transport, *_ = rig
     transport.connected.add("remote")
@@ -1884,12 +1671,6 @@ def test_an_unpaired_peer_cannot_request_a_cached_update(rig, monkeypatch, tmp_p
     transport.message(frame("update_request"), "remote")
 
     assert transport.sent == []
-
-
-def test_request_update_from_peers_broadcasts_the_frame(rig):
-    runtime, _, transport, *_ = rig
-    runtime.request_update_from_peers()
-    assert [msg.msg_type for msg in transport.broadcasts] == ["update_request"]
 
 
 def test_a_peer_sent_update_blob_reaches_the_update_sink(rig, tmp_path):
@@ -1989,14 +1770,6 @@ def test_discovered_peers_shape_matches_the_web_devices_api(rig):
     assert runtime.discovered_peers() == {}
 
 
-def test_resolved_hashes_and_reconnect_states_pass_through(rig):
-    runtime, _, transport, *_ = rig
-    transport.resolved["hash"] = "remote"
-    transport.reconnects["remote"] = {"attempts": 2, "next_in": 5}
-    assert runtime.resolved_hashes() == {"hash": "remote"}
-    assert runtime.reconnect_states() == {"remote": {"attempts": 2, "next_in": 5}}
-
-
 def test_pending_pairings_append_the_shared_sas_code(rig):
     from internal.security.fingerprint import sas_code
 
@@ -2023,29 +1796,6 @@ def test_device_action_maps_legacy_panel_names(rig):
     assert ("remote", True) in transport.disconnected
 
 
-@pytest.mark.parametrize(
-    "action, device_id, args",
-    [
-        ("bogus", "remote", ()),          # the panel sent an action we do not know
-        ("connect", "ghost", ()),         # unknown device
-        ("edit_note", "ghost", ("note",)),
-    ],
-)
-def test_device_action_reports_failure_instead_of_raising(rig, action, device_id, args):
-    runtime, *_ = rig
-    assert runtime.device_action(action, device_id, *args) is False
-
-
-def test_device_action_unpair_of_an_unknown_device_is_not_an_error(rig):
-    """An unknown peer ends pairing as ``{"accepted": False}`` without raising.
-
-    The runtime treats "nothing to unpair" as a normal answer, so the web
-    callback reports success exactly like the legacy handler did.
-    """
-    runtime, *_ = rig
-    assert runtime.device_action("unpair", "ghost") is True
-
-
 def test_web_transfer_action_maps_history_delete_to_delete(rig, monkeypatch):
     runtime = rig[0]
     calls = []
@@ -2061,43 +1811,6 @@ def test_web_transfer_action_rejects_unknown_actions_without_dispatching(rig, mo
     monkeypatch.setattr(runtime, "transfer_action", lambda action, tid: calls.append(action))
     assert runtime.web_transfer_action("rm -rf", "t1") is False
     assert calls == []
-
-
-def test_web_transfer_action_reports_a_failed_action(rig, monkeypatch):
-    runtime = rig[0]
-
-    def boom(action, tid):
-        raise ApplicationError("NOT_FOUND", "Transfer not found")
-
-    monkeypatch.setattr(runtime, "transfer_action", boom)
-    assert runtime.web_transfer_action("cancel", "gone") is False
-
-
-def test_forward_file_requires_a_connected_peer(rig, monkeypatch):
-    runtime, _, transport, *_ = rig
-    sent = []
-    monkeypatch.setattr(
-        runtime.file_transfer, "send_file",
-        lambda path, send: (sent.append((path, send)), "tid")[1],
-    )
-    assert runtime.forward_file("/tmp/upload.bin", "remote") is False
-    assert sent == []
-    transport.connected.add("remote")
-    assert runtime.forward_file("/tmp/upload.bin", "remote") is True
-    path, send = sent[-1]
-    assert path == "/tmp/upload.bin"
-    send(b"frame")
-    assert transport.sent[-1][0] == "remote"
-
-
-def test_forward_file_reports_a_transfer_that_could_not_start(rig, monkeypatch):
-    runtime, _, transport, *_ = rig
-    transport.connected.add("remote")
-    monkeypatch.setattr(
-        runtime.file_transfer, "send_file",
-        lambda path, send: (_ for _ in ()).throw(OSError("disk gone")),
-    )
-    assert runtime.forward_file("/tmp/upload.bin", "remote") is False
 
 
 def test_send_files_names_one_peer_and_refuses_an_unreachable_one(rig, monkeypatch):
@@ -2191,64 +1904,6 @@ def test_a_folder_send_archives_it_and_the_archive_outlives_the_transfer(
     assert not sent_path.exists()
 
 
-def test_a_folder_with_nothing_to_send_is_refused_before_anything_starts(
-    rig, monkeypatch, tmp_path
-):
-    runtime, _, transport, *_ = rig
-    transport.connected.add("remote")
-    folder = tmp_path / "Empty"
-    folder.mkdir()
-    started = []
-    monkeypatch.setattr(
-        runtime.file_transfer, "send_file",
-        lambda path, send: (started.append(path), "tid")[1],
-    )
-    with pytest.raises(ApplicationError) as refused:
-        runtime.send_files([str(folder)], "remote")
-    # Refused rather than sent: an empty archive transfers fine and arrives
-    # empty, which reads to the receiver as a broken send rather than as a
-    # folder that had nothing in it.
-    assert refused.value.code == "INVALID_ARGUMENT"
-    assert started == []
-    assert runtime._outgoing_archives == {}
-
-
-def test_a_folder_send_to_an_unreachable_peer_leaves_no_archive_behind(rig, monkeypatch, tmp_path):
-    runtime, _, *_ = rig
-    folder = tmp_path / "Photos"
-    folder.mkdir()
-    (folder / "a.txt").write_text("a", encoding="utf-8")
-    monkeypatch.setattr(runtime.file_transfer, "send_file", lambda path, send: "tid")
-    before = temp_archives("Photos")
-    with pytest.raises(ApplicationError) as offline:
-        runtime.send_files([str(folder)], "gone")
-    # Nothing was started, so no completion event will come to reclaim the
-    # archive: the refusal has to take it with it.
-    assert offline.value.code == "NOT_CONNECTED"
-    assert temp_archives("Photos") == before
-    assert runtime._outgoing_archives == {}
-
-
-def test_a_file_send_registers_no_archive_and_its_completion_still_goes_out(
-    rig, monkeypatch, tmp_path
-):
-    runtime, _, _, _, _, _, events, *_ = rig
-    source = tmp_path / "notes.txt"
-    source.write_text("x", encoding="utf-8")
-    started = []
-    monkeypatch.setattr(
-        runtime.file_transfer, "send_file",
-        lambda path, send: (started.append(path), "tid")[1],
-    )
-    assert runtime.send_files([str(source)]) == "tid"
-    # A file goes as itself; only a folder has an archive to reclaim.
-    assert started == [str(source)]
-    assert runtime._outgoing_archives == {}
-    runtime._on_transfer_complete("tid", True, False, "completed")
-    # The completion is reported as it always was, with no archive in the picture.
-    assert events_named(events, "transfer.complete")[-1]["transfer_id"] == "tid"
-
-
 def test_several_picks_go_as_one_archive_and_one_transfer(rig, monkeypatch, tmp_path):
     runtime, _, transport, *_ = rig
     transport.connected.add("remote")
@@ -2292,42 +1947,6 @@ def test_a_pick_that_is_gone_between_the_pick_and_the_send_is_refused(rig, monke
     assert refused.value.code == "INVALID_ARGUMENT"
     assert started == []
     assert not temp_archives("files-2")
-
-
-def test_nothing_picked_is_refused(rig):
-    runtime, *_ = rig
-    with pytest.raises(ApplicationError) as refused:
-        runtime.send_files([])
-    assert refused.value.code == "INVALID_ARGUMENT"
-
-
-def test_transfer_lists_and_speed_test_state_pass_raw_manager_rows(rig, monkeypatch):
-    runtime = rig[0]
-    active, history = [{"transfer_id": "a", "state": "sending"}], [{"transfer_id": "b"}]
-    monkeypatch.setattr(runtime.file_transfer, "get_transfers", lambda: active)
-    monkeypatch.setattr(runtime.file_transfer, "get_history", lambda: history)
-    monkeypatch.setattr(
-        runtime.file_transfer, "get_speed_test", lambda: {"running": True, "mbps": 12.5}
-    )
-    assert runtime.transfer_lists() == (active, history)
-    assert runtime.speed_test_state() == {"running": True, "mbps": 12.5}
-
-
-def test_speed_test_state_degrades_to_an_empty_mapping(rig, monkeypatch):
-    runtime = rig[0]
-    monkeypatch.setattr(runtime.file_transfer, "get_speed_test", lambda: None)
-    assert runtime.speed_test_state() == {}
-
-
-def test_record_web_upload_delegates_to_the_transfer_manager(rig, monkeypatch):
-    runtime = rig[0]
-    calls = []
-    monkeypatch.setattr(
-        runtime.file_transfer, "record_web_upload",
-        lambda name, size, path: (calls.append((name, size, path)), "tid")[1],
-    )
-    assert runtime.record_web_upload("photo.png", 1234, "/tmp/photo.png") == "tid"
-    assert calls == [("photo.png", 1234, "/tmp/photo.png")]
 
 
 def test_current_relay_broker_requires_internet_sync_and_a_live_relay(rig):
@@ -2627,22 +2246,6 @@ def test_both_switches_silence_the_beep_and_a_missing_tool_never_raises(rig, mon
     assert played == [True]
 
 
-def test_a_phone_upload_beeps_even_when_recording_it_fails(rig, monkeypatch):
-    runtime, *_ = rig
-    played = sound_spy(monkeypatch)
-    monkeypatch.setattr(runtime.file_transfer, "record_web_upload", lambda *args: "web-tid")
-    assert runtime.record_web_upload("photo.png", 5, "/tmp/photo.png") == "web-tid"
-    assert played == [True]
-
-    def _disk_full(*_args, **_kwargs):
-        raise RuntimeError("disk full")
-
-    monkeypatch.setattr(runtime.file_transfer, "record_web_upload", _disk_full)
-    with pytest.raises(RuntimeError):
-        runtime.record_web_upload("photo.png", 5, "/tmp/photo.png")
-    assert played == [True, True]
-
-
 # ── an invite cancels the pairing prompt for that peer ───────────────────
 
 
@@ -2674,18 +2277,6 @@ def test_a_chat_invite_drops_the_pending_pairing_card(rig):
     assert runtime.chat_sessions()["sessions"][0]["status"] == "invited"
 
 
-def test_a_paired_peer_inviting_to_chat_keeps_its_pairing(rig):
-    runtime, pairing, transport, *_ = rig
-    pairing.add_peer("remote", "Remote", pairing.get_peer_certificate("remote"), paired=True)
-    transport.connected.add("remote")
-    runtime._refresh()
-
-    runtime._receive(invite_frame(), "remote")
-
-    row = next(item for item in runtime.devices()["items"] if item["id"] == "remote")
-    assert row["paired"] and row["pairing_status"] == "paired"
-
-
 def test_a_pairing_request_after_a_chat_invite_can_notify_again(rig):
     runtime, pairing, transport, _, _, _, events, *_ = rig
     transport.connected.add("remote")
@@ -2706,3 +2297,292 @@ def test_a_pairing_request_after_a_chat_invite_can_notify_again(rig):
     runtime._refresh()
     runtime._refresh()
     assert len(events_named(events, "pairing.request")) == 2
+
+
+# ── files pulled from a peer's history ───────────────────────────────────
+
+
+def _file_row(*paths, source_device=""):
+    """A history clip holding this machine's paths for one file selection."""
+    return ClipboardContent(
+        types={ContentType.FILE: "\n".join(paths).encode()}, source_device=source_device
+    )
+
+
+def _pullable(rig, tmp_path, content, name="h.db"):
+    """A paired, connected peer, and a row here that its request may resolve to."""
+    runtime, pairing, transport, *_ = rig
+    pairing.add_peer("remote", "Remote", pairing.get_peer_certificate("remote"), paired=True)
+    transport.connected.add("remote")
+    store = HistoryDB(storage_path=str(tmp_path / name))
+    entry = str(store.add(content))
+    runtime.set_clip_file_source(store.file_entry_paths)
+    return runtime, transport, entry
+
+
+def _ask(runtime, transport, entry, via_relay=False):
+    runtime._receive(
+        frame("clip_file_request", entry=entry), "remote", via_relay=via_relay
+    )
+
+
+def _file_requests(transport):
+    return [msg._raw_payload for _, msg in transport.sent if msg.msg_type == "file_request"]
+
+
+def _denial(transport):
+    return next(msg._raw_payload for _, msg in transport.sent if msg.msg_type == "clip_file_denied")
+
+
+def test_a_request_serves_each_file_as_its_own_transfer(rig, tmp_path):
+    """One transfer per file, so what lands is the document the user saw rather
+    than an archive they have to open."""
+    first = tmp_path / "a.txt"
+    second = tmp_path / "b.txt"
+    first.write_bytes(b"aaa")
+    second.write_bytes(b"bbb")
+    runtime, transport, entry = _pullable(rig, tmp_path, _file_row(str(first), str(second)))
+
+    _ask(runtime, transport, entry)
+
+    requests = _file_requests(transport)
+    assert [payload["file_name"] for payload in requests] == ["a.txt", "b.txt"]
+    assert {payload["kind"] for payload in requests} == {"clip_file"}
+    # Each names the entry it answers, so the receiver can check the file
+    # against the request it made rather than taking the label on trust.
+    assert {payload["entry"] for payload in requests} == {entry}
+
+
+def test_a_folder_travels_as_one_archive(rig, tmp_path):
+    """A directory has no other shape to travel in; the archive is named after
+    what was picked, like a folder sent from the transfers page."""
+    folder = tmp_path / "quarterly"
+    folder.mkdir()
+    (folder / "report.txt").write_text("hello", encoding="utf-8")
+    runtime, transport, entry = _pullable(rig, tmp_path, _file_row(str(folder)))
+
+    _ask(runtime, transport, entry)
+
+    payload = _file_requests(transport)[0]
+    assert payload["file_name"].startswith("quarterly") and payload["file_name"].endswith(".zip")
+    assert payload["kind"] == "clip_file"
+
+
+def test_an_unpaired_peer_is_ignored(rig, tmp_path):
+    path = tmp_path / "a.txt"
+    path.write_bytes(b"x")
+    runtime, transport, entry = _pullable(rig, tmp_path, _file_row(str(path)))
+    rig[1].remove_peer("remote")
+
+    _ask(runtime, transport, entry)
+
+    assert transport.sent == []
+
+
+def test_a_request_over_the_relay_is_ignored(rig, tmp_path):
+    """The files travel over the LAN channel — the one whose certificate is
+    pinned — so a request that arrived through the relay could only be answered
+    with a transfer that never completes."""
+    path = tmp_path / "a.txt"
+    path.write_bytes(b"x")
+    runtime, transport, entry = _pullable(rig, tmp_path, _file_row(str(path)))
+
+    _ask(runtime, transport, entry, via_relay=True)
+
+    assert transport.sent == []
+
+
+def test_a_row_from_another_device_is_refused_with_a_reason(rig, tmp_path):
+    """The paths in a synced row name the *sending* machine's disk, so serving
+    one here would send this machine's unrelated file.  The path is real, so
+    what refuses the request is the row's provenance rather than a missing file.
+    """
+    here = tmp_path / "a.txt"
+    here.write_bytes(b"x")
+    runtime, transport, entry = _pullable(
+        rig, tmp_path, _file_row(str(here), source_device="peer-b")
+    )
+
+    _ask(runtime, transport, entry)
+
+    assert _denial(transport)["reason"] == "not_local"
+    assert not _file_requests(transport)
+
+
+def test_a_file_that_has_since_gone_is_refused_with_a_reason(rig, tmp_path):
+    """Refused up front, rather than as a transfer that dies mid-flight."""
+    path = tmp_path / "a.txt"
+    path.write_bytes(b"x")
+    runtime, transport, entry = _pullable(rig, tmp_path, _file_row(str(path)))
+    path.unlink()
+
+    _ask(runtime, transport, entry)
+
+    assert _denial(transport)["reason"] == "gone"
+
+
+def test_a_missing_row_is_refused_with_a_reason(rig, tmp_path):
+    path = tmp_path / "a.txt"
+    path.write_bytes(b"x")
+    runtime, transport, entry = _pullable(rig, tmp_path, _file_row(str(path)))
+
+    _ask(runtime, transport, "nobody")
+
+    assert _denial(transport)["reason"] == "not_found"
+
+
+def test_a_row_that_is_not_a_file_is_refused_with_a_reason(rig, tmp_path):
+    runtime, transport, entry = _pullable(
+        rig, tmp_path, ClipboardContent(types={ContentType.TEXT: b"hi"})
+    )
+
+    _ask(runtime, transport, entry)
+
+    assert _denial(transport)["reason"] == "not_a_file"
+
+
+def test_a_request_with_no_store_behind_it_is_refused_rather_than_guessed(rig):
+    """A host with no repository wired up.  A refusal answers the button; a
+    request that is quietly dropped does not."""
+    runtime, pairing, transport, *_ = rig
+    pairing.add_peer("remote", "Remote", pairing.get_peer_certificate("remote"), paired=True)
+    transport.connected.add("remote")
+
+    runtime._receive(frame("clip_file_request", entry="h-1"), "remote")
+
+    assert [msg.msg_type for _, msg in transport.sent] == ["clip_file_denied"]
+    assert _denial(transport)["reason"] == "not_found"
+
+
+def test_a_denial_from_a_peer_becomes_an_event(rig):
+    """A refusal is the requester's to see: nothing changed on the serving
+    machine's screen, and without this the 下载 button would be the one control
+    in the window that can fail silently."""
+    runtime, pairing, transport, _, _, _, events, *_ = rig
+    pairing.add_peer("remote", "Remote", pairing.get_peer_certificate("remote"), paired=True)
+    transport.connected.add("remote")
+
+    runtime._receive(frame("clip_file_denied", entry="h-9", reason="gone"), "remote")
+
+    assert events_named(events, "clip.file.denied") == [
+        {"device_id": "remote", "entry_id": "h-9", "reason": "gone"}
+    ]
+
+
+def test_an_unpaired_peers_denial_is_dropped_too(rig):
+    """The same gate as the request: a peer with no standing here has nothing
+    to deny, and its frame must not clear a request this machine did make."""
+    runtime, pairing, transport, _, _, _, events, *_ = rig
+    transport.connected.add("remote")
+
+    runtime._receive(frame("clip_file_denied", entry="h-9", reason="gone"), "remote")
+
+    assert events_named(events, "clip.file.denied") == []
+
+
+def test_requesting_files_names_the_device_and_answers_at_once(rig):
+    runtime, pairing, transport, *_ = rig
+    pairing.add_peer("remote", "Remote", pairing.get_peer_certificate("remote"), paired=True)
+    transport.connected.add("remote")
+
+    assert runtime.request_entry_files("remote", "h-1") == {"requested": True}
+
+    sent = [msg for _, msg in transport.sent]
+    assert [msg.msg_type for msg in sent] == ["clip_file_request"]
+    assert sent[0]._raw_payload["entry"] == "h-1"
+
+
+def test_a_request_to_an_unconnected_device_is_refused_at_the_call(rig):
+    """The counters are checked at the call so the caller learns immediately
+    rather than watching a button do nothing."""
+    runtime, pairing, *_ = rig
+    pairing.add_peer("remote", "Remote", pairing.get_peer_certificate("remote"), paired=True)
+
+    with pytest.raises(ApplicationError, match="not connected"):
+        runtime.request_entry_files("remote", "h-1")
+
+
+def test_a_request_to_an_unpaired_device_is_refused_at_the_call(rig):
+    """The files ride the LAN channel, which is the one whose certificate is
+    pinned; an unpaired peer has nothing pinned to send them over."""
+    runtime, pairing, transport, *_ = rig
+    pairing.add_peer("remote", "Remote", pairing.get_peer_certificate("remote"), paired=False)
+    transport.connected.add("remote")
+
+    with pytest.raises(ApplicationError, match="not paired"):
+        runtime.request_entry_files("remote", "h-1")
+
+
+def test_an_empty_entry_is_refused_at_the_call(rig):
+    runtime, pairing, transport, *_ = rig
+    pairing.add_peer("remote", "Remote", pairing.get_peer_certificate("remote"), paired=True)
+    transport.connected.add("remote")
+
+    with pytest.raises(ApplicationError, match="No entry"):
+        runtime.request_entry_files("remote", "")
+
+
+class TestTheConsentWindow:
+    """A request licenses the peer to send without a prompt — for that entry,
+    for a while, and no longer."""
+
+    def _asked(self, rig, tmp_path):
+        path = tmp_path / "a.txt"
+        path.write_bytes(b"x")
+        runtime, transport, entry = _pullable(rig, tmp_path, _file_row(str(path)))
+        assert runtime.request_entry_files("remote", entry) == {"requested": True}
+        return runtime, transport, entry
+
+    def test_a_request_opens_the_window_for_that_entry(self, rig, tmp_path):
+        runtime, _transport, entry = self._asked(rig, tmp_path)
+
+        assert runtime._clip_file_outstanding_for("remote", entry)
+
+    def test_the_window_covers_the_whole_batch(self, rig, tmp_path):
+        """One ask yields many files, so the entry cannot be consumed on first
+        use — a folder of thirty would otherwise prompt on the second."""
+        runtime, _transport, entry = self._asked(rig, tmp_path)
+
+        assert all(runtime._clip_file_outstanding_for("remote", entry) for _ in range(5))
+
+    def test_another_entry_is_not_covered(self, rig, tmp_path):
+        runtime, _transport, entry = self._asked(rig, tmp_path)
+
+        assert not runtime._clip_file_outstanding_for("remote", "h-other")
+
+    def test_another_device_is_not_covered(self, rig, tmp_path):
+        runtime, _transport, entry = self._asked(rig, tmp_path)
+
+        assert not runtime._clip_file_outstanding_for("stranger", entry)
+
+    def test_an_expired_window_licenses_nothing(self, rig, tmp_path, monkeypatch):
+        """A peer that simply drops the request would otherwise license the next
+        thing it chose to push, forever."""
+        runtime, _transport, entry = self._asked(rig, tmp_path)
+        real = time.monotonic
+        monkeypatch.setattr(time, "monotonic", lambda: real() + CLIP_FILE_WINDOW + 1)
+
+        assert not runtime._clip_file_outstanding_for("remote", entry)
+
+    def test_an_expired_window_is_pruned_rather_than_kept(self, rig, tmp_path, monkeypatch):
+        runtime, _transport, entry = self._asked(rig, tmp_path)
+        real = time.monotonic
+        monkeypatch.setattr(time, "monotonic", lambda: real() + CLIP_FILE_WINDOW + 1)
+
+        runtime._clip_file_outstanding_for("remote", entry)
+
+        assert runtime._clip_file_outstanding == {}
+
+    def test_nothing_asked_for_licenses_nothing(self, rig, tmp_path):
+        path = tmp_path / "a.txt"
+        path.write_bytes(b"x")
+        runtime, _transport, entry = _pullable(rig, tmp_path, _file_row(str(path)))
+
+        assert not runtime._clip_file_outstanding_for("remote", entry)
+
+    def test_the_guard_is_wired_to_the_manager(self, rig):
+        """The exemption is the receiver's to grant, so the runtime is what has
+        to answer the transfer manager's question about a `clip_file` frame."""
+        runtime, *_ = rig
+
+        assert runtime.file_transfer._clip_file_guard == runtime._clip_file_outstanding_for

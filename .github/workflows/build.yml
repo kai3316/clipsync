@@ -44,10 +44,42 @@ jobs:
           NOTES=$(cat <<'EOF'
           Automated build of both applications for this tag.
 
-          The Tauri desktop (unsigned, so macOS and Windows warn on first run):
+          Neither application is notarized, because that needs a paid Apple
+          Developer account.  Both macOS downloads are ad-hoc signed, which is
+          what lets them start at all on Apple Silicon.
+
+          macOS can still refuse either one on first launch, and the two
+          refusals need different answers.  If the dialog says the app "is
+          damaged and can't be opened", it has no Open button: that is
+          Gatekeeper rejecting an ad-hoc signature on a downloaded copy rather
+          than a damaged download, and clearing the download's quarantine flag
+          once is what gets past it.
+
+                xattr -dr com.apple.quarantine /Applications/ClipSync.app
+
+          Change the path if the app is not in /Applications.  For the older
+          `clipsync-macos-arm64.zip`, unzip it first and point the command at
+          the app you got.
+
+          If instead it says the developer cannot be verified, right-click the
+          app and choose Open, or allow it under System Settings > Privacy &
+          Security.  That path stops working once macOS has shown the damaged
+          dialog, which is why it is not the first thing to try.
+
+          The Tauri desktop:
           - `ClipSync_<version>_x64-setup.exe` — Windows installer
           - `ClipSync_<version>_aarch64.dmg` — macOS Apple Silicon
           - `ClipSync_<version>_amd64.deb` / `.AppImage` — Linux x86_64
+          - `ClipSync.app.tar.gz` — what the macOS app updates itself with;
+            not something you download by hand
+          - `latest.json` — the signed update manifest the app reads
+
+          Installing this release replaces 1.0.2 by hand one last time: 1.0.2
+          has no updater in it, so it cannot see or use any of the above.  From
+          this version on, the desktop app installs its own updates — it
+          downloads, installs and restarts, and on Linux the `.deb` asks for
+          your password once.  The previous Python application is unchanged and
+          still leaves replacing it to you.
 
           The previous Python application:
           - `clipsync-windows.zip` — Windows `.exe`
@@ -62,7 +94,28 @@ jobs:
             gh release create "$TAG" --repo "$REPO" --title "ClipSync $TAG" --notes "$NOTES"
           fi
 
+  test:
+    # The gate the build legs and the uploader wait on.  Until this job existed,
+    # a tag published both applications with no test having run in this
+    # workflow at all: `prepare` created the release within seconds of the tag
+    # and `build` filled it, so the release page was the first thing to learn
+    # the tree was broken.  The command is deliberately the one
+    # `desktop.yml` already runs green on `ubuntu-24.04` rather than the whole
+    # suite, whose platform-specific legs are not proven on Linux.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install Python dependencies
+        run: python -m pip install -r requirements.txt pytest pytest-timeout
+      - name: Sidecar tests
+        run: python -m pytest tests/sidecar -q
+
   build:
+    needs: test
     strategy:
       fail-fast: false
       matrix:

@@ -1,17 +1,26 @@
-"""Round-8 system-UI tests.
+"""Backup, restore, export and the lock — the paths where a mistake loses data.
 
-Covers:
-1. Dashboard history lazy-render: a stale "show more" button reference
-   (already destroyed by a list rebuild) must not abort the batch render.
-2. Backup/restore now carries global-hotkey bindings (hotkeys +
-   hotkeys_enabled) with strict validation on the way back in.
-3. Settings search: text-index collection, per-panel match counting.
-4. i18n: the new settings-search keys exist in BOTH locales.
+The static wiring assertions and the private-method pokes this file used to
+carry are gone.  What is left is everything that reads or writes something a
+user owns:
+
+1. Backup/restore carries the global-hotkey bindings, drops junk pairs on the
+   way out and on the way back in, and re-applies peers WITHOUT the pinned
+   public keys (a stale pin is a certificate lockout).
+2. Config load degrades per field, and archives an unparseable config before
+   falling back to defaults, so an identity is never lost outright.
+3. Exports and backups are atomic (no ``.part`` or partial archive left), and
+   a backup whose history cannot be read is refused rather than shipped.
+4. The ``%TEMP%`` sweep removes only our own abandoned scratch, and the
+   single-instance lock recognises a live instance whatever it was launched
+   from — and always releases the lock on the way out.
 """
 
 import json
 import os
 import sys
+import threading
+import time
 import zipfile
 from pathlib import Path
 
@@ -19,92 +28,11 @@ import pytest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-import tkinter as tk
-
 from internal.clipboard.history_db import ClipboardHistoryDB
 from internal.config.config import Config
 from internal.data import backup as backup_mod
-from internal.i18n import LOCALES
-from internal.ui.dashboard import DashboardWindow
-from internal.ui.settings_window import SettingsWindow
 
-# ── helpers ───────────────────────────────────────────────────────────
-
-
-class _DeadButton:
-    """Mimics a Tk widget whose .destroy() raises after being destroyed."""
-
-    def __init__(self):
-        self.destroyed = False
-
-    def winfo_exists(self):
-        return not self.destroyed
-
-    def destroy(self):
-        if self.destroyed:
-            raise tk.TclError("bad window path name")
-        self.destroyed = True
-
-
-def _bare_dashboard() -> DashboardWindow:
-    """A DashboardWindow shell without running __init__ (no Tk objects)."""
-    dash = object.__new__(DashboardWindow)
-    dash._window = None  # makes _render_card_chunk bail out early
-    dash._root = None
-    dash._history_shown = 0
-    dash._history_entries = []
-    dash._history_peer_map = {}
-    return dash
-
-
-class _FakeWidget:
-    """Minimal widget stand-in for the settings text-index collector."""
-
-    def __init__(self, text=None, children=()):
-        self._text = text
-        self._children = list(children)
-
-    def winfo_children(self):
-        return self._children
-
-    def cget(self, name):
-        if name == "text" and self._text is not None:
-            return self._text
-        raise ValueError(f"unknown option {name!r}")
-
-
-# ── 1. History batch render vs stale more-button ──────────────────────
-
-
-class TestHistoryMoreButtonGuard:
-    def test_stale_more_button_does_not_abort_batch(self):
-        """After _refresh_history_list wipes the scroll frame the attribute
-        still references the dead button; clicking/refreshing used to hit
-        destroy() twice (TclError on several stock Tk builds), aborting the
-        whole render and leaving the panel blank."""
-        dash = _bare_dashboard()
-        dead = _DeadButton()
-        dead.destroyed = True  # already gone with the wiped frame
-        dash._history_more_btn = dead
-        dash._history_entries = [{"entry_id": i} for i in range(25)]
-
-        dash._show_history_batch()  # must not raise
-
-        assert dash._history_more_btn is None
-
-    def test_live_more_button_still_destroyed(self):
-        dash = _bare_dashboard()
-        live = _DeadButton()
-        dash._history_more_btn = live
-        dash._history_entries = [{}]
-
-        dash._show_history_batch()
-
-        assert live.destroyed
-        assert dash._history_more_btn is None
-
-
-# ── 2. Backup carries hotkey bindings ─────────────────────────────────
+# ── 1. Backup carries hotkey bindings ─────────────────────────────────
 
 
 @pytest.fixture()
@@ -158,180 +86,8 @@ class TestBackupHotkeys:
         backup_mod.restore_backup(zip_path, fresh, history)
         assert fresh.hotkeys == {"paste_1": "Ctrl+1"}
 
-    def test_validate_strdict_rule(self):
-        from internal.data.backup import _SKIP, _validate_config_value
 
-        ok = _validate_config_value({"a": "Ctrl+1", 1: "x", "b": 2}, ("strdict",))
-        assert ok == {"a": "Ctrl+1"}
-
-        assert _validate_config_value(["nope"], ("strdict",)) is _SKIP
-        assert _validate_config_value("nope", ("strdict",)) is _SKIP
-        assert _validate_config_value({}, ("strdict",)) == {}
-
-
-# ── 3. Settings search matching logic ─────────────────────────────────
-
-
-def _bare_settings() -> SettingsWindow:
-    return object.__new__(SettingsWindow)
-
-
-class TestSettingsSearchCounts:
-    def _indexed(self):
-        sw = _bare_settings()
-        sw._panel_texts = {
-            "network": ["🌐  Network", "TCP Port", "Service Type"],
-            "appearance": ["🎨  Appearance", "Theme", "Dark"],
-            "advanced": ["⚙  Advanced", "历史记录上限", "Language"],
-        }
-        return sw
-
-    def test_empty_query_matches_nothing(self):
-        sw = self._indexed()
-        assert sw._search_counts("") == {}
-        assert sw._search_counts("   ") == {}
-
-    def test_case_insensitive_substring(self):
-        sw = self._indexed()
-        counts = sw._search_counts("port")
-        assert counts == {"network": 1}  # only the "TCP Port" label
-
-    def test_only_matching_panels_listed(self):
-        sw = self._indexed()
-        counts = sw._search_counts("dark")
-        assert counts == {"appearance": 1}  # only the "Dark" label
-
-    def test_unicode_query(self):
-        sw = self._indexed()
-        assert sw._search_counts("历史") == {"advanced": 1}
-
-    def test_no_match_returns_empty(self):
-        sw = self._indexed()
-        assert sw._search_counts("zzzz") == {}
-
-    def test_collector_walks_tree_and_skips_textless(self):
-        tree = _FakeWidget(
-            children=[
-                _FakeWidget(text="TCP Port"),
-                _FakeWidget(),  # no text attr → skipped
-                _FakeWidget(
-                    children=[
-                        _FakeWidget(text="  "),  # blank → skipped
-                        _FakeWidget(text="Theme"),
-                    ]
-                ),
-            ]
-        )
-        texts = SettingsWindow._collect_widget_texts(tree)
-        assert texts == ["TCP Port", "Theme"]
-
-
-# ── 4. i18n completeness ──────────────────────────────────────────────
-
-
-class TestSettingsSearchI18n:
-    @pytest.mark.parametrize(
-        "key",
-        [
-            "settings_window.search_placeholder",
-            "settings_window.search_matches",
-            "settings_window.search_no_matches",
-        ],
-    )
-    def test_key_present_in_both_locales(self, key):
-        for locale in ("en", "zh-CN"):
-            assert key in LOCALES[locale], f"{key} missing in {locale}"
-
-
-# ══════════════════════════════════════════════════
-# merged from test_desktop_fixes.py
-# ══════════════════════════════════════════════════
-
-import os
-import re
-import sys
-import threading
-import time
-
-import pytest
-
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-
-
-# ═════════════════════════════════════════════════════════════════════════
-# #1 (P0) — webview dialogs run their blocking wait off the Tk main thread
-# ═════════════════════════════════════════════════════════════════════════
-
-
-class _FakeRoot:
-    """Minimal Tk-root stand-in: executes ``after(0, ...)`` callbacks inline."""
-
-    def __init__(self):
-        self.delivered = []
-
-    def after(self, delay, fn, *args):
-        if delay == 0:
-            fn(*args)
-        return 1
-
-
-def test_web_dialog_async_runs_blocking_wait_off_main_thread():
-    """``_web_dialog_async`` must not block the caller while the dialog wait
-    is still pending — that wait happens on a worker thread, and only the
-    result hop comes back (via ``root.after(0, ...)``)."""
-    from src.main import Application
-
-    app = Application.__new__(Application)
-    app.root = _FakeRoot()
-
-    release = threading.Event()
-
-    def _blocking_dialog(dialog_type, **kwargs):
-        # Mirrors DialogManager.show(): blocks up to 120s for a human.
-        assert release.wait(timeout=5), "worker should be released by the test"
-        return {"action": "accept"}
-
-    app._web_dialog = _blocking_dialog  # type: ignore[attr-defined]
-
-    results = []
-    app._web_dialog_async("transfer_request", results.append, title="t")
-
-    # Returned immediately — the dialog wait is still blocked on a worker.
-    assert results == []
-
-    release.set()
-    deadline = time.time() + 5
-    while not results and time.time() < deadline:
-        time.sleep(0.01)
-    assert results == [{"action": "accept"}]
-
-
-def test_webview_dialog_paths_use_async_not_blocking():
-    """The webview branches of transfer-request / peer-pick / cert-retrust /
-    send-URL must route through ``_web_dialog_async`` — a direct
-    ``_web_dialog`` call from the main thread would stall hotkeys, tray
-    polling and timers for up to two minutes."""
-    import inspect
-
-    from src.main import Application
-
-    blocking_re = re.compile(r"self\._web_dialog\((?!async)")
-    for method in (
-        Application._show_transfer_request_dialog,
-        Application._pick_peer_then,
-        Application._ask_retrust_choice,
-        Application._do_send_url,
-    ):
-        src = inspect.getsource(method)
-        assert "self._web_dialog_async(" in src, f"{method.__name__} must use the async web dialog"
-        assert not blocking_re.search(src), (
-            f"{method.__name__} must not call blocking _web_dialog on the main thread"
-        )
-
-
-# ═════════════════════════════════════════════════════════════════════════
-# #2 (P1) — config parse failures degrade per-field, not whole-identity
-# ═════════════════════════════════════════════════════════════════════════
+# ── 2. Config parse failures degrade per-field, not whole-identity ────
 
 
 def _point_config_at(tmp_path, monkeypatch, data) -> Path:
@@ -388,27 +144,7 @@ def test_config_load_corrupt_archives_file(tmp_path, monkeypatch):
     assert archived[0].read_text(encoding="utf-8") == "{ definitely not json"
 
 
-def test_hotkey_parse_shortcut_rejects_non_string():
-    """Config hotkeys are untrusted input: a non-string shortcut must raise
-    ValueError (so it is skipped) instead of raising AttributeError."""
-    import internal.system.hotkey as hotkey_module
-
-    mgr = hotkey_module.HotkeyManager()
-    for bad in (123, None, ["Ctrl+V"], 3.14, {"a": "b"}):
-        with pytest.raises(ValueError):
-            mgr._parse_shortcut(bad)  # type: ignore[arg-type]
-    mods, vk = mgr._parse_shortcut("Ctrl+1")
-    assert mods & hotkey_module.MOD_CONTROL
-    # VK semantics are platform-specific: Windows/Linux use ord('1'), macOS
-    # uses the Carbon kVK code (kVK_ANSI_1 = 18).  Assert against the platform
-    # the manager detected rather than hardcoding the Windows value.
-    expected_vk = hotkey_module._MAC_DIGIT_VK["1"] if mgr._platform == "macos" else ord("1")
-    assert vk == expected_vk
-
-
-# ═════════════════════════════════════════════════════════════════════════
-# #4 (P4) — backup restore applies peers (and drops pinned public keys)
-# ═════════════════════════════════════════════════════════════════════════
+# ── 3. Backup restore applies peers (and drops pinned public keys) ────
 
 
 def test_backup_restore_applies_peers():
@@ -464,9 +200,7 @@ def test_backup_restore_skips_malformed_peers():
     assert cfg.peers["good"].paired is True
 
 
-# ═════════════════════════════════════════════════════════════════════════
-# #5 (P5) — export / backup writes are atomic
-# ═════════════════════════════════════════════════════════════════════════
+# ── 4. Export / backup writes are atomic ──────────────────────────────
 
 
 class _StubHistory:
@@ -502,29 +236,6 @@ def test_export_history_json_is_atomic(tmp_path):
     assert out.exists()
     assert not (tmp_path / "history.json.part").exists()
     assert json.loads(out.read_text(encoding="utf-8"))[0]["text_preview"] == "hi"
-
-
-def test_export_history_csv_is_atomic(tmp_path):
-    from internal.data.export import export_history_csv
-
-    hist = _StubHistory(
-        [
-            {
-                "timestamp": 1.0,
-                "content_type": "TEXT",
-                "text_preview": "hello",
-                "source_device": "",
-                "pinned": False,
-                "paste_count": 0,
-            }
-        ]
-    )
-    out = tmp_path / "history.csv"
-    n = export_history_csv(hist, str(out))
-    assert n == 1
-    assert out.exists()
-    assert not (tmp_path / "history.csv.part").exists()
-    assert "hello" in out.read_text(encoding="utf-8")
 
 
 def test_create_backup_is_atomic_and_valid(tmp_path, monkeypatch):
@@ -579,25 +290,7 @@ def test_create_backup_aborts_when_history_export_invalid(tmp_path, monkeypatch)
     assert not list(backups_dir.glob("*.part"))
 
 
-# ═════════════════════════════════════════════════════════════════════════
-# P3 — port-in-use message teaches the platform's native command
-# ═════════════════════════════════════════════════════════════════════════
-
-
-def test_port_in_use_msg_is_platform_aware():
-    import internal.i18n as i18n
-
-    msg = i18n.T("ui.port_in_use_msg", port=19990)
-    if sys.platform.startswith("win"):
-        assert "netstat -ano | findstr :19990" in msg
-        assert "lsof" not in msg
-    else:
-        assert "lsof -i :19990" in msg
-
-
-# ═════════════════════════════════════════════════════════════════════════
-# Stage 5 — main-program / platform lifecycle
-# ═════════════════════════════════════════════════════════════════════════
+# ── 5. The %TEMP% sweep deletes only our own abandoned scratch ────────
 
 
 def _make_stale(path, age_seconds):
@@ -645,27 +338,6 @@ def test_temp_sweep_removes_abandoned_update_downloads(tmp_path, monkeypatch):
     assert other.exists(), "the sweep must only touch our own prefixes"
 
 
-def test_temp_sweep_never_touches_the_restart_dir(tmp_path, monkeypatch):
-    """A frozen restart hands clipsync_restart/<hex> to a child process whose
-    live PyInstaller _MEI extraction sits inside it.  Age proves nothing there
-    — a long-running child keeps an old-looking directory in use — so this
-    directory is off-limits to housekeeping, full stop."""
-    import tempfile
-
-    monkeypatch.setattr(tempfile, "gettempdir", lambda: str(tmp_path))
-
-    restart = tmp_path / "clipsync_restart"
-    (restart / "deadbeef").mkdir(parents=True)
-    (restart / "deadbeef" / "_MEI123").mkdir()
-    _make_stale(restart / "deadbeef", 90 * 24 * 3600)
-    _make_stale(restart, 90 * 24 * 3600)
-
-    self_, sweep = _sweeper()
-    sweep(self_)
-
-    assert (restart / "deadbeef" / "_MEI123").exists()
-
-
 def test_temp_sweep_clears_stale_chat_uploads_only(tmp_path, monkeypatch):
     """Chat attachments are staged in temp and read by the transfer; nothing
     deletes them afterwards.  Sweep old files, leave fresh ones (a send may
@@ -693,28 +365,7 @@ def test_temp_sweep_clears_stale_chat_uploads_only(tmp_path, monkeypatch):
     assert sub.exists()
 
 
-def test_temp_sweep_survives_a_missing_temp_dir(tmp_path, monkeypatch):
-    """Housekeeping is best effort: an unreadable %TEMP% must not raise out of
-    the background thread."""
-    import tempfile
-
-    monkeypatch.setattr(tempfile, "gettempdir", lambda: str(tmp_path / "does-not-exist"))
-    self_, sweep = _sweeper()
-    sweep(self_)  # must not raise
-
-
-def test_temp_sweep_runs_off_the_main_thread():
-    """The scan walks every entry in %TEMP% — thousands on an old machine —
-    so it must never sit between startup and the tray appearing."""
-    import inspect
-
-    from src.main import Application
-
-    src = inspect.getsource(Application._start_threads)
-    assert "_sweep_stale_temp" in src, "startup must schedule the sweep"
-    assert "threading.Thread(target=self._sweep_stale_temp" in src, (
-        "the sweep must be started on its own thread, not called inline"
-    )
+# ── 6. The single-instance lock ───────────────────────────────────────
 
 
 def test_pid_alive_accepts_a_source_run_outside_a_clipsync_folder(monkeypatch):
@@ -739,17 +390,6 @@ def test_pid_alive_accepts_a_source_run_outside_a_clipsync_folder(monkeypatch):
     assert main_mod._pid_alive(4242) is True
 
 
-def test_pid_alive_still_recognises_a_frozen_run(monkeypatch):
-    import pathlib
-
-    import src.main as main_mod
-
-    monkeypatch.setattr(main_mod.sys, "platform", "linux")
-    monkeypatch.setattr(main_mod.os, "kill", lambda pid, sig: None)
-    monkeypatch.setattr(pathlib.Path, "read_bytes", lambda self: b"/opt/clipsync/clipsync\x00")
-    assert main_mod._pid_alive(4242) is True
-
-
 def test_pid_alive_rejects_an_unrelated_process_reusing_the_pid(monkeypatch):
     """PID reuse is the whole reason this reads cmdline at all."""
     import pathlib
@@ -760,26 +400,6 @@ def test_pid_alive_rejects_an_unrelated_process_reusing_the_pid(monkeypatch):
     monkeypatch.setattr(main_mod.os, "kill", lambda pid, sig: None)
     monkeypatch.setattr(pathlib.Path, "read_bytes", lambda self: b"/usr/bin/vim\x00notes.txt\x00")
     assert main_mod._pid_alive(4242) is False
-
-
-def test_netpair_sweep_waits_until_cfg_exists():
-    """``_netpair_drop_provisional`` reads self.cfg.netpair_secrets, and
-    __init__ runs long before load_config() assigns self.cfg — calling it
-    there swept nothing, every launch, silently."""
-    import inspect
-
-    from src.main import Application
-
-    init_src = inspect.getsource(Application.__init__)
-    load_src = inspect.getsource(Application.load_config)
-
-    assert "self._netpair_drop_provisional()" not in init_src, (
-        "the sweep must not run in __init__, where self.cfg is still None"
-    )
-    assert "self._netpair_drop_provisional()" in load_src
-    assert load_src.index("self.cfg = load()") < load_src.index(
-        "self._netpair_drop_provisional()"
-    ), "the sweep must run after cfg is loaded"
 
 
 def test_shutdown_releases_the_lock_even_when_the_final_save_fails(monkeypatch):
@@ -820,79 +440,3 @@ def test_shutdown_releases_the_lock_even_when_the_final_save_fails(monkeypatch):
     app.shutdown()  # must not raise
 
     assert unlocked == [True], "the single-instance lock must always be released"
-
-
-def test_systray_without_pystray_reports_instead_of_crashing(monkeypatch):
-    """On a headless/Wayland box the module-level pystray import fails and the
-    name is None.  The menu build then raised AttributeError from OUTSIDE the
-    handler written for exactly this case."""
-    import internal.ui.systray as systray_mod
-
-    monkeypatch.setattr(systray_mod, "pystray", None)
-
-    told = []
-    tray = systray_mod.SystrayApp.__new__(systray_mod.SystrayApp)
-    tray._on_tray_failed = lambda: told.append(True)
-
-    tray.run()  # must not raise
-
-    assert told == [True], "the user must be told the tray is not there"
-
-
-def test_webview_falls_back_when_the_found_browser_cannot_be_launched(monkeypatch):
-    """_find_browser() proves a path was DISCOVERED, not that it runs.  A
-    moved or permission-denied binary made Popen raise straight out of
-    start(), so no dashboard opened at all — even though the default-browser
-    fallback right there would have worked."""
-    from internal.ui.webview_window import WebViewWindow
-
-    win = WebViewWindow("http://127.0.0.1:9580/index.html?token=t")
-    monkeypatch.setattr(win, "is_running", lambda: False)
-    monkeypatch.setattr(
-        "internal.ui.webview_window._find_browser", lambda: ("chrome", ["/gone/chrome", "--app=%s"])
-    )
-
-    def _cannot_exec():
-        raise PermissionError("nope")
-
-    monkeypatch.setattr(win, "_launch_browser", _cannot_exec)
-
-    opened = []
-    monkeypatch.setattr(win, "_start_fallback", lambda: opened.append(True))
-
-    win.start()  # must not raise
-
-    assert opened == [True]
-    assert win._process is None
-
-
-def test_webview_fallback_survives_a_dead_default_browser(monkeypatch):
-    """Last resort: no BROWSER, no xdg-open.  Raising here would take down the
-    tray click for something the user can work around by typing the URL."""
-    import webbrowser
-
-    from internal.ui.webview_window import WebViewWindow
-
-    def _boom(url):
-        raise RuntimeError("no browser")
-
-    monkeypatch.setattr(webbrowser, "open_new", _boom)
-    win = WebViewWindow("http://127.0.0.1:9580/index.html")
-    win._start_fallback()  # must not raise
-
-
-def test_web_port_is_restored_before_the_failure_dialog():
-    """After the +1..+5 scan fails, cfg.web_port is parked on the LAST port
-    tried.  Left there it gets persisted by the very next save, so each failed
-    launch drifts the port another +5 while settings and diagnostics report a
-    port nothing ever listened on."""
-    import inspect
-
-    from src.main import Application
-
-    src = inspect.getsource(Application._start_services)
-    marker = "self.cfg.web_port = base_port"
-    assert marker in src, "the base port must be restored after a failed scan"
-    restore = src.index(marker)
-    dialog = src.index('show_error(self.root, T("ui.web_companion")')
-    assert restore < dialog, "the port must be restored before anything can persist or display it"

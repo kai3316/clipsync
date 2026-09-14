@@ -14,6 +14,7 @@ from internal.adapters.sidecar.favorites import dispatch_favorites, valid_entry_
 from internal.application.bootstrap import SidecarApplication
 from internal.application.errors import ApplicationError
 from internal.application.use_cases.history import KINDS, SORTS
+from internal.transport.peer_id import id_forms
 
 logger = logging.getLogger(__name__)
 MAX_FRAME_BYTES = 1024 * 1024
@@ -29,6 +30,47 @@ def _unique_object(pairs: list[tuple]) -> dict:
             raise ValueError("Duplicate object key")
         result[key] = value
     return result
+
+
+def attach_reconnect_progress(payload: dict, runtime) -> None:
+    """Add the auto-reconnect counter to the device rows that are being retried.
+
+    Both legacy fronts promise the same thing on a paired device that has gone
+    away: "Reconnecting 2/10" while the transport works through its attempts,
+    and only "offline" once it has given up
+    (``dashboard.py::_create_device_row``, ``internal/web/api/devices.py``).
+    Without it the two states look identical here — the row reads 离线 either
+    way, and a reader cannot tell a retry in flight from a peer that is simply
+    gone.
+
+    The bookkeeping is keyed by whichever id form the reconnect scheduler used,
+    so both forms are tried; :func:`id_forms` is the same bridge every other
+    device-list builder uses.  A row that is already connected carries no
+    counter — the transport drops the entry the moment a peer answers.
+    """
+    if runtime is None:
+        return
+    try:
+        states = runtime.reconnect_states() or {}
+    except Exception:
+        return
+    if not states:
+        return
+    for row in payload.get("items", ()):
+        if row.get("archived") or row.get("connection_state") == "online":
+            continue
+        state = next(
+            (states[form] for form in id_forms(row.get("id", "")) if form in states),
+            None,
+        )
+        if not isinstance(state, dict) or not state:
+            continue
+        try:
+            row["reconnect_attempt"] = int(state.get("attempts", 0) or 0)
+            row["reconnect_max"] = int(state.get("max_attempts", 0) or 0)
+        except (TypeError, ValueError):
+            continue
+        row["reconnecting"] = True
 
 
 def _reject_constant(value: str):
@@ -161,7 +203,9 @@ class Dispatcher:
             return self.app.factory_reset()
         if method == "devices.list":
             validate_params(params, {})
-            return self.app.events.snapshot(self.app.devices)
+            payload = self.app.events.snapshot(self.app.devices)
+            attach_reconnect_progress(payload, self.app.runtime)
+            return payload
         if method == "companion.status":
             validate_params(params, {})
             return self.app.companion_status()
@@ -170,6 +214,10 @@ class Dispatcher:
                 "enabled": (bool, lambda _: True),
                 "port": (int, lambda value: 1 <= value <= 65535),
                 "rotate_token": (bool, lambda _: True),
+                # Clearing is a distinct intent, not "rotate to nothing": the
+                # legacy web panel offered it as its own button and this is the
+                # method the new page reaches it through.
+                "clear_token": (bool, lambda _: True),
             }, ("enabled",))
             return self.app.configure_companion(**params)
         if method == "devices.note":
@@ -213,6 +261,17 @@ class Dispatcher:
                 "text": (str, lambda v: 0 < len(v) <= 100000),
             }, ("text",))
             return self.app.require_runtime().push_text(params["text"])
+        if method == "clipboard.copy":
+            # Local only, unlike clipboard.push above: this is the context
+            # menu's "copy", which must not turn a device id or a file path
+            # into a clip that syncs to every device.
+            validate_params(params, {
+                "text": (str, lambda v: 0 < len(v) <= 100000),
+            }, ("text",))
+            return self.app.copy_text(params["text"])
+        if method == "overview.get":
+            validate_params(params, {})
+            return self.app.overview()
         if method == "discovery.status":
             validate_params(params, {})
             return self.app.require_runtime().discovery_state()
@@ -244,6 +303,14 @@ class Dispatcher:
         if method == "internet_pairing.unpair":
             validate_params(params, {"peer_id": (str, lambda v: 0 < len(v) <= 128)}, ("peer_id",))
             return self.app.require_internet_pairing().unpair(params["peer_id"])
+        if method == "internet_pairing.test":
+            # The staged list is what is tested, so an empty one is not an
+            # error here: it means "test what is saved", which is the panel's
+            # own reading of an empty body, and the application layer resolves
+            # it.  Same shape and same limit as the relay lists the settings
+            # write, so a frame cannot be tested that could not be saved.
+            validate_params(params, {"brokers": (list, _broker_list)})
+            return self.app.internet_pairing_test(params.get("brokers") or [])
         if method == "relay.delivery_status":
             validate_params(params, {"peer_id": (str, lambda v: len(v) <= 128)})
             return self.app.require_runtime().relay_delivery_status(params.get("peer_id", ""))
@@ -337,6 +404,11 @@ class Dispatcher:
                 ("which",),
             )
             return self.app.open_data_folder(params["which"])
+        if method == "companion.share_file":
+            validate_params(
+                params, {"path": (str, lambda v: 0 < len(v) <= 4096)}, ("path",)
+            )
+            return self.app.share_file_to_phone(params["path"])
         if method == "settings.get":
             validate_params(params, {})
             return self.app.settings()
@@ -454,6 +526,25 @@ class Dispatcher:
                 params["paths"], params.get("device_id", "")
             )
             return {"transfer_id": transfer_id}
+        if method == "transfers.request_entry_files":
+            # A file entry whose bytes live on another device: the row shows a
+            # name and a size, and this is the click that asks for the file.
+            # The command answers only "the request went out" — the download
+            # itself arrives as a transfer, and a refusal arrives as an event —
+            # so anything that looked like an outright "downloaded" here would
+            # be a claim made before a byte had moved.
+            validate_params(
+                params,
+                {
+                    "entry_id": (str, lambda v: 0 < len(v) <= 128),
+                    "device_id": (str, lambda v: len(v) <= 128),
+                },
+                ("entry_id",),
+            )
+            requested = self.app.require_runtime().request_entry_files(
+                params.get("device_id", ""), params["entry_id"]
+            )
+            return requested
         if method == "transfers.action":
             fields = {
                 "action": (
@@ -505,6 +596,18 @@ class Dispatcher:
                 "transfer_id": (str, lambda v: 0 < len(v) <= 128),
             }, ("session_id", "transfer_id"))
             return self.app.require_runtime().chat_saved_file(
+                params["session_id"], params["transfer_id"]
+            )
+        if method == "chat.reveal_file":
+            # The legacy chat panel's 打开所在文件夹, beside the 打开 that
+            # `chat.open_file` already answers.  A session and a transfer id,
+            # never a path: the runtime resolves which file that is, so the
+            # page cannot ask the host to show an arbitrary folder.
+            validate_params(params, {
+                "session_id": (str, lambda v: 0 < len(v) <= 128),
+                "transfer_id": (str, lambda v: 0 < len(v) <= 128),
+            }, ("session_id", "transfer_id"))
+            return self.app.require_runtime().chat_reveal_file(
                 params["session_id"], params["transfer_id"]
             )
         if method == "chat.invite":

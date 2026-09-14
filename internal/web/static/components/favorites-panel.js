@@ -334,7 +334,7 @@
                 @keydown.space.prevent="addFromHistory(hitem)"
               >
                 <span class="favorites-add-modal__history-icon">{{ historyIcon(hitem) }}</span>
-                <span class="favorites-add-modal__history-text text-ellipsis">{{ hitem.text_preview || t('history.empty_preview') }}</span>
+                <span class="favorites-add-modal__history-text text-ellipsis">{{ historyText(hitem) }}</span>
               </div>
             </div>
           </div>
@@ -702,6 +702,13 @@
 
       historyIcon: function (item) {
         return ClipsyncAPI.typeIcon(item.content_type);
+      },
+
+      // The picker's one line about a row. A clip with no text of its own is
+      // stored under a bracketed label, which reads as English in a Chinese
+      // window; see ClipsyncAPI.previewText.
+      historyText: function (item) {
+        return ClipsyncAPI.previewText(item.text_preview) || this.t('history.empty_preview');
       },
 
       addFromHistory: function (hitem) {

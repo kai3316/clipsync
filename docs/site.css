@@ -1,0 +1,1450 @@
+/* ClipSync's landing page.
+ *
+ * The colours are the window's own.  `desktop/src/styles.css` defines them and
+ * this file repeats them rather than inventing a marketing palette, because the
+ * page's job is to show the application and a visitor who downloads it should
+ * land in the same green they were just looking at.  Where a token exists in
+ * the window it is spelled the same here; the few that do not — the hero's
+ * deeper ground, the packet's fill — are derived from it and marked.
+ *
+ * Themed at the token level for all three viewer states: the bare `:root` block
+ * is the complete light palette, the media query redefines only tokens and is
+ * guarded so an explicit light choice survives a dark system, and the
+ * `[data-theme="dark"]` block wins in the other direction.  No rule below a
+ * theme block hard-codes a colour.
+ */
+
+:root {
+  color-scheme: light;
+
+  /* The window's own face order, CJK families after the Latin ones so a glyph
+     missing from Segoe UI or SF falls to YaHei or PingFang rather than to a
+     fallback face.  Archivo and JetBrains Mono are the two the page adds: the
+     first for headings, the second for every number, port and cipher name,
+     which are read character by character. */
+  --font-ui: "Segoe UI", -apple-system, "SF Pro Text", "PingFang SC",
+    "Hiragino Sans GB", "Microsoft YaHei UI", "Noto Sans", "Noto Sans CJK SC",
+    "Source Han Sans SC", "WenQuanYi Micro Hei", system-ui, sans-serif;
+  --font-display: "Archivo", "Segoe UI", -apple-system, "PingFang SC",
+    "Hiragino Sans GB", "Microsoft YaHei UI", "Noto Sans CJK SC", system-ui,
+    sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, "Cascadia Mono", Consolas,
+    "SF Mono", Menlo, monospace;
+
+  --page: #fff;
+  --chrome: #f4f6f5;
+  --surface: #f5f7f6;
+  --raised: #fff;
+  --line: #e5e9e8;
+  --line-soft: #eef1f0; /* derived: the line at half weight, for inner rules */
+  --ink: #262b2c;
+  --muted: #697371;
+  --accent: #087c6b;
+  --accent-text: #086956;
+  --accent-soft: #e0eee8;
+  --accent-line: #cfe4dc;
+  --accent-deep: #04503f; /* derived: the accent at reading weight on a tint */
+  --on-accent: #fff;
+  --state-paired: #7cb2a2;
+  --state-discovered: #bccbc5;
+
+  --radius: 5px;
+  --radius-lg: 8px;
+  --shadow: 0 8px 24px rgb(0 0 0 / 12%);
+  --shadow-soft: 0 6px 18px rgb(0 0 0 / 10%);
+  --gutter: clamp(16px, 4vw, 28px);
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    color-scheme: dark;
+    --page: #202423;
+    --chrome: #252b28;
+    --surface: #2c322f;
+    --raised: #252b28;
+    --line: #3d4642;
+    --line-soft: #333a37;
+    --ink: #e4e7e5;
+    --muted: #a6b1ab;
+    --accent: #65c6a6;
+    --accent-text: #a2e1bf;
+    --accent-soft: #284a3b;
+    --accent-line: #35604e;
+    --accent-deep: #c9f0dd;
+    --on-accent: #10231c;
+    --state-paired: #4a8a74;
+    --state-discovered: #4e5c56;
+    --shadow: 0 8px 24px rgb(0 0 0 / 45%);
+    --shadow-soft: 0 6px 18px rgb(0 0 0 / 35%);
+  }
+}
+
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --page: #202423;
+  --chrome: #252b28;
+  --surface: #2c322f;
+  --raised: #252b28;
+  --line: #3d4642;
+  --line-soft: #333a37;
+  --ink: #e4e7e5;
+  --muted: #a6b1ab;
+  --accent: #65c6a6;
+  --accent-text: #a2e1bf;
+  --accent-soft: #284a3b;
+  --accent-line: #35604e;
+  --accent-deep: #c9f0dd;
+  --on-accent: #10231c;
+  --state-paired: #4a8a74;
+  --state-discovered: #4e5c56;
+  --shadow: 0 8px 24px rgb(0 0 0 / 45%);
+  --shadow-soft: 0 6px 18px rgb(0 0 0 / 35%);
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  padding-inline: var(--gutter);
+  background: var(--page);
+  color: var(--ink);
+  font-family: var(--font-ui);
+  font-size: 16px;
+  line-height: 1.65;
+  -webkit-font-smoothing: antialiased;
+}
+
+h1,
+h2,
+h3,
+p,
+figure {
+  margin: 0;
+}
+
+img {
+  max-width: 100%;
+  display: block;
+}
+
+a {
+  color: var(--accent-text);
+}
+
+a:focus-visible,
+button:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 3px;
+  border-radius: 2px;
+}
+
+.wrap {
+  max-width: 1080px;
+  margin-inline: auto;
+}
+
+/* A section is separated by a hairline rather than by a card.  The page sets
+   three rules — the band under the hero, the section dividers, the footer — and
+   spends its lifted surfaces on the one object that needs to read as separate:
+   the application window. */
+.band {
+  border-top: 1px solid var(--line);
+  padding-block: clamp(52px, 7vw, 84px);
+}
+
+.eyebrow {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  font-weight: 500;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--accent-text);
+}
+
+h2 {
+  font-family: var(--font-display);
+  font-weight: 600;
+  font-size: clamp(24px, 3.4vw, 34px);
+  line-height: 1.2;
+  letter-spacing: -0.02em;
+  text-wrap: balance;
+  margin-block: 10px 14px;
+}
+
+h3 {
+  font-family: var(--font-display);
+  font-weight: 600;
+  font-size: 17px;
+  letter-spacing: -0.01em;
+  line-height: 1.35;
+}
+
+.lede {
+  max-width: 62ch;
+  color: var(--muted);
+  font-size: 17px;
+}
+
+.mono {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+}
+
+/* ---------------------------------------------------------------- top bar -- */
+
+/* Full-bleed, so the hairline under it reaches both edges instead of stopping
+   at the page gutter. */
+.top {
+  position: sticky;
+  top: 0;
+  z-index: 20;
+  margin-inline: calc(var(--gutter) * -1);
+  padding: 12px var(--gutter);
+  background: color-mix(in srgb, var(--page) 88%, transparent);
+  backdrop-filter: blur(10px);
+  border-bottom: 1px solid var(--line-soft);
+}
+
+.top .wrap {
+  display: flex;
+  align-items: center;
+  gap: 18px;
+  width: 100%;
+}
+
+.brand {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  font-family: var(--font-display);
+  font-weight: 700;
+  font-size: 16px;
+  letter-spacing: -0.01em;
+  color: var(--ink);
+  text-decoration: none;
+}
+
+.brand img {
+  width: 24px;
+  height: 24px;
+}
+
+.top nav {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: 20px;
+  font-size: 14px;
+}
+
+.top nav a {
+  color: var(--muted);
+  text-decoration: none;
+}
+
+.top nav a:hover {
+  color: var(--ink);
+}
+
+.lang {
+  display: flex;
+  gap: 2px;
+  padding: 2px;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  font-size: 13px;
+}
+
+.lang a {
+  padding: 3px 9px;
+  border-radius: 3px;
+  color: var(--muted);
+  text-decoration: none;
+}
+
+.lang a[aria-current="true"] {
+  background: var(--raised);
+  color: var(--ink);
+  box-shadow: 0 1px 2px rgb(0 0 0 / 8%);
+}
+
+/* ------------------------------------------------------------------- hero -- */
+
+.hero {
+  padding-block: clamp(44px, 7vw, 76px) clamp(36px, 5vw, 56px);
+  display: grid;
+  /* The picture gets the larger half.  It carries two machines, two rails and
+     a gate, and every one of them is a thing a reader has to be able to make
+     out at a glance — the text beside it is three short paragraphs. */
+  grid-template-columns: minmax(0, 0.88fr) minmax(0, 1.12fr);
+  gap: clamp(28px, 4vw, 44px);
+  align-items: center;
+}
+
+.hero h1 {
+  font-family: var(--font-display);
+  font-weight: 700;
+  font-size: clamp(29px, 4.4vw, 42px);
+  line-height: 1.14;
+  letter-spacing: -0.03em;
+  text-wrap: balance;
+}
+
+/* The headline is two clauses that break badly across one character.  Pinning
+   the second keeps the line ending after the comma, which is where it is read
+   as ending.  Only above the narrow breakpoint: down there the second clause is
+   most of a line on its own, and pinning it would push the break into the first
+   clause instead — worse than the one it fixes.  Balancing the two lines does
+   the work there. */
+@media (min-width: 561px) {
+  .nw {
+    white-space: nowrap;
+  }
+}
+
+.hero .lede {
+  margin-block: 18px 26px;
+}
+
+.cta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  align-items: center;
+}
+
+.btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 40px;
+  padding: 8px 18px;
+  border-radius: var(--radius);
+  border: 1px solid var(--line);
+  font-size: 15px;
+  font-weight: 500;
+  text-decoration: none;
+  color: var(--ink);
+}
+
+.btn:hover {
+  background: var(--surface);
+}
+
+.btn-primary {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: var(--on-accent);
+}
+
+.btn-primary:hover {
+  background: var(--accent-deep);
+  border-color: var(--accent-deep);
+}
+
+/* The spec rail: the numbers a technical reader wants before downloading,
+   in the face that makes them comparable.  Not badges — a list. */
+.spec {
+  margin-top: 28px;
+  padding-top: 20px;
+  border-top: 1px solid var(--line);
+  display: grid;
+  gap: 7px;
+  font-family: var(--font-mono);
+  font-size: 12.5px;
+  color: var(--muted);
+}
+
+.spec b {
+  color: var(--ink);
+  font-weight: 500;
+}
+
+/* The wire.  Two machines, a link between them, and frames crossing it in both
+   directions without pause -- the product's whole thesis in one object, so the
+   hero does not need a slogan to carry it.
+
+   Each machine is drawn rather than named: a monitor on its stand and a laptop
+   on its deck, and on each screen the window the reader has just been looking
+   at -- its title bar, its sidebar, its list -- with the newest row in the
+   accent and a soft glow under it.  The two are the same application on two
+   machines, which is what the two ends of this link are.
+
+   Two rails, running opposite ways, because the protocol is sender-initiated in
+   both directions -- traffic one way only would be a picture of something this
+   application does not do.  Each rail's dashes march with its own traffic.
+
+   The gate in the middle is the one detail a conveyor cannot carry.  A frame
+   leaves its machine legible, is ghosted for the width of the gate, and comes
+   back legible on the far side; the lock on the gate is what that means, and the
+   ring that leaves the lock is the sealing happening.  Being a *place* rather
+   than a moment in each chip's own timeline is the point: every chip is dimmed
+   at the same point in the lane, so the gate reads as one thing happening once,
+   not as ten chips each dimming on their own clock.
+
+   The mechanism is one track per chip, each a full-width box translated from
+   -100% to 100% (and the reverse on the far rail).  A chip is anchored to the
+   track's leading edge, so at either end of the cycle it is a full lane-width
+   off that edge and thus out of sight whatever its own width is -- no measuring,
+   and the loop is seamless because the stagger is exactly one traversal divided
+   by the number of chips.  A chip's own opacity carries its two ends, in the
+   keyframes, because that is the only treatment that fits every chip: a mask
+   ramp narrower than the thing crossing it does not fade that thing, it
+   truncates it, and the lane is not wide enough for ramps wider than a chip at
+   every width this page is read at.  What the mask is left to do is the gate. */
+.wire {
+  /* One width for the two machines, and the height their screens come out at --
+     the drawing is 168x120 with 10px of side padding and a 1px border inside a
+     `--unit-w` card, so the height is that content width at the viewBox's own
+     ratio plus the padding.  The link is given exactly that height, which is
+     what puts the rails against the machines: centred against the *figure*
+     instead, the returning rail's chips sat down beside the captions. */
+  --unit-w: clamp(126px, 13.2vw, 174px);
+  --art-h: calc((var(--unit-w) - 22px) * 120 / 168 + 22px);
+  display: grid;
+  grid-template-columns: auto minmax(46px, 1fr) auto;
+  align-items: start;
+  gap: 0;
+}
+
+/* The one gradient both drawings share, declared once so neither machine's
+   screen has to carry its own copy of the same three stops. */
+.art-defs {
+  position: absolute;
+  width: 0;
+  height: 0;
+  overflow: hidden;
+}
+
+/* One machine: a card holding the drawing, and the caption a figure would
+   carry -- the name, the address, the link state -- centred under the machine
+   it belongs to, so the caption reads as that machine's label and not as a
+   second column of the page. */
+.unit {
+  width: var(--unit-w);
+  margin: 0;
+}
+
+.unit-art {
+  position: relative;
+  overflow: hidden;
+  padding: 12px 10px 8px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-lg);
+  background: linear-gradient(180deg, var(--raised), var(--surface));
+  box-shadow: var(--shadow-soft);
+}
+
+/* The window's own card mark, mirrored on the far machine: traffic leaves the
+   left one rightwards and the right one leftwards, and the two hairlines point
+   the way each machine's traffic goes. */
+.unit-art::before {
+  content: "";
+  position: absolute;
+  inset: 0 0 auto 0;
+  height: 2px;
+  background: linear-gradient(90deg, var(--accent), transparent 72%);
+}
+
+.unit--end .unit-art::before {
+  background: linear-gradient(270deg, var(--accent), transparent 72%);
+}
+
+.unit-art svg.art {
+  display: block;
+  width: 100%;
+  height: auto;
+}
+
+/* The drawings, in the page's own tokens: bezel and glass are the card's own
+   surfaces one step apart, the screen carries a wash of the accent so a display
+   reads as lit rather than as a hole in the bezel, and the machine's newest row
+   is the accent itself. */
+.art-bezel {
+  fill: var(--raised);
+  stroke: var(--line);
+  stroke-width: 2;
+}
+
+.art-glass {
+  fill: url(#screen);
+  stroke: var(--line-soft);
+  stroke-width: 1.5;
+}
+
+.art-dot {
+  fill: var(--muted);
+  opacity: 0.35;
+}
+
+.art-side {
+  fill: var(--accent-soft);
+  opacity: 0.6;
+}
+
+.art-nav {
+  fill: none;
+  stroke: var(--muted);
+  stroke-width: 1.6;
+  stroke-linecap: round;
+  opacity: 0.3;
+}
+
+.art-hair {
+  fill: none;
+  stroke: var(--line);
+  stroke-width: 1.2;
+}
+
+.art-row {
+  fill: var(--accent-line);
+}
+
+.art-row--hot {
+  fill: var(--accent);
+  animation: hot 3.4s ease-in-out infinite;
+}
+
+/* Under the newest row, at the hot row's own clock: the machine is not merely
+   holding a clip, it is holding the one that just arrived.  Its own keyframes
+   rather than `hot`, because an animation beats a normal declaration and would
+   have taken this rect to full opacity. */
+.art-glow {
+  fill: var(--accent);
+  opacity: 0.16;
+  animation: glow 3.4s ease-in-out infinite;
+}
+
+@keyframes glow {
+  0%,
+  100% {
+    opacity: 0.17;
+  }
+  50% {
+    opacity: 0.06;
+  }
+}
+
+@keyframes hot {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.4;
+  }
+}
+
+/* The laptop's deck and the keys on it. */
+.art-deck {
+  fill: var(--raised);
+  stroke: var(--line);
+  stroke-width: 2;
+}
+
+.art-key {
+  fill: var(--muted);
+  opacity: 0.32;
+}
+
+.unit-plate {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  margin-top: 11px;
+  text-align: center;
+}
+
+.unit-name {
+  font-family: var(--font-display);
+  font-weight: 600;
+  font-size: 15px;
+  line-height: 1.25;
+}
+
+.unit-addr {
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  color: var(--muted);
+  margin-top: 2px;
+}
+
+.unit-live {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 7px;
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  color: var(--accent-text);
+}
+
+.unit-live::before {
+  content: "";
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--accent);
+}
+
+/* The ring that leaves the dot: the one part of this picture that says the
+   link is up right now rather than merely configured. */
+.unit-live::after {
+  content: "";
+  position: absolute;
+  left: 0;
+  top: 50%;
+  width: 7px;
+  height: 7px;
+  margin-top: -3.5px;
+  border: 1px solid var(--accent);
+  border-radius: 50%;
+  animation: ping 2.6s ease-out infinite;
+}
+
+@keyframes ping {
+  from {
+    transform: scale(1);
+    opacity: 0.65;
+  }
+  to {
+    transform: scale(3);
+    opacity: 0;
+  }
+}
+
+/* The band the two machines occupy, with the rails centred in it and the gate
+   drawn the full height of it. */
+.link {
+  position: relative;
+  align-self: start;
+  display: grid;
+  grid-template-rows: 1fr 1fr;
+  gap: 14px;
+  block-size: var(--art-h);
+  padding-inline: 6px;
+}
+
+.link-gate {
+  position: absolute;
+  top: 3px;
+  bottom: 3px;
+  left: 50%;
+  width: 1.5px;
+  margin-left: -0.75px;
+  border-radius: 1px;
+  background: linear-gradient(
+    180deg,
+    transparent,
+    var(--accent) 14%,
+    var(--accent) 86%,
+    transparent
+  );
+  opacity: 0.55;
+}
+
+/* What the ghosting means.  Between the two rails, on the gate, so the lock
+   names the crossing rather than the traffic -- it is not on either machine. */
+.link-lock {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  translate: -50% -50%;
+  display: grid;
+  place-items: center;
+  width: 30px;
+  height: 30px;
+  border: 1px solid var(--accent-line);
+  border-radius: 50%;
+  background: var(--raised);
+  box-shadow: 0 0 0 4px var(--page), 0 6px 14px -8px var(--accent);
+  color: var(--accent-text);
+}
+
+/* The seal, leaving the lock -- the one thing on this picture that happens at
+   the gate rather than passing through it. */
+.link-lock::after {
+  content: "";
+  position: absolute;
+  inset: -1px;
+  border: 1px solid var(--accent);
+  border-radius: 50%;
+  animation: seal 3s ease-out infinite;
+}
+
+@keyframes seal {
+  0% {
+    transform: scale(1);
+    opacity: 0.5;
+  }
+  70%,
+  100% {
+    transform: scale(1.75);
+    opacity: 0;
+  }
+}
+
+.link-rail {
+  position: relative;
+  overflow: hidden;
+  /* The gate, and nothing else.  Opaque everywhere the chip's own opacity says
+     it may be seen, a little under a third at the crossing. */
+  -webkit-mask-image: linear-gradient(90deg, #000 0, #000 34%, rgb(0 0 0 / 26%) 50%, #000 66%, #000 100%);
+  mask-image: linear-gradient(90deg, #000 0, #000 34%, rgb(0 0 0 / 26%) 50%, #000 66%, #000 100%);
+}
+
+.link-rail::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: 50%;
+  height: 1.5px;
+  margin-top: -0.75px;
+  background-image: repeating-linear-gradient(90deg, var(--accent-line) 0 4px, transparent 4px 12px);
+  animation: flow-x 0.6s linear infinite;
+}
+
+/* The dashes on the returning rail run the way its chips do.  Reversed rather
+   than given its own keyframes: the gradient repeats every 12px, which is
+   exactly what the keyframe advances it by, so playing it backwards is
+   seamless. */
+.link-rail--in::before {
+  animation-direction: reverse;
+}
+
+@keyframes flow-x {
+  to {
+    background-position-x: 12px;
+  }
+}
+
+/* One chip's whole journey.  The transform runs the full traversal at a steady
+   rate; the opacity is what a chip has at each end of it.  A chip is off the
+   lane entirely at both extremes, and is being cut by the rail's edge while it
+   is less than its own width inside -- the whole first half of the traversal,
+   since its leading edge only reaches the rail at 50%.  So the fade sits at the
+   end of that window, and
+   is a whole chip, at full strength, from the moment it has cleared the machine
+   to well after it has passed the gate.  Fixed percentages rather than measured
+   ones: the chip is a fifth of the lane at worst, so the window they leave on
+   either side of them is a fraction of a chip, and a fraction of a chip at
+   partial opacity is a chip arriving rather than a chip broken. */
+.track {
+  position: absolute;
+  inset: 0;
+  animation: cross 7s linear infinite;
+  animation-delay: calc(var(--i) * -1.1667s);
+}
+
+.link-rail--in .track {
+  animation-name: cross-rev;
+  animation-delay: calc(var(--i) * -1.75s);
+}
+
+/* Small on purpose.  A chip is one frame on a wire that also has two machines
+   on it, and at the size of a button it stopped being the traffic and started
+   being the subject. */
+.packet {
+  position: absolute;
+  top: 50%;
+  left: 0;
+  translate: 0 -50%;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 4px 9px;
+  border: 1px solid var(--accent-line);
+  background: var(--accent-soft);
+  border-radius: 4px;
+  box-shadow: 0 1px 2px rgb(0 0 0 / 5%);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-weight: 500;
+  letter-spacing: 0.05em;
+  color: var(--accent-text);
+  white-space: nowrap;
+}
+
+/* Anchored to the other edge on the returning rail, so it is off that edge at
+   both ends of the cycle exactly as the outbound one is. */
+.link-rail--in .packet {
+  left: auto;
+  right: 0;
+}
+
+/* The type's own mark, in the same ink as the label: a chain for a link, a
+   frame for an image, a folded corner for a file.  Six types and six marks, so
+   a chip is recognisable before the label is read -- which is the whole claim
+   the rail is making, that these are different kinds of thing travelling and
+   not one thing with six names. */
+.packet svg {
+  width: 11px;
+  height: 11px;
+  flex: none;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.5;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  opacity: 0.75;
+}
+
+@keyframes cross {
+  0% {
+    transform: translateX(-100%);
+    opacity: 0;
+  }
+  40% {
+    opacity: 0;
+  }
+  52%,
+  88% {
+    opacity: 1;
+  }
+  100% {
+    transform: translateX(100%);
+    opacity: 0;
+  }
+}
+
+@keyframes cross-rev {
+  0% {
+    transform: translateX(100%);
+    opacity: 0;
+  }
+  40% {
+    opacity: 0;
+  }
+  52%,
+  88% {
+    opacity: 1;
+  }
+  100% {
+    transform: translateX(-100%);
+    opacity: 0;
+  }
+}
+
+/* What the lane is carrying, as a ribbon of the names a reader would meet in
+   the window itself. */
+.wire-facts {
+  grid-column: 1 / -1;
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 6px;
+  margin-top: 22px;
+}
+
+.wire-facts span {
+  padding: 4px 11px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--raised);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  letter-spacing: 0.03em;
+  color: var(--muted);
+}
+
+.wire-facts span:first-child {
+  border-color: var(--accent-line);
+  background: var(--accent-soft);
+  color: var(--accent-text);
+}
+
+/* ------------------------------------------------------------ the window -- */
+
+/* The screenshot is the one lifted object on the page: it is framed as the
+   window it is, with the title bar the application actually has, so a reader
+   reads it as a product rather than as an illustration. */
+.shot {
+  margin-top: clamp(30px, 4vw, 44px);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-lg);
+  overflow: hidden;
+  box-shadow: var(--shadow);
+  background: var(--raised);
+}
+
+@supports not (background: color-mix(in srgb, red 50%, blue)) {
+  .top {
+    background: var(--page);
+  }
+}
+
+.shot-bar {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 9px 13px;
+  background: var(--chrome);
+  border-bottom: 1px solid var(--line);
+}
+
+.shot-bar i {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: var(--line);
+}
+
+.shot-bar span {
+  margin-left: 8px;
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  color: var(--muted);
+}
+
+/* --------------------------------------------------------------- tables --- */
+
+.scroller {
+  overflow-x: auto;
+}
+
+table {
+  border-collapse: collapse;
+  width: 100%;
+  min-width: 520px;
+  font-size: 14.5px;
+}
+
+th,
+td {
+  text-align: left;
+  padding: 11px 14px;
+  border-bottom: 1px solid var(--line-soft);
+  vertical-align: top;
+}
+
+thead th {
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  font-weight: 500;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--muted);
+  border-bottom: 1px solid var(--line);
+}
+
+tbody th {
+  font-weight: 500;
+  color: var(--muted);
+  font-size: 14px;
+}
+
+.yes {
+  color: var(--accent-text);
+  font-weight: 500;
+}
+
+.no {
+  color: var(--muted);
+}
+
+/* ------------------------------------------------------------- the pages -- */
+
+/* The eight pages, one at a time and at a size that can be read.
+
+   A grid of eight was the obvious shape and the wrong one: at two columns a
+   1280-wide window renders at 41%, and its own interface -- the one thing this
+   section exists to show -- stops being legible.  So the stage takes the full
+   measure and the enumeration becomes the control.  The enumeration is real,
+   which is why it survives the change: it is the sidebar's order and the
+   Ctrl+1..8 shortcuts, so a numbered name is a thing the reader can go and
+   press in the application, not a caption invented for a picture.
+
+   The names are links to the screenshots themselves.  With scripting on they
+   swap the stage instead, which is the better behaviour; with it off they
+   still lead somewhere, which is what keeps this a gallery rather than a
+   slideshow that shows one slide.
+
+   The hero's screenshot is the one lifted object on this page.  These are the
+   same window named eight times, so they carry the same chrome and no shadow
+   of their own: eight shadows is eight heroes, and then none of them is one. */
+.viewer {
+  margin-top: 34px;
+}
+
+/* Off until the script says otherwise, so a browser without it stacks all
+   eight at full measure and nothing is unreachable. */
+.viewer.is-live .page {
+  display: none;
+}
+
+.viewer.is-live .page.is-on {
+  display: block;
+}
+
+/* The control the enumeration became.  Eight to a row: the names are short and
+   `minmax(120px, 1fr)` divides 1080 into exactly eight of them. */
+.vnav {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
+  gap: 8px;
+  margin-bottom: 18px;
+}
+
+.vn {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  padding: 9px 12px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--raised);
+  font-size: 13.5px;
+  line-height: 1.4;
+  color: var(--muted);
+  text-decoration: none;
+  transition: border-color 0.15s, background 0.15s;
+}
+
+.vn-n {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--muted);
+}
+
+.vn:hover {
+  border-color: var(--accent-line);
+}
+
+.vn[aria-current="true"] {
+  border-color: var(--accent-line);
+  background: var(--accent-soft);
+  color: var(--accent-text);
+  font-weight: 500;
+}
+
+.vn[aria-current="true"] .vn-n {
+  color: var(--accent-text);
+}
+
+.page-win {
+  border: 1px solid var(--line);
+  border-radius: var(--radius-lg);
+  overflow: hidden;
+  background: var(--raised);
+}
+
+/* The same title bar as the hero's shot, a size down -- it is the same window,
+   at the size this grid can give it. */
+.page-win .shot-bar {
+  padding-block: 7px;
+}
+
+.page-win .shot-bar i {
+  width: 8px;
+  height: 8px;
+}
+
+.page-win .shot-bar span {
+  font-size: 11px;
+}
+
+.page-win img {
+  width: 100%;
+  height: auto;
+  border-top: 1px solid var(--line-soft);
+}
+
+.page figcaption {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  align-items: baseline;
+  gap: 1px 10px;
+  margin-top: 14px;
+}
+
+.page-n {
+  grid-row: 1;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--accent-text);
+}
+
+.page figcaption h3 {
+  grid-row: 1;
+  grid-column: 2;
+}
+
+.page figcaption p {
+  grid-row: 2;
+  grid-column: 2;
+  font-size: 14.5px;
+  color: var(--muted);
+}
+
+/* ---------------------------------------------------------------- phone -- */
+
+/* The handset, as a handset.  The shot is the companion page in a real mobile
+   browser at 390x844, so the frame is a plain bezel around the page's own
+   ground -- drawn buttons and a notch would be a picture of an app, and this
+   is deliberately not one. */
+.phone {
+  justify-self: center;
+  width: min(100%, 266px);
+  max-width: 100%;
+  margin: 0;
+}
+
+/* Four short lines in a column this wide would read as four rules; paired up
+   they read as the list they are. */
+.split--phone .points {
+  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+}
+
+.phone-body {
+  padding: 7px;
+  border: 1px solid var(--line);
+  border-radius: 30px;
+  background: var(--raised);
+  box-shadow: var(--shadow-soft);
+}
+
+.phone-body img {
+  width: 100%;
+  height: auto;
+  border-radius: 24px;
+}
+
+.phone figcaption {
+  margin-top: 16px;
+  text-align: center;
+  font-size: 13.5px;
+  color: var(--muted);
+  text-wrap: balance;
+}
+
+/* --------------------------------------------------------------- two-col -- */
+
+.split {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+  gap: clamp(28px, 5vw, 56px);
+  align-items: start;
+}
+
+/* The phone section is the one split whose second column is a fixed-width
+   object rather than a second block of prose, so it takes what the handset
+   needs and leaves the rest to the text.  Declared here rather than beside the
+   phone's own rules because it is the same property `split` just set, and this
+   has to be the later of the two. */
+.split--phone {
+  grid-template-columns: 1fr;
+  align-items: center;
+}
+
+@media (min-width: 780px) {
+  /* The handset's column is the handset's width, not `auto`: an auto track
+     asks the figure how wide it would like to be, and with the screenshot
+     still lazy the answer comes back as the width attribute's 780px rather
+     than the 266 the frame is drawn at -- so the text column is squeezed to
+     its minimum until the image arrives, and the section is laid out one way
+     while it loads and another after. */
+  .split--phone {
+    grid-template-columns: minmax(0, 1fr) 266px;
+  }
+}
+
+.points {
+  display: grid;
+  gap: 16px;
+  margin-top: 26px;
+  padding: 0;
+  list-style: none;
+}
+
+.points li {
+  display: grid;
+  grid-template-columns: 20px 1fr;
+  gap: 12px;
+  font-size: 15px;
+}
+
+.points li::before {
+  content: "";
+  width: 7px;
+  height: 7px;
+  margin-top: 9px;
+  border-radius: 50%;
+  background: var(--accent);
+}
+
+.points b {
+  font-weight: 600;
+}
+
+/* ------------------------------------------------------------- downloads -- */
+
+.downloads {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(224px, 1fr));
+  gap: 14px;
+  margin-top: 30px;
+}
+
+.dl {
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--raised);
+  padding: 18px;
+  display: grid;
+  gap: 4px;
+  align-content: start;
+}
+
+.dl h3 {
+  font-size: 15px;
+}
+
+.dl .file {
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  color: var(--muted);
+  word-break: break-all;
+}
+
+.dl .btn {
+  margin-top: 12px;
+  justify-content: center;
+}
+
+.dl-note {
+  font-size: 13px;
+  color: var(--muted);
+}
+
+.elsewhere {
+  margin-top: 18px;
+  font-size: 14px;
+  color: var(--muted);
+}
+
+/* ---------------------------------------------------------------- footer -- */
+
+footer {
+  border-top: 1px solid var(--line);
+  padding-block: 34px 44px;
+  font-size: 14px;
+  color: var(--muted);
+}
+
+footer .wrap {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px 22px;
+  align-items: center;
+}
+
+footer a {
+  color: var(--muted);
+}
+
+/* ------------------------------------------------------------ narrow ----- */
+
+@media (max-width: 860px) {
+  .hero {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .wire {
+    max-width: 560px;
+    margin-inline: auto;
+  }
+}
+
+@media (max-width: 560px) {
+  body {
+    font-size: 15.5px;
+  }
+
+  /* The section links go; the language switch and the source link stay, which
+     are the two a narrow-screen reader still needs. */
+  .top nav > a {
+    display: none;
+  }
+
+  .top nav > a.gh {
+    display: inline;
+  }
+
+  .wire {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 0;
+    max-width: 380px;
+  }
+
+  .unit {
+    width: min(200px, 100%);
+    justify-self: center;
+  }
+
+  /* Stacked, the link runs downward, and the two rails stand side by side —
+     the outbound one on the left going down, the returning one on the right
+     going up.  Same rails, same masks, same chips, turned ninety degrees and
+     split across the axis they were sharing. */
+  .link {
+    grid-template-rows: none;
+    grid-template-columns: 86px 86px;
+    justify-content: center;
+    block-size: auto;
+    min-height: 190px;
+    gap: 44px;
+    padding-inline: 0;
+    padding-block: 2px;
+  }
+
+  .link-rail {
+    width: auto;
+    align-self: stretch;
+    /* The gate, and nothing else -- the same rule the wide layout keeps, on the
+       other axis.  The chips' own opacity is what ends them, here as there. */
+    -webkit-mask-image: linear-gradient(180deg, #000 0, #000 34%, rgb(0 0 0 / 26%) 50%, #000 66%, #000 100%);
+    mask-image: linear-gradient(180deg, #000 0, #000 34%, rgb(0 0 0 / 26%) 50%, #000 66%, #000 100%);
+  }
+
+  .link-rail::before {
+    top: 0;
+    bottom: 0;
+    left: 50%;
+    right: auto;
+    width: 1.5px;
+    height: auto;
+    margin: 0 0 0 -0.75px;
+    background-image: repeating-linear-gradient(
+      180deg,
+      var(--accent-line) 0 4px,
+      transparent 4px 12px
+    );
+    animation-name: flow-y;
+  }
+
+  .link-gate {
+    top: 50%;
+    bottom: auto;
+    left: 0;
+    right: 0;
+    width: auto;
+    height: 1.5px;
+    margin: -0.75px 0 0;
+    background: linear-gradient(
+      90deg,
+      transparent,
+      var(--accent) 16%,
+      var(--accent) 84%,
+      transparent
+    );
+  }
+
+  .track {
+    animation-name: cross-down;
+  }
+
+  .link-rail--in .track {
+    animation-name: cross-up;
+  }
+
+  .packet {
+    top: 0;
+    left: 50%;
+    translate: -50% 0;
+  }
+
+  /* Restated in full rather than only what changes: the rule these override
+     carries two selectors, so every property it sets has to be answered. */
+  .link-rail--in .packet {
+    top: auto;
+    bottom: 0;
+    left: 50%;
+    right: auto;
+    translate: -50% 0;
+  }
+
+}
+
+@keyframes cross-down {
+  0% {
+    transform: translateY(-100%);
+    opacity: 0;
+  }
+  40% {
+    opacity: 0;
+  }
+  52%,
+  88% {
+    opacity: 1;
+  }
+  100% {
+    transform: translateY(100%);
+    opacity: 0;
+  }
+}
+
+@keyframes cross-up {
+  0% {
+    transform: translateY(100%);
+    opacity: 0;
+  }
+  40% {
+    opacity: 0;
+  }
+  52%,
+  88% {
+    opacity: 1;
+  }
+  100% {
+    transform: translateY(-100%);
+    opacity: 0;
+  }
+}
+
+@keyframes flow-y {
+  to {
+    background-position-y: 12px;
+  }
+}
+
+/* Motion off: the rails hold still, the ring stops leaving the dot, and one
+   frame rests on each rail — not six of them piled at the leading edge, which
+   is where they would otherwise sit with the animation switched off.  Last in
+   the file so it wins over the narrow rules above, whose rails run the other
+   way. */
+@media (prefers-reduced-motion: reduce) {
+  .track {
+    animation: none;
+  }
+
+  .track:not(:first-child) {
+    display: none;
+  }
+
+  .track:first-child {
+    display: grid;
+    place-items: center;
+  }
+
+  .track:first-child .packet {
+    position: static;
+    translate: none;
+  }
+
+  .link-rail::before,
+  .link-lock::after,
+  .unit-live::after,
+  .art-row--hot,
+  .art-glow {
+    animation: none;
+  }
+
+  .link-lock::after,
+  .unit-live::after {
+    opacity: 0;
+  }
+}

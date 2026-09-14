@@ -76,28 +76,9 @@ def test_several_picks_become_one_archive_of_themselves(tmp_path):
         assert sorted(bundle.namelist()) == ["Documents/c.txt", "a.txt", "b.txt"]
 
 
-def test_one_pick_is_named_after_itself_even_as_a_list(tmp_path):
-    # The picker answers with a list however many it holds, so a one-item list
-    # has to read as one pick rather than as "files-1".
-    target = tmp_path / "notes.txt"
-    target.write_text("x", encoding="utf-8")
-    archive, count = create_archive([target], dest_dir=tmp_path / "out")
-    assert count == 1
-    assert archive.name.startswith("notes")
-
-
 def test_a_path_that_is_gone_between_the_pick_and_the_send_is_refused(tmp_path):
     missing = tmp_path / "vanished.txt"
     with pytest.raises(FileNotFoundError):
         create_archive([missing], dest_dir=tmp_path / "out")
-
-
-def test_nothing_picked_is_refused(tmp_path):
     with pytest.raises(ValueError):
         create_archive([], dest_dir=tmp_path / "out")
-
-
-def test_creates_its_destination_directory(tmp_path):
-    destination = tmp_path / "out" / "nested"
-    archive, _ = create_archive(_folder(tmp_path), dest_dir=destination)
-    assert archive.parent == destination

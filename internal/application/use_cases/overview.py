@@ -7,6 +7,7 @@ import logging
 import platform
 import time
 
+from internal.application.use_cases.history import row_dto
 from internal.platform import friendly_platform_name
 from internal.platform.network import detect_network_type
 from internal.version import __version__
@@ -63,7 +64,7 @@ def _is_today(timestamp) -> bool:
         return False
 
 
-def build_overview(cfg, history, runtime, start_time, lan_ip="") -> dict:
+def build_overview(cfg, history, runtime, start_time, lan_ip="", source_label=None) -> dict:
     """Aggregate the dashboard counters the web overview panel renders.
 
     Mirrors the legacy ``Application._get_overview_data``.  Every group
@@ -129,13 +130,13 @@ def build_overview(cfg, history, runtime, start_time, lan_ip="") -> dict:
         "version": __version__,
         "network_type": network_type,
         "network_detail": network_detail,
+        # The feed is the newest six history rows, built by the same helper the
+        # history page's list uses — so a row here is a row there, and every
+        # action a window can take on one it can take on the other.  The preview
+        # is capped at what the feed's single line shows, which is also what this
+        # projection used to ship; the id is what an action needs, and the full
+        # clip is read back by it.
         "recent_items": [
-            {
-                "text": (row.get("text_preview") or "")[:80],
-                "type": str(row.get("content_type") or "TEXT"),
-                "time": row.get("timestamp", 0),
-                "pinned": bool(row.get("pinned")),
-            }
-            for row in rows[:6]
+            row_dto(row, source_label, preview_limit=80) for row in rows[:6]
         ],
     }

@@ -16,7 +16,12 @@ from collections.abc import Callable
 from typing import Protocol
 
 from internal.application.errors import ApplicationError
-from internal.clipboard.format import ClipboardContent, ContentType, strip_html
+from internal.clipboard.format import (
+    HISTORY_ONLY_TYPES,
+    ClipboardContent,
+    ContentType,
+    strip_html,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -82,7 +87,9 @@ def matches_kind(entry: dict, kind: str) -> bool:
     if kind == "image":
         return content_type in ("IMAGE", "IMAGE_PNG", "IMAGE_EMF")
     if kind == "file":
-        return content_type == "FILE"
+        # A file on another device belongs under 文件 as much as one copied
+        # here: the chip is what the user is looking for, not where it is.
+        return content_type in ("FILE", "FILE_REMOTE")
     if kind == "link":
         return content_type in ("URL", "LINK") or bool(_LINK.match(preview))
     return True
@@ -110,6 +117,59 @@ def searchable(entry: dict) -> str:
 # as the whole of one.  Nothing is lost by it: the clipboard is uncapped, and
 # this is a read for showing and translating, not for moving the bytes.
 TEXT_READ_LIMIT = 100_000
+
+
+def row_dto(entry: dict, source_label=None, preview_limit: int = 1000) -> dict:
+    """One stored entry as a window reads it.
+
+    The list page and the overview's activity feed are the same rows — the feed
+    is the newest few of them — so they are built here once.  The feed used to
+    project its own four keys (``text``/``type``/``time``/``pinned``) out of the
+    same entries, which left it unable to say *which* entry a row was: the
+    window could show a recent clip and do nothing with it, because there was
+    nothing to name it by.  A row built here carries its id, so every action the
+    history page offers a row — copy, pin, favourite, translate, delete — is
+    offered on the feed too, and the two cannot drift apart.
+
+    ``preview_limit`` is how much of the clip travels.  The list page ships a
+    full one because a reader can select the text there; the feed caps it at what
+    its single line can show, and copies go through the id, so nothing a reader
+    can act on is lost by the shorter preview.
+    """
+    return {
+        "id": str(entry["entry_id"]),
+        "timestamp": entry.get("timestamp", 0),
+        "preview": str(entry.get("text_preview", ""))[:preview_limit],
+        "content_type": str(entry.get("content_type", "")),
+        "pinned": bool(entry.get("pinned", False)),
+        # Where the clip came from, which the legacy row showed and a window
+        # with no other source of it cannot work out: the *device* it synced
+        # from (this one, a peer, or the phone), the application it was copied
+        # in, and that window's title.
+        "source_name": source_label(str(entry.get("source_device", "")))
+        if source_label is not None
+        else "",
+        # The device *id* behind that name.  A row's file lives on the machine
+        # that published it, and asking for it means naming that machine — the
+        # label is for reading, this is what a 下载 request carries.  Empty for a
+        # clip captured here, which is exactly the row a file offer resolves
+        # against on the other side.
+        "source_device": str(entry.get("source_device", "")),
+        "source_app": str(entry.get("source_app", "")),
+        "source_title": str(entry.get("source_title", ""))[:SOURCE_TITLE_LIMIT],
+        # Which of the three routes carried it: "lan" for a peer on a direct
+        # connection, "relay" for one that came through the internet relay,
+        # "web" for a push from this machine's own web server, and "" for a clip
+        # captured here or a row written before the route was recorded.  The
+        # device name alone cannot answer it — a peer paired on both paths sends
+        # over either, and a pushed row's name says only "Web" — and the window
+        # shows it as a chip beside that name.
+        "transport": str(entry.get("transport", "")),
+        # The paste count the row already keeps; legacy showed it as a badge,
+        # and a copy made here bumps it, so the window's own copies come back as
+        # the same count the panel would show.
+        "paste_count": int(entry.get("paste_count", 0) or 0),
+    }
 
 
 def decode_formats(entry: dict) -> dict:
@@ -150,6 +210,14 @@ def text_of(types: dict) -> bytes | None:
         from internal.clipboard.filter import _rtf_to_text
 
         return _rtf_to_text(types[ContentType.RTF]).encode("utf-8")
+    # A link's payload *is* text, and for a URL-typed row it is the only payload
+    # there is — without this branch such a row had no text at all, so 在浏览器
+    # 打开 resolved it to an empty URL and refused while its own button said it
+    # would work, and a plain-text copy of it answered that the row carried no
+    # text.  Last, so a clip that also carries words still answers with the
+    # words.
+    if ContentType.URL in types:
+        return types[ContentType.URL]
     return None
 
 
@@ -194,6 +262,16 @@ class HistoryUseCase:
         if not types:
             raise ApplicationError(
                 "NOT_SUPPORTED", "History item has no supported clipboard format"
+            )
+        # A row naming a file on another device is not a clipboard payload: no
+        # platform's writer has a branch for it, so copying one would clear the
+        # clipboard and then report success for having written nothing.  Refused
+        # with something the caller can act on instead — the row's own action is
+        # 下载, and the window does not offer 复制 for it.
+        if any(t in HISTORY_ONLY_TYPES for t in types):
+            raise ApplicationError(
+                "NOT_SUPPORTED",
+                "This file is on the device that published it — download it first",
             )
         if plain_text:
             text = text_of(types)
@@ -349,35 +427,7 @@ class HistoryUseCase:
             "counts": counts,
             "has_history": has_history,
             "items": [
-                {
-                    "id": str(entry["entry_id"]),
-                    "timestamp": entry.get("timestamp", 0),
-                    "preview": str(entry.get("text_preview", ""))[:1000],
-                    "content_type": str(entry.get("content_type", "")),
-                    "pinned": bool(entry.get("pinned", False)),
-                    # Where the clip came from, which the legacy row showed and
-                    # a window with no other source of it cannot work out: the
-                    # *device* it synced from (this one, a peer, or the phone),
-                    # the application it was copied in, and that window's title.
-                    "source_name": self._source_label(str(entry.get("source_device", "")))
-                    if self._source_label is not None
-                    else "",
-                    "source_app": str(entry.get("source_app", "")),
-                    "source_title": str(entry.get("source_title", ""))[:SOURCE_TITLE_LIMIT],
-                    # Which of the three routes carried it: "lan" for a peer on a
-                    # direct connection, "relay" for one that came through the
-                    # internet relay, "web" for a push from this machine's own
-                    # web server, and "" for a clip captured here or a row
-                    # written before the route was recorded.  The device name
-                    # alone cannot answer it — a peer paired on both paths sends
-                    # over either, and a pushed row's name says only "Web" — and
-                    # the window shows it as a chip beside that name.
-                    "transport": str(entry.get("transport", "")),
-                    # The paste count the row already keeps; legacy showed it as
-                    # a badge, and a copy made here bumps it, so the window's own
-                    # copies come back as the same count the panel would show.
-                    "paste_count": int(entry.get("paste_count", 0) or 0),
-                }
+                row_dto(entry, self._source_label)
                 for entry in matched[offset : offset + limit]
             ],
         }

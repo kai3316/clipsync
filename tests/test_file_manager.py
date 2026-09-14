@@ -1,4 +1,11 @@
-"""Shared open/reveal helper: platform commands and failure codes."""
+"""Shared open/reveal helper: the platform commands, and the failure codes
+callers map to their own message.
+
+The two platform tests are the only place a Darwin or Linux dispatch is ever
+executed — this machine is Windows, and both branches are live on machines the
+suite cannot run on.  Every other test below is a failure path, which is what
+the callers actually branch on.
+"""
 
 import pytest
 
@@ -24,11 +31,11 @@ def test_open_file_uses_the_platform_command(system, command, monkeypatch, tmp_p
     assert calls == [expected]
 
 
-@pytest.mark.parametrize("value", ["", "no/such/path.zip"])
-def test_open_file_reports_a_missing_path(value, monkeypatch):
+def test_open_file_reports_a_missing_path(monkeypatch):
     calls = []
     monkeypatch.setattr(file_manager.os, "startfile", lambda p: calls.append([p]), raising=False)
-    assert file_manager.open_file(value) == (False, file_manager.FILE_NOT_FOUND)
+    assert file_manager.open_file("no/such/path.zip") == (False, file_manager.FILE_NOT_FOUND)
+    assert file_manager.open_file("") == (False, file_manager.FILE_NOT_FOUND)
     assert calls == []
 
 
@@ -74,13 +81,16 @@ def test_reveal_folder_accepts_a_directory(monkeypatch, tmp_path):
     assert calls == [["xdg-open", str(tmp_path)]]
 
 
-@pytest.mark.parametrize("value", ["", "no/such/path.zip"])
-def test_reveal_folder_reports_a_missing_path(value, monkeypatch):
+def test_reveal_folder_reports_a_missing_path(monkeypatch):
     calls = []
     monkeypatch.setattr(
         file_manager.subprocess, "Popen", lambda args: calls.append(args)
     )
-    assert file_manager.reveal_folder(value) == (False, file_manager.FILE_NOT_FOUND)
+    assert file_manager.reveal_folder("") == (False, file_manager.FILE_NOT_FOUND)
+    assert file_manager.reveal_folder("no/such/path.zip") == (
+        False,
+        file_manager.FILE_NOT_FOUND,
+    )
     assert calls == []
 
 

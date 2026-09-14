@@ -9,6 +9,29 @@
  */
 export const EN: Record<string, string> = {
   // ── App shell, navigation and status ─────────────────────────────────
+  // ── Click confirmations ──────────────────────────────────────────────
+  // The window's own answers to its own buttons, for the clicks that change
+  // nothing a reader can see — see `toast` in `stores/application.ts`. The
+  // first line of each is the notice's title (the page the click was on).
+  "已刷新 · {count} 条记录": "Refreshed · {count} records",
+  "已刷新 · {count} 台设备": "Refreshed · {count} devices",
+  "已刷新 · {count} 条收藏": "Refreshed · {count} favourites",
+  "已刷新 · 收藏库是空的": "Refreshed · the library is empty",
+  "已刷新 · {count} 个进行中的传输": "Refreshed · {count} transfers in progress",
+  "已刷新 · 暂无进行中的传输": "Refreshed · nothing in progress",
+  "已刷新 · {count} 个会话": "Refreshed · {count} conversations",
+  "已刷新 · 暂无会话": "Refreshed · no conversations",
+  "已刷新 · {count} 个备份": "Refreshed · {count} backups",
+  "同步已开启": "Sync is on",
+  "同步已关闭": "Sync is off",
+  "已刷新互联网配对状态": "Internet pairing state refreshed",
+  "已刷新投递状态": "Delivery state refreshed",
+  "已重新检测 · {ok}/{total} 项通过": "Re-checked · {ok}/{total} checks passed",
+  "已复制收藏内容": "Favourite copied",
+  "已置顶这条记录": "Record pinned",
+  "已取消置顶这条记录": "Record unpinned",
+  "已删除这条记录": "Record deleted",
+  "已删除这条收藏": "Favourite deleted",
   "主导航": "Main navigation",
   "剪贴板历史": "Clipboard History",
   "历史记录": "History",
@@ -63,6 +86,8 @@ export const EN: Record<string, string> = {
   "密码": "Password",
   "连接失败，请重试": "Connection failed, please try again",
   "后台进程不可用，请重试": "The background process is unavailable — please try again",
+  "数据目录正被旧版 ClipSync 占用。请关闭旧版应用后重试。":
+    "The older ClipSync application is still using this data folder. Close it, then try again.",
   "后台进程已退出，正在重新启动（第 {attempt} 次）…":
     "The background process exited — restarting it (attempt {attempt})…",
   "操作未完成，请刷新后重试": "The action did not complete — refresh and try again",
@@ -81,6 +106,9 @@ export const EN: Record<string, string> = {
   "同步已暂停": "Sync paused",
   "同步引擎未启动": "Sync engine not started",
   "连接中": "Connecting",
+  "重连中 {attempt}/{max}": "Reconnecting {attempt}/{max}",
+  "重连中 {attempt}": "Reconnecting {attempt}",
+  "{count} 条未读消息": "{count} unread messages",
   "连接异常": "Connection problem",
   "连接状态未知": "Connection status unknown",
   "在线": "Online",
@@ -172,6 +200,9 @@ export const EN: Record<string, string> = {
   "显示二维码": "Show QR code",
   "正在生成二维码…": "Generating QR code…",
   "二维码不可用": "QR code unavailable",
+  "发送文件到手机": "Send a file to the phone",
+  "正在发送…": "Sending…",
+  "已发送到手机：{name}": "Sent to the phone: {name}",
   "网页伴侣未开启": "Web companion is not enabled",
   "用手机相机扫描，打开手机 Companion 页面。":
     "Scan with your phone camera to open the phone Companion page.",
@@ -180,6 +211,13 @@ export const EN: Record<string, string> = {
   "更换访问令牌": "Rotate access token",
   "更换令牌": "Rotate token",
   "更换手机访问令牌？": "Rotate the phone access token?",
+  "清除访问令牌": "Clear access token",
+  "清除令牌": "Clear token",
+  "清除手机访问令牌？": "Clear the phone access token?",
+  "清除后手机不再需要令牌，任何能访问该端口的设备都可以直接连接。":
+    "After clearing, the phone no longer needs a token, and any device that can reach the port connects directly.",
+  "访问令牌已清除，任何能访问该端口的设备都可以直接连接":
+    "Access token cleared — any device that can reach this port can connect directly",
   "浏览器预览": "Browser preview",
   "本地数据": "Local data",
   "附近设备": "Nearby devices",
@@ -205,6 +243,15 @@ export const EN: Record<string, string> = {
   "未送达": "Not delivered",
   "待补发": "Queued",
   "发送中": "Sending",
+  // A file's own state inside a conversation.  The words the phone and the web
+  // panel already use, so one transfer reads the same wherever it is watched.
+  "已发送": "Sent",
+  "已接收": "Received",
+  "发送中…": "Sending…",
+  "接收中…": "Receiving…",
+  "准备中…": "Preparing…",
+  "等待接受": "Awaiting accept",
+  "昨天 {time}": "Yesterday {time}",
   "待补发 {count}": "{count} queued",
   "对方离线时内容暂存，上线后自动补发": "Held while the device is offline; sent when it returns",
   "已选择 {count} 条": "{count} selected",
@@ -232,11 +279,44 @@ export const EN: Record<string, string> = {
   "桌面窗口连接后显示本地记录": "Local records appear once the desktop window connects",
   "全选当前页": "Select all on this page",
   "复制记录": "Copy record",
+  // The right-click menu.  Its wording is the legacy menu's own, catalog key
+  // for catalog key, because these are the same five objects it was opened on
+  // and a reader who knew the old menu should recognise every line of this one.
+  "复制": "Copy",
+  "置顶": "Pin",
+  "取消置顶": "Unpin",
+  "添加到收藏": "Add to Favorites",
+  "在浏览器中打开链接": "Open link in browser",
+  "查看详情": "View Details",
+  "复制设备 ID": "Copy Device ID",
+  "复制文件名": "Copy file name",
+  "复制文件路径": "Copy file path",
+  "重命名": "Rename",
+  "重命名设备": "Rename device",
+  "名称只保存在这台设备上，对方看到的仍是自己的名字。":
+    "The name is stored on this device only; the other side still sees its own.",
+  "已重命名为 {name}": "Renamed to {name}",
+  "重命名失败": "Could not rename the device",
+  "打开聊天": "Open chat",
+  "标记为已读": "Mark as read",
+  "复制失败": "Failed to copy",
+  "未知": "Unknown",
+  // The two lines the conversation menu reports a mute with.  The row's bell
+  // says it by its own shape; the menu needs words, because its click changes
+  // nothing on screen that the reader is looking at.
+  "已静音此设备的消息通知": "Notifications muted for this device",
+  "已恢复此设备的消息通知": "Notifications enabled for this device",
+  "已复制！": "Copied!",
+  "类型：{type} | 来源：{source} | ID：{id}": "Type: {type} | Source: {source} | ID: {id}",
   "收藏": "Favorite",
   "取消收藏": "Unfavorite",
   "批量收藏": "Favorite selected",
   "批量取消收藏": "Unfavorite selected",
   "加入收藏夹": "Add to favorites",
+  "合并推送到电脑": "Merge and push to desktop",
+  "已合并推送 {count} 条到本机剪贴板": "Merged and pushed {count} clips to this machine's clipboard",
+  "没有可合并的记录": "Nothing to merge",
+  "合并后内容过长，无法推送": "The merged clips are too long to push",
   "已收藏": "Favorited",
   "删除记录": "Delete record",
   "删除所选记录": "Delete selected records",
@@ -283,6 +363,8 @@ export const EN: Record<string, string> = {
   // (TEXT, IMAGE_PNG) are not labels, so the kinds the panel named are named
   // here too; anything else falls back to the type it is.
   "图片": "Image",
+  "矢量图": "Vector Image",
+  "富文本": "Rich Text",
   "文件": "File",
   "链接": "Link",
   "1 次粘贴": "1 paste",
@@ -306,6 +388,11 @@ export const EN: Record<string, string> = {
   "存在故障": "Failure",
   "存在警告": "Warning",
   "失败": "Failed",
+  // A diagnostics section's verdict, and a shortcut for the words a check
+  // reports about itself.  "Failed" above is the same word the legacy panel's
+  // verdict used, so only the other two are new.
+  "正常": "OK",
+  "警告": "Warn",
   "已保存": "Saved",
   "未保存": "Unsaved",
   // The save bar's own two remarks about the form.
@@ -320,12 +407,21 @@ export const EN: Record<string, string> = {
   "关闭": "Close",
   "关闭会话": "Close conversation",
   "会话": "Sessions",
+  "聊天页分区": "Chat sections",
+  "附近没有可聊天的设备。": "No devices nearby to chat with.",
   "会话未关闭": "The session is still open",
   "选择已配对设备": "Choose a paired device",
   "查看设备": "Device",
   "尚未读取该设备的配置": "That device's config has not been read yet",
   "（{count} 项不同）": "({count} differ)",
   "该设备还没有可同步的配置项": "That device has no config files to sync yet",
+  "测试中继连接": "Test relay connections",
+  "正在测试…": "Testing…",
+  "{total} 个中继中 {reachable} 个可达": "{reachable} of {total} relays reachable",
+  "{ms} 毫秒": "{ms} ms",
+  "不可达": "Unreachable",
+  "（只能浏览）": " (browse only)",
+  "该设备版本过旧，只能浏览，不能作为迁移来源": "That device runs an older version; its files can be browsed but not migrated from",
   "选择一个会话": "Choose a conversation",
   "暂无聊天会话": "No conversations",
   "暂无消息": "No messages",
@@ -351,6 +447,7 @@ export const EN: Record<string, string> = {
   "无法读取聊天会话": "Could not load conversations",
   "无法读取聊天消息": "Could not load messages",
   "无法打开附件": "Could not open the attachment",
+  "无法打开附件所在文件夹": "Could not open the folder containing the attachment",
   "附件发送失败": "Could not send the attachment",
   "附件操作失败": "Attachment action failed",
   "附件操作未完成": "The attachment action did not complete",
@@ -435,6 +532,13 @@ export const EN: Record<string, string> = {
   "暂无收藏": "No favorites",
   "收藏库暂不可用": "Favorites are unavailable",
   "收藏条目": "Favorites",
+  // The page's two tabs: the library, and the editor opened out of it.
+  "收藏列表": "Favorites",
+  "编辑器": "Editor",
+  "收藏页分区": "Favorites sections",
+  "编辑器里有未保存的修改": "The editor has unsaved changes",
+  "没有正在编辑的收藏": "Nothing is open in the editor",
+  "在收藏列表里点一条右边的铅笔来编辑它，或者在这里新建一条。": "Pick a favorite's pencil in the list to edit it, or start a new one here.",
   "新建": "New",
   "新建收藏": "New favorite",
   "编辑": "Edit",
@@ -450,7 +554,24 @@ export const EN: Record<string, string> = {
   "收藏上一页": "Favorites previous page",
   "收藏下一页": "Favorites next page",
   "全部分组": "All groups",
-  "筛选收藏分组": "Filter by group",
+  "收藏分组": "Favorite groups",
+  "新建分组": "New group",
+  "分组名称": "Group name",
+  "新分组名称": "New group name",
+  "重命名分组 {name}": "Rename the group {name}",
+  "分组操作 {name}": "Group actions for {name}",
+  "重命名或删除分组": "Rename or delete this group",
+  "删除分组": "Delete group",
+  "删除分组？": "Delete this group?",
+  // Deleting a group keeps its favourites: they are moved out of the group,
+  // not deleted with it.  The dialog says so because the alternative is what
+  // a reader would reasonably fear.
+  "分组 {group} 中的 {count} 条收藏会移到未分组，收藏本身不会被删除。": "{count} favorites in {group} will move to Ungrouped. The favorites themselves are kept.",
+  "分组已重命名为 {name}": "Group renamed to {name}",
+  "已新建分组 {name}": "Created the group {name}",
+  "已删除分组 {name}": "Deleted the group {name}",
+  "上移": "Move up",
+  "下移": "Move down",
   "收藏编辑器": "Favorites editor",
   "关闭收藏编辑器": "Close the favorites editor",
   "关闭编辑器": "Close the editor",
@@ -495,7 +616,6 @@ export const EN: Record<string, string> = {
   "启用动画": "Enable animations",
   "启用通知": "Enable notifications",
   "启用声音": "Enable sounds",
-  "启用同步": "Enable sync",
   "同步": "Sync",
   "恢复同步": "Resume sync",
   "恢复同步失败": "Could not resume sync",
@@ -586,14 +706,48 @@ export const EN: Record<string, string> = {
   "最新版本": "Latest version",
   "发现新版本：": "New version available: ",
   "正在下载…": "Downloading…",
+  "正在安装更新，完成后应用会自动重启。":
+    "Installing the update. The app restarts on its own when it finishes.",
   "新版本 {version} 已就绪": "Version {version} is ready",
+  "更新失败": "Update failed",
   "更新下载失败": "Update download failed",
+  "更新安装失败": "Update install failed",
   "下载更新": "Download update",
+  "下载并安装": "Download and install",
+  "下载并安装最新版本，完成后应用会自动重启。":
+    "Downloads and installs the latest version, then restarts the app.",
   "自动下载最新版本，下载完成后提示你手动替换旧版本。":
     "Downloads the latest version automatically and then asks you to replace the old one manually.",
   "无法连接更新服务器": "Could not reach the update server",
   "请退出当前应用，然后用下方文件替换旧版本。剪贴板历史与设备仍保留在本机。":
     "Quit the app, then replace the old version with the file below. Your clipboard history and devices stay on this machine.",
+
+  // ── A file that lives on another device ──────────────────────────────
+  // Its row carries a name and a size, never a path, so the only thing to do
+  // with it is ask the machine that has it.  The refusals come back as codes
+  // and are worded here, for the peer's window.  下载文件 rather than 下载:
+  // the row's neighbours are 复制记录/翻译记录/删除记录, and a bare 下载 reads
+  // as the page's own download rather than this row's.
+  "下载文件": "Download file",
+  "从 {name} 下载这个文件": "Download this file from {name}",
+  "已请求下载，正在等待那台设备": "Download requested — waiting for that device",
+  "已请求下载，对方开始发送后可在文件传输里查看":
+    "Download requested — it will appear under File transfers once that device starts sending",
+  "{name} 当前不在线": "{name} is offline",
+  "{name} 没能发送这个文件：{reason}": "{name} could not send this file: {reason}",
+  "那台设备当前不在线": "That device is offline right now",
+  "已与那台设备解除配对": "That device is no longer paired",
+  "那台设备上已经没有这条记录了": "That record is gone from that device",
+  "这个文件不在那台设备上": "The file is not on that device",
+  "这条记录不是文件": "That record is not a file",
+  "文件已被移动或删除": "The file was moved or deleted",
+  "文件太多，请分成几次下载": "Too many files — download them in smaller batches",
+  "文件太大，无法传输": "The file is too large to transfer",
+  "文件夹里没有可发送的文件": "The folder has no files to send",
+  "那台设备没能把文件发出来": "That device could not send the file",
+  // The fallback, for a code from a peer newer than this window.  Said rather
+  // than shown: a code is not something a reader can act on.
+  "请稍后重试": "Please try again shortly",
 
   // ── Translation ──────────────────────────────────────────────────────
   "翻译": "Translate",
@@ -696,6 +850,14 @@ export const EN: Record<string, string> = {
 
   // ── Action results (toasts and status lines) ─────────────────────────
   "已加入收藏夹 {count} 条": "Added {count} to favorites",
+  // Batch results.  A dialog that closes on the click that commits has to say
+  // how many rows it covered, and a drag already painted in its new place has
+  // to say whether the new order was kept.
+  "已删除 {count} 条": "Deleted {count} items",
+  "已置顶 {count} 条": "Pinned {count} items",
+  "已取消置顶 {count} 条": "Unpinned {count} items",
+  "顺序已保存": "Order saved",
+  "保存顺序失败": "Failed to save the order",
   "已清空 {count} 条历史记录": "Cleared {count} history entries",
   "已导出：{path}": "Exported: {path}",
   "已在浏览器打开：{url}": "Opened in your browser: {url}",
@@ -737,8 +899,21 @@ export const EN: Record<string, string> = {
   "{label} · 指纹 {code}": "{label} · Fingerprint {code}",
   "测速中 {sent}/{total}": "Testing {sent}/{total}",
   "速度 {mbps} MB/s": "Speed {mbps} MB/s",
+  // The panel's three words for a finished speed test, on its own thresholds.
+  // It also owned a fourth reading — a run that ended with no measurement is the
+  // failure below, not a speed of zero.
+  "快速": "Fast",
+  "良好": "Good",
+  "慢": "Slow",
+  "速度测试失败": "Speed test failed",
+  // The line under the history card's header: how many records there are, how
+  // they ended, and how much has moved.  The panel wrote the same three clauses
+  // with the same omission rule — a part with nothing to say is left out, so a
+  // list without failures does not report zero of them.
+  "已完成 {count} 个": "{count} completed",
+  "{count} 成功": "{count} succeeded",
+  "{count} 失败": "{count} failed",
   "已导出 {count} 条收藏 → {path}": "Exported {count} favorites → {path}",
-  "位置 {position}": "Position {position}",
   "{title} 将被永久删除。": "{title} will be permanently deleted.",
   "未提供": "Not provided",
   "{name} 邀请你聊天": "{name} invites you to chat",
@@ -858,4 +1033,55 @@ export const EN: Record<string, string> = {
     "The moved files can be restored by renaming them back.",
   "正在修复": "Repairing",
   "确认修复": "Repair now",
+
+  // ── The overview page ────────────────────────────────────────────────
+  // The dashboard the window opens on: what this machine is doing, the four
+  // switches that change it, and the way in to the three pages its rows lead
+  // to.  Most of its words are the legacy panel's own (快速控制, 网络地图,
+  // 最近活动, the three network-health verdicts); the ones that differ are
+  // noted where they sit.
+  "概览": "Overview",
+  "概览暂不可用": "Overview unavailable",
+  "同步引擎未运行，无法读取概览。": "The sync engine is not running, so the overview cannot be read.",
+  "正在读取概览": "Reading the overview",
+  "读取概览失败": "The overview could not be read",
+  "本机状态与最近活动": "This device's state and recent activity",
+  "以太网": "Ethernet",
+  "运行时间": "Uptime",
+  "网络正常": "Network healthy",
+  "网络需注意": "Network needs attention",
+  "网络异常": "Network problem",
+  "检查网络": "Check the network",
+  "打开网络诊断": "Open network diagnostics",
+  "编辑设备名称": "Edit device name",
+  "设备名称已更新": "Device name updated",
+  "设备 ID": "Device ID",
+  "平台": "Platform",
+  "本地地址": "Local address",
+  "复制地址": "Copy address",
+  "快速控制": "Quick controls",
+  "发现": "Discovery",
+  "可见性": "Visibility",
+  "远程访问": "Remote access",
+  "已信任": "trusted",
+  "今天": "today",
+  "已置顶": "pinned",
+  "传输": "Transfers",
+  "网络地图": "Network map",
+  "已配对（离线）": "Paired (offline)",
+  "已连接设备": "Connected devices",
+  "还没有已连接的设备——复制内容并配对一台设备即可开始同步。":
+    "No devices are connected yet — copy something and pair a device to start syncing.",
+  "发送链接到设备": "Send a link to a device",
+  "最近活动": "Recent activity",
+  "查看全部": "View all",
+  "复制到剪贴板": "Copy to clipboard",
+  "已复制": "Copied",
+  "复制文本、图片和文件时，剪贴板活动将显示在这里。":
+    "Clipboard activity appears here as you copy text, images and files.",
+  "（无内容）": "(no content)",
+  "刚刚": "just now",
+  "{minutes} 分钟前": "{minutes} min ago",
+  "{hours} 小时前": "{hours} h ago",
+  "{days} 天前": "{days} d ago",
 };

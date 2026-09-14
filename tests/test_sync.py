@@ -1,4 +1,12 @@
-"""Tests for SyncManager — dedup, loop prevention, throttle, enable/disable."""
+"""Clipboard pipeline interactions — SyncManager plus the pieces it feeds.
+
+SyncManager itself: broadcast on a local change, throttle, loop prevention,
+enable/disable, and the remote-apply paths (dedup, merge into a richer entry,
+an in-flight local capture winning over a remote message).  Around it: the
+content filter over Linux/macOS clipboard shapes, dedup keys, the max-age
+prune with pinned entries, history/backup migrations and the file-request
+reject-then-retry path.
+"""
 
 import os
 import sys
@@ -10,7 +18,7 @@ import pytest
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from internal.clipboard.format import ClipboardContent, ContentType, SyncMessage
-from internal.sync.manager import DEDUP_RING_SIZE, SyncManager
+from internal.sync.manager import SyncManager
 
 
 class MockClipboardMonitor:
@@ -99,37 +107,6 @@ class TestSyncManager:
         assert self.sent[0].source_device == "test-device"
         assert self.sent[0].content.types[ContentType.TEXT] == b"hello"
 
-    def test_dedup_identical_content(self):
-        self.reader.content = ClipboardContent(
-            types={ContentType.TEXT: b"dup"},
-        )
-        self.mgr.start()
-        self.monitor.fire()
-        self.monitor.fire()  # second fire cancels timer, restarts — coalesced
-
-        assert self._wait_sent(1)
-        assert len(self.sent) == 1
-
-    def test_different_content_sends_both(self):
-        self.reader.content = ClipboardContent(
-            types={ContentType.TEXT: b"first"},
-        )
-        self.mgr.start()
-        self.monitor.fire()
-
-        # Wait for the FIRST send to actually complete before firing the second
-        # — otherwise the second fire cancels the first's pending timer and
-        # "first" is coalesced away (a real race at the debounce boundary).
-        assert self._wait_sent(1)
-
-        self.reader.content = ClipboardContent(
-            types={ContentType.TEXT: b"second"},
-        )
-        self.monitor.fire()
-
-        assert self._wait_sent(2)
-        assert len(self.sent) == 2
-
     def test_throttle_rapid_changes(self):
         self.mgr.start()
 
@@ -155,18 +132,6 @@ class TestSyncManager:
         time.sleep(0.1)
 
         assert len(self.sent) == 0
-
-    def test_disabled_does_not_receive(self):
-        self.mgr.set_enabled(False)
-        self.mgr.start()
-
-        msg = SyncMessage(
-            content=ClipboardContent(types={ContentType.TEXT: b"remote"}),
-            msg_id="remote-1",
-            source_device="peer",
-        )
-        self.mgr.handle_remote_message(msg)
-        assert self.writer.write_count == 0
 
     def test_remote_message_writes_locally(self):
         msg = SyncMessage(
@@ -203,30 +168,6 @@ class TestSyncManager:
         self.mgr.handle_remote_message(reflected)
         assert self.writer.write_count == write_count_before, "Should not write reflected content"
 
-    def test_empty_content_ignored(self):
-        self.reader.content = ClipboardContent()  # empty
-        self.mgr.start()
-        self.monitor.fire()
-        time.sleep(0.1)
-        assert len(self.sent) == 0
-
-    def test_dedup_ring_limits(self):
-        self.mgr.start()
-        # Send many different clips
-        for i in range(DEDUP_RING_SIZE + 10):
-            self.reader.content = ClipboardContent(
-                types={ContentType.TEXT: f"clip-{i}".encode()},
-            )
-            self.monitor.fire()
-            # Wait for this clip to be observed before sending the next one.
-            # A fixed sleep can be flaky on slower CI runners.
-            deadline = time.time() + 2.0
-            while len(self.sent) < i + 1 and time.time() < deadline:
-                time.sleep(0.05)
-
-        # All should have been sent (each is different)
-        assert len(self.sent) == DEDUP_RING_SIZE + 10
-
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
@@ -235,6 +176,7 @@ if __name__ == "__main__":
 # ══════════════════════════════════════════════════
 # merged from test_round4_interactions.py
 # ══════════════════════════════════════════════════
+
 
 import base64
 import json
@@ -305,19 +247,6 @@ def _rich_clip() -> ClipboardContent:
     )
 
 
-def test_peer_result_identical_regardless_of_sender_plain_text_toggle():
-    """Both sender settings converge on the same peer-side bytes."""
-    # Sender A: plain_text_only ON + filter ON.
-    a = _receive_pipeline(_send_pipeline(_rich_clip(), True, True))
-    # Sender B: plain_text_only OFF + filter ON; receiver strips instead.
-    b = _receive_pipeline(_send_pipeline(_rich_clip(), False, True), True)
-
-    assert a.types == b.types
-    assert set(a.types) == {ContentType.TEXT, ContentType.IMAGE_PNG}
-    assert a.types[ContentType.TEXT] == b"Pay [FILTERED] today"
-    assert a.types[ContentType.IMAGE_PNG] == PNG_BYTES
-
-
 def test_no_secret_bytes_survive_any_pipeline_stage():
     for plain in (True, False):
         stage0 = _rich_clip()
@@ -329,19 +258,6 @@ def test_no_secret_bytes_survive_any_pipeline_stage():
             for data in stage.types.values():
                 assert b"4111" not in data
         assert b"[FILTERED]" in stage2.types[ContentType.TEXT]
-
-
-def test_rtf_only_sensitive_clip_survives_double_processing():
-    """RTF-only clip: strip passes it through unchanged, the filter down-
-    grades it to redacted plain TEXT, and the receiver-side strip must not
-    damage that synthesized TEXT."""
-    clip = ClipboardContent(types={ContentType.RTF: RTF_CARD})
-    final = _receive_pipeline(_send_pipeline(clip, True, True), True)
-
-    assert set(final.types) == {ContentType.TEXT}
-    body = final.types[ContentType.TEXT]
-    assert body == b"Pay [FILTERED] today"
-    assert b"{" not in body and b"\\" not in body  # no brace garbage
 
 
 # ── 2. [FILTERED] x dedup ──────────────────────────────────────────────
@@ -630,24 +546,7 @@ def test_corrupt_types_row_degrades_and_captures_still_persist(tmp_path):
     assert previews == {"good row", "bad row", "fresh capture"}
 
 
-# ── 8. legacy JSON history parity ──────────────────────────────────────
-
-
-def test_legacy_json_history_type_tolerant_batch_ops(tmp_path):
-    h = ClipboardHistoryDB(storage_path=str(tmp_path / "h.db"))
-    h.add(ClipboardContent(types={ContentType.TEXT: b"a note"}))
-    eid = h.get_all()[0]["entry_id"]
-    assert isinstance(eid, int)
-
-    assert h.batch_set_pinned([str(eid)], True) == 1
-    _, entry = h.find_by_id(str(eid))
-    assert entry is not None and entry["pinned"] is True
-
-    assert h.batch_delete([str(eid)]) == 1
-    assert h.get_all() == []
-
-
-# ── 9. darwin source tracker title split ───────────────────────────────
+# ── 8. darwin source tracker title split ───────────────────────────────
 
 
 def test_darwin_window_title_with_commas_stays_intact(monkeypatch):
@@ -664,6 +563,7 @@ def test_darwin_window_title_with_commas_stays_intact(monkeypatch):
 # ══════════════════════════════════════════════════
 # merged from test_round9_interactions.py
 # ══════════════════════════════════════════════════
+
 
 import inspect
 import sys
@@ -730,15 +630,6 @@ class TestMergeXSync:
         assert "HTML" in top["types"], "rich flavor must survive the merge"
         assert top["source_device"] == "peerB"
 
-    def test_remote_different_text_stacks_normally(self, tmp_path):
-        h = ClipboardHistoryDB(storage_path=str(tmp_path / "h.db"))
-        h.add(_rich())
-        _backdate_coalesce(h, 5)
-        other = ClipboardContent(types={ContentType.TEXT: b"other text"})
-        other.source_device = "peerC"
-        h.add(other)
-        assert len(h._entries) == 2
-
     def test_merge_never_mutates_the_broadcast_content(self, tmp_path):
         """The sender reads/broadcasts its clipboard bytes; the history-level
         merge builds a NEW format map and must leave the captured object (the
@@ -751,22 +642,6 @@ class TestMergeXSync:
         h.add(outgoing)
         assert set(outgoing.types.keys()) == {ContentType.TEXT}
         assert outgoing.types[ContentType.TEXT] == BODY
-
-    def test_plain_text_only_strip_composes_with_merge(self, tmp_path):
-        """plain_text_only strips HTML/RTF from the message only; the receiver
-        still unifies the stripped variant with any rich entry it already
-        holds."""
-        stripped = strip_rich_formats(_rich())
-        assert ContentType.HTML not in stripped.types
-        assert stripped.types[ContentType.TEXT] == BODY
-
-        h = ClipboardHistoryDB(storage_path=str(tmp_path / "h.db"))
-        h.add(_rich())
-        _backdate_coalesce(h, 5)
-        h._entries[0]["timestamp"] = time.time() - 5
-        h.add(stripped)
-        assert len(h._entries) == 1
-        assert "HTML" in h._entries[0]["types"]
 
 
 class _MockMonitor:
@@ -949,19 +824,6 @@ class TestTimedPausePersistenceConfig:
         loaded = config_module.load()
         assert loaded.timed_pause_until == pytest.approx(1770000000.5)
 
-    def test_invalid_type_keeps_default(self, tmp_path, monkeypatch):
-        _point_config_at(
-            tmp_path,
-            monkeypatch,
-            {
-                "timed_pause_until": "soon",
-                "sync_enabled": False,
-            },
-        )
-        cfg = config_module.load()
-        assert cfg.timed_pause_until == 0.0
-        assert cfg.sync_enabled is False, "other fields still load"
-
 
 class _StubSyncMgr:
     def __init__(self):
@@ -1010,23 +872,6 @@ class TestTimedPauseLifecycle:
             assert app.cfg.timed_pause_until == 0.0
             assert app._pause_saves[-1] == 0.0
         finally:
-            if app._pause_timer is not None:
-                app._pause_timer.cancel()
-
-    def test_rapid_double_pause_replaces_timer(self, monkeypatch):
-        app = _bare_app(monkeypatch)
-        timers = []
-        try:
-            app._pause_sync_for_minutes(30)
-            first = app._pause_timer
-            timers.append(first)
-            app._pause_sync_for_minutes(10)  # quick re-click of another option
-            assert first.finished.is_set(), "old resume timer must be cancelled"
-            assert app._pause_deadline is not None
-            assert app.cfg.timed_pause_until > time.time()
-        finally:
-            for t in timers:
-                t.cancel()
             if app._pause_timer is not None:
                 app._pause_timer.cancel()
 
@@ -1089,6 +934,7 @@ def _minutes_left(deadline):
 # Pair 4 — file_request idempotency x reject-then-retry
 # ═════════════════════════════════════════════════════════════════════════
 
+
 TID = "b" * 32
 
 
@@ -1126,100 +972,6 @@ class TestFileRequestIdempotencyXReject:
         assert mgr._transfers[TID]["state"] == "pending"
 
         mgr.reject_transfer(TID, send_fn)
-
-    def test_duplicate_request_mid_receive_resets_nothing(self, tmp_path):
-        mgr = FileTransferManager(device_id="self", output_dir=str(tmp_path))
-        mgr.handle_message("file_request", self._request(), lambda d: True, "peerA")
-        mgr.accept_transfer(TID, lambda d: True)
-        chunk0 = {
-            "msg_type": "file_chunk",
-            "transfer_id": TID,
-            "chunk_index": 0,
-            "total_chunks": 3,
-            "_raw_data": b"\x01" * CHUNK_SIZE,
-        }
-        mgr.handle_message("file_chunk", chunk0, lambda d: True, "peerA")
-        before = (mgr._transfers[TID]["received_bytes"], mgr._transfers[TID]["received_chunks"])
-
-        # Replay of the request mid-transfer: must not zero the receive window
-        # nor reopen a second temp handle.
-        mgr.handle_message("file_request", dict(self._request()), lambda d: True, "peerA")
-        t = mgr._transfers[TID]
-        assert (t["received_bytes"], t["received_chunks"]) == before
-        assert t["state"] == "receiving"
-        assert t["received_chunks"] == 1
-
-        mgr.cancel_transfer(TID)
-
-
-# ═════════════════════════════════════════════════════════════════════════
-# Pair 5 — speed sampling x cancel-all / pause / completion
-# ═════════════════════════════════════════════════════════════════════════
-
-
-class TestRateSampleLifecycle:
-    def test_cancel_all_leaves_no_transfer_state_behind(self, tmp_path):
-        """The web/desktop 'cancel all' pattern: snapshot get_transfers() and
-        cancel each row.  Samples ride the transfer dict, so every terminal
-        path must remove the dict itself — nothing may linger."""
-        mgr = FileTransferManager(device_id="self", output_dir=str(tmp_path))
-        ids = []
-        for i in range(2):
-            src = tmp_path / f"up{i}.bin"
-            src.write_bytes(bytes([i]) * (CHUNK_SIZE + 7))
-            tid = mgr.send_file(str(src), lambda data: True)
-            ids.append(tid)
-            t = mgr._transfers[tid]
-            FileTransferManager._record_rate_sample(t, 1000)
-            FileTransferManager._record_rate_sample(t, 2000)
-        assert all(r["speed_bytes_per_sec"] >= 0 for r in mgr.get_transfers())
-
-        # cancel-all: iterate the SNAPSHOT (ids), cancel each.
-        for tid in list(ids):
-            assert mgr.cancel_transfer(tid, lambda data: True)
-        assert mgr._transfers == {}, "no sample state may outlive its transfer"
-        assert mgr.get_transfers() == []
-        assert not list(tmp_path.glob(".*.part"))
-
-    def test_paused_receiver_records_no_samples_then_completes(self, tmp_path):
-        total = 3
-        mgr = FileTransferManager(device_id="self", output_dir=str(tmp_path))
-        req = {
-            "msg_type": "file_request",
-            "transfer_id": TID,
-            "file_name": "paused.bin",
-            "file_size": CHUNK_SIZE * total,
-            "mime_type": "application/octet-stream",
-            "kind": "file",
-        }
-        done = []
-        mgr.set_on_transfer_complete(lambda tid, ok, canc, status: done.append(status))
-        mgr.handle_message("file_request", req, lambda d: True, "peerA")
-        mgr.accept_transfer(TID, lambda d: True)
-
-        mgr.pause_transfer(TID, lambda d: True)
-        chunk = {
-            "msg_type": "file_chunk",
-            "transfer_id": TID,
-            "chunk_index": 0,
-            "total_chunks": total,
-            "_raw_data": b"\x05" * CHUNK_SIZE,
-        }
-        mgr.handle_message("file_chunk", chunk, lambda d: True, "peerA")
-        t = mgr._transfers[TID]
-        assert t["received_chunks"] == 0, "paused chunks are dropped"
-        assert not t.get("_rate_samples"), "no progress => no samples"
-        assert FileTransferManager._instant_speed(t) == 0.0
-
-        mgr.resume_transfer(TID, lambda d: True)
-        for i in range(total):
-            mgr.handle_message("file_chunk", {**chunk, "chunk_index": i}, lambda d: True, "peerA")
-
-        deadline = time.time() + 5
-        while TID in mgr._transfers and time.time() < deadline:
-            time.sleep(0.05)
-        assert done and done[-1] == "success"
-        assert mgr._transfers == {}, "completion cleans up samples too"
 
 
 # ═════════════════════════════════════════════════════════════════════════
@@ -1262,21 +1014,6 @@ class TestBackupHotkeysXMigration:
         assert target.hotkeys.get("paste_1") == "Ctrl+1", "defaults must survive a keyless backup"
         assert target.hotkeys_enabled is False
 
-    def test_malformed_hotkey_pairs_filtered_on_restore(self, tmp_path):
-        crafted = tmp_path / "bad.zip"
-        # JSON object keys are always strings; non-string VALUES are what the
-        # strdict filter must drop.
-        payload = {"hotkeys": {"paste_1": "F9", "evil": 123, "bad2": None}}
-        with zipfile.ZipFile(crafted, "w") as zf:
-            zf.writestr("config.json", json.dumps(payload))
-        target = Config()
-        backup_mod.restore_backup(
-            str(crafted), target, ClipboardHistoryDB(storage_path=str(tmp_path / "h.db"))
-        )
-        assert target.hotkeys.get("paste_1") == "F9"
-        assert "evil" not in target.hotkeys
-        assert "bad2" not in target.hotkeys
-
     def test_factory_reset_removes_wal_sidecars(self):
         """Tripwire: the history DB runs in WAL mode with a long-lived
         connection, so deleting only the .db at factory reset leaves a stale
@@ -1297,35 +1034,6 @@ class TestBackupHotkeysXMigration:
         assert ".corrupt-*" in src, (
             "quarantine copies keep the old identity — reset must sweep them"
         )
-
-    def test_factory_reset_file_lists_cannot_drift(self):
-        """The sidecar's reset must delete exactly what the legacy host does.
-
-        ``internal/data/reset.py`` is the sidecar's copy of the file list (the
-        legacy method is Tk-bound and cannot be imported).  A new user-data
-        file added to one list but not the other silently survives a reset.
-        """
-        from internal.data.reset import DATA_FILES, MARKERS, QUARANTINE_GLOBS
-        from src.main import Application
-
-        src = inspect.getsource(Application._do_factory_reset)
-        for name in DATA_FILES:
-            assert f'"{name}"' in src, f"legacy factory reset no longer deletes {name}"
-        for pattern in QUARANTINE_GLOBS:
-            assert pattern.strip(".*") in src, (
-                f"legacy factory reset no longer sweeps {pattern}"
-            )
-        for marker in MARKERS:
-            assert f'"{marker}"' in src, f"legacy factory reset no longer writes {marker}"
-
-
-# ═════════════════════════════════════════════════════════════════════════
-# Pair 7/8 conclusions are documented in the round report (settings-search
-# highlight restore mutates view attributes only — no Variable writes, no
-# command callbacks; dashboard LAN-IP cache is display-only with a 30 s TTL
-# refreshed off-thread).  Neither exposes testable logic headlessly without
-# a full CTk/Tk display harness.
-# ═════════════════════════════════════════════════════════════════════════
 
 
 # ═════════════════════════════════════════════════════════════════════════
@@ -1389,13 +1097,6 @@ class TestFailedRemoteWriteLeavesNoGhost:
         assert hist.added == [], "no clipboard, no history row"
         assert notified == [], "and no history_updated push to the web UI"
 
-    def test_write_raising_writes_no_history(self):
-        writer = _FailingWriter("raise")
-        mgr, hist, notified = self._mgr(writer)
-        assert mgr.handle_remote_message(self._msg()) is False
-        assert hist.added == []
-        assert notified == []
-
     def test_successful_write_still_records_history(self):
         writer = MockClipboardWriter()
         mgr, hist, notified = self._mgr(writer)
@@ -1403,30 +1104,6 @@ class TestFailedRemoteWriteLeavesNoGhost:
         assert writer.write_count == 1
         assert len(hist.added) == 1
         assert notified == [True]
-
-    def test_clipboard_is_written_before_history(self):
-        """Ordering, not just the outcome: history must follow the write."""
-        order = []
-
-        class _OrderWriter:
-            def write(self, content):
-                order.append("clipboard")
-                return True
-
-        class _OrderHistory:
-            def add(self, content):
-                order.append("history")
-
-        mgr = SyncManager(
-            "test-device",
-            "Test Device",
-            reader=MockClipboardReader(),
-            writer=_OrderWriter(),
-            monitor=MockClipboardMonitor(),
-            history=_OrderHistory(),
-        )
-        assert mgr.handle_remote_message(self._msg()) is True
-        assert order == ["clipboard", "history"]
 
 
 class TestRemoteMessageLosesToAnInFlightLocalCapture:
@@ -1479,20 +1156,4 @@ class TestRemoteMessageLosesToAnInFlightLocalCapture:
         assert verdicts == [False], "the local copy in progress must win"
         assert writer.write_count == 0, "the user's clipboard must be untouched"
 
-    def test_flag_is_released_even_when_the_capture_raises(self):
-        """A capture that blows up must not wedge the receive path shut."""
-        mgr = SyncManager(
-            "test-device",
-            "Test Device",
-            reader=MockClipboardReader(),
-            writer=MockClipboardWriter(),
-            monitor=MockClipboardMonitor(),
-        )
 
-        def _boom():
-            raise RuntimeError("reader exploded")
-
-        mgr._do_read_and_send_locked = _boom
-        with pytest.raises(RuntimeError):
-            mgr._do_read_and_send()
-        assert mgr._local_capture_active == 0

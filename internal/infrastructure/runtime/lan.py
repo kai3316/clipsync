@@ -14,7 +14,10 @@ from urllib.parse import urlparse
 
 from internal.application.errors import ApplicationError
 from internal.application.use_cases.transfers import format_eta
+from internal.clipboard import file_ref, format
 from internal.clipboard.clipboard import strip_rich_formats
+from internal.clipboard.file_ref import MAX_OFFER_ENTRIES
+from internal.clipboard.file_ref import summary as file_summary
 from internal.clipboard.filter import ContentFilter
 from internal.clipboard.format import ClipboardContent, ContentType, SyncMessage
 from internal.clipboard.platform import create_monitor, create_reader, create_writer
@@ -28,6 +31,8 @@ from internal.infrastructure.runtime.internet_pairing import (
 from internal.infrastructure.runtime.relay_delivery import RelayDelivery
 from internal.platform.notify import notification_mgr
 from internal.protocol.codec import (
+    CLIP_FILE_MSG_TYPES,
+    ENDING_MSG_TYPES,
     PAIRING_MSG_TYPES,
     decode_message,
     encode_frame,
@@ -37,7 +42,7 @@ from internal.protocol.codec import (
 from internal.security.fingerprint import sas_code
 from internal.security.pairing import PAIRING_STATUS_PAIRED, fingerprint_short
 from internal.sync.ai_config import AIConfigManager
-from internal.sync.file_transfer import FileTransferManager
+from internal.sync.file_transfer import MAX_FILE_SIZE, FileTransferManager
 from internal.sync.manager import SyncManager
 from internal.sync.nearby_chat import CHAT_MSG_TYPES, ChatManager
 from internal.system import updater
@@ -48,6 +53,13 @@ from internal.transport.ids import peer_id_hash
 from internal.transport.relay import RelayTransport, build_paho_client, netpair_device_tag
 
 logger = logging.getLogger(__name__)
+
+# How long a 下载 request licenses the peer to send unprompted.  The window is
+# not a guess at transfer time: what it bounds is how long the *receiver* will
+# keep believing a `clip_file` frame is one it asked for.  Long enough that a
+# peer preparing a folder archive is still inside it, short enough that a
+# request abandoned by a crash stops being an open door.
+CLIP_FILE_WINDOW = 300.0
 
 
 def _short_fingerprint(certificate_pem):
@@ -138,6 +150,10 @@ class LanRuntime:
     STOP_TIMEOUT = 5.0
     REFRESH_INTERVAL = 0.25
     PAIRING_SEND_WAIT = 12.0
+    # How often a deferred ending notice re-dials a peer it cannot reach.  The
+    # maintenance loop runs four times a second, which is far more often than a
+    # connection attempt needs and would keep several in flight at once.
+    ENDING_DIAL_RETRY = 1.0
     DEVICE_PING_TIMEOUT = 4.0
     # Legacy waited this long for a chat peer's connection to come up.
     CHAT_CONNECT_TIMEOUT = 15.0
@@ -188,6 +204,7 @@ class LanRuntime:
         self._discovered = {}
         self._connecting = {}
         self._deferred = {}
+        self._ending_dial_at = {}
         self._snapshot = {"items": []}
         self._pairing_ops = threading.RLock()
         self._probes = {}
@@ -276,6 +293,9 @@ class LanRuntime:
         # Peer-sent update blobs arrive as ordinary transfers (kind="update") and
         # are handed to the update service instead of the file-received flow.
         self.file_transfer.set_on_file_received(self._on_file_received)
+        # Whether an inbound `clip_file` may skip the consent prompt is not the
+        # sender's to decide; the manager asks this machine's own ledger.
+        self.file_transfer.set_clip_file_guard(self._clip_file_outstanding_for)
         # The temp archives of folder sends, by transfer id, waiting to be
         # unlinked when their transfer reaches a terminal state.  Its own lock
         # rather than the runtime's: the completion callback runs on the
@@ -283,6 +303,17 @@ class LanRuntime:
         self._outgoing_archives = {}
         self._archive_lock = threading.Lock()
         self._update_sink = None
+        # Resolves an entry id a peer asked for into this machine's own paths —
+        # set by the application layer, which is what owns the history store.
+        # A callback rather than a history reference because the runtime is
+        # built before the store is guaranteed to exist, and because the answer
+        # ("these paths, or this reason") is a policy the store should own.
+        self._clip_file_source = None
+        # device_id -> (entry_id asked for, monotonic deadline), the ledger of
+        # what this machine has actually requested.  The manager asks rather
+        # than tracks because the sender writes the `clip_file` label on its own
+        # frames — see `FileTransferManager.set_clip_file_guard`.
+        self._clip_file_outstanding: dict[str, tuple[str, float]] = {}
         self.chat = ChatManager(
             config.device_id,
             config.device_name,
@@ -733,6 +764,236 @@ class LanRuntime:
         """Where a peer-sent update blob goes (the update service's stage step)."""
         self._update_sink = sink
 
+    # ── files pulled from a peer's history ───────────────────────────────
+    def set_clip_file_source(self, source) -> None:
+        """Set the ``entry_id -> (paths, reason)`` resolver for file offers.
+
+        The runtime knows the wire and the history store knows the row, so the
+        question "may this peer have these files, and where are they" is
+        answered by the store and asked by the runtime.  Passing ``None``
+        disables serving, and every request is then answered with a refusal.
+        """
+        self._clip_file_source = source
+
+    def _clip_file_outstanding_for(self, device_id: str, entry_id: str) -> bool:
+        """Whether a file from *device_id* really is the one we asked for.
+
+        Read by the transfer manager on every inbound `clip_file` frame, which is
+        what makes the label an answer to a request rather than a claim a peer
+        can make on its own.
+
+        Matched on the entry as well as the device: one ask yields many files, so
+        the entry cannot be consumed on first use, and matching only the device
+        would leave a window in which anything that peer chose to push went
+        through unprompted.  The deadline is what ends it — a peer that refuses
+        answers with a denial instead, and one that simply drops the request
+        would otherwise license the next push from it forever.
+        """
+        if not device_id or not entry_id:
+            return False
+        now = time.monotonic()
+        with self._archive_lock:
+            # Pruned here rather than on a timer: this is the only reader, and a
+            # window that has run out is indistinguishable from no window.
+            for peer, (_entry, deadline) in list(self._clip_file_outstanding.items()):
+                if deadline <= now:
+                    del self._clip_file_outstanding[peer]
+            asked = self._clip_file_outstanding.get(device_id, ("", 0.0))
+        return asked[1] > now and asked[0] == entry_id
+
+    def request_entry_files(self, device_id: str, entry_id: str) -> dict:
+        """Ask one paired device to send the files behind a history entry.
+
+        This is the only pull in the protocol: every other transfer is started
+        by whoever holds the file.  The request carries the entry id and
+        nothing else that matters — the names and sizes the user is looking at
+        came from the peer's own offer, and the paths are resolved on the
+        peer's side, because a path is only meaningful on the machine it names.
+
+        Only a paired, currently-connected peer can be asked: the files travel
+        over the LAN channel, which is the one whose certificate is pinned, and
+        a request that named a relay peer would start a download that could
+        never complete.  The counters are checked here so the caller learns
+        immediately rather than watching a button do nothing.
+        """
+        if not entry_id or not isinstance(entry_id, str):
+            raise ApplicationError("INVALID_ARGUMENT", "No entry to download")
+
+        def run():
+            pid = self._resolve(device_id)
+            if not pid:
+                raise ApplicationError("NOT_CONNECTED", "Device is not connected")
+            if not self.pairing.is_peer_paired(pid):
+                raise ApplicationError("NOT_PAIRED", "That device is not paired")
+            if pid not in (self.transport.get_connected_peers() or []):
+                raise ApplicationError("NOT_CONNECTED", "Device is not connected")
+            self.transport.send_to_peer(
+                pid,
+                encode_frame(
+                    {
+                        "msg_type": "clip_file_request",
+                        "entry": entry_id,
+                        "ts": time.time(),
+                    },
+                    source_device=self.config.device_id,
+                ),
+            )
+            with self._archive_lock:
+                self._clip_file_outstanding[pid] = (entry_id, time.monotonic() + CLIP_FILE_WINDOW)
+            logger.info("Asked %s for the files behind a history entry", pid[:8])
+            return {"requested": True}
+
+        return self._command(run)
+
+    def _serve_clip_file(self, pid: str, payload: dict) -> None:
+        """Answer a peer's request for the files behind an entry we published.
+
+        Every step is a refusal the requester is told about, because the
+        alternative is a 下载 button that appears to work and produces nothing:
+        an entry we cannot resolve, a selection too large for one click, a file
+        past the transfer size cap, or an archive that will not build.  The
+        refusal carries a reason code rather than a sentence — the requester's
+        window is in the requester's language, and this machine does not know
+        which that is.
+        """
+        entry_id = str(payload.get("entry") or "")
+        paths, reason = ([], "not_found")
+        if entry_id and self._clip_file_source is not None:
+            try:
+                paths, reason = self._clip_file_source(entry_id)
+            except Exception:
+                logger.exception("Could not resolve a file offer for a peer")
+                paths, reason = [], "not_found"
+        if not paths:
+            self._deny_clip_file(pid, entry_id, reason or "not_found")
+            return
+        # Cut to what the offer itself could describe rather than refusing past
+        # it.  The two limits are different — the offer's is the size of one JSON
+        # frame, this one is how many transfers a single click may start — but
+        # they meet at the same number: a peer can only ask for an entry it holds
+        # an offer for, and every path here past that offer was never shown to
+        # anybody.  A refusal would name no remedy (there is no way to ask for
+        # "the next batch"), where a partial delivery is visible in the transfers
+        # list; the row's own count already said how many there were.
+        if len(paths) > MAX_OFFER_ENTRIES:
+            logger.info(
+                "Serving the first %d of %d files behind an entry",
+                MAX_OFFER_ENTRIES,
+                len(paths),
+            )
+            paths = paths[:MAX_OFFER_ENTRIES]
+
+        # Everything is prepared before anything is sent.  Preparing inside the
+        # send loop would mean a selection whose fourth file is too large leaves
+        # three transfers already running behind a refusal — the requester would
+        # see files arrive *and* an error, which is worse than either alone.
+        prepared: list[tuple[str, str]] = []
+        for path in paths:
+            try:
+                subject, archive = self._clip_file_subject(path)
+                if os.path.getsize(subject) > MAX_FILE_SIZE:
+                    self._discard_archives(prepared)
+                    self._deny_clip_file(pid, entry_id, "too_large")
+                    return
+            except ArchiveEmptyError:
+                self._discard_archives(prepared)
+                self._deny_clip_file(pid, entry_id, "empty")
+                return
+            except OSError as error:
+                logger.info("Could not prepare a file for a peer: %s", error)
+                self._discard_archives(prepared)
+                self._deny_clip_file(pid, entry_id, "gone")
+                return
+            prepared.append((subject, archive))
+
+        send_fn = lambda data: self.transport.send_to_peer(pid, data)  # noqa: E731
+        sent = 0
+        orphaned: list[tuple[str, str]] = []
+        for subject, archive in prepared:
+            try:
+                # One transfer per file, so what lands is the file the user saw
+                # rather than an archive they have to open; a *directory* has no
+                # other shape to travel in, so it goes as its own archive,
+                # exactly as a folder sent from the transfers page does.
+                transfer_id = self.file_transfer.send_file(
+                    subject, send_fn, kind="clip_file", entry_id=entry_id
+                )
+            except OSError as error:
+                logger.info("Could not send a file to a peer: %s", error)
+                transfer_id = ""
+            if transfer_id:
+                if archive:
+                    # Reclaimed when the transfer ends, like any folder send:
+                    # the receiver has to read it for as long as it runs, so it
+                    # must outlive this call.
+                    with self._archive_lock:
+                        self._outgoing_archives[transfer_id] = archive
+                sent += 1
+            elif archive:
+                # Nothing will ever reclaim this one.
+                orphaned.append((subject, archive))
+        # An archive nothing reclaimed would sit in the temp dir forever.
+        self._discard_archives(orphaned)
+        logger.info("Serving %d file(s) behind a history entry to %s", sent, pid[:8])
+        if not sent:
+            self._deny_clip_file(pid, entry_id, "failed")
+
+    @staticmethod
+    def _clip_file_subject(path: str) -> tuple[str, str]:
+        """What actually goes on the wire for one pulled path: (subject, archive).
+
+        ``archive`` is "" for a plain file and the temp archive's path for a
+        directory, which the caller remembers so it can be unlinked when the
+        transfer ends.  A file is sent as itself: archiving a single file would
+        hand the user a zip where they expected the document.
+        """
+        if not os.path.isdir(path):
+            return path, ""
+        archive_path, _count = create_archive(path)
+        return str(archive_path), str(archive_path)
+
+    @staticmethod
+    def _discard_archives(prepared: list[tuple[str, str]]) -> None:
+        """Unlink the temp archives of a request that will not be served."""
+        for _subject, archive in prepared:
+            if archive:
+                Path(archive).unlink(missing_ok=True)
+
+    def _deny_clip_file(self, pid: str, entry_id: str, reason: str) -> None:
+        """Tell a peer its file request will not be served, and why (a code).
+
+        A code rather than a sentence: the requester's window is in the
+        requester's language, and this machine does not know which that is.
+        Nothing is published here — a refusal is the requester's to see, and
+        on this side nothing happened to report.
+        """
+        try:
+            self.transport.send_to_peer(
+                pid,
+                encode_frame(
+                    {
+                        "msg_type": "clip_file_denied",
+                        "entry": entry_id,
+                        "reason": reason,
+                        "ts": time.time(),
+                    },
+                    source_device=self.config.device_id,
+                ),
+            )
+        except Exception:
+            logger.debug("Could not send a clip file refusal", exc_info=True)
+
+    def _on_clip_file_denied(self, pid: str, payload: dict) -> None:
+        """Surface a peer's refusal to this machine's window."""
+        self._publish(
+            "clip.file.denied",
+            {
+                "device_id": pid,
+                "entry_id": str(payload.get("entry") or ""),
+                "reason": str(payload.get("reason") or "failed"),
+            },
+        )
+
     def request_update_from_peers(self) -> None:
         """Ask connected peers for their cached release asset.
 
@@ -816,6 +1077,30 @@ class LanRuntime:
                 if os.path.isfile(path):
                     return {"path": path}
         raise ApplicationError("NOT_FOUND", "Received file is not available")
+
+    def chat_reveal_file(self, session_id, transfer_id):
+        """Show a received chat file in the OS file manager.
+
+        The legacy chat panel put 打开所在文件夹 beside 打开 on a saved
+        attachment (`chat-panel.js`, `revealFile(m.saved_path)`), and the new
+        page had only the first of the two.  The lookup is `chat_saved_file`'s,
+        so a file can only be revealed from a message that actually carries a
+        saved path — the caller names a session and a transfer, never a path.
+
+        Revealing goes through the same `reveal_folder` the transfer list uses
+        rather than a second implementation: one place that knows how each
+        platform's file manager is asked, and the same answer to "打开所在
+        文件夹" wherever it is clicked.  A file whose folder has since been
+        moved or deleted comes back as its own error instead of a silent
+        success.
+        """
+        from internal.system.file_manager import reveal_folder
+
+        path = self.chat_saved_file(session_id, transfer_id)["path"]
+        ok, detail = reveal_folder(path)
+        if not ok:
+            raise ApplicationError("REVEAL_FAILED", "The file's folder could not be opened")
+        return {"ok": True, "folder": detail}
 
     def _chat_send_fn(self, peer_id):
         """A send closure for one chat peer: LAN first, relay only as fallback.
@@ -1247,16 +1532,78 @@ class LanRuntime:
         connected = set(self.transport.get_connected_peers())
         pending = {p[0] for p in self.pairing.get_pending_pairings()}
         for pid, (kind, deadline) in deferred.items():
-            # Cancel stale confirmations after reject/unpair/expiry.
-            valid = pid in pending or self.pairing.is_peer_paired(pid)
+            # A notice that *ends* a pairing is valid on the opposite rule from
+            # one that concludes it: a confirmation matters while the pairing is
+            # still live (pending or paired), an unpair/reject matters while it
+            # is not.  Reading both off the confirmation rule is how a severed
+            # pairing stayed severed on one device and intact on the other.
+            if kind in ENDING_MSG_TYPES:
+                # Only a completed pairing supersedes an ending notice.  A
+                # *request* does not, because reconnecting to a peer this
+                # device no longer trusts is what puts the shared code back on
+                # screen: both connection paths re-offer it for any known
+                # unpaired peer (`generate_shared_pairing_code`), which is how
+                # two machines on this network come to pair at all.  Reading
+                # that as "the pairing is live again" discarded the notice in
+                # the one case it exists for -- the link came back after the
+                # unpair -- and left the other device paired forever.
+                valid = not self.pairing.is_peer_paired(pid)
+            else:
+                # Cancel stale confirmations after reject/unpair/expiry.
+                valid = pid in pending or self.pairing.is_peer_paired(pid)
             expired = time.monotonic() >= deadline
             sent = valid and pid in connected and self._send_pairing(pid, kind)
+            if valid and not sent and not expired and pid not in connected:
+                # Nothing to send down yet.  The single dial `_end_pairing`
+                # made is an attempt, not a delivery: it fails on its own when
+                # the peer is mid-reconnect or the TLS handshake does not
+                # finish, and when it does the notice has nowhere to go and
+                # nobody tries again.  That is the whole of the divergence --
+                # one device unpaired, the other still showing the pairing as
+                # live -- so the window is spent reaching for the peer.
+                self._redial_for_notice(pid)
             if sent or not valid or expired:
                 with self._lock:
                     if self._deferred.get(pid) == (kind, deadline):
                         self._deferred.pop(pid, None)
                 if expired and valid and not sent:
-                    self._error("PAIRING_SEND_FAILED")
+                    # An ending notice that ran out of window is logged rather
+                    # than raised: the user asked to break the pairing and this
+                    # device did, so the operation they performed succeeded.  The
+                    # peer only failed to hear about it, and a toast here would
+                    # have to say that in a sentence none of the three fronts has
+                    # a catalog entry for -- what it actually renders today is
+                    # the runtime's untranslated "LAN operation failed".  It is
+                    # a deliberate divergence from the previous panel, and the
+                    # warning below is the record of it.
+                    if kind in ENDING_MSG_TYPES:
+                        logger.warning(
+                            "LAN runtime: %s to %s never landed; that device may "
+                            "still show this pairing as live",
+                            kind,
+                            pid[:12],
+                        )
+                    else:
+                        self._error("PAIRING_SEND_FAILED")
+
+    def _redial_for_notice(self, pid):
+        """Dial a peer again so a deferred ending notice has a link to travel on.
+
+        `_end_pairing` dials once, immediately, which is the right first move
+        and not a guarantee: the dial is asynchronous and fails on its own if
+        the handshake does not finish or the peer is already reconnecting to
+        us.  Throttled, because the tick runs four times a second and each
+        attempt starts a connection of its own.  The stale entry this leaves
+        for a peer that is never dialled again costs one delayed attempt, which
+        is cheaper than tracking the dict's lifetime in the six places a
+        deferred notice can be dropped.
+        """
+        now = time.monotonic()
+        with self._lock:
+            if now - self._ending_dial_at.get(pid, 0.0) < self.ENDING_DIAL_RETRY:
+                return
+            self._ending_dial_at[pid] = now
+        self._connect(pid)
 
     def _internet_unpaired(self, peer_id):
         """An internet pair was severed — drop its sends and tell the UIs.
@@ -1734,11 +2081,23 @@ class LanRuntime:
         events = []
         arrived = set()
         with self._lock:
+            # A peer carrying an ending notice is on this link for the notice's
+            # sake: the runtime dials it itself so the retry has somewhere to
+            # land.  Both fronts render `device.connected` as a "connected"
+            # notice, and saying that a second after the user broke the pairing
+            # would contradict the thing they just did.  The transition is still
+            # recorded below, so it is not announced a tick later instead.
+            ending = {
+                pid
+                for pid, (kind, _) in self._deferred.items()
+                if kind in ENDING_MSG_TYPES
+            }
             for pid in sorted(connected - self._connected_seen):
                 arrived.add(pid)
-                events.append(
-                    ("device.connected", {"device_id": pid, "name": names.get(pid) or pid[:12]})
-                )
+                if pid not in ending:
+                    events.append(
+                        ("device.connected", {"device_id": pid, "name": names.get(pid) or pid[:12]})
+                    )
             for pid in sorted(self._connected_seen - connected):
                 events.append(
                     ("device.disconnected", {"device_id": pid, "name": names.get(pid) or pid[:12]})
@@ -2537,8 +2896,9 @@ class LanRuntime:
             # pin left for "trust again" to replace, and re-pairing is what
             # establishes the new one.
             self._pending_certs.pop(pid, None)
+        kind = "pairing_unpair" if unpair else "pairing_reject"
         try:
-            self._send_pairing(pid, "pairing_unpair" if unpair else "pairing_reject")
+            notice_sent = self._send_pairing(pid, kind)
         finally:
             self.transport.forget_peer(pid)
             if unpair:
@@ -2552,6 +2912,16 @@ class LanRuntime:
             # Legacy pushed this without a status, so keep it empty.
             self._publish("pairing.resolved", {"device_id": pid, "status": ""})
             self._refresh()
+        if not notice_sent:
+            # The link was already down, so the peer was never told and would go
+            # on believing it is still paired -- and would keep auto-connecting
+            # to a device that has broken with it.  Hand the notice to the
+            # maintenance tick, which retries it for PAIRING_SEND_WAIT and dials
+            # the peer itself: an explicit connect is what lifts the reject that
+            # forget_peer just installed.
+            with self._lock:
+                self._deferred[pid] = (kind, time.monotonic() + self.PAIRING_SEND_WAIT)
+            self._connect(pid)
         return {"accepted": True}
 
     def set_sync_enabled(self, enabled):
@@ -2646,6 +3016,13 @@ class LanRuntime:
             return False
         outgoing = SyncMessage(content, msg.msg_id, self.config.device_id)
         data = encode_message(outgoing)
+        if not data:
+            # `has_syncable_types` is a cheap type-level gate and the encoder is
+            # the real one: a clip whose only format is a FILE with no row to
+            # name, or a URL that is really a path, passes the first and encodes
+            # to nothing.  Broadcasting those bytes would put a zero-length
+            # frame on the wire for every peer to trip over.
+            return False
         if len(data) > MAX_FRAME_SIZE:
             self._error("CLIPBOARD_TOO_LARGE")
             return False
@@ -2750,13 +3127,37 @@ class LanRuntime:
 
     @staticmethod
     def _delivery_preview(content) -> str:
-        """First 40 chars of a clipboard message's text (for the send list)."""
+        """First 40 chars of a clipboard message's text (for the send list).
+
+        The two payloads with no text of their own are named by what they carry
+        rather than left blank: a send ledger line reading 已送达 with nothing
+        after it is the one row a reader cannot place, and a URL and a file are
+        exactly the clips whose content the summary *is*.
+        """
         try:
             types = getattr(content, "types", {}) or {}
             for content_type in (ContentType.TEXT, ContentType.HTML, ContentType.RTF):
                 raw = types.get(content_type)
                 if not raw:
                     continue
+                text = raw.decode("utf-8", errors="replace").strip()
+                if text:
+                    return text[:40]
+            # A file copy on macOS carries a `public.url` beside its paths, so
+            # the paths are asked first — the name of the thing beats a URI that
+            # is only a spelling of its path.  Same order, and the same line, as
+            # the history row this clip will become.
+            raw = types.get(ContentType.FILE)
+            if raw:
+                paths = format.split_paths(raw.decode("utf-8", errors="replace"))
+                if paths:
+                    first = os.path.basename(paths[0]) or paths[0]
+                    return first[:40] if len(paths) == 1 else f"{first[:40]} 等 {len(paths)} 个文件"
+            offer = file_ref.parse(types.get(ContentType.FILE_REMOTE) or b"")
+            if offer:
+                return file_summary(offer["files"], offer["total"])[:40]
+            raw = types.get(ContentType.URL)
+            if raw:
                 text = raw.decode("utf-8", errors="replace").strip()
                 if text:
                     return text[:40]
@@ -2807,6 +3208,19 @@ class LanRuntime:
         if kind == "update_request":
             if trusted:
                 self._serve_cached_update(pid)
+            return
+        if kind in CLIP_FILE_MSG_TYPES:
+            # Asked and answered on the LAN only.  The files travel over the
+            # channel whose certificate is pinned, so a request that arrived
+            # over the relay could only be answered with a transfer that never
+            # completes — and answering it anyway would mean reading a peer's
+            # files on the strength of a claim made on the public relay.
+            if not (trusted and not via_relay):
+                return
+            if kind == "clip_file_request":
+                self._serve_clip_file(pid, getattr(msg, "_raw_payload", {}))
+            else:
+                self._on_clip_file_denied(pid, getattr(msg, "_raw_payload", {}))
             return
         if kind in PAIRING_MSG_TYPES:
             if via_relay:

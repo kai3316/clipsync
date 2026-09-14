@@ -664,12 +664,12 @@
         '<div class="overview-card glass overview-activity-card">' +
           '<h3 class="overview-card__title">{{ t(\'overview.recent_activity\') }}</h3>' +
           '<div v-if="recentList.length > 0" class="overview-feed">' +
-            '<div v-for="(item, i) in recentList" :key="i" class="overview-feed__item" role="button" tabindex="0" :title="t(\'ui.history\')" :style="{ animationDelay: (i * 0.06) + \'s\' }" @click="openHistoryTab" @keydown.enter="openHistoryTab" @keydown.space.prevent="openHistoryTab">' +
-              '<span class="overview-feed__icon">{{ typeIcon(item.type) }}</span>' +
-              '<span class="overview-feed__text text-ellipsis selectable">{{ item.text || t(\'history.empty_preview\') }}</span>' +
+            '<div v-for="(item, i) in recentList" :key="item.id || i" class="overview-feed__item" role="button" tabindex="0" :title="t(\'ui.history\')" :style="{ animationDelay: (i * 0.06) + \'s\' }" @click="openHistoryTab" @keydown.enter="openHistoryTab" @keydown.space.prevent="openHistoryTab">' +
+              '<span class="overview-feed__icon">{{ typeIcon(item.content_type) }}</span>' +
+              '<span class="overview-feed__text text-ellipsis selectable">{{ item.preview || t(\'history.empty_preview\') }}</span>' +
               '<span class="overview-feed__meta">' +
                 '<span v-if="item.pinned" class="overview-feed__pin">📌</span>' +
-                '<span class="text-subtle">{{ timeAgo(item.time) }}</span>' +
+                '<span class="text-subtle">{{ timeAgo(item.timestamp) }}</span>' +
               '</span>' +
             '</div>' +
           '</div>' +

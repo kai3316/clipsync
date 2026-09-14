@@ -1,5 +1,6 @@
 """Sidecar composition root; never imports the legacy Tk application."""
 
+import contextlib
 import json
 import logging
 import secrets
@@ -43,6 +44,7 @@ from internal.security.encryption import EncryptionManager, make_password_hash, 
 from internal.security.pairing import fingerprint_pem
 from internal.system.qr import png_data_url
 from internal.system.update_service import UpdateService
+from internal.transport.relay import probe_relay_endpoints
 from internal.version import __version__
 from internal.web.api.settings import get_settings, update_settings
 
@@ -50,7 +52,8 @@ logger = logging.getLogger(__name__)
 
 
 class SidecarApplication:
-    def __init__(self, clipboard_writer_factory=None, runtime_factory=None, companion_factory=None):
+    def __init__(self, clipboard_writer_factory=None, runtime_factory=None,
+                 companion_factory=None, update_checks=True):
         self.events = EventJournal()
         # Owns the update lifecycle (check / download / stage / reveal). It needs
         # no lock state, so it exists before the first configuration load; the
@@ -65,6 +68,11 @@ class SidecarApplication:
         self.identity: IdentitySession | None = None
         self._clipboard_writer_factory = clipboard_writer_factory
         self._runtime_factory = runtime_factory
+        # The periodic update check is a background service, and the sidecar's
+        # isolated verification mode has to be able to exist without one: it
+        # opens a socket on the first tick, which both breaks the mode's promise
+        # and leaves a request in flight at exit.
+        self._update_checks = update_checks
         self.runtime = None
         self.companion = None
         self._companion_factory = companion_factory
@@ -113,7 +121,8 @@ class SidecarApplication:
         # reasons, repair hints), so it follows the configured language exactly
         # like the legacy entry does at startup.
         set_locale(self.config.language)
-        self.updates.start()
+        if self._update_checks:
+            self.updates.start()
         if self.config.encryption_enabled and self.config.encryption_password_hash:
             self._health = "locked"
         else:
@@ -180,6 +189,46 @@ class SidecarApplication:
             factory = create_writer
         return factory().write(content)
 
+    def copy_text(self, text: str) -> dict:
+        """Put text on this machine's clipboard, and do nothing else with it.
+
+        The window's context menu copies things that are not clips -- a device
+        id, a file's path, a chat message -- and every one of those would be a
+        new clip if it went through the ordinary capture path: the monitor would
+        read the write back as a fresh entry and sync it to every paired
+        device.  So this writes to the clipboard directly and absorbs the
+        monitor event, recording nothing and broadcasting nothing.
+
+        ``push_text`` is the deliberate opposite, and is what the window calls
+        when the user does mean to send the text everywhere.
+        """
+        if not isinstance(text, str) or not text.strip():
+            raise ApplicationError("INVALID_ARGUMENT", "Text is required")
+        if len(text) > 100000:
+            raise ApplicationError("INVALID_ARGUMENT", "Text is too long")
+        content = ClipboardContent(types={ContentType.TEXT: text.encode("utf-8")})
+        try:
+            wrote = self._write_clipboard(content)
+        except Exception:
+            logger.debug("Copy to clipboard raised", exc_info=True)
+            wrote = False
+        if wrote is not True:
+            raise ApplicationError(
+                "CLIPBOARD_WRITE_FAILED",
+                "Could not write to the clipboard",
+                retryable=True,
+            )
+        # The runtime is absent when the sidecar runs without a LAN session;
+        # there is then no monitor to absorb and nothing to sync.
+        sync = getattr(self.runtime, "sync", None)
+        monitor = getattr(sync, "_monitor", None) if sync is not None else None
+        if monitor is not None:
+            try:
+                monitor.suppress_for(2.0)
+            except Exception:
+                logger.debug("Clipboard monitor suppression failed", exc_info=True)
+        return {"copied": True, "len": len(text)}
+
     def _prepare_history_restore(self):
         if self.runtime is not None:
             self.runtime.sync.reset_dedup_for_restore()
@@ -215,6 +264,12 @@ class SidecarApplication:
         set_sink = getattr(self.runtime, "set_update_sink", None)
         if set_sink is not None:
             set_sink(self.updates.finish_from_peer)
+        # A peer may ask this machine for the files behind a history entry it
+        # published to us; the store, not the runtime, answers which paths a
+        # request may reach — so the runtime is handed the store's own resolver.
+        set_source = getattr(self.runtime, "set_clip_file_source", None)
+        if set_source is not None:
+            set_source(self._repository.file_entry_paths)
         self.runtime.start()
         self.internet_pairing = getattr(self.runtime, "internet_pairing", None)
 
@@ -231,7 +286,12 @@ class SidecarApplication:
         if (self.identity is None or self.runtime is None
                 or not self.config.web_enabled or self.companion is not None):
             return
-        if not self.config.web_token:
+        # Starting is not a reason to re-arm a token the user cleared: this runs
+        # on every app launch, so minting here meant "clear the token" lasted
+        # until the next restart.  ``web_token_disabled`` is the record of that
+        # choice; the explicit enable transition in ``configure_companion`` is
+        # what mints a fresh one.
+        if not self.config.web_token and not self.config.web_token_disabled:
             self.config.web_token = secrets.token_urlsafe(32)
             save(self.config, self.identity.encryption)
         factory = self._companion_factory
@@ -314,14 +374,15 @@ class SidecarApplication:
             return {"ok": False, "error": "QR_UNAVAILABLE", "url": url, "qr": None}
         return {"ok": True, "url": url, "qr": qr}
 
-    def configure_companion(self, enabled, port=None, rotate_token=False):
+    def configure_companion(self, enabled, port=None, rotate_token=False,
+                            clear_token=False):
         # Serialize service replacement with lifecycle shutdown/rollback.
         with self.lifecycle._lock:
             if self.lifecycle.state != "running":
                 raise ApplicationError("APP_NOT_READY", "Application is not running")
             self.require_runtime()
             cfg = self.config
-            old = (cfg.web_enabled, cfg.web_port, cfg.web_token)
+            old = (cfg.web_enabled, cfg.web_port, cfg.web_token, cfg.web_token_disabled)
             desired_port = cfg.web_port if port is None else port
             status = self.companion_status()
             replace = (desired_port != cfg.web_port or rotate_token
@@ -333,13 +394,36 @@ class SidecarApplication:
                 )
             cfg.web_enabled = enabled
             cfg.web_port = desired_port
-            if rotate_token or (enabled and not cfg.web_token):
+            # ``clear_token`` is the explicit "no token" choice — the companion
+            # then lets every request through (``web.server._validate_token``).
+            # It wins over ``rotate_token`` if a caller sends both, because a
+            # rotation that is also a clear has no coherent meaning and the two
+            # together would otherwise mint the token the user just removed.
+            #
+            # The third clause is what keeps that choice from being undone.  A
+            # token is minted when the companion is switched *on*, not whenever
+            # an enabled companion is configured without one: reading it as the
+            # latter meant the next port change re-armed a cleared token.  That
+            # was reachable before this parameter existed, through the phone
+            # panel's own clear-then-rebind path (``_reconfigure_companion``),
+            # so ``old[0]`` — the enabled state this call began with — is the
+            # honest test for "is this the transition that needs a token".
+            #
+            # A clear needs no restart: the expected token is read from the
+            # config on every request, so the running listener honours it at
+            # once and the phone in hand is not dropped for the privilege.
+            if clear_token:
+                cfg.web_token = ""
+                cfg.web_token_disabled = True
+            elif rotate_token or (enabled and not cfg.web_token and not old[0]):
                 cfg.web_token = secrets.token_urlsafe(32)
+                cfg.web_token_disabled = False
             try:
                 # Persist credentials before exposing the listener.
                 save(cfg, self.identity.encryption)
             except Exception:
-                cfg.web_enabled, cfg.web_port, cfg.web_token = old
+                (cfg.web_enabled, cfg.web_port, cfg.web_token,
+                 cfg.web_token_disabled) = old
                 self.events.publish("companion.changed", {})
                 raise ApplicationError(
                     "SAVE_FAILED", "Companion configuration could not be saved",
@@ -459,16 +543,30 @@ class SidecarApplication:
                 "history.batch_delete", "history.batch_set_pinned", "history.clear",
                 "favorites.list", "favorites.get", "favorites.add", "favorites.update",
                 "favorites.delete", "favorites.copy", "favorites.batch_add", "favorites.export",
+                "favorites.reorder", "favorites.group_create", "favorites.group_rename",
+                "favorites.group_delete",
                 "settings.get", "settings.update",
                 "companion.status", "companion.qr",
                 "backups.list", "backups.create", "backups.restore",
                 "history.export", "history.import",
+                # Local-only, so it answers with the engine down: the context
+                # menu copies a device id or a path, and neither needs a LAN
+                # session to reach this machine's clipboard.
+                "clipboard.copy",
                 "translate.text", "ai.profiles", "ai.profiles.update",
                 "logs.tail", "logs.export",
+                "overview.get",
                 "app.open_link", "app.factory_reset",
                 "diagnostics.report", "diagnostics.request",
                 "update.check", "update.status", "update.download", "update.open_folder",
                 "data.open_folder",
+                # Staging a file for the phone needs neither the engine nor a
+                # running companion: it copies into the share directory, and the
+                # phone collects the file whenever it next polls.
+                "companion.share_file",
+                # The pairing family's one member that needs no engine: it opens
+                # a socket to each broker, which is not a session in the mesh.
+                "internet_pairing.test",
             # The runtime's own half -- and the internet-pairing family, the
             # delivery ledger, the transfer history's clear and the answer to a
             # certificate prompt, which the host has been calling all along
@@ -487,8 +585,10 @@ class SidecarApplication:
                 "discovery.set_enabled", "discovery.set_visible",
                 "transfers.list", "transfers.send", "transfers.action",
                 "transfers.cancel_all", "transfers.speed_test", "transfers.clear_history",
+                "transfers.request_entry_files",
                 "chat.devices", "chat.sessions", "chat.messages", "chat.invite",
                 "chat.action", "chat.file", "chat.typing", "chat.mute", "chat.open_file",
+                "chat.reveal_file",
                 "ai.inventory", "ai.preview", "ai.pull",
                 "ai.local.listing", "ai.local.read", "ai.local.save",
                 "ai.local.trash", "ai.local.open",
@@ -498,6 +598,44 @@ class SidecarApplication:
                 "relay.delivery_status",
             ] if self.runtime is not None and self.runtime.sync_state in ("running", "paused")
                 else []),
+        }
+
+    def internet_pairing_test(self, brokers=None) -> dict:
+        """Probe relay brokers and report each one's reachability.
+
+        The list handed in is tested as given, so a reader can check what they
+        have typed but not yet saved; an empty list means "test what is saved",
+        which is how the panel's own test button read an empty body.  It is the
+        same probe either way -- a TCP/TLS handshake per broker, on its own
+        connection, so a live relay session is not disturbed.
+
+        This answers with the engine down, and that is not an oversight: the
+        probe is a socket to a broker, not a session in the mesh, so it is the
+        one member of the pairing family that needs no runtime.  Which is why it
+        is advertised in the block above rather than beside its siblings.
+        """
+        if self.config is None:
+            raise ApplicationError("APP_LOCKED", "Unlock ClipSync to test the relay")
+        wanted = [b.strip() for b in (brokers or []) if isinstance(b, str) and b.strip()]
+        if not wanted:
+            wanted = [b for b in (getattr(self.config, "relay_brokers", None) or []) if b]
+        if not wanted:
+            raise ApplicationError("INVALID_ARGUMENT", "no relay brokers configured")
+        # Probe in the order they were given, deduplicated the way the panel
+        # deduplicated them: the same broker staged in both lists is one broker.
+        seen, ordered = set(), []
+        for endpoint in wanted:
+            if endpoint not in seen:
+                seen.add(endpoint)
+                ordered.append(endpoint)
+        results = probe_relay_endpoints(ordered)
+        # `summary` is deliberately not composed here: it is a sentence, and a
+        # sentence belongs to whichever front is showing it.  The two counts are
+        # the fact both fronts word.
+        return {
+            "results": results,
+            "reachable": sum(1 for row in results if row.get("ok")),
+            "total": len(ordered),
         }
 
     def read_logs(self, lines=200) -> dict:
@@ -596,6 +734,7 @@ class SidecarApplication:
             runtime=self.runtime,
             start_time=self._start_time,
             lan_ip=lan_ip,
+            source_label=self._history_source_name,
         )
 
     def update_check(self) -> dict:
@@ -644,6 +783,50 @@ class SidecarApplication:
         if not ok:
             raise ApplicationError("OPEN_FAILED", f"Could not open {folder} ({detail})")
         return {"ok": True, "folder": str(folder)}
+
+    def share_file_to_phone(self, path: str) -> dict:
+        """Stage a local file for the phone companion to download.
+
+        The legacy 发送文件到手机 button (`src/main.py`, `_send_file_to_phone`)
+        copied the chosen file into the directory the companion page lists at
+        ``/api/files`` and serves from ``/api/download``, so the phone picks it
+        up on its next poll of the Files tab with no pairing involved.  This is
+        that copy: the source file is left alone, and the destination name goes
+        through the same sanitiser an upload's does, so a path can neither
+        escape the share directory nor land on a file already in it.
+
+        The name is claimed with ``_reserve_dest_name`` rather than the legacy
+        ``while exists: bump`` loop — same resulting names, but the placeholder
+        is created ``O_EXCL``, so two shares of the same file name at the same
+        moment cannot both settle on ``photo (1).png`` and lose one of them.
+        """
+        import os
+        import shutil
+        from pathlib import Path
+
+        from internal.sync.file_transfer import _reserve_dest_name, _sanitize_file_name
+        from internal.web.server import _get_upload_dir
+
+        source = Path(os.path.expanduser(path))
+        if not source.is_file():
+            raise ApplicationError("NOT_FOUND", f"Not a file: {path}")
+        dest_dir = Path(_get_upload_dir(self.config))
+        try:
+            dest_dir.mkdir(parents=True, exist_ok=True)
+            name = _sanitize_file_name(source.name)
+            dest = _reserve_dest_name(dest_dir / name)
+        except OSError as exc:
+            raise ApplicationError("COPY_FAILED", f"Could not share {path}: {exc}") from None
+        try:
+            shutil.copy2(source, dest)
+            size = dest.stat().st_size
+        except OSError as exc:
+            # The name was reserved, so a failure here would otherwise leave an
+            # empty file the phone lists and cannot open — drop the claim.
+            with contextlib.suppress(OSError):
+                dest.unlink()
+            raise ApplicationError("COPY_FAILED", f"Could not share {path}: {exc}") from None
+        return {"ok": True, "name": dest.name, "path": str(dest), "size": size}
 
     @staticmethod
     def _open_received_file(path: str) -> bool:
@@ -878,6 +1061,10 @@ class SidecarApplication:
         if "regenerate_web_token" in special or "clear_web_token" in special:
             rotate = "regenerate_web_token" in special
             self.config.web_token = secrets.token_urlsafe(16) if rotate else ""
+            # The phone panel's Clear means the same thing as the desktop page's:
+            # record it, so the listener moving (or the app restarting) does not
+            # mint the token back under the user.
+            self.config.web_token_disabled = not rotate
             self._persist_config("Could not save the web access token")
             response["token_updated"] = True
             response["web_token"] = self.config.web_token

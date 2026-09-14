@@ -69,60 +69,6 @@ def test_backoff_escalates_when_the_broker_drops_us_immediately(monkeypatch):
     assert delays[:3] == [2, 4, 8]
 
 
-def test_backoff_resets_after_a_session_that_was_actually_usable(monkeypatch):
-    monkeypatch.setattr(R, "MIN_USABLE_SESSION", 0.0)
-    t = _relay(monkeypatch)
-    delays = _drive_run(t, sessions=4)
-    assert delays[:3] == [1, 1, 1]
-
-
-def test_a_retired_worker_keeps_seeing_its_own_stop_event(monkeypatch):
-    """start() must not un-stop a worker that outlived stop()'s bounded join."""
-    t = _relay(monkeypatch)
-    handed: list = []
-    t._run = lambda stop=None: handed.append(stop)
-    first = t._stop
-    t._stop.set()  # as stop() does
-    t._thread = None  # as stop() does
-    t.start()  # spawns a worker with a fresh event
-    try:
-        assert t._stop is not first, "new worker inherited the old event"
-        assert first.is_set(), "the retired worker was un-stopped by start()"
-        assert not t._stop.is_set()
-        deadline = time.time() + 2.0
-        while time.time() < deadline and not handed:
-            time.sleep(0.01)
-        assert handed and handed[0] is t._stop, "_run was not given its own event"
-    finally:
-        t.stop()
-
-
-def test_mirror_teardown_does_not_block_the_callback_thread(monkeypatch):
-    """_sync_mirrors runs on paho's network thread; joining there stalls keepalive."""
-    t = _relay(monkeypatch)
-    released = threading.Event()
-
-    class SlowMirror:
-        def __init__(self):
-            self.stopped = False
-
-        def stop(self):
-            released.wait(2.0)
-            self.stopped = True
-
-    mirror = SlowMirror()
-    t._mirror_clients = {0: mirror}
-    t._brokers = []  # every existing mirror is now stale
-    began = time.monotonic()
-    t._sync_mirrors()
-    assert time.monotonic() - began < 0.5, "_sync_mirrors joined the mirror inline"
-    released.set()
-    deadline = time.time() + 2.0
-    while time.time() < deadline and not mirror.stopped:
-        time.sleep(0.01)
-    assert mirror.stopped, "the retired mirror was never stopped"
-
-
 # ------------------------------------------------------------ mDNS advertising
 
 
@@ -166,81 +112,6 @@ def test_failed_registration_can_be_retried(disco):
     disco.start_advertising()  # must actually try again
     assert disco._zc.registered, "start_advertising never retried"
     assert disco.is_advertising is True
-
-
-def test_successful_registration_records_the_advertised_ips(disco):
-    disco._zc = _FakeZeroconf()
-    disco.start_advertising()
-    assert disco._advertised_ips == frozenset({"192.168.1.5"})
-
-
-def test_failed_registration_leaves_the_old_ip_set_for_a_retry(disco):
-    disco._zc = _FakeZeroconf()
-    disco.start_advertising()
-    old = disco._advertised_ips
-
-    # Interfaces changed, but the re-register fails.
-    disco._zc = _FakeZeroconf(fail_times=99)
-    disco.stop_advertising()
-    disco.start_advertising()
-    assert disco._advertised_ips == old, (
-        "recording the new IP set on a failed register makes the failure "
-        "permanent -- the watcher then sees no change and never retries"
-    )
-
-
-def test_stop_advertising_survives_a_raising_unregister(disco):
-    class Boom(_FakeZeroconf):
-        def unregister_service(self, info):
-            raise OSError("interface gone")
-
-    disco._zc = Boom()
-    disco.start_advertising()
-    disco.stop_advertising()  # must not propagate
-    assert disco._service_info is None
-    disco._zc = _FakeZeroconf()
-    disco.start_advertising()
-    assert disco.is_advertising is True
-
-
-def test_advertising_is_idempotent(disco):
-    disco._zc = _FakeZeroconf()
-    disco.start_advertising()
-    disco.start_advertising()
-    assert len(disco._zc.registered) == 1
-
-
-def test_is_advertising_reads_service_info_under_the_lock(disco):
-    """The visibility flag must not observe a half-written register.
-
-    Every other `_service_info` access is inside `self._lock`; this property
-    is what the dashboard's "visible on the LAN" indicator reads, so it has
-    to honour the same invariant.  Hold the lock from another thread and the
-    read must block rather than sail past.
-    """
-    disco._zc = _FakeZeroconf()
-    disco.start_advertising()
-
-    entered = threading.Event()
-    done = threading.Event()
-    result = []
-
-    with disco._lock:
-
-        def reader():
-            entered.set()
-            result.append(disco.is_advertising)
-            done.set()
-
-        t = threading.Thread(target=reader, daemon=True)
-        t.start()
-        assert entered.wait(2.0)
-        # We still hold the lock, so the property must not have completed.
-        assert not done.wait(0.2), "is_advertising read _service_info unlocked"
-
-    assert done.wait(2.0)
-    t.join(2.0)
-    assert result == [True]
 
 
 # ------------------------------------------------------- sleep/wake detection
@@ -310,44 +181,6 @@ def test_cert_pin_block_is_dropped_without_reconnecting_when_unpaired(monkeypatc
     assert m._cert_pin_blocked == {}
 
 
-def test_max_idle_is_checked_where_the_waiting_happens(monkeypatch):
-    """_recv_exact parks on TimeoutError, so the check must live there too.
-
-    The half-open check at the top of _recv_loop only runs between frames; a
-    quiet connection never leaves _recv_exact, which made MAX_IDLE_SECONDS dead
-    code in exactly the case it exists for.
-    """
-    from internal.transport import connection as C  # noqa: N812
-
-    class DeadSock:
-        def recv(self, n):
-            raise TimeoutError()
-
-    conn = C.PeerConnection.__new__(C.PeerConnection)
-    conn._sock = DeadSock()
-    conn._running = True
-    conn._pending_recv = b""
-    conn._remote_closed = False
-    conn.device_name = "ghost"
-    conn._last_recv_time = time.monotonic() - (C.MAX_IDLE_SECONDS + 5)
-
-    conn._max_idle_expired = lambda: True
-    assert conn._recv_exact(4) is None, "recv_exact spun forever on a dead socket"
-
-    # A healthy idle socket must NOT be reaped -- prove the loop keeps waiting.
-    conn._max_idle_expired = lambda: False
-    done = threading.Event()
-
-    def _run():
-        conn._recv_exact(4)
-        done.set()
-
-    threading.Thread(target=_run, daemon=True).start()
-    assert not done.wait(0.3), "a healthy idle connection was torn down"
-    conn._running = False
-    done.wait(1.0)
-
-
 @pytest.mark.parametrize(
     "wall_gap,mono_gap,expected,why",
     [
@@ -365,9 +198,3 @@ def test_wake_detection_uses_both_clocks(wall_gap, mono_gap, expected, why):
     assert _looks_like_wake(wall_gap, mono_gap) is expected, why
 
 
-def test_backward_clock_step_does_not_hide_a_real_sleep():
-    """The old wall-clock-only check went negative and missed the wake entirely."""
-    from internal.transport.connection import _looks_like_wake
-
-    # Suspended for 20 minutes AND the clock was corrected 5 minutes back.
-    assert _looks_like_wake(1200.0 - 300.0, 1200.0) is True

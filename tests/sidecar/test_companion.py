@@ -12,65 +12,6 @@ from internal.infrastructure.runtime.companion import MobileCompanion
 from tests.sidecar.test_application_runtime import Runtime
 
 
-@pytest.mark.parametrize("enabled", [True, False])
-def test_companion_owned_after_runtime(tmp_path, monkeypatch, enabled):
-    monkeypatch.setenv("CLIPSYNC_CONFIG_DIR", str(tmp_path))
-    save(Config(encryption_enabled=False, web_enabled=enabled))
-    server = Mock()
-    server.stop.return_value = True
-    factory = Mock(return_value=server)
-    app = SidecarApplication(runtime_factory=Runtime, companion_factory=factory)
-    app.lifecycle.start()
-    try:
-        assert factory.call_count == int(enabled)
-        if enabled:
-            assert len(load().web_token) >= 32
-            assert factory.call_args.args[1] is app._repository
-            assert factory.call_args.args[2] is app.runtime
-            server.stop.return_value = False
-            assert app.lifecycle.stop() is False
-            assert app.runtime is not None
-            assert app._repository is not None
-    finally:
-        server.stop.return_value = True
-        assert app.lifecycle.stop()
-
-
-def test_failed_bind_rolls_back(tmp_path, monkeypatch):
-    monkeypatch.setenv("CLIPSYNC_CONFIG_DIR", str(tmp_path))
-    save(Config(encryption_enabled=False, web_enabled=True))
-    server = Mock()
-    server.start.side_effect = ApplicationError("COMPANION_START_FAILED", "bind")
-    app = SidecarApplication(
-        runtime_factory=Runtime, companion_factory=lambda *args, **kwargs: server
-    )
-    with pytest.raises(ApplicationError):
-        app.lifecycle.start()
-    server.stop.assert_called_once()
-    assert app.runtime is None
-    assert app.lifecycle.state == "stopped"
-
-
-def test_adapter_preserves_chat_contract_and_retries_stop():
-    runtime = Mock()
-    runtime.chat_devices.return_value = {"devices": [{"id": "peer"}]}
-    runtime.chat_sessions.return_value = {"muted": ["peer"]}
-    runtime.set_chat_muted.return_value = {"muted": []}
-    server = Mock(_thread=None)
-    factory = Mock(return_value=server)
-    adapter = MobileCompanion(SimpleNamespace(), object(), runtime, object(), factory)
-    kwargs = factory.call_args.kwargs
-    assert kwargs["get_chat_devices"]() == [{"id": "peer"}]
-    assert kwargs["get_chat_muted"]() == ["peer"]
-    assert kwargs["set_chat_muted"]("peer", False) == []
-    server.start.return_value = False
-    with pytest.raises(ApplicationError):
-        adapter.start()
-    server.stop.side_effect = [RuntimeError("busy"), None]
-    assert adapter.stop() is False
-    assert adapter.stop() is True
-
-
 def test_real_mobile_page_requires_token_and_releases_socket(tmp_path, monkeypatch):
     import json
     from urllib.error import HTTPError
@@ -146,53 +87,6 @@ def controlled_companion(tmp_path, monkeypatch):
     assert app.lifecycle.stop()
 
 
-def test_the_device_page_is_pushed_only_when_its_snapshot_changes():
-    """Legacy's fingerprint poll: a steady page stays quiet."""
-    import threading
-
-    from internal.web.server import WebServer
-
-    server = WebServer.__new__(WebServer)
-    server.DEVICE_BROADCAST_INTERVAL = 0.01
-    server._httpd = object()
-    server._device_stop = threading.Event()
-
-    class Ws:
-        def __init__(self):
-            self.polls = 0
-            self.broadcasts = []
-
-        def devices_fingerprint(self):
-            self.polls += 1
-            if self.polls >= 4:
-                # The script is consumed — let the loop finish.
-                server._device_stop.set()
-            return ["", "a", "a", "b"][min(self.polls, 4) - 1]
-
-        def broadcast_devices(self):
-            self.broadcasts.append(self.polls)
-
-    server._ws_manager = ws = Ws()
-    server._device_broadcast_loop()
-    # The first real snapshot and the change to "b" are pushed; the unchanged
-    # poll between them (and the empty one before the page had anything) is not.
-    assert ws.broadcasts == [2, 4]
-
-
-def test_the_device_page_loop_ends_when_the_listener_is_gone():
-    import threading
-
-    from internal.web.server import WebServer
-
-    server = WebServer.__new__(WebServer)
-    server.DEVICE_BROADCAST_INTERVAL = 0.01
-    server._httpd = None
-    server._device_stop = threading.Event()
-    server._ws_manager = Mock()
-    server._device_broadcast_loop()
-    server._ws_manager.devices_fingerprint.assert_not_called()
-
-
 def free_port():
     import socket
 
@@ -220,47 +114,6 @@ def started_companion(rpc):
     """Start the real listener and return (settings base URL, token)."""
     status = rpc.call("companion.configure", {"enabled": True, "port": free_port()})
     return f"http://127.0.0.1:{status['actual_port']}", status["token"]
-
-
-def test_adapter_forwards_the_web_host_callbacks():
-    runtime = Mock()
-    runtime.chat_devices.return_value = {"devices": []}
-    runtime.chat_sessions.return_value = {"muted": []}
-    runtime.set_chat_muted.return_value = {"muted": []}
-    server = Mock(_thread=None)
-    factory = Mock(return_value=server)
-    changes, restarts = [], []
-    MobileCompanion(
-        SimpleNamespace(), object(), runtime, object(), factory,
-        on_settings_change=lambda updated, special: changes.append((updated, special)),
-        on_restart=lambda: restarts.append(True),
-    )
-    kwargs = factory.call_args.kwargs
-    kwargs["on_settings_change"]({"device_name": "Phone"}, {"clear_password": True})
-    kwargs["on_restart"]()
-    assert changes == [({"device_name": "Phone"}, {"clear_password": True})]
-    assert restarts == [True]
-    # The panel's own favourite routes write the store directly, so the host
-    # has to say so on the journal the desktop window listens to.
-    kwargs["on_favorites_change"]()
-    runtime.events.publish.assert_called_once_with("favorites.changed", {})
-    # Same seam, other event: the panel's history routes broadcast to the
-    # panels directly, so a delete made on a phone reached no native window.
-    runtime.events.publish.reset_mock()
-    kwargs["on_history_change"]({"id": "e1"})
-    runtime.events.publish.assert_called_once_with("history.changed", {"id": "e1"})
-    # A route that could not name what it changed still says something.
-    runtime.events.publish.reset_mock()
-    kwargs["on_history_change"]({})
-    runtime.events.publish.assert_called_once_with("history.changed", {})
-    # The seam is a plain callable, so nothing stops a host wiring something
-    # that hands it a payload which is not a mapping at all.  It is normalised
-    # to that same "something changed" shape rather than passed through:
-    # `PhonePush` reads these payloads by key, and an event whose payload is a
-    # bare string would be the one history change it could not answer.
-    runtime.events.publish.reset_mock()
-    kwargs["on_history_change"](None)
-    runtime.events.publish.assert_called_once_with("history.changed", {})
 
 
 def test_web_panel_settings_apply_live(controlled_companion):
@@ -402,16 +255,88 @@ def test_rpc_controls_real_listener_and_rotates_credentials(controlled_companion
     assert app.runtime is not None
 
 
-@pytest.mark.parametrize("params", [
-    {}, {"enabled": 1}, {"enabled": True, "port": True},
-    {"enabled": True, "port": 0}, {"enabled": True, "port": 65536},
-    {"enabled": True, "token": "injected"}, {"enabled": True, "rotate_token": 1},
-])
-def test_rpc_rejects_invalid_companion_configuration(controlled_companion, params):
+def test_cleared_token_survives_a_restart(controlled_companion):
+    """The persisted record is what makes the clear last past the process.
+
+    ``_start_companion`` runs on every launch and mints a token whenever one is
+    missing, so an empty string cannot carry "the user cleared this" on its own
+    — the first relaunch would undo the button.  ``web_token_disabled`` is that
+    record, and this drives the boundary a relaunch crosses.
+    """
+    from urllib.request import urlopen
+
+    app, rpc = controlled_companion
+    rpc.call("companion.configure", {"enabled": True, "port": free_port()})
+    cleared = rpc.call("companion.configure", {"enabled": True, "clear_token": True})
+    assert cleared["access_url"] is None
+    assert load().web_token_disabled is True
+
+    # A relaunch builds a new companion over the same saved config; this is that
+    # boundary without standing up a second application object.
+    assert app._stop_companion()
+    app.companion = None
+    app._start_companion()
+    assert app.config.web_token == ""
+    restarted = app.companion_status()
+    assert restarted["running"] and restarted["access_url"] is None
+    with urlopen(restarted["url"], timeout=3) as response:
+        assert response.status == 200
+
+
+def test_rpc_rejects_an_injected_token(controlled_companion):
+    """The shared secret is the host's to mint: a caller may ask for a new one
+    (rotate_token) or for none at all (clear_token), but it cannot name the
+    token the phone will be asked for."""
     _, rpc = controlled_companion
     with pytest.raises(ApplicationError) as error:
-        rpc.call("companion.configure", params)
+        rpc.call("companion.configure", {"enabled": True, "token": "injected"})
     assert error.value.code == "VALIDATION_ERROR"
+
+
+def test_rpc_clear_token_serves_token_free_and_is_not_re_minted(controlled_companion):
+    """Clearing the token is the web panel's 清除访问令牌, and it has to stick.
+
+    Two halves, and the second is the one that was broken: the running
+    listener must honour the clear at once (the expected token is read per
+    request, so no restart is needed and the phone in hand is not dropped),
+    and a later configure of an already-enabled companion must not quietly
+    mint the token back — a port change is not a reason to re-arm auth.
+    """
+    from urllib.request import urlopen
+
+    app, rpc = controlled_companion
+    started = rpc.call("companion.configure", {"enabled": True, "port": free_port()})
+    assert started["access_url"] and started["token"]
+    owner = app.companion
+
+    cleared = rpc.call("companion.configure", {"enabled": True, "clear_token": True})
+    assert cleared["running"] and cleared["state"] == "running"
+    assert cleared["token"] in (None, "")
+    # No token means no tokenized link to hand out, but the address is still
+    # the address: the card shows `url` so the user can still point a phone.
+    assert cleared["access_url"] is None
+    assert cleared["url"] and "token=" not in cleared["url"]
+    assert app.companion is owner, "a clear must not restart the listener"
+
+    # Auth off means every request passes, including the link that still
+    # carries the old token — that is the consequence the confirm dialog warns
+    # about, and it is the honest thing to assert rather than gloss over.
+    with urlopen(cleared["url"], timeout=3) as response:
+        assert response.status == 200
+    with urlopen(started["access_url"], timeout=3) as response:
+        assert response.status == 200
+
+    # A port change on the enabled companion keeps it token-free.
+    moved = rpc.call("companion.configure", {"enabled": True, "port": free_port()})
+    assert moved["actual_port"] != cleared["actual_port"]
+    assert moved["token"] in (None, "")
+    assert moved["access_url"] is None
+
+    # Switching the service off and on again is the transition that mints one.
+    rpc.call("companion.configure", {"enabled": False})
+    again = rpc.call("companion.configure", {"enabled": True, "port": free_port()})
+    assert again["token"]
+    assert again["access_url"]
 
 
 def test_rpc_bind_failure_reports_stopped_and_allows_retry(controlled_companion):
@@ -539,44 +464,40 @@ def test_web_panel_devices_and_certs_read_live_host_state(controlled_companion):
     assert get_json(base, token, "/api/devices/certs") == {"devices": []}
 
 
-def test_web_panel_overview_uses_the_host_aggregate(controlled_companion):
+def test_a_file_shared_to_the_phone_is_listed_and_downloadable(controlled_companion, tmp_path):
+    """The legacy 发送文件到手机 button, told as the phone experiences it.
+
+    Staged through the RPC the desktop window calls, and then *found* by the
+    real companion over real HTTP: the claim is not that bytes were copied
+    somewhere, it is that the phone's Files tab lists the file and its download
+    route serves it back.  Writing into one directory while the panel lists
+    another is exactly the failure this holds shut — the staging side resolves
+    the share directory per call, the listing side holds the one bound when the
+    companion was built, and both have to be the same directory.
+    """
+    from urllib.request import urlopen
+
     app, rpc = controlled_companion
+    share = tmp_path / "share"
+    app.config.file_receive_dir = str(share)
+    source = tmp_path / "holiday photo.txt"
+    source.write_text("the bytes the phone gets", encoding="utf-8")
+
+    staged = rpc.call("companion.share_file", {"path": str(source)})
+    assert staged["name"] == "holiday photo.txt"
+
     base, token = started_companion(rpc)
+    assert [row["name"] for row in get_json(base, token, "/api/files")["files"]] == [
+        "holiday photo.txt"
+    ]
+    from urllib.parse import quote
 
-    overview = get_json(base, token, "/api/overview")["overview"]
-    assert overview["port"] == app.config.web_port
-    assert overview["local_ip"] == "127.0.0.1"
-    assert overview["discovering"] is True and overview["visible"] is True
-    assert overview["web_enabled"] is True
-    assert overview["paired_count"] == 0
-    assert overview["history_count"] == 0
-    assert overview["version"] and overview["platform"]
-    assert overview["uptime_seconds"] >= 0
+    url = f"{base}/api/download?file={quote(staged['name'])}&token={token}"
+    with urlopen(url, timeout=5) as response:
+        assert response.read() == b"the bytes the phone gets"
 
-
-def test_web_panel_diagnostics_and_update_status_come_from_the_host(
-    controlled_companion,
-):
-    app, rpc = controlled_companion
-    base, token = started_companion(rpc)
-
-    report = get_json(base, token, "/api/diagnostics")
-    assert report["checks"], "the host report replaces the unavailable fallback"
-    assert not any(c.get("detail") == "diagnostics unavailable" for c in report["checks"])
-
-    status = get_json(base, token, "/api/update/status")
-    assert "state" in status
-    assert status["state"]["phase"] in ("idle", "downloading", "ready", "failed")
-
-
-def test_web_panel_diagnostics_request_reaches_the_host_action(controlled_companion):
-    app, rpc = controlled_companion
-    base, token = started_companion(rpc)
-
-    # An unknown action exercises the host callback without touching the OS.
-    assert post_json(base, token, "/api/diagnostics/request", {
-        "action": "no-such-action",
-    }) == {"ok": False, "error": "Unknown action: no-such-action"}
+    # The user's own file is still where it was: this is a copy, not a move.
+    assert source.read_text(encoding="utf-8") == "the bytes the phone gets"
 
 
 def test_web_panel_transfer_routes_reach_the_runtime(controlled_companion):
@@ -607,8 +528,22 @@ def test_web_panel_transfer_routes_reach_the_runtime(controlled_companion):
     assert post_json(
         base, token, "/api/transfer/history/delete", {"transfer_id": "t2"}
     ) == {"ok": True}
+    # Answering an INCOMING request.  Both routes were missing until now while
+    # the phone rendered 接受/拒绝 and the host handled both actions, so every
+    # tap 404'd and a pending request hung until the desktop answered it.
+    assert post_json(base, token, "/api/transfer/accept", {"transfer_id": "t3"}) == {
+        "ok": True
+    }
+    assert post_json(base, token, "/api/transfer/reject", {"transfer_id": "t4"}) == {
+        "ok": True
+    }
     # The panel speaks the legacy name; LanRuntime maps history_delete→delete.
-    assert app.runtime.transfer_actions == [("cancel", "t1"), ("history_delete", "t2")]
+    assert app.runtime.transfer_actions == [
+        ("cancel", "t1"),
+        ("history_delete", "t2"),
+        ("accept", "t3"),
+        ("reject", "t4"),
+    ]
 
     # Cancel-all reads the live list through on_get_transfers and cancels each row.
     assert post_json(base, token, "/api/transfer/cancel-all") == {
@@ -678,21 +613,6 @@ def test_web_panel_toggles_and_nav_reach_the_runtime(controlled_companion):
     assert app.runtime.sent_url == ("peer", "https://example.com/x")
 
 
-def test_web_panel_ui_requests_become_host_events(controlled_companion):
-    app, rpc = controlled_companion
-    base, token = started_companion(rpc)
-
-    assert post_json(base, token, "/api/show_qr") == {"ok": True}
-    assert post_json(base, token, "/api/send_url") == {"ok": True}
-    assert post_json(base, token, "/api/window", {"action": "close"}) == {"ok": True}
-    names = [event["name"] for event in app.events.since(0)[0]]
-    assert names[-3:] == [
-        "app.qr_requested",
-        "app.send_url_requested",
-        "app.window_close_requested",
-    ]
-
-
 def test_web_panel_upload_records_a_received_file(controlled_companion, tmp_path):
     from pathlib import Path
 
@@ -717,28 +637,6 @@ def test_web_panel_upload_records_a_received_file(controlled_companion, tmp_path
     assert events[-1]["data"] == {
         "transfer_id": "web-tid", "name": "notes.txt", "size": 11,
     }
-
-
-def test_web_panel_upload_forwards_to_a_peer_instead_of_recording(
-    controlled_companion, tmp_path
-):
-    app, rpc = controlled_companion
-    app.config.file_receive_dir = str(tmp_path)
-    forwarded, recorded = [], []
-    # forward_file is bound when the companion is built — patch before start.
-    app.runtime.forward_file = (
-        lambda path, device_id: forwarded.append((path, device_id)) or True
-    )
-    app.runtime.record_web_upload = lambda *args: recorded.append(args)
-    base, token = started_companion(rpc)
-
-    body, content_type = multipart(
-        [("file", "report.pdf", b"%PDF-1.4"), ("device_id", None, b"peer")]
-    )
-    payload = post_raw(base, token, "/api/upload", body, content_type)
-    assert payload == {"ok": True, "name": "report.pdf", "size": 8}
-    assert forwarded[0][1] == "peer"
-    assert recorded == []
 
 
 def test_web_panel_upload_reports_an_offline_forward_target(

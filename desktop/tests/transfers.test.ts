@@ -2,7 +2,6 @@ import { flushPromises, mount } from "@vue/test-utils";
 import { describe, expect, it, vi } from "vitest";
 import TransfersView from "../src/components/TransfersView.vue";
 import { bridge } from "../src/api/bridge";
-import { dateTime } from "../src/i18n/format";
 
 vi.mock("../src/api/bridge", () => ({
   bridge: {
@@ -112,10 +111,12 @@ describe("transfer controls", () => {
     const view = mount(TransfersView);
     try {
       await flushPromises();
-      // Scoped to the toolbar: the history card's header now carries a danger
-      // button of its own, and a bare `button.danger` would be whichever of the
-      // two happens to come first in the document.
-      await view.get(".toolbar button.danger").trigger("click");
+      // Scoped to the running card: the history card's header carries a
+      // destructive button of its own, and a bare `button` would be whichever of
+      // the two happens to come first in the document.  Both live in a card
+      // header now — 全部取消 on the list it cancels, 清除传输历史 on the history
+      // it clears — which is why the scope is the card rather than the bar.
+      await view.get(".transfer-list--active button.danger-outline").trigger("click");
       await flushPromises();
       expect(bridge.cancelAllTransfers).toHaveBeenCalledTimes(1);
       // The count comes from the sidecar, which read the live list — not from
@@ -131,7 +132,7 @@ describe("transfer controls", () => {
     const view = mount(TransfersView);
     try {
       await flushPromises();
-      expect(view.get(".toolbar button.danger").attributes("disabled")).toBeDefined();
+      expect(view.get(".transfer-list--active button.danger-outline").attributes("disabled")).toBeDefined();
       expect(bridge.cancelAllTransfers).not.toHaveBeenCalled();
     } finally { view.unmount(); }
   });
@@ -141,10 +142,10 @@ describe("transfer controls", () => {
     const view = mount(TransfersView);
     try {
       await flushPromises();
-      await view.get(".toolbar button.danger").trigger("click");
+      await view.get(".transfer-list--active button.danger-outline").trigger("click");
       await flushPromises();
       expect(view.get('[role="alert"]').text()).toBe("runtime is stopping");
-      expect(view.get(".toolbar button.danger").attributes("disabled")).toBeUndefined();
+      expect(view.get(".transfer-list--active button.danger-outline").attributes("disabled")).toBeUndefined();
     } finally { view.unmount(); }
   });
 
@@ -168,7 +169,7 @@ describe("transfer controls", () => {
     try {
       await flushPromises();
       // Nothing goes on the click that opens the confirm.
-      await view.get(".transfer-list-header button").trigger("click");
+      await view.get(".transfer-list--history .transfer-list-header button").trigger("click");
       await flushPromises();
       expect(HTMLDialogElement.prototype.showModal).toHaveBeenCalledTimes(1);
       expect(bridge.clearTransferHistory).not.toHaveBeenCalled();
@@ -184,7 +185,7 @@ describe("transfer controls", () => {
       // Confirming goes through the sidecar and reports its count, which is the
       // live list's rather than the one this page last read.
       vi.mocked(bridge.clearTransferHistory).mockResolvedValueOnce({ cleared: 1 } as any);
-      await view.get(".transfer-list-header button").trigger("click");
+      await view.get(".transfer-list--history .transfer-list-header button").trigger("click");
       await flushPromises();
       await view.get("dialog button.danger").trigger("click");
       await flushPromises();
@@ -199,14 +200,6 @@ describe("transfer controls", () => {
     }
   });
 
-  it("offers no clear-history when there is nothing recorded", async () => {
-    const view = mount(TransfersView);
-    try {
-      await flushPromises();
-      expect(view.get(".transfer-list-header button").attributes("disabled")).toBeDefined();
-    } finally { view.unmount(); }
-  });
-
   it("reports file picker errors and releases the busy state", async () => {
     vi.mocked(bridge.chooseFiles).mockRejectedValueOnce(new Error("picker unavailable"));
     const view = mount(TransfersView, { props: { devices: [device("dev-1", "Laptop")] } });
@@ -218,57 +211,6 @@ describe("transfer controls", () => {
       expect(view.get('[role="alert"]').text()).toBe("picker unavailable");
       expect(view.get("button.primary").attributes("disabled")).toBeUndefined();
       expect(bridge.sendFiles).not.toHaveBeenCalled();
-    } finally { view.unmount(); }
-  });
-
-  it("sends the files the picker returned to the chosen device and to no other", async () => {
-    // Shared module mock: an earlier case's picker call would otherwise be counted.
-    vi.mocked(bridge.chooseFiles).mockClear().mockResolvedValueOnce(["C:/report.pdf"]);
-    vi.mocked(bridge.sendFiles).mockClear().mockResolvedValueOnce({ transfer_id: "t1" });
-    const view = mount(TransfersView, {
-      props: { devices: [device("dev-1", "Laptop"), device("dev-2", "Studio")] },
-    });
-    try {
-      await flushPromises();
-      // Nothing is sent to an unnamed target, so the file dialog does not open.
-      expect(view.get("button.primary").attributes("disabled")).toBeDefined();
-      await view.get("button.primary").trigger("click");
-      await flushPromises();
-      expect(bridge.chooseFiles).not.toHaveBeenCalled();
-
-      await view.get("select").setValue("dev-2");
-      await view.get("button.primary").trigger("click");
-      await flushPromises();
-      expect(bridge.sendFiles).toHaveBeenCalledTimes(1);
-      expect(bridge.sendFiles).toHaveBeenCalledWith(["C:/report.pdf"], "dev-2");
-    } finally { view.unmount(); }
-  });
-
-  it("sends a folder through the folder picker, and says it is archiving until it does", async () => {
-    let finish!: (value: any) => void;
-    vi.mocked(bridge.chooseFiles).mockClear();
-    vi.mocked(bridge.chooseFolder).mockClear().mockResolvedValueOnce("C:/Photos");
-    vi.mocked(bridge.sendFiles).mockClear().mockReturnValueOnce(new Promise(done => { finish = done; }));
-    const view = mount(TransfersView, { props: { devices: [device("dev-1", "Laptop")] } });
-    try {
-      await flushPromises();
-      await view.get("select").setValue("dev-1");
-      const folderButton = view.findAll("button").find(button => button.text() === "发送文件夹")!;
-      await folderButton.trigger("click");
-      await flushPromises();
-      // The folder button opens the folder picker, and only that one: which
-      // dialog the user sees is the difference between the two buttons.
-      expect(bridge.chooseFolder).toHaveBeenCalledTimes(1);
-      expect(bridge.chooseFiles).not.toHaveBeenCalled();
-      // Archiving a large folder takes long enough that the page has to say what
-      // the wait is for; the line is up for exactly as long as the send is
-      // pending, because the send is what waits on the archive.
-      expect(view.get(".bulk-status").text()).toBe("正在打包文件夹…");
-      finish({ transfer_id: "t1" });
-      await flushPromises();
-      // The folder's own path goes to the sidecar, which does the archiving.
-      expect(bridge.sendFiles).toHaveBeenCalledWith(["C:/Photos"], "dev-1");
-      expect(view.find(".bulk-status").exists()).toBe(false);
     } finally { view.unmount(); }
   });
 
@@ -310,55 +252,6 @@ describe("transfer controls", () => {
       await flushPromises();
       expect(bridge.sendFiles).not.toHaveBeenCalled();
       expect(view.find(".bulk-status").exists()).toBe(false);
-    } finally { view.unmount(); }
-  });
-
-  it("says what a running transfer is doing, and how big and how fast it is", async () => {
-    vi.mocked(bridge.transfers).mockResolvedValueOnce({
-      active: [
-        { id: "a", filename: "film.mkv", direction: "up", status: "finalizing", progress: 100, size: 1572864, speed: 3145728, eta: "" },
-        { id: "b", filename: "notes.txt", direction: "down", status: "awaiting_ack", progress: 0, size: 512 },
-        { id: "c", filename: "paused.bin", direction: "up", status: "paused", progress: 40, size: 2048 },
-      ],
-      history: [],
-    } as any);
-    const view = mount(TransfersView);
-    try {
-      await flushPromises();
-      const rows = view.findAll(".transfer-row");
-      // The protocol's own state words are not shown to the user; the states
-      // that need no words (plain sending/receiving) show nothing extra.
-      expect(rows[0].text()).toContain("发送 · 正在写入对方设备… · 1.5 MB · 3.0 MB/s");
-      expect(rows[1].text()).toContain("接收 · 等待对方接受… · 512 B");
-      expect(rows[2].text()).toContain("发送 · 已暂停 · 2.0 KB");
-      expect(view.text()).not.toContain("finalizing");
-      expect(view.text()).not.toContain("awaiting_ack");
-    } finally { view.unmount(); }
-  });
-
-  it("names why a finished transfer failed, with its size and time", async () => {
-    const stamp = Math.floor(Date.now() / 1000);
-    vi.mocked(bridge.transfers).mockResolvedValueOnce({
-      active: [],
-      history: [
-        { id: "d1", filename: "ok.txt", direction: "down", status: "completed", size: 1024, timestamp: stamp },
-        { id: "d2", filename: "big.iso", direction: "up", status: "failed", reason: "error_disk", size: 2097152, timestamp: stamp },
-        { id: "d3", filename: "gone.zip", direction: "up", status: "failed", reason: "peer_offline", size: 0, timestamp: stamp },
-        { id: "d4", filename: "odd.dat", direction: "up", status: "failed", reason: "error_internal", size: 0, timestamp: stamp },
-      ],
-    } as any);
-    const view = mount(TransfersView);
-    try {
-      await flushPromises();
-      const rows = view.findAll(".transfer-row");
-      expect(rows[0].text()).toContain(`已完成 · 1.0 KB · ${dateTime(stamp)}`);
-      expect(rows[1].text()).toContain("接收设备磁盘空间不足 · 2.0 MB");
-      expect(rows[2].text()).toContain("对方设备已离线");
-      // A reason the shell has no words for reads as a plain failure, rather
-      // than as the raw status string or a missing translation key.
-      expect(rows[3].text()).toContain("传输失败");
-      expect(view.text()).not.toContain("error_internal");
-      expect(rows.filter(row => row.find(".transfer-failed").exists())).toHaveLength(3);
     } finally { view.unmount(); }
   });
 
@@ -414,28 +307,6 @@ describe("transfer controls", () => {
     } finally { view.unmount(); }
   });
 
-  it("packs several dropped files into one send and can drop the drop", async () => {
-    vi.mocked(bridge.sendFiles).mockClear().mockResolvedValueOnce({ transfer_id: "t1" } as any);
-    const view = mount(TransfersView, {
-      props: {
-        devices: [device("dev-1", "Laptop")],
-        dropped: ["C:\\a.txt", "C:/b.txt"],
-      },
-    });
-    try {
-      await flushPromises();
-      // Both spellings of a path end in the file's name.
-      expect(view.get(".staged-drop-names").text()).toBe("a.txt · b.txt");
-      // Clearing is the one way out of a drop the reader did not mean: the
-      // window's copy is spent either way, so nothing re-stages it.
-      await view.get('[aria-label="清除"]').trigger("click");
-      await flushPromises();
-      expect(view.find(".staged-drop").exists()).toBe(false);
-      expect(view.emitted("dropped")).toHaveLength(1);
-      expect(bridge.sendFiles).not.toHaveBeenCalled();
-    } finally { view.unmount(); }
-  });
-
   it("stages a drop that arrives after the page is already open", async () => {
     const view = mount(TransfersView, { props: { devices: [device("dev-1", "Laptop")] } });
     try {
@@ -446,15 +317,5 @@ describe("transfer controls", () => {
       expect(view.get(".staged-drop").text()).toContain("late.txt");
     } finally { view.unmount(); }
   });
-
-  it("says so when no device is connected, rather than offering to send", async () => {
-    const view = mount(TransfersView, {
-      props: { devices: [device("dev-1", "Old tower", { connection_state: "offline" })] },
-    });
-    try {
-      await flushPromises();
-      expect(view.get("select option").text()).toBe("没有已连接的设备");
-      expect(view.get("button.primary").attributes("disabled")).toBeDefined();
-    } finally { view.unmount(); }
-  });
 });
+

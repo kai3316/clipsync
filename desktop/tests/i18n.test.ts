@@ -60,7 +60,8 @@ describe("i18n core", () => {
   });
 });
 
-/** Every `t("…")` / `t('…')` argument in the shell, minus i18n/ itself. */
+/** Every `t("…")` / `t('…')` argument in the shell, minus the two files that
+ *  are the i18n layer rather than users of it. */
 function translatedKeys(): Map<string, string> {
   const found = new Map<string, string>();
   for (const { path, source } of shellFiles()) {
@@ -76,10 +77,17 @@ function withoutKeys(source: string): string {
   return source.replace(/\bt\(\s*(["'])((?:\\.|(?!\1)[^\\])*)\1/g, "t(");
 }
 
-/** Chinese that never reached `t()`: a quoted literal or a raw text node. */
+/** Chinese that never reached `t()`: a quoted literal or a raw text node.
+ *
+ *  Read over the prose only.  The i18n module is where multilingual tables
+ *  live on purpose — `en.ts` maps Chinese to English, `chat.ts` holds the
+ *  system-notice sentences in both languages — so a Chinese literal there is
+ *  the mechanism, not a string that escaped it.  Whether those tables are
+ *  complete is the business of the sidecar suite, which holds every one of them
+ *  to the shared locale files. */
 function untranslatedCjk(): string[] {
   const found: string[] = [];
-  for (const { path, source: raw } of shellFiles()) {
+  for (const { path, source: raw } of shellFiles().filter(({ path }) => !path.includes("i18n/"))) {
     const source = withoutKeys(raw);
     for (const match of source.matchAll(/"([^"\n]*[一-鿿][^"\n]*)"/g)) {
       found.push(`${path}: ${match[1]}`);
@@ -102,9 +110,14 @@ const SHELL_SOURCES = import.meta.glob("../src/**/*.{vue,ts}", {
   eager: true,
 }) as Record<string, string>;
 
+/** The i18n layer itself, rather than a file that renders through it. */
+function isI18nLayer(path: string): boolean {
+  return path.endsWith("/i18n/en.ts") || path.endsWith("/i18n/index.ts");
+}
+
 function shellFiles(): Array<{ path: string; source: string }> {
   return Object.entries(SHELL_SOURCES)
-    .filter(([path]) => !path.includes("/i18n/"))
+    .filter(([path]) => !isI18nLayer(path))
     .map(([path, source]) => ({ path: path.replace("../src/", ""), source }));
 }
 

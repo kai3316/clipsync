@@ -79,7 +79,12 @@ class FavoritesUseCase:
         self._number(limit, "limit", 1, 100)
         entries = self._call(self.repository.get_all)
         try:
-            groups = sorted({entry["group"] for entry in entries if entry["group"]})
+            # Every group the user has, which is the groups their favourites
+            # are in plus the ones they made and have not filled yet.
+            groups = sorted(
+                {entry["group"] for entry in entries if entry["group"]}
+                | set(self._call(self.repository.group_names))
+            )
             for name in groups:
                 self._text(name, "stored group", 128)
             needle = query.casefold()
@@ -93,6 +98,14 @@ class FavoritesUseCase:
                     or needle in entry["content"].casefold()
                 )
             ]
+            # The sidebar's counts are taken over the whole library, not over
+            # the search: a count that moved while the reader typed would be
+            # answering a question they did not ask.  `groups` are the ones to
+            # draw, `group_counts` what to write beside each.
+            group_counts = {name: 0 for name in groups}
+            for entry in entries:
+                if entry["group"]:
+                    group_counts[entry["group"]] = group_counts.get(entry["group"], 0) + 1
             items = []
             for entry in matches[offset : offset + limit]:
                 self._id(entry["id"])
@@ -110,7 +123,14 @@ class FavoritesUseCase:
                         "preview": entry["content"][:256],
                     }
                 )
-            return {"items": items, "total": len(matches), "offset": offset, "groups": groups}
+            return {
+                "items": items,
+                "total": len(matches),
+                "offset": offset,
+                "groups": groups,
+                "group_counts": group_counts,
+                "library_total": len(entries),
+            }
         except (ApplicationError, KeyError, TypeError, AttributeError):
             raise ApplicationError("DATA_INVALID", "Stored favorites require recovery") from None
 
@@ -126,6 +146,9 @@ class FavoritesUseCase:
         ):
             self._text(value, name, maximum)
         entry = self._call(self.repository.add, title, content, group, validate=self._validate)
+        # Filing a favourite into a group is how a group comes to exist; the
+        # registry only has to be told explicitly for one made empty.
+        self._register(group)
         return {"favorite": entry}
 
     def update(self, favorite_id, title=None, content=None, group=None, position=None):
@@ -149,7 +172,111 @@ class FavoritesUseCase:
             validate=self._validate,
             validate_existing=self._full,
         )
+        self._register(group)
         return {"favorite": self._full(entry)}
+
+    def _register(self, group):
+        """Put a name in the registry, ignoring an empty one and a repeat."""
+        if isinstance(group, str) and group.strip():
+            self._call(self.repository.register_group, group)
+
+    def reorder(self, favorite_ids):
+        """Put these favourites in the order given, as one call.
+
+        The client sends the ids it moved, in their new order, and nothing
+        about positions: where they land is a fact about the whole library and
+        the client is looking at a page of it.  The positions the ids already
+        hold are sorted and handed back out in the new order, which is what
+        makes this safe — the set of positions occupied is unchanged, so no
+        favourite outside the list can be pushed past or landed on, whether
+        they are numbered consecutively or gapped by earlier deletions.
+
+        A favourite deleted while the drag was in flight is simply not there to
+        move; one remaining id is no reorder at all.
+        """
+        if type(favorite_ids) is not list or not 1 <= len(favorite_ids) <= 100:
+            raise ApplicationError("INVALID_ARGUMENT", "Invalid favorites order")
+        for favorite_id in favorite_ids:
+            self._id(favorite_id)
+        if len(set(favorite_ids)) != len(favorite_ids):
+            raise ApplicationError("INVALID_ARGUMENT", "Favorites order repeats an id")
+        entries = self._call(self.repository.get_all)
+        positions = {entry["id"]: entry["position"] for entry in entries}
+        present = [favorite_id for favorite_id in favorite_ids if favorite_id in positions]
+        if len(present) < 2:
+            raise ApplicationError("NOT_FOUND", "No favorites in the order exist")
+        slots = sorted(positions[favorite_id] for favorite_id in present)
+        moved = 0
+        for favorite_id, position in zip(present, slots, strict=True):
+            if positions[favorite_id] == position:
+                continue
+            entry = self._call(
+                self.repository.update,
+                favorite_id,
+                {"position": position},
+                validate=self._validate,
+                validate_existing=self._full,
+            )
+            if entry is not None:
+                moved += 1
+        return {"moved": moved}
+
+    def create_group(self, name):
+        """Make a group that has nothing in it yet, so it can be filled."""
+        self._text(name, "group", 128)
+        if not name.strip():
+            raise ApplicationError("INVALID_ARGUMENT", "Invalid group name")
+        self._register(name)
+        return {"groups": self._all_groups()}
+
+    def rename_group(self, name, new_name):
+        """Rename a group, taking everything filed under it along.
+
+        The registry entry moves even when the group is empty, which is the
+        whole reason the registry exists.
+        """
+        self._text(name, "group", 128)
+        self._text(new_name, "group", 128)
+        new_name = new_name.strip()
+        if not name.strip() or not new_name:
+            raise ApplicationError("INVALID_ARGUMENT", "Invalid group name")
+        if new_name == name:
+            return {"renamed": 0, "groups": self._all_groups()}
+        moved = self._reassign(name, new_name)
+        self._call(self.repository.rename_group, name, new_name)
+        return {"renamed": moved, "groups": self._all_groups()}
+
+    def delete_group(self, name):
+        """Delete a group.  Its favourites are kept and left unfiled."""
+        self._text(name, "group", 128)
+        if not name.strip():
+            raise ApplicationError("INVALID_ARGUMENT", "Invalid group name")
+        moved = self._reassign(name, "")
+        self._call(self.repository.forget_group, name)
+        return {"moved": moved, "groups": self._all_groups()}
+
+    def _reassign(self, name, new_name):
+        """Move every favourite filed under ``name`` to ``new_name``."""
+        moved = 0
+        for entry in self._call(self.repository.get_all):
+            if entry["group"] != name:
+                continue
+            updated = self._call(
+                self.repository.update,
+                entry["id"],
+                {"group": new_name},
+                validate=self._validate,
+                validate_existing=self._full,
+            )
+            if updated is not None:
+                moved += 1
+        if new_name:
+            self._register(new_name)
+        return moved
+
+    def _all_groups(self):
+        """The group list as `list` reports it, for a caller that changed one."""
+        return self.list(limit=1)["groups"]
 
     def delete(self, favorite_id):
         self._id(favorite_id)

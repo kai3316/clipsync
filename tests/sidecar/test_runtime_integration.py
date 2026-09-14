@@ -1,5 +1,6 @@
 """Cross-process stdio, real TLS, persisted pairing and clipboard-use-case integration."""
 
+import collections
 import json
 import os
 import queue
@@ -17,17 +18,35 @@ import pytest
 from internal.clipboard.format import ClipboardContent, ContentType
 from internal.clipboard.history_db import ClipboardHistoryDB
 from internal.config.config import Config, PeerInfo, save
+from internal.infrastructure.runtime.lan import LanRuntime
 from internal.security.encryption import EncryptionManager, make_password_hash
 from internal.security.pairing import PairingManager
 
 ROOT = Path(__file__).resolve().parents[2]
 FIXTURE = Path(__file__).parent / "fixtures" / "lan_peer.py"
 
+# How long a notice may take to reach the other device before that counts as
+# failure.  Not a rounder number chosen here: a notice whose first send found no
+# link is retried by the maintenance tick for `PAIRING_SEND_WAIT` seconds while
+# the tick redials the peer, so the runtime's own contract already allows more
+# than the ten this file used to allow -- and a window shorter than the contract
+# reports the mechanism as broken while it is doing exactly what it documents.
+#
+# It cannot hide the case this file exists for.  `_end_pairing` arms that retry
+# only when the first send *failed*; a notice written successfully and then lost
+# in the teardown (`forget_peer` follows immediately) is never retried, so it is
+# still missing at 15s and still fails here.  Waiting past 12s also lets the
+# runtime's own expiry fire, which logs the divergence into the tail this file
+# attaches to the failure.
+NOTICE_BUDGET = LanRuntime.PAIRING_SEND_WAIT + 3
+
 
 class PeerProcess:
     def __init__(self, directory):
         self.events = []
         self.frames = queue.Queue()
+        self.log = collections.deque(maxlen=500)
+        self._log_lock = threading.Lock()
         self.process = subprocess.Popen(
             [sys.executable, "-u", str(FIXTURE)],
             cwd=ROOT,
@@ -56,8 +75,17 @@ class PeerProcess:
             self.frames.put(None)
 
     def _drain_errors(self):
-        for _ in self.process.stderr:
-            pass
+        # Kept, not discarded.  The pipe has to be drained whether or not
+        # anything reads it, but a sidecar that says nothing about why it went
+        # quiet is how a lost-frame bug was read as a tight timeout for two
+        # days: the one place that knew what happened was this pipe.
+        for raw in self.process.stderr:
+            with self._log_lock:
+                self.log.append(raw.decode("utf-8", "replace").rstrip())
+
+    def log_tail(self, limit=40):
+        with self._log_lock:
+            return "\n".join(list(self.log)[-limit:])
 
     def call(self, method, **params):
         request_id = str(uuid.uuid4())
@@ -79,13 +107,21 @@ class PeerProcess:
             assert frame["ok"], frame.get("error")
             return frame["result"]
 
-    def wait(self, method, predicate, **params):
-        deadline = time.monotonic() + 10
+    def wait(self, method, predicate, timeout=10, **params):
+        deadline = time.monotonic() + timeout
         while True:
             result = self.call(method, **params)
             if predicate(result):
                 return result
-            assert time.monotonic() < deadline, "Timed out waiting for runtime state"
+            if time.monotonic() >= deadline:
+                # The sidecar's own account of the window, not just the
+                # predicate that never came true: what it was doing while the
+                # clock ran out is the only part that says why.
+                raise AssertionError(
+                    f"Timed out waiting for runtime state\n"
+                    f"  last {method} answer: {result}\n"
+                    f"  sidecar log tail:\n{self.log_tail()}"
+                )
             time.sleep(0.03)
 
     def _close_pipes(self):
@@ -107,6 +143,22 @@ class PeerProcess:
                 self.process.wait(timeout=5)
             self._close_pipes()
             self.closed = True
+
+    def terminate(self):
+        """Stop the process the way a machine does: no shutdown call, no exit.
+
+        The point is the *other* side, which has to notice on its own — a
+        graceful ``close`` sends nothing either, but it leaves a socket that
+        closed from the inside, and what a peer that fell off the network
+        looks like is the case worth driving.
+        """
+        if self.closed:
+            return
+        if self.process.poll() is None:
+            self.process.kill()
+            self.process.wait(timeout=5)
+        self._close_pipes()
+        self.closed = True
 
 
 def configure_pair(tmp_path, monkeypatch, encrypted, password):
@@ -318,6 +370,12 @@ def test_real_rpc_pairing_bidirectional_copy_and_restart_trust(
         ))
         assert left.call("pairing.unpair", device_id="right") == {"accepted": True}
         assert not left.call("devices.list")["items"][0]["paired"]
-        right.wait("devices.list", lambda d: not d["items"][0]["paired"])
+        try:
+            right.wait("devices.list", lambda d: not d["items"][0]["paired"],
+                       timeout=NOTICE_BUDGET)
+        except AssertionError as exc:
+            # Both sides: this failure is one process not knowing what the
+            # other did, so which log is empty is itself the finding.
+            raise AssertionError(f"{exc}\n  --- left log tail ---\n{left.log_tail()}") from exc
     assert not (tmp_path / "left" / ".lock").exists()
     assert not (tmp_path / "right" / ".lock").exists()

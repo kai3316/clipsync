@@ -6,10 +6,24 @@ import { createApplicationStore } from "../stores/application";
 // The store keys a notice by its runtime event name (machine-readable and
 // stable across languages); the legacy app toasted a translated title, so the
 // mapping lives here, next to the catalog it translates.
+//
+// The `ui.*` keys are not events: they are the window's own answers to its own
+// buttons — a copy, a refresh, a save — which the store raises for the clicks
+// that change nothing a reader can see. They name the page the click was on,
+// the same way an event names the subsystem it came from.
 const props = defineProps<{ store: ReturnType<typeof createApplicationStore> }>();
 
 function title(name: string): string {
   switch (name) {
+    case "ui.overview": return t("概览");
+    case "ui.history": return t("剪贴板历史");
+    case "ui.favorites": return t("收藏库");
+    case "ui.transfers": return t("文件传输");
+    case "ui.chat": return t("附近聊天");
+    case "ui.devices": return t("设备");
+    case "ui.ai": return t("AI 配置");
+    case "ui.settings": return t("设置");
+    case "ui.sync": return t("剪贴板同步");
     case "runtime.error": return t("错误");
     case "pairing.request": return t("配对请求");
     case "pairing.failed": return t("配对请求");
@@ -22,6 +36,9 @@ function title(name: string): string {
     case "device.connection_rejected": return t("连接设备");
     case "device.connection_unreachable": return t("连接设备");
     case "sync.redacted": return t("剪贴板同步");
+    // A download this window asked for.  Under 文件传输 rather than 剪贴板历史:
+    // what failed is a transfer, and the row that started it is on another page.
+    case "clip.file.denied": return t("文件传输");
     case "device.security_alert": return t("设备身份变更");
     default: return name;
   }

@@ -15,7 +15,7 @@ import uuid
 from collections import deque
 from collections.abc import Callable
 
-from internal.clipboard.format import ContentType, SyncMessage
+from internal.clipboard.format import HISTORY_ONLY_TYPES, ContentType, SyncMessage
 from internal.clipboard.history_db import ClipboardHistoryDB
 from internal.clipboard.platform import create_monitor, create_reader, create_writer
 
@@ -290,16 +290,34 @@ class SyncManager:
         # client) for content that never reached the clipboard: the user saw
         # the item arrive, clicked it, and got something else -- a ghost entry
         # with no way to tell it apart from a real one.
-        try:
+        # A clip that only *points at* a file on another device is a history row
+        # and nothing else: no clipboard can hold a reference to a file this
+        # machine does not have.  Those formats are dropped before the write —
+        # handing one to a writer would clear the clipboard and then report
+        # success, which is what the Windows URL branch used to do — and a clip
+        # left with nothing to write is not written at all, because a platform
+        # write is preceded by an empty-the-clipboard step.  History still gets
+        # the whole clip, below.
+        writable = content.without(HISTORY_ONLY_TYPES)
+        if writable.is_empty():
             logger.info(
-                "Writing remote clipboard from %s: %d format(s)",
+                "Remote clip from %s holds only history-only formats (%d format(s))"
+                " — nothing to put on the clipboard",
                 msg.source_device,
                 len(content.types),
             )
-            wrote = self._writer.write(content)
-        except Exception:
-            wrote = False
-            logger.exception("Failed to write remote clipboard content")
+            wrote = True
+        else:
+            try:
+                logger.info(
+                    "Writing remote clipboard from %s: %d format(s)",
+                    msg.source_device,
+                    len(writable.types),
+                )
+                wrote = self._writer.write(writable)
+            except Exception:
+                wrote = False
+                logger.exception("Failed to write remote clipboard content")
 
         if not wrote:
             # Surface the failure (desktop notification) without letting it
@@ -494,10 +512,14 @@ class SyncManager:
 
             self._dedup_ring_remember(content_hash)
 
-        # Record in clipboard history — once per action
+        # Record in clipboard history — once per action.  The row's id comes
+        # back out because a file entry crosses as an offer naming it: that id is
+        # how a peer's request is matched back to a row here, and so how *this*
+        # machine, rather than the one asking, decides which paths a request may
+        # resolve to.
         if self._history is not None:
             try:
-                self._history.add(content, source_app=source_app)
+                content.entry_id = self._history.add(content, source_app=source_app) or ""
             except Exception:
                 logger.debug("Failed to add to clipboard history", exc_info=True)
 
@@ -511,8 +533,11 @@ class SyncManager:
 
         logger.info("Local clipboard changed: %d format(s)", len(content.types))
 
-        # Don't broadcast content that carries no encodable formats (e.g. a
-        # FILE/URL-only capture) — it would produce an empty frame on the wire.
+        # Don't broadcast content that carries no encodable formats — a capture
+        # whose every format the wire cannot name encodes to an empty frame.
+        # FILE and URL are no longer in that set: a file goes out as an offer
+        # naming the row above, and a URL as itself, so what is left here is a
+        # clip carrying nothing the encoder has a name for.
         from internal.protocol.codec import has_syncable_types
 
         if not has_syncable_types(content):

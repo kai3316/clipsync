@@ -54,7 +54,7 @@
         <span>{{ typeIcon }}</span>
       </div>
       <div class="history-item__body">
-        <div class="history-item__text selectable">{{ item.text_preview || t('history.empty_preview') }}</div>
+        <div class="history-item__text selectable">{{ previewText }}</div>
         <div v-if="store.isFilteredText(item.text_preview)" class="history-item__filtered-note">
           {{ t('filter.receiver_note') }}
         </div>
@@ -96,6 +96,13 @@
     computed: {
       typeIcon: function () {
         return ClipsyncAPI.typeIcon(this.item.content_type);
+      },
+
+      // The sidecar's bracketed placeholder for a clip with no text of its own
+      // ("[Image]") is a label, not the user's words, so it is shown in the
+      // interface language; see ClipsyncAPI.previewText.
+      previewText: function () {
+        return ClipsyncAPI.previewText(this.item.text_preview) || this.t('history.empty_preview');
       },
 
       typeLabel: function () {

@@ -32,6 +32,11 @@ PHASES = ("idle", "downloading", "ready", "failed")
 # pinning the caller.
 CHECK_TIMEOUT = 8.0
 CHECK_WALL_BOUND = 8.0
+# The silent periodic check gets a shorter bound than the manual one.  Nobody is
+# watching it, so a slow answer is worth less than a prompt quit -- and stop()
+# must be able to wait it out, which it can only do if the request is bounded by
+# something it knows.  Raising this raises the worst-case shutdown delay.
+AUTO_CHECK_TIMEOUT = 3.0
 # Silent periodic check window, matching the legacy device-status loop.
 AUTO_CHECK_INTERVAL = 6 * 3600
 AUTO_CHECK_TICK = 3.0
@@ -91,6 +96,12 @@ class UpdateService:
         self._last_auto_check: float | None = None
         self._shutting_down = False
         self._timer: threading.Thread | None = None
+        # The tick loop schedules a *separate* thread for the request itself, so
+        # that a slow lookup never delays the next tick.  That second thread has
+        # to be held here: stop() can only wait for a thread it can name, and a
+        # thread left running into interpreter finalization is not a leak but a
+        # crash -- see stop().
+        self._worker: threading.Thread | None = None
         self._wake = threading.Event()
 
     # ── state ────────────────────────────────────────────────────────────
@@ -319,12 +330,25 @@ class UpdateService:
         self._timer.start()
 
     def stop(self) -> None:
-        """Stop scheduling new work; in-flight daemon workers die with the app."""
+        """Stop the periodic check and wait for the request it may have started.
+
+        "In-flight daemon workers die with the app" is true of the thread and
+        false of the process.  CPython finalizes the interpreter underneath a
+        daemon thread that is still inside a blocking C call, and tearing the
+        `ssl` module down under a live request is a SIGSEGV rather than a clean
+        exit -- which is what turned an ordinary quit into a crash on any host
+        whose uptime let the first automatic check fire.  So the request thread
+        is waited for instead.  That is affordable only because the silent
+        lookup is bounded by AUTO_CHECK_TIMEOUT, not by the manual CHECK_TIMEOUT.
+        """
         self._shutting_down = True
         self._wake.set()
         timer, self._timer = self._timer, None
         if timer is not None:
             timer.join(timeout=1.0)
+        worker, self._worker = self._worker, None
+        if worker is not None:
+            worker.join(timeout=AUTO_CHECK_TIMEOUT + 0.5)
 
     def _auto_check_loop(self) -> None:
         while not self._shutting_down:
@@ -356,17 +380,27 @@ class UpdateService:
         if last is not None and now - last < AUTO_CHECK_INTERVAL:
             return False
         self._last_auto_check = now
-        threading.Thread(
-            target=self._auto_check_worker, name="auto-update-check", daemon=True
-        ).start()
+        # Held on the instance so stop() can wait for it.  Overwriting a handle
+        # is safe here only because the throttle above guarantees the previous
+        # request is six hours gone.
+        worker = threading.Thread(
+            target=self._auto_check_worker, name="auto-update-request", daemon=True
+        )
+        self._worker = worker
+        worker.start()
         return True
 
     def _auto_check_worker(self) -> None:
         """Silent check: only surfaces a result when an update is available."""
         try:
-            result = updater.check_for_update(timeout=CHECK_TIMEOUT)
+            result = updater.check_for_update(timeout=AUTO_CHECK_TIMEOUT)
         except Exception as exc:
             logger.debug("Auto update check failed: %s", exc)
             return
+        finally:
+            # Release the handle only if stop() has not already taken it, so a
+            # request that finishes during shutdown is not re-joined.
+            if self._worker is threading.current_thread():
+                self._worker = None
         if result.get("available") and not self._shutting_down:
             self._notify_available(result)

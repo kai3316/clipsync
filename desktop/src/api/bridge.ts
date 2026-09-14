@@ -2,7 +2,7 @@ import { invoke, isTauri } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { getCurrentWebview, type DragDropEvent } from "@tauri-apps/api/webview";
 import { t } from "../i18n";
-import type { AppStatus, ChatMessagesPage, ChatSessionsPage, Device, DeviceCertificate, DeviceProbeResult, DiagnosticAction, DiagnosticsReport, Favorite, FavoritesPage, HistoryPage, InternetPairingStatus, Settings, SidecarEvent, TransfersPage, UpdateCheckResult, UpdateDownloadResult, UpdateOpenFolderResult, UpdateStatusResult } from "./types";
+import type { AppStatus, ChatMessagesPage, ChatSessionsPage, Device, DeviceCertificate, DeviceProbeResult, DiagnosticAction, DiagnosticsReport, Favorite, FavoritesPage, HistoryPage, InternetPairingStatus, Overview, RelayTestResult, Settings, SidecarEvent, TransfersPage, UpdateCheckResult, UpdateDownloadResult, UpdateInstallResult, UpdateOpenFolderResult, UpdateStatusResult } from "./types";
 
 export function inDesktop(): boolean {
   return isTauri();
@@ -57,8 +57,20 @@ export const bridge = {
     command<{ favorite: Favorite }>("add_favorite", { title, content, group }),
   updateFavorite: (favoriteId: string, title: string, content: string, group: string, position: number) =>
     command<{ favorite: Favorite }>("update_favorite", { favoriteId, title, content, group, position }),
+  // One gesture that moves several favourites is one request, so the other
+  // surfaces see the finished order rather than each row of it.  The ids go in
+  // their new order and the positions come back decided by the host, which is
+  // the only party that knows the whole library.
+  reorderFavorites: (favoriteIds: string[]) =>
+    command<{ moved: number }>("reorder_favorites", { favoriteIds }),
   deleteFavorite: (favoriteId: string) => command<{ deleted: boolean }>("delete_favorite", { favoriteId }),
   copyFavorite: (favoriteId: string) => command<{ copied: boolean }>("copy_favorite", { favoriteId }),
+  createFavoriteGroup: (name: string) =>
+    command<{ groups: string[] }>("create_favorite_group", { name }),
+  renameFavoriteGroup: (name: string, renameTo: string) =>
+    command<{ renamed: number; groups: string[] }>("rename_favorite_group", { name, renameTo }),
+  deleteFavoriteGroup: (name: string) =>
+    command<{ moved: number; groups: string[] }>("delete_favorite_group", { name }),
   exportFavorites: (format: string) =>
     command<{ filepath: string; filename: string; count: number; format: string }>(
       "export_favorites", { format }),
@@ -85,9 +97,12 @@ export const bridge = {
   setDiscoveryVisible: (enabled: boolean) =>
     command<{ enabled: boolean; visible: boolean }>("set_discovery_visible", { enabled }),
   settings: () => command<Settings>("get_settings"),
-  companionStatus: () => command<{ enabled: boolean; port: number; running: boolean; state: string; access_url: string | null }>("companion_status"),
-  configureCompanion: (enabled: boolean, port: number, rotateToken = false) =>
-    command<{ enabled: boolean; port: number; running: boolean; state: string; access_url: string | null }>("configure_companion", { enabled, port, rotateToken }),
+  // `access_url` carries the token and goes null once it is cleared, while
+  // `url` is the same address without one — the address a phone opens when the
+  // companion is deliberately serving token-free.
+  companionStatus: () => command<{ enabled: boolean; port: number; running: boolean; state: string; access_url: string | null; url: string | null }>("companion_status"),
+  configureCompanion: (enabled: boolean, port: number, rotateToken = false, clearToken = false) =>
+    command<{ enabled: boolean; port: number; running: boolean; state: string; access_url: string | null; url: string | null }>("configure_companion", { enabled, port, rotateToken, clearToken }),
   updateSettings: (values: Record<string, unknown>) => command("update_settings", { values }),
   translate: (text: string, targetLang = "en", sourceLang = "auto") =>
     command<Record<string, unknown>>("translate_text", { text, targetLang, sourceLang }),
@@ -124,6 +139,14 @@ export const bridge = {
   // Records only, and counted by the sidecar: a transfer that finished since the
   // page's last poll is one the page's own list would not have counted.
   clearTransferHistory: () => command<{ cleared: number }>("clear_transfer_history"),
+  // The 下载 button on a row whose file lives on another device.  The request
+  // names the entry and the device; the peer resolves the paths against its own
+  // history, which is what keeps the ask to files that peer published.  The
+  // answer is only "the request went out" — the download arrives as a transfer
+  // and a refusal as a `clip.file.denied` event, so nothing here claims bytes
+  // have moved.
+  requestEntryFiles: (entryId: string, deviceId: string) =>
+    command<{ requested: boolean }>("request_entry_files", { entryId, deviceId }),
   startSpeedTest: () => command<{ test_id: string }>("start_speed_test"),
   sendChatFile: (sessionId: string, path: string) =>
     command<{ ok: boolean; transfer_id: string }>("send_chat_file", { sessionId, path }),
@@ -141,6 +164,8 @@ export const bridge = {
   chatMessages: (sessionId: string) => command<ChatMessagesPage>("list_chat_messages", { sessionId }),
   openChatFile: (sessionId: string, transferId: string) =>
     command<{ ok: boolean }>("open_chat_file", { sessionId, transferId }),
+  revealChatFile: (sessionId: string, transferId: string) =>
+    command<{ ok: boolean; folder: string }>("reveal_chat_file", { sessionId, transferId }),
   // `chat_session_id`, not `session_id`: the frame envelope reads a top-level
   // `session_id` as the sidecar's own session, and a result putting a chat
   // session there is refused as an invalid frame — which the host treats as
@@ -174,6 +199,10 @@ export const bridge = {
     command<{ ok: boolean }>("internet_pairing_rename", { peerId, name }),
   unpairInternetPeer: (peerId: string) =>
     command<{ ok: boolean }>("internet_pairing_unpair", { peerId }),
+  // An empty list tests the saved brokers; the relay card passes the staged
+  // ones so a reader can check what they are about to save.
+  testRelayBrokers: (brokers: string[] = []) =>
+    command<RelayTestResult>("internet_pairing_test", { brokers }),
   relayDeliveryStatus: (peerId = "") =>
     command<{ pending: number; items: Array<Record<string, unknown>> }>(
       "relay_delivery_status", { peerId }),
@@ -181,6 +210,10 @@ export const bridge = {
   pauseSync: (minutes: number) => command<{ enabled: boolean; until: number }>("pause_sync", { minutes }),
   resumeSync: () => command<{ enabled: boolean }>("resume_sync"),
   copyHistory: (entryId: string) => command<{ copied: boolean }>("copy_history", { entryId }),
+  // Local clipboard only.  Different from pushText, which also sends the text
+  // to every paired device: the context menu copies things that are not clips.
+  copyText: (text: string) => command<{ copied: boolean }>("copy_text", { text }),
+  overview: () => command<Overview>("get_overview"),
   readHistoryText: (entryId: string) =>
     command<{ id: string; text: string; truncated: boolean }>("read_history_text", { entryId }),
   openHistoryLink: (entryId: string) =>
@@ -207,12 +240,17 @@ export const bridge = {
   updateStatus: () => command<UpdateStatusResult>("update_status"),
   updateDownload: () => command<UpdateDownloadResult>("update_download"),
   updateOpenFolder: () => command<UpdateOpenFolderResult>("update_open_folder"),
+  updateInstall: () => command<UpdateInstallResult>("update_install"),
   openDataFolder: (which: "data" | "backups") =>
     command<{ ok: boolean; folder: string }>("open_data_folder", { which }),
   openAboutLink: (target: "homepage" | "releases") =>
     command<{ ok: boolean; url: string }>("open_about_link", { target }),
   companionQr: () =>
     command<{ ok: boolean; url: string | null; qr: string | null; error?: string }>("companion_qr"),
+  shareFileToPhone: (path: string) =>
+    command<{ ok: boolean; name: string; path: string; size: number }>("share_file_to_phone", {
+      path,
+    }),
   onMenuAction: async (handler: (action: MenuAction) => void): Promise<UnlistenFn> => {
     // The native tray's entries that open one of this window's own surfaces.
     // One listener per action, because Tauri matches an event name exactly —
@@ -249,12 +287,12 @@ export const bridge = {
   quit: () => command("quit_app"),
   subscribe: async (
     onEvent: (event: SidecarEvent) => void,
-    onState: (state: { state: string; error?: string; attempt?: number }) => void,
+    onState: (state: { state: string; error?: string; message?: string; retryable?: boolean; attempt?: number }) => void,
   ): Promise<UnlistenFn> => {
     if (!inDesktop()) return () => {};
     const offEvent = await listen<SidecarEvent>("sidecar:event", ({ payload }) => onEvent(payload));
     try {
-      const offState = await listen<{ state: string; error?: string; attempt?: number }>(
+      const offState = await listen<{ state: string; error?: string; message?: string; retryable?: boolean; attempt?: number }>(
         "sidecar:state", ({ payload }) => onState(payload),
       );
       return () => { offEvent(); offState(); };

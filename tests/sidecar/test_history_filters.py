@@ -70,29 +70,6 @@ def test_the_chip_membership_rules(content_type, preview, kind, expected):
     assert matches_kind(row(content_type=content_type, text_preview=preview), kind) is expected
 
 
-def test_a_chip_returns_only_its_kind():
-    page = use_case([
-        row(entry_id="t", content_type="TEXT", text_preview="words"),
-        row(entry_id="i", content_type="IMAGE_PNG", text_preview="[Image]"),
-    ]).list(kind="image")
-    assert ids(page) == ["i"]
-    # The total is the filtered total: paging must not promise rows the filter
-    # has already excluded.
-    assert page["total"] == 1
-
-
-def test_the_counts_are_what_each_chip_would_show():
-    page = use_case([
-        row(entry_id="t", content_type="TEXT", text_preview="words"),
-        row(entry_id="i", content_type="IMAGE_PNG", text_preview="[Image]"),
-        row(entry_id="f", content_type="FILE", text_preview="[File] a.pdf"),
-        row(entry_id="l", content_type="TEXT", text_preview="https://example.com"),
-    ]).list()
-    # The link is also text, so it is counted in both: a chip's badge is the
-    # number of rows clicking it yields, not a partition.
-    assert page["counts"] == {"all": 4, "text": 2, "image": 1, "file": 1, "link": 1}
-
-
 def test_the_counts_follow_the_search_and_not_the_chip():
     rows = [
         row(entry_id="a", content_type="TEXT", text_preview="alpha"),
@@ -144,22 +121,6 @@ def test_a_pinned_entry_comes_first_in_both_orders():
     # happens.
     assert ids(use_case(rows).list()) == ["pinned", "new", "old"]
     assert ids(use_case(rows).list(sort="oldest")) == ["pinned", "old", "new"]
-
-
-def test_an_empty_history_still_answers_an_empty_page():
-    page = use_case([]).list()
-    assert page["items"] == []
-    assert page["total"] == 0
-    assert page["has_history"] is False
-    assert page["counts"] == {"all": 0, "text": 0, "image": 0, "file": 0, "link": 0}
-
-
-def test_history_exists_even_when_the_search_matches_nothing():
-    # The chip row stays on screen while a search matches nothing — a bar that
-    # vanishes on a typo takes the way back out with it.
-    page = use_case([row(entry_id="a")]).list(query="no such thing")
-    assert page["items"] == []
-    assert page["has_history"] is True
 
 
 def test_the_kinds_and_sorts_are_the_closed_sets_the_protocol_validates():

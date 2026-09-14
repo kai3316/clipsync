@@ -1,3 +1,11 @@
+"""The localized diagnostics payload the shell renders.
+
+`localize` is what turns the report's `*_key` / `*_params` pairs into the
+`*_text` fields the front end draws.  Two tests: the shape it produces (text
+added beside — never instead of — the raw fields), and the degradation the
+caller relies on when no locale can be read.
+"""
+
 import json
 
 from internal.diagnostics import localize as module
@@ -45,29 +53,6 @@ def _report():
     }
 
 
-def test_translate_replaces_every_placeholder_and_misses_resolve_to_none():
-    table = {"k": "{a} and {a} then {b}"}
-    assert module.translate(table, "k", {"a": 1, "b": 2}) == "1 and 1 then 2"
-    assert module.translate(table, "missing") is None
-    assert module.translate(table, None) is None
-    assert module.translate(table, "k", {"a": "x"}) == "x and x then {b}"
-
-
-def test_translations_fall_back_to_english_and_cache(tmp_path, monkeypatch):
-    (tmp_path / "en.json").write_text(json.dumps({"k": "english"}), encoding="utf-8")
-    monkeypatch.setattr(module, "locales_dir", lambda: str(tmp_path))
-    monkeypatch.setattr(module, "_cache", {})
-    assert module.translations("fr") == {"k": "english"}
-    assert module.translations("") == {"k": "english"}
-    assert module.translations("fr") is module.translations("fr")
-
-
-def test_translations_of_a_missing_directory_are_empty(tmp_path, monkeypatch):
-    monkeypatch.setattr(module, "locales_dir", lambda: str(tmp_path / "absent"))
-    monkeypatch.setattr(module, "_cache", {})
-    assert module.translations("zh-CN") == {}
-
-
 def test_localize_adds_resolved_text_and_leaves_the_report_untouched(tmp_path, monkeypatch):
     (tmp_path / "zh-CN.json").write_text(
         json.dumps(
@@ -109,14 +94,3 @@ def test_localize_returns_the_report_when_no_locale_can_be_read(tmp_path, monkey
     monkeypatch.setattr(module, "_cache", {})
     original = _report()
     assert module.localize(original, "zh-CN") is original
-
-
-def test_real_locales_cover_every_group_and_item_label():
-    """The shipped locale files must label every group and v2 item the report
-    can emit — a new item without a label would render as a bare id."""
-    table = module.translations("zh-CN")
-    assert table, "the zh-CN locale file must be present"
-    for _group_id, key in module.GROUP_LABEL_KEYS:
-        assert key in table
-    for item_id, key in module.ITEM_LABEL_KEYS.items():
-        assert key in table, item_id

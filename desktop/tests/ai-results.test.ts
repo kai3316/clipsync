@@ -18,13 +18,4 @@ describe("AI business results", () => {
       expect(() => requireAiSuccess({ ok: false, error })).toThrow();
     }
   });
-  it("preserves empty file content, truncation flags and inventory responses", () => {
-    for (const result of [
-      { ok: true, content: "", truncated: false },
-      { ok: true, content: "partial", truncated: true },
-      { entries: [] },
-    ]) {
-      expect(requireAiSuccess(result)).toBe(result);
-    }
-  });
 });

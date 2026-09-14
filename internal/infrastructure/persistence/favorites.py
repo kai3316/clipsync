@@ -18,6 +18,17 @@ CREATE TABLE IF NOT EXISTS favorites (
     updated REAL
 )
 """
+
+# One statement per entry, because `sqlite3` executes one at a time.
+SCHEMAS = (
+    SCHEMA,
+    """
+CREATE TABLE IF NOT EXISTS favorite_groups (
+    name TEXT PRIMARY KEY,
+    created REAL NOT NULL
+)
+""",
+)
 FIELDS = 'id, title, content, "group", position, created, updated'
 
 
@@ -71,7 +82,8 @@ class FavoritesRepository:
     def ensure_db(self):
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         with self.transaction() as conn:
-            conn.execute(SCHEMA)
+            for statement in SCHEMAS:
+                conn.execute(statement)
             self.run_migrations(conn)
 
     def maybe_migrate(self):
@@ -208,3 +220,56 @@ class FavoritesRepository:
         self.initialize()
         with self.transaction() as conn:
             return conn.execute("DELETE FROM favorites WHERE id=?", (favorite_id,)).rowcount > 0
+
+    # ── Group registry ────────────────────────────────────────────────
+    #
+    # A group is a name, not a row in `favorites`: a group with nothing in it
+    # is still a group the user made, and it has to survive until they delete
+    # it.  The legacy panel kept this list in the browser's localStorage,
+    # which is why it could show groups the data folder no longer had — the
+    # two lived in different places and only one of them was reset.  Here the
+    # registry sits beside the favourites it names, so a wipe clears both.
+
+    def group_names(self):
+        self.initialize()
+        with self.transaction() as conn:
+            return [
+                row[0]
+                for row in conn.execute("SELECT name FROM favorite_groups ORDER BY name")
+            ]
+
+    def register_group(self, name):
+        """Remember a group name so an empty one stays visible."""
+        name = name.strip()
+        if not name:
+            return False
+        self.initialize()
+        with self.transaction() as conn:
+            cursor = conn.execute(
+                "INSERT OR IGNORE INTO favorite_groups (name, created) VALUES (?, ?)",
+                (name, time.time()),
+            )
+            return cursor.rowcount > 0
+
+    def forget_group(self, name):
+        self.initialize()
+        with self.transaction() as conn:
+            return conn.execute(
+                "DELETE FROM favorite_groups WHERE name=?", (name,)
+            ).rowcount > 0
+
+    def rename_group(self, name, new_name):
+        """Move the registry entry, leaving the favourites in it to the caller.
+
+        Renaming the group and moving its members are one user action, so they
+        belong in one request — but not one transaction: the members are
+        ordinary favourite updates that go through `update()`, whose
+        per-entry validation must still run.
+        """
+        self.initialize()
+        with self.transaction() as conn:
+            conn.execute("DELETE FROM favorite_groups WHERE name=?", (name,))
+            conn.execute(
+                "INSERT OR IGNORE INTO favorite_groups (name, created) VALUES (?, ?)",
+                (new_name.strip(), time.time()),
+            )

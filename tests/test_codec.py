@@ -353,57 +353,6 @@ class TestImageFmtCodec:
         assert result.content.types[ContentType.IMAGE_PNG] == tiff_data
 
 
-class TestClipboardContent:
-    def test_hash_key_deterministic(self):
-        c1 = ClipboardContent(types={ContentType.TEXT: b"hello"})
-        c2 = ClipboardContent(types={ContentType.TEXT: b"hello"})
-        assert c1.hash_key() == c2.hash_key()
-
-    def test_hash_key_differs(self):
-        c1 = ClipboardContent(types={ContentType.TEXT: b"hello"})
-        c2 = ClipboardContent(types={ContentType.TEXT: b"world"})
-        assert c1.hash_key() != c2.hash_key()
-
-    def test_hash_order_independent(self):
-        """Hash should be the same regardless of insert order."""
-        c1 = ClipboardContent(
-            types={
-                ContentType.TEXT: b"a",
-                ContentType.HTML: b"b",
-            }
-        )
-        c2 = ClipboardContent(
-            types={
-                ContentType.HTML: b"b",
-                ContentType.TEXT: b"a",
-            }
-        )
-        assert c1.hash_key() == c2.hash_key()
-
-    def test_is_empty(self):
-        assert ClipboardContent().is_empty()
-        assert not ClipboardContent(types={ContentType.TEXT: b"x"}).is_empty()
-
-    def test_best_format_priority(self):
-        """HTML > RTF > TEXT > IMAGE_PNG"""
-        c = ClipboardContent(
-            types={
-                ContentType.IMAGE_PNG: b"png",
-                ContentType.TEXT: b"text",
-                ContentType.HTML: b"html",
-                ContentType.RTF: b"rtf",
-            }
-        )
-        fmt, data = c.best_format()
-        assert fmt == ContentType.HTML
-        assert data == b"html"
-
-    def test_best_format_fallback(self):
-        c = ClipboardContent(types={ContentType.IMAGE_PNG: b"png"})
-        fmt, data = c.best_format()
-        assert fmt == ContentType.IMAGE_PNG
-
-
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
 

@@ -8,6 +8,36 @@ from internal.data import recovery
 from src import sidecar_main
 
 
+def test_history_only_switches_off_the_background_update_check(monkeypatch):
+    """``--history-only`` promises an isolated process, and the periodic update
+    check is the one background service that reaches the network on its first
+    tick.  It used to be started regardless of the flag, so the mode opened a
+    socket it had promised not to and left that request in flight over exit."""
+    constructed = []
+
+    def capture(**kwargs):
+        constructed.append(kwargs)
+        return SimpleNamespace(
+            lifecycle=SimpleNamespace(start=Mock(), stop=Mock(return_value=True))
+        )
+
+    monkeypatch.setattr(sidecar_main, "SidecarApplication", capture)
+    monkeypatch.setattr(sidecar_main.sys, "stdin", SimpleNamespace(buffer=io.BytesIO()))
+    monkeypatch.setattr(sidecar_main.sys, "stdout", SimpleNamespace(buffer=io.BytesIO()))
+    monkeypatch.setattr(sidecar_main, "RpcServer", Mock(
+        return_value=SimpleNamespace(serve=Mock(return_value=0))
+    ))
+
+    assert sidecar_main.main(["--history-only"]) == 0
+    assert constructed[0]["update_checks"] is False
+    assert constructed[0]["runtime_factory"] is None
+
+    # The ordinary mode still gets both; the flag defaults to on.
+    assert sidecar_main.main([]) == 0
+    assert constructed[1]["update_checks"] is True
+    assert constructed[1]["runtime_factory"] is not None
+
+
 def test_shutdown_retries_incomplete_cleanup_without_pretending_success():
     app = SimpleNamespace(lifecycle=SimpleNamespace(stop=Mock(side_effect=[False, True])))
     assert sidecar_main._shutdown(app)

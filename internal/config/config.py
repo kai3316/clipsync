@@ -68,8 +68,9 @@ DEFAULT_HOTKEYS: dict[str, str] = {
 @dataclass
 class Config:
     # Schema version for one-way migrations on load. v1 configs stored
-    # filter_enabled_categories=[] to mean "all enabled"; v2 uses None=all.
-    config_version: int = 2
+    # filter_enabled_categories=[] to mean "all enabled"; v2 uses None=all;
+    # v3 turns the phone companion (远程访问) on by default.
+    config_version: int = 3
     device_id: str = field(default_factory=lambda: uuid.uuid4().hex[:12])
     device_name: str = field(default_factory=platform.node)
     port: int = 19990
@@ -163,10 +164,31 @@ class Config:
     # nothing.  Do not surface it again without wiring it up first.
     data_dir: str = ""  # custom data directory (empty = default)
 
-    # Web companion
-    web_enabled: bool = False
+    # Web companion (远程访问 / 手机 Companion) — the phone-facing web page.
+    #
+    # ON by default: the phone companion is the feature most people install the
+    # app for, and finding it meant knowing to go and switch it on first.  The
+    # server still mints an access token the moment it starts (see
+    # ``Application._start_companion``), so "on" is not "open" — a device on the
+    # same network still has to carry the token.
+    #
+    # A config that says OFF on purpose stays off: see the v3 migration in
+    # ``load``, which only flips a config showing no sign of the companion ever
+    # having run.
+    web_enabled: bool = True
     web_port: int = 19991
     web_token: str = ""
+    # The user cleared the access token on purpose.  An empty ``web_token``
+    # alone cannot say whether that is a leftover or a decision, and the
+    # companion mints one whenever it starts without — so without this the
+    # clear button would be undone by the next restart.  This flag's whole job
+    # is to keep that token empty: serving without one is ``web_token``'s own
+    # doing (``web.server._validate_token`` passes every request when the
+    # expected token is empty), and it stays true only as long as nothing
+    # re-mints.  Rotating a token, or switching the companion on from off,
+    # clears the flag.  The sidecar honours it; the legacy Tk panel still
+    # re-mints (see the parity audit).
+    web_token_disabled: bool = False
     web_history_limit: int = 30
 
     # Translation (LibreTranslate-compatible endpoint). Empty url = the
@@ -373,6 +395,7 @@ _FIELD_RULES: dict[str, tuple] = {
     "web_enabled": ("bool",),
     "web_port": ("int",),
     "web_token": ("str",),
+    "web_token_disabled": ("bool",),
     "web_history_limit": ("int",),
     "translate_url": ("str",),
     "translate_api_key": ("str",),
@@ -627,6 +650,7 @@ def load() -> Config:
                 "web_enabled",
                 "web_port",
                 "web_token",
+                "web_token_disabled",
                 "web_history_limit",
                 "translate_url",
                 "translate_api_key",
@@ -674,6 +698,26 @@ def load() -> Config:
             # "disable everything" choice.
             if data.get("config_version", 1) < 2 and cfg.filter_enabled_categories == []:
                 cfg.filter_enabled_categories = None
+            # v3: the phone companion (远程访问) is on by default, so a config
+            # written while the default was OFF is brought forward.  Without
+            # this, "on by default" only ever reaches a machine that has never
+            # run the app, which is never the machine anyone is looking at.
+            #
+            # ``web_token_disabled`` is the one state this must not touch: it
+            # means the user cleared the access token on purpose, and the
+            # companion started for such a config serves every request without
+            # one (``web.server._validate_token``).  Switching it on there would
+            # not be a default, it would be opening the port to the network.
+            #
+            # Every other config is flipped once, and only once — the save that
+            # follows writes version 3, so a user who turns it back off keeps it
+            # off.  A token in the config is not evidence of use and is
+            # deliberately not consulted: the webview front end mints one
+            # whether or not the companion was ever enabled
+            # (``src/main.py``), so most configs carry one.
+            if (data.get("config_version", 1) < 3 and not cfg.web_enabled
+                    and not cfg.web_token_disabled):
+                cfg.web_enabled = True
             # Migrate from legacy dict-format peers (pre-list) to list format:
             #   {"device_id": {device_name, public_key_pem, paired, notes}, ...}
             cfg.peers = _parse_peer_list(data, "peers")
@@ -692,7 +736,7 @@ def load() -> Config:
 
 def save(cfg: Config, enc_mgr: "EncryptionManager | None" = None):
     with config_lock:
-        cfg.config_version = 2
+        cfg.config_version = 3
         config_dir = _config_dir()
         config_dir.mkdir(parents=True, exist_ok=True)
         config_path = _config_path()
@@ -775,6 +819,7 @@ def save(cfg: Config, enc_mgr: "EncryptionManager | None" = None):
             "web_enabled": cfg.web_enabled,
             "web_port": cfg.web_port,
             "web_token": cfg.web_token,
+            "web_token_disabled": cfg.web_token_disabled,
             "web_history_limit": cfg.web_history_limit,
             "translate_url": cfg.translate_url,
             "translate_api_key": cfg.translate_api_key,

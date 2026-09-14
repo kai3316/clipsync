@@ -1,8 +1,10 @@
 <script setup lang="ts">
 import { computed, nextTick, onMounted, onUnmounted, ref, watch } from "vue";
-import { Eraser, ExternalLink, FileDown, FileUp, FolderOpen, FolderUp, RefreshCw, Pause, Play, X, Check, Trash2 } from "@lucide/vue";
+import { Eraser, ExternalLink, FileDown, FileUp, FolderOpen, FolderUp, RefreshCw, Pause, Play, X, Check, Trash2, Copy, Link } from "@lucide/vue";
 import { bridge } from "../api/bridge";
 import { t } from "../i18n";
+import { openContextMenu } from "../lib/context-menu";
+import { copyText } from "../lib/clipboard";
 import { dateTime, size as formatSize, speed as formatSpeed } from "../i18n/format";
 import type { Device, Transfer } from "../api/types";
 
@@ -57,7 +59,14 @@ function activeStatus(item: Transfer): string {
  * devices only, and refused to start an upload with no target chosen
  * (``transfer.select_target``) rather than sending to everyone.
  */
-const props = defineProps<{ devices?: Device[]; dropped?: string[] }>();
+const props = defineProps<{
+  devices?: Device[];
+  dropped?: string[];
+  /** Say that a click did something, for the clicks this page cannot show.
+   * The window owns the notice stack and hands one down; a page mounted
+   * without it — a unit test — simply has nothing to report to. */
+  notify?: (message: string) => void;
+}>();
 const emit = defineEmits<{ dropped: [] }>();
 const targets = computed(() =>
   (props.devices || []).filter((device) => device.paired && device.connection_state === "online"));
@@ -66,11 +75,52 @@ const targets = computed(() =>
 const target = ref("");
 
 const active = ref<Transfer[]>([]);
+/** The finished transfers, as the panel's history card listed them. */
 const history = ref<Transfer[]>([]);
+/** The line the panel put under that card's own header: how many records there
+ *  are, how they ended, and how much has moved through.
+ *
+ *  Each part is left out when it has nothing to say, which is the panel's own
+ *  rule (`dashboard.py::_refresh_transfers`) — a list with no failures does not
+ *  report zero failures.  A record counts as a success by the same test the row
+ *  itself uses (:func:`historyStatus`), so the line and the rows under it cannot
+ *  disagree about what happened. */
+const historyStats = computed(() => {
+  const records = history.value;
+  if (!records.length) return "";
+  const succeeded = records.filter((item) => item.status === "completed").length;
+  const parts = [t("已完成 {count} 个", { count: records.length })];
+  if (succeeded) parts.push(t("{count} 成功", { count: succeeded }));
+  if (records.length - succeeded) parts.push(t("{count} 失败", { count: records.length - succeeded }));
+  const bytes = records.reduce((sum, item) => sum + (Number(item.size) || 0), 0);
+  if (bytes > 0) parts.push(formatSize(bytes));
+  return parts.join(" · ");
+});
 const busy = ref(false);
 const error = ref("");
 const refreshError = ref("");
 const speed = ref<Record<string, any>>({});
+/** The finished speed test's reading, or the failure it actually was.
+ *
+ *  The panel drew three outcomes out of one result, not two
+ *  (`dashboard.py::_refresh_transfers`): while the chunks are going it counted
+ *  them, a measurement above zero was the number **plus a word** for how good
+ *  that is, and anything else was the failure it says.  The last one matters
+ *  here: this manager ends every run at `done`, a run whose peer never echoed
+ *  included, and reports 0 MB/s for it — so a zero is not a reading, and
+ *  printing it as one would be the one thing the panel refused to do.
+ *
+ *  The thresholds are the panel's own: above 10 MB/s fast, above 2 good, below
+ *  that slow. */
+const speedReading = computed<{ mbps: number | null; label: string; tone: string } | null>(() => {
+  const state = String(speed.value.state || "");
+  if (state !== "done" && state !== "acknowledged") return null;
+  const mbps = Number(speed.value.result_mbps) || 0;
+  if (mbps <= 0) return { mbps: null, label: "", tone: "" };
+  if (mbps > 10) return { mbps, label: t("快速"), tone: "fast" };
+  if (mbps > 2) return { mbps, label: t("良好"), tone: "good" };
+  return { mbps, label: t("慢"), tone: "slow" };
+});
 /** What the last bulk action did, reported rather than assumed: "cancel all"
  * counts what it actually cancelled, and clearing history counts what it
  * actually deleted.  One line for both, because it is one question — what did
@@ -148,6 +198,19 @@ async function poll() {
   if (!busy.value) await refresh();
   if (!disposed) timer = setTimeout(poll, 1000);
 }
+/** The toolbar's refresh, which says what it found.
+ *
+ * A refresh is the one click allowed to change nothing: the rows come back as
+ * they were and the spinner is over before the eye reaches it. The poller runs
+ * the same read once a second and must stay silent, which is why the report
+ * sits on the button rather than in `refresh`.
+ */
+async function refreshNow() {
+  await refresh();
+  props.notify?.(active.value.length
+    ? t("已刷新 · {count} 个进行中的传输", { count: active.value.length })
+    : t("已刷新 · 暂无进行中的传输"));
+}
 /** Send what the picker returned — one file, several files, or one folder.
  *
  * The three differ in the picker and in what happens between the pick and the
@@ -190,6 +253,45 @@ async function action(name: string, id: string) {
   try { await bridge.transferAction(name, id); await refresh(); }
   catch (reason: any) { error.value = reason?.message || t("操作失败"); }
   finally { busy.value = false; }
+}
+/** The right-click menu on a transfer record.
+ *
+ * The legacy menu's six entries, each offered under the same condition its
+ * button on the row is, so the two can never disagree about what a given row
+ * can do.  The two that have no button — 复制文件名 and 复制文件路径 — are the
+ * reason this menu is worth having on this page at all: the name of a file that
+ * arrived is the thing a reader most often needs somewhere else, and the path
+ * is the thing a support conversation always ends up asking for.
+ */
+function rowMenu(event: MouseEvent, item: Transfer) {
+  const openable = item.direction !== "up" && !!item.path;
+  openContextMenu(event, [
+    openable
+      ? { id: "open", label: t("打开文件"), icon: ExternalLink, run: () => action("open", item.id) }
+      : null,
+    item.path
+      ? { id: "reveal", label: t("打开所在文件夹"), icon: FolderOpen, run: () => action("reveal", item.id) }
+      : null,
+    {
+      id: "copy-name", label: t("复制文件名"), icon: Copy, disabled: !item.filename,
+      run: () => copyText(item.filename || ""),
+    },
+    item.path
+      ? { id: "copy-path", label: t("复制文件路径"), icon: Link, run: () => copyText(item.path || "") }
+      : null,
+    retryable(item)
+      ? { id: "retry", label: t("重试传输"), icon: RefreshCw, run: () => action("retry", item.id) }
+      : null,
+    {
+      id: "delete", label: t("删除传输记录"), icon: Trash2, divider: true, danger: true,
+      run: () => action("delete", item.id),
+    },
+  ]);
+}
+/** Whether a finished record can be sent again — the same test the row's own
+ * retry button makes, in one place so the two cannot drift apart. */
+function retryable(item: Transfer): boolean {
+  return item.status !== "completed" && item.direction === "up" && !!item.path;
 }
 async function cancelAll() {
   if (disposed || busy.value) return;
@@ -265,11 +367,8 @@ onUnmounted(() => {
            so do several files picked at once, so neither is a second transfer
            path — the sidecar archives and the same send carries it. -->
       <button :disabled="busy || !target" @click="chooseAndSend('folder')"><FolderUp :size="17" />{{ t("发送文件夹") }}</button>
-      <button class="icon-button" :title="t('刷新')" :aria-label="t('刷新传输')" :disabled="busy" @click="refresh"><RefreshCw :size="18" /></button>
+      <button class="icon-button" :title="t('刷新')" :aria-label="t('刷新传输')" :disabled="busy" @click="refreshNow"><RefreshCw :size="18" /></button>
       <button :disabled="busy || speed.state === 'sending'" @click="speedTest">{{ t("速度测试") }}</button>
-      <!-- Cancels every row at once; the sidecar reads the live list, so a
-           transfer that arrived since the last poll is included. -->
-      <button class="danger" :disabled="busy || !active.length" @click="cancelAll"><X :size="17" />{{ t("全部取消") }}</button>
     </div>
     <!-- A drop answers the picker, not the target: the files it brought are
          shown with the one question it left open — which machine — and nothing
@@ -287,12 +386,25 @@ onUnmounted(() => {
     <p v-if="bulkMessage" class="muted small bulk-status" role="status">{{ bulkMessage }}</p>
     <div class="speed-test" role="status">
       <span v-if="speed.state === 'sending'">{{ t("测速中 {sent}/{total}", { sent: speed.chunks_sent || 0, total: speed.total_chunks || 0 }) }}</span>
-      <span v-else-if="speed.state === 'done'">{{ t("速度 {mbps} MB/s", { mbps: speed.result_mbps }) }}</span>
+      <!-- The reading and the word for it, the way the panel put both beside
+           each other.  The word is a chip rather than more text because it is a
+           verdict on the number, not another one. -->
+      <span v-else-if="speedReading && speedReading.mbps !== null">{{ t("速度 {mbps} MB/s", { mbps: speedReading.mbps }) }}<b class="speed-quality" :class="`speed-quality--${speedReading.tone}`">{{ speedReading.label }}</b></span>
+      <span v-else-if="speedReading" class="speed-failed">{{ t("速度测试失败") }}</span>
       <span v-else>{{ t("点击测试局域网速度") }}</span>
     </div>
     <p v-if="error" role="alert" class="error-band">{{ error }}</p>
     <p v-if="refreshError" role="alert" class="error-band">{{ refreshError }}</p>
-    <div class="transfer-list"><h2>{{ t("进行中的传输") }}</h2>
+    <!-- 全部取消 sits on the card it acts on, the way 清除传输历史 sits on the
+         history card, rather than in the send bar — which is where the controls
+         that *start* work belong, and every one of them needs a target first.
+         It cancels every row at once; the sidecar reads the live list, so a
+         transfer that arrived since the last poll is included. -->
+    <div class="transfer-list transfer-list--active">
+      <div class="transfer-list-header">
+        <h2>{{ t("进行中的传输") }}</h2>
+        <button class="danger-outline" :disabled="busy || !active.length" @click="cancelAll"><X :size="17" />{{ t("全部取消") }}</button>
+      </div>
       <div v-if="!active.length" class="empty"><FileUp :size="34" /><p>{{ t("暂无进行中的传输") }}</p></div>
       <article v-for="item in active" :key="item.id" class="transfer-row">
         <div class="transfer-main"><strong>{{ item.filename || t("未知文件") }}</strong><span class="muted small">{{ [item.direction === "up" ? t("发送") : t("接收"), activeStatus(item), formatSize(item.size), formatSpeed(item.speed), item.eta].filter(Boolean).join(" · ") }}</span></div>
@@ -315,10 +427,14 @@ onUnmounted(() => {
            transfer is not a record, so clearing records cannot touch one. -->
       <div class="transfer-list-header">
         <h2>{{ t("传输历史") }}</h2>
-        <button class="danger" :disabled="busy || !history.length" @click="clearOpen = true"><Eraser :size="16" />{{ t("清除传输历史") }}</button>
+        <button class="danger-outline" :disabled="busy || !history.length" @click="clearOpen = true"><Eraser :size="16" />{{ t("清除传输历史") }}</button>
       </div>
+      <!-- The panel's own summary of the list, under the header it belonged to.
+           It is stated once for the card rather than counted per row, which is
+           what a user checks before clearing the list. -->
+      <p v-if="historyStats" class="muted small transfer-history-stats">{{ historyStats }}</p>
       <div v-if="!history.length" class="empty"><p>{{ t("暂无传输记录") }}</p></div>
-      <article v-for="item in history" :key="item.id" class="transfer-row">
+      <article v-for="item in history" :key="item.id" class="transfer-row" @contextmenu.prevent="rowMenu($event, item)">
         <!-- The panel's history rows put the reason in the badge, where the
              native row's slot beside the name used to say only that it was not
              completed: the reason is what the user wants from a failed row. -->
@@ -331,7 +447,7 @@ onUnmounted(() => {
           <button class="icon-button" :disabled="busy" :aria-label="t('打开文件')" :title="t('打开文件')" @click="action('open', item.id)"><ExternalLink :size="16" /></button>
           <button class="icon-button" :disabled="busy" :aria-label="t('打开所在文件夹')" :title="t('打开所在文件夹')" @click="action('reveal', item.id)"><FolderOpen :size="16" /></button>
         </template>
-        <button v-if="item.status !== 'completed' && item.direction === 'up' && item.path" class="icon-button" :aria-label="t('重试传输')" :title="t('重试传输')" @click="action('retry', item.id)"><RefreshCw :size="16" /></button>
+        <button v-if="retryable(item)" class="icon-button" :aria-label="t('重试传输')" :title="t('重试传输')" @click="action('retry', item.id)"><RefreshCw :size="16" /></button>
         <button class="icon-button" :aria-label="t('删除传输记录')" :title="t('删除传输记录')" @click="action('delete', item.id)"><Trash2 :size="16" /></button>
       </article>
     </div>
@@ -344,7 +460,7 @@ onUnmounted(() => {
       <button class="icon-button modal-close" :aria-label="t('关闭')" :title="t('关闭')" @click="clearOpen = false"><X :size="18" /></button>
       <h2 id="clear-transfers-title">{{ t("清除传输历史") }}</h2>
       <p class="muted">{{ t("共 {count} 条传输记录将被移除，正在进行的传输不受影响，此操作无法撤销。", { count: history.length }) }}</p>
-      <p v-if="error" role="alert">{{ error }}</p>
+      <p v-if="error" class="modal-error small" role="alert">{{ error }}</p>
       <div class="modal-actions"><button autofocus @click="clearOpen = false">{{ t("取消") }}</button><button class="danger" :disabled="busy || !history.length" @click="clearHistory">{{ t("清除传输历史") }}</button></div>
     </dialog>
   </section>

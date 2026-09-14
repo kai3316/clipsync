@@ -59,7 +59,7 @@ def main(argv=None) -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument(
         "--history-only", action="store_true",
-        help="Isolated history/IPC verification without network or clipboard monitoring",
+        help="Isolated history/IPC verification: no LAN runtime and no background services",
     )
     parser.add_argument(
         "--recover", action="store_true",
@@ -77,7 +77,13 @@ def main(argv=None) -> int:
             from internal.infrastructure.runtime.lan import LanRuntime
 
             runtime_factory = LanRuntime
-        app = SidecarApplication(runtime_factory=runtime_factory)
+        # Not only the LAN runtime: the periodic update check is a background
+        # service as well, and it reaches the network on its very first tick.
+        # Leaving it running made this mode's promise false, and left an HTTPS
+        # request in flight over the process's exit.
+        app = SidecarApplication(
+            runtime_factory=runtime_factory, update_checks=not args.history_only
+        )
         app.lifecycle.start()
         result = RpcServer(app, sys.stdin.buffer, sys.stdout.buffer).serve()
     except ApplicationError as exc:

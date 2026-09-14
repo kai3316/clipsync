@@ -58,6 +58,27 @@
   --danger-text: #98382f;
   --danger-soft: #fff2ef;
   --danger-line: #eed8d2;
+  /* A finding that is neither good nor a failure: diagnostics report one, and
+     the overview's health chip shows one.  It is the only third state in the
+     window, and it is amber rather than a second green or a second red so that
+     "look at this" cannot be read as either verdict. */
+  --warn: #c08a2e;
+  --warn-text: #9a6b1c;
+  /* The warning's own fill, for the one mark that is a chip rather than a word:
+     the speed test's reading.  It pairs with `--warn-text` the way the danger
+     pair above pairs, and for the same reason — amber type on a bare page is a
+     claim without a boundary, amber on its own tint is a badge. */
+  --warn-soft: #fbf3e2;
+  /* The overview's network map draws three counts as one ring, and three bands
+     of one hue are a scale rather than three colours competing on one card.
+     The first band is the accent itself — the green every live mark in the
+     window already uses — so these are the same hue stepped back twice: paired
+     but away, then merely seen.  The first band names the accent rather than
+     repeating it, so it follows the window into dark the way every other live
+     mark does. */
+  --state-connected: var(--accent);
+  --state-paired: #7cb2a2;
+  --state-discovered: #bccbc5;
   --shadow: 0 8px 24px rgb(0 0 0 / 12%);
   --shadow-soft: 0 6px 18px rgb(0 0 0 / 12%);
   --radius: 5px;
@@ -108,6 +129,11 @@ h2 { font-size: 17px; font-weight: 600; }
 nav { display: grid; gap: 5px; }
 nav button { width: 100%; justify-content: flex-start; border-color: transparent; min-height: 43px; }
 nav button.active { color: var(--accent-text); background: var(--accent-soft); }
+/* The unread chat count, pushed to the row's right edge so it sits in one
+   column down the sidebar and reads as a mark on the row rather than as part
+   of the page's name.  It is the accent's own colour and not a warning one:
+   a message waiting is the ordinary thing this app is for, not a fault. */
+nav .nav-count { margin-left: auto; padding: 1px 7px; border-radius: 999px; background: var(--accent-soft); color: var(--accent-text); font-size: 11px; font-weight: 600; font-variant-numeric: tabular-nums; }
 /* The settings row is set apart from the pages above it by a rule, so the
    sidebar reads as "five places to look, and the window's own settings"
    rather than as six rows of the same kind.  The rule belongs to the row, not
@@ -193,6 +219,14 @@ time { font-size: 12px; color: var(--muted); }
 .history-row:hover .row-actions, .history-row:focus-within .row-actions { opacity: 1; }
 /* Nothing can point at a row here, so nothing may hide behind a pointer. */
 @media (hover: none) { .history-row .row-actions { opacity: 1; } }
+/* Where ↑/↓ have walked the list to.  A row reached by keyboard was never
+   hovered, so it cannot borrow the hover state to say which one it is: the
+   cursor is drawn in its own right, and it brings the action strip with it
+   (`:focus-within` would have, if the row held focus — it does not, the window
+   does).  The accent is an active chip's, so "this one" never reads as a
+   fault. */
+.history-row--kbd { background: var(--accent-soft); box-shadow: inset 0 0 0 1px var(--accent-line); }
+.history-row--kbd .row-actions { opacity: 1; }
 /* At the end of a list row the actions are a quiet strip, so their boxes go.
    A device's are the only way to act on it, so they keep theirs. */
 .row-actions button { border: 0; }
@@ -206,8 +240,20 @@ input[type="checkbox"] { width: 16px; height: 16px; flex-shrink: 0; accent-color
 .select-visible { display: inline-flex; align-items: center; gap: 6px; }
 .batch-actions { display: flex; gap: 2px; margin-left: auto; }
 .pinned { color: var(--accent); }
-.empty { min-height: 310px; display: flex; flex-direction: column; align-items: center; justify-content: center; text-align: center; gap: 14px; padding: 30px; }
-.empty > svg { color: #8d9c96; }
+/* A placeholder carries the weight of what it stands in for, and the window has
+   two sizes of that, not one.  `.empty` is the placeholder of a *region* — a
+   card, a rail, a conversation — and is the height of what it says, so a list
+   reading 暂无进行中的传输 is one line rather than a card's worth of void; it was
+   given the page's own 310px, which is most of why a fresh transfers page was
+   two tall blank blocks.  `.empty--page` is the placeholder of a whole view,
+   where the alternative to a fixed height is nothing at all, and says so. */
+.empty { display: flex; flex-direction: column; align-items: center; justify-content: center; text-align: center; gap: 14px; padding: 34px 20px; }
+.empty--page { min-height: 310px; padding: 30px; }
+/* The icon is the state's, not the page's, so it is the same muted grey the
+   rest of the shell's quiet marks use.  It was the one literal colour left below
+   the tokens — `#8d9c96` — and a literal cannot follow the window into the dark
+   theme, where it left the empty state's icon darker than its own sentence. */
+.empty > svg { color: var(--muted); }
 .empty p { max-width: 350px; line-height: 1.6; }
 .pagination { padding: 18px var(--page-gutter); display: flex; justify-content: flex-end; align-items: center; gap: 8px; font-size: 12px; color: var(--muted); }
 /* Except inside a list that carries the gutter itself, where the strip is the
@@ -223,11 +269,14 @@ input[type="checkbox"] { width: 16px; height: 16px; flex-shrink: 0; accent-color
    element that knows where that edge is is the bar itself.  `position: relative`
    is what makes it that box. */
 .bottom-status { position: relative; flex-shrink: 0; display: flex; align-items: center; gap: 6px; padding: 11px 22px; border-top: 1px solid var(--line); color: var(--muted); font-size: 11px; }
-/* Only the runtime status text takes the free space, so the sync controls sit
-   together against the right edge; the pause countdown and the notice that
-   follow it must not each claim a share of that space. */
+/* The label stays at the left and the runtime status takes the free space, so
+   the state sits against the right edge the way a status bar's does; the pause
+   countdown and the notice that follow it must not each claim a share of that
+   space.  The bar carried the sync switch and the pause presets beside the
+   status until 2026-09-14 and no longer does, which is why the state is now the
+   only thing on the right rather than the first of a group. */
 .bottom-status span:first-of-type { margin-left: auto; }
-.pause-status, .pause-label { white-space: nowrap; }
+.pause-status { white-space: nowrap; }
 .error-band { display: flex; gap: 10px; align-items: center; padding: 14px var(--page-gutter); color: var(--danger-text); background: var(--danger-soft); border-bottom: 1px solid var(--danger-line); }
 .error-band > svg { flex-shrink: 0; }
 .error-band strong { font-weight: 550; }
@@ -275,6 +324,11 @@ button.primary { background: var(--accent-solid); color: var(--on-accent); }
    by a second warning colour. */
 .channel--unpaired { border-style: dashed; background: transparent; }
 .channel--pending { border-color: var(--accent-line); color: var(--accent-text); }
+/* A retry in flight is work being done, not the failure it will become if the
+   attempts run out — so it is the one chip that is neither the accent's own
+   colour (it is not a working link) nor grey (it is not settled), and it wears
+   the warning hue until it resolves one way or the other. */
+.channel--connecting { border-color: var(--warn); color: var(--warn-text); }
 /* This row used to pin itself to the top of the scroll, the way the history
    page's toolbar does.  It cannot any more: the tab strip sits at that offset
    now, and where a second pinned row's own top would have to be is the strip's
@@ -300,17 +354,10 @@ button.primary { background: var(--accent-solid); color: var(--on-accent); }
    the same kind of thing: a titled card of labelled rows.  One rule for the
    card, and one for the column of them, means the pages cannot drift apart.
 
-   Two columns only when there is room for two rows of a 168px name with its
-   control beside them; below that they stack.  The track's minimum is written
-   `min(560px, 100%)` so a column narrower than 560px — any window under about
-   1400px, where the rail and two gutters come off the top — shrinks to the
-   column rather than pushing the card out of the page.
-
-   `page-col` is the stack inside one column, for a page whose cards are not
-   all the same size: the AI page puts its own two cards beside the peer's one
-   rather than letting the grid drop the third under the first two. */
-.page-panels { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(560px, 100%), 1fr)); gap: 16px; align-items: start; margin: 26px 0 32px; }
-.page-panels > * { min-width: 0; }
+   `page-col` is that column.  A `.page-panels` grid stood beside it — an
+   `auto-fit` of 560px tracks for a page that wanted two columns of cards — and
+   nothing has drawn one since the devices page and the AI page each became a
+   strip of tabs over a single column. */
 .page-col { display: grid; gap: 16px; align-content: start; }
 /* A long page drawn as a few questions that share one title.  The devices page
    and the AI page were each a single scroll of three cards, so the card the
@@ -352,6 +399,10 @@ button.primary { background: var(--accent-solid); color: var(--on-accent); }
    group row says where the reader is with the accent text and the underline
    under it, and nothing else. */
 .page-tabs button.page-tab--active, .settings-nav-groups button.active { color: var(--accent-text); background: none; border-bottom-color: var(--accent-solid); }
+/* A tab whose panel holds something the reader has not dealt with yet: the
+   favorites editor carries the same `*` its own heading does, because a draft
+   is not less unsaved for being on the tab the reader walked away from. */
+.page-tab-mark { color: var(--muted); }
 /* The panel under the strip keeps the distance the page's cards used to have
    from the page's top edge; the strip supplies the space above itself. */
 .ai-page > .page-col, .device-list > .settings-section { margin: 20px 0 32px; }
@@ -380,6 +431,12 @@ button.primary { background: var(--accent-solid); color: var(--on-accent); }
 .modal-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 10px; }
 /* A failed action reported inside a dialog: red type on the dialog's own
    surface, not the full-width band the page uses. */
+/* A dialog's own failure line.  Every dialog that can fail shows it with this
+   class and `role="alert"`: five of them shared the alert role and then three
+   painted the message in the reader's own body colour, so a refused delete read
+   as an ordinary sentence while the same refusal on the page behind it read as
+   an error.  It is a line rather than a band — the dialog is already the frame,
+   and a second frame inside it would be two borders for one failure. */
 .modal-error { color: var(--danger-text); }
 .log-view { max-height: 46vh; overflow: auto; margin: 12px 0 20px; padding: 10px; background: var(--code); border: 1px solid var(--line); border-radius: 4px; font-family: var(--font-mono); font-size: 12px; line-height: 1.55; white-space: pre-wrap; overflow-wrap: anywhere; }
 /* A clip's own text, read-only and selectable. It scrolls rather than growing
@@ -428,29 +485,99 @@ button.primary { background: var(--accent-solid); color: var(--on-accent); }
 .diag-list h3 { margin: 0 0 8px; font-size: 13px; color: var(--muted); }
 .diag-list ul { margin: 0; padding: 0; list-style: none; display: grid; gap: 8px; }
 .diag-list ul li { display: grid; gap: 3px; padding-left: 10px; border-left: 3px solid var(--line); line-height: 1.55; overflow-wrap: anywhere; }
-.diag-list ul li.diag-ok { border-left-color: #4a8f5b; }
-.diag-list ul li.diag-warn { border-left-color: #c08a2e; }
+.diag-list ul li.diag-ok { border-left-color: var(--accent); }
+.diag-list ul li.diag-warn { border-left-color: var(--warn); }
 .diag-list ul li.diag-fail { border-left-color: var(--danger); }
 .diag-list ul li > .status-action { justify-self: start; }
 .diag-label { margin-right: 8px; font-weight: 600; }
 /* The check's name and what it found belong on one line, so they share a single
    item of the surrounding grid instead of becoming two rows of it. */
 .diag-item { display: block; }
-.diag-summary--ok { color: #3f7a4f; }
-.diag-summary--warn { color: #9a6b1c; }
+.diag-summary--ok { color: var(--accent-text); }
+.diag-summary--warn { color: var(--warn-text); }
 .diag-summary--fail { color: var(--danger-text); }
+/* A section's heading carries its own verdict and size, so the report can be
+   triaged before anything is read in detail. */
+.diag-list h3 { display: flex; align-items: baseline; gap: 8px; }
+.diag-count { color: var(--muted); font-weight: 400; }
+.diag-verdict { margin-left: auto; font-weight: 600; }
+/* The per-check mark, in the border's colour: the stripe says "this row is a
+   warning" to someone scanning, the glyph says which of the three it is. */
+.diag-mark { margin-right: 6px; font-weight: 700; }
+li.diag-ok > .diag-mark { color: var(--accent); }
+li.diag-warn > .diag-mark { color: var(--warn-text); }
+li.diag-fail > .diag-mark { color: var(--danger-text); }
 button.danger { color: #fff; background: var(--danger); border-color: var(--danger); }
+/* A destructive control that stands on a page or a row rather than in a dialog.
+   The fill belongs to the button that actually commits the deletion, and a page
+   showing two solid red slabs reads as a page whose business is destroying
+   things — the transfers page had three filled buttons, two of them red, and
+   the loudest thing on it was "cancel everything".  Both legacy fronts drew
+   these as red type behind a hairline instead (the panel's 移除设备 and
+  清除加密密码, the web panel's 全部取消), so this is that treatment in the
+   window's own tokens; the solid fill stays where legacy kept it too, on the
+   button a dialog puts in front of you.  The device-row selector repeats because
+   `.device-row .row-actions button` out-specifies a lone `button` class and would
+   put the grey hairline back. */
+button.danger-outline,
+.device-row .row-actions button.danger-outline { color: var(--danger-text); background: transparent; border-color: var(--danger-line); }
+button.danger-outline:hover:not(:disabled),
+.device-row .row-actions button.danger-outline:hover:not(:disabled) { background: var(--danger-soft); border-color: var(--danger-text); }
 .spinning { animation: spin 1s linear infinite; }
-.favorites-view { flex: 1; min-width: 0; }
-.favorites-workspace { margin: 0 var(--page-gutter); display: grid; min-width: 0; }
-.favorites-workspace.has-editor { grid-template-columns: minmax(0, 1fr) minmax(260px, 1fr); gap: 24px; }
+/* The favorites page is a library and the editor opened out of it, and it is
+   built like the AI page and the devices page: a strip of tabs, then one panel.
+   The two were three columns of one grid — the groups rail, the list, and the
+   editor beside them — and below about 1400px all three were squeezed into
+   what was left.  The page and its panels take the gutter, as the AI page's
+   does, now that no panel is a column of its own. */
+.favorites-view { flex: 1; min-width: 0; margin: 0 var(--page-gutter); }
+.favorites-view > .page-col { margin: 20px 0 32px; }
+/* The toolbar is the history page's, pinned to the window's top edge.  Here the
+   tab strip is the pinned row, and two opaque strips at `top: 0` would sit on
+   each other — the same reason the devices page's own toolbar gave it up. */
+.favorites-view .toolbar { position: static; padding: 0; }
+.favorites-workspace { display: grid; min-width: 0; grid-template-columns: minmax(150px, 200px) minmax(0, 1fr); gap: 24px; }
 .favorites-list { min-width: 0; }
+.favorites-groups { min-width: 0; display: flex; flex-direction: column; gap: 2px; align-content: start; }
+.favorites-groups .list-heading { display: flex; justify-content: space-between; align-items: center; gap: 8px; }
+/* A group's row and the way into its menu.  The row is the filter and takes
+   what is left; the button beside it holds a fixed 22px so a column of names
+   starts at the same x whether or not the row beside it has one. */
+.group-line { display: flex; align-items: center; gap: 2px; }
+.group-line .group-row { flex: 1; min-width: 0; }
+.group-more { display: flex; align-items: center; justify-content: center; flex: 0 0 22px; width: 22px; height: 22px;
+  padding: 0; border: 0; border-radius: 6px; background: none; color: var(--muted); cursor: pointer; }
+.group-more:hover:not(:disabled) { background: var(--surface); color: inherit; }
+.group-row { display: flex; justify-content: space-between; align-items: center; gap: 8px; width: 100%;
+  padding: 7px 10px; border: 0; border-radius: 8px; background: none; color: inherit;
+  text-align: left; cursor: pointer; font: inherit; }
+.group-row:hover:not(:disabled) { background: var(--surface); }
+/* The active group is the one the list under it is filtered to, so it is
+   marked by more than a hover tint. */
+.group-row.active { background: var(--surface); font-weight: 600; }
+.group-row .group-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.group-row .group-count { color: var(--muted); font-variant-numeric: tabular-nums; font-size: 12px; }
+.group-input { width: 100%; min-width: 0; padding: 5px 8px; font: inherit; border-radius: 8px; }
 .favorite-row { padding: 18px 0; border-bottom: 1px solid var(--line); display: flex; flex-wrap: wrap; gap: 12px; align-items: center; }
 .favorite-row.selected { border-left: 3px solid var(--accent); padding-left: 10px; }
+/* A drag in progress, and the row the pointer is over: one is lifted, the
+   other shows where it would land. */
+.favorite-row.dragging { opacity: 0.5; }
+.favorite-row.drag-over { box-shadow: inset 0 2px 0 var(--accent); }
+.drag-handle { display: flex; align-items: center; color: var(--muted); cursor: grab; }
+.drag-handle:active { cursor: grabbing; }
+.row-step { display: flex; flex-direction: column; gap: 2px; }
 .favorite-summary { flex: 1 1 160px; min-width: 0; overflow-wrap: anywhere; }
 .favorite-summary h2 { font-size: 15px; margin-bottom: 8px; }
 .favorite-summary p { white-space: pre-wrap; line-height: 1.6; margin-bottom: 8px; display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; }
-.favorite-editor { min-width: 0; padding: 12px 0 24px; }
+/* The editor has the page to itself now, and a textarea as wide as the window
+   is a line no one can read: the form takes a measure and leaves the rest. */
+.favorite-editor { min-width: 0; max-width: 760px; padding: 0 0 24px; }
+/* The band is full-bleed and brings its own gutter, so it cancels the page's —
+   the negative margin the overview's band already carries for the same reason.
+   It sits above the panels rather than inside one, because a refused write can
+   come from either: a group rename from the library, a save from the editor. */
+.favorites-view > .error-band { margin: 0 calc(var(--page-gutter) * -1); }
 .editor-heading { display: flex; justify-content: space-between; align-items: center; gap: 10px; margin-bottom: 12px; }
 .favorite-editor fieldset { border: 0; padding: 0; margin: 12px 0 0; min-width: 0; display: grid; gap: 10px; }
 .favorite-editor input, .favorite-editor textarea { width: 100%; min-width: 0; border: 1px solid var(--line); border-radius: 4px; background: var(--surface); padding: 9px; }
@@ -573,6 +700,24 @@ button.danger { color: #fff; background: var(--danger); border-color: var(--dang
    list of the values behind a setting, a progress bar, the path an update landed
    in, a line reporting what the last button did. */
 .setting-block { margin: 10px 0 0; margin-inline-start: calc(var(--setting-name) + var(--setting-gap)); }
+/* The relay test: a button and what it found.  The rows line up on their own
+   marks rather than on the bullets a list would add, because the mark is the
+   answer and a bullet in front of it would be a second, emptier one. */
+.relay-test-block { display: grid; gap: 8px; justify-items: start; }
+.relay-test { display: grid; gap: 6px; }
+.relay-test-list { list-style: none; margin: 0; padding: 0; display: grid; gap: 4px; }
+.relay-test-list > li { display: flex; align-items: baseline; gap: 8px; font-size: 12px; }
+.relay-test-mark { font-weight: 700; }
+/* The same two colours the diagnostics report marks its own checks with, so
+   "reachable" reads the same in both places.  Both take them from the tokens now
+   — a pass is the window's own green, a failure its own red — where they used to
+   agree by both writing out the same two hand-picked literals, which is an
+   agreement nothing enforced and nothing carried into the dark theme. */
+.relay-test--ok > .relay-test-mark { color: var(--accent-text); }
+.relay-test--fail > .relay-test-mark { color: var(--danger-text); }
+/* A broker address is a string to be checked character by character, which is
+   what the monospace face is for here as it is for the pairing code. */
+.relay-test-endpoint { font-family: var(--font-mono); overflow-wrap: anywhere; }
 /* A block that is the card's own content rather than an answer to the row above
    it.  The indent exists to hang a block under the control it belongs to; a
    status line at the card's own left edge is not under any control. */
@@ -801,6 +946,10 @@ button.danger { color: #fff; background: var(--danger); border-color: var(--dang
    the button does not push the rule down. */
 .transfer-list-header { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 4px 12px; border-bottom: 1px solid var(--line); }
 .transfer-list-header h2 { border-bottom: 0; }
+/* The panel's own summary of the history card, under the header it belonged to.
+   It carries a little air below it so the first row's rule does not sit close
+   enough to the sentence to read as a rule under the sentence. */
+.transfer-history-stats { margin: 0; padding: 8px 0 2px; }
 /* The last bulk action's report — "cancel all" and clearing history write to
    the same line, because it is the same question: what did that button do. */
 .bulk-status { margin: 0 var(--page-gutter); }
@@ -814,6 +963,18 @@ button.danger { color: #fff; background: var(--danger); border-color: var(--dang
    and the row's height is the answer's, not the list's. */
 .staged-drop-names { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .speed-test { display: flex; align-items: center; gap: 8px; margin: 0 var(--page-gutter) 4px; font-size: 12px; color: var(--muted); }
+/* The panel's word for how good the measurement is.  Its three colours are the
+   panel's three readings — a fast link is the accent's own green, a middling one
+   the warning amber, a slow one the failure red — which is also why this is the
+   one place on the page where a speed is colour-graded rather than merely
+   printed: the number says how fast, the colour says whether that is fine. */
+.speed-quality { padding: 1px 7px; border-radius: 999px; font-size: 11px; font-weight: 600; }
+.speed-quality--fast { background: var(--accent-soft); color: var(--accent-text); }
+.speed-quality--good { background: var(--warn-soft); color: var(--warn-text); }
+.speed-quality--slow { background: var(--danger-soft); color: var(--danger-text); }
+/* A test that ended without a measurement is the panel's failure line, in the
+   panel's failure colour — not a speed of zero presented as a reading. */
+.speed-failed { color: var(--danger-text); }
 .transfer-row { display: grid; grid-template-columns: minmax(0, 1fr) minmax(120px, 240px) auto auto auto; gap: 12px; align-items: center; padding: 15px 0; border-bottom: 1px solid var(--line); }
 .transfer-main { min-width: 0; display: grid; gap: 5px; overflow-wrap: anywhere; }
 .transfer-row progress { width: 100%; accent-color: var(--accent); }
@@ -872,6 +1033,145 @@ button.danger { color: #fff; background: var(--danger); border-color: var(--dang
 *::-webkit-scrollbar-track, *::-webkit-scrollbar-corner { background: transparent; }
 *::-webkit-scrollbar-thumb { background: var(--line); border: 3px solid transparent; background-clip: content-box; border-radius: 999px; }
 *::-webkit-scrollbar-thumb:hover { background: var(--muted); background-clip: content-box; }
+/* ── The overview page ──────────────────────────────────────────────────────
+   The one page drawn from a read of its own rather than from the lists the
+   other pages keep, so it is the only place in the window where five unrelated
+   counts and a live status line share a screen.  It is laid out in the order
+   the questions are asked — what is this machine doing, what can I switch,
+   what has it done, who is here, what just happened — as one column of cards
+   in the page's own gutter, with the two pairs that sit side by side folding
+   to one column when the window is narrow.
+
+   The three shapes the eye lands on — the status strip, the counters and the
+   ring — all say their numbers in words beside the shape rather than inside
+   it.  A colour here is always a second copy of something already written
+   down, never the only copy of it. */
+.overview-view { flex: 1; min-width: 0; margin: 0 var(--page-gutter); padding: 20px 0 28px; display: grid; gap: 16px; align-content: start; }
+/* A read that failed is news about the whole page, so its band spans the page
+   rather than sitting inset inside it like the cards it replaces. */
+.overview-view > .error-band { margin: 0 calc(var(--page-gutter) * -1); }
+/* The status line is the page's headline and its only strip: what the machine
+   is doing, on which network, with how many devices — and at the far end,
+   whether anything is wrong and how long it has been up.  The health chip is
+   a button because a verdict that is not "normal" is the start of a question,
+   and the diagnostics card is the answer to it. */
+.overview-status { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; min-height: 40px; padding: 6px 14px; background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius-lg); font-size: 13px; }
+.overview-sep { width: 1px; align-self: stretch; margin: 2px 1px; background: var(--line); }
+.overview-gap { flex: 1; }
+.overview-health { min-height: 26px; padding: 3px 10px; gap: 6px; font-size: 12px; color: var(--muted); background: transparent; }
+.overview-health--ok { color: var(--accent-text); }
+.overview-health--warn { color: var(--warn-text); }
+.overview-health--fail { color: var(--danger-text); }
+/* The state as one glyph, wherever it appears: the sync line, the device
+   card's chips, a connected device's name, the health chip. */
+.overview-dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; background: var(--muted); }
+.overview-dot--on, .overview-dot--ok { background: var(--accent); }
+.overview-dot--off, .overview-dot--unknown { background: var(--muted); }
+.overview-dot--warn { background: var(--warn); }
+.overview-dot--fail { background: var(--danger); }
+/* Two rows of cards, each pair being one question answered twice: the machine
+   beside its controls, and the network map beside the devices on it.
+   One rule for both, and `stretch` rather than `start`, which is what the two
+   rows used to disagree about: the first split into two equal columns and the
+   second into a fixed 300px beside the rest, and both let each card take its
+   own height.  The effect on screen was two cards in a row whose titles sat at
+   different heights and whose bottom edges never lined up — the raggedness a
+   reader calls 乱 without being able to name it.  Equal columns and one shared
+   height put every card title on its row's own line. */
+.overview-row { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; align-items: stretch; }
+.overview-card { min-width: 0; display: grid; gap: 12px; align-content: start; padding: 16px 18px 18px; background: var(--raised); border: 1px solid var(--line); border-radius: var(--radius-lg); }
+/* A card's title is a label on a box rather than a heading in a document: it
+   says what the box is and then gets out of the way of what is under it. */
+.overview-card > h2, .overview-card-head > h2 { font-size: 13px; font-weight: 600; color: var(--muted); }
+/* A title that has a way out of its card beside it.  The pair sits on one line
+   and the action is the card's own button, not the page's: 查看全部 belongs to
+   最近活动 the way 显示二维码 belongs to 已连接设备. */
+.overview-card-head { display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between; gap: 4px 12px; }
+/* ── This machine ── */
+.overview-name { display: flex; align-items: center; gap: 9px; font-size: 15px; font-weight: 600; }
+.overview-name > svg { flex-shrink: 0; color: var(--accent-text); }
+.overview-name-text { min-width: 0; overflow-wrap: anywhere; }
+/* The pencil and the box it opens keep the line's own height: this is a name
+   being corrected in place, not a form being opened. */
+.overview-name .icon-button { width: 28px; height: 28px; min-width: 28px; }
+.overview-name-input { flex: 1; min-width: 0; min-height: 28px; padding: 3px 8px; font: inherit; font-size: 15px; font-weight: 600; color: inherit; background: var(--surface); border: 1px solid var(--line); border-radius: 4px; }
+.overview-facts { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 5px 12px; margin: 0; font-size: 12px; }
+.overview-facts dt { color: var(--muted); }
+.overview-facts dd { margin: 0; min-width: 0; overflow-wrap: anywhere; }
+/* The device ID is read back on the other screen to prove these are the same
+   two machines, so it is set in the face that makes a hex string comparable. */
+.overview-facts .overview-mono { font-family: var(--font-mono); font-size: 11px; }
+.overview-chips { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin: 0; }
+.overview-chip { display: inline-flex; align-items: center; gap: 6px; min-height: 26px; max-width: 100%; padding: 3px 10px; font-size: 12px; color: var(--muted); background: var(--surface); border: 1px solid var(--line); border-radius: 999px; overflow-wrap: anywhere; }
+/* A chip that leads somewhere says so under the pointer, in the accent every
+   other link-shaped control in the window uses. */
+.overview-chip--link { cursor: pointer; }
+.overview-chip--link:hover { color: var(--accent-text); border-color: var(--accent-line); }
+.overview-address { display: flex; flex-wrap: wrap; align-items: center; gap: 9px; margin: 0; }
+.overview-address code { min-width: 0; padding: 3px 8px; font-family: var(--font-mono); font-size: 12px; background: var(--code); border: 1px solid var(--line); border-radius: 4px; overflow-wrap: anywhere; }
+/* The page's own buttons are the height of the strip they sit in rather than
+   the window's 36px control: five of them at full height would be the loudest
+   thing on a page whose subject is numbers. */
+.overview-button { min-height: 30px; padding: 4px 11px; gap: 6px; font-size: 12px; }
+/* ── The switches ── */
+.overview-switch { display: flex; align-items: center; justify-content: space-between; gap: 12px; min-height: 30px; font-size: 13px; }
+.overview-pause { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin: 0; padding-top: 10px; border-top: 1px solid var(--line); }
+/* ── The counters ── */
+.overview-stats { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 16px; }
+.overview-stat { display: grid; grid-template-columns: auto minmax(0, 1fr); align-items: center; gap: 0 9px; padding: 14px 16px; background: var(--raised); border: 1px solid var(--line); border-radius: var(--radius-lg); }
+.overview-stat > svg { color: var(--muted); }
+/* Digits that line up: four counters read side by side are compared by their
+   numbers, and a proportional face shifts each one off the column above it. */
+.overview-stat strong { font-size: 22px; font-weight: 650; font-variant-numeric: tabular-nums; }
+.overview-stat span { grid-column: 1 / -1; margin-top: 5px; font-size: 12px; color: var(--muted); }
+.overview-stat small { grid-column: 1 / -1; margin-top: 1px; font-size: 11px; color: var(--muted); }
+/* ── The network map ── */
+.overview-ring-wrap { display: flex; flex-wrap: wrap; align-items: center; gap: 18px; }
+/* The ring is the three counts drawn to scale and the legend beside it writes
+   all three out, so the drawing is never the only place a number lives. */
+.overview-ring { position: relative; width: 108px; height: 108px; flex-shrink: 0; border-radius: 50%; }
+.overview-ring-center { position: absolute; inset: 20px; display: grid; place-content: center; gap: 1px; text-align: center; background: var(--raised); border-radius: 50%; }
+.overview-ring-center strong { font-size: 21px; font-weight: 650; font-variant-numeric: tabular-nums; }
+.overview-ring-center small { font-size: 11px; color: var(--muted); }
+.overview-legend { display: grid; gap: 7px; margin: 0; padding: 0; list-style: none; min-width: 0; font-size: 12px; }
+.overview-legend li { display: flex; align-items: center; gap: 8px; }
+.overview-swatch { width: 10px; height: 10px; flex-shrink: 0; border-radius: 3px; }
+.overview-swatch--connected { background: var(--accent); }
+.overview-swatch--paired { background: var(--state-paired); }
+.overview-swatch--discovered { background: var(--state-discovered); }
+.overview-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+/* ── The feed ── */
+.overview-feed { display: grid; gap: 2px; margin: 0; padding: 0; list-style: none; }
+/* A row of the feed copies its clip, so the whole row is the target and it
+   lights up as one under the pointer.  The mark column is a fixed 14px whether
+   or not a row carries a mark, so the one line of text every row holds is the
+   same width on all of them instead of shifting under the eye as the ticked and
+   unticked rows alternate.
+   The column is held open by `.overview-feed-mark` and not by the track alone:
+   a `v-if` with no `v-else` leaves no box behind, and a track no element lands
+   in is a track the next element slides into — which is how the age came to sit
+   in this 14px column, one character wide, on every row with neither a tick nor
+   a pin. */
+.overview-feed-row { display: grid; grid-template-columns: auto minmax(0, 1fr) 14px max-content; align-items: center; gap: 10px; width: 100%; min-height: 34px; padding: 6px 8px; font-size: 13px; text-align: left; border: 1px solid transparent; }
+.overview-feed-row:hover:not(:disabled) { background: var(--surface); border-color: var(--line); }
+.overview-feed-row > svg { flex-shrink: 0; color: var(--muted); }
+/* The mark's box: the tick, or the pin, or nothing — but a box either way. */
+.overview-feed-mark { display: flex; align-items: center; justify-content: center; color: var(--muted); }
+/* One line per clip: the feed is a glance at what just happened, and the whole
+   of it is one click away on the history page. */
+.overview-feed-text { min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+/* When the row ran short of room the age broke one character to a line and stood
+   up the right of the row as a column of glyphs: the track holding it was `auto`,
+   whose minimum is the text's *min-content* width, and for Chinese that is a
+   single character.  `max-content` says the column is as wide as the whole age
+   and no narrower, and the clip's own track — `minmax(0, 1fr)` — is the one that
+   gives way, which is what its ellipsis is for. */
+.overview-feed-age { white-space: nowrap; }
+/* The tick a row shows for as long as it is the one last copied, in the
+   history page's own green — the same confirmation the history rows and the
+   favourites rows give, for the same action.  It takes the pin's place rather
+   than sitting beside it, so the row's right edge is one width. */
+.overview-feed-row .overview-feed-copied { color: var(--accent); }
 @media (max-width: 700px) {
   /* The gutter is the one number a narrow window moves, and everything placed by
      it moves with it: the page header, the toolbar, the lists and their filter
@@ -891,17 +1191,35 @@ button.danger { color: #fff; background: var(--danger); border-color: var(--dang
   nav button { padding: 10px; justify-content: center; }
   header { padding: 24px var(--page-gutter) 20px; flex-wrap: wrap; }
   .toolbar { padding: 18px var(--page-gutter); }
-  .history-row { grid-template-columns: minmax(0, 1fr) auto; gap: 9px; }
-  .history-content { grid-column: 1 / -1; }
-  .history-row .history-selection { grid-column: 1; grid-row: 1; }
-  .history-row .history-content { grid-row: 2; }
-  .history-row:has(.history-selection) time { grid-row: 3; }
-  .history-row:has(.history-selection) .row-actions { grid-row: 3; }
-  .history-row time { grid-column: 1; grid-row: 2; }
-  .row-actions { grid-column: 2; grid-row: 2; }
+  /* Three tracks rather than two, and the checkbox takes the first on its own
+     rather than a row of its own: stacked as grid rows, the box sat alone on a
+     line about 30px tall with nothing beside it, on every one of forty-odd
+     rows.  Beside the content it costs the width it actually occupies, and the
+     strip of metadata under the text still gets the whole remaining column. */
+  .history-row { grid-template-columns: auto minmax(0, 1fr) auto; gap: 9px 10px; }
+  /* Top-aligned, because beside the content the box's own line is the first
+     line of the clip: centred, it drifts down the block and reads as belonging
+     to whichever line it lands on.  The nudge puts it on that first line's
+     baseline rather than on the row's top edge. */
+  .history-row .history-selection { grid-column: 1; grid-row: 1; align-self: start; padding-top: 1px; }
+  .history-row .history-content { grid-column: 2 / -1; grid-row: 1; }
+  .history-row time { grid-column: 2; grid-row: 2; }
+  .history-row .row-actions { grid-column: 3; grid-row: 2; }
+  /* Narrow: a device's controls go under its identity instead of beside it.
+     Beside it they are an `auto` track, which sizes to the width of the five
+     buttons plus their borders; the name and the id are left the remainder,
+     and at 390px that is about forty pixels — a device name wrapping to one
+     letter a line and a UUID down the page in three-character pieces. */
+  .device-row { grid-template-columns: auto minmax(0, 1fr); }
+  .device-row .row-actions { grid-row: 3; grid-column: 2; justify-self: start; }
+  .device-channels, .device-note, .device-full, .device-row > .pairing-controls { grid-column: 2; }
   .pagination { padding: 14px var(--page-gutter); }
   .bottom-status { flex-wrap: wrap; }
   .bottom-status span:first-of-type { margin-left: 0; width: 100%; }
+  /* The footer is not a menu, and this is the one row that has to stay on every
+     page.  Narrow, it has room for what the app is doing and nothing else —
+     which since 2026-09-14 is all it carries: the switch and the three pause
+     presets moved out to the overview's own card, where they already were. */
   .error-band, .status-band { padding: 12px var(--page-gutter); align-items: flex-start; }
   .settings-panel { margin: 0 var(--page-gutter) 28px; }
   /* Narrow: the two-column setting row folds to one, so a long label and a long
@@ -937,9 +1255,20 @@ button.danger { color: #fff; background: var(--danger); border-color: var(--dang
   .transfer-row { grid-template-columns: minmax(0, 1fr) auto auto auto; }
   .transfer-main { grid-column: 1 / -1; grid-row: 1; }
   .transfer-row progress { grid-column: 1; grid-row: 2; }
-  .favorites-workspace.has-editor { grid-template-columns: minmax(0, 1fr); }
-  .favorite-editor { grid-row: 1; border-bottom: 1px solid var(--line); }
+  /* The sidebar goes above the list rather than beside it, and the editor
+     keeps the first row: it is what the reader just opened. */
+  .favorites-workspace { grid-template-columns: minmax(0, 1fr); }
+  .favorites-groups { flex-direction: row; flex-wrap: wrap; align-items: center; }
+  .favorites-groups .list-heading { flex-basis: 100%; }
+  .group-line { flex: 0 0 auto; }
+  .group-line .group-row { flex: 0 1 auto; width: auto; }
   .favorites-list .pagination { flex-wrap: wrap; }
+  /* The overview's two pairs of cards sit side by side only while there is
+     room for two; narrow, each pair folds to one column and the four counters
+     to two — the count a narrow card holds without its number and its label
+     fighting over the line. */
+  .overview-row { grid-template-columns: minmax(0, 1fr); }
+  .overview-stats { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 }
 /* The dark theme is the same token list with the other values, in two blocks
    because CSS cannot put a media query and an attribute selector in one rule
@@ -963,6 +1292,11 @@ button.danger { color: #fff; background: var(--danger); border-color: var(--dang
     --danger-text: #ffb1a8;
     --danger-soft: #402b27;
     --danger-line: #63453e;
+    --warn: #d8a24a;
+    --warn-text: #e3b566;
+    --warn-soft: #3f3524;
+    --state-paired: #4a8a74;
+    --state-discovered: #4e5c56;
   }
 }
 :root[data-theme="dark"] {
@@ -982,4 +1316,9 @@ button.danger { color: #fff; background: var(--danger); border-color: var(--dang
   --danger-text: #ffb1a8;
   --danger-soft: #402b27;
   --danger-line: #63453e;
+  --warn: #d8a24a;
+  --warn-text: #e3b566;
+  --warn-soft: #3f3524;
+  --state-paired: #4a8a74;
+  --state-discovered: #4e5c56;
 }

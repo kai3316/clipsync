@@ -27,6 +27,16 @@ if not getattr(sys, "frozen", False):
 
 import contextlib
 
+from internal.application.use_cases.history import (
+    WEB_SOURCE as _WEB_SOURCE,
+)
+from internal.application.use_cases.history import (
+    WEB_SOURCE_LABEL as _WEB_SOURCE_LABEL,
+)
+from internal.application.use_cases.history import (
+    row_dto,
+    source_name,
+)
 from internal.clipboard.clipboard import strip_rich_formats
 from internal.clipboard.filter import ContentFilter
 from internal.clipboard.format import ClipboardContent
@@ -6055,13 +6065,21 @@ class Application:
                 if pid in paired_ids
             ]
         # ── Recent clipboard activity feed ─────────────────────────
+        # The same rows the history page lists, built by the same helper, so a
+        # row in the feed *is* a row there: it carries its id, which is what a
+        # window needs to copy it, pin it or open its menu.  This used to
+        # project four keys of its own (`text`/`type`/`time`/`pinned`) out of
+        # the same entries, which named nothing and so could do nothing with
+        # them.  The preview is cut to what the feed's one line shows; the id
+        # is what everything else goes through.
+        _names = {_WEB_SOURCE: _WEB_SOURCE_LABEL, self.cfg.device_id: self.cfg.device_name}
+        _names.update({p.device_id: p.device_name for p in self.cfg.peers.values()})
         recent_items = [
-            {
-                "text": (e.get("text_preview") or "")[:80],
-                "type": str(e.get("content_type") or "TEXT"),
-                "time": e.get("timestamp", 0),
-                "pinned": bool(e.get("pinned")),
-            }
+            row_dto(
+                e,
+                lambda sid: source_name(sid, _names, self.cfg.device_name),
+                preview_limit=80,
+            )
             for e in hist[:6]
         ]
         ntype, niface = _detect_network_type()

@@ -1,4 +1,4 @@
-import { currentLocale } from "./index";
+import { currentLocale, t } from "./index";
 
 /**
  * Human-readable values for the shell's surfaces.
@@ -45,6 +45,36 @@ export function speed(bytesPerSec: unknown): string {
   return `${(value / MB).toFixed(1)} MB/s`;
 }
 
+/** Two dates falling on the same calendar day, in local time. */
+function sameDay(left: Date, right: Date): boolean {
+  return left.getFullYear() === right.getFullYear()
+    && left.getMonth() === right.getMonth()
+    && left.getDate() === right.getDate();
+}
+
+/**
+ * A timestamp as it reads inside a conversation or a row list.
+ *
+ * Three cases, matching the legacy panels' `formatTime`: today shows the clock
+ * alone, yesterday is named, and anything older carries an `MM-DD` prefix so a
+ * message from last week cannot be read as one that just arrived.  A bare
+ * clock time is the one thing a chat list must not show for an old message.
+ */
+export function shortTime(seconds: number): string {
+  const date = new Date(seconds * 1000);
+  if (!seconds || isNaN(date.getTime())) return "";
+  const clock = new Intl.DateTimeFormat(currentLocale.value, {
+    hour: "2-digit", minute: "2-digit", hour12: false,
+  }).format(date);
+  const now = new Date();
+  if (sameDay(date, now)) return clock;
+  const yesterday = new Date(now.getFullYear(), now.getMonth(), now.getDate() - 1);
+  if (sameDay(date, yesterday)) return t("昨天 {time}", { time: clock });
+  const month = String(date.getMonth() + 1).padStart(2, "0");
+  const day = String(date.getDate()).padStart(2, "0");
+  return `${month}-${day} ${clock}`;
+}
+
 /**
  * The date and time a timestamp shows as, for the active locale.
  *
@@ -62,4 +92,49 @@ export function dateTime(seconds: number): string {
     minute: "2-digit",
     hour12: false,
   }).format(date);
+}
+
+/**
+ * The bracketed previews `history_db` writes for a clip that has no text of
+ * its own, and what each says to a reader.
+ *
+ * The labels are thunks rather than strings because the locale can change
+ * after this module loads: a `t("图片")` evaluated at import time would freeze
+ * the window into whichever language it started in.
+ *
+ * "[HTML]" is deliberately absent — it is the format's own name in both
+ * languages, so an entry for it would only be a second way to spell it.
+ */
+const PLACEHOLDER_PREVIEWS = new Map<string, () => string>([
+  ["[Image]", () => t("图片")],
+  ["[Vector Image]", () => t("矢量图")],
+  ["[Rich Text]", () => t("富文本")],
+]);
+
+/**
+ * A clip's preview, with the sidecar's placeholder labels in the reader's
+ * language.
+ *
+ * An image, a vector image and a rich-text clip have no text to preview, so
+ * `history_db` writes a bracketed English word into the preview column and
+ * every surface printed it verbatim — a Chinese window read "[Image]" on the
+ * line above the row's own 图片 chip.  It is a label rather than the user's
+ * words, so it follows the interface language here.  The panel's counterpart
+ * is `ClipsyncAPI.previewText`.
+ *
+ * Only the rendering changes.  The stored form is what the merge, the search
+ * index and the sidecar's own type filters read, and it is left alone.
+ */
+export function previewText(preview: unknown): string {
+  const stored = String(preview == null ? "" : preview);
+  const label = PLACEHOLDER_PREVIEWS.get(stored);
+  return label ? label() : stored;
+}
+
+/**
+ * Whether a preview is one of those labels rather than something the user
+ * copied — a clip whose text there is nothing more of to show.
+ */
+export function isPlaceholderPreview(preview: unknown): boolean {
+  return PLACEHOLDER_PREVIEWS.has(String(preview == null ? "" : preview));
 }

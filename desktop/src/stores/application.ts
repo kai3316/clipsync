@@ -10,6 +10,14 @@ export function createApplicationStore() {
     status: null as AppStatus | null,
     history: [] as HistoryItem[],
     selectedIds: [] as string[],
+    // Where the arrow keys have walked the history list to, or -1 for nowhere.
+    // The legacy panel kept the same cursor: ↑/↓ moved it, Enter copied the row
+    // it sat on and Delete removed it.  It is an index into `history` — the
+    // visible page — rather than an id, because every paging move refetches and
+    // an id from the page before would survive into a list that no longer holds
+    // it.  -1 rather than 0 so the first ↓ enters the list at the top instead of
+    // opening with a row already chosen.
+    kbdIndex: -1,
     devices: [] as Device[],
     query: "",
     // The history toolbar's filter, kept in the store beside the query because
@@ -26,6 +34,15 @@ export function createApplicationStore() {
     pending: false,
     refreshing: false,
     copiedId: null as string | null,
+    // The rows whose 下载 was answered, keyed `device_id:entry_id`.  A download
+    // is a request to another machine and the file arrives minutes later as a
+    // transfer, so the row has to say something in between or the click reads as
+    // a button that did nothing.  Not `copiedId`: that marks a clip that is now
+    // on the clipboard, which this is not — and it is one row, where several
+    // downloads can be outstanding.  Dropped when the peer refuses, and dropped
+    // again on a timer — see `clearRemoteFilePending` for why the second one is
+    // not belt-and-braces but the thing that keeps the button usable.
+    remoteFilePending: [] as string[],
     error: null as BridgeError | null,
     notices: [] as Array<{ id: number; title: string; message: string }>,
     aiInventoryEvent: null as { revision: number; event: SidecarEvent } | null,
@@ -119,6 +136,16 @@ export function createApplicationStore() {
     // ever read it, so a clip that left the device with its sensitive values
     // replaced left silently. Legacy said so; the wording is legacy's.
     if (name === "sync.redacted") return t("敏感内容未同步");
+    // A peer would not hand over a file this window asked for. The reason
+    // crosses the wire as a code rather than a sentence — the peer does not
+    // know which language this window is in — so it is worded here, and an
+    // unrecognised code still says something true rather than showing the code.
+    if (name === "clip.file.denied") {
+      return t("{name} 没能发送这个文件：{reason}", {
+        name: peerLabel(data),
+        reason: remoteFileReason(String(data.reason || "")),
+      });
+    }
     // The same wording the prompt used, so the notice left behind when nobody
     // answers still says what happened and what to do about it.
     if (name === "device.security_alert") {
@@ -126,11 +153,63 @@ export function createApplicationStore() {
     }
     return String(data.message || data.text || data.filename || data.name || data.url || name);
   }
+  /** Why a download did not happen, in words, from the code a peer sent back.
+   *
+   * One place, because the same codes reach the window twice: as an event when
+   * the peer answers after the fact, and as an error when this machine never
+   * managed to ask.  The two the window raises itself are last, and the default
+   * covers a code from a peer newer than this build — said rather than shown,
+   * because a code is not something a reader can act on.
+   *
+   * `too_many` has no producer in this build: it is what the previous one
+   * answered a request for more files than it would serve, and a peer that
+   * still runs it is telling this window something true.
+   */
+  function remoteFileReason(reason: string): string {
+    switch (reason) {
+      case "not_found": return t("那台设备上已经没有这条记录了");
+      case "not_local": return t("这个文件不在那台设备上");
+      case "not_a_file": return t("这条记录不是文件");
+      case "gone": return t("文件已被移动或删除");
+      case "too_many": return t("文件太多，请分成几次下载");
+      case "too_large": return t("文件太大，无法传输");
+      case "empty": return t("文件夹里没有可发送的文件");
+      case "failed": return t("那台设备没能把文件发出来");
+      // The two the window words for itself, because it is the one that knows:
+      // the request never left this machine, so no peer ever answered.
+      case "offline": return t("那台设备当前不在线");
+      case "not_paired": return t("已与那台设备解除配对");
+      default: return t("请稍后重试");
+    }
+  }
   function pushNotice(name: string, data: Record<string, unknown>) {
     const id = ++noticeSequence;
     state.notices.push({ id, title: name, message: noticeMessage(name, data) });
     if (state.notices.length > 5) dismissNotice(state.notices[0].id);
     noticeTimers.set(id, setTimeout(() => dismissNotice(id), 6000));
+  }
+
+  /** Say that a click did something, for the clicks that show nothing.
+   *
+   * Most of the window's buttons announce themselves: a page opens, a row
+   * leaves the list, a switch flips, a dialog closes. The rest — a refresh that
+   * found the same rows, a copy whose only trace was a tick in a list the eye
+   * had already left, a save that leaves the form exactly as it was — answered
+   * the click with nothing at all, and a reader cannot tell those apart from a
+   * button that is broken. Those say so here.
+   *
+   * They ride the notice stack rather than a surface of their own, so a copy
+   * and a peer's pairing request queue up, expire and dismiss the same way, and
+   * they are keyed the same way too: `key` names the area (`ui.history`) and
+   * `NoticeStack` translates it, which keeps the message the only thing a
+   * caller has to word. They also go sooner than an event's six seconds —
+   * nothing here needs reading twice.
+   */
+  function toast(key: string, message: string, ms = 3500) {
+    const id = ++noticeSequence;
+    state.notices.push({ id, title: key, message });
+    if (state.notices.length > 5) dismissNotice(state.notices[0].id);
+    noticeTimers.set(id, setTimeout(() => dismissNotice(id), ms));
   }
   function dismissNotice(id: number) {
     clearTimeout(noticeTimers.get(id));
@@ -150,9 +229,29 @@ export function createApplicationStore() {
     certPromptTimer = undefined;
     state.certAlert = null;
   }
+
+  /** How long a 下载 request stays marked as outstanding.
+   *
+   * The mark exists to stop a second click from asking twice, and the peer's
+   * answer is not the only way it ends: a peer that serves the file simply
+   * starts sending, and nothing on this side carries the entry id back — the
+   * transfers list knows a transfer, not which row asked for it.  So the mark
+   * is released on a clock as well as on a refusal.  Waiting forever would be
+   * the one outcome worth avoiding: the row's 下载 would stay greyed out over a
+   * file that had already arrived — after a restart, permanently.
+   */
+  const REMOTE_FILE_TIMEOUT = 30_000;
+  const remoteFileTimers = new Map<string, ReturnType<typeof setTimeout>>();
+  function clearRemoteFilePending(key: string) {
+    const timer = remoteFileTimers.get(key);
+    if (timer !== undefined) clearTimeout(timer);
+    remoteFileTimers.delete(key);
+    state.remoteFilePending = state.remoteFilePending.filter((open) => open !== key);
+  }
   let refreshTimer: ReturnType<typeof setTimeout> | undefined;
   const favorites = createFavoritesStore(() => state.status?.health === "ready" &&
-    !!state.status.capabilities?.includes("favorites.list"));
+    !!state.status.capabilities?.includes("favorites.list"),
+  (message) => toast("ui.favorites", message));
   // Relay delivery receipts ride the same event stream as everything else, so
   // the mirror lives beside the store rather than in the window: a receipt has
   // to outlive the settings section it is rendered in, and the chat tab reads
@@ -161,14 +260,35 @@ export function createApplicationStore() {
 
   /** Error codes that mean the sidecar itself is down, not the request. */
   const SIDECAR_DOWN_CODES = ["SIDECAR_UNAVAILABLE", "SIDECAR_START_FAILED", "STARTUP_TIMEOUT"];
+  /** Codes the user clears from outside the application and then retries. */
+  const USER_FIXABLE_CODES = ["DATA_IN_USE"];
+
+  /** The line the failure band shows for a sidecar that gave up.
+   *
+   * A refused data directory is the one failure here the user can act on --
+   * the legacy application is still running and holding it -- so it gets a
+   * translated line naming the cause and the fix, rather than the sidecar's
+   * English sentence or a generic notice beside a retry button that cannot
+   * work until the other application is closed. */
+  function sidecarFailureMessage(code?: string, message?: string): string {
+    if (code === "DATA_IN_USE") {
+      return t("数据目录正被旧版 ClipSync 占用。请关闭旧版应用后重试。");
+    }
+    return message || t("后台进程不可用，请重试");
+  }
 
   function setError(error: unknown) {
     const value = typeof error === "object" && error !== null && "code" in error
       ? error as BridgeError
       : { code: "CONNECTION_FAILED", message: t("连接失败，请重试"), retryable: true };
     // A dead sidecar is recoverable now that the host can relaunch it, whatever
-    // the error's own flag says — the host reports these as non-retryable.
-    state.error = SIDECAR_DOWN_CODES.includes(value.code) ? { ...value, retryable: true } : value;
+    // the error's own flag says — the host reports these as non-retryable. A
+    // refused data directory reports itself as non-retryable too, and is kept
+    // retryable for the opposite reason: closing the other application is what
+    // makes the next attempt succeed.
+    state.error = SIDECAR_DOWN_CODES.includes(value.code) || USER_FIXABLE_CODES.includes(value.code)
+      ? { ...value, retryable: true }
+      : value;
   }
 
   async function refreshHistory() {
@@ -181,6 +301,11 @@ export function createApplicationStore() {
       state.history = page.items;
       const visibleIds = new Set(page.items.map((item) => item.id));
       state.selectedIds = state.selectedIds.filter((id) => visibleIds.has(id));
+      // Clamp rather than reset: a delete shortens the list under the cursor and
+      // a continued Delete should walk on down without skipping a row.  The
+      // callers that replace the whole list (search, chip, sort, page) reset it
+      // themselves, where a clamp would leave the cursor pointing at a stranger.
+      if (state.kbdIndex >= state.history.length) state.kbdIndex = state.history.length - 1;
       state.total = page.total;
       state.counts = page.counts || {};
       state.hasHistory = !!page.has_history;
@@ -307,6 +432,14 @@ export function createApplicationStore() {
             };
             if (data.status === "paired") pushNotice(event.name, data);
           }
+          // A download this window asked for that the peer could not serve.  It
+          // is reported rather than left to the refresh: nothing on screen
+          // changes when a file does not arrive, so without this the 下载 button
+          // would be the one control in the window that can fail silently.
+          if (event.name === "clip.file.denied") {
+            pushNotice(event.name, data);
+            clearRemoteFilePending(`${String(data.device_id || "")}:${String(data.entry_id || "")}`);
+          }
           if (event.name && ["runtime.error", "pairing.request", "transfer.request", "chat.message", "chat.connect_timeout", "url.received", "device.connected", "device.disconnected", "sync.redacted", "device.connection_rejected", "device.connection_unreachable"].includes(event.name)) {
             pushNotice(event.name, data);
           }
@@ -345,7 +478,8 @@ export function createApplicationStore() {
                 message: t("后台进程已退出，正在重新启动（第 {attempt} 次）…", { attempt: update.attempt || 1 }),
                 retryable: false }
               : { code: update.error || "SIDECAR_UNAVAILABLE",
-                message: t("后台进程不可用，请重试"), retryable: true });
+                message: sidecarFailureMessage(update.error, update.message),
+                retryable: true });
           } else if (update.state === "ready" && state.error) {
             // The relaunched sidecar is up: clear the failure and pull the
             // snapshot the dropped UI is missing.
@@ -495,7 +629,7 @@ export function createApplicationStore() {
 
   return {
     state, favorites, delivery, start, refreshHistory,
-    dismissNotice,
+    dismissNotice, toast,
     refresh() { state.error = null; return refresh(); },
     // The error band's retry: relaunches a dead sidecar, then refreshes.
     reconnect,
@@ -512,6 +646,15 @@ export function createApplicationStore() {
       state.selectedIds = selected
         ? [...new Set(state.history.map((item) => item.id).filter((id) => id.trim()))].slice(0, 100)
         : [];
+    },
+    /** Walk the keyboard cursor down (`+1`) or up (`-1`) the visible page.
+     * A cursor at -1 enters the list at the top rather than the second row, so
+     * nobody opens the page with a row already chosen; the ends clamp rather
+     * than wrap, which is what the legacy list did too. */
+    kbdStep(delta: number) {
+      if (historyBusy() || !state.history.length) return;
+      const next = state.kbdIndex < 0 ? 0 : state.kbdIndex + delta;
+      state.kbdIndex = Math.max(0, Math.min(next, state.history.length - 1));
     },
     batchPin(pinned: boolean) {
       if (historyBusy()) return Promise.resolve(false);
@@ -551,6 +694,7 @@ export function createApplicationStore() {
         const result = await bridge.clearHistory();
         if (disposed) return 0;
         state.selectedIds = [];
+        state.kbdIndex = -1;
         state.offset = 0;
         await refresh();
         return result.cleared;
@@ -564,6 +708,7 @@ export function createApplicationStore() {
     search(query: string) {
       if (disposed || state.pending) return;
       if (query !== state.query || state.offset !== 0) state.selectedIds = [];
+      state.kbdIndex = -1;
       state.query = query;
       state.offset = 0;
       void refreshHistory();
@@ -575,6 +720,7 @@ export function createApplicationStore() {
       // thirty-first row of the old list would open on an empty page, and the
       // selection cannot survive rows that the filter just removed.
       state.selectedIds = [];
+      state.kbdIndex = -1;
       state.kind = kind;
       state.offset = 0;
       void refreshHistory();
@@ -584,6 +730,7 @@ export function createApplicationStore() {
       if (disposed || state.pending) return;
       state.sort = state.sort === "newest" ? "oldest" : "newest";
       state.selectedIds = [];
+      state.kbdIndex = -1;
       state.offset = 0;
       void refreshHistory();
     },
@@ -591,15 +738,78 @@ export function createApplicationStore() {
       if (historyBusy()) return;
       const offset = Math.max(0, state.offset + direction * state.limit);
       if (offset !== state.offset) state.selectedIds = [];
+      if (offset !== state.offset) state.kbdIndex = -1;
       state.offset = offset;
       void refreshHistory();
     },
     unlock: (password: string) => action(() => bridge.unlock(password)),
-    pin: (item: HistoryItem) => action(() => bridge.pinHistory(item.id, !item.pinned)),
-    delete: (item: HistoryItem) => action(() => bridge.deleteHistory(item.id)),
+    async pin(item: HistoryItem) {
+      if (!(await action(() => bridge.pinHistory(item.id, !item.pinned)))) return false;
+      toast("ui.history", item.pinned ? t("已取消置顶这条记录") : t("已置顶这条记录"));
+      return true;
+    },
+    async delete(item: HistoryItem) {
+      if (!(await action(() => bridge.deleteHistory(item.id)))) return false;
+      toast("ui.history", t("已删除这条记录"));
+      return true;
+    },
+    /** Put a clip back on the clipboard.
+     *
+     * The row's own answer is a tick that replaces its copy icon, which is the
+     * whole of the confirmation — and the row is in a list the reader is
+     * looking past by the time it lands, or on a feed that has already been
+     * scrolled. So it says so in words as well, and names what was copied when
+     * the clip is short enough to read at a glance.
+     */
     async copy(item: HistoryItem) {
       state.copiedId = null;
-      if (await action(() => bridge.copyHistory(item.id))) state.copiedId = item.id;
+      if (!(await action(() => bridge.copyHistory(item.id)))) return;
+      state.copiedId = item.id;
+      toast("ui.history", t("已复制"));
+    },
+    /** Ask the device holding a file to send it.
+     *
+     * The row's own button on a file that lives on another machine.  Nothing is
+     * copied and nothing is written here: the request goes out, the peer starts
+     * a transfer, and the file lands in the receive folder like any other
+     * download.  So the answer is a word rather than the tick `copy` shows —
+     * a tick on a row means the clip is on this clipboard, and this one is not
+     * on this machine at all yet.
+     *
+     * A row with no source device has nobody to ask: the clip was captured here,
+     * so its file is already on this disk and 复制 is the action for it.
+     */
+    async downloadRemoteFile(item: HistoryItem) {
+      const deviceId = item.source_device || "";
+      if (!deviceId) return false;
+      const key = `${deviceId}:${item.id}`;
+      state.remoteFilePending = [key, ...state.remoteFilePending];
+      try {
+        await bridge.requestEntryFiles(item.id, deviceId);
+      } catch (error) {
+        clearRemoteFilePending(key);
+        // The three ways the ask never left, named rather than shown as a code:
+        // the peer is offline, the peer is not paired any more, or the request
+        // itself was refused.  A peer that answered and could not serve it
+        // arrives later as `clip.file.denied` and is reported there.
+        const code = (error as BridgeError | undefined)?.code || "";
+        if (code === "NOT_CONNECTED") {
+          pushNotice("clip.file.denied", { device_id: deviceId, reason: "offline" });
+        } else if (code === "NOT_PAIRED") {
+          pushNotice("clip.file.denied", { device_id: deviceId, reason: "not_paired" });
+        } else {
+          setError(error);
+        }
+        return false;
+      }
+      // Asked, answered: the peer will either start sending or refuse, and the
+      // refusal clears the mark early.  This is the backstop for the other half.
+      const timer = remoteFileTimers.get(key);
+      if (timer !== undefined) clearTimeout(timer);
+      remoteFileTimers.set(key, setTimeout(() => {
+        if (!disposed) clearRemoteFilePending(key);
+      }, REMOTE_FILE_TIMEOUT));
+      return true;
     },
     startPairing: (device: Device) => action(() => bridge.startPairing(device.id)),
     /** Confirm the code, and say so when it did not take.
@@ -716,10 +926,14 @@ export function createApplicationStore() {
         if (!disposed) state.pending = false;
       }
     },
-    setSyncEnabled: (enabled: boolean) => {
+    async setSyncEnabled(enabled: boolean) {
       if (state.status?.health !== "ready" ||
         !state.status.capabilities?.includes("sync.set_enabled")) return;
-      return action(() => bridge.setSyncEnabled(enabled));
+      if (!(await action(() => bridge.setSyncEnabled(enabled)))) return;
+      // The switch is on the overview and the footer's word for the same fact
+      // is at the bottom of the window, so the answer is worth saying next to
+      // the click as well.
+      toast("ui.sync", enabled ? t("同步已开启") : t("同步已关闭"));
     },
     async sendUrl(device: Device, url: string) {
       // Returns whether the frame actually left this machine. The runtime
@@ -810,7 +1024,12 @@ export function createApplicationStore() {
       if (disposed || !state.status?.capabilities?.includes("update.status")) return null;
       try {
         const result = await bridge.updateStatus();
-        if (!disposed && result?.state) Object.assign(state.update, result.state);
+        // Opening settings mid-install must not undo it. The sidecar only knows
+        // its own four phases and would answer `idle`, putting the download
+        // button back while the bundle is being replaced underneath it.
+        if (!disposed && result?.state && state.update.phase !== "installing") {
+          Object.assign(state.update, result.state);
+        }
         return result;
       } catch (error) {
         if (!disposed) setError(error);
@@ -828,6 +1047,23 @@ export function createApplicationStore() {
         if (disposed) return null;
         state.updateCheck = result.latest || result.available ? result : null;
         return result;
+      } catch (error) {
+        if (!disposed) setError(error);
+        return null;
+      } finally {
+        if (!disposed) state.pending = false;
+      }
+    },
+    async installUpdate() {
+      // There is no success path that returns to render: installing replaces
+      // this installation and relaunches the app. A reply therefore means the
+      // install did not happen, and the host has already published the failing
+      // phase, so the caller only has to decide what to say about it.
+      if (disposed || state.pending) return null;
+      state.pending = true;
+      state.error = null;
+      try {
+        return await bridge.updateInstall();
       } catch (error) {
         if (!disposed) setError(error);
         return null;
@@ -873,6 +1109,8 @@ export function createApplicationStore() {
       ++statusSequence;
       clearTimeout(refreshTimer);
       clearTimeout(certPromptTimer);
+      for (const timer of remoteFileTimers.values()) clearTimeout(timer);
+      remoteFileTimers.clear();
       unlisten?.();
     },
   };

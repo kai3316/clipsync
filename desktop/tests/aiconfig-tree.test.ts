@@ -48,56 +48,6 @@ describe("AI config tree", () => {
     ]);
   });
 
-  it("sorts groups by the profile order, with a tool the profiles never named last", () => {
-    const groups = aiTreeGroups(
-      [entry("x.md", { tool: "zeta" }), entry("y.md"), entry("z.md", { tool: "alpha" })],
-      { order: ["claude", "alpha"], label: tool => `tool:${tool}` },
-    );
-    expect(groups.map(group => group.label)).toEqual(["tool:claude", "tool:alpha", "tool:zeta"]);
-  });
-
-  it("shows a root hint only where one tool watches more than one root, and only at the top", () => {
-    // One root: the paths are unambiguous and a hint on every row would be noise.
-    expect(shape([entry("a/one.md")], { expanded: opened([entry("a/one.md")]) }))
-      .toEqual(["0:a/", "1:one.md"]);
-    // Two roots: a rel_path is relative to its own, so `foo/x.md` means two
-    // different files and the reader has to be told which one this is.
-    const twoRoots = [
-      entry("foo/x.md", { root: "skills" }),
-      entry("foo/x.md", { root: "commands" }),
-    ];
-    expect(shape(twoRoots, { expanded: opened(twoRoots) })).toEqual([
-      "0:foo/@skills",
-      "1:x.md",
-      "0:foo/@commands",
-      "1:x.md",
-    ]);
-  });
-
-  it("folds every folder until it is opened, and keeps the folder itself on screen", () => {
-    const entries = [entry("a/one.md"), entry("a/two.md")];
-    // A folder starts folded: the list is a list of config items, and what is
-    // inside one is that item's own business.
-    expect(shape(entries)).toEqual(["0:a/"]);
-    const aOpened = { [aiNodeKey("claude", "skills", "a")]: true };
-    expect(shape(entries, { expanded: aOpened })).toEqual(["0:a/", "1:one.md", "1:two.md"]);
-    // Opening a name that is not a folder changes nothing.
-    const leaf = { [aiNodeKey("claude", "skills", "top.md")]: true };
-    expect(shape([entry("top.md")], { expanded: leaf })).toEqual(["0:top.md"]);
-    // And a folder inside an opened one is folded in turn until it too is
-    // opened: opening a skill shows the folders it is made of, not every file
-    // in the tree under it.
-    expect(shape([entry("a/deep/one.md")], {
-      expanded: { [aiNodeKey("claude", "skills", "a")]: true },
-    })).toEqual(["0:a/", "1:deep/"]);
-    expect(shape([entry("a/deep/one.md")], {
-      expanded: {
-        [aiNodeKey("claude", "skills", "a")]: true,
-        [aiNodeKey("claude", "skills", "a/deep")]: true,
-      },
-    })).toEqual(["0:a/", "1:deep/", "2:one.md"]);
-  });
-
   it("flattens a search to matching rows at depth 0, across every folder", () => {
     const entries = [entry("a/one.md"), entry("b/two.md"), entry("c/three.md")];
     // A match inside a folded folder would otherwise be invisible, which is

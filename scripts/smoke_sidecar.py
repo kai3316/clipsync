@@ -130,6 +130,42 @@ def verify_http(status):
         raise SmokeError("Companion HTTP verification failed") from None
 
 
+def companion_get(status, path):
+    """One authenticated Companion GET, returning the raw body."""
+    base = f"http://127.0.0.1:{status.get('actual_port')}"
+    separator = "&" if "?" in path else "?"
+    token = quote(status.get("token") or "", safe="")
+    with build_opener(ProxyHandler({})).open(
+        base + path + separator + "token=" + token, timeout=5,
+    ) as response:
+        return response.read()
+
+
+def verify_share(child, status, directory):
+    """A desktop share reaches the phone's own list and download route.
+
+    The one check that ties the three layers together: the RPC the window
+    calls, the copy the sidecar makes, and the two Companion routes the phone
+    reads.  Run against the packaged executable and over the real IPC wire, so
+    it covers the framing and the packaging as well as the behaviour.
+    """
+    source = Path(directory) / "smoke-share-source.txt"
+    payload = b"clipsync smoke share"
+    source.write_bytes(payload)
+    staged = child.call("companion.share_file", {"path": str(source)})
+    require(staged.get("ok") is True and staged.get("size") == len(payload),
+            "Share did not stage the file")
+    name = staged.get("name")
+    require(isinstance(name, str) and bool(name), "Share returned no name")
+    listed = json.loads(companion_get(status, "/api/files"))
+    require(any(row.get("name") == name for row in listed.get("files") or []),
+            "Shared file is not in the phone's list")
+    require(companion_get(status, "/api/download?file=" + quote(name, safe="")) == payload,
+            "Shared file did not download")
+    require(source.read_bytes() == payload, "Share moved the original file")
+    print("Shared file reaches the phone's list and download: PASS")
+
+
 def require_port_closed(port):
     deadline = time.monotonic() + 5
     while time.monotonic() < deadline:
@@ -141,10 +177,118 @@ def require_port_closed(port):
     raise SmokeError("Companion listener survived shutdown")
 
 
+def verify_clear_token(child):
+    """The packaged build can clear the access token, and the clear serves.
+
+    The legacy web panel's second token button, and the one thing the capability
+    comparison above cannot see: `clear_token` is a parameter of a method that
+    already existed, so a build predating it advertises the same list and would
+    refuse the parameter instead.  Run last -- it leaves the companion serving
+    without a token, which is the point.
+    """
+    cleared = child.call("companion.configure", {"enabled": True, "clear_token": True})
+    require(not cleared.get("token"), "Clearing the token left one behind")
+    require(cleared.get("access_url") is None, "A cleared companion still offers a token URL")
+    url = cleared.get("url")
+    require(isinstance(url, str) and url and "token=" not in url,
+            "The cleared address still carries a token")
+    # Served without one, because an empty expected token is what the companion
+    # accepts every request against.
+    body = companion_get({**cleared, "token": ""}, "/api/history")
+    require(b"total" in body, "The companion did not serve without a token")
+    print("Cleared access token serves without one: PASS")
+
+
+def source_module(name):
+    return Path(__file__).resolve().parents[1] / "internal" / "application" / name
+
+
+def capability_expression():
+    """The sidecar's own capability expression, from `bootstrap.py`."""
+    import ast
+
+    for node in ast.walk(ast.parse(source_module("bootstrap.py").read_text(encoding="utf-8"))):
+        if not isinstance(node, ast.Dict):
+            continue
+        for key, value in zip(node.keys, node.values, strict=True):
+            if isinstance(key, ast.Constant) and key.value == "capabilities":
+                return value
+    raise SmokeError("No capability list found in bootstrap.py")
+
+
+def fold_capabilities(node, runtime_up):
+    """Read one capability expression the way the sidecar's own runtime would.
+
+    The value is ``[...] + ([...] if <engine up> else [])``, so a plain literal
+    read sees half of it and ``runtime_up`` decides the branch.  Same fold as
+    `tests/sidecar/test_e2e_host_capabilities.py`, which holds the Playwright
+    fixture to the same list.
+    """
+    import ast
+
+    if isinstance(node, ast.List):
+        return [ast.literal_eval(element) for element in node.elts]
+    if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
+        return fold_capabilities(node.left, runtime_up) + fold_capabilities(node.right, runtime_up)
+    if isinstance(node, ast.IfExp):
+        return fold_capabilities(node.body if runtime_up else node.orelse, runtime_up)
+    return []
+
+
+def verify_capabilities(status):
+    """The packaged build is this tree, not an older one.
+
+    A stale artifact is not hypothetical: a build the record credited was ten
+    Python modules behind, and every other check in this file would have passed,
+    because those exercise routes that existed in both builds.  The list the
+    sidecar advertises is where a new method shows up first, and this reads the
+    same list out of `bootstrap.py` -- so an executable built before a method was
+    added cannot agree with the tree it is being verified against.
+
+    Which half it should carry is read from the state it reports rather than
+    assumed: the engine's methods are advertised only while the engine is up.
+    Both directions are checked, so a method this tree has dropped is caught too.
+    """
+    advertised = status.get("capabilities")
+    require(isinstance(advertised, list) and bool(advertised),
+            "Sidecar advertises no capabilities")
+    runtime_up = status.get("sync_state") in ("running", "paused")
+    expected = fold_capabilities(capability_expression(), runtime_up)
+    # The floor fits the engine-down half, which is the smaller one: this is
+    # called with whichever state the sidecar reports.
+    require(len(expected) > 40, f"Read only {len(expected)} capabilities from bootstrap.py")
+    missing = sorted(set(expected) - set(advertised))
+    extra = sorted(set(advertised) - set(expected))
+    require(not missing, "Packaged sidecar is older than this tree; it does not know: "
+                         + ", ".join(missing))
+    require(not extra, "Packaged sidecar advertises what this tree does not grant: "
+                       + ", ".join(extra))
+    print(f"Packaged capabilities match this tree ({len(expected)}): PASS")
+
+
 def verify_companion_runtime(command, directory):
-    # Disable clipboard synchronization in this disposable profile.
-    config = {"encryption_enabled": False, "sync_enabled": False,
-              "web_enabled": False, "port": temporary_port()}
+    # Disable clipboard synchronization in this disposable profile.  The shared
+    # directory is named too: left unset it resolves to the user's own
+    # ~/Downloads/ClipSync, and a smoke test must not write there.
+    # ``config_version`` is written out because the companion is ON by default:
+    # this profile wants it off so the enable transition below is a real one,
+    # and a config below version 3 carrying ``web_enabled: false`` is exactly
+    # what the v3 migration brings forward.  Version 3 makes this an off that
+    # was chosen rather than a default that has not moved yet.
+    #
+    # ``service_type`` is the one field here that is not about this profile's
+    # own settings.  Starting a runtime registers a real mDNS service — that is
+    # what the runtime is for — so a sidecar started under the app's service
+    # type joins the LAN it is being tested on.  The app already running on this
+    # machine then discovers it, and lists it: same hostname, so it reads as the
+    # user's own machine, under a device id that belongs to no config and is
+    # gone as soon as the process is killed (a killed process sends no goodbye,
+    # so the entry lingers for the record's TTL).  A service type of its own
+    # keeps this profile off the app's radar while exercising everything else.
+    config = {"config_version": 3, "encryption_enabled": False, "sync_enabled": False,
+              "web_enabled": False, "port": temporary_port(),
+              "service_type": "_clipsync-smoke._tcp.local.",
+              "file_receive_dir": str(Path(directory) / "received")}
     (Path(directory) / "config.json").write_text(json.dumps(config), encoding="utf-8")
     port = temporary_port()
     previous_token = None
@@ -161,6 +305,9 @@ def verify_companion_runtime(command, directory):
                 require(not status["running"], "Companion unexpectedly started")
             status = child.call("companion.configure", {"enabled": True, "port": port})
             verify_http(status)
+            verify_share(child, status, directory)
+            if not iteration:
+                verify_capabilities(child.call("app.status"))
             previous_token = status["token"]
             stopped = child.call("companion.configure", {"enabled": False})
             require(not stopped["running"] and stopped["token"] is None
@@ -169,6 +316,10 @@ def verify_companion_runtime(command, directory):
             # Exit while enabled, then verify persisted startup in the next process.
             status = child.call("companion.configure", {"enabled": True, "port": port})
             verify_http(status)
+            if iteration:
+                # Last iteration, last check: this one leaves the companion
+                # serving without a token, which is what it is asserting.
+                verify_clear_token(child)
             require(child.call("app.shutdown")["accepted"] is True, "Shutdown rejected")
             require(child.process.wait(timeout=30) == 0, "Sidecar shutdown failed")
             require_port_closed(port)

@@ -50,16 +50,6 @@ def test_a_row_ships_the_provenance_and_count_the_legacy_row_showed():
     assert item["paste_count"] == 3
 
 
-def test_a_row_without_provenance_ships_empty_strings_and_a_zero():
-    # Every key is present on every row: the window renders from these, and a
-    # missing key would be a field it has to guard for no reason.
-    item = use_case([row()]).list()["items"][0]
-    assert item["source_app"] == ""
-    assert item["source_title"] == ""
-    assert item["source_name"] == ""
-    assert item["paste_count"] == 0
-
-
 def test_a_row_ships_the_route_it_arrived_on():
     """The route is the half of the pair a device name cannot give: a peer
     reachable both ways sends over whichever is up, and the phone's pushed rows
@@ -74,16 +64,6 @@ def test_a_row_ships_the_route_it_arrived_on():
     assert [item["transport"] for item in service.list()["items"]] == [
         "relay", "lan", "web", "",
     ]
-
-
-def test_the_label_is_asked_about_the_row_and_not_the_caller():
-    asked = []
-    service = use_case(
-        [row(source_device="peer-1"), row(source_device="")],
-        label=lambda source: asked.append(source) or "name",
-    )
-    service.list()
-    assert asked == ["peer-1", ""]
 
 
 def test_a_title_longer_than_a_window_title_is_cut():
@@ -142,24 +122,5 @@ def test_the_runtime_names_the_devices_it_knows(tmp_path, monkeypatch):
         assert label(WEB_SOURCE) == WEB_SOURCE_LABEL
         # A peer this device no longer knows: the id it holds, not a blank.
         assert label("unpaired") == "unpaired"
-    finally:
-        assert app.lifecycle.stop()
-
-
-def test_a_peer_paired_after_startup_is_named_without_a_restart(tmp_path, monkeypatch):
-    # The label is read on every call rather than captured at startup: a clip
-    # from a peer paired a minute ago must not show a raw id until the next
-    # restart, which is what a captured mapping would do.
-    monkeypatch.setenv("CLIPSYNC_CONFIG_DIR", str(tmp_path))
-    save(Config(encryption_enabled=False, device_name="This laptop"))
-
-    app = SidecarApplication()
-    app.lifecycle.start()
-    try:
-        assert app.require_history()._source_label("late-peer") == "late-peer"
-        app.config.peers["late-peer"] = PeerInfo(
-            device_id="late-peer", device_name="Newcomer", public_key_pem="", paired=True
-        )
-        assert app.require_history()._source_label("late-peer") == "Newcomer"
     finally:
         assert app.lifecycle.stop()

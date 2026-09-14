@@ -13,7 +13,13 @@ import time
 from io import BytesIO
 
 from internal.clipboard.clipboard import ClipboardMonitor, ClipboardReader, ClipboardWriter
-from internal.clipboard.format import ClipboardContent, ContentType
+from internal.clipboard.dib import (
+    as_bitmapinfoheader,
+    bitmapv5_header,
+    carries_alpha,
+    header_size,
+)
+from internal.clipboard.format import ClipboardContent, ContentType, png_payload
 
 logger = logging.getLogger(__name__)
 
@@ -143,9 +149,31 @@ CF_HDROP = 15
 CF_ENHMETAFILE = 14
 CF_DIBV5 = 17  # BITMAPV5HEADER — same layout as DIB, just longer header
 
-# Registered format for HTML
+# Which of the three bitmap formats says the most about the image it carries.
+#
+# Windows synthesizes companion formats: putting CF_DIB on the clipboard makes
+# CF_BITMAP available, and wide text brings CF_OEMTEXT and CF_LOCALE with it.
+# The copies are enumerated *after* the format they were derived from, so a
+# reader that simply keeps the last format it maps throws away the best
+# capture it was offered — a CF_DIBV5 whose header declares the alpha channel
+# loses to the CF_BITMAP Windows made out of it, whose pixels are pulled back
+# through GetDIBits with no alpha at all.
+_IMAGE_FORMAT_RANK = {CF_BITMAP: 1, CF_DIB: 2, CF_DIBV5: 3}
+
+# Registered formats.  Each name is the whole contract: registering it returns
+# the same id that an application which registered the same name publishes
+# under, so a name spelled differently from the way the rest of Windows spells
+# it would be a format this process writes and nobody else ever reads.
 CF_HTML = user32.RegisterClipboardFormatW("HTML Format")
 CF_RTF = user32.RegisterClipboardFormatW("Rich Text Format")
+# A link.  Browsers publish it as a wide (UTF-16LE) string under the "W" name;
+# there is no plain-text copy inside it, which is why `_set_url` offers
+# CF_UNICODETEXT alongside when the clip carries no text of its own.
+CF_URL = user32.RegisterClipboardFormatW("UniformResourceLocatorW")
+# A picture, as the image file the sender had.  This is the format CF_DIB
+# cannot cover: an image already encoded as PNG goes out under its own name,
+# byte for byte, for the applications that ask for PNG first.
+CF_PNG = user32.RegisterClipboardFormatW("PNG")
 
 # Message constants
 WM_CLIPBOARDUPDATE = 0x031D
@@ -218,6 +246,7 @@ class _ClipboardReader(ClipboardReader):
                     return content
 
             try:
+                image_rank = 0
                 fmt = 0
                 while True:
                     fmt = user32.EnumClipboardFormats(fmt)
@@ -233,6 +262,13 @@ class _ClipboardReader(ClipboardReader):
                                 and ContentType.TEXT in content.types
                             ):
                                 continue  # prefer CF_UNICODETEXT already read, skip ANSI
+                            if content_type == ContentType.IMAGE_PNG:
+                                # Keep the richest of the three, not the last
+                                # one enumerated — see _IMAGE_FORMAT_RANK.
+                                rank = _IMAGE_FORMAT_RANK.get(fmt, 0)
+                                if rank <= image_rank:
+                                    continue
+                                image_rank = rank
                             content.types[content_type] = data
                             if content_type == ContentType.IMAGE_PNG:
                                 content.image_fmt = self._image_fmt
@@ -261,6 +297,12 @@ class _ClipboardReader(ClipboardReader):
                 # instead of our (or another app's) one-time inflation.
                 data = self._strip_cf_html(data)
             return data
+        elif fmt == CF_URL:
+            # A wide string, read through the wide text path: that is what
+            # decodes UTF-16LE and drops the terminator.  Read as raw bytes it
+            # would be UTF-16 stored as though it were UTF-8 — a link with a
+            # NUL between every character.
+            return self._read_text_handle(handle, True)
         elif fmt in (CF_DIB, CF_DIBV5):
             return self._read_dib_handle(handle)
         elif fmt == CF_BITMAP:
@@ -544,6 +586,8 @@ class _ClipboardReader(ClipboardReader):
             return ContentType.IMAGE_EMF
         elif fmt == CF_HDROP:
             return ContentType.FILE
+        elif fmt == CF_URL:
+            return ContentType.URL
         return None
 
 
@@ -585,6 +629,13 @@ class _ClipboardWriter(ClipboardWriter):
                         self._set_emf(data)
                     elif fmt_type == ContentType.FILE:
                         self._set_hdrop(data)
+                    elif fmt_type == ContentType.URL:
+                        # A URL was the one format with no branch here: it fell
+                        # through the chain, so EmptyClipboard had already wiped
+                        # the user's clipboard and the write still reported
+                        # success.  The reader above produces URL rows now, so
+                        # the branch is what makes copying a link back work.
+                        self._set_url(data, text_fallback=ContentType.TEXT not in content.types)
             finally:
                 user32.CloseClipboard()
         return True
@@ -596,14 +647,7 @@ class _ClipboardWriter(ClipboardWriter):
         # user's clipboard, leaving it empty.
         text = data.decode("utf-8", errors="replace")
         wide_text = text.encode("utf-16-le") + b"\x00\x00"
-        handle = kernel32.GlobalAlloc(0x0002, len(wide_text))  # GMEM_MOVEABLE
-        if handle:
-            ptr = kernel32.GlobalLock(handle)
-            ctypes.memmove(ptr, wide_text, len(wide_text))
-            kernel32.GlobalUnlock(handle)
-            if not user32.SetClipboardData(CF_UNICODETEXT, handle):
-                logger.warning("SetClipboardData(CF_UNICODETEXT) failed")
-                kernel32.GlobalFree(handle)
+        self._set_global_format(CF_UNICODETEXT, wide_text)
 
         # Also offer CF_TEXT (ANSI, system code page).  Legacy 16-bit apps
         # enumerate only CF_TEXT and paste empty text when the clipboard
@@ -613,14 +657,7 @@ class _ClipboardWriter(ClipboardWriter):
             ansi_text = text.encode(f"cp{acp}", errors="replace") + b"\x00"
         except Exception:
             ansi_text = text.encode("latin-1", errors="replace") + b"\x00"
-        ansi_handle = kernel32.GlobalAlloc(0x0002, len(ansi_text))  # GMEM_MOVEABLE
-        if ansi_handle:
-            ptr = kernel32.GlobalLock(ansi_handle)
-            ctypes.memmove(ptr, ansi_text, len(ansi_text))
-            kernel32.GlobalUnlock(ansi_handle)
-            if not user32.SetClipboardData(CF_TEXT, ansi_handle):
-                logger.warning("SetClipboardData(CF_TEXT) failed")
-                kernel32.GlobalFree(ansi_handle)
+        self._set_global_format(CF_TEXT, ansi_text)
 
     def _set_html(self, data: bytes):
         cf_html = self._build_cf_html(data)
@@ -673,17 +710,41 @@ class _ClipboardWriter(ClipboardWriter):
         return (header + prefix + html + suffix).encode("utf-8")
 
     def _set_image(self, data: bytes, image_fmt: str = ""):
+        """Publish a picture, keeping as much of what the sender meant as the
+        clipboard can carry.
+
+        Three shapes arrive and each is handled the way that costs it nothing:
+
+        * the payload is already a PNG file — published under the registered
+          ``PNG`` format, because that is the file the sender had and a copy of
+          it beats any conversion of it,
+        * the payload is a BMP file built by this module's own reader — the
+          14-byte file header comes off and the DIB goes out, converting
+          nothing at all,
+        * anything else — the PNG or TIFF a macOS or Linux peer sent — is
+          decoded here and built into a DIB.
+
+        An image that declares an alpha channel is published twice: once as
+        ``CF_DIBV5``, whose header says the fourth byte of each pixel is alpha,
+        and once as the flattened ``CF_DIB`` that a consumer ignoring alpha
+        still shows correctly.  Only the first of those existed before, in
+        neither form — the alpha was flattened onto white for everybody, so a
+        transparent PNG pasted on a white block.
+        """
+        png = png_payload(data)
+        if png is not None:
+            self._set_global_format(CF_PNG, png)
+
         if image_fmt == "bmp" and data[:2] == b"BM":
-            # BMP passthrough: strip 14-byte header → DIB (zero conversion)
-            dib_data = data[14:]
-            handle = kernel32.GlobalAlloc(0x0002, len(dib_data))
-            if handle:
-                ptr = kernel32.GlobalLock(handle)
-                ctypes.memmove(ptr, dib_data, len(dib_data))
-                kernel32.GlobalUnlock(handle)
-                if not user32.SetClipboardData(CF_DIB, handle):
-                    logger.warning("SetClipboardData(CF_DIB) failed")
-                    kernel32.GlobalFree(handle)
+            # BMP passthrough: strip the 14-byte file header → DIB.  The DIB
+            # may still be one that declares alpha — a capture from a V5
+            # clipboard came through this same reader — so it is offered both
+            # ways rather than flattened here.
+            dib = data[14:]
+            if carries_alpha(dib):
+                self._set_dibs(as_bitmapinfoheader(dib), dib)
+            else:
+                self._set_dibs(dib)
             return
 
         try:
@@ -692,28 +753,72 @@ class _ClipboardWriter(ClipboardWriter):
             return
         try:
             img = Image.open(BytesIO(data))
-            # Smart mode handling: composite RGBA on white, pass RGB through
-            if img.mode == "RGBA":
-                bg = Image.new("RGB", img.size, (255, 255, 255))
-                bg.paste(img, mask=img.split()[3])
-                img = bg
+            alpha_dib = None
+            if img.mode in ("RGBA", "LA") or (
+                img.mode == "P" and "transparency" in img.info
+            ):
+                # Keep the alpha it came with: a V5 DIB states it in the
+                # header, which is the only way any consumer will believe it.
+                rgba = img.convert("RGBA")
+                alpha_dib = bitmapv5_header(*rgba.size) + rgba.tobytes("raw", "BGRA")
+                # …and flatten the copy that goes out as plain CF_DIB, so a
+                # consumer which ignores alpha shows white under it rather
+                # than the raw colour of a pixel with zero alpha.
+                flat = Image.new("RGB", rgba.size, (255, 255, 255))
+                flat.paste(rgba, mask=rgba.split()[3])
+                img = flat
             elif img.mode != "RGB":
                 img = img.convert("RGB")
 
-            dib = BytesIO()
-            img.save(dib, format="BMP")
-            dib_data = dib.getvalue()
-            dib_data = dib_data[14:]  # strip BMP header → DIB
-            handle = kernel32.GlobalAlloc(0x0002, len(dib_data))
-            if handle:
-                ptr = kernel32.GlobalLock(handle)
-                ctypes.memmove(ptr, dib_data, len(dib_data))
-                kernel32.GlobalUnlock(handle)
-                if not user32.SetClipboardData(CF_DIB, handle):
-                    logger.warning("SetClipboardData(CF_DIB) failed")
-                    kernel32.GlobalFree(handle)
+            buffer = BytesIO()
+            img.save(buffer, format="BMP")
+            self._set_dibs(buffer.getvalue()[14:], alpha_dib)  # strip BMP header
         except Exception:
             logger.debug("Failed to write image to clipboard", exc_info=True)
+
+    def _set_dibs(self, plain: bytes, alpha: bytes | None = None):
+        """Publish an image as a DIB, and as the alpha-carrying one behind it.
+
+        ``plain`` is what a consumer reading CF_DIB gets: 32 bits without a
+        claim, or the flattened copy of an image that had transparency.
+        ``alpha`` is the same pixels under a V5 header that says the fourth
+        byte is alpha, and it is published second **on purpose**.
+
+        Order is the whole difference between the two for this program's own
+        clipboard.  ``EnumClipboardFormats`` walks formats in the order they
+        were put on the clipboard, not ascending by id, and this file's reader
+        keeps the richest of the three bitmap formats — so the rich one has to
+        be the one already there when the walk ends.  Written the other way
+        round, a transparent image copied out of a ClipSync window was captured
+        back flattened, and a transparent PNG synced between two machines
+        arrived opaque.  An application asking for a format by id is unaffected
+        either way, and one that walks the list and takes the first gets the
+        safest of the two.
+        """
+        self._set_global_format(CF_DIB, plain)
+        if alpha is not None:
+            self._set_global_format(CF_DIBV5, alpha)
+            logger.debug(
+                "Wrote image as CF_DIBV5 (header %d) behind a flattened CF_DIB",
+                header_size(alpha),
+            )
+
+    def _set_url(self, data: bytes, text_fallback: bool = True):
+        """Publish a link as a link, and as text when there is no text.
+
+        ``UniformResourceLocatorW`` is a wide string ending in a NUL — the form
+        browsers publish it in, and the one an application asking for a URL
+        expects.  On its own it is a link that only URL-aware applications can
+        paste: dropping a link into Notepad would do nothing, so a clip that
+        carries no text of its own also gets CF_UNICODETEXT, which is exactly
+        the pair a browser puts on the clipboard for the same reason.
+        """
+        url = data.decode("utf-8", errors="replace").strip()
+        if not url:
+            return
+        self._set_global_format(CF_URL, url.encode("utf-16-le") + b"\x00\x00")
+        if text_fallback:
+            self._set_text(url.encode("utf-8"))
 
     def _set_emf(self, data: bytes):
         """Write EMF (Enhanced Metafile) to clipboard. Preserves editable
@@ -747,27 +852,38 @@ class _ClipboardWriter(ClipboardWriter):
 
         # DROPFILES header: 20 bytes (pFiles offset, pt, fNC, fWide)
         header = struct.pack("<IiiII", 20, 0, 0, 0, 1)  # pFiles=20, fWide=TRUE
-        hdrop_data = header + wide_bytes
+        self._set_global_format(CF_HDROP, header + wide_bytes)
 
-        handle = kernel32.GlobalAlloc(0x0002, len(hdrop_data))
-        if handle:
-            ptr = kernel32.GlobalLock(handle)
-            ctypes.memmove(ptr, hdrop_data, len(hdrop_data))
-            kernel32.GlobalUnlock(handle)
-            if not user32.SetClipboardData(CF_HDROP, handle):
-                logger.warning("SetClipboardData(CF_HDROP) failed")
-                kernel32.GlobalFree(handle)
+    def _set_global_format(self, fmt: int, data: bytes):
+        """Hand ``data`` to the clipboard in a movable global block.
+
+        Every format this writer publishes goes through here, because the
+        ownership rule is the part that is easy to get wrong: SetClipboardData
+        takes the block over on success *only*, so a refused format has to be
+        freed here and a successful one must not be.  Freeing a block the
+        clipboard now owns corrupts the clip; leaking a refused one is a slow
+        leak in the process that copies all day.
+        """
+        if not data:
+            return
+        handle = kernel32.GlobalAlloc(0x0002, len(data))  # GMEM_MOVEABLE
+        if not handle:
+            logger.warning("GlobalAlloc failed for clipboard format %d", fmt)
+            return
+        ptr = kernel32.GlobalLock(handle)
+        if not ptr:
+            logger.warning("GlobalLock failed for clipboard format %d", fmt)
+            kernel32.GlobalFree(handle)
+            return
+        ctypes.memmove(ptr, data, len(data))
+        kernel32.GlobalUnlock(handle)
+        if not user32.SetClipboardData(fmt, handle):
+            logger.warning("SetClipboardData(%d) failed", fmt)
+            kernel32.GlobalFree(handle)
 
     def _set_custom_format(self, fmt: int, data: bytes):
-        handle = kernel32.GlobalAlloc(0x0002, len(data) + 1)
-        if handle:
-            ptr = kernel32.GlobalLock(handle)
-            ctypes.memmove(ptr, data, len(data))
-            ctypes.memset(ptr + len(data), 0, 1)
-            kernel32.GlobalUnlock(handle)
-            if not user32.SetClipboardData(fmt, handle):
-                logger.warning("SetClipboardData(%d) failed", fmt)
-                kernel32.GlobalFree(handle)
+        """A registered text format, which Windows expects NUL-terminated."""
+        self._set_global_format(fmt, data + b"\x00")
 
 
 class WindowsClipboardMonitor(ClipboardMonitor):

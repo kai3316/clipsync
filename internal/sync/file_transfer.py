@@ -258,6 +258,7 @@ class FileTransferManager:
         self._on_transfer_complete: Callable[[str, bool, bool, str], None] | None = None
         self._on_file_received: Callable[[str, str, str], None] | None = None
         self._on_transfer_request: Callable[[str, str, int, str, Callable], None] | None = None
+        self._clip_file_guard: Callable[[str, str], bool] | None = None
 
     # ------------------------------------------------------------------
     # Callback registration
@@ -311,9 +312,21 @@ class FileTransferManager:
         saved successfully to the output directory."""
         self._on_file_received = callback
 
+    def set_clip_file_guard(self, callback: Callable[[str, str], bool]) -> None:
+        """*callback(sender_device_id, entry_id) -> bool* -- whether a file
+        labeled ``clip_file`` really is one this side asked for.
+
+        Registered so that ``clip_file`` is an exemption the *receiver* grants
+        rather than a label the sender may claim.  See ``_handle_file_request``
+        for why that distinction is the whole of the consent gate."""
+        self._clip_file_guard = callback
+
     def take_received_kind(self, transfer_id: str) -> str:
-        """Pop and return the kind ("file" | "update") of a received transfer,
-        or "file" if unknown. Called from the on-file-received callback."""
+        """Pop and return the kind of a received transfer, or "file" if unknown.
+
+        One of "file", "update" or "clip_file" — the latter being a file this
+        user pulled from a peer's history row.  Called from the
+        on-file-received callback."""
         return self._received_kinds.pop(transfer_id, "file")
 
     def set_on_transfer_request(
@@ -333,7 +346,11 @@ class FileTransferManager:
     # ------------------------------------------------------------------
 
     def send_file(
-        self, file_path: str, broadcast_fn: Callable[[bytes], None], kind: str = "file"
+        self,
+        file_path: str,
+        broadcast_fn: Callable[[bytes], None],
+        kind: str = "file",
+        entry_id: str = "",
     ) -> str:
         """Start sending *file_path* to all connected peers.
 
@@ -344,6 +361,14 @@ class FileTransferManager:
         broadcast_fn:
             Callable that takes encoded ``bytes`` and sends them to all
             connected peers (typically ``TransportManager.broadcast``).
+        kind:
+            What the receiver should make of it: ``"file"``, ``"update"``, or
+            ``"clip_file"`` for a file a history row asked for.
+        entry_id:
+            The history entry a ``clip_file`` send is answering, carried so the
+            receiver can check the file against the request it made instead of
+            taking the sender's word for the label.  Omitted from the frame when
+            empty, which is every send that is not a ``clip_file``.
 
         Returns
         -------
@@ -389,17 +414,17 @@ class FileTransferManager:
                 "peer_id": self._send_fn_peer_id(broadcast_fn) or "",
             }
 
-        self._send_as_frame(
-            {
-                "msg_type": "file_request",
-                "transfer_id": transfer_id,
-                "file_name": file_name,
-                "file_size": file_size,
-                "mime_type": mime_type,
-                "kind": kind,
-            },
-            broadcast_fn,
-        )
+        request = {
+            "msg_type": "file_request",
+            "transfer_id": transfer_id,
+            "file_name": file_name,
+            "file_size": file_size,
+            "mime_type": mime_type,
+            "kind": kind,
+        }
+        if entry_id:
+            request["entry"] = entry_id
+        self._send_as_frame(request, broadcast_fn)
 
         logger.info(
             "File transfer %s initiated: %s (%d bytes, %d chunks)",
@@ -751,7 +776,7 @@ class FileTransferManager:
         if not isinstance(mime_type, str):
             mime_type = "application/octet-stream"
         kind = payload.get("kind", "file")
-        if kind not in ("file", "update"):
+        if kind not in ("file", "update", "clip_file"):
             kind = "file"
 
         # Validate/coerce file_size -- a malformed value must not crash the
@@ -826,9 +851,28 @@ class FileTransferManager:
                 "chunks": set(range(total_chunks)),
             }
 
-        if kind == "update":
-            # Update blob: auto-accept without a user prompt.
-            logger.info("Auto-accepting update blob transfer %s", transfer_id[:8])
+        # A `clip_file` transfer is one this machine asked for by clicking 下载 on
+        # a history row, so it takes no prompt: asking the user to accept the
+        # transfer they just requested is the same question twice, and the second
+        # answer can be no — a button that looks live and produces nothing.
+        #
+        # But the label is the *sender's* to write.  Read as an instruction it
+        # would be a hole: any paired peer could put `kind=clip_file` on an
+        # arbitrary push and have files written to this disk with nobody asked,
+        # which is precisely the consent gate every other inbound file passes
+        # through.  So the exemption is not the label — it is an outstanding
+        # request from that device, checked on this side.  Without one, the
+        # transfer prompts like any other file someone is pushing at us.
+        wanted = (
+            kind == "clip_file"
+            and self._clip_file_guard is not None
+            and self._clip_file_guard(sender_device_id, str(payload.get("entry", "")))
+        )
+        if kind == "update" or wanted:
+            # An update blob is one the app asked for on its own, and its kind is
+            # set by the download path rather than by a peer, so it needs no
+            # second check.
+            logger.info("Auto-accepting %s transfer %s", kind, transfer_id[:8])
             self.accept_transfer(transfer_id, send_fn)
         elif self._on_transfer_request is not None:
             self._on_transfer_request(transfer_id, file_name, file_size, mime_type, send_fn)

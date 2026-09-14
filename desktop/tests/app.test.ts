@@ -1,8 +1,9 @@
 import { flushPromises, mount, type VueWrapper } from "@vue/test-utils";
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import App from "../src/App.vue";
 import { bridge } from "../src/api/bridge";
-import type { HistoryItem } from "../src/api/types";
+import { closeContextMenu } from "../src/lib/context-menu";
+import type { HistoryItem, Overview } from "../src/api/types";
 import { setLocale, t } from "../src/i18n";
 
 /** A history row as the sidecar sends one, with whatever a case asserts on.
@@ -29,6 +30,24 @@ function historyPage(items: HistoryItem[]) {
   };
 }
 
+/** The counters the overview page is drawn from, as the sidecar sends them.
+ *
+ * Zero everywhere is the quietest answer — no devices, nothing copied, nothing
+ * discovered — so a case that is about the page says which number it is about
+ * and every other case gets a page that renders without claiming anything.
+ */
+function overview(overrides: Partial<Overview> = {}): Overview {
+  return {
+    connected_count: 0, paired_count: 0, discovered_count: 0, connected_names: [],
+    history_count: 0, history_today: 0, history_pinned: 0, history_images: 0,
+    active_transfers: 0, transfer_completed: 0, discovering: false, visible: false,
+    sync_enabled: false, web_enabled: false, uptime_seconds: 0, local_ip: "",
+    port: 8765, platform: "Windows", version: "test", network_type: "lan",
+    network_detail: "", recent_items: [],
+    ...overrides,
+  };
+}
+
 vi.mock("../src/api/bridge", () => ({
   inDesktop: () => true,
   bridge: {
@@ -37,6 +56,10 @@ vi.mock("../src/api/bridge", () => ({
       version: "test", health: "ready", device_name: "Local",
       session_id: "s", seq: 0, sync_state: "not_started",
     }),
+    // The window opens on the overview, so every case mounts it.  A count of
+    // zero everywhere is the quietest answer it can give; a case about the
+    // page itself says what it wants to see.
+    overview: vi.fn().mockResolvedValue(overview({})),
     devices: vi.fn().mockResolvedValue({ items: [] }),
     history: vi.fn().mockResolvedValue(historyPage([historyRow({
       preview: '<img src=x onerror="window.injected=true">',
@@ -55,6 +78,9 @@ vi.mock("../src/api/bridge", () => ({
     // so the panel has no success to report even when the call succeeds.
     enterInternetPairingCode: vi.fn().mockResolvedValue({ peer_id: "", waiting: true }),
     relayDeliveryStatus: vi.fn().mockResolvedValue({ pending: 0, items: [] }),
+    // The probe answered nothing, which is the quietest answer: a case about
+    // the button says what it wants the test to have found.
+    testRelayBrokers: vi.fn().mockResolvedValue({ results: [], reachable: 0, total: 0 }),
     chatDevices: vi.fn().mockResolvedValue({ devices: [] }),
     chatSessions: vi.fn().mockResolvedValue({ sessions: [], muted: [] }),
     chatMessages: vi.fn().mockResolvedValue({ messages: [] }),
@@ -66,6 +92,7 @@ vi.mock("../src/api/bridge", () => ({
     translate: vi.fn(),
     readHistoryText: vi.fn(),
     openHistoryLink: vi.fn().mockResolvedValue({ opened: true, url: "https://example.com" }),
+    requestEntryFiles: vi.fn().mockResolvedValue({ requested: true }),
     // Opening the devices page reads the phone service's status whatever
     // sub-tab is showing, so an unresolved mock left every devices-page case
     // with a spurious error band ("cannot read properties of undefined").
@@ -74,6 +101,9 @@ vi.mock("../src/api/bridge", () => ({
     }),
     configureCompanion: vi.fn(),
     chooseFile: vi.fn(),
+    shareFileToPhone: vi.fn().mockResolvedValue({
+      ok: true, name: "notes.txt", path: "C:/share/notes.txt", size: 5,
+    }),
     listBackups: vi.fn().mockResolvedValue({ backups: [] }),
     restoreBackup: vi.fn(),
     confirmPairing: vi.fn().mockResolvedValue({ paired: false, status: "confirmed_waiting" }),
@@ -104,6 +134,7 @@ vi.mock("../src/api/bridge", () => ({
       downloaded: 0, total: 0, error: "", version: "", path: "" } }),
     updateDownload: vi.fn().mockResolvedValue({ ok: true, started: true, error: null }),
     updateOpenFolder: vi.fn().mockResolvedValue({ ok: true }),
+    updateInstall: vi.fn().mockResolvedValue({ ok: true, installed: false, reason: "up_to_date" }),
     openDataFolder: vi.fn().mockResolvedValue({ ok: true, folder: "C:/data" }),
     openAboutLink: vi.fn().mockResolvedValue({ ok: true, url: "https://github.com/kai3316/clipsync" }),
     onMenuAction: vi.fn().mockResolvedValue(() => {}),
@@ -119,6 +150,9 @@ vi.mock("../src/api/bridge", () => ({
     discoveryStatus: vi.fn().mockResolvedValue({ enabled: true, visible: true }),
     setDiscoveryEnabled: vi.fn().mockResolvedValue({ enabled: false, visible: true }),
     setDiscoveryVisible: vi.fn().mockResolvedValue({ enabled: true, visible: false }),
+    copyHistory: vi.fn().mockResolvedValue({ copied: true }),
+    copyText: vi.fn().mockResolvedValue({ copied: true }),
+    deleteHistory: vi.fn().mockResolvedValue({ deleted: true }),
     batchPinHistory: vi.fn().mockResolvedValue({ updated: 1 }),
     batchDeleteHistory: vi.fn().mockResolvedValue({ deleted: 1 }),
     batchFavoriteHistory: vi.fn().mockResolvedValue({ added: 1, ids: ["f1"] }),
@@ -135,6 +169,33 @@ vi.mock("../src/api/bridge", () => ({
  * other way round, keeping its cards as hidden nodes because its search has to
  * count them.
  */
+/** The chord that opens each page, in the order the sidebar draws them.
+ *
+ * The window opens on the overview — the legacy dashboard did, and the phone's
+ * Companion panel still does — so a case that reaches into another page's rows
+ * has to go there first.  The digits count the sidebar's rows, which is the
+ * same table the window writes into its tooltips and its `aria-keyshortcuts`.
+ */
+const PAGE_CHORDS = {
+  overview: "1", history: "2", devices: "3", favorites: "4",
+  transfers: "5", chat: "6", ai: "7", settings: "8",
+} as const;
+
+/** Mount the window on the page the case is about.  `attachTo` is passed
+ * through for the cases that are about where the keyboard goes.
+ *
+ * The chord is dispatched rather than the sidebar row clicked so that the page
+ * is where it is because the window says so, and the caller's own
+ * `flushPromises` is what paints it — the same one the mount line used to be
+ * followed by. */
+function mountOn(page: keyof typeof PAGE_CHORDS, attachTo?: HTMLElement) {
+  const app = attachTo ? mount(App, { attachTo }) : mount(App);
+  if (page !== "overview") {
+    window.dispatchEvent(new KeyboardEvent("keydown", { key: PAGE_CHORDS[page], ctrlKey: true }));
+  }
+  return app;
+}
+
 async function openPanel(app: VueWrapper, label: string) {
   const tab = app.findAll(".page-tabs button").find(node => node.text() === label);
   if (!tab) throw new Error(`no panel tab named ${label}`);
@@ -225,28 +286,35 @@ describe("history rendering", () => {
       await flushPromises();
       // The numbers count the sidebar rows, in the order they are drawn, and
       // the row says which number it is — the chord is only discoverable if the
-      // sidebar advertises it.  Settings is drawn after the six content pages,
-      // so the pages count 1–6 and settings is 7.
+      // sidebar advertises it.  Settings is drawn after the seven content
+      // pages, so the pages count 1–7 and settings is 8.
       const transfers = app.findAll("button").find(button => button.attributes("aria-label") === "文件传输")!;
-      expect(transfers.attributes("aria-keyshortcuts")).toBe("Control+4");
-      expect(transfers.attributes("title")).toContain("Ctrl+4");
+      expect(transfers.attributes("aria-keyshortcuts")).toBe("Control+5");
+      expect(transfers.attributes("title")).toContain("Ctrl+5");
       const aiRow = app.findAll("button").find(button => button.attributes("aria-label") === "AI 配置")!;
-      expect(aiRow.attributes("aria-keyshortcuts")).toBe("Control+6");
-      await press("4");
+      expect(aiRow.attributes("aria-keyshortcuts")).toBe("Control+7");
+      // The first row is the page the window opens on, so its chord is the way
+      // back to where a reader who has wandered off started.
+      const dashboard = app.findAll("button").find(button => button.attributes("aria-label") === "概览")!;
+      expect(dashboard.attributes("aria-keyshortcuts")).toBe("Control+1");
+      await press("5");
       expect(app.find(".transfers-view").exists()).toBe(true);
-      await press("3");
+      await press("4");
       expect(app.find(".favorites-view").exists()).toBe(true);
-      // Ctrl+F goes to the search box, from wherever it is pressed: favourites
-      // has none of its own, so the history page's is the one it reaches.
+      await press("1");
+      expect(app.find(".overview-view").exists()).toBe(true);
+      // Ctrl+F goes to the search box, from wherever it is pressed: the
+      // dashboard in front of us has none of its own, so the history page's is
+      // the one it reaches.
       await press("f");
       expect(app.find(".history-list").exists()).toBe(true);
       expect(document.activeElement).toBe(app.get('[aria-label="搜索历史记录"]').element);
       // The AI page is a page of content, and the settings page is not: the
       // chord reaches each of them and leaves the other alone.
-      await press("6");
+      await press("7");
       expect(app.find(".ai-page").exists()).toBe(true);
       expect(app.find(".settings-panel").exists()).toBe(false);
-      await press("7");
+      await press("8");
       expect(app.find(".settings-panel").exists()).toBe(true);
       // Preferences has the chord everyone tries first.
       await press(",");
@@ -270,471 +338,123 @@ describe("history rendering", () => {
       app.unmount();
     }
   });
-  it("names every page in the header, in both languages, with its own count", async () => {
-    setLocale("zh-CN");
-    const app = mount(App);
-    try {
-      await flushPromises();
-      // The header's two lines come from one table keyed by page, so a page
-      // that is drawn but not named there is the failure this catches.
-      const open = async (digit: string) => {
-        window.dispatchEvent(new KeyboardEvent("keydown", { key: digit, ctrlKey: true }));
-        await flushPromises();
-        return [app.get("header h1").text(), app.get("header p").text()];
-      };
-      expect(await open("1")).toEqual(["剪贴板历史", "1 条记录"]);
-      expect(await open("2")).toEqual(["设备", "0 台设备"]);
-      expect(await open("3")).toEqual(["收藏库", "0 条收藏"]);
-      expect(await open("4")).toEqual(["文件传输", "文件发送与接收"]);
-      expect(await open("5")).toEqual(["附近聊天", "与附近设备进行会话"]);
-      expect(await open("6")).toEqual(["AI 配置", "读取、编辑本机与已配对设备的 AI 工具配置"]);
-      expect(await open("7")).toEqual(["设置", "本地配置"]);
-      // The counts and labels are both live: a table written once would leave
-      // the header in the language it was first read in.
-      setLocale("en");
-      await flushPromises();
-      expect(await open("1")).toEqual(["Clipboard History", "1 records"]);
-      expect(await open("4")).toEqual(["File Transfer", "File sending and receiving"]);
-    } finally {
-      app.unmount();
-      setLocale("zh-CN");
-    }
-  });
-  it("says when the settings form holds something the sidecar has not been told", async () => {
-    vi.mocked(bridge.settings).mockResolvedValue({ settings: { device_name: "desk" } });
-    vi.mocked(bridge.updateSettings).mockClear().mockResolvedValue({});
-    const app = mount(App);
-    try {
-      await flushPromises();
-      await app.get('[aria-label="设置"]').trigger("click");
-      await flushPromises();
-      // Loaded and untouched: nothing is pending, so the bar says nothing.
-      expect(app.text()).not.toContain("有未保存的更改");
-      const name = () => app.findAll("label").find(node => node.text().startsWith("设备名称"))!.get("input");
-      await name().setValue("laptop");
-      expect(app.text()).toContain("有未保存的更改");
-      // Typed back to what was loaded, the form is the saved state again.
-      await name().setValue("desk");
-      expect(app.text()).not.toContain("有未保存的更改");
-      await name().setValue("laptop");
-      await app.findAll("button").find(button => button.text() === "保存设置")!.trigger("submit");
-      await flushPromises();
-      expect(app.text()).not.toContain("有未保存的更改");
-      expect(app.text()).toContain("所有更改都已保存");
-    } finally {
-      app.unmount();
-      vi.mocked(bridge.settings).mockResolvedValue({ settings: {} });
-    }
-  });
-  it("marks the cards holding an edit the reader has walked away from", async () => {
-    vi.mocked(bridge.settings).mockResolvedValue({ settings: { device_name: "desk", port: 19990 } });
-    vi.mocked(bridge.updateSettings).mockClear().mockResolvedValue({});
-    const app = mount(App);
-    try {
-      await flushPromises();
-      await app.get('[aria-label="设置"]').trigger("click");
-      await flushPromises();
-      const rail = (label: string) =>
-        app.findAll(".settings-nav button").find(button => button.text().startsWith(label))!;
-      const dot = (label: string) => rail(label).find(".settings-edited");
-      // The same reading the rail's own cases make: `v-show` hides with an
-      // inline display, and that inline style is what a tree jsdom never
-      // attached to the document can be read for.
-      const onScreen = (id: string) =>
-        (app.get(`#settings-${id}`).element as HTMLElement).style.display !== "none";
-      const deviceName = () =>
-        app.findAll("label").find(node => node.text().startsWith("设备名称"))!.get("input");
-      // A form that is the saved state marks nothing, whichever card is on
-      // screen: the marks answer the same question the Save bar does.
-      expect(app.findAll(".settings-edited")).toHaveLength(0);
-      await deviceName().setValue("laptop");
-      expect(app.text()).toContain("有未保存的更改");
-      expect(dot("常规").exists()).toBe(true);
-      expect(dot("网络与高级").exists()).toBe(false);
-      // The mark says what it means to a reader who cannot see a colour.
-      expect(dot("常规").attributes("role")).toBe("img");
-      expect(dot("常规").attributes("aria-label")).toBe("有未保存的更改");
-      // The group tab above it says so too.  It has to: the strip below the
-      // groups lists one group's cards at a time, so an edit left in another
-      // group is a dot on that group's tab or it is nowhere.
-      expect(app.findAll(".settings-nav-groups .settings-edited")).toHaveLength(1);
-      // Walking to another card leaves the mark where the edit is.  That is the
-      // point of it: the card holding the edit is no longer on screen.
-      await rail("网络与高级").trigger("click");
-      await flushPromises();
-      expect(onScreen("general")).toBe(false);
-      expect(dot("常规").exists()).toBe(true);
-      // A second card's edit marks that one, and only that one.
-      await app.get('[aria-label="TCP 端口"]').setValue("20001");
-      expect(dot("网络与高级").exists()).toBe(true);
-      // Counted per row, because the two rows answer different questions: two
-      // cards hold an edit, and they sit in two different groups.
-      expect(app.findAll(".settings-nav-group .settings-edited")).toHaveLength(2);
-      expect(app.findAll(".settings-nav-groups .settings-edited")).toHaveLength(2);
-      // A control inside a card that is not a form field changes nothing the save
-      // writes, so it marks nothing ~ the translation card's API key is typed in
-      // without anything else being true: it has its own button and its own
-      // request, and the snapshot the save is compared against does not carry it.
-      await rail("翻译").trigger("click");
-      await flushPromises();
-      await app.get('[aria-label="翻译 API 密钥"]').setValue("sk-typed");
-      expect(dot("翻译").exists()).toBe(false);
-      expect(app.findAll(".settings-nav-group .settings-edited")).toHaveLength(2);
-
-      // Saving is the end of the question: the marks go with it.
-      await app.findAll("button").find(button => button.text() === "保存设置")!.trigger("submit");
-      await flushPromises();
-      expect(app.findAll(".settings-edited")).toHaveLength(0);
-      expect(app.text()).toContain("所有更改都已保存");
-    } finally {
-      app.unmount();
-      vi.mocked(bridge.settings).mockResolvedValue({ settings: {} });
-    }
-  });
-
-  it("round-trips the notification switches the host gates its own toasts on", async () => {
-    vi.mocked(bridge.settings).mockResolvedValue({ settings: {
-      notifications_enabled: true, notify_transfer: true,
-      notify_pairing: false, notify_device_connect: false,
-    } });
-    vi.mocked(bridge.updateSettings).mockClear().mockResolvedValue({});
-    const app = mount(App);
-    try {
-      await flushPromises();
-      await app.get('[aria-label="设置"]').trigger("click");
-      await flushPromises();
-      const toggle = (label: string) =>
-        app.findAll("label").find(node => node.text() === label)!.get("input");
-      // The switch has to show what the sidecar holds: a control that reads as
-      // off every time it opens is a control the user flips twice.
-      expect((toggle("配对请求通知").element as HTMLInputElement).checked).toBe(false);
-      expect((toggle("设备连接通知").element as HTMLInputElement).checked).toBe(false);
-      await toggle("配对请求通知").setValue(true);
-      await toggle("设备连接通知").setValue(true);
-      // Turning the master off greys the per-type choices without erasing them —
-      // the host keeps honouring those flags, so re-enabling has to restore the
-      // user's earlier answer rather than resetting it to on.
-      await toggle("启用通知").setValue(false);
-      expect(toggle("配对请求通知").attributes("disabled")).toBeDefined();
-      await app.findAll("button").find(button => button.text() === "保存设置")!.trigger("submit");
-      await flushPromises();
-      expect(bridge.updateSettings).toHaveBeenLastCalledWith(expect.objectContaining({
-        notifications_enabled: false, notify_transfer: true,
-        notify_pairing: true, notify_device_connect: true,
-      }));
-    } finally {
-      app.unmount();
-      vi.mocked(bridge.settings).mockResolvedValue({ settings: {} });
-    }
-  });
-  it("shows default filtering categories but preserves an explicitly disabled selection", async () => {
-    vi.mocked(bridge.settings).mockResolvedValue({ settings: { filter_enabled_categories: null } });
-    vi.mocked(bridge.updateSettings).mockClear().mockResolvedValue({});
-    const app = mount(App);
-    try {
-      await flushPromises();
-      await app.get('[aria-label="设置"]').trigger("click");
-      await flushPromises();
-      const filters = app.findAll("fieldset").find(field => field.text().includes("敏感内容过滤"))!;
-      const inputs = filters.findAll("input");
-      expect(inputs).toHaveLength(6);
-      expect(inputs.filter(input => (input.element as HTMLInputElement).checked)).toHaveLength(5);
-      expect((filters.get('input[value="email"]').element as HTMLInputElement).checked).toBe(false);
-      for (const input of inputs) await input.setValue(false);
-      await app.findAll("button").find(button => button.text() === "保存设置")!.trigger("submit");
-      await flushPromises();
-      expect(bridge.updateSettings).toHaveBeenLastCalledWith(expect.objectContaining({
-        filter_enabled_categories: [],
-      }));
-    } finally {
-      app.unmount();
-      vi.mocked(bridge.settings).mockResolvedValue({ settings: {} });
-    }
-  });
-
-  it("restores a backup from the list without a file dialog", async () => {
+  it("drives the history list from the keyboard, the way the legacy panel did", async () => {
+    // Three rows, because every claim here is about moving between them.
+    vi.mocked(bridge.history).mockResolvedValue(historyPage([
+      historyRow({ id: "a", preview: "first" }),
+      historyRow({ id: "b", preview: "second" }),
+      historyRow({ id: "c", preview: "third" }),
+    ]));
     HTMLDialogElement.prototype.showModal = vi.fn();
     HTMLDialogElement.prototype.close = vi.fn();
-    vi.mocked(bridge.listBackups).mockResolvedValue({ backups: [
-      { path: "C:/data/backups/clipsync-20260912.zip", filename: "clipsync-20260912.zip", date: "2026-09-12 09:30:00", size: 2048 },
-    ] });
-    const app = mount(App);
+    // The arrow keys belong to the history list, so the window has to be on it.
+    const app = mountOn("history", document.body);
+    const press = async (key: string, modifiers: Record<string, boolean> = {}) => {
+      window.dispatchEvent(new KeyboardEvent("keydown", { key, ...modifiers }));
+      await flushPromises();
+    };
+    /** Which row the cursor is on, read from the row itself: the highlight is
+     * a class on the row, and the record it sits on is the only thing that
+     * says the class landed where the arrow keys meant it to. */
+    const cursor = () => {
+      const row = app.find(".history-row--kbd");
+      return row.exists() ? row.find(".history-content p").text() : null;
+    };
     try {
       await flushPromises();
-      await app.get('[aria-label="设置"]').trigger("click");
-      await flushPromises();
-      await app.get('[aria-label="刷新备份"]').trigger("click");
-      await flushPromises();
-      // Age and size come back with the row, so the list says which backup is
-      // which — the legacy panel printed the byte count raw.
-      expect(app.get(".backup-list").text()).toContain("2026-09-12 09:30:00");
-      expect(app.get(".backup-list").text()).toContain("2.0 KB");
-      // A row's button says which backup it restores, so six rows are not six
-      // buttons with the same name to a screen reader.
-      expect(app.get(".backup-list button").attributes("aria-label"))
-        .toBe(t("恢复备份 {name}", { name: "clipsync-20260912.zip" }));
-      await app.get(".backup-list button").trigger("click");
-      await flushPromises();
-      // The listed path goes to the same confirmation the picker fills in: a
-      // reader looking at the row should not have to find the file again.
-      expect(app.get('[aria-labelledby="restore-title"]').text()).toContain("clipsync-20260912.zip");
-      expect(bridge.chooseFile).not.toHaveBeenCalled();
+      // Nothing is chosen before the reader asks for anything.
+      expect(cursor()).toBeNull();
+      // The first ↓ enters at the top rather than the second row.
+      await press("ArrowDown");
+      expect(cursor()).toBe("first");
+      await press("ArrowDown");
+      expect(cursor()).toBe("second");
+      await press("ArrowUp");
+      expect(cursor()).toBe("first");
+      // ↑ at the top and ↓ at the bottom clamp rather than wrap.
+      await press("ArrowUp");
+      expect(cursor()).toBe("first");
+      await press("ArrowDown");
+      await press("ArrowDown");
+      await press("ArrowDown");
+      expect(cursor()).toBe("third");
+      // Enter copies the row under the cursor, not the first row.
+      await press("Enter");
+      expect(bridge.copyHistory).toHaveBeenLastCalledWith("c");
+      // Delete opens the same confirm the row's own trash does — it must not
+      // remove anything on the keypress alone.
+      await press("Delete");
+      expect(HTMLDialogElement.prototype.showModal).toHaveBeenCalled();
+      expect(bridge.deleteHistory).not.toHaveBeenCalled();
+      // Ctrl+A takes the whole visible page.
+      await press("a", { ctrlKey: true });
+      expect(app.find('[role="status"]').text()).toContain("3");
+      // A reader typing in the search box owns the keys: no cursor moves, and
+      // Ctrl+A means "select this text" rather than "select every record".
+      const search = app.get('[aria-label="搜索历史记录"]');
+      (search.element as HTMLInputElement).focus();
+      await press("ArrowDown");
+      expect(cursor()).toBe("third");
+      await press("a", { ctrlKey: true });
+      expect(app.find('[role="status"]').text()).toContain("3");
     } finally {
       app.unmount();
-      vi.mocked(bridge.listBackups).mockResolvedValue({ backups: [] });
+      vi.mocked(bridge.history).mockResolvedValue(historyPage([
+        historyRow({ preview: '<img src=x onerror="window.injected=true">' }),
+      ]));
     }
   });
 
-  it("opens one settings card at a time from the rail", async () => {
-    const app = mount(App);
-    try {
-      await flushPromises();
-      await app.get('[aria-label="设置"]').trigger("click");
-      await flushPromises();
-      const railButton = (label: string) =>
-        app.findAll(".settings-nav button").find(button => button.text() === label)!;
-      // `v-show` hides with an inline display, and that inline style is what
-      // this reads: VTU's `isVisible()` answers from the computed style, and in
-      // jsdom that comes from the default stylesheet rather than the inline one
-      // for a tree that was never attached to the document.
-      const onScreen = (id: string) =>
-        (app.get(`#settings-${id}`).element as HTMLElement).style.display !== "none";
-      // One card is the page.  The other ten are still in the document —
-      // v-show, not v-if — so a control keeps whatever state the reader left on
-      // it, but none of them is on screen.
-      expect(onScreen("general")).toBe(true);
-      expect(onScreen("sync")).toBe(false);
-      expect(railButton("常规").attributes("aria-current")).toBe("true");
-      // Picking a card shows it and puts the one before it away.
-      await railButton("同步").trigger("click");
-      await flushPromises();
-      expect(onScreen("sync")).toBe(true);
-      expect(onScreen("general")).toBe(false);
-      expect(railButton("同步").attributes("aria-current")).toBe("true");
-      expect(railButton("常规").attributes("aria-current")).toBeUndefined();
-      // And back, from a card three groups away.
-      await railButton("诊断与维护").trigger("click");
-      await flushPromises();
-      expect(onScreen("diagnostics")).toBe(true);
-      expect(onScreen("sync")).toBe(false);
-    } finally { app.unmount(); }
-  });
-
-  it("keeps the phone out of the settings page and its one setting with the history", async () => {
-    const app = mount(App);
-    try {
-      await flushPromises();
-      await app.get('[aria-label="设置"]').trigger("click");
-      await flushPromises();
-      // The card that held the service's controls left this page for the
-      // devices page; what remained was a card headed with a phone, holding one
-      // number and a note about where everything else had gone.  It is gone, and
-      // so is its entry in the rail.
-      expect(app.find("#settings-companion").exists()).toBe(false);
-      expect(app.findAll(".settings-nav button").map(button => button.text()))
-        .not.toContain("手机 Companion");
-      // What the card held is a bound on the history, and it sits with the two
-      // bounds on the history in the card whose subject it shares rather than in
-      // a card of its own.
-      const limit = app.get('[aria-label="显示历史条数"]');
-      expect((limit.element as HTMLElement).closest("section.settings-section")!.id)
-        .toBe("settings-history");
-      // And it is on this page for a reason that a move would have broken: it
-      // rides this page's own save.  That is the claim, so it is the assertion.
-      await limit.setValue("42");
-      await app.findAll("button").find(button => button.text() === "保存设置")!.trigger("submit");
-      await flushPromises();
-      expect(bridge.updateSettings).toHaveBeenLastCalledWith(
-        expect.objectContaining({ web_history_limit: 42 }));
-    } finally { app.unmount(); }
-  });
-
-  it("groups the rail so that no group holds a single card", async () => {
-    const app = mount(App);
-    try {
-      await flushPromises();
-      await app.get('[aria-label="设置"]').trigger("click");
-      await flushPromises();
-      // A group is a question the reader arrives with, and a group with one
-      // entry is a label with nothing to aim at.  The card that had to move is
-      // the translation one: it is a service this machine calls rather than one
-      // it hosts, so it belongs under what this machine talks to -- and the
-      // group it left was the one the phone service emptied.
-      //
-      // The label is the group tab's own text now, and the cards are the run
-      // under it: the two rows are the two halves of the question above.
-      const groups = app.findAll(".settings-nav-groups button")
-        .map(tab => tab.text());
-      expect(groups).toEqual(["通用", "连接", "数据", "系统"]);
-      const sections = app.findAll(".settings-nav-group")
-        .map(run => run.findAll("button").map(button => button.text()));
-      expect(sections.every(items => items.length > 1)).toBe(true);
-      // The runs are in the order of the tabs above them, so the second one is
-      // 连接's — the group 翻译 moved to.
-      expect(sections[1]).toContain("翻译");
-      // One run of cards is on screen at a time, and it is the open group's.
-      // The others stay in the tree so the search can still count them, which
-      // is why this reads the inline display rather than the number of runs.
-      const shown = app.findAll(".settings-nav-group")
-        .filter(run => (run.element as HTMLElement).style.display !== "none");
-      expect(shown).toHaveLength(1);
-      expect(shown[0].findAll("button").map(button => button.text())).toContain("常规");
-    } finally { app.unmount(); }
-  });
-
-  it("browses the settings in two steps: a group, then a card inside it", async () => {
-    const app = mount(App);
-    try {
-      await flushPromises();
-      await app.get('[aria-label="设置"]').trigger("click");
-      await flushPromises();
-      const tabs = () => app.findAll(".settings-nav-groups button");
-      const tab = (label: string) =>
-        tabs().find(node => node.text().replace(/ · \d+$/, "") === label)!;
-      const activeTab = () => tabs().find(node => node.classes().includes("active"))!;
-      const runs = () => app.findAll(".settings-nav-group");
-      // `v-show` on the runs, read the way the cards' own visibility is.
-      const shownRun = () =>
-        runs().find(run => (run.element as HTMLElement).style.display !== "none")!;
-      const cardOnScreen = (id: string) =>
-        (app.get(`#settings-${id}`).element as HTMLElement).style.display !== "none";
-
-      // The page opens in 通用 with that group's own cards under the tab: the
-      // reader's first step is already made, and the row of cards says which
-      // group it belongs to by sitting under it.
-      expect(activeTab().text()).toBe("通用");
-      expect(shownRun().findAll("button").map(button => button.text()))
-        .toEqual(["常规", "剪贴板历史", "通知"]);
-
-      // A group is a step on the way to a card rather than a card of its own,
-      // so it lands on one: a reader who opens 连接 is asking for the settings
-      // about connecting, and a row of names under a card from another group
-      // would leave the two rows disagreeing about what is open.
-      await tab("连接").trigger("click");
-      await flushPromises();
-      expect(cardOnScreen("sync")).toBe(true);
-      expect(cardOnScreen("general")).toBe(false);
-      expect(activeTab().text()).toBe("连接");
-      expect(shownRun().findAll("button").map(button => button.text()))
-        .toEqual(["同步", "局域网发现", "网络与高级", "翻译"]);
-
-      // A card inside the open group is opened by its own tab, and the group
-      // stays where it was: it was already the open one.
-      await shownRun().findAll("button").find(button => button.text() === "翻译")!
-        .trigger("click");
-      await flushPromises();
-      expect(cardOnScreen("translation")).toBe(true);
-      expect(activeTab().text()).toBe("连接");
-
-      // Clicking the group that is already open leaves the reader alone.  Its
-      // cards are on screen already, and moving them to 同步 would be the tab
-      // taking them somewhere they did not ask to go.
-      await tab("连接").trigger("click");
-      await flushPromises();
-      expect(cardOnScreen("translation")).toBe(true);
-      expect(cardOnScreen("sync")).toBe(false);
-      expect(activeTab().text()).toBe("连接");
-    } finally { app.unmount(); }
-  });
-
-  it("searches the settings page, showing the cards that hold the query", async () => {
-    const app = mount(App);
-    try {
-      await flushPromises();
-      await app.get('[aria-label="设置"]').trigger("click");
-      await flushPromises();
-      const search = app.get('[aria-label="搜索设置…"]');
-      const railButton = (label: string) =>
-        app.findAll(".settings-nav button").find(button => button.text().startsWith(label))!;
-      const onScreen = (id: string) =>
-        (app.get(`#settings-${id}`).element as HTMLElement).style.display !== "none";
-      // Nothing is claimed before anything is typed, and the page is one card.
-      expect(app.find(".settings-search-status").exists()).toBe(false);
-      expect(app.findAll(".settings-nav button.has-match").length).toBe(0);
-      expect(app.findAll(".settings-nav button.dimmed").length).toBe(0);
-      expect(onScreen("advanced")).toBe(false);
-      // One card holds this, in one place: the row's own label.
-      await search.setValue("低内存模式");
-      await flushPromises();
-      expect(app.text()).toContain("1 个分区匹配“低内存模式”");
-      expect(railButton("网络与高级").text()).toContain("· 1");
-      expect(app.findAll(".settings-hit").map(hit => hit.text()))
-        .toEqual(["低内存模式（更少预览、更慢轮询）"]);
-      // The page becomes the cards that hold the query, and only those: a match
-      // the reader cannot see is a match they cannot act on.  The rail still
-      // counts and dims the rest, so nothing is lost from the rail's own list,
-      // and the entry for a match opens it like any other.
-      expect(onScreen("advanced")).toBe(true);
-      expect(onScreen("general")).toBe(false);
-      // Counted per row.  Every card but the one holding the query is dimmed,
-      // and the groups are dimmed except the one holding it -- which is also
-      // the group whose cards the strip is listing, so the count a reader can
-      // act on is the one on the card, not the one on the tab.
-      expect(app.findAll(".settings-nav-group button.dimmed").length).toBe(10);
-      expect(app.findAll(".settings-nav-groups button.dimmed").length).toBe(3);
-      expect(app.findAll(".settings-nav-groups button.has-match").length).toBe(1);
-      expect(app.findAll(".settings-nav-group button.has-match").length).toBe(1);
-      // Enter opens the first card that holds it, in the rail's own order, and
-      // ends the search: the reader asked for a card, not for a result list.
-      await search.trigger("keydown.enter");
-      await flushPromises();
-      expect((search.element as HTMLInputElement).value).toBe("");
-      expect(app.find(".settings-search-status").exists()).toBe(false);
-      expect(railButton("网络与高级").classes()).toContain("active");
-      expect(onScreen("advanced")).toBe(true);
-      expect(onScreen("general")).toBe(false);
-      // A query nothing holds says so, and leaves the reader on that card
-      // rather than on an empty page under a rail that already said so.
-      await search.setValue("绝无此物");
-      await flushPromises();
-      expect(app.text()).toContain("没有匹配“绝无此物”的设置项");
-      expect(app.findAll(".settings-nav button.has-match").length).toBe(0);
-      expect(onScreen("advanced")).toBe(true);
-      // Opening a card from the rail while a query is up ends the search too,
-      // so a dimmed entry is still a control that does something.
-      await search.setValue("低内存模式");
-      await flushPromises();
-      await railButton("常规").trigger("click");
-      await flushPromises();
-      expect((search.element as HTMLInputElement).value).toBe("");
-      expect(onScreen("general")).toBe(true);
-      expect(onScreen("advanced")).toBe(false);
-      // And it can be dropped: Escape leaves the page as it was found.
-      await search.trigger("keydown.esc");
-      await flushPromises();
-      expect((search.element as HTMLInputElement).value).toBe("");
-      expect(app.find(".settings-search-status").exists()).toBe(false);
-      expect(app.findAll(".settings-hit").length).toBe(0);
-      expect(app.findAll(".settings-nav button.dimmed").length).toBe(0);
-    } finally { app.unmount(); }
-  });
-
-  it("edits the relay lists as the multi-line lists they are", async () => {
+  /**
+   * The relay test is the one control on the settings page that asks about a
+   * broker rather than storing it, and it was the one capability the audit found
+   * on the old web panel with no command behind it in this shell
+   * (`settings-panel.js` 测试 → `POST /api/internetpair/test`).
+   *
+   * What it tests is the **staged** list, not the saved one: a reader checks
+   * what they are about to save, and finds out a broker is unreachable before it
+   * is written into the config the relay runs on.
+   */
+  it("probes the staged relay brokers and reports each one", async () => {
     vi.mocked(bridge.settings).mockResolvedValue({ settings: {
-      relay_brokers: ["wss://one:8884/mqtt", "wss://two:8884/mqtt"],
-      relay_private_brokers: [],
+      relay_brokers: ["wss://one:8884/mqtt"],
+      relay_private_brokers: ["wss://private:8884/mqtt"],
     } });
+    vi.mocked(bridge.testRelayBrokers).mockResolvedValue({
+      results: [
+        { endpoint: "wss://private:8884/mqtt", ok: true, latency_ms: 42 },
+        { endpoint: "wss://one:8884/mqtt", ok: false, latency_ms: null, detail: "connection refused" },
+      ],
+      reachable: 1,
+      total: 2,
+    });
     const app = mount(App);
     try {
       await flushPromises();
       await app.get('[aria-label="设置"]').trigger("click");
       await flushPromises();
-      // One address per line: the control has to be able to hold a line break,
-      // which is the one thing the single-line input it used to be could not.
-      const free = app.get('[aria-label="公共中继地址"]');
-      expect(free.element.tagName).toBe("TEXTAREA");
-      expect((free.element as HTMLTextAreaElement).value).toBe("wss://one:8884/mqtt\nwss://two:8884/mqtt");
-      await free.setValue("wss://one:8884/mqtt\nwss://three:8884/mqtt\n");
-      await app.findAll("button").find(button => button.text() === "保存设置")!.trigger("submit");
+      // A broker staged in both lists is one broker, as it was for the panel.
+      await app.get('[aria-label="公共中继地址"]').setValue("wss://one:8884/mqtt");
+      const test = () => app.findAll("button").find(button => button.text().includes("测试中继连接"))!;
+      await test().trigger("click");
       await flushPromises();
-      expect(bridge.updateSettings).toHaveBeenLastCalledWith(expect.objectContaining({
-        // The blank last line is dropped rather than saved as an empty broker.
-        relay_brokers: ["wss://one:8884/mqtt", "wss://three:8884/mqtt"],
-        relay_private_brokers: [],
-      }));
+      expect(bridge.testRelayBrokers).toHaveBeenCalledExactlyOnceWith([
+        "wss://one:8884/mqtt", "wss://private:8884/mqtt",
+      ]);
+      // Both counts, and a row per broker: which one answered, how fast, and
+      // for the one that did not, the probe's own reason.
+      expect(app.text()).toContain("2 个中继中 1 个可达");
+      expect(app.get(".relay-test").text()).toContain("42 毫秒");
+      expect(app.get(".relay-test").text()).toContain("connection refused");
+      const rows = app.findAll(".relay-test-list > li");
+      expect(rows.map(row => row.classes().join(" "))).toEqual([
+        expect.stringContaining("relay-test--ok"),
+        expect.stringContaining("relay-test--fail"),
+      ]);
     } finally {
       app.unmount();
       vi.mocked(bridge.settings).mockResolvedValue({ settings: {} });
+      vi.mocked(bridge.testRelayBrokers).mockReset().mockResolvedValue({ results: [], reachable: 0, total: 0 });
     }
   });
 
@@ -814,37 +534,6 @@ describe("history rendering", () => {
       vi.mocked(bridge.updateSettings).mockResolvedValue({});
     }
   });
-  it("sends the encryption toggle alone and clears the password through its dialog", async () => {
-    HTMLDialogElement.prototype.showModal = vi.fn();
-    HTMLDialogElement.prototype.close = vi.fn();
-    vi.mocked(bridge.settings).mockResolvedValue({
-      settings: { encryption_enabled: false, password_set: true },
-    });
-    vi.mocked(bridge.updateSettings).mockResolvedValue({ password_set: false });
-    const app = mount(App);
-    try {
-      await flushPromises();
-      await app.get('[aria-label="设置"]').trigger("click");
-      await flushPromises();
-      await app.get('[aria-label="启用端到端加密"]').setValue(true);
-      await app.findAll("button").find(button => button.text().includes("保存设置"))!.trigger("submit");
-      await flushPromises();
-      expect(vi.mocked(bridge.updateSettings).mock.calls.at(-1)![0]).toMatchObject({
-        encryption_enabled: true,
-      });
-      await app.findAll("button").find(button => button.text().includes("清除加密密码"))!.trigger("click");
-      await flushPromises();
-      const dialog = app.get('[aria-labelledby="clear-password-title"]');
-      await dialog.findAll("button").find(button => button.text() === "清除")!.trigger("click");
-      await flushPromises();
-      // An empty password means "unchanged", so clearing needs the action key.
-      expect(bridge.updateSettings).toHaveBeenLastCalledWith({ password: "", clear_password: true });
-    } finally {
-      app.unmount();
-      vi.mocked(bridge.settings).mockResolvedValue({ settings: {} });
-      vi.mocked(bridge.updateSettings).mockResolvedValue({});
-    }
-  });
   it("resets every data file only after the factory-reset dialog is confirmed", async () => {
     HTMLDialogElement.prototype.showModal = vi.fn();
     HTMLDialogElement.prototype.close = vi.fn();
@@ -862,26 +551,6 @@ describe("history rendering", () => {
       expect(bridge.factoryReset).toHaveBeenCalledTimes(1);
     } finally {
       app.unmount();
-    }
-  });
-
-  it("does not let a delayed startup settings read overwrite a newer theme", async () => {
-    let resolve!: (value: any) => void;
-    vi.mocked(bridge.settings)
-      .mockReturnValueOnce(new Promise(done => { resolve = done; }))
-      .mockResolvedValueOnce({ settings: { appearance_mode: "light" } });
-    const app = mount(App);
-    try {
-      await flushPromises();
-      await app.get('[aria-label="设置"]').trigger("click");
-      await flushPromises();
-      expect(document.documentElement.dataset.theme).toBe("light");
-      resolve({ settings: { appearance_mode: "dark" } });
-      await flushPromises();
-      expect(document.documentElement.dataset.theme).toBe("light");
-    } finally {
-      app.unmount();
-      delete document.documentElement.dataset.theme;
     }
   });
 
@@ -942,59 +611,16 @@ describe("history rendering", () => {
     } finally { app.unmount(); }
   });
 
-  it("opens the data and backups folders from the settings page", async () => {
-    vi.mocked(bridge.openDataFolder).mockClear();
-    const app = mount(App);
-    try {
-      await flushPromises();
-      await app.get('[aria-label="设置"]').trigger("click");
-      await flushPromises();
-      await app.findAll("button").find(button => button.text() === "打开数据文件夹")!.trigger("click");
-      await flushPromises();
-      expect(bridge.openDataFolder).toHaveBeenLastCalledWith("data");
-      await app.findAll("button").find(button => button.text() === "打开备份文件夹")!.trigger("click");
-      await flushPromises();
-      expect(bridge.openDataFolder).toHaveBeenLastCalledWith("backups");
-    } finally { app.unmount(); }
-  });
-
-  it("ignores a stale running snapshot after Companion shutdown completes", async () => {
-    const running = { enabled: true, running: true, port: 8080, state: "running", access_url: "old-access-url" };
-    let resolve!: (value: typeof running) => void;
-    vi.mocked(bridge.companionStatus)
-      .mockResolvedValueOnce(running)
-      .mockReturnValueOnce(new Promise(done => { resolve = done; }));
-    vi.mocked(bridge.configureCompanion).mockResolvedValueOnce({
-      ...running, enabled: false, running: false, state: "stopped", access_url: null,
-    });
-    const app = mount(App);
-    try {
-      await flushPromises();
-      // The phone service's own controls are on the devices page: the button
-      // that starts it is how a phone is added to this machine.
-      await app.get('[aria-label="设备"]').trigger("click");
-      await flushPromises();
-      // Opening the page reads the service once; the read the button below asks
-      // for is the one left in flight while the stop is asked for.
-      await openPanel(app, "手机 Companion");
-      await app.findAll("button").find(button => button.text() === "读取手机服务状态")!.trigger("click");
-      await flushPromises();
-      await app.findAll("button").find(button => button.text() === "停止服务")!.trigger("click");
-      await flushPromises();
-      resolve(running);
-      await flushPromises();
-      expect(app.find('[aria-label="手机访问地址"]').exists()).toBe(false);
-      expect(app.findAll("button").find(button => button.text() === "停止服务")!.attributes("disabled")).toBeDefined();
-    } finally { app.unmount(); }
-  });
-
   it("requires confirmation to rotate the Companion token without applying an edited port", async () => {
     HTMLDialogElement.prototype.showModal = vi.fn();
     HTMLDialogElement.prototype.close = vi.fn();
-    const running = { enabled: true, running: true, port: 8080, state: "running", access_url: "old-url" };
-    vi.mocked(bridge.companionStatus).mockResolvedValue(running);
-    vi.mocked(bridge.configureCompanion).mockClear().mockResolvedValueOnce({ ...running, access_url: "new-url" });
-    const app = mount(App);
+    const running = { enabled: true, running: true, port: 8080, state: "running", access_url: "old-url", url: "old-url-plain" };
+    vi.mocked(bridge.companionStatus).mockReset().mockResolvedValue(running);
+    vi.mocked(bridge.configureCompanion).mockReset().mockResolvedValue({ ...running, access_url: "new-url" });
+    vi.mocked(bridge.status).mockResolvedValue({ version: "test", health: "ready",
+      device_name: "Local", session_id: "s", seq: 0, sync_state: "not_started",
+      capabilities: ["companion.status"] } as any);
+    const app = mountOn("history");
     try {
       await flushPromises();
       await app.get('[aria-label="设备"]').trigger("click");
@@ -1008,35 +634,8 @@ describe("history rendering", () => {
       expect(bridge.configureCompanion).not.toHaveBeenCalled();
       await app.get('[aria-labelledby="companion-rotate-title"] .danger').trigger("click");
       await flushPromises();
-      expect(bridge.configureCompanion).toHaveBeenCalledExactlyOnceWith(true, 8080, true);
+      expect(bridge.configureCompanion).toHaveBeenCalledExactlyOnceWith(true, 8080, true, false);
       expect((app.get('[aria-label="手机访问地址"]').element as HTMLInputElement).value).toBe("new-url");
-    } finally { app.unmount(); }
-  });
-
-  it("stops the actual Companion even with an invalid unsaved port and removes its access URL", async () => {
-    vi.mocked(bridge.companionStatus).mockResolvedValue({
-      enabled: true, running: true, port: 8080, state: "running",
-      access_url: "http://127.0.0.1:8080/mobile.html?token=fixture",
-    });
-    vi.mocked(bridge.configureCompanion).mockClear().mockResolvedValueOnce({
-      enabled: false, running: false, port: 8080, state: "stopped", access_url: null,
-    });
-    const app = mount(App);
-    try {
-      await flushPromises();
-      await app.get('[aria-label="设备"]').trigger("click");
-      await flushPromises();
-      await openPanel(app, "手机 Companion");
-      await app.findAll("button").find(button => button.text() === "读取手机服务状态")!.trigger("click");
-      await flushPromises();
-      expect(app.find('[aria-label="手机访问地址"]').exists()).toBe(true);
-      await app.get('[aria-label="手机服务端口"]').setValue(0);
-      expect(app.findAll("button").find(button => button.text() === "启动 / 应用端口")!.attributes("disabled")).toBeDefined();
-      await app.findAll("button").find(button => button.text() === "停止服务")!.trigger("click");
-      await flushPromises();
-      expect(bridge.configureCompanion).toHaveBeenCalledExactlyOnceWith(false, 8080, false);
-      expect(app.find('[aria-label="手机访问地址"]').exists()).toBe(false);
-      expect((app.get('[aria-label="手机服务端口"]').element as HTMLInputElement).value).toBe("8080");
     } finally { app.unmount(); }
   });
 
@@ -1075,48 +674,6 @@ describe("history rendering", () => {
     } finally {
       app.unmount();
       vi.mocked(bridge.settings).mockResolvedValue({ settings: {} });
-    }
-  });
-
-  it("reads the AI tools when the AI page opens, and retries a read that failed", async () => {
-    vi.mocked(bridge.aiProfiles).mockClear()
-      .mockRejectedValueOnce(new Error("temporary profile read failure"))
-      .mockResolvedValueOnce({
-        tools: [{ key: "claude", label: "Claude" }],
-        enabled: ["claude"],
-        custom_paths: ["restored-path"],
-      });
-    const app = mount(App);
-    try {
-      await flushPromises();
-      await app.get('[aria-label="AI 配置"]').trigger("click");
-      await flushPromises();
-      expect(bridge.aiProfiles).toHaveBeenCalledTimes(1);
-      const save = () => app.findAll("button").find(button => button.text().includes("保存 AI 配置"))!;
-      // No tools were read and nothing was stored by this page, so the button is
-      // off: saving here would write an empty list over the stored one.
-      expect(save().attributes("disabled")).toBeDefined();
-      // Walking away and back is what retries it — the flag is set on success
-      // only — and what arrives is what the sidecar has.
-      await app.get('[aria-label="设置"]').trigger("click");
-      await flushPromises();
-      await app.get('[aria-label="AI 配置"]').trigger("click");
-      await flushPromises();
-      expect(bridge.aiProfiles).toHaveBeenCalledTimes(2);
-      expect(save().attributes("disabled")).toBeUndefined();
-      expect(app.findAll("textarea").some(field =>
-        (field.element as HTMLTextAreaElement).value === "restored-path")).toBe(true);
-      expect(app.text()).toContain("所有更改都已保存");
-      // A page that read successfully is not read again, for the reason the
-      // settings form is not: the fields are the reader's while it is open.
-      await app.get('[aria-label="AI 配置"]').trigger("click");
-      await flushPromises();
-      expect(bridge.aiProfiles).toHaveBeenCalledTimes(2);
-    } finally {
-      app.unmount();
-      // The queued answers are spent by the two reads above; the shape the rest
-      // of the file expects is put back either way.
-      vi.mocked(bridge.aiProfiles).mockResolvedValue({ tools: [], enabled: [], custom_paths: [] });
     }
   });
 
@@ -1242,39 +799,6 @@ describe("history rendering", () => {
     } finally { app.unmount(); }
   });
 
-  it("preserves an AI draft until switching files is confirmed", async () => {
-    HTMLDialogElement.prototype.showModal = vi.fn();
-    HTMLDialogElement.prototype.close = vi.fn();
-    vi.mocked(bridge.aiLocal).mockClear()
-      .mockResolvedValueOnce({ entries: ["a.md", "b.md"].map(rel_path => ({
-        tool: "custom", root: "", rel_path,
-      })) })
-      .mockResolvedValueOnce({ content: "original" })
-      .mockResolvedValueOnce({ content: "second file" });
-    const app = mount(App);
-    try {
-      await flushPromises();
-      await app.get('[aria-label="AI 配置"]').trigger("click");
-      await flushPromises();
-      await openPanel(app, "本机配置");
-      await app.findAll("button").find(button => button.text().includes("读取本机配置"))!.trigger("click");
-      await flushPromises();
-      await app.get('[aria-label="编辑 a.md"]').trigger("click");
-      await flushPromises();
-      await app.get('[aria-label="AI 配置编辑器"]').setValue("unsaved draft");
-      await app.get('[aria-label="编辑 b.md"]').trigger("click");
-      await flushPromises();
-      expect(bridge.aiLocal).toHaveBeenCalledTimes(2);
-      await app.get('[aria-labelledby="ai-discard-title"] button[autofocus]').trigger("click");
-      expect((app.get('[aria-label="AI 配置编辑器"]').element as HTMLTextAreaElement).value).toBe("unsaved draft");
-      await app.get('[aria-label="编辑 b.md"]').trigger("click");
-      await flushPromises();
-      await app.get('[aria-labelledby="ai-discard-title"] .danger').trigger("click");
-      await flushPromises();
-      expect((app.get('[aria-label="AI 配置编辑器"]').element as HTMLTextAreaElement).value).toBe("second file");
-    } finally { app.unmount(); }
-  });
-
   it.each(["overwrite", "append"])("requires confirmation before an AI %s request", async (mode) => {
     HTMLDialogElement.prototype.showModal = vi.fn();
     HTMLDialogElement.prototype.close = vi.fn();
@@ -1312,180 +836,6 @@ describe("history rendering", () => {
       expect(bridge.aiPull).toHaveBeenCalledExactlyOnceWith("a", [
         { tool: "custom", root: "", rel_path: "remote.md", is_dir: false },
       ], mode);
-    } finally { app.unmount(); }
-  });
-
-  it("labels each remote row with how it differs from this machine, and reads the local index to do it", async () => {
-    vi.mocked(bridge.devices).mockResolvedValueOnce({ items: [
-      { id: "a", name: "First", paired: true } as any,
-    ] });
-    // The local walk is what the badges compare against, and the reader must not
-    // have to find the other button first for them to be honest.
-    vi.mocked(bridge.aiLocal).mockClear().mockResolvedValueOnce({ entries: [
-      { tool: "custom", root: "", rel_path: "same.md", sha256: "aaaa", mtime: 100, is_dir: false },
-      { tool: "custom", root: "", rel_path: "here.md", sha256: "bbbb", mtime: 200, is_dir: false },
-      { tool: "custom", root: "", rel_path: "there.md", sha256: "cccc", mtime: 100, is_dir: false },
-    ] });
-    // Reset rather than clear, and one answer for both reads: the settings page
-    // primes the picker before the reader asks for this peer itself.
-    vi.mocked(bridge.aiInventory).mockReset().mockResolvedValue({ peers: { a: { entries: [
-      { tool: "custom", root: "", rel_path: "same.md", sha256: "aaaa", mtime: 100, is_dir: false },
-      { tool: "custom", root: "", rel_path: "here.md", sha256: "zzzz", mtime: 100, is_dir: false },
-      { tool: "custom", root: "", rel_path: "there.md", sha256: "zzzz", mtime: 200, is_dir: false },
-      { tool: "custom", root: "", rel_path: "absent.md", sha256: "zzzz", mtime: 100, is_dir: false },
-    ] } } });
-    const app = mount(App);
-    try {
-      await flushPromises();
-      await app.get('[aria-label="AI 配置"]').trigger("click");
-      await flushPromises();
-      await openPanel(app, "其他设备");
-      await app.get('[aria-label="AI 配置远程设备"]').setValue("a");
-      await app.findAll("button").find(button => button.text().includes("读取远程库存"))!.trigger("click");
-      await flushPromises();
-      expect(bridge.aiLocal).toHaveBeenCalledWith("listing");
-      // Scoped to the remote half: both lists share `.ai-local-list`, and the
-      // reader's own files must not be able to answer for the peer's.
-      const row = (path: string) => app.findAll(".ai-remote .ai-local-list li").find(li => li.text().includes(path))!;
-      expect(row("absent.md").text()).toContain("缺失");
-      expect(row("here.md").text()).toContain("本机较新");
-      expect(row("there.md").text()).toContain("对方较新");
-      // A file that matches carries no badge at all — a badge on every row would
-      // make the differing ones harder to find.
-      expect(row("same.md").find(".ai-version").exists()).toBe(false);
-      expect(app.text()).toContain("与对方不同：缺失 1、对方较新 1、本机较新 1");
-      // One click on the missing ones only: a file present on both sides may be
-      // newer here, so ticking it for the reader could overwrite their own work.
-      await app.findAll("button").find(button => button.text().includes("选择缺失项"))!.trigger("click");
-      expect(app.findAll("button").find(button => button.text().includes("拉取选中项"))!.text()).toContain("（1）");
-      expect(app.get('[aria-label="选择 absent.md"]').attributes("checked")).toBeDefined();
-      expect(app.get('[aria-label="选择 there.md"]').attributes("checked")).toBeUndefined();
-    } finally { app.unmount(); }
-  });
-
-  it("ticks a folder as the files under it, and leaves a sibling root's folder alone", async () => {
-    HTMLDialogElement.prototype.showModal = vi.fn();
-    HTMLDialogElement.prototype.close = vi.fn();
-    vi.mocked(bridge.aiPull).mockClear().mockResolvedValue({ requested: 2 });
-    vi.mocked(bridge.devices).mockResolvedValueOnce({ items: [
-      { id: "a", name: "First", paired: true } as any,
-    ] });
-    vi.mocked(bridge.aiLocal).mockClear().mockResolvedValueOnce({ entries: [] });
-    // `foo` under two roots, and a `foobar` that must not be swept into either:
-    // a folder belongs to exactly one root, and a prefix match that ignores the
-    // separator would take `foobar/` for a child of `foo`.
-    // Reset rather than clear, and one answer for both reads: the settings page
-    // primes the picker before the reader asks for this peer itself.
-    vi.mocked(bridge.aiInventory).mockReset().mockResolvedValue({ peers: { a: { entries: [
-      { tool: "claude", root: "skills", rel_path: "foo", is_dir: true },
-      { tool: "claude", root: "skills", rel_path: "foo/one.md", sha256: "a", mtime: 1, is_dir: false },
-      { tool: "claude", root: "skills", rel_path: "foo/two.md", sha256: "b", mtime: 1, is_dir: false },
-      { tool: "claude", root: "skills", rel_path: "foobar/other.md", sha256: "c", mtime: 1, is_dir: false },
-      { tool: "claude", root: "commands", rel_path: "foo", is_dir: true },
-      { tool: "claude", root: "commands", rel_path: "foo/three.md", sha256: "d", mtime: 1, is_dir: false },
-      { tool: "claude", root: "skills", rel_path: "empty", is_dir: true },
-    ] } } });
-    const app = mount(App);
-    try {
-      await flushPromises();
-      await app.get('[aria-label="AI 配置"]').trigger("click");
-      await flushPromises();
-      await openPanel(app, "其他设备");
-      await app.get('[aria-label="AI 配置远程设备"]').setValue("a");
-      await app.findAll("button").find(button => button.text().includes("读取远程库存"))!.trigger("click");
-      await flushPromises();
-      const boxes = () => app.findAll('[aria-label="选择文件夹 foo 下的全部文件"]').map(box => box.element as HTMLInputElement);
-      // A folder holding nothing offers no box at all — there is nothing to
-      // shortcut to — but still marks the column.
-      expect(app.findAll('[aria-label="选择文件夹 empty 下的全部文件"]').length).toBe(0);
-      expect(boxes().length).toBe(2);
-      // Every folder starts folded, so the files the ticks stand for are opened
-      // first: the three folders that hold something, leaving `empty` out.
-      for (const name of ["foo", "foo", "foobar"]) {
-        const chevrons = app.findAll('[aria-label="展开或折叠 foo"], [aria-label="展开或折叠 foobar"]');
-        await chevrons.find(box => box.attributes("aria-expanded") === "false")!.trigger("click");
-      }
-      expect(app.find('[aria-label="选择 foo/one.md"]').exists()).toBe(true);
-      expect(app.find('[aria-label="选择 foobar/other.md"]').exists()).toBe(true);
-      expect(boxes()[0].checked).toBe(false);
-      await app.get('[aria-label="选择文件夹 foo 下的全部文件"]').setValue(true);
-      const skillsBox = boxes()[0];
-      expect(skillsBox.checked).toBe(true);
-      expect(app.get('[aria-label="选择 foo/one.md"]').attributes("checked")).toBeDefined();
-      expect(app.get('[aria-label="选择 foo/two.md"]').attributes("checked")).toBeDefined();
-      // `foobar/other.md` is not under `foo`, and the other root's `foo` is a
-      // different folder: neither may be swept in by the one tick.
-      expect(app.get('[aria-label="选择 foobar/other.md"]').attributes("checked")).toBeUndefined();
-      expect(app.get('[aria-label="选择 foo/three.md"]').attributes("checked")).toBeUndefined();
-      // One file unticked afterwards leaves the folder reading "some, not all".
-      await app.get('[aria-label="选择 foo/one.md"]').setValue(false);
-      expect(skillsBox.checked).toBe(false);
-      expect(skillsBox.indeterminate).toBe(true);
-      // What is pulled is the files, not the folder row: the same keys the tick
-      // stands for.
-      await app.findAll("button").find(button => button.text().includes("拉取选中项"))!.trigger("click");
-      await flushPromises();
-      expect(bridge.aiPull).toHaveBeenCalledExactlyOnceWith("a", [
-        { tool: "claude", root: "skills", rel_path: "foo/two.md", is_dir: false },
-      ], "copy");
-      // The two folders share a name, so each row says which root it is under —
-      // `skills/foo` and `commands/foo` are different folders.
-      const fooRows = () => app.findAll(".ai-remote .ai-local-list li.ai-row")
-        .filter(li => li.find(".ai-path-btn").exists() && li.find(".ai-path-btn").text() === "📁 foo");
-      expect(fooRows().map(li => li.find(".ai-root-hint").text())).toEqual(["skills", "commands"]);
-    } finally { app.unmount(); }
-  });
-
-  it("draws each tool's config as a named tree, and folds a folder without losing its row", async () => {
-    vi.mocked(bridge.devices).mockResolvedValueOnce({ items: [
-      { id: "a", name: "First", paired: true } as any,
-    ] });
-    // The inventory is flat — the folders exist only as path segments — so the
-    // tree is the renderer's, built from where each file lives.
-    vi.mocked(bridge.aiLocal).mockClear().mockResolvedValueOnce({ entries: [
-      { tool: "claude", root: "skills", rel_path: "deep/one.md", is_dir: false },
-      { tool: "claude", root: "skills", rel_path: "top.md", is_dir: false },
-    ] });
-    vi.mocked(bridge.aiInventory).mockResolvedValueOnce({ peers: { a: { entries: [
-      { tool: "claude", root: "skills", rel_path: "deep/two.md", is_dir: false },
-    ] } } });
-    const app = mount(App);
-    try {
-      await flushPromises();
-      await app.get('[aria-label="AI 配置"]').trigger("click");
-      await flushPromises();
-      await openPanel(app, "本机配置");
-      await app.findAll("button").find(button => button.text().includes("读取本机配置"))!.trigger("click");
-      await flushPromises();
-      const localRows = () => app.findAll(".ai-local-list.setting-block li.ai-row").map(li => li.text());
-      const heads = () => app.findAll(".ai-local-list.setting-block li.ai-group-head").map(li => li.text());
-      // A header per tool over its own rows, then the folder and the file beside
-      // it.  The folder starts folded: the two items are the folder and the
-      // file, and `one.md` is the folder's business until the reader opens it.
-      expect(heads()).toEqual(["claude2"]);
-      expect(localRows()).toEqual(["📁 deep", "top.md"]);
-      const chevron = () => app.get('[aria-label="展开或折叠 deep"]');
-      expect(chevron().attributes("aria-expanded")).toBe("false");
-      // Opening it — by its chevron or by its own name, the two halves of the
-      // same control — shows what is inside without taking the folder away.
-      await chevron().trigger("click");
-      expect(localRows()).toEqual(["📁 deep", "one.md", "top.md"]);
-      expect(chevron().attributes("aria-expanded")).toBe("true");
-      await app.findAll(".ai-local-list.setting-block li.ai-row .ai-path-btn")[0].trigger("click");
-      expect(localRows()).toEqual(["📁 deep", "top.md"]);
-      await app.findAll(".ai-local-list.setting-block li.ai-row .ai-path-btn")[0].trigger("click");
-      expect(localRows()).toEqual(["📁 deep", "one.md", "top.md"]);
-      // A folder the inventory never listed has no file to edit and nothing it
-      // listed to move, so it carries neither control — but it is still a place
-      // on disk, so it can be opened.
-      const folderRow = () => app.findAll(".ai-local-list.setting-block li.ai-row")[0];
-      expect(folderRow().find('[aria-label="打开 deep"]').exists()).toBe(true);
-      // Its fold control and its name, then the one action it has: nothing to
-      // open in the editor and nothing listed to move.
-      expect(folderRow().findAll("button").length).toBe(3);
-      expect(folderRow().findAll(".icon-button").length).toBe(1);
-      expect(localRows()[1]).toBe("one.md");
-      expect(app.findAll(".ai-local-list.setting-block li.ai-row")[1].findAll(".icon-button").length).toBe(3);
     } finally { app.unmount(); }
   });
 
@@ -1563,26 +913,36 @@ describe("history rendering", () => {
     } finally { app.unmount(); }
   });
 
-  it("counts a folder as one migration target, whichever strategy is chosen", async () => {
+  /**
+   * A pre-v3 peer reports an inventory with no root id, so the sidecar refuses
+   * to pull from it (`ai_config.py` — `legacy_peer_read_only`).  The older panel
+   * never let a reader get that far: it filtered such peers out of the wizard's
+   * source list entirely.  This shell lists every paired device, so it can, and
+   * the refusal has to arrive as a reason before the work rather than as an
+   * error code after it.
+   */
+  it("closes the migration wizard on a pre-v3 source instead of failing at the last step", async () => {
     HTMLDialogElement.prototype.showModal = vi.fn();
     HTMLDialogElement.prototype.close = vi.fn();
-    vi.mocked(bridge.aiPull).mockClear().mockResolvedValue({ requested: 2 });
-    vi.mocked(bridge.devices).mockResolvedValueOnce({ items: [
-      { id: "a", name: "First", paired: true } as any,
+    vi.mocked(bridge.aiPull).mockClear().mockResolvedValue({ requested: 0, errors: ["legacy_peer_read_only"] });
+    vi.mocked(bridge.devices).mockResolvedValue({ items: [
+      { id: "old", name: "Old", paired: true } as any,
+      { id: "new", name: "New", paired: true } as any,
     ] });
-    // One skill folder holding three files, two of which this machine already
-    // has — so the wizard has two things to migrate, not four: the skill, and
-    // the one loose file beside it.
     vi.mocked(bridge.aiLocal).mockReset().mockResolvedValue({ entries: [
-      { tool: "claude", root: "skills", rel_path: "skill/keep.md", sha256: "aa", mtime: 100, is_dir: false },
-      { tool: "claude", root: "skills", rel_path: "skill/mine.md", sha256: "bb", mtime: 500, is_dir: false },
+      { tool: "custom", root: "", rel_path: "same.md", sha256: "aaaa", mtime: 100, is_dir: false },
     ] });
-    vi.mocked(bridge.aiInventory).mockReset().mockResolvedValue({ peers: { a: { entries: [
-      { tool: "claude", root: "skills", rel_path: "skill/keep.md", sha256: "aa", mtime: 100, is_dir: false },
-      { tool: "claude", root: "skills", rel_path: "skill/mine.md", sha256: "cc", mtime: 100, is_dir: false },
-      { tool: "claude", root: "skills", rel_path: "skill/new.md", sha256: "dd", mtime: 100, is_dir: false },
-      { tool: "custom", root: "", rel_path: "absent.md", sha256: "ee", mtime: 100, is_dir: false },
-    ] } } });
+    // The flag rides on the inventory the peer reports, not on the device row,
+    // so it is only known once that peer has answered — which is why the label
+    // cannot do the whole job and the note below has to exist.
+    vi.mocked(bridge.aiInventory).mockReset().mockResolvedValue({ peers: {
+      old: { legacy: true, entries: [
+        { tool: "custom", root: "", rel_path: "theirs.md", sha256: "bbbb", mtime: 100, is_dir: false },
+      ] },
+      new: { entries: [
+        { tool: "custom", root: "", rel_path: "theirs.md", sha256: "bbbb", mtime: 100, is_dir: false },
+      ] },
+    } });
     const app = mount(App);
     const open = () => app.findAll("button").find(button => button.text().includes("迁移向导"))!.trigger("click");
     try {
@@ -1591,256 +951,45 @@ describe("history rendering", () => {
       await flushPromises();
       await openPanel(app, "其他设备");
       await open();
-      await app.get('[aria-label="迁移来源设备"]').setValue("a");
-      await flushPromises();
       const migrate = () => app.findAll("button").find(button => button.text().includes("开始迁移"))!;
-      // The skill counts once, and so does the loose file: the number beside the
-      // button is the number of config items, the way the card counts them.
-      expect(migrate().text()).toContain("（2）");
-      expect(app.text()).toContain("将补齐本机缺少的 2 个配置项");
+      const source = () => app.get('[aria-label="迁移来源设备"]');
+      await source().setValue("old");
+      await flushPromises();
+      // The diff is real and stays on screen: the peer's files are readable.
+      expect(app.text()).toContain("将补齐本机缺少的 1 个配置项");
+      expect(app.text()).toContain("该设备版本过旧，只能浏览，不能作为迁移来源");
+      // ...but the step that cannot work is closed, and clicking it does nothing.
+      expect(migrate().attributes("disabled")).toBeDefined();
       await migrate().trigger("click");
       await flushPromises();
-      // What travels is the files — the skill's missing one and the loose file —
-      // because "this machine does not have it" is a fact about a file, and a
-      // folder sent as a folder would be expanded into its identical files too.
-      expect(bridge.aiPull).toHaveBeenCalledExactlyOnceWith("a", [
-        { tool: "claude", root: "skills", rel_path: "skill/new.md", is_dir: false },
-        { tool: "custom", root: "", rel_path: "absent.md", is_dir: false },
+      expect(bridge.aiPull).not.toHaveBeenCalled();
+      // A peer that answers while it is selected is labelled in the list too,
+      // so the reason is visible before the next reader picks it.
+      expect(source().text()).toContain("（只能浏览）");
+      // The card behind the wizard lists the same peer's files, and closes its
+      // pull there as well: the reason belongs with the list that shows what
+      // cannot be pulled, not only with the wizard.
+      await app.get('[aria-label="选择 theirs.md"]').setValue(true);
+      await flushPromises();
+      const batch = () => app.findAll("button").find(button => button.text().includes("拉取选中项"))!;
+      expect(batch().attributes("disabled")).toBeDefined();
+      await batch().trigger("click");
+      await flushPromises();
+      expect(bridge.aiPull).not.toHaveBeenCalled();
+      // Scoped to the card: the wizard's own note says the same words, and a
+      // page-wide check would pass on that one alone.
+      expect(app.get(".ai-remote").text()).toContain("该设备版本过旧，只能浏览，不能作为迁移来源");
+      // The same shell pulls from a peer that is not pre-v3, so the closure is
+      // about the source and not about the wizard.
+      await source().setValue("new");
+      await flushPromises();
+      expect(migrate().attributes("disabled")).toBeUndefined();
+      await migrate().trigger("click");
+      await flushPromises();
+      expect(bridge.aiPull).toHaveBeenCalledExactlyOnceWith("new", [
+        { tool: "custom", root: "", rel_path: "theirs.md", is_dir: false },
       ], "copy");
-      // Overwriting takes the differing files, and counts and lists items: the
-      // skill is one line carrying how many files are behind it.
-      vi.mocked(bridge.aiPull).mockClear();
-      await open();
-      await app.get('[aria-label="全部拉取，覆盖本机文件"]').setValue(true);
-      expect(migrate().text()).toContain("（2）");
-      await migrate().trigger("click");
-      await flushPromises();
-      expect(app.text()).toContain("将写入以下 2 个配置项：");
-      const confirmText = app.get('[aria-labelledby="ai-pull-title"]').text();
-      expect(confirmText).toContain("claude / skill");
-      expect(confirmText).toContain("（2 个文件）");
-      expect(confirmText).toContain("custom / absent.md");
-      await app.get('[aria-labelledby="ai-pull-title"] .danger').trigger("click");
-      await flushPromises();
-      expect(bridge.aiPull).toHaveBeenCalledExactlyOnceWith("a", [
-        { tool: "claude", root: "skills", rel_path: "skill/mine.md", is_dir: false },
-        { tool: "claude", root: "skills", rel_path: "skill/new.md", is_dir: false },
-        { tool: "custom", root: "", rel_path: "absent.md", is_dir: false },
-      ], "overwrite");
     } finally { app.unmount(); }
-  });
-
-  it("narrows either list by path without disturbing the ticks or the count", async () => {
-    vi.mocked(bridge.devices).mockResolvedValueOnce({ items: [
-      { id: "a", name: "First", paired: true } as any,
-    ] });
-    vi.mocked(bridge.aiLocal).mockClear().mockResolvedValueOnce({ entries: [
-      { tool: "claude", root: "skills", rel_path: "alpha.md", sha256: "aaaa", mtime: 100, is_dir: false },
-      { tool: "custom", root: "", rel_path: "beta.md", sha256: "bbbb", mtime: 100, is_dir: false },
-    ] });
-    // Reset rather than clear, and the same answer either way: opening settings
-    // primes the picker from the cache and the read then asks the peer itself, so
-    // a single queued once-value would only answer the priming one.
-    vi.mocked(bridge.aiInventory).mockReset().mockResolvedValue({ peers: { a: { entries: [
-      { tool: "claude", root: "skills", rel_path: "alpha.md", sha256: "aaaa", mtime: 100, is_dir: false },
-      { tool: "custom", root: "", rel_path: "beta.md", sha256: "bbbb", mtime: 100, is_dir: false },
-    ] } } });
-    const app = mount(App);
-    try {
-      await flushPromises();
-      await app.get('[aria-label="AI 配置"]').trigger("click");
-      await flushPromises();
-      await openPanel(app, "其他设备");
-      await app.get('[aria-label="AI 配置远程设备"]').setValue("a");
-      await app.findAll("button").find(button => button.text().includes("读取远程库存"))!.trigger("click");
-      await flushPromises();
-      // Rows only: the list also carries a header per tool, which is not a row
-      // and has no tick to hold.
-      const remoteRows = () => app.findAll(".ai-remote .ai-local-list li.ai-row").map(li => li.text());
-      const remoteHeads = () => app.findAll(".ai-remote .ai-local-list li.ai-group-head").map(li => li.text());
-      expect(remoteRows().length).toBe(2);
-      // One header per tool, named the way the settings checkboxes name it,
-      // carrying that tool's file count.
-      expect(remoteHeads()).toEqual(["claude1", "custom1"]);
-      // Tick one row, then narrow past it: the tick is held on the entry, not on
-      // the row's position, so filtering cannot move it to another file.
-      await app.get('[aria-label="选择 beta.md"]').setValue(true);
-      await app.get('[aria-label="搜索远程配置"]').setValue("alpha");
-      expect(remoteRows().length).toBe(1);
-      expect(remoteRows()[0]).toContain("alpha.md");
-      await app.get('[aria-label="搜索远程配置"]').setValue("");
-      expect(remoteRows().length).toBe(2);
-      expect(app.get('[aria-label="选择 beta.md"]').attributes("checked")).toBeDefined();
-      // A filter that matches nothing says so, rather than looking like an empty
-      // inventory — and the batch count still describes what is ticked.  The
-      // header goes with the rows: a tool with nothing left to show is not a
-      // heading over an empty list.
-      await app.get('[aria-label="搜索远程配置"]').setValue("nothing-matches-this");
-      expect(remoteRows().length).toBe(0);
-      expect(remoteHeads().length).toBe(0);
-      expect(app.text()).toContain("没有匹配的配置项");
-      expect(app.findAll("button").find(button => button.text().includes("拉取选中项"))!.text()).toContain("（1）");
-      // The two lists are one view each: the local filter is reached by putting
-      // the card back on this machine, and then it narrows that list alone.
-      await app.get('[aria-label="AI 配置远程设备"]').setValue("");
-      await openPanel(app, "本机配置");
-      await app.get('[aria-label="搜索本机配置"]').setValue("alpha");
-      expect(app.findAll(".ai-local-list li").filter(li => li.text().includes("beta.md")).length).toBe(0);
-    } finally { app.unmount(); }
-  });
-
-  it("keeps this machine's list and a chosen device's apart, and says when a device has not been read", async () => {
-    vi.mocked(bridge.devices).mockResolvedValueOnce({ items: [
-      { id: "a", name: "First", paired: true } as any,
-    ] });
-    vi.mocked(bridge.aiLocal).mockReset().mockResolvedValue({ entries: [
-      { tool: "claude", root: "skills", rel_path: "mine.md" },
-    ] });
-    // Opening the page primes the picker, and the cache it finds holds nothing
-    // for this device: a peer nobody has asked is not a peer with no files.
-    vi.mocked(bridge.aiInventory).mockReset()
-      .mockResolvedValueOnce({ peers: {} })
-      .mockResolvedValueOnce({ peers: { a: { entries: [] } } });
-    const app = mount(App);
-    try {
-      await flushPromises();
-      await app.get('[aria-label="AI 配置"]').trigger("click");
-      await flushPromises();
-      await openPanel(app, "本机配置");
-      await app.findAll("button").find(button => button.text().includes("读取本机配置"))!.trigger("click");
-      await flushPromises();
-      // This machine's list is a card of its own, and how a pull writes is the
-      // peer's business: it stays in the peer's card, which has not been given
-      // a device to be about yet.
-      expect(app.find('[aria-label="编辑 mine.md"]').exists()).toBe(true);
-      await openPanel(app, "其他设备");
-      expect(app.find('[aria-label="AI 配置拉取方式"]').exists()).toBe(false);
-      // Naming a device adds its card's rows without taking this machine's
-      // away — the two lists are two cards, not one card showing one of them
-      // at a time — and that device has not been read yet, which is not the
-      // same thing as a device with no config files.
-      await app.get('[aria-label="AI 配置远程设备"]').setValue("a");
-      await flushPromises();
-      await openPanel(app, "本机配置");
-      expect(app.find('[aria-label="编辑 mine.md"]').exists()).toBe(true);
-      await openPanel(app, "其他设备");
-      expect(app.find('[aria-label="AI 配置拉取方式"]').exists()).toBe(true);
-      expect(app.text()).toContain("尚未读取该设备的配置");
-      await app.findAll("button").find(button => button.text().includes("读取远程库存"))!.trigger("click");
-      await flushPromises();
-      expect(app.text()).toContain("该设备还没有可同步的配置项");
-      expect(app.text()).not.toContain("尚未读取该设备的配置");
-    } finally {
-      app.unmount();
-      // The listing is left standing for the whole file otherwise, and the cases
-      // after this one are about peers the reader has never listed.
-      vi.mocked(bridge.aiLocal).mockReset();
-      vi.mocked(bridge.devices).mockResolvedValue({ items: [] });
-    }
-  });
-
-  it("marks each device with how many files differ, and keeps what each device last said", async () => {
-    vi.mocked(bridge.devices).mockResolvedValueOnce({ items: [
-      { id: "a", name: "First", paired: true } as any,
-      { id: "b", name: "Second", paired: true } as any,
-    ] });
-    vi.mocked(bridge.aiLocal).mockReset().mockResolvedValue({ entries: [
-      { tool: "custom", root: "", rel_path: "same.md", sha256: "aaaa", mtime: 100, is_dir: false },
-    ] });
-    vi.mocked(bridge.aiInventory).mockReset().mockResolvedValue({ peers: {
-      a: { entries: [
-        { tool: "custom", root: "", rel_path: "same.md", sha256: "aaaa", mtime: 100, is_dir: false },
-        { tool: "custom", root: "", rel_path: "absent.md", sha256: "bbbb", mtime: 100, is_dir: false },
-      ] },
-      b: { entries: [
-        { tool: "custom", root: "", rel_path: "same.md", sha256: "zzzz", mtime: 300, is_dir: false },
-      ] },
-    } });
-    const app = mount(App);
-    try {
-      await flushPromises();
-      await app.get('[aria-label="AI 配置"]').trigger("click");
-      await flushPromises();
-      await openPanel(app, "其他设备");
-      const options = () => app.findAll('[aria-label="AI 配置远程设备"] option').map(option => option.text());
-      // Neither side has been read, so the picker claims nothing about either
-      // device: a count of zero here would read as "identical", which nobody
-      // has established.
-      expect(options()).toEqual(["请选择设备", "First", "Second"]);
-      await app.get('[aria-label="AI 配置远程设备"]').setValue("a");
-      await app.findAll("button").find(button => button.text().includes("读取远程库存"))!.trigger("click");
-      await flushPromises();
-      // One read answers for every device, not just the one that was asked: a
-      // file this machine lacks on First, one that is newer there on Second.
-      expect(options()).toEqual(["请选择设备", "First（1 项不同）", "Second（1 项不同）"]);
-      // Second's list arrived with that read, so looking at it costs no request
-      // — what the reader sees is what that device last told this machine.
-      vi.mocked(bridge.aiInventory).mockClear();
-      await app.get('[aria-label="AI 配置远程设备"]').setValue("b");
-      await flushPromises();
-      expect(bridge.aiInventory).not.toHaveBeenCalled();
-      const rows = () => app.findAll(".ai-remote .ai-local-list li.ai-row").map(li => li.text());
-      expect(rows()).toEqual(["same.md对方较新"]);
-    } finally {
-      app.unmount();
-      vi.mocked(bridge.aiLocal).mockReset();
-      vi.mocked(bridge.aiInventory).mockReset();
-      vi.mocked(bridge.devices).mockResolvedValue({ items: [] });
-    }
-  });
-
-  it("badges a folded folder with what its whole subtree holds, not just the rows on screen", async () => {
-    vi.mocked(bridge.devices).mockResolvedValueOnce({ items: [
-      { id: "a", name: "First", paired: true } as any,
-    ] });
-    // One skill folder holding a file this machine is missing, a file the peer's
-    // copy is older than ours on, and one both sides agree about.
-    const local = [
-      { tool: "claude", root: "skills", rel_path: "skill/keep.md", sha256: "aa", mtime: 100, is_dir: false },
-      { tool: "claude", root: "skills", rel_path: "skill/mine.md", sha256: "bb", mtime: 500, is_dir: false },
-    ];
-    vi.mocked(bridge.aiLocal).mockReset().mockResolvedValue({ entries: local });
-    vi.mocked(bridge.aiInventory).mockReset().mockResolvedValue({ peers: { a: { entries: [
-      local[0],
-      { tool: "claude", root: "skills", rel_path: "skill/mine.md", sha256: "cc", mtime: 100, is_dir: false },
-      { tool: "claude", root: "skills", rel_path: "skill/new.md", sha256: "dd", mtime: 100, is_dir: false },
-    ] } } });
-    const app = mount(App);
-    try {
-      await flushPromises();
-      await app.get('[aria-label="AI 配置"]').trigger("click");
-      await flushPromises();
-      await openPanel(app, "其他设备");
-      await app.get('[aria-label="AI 配置远程设备"]').setValue("a");
-      await flushPromises();
-      // Reading the peer is what walks this machine's own list too, and the
-      // badges are the comparison between the two: without it there is nothing
-      // to compare against and every row would be silent.
-      await app.findAll("button").find(button => button.text().includes("读取远程库存"))!.trigger("click");
-      await flushPromises();
-      // The folder is folded, so the files inside are not on screen at all: the
-      // one row a reader can see has to carry what they would otherwise have to
-      // open it to find out.
-      const folder = app.findAll(".ai-remote .ai-local-list li.ai-row")
-        .find(row => row.findAll(".ai-path-btn").some(button => button.text() === "📁 skill"));
-      if (!folder) throw new Error("no skill folder row");
-      expect(folder.findAll(".ai-version").map(node => node.text())).toEqual(["缺失1", "本机较新1"]);
-      // Nothing is said about the file the two sides agree on: a badge on every
-      // folder would make the differing ones harder to find, not easier.
-      expect(folder.findAll(".ai-version--same")).toEqual([]);
-      // Opening it moves the same facts onto the file rows, which is the other
-      // half of the same rule.
-      await folder.get(".ai-path-btn").trigger("click");
-      await flushPromises();
-      const rows = app.findAll(".ai-remote .ai-local-list li.ai-row").map(row => row.text());
-      expect(rows).toContain("new.md缺失");
-      expect(rows).toContain("mine.md本机较新");
-    } finally {
-      app.unmount();
-      vi.mocked(bridge.aiLocal).mockReset();
-      vi.mocked(bridge.aiInventory).mockReset();
-      vi.mocked(bridge.devices).mockResolvedValue({ items: [] });
-    }
   });
 
   it("pulls the ticked remote entries as one batch, and drops a tick the peer no longer offers", async () => {
@@ -1910,276 +1059,6 @@ describe("history rendering", () => {
     } finally { app.unmount(); }
   });
 
-  it("reports a pull while it runs and how it ended, rather than stopping at what it sent", async () => {
-    let emit!: Parameters<typeof bridge.subscribe>[0];
-    vi.mocked(bridge.subscribe).mockImplementationOnce(async callback => {
-      emit = callback; return () => {};
-    });
-    vi.mocked(bridge.aiPull).mockClear().mockResolvedValue({ requested: 2 });
-    vi.mocked(bridge.aiLocal).mockReset().mockResolvedValue({ entries: [] });
-    vi.mocked(bridge.devices).mockResolvedValueOnce({ items: [
-      { id: "a", name: "First", paired: true } as any,
-    ] });
-    vi.mocked(bridge.aiInventory).mockReset().mockResolvedValue({ peers: { a: { entries: [
-      { tool: "custom", root: "", rel_path: "one.md", is_dir: false },
-      { tool: "custom", root: "", rel_path: "two.md", is_dir: false },
-    ] } } });
-    const app = mount(App);
-    try {
-      await flushPromises();
-      await app.get('[aria-label="AI 配置"]').trigger("click");
-      await flushPromises();
-      await openPanel(app, "其他设备");
-      await app.get('[aria-label="AI 配置远程设备"]').setValue("a");
-      await flushPromises();
-      await app.get('[aria-label="选择本页全部远程配置"]').setValue(true);
-      await app.findAll("button").find(button => button.text().includes("拉取选中项"))!.trigger("click");
-      await flushPromises();
-      // The peer accepted two requests, so two files are on their way: the page
-      // counts the ones that have landed rather than leaving the reader with the
-      // count of requests it sent.
-      const status = () => app.get(".ai-pull-status");
-      expect(status().text()).toContain("正在接收 0 / 2 个文件");
-      const arrival = (status: string) => emit({
-        type: "event", session_id: "s", name: "aiconfig.file",
-        data: { type: "aiconfig_file", peer_id: "a", status },
-      } as any);
-      arrival("ok");
-      await flushPromises();
-      expect(status().text()).toContain("正在接收 1 / 2 个文件");
-      arrival("ok");
-      await flushPromises();
-      expect(status().text()).toContain("拉取完成：2 个文件已更新");
-      expect(status().classes()).toContain("ai-pull-status--done");
-      // A file that did not land is a different failure from a request the peer
-      // refused, and the finished line names both halves rather than one total.
-      await app.findAll("button").find(button => button.text().includes("拉取选中项"))!.trigger("click");
-      await flushPromises();
-      arrival("error");
-      await flushPromises();
-      arrival("ok");
-      await flushPromises();
-      expect(status().text()).toContain("拉取完成：1 个成功、1 个失败");
-      expect(status().classes()).toContain("ai-pull-status--failed");
-    } finally { app.unmount(); }
-  });
-
-  it.each(["preview", "pull"] as const)("ignores a delayed remote %s result after changing peers", async (operation) => {
-    vi.mocked(bridge.devices).mockResolvedValueOnce({ items: [
-      { id: "a", name: "First", paired: true } as any,
-      { id: "b", name: "Second", paired: true } as any,
-    ] });
-    // Reset rather than clear, and the same answer however often it is asked:
-    // opening settings primes the picker from the cache before the reader reads
-    // anything, and that priming call would eat a queued once-value.
-    vi.mocked(bridge.aiInventory).mockReset().mockResolvedValue({
-      peers: { a: { entries: [{ tool: "custom", root: "", rel_path: "remote.md" }] } },
-    });
-    let resolve!: (value: any) => void;
-    const response = new Promise<any>(done => { resolve = done; });
-    if (operation === "preview") vi.mocked(bridge.aiPreview).mockReturnValueOnce(response);
-    else vi.mocked(bridge.aiPull).mockReturnValueOnce(response);
-    const app = mount(App);
-    try {
-      await flushPromises();
-      await app.get('[aria-label="AI 配置"]').trigger("click");
-      await flushPromises();
-      await openPanel(app, "其他设备");
-      const select = app.get('[aria-label="AI 配置远程设备"]');
-      await select.setValue("a");
-      await app.findAll("button").find(button => button.text().includes("读取远程库存"))!.trigger("click");
-      await flushPromises();
-      await app.get(`[aria-label="${operation === "preview" ? "预览" : "拉取"} remote.md"]`).trigger("click");
-      await select.setValue("b");
-      resolve(operation === "preview" ? { content: "obsolete preview" } : { requested: 1 });
-      await flushPromises();
-      expect(app.text()).not.toContain("obsolete preview");
-      expect(app.text()).not.toContain("已发送 1 个拉取请求");
-      expect(app.find('[aria-label="预览 remote.md"]').exists()).toBe(false);
-    } finally { app.unmount(); }
-  });
-
-  it("does not show a previous peer's delayed inventory after switching devices", async () => {
-    vi.mocked(bridge.devices).mockResolvedValueOnce({ items: [
-      { id: "a", name: "First", paired: true } as any,
-      { id: "b", name: "Second", paired: true } as any,
-      { id: "c", name: "Untrusted", paired: false } as any,
-    ] });
-    let resolve!: (value: any) => void;
-    // The priming read answers at once; the reader's own read is the one left
-    // hanging, which is what switching devices then has to be safe against.
-    vi.mocked(bridge.aiInventory).mockReset()
-      .mockResolvedValueOnce({ peers: {} })
-      .mockReturnValueOnce(new Promise(done => { resolve = done; }));
-    const app = mount(App);
-    try {
-      await flushPromises();
-      await app.get('[aria-label="AI 配置"]').trigger("click");
-      await flushPromises();
-      await openPanel(app, "其他设备");
-      const select = app.get('[aria-label="AI 配置远程设备"]');
-      expect(select.text()).not.toContain("Untrusted");
-      await select.setValue("a");
-      await app.findAll("button").find(button => button.text().includes("读取远程库存"))!.trigger("click");
-      await select.setValue("b");
-      resolve({ peers: { a: { entries: [{ tool: "custom", rel_path: "old-peer.md" }] } } });
-      await flushPromises();
-      expect(app.find('[aria-label="预览 old-peer.md"]').exists()).toBe(false);
-    } finally { app.unmount(); }
-  });
-
-  it("only submits auto-start when the switch changes", async () => {
-    vi.mocked(bridge.updateSettings).mockClear();
-    const app = mount(App);
-    try {
-      await flushPromises();
-      await app.get('[aria-label="设置"]').trigger("click");
-      await flushPromises();
-      const save = app.get('button[type="submit"]');
-      await save.trigger("submit");
-      await flushPromises();
-      expect(bridge.updateSettings).toHaveBeenCalledTimes(1);
-      expect(vi.mocked(bridge.updateSettings).mock.calls[0][0]).not.toHaveProperty("auto_start");
-      const toggle = app.findAll("label").find(label => label.text().includes("开机自动启动"))!;
-      await toggle.get("input").setValue(true);
-      await save.trigger("submit");
-      await flushPromises();
-      expect(bridge.updateSettings).toHaveBeenLastCalledWith(expect.objectContaining({ auto_start: true }));
-      await save.trigger("submit");
-      await flushPromises();
-      expect(vi.mocked(bridge.updateSettings).mock.calls[2][0]).not.toHaveProperty("auto_start");
-    } finally { app.unmount(); }
-  });
-
-  it("closes the deleted file editor even after listing replaces entry objects", async () => {
-    HTMLDialogElement.prototype.showModal = vi.fn();
-    HTMLDialogElement.prototype.close = vi.fn();
-    const entry = { tool: "custom", root: "fixture", rel_path: "config.md" };
-    vi.mocked(bridge.aiLocal)
-      .mockResolvedValueOnce({ entries: [{ ...entry }] })
-      .mockResolvedValueOnce({ content: "config" })
-      .mockResolvedValueOnce({ entries: [{ ...entry }] })
-      .mockResolvedValueOnce({ ok: true })
-      .mockResolvedValueOnce({ entries: [] });
-    const app = mount(App);
-    try {
-      await flushPromises();
-      await app.get('[aria-label="AI 配置"]').trigger("click");
-      await flushPromises();
-      await openPanel(app, "本机配置");
-      const refresh = () => app.findAll("button").find(button => button.text().includes("读取本机配置"))!;
-      await refresh().trigger("click");
-      await flushPromises();
-      await app.get('[aria-label="编辑 config.md"]').trigger("click");
-      await flushPromises();
-      expect(app.find('[aria-label="AI 配置编辑器"]').exists()).toBe(true);
-      await refresh().trigger("click");
-      await flushPromises();
-      await app.get('[aria-label="移入回收区 config.md"]').trigger("click");
-      await flushPromises();
-      expect(app.find('[aria-label="AI 配置编辑器"]').exists()).toBe(true);
-      expect(bridge.aiLocal).not.toHaveBeenCalledWith("trash", "custom", "fixture", "config.md");
-      await app.get('[aria-labelledby="ai-trash-title"] .danger').trigger("click");
-      await flushPromises();
-      expect(app.find('[aria-label="AI 配置编辑器"]').exists()).toBe(false);
-    } finally { app.unmount(); }
-  });
-
-  it.each(["success", "failure"] as const)("ignores an older AI read %s after selecting another file", async (outcome) => {
-    let resolveOld!: (value: any) => void;
-    let rejectOld!: (error: Error) => void;
-    const oldRead = new Promise<any>((resolve, reject) => {
-      resolveOld = resolve;
-      rejectOld = reject;
-    });
-    vi.mocked(bridge.aiLocal).mockResolvedValueOnce({
-      entries: ["old.md", "new.md"].map(rel_path => ({ tool: "custom", root: "fixture", rel_path })),
-    }).mockReturnValueOnce(oldRead).mockResolvedValueOnce({ content: "new content" });
-    const app = mount(App);
-    try {
-      await flushPromises();
-      await app.get('[aria-label="AI 配置"]').trigger("click");
-      await flushPromises();
-      await openPanel(app, "本机配置");
-      await app.findAll("button").find(button => button.text().includes("读取本机配置"))!.trigger("click");
-      await flushPromises();
-      await app.get('[aria-label="编辑 old.md"]').trigger("click");
-      await app.get('[aria-label="编辑 new.md"]').trigger("click");
-      await flushPromises();
-      if (outcome === "success") resolveOld({ content: "stale content" });
-      else rejectOld(new Error("obsolete read failed"));
-      await flushPromises();
-      expect((app.get('[aria-label="AI 配置编辑器"]').element as HTMLTextAreaElement).value).toBe("new content");
-      expect(app.text()).not.toContain("obsolete read failed");
-    } finally { app.unmount(); }
-  });
-
-  it("pages through all local AI files and resets pagination after refresh", async () => {
-    vi.mocked(bridge.aiLocal).mockResolvedValue({
-      entries: Array.from({ length: 41 }, (_, index) => ({
-        tool: "custom", root: "fixture", rel_path: `file-${index + 1}.md`,
-      })),
-    });
-    const app = mount(App);
-    try {
-      await flushPromises();
-      await app.get('[aria-label="AI 配置"]').trigger("click");
-      await flushPromises();
-      await openPanel(app, "本机配置");
-      const refresh = () => app.findAll("button").find(button => button.text().includes("读取本机配置"))!;
-      await refresh().trigger("click");
-      await flushPromises();
-      expect(app.find('[aria-label="编辑 file-40.md"]').exists()).toBe(true);
-      expect(app.find('[aria-label="编辑 file-41.md"]').exists()).toBe(false);
-      await app.get('[aria-label="下一页本地配置"]').trigger("click");
-      expect(app.find('[aria-label="编辑 file-41.md"]').exists()).toBe(true);
-      expect(app.get('[aria-label="下一页本地配置"]').attributes("disabled")).toBeDefined();
-      await refresh().trigger("click");
-      await flushPromises();
-      expect(app.find('[aria-label="编辑 file-1.md"]').exists()).toBe(true);
-      expect(app.get('[aria-label="上一页本地配置"]').attributes("disabled")).toBeDefined();
-    } finally { app.unmount(); }
-  });
-
-  it("counts a skill folder as one config item, not as the files inside it", async () => {
-    vi.mocked(bridge.aiLocal).mockResolvedValueOnce({
-      entries: [
-        { tool: "claude_code", root: "settings", rel_path: "settings.json", is_dir: false },
-        { tool: "claude_code", root: "skills", rel_path: "obe-softeng-report/", is_dir: true },
-        ...Array.from({ length: 20 }, (_, index) => ({
-          tool: "claude_code", root: "skills", rel_path: `obe-softeng-report/paper-${index}.docx`,
-        })),
-        { tool: "codex", root: "config", rel_path: "config.toml", is_dir: false },
-      ],
-    });
-    const app = mount(App);
-    try {
-      await flushPromises();
-      await app.get('[aria-label="AI 配置"]').trigger("click");
-      await flushPromises();
-      await openPanel(app, "本机配置");
-      await app.findAll("button").find(button => button.text().includes("读取本机配置"))!.trigger("click");
-      await flushPromises();
-      // Twenty-three entries, three config items: the file, the skill, and the
-      // other tool's file.  The skill's own files are counted once with the
-      // folder rather than twenty times beside it.
-      expect(app.text()).toContain("已读取 3 个配置项");
-      const count = (tool: string) =>
-        app.findAll(".ai-local-list .ai-group-head")
-          .find(head => head.text().startsWith(tool))!.get(".ai-group-count").text();
-      expect(count("claude_code")).toBe("2");
-      expect(count("codex")).toBe("1");
-      // The rows themselves are unchanged: the folder is still there to open, and
-      // its files are still under it.  Only the count changed.
-      expect(app.find('[aria-label="展开或折叠 obe-softeng-report"]').exists()).toBe(true);
-      const folder = () => app.get('[aria-label="展开或折叠 obe-softeng-report"]');
-      expect(folder().attributes("aria-expanded")).toBe("false");
-      expect(app.find('[aria-label="打开 obe-softeng-report/paper-0.docx"]').exists()).toBe(false);
-      await folder().trigger("click");
-      expect(app.find('[aria-label="打开 obe-softeng-report/paper-0.docx"]').exists()).toBe(true);
-    } finally { app.unmount(); }
-  });
-
   it("does not expose a writable editor for a truncated AI file", async () => {
     vi.mocked(bridge.aiLocal).mockResolvedValueOnce({
       entries: [{ tool: "custom", root: "fixture", rel_path: "large.md" }],
@@ -2201,7 +1080,7 @@ describe("history rendering", () => {
   it("selects visible rows, pins/unpins, and requires confirmation for batch deletion", async () => {
     HTMLDialogElement.prototype.showModal = vi.fn();
     HTMLDialogElement.prototype.close = vi.fn();
-    const app = mount(App);
+    const app = mountOn("history");
     await flushPromises();
     expect(app.get('[aria-label="批量删除"]').attributes("disabled")).toBeDefined();
     await app.get('[aria-label="全选当前页"]').setValue(true);
@@ -2223,6 +1102,52 @@ describe("history rendering", () => {
     expect(app.find('[aria-label="删除记录"]').exists()).toBe(true);
     app.unmount();
   });
+  it("merges the selected rows' full text, in list order, into one push", async () => {
+    vi.clearAllMocks();
+    HTMLDialogElement.prototype.showModal = vi.fn();
+    HTMLDialogElement.prototype.close = vi.fn();
+    // A list row carries a truncated preview, so the two are spelled out and
+    // differ: a merge that pushed previews would push cut-off clips, which is
+    // the whole reason this fetches each row's text first.
+    vi.mocked(bridge.history).mockResolvedValue(historyPage([
+      historyRow({ id: "1", preview: "第一条被截断的…" }),
+      historyRow({ id: "2", preview: "第二条被截断的…" }),
+    ]));
+    vi.mocked(bridge.readHistoryText).mockImplementation(async (id: string) =>
+      ({ id, text: id === "1" ? "第一条完整原文" : "第二条完整原文", truncated: false }));
+    vi.mocked(bridge.pushText).mockResolvedValue({ ok: true, len: 21, sent: true } as any);
+    const app = mountOn("history");
+    await flushPromises();
+    await app.get('[aria-label="全选当前页"]').setValue(true);
+    await app.get('[aria-label="合并推送到电脑"]').trigger("click");
+    await flushPromises();
+    expect(bridge.readHistoryText).toHaveBeenCalledTimes(2);
+    expect(bridge.pushText).toHaveBeenCalledExactlyOnceWith("第一条完整原文\n---\n第二条完整原文");
+    app.unmount();
+  });
+  it("keeps a row whose text could not be read, using the preview it was listed with", async () => {
+    vi.clearAllMocks();
+    HTMLDialogElement.prototype.showModal = vi.fn();
+    HTMLDialogElement.prototype.close = vi.fn();
+    vi.mocked(bridge.history).mockResolvedValue(historyPage([
+      historyRow({ id: "1", preview: "第一条被截断的…" }),
+      historyRow({ id: "2", preview: "第二条被截断的…" }),
+    ]));
+    // One entry vanishing mid-flight must not lose the other: the row that
+    // cannot be read falls back to what the list showed for it.
+    vi.mocked(bridge.readHistoryText).mockImplementation(async (id: string) => {
+      if (id === "2") throw new Error("gone");
+      return { id, text: "第一条完整原文", truncated: false };
+    });
+    vi.mocked(bridge.pushText).mockResolvedValue({ ok: true, len: 21, sent: true } as any);
+    const app = mountOn("history");
+    await flushPromises();
+    await app.get('[aria-label="全选当前页"]').setValue(true);
+    await app.get('[aria-label="合并推送到电脑"]').trigger("click");
+    await flushPromises();
+    expect(bridge.pushText).toHaveBeenCalledExactlyOnceWith("第一条完整原文\n---\n第二条被截断的…");
+    app.unmount();
+  });
   it("reads a clip's own text back to translate it, not the row's preview", async () => {
     vi.clearAllMocks();
     HTMLDialogElement.prototype.showModal = vi.fn();
@@ -2231,7 +1156,7 @@ describe("history rendering", () => {
       id: "1", text: "一整段很长的原文", truncated: false,
     });
     vi.mocked(bridge.translate).mockResolvedValue({ translated: "a whole long source text" } as any);
-    const app = mount(App);
+    const app = mountOn("history");
     await flushPromises();
     await app.get('[aria-label="翻译记录"]').trigger("click");
     await flushPromises();
@@ -2251,7 +1176,7 @@ describe("history rendering", () => {
     vi.mocked(bridge.history).mockResolvedValue({ session_id: "s", seq: 0, offset: 0, total: 1, items: [
       historyRow({ content_type: "URL", preview: "https://example.com/page" }),
     ] });
-    const app = mount(App);
+    const app = mountOn("history");
     try {
       await flushPromises();
       await app.get('[aria-label="在浏览器打开"]').trigger("click");
@@ -2277,267 +1202,39 @@ describe("history rendering", () => {
       })]));
     }
   });
-  it("names a clip's kind, its provenance and its paste count the way the panel did", async () => {
+  it("offers to download a file that lives on another device, and asks that device for it", async () => {
     vi.clearAllMocks();
-    vi.mocked(bridge.history).mockResolvedValue({ session_id: "s", seq: 0, offset: 0, total: 2, items: [
-      historyRow({
-        id: "1", content_type: "IMAGE_PNG", source_app: "chrome", source_title: "Inbox",
-        source_name: "Studio", paste_count: 3,
-      }),
-      // A clip captured here, never pasted back: the badges a user would not
-      // learn anything from stay off.
-      historyRow({ id: "2", preview: "just a note" }),
+    vi.mocked(bridge.devices).mockResolvedValue({ items: [
+      { id: "peer-1", name: "Studio", paired: true, connection_state: "online",
+        pairing_status: "paired", pairing_code: null, sas: null },
     ] });
-    const app = mount(App);
-    try {
-      await flushPromises();
-      const rows = app.findAll(".history-row");
-      // The wire name is not a label: IMAGE_PNG reads as 图片, not as its type.
-      expect(rows[0].text()).toContain(t("图片"));
-      expect(rows[0].find(".history-meta").text()).toContain("chrome");
-      expect(rows[0].find(".history-meta").text()).toContain("Inbox");
-      expect(rows[0].find(".history-meta").text()).toContain("Studio");
-      expect(rows[0].find(".history-meta").text()).toContain(t("{count} 次粘贴", { count: 3 }));
-      expect(rows[1].text()).toContain(t("文本"));
-      expect(rows[1].find(".badge").exists()).toBe(false);
-    } finally {
-      app.unmount();
-      vi.mocked(bridge.history).mockResolvedValue(historyPage([historyRow({
-        preview: '<img src=x onerror="window.injected=true">',
-      })]));
-    }
-  });
-  it("says which link a record came in on, beside the device it came from", async () => {
-    vi.clearAllMocks();
-    vi.mocked(bridge.history).mockResolvedValue({ session_id: "s", seq: 0, offset: 0, total: 5, items: [
-      historyRow({ id: "1", source_name: "Away", transport: "relay" }),
-      // The same words the device list uses for the same link, so one
-      // vocabulary covers both pages.
-      historyRow({ id: "2", source_name: "Next room", transport: "lan" }),
-      // Captured here, and a row written before the route was recorded: both
-      // say nothing rather than claiming a path.
-      historyRow({ id: "3", source_name: "Local" }),
-      historyRow({ id: "4", source_name: "Local", transport: "" }),
-      // A push from the panel is neither of the two links: it came in over this
-      // machine's own web server, and its name says only "Web" — reading that
-      // as 本地 would claim the phone was on this network when the panel's whole
-      // point is that it need not be.
-      historyRow({ id: "5", source_name: "📱 Web", transport: "web" }),
-    ] });
-    const app = mount(App);
-    try {
-      await flushPromises();
-      const routes = app.findAll(".history-row .history-route").map(node => node.text());
-      expect(routes).toEqual([t("互联网"), t("本地"), t("网页")]);
-      const rows = app.findAll(".history-row");
-      expect(rows[0].find(".history-meta").text()).toContain("Away");
-      // The name alone cannot say it — "Away" over the relay and "Next room"
-      // over the cable are the same badge without the chip beside it.
-      expect(rows[1].find(".history-meta").text()).toContain("Next room");
-      expect(rows[2].find(".history-route").exists()).toBe(false);
-      expect(rows[3].find(".history-route").exists()).toBe(false);
-      expect(rows[0].get(".history-route").attributes("title")).toBe(t("互联网中继"));
-      expect(rows[1].get(".history-route").attributes("title")).toBe(t("本地连接"));
-      expect(rows[4].find(".history-meta").text()).toContain("📱 Web");
-      expect(rows[4].get(".history-route").attributes("title")).toBe(t("网页推送"));
-      // One glyph per route, so a glance separates them before the words are
-      // read — a plug on a pushed row would say the local link.
-      expect(rows[0].get(".history-route svg").classes()).toContain("lucide-globe");
-      expect(rows[1].get(".history-route svg").classes()).toContain("lucide-plug");
-      expect(rows[4].get(".history-route svg").classes()).toContain("lucide-smartphone");
-    } finally {
-      app.unmount();
-      vi.mocked(bridge.history).mockResolvedValue(historyPage([historyRow({
-        preview: '<img src=x onerror="window.injected=true">',
-      })]));
-    }
-  });
-  it("spells a single paste count as one, which English needs", async () => {
-    vi.clearAllMocks();
     vi.mocked(bridge.history).mockResolvedValue({ session_id: "s", seq: 0, offset: 0, total: 1, items: [
-      historyRow({ paste_count: 1 }),
+      historyRow({ id: "7", content_type: "FILE_REMOTE", preview: "report.pdf",
+        source_device: "peer-1", source_name: "Studio" }),
     ] });
-    const app = mount(App);
+    const app = mountOn("history");
     try {
       await flushPromises();
-      expect(app.find(".history-meta").text()).toContain(t("1 次粘贴"));
-    } finally {
+      // 复制 would clear this machine's clipboard for a file it does not have,
+      // so the row offers the ask in its place rather than beside it.
+      expect(app.find('[aria-label="复制记录"]').exists()).toBe(false);
+      await app.get('[aria-label="下载文件"]').trigger("click");
+      await flushPromises();
+      // The row's own id and the device it came from, and nothing else: the peer
+      // resolves which of its paths that row may reach.
+      expect(bridge.requestEntryFiles).toHaveBeenCalledExactlyOnceWith("7", "peer-1");
       app.unmount();
+    } finally {
+      vi.mocked(bridge.devices).mockResolvedValue({ items: [] });
       vi.mocked(bridge.history).mockResolvedValue(historyPage([historyRow({
         preview: '<img src=x onerror="window.injected=true">',
       })]));
     }
-  });
-  it("filters the list by kind, with a badge on every chip", async () => {
-    vi.clearAllMocks();
-    vi.mocked(bridge.history).mockResolvedValue({
-      ...historyPage([historyRow({ id: "1" })]),
-      counts: { all: 9, text: 5, image: 3, file: 1, link: 0 },
-      has_history: true,
-    });
-    const app = mount(App);
-    try {
-      await flushPromises();
-      const chips = app.findAll(".chip");
-      // Five kinds and the sort toggle, in the panel's order.
-      expect(chips.map((chip) => chip.text().replace(/[📝🖼📄🔗]/g, ""))).toEqual([
-        t("全部") + "9", t("文本") + "5", t("图片") + "3", t("文件") + "1", t("链接") + "0",
-        "↓ " + t("最新优先"),
-      ]);
-      // A kind with nothing behind it is disabled — the way back to 全部 is not.
-      expect(chips[4].attributes("disabled")).toBeDefined();
-      expect(chips[0].attributes("disabled")).toBeUndefined();
-      await chips[2].trigger("click");
-      await flushPromises();
-      expect(vi.mocked(bridge.history)).toHaveBeenLastCalledWith("", 0, 30, "image", "newest");
-      // The chip in effect says so, and 全部 stops saying it does.
-      expect(app.findAll(".chip")[2].attributes("aria-pressed")).toBe("true");
-      expect(app.findAll(".chip")[0].attributes("aria-pressed")).toBe("false");
-    } finally {
-      app.unmount();
-      vi.mocked(bridge.history).mockResolvedValue(historyPage([historyRow({
-        preview: '<img src=x onerror="window.injected=true">',
-      })]));
-    }
-  });
-  it("reverses the order from the sort toggle and says which order it is in", async () => {
-    vi.clearAllMocks();
-    const app = mount(App);
-    try {
-      await flushPromises();
-      const sort = app.get(".chip--sort");
-      expect(sort.text()).toContain(t("最新优先"));
-      await sort.trigger("click");
-      await flushPromises();
-      expect(vi.mocked(bridge.history)).toHaveBeenLastCalledWith("", 0, 30, "all", "oldest");
-      expect(sort.text()).toContain(t("最旧优先"));
-      await sort.trigger("click");
-      await flushPromises();
-      expect(vi.mocked(bridge.history)).toHaveBeenLastCalledWith("", 0, 30, "all", "newest");
-    } finally {
-      app.unmount();
-      vi.mocked(bridge.history).mockResolvedValue(historyPage([historyRow({
-        preview: '<img src=x onerror="window.injected=true">',
-      })]));
-    }
-  });
-  it("keeps the chips on screen when a search matches nothing", async () => {
-    vi.clearAllMocks();
-    vi.mocked(bridge.history).mockResolvedValue({
-      ...historyPage([]),
-      counts: { all: 0, text: 0, image: 0, file: 0, link: 0 },
-      has_history: true,
-    });
-    const app = mount(App);
-    try {
-      await flushPromises();
-      expect(app.findAll(".chip").length).toBe(6);
-      await app.get(`[aria-label="${t("搜索历史记录")}"]`).setValue("zzz");
-      await flushPromises();
-      expect(app.text()).toContain(t("没有匹配的记录"));
-      expect(app.findAll(".chip").length).toBe(6);
-    } finally {
-      app.unmount();
-      vi.mocked(bridge.history).mockResolvedValue(historyPage([historyRow({
-        preview: '<img src=x onerror="window.injected=true">',
-      })]));
-    }
-  });
-  it("names the kind a chip filtered down to, rather than saying there is no history", async () => {
-    vi.clearAllMocks();
-    vi.mocked(bridge.history)
-      .mockResolvedValueOnce({
-        ...historyPage([historyRow({ id: "1", content_type: "IMAGE_PNG" })]),
-        counts: { all: 4, text: 3, image: 1, file: 0, link: 0 },
-        has_history: true,
-      })
-      // The picture is gone by the time the chip's own page comes back — other
-      // kinds are still there, so there IS history; there is just none of this.
-      .mockResolvedValueOnce({
-        ...historyPage([]),
-        counts: { all: 3, text: 3, image: 0, file: 0, link: 0 },
-        has_history: true,
-      });
-    const app = mount(App);
-    try {
-      await flushPromises();
-      await app.findAll(".chip")[2].trigger("click");
-      await flushPromises();
-      expect(app.text()).toContain(t("还没有{type}", { type: t("图片") }));
-      expect(app.text()).not.toContain(t("暂无历史记录"));
-    } finally {
-      app.unmount();
-      vi.mocked(bridge.history).mockReset();
-      vi.mocked(bridge.history).mockResolvedValue(historyPage([historyRow({
-        preview: '<img src=x onerror="window.injected=true">',
-      })]));
-    }
-  });
-  it("reads a clipped row in full on hover, and only the hovered row", async () => {
-    vi.clearAllMocks();
-    const long = "x".repeat(900);
-    vi.mocked(bridge.history).mockResolvedValue(historyPage([
-      historyRow({ id: "1", preview: long }),
-      historyRow({ id: "2", preview: "short" }),
-    ]));
-    const app = mount(App);
-    try {
-      await flushPromises();
-      const rows = app.findAll(".history-row");
-      expect(app.find(".history-preview").exists()).toBe(false);
-      await rows[0].trigger("mouseenter");
-      // The row clamps to three lines in CSS; the card holds the same string
-      // uncut, and only for the row under the pointer.
-      expect(app.findAll(".history-preview").length).toBe(1);
-      expect(app.get(".history-preview").text()).toBe(long);
-      expect(app.get(".history-preview").attributes("aria-hidden")).toBe("true");
-      await rows[0].trigger("mouseleave");
-      expect(app.find(".history-preview").exists()).toBe(false);
-      // Keyboard reach: the same card opens for a row the user tabs into,
-      // since the clamp is invisible to a screen reader but not to its user.
-      await rows[1].trigger("focusin");
-      expect(app.get(".history-preview").text()).toBe("short");
-    } finally {
-      app.unmount();
-      vi.mocked(bridge.history).mockResolvedValue(historyPage([historyRow({
-        preview: '<img src=x onerror="window.injected=true">',
-      })]));
-    }
-  });
-  it("refuses to open the translator for a clip with no text of its own", async () => {
-    vi.clearAllMocks();
-    HTMLDialogElement.prototype.showModal = vi.fn();
-    HTMLDialogElement.prototype.close = vi.fn();
-    vi.mocked(bridge.readHistoryText).mockResolvedValue({ id: "1", text: "", truncated: false });
-    const app = mount(App);
-    await flushPromises();
-    await app.get('[aria-label="翻译记录"]').trigger("click");
-    await flushPromises();
-    expect(app.text()).toContain("这条记录没有可翻译的文本");
-    // An empty dialog over an image would be noise, so nothing opens.
-    expect(HTMLDialogElement.prototype.showModal).not.toHaveBeenCalled();
-    expect(bridge.translate).not.toHaveBeenCalled();
-    app.unmount();
-  });
-  it("tells the user when only part of a long clip could be read", async () => {
-    vi.clearAllMocks();
-    HTMLDialogElement.prototype.showModal = vi.fn();
-    HTMLDialogElement.prototype.close = vi.fn();
-    vi.mocked(bridge.readHistoryText).mockResolvedValue({
-      id: "1", text: "cut here", truncated: true,
-    });
-    const app = mount(App);
-    await flushPromises();
-    await app.get('[aria-label="翻译记录"]').trigger("click");
-    await flushPromises();
-    const dialog = app.get('[aria-labelledby="translate-item-title"]');
-    expect(dialog.get(".translate-truncated").text()).toContain("8");
-    app.unmount();
   });
   it("adds the selection to favorites and clears all history only after confirmation", async () => {
     HTMLDialogElement.prototype.showModal = vi.fn();
     HTMLDialogElement.prototype.close = vi.fn();
-    const app = mount(App);
+    const app = mountOn("history");
     await flushPromises();
     await app.get('[aria-label="全选当前页"]').setValue(true);
     await app.get('[aria-label="加入收藏夹"]').trigger("click");
@@ -2607,7 +1304,7 @@ describe("history rendering", () => {
     }
   });
 
-  it("sends a URL from the phone to its only connected peer without a picker", async () => {
+  it("hands a picked file to the phone from the Companion QR dialog", async () => {
     HTMLDialogElement.prototype.showModal = vi.fn();
     HTMLDialogElement.prototype.close = vi.fn();
     let emit!: Parameters<typeof bridge.subscribe>[0];
@@ -2615,32 +1312,24 @@ describe("history rendering", () => {
       emit = callback;
       return () => {};
     });
-    vi.mocked(bridge.status).mockResolvedValue({ version: "test", health: "ready",
-      device_name: "Local", session_id: "s", seq: 0, sync_state: "not_started",
-      capabilities: ["url.send"] } as any);
-    vi.mocked(bridge.devices).mockResolvedValue({ items: [
-      { id: "p", name: "Peer", paired: true, connection_state: "online",
-        pairing_status: "paired", pairing_code: null, sas: null },
-    ] as any });
-    vi.mocked(bridge.sendUrl).mockClear();
+    vi.mocked(bridge.chooseFile).mockResolvedValueOnce("C:/notes.txt");
     const app = mount(App);
     try {
       await flushPromises();
-      emit({ type: "event", session_id: "s", name: "app.send_url_requested" });
+      emit({ type: "event", session_id: "s", name: "app.qr_requested" });
       await flushPromises();
-      expect(HTMLDialogElement.prototype.showModal).toHaveBeenCalledOnce();
-      // One candidate needs no picker — legacy sent straight to it.
-      expect(app.find('[aria-label="目标设备"]').exists()).toBe(false);
-      const dialog = app.get('[aria-labelledby="send-url-title"]');
-      expect(dialog.text()).toContain("Peer");
-      await dialog.get('[aria-label="要发送的网址"]').setValue("https://example.com/from-phone");
-      await dialog.findAll("button").find((button) => button.text() === "发送")!.trigger("click");
+      await app.findAll("button").find(b => b.text().includes("发送文件到手机"))!.trigger("click");
       await flushPromises();
-      expect(bridge.sendUrl).toHaveBeenCalledExactlyOnceWith("p", "https://example.com/from-phone");
+      // The single-file picker, which is the one the legacy 发送文件到手机 dialog
+      // used — not the multi-select one the transfers page packs into an archive.
+      // The path is all the window contributes: the copy, the sanitising and the
+      // collision naming are the sidecar's, beside the directory it owns.
+      expect(bridge.chooseFile).toHaveBeenCalledWith("any");
+      expect(bridge.shareFileToPhone).toHaveBeenCalledWith("C:/notes.txt");
+      expect(app.text()).toContain("已发送到手机：notes.txt");
     } finally {
-      vi.mocked(bridge.devices).mockResolvedValue({ items: [] });
-      vi.mocked(bridge.status).mockResolvedValue({ version: "test", health: "ready",
-        device_name: "Local", session_id: "s", seq: 0, sync_state: "not_started" } as any);
+      vi.mocked(bridge.chooseFile).mockReset();
+      vi.mocked(bridge.shareFileToPhone).mockClear();
       app.unmount();
     }
   });
@@ -2688,59 +1377,6 @@ describe("history rendering", () => {
     }
   });
 
-  it("reports a phone URL request when no peer is connected", async () => {
-    HTMLDialogElement.prototype.showModal = vi.fn();
-    HTMLDialogElement.prototype.close = vi.fn();
-    let emit!: Parameters<typeof bridge.subscribe>[0];
-    vi.mocked(bridge.subscribe).mockImplementationOnce(async callback => {
-      emit = callback;
-      return () => {};
-    });
-    vi.mocked(bridge.status).mockResolvedValue({ version: "test", health: "ready",
-      device_name: "Local", session_id: "s", seq: 0, sync_state: "not_started",
-      capabilities: ["url.send"] } as any);
-    vi.mocked(bridge.devices).mockResolvedValue({ items: [
-      { id: "p", name: "Peer", paired: true, connection_state: "offline",
-        pairing_status: "paired", pairing_code: null, sas: null },
-    ] as any });
-    const app = mount(App);
-    try {
-      await flushPromises();
-      emit({ type: "event", session_id: "s", name: "app.send_url_requested" });
-      await flushPromises();
-      expect(app.text()).toContain("没有已连接的设备可以发送。");
-      expect(HTMLDialogElement.prototype.showModal).not.toHaveBeenCalled();
-    } finally {
-      vi.mocked(bridge.devices).mockResolvedValue({ items: [] });
-      vi.mocked(bridge.status).mockResolvedValue({ version: "test", health: "ready",
-        device_name: "Local", session_id: "s", seq: 0, sync_state: "not_started" } as any);
-      app.unmount();
-    }
-  });
-
-  it("lets the host hide its own window without refreshing anything", async () => {
-    HTMLDialogElement.prototype.showModal = vi.fn();
-    HTMLDialogElement.prototype.close = vi.fn();
-    let emit!: Parameters<typeof bridge.subscribe>[0];
-    vi.mocked(bridge.subscribe).mockImplementationOnce(async callback => {
-      emit = callback;
-      return () => {};
-    });
-    const app = mount(App);
-    try {
-      await flushPromises();
-      vi.mocked(bridge.devices).mockClear();
-      // The Rust bridge hides the window; the panel only has to not react.
-      emit({ type: "event", session_id: "s", name: "app.window_close_requested" });
-      await flushPromises();
-      expect(bridge.devices).not.toHaveBeenCalled();
-      expect(HTMLDialogElement.prototype.showModal).not.toHaveBeenCalled();
-      expect(app.text()).not.toContain("没有已连接的设备可以发送。");
-    } finally {
-      app.unmount();
-    }
-  });
-
   it("says which control is grey and why when the engine is stopped", async () => {
     vi.mocked(bridge.devices).mockResolvedValueOnce({ items: [
       { id: "a", name: "First", paired: true } as any,
@@ -2759,25 +1395,6 @@ describe("history rendering", () => {
       const sendUrl = app.get('[aria-label="发送网址"]');
       expect(sendUrl.attributes("disabled")).toBeDefined();
       expect(sendUrl.attributes("aria-describedby")).toBe("devices-engine-note");
-    } finally { app.unmount(); }
-  });
-
-  it("takes the engine line and the description away once the engine is up", async () => {
-    vi.mocked(bridge.devices).mockResolvedValueOnce({ items: [
-      { id: "a", name: "First", paired: true } as any,
-    ] });
-    vi.mocked(bridge.status).mockResolvedValue({ version: "test", health: "ready",
-      device_name: "Local", session_id: "s", seq: 0, sync_state: "running",
-      capabilities: ["clipboard.push", "url.send"] } as any);
-    const app = mount(App);
-    try {
-      await flushPromises();
-      await app.get('[aria-label="设备"]').trigger("click");
-      await flushPromises();
-      expect(app.find("#devices-engine-note").exists()).toBe(false);
-      const sendUrl = app.get('[aria-label="发送网址"]');
-      expect(sendUrl.attributes("disabled")).toBeUndefined();
-      expect(sendUrl.attributes("aria-describedby")).toBeUndefined();
     } finally { app.unmount(); }
   });
 
@@ -2802,183 +1419,6 @@ describe("history rendering", () => {
     app.unmount();
   });
 
-  it("reports a clipboard-only push when sync is off", async () => {
-    HTMLDialogElement.prototype.showModal = vi.fn();
-    HTMLDialogElement.prototype.close = vi.fn();
-    vi.mocked(bridge.status).mockResolvedValue({ version: "test", health: "ready",
-      device_name: "Local", session_id: "s", seq: 0, sync_state: "not_started",
-      capabilities: ["clipboard.push"] } as any);
-    vi.mocked(bridge.pushText).mockResolvedValueOnce({ ok: true, len: 7, sent: false });
-    const app = mount(App);
-    await flushPromises();
-    await app.get('[aria-label="设备"]').trigger("click");
-    await app.get('[aria-label="推送文本"]').trigger("click");
-    await flushPromises();
-    const dialog = app.get('[aria-labelledby="push-text-title"]');
-    await dialog.get('[aria-label="要推送的文本"]').setValue("offline");
-    await dialog.findAll("button").find((button) => button.text() === "推送")!.trigger("click");
-    await flushPromises();
-    expect(app.text()).toContain("已推送到本机剪贴板（同步未开启，未广播）");
-    app.unmount();
-  });
-
-  it("shows the Companion QR from the devices page and the tray entry", async () => {
-    HTMLDialogElement.prototype.showModal = vi.fn();
-    HTMLDialogElement.prototype.close = vi.fn();
-    vi.mocked(bridge.companionStatus).mockResolvedValue({
-      enabled: true, port: 8080, running: true, state: "running",
-      access_url: "http://10.0.0.2:8080/mobile.html?token=t",
-    } as any);
-    let menuAction: ((action: string) => void) | undefined;
-    vi.mocked(bridge.onMenuAction).mockImplementation(async (handler: (action: any) => void) => {
-      menuAction = handler;
-      return () => {};
-    });
-    const app = mount(App);
-    try {
-      await flushPromises();
-      await app.get('[aria-label="设备"]').trigger("click");
-      await flushPromises();
-      await openPanel(app, "手机 Companion");
-      await app.findAll("button").find((button) => button.text().includes("读取手机服务状态"))!.trigger("click");
-      await flushPromises();
-      await app.findAll("button").find((button) => button.text().includes("显示二维码"))!.trigger("click");
-      await flushPromises();
-      const dialog = app.get('[aria-labelledby="qr-title"]');
-      expect(dialog.get("img").attributes("src")).toBe("data:image/png;base64,AAAA");
-      expect(dialog.text()).toContain("http://10.0.0.2:8080/mobile.html?token=t");
-      await dialog.findAll("button").find((button) => button.text() === "关闭")!.trigger("click");
-      await flushPromises();
-      // The native tray entry reopens the same dialog through the host event.
-      menuAction!("qr");
-      await flushPromises();
-      expect(HTMLDialogElement.prototype.showModal).toHaveBeenCalledTimes(2);
-    } finally {
-      vi.mocked(bridge.onMenuAction).mockResolvedValue(() => {});
-      vi.mocked(bridge.companionQr).mockClear();
-      app.unmount();
-    }
-  });
-
-  it("opens About from settings and the tray, and opens only its fixed links", async () => {
-    HTMLDialogElement.prototype.showModal = vi.fn();
-    HTMLDialogElement.prototype.close = vi.fn();
-    let menuAction: ((action: string) => void) | undefined;
-    vi.mocked(bridge.onMenuAction).mockImplementation(async (handler: (action: any) => void) => {
-      menuAction = handler;
-      return () => {};
-    });
-    const app = mount(App);
-    try {
-      await flushPromises();
-      await app.get('[aria-label="设置"]').trigger("click");
-      await flushPromises();
-      await app.findAll("button").find((button) => button.text().includes("关于"))!.trigger("click");
-      await flushPromises();
-      const dialog = app.get('[aria-labelledby="about-title"]');
-      expect(dialog.text()).toContain("ClipSync test");
-      await dialog.findAll("button").find((button) => button.text().includes("项目主页"))!.trigger("click");
-      await flushPromises();
-      expect(bridge.openAboutLink).toHaveBeenLastCalledWith("homepage");
-      expect(dialog.get('[role="status"]').text())
-        .toContain("已在浏览器打开：https://github.com/kai3316/clipsync");
-      await dialog.findAll("button").find((button) => button.text() === "关闭")!.trigger("click");
-      await flushPromises();
-      // The native tray entry reopens the same dialog through the host event.
-      menuAction!("about");
-      await flushPromises();
-      expect(HTMLDialogElement.prototype.showModal).toHaveBeenCalledTimes(2);
-    } finally {
-      vi.mocked(bridge.onMenuAction).mockResolvedValue(() => {});
-      vi.mocked(bridge.openAboutLink).mockClear();
-      app.unmount();
-    }
-  });
-
-  it("opens settings, logs and the update check from the tray, not just About and QR", async () => {
-    vi.clearAllMocks();
-    HTMLDialogElement.prototype.showModal = vi.fn();
-    HTMLDialogElement.prototype.close = vi.fn();
-    vi.mocked(bridge.status).mockResolvedValue({ version: "test", health: "ready",
-      device_name: "Local", session_id: "s", seq: 0, sync_state: "not_started",
-      capabilities: ["url.send"] } as any);
-    vi.mocked(bridge.devices).mockResolvedValue({ items: [
-      { id: "p", name: "Peer", paired: true, connection_state: "online",
-        pairing_status: "paired", pairing_code: null, sas: null },
-    ] as any });
-    let menuAction: ((action: string) => void) | undefined;
-    vi.mocked(bridge.onMenuAction).mockImplementation(async (handler: (action: any) => void) => {
-      menuAction = handler;
-      return () => {};
-    });
-    const app = mount(App);
-    try {
-      await flushPromises();
-      // Each entry runs the window's own handler for that surface: nothing is
-      // opened until the tray asks for it, and what opens is the same page and
-      // the same dialogs the buttons open rather than a second implementation.
-      const settingsButton = () =>
-        app.findAll("button").some((button) => button.text().includes("关于"));
-      expect(settingsButton()).toBe(false);
-      menuAction!("settings");
-      await flushPromises();
-      expect(settingsButton()).toBe(true);
-
-      menuAction!("export-logs");
-      await flushPromises();
-      expect(bridge.readLogs).toHaveBeenCalledOnce();
-      expect(app.get('[aria-labelledby="logs-title"]').text()).toContain("line 1");
-
-      menuAction!("check-update");
-      await flushPromises();
-      expect(bridge.updateCheck).toHaveBeenCalledOnce();
-
-      // 发送链接 needs a target: the tray entry resolves it the same way the
-      // phone's request does, which is the picker, preselected to the one peer.
-      menuAction!("send-url");
-      await flushPromises();
-      expect(app.get('[aria-labelledby="send-url-title"]').text()).toContain("Peer");
-    } finally {
-      vi.mocked(bridge.onMenuAction).mockResolvedValue(() => {});
-      // These are the mocks later tests count calls on; leaving them dirty
-      // would make this test's tray actions look like theirs.
-      for (const call of [bridge.settings, bridge.readLogs, bridge.updateCheck, bridge.updateStatus]) {
-        vi.mocked(call).mockClear();
-      }
-      app.unmount();
-    }
-  });
-
-  it("exports the log to a save-dialog destination and stays quiet when cancelled", async () => {
-    HTMLDialogElement.prototype.showModal = vi.fn();
-    HTMLDialogElement.prototype.close = vi.fn();
-    const app = mount(App);
-    try {
-      await flushPromises();
-      await app.get('[aria-label="设置"]').trigger("click");
-      await flushPromises();
-      await app.findAll("button").find((button) => button.text().includes("查看日志"))!.trigger("click");
-      await flushPromises();
-      const dialog = app.get('[aria-labelledby="logs-title"]');
-      await dialog.findAll("button").find((button) => button.text().includes("导出日志"))!.trigger("click");
-      await flushPromises();
-      expect(bridge.exportLogs).toHaveBeenCalledTimes(1);
-      // The host's dialog gets a timestamped default name, never a path.
-      expect(vi.mocked(bridge.exportLogs).mock.calls[0][0]).toMatch(/^clipsync_\d{8}_\d{6}\.log$/);
-      expect(dialog.get('[role="status"]').text()).toContain("已导出：C:/logs/clipsync.log");
-      // Cancelling the native dialog reports nothing.
-      vi.mocked(bridge.exportLogs).mockResolvedValueOnce({ cancelled: true });
-      await dialog.findAll("button").find((button) => button.text().includes("导出日志"))!.trigger("click");
-      await flushPromises();
-      expect(dialog.find('[role="status"]').exists()).toBe(false);
-    } finally {
-      // Later tests count calls on the shared bridge mocks.
-      vi.mocked(bridge.readLogs).mockClear();
-      vi.mocked(bridge.exportLogs).mockClear();
-      app.unmount();
-    }
-  });
-
   it("opens the shared log tail and restarts only after confirmation", async () => {
     HTMLDialogElement.prototype.showModal = vi.fn();
     HTMLDialogElement.prototype.close = vi.fn();
@@ -2998,90 +1438,6 @@ describe("history rendering", () => {
     await flushPromises();
     expect(bridge.restartApp).toHaveBeenCalledOnce();
     app.unmount();
-  });
-
-  it("runs diagnostics, renders the grouped report, and repairs the firewall", async () => {
-    HTMLDialogElement.prototype.showModal = vi.fn();
-    HTMLDialogElement.prototype.close = vi.fn();
-    vi.mocked(bridge.status).mockResolvedValue({ version: "test", health: "ready",
-      device_name: "Local", session_id: "s", seq: 0, sync_state: "not_started",
-      capabilities: ["diagnostics.report"] } as any);
-    vi.mocked(bridge.diagnosticsReport).mockResolvedValue({
-      v2: true, summary: "fail",
-      checks: [{ id: "permissions", ok: true, detail: "raw permissions" }],
-      groups: {
-        system: { label_key: "diag.v2.group.system", label_text: "系统", items: [
-          { id: "app_version", status: "ok", detail: "raw", label_text: "应用版本",
-            detail_text: "版本 1.0.0" }] },
-        network: { label_key: "diag.v2.group.network", label_text: "网络", items: [
-          { id: "firewall", status: "fail", detail: "raw", label_text: "防火墙",
-            detail_text: "端口 8765 未放行", hint_text: "请放行端口 8765" }] },
-      },
-      discovery_running: false, server_running: true, connected_count: 0, paired_count: 1,
-      web_companion_running: false, web_port: 8080, lan_ip: "192.168.1.5", os: "Windows",
-      version: "1.0.0",
-    });
-    const app = mount(App);
-    try {
-      await flushPromises();
-      await app.get('[aria-label="设置"]').trigger("click");
-      await flushPromises();
-      await app.findAll("button").find((button) => button.text().includes("运行诊断"))!
-        .trigger("click");
-      await flushPromises();
-      expect(bridge.diagnosticsReport).toHaveBeenCalledExactlyOnceWith();
-      const dialog = app.get('[aria-labelledby="diagnostics-title"]');
-      expect(dialog.text()).toContain("存在故障");
-      expect(dialog.text()).toContain("已配对 1 台");
-      expect(dialog.text()).toContain("应用版本");
-      expect(dialog.text()).toContain("版本 1.0.0");
-      expect(dialog.text()).toContain("端口 8765 未放行");
-      expect(dialog.text()).toContain("请放行端口 8765");
-      await dialog.findAll("button").find((button) => button.text().includes("修复防火墙"))!
-        .trigger("click");
-      await flushPromises();
-      expect(bridge.diagnosticsRequest).toHaveBeenCalledExactlyOnceWith("firewall");
-    } finally {
-      app.unmount();
-      vi.mocked(bridge.status).mockResolvedValue({ version: "test", health: "ready",
-        device_name: "Local", session_id: "s", seq: 0, sync_state: "not_started" } as any);
-    }
-  });
-
-  it("offers the local-network repair when the permissions check fails", async () => {
-    HTMLDialogElement.prototype.showModal = vi.fn();
-    HTMLDialogElement.prototype.close = vi.fn();
-    vi.mocked(bridge.status).mockResolvedValue({ version: "test", health: "ready",
-      device_name: "Local", session_id: "s", seq: 0, sync_state: "not_started",
-      capabilities: ["diagnostics.report"] } as any);
-    vi.mocked(bridge.diagnosticsReport).mockResolvedValue({
-      v2: true, summary: "warn", groups: {},
-      checks: [{ id: "permissions", ok: false, detail: "raw",
-        detail_text: "未授予本地网络权限", guidance_text: "请在系统设置中允许 ClipSync" }],
-      discovery_running: false, server_running: true, connected_count: 0, paired_count: 0,
-      web_companion_running: false, web_port: 8080, lan_ip: "", os: "Darwin", version: "1.0.0",
-    });
-    vi.mocked(bridge.diagnosticsRequest).mockClear();
-    const app = mount(App);
-    try {
-      await flushPromises();
-      await app.get('[aria-label="设置"]').trigger("click");
-      await flushPromises();
-      await app.findAll("button").find((button) => button.text().includes("运行诊断"))!
-        .trigger("click");
-      await flushPromises();
-      const dialog = app.get('[aria-labelledby="diagnostics-title"]');
-      expect(dialog.text()).toContain("未授予本地网络权限");
-      expect(dialog.text()).toContain("请在系统设置中允许 ClipSync");
-      await dialog.findAll("button").find((button) => button.text().includes("打开本地网络权限"))!
-        .trigger("click");
-      await flushPromises();
-      expect(bridge.diagnosticsRequest).toHaveBeenCalledExactlyOnceWith("local_network");
-    } finally {
-      app.unmount();
-      vi.mocked(bridge.status).mockResolvedValue({ version: "test", health: "ready",
-        device_name: "Local", session_id: "s", seq: 0, sync_state: "not_started" } as any);
-    }
   });
 
   it("drives the update panel from the check, download and ready phases", async () => {
@@ -3136,50 +1492,54 @@ describe("history rendering", () => {
     }
   });
 
-  it("reports a failed update download with the sidecar's reason", async () => {
+  it("offers to install in place when the host says the update is installable", async () => {
     vi.mocked(bridge.status).mockResolvedValue({ version: "test", health: "ready",
       device_name: "Local", session_id: "s", seq: 0, sync_state: "not_started",
       capabilities: ["update.status"] } as any);
-    vi.mocked(bridge.updateDownload).mockResolvedValueOnce({
-      ok: false, started: false, error: "update already in progress" });
+    let emit!: Parameters<typeof bridge.subscribe>[0];
+    vi.mocked(bridge.subscribe).mockImplementationOnce(async callback => {
+      emit = callback;
+      return () => {};
+    });
+    // `installable` is the host's answer to a different question from
+    // `available`: there is a newer release, and this build can replace itself
+    // with it.  Both true is the case the label has to follow.
+    vi.mocked(bridge.updateCheck).mockResolvedValueOnce({
+      available: true, latest: "v2.0.0", current: "1.0.0", url: "https://example.com",
+      installable: true });
     const app = mount(App);
     try {
       await flushPromises();
       await app.get('[aria-label="设置"]').trigger("click");
       await flushPromises();
-      await app.findAll("button").find((button) => button.text() === "下载更新");
-      // No download button without a confirmed newer release, so call the
-      // store directly and assert the panel surfaces the refusal.
-      await (app.vm as any).startUpdateDownload();
+      await app.findAll("button").find((button) => button.text().includes("立即检查更新"))!
+        .trigger("click");
       await flushPromises();
-      expect(app.text()).toContain("更新下载失败：update already in progress");
+      const labels = () => app.findAll("button").map((button) => button.text());
+      expect(labels()).toContain("下载并安装");
+      // The manual path must be gone, not merely joined: the card cannot both
+      // promise to install and tell the reader to replace the files by hand.
+      expect(labels()).not.toContain("下载更新");
+      expect(app.text()).not.toContain("请退出当前应用");
+
+      await app.findAll("button").find((button) => button.text() === "下载并安装")!
+        .trigger("click");
+      await flushPromises();
+      expect(bridge.updateInstall).toHaveBeenCalledOnce();
+
+      emit({ type: "event", session_id: "s", name: "update.state",
+        data: { state: { phase: "installing", fraction: 1, downloaded: 100, total: 100,
+          error: "", version: "v2.0.0", path: "" } } });
+      await flushPromises();
+      expect(app.text()).toContain("正在安装更新，完成后应用会自动重启。");
+      // Nothing may be offered while the bundle is being replaced.
+      expect(labels()).not.toContain("下载并安装");
+      expect(labels()).not.toContain("下载更新");
     } finally {
       app.unmount();
       vi.mocked(bridge.status).mockResolvedValue({ version: "test", health: "ready",
         device_name: "Local", session_id: "s", seq: 0, sync_state: "not_started" } as any);
-    }
-  });
-
-  it("persists the auto-update preference immediately and keeps the stored value on failure", async () => {
-    const app = mount(App);
-    try {
-      await flushPromises();
-      await app.get('[aria-label="设置"]').trigger("click");
-      await flushPromises();
-      vi.mocked(bridge.updateSettings).mockClear();
-      const toggle = app.get('[aria-label="自动检查更新"]');
-      await toggle.setValue(false);
-      await flushPromises();
-      expect(bridge.updateSettings).toHaveBeenCalledExactlyOnceWith({ auto_update_check: false });
-      expect((toggle.element as HTMLInputElement).checked).toBe(false);
-      vi.mocked(bridge.updateSettings).mockRejectedValueOnce({
-        code: "SAVE_FAILED", message: "disk full", retryable: true });
-      await toggle.setValue(true);
-      await flushPromises();
-      expect(app.text()).toContain("保存设置失败");
-      expect((toggle.element as HTMLInputElement).checked).toBe(false);
-    } finally {
-      app.unmount();
+      vi.mocked(bridge.subscribe).mockResolvedValue(() => {});
     }
   });
 
@@ -3225,7 +1585,12 @@ describe("history rendering", () => {
     expect(app.text()).not.toContain("HIDDEN-SAS");
     const confirm = app.findAll("button").find((button) => button.text() === "确认配对")!;
     expect(confirm.attributes("disabled")).toBeDefined();
-    expect(app.get('[aria-label="启用同步"]').attributes("disabled")).toBeDefined();
+    // A second assertion stood here, on the footer's sync switch.  It went with
+    // the switch on 2026-09-14, and it is not carried over to the overview's
+    // replacement: it asked for `disabled` while this status payload advertises
+    // no capabilities at all, so the switch was disabled for that reason and the
+    // pending pairing it was placed here to observe was never what it measured.
+    // The confirm above does carry that.
     app.unmount();
   });
 
@@ -3283,51 +1648,6 @@ describe("history rendering", () => {
     } finally {
       app.unmount();
       vi.mocked(bridge.devices).mockResolvedValue({ items: [] });
-    }
-  });
-  it("says which route a device row is reachable by, not just that it is paired", async () => {
-    // Three machines the device list alone cannot tell apart: one here on this
-    // network and absent from the relay, one the relay can reach and this
-    // network cannot, and one this machine has only ever known locally.  The
-    // local half answers 离线 for two of them, so the joined relay row is the
-    // only thing that separates "away" from "no internet pairing at all".
-    vi.mocked(bridge.devices).mockResolvedValue({ items: [
-      { id: "near", name: "Next room", paired: true, connection_state: "online",
-        pairing_status: "paired", pairing_code: null, sas: null },
-      { id: "far", name: "Away", paired: true, connection_state: "offline",
-        pairing_status: "paired", pairing_code: null, sas: null },
-      { id: "only", name: "Cable only", paired: true, connection_state: "offline",
-        pairing_status: "paired", pairing_code: null, sas: null },
-    ] });
-    vi.mocked(bridge.internetPairingStatus).mockResolvedValue({ relay: "online", peers: [
-      { peer_id: "near", name: "Next room", online: false, last_seen: 1700000000 },
-      { peer_id: "far", name: "Away", online: true, last_seen: 1700000000 },
-    ] } as any);
-    const app = mount(App);
-    try {
-      await flushPromises();
-      await app.get('[aria-label="设备"]').trigger("click");
-      await flushPromises();
-      const chips = (name: string) => {
-        const row = app.findAll(".device-row").find(node => node.get("h2").text() === name);
-        if (!row) throw new Error(`no device row named ${name}`);
-        return row.findAll(".channel").map(node => node.text());
-      };
-      expect(chips("Next room")).toEqual(["已配对", "本地·在线", "互联网·离线"]);
-      expect(chips("Away")).toEqual(["已配对", "本地·离线", "互联网·在线"]);
-      // The third state is not 离线: a device with no relay pairing has no
-      // internet route to be away on, and the row says which of the two it is.
-      expect(chips("Cable only")).toEqual(["已配对", "本地·离线", "互联网·未配对"]);
-      // The relay's own link is the first line of the pairing card, because
-      // every 在线 under it is the relay's view of another device: when ours is
-      // down the whole list reads 离线 and nothing would say who is away.
-      await openPanel(app, "互联网配对");
-      expect(app.get(".relay-state").text()).toContain("本机中继：在线");
-      expect(app.get(".relay-state").classes()).toContain("relay-state--online");
-    } finally {
-      app.unmount();
-      vi.mocked(bridge.devices).mockResolvedValue({ items: [] });
-      vi.mocked(bridge.internetPairingStatus).mockResolvedValue({ peers: [] });
     }
   });
   it("probes a paired device per channel and lists pinned certificate fingerprints", async () => {
@@ -3406,48 +1726,6 @@ describe("history rendering", () => {
     }
   });
 
-  it("shows what each internet peer's relay still holds, and folds a live receipt into it", async () => {
-    let emit!: Parameters<typeof bridge.subscribe>[0];
-    vi.mocked(bridge.subscribe).mockImplementationOnce(async callback => {
-      emit = callback; return () => {};
-    });
-    vi.mocked(bridge.internetPairingStatus).mockResolvedValue({ peers: [
-      { peer_id: "p1", name: "Phone", online: false },
-    ] } as any);
-    // What the host queued before this window opened: the panel seeds itself
-    // from the ledger, so a device that has been offline has something to show.
-    vi.mocked(bridge.relayDeliveryStatus).mockResolvedValue({ pending: 1, items: [
-      { msg_id: "m1", status: "queued" },
-    ] } as any);
-    const app = mount(App);
-    try {
-      await flushPromises();
-      await app.get('[aria-label="设备"]').trigger("click");
-      await flushPromises();
-      // The peers the relay is holding for are the internet pairing panel's own
-      // rows: the device list is about machines on this network.
-      await openPanel(app, "互联网配对");
-      expect(bridge.relayDeliveryStatus).toHaveBeenCalledWith("p1");
-      expect(app.get(".delivery-badge").text()).toBe(t("待补发 {count}", { count: 1 }));
-      const aggregate = app.findAll("p").find(node => node.text().startsWith(t("待投递消息：")));
-      expect(aggregate?.text()).toBe(`${t("待投递消息：")}1`);
-      // The peer comes back and the queue drains: the receipt retires the badge
-      // and leaves the result the send ended on.
-      emit({ type: "event", session_id: "s", name: "relay.delivery.changed",
-        data: { peer_id: "p1", msg_id: "m1", status: "delivered",
-          kind: "clipboard", session_id: "" } });
-      await flushPromises();
-      expect(app.find(".delivery-badge").exists()).toBe(false);
-      expect(app.get(".delivery-result").text()).toContain(t("已送达"));
-      expect(app.get(".delivery-result").classes()).toContain("delivery-result--delivered");
-      expect(aggregate?.text()).toBe(`${t("待投递消息：")}0`);
-    } finally {
-      app.unmount();
-      vi.mocked(bridge.internetPairingStatus).mockResolvedValue({ peers: [] });
-      vi.mocked(bridge.relayDeliveryStatus).mockResolvedValue({ pending: 0, items: [] });
-    }
-  });
-
   it("answers a submitted internet pairing code with a wait, a completion, or a reason", async () => {
     let emit!: Parameters<typeof bridge.subscribe>[0];
     vi.mocked(bridge.subscribe).mockImplementationOnce(async callback => {
@@ -3505,29 +1783,43 @@ describe("history rendering", () => {
     }
   });
 
-  it("keeps the footer to this machine and this build, with no window action", async () => {
-    const app = mount(App);
-    try {
-      await flushPromises();
-      // 退出 belongs to the tray, and the window is decorated, so the title bar
-      // already carries minimize.  A second control for the title bar's job was
-      // a duplicate, and the footer's own two facts are what is left.
-      const footer = app.get(".sidebar-footer");
-      expect(footer.text()).toContain("Local");
-      expect(footer.text()).toContain(t("版本 {version}", { version: "test" }));
-      expect(footer.findAll("button")).toHaveLength(0);
-      expect(bridge.minimize).not.toHaveBeenCalled();
-      expect(bridge.quit).not.toHaveBeenCalled();
-    } finally { app.unmount(); }
-  });
-
   it("renders clipboard markup as text, never as executable HTML", async () => {
-    const app = mount(App);
+    const app = mountOn("history");
     await flushPromises();
     expect(app.find(".history-content").text()).toContain("<img");
     expect(app.find(".history-content img").exists()).toBe(false);
     expect(app.text()).toContain("同步引擎未启动");
     app.unmount();
+  });
+
+  it("previews a clip with no text of its own in the reader's language", async () => {
+    // The sidecar previews an image with the label "[Image]", which is its own
+    // word rather than anything the user copied — so the row says 图片 in a
+    // Chinese window instead of the English it was stored under.
+    const imagePage = () => historyPage([
+      historyRow({ id: "img", content_type: "IMAGE", preview: "[Image]" }),
+    ]);
+    // Once per mount: the second one fetches again, and the shared fixture is
+    // the markup row the neighbouring case is about.
+    vi.mocked(bridge.history).mockResolvedValueOnce(imagePage());
+
+    setLocale("zh-CN");
+    const zh = mountOn("history");
+    await flushPromises();
+    // The paragraph, not the row: the kind chip beside it says 图片 too, as it
+    // does on the panel, and this case is about the preview line.
+    expect(zh.find(".history-content p").text()).toBe("图片");
+    zh.unmount();
+
+    // The window renders in the saved language, so that is what the second
+    // mount has to be told -- `setLocale` alone is overwritten on mount.
+    setLocale("en");
+    vi.mocked(bridge.settings).mockResolvedValueOnce({ settings: { language: "en" } });
+    vi.mocked(bridge.history).mockResolvedValueOnce(imagePage());
+    const en = mountOn("history");
+    await flushPromises();
+    expect(en.find(".history-content p").text()).toBe("Image");
+    en.unmount();
   });
 });
 
@@ -3563,44 +1855,6 @@ describe("first-run language picker", () => {
       app.unmount();
       setLocale("zh-CN");
       vi.mocked(bridge.settings).mockResolvedValue({ settings: {} });
-    }
-  });
-
-  it("stays away once a language has been chosen, and follows that language", async () => {
-    HTMLDialogElement.prototype.showModal = vi.fn();
-    setLocale("zh-CN");
-    vi.mocked(bridge.settings).mockResolvedValueOnce({
-      settings: { language: "en", language_chosen: true },
-    });
-    const app = mount(App);
-    try {
-      await flushPromises();
-      expect(showModal()).not.toHaveBeenCalled();
-      expect(app.find('[aria-label="Settings"]').exists()).toBe(true);
-    } finally {
-      app.unmount();
-      setLocale("zh-CN");
-      vi.mocked(bridge.settings).mockResolvedValue({ settings: {} });
-    }
-  });
-
-  it("switches and persists the language from the settings page", async () => {
-    setLocale("zh-CN");
-    vi.mocked(bridge.updateSettings).mockClear();
-    const app = mount(App);
-    try {
-      await flushPromises();
-      await app.get('[aria-label="设置"]').trigger("click");
-      await flushPromises();
-      const select = app.get('select[aria-label="语言"]');
-      expect(select.findAll("option").map(option => option.text())).toEqual(["简体中文", "English"]);
-      await select.setValue("en");
-      await flushPromises();
-      expect(bridge.updateSettings).toHaveBeenCalledExactlyOnceWith({ language: "en" });
-      expect(app.find('[aria-label="Settings"]').exists()).toBe(true);
-    } finally {
-      app.unmount();
-      setLocale("zh-CN");
     }
   });
 
@@ -3788,39 +2042,32 @@ describe("first-run language picker", () => {
 });
 
 describe("timed sync pause", () => {
-  /** A status payload with sync in the state the case is about. */
+  /** A status payload with sync in the state the case is about.
+   *
+   * `overview.get` is advertised because the pause controls live on the
+   * overview page and this suite drives them there: the footer keeps the
+   * countdown and nothing else, by the user's request of 2026-09-14.
+   */
   function status(syncState: string) {
     return { version: "test", health: "ready", device_name: "Local",
-      session_id: "s", seq: 0, sync_state: syncState } as any;
+      session_id: "s", seq: 0, sync_state: syncState,
+      capabilities: ["overview.get"] } as any;
   }
 
-  it("offers the dashboard's pause presets while sync is running", async () => {
-    setLocale("zh-CN");
-    vi.clearAllMocks();
-    vi.mocked(bridge.status).mockResolvedValue(status("running"));
-    const app = mount(App);
-    try {
-      await flushPromises();
-      const row = app.get(".bottom-status");
-      expect(row.text()).toContain("定时暂停同步");
-      expect(row.findAll("button").map(button => button.text()))
-        .toEqual(["15 分钟", "30 分钟", "1 小时"]);
-    } finally {
-      app.unmount();
-      setLocale("zh-CN");
-    }
-  });
-
-  it("pauses for the chosen preset and counts down the deadline the runtime armed", async () => {
+  it("arms the pause from the overview and counts down the deadline the runtime reports", async () => {
     setLocale("zh-CN");
     vi.clearAllMocks();
     const until = Math.floor(Date.now() / 1000) + 30 * 60;
     vi.mocked(bridge.status).mockResolvedValue(status("running"));
+    // No deadline armed, so the card offers the presets rather than a
+    // countdown — and said explicitly, because `clearAllMocks` clears calls
+    // without putting an earlier case's implementation back.
+    vi.mocked(bridge.settings).mockResolvedValue({ settings: { timed_pause_until: 0 } } as any);
     vi.mocked(bridge.pauseSync).mockResolvedValue({ enabled: false, until } as any);
     const app = mount(App);
     try {
       await flushPromises();
-      await app.get(".bottom-status").findAll("button")
+      await app.get(".overview-pause").findAll("button")
         .find(button => button.text() === "30 分钟")!.trigger("click");
       await flushPromises();
       expect(bridge.pauseSync).toHaveBeenCalledWith(30);
@@ -3828,86 +2075,11 @@ describe("timed sync pause", () => {
       // this window asked for, so a pause armed elsewhere counts down too.
       expect(app.get(".bottom-status").text()).toContain("⏸ 已暂停 · 剩余 30 分钟");
       expect(app.text()).toContain("同步已暂停 30 分钟");
-      // The presets give way to the way out of the pause.
-      expect(app.get(".bottom-status").findAll("button").map(button => button.text()))
-        .toEqual(["立即恢复"]);
     } finally {
       app.unmount();
       setLocale("zh-CN");
     }
   });
-
-  it("resumes from the countdown and stops showing the deadline", async () => {
-    setLocale("zh-CN");
-    vi.clearAllMocks();
-    vi.mocked(bridge.status).mockResolvedValue(status("paused"));
-    vi.mocked(bridge.settings).mockResolvedValue({
-      settings: { timed_pause_until: Math.floor(Date.now() / 1000) + 600 },
-    } as any);
-    const app = mount(App);
-    try {
-      await flushPromises();
-      expect(app.get(".bottom-status").text()).toContain("⏸ 已暂停 · 剩余 10 分钟");
-      await app.get(".bottom-status").get("button").trigger("click");
-      await flushPromises();
-      expect(bridge.resumeSync).toHaveBeenCalledTimes(1);
-      expect(app.get(".bottom-status").text()).not.toContain("剩余");
-      expect(app.text()).toContain("同步已恢复");
-    } finally {
-      app.unmount();
-      setLocale("zh-CN");
-    }
-  });
-
-  it("keeps the plain resume when sync is off with no deadline armed", async () => {
-    setLocale("zh-CN");
-    vi.clearAllMocks();
-    vi.mocked(bridge.status).mockResolvedValue(status("paused"));
-    vi.mocked(bridge.settings).mockResolvedValue({ settings: { timed_pause_until: 0 } } as any);
-    const app = mount(App);
-    try {
-      await flushPromises();
-      // Nothing was timed, so there is no countdown — only the way back to the
-      // sync the user turned off from the toggle beside it.
-      expect(app.get(".bottom-status").findAll("button").map(button => button.text()))
-        .toEqual(["恢复同步"]);
-      await app.get(".bottom-status").get("button").trigger("click");
-      await flushPromises();
-      expect(bridge.resumeSync).toHaveBeenCalledTimes(1);
-    } finally {
-      app.unmount();
-      setLocale("zh-CN");
-    }
-  });
-
-  it("asks the runtime again once the deadline passes, and stops counting down", async () => {
-    vi.useFakeTimers();
-    setLocale("zh-CN");
-    vi.clearAllMocks();
-    const until = Math.floor(Date.now() / 1000) + 600;
-    vi.mocked(bridge.status).mockResolvedValue(status("paused"));
-    vi.mocked(bridge.settings).mockResolvedValue({ settings: { timed_pause_until: until } } as any);
-    const app = mount(App);
-    try {
-      await flushPromises();
-      expect(app.get(".bottom-status").text()).toContain("已暂停 · 剩余 10 分钟");
-      // The host resumes on its own at the deadline and clears it on disk; this
-      // window only has to stop showing a deadline that is no longer there.
-      vi.mocked(bridge.settings).mockResolvedValue({ settings: { timed_pause_until: 0 } } as any);
-      const before = vi.mocked(bridge.settings).mock.calls.length;
-      await vi.advanceTimersByTimeAsync(600000);
-      await flushPromises();
-      // One extra read: the tick that crosses the deadline asks, and the answer
-      // it gets clears the countdown so the ticks after it ask nothing.
-      expect(vi.mocked(bridge.settings).mock.calls.length).toBe(before + 1);
-      expect(app.get(".bottom-status").text()).not.toContain("剩余");
-    } finally {
-      app.unmount();
-      vi.useRealTimers();
-      setLocale("zh-CN");
-    }
-  });
-;
 
 });
 
@@ -3962,44 +2134,35 @@ describe("files dropped on the window", () => {
     }
   });
 
-  it("treats a drop with no paths in it as no drop at all", async () => {
-    vi.clearAllMocks();
+});
+
+describe("the window's right-click menus", () => {
+
+  let app: ReturnType<typeof mount>;
+  beforeEach(async () => {
+    HTMLDialogElement.prototype.showModal = vi.fn();
+    HTMLDialogElement.prototype.close = vi.fn();
     setLocale("zh-CN");
-    const { app, drop } = await mountWithDrop();
-    try {
-      // Some platforms report a drop with nothing in it.  Opening a page and
-      // asking which device to send nothing to would be a question with no
-      // possible answer, so the window stays where it is.
-      drop({ type: "drop", paths: [], position: { x: 1, y: 1 } });
-      await flushPromises();
-      expect(app.find(".transfers-view").exists()).toBe(false);
-      expect(app.find(".history-list").exists()).toBe(true);
-      expect(app.find(".drop-veil").exists()).toBe(false);
-    } finally {
-      app.unmount();
-      vi.mocked(bridge.onFileDrop).mockResolvedValue(() => {});
-    }
+    vi.mocked(bridge.history).mockResolvedValue(historyPage([
+      historyRow({ id: "a", preview: "https://example.com/a", content_type: "URL" }),
+    ]));
+    vi.mocked(bridge.devices).mockResolvedValue({ items: [{
+      id: "dev-1", name: "Laptop", paired: true, connection_state: "online",
+      pairing_status: "paired", pairing_code: null, sas: null, note: "",
+    }] as any });
+    // Every case here right-clicks a row of one of the two list pages.
+    app = mountOn("history");
+    await flushPromises();
+  });
+  afterEach(() => { app.unmount(); closeContextMenu(); });
+
+  it("copies the row it was opened on, not the first one", async () => {
+    vi.mocked(bridge.copyHistory).mockClear();
+    await app.findAll(".history-row")[0].trigger("contextmenu");
+    await flushPromises();
+    await app.findAll(".context-menu-item")[0].trigger("click");
+    await flushPromises();
+    expect(bridge.copyHistory).toHaveBeenLastCalledWith("a");
   });
 
-  it("stops listening when the window goes away", async () => {
-    vi.clearAllMocks();
-    setLocale("zh-CN");
-    let drop!: (event: any) => void;
-    const off = vi.fn();
-    vi.mocked(bridge.onFileDrop).mockImplementation(async (handler: (event: any) => void) => {
-      drop = handler;
-      return off;
-    });
-    const app = mount(App);
-    try {
-      await flushPromises();
-      drop({ type: "enter", paths: ["C:/a.txt"], position: { x: 1, y: 1 } });
-      await flushPromises();
-      expect(app.find(".drop-veil").exists()).toBe(true);
-      app.unmount();
-      expect(off).toHaveBeenCalledOnce();
-    } finally {
-      vi.mocked(bridge.onFileDrop).mockResolvedValue(() => {});
-    }
-  });
 });

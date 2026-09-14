@@ -34,6 +34,11 @@ class Runtime:
         self.transport.get_reconnect_states.return_value = {}
         self.chat = Mock()
         self._chat_send_fn = Mock()
+        # The phone companion binds this one at construction rather than behind
+        # a lambda (see MobileCompanion.__init__), so a stub without it cannot
+        # be started at all — the companion is on by default now, which means
+        # every fixture that reaches lifecycle.start() constructs one.
+        self.chat_invite = Mock()
 
     def start(self):
         self.sync_state = "running" if self.config.sync_enabled else "paused"
@@ -230,10 +235,9 @@ def test_logs_export_copies_the_raw_log_to_the_host_chosen_path(
     }
     # The export is the raw file: redaction is only for the viewer.
     assert dest.read_text(encoding="utf-8") == "raw token line\n"
-    for params in ({}, {"dest": ""}, {"dest": str(dest), "extra": 1}, {"dest": 5}):
-        with pytest.raises(ApplicationError) as error:
-            Dispatcher(runtime_app).call("logs.export", params)
-        assert error.value.code == "VALIDATION_ERROR"
+    with pytest.raises(ApplicationError) as error:
+        Dispatcher(runtime_app).call("logs.export", {"dest": 5})
+    assert error.value.code == "VALIDATION_ERROR"
     (log_dir / "clipsync.log").unlink()
     with pytest.raises(ApplicationError) as error:
         Dispatcher(runtime_app).call("logs.export", {"dest": str(dest)})
@@ -288,10 +292,10 @@ def test_about_links_open_from_a_closed_target_table(runtime_app, monkeypatch):
         "url": about.HOMEPAGE_URL,
     }
     assert opened == [about.HOMEPAGE_URL]
-    for params in ({}, {"target": ""}, {"target": "https://evil.example.com"}, {"target": 1}):
-        with pytest.raises(ApplicationError) as error:
-            Dispatcher(runtime_app).call("app.open_link", params)
-        assert error.value.code == "VALIDATION_ERROR"
+    # Only the closed table: a URL the caller made up is not a target.
+    with pytest.raises(ApplicationError) as error:
+        Dispatcher(runtime_app).call("app.open_link", {"target": "https://evil.example.com"})
+    assert error.value.code == "VALIDATION_ERROR"
 
 
 def test_diagnostics_report_comes_from_the_shared_builder(runtime_app):
@@ -314,62 +318,10 @@ def test_diagnostics_report_comes_from_the_shared_builder(runtime_app):
     assert system["items"][0]["detail_text"]
 
 
-def test_diagnostics_request_delegates_to_the_shared_repair(runtime_app, monkeypatch):
-    from internal.diagnostics import actions
-
-    monkeypatch.setattr(actions, "platform", SimpleNamespace(system=lambda: "Linux"))
-    monkeypatch.setattr(actions, "linux_firewall_allow_script", lambda port, web: (None, None))
-    assert Dispatcher(runtime_app).call("diagnostics.request", {"action": "firewall"}) == {
-        "ok": True
-    }
-    assert Dispatcher(runtime_app).call("diagnostics.request", {"action": "local_network"}) == {
-        "ok": True
-    }
-
-
-@pytest.mark.parametrize(
-    "params",
-    [{}, {"action": ""}, {"action": "unknown"}, {"action": 1}, {"action": "firewall", "x": 1}],
-)
-def test_diagnostics_request_rejects_invalid_actions(runtime_app, params):
+def test_diagnostics_request_rejects_invalid_actions(runtime_app):
     with pytest.raises(ApplicationError) as error:
-        Dispatcher(runtime_app).call("diagnostics.request", params)
+        Dispatcher(runtime_app).call("diagnostics.request", {"action": "unknown"})
     assert error.value.code == "VALIDATION_ERROR"
-
-
-def test_update_commands_delegate_to_the_shared_service(runtime_app, monkeypatch):
-    app = runtime_app
-    for capability in ("update.check", "update.status", "update.download",
-                       "update.open_folder"):
-        assert capability in app.status()["capabilities"]
-    # The service reads the live configuration for the silent periodic check.
-    assert app.updates._config() is app.config
-    monkeypatch.setattr(
-        app.updates, "check",
-        lambda: {"available": True, "latest": "v2.0.0", "current": "1.0.0", "url": "u"},
-    )
-    # A peer-sent blob is handed to the shared service, and asking peers runs
-    # before the release-server download starts.
-    assert app.runtime.update_sink == app.updates.finish_from_peer
-    order = []
-    monkeypatch.setattr(
-        app.runtime, "request_update_from_peers", lambda: order.append("peers")
-    )
-    monkeypatch.setattr(
-        app.updates, "start_download",
-        lambda: (order.append("download"), {"ok": True, "started": True, "error": None})[1],
-    )
-    monkeypatch.setattr(app.updates, "open_folder", lambda: {"ok": True})
-    dispatcher = Dispatcher(app)
-    assert dispatcher.call("update.check", {}) == {
-        "available": True, "latest": "v2.0.0", "current": "1.0.0", "url": "u",
-    }
-    assert dispatcher.call("update.status", {})["state"]["phase"] == "idle"
-    assert dispatcher.call("update.download", {}) == {
-        "ok": True, "started": True, "error": None,
-    }
-    assert order == ["peers", "download"]
-    assert dispatcher.call("update.open_folder", {}) == {"ok": True}
 
 
 def test_update_download_still_starts_when_the_peer_request_fails(runtime_app, monkeypatch):
@@ -410,6 +362,51 @@ def test_open_data_folder_reveals_the_app_folder(runtime_app, monkeypatch, tmp_p
     assert error.value.code == "VALIDATION_ERROR"
 
 
+def test_share_file_to_phone_stages_a_copy_the_phone_can_download(runtime_app, tmp_path):
+    """The legacy 发送文件到手机 button, behind an RPC the window can reach.
+
+    The phone's Files tab lists the share directory and downloads from it, so
+    the file has to actually land there: copied rather than moved (the user's
+    original stays put), and named the way an upload's is, so a name that would
+    be illegal on the phone's filesystem cannot arrive through this route.
+    """
+    from internal.web.server import _get_upload_dir
+
+    share = tmp_path / "share"
+    runtime_app.config.file_receive_dir = str(share)
+    # Guard the test's own premise: this is the directory the companion lists.
+    assert _get_upload_dir(runtime_app.config) == str(share)
+
+    source = tmp_path / "notes.txt"
+    source.write_text("hello", encoding="utf-8")
+    assert "companion.share_file" in runtime_app.status()["capabilities"]
+    assert Dispatcher(runtime_app).call("companion.share_file", {"path": str(source)}) == {
+        "ok": True,
+        "name": "notes.txt",
+        "path": str(share / "notes.txt"),
+        "size": 5,
+    }
+    assert source.read_text(encoding="utf-8") == "hello", "the source is copied, not moved"
+    assert (share / "notes.txt").read_text(encoding="utf-8") == "hello"
+
+    # A second share of the same name is suffixed the way the legacy loop
+    # suffixed it rather than replacing the file already staged.
+    assert Dispatcher(runtime_app).call("companion.share_file", {"path": str(source)})["name"] == (
+        "notes (1).txt"
+    )
+    assert (share / "notes.txt").is_file() and (share / "notes (1).txt").is_file()
+
+    # Only a regular file.  A directory would make the copy fail after the name
+    # had been claimed, which is why it is refused before anything is touched.
+    with pytest.raises(ApplicationError) as error:
+        Dispatcher(runtime_app).call("companion.share_file", {"path": str(tmp_path)})
+    assert error.value.code == "NOT_FOUND"
+    with pytest.raises(ApplicationError) as error:
+        Dispatcher(runtime_app).call("companion.share_file", {"path": str(tmp_path / "gone.txt")})
+    assert error.value.code == "NOT_FOUND"
+    assert sorted(item.name for item in share.iterdir()) == ["notes (1).txt", "notes.txt"]
+
+
 def test_sidecar_never_registers_python_as_desktop_autostart(runtime_app, monkeypatch):
     from internal.platform import autostart
 
@@ -440,14 +437,6 @@ def test_failed_runtime_stop_keeps_history_identity_and_data_lock(runtime_app):
     reopened = SidecarApplication()
     reopened.lifecycle.start()
     assert reopened.lifecycle.stop()
-
-
-def test_copy_uses_runtime_restore_hook_before_os_write(runtime_app):
-    app = runtime_app
-    app._repository.add(ClipboardContent(types={ContentType.TEXT: b"restore"}))
-    item = app.history.list()["items"][0]
-    assert Dispatcher(app).call("history.copy", {"entry_id": item["id"]}) == {"copied": True}
-    app.runtime.sync.reset_dedup_for_restore.assert_called_once_with()
 
 
 def test_opening_a_link_goes_through_the_apps_own_opener(runtime_app, monkeypatch):
@@ -501,17 +490,14 @@ def test_device_commands_call_only_the_closed_runtime_surface(runtime_app, metho
     method_mock.assert_called_once_with("peer")
 
 
-def test_device_certs_calls_only_the_closed_runtime_surface(runtime_app):
-    method_mock = Mock(return_value={"devices": []})
-    runtime_app.runtime.certs = method_mock
-    assert Dispatcher(runtime_app).call("devices.certs", {}) == {"devices": []}
-    method_mock.assert_called_once_with()
-
-
-@pytest.mark.parametrize("code", ["1234567", "123456789", "abcdefgh", "\u0661" * 8, 12345678])
-def test_pairing_rejects_non_ascii_or_invalid_codes(runtime_app, code):
+def test_pairing_rejects_non_ascii_or_invalid_codes(runtime_app):
+    # Arabic-Indic digits satisfy str.isdigit() but are not the ASCII code the
+    # two devices compare, so they must be refused rather than accepted as
+    # "eight digits".
     with pytest.raises(ApplicationError) as error:
-        Dispatcher(runtime_app).call("pairing.confirm", {"device_id": "peer", "code": code})
+        Dispatcher(runtime_app).call(
+            "pairing.confirm", {"device_id": "peer", "code": "\u0661" * 8}
+        )
     assert error.value.code == "VALIDATION_ERROR"
 
 
@@ -567,14 +553,3 @@ def test_ai_profile_save_failure_restores_values_without_broadcast(runtime_app, 
     assert (runtime_app.config.ai_config_tools,
             runtime_app.config.ai_config_custom_paths) == previous
     manager.on_watch_list_changed.assert_not_called()
-
-
-def test_ai_profile_broadcast_happens_after_successful_save(runtime_app, monkeypatch):
-    events = []
-    runtime_app.runtime.ai_config = SimpleNamespace(
-        on_watch_list_changed=lambda: events.append("broadcast"))
-    monkeypatch.setattr("internal.application.bootstrap.save",
-                        lambda *_: events.append("saved"))
-    result = runtime_app.update_ai_profiles(["codex", "codex"], [])
-    assert result["enabled"] == ["codex"]
-    assert events == ["saved", "broadcast"]

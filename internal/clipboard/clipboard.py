@@ -2,6 +2,7 @@
 
 import time
 from abc import ABC, abstractmethod
+from dataclasses import replace
 
 from internal.clipboard.format import ClipboardContent, ContentType
 
@@ -69,13 +70,11 @@ def strip_rich_formats(content: ClipboardContent) -> ClipboardContent:
         # Nothing left after stripping (degenerate HTML-only clip whose
         # text extraction came up empty) — keep the original.
         return content
-    return ClipboardContent(
-        types=types,
-        source_device=content.source_device,
-        timestamp=content.timestamp,
-        image_fmt=content.image_fmt,
-        transport=content.transport,
-    )
+    # ``replace`` rather than a field-by-field rebuild: every field other than
+    # ``types`` — the image hint, the transport, and the entry id a file offer
+    # names — has to survive, and a rebuild silently drops whichever one was
+    # added last.
+    return replace(content, types=types)
 
 
 class ClipboardMonitor(ABC):

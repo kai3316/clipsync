@@ -52,6 +52,12 @@ export interface HistoryItem {
   /** Name of the device the clip synced from — this one, a peer, or the phone. */
   source_name: string;
   /**
+   * The device id that name stands for, which is what a download request has to
+   * name.  Empty for a clip captured on this machine.  Optional because the
+   * sidecar only started sending it alongside `FILE_REMOTE` rows.
+   */
+  source_device?: string;
+  /**
    * Which link a remote clip arrived on: `"lan"` for a peer on a direct
    * connection, `"relay"` for one that came through the internet relay, and
    * `""` for a clip captured here or a row written before the route was
@@ -94,6 +100,12 @@ export interface Device {
   sas: string | null;
   archived?: boolean;
   removed_at?: number;
+  /** Set while the transport is working through its reconnect attempts at an
+   *  offline paired peer, with the count the row's chip reports.  Absent on a
+   *  connected row and on one the transport is not retrying. */
+  reconnecting?: boolean;
+  reconnect_attempt?: number;
+  reconnect_max?: number;
 }
 
 export interface DeviceProbeChannel {
@@ -154,6 +166,32 @@ export interface InternetPairingWait {
   since?: number | null;
 }
 
+/**
+ * What a relay broker test found, one row per broker tried.
+ *
+ * The rows come back sorted by the sidecar — reachable first, then by ascending
+ * latency — which is the order the old panel rendered and the reason this type
+ * carries no ordering of its own for the view to re-apply.
+ *
+ * `summary` is deliberately absent: the sidecar returns the two counts and each
+ * front words its own sentence, because the old panel's English "2/3 reachable"
+ * is not a sentence this window can show in Chinese.
+ */
+export interface RelayTestResult {
+  results: RelayProbeRow[];
+  reachable: number;
+  total: number;
+}
+
+export interface RelayProbeRow {
+  endpoint: string;
+  ok: boolean;
+  /** Milliseconds to a completed handshake; null where the probe never got one. */
+  latency_ms?: number | null;
+  /** Why it failed, in the probe's own words — shown as received. */
+  detail?: string;
+}
+
 export interface SidecarEvent {
   type: "event" | "resync";
   name?: string;
@@ -184,9 +222,16 @@ export interface Favorite extends Omit<FavoriteSummary, "preview"> {
 
 export interface FavoritesPage {
   items: FavoriteSummary[];
+  /** How many favourites match the search and group filter, not the page. */
   total: number;
   offset: number;
   groups: string[];
+  /** Every group's size, counted over the whole library rather than the
+   * search, so the sidebar does not renumber itself while the reader types.
+   * A group with nothing in it yet is present and counts zero. */
+  group_counts?: Record<string, number>;
+  /** The whole library's size, for the "all groups" row. */
+  library_total?: number;
   session_id: string;
   seq: number;
 }
@@ -289,7 +334,9 @@ export type DiagnosticAction = "firewall" | "local_network";
 
 // The update lifecycle is owned by the sidecar; this client only mirrors it.
 // `fraction` is 0–1 and `downloaded`/`total` are bytes (0 when unknown).
-export type UpdatePhase = "idle" | "downloading" | "ready" | "failed";
+// `installing` is the one phase the sidecar never emits: replacing the running
+// installation is the host's job, and it publishes that phase itself.
+export type UpdatePhase = "idle" | "downloading" | "ready" | "installing" | "failed";
 
 export interface UpdateState {
   phase: UpdatePhase;
@@ -310,6 +357,20 @@ export interface UpdateCheckResult {
   latest: string;
   current: string;
   url: string;
+  /** Whether this build can install what it finds in place, which only the
+   *  host knows: it is the updater plugin matching this machine's bundle
+   *  against the release manifest.  Optional because it is the host's addition
+   *  and an older one does not send it. */
+  installable?: boolean;
+}
+
+export interface UpdateInstallResult {
+  ok: boolean;
+  /** False only when there was nothing to install — a reply at all means the
+   *  install did not happen, because a successful one replaces this process. */
+  installed: boolean;
+  /** `up_to_date` when the manifest had nothing newer than what is running. */
+  reason?: string | null;
 }
 
 export interface UpdateDownloadResult {
@@ -336,4 +397,39 @@ export interface RecoveryItem {
 export interface RecoveryResult {
   /** Empty when the data directory was already usable. */
   items: RecoveryItem[];
+}
+
+/** One clip in the overview's activity feed.
+ *
+ * The same row the history page lists, only with a shorter preview — the feed
+ * is the newest few of that list.  It used to be a shape of its own (`text` /
+ * `type` / `time`), which named nothing and so could do nothing: the row could
+ * only jump to the page that owns the real ones. */
+export type OverviewRecentItem = HistoryItem;
+
+/** The dashboard counters the phone Companion and the legacy web dashboard
+ * both render, now read by the window's own overview page. */
+export interface Overview {
+  connected_count: number;
+  paired_count: number;
+  discovered_count: number;
+  connected_names: string[];
+  history_count: number;
+  history_today: number;
+  history_pinned: number;
+  history_images: number;
+  active_transfers: number;
+  transfer_completed: number;
+  discovering: boolean;
+  visible: boolean;
+  sync_enabled: boolean;
+  web_enabled: boolean;
+  uptime_seconds: number;
+  local_ip: string;
+  port: number;
+  platform: string;
+  version: string;
+  network_type: string;
+  network_detail: string;
+  recent_items: OverviewRecentItem[];
 }

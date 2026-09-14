@@ -43,7 +43,8 @@ import uuid
 import zlib
 from io import BytesIO
 
-from internal.clipboard.format import ClipboardContent, ContentType, SyncMessage
+from internal.clipboard import file_ref
+from internal.clipboard.format import ClipboardContent, ContentType, SyncMessage, split_paths
 
 logger = logging.getLogger(__name__)
 
@@ -67,13 +68,22 @@ _TYPE_NAME_MAP = {
     ContentType.RTF: "RTF",
     ContentType.IMAGE_PNG: "IMAGE_PNG",
     ContentType.IMAGE_EMF: "IMAGE_EMF",
+    ContentType.URL: "URL",
+    ContentType.FILE_REMOTE: "FILE_REMOTE",
 }
 _NAME_TYPE_MAP = {v: k for k, v in _TYPE_NAME_MAP.items()}
 
 
 def has_syncable_types(content: ClipboardContent) -> bool:
-    """Return True if any format in ``content`` can be encoded for sync."""
-    return any(t in _TYPE_NAME_MAP for t in content.types)
+    """Return True if any format in ``content`` can be encoded for sync.
+
+    A cheap type-level test, because it is what decides whether the capture path
+    attempts a broadcast at all.  ``FILE`` counts even though it never travels
+    as itself (an offer does), and a ``URL`` counts even though one that names a
+    local path is dropped: `_wire_types` is where both are settled for real, and
+    it emits no frame when nothing survives it.
+    """
+    return any(t in _TYPE_NAME_MAP or t == ContentType.FILE for t in content.types)
 
 
 # Valid message types for file transfer routing
@@ -102,6 +112,12 @@ PAIRING_MSG_TYPES = frozenset(
         "pairing_unpair",
     }
 )
+
+# The pairing notices that end a trust relationship rather than conclude one.
+# The split matters to the retry that holds the two devices in sync: a
+# confirmation is worth re-sending while the pairing is live, while an un-pair
+# is worth re-sending for as long as this device considers itself *un*paired.
+ENDING_MSG_TYPES = frozenset({"pairing_reject", "pairing_unpair"})
 
 # Nearby-chat messages for consent-gated communication with UNPAIRED devices
 # discovered on the LAN.  These are the only frames (besides pairing) that the
@@ -180,6 +196,18 @@ NETPAIR_MSG_TYPES = frozenset({"netpair_hello"})
 # channel, and the relay path only admits them from channel-key holders.
 DEVICE_PROBE_MSG_TYPES = frozenset({"device_ping", "device_pong"})
 
+# A peer asking for the files behind a clipboard entry, and the refusal when
+# this machine cannot serve it.  LAN-only and paired-only, like the transfers
+# they start — so deliberately absent from UNPAIRED_GATE_MSG_TYPES (an unpaired
+# peer must not be able to ask what a device has on its clipboard, let alone
+# receive it) and from RELAY_MSG_TYPES (the bytes ride the LAN transfer channel,
+# which the relay does not carry).
+#
+# The request names an entry id and nothing else.  It does not name a path: a
+# path is only meaningful on the machine it names, so the peer that owns the
+# files resolves them itself, against its own history row.
+CLIP_FILE_MSG_TYPES = frozenset({"clip_file_request", "clip_file_denied"})
+
 
 def encode_frame(payload_dict: dict, msg_id: str = "", source_device: str = "") -> bytes:
     """Encode a generic JSON payload dict into the binary frame format.
@@ -209,6 +237,45 @@ def encode_frame(payload_dict: dict, msg_id: str = "", source_device: str = "") 
     return buf.getvalue()
 
 
+def _wire_types(content: ClipboardContent) -> dict[ContentType, bytes]:
+    """The formats that actually go on the wire, out of the ones a clip holds.
+
+    Two of them deliberately do not travel as themselves, for the same reason:
+    a path only means something on the machine it names.
+
+    * A ``FILE`` entry holds absolute paths.  It crosses as an *offer* instead —
+      the names, the sizes, and the id of the history entry that published it —
+      and the paths stay here until a peer asks for that entry by id, at which
+      point this machine resolves them itself.  See
+      `internal.clipboard.file_ref` for why the id travels rather than a path.
+    * A ``URL`` that is really a path is dropped.  macOS publishes a file's own
+      ``file://`` address beside the file and the Linux file managers put one in
+      ``text/uri-list``, so a plain file copy can reach the reader as both a FILE
+      and a URL — and syncing that URL would put the absolute path on the wire
+      through the one type meant to keep paths off it.
+    """
+    types = dict(content.types)
+
+    if ContentType.FILE in types:
+        raw = types.pop(ContentType.FILE).decode("utf-8", errors="replace")
+        items = [item for item in (file_ref.describe(p) for p in split_paths(raw)) if item]
+        # No entry id means this clip was never given a row — the history had an
+        # identical one and folded it in — so there is nothing for a peer to ask
+        # back for.  The row it duplicates was offered when *it* was captured.
+        if items and content.entry_id:
+            types[ContentType.FILE_REMOTE] = file_ref.offer(
+                content.entry_id,
+                items[: file_ref.MAX_OFFER_ENTRIES],
+                total=len(items),
+            )
+
+    url = types.get(ContentType.URL)
+    if url is not None and file_ref.is_local_path_url(url):
+        del types[ContentType.URL]
+
+    return types
+
+
 def encode_message(msg: SyncMessage, msg_type: str = "clipboard") -> bytes:
     """Encode a SyncMessage to wire format bytes.
 
@@ -226,7 +293,7 @@ def encode_message(msg: SyncMessage, msg_type: str = "clipboard") -> bytes:
     if msg.content.image_fmt:
         payload["image_fmt"] = msg.content.image_fmt
 
-    for content_type, data in msg.content.types.items():
+    for content_type, data in _wire_types(msg.content).items():
         name = _TYPE_NAME_MAP.get(content_type)
         if name is None:
             logger.debug("Skipping unregistered content type: %s", content_type)

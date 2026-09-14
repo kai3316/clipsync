@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-share-file-to-phone"
+description = "Enables the share_file_to_phone command without any pre-configured scope."
+commands.allow = ["share_file_to_phone"]
+
+[[permission]]
+identifier = "deny-share-file-to-phone"
+description = "Denies the share_file_to_phone command without any pre-configured scope."
+commands.deny = ["share_file_to_phone"]

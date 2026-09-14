@@ -12,13 +12,24 @@ def valid_entry_ids(values: list) -> bool:
 
 METHODS = frozenset({
     "favorites.list", "favorites.get", "favorites.add",
-    "favorites.update", "favorites.delete", "favorites.copy",
-    "favorites.batch_add", "favorites.export",
+    "favorites.update", "favorites.reorder", "favorites.delete",
+    "favorites.copy", "favorites.batch_add", "favorites.export",
+    "favorites.group_create", "favorites.group_rename", "favorites.group_delete",
 })
+
+
+def valid_order(favorite_ids: list) -> bool:
+    """A list of distinct favourite ids: the ones being moved, in their order."""
+    return (
+        1 <= len(favorite_ids) <= 100
+        and all(type(value) is str and 0 < len(value) <= 64 for value in favorite_ids)
+        and len(set(favorite_ids)) == len(favorite_ids)
+    )
 
 
 def dispatch_favorites(app, method, params, validate):
     identifier = {"favorite_id": (str, lambda v: 0 < len(v) <= 64)}
+    group_name = {"name": (str, lambda v: 0 < len(v) <= 128 and bool(v.strip()))}
     text_fields = {
         "title": (str, lambda v: len(v) <= 256),
         "content": (str, lambda v: len(v) <= 65536),
@@ -56,6 +67,18 @@ def dispatch_favorites(app, method, params, validate):
             ("favorite_id", "title", "content", "group", "position"),
         )
         result = app.require_favorites().update(**params)
+    elif method == "favorites.reorder":
+        validate(params, {"favorite_ids": (list, valid_order)}, ("favorite_ids",))
+        result = app.require_favorites().reorder(params["favorite_ids"])
+    elif method == "favorites.group_create":
+        validate(params, group_name, ("name",))
+        result = app.require_favorites().create_group(**params)
+    elif method == "favorites.group_rename":
+        validate(params, {**group_name, "rename_to": group_name["name"]}, ("name", "rename_to"))
+        result = app.require_favorites().rename_group(params["name"], params["rename_to"])
+    elif method == "favorites.group_delete":
+        validate(params, group_name, ("name",))
+        result = app.require_favorites().delete_group(**params)
     else:
         validate(params, identifier, ("favorite_id",))
         service = app.require_favorites()

@@ -572,7 +572,7 @@ class WebServer:
         # Pre-generate PWA icons
         self._icon_192 = _make_icon(192)
         self._icon_512 = _make_icon(512)
-        self._upload_dir = _get_upload_dir(self._cfg)
+        # `_upload_dir` is a property, not a field: see its own note below.
         self._static_dir = _get_static_dir()
 
         # ── Upgrade history to SQLite-backed storage if needed ───
@@ -620,6 +620,35 @@ class WebServer:
         return ClipboardHistoryDB()
 
     # ── Public properties ────────────────────────────────────────
+
+    @property
+    def _upload_dir(self) -> str:
+        """The directory the phone uploads to, downloads from and lists.
+
+        Resolved per read rather than cached at startup.  ``file_receive_dir``
+        is a setting the user can change while the phone service is up, and
+        ``_get_upload_dir`` follows it — which is what the upload path has
+        always relied on.  The Files list, download and delete paths read this
+        name, so caching it left them pointing at the directory the user had
+        just moved away from: a file uploaded (or, now, shared from the desktop)
+        after such a change landed in the new directory and the Files tab
+        listed the old one, so it never appeared.  The legacy application
+        papered over that at the single call site that changed the setting, by
+        assigning ``web_server._upload_dir`` by hand; there is one source of
+        truth here instead.
+        """
+        return _get_upload_dir(getattr(self, "_cfg", None))
+
+    @_upload_dir.setter
+    def _upload_dir(self, value) -> None:
+        """Route an assignment to the config the getter reads.
+
+        Kept because the legacy settings path assigns the new directory here
+        rather than writing the setting itself.  Storing a shadow copy would
+        reintroduce the staleness the getter exists to remove, so the
+        assignment is recorded where it is read from.
+        """
+        self._cfg.file_receive_dir = str(value)
 
     @property
     def firewall_ok(self) -> bool:

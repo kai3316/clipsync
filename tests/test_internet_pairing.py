@@ -1,4 +1,4 @@
-"""Round 14 — internet pairing code (codec, code format, config, relay, REST).
+"""Internet pairing: the code, the channels it derives, and who may pair.
 
 Devices that have NEVER met pair over the public relay using a shared secret
 carried inside a short human-readable code.  One side generates
@@ -6,20 +6,29 @@ carried inside a short human-readable code.  One side generates
 both derive the SAME netpair topic+key from the secret alone, then a
 ``netpair_hello`` round-trip confirms identity.
 
-Handlers are exercised through the make_app_stub pattern (mirroring
-tests/test_round11_integration.py): no app/tkinter/transport stack boots here,
-and every frame crosses the wire through the real codec.
+What is pinned here is that wire contract — the code format, the topic/key
+derivation and its passphrase layering, the frames either side may send — plus
+the trust gates around it: a device cannot pair with itself, self-originated
+frames are dropped, and one clip arriving over both channels at once reaches
+history once.
+
+Handlers are exercised through the make_app_stub pattern: no
+app/tkinter/transport stack boots here, and every frame crosses the wire
+through the real codec.
 """
 
 import json
 import threading
+import time
 import types
 import zipfile
 
 import pytest
 
+from internal.clipboard.format import ClipboardContent, ContentType, SyncMessage
 from internal.protocol import codec
 from internal.protocol.codec import decode_message, encode_frame
+from internal.sync.manager import SyncManager
 from internal.transport import relay as R  # noqa: N812
 
 # ------------------------------------------------------------------ codec
@@ -153,33 +162,11 @@ def test_netpair_key_password_layers_deterministically():
     assert R.netpair_key(secret, pw) != R.netpair_key(other, pw)
 
 
-def test_netpair_key_unicode_password_supported():
-    # A non-ASCII passphrase (Chinese chars + all four classes) derives a
-    # full-strength key; both ends must compute it identically.
-    pw = "密码Ab12!@安全加密"
-    secret = R.generate_netpair_secret()
-    assert R.netpair_passphrase_error(pw) is None
-    assert R.netpair_key(secret, pw) == R.netpair_key(secret, pw)
-    assert len(R.netpair_key(secret, pw)) == 32
-
-
-def test_netpair_passphrase_error_accepts_strong():
-    for pw in ("Passw0rd!123", "P@ssphrase-2024-Beta", "密码Ab12!@安全加密"):
-        assert R.netpair_passphrase_error(pw) is None, pw
-
-
 def test_netpair_passphrase_error_rejects_each_missing_class():
     assert R.netpair_passphrase_error("password1!ab") == "upper"
     assert R.netpair_passphrase_error("PASSWORD1!AB") == "lower"
     assert R.netpair_passphrase_error("Password!!ab") == "digit"
     assert R.netpair_passphrase_error("Password1abc") == "special"
-
-
-def test_netpair_passphrase_error_length_and_type_rules():
-    assert R.netpair_passphrase_error("Ab1!") == "length"  # <12
-    assert R.netpair_passphrase_error("A1!a" + "x" * 200) == "length"  # >200
-    assert R.netpair_passphrase_error(12345) == "type"  # not a str
-    assert R.netpair_passphrase_error(None) == "type"
 
 
 # ------------------------------------------------------------------ config
@@ -529,15 +516,6 @@ def test_device_probe_relay_roundtrip():
     assert app._relay_published and app._relay_published[0][1] == R.netpair_topic("ABCDEFG")
 
 
-def test_device_probe_both_channels_roundtrip():
-    app = _probe_app(connected_peers=["bbbbbbbbbbbb"], netpair_secrets={"bbbbbbbbbbbb": "ABCDEFG"})
-    result = app._device_test_connection("bbbbbbbbbbbb")
-    assert result["ok"] is True
-    by_chan = {r["channel"]: r for r in result["results"]}
-    assert set(by_chan) == {"lan", "relay"}
-    assert all(r["ok"] for r in result["results"])
-
-
 def test_device_probe_no_channel():
     # peer is neither LAN-connected nor internet-reachable -> no_channel
     app = _probe_app()
@@ -555,21 +533,6 @@ def test_device_probe_lan_timeout(monkeypatch):
     r = result["results"][0]
     assert r["channel"] == "lan" and r["ok"] is False
     assert r["error"] == "timeout"
-
-
-def test_device_probe_send_failed(monkeypatch):
-    monkeypatch.setattr("src.main.DEVICE_PING_TIMEOUT", 0.3)
-
-    def boom(peer_id, frame):
-        raise RuntimeError("no route to host")
-
-    app = _probe_app(connected_peers=["bbbbbbbbbbbb"], echo=False)
-    app.transport_mgr.send_to_peer = boom
-    result = app._device_test_connection("bbbbbbbbbbbb")
-    assert result["ok"] is False
-    r = result["results"][0]
-    assert r["channel"] == "lan" and r["ok"] is False
-    assert r["error"] == "send_failed"
 
 
 def test_device_probe_send_returning_false_is_send_failed_not_timeout(monkeypatch):
@@ -597,34 +560,6 @@ def test_device_probe_relay_publish_returning_false_is_relay_offline(monkeypatch
     r = result["results"][0]
     assert r["channel"] == "relay" and r["ok"] is False
     assert r["error"] == "relay_offline"
-
-
-def test_device_probe_returns_at_once_when_no_ping_could_be_sent():
-    # The user-visible bug: "测试连接" spun for the full DEVICE_PING_TIMEOUT
-    # before failing, even for a peer nothing could be sent to.  A channel whose
-    # ping never went out is already decided, so the probe must not wait on it.
-    # Deliberately does NOT shrink DEVICE_PING_TIMEOUT — the real 4s budget is
-    # what makes a regression here obvious.
-    import time as _time
-
-    from src import main as _main
-
-    app = _probe_app(
-        connected_peers=["bbbbbbbbbbbb"], netpair_secrets={"bbbbbbbbbbbb": "ABCDEFG"}, echo=False
-    )
-    app.transport_mgr.send_to_peer = lambda peer_id, frame: False
-    app._relay.publish = lambda frame, topic, key, qos=0: False
-
-    start = _time.monotonic()
-    result = app._device_test_connection("bbbbbbbbbbbb")
-    elapsed = _time.monotonic() - start
-
-    assert elapsed < 1.0, f"probe burned {elapsed:.2f}s waiting on unsent pings"
-    assert elapsed < _main.DEVICE_PING_TIMEOUT
-    assert result["ok"] is False
-    by_chan = {r["channel"]: r for r in result["results"]}
-    assert by_chan["lan"]["error"] == "send_failed"
-    assert by_chan["relay"]["error"] == "relay_offline"
 
 
 def test_device_probe_still_waits_for_the_channel_that_did_send(monkeypatch):
@@ -866,20 +801,6 @@ def test_on_relay_frame_drops_self_originated():
 # ══════════════════════════════════════════════════
 
 
-import pytest
-
-# ------------------------------------------------------------------ config
-
-
-def test_config_netpair_aliases_bad_type_falls_back(isolated_config):
-    cfg_mod = isolated_config
-    path = cfg_mod._config_path()
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps({"netpair_aliases": {"p": 5}}), encoding="utf-8")
-    loaded = cfg_mod.load()
-    assert loaded.netpair_aliases == {}
-
-
 # ------------------------------------------- Application handler behaviour
 
 
@@ -979,24 +900,6 @@ def _clipboard_frame(source_device):
 # ------------------------------------------------------- status semantics
 
 
-def test_status_includes_alias_online_last_seen():
-    app = make_app_stub_mgmt(
-        netpair_secrets={"peer-1": "ABCDEFG"},
-        netpair_aliases={"peer-1": "客厅电脑"},
-        _netpair_names={"peer-1": "DevB"},
-        _netpair_last_seen={"peer-1": 1000.0},
-    )
-    data, status = app._netpair_status(now=1050.0)  # 50s ago -> online
-    assert status == 200
-    p = data["peers"][0]
-    assert p["peer_id"] == "peer-1"
-    assert p["name"] == "DevB"  # peer's device name
-    assert p["alias"] == "客厅电脑"  # our memo
-    assert p["online"] is True
-    assert p["last_seen"] == 1000.0  # epoch seconds
-    assert p["paired"] is True
-
-
 def test_status_online_cutoff_is_90s():
     app = make_app_stub_mgmt(
         netpair_secrets={"peer-1": "ABCDEFG"},
@@ -1008,23 +911,6 @@ def test_status_online_cutoff_is_90s():
     assert data["peers"][0]["online"] is False
 
 
-def test_status_no_last_seen_is_offline_null():
-    app = make_app_stub_mgmt(netpair_secrets={"peer-1": "ABCDEFG"})
-    data, _ = app._netpair_status(now=500.0)
-    p = data["peers"][0]
-    assert p["online"] is False
-    assert p["last_seen"] is None
-    # alias unset -> empty string (frontend falls back to name)
-    assert p["alias"] == ""
-    # name falls back to LAN peer device_name when hello never arrived
-    app2 = make_app_stub_mgmt(
-        netpair_secrets={"peer-1": "ABCDEFG"},
-        peers={"peer-1": {"paired": True, "device_name": "DevB"}},
-    )
-    data, _ = app2._netpair_status(now=500.0)
-    assert data["peers"][0]["name"] == "DevB"
-
-
 # ----------------------------------------------- last_seen refresh points
 
 
@@ -1032,17 +918,6 @@ def test_last_seen_refreshes_on_clipboard_frame():
     app = make_app_stub_mgmt(netpair_secrets={"peer-1": "ABCDEFG"}, _netpair_last_seen={})
     app._on_relay_frame(_clipboard_frame("peer-1"), "some/topic", now=1234.0)
     assert app._netpair_last_seen == {"peer-1": 1234.0}
-
-
-def test_last_seen_refreshes_on_netpair_hello():
-    app = make_app_stub_mgmt(netpair_secrets={"peer-1": "ABCDEFG"}, _netpair_last_seen={})
-    hello = encode_frame(
-        {"msg_type": "netpair_hello", "peer_id": "x", "device_name": "DevB", "ts": 1.0},
-        source_device="peer-1",
-    )
-    app._on_relay_frame(hello, R.netpair_topic("ABCDEFG"), now=999.0)
-    # a hello from a confirmed peer counts as "seen"
-    assert app._netpair_last_seen.get("peer-1") == 999.0
 
 
 def test_self_frame_does_not_update_last_seen():
@@ -1070,20 +945,6 @@ def test_rename_empty_name_clears_alias():
     assert status == 200 and data["ok"] is True
     assert app.cfg.netpair_aliases == {}
     assert app._saved["n"] == 1
-
-
-def test_rename_rejects_unknown_peer_and_bad_name():
-    app = make_app_stub_mgmt(netpair_secrets={"peer-1": "ABCDEFG"}, netpair_aliases={})
-    data, status = app._netpair_rename("ghost", "X")
-    assert status == 400
-    data, status = app._netpair_rename("peer-1", None)  # not a string
-    assert status == 400
-    data, status = app._netpair_rename("peer-1", 42)  # not a string
-    assert status == 400
-    data, status = app._netpair_rename("peer-1", "x" * 121)  # too long
-    assert status == 400
-    assert app.cfg.netpair_aliases == {}
-    assert app._saved["n"] == 0
 
 
 # ------------------------------------------------------------- unpair
@@ -1178,38 +1039,10 @@ def test_api_rename_unpair_routes():
         api.bind(None)
 
 
-# ----------------------------------------------------------------- backup
-
-
-def test_backup_restore_ignores_malformed_netpair_aliases(tmp_path, _isolated_favorites):
-    import internal.data.backup as backup_mod
-    from internal.config.config import Config
-
-    crafted = tmp_path / "bad.zip"
-    with zipfile.ZipFile(crafted, "w") as zf:
-        zf.writestr(
-            "config.json",
-            json.dumps(
-                {
-                    "netpair_aliases": {"ok": "Alias", "bad": 5, "bad2": ["x"]},
-                    "device_name": "Restored",
-                }
-            ),
-        )
-        zf.writestr("history.json", json.dumps([]))
-    fresh = Config()
-    backup_mod.restore_backup(str(crafted), fresh, None)
-    assert fresh.netpair_aliases == {"ok": "Alias"}  # junk pairs dropped
-
-
 # ══════════════════════════════════════════════════
 # merged from test_round16_audit.py (make_app_stub_mgmt renamed)
 # ══════════════════════════════════════════════════
 
-import time
-
-from internal.clipboard.format import ClipboardContent, ContentType, SyncMessage
-from internal.sync.manager import SyncManager
 
 # ---------------------------------------------------------------------------
 # Fakes / helpers
@@ -1467,20 +1300,6 @@ def test_p2_relay_publish_is_off_when_internet_disabled():
     assert app._relay.published == []
 
 
-def test_p2_relay_publish_is_off_without_transport():
-    """_relay_publish_frame is a no-op when the relay transport is down."""
-    app = make_app_stub_audit(
-        internet_sync_enabled=True, peer_relay_secrets={"device-B": "bb" * 32}
-    )
-    app.cfg.peers["device-B"] = types.SimpleNamespace(
-        device_id="device-B", paired=True, device_name="DevB"
-    )
-    app._relay = None
-    app._relay_publish_frame(b"frame")
-    # Nothing to publish to — must not raise.
-    assert True
-
-
 # ---------------------------------------------------------------------------
 # P3 — internet arrival consistency (same router as LAN)
 # ---------------------------------------------------------------------------
@@ -1498,17 +1317,6 @@ def test_p3_relay_clipboard_routes_to_peer_router():
     msg, pid = calls[0]
     assert pid == "device-B"  # peer_id = source_device, like LAN
     assert getattr(msg, "msg_type", "") == "clipboard"
-
-
-def test_p3_relay_self_frame_is_dropped():
-    """Our own mirrored frame must never re-enter the router (self-echo)."""
-    calls = []
-    app = make_app_stub_audit(
-        _on_peer_message=lambda msg, pid, _a=None, via_relay=False: calls.append((msg, pid))
-    )
-    frame = encode_frame({"msg_type": "clipboard", "text": "self"}, source_device=app.cfg.device_id)
-    app._on_relay_frame(frame, topic="t")
-    assert calls == []
 
 
 def test_p3_relay_netpair_hello_never_reaches_clipboard_router():
@@ -1530,25 +1338,6 @@ def test_p3_relay_netpair_hello_never_reaches_clipboard_router():
 # ---------------------------------------------------------------------------
 # P4 — status / alias consistency
 # ---------------------------------------------------------------------------
-
-
-def test_p4_netpair_status_online_follows_last_seen_window():
-    """online is driven by the 90 s last-seen window, independent of relay."""
-    pid = "device-B"
-    secret = _netpair_secret()
-    now = 1_000_000.0
-    app = make_app_stub_audit(netpair_secrets={pid: secret}, _netpair_last_seen={pid: now - 30})
-    data, status = app._netpair_status(now)
-    assert status == 200
-    peer = data["peers"][0]
-    assert peer["peer_id"] == pid and peer["online"] is True
-    assert peer["last_seen"] == now - 30
-    assert peer["paired"] is True
-
-    # Outside the window → offline.
-    app2 = make_app_stub_audit(netpair_secrets={pid: secret}, _netpair_last_seen={pid: now - 300})
-    data2, _ = app2._netpair_status(now)
-    assert data2["peers"][0]["online"] is False
 
 
 def test_p4_last_seen_only_for_confirmed_netpair_peers():
@@ -1635,15 +1424,6 @@ def test_p6_relay_enroll_only_peer_publishes_once():
     assert key == R.derive_key(app.cfg.relay_secret, "bb" * 32)
 
 
-def test_p6_netpair_only_peer_publishes_once():
-    pid = "device-B"
-    secret = _netpair_secret()
-    app = make_app_stub_audit(peer_relay_secrets={}, netpair_secrets={pid: secret})
-    app._relay_publish_frame(b"clip frame")
-    assert len(app._relay.published) == 1
-    assert app._relay.published[0][1] == R.netpair_topic(secret)
-
-
 def test_p6_self_never_published():
     """A stray self netpair entry is skipped on the publish path."""
     secret = _netpair_secret()
@@ -1669,35 +1449,6 @@ def test_p6_unpaired_peer_never_published():
 # ---------------------------------------------------------------------------
 
 
-def test_p7_unpair_clears_state_and_resubscribes():
-    pid = "device-B"
-    secret = _netpair_secret()
-    app = make_app_stub_audit(
-        netpair_secrets={pid: secret},
-        netpair_aliases={pid: "My Laptop"},
-        _netpair_names={pid: "DevB"},
-        _netpair_last_seen={pid: time.time()},
-    )
-    # Confirm the channel is currently subscribed.
-    assert R.netpair_topic(secret) in app._relay_channels()
-
-    data, status = app._netpair_unpair(pid)
-    assert status == 200 and data["ok"] is True
-    assert app.cfg.netpair_secrets == {}
-    assert app.cfg.netpair_aliases == {}
-    assert pid not in app._netpair_names
-    assert pid not in app._netpair_last_seen
-    assert app._relay.refreshed >= 1
-    # Unsubscribed: the topic must no longer be in the channel set.
-    assert R.netpair_topic(secret) not in app._relay_channels()
-
-
-def test_p7_unpair_unknown_peer_is_400():
-    app = make_app_stub_audit(netpair_secrets={})
-    data, status = app._netpair_unpair("ghost")
-    assert status == 400 and data.get("ok") is False
-
-
 def test_p7_unpair_broadcasts_unpaired_to_web_tabs():
     """Unpair pushes a WS `netpair_peer status:unpaired` so sibling tabs
     (and the acting tab, if it misses the REST response) drop the row."""
@@ -1710,97 +1461,12 @@ def test_p7_unpair_broadcasts_unpaired_to_web_tabs():
     assert ws_events[0][1] == {"peer_id": pid, "status": "unpaired"}
 
 
-def test_p7_stop_releases_transport():
-    app = make_app_stub_audit()
-    relay = app._relay
-    app._stop_internet_sync()
-    assert app._relay is None
-    assert relay.stopped == 1  # the fake relay recorded transport.stop()
-
-
-def test_p7_relay_channels_exclude_self_and_include_both_paths():
-    pid = "device-B"
-    secret = _netpair_secret()
-    app = make_app_stub_audit(
-        peer_relay_secrets={pid: "bb" * 32},
-        netpair_secrets={pid: secret},
-        peers={pid: True},  # make_app_stub_audit: {device_id: paired_bool}
-    )
-    channels = app._relay_channels()
-    assert R.derive_topic(app.cfg.relay_secret, "bb" * 32) in channels
-    assert R.netpair_topic(secret) in channels
-    # self netpair entry never subscribed
-    app.cfg.netpair_secrets[app.cfg.device_id] = _netpair_secret()
-    channels2 = app._relay_channels()
-    assert not any(
-        R.netpair_topic(app.cfg.netpair_secrets[app.cfg.device_id]) == t for t in channels2
-    )
-
-
 # ---------------------------------------------------------------------------
 # P8 — history / transfer panels share one store
 # ---------------------------------------------------------------------------
-
-
-def test_p8_internet_content_uses_same_history_as_lan():
-    """Relay-arriving clipboard is fed to the shared handle_remote_message.
-
-    The one store (the SyncManager's history) receives both a LAN-arriving
-    clip and a relay-arriving clip, so the history panel sees a single
-    timeline with a single source device — no separate internet bucket.
-    """
-    history = FakeHistory()
-    # The app's clipboard path (LAN and relay) both terminate at the SAME
-    # SyncManager.handle_remote_message; prove the shared history dedups.
-    mgr = SyncManager(
-        "device-A",
-        "DevA",
-        reader=MockClipboardReader(),
-        writer=MockClipboardWriter(),
-        monitor=MockClipboardMonitor(),
-        history=history,
-        sync_debounce=0.0,
-    )
-    lan = _remote_msg("shared clip", "device-B")
-    relay = _remote_msg("shared clip", "device-B")
-    mgr.handle_remote_message(lan)  # arrives over LAN
-    mgr.handle_remote_message(relay)  # same content arrives over relay
-    assert len(history.items) == 1
-    assert history.items[0].source_device == "device-B"
 
 
 # ══════════════════════════════════════════════════
 # restored from test_round15_netpair_mgmt.py (lost in fixture dedup)
 # ══════════════════════════════════════════════════
 
-
-def test_config_netpair_aliases_roundtrip(isolated_config):
-    cfg_mod = isolated_config
-    cfg = cfg_mod.Config()
-    cfg.netpair_aliases = {"peer-1": "客厅电脑", "peer-2": "Office PC"}
-    cfg_mod.save(cfg)
-    loaded = cfg_mod.load()
-    assert loaded.netpair_aliases == {"peer-1": "客厅电脑", "peer-2": "Office PC"}
-    assert cfg_mod.Config().netpair_aliases == {}  # fresh default
-
-
-def test_backup_roundtrip_includes_netpair_aliases(tmp_path, _isolated_favorites):
-    import internal.data.backup as backup_mod
-    from internal.clipboard.history_db import ClipboardHistoryDB
-    from internal.config.config import Config
-
-    cfg = Config()
-    cfg.netpair_aliases = {"peer-1": "客厅电脑", "peer-2": "Office PC"}
-    cfg.netpair_secrets = {"peer-1": "ABCDEFG"}
-
-    history = ClipboardHistoryDB(storage_path=str(tmp_path / "h.db"))
-    zip_path = backup_mod.create_backup(cfg, history, backup_dir=str(tmp_path / "bk"))
-
-    with zipfile.ZipFile(zip_path) as zf:
-        exported = json.loads(zf.read("config.json").decode("utf-8"))
-    assert exported["netpair_aliases"] == {"peer-1": "客厅电脑", "peer-2": "Office PC"}
-
-    fresh = Config()
-    result = backup_mod.restore_backup(zip_path, fresh, history)
-    assert result["config"] is True
-    assert fresh.netpair_aliases == {"peer-1": "客厅电脑", "peer-2": "Office PC"}

@@ -1,25 +1,22 @@
-"""Tests for TransportManager and PeerConnection — init, attributes, and
-operations that do not require a live network or TLS handshake."""
+"""The transport's wire constants, its send contract, and scratch hygiene.
+
+``MockPairingManager`` also lives here: the TCP/TLS lifecycle suite
+(tests/sidecar/test_transport_lifecycle.py) imports it to stand a real
+``TransportManager`` up without a real pairing store.
+"""
 
 import os
 import sys
-from pathlib import Path
 
 import pytest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from internal.transport.connection import (
-    DATA_TIMEOUT,
     FRAME_HEADER_SIZE,
     MAX_FRAME_SIZE,
-    PeerConnection,
     TransportManager,
 )
-
-# ---------------------------------------------------------------------------
-# Mocks
-# ---------------------------------------------------------------------------
 
 
 class MockPairingManager:
@@ -91,265 +88,13 @@ class MockPairingManager:
         return "00000000"
 
 
-class MockSocket:
-    """Minimal socket stub — has the methods PeerConnection calls."""
-
-    def __init__(self):
-        self._timeout = None
-
-    def settimeout(self, timeout):
-        self._timeout = timeout
-
-    def shutdown(self, how):
-        pass
-
-    def close(self):
-        pass
-
-    def sendall(self, data):
-        pass
-
-    def recv(self, bufsize):
-        return b""
-
-
-# ---------------------------------------------------------------------------
-# TransportManager
-# ---------------------------------------------------------------------------
-
-
-class TestTransportManagerInit:
-    """TransportManager.__init__ stores constructor arguments."""
-
-    def setup_method(self):
-        self.pairing_mgr = MockPairingManager()
-
-    def test_stores_device_id(self):
-        tm = TransportManager("dev-1", "Device 1", 9999, self.pairing_mgr)
-        assert tm._device_id == "dev-1"
-
-    def test_stores_device_name(self):
-        tm = TransportManager("dev-1", "Device 1", 9999, self.pairing_mgr)
-        assert tm._device_name == "Device 1"
-
-    def test_stores_port(self):
-        tm = TransportManager("dev-1", "Device 1", 5555, self.pairing_mgr)
-        assert tm._port == 5555
-
-    def test_stores_pairing_mgr(self):
-        tm = TransportManager("dev-1", "Device 1", 9999, self.pairing_mgr)
-        assert tm._pairing_mgr is self.pairing_mgr
-
-    def test_starts_with_empty_peers_dict(self):
-        tm = TransportManager("dev-1", "Device 1", 9999, self.pairing_mgr)
-        assert tm._peers == {}
-
-    def test_starts_not_running(self):
-        tm = TransportManager("dev-1", "Device 1", 9999, self.pairing_mgr)
-        assert tm._running is False
-
-    def test_on_peer_message_is_none_initially(self):
-        tm = TransportManager("dev-1", "Device 1", 9999, self.pairing_mgr)
-        assert tm._on_peer_message is None
-
-    def test_server_sock_is_none_initially(self):
-        tm = TransportManager("dev-1", "Device 1", 9999, self.pairing_mgr)
-        assert tm._server_sock is None
-
-
-class TestConnectRejectedCallback:
-    """A peer that refuses our connection attempt must reach the app layer
-    (e.g. a web toast) — otherwise a "Connect" click on a device whose user
-    removed us looks like a silent no-op."""
-
-    def setup_method(self):
-        self.pairing_mgr = MockPairingManager()
-        self.tm = TransportManager("dev-1", "Device 1", 9999, self.pairing_mgr)
-
-    def test_callback_defaults_to_none(self):
-        assert self.tm._on_connect_rejected is None
-
-    def test_setter_stores_callback(self):
-        def cb(name, pid):
-            pass
-
-        self.tm.set_on_connect_rejected(cb)
-        assert self.tm._on_connect_rejected is cb
-
-    def test_notify_delivers_name_and_peer_id(self):
-        seen = []
-        self.tm.set_on_connect_rejected(lambda name, pid: seen.append((name, pid)))
-        self.tm._notify_connect_rejected("Kais-Mac", "peer-123")
-        assert seen == [("Kais-Mac", "peer-123")]
-
-    def test_notify_without_callback_is_silent_noop(self):
-        # A rejection on a transport thread must never raise when no
-        # callback is wired (e.g. headless or in tests).
-        self.tm._notify_connect_rejected("Kais-Mac", "peer-123")
-
-    def test_throwing_callback_does_not_propagate(self):
-        def boom(name, pid):
-            raise RuntimeError("boom")
-
-        self.tm.set_on_connect_rejected(boom)
-        # The connect thread must survive a misbehaving callback.
-        self.tm._notify_connect_rejected("Kais-Mac", "peer-123")
-
-
-class TestTransportManagerOperations:
-    """Operations that do not need a running server or network."""
-
-    def setup_method(self):
-        self.pairing_mgr = MockPairingManager()
-        self.tm = TransportManager("dev-1", "Device 1", 9999, self.pairing_mgr)
-
-    def test_send_to_peer_unknown_peer_returns_false(self):
-        # Regression: nearby chat's _send_frame treats a non-True result as
-        # "nothing delivered", so the transport MUST return a real bool — a
-        # bare `return` (None) made every chat send look like a failure in
-        # the real app while the unit tests' bool-returning stubs hid it.
-        assert self.tm.send_to_peer("nobody", b"data") is False
-
-    def test_broadcast_with_no_peers_returns_false(self):
-        assert self.tm.broadcast(b"data") is False
-
-    def test_set_on_peer_message_sets_callback(self):
-        def cb(msg):
-            pass
-
-        self.tm.set_on_peer_message(cb)
-        assert self.tm._on_peer_message is cb
-
-    def test_set_on_peer_message_overwrites_previous(self):
-        def cb1(msg):
-            pass
-
-        def cb2(msg):
-            pass
-
-        self.tm.set_on_peer_message(cb1)
-        self.tm.set_on_peer_message(cb2)
-        assert self.tm._on_peer_message is cb2
-
-    def test_get_connected_peers_returns_empty_list_initially(self):
-        assert self.tm.get_connected_peers() == []
-        assert isinstance(self.tm.get_connected_peers(), list)
-
-    def test_broadcast_with_no_peers_does_not_raise(self):
-        self.tm.broadcast(b"test-data")
-
-    def test_broadcast_empty_data_does_not_raise(self):
-        self.tm.broadcast(b"")
-
-    def test_disconnect_unknown_peer_does_not_raise(self):
-        self.tm.disconnect_peer("nonexistent-peer-id")
-
-    def test_disconnect_unknown_peer_does_not_affect_peers(self):
-        self.tm.disconnect_peer("nonexistent-peer-id")
-        assert self.tm._peers == {}
-
-
-# ---------------------------------------------------------------------------
-# PeerConnection
-# ---------------------------------------------------------------------------
-
-
-class TestPeerConnectionInit:
-    """PeerConnection.__init__ stores constructor arguments."""
-
-    def setup_method(self):
-        self.sock = MockSocket()
-        self.conn = PeerConnection("peer-1", "Peer One", self.sock)
-
-    def test_stores_device_id(self):
-        assert self.conn.device_id == "peer-1"
-
-    def test_stores_device_name(self):
-        assert self.conn.device_name == "Peer One"
-
-    def test_stores_socket(self):
-        assert self.conn._sock is self.sock
-
-    def test_sets_socket_data_timeout(self):
-        assert self.sock._timeout == DATA_TIMEOUT
-
-    def test_starts_not_running(self):
-        assert self.conn._running is False
-
-    def test_recv_thread_is_none_initially(self):
-        assert self.conn._recv_thread is None
-
-    def test_on_message_is_none_initially(self):
-        assert self.conn._on_message is None
-
-    def test_on_disconnect_is_none_initially(self):
-        assert self.conn._on_disconnect is None
-
-    def test_send_lock_is_initialized(self):
-        import threading
-
-        assert isinstance(self.conn._send_lock, type(threading.Lock()))
-
-
-class TestPeerConnectionCallbacks:
-    """set_on_message / set_on_disconnect store user-provided callbacks."""
-
-    def setup_method(self):
-        self.sock = MockSocket()
-        self.conn = PeerConnection("peer-1", "Peer One", self.sock)
-
-    def test_set_on_message_stores_callback(self):
-        def cb(msg):
-            pass
-
-        self.conn.set_on_message(cb)
-        assert self.conn._on_message is cb
-
-    def test_set_on_disconnect_stores_callback(self):
-        def cb(peer_id):
-            pass
-
-        self.conn.set_on_disconnect(cb)
-        assert self.conn._on_disconnect is cb
-
-    def test_set_on_message_replaces_previous(self):
-        def cb1(msg):
-            pass
-
-        def cb2(msg):
-            pass
-
-        self.conn.set_on_message(cb1)
-        self.conn.set_on_message(cb2)
-        assert self.conn._on_message is cb2
-
-    def test_set_on_disconnect_replaces_previous(self):
-        def cb1(peer_id):
-            pass
-
-        def cb2(peer_id):
-            pass
-
-        self.conn.set_on_disconnect(cb1)
-        self.conn.set_on_disconnect(cb2)
-        assert self.conn._on_disconnect is cb2
-
-
-class TestPeerConnectionSend:
-    """send() serialises a length-prefixed frame and writes to the socket."""
-
-    def setup_method(self):
-        self.sock = MockSocket()
-        self.conn = PeerConnection("peer-1", "Peer One", self.sock)
-
-    def test_send_returns_true_for_mock_socket(self):
-        """With a cooperative socket, send() returns True."""
-        assert self.conn.send(b"test payload") is True
-
-
-# ---------------------------------------------------------------------------
-# Constants
-# ---------------------------------------------------------------------------
+def test_send_to_peer_unknown_peer_returns_false():
+    # Regression: nearby chat's _send_frame treats a non-True result as
+    # "nothing delivered", so the transport MUST return a real bool — a
+    # bare `return` (None) made every chat send look like a failure in
+    # the real app while the unit tests' bool-returning stubs hid it.
+    tm = TransportManager("dev-1", "Device 1", 9999, MockPairingManager())
+    assert tm.send_to_peer("nobody", b"data") is False
 
 
 class TestConstants:
@@ -361,79 +106,31 @@ class TestConstants:
     def test_frame_header_size_is_4(self):
         assert FRAME_HEADER_SIZE == 4
 
-    def test_data_timeout_is_positive(self):
-        assert DATA_TIMEOUT > 0
 
+def test_stale_scratch_pem_files_are_removed(monkeypatch, tmp_path):
+    """Leftover key/cert files in the TLS scratch directory do not survive."""
+    monkeypatch.setattr(
+        TransportManager,
+        "_secure_scratch_dir",
+        staticmethod(lambda: tmp_path),
+    )
 
-# ---------------------------------------------------------------------------
-# _secure_scratch_dir / _cleanup_stale_scratch
-# ---------------------------------------------------------------------------
+    pem1 = tmp_path / "old_key.pem"
+    pem2 = tmp_path / "old_cert.pem"
+    keep = tmp_path / "config.txt"
 
+    pem1.write_text("dummy key data")
+    pem2.write_text("dummy cert data")
+    keep.write_text("should remain")
 
-class TestSecureScratchDir:
-    """_secure_scratch_dir() returns a per-user, secure scratch directory."""
+    assert pem1.exists()
+    assert pem2.exists()
 
-    def test_returns_path_instance(self):
-        path = TransportManager._secure_scratch_dir()
-        assert isinstance(path, Path)
+    TransportManager._cleanup_stale_scratch()
 
-    def test_returns_existing_directory(self):
-        path = TransportManager._secure_scratch_dir()
-        assert path.exists()
-        assert path.is_dir()
-
-    def test_idempotent(self):
-        """Calling it twice returns the same path and does not raise."""
-        path1 = TransportManager._secure_scratch_dir()
-        path2 = TransportManager._secure_scratch_dir()
-        assert path1 == path2
-
-
-class TestCleanupStaleScratch:
-    """_cleanup_stale_scratch() removes leftover *.pem files."""
-
-    def test_removes_pem_files(self, monkeypatch, tmp_path):
-        monkeypatch.setattr(
-            TransportManager,
-            "_secure_scratch_dir",
-            staticmethod(lambda: tmp_path),
-        )
-
-        pem1 = tmp_path / "old_key.pem"
-        pem2 = tmp_path / "old_cert.pem"
-        keep = tmp_path / "config.txt"
-
-        pem1.write_text("dummy key data")
-        pem2.write_text("dummy cert data")
-        keep.write_text("should remain")
-
-        assert pem1.exists()
-        assert pem2.exists()
-
-        TransportManager._cleanup_stale_scratch()
-
-        assert not pem1.exists(), "Stale .pem file should be removed"
-        assert not pem2.exists(), "Stale .pem file should be removed"
-        assert keep.exists(), "Non-.pem files must be left untouched"
-
-    def test_handles_empty_scratch_dir(self, monkeypatch, tmp_path):
-        monkeypatch.setattr(
-            TransportManager,
-            "_secure_scratch_dir",
-            staticmethod(lambda: tmp_path),
-        )
-        # tmp_path is empty — should not raise
-        TransportManager._cleanup_stale_scratch()
-
-    def test_handles_missing_scratch_dir(self, monkeypatch, tmp_path):
-        missing = tmp_path / "does_not_exist"
-        monkeypatch.setattr(
-            TransportManager,
-            "_secure_scratch_dir",
-            staticmethod(lambda: missing),
-        )
-        # The method catches all exceptions internally — should not propagate
-        TransportManager._cleanup_stale_scratch()
+    assert not pem1.exists(), "Stale .pem file should be removed"
+    assert not pem2.exists(), "Stale .pem file should be removed"
+    assert keep.exists(), "Non-.pem files must be left untouched"
 
 
 if __name__ == "__main__":

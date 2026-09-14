@@ -51,8 +51,8 @@ jobs:
   package:
     # Unsigned bundles, on purpose: what this job establishes is that each
     # platform turns the tree into an installable artifact at all.  Signing,
-    # notarization and updater verification are a separate release gate --
-    # docs/tauri, 9.8 -- and nothing here claims them.
+    # notarization and updater verification are a separate release gate, and
+    # nothing here claims them.
     strategy:
       fail-fast: false
       matrix:
@@ -90,6 +90,16 @@ jobs:
         run: npm ci
       - name: Build the Python sidecar
         run: python -m PyInstaller --noconfirm clipsync-sidecar.spec
+      - name: Smoke the packaged sidecar
+        # Windows only, because that is where this has actually been run: the
+        # other two runners get the build without the check rather than a check
+        # nobody has watched pass.  What it holds: the Companion resources
+        # embedded in the executable match the tree byte for byte, and the
+        # packaged binary answers its own IPC and serves authenticated HTTP over
+        # two full restart cycles.  None of that is visible to the Python suite,
+        # which never loads the executable at all.
+        if: runner.os == 'Windows'
+        run: python scripts/smoke_sidecar.py dist/clipsync-sidecar.exe
       - name: Stage the sidecar under its target-triple name
         # Bash on every runner: the Windows default shell would not run this.
         shell: bash
@@ -115,22 +125,86 @@ jobs:
           sys.path.insert(0, ".")
           from internal.version import __version__
 
+          bundle = {"externalBin": ["binaries/clipsync-sidecar"]}
+
+          # The updater's payloads and their detached signatures.  Asked for on
+          # a release build only: tauri.conf.json carries the public key, so the
+          # bundler treats "sign this" without a private key in reach as an
+          # error rather than a no-op, and a pull request from a fork gets no
+          # secrets.  Set here rather than in the committed config so that a
+          # developer running `tauri build` locally is not required to hold the
+          # signing key at all.
+          if "${{ github.ref }}".startswith("refs/tags/v"):
+              bundle["createUpdaterArtifacts"] = True
+
           # externalBin is resolved against src-tauri, not against this file,
           # and names the sidecar without its triple -- Tauri appends
           # "-<target-triple><ext>" itself, which is why the staged file carries it.
           with open("build/tauri-package.json", "w", encoding="utf-8") as handle:
-              json.dump(
-                  {
-                      "version": __version__,
-                      "bundle": {"externalBin": ["binaries/clipsync-sidecar"]},
-                  },
-                  handle,
-              )
+              json.dump({"version": __version__, "bundle": bundle}, handle)
           PY
           cat build/tauri-package.json
       - name: Build the desktop bundles
         working-directory: desktop
+        env:
+          # Read by the bundler when `createUpdaterArtifacts` is on -- the
+          # contents of the minisign private key, not a path to it.  Empty on a
+          # pull request, which never turns that flag on.
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
         run: npm exec tauri build -- --config ../build/tauri-package.json --bundles ${{ matrix.bundles }}
+      - name: Verify the macOS bundle is signed
+        # An unsigned bundle is not merely warned about on Apple Silicon: the
+        # kernel refuses to launch it, and the user is told the download is
+        # damaged.  tauri.conf.json asks the bundler for an ad-hoc signature
+        # (`bundle.macOS.signingIdentity`), and this asserts the bundler
+        # actually produced one rather than quietly shipping the unsigned
+        # bundle the user reported.  No Apple credentials are involved.
+        if: runner.os == 'macOS'
+        run: |
+          set -euo pipefail
+          app="desktop/src-tauri/target/release/bundle/macos/ClipSync.app"
+          test -d "$app"
+          # Fails on a missing or invalid signature, and on any nested binary
+          # the bundler signed with a different identity than the app.
+          codesign --verify --strict --deep --verbose=2 "$app"
+          # An ad-hoc signature has no Team ID and no certificate chain; the
+          # presence of either would mean this is a real identity, not the one
+          # this project configured.
+          if codesign -dv "$app" 2>&1 | grep -q '^Authority='; then
+            echo "::error::$app is signed by a real identity; this project builds ad-hoc"
+            exit 1
+          fi
+          if ! codesign -dv "$app" 2>&1 | grep -q 'Signature=adhoc'; then
+            echo "::error::$app does not carry an ad-hoc signature"
+            exit 1
+          fi
+          # The sidecar is embedded in the bundle and has to be signed too.
+          codesign --verify --strict --verbose=2 "$app/Contents/MacOS/clipsync-sidecar"
+          echo "OK: $app and its sidecar carry ad-hoc signatures"
+      - name: Run the bundled sidecar from inside the macOS bundle
+        # The signatures above are necessary but not sufficient.  The sidecar is
+        # a PyInstaller onefile build, so the Python framework is packed inside
+        # the executable and extracted to a temp directory at run time carrying
+        # whatever signature it had when the runner's Python was installed.
+        # macOS refuses to load a dylib whose Team ID differs from its
+        # process's, and that refusal happens after every check above has
+        # passed -- which is how build.yml came to re-sign the legacy bundle at
+        # all.  Running the sidecar from where the application will run it is
+        # the only test that reaches the extract-and-load path.
+        if: runner.os == 'macOS'
+        run: |
+          set -euo pipefail
+          sidecar="desktop/src-tauri/target/release/bundle/macos/ClipSync.app/Contents/MacOS/clipsync-sidecar"
+          data=$(mktemp -d)
+          # --history-only opens no sockets and starts no background services;
+          # EOF on stdin ends the session and returns 0.  A dyld failure to load
+          # the packed framework aborts the process instead, which is the
+          # outcome this step exists to catch.
+          if ! CLIPSYNC_CONFIG_DIR="$data" "$sidecar" --history-only </dev/null; then
+            echo "::error::$sidecar did not run -- the packed Python runtime could not be loaded"
+            exit 1
+          fi
+          echo "OK: the bundled sidecar ran and loaded its Python runtime"
       - name: Upload the bundles
         uses: actions/upload-artifact@v4
         with:
@@ -146,14 +220,37 @@ jobs:
             desktop/src-tauri/target/release/bundle/**/*.deb
             desktop/src-tauri/target/release/bundle/**/*.AppImage
           if-no-files-found: error
+      - name: Upload the updater payloads
+        # Separate from the installers and tag-gated, because these exist only
+        # when the build was signed: on a pull request `createUpdaterArtifacts`
+        # is not even requested, so this glob would match nothing and
+        # `if-no-files-found` would fail the leg.  The `.app.tar.gz` is here
+        # rather than above because it is an update payload, not an installer:
+        # the updater extracts it over the installed bundle, and no human is
+        # meant to open it.
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}-updater
+          path: |
+            desktop/src-tauri/target/release/bundle/**/*.sig
+            desktop/src-tauri/target/release/bundle/**/*.app.tar.gz
+          if-no-files-found: error
 
   release:
     # build.yml creates the release in its `prepare` job the moment the tag
     # lands, precisely so this uploader cannot race it; this job adds the
     # desktop installers to it, so one Releases page carries both apps.
     # Nothing is created or deleted here.
+    #
+    # `needs: desktop` is the release gate, and it is the reason `desktop` is
+    # named here rather than left to run alongside: the artifacts this job
+    # attaches are the ones a user downloads, so they must not come from a tree
+    # whose tests failed.  `package` deliberately stays ungated so the slow
+    # bundle builds still run in parallel with the tests -- a red test job costs
+    # the bundles, not the wall clock.
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: package
+    needs: [package, desktop]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -179,11 +276,16 @@ jobs:
 
           # Installers only -- a macOS .app would otherwise contribute one
           # release asset per file inside the bundle.  Read with -print0 so a
-          # path with a space in it survives.
+          # path with a space in it survives.  The .app.tar.gz is the one
+          # exception: it is the macOS update payload, so it has to be
+          # downloadable even though nobody opens it by hand.  The .sig files
+          # are deliberately not attached -- their contents go into the
+          # manifest below, and loose copies would only clutter the page.
           files=()
           while IFS= read -r -d '' f; do
             case "$f" in
               *-setup.exe|*.msi|*.dmg|*.deb|*.AppImage) files+=("$f") ;;
+              *.app.tar.gz) files+=("$f") ;;
             esac
           done < <(find bundles -type f -print0)
           if [ "${#files[@]}" -eq 0 ]; then
@@ -192,3 +294,89 @@ jobs:
           fi
           printf 'Attaching: %s\n' "${files[@]}"
           gh release upload "$tag" --repo "$GITHUB_REPOSITORY" --clobber "${files[@]}"
+
+      - name: Write the update manifest
+        # One manifest for the whole release, assembled here rather than by the
+        # three build legs: they run in parallel and cannot see each other's
+        # artifacts, so per-leg manifests would need a merge step and a fourth
+        # job.  The tag is the version, and `v` has to come off it -- the
+        # updater parses this field as semver and rejects a leading `v`, which
+        # would make every client's check fail silently.
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          tag="${{ github.ref_name }}"
+          version="${tag#v}"
+          base="https://github.com/$GITHUB_REPOSITORY/releases/download/$tag"
+
+          python3 - "$version" "$base" <<'PY'
+          import datetime
+          import json
+          import pathlib
+          import sys
+
+          version, base = sys.argv[1], sys.argv[2]
+
+          # The updater looks for `{os}-{arch}-{installer}` first and falls back
+          # to `{os}-{arch}`.  Linux needs both of its own keys, because a .deb
+          # and an AppImage are different payloads and a single bare
+          # `linux-x86_64` entry could only ever name one of them -- a .deb
+          # client served AppImage bytes fails the installer's own format check.
+          # The bare entries are the fallback for a client whose bundle type the
+          # plugin could not identify; on Linux that path installs an AppImage,
+          # which is what they therefore name.
+          wanted = {
+              "windows-x86_64-nsis": "*-setup.exe",
+              "darwin-aarch64-app": "*.app.tar.gz",
+              "linux-x86_64-appimage": "*.AppImage",
+              "linux-x86_64-deb": "*.deb",
+              "windows-x86_64": "*-setup.exe",
+              "darwin-aarch64": "*.app.tar.gz",
+              "linux-x86_64": "*.AppImage",
+          }
+
+          # The artifact zip keeps the path it had under `bundle/`, so match on
+          # the basename and never on the full path.
+          artifacts, signatures = {}, {}
+          for path in pathlib.Path("bundles").rglob("*"):
+              if not path.is_file():
+                  continue
+              name = path.name
+              if name.endswith(".sig"):
+                  signatures[name[: -len(".sig")]] = path.read_text().strip()
+                  continue
+              for key, pattern in wanted.items():
+                  if key not in artifacts and pathlib.PurePath(name).match(pattern):
+                      artifacts[key] = name
+
+          # A manifest naming an artifact that is not on the release, or one
+          # with no signature, is a client-side failure no signal on this side
+          # would ever show.  Refuse to publish either.
+          missing = [key for key in wanted if key not in artifacts]
+          if missing:
+              sys.exit("no artifact for: " + ", ".join(missing))
+          unsigned = [artifacts[key] for key in wanted if artifacts[key] not in signatures]
+          if unsigned:
+              sys.exit("no signature for: " + ", ".join(sorted(set(unsigned))))
+
+          json.dump(
+              {
+                  "version": version,
+                  "pub_date": datetime.datetime.now(datetime.timezone.utc)
+                  .strftime("%Y-%m-%dT%H:%M:%SZ"),
+                  "platforms": {
+                      key: {
+                          "signature": signatures[artifacts[key]],
+                          "url": f"{base}/{artifacts[key]}",
+                      }
+                      for key in wanted
+                  },
+              },
+              sys.stdout,
+              indent=2,
+          )
+          PY
+
+          cat latest.json
+          gh release upload "$tag" --repo "$GITHUB_REPOSITORY" --clobber latest.json

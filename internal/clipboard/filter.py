@@ -1,8 +1,13 @@
 """Sensitive content filtering for clipboard data."""
 
+import logging
 import re
+from dataclasses import replace
 
-from internal.clipboard.format import ClipboardContent, ContentType
+from internal.clipboard import file_ref
+from internal.clipboard.format import HISTORY_ONLY_TYPES, ClipboardContent, ContentType
+
+logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # Compiled regex patterns, grouped by sensitivity category.
@@ -226,8 +231,42 @@ class ContentFilter:
         pasted only into the RTF body would otherwise ride to peers
         unredacted alongside a redacted TEXT payload.  RTF is inspected
         through ``_rtf_to_text`` instead of a raw decode.
+
+        URL counts for the same reason as RTF: since links cross devices it is
+        a payload that leaves this machine, and a link can carry the thing the
+        filter is for — a password in a query string, an internal host, a
+        signed download address.  A hidden offer's *names* are checked too, but
+        separately: see `_offered_names_sensitive`.
         """
-        return (ContentType.TEXT, ContentType.HTML, ContentType.RTF)
+        return (ContentType.TEXT, ContentType.HTML, ContentType.RTF, ContentType.URL)
+
+    def _matches_text(self, text: str) -> bool:
+        """True if any active pattern matches *text*.
+
+        One place, because the same loop answers for a plain text payload, for
+        RTF's extracted body, for a URL and for the names in a file offer — and
+        a rule kept in four copies is four rules, three of which drift.
+        """
+        for category, pattern in self._active_patterns():
+            if category == "credit_card":
+                # The bare shape matches order numbers and timestamps; only the
+                # checksum makes it a card number.
+                if any(_luhn_valid(m.group(0)) for m in pattern.finditer(text)):
+                    return True
+            elif pattern.search(text):
+                return True
+        return False
+
+    def _offered_names_sensitive(self, content: ClipboardContent) -> bool:
+        """True if a remote-file offer's names match an active pattern.
+
+        A name cannot be redacted into something useful — the file arrives
+        under its real name, so an edited name would only hide the problem from
+        the person who set the filter — which is why a match here takes the
+        whole offer off the wire rather than rewriting it.
+        """
+        names = self._offered_names(content)
+        return bool(names) and self._matches_text(names)
 
     @staticmethod
     def _inspectable_text(ct: ContentType, data: bytes) -> str:
@@ -236,18 +275,41 @@ class ContentFilter:
             return _rtf_to_text(data)
         return ContentFilter._bytes_to_str(data)
 
+    def _payload_texts(self, content: ClipboardContent) -> list[str]:
+        """Every string in *content* the patterns are run against.
+
+        Detection walks this list rather than the content types directly, so
+        that "what counts as inspectable" is answered once.  The file offer's
+        names are the last entry and the odd one out: an offer carries no text
+        payload, but its names are the only part of a file that crosses the
+        wire, and a name can be the sensitive part — "裁员名单.xlsx" is exactly
+        what this filter is for.
+        """
+        texts = [
+            self._inspectable_text(ct, data)
+            for ct in self._textual_types()
+            if (data := content.types.get(ct)) is not None
+        ]
+        names = self._offered_names(content)
+        if names:
+            texts.append(names)
+        return texts
+
+    def _offered_names(self, content: ClipboardContent) -> str:
+        """The names in a file offer, space-joined — "" when there is no offer."""
+        data = content.types.get(ContentType.FILE_REMOTE)
+        if data is None:
+            return ""
+        parsed = file_ref.parse(data)
+        if not parsed:
+            return ""
+        return " ".join(item["name"] for item in parsed["files"])
+
     def _rtf_is_sensitive(self, data: bytes) -> bool:
         """True if the RTF payload's visible text matches an active pattern."""
         if not self._enabled:
             return False
-        text = _rtf_to_text(data)
-        for _category, pattern in self._active_patterns():
-            if _category == "credit_card":
-                if any(_luhn_valid(m.group(0)) for m in pattern.finditer(text)):
-                    return True
-            elif pattern.search(text):
-                return True
-        return False
+        return self._matches_text(_rtf_to_text(data))
 
     # ------------------------------------------------------------------
     # Detection
@@ -256,32 +318,21 @@ class ContentFilter:
     def is_sensitive(self, content: ClipboardContent) -> bool:
         """Check if clipboard content contains sensitive data.
 
-        TEXT, HTML and RTF (extracted) are inspected.  Only enabled
-        categories are checked.  Returns True as soon as any pattern matches.
+        TEXT, HTML, RTF (extracted) and URL are inspected, and so are the names
+        in a file offer — including them here matters as much as it does in
+        `filter_content`, because this is what decides whether a clip is
+        redacted at all.  Only enabled categories are checked.  Returns True as
+        soon as any pattern matches.
         """
         if not self._enabled:
             return False
-        for ct in self._textual_types():
-            data = content.types.get(ct)
-            if data is None:
-                continue
-            text = self._inspectable_text(ct, data)
-            for _category, pattern in self._active_patterns():
-                if _category == "credit_card":
-                    if any(_luhn_valid(m.group(0)) for m in pattern.finditer(text)):
-                        return True
-                elif pattern.search(text):
-                    return True
-        return False
+        return any(self._matches_text(text) for text in self._payload_texts(content))
 
     def describe_sensitivity(self, content: ClipboardContent) -> list[str]:
         """Return a deduplicated list of matched sensitivity category names."""
+        texts = self._payload_texts(content) if self._enabled else []
         matched: list[str] = []
-        for ct in self._textual_types():
-            data = content.types.get(ct)
-            if data is None:
-                continue
-            text = self._inspectable_text(ct, data)
+        for text in texts:
             for category, pattern in self._active_patterns():
                 if category in matched:
                     continue
@@ -331,8 +382,16 @@ class ContentFilter:
             filtered_types[ct] = self._redact(self._inspectable_text(ct, data)).encode("utf-8")
 
         for ct, data in content.types.items():
-            if ct not in self._textual_types():
-                filtered_types[ct] = data
+            if ct in self._textual_types():
+                continue
+            if ct in HISTORY_ONLY_TYPES and self._offered_names_sensitive(content):
+                # Nothing in this payload can be edited into something safe —
+                # the file arrives under its real name whatever the offer says
+                # — so an offer whose names match takes the whole offer off the
+                # wire instead of going out unredacted beside a [FILTERED] text.
+                logger.debug("Dropping a file offer whose names match the filter")
+                continue
+            filtered_types[ct] = data
 
         if (
             ContentType.RTF in content.types
@@ -344,15 +403,12 @@ class ContentFilter:
             if plain:
                 filtered_types[ContentType.TEXT] = plain.encode("utf-8")
 
-        return ClipboardContent(
-            types=filtered_types,
-            source_device=content.source_device,
-            timestamp=content.timestamp,
-            # Preserve the image format hint: without it the image bytes are
-            # re-labelled as PNG (and zlib-compressed) on the wire, so a
-            # BMP/TIFF copy gets corrupted on Linux/macOS receivers.
-            image_fmt=content.image_fmt,
-            # ...and the route it arrived on, which is stamped before filtering
-            # runs and would otherwise be lost by this rebuild.
-            transport=content.transport,
-        )
+        # ``replace`` rather than a field-by-field rebuild, for the reasons the
+        # old version spelled out per field: the image format hint has to
+        # survive or a BMP/TIFF copy is re-labelled PNG (and zlib-compressed)
+        # on the wire, the transport has to survive because it is stamped
+        # before filtering runs — and the entry id has to survive because it is
+        # what a file offer names.  Copying the fields by hand meant every
+        # field added later had to remember to add itself here; ``replace``
+        # cannot forget one.
+        return replace(content, types=filtered_types)

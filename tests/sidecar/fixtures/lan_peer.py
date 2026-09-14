@@ -59,7 +59,7 @@ class Discovery:
 
 
 def main():
-    logging.basicConfig(stream=sys.stderr, level=logging.ERROR)
+    logging.basicConfig(stream=sys.stderr, level=logging.WARNING)
     monitor = Monitor()
     clipboard = Clipboard(monitor)
     app = SidecarApplication(

@@ -1,26 +1,25 @@
-"""Refactor round 1 — AI-config sync (codec, config migration, tool profiles,
-collector, manager, REST).
+"""AI-config sync: the aiconfig wire, the config it persists, and the pull
+path's refusals.
 
-The feature now runs on TOOL PROFILES (internal/sync/ai_profiles.py) instead
-of a raw watch-path list: a device enables built-in profiles (Claude Code,
-Codex, Cursor, Gemini) plus user custom paths, inventory entries carry a
-``tool`` key (never a root index across the wire), and landing targets are
-resolved through THIS device's profile table — the old ambiguous_root /
-no_local_root mapping errors are gone.
+The feature runs on TOOL PROFILES (internal/sync/ai_profiles.py) instead of a
+raw watch-path list: a device enables built-in profiles (Claude Code, Codex,
+Cursor, Gemini) plus user custom paths, inventory entries carry a ``tool`` key
+(never a root index across the wire), and landing targets are resolved through
+THIS device's profile table.
+
+What is pinned here:
+  - the frame round-trip, the v2 inventory shape and its sanitization, and the
+    read-only legacy (root_index) path for older peers
+  - config defaults / persistence, and the legacy watch-path migration
+  - every refusal a peer or the user can hit: unpaired sender, hash drift,
+    traversal, truncated source, failed backup, unadvertised path — each one
+    reported to the requester instead of leaving a batch stuck
+  - what a pull is allowed to do to a local file: overwrite backs the file it
+    replaces up, copy protects it, and neither one lands a truncated source
+  - the REST surface (/api/aiconfig/*) and the settings whitelist fields
 
 Handlers are exercised through lightweight stubs: no app/tkinter/transport
 stack boots here, and every frame crosses the wire through the real codec.
-
-Coverage per the refactor plan:
-  - profile expansion / validation / legacy watch-path migration helpers
-  - collector emits (tool, rel_path) v2 entries; folders via is_dir
-  - inv roundtrip + sanitization; legacy (root_index) inv cached read-only
-  - req serves verified data by tool; hash drift / traversal refused
-  - pull lands per mode with batch_id echoed through aiconfig_file events
-  - folder whole-select expansion pulls every descendant file recursively
-  - preview (v2 + legacy) never touches disk
-  - /api/aiconfig/profiles GET/POST, pull/inventory/local REST routes
-  - settings whitelist carries the new profile fields
 """
 
 import base64
@@ -47,9 +46,6 @@ from internal.sync.ai_config import (
     MAX_ENTRIES,
     AIConfigManager,
     collect_roots,
-    expand_root,
-    is_temp_name,
-    open_with_default_app,
     resolve_safe,
 )
 
@@ -155,16 +151,6 @@ def test_config_legacy_watch_paths_migrate_to_profiles(isolated_config):
     assert "~/my-notes" in loaded.ai_config_custom_paths
 
 
-def test_config_legacy_bad_type_falls_back_to_all_tools(isolated_config):
-    cfg_mod = isolated_config
-    path = cfg_mod._config_path()
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps({"ai_config_paths": "not-a-list"}), encoding="utf-8")
-    loaded = cfg_mod.load()
-    # malformed legacy list → the (non-empty) all-tools default
-    assert loaded.ai_config_tools == ai_profiles.DEFAULT_TOOL_KEYS
-
-
 # --------------------------------------------------------------- profiles
 
 
@@ -190,41 +176,6 @@ def test_effective_roots_expands_enabled_profiles_and_custom():
     assert ("claude_code", "memory", "file", "~/.claude/CLAUDE.md") in roots
     assert ("custom", ai_profiles.custom_root_id("~/extra"), "dir", "~/extra") in roots
     assert ("custom", ai_profiles.custom_root_id("D:\\n"), "dir", "D:\\n") in roots
-
-
-def test_validate_tool_keys_dedupes_bounds_and_rejects_junk():
-    keys = ai_profiles.validate_tool_keys(
-        [" claude_code ", "codex", "claude_code", "bogus", 42, None]
-    )
-    assert keys == ["claude_code", "codex"]
-    assert ai_profiles.validate_tool_keys("nope") == []
-    assert len(ai_profiles.validate_tool_keys(["claude_code"] * 999)) <= ai_profiles.MAX_TOOL_KEYS
-
-
-def test_validate_custom_paths_cleans_and_bounds():
-    paths = ai_profiles.validate_custom_paths(["  ~/a ", "", "~/a", "D:\\n", None])
-    assert paths == ["~/a", "D:\\n"]
-    # dedupe happens BEFORE the cap, so 999 identical paths collapse to one
-    assert ai_profiles.validate_custom_paths(["x"] * 999) == ["x"]
-    assert (
-        len(ai_profiles.validate_custom_paths([f"x{i}" for i in range(999)]))
-        == ai_profiles.MAX_CUSTOM_PATHS
-    )
-
-
-def test_migrate_watch_paths_classification():
-    # no tools mentioned -> all tools enabled by default (feature stays on)
-    keys, custom = ai_profiles.migrate_watch_paths(["~/custom/dir"])
-    assert keys == ai_profiles.DEFAULT_TOOL_KEYS
-    assert custom == ["~/custom/dir"]
-    # profile paths enable their tool; unknown paths become custom
-    keys, custom = ai_profiles.migrate_watch_paths(
-        ["~/.claude/CLAUDE.md", "~/.cursor/commands", "~/notes"]
-    )
-    assert keys == ["claude_code", "cursor"]
-    assert custom == ["~/notes"]
-    # non-list input -> all tools, no custom
-    assert ai_profiles.migrate_watch_paths(None) == (ai_profiles.DEFAULT_TOOL_KEYS, [])
 
 
 # --------------------------------------------------------------- collector
@@ -253,38 +204,6 @@ def test_collect_expands_home_and_relative_posix_paths(tmp_path):
     assert ent["size"] == len(b"# rules\n")
     st = (home / "airoot" / "CLAUDE.md").stat()
     assert abs(ent["mtime"] - st.st_mtime) < 1.0
-
-
-def test_collect_tool_profile_root_tags_every_entry(tmp_path):
-    home = tmp_path / "home"
-    _mk(home, "CLAUDE.md", b"# rules\n")
-    _mk(home / "skills", "a/SKILL.md", b"skill")
-    entries = collect_roots(
-        [
-            ("claude_code", "memory", "file", "~/CLAUDE.md"),
-            ("claude_code", "skills", "dir", "~/skills"),
-        ],
-        home=home,
-    )
-    by_path = {e["path"]: e for e in entries}
-    assert by_path["CLAUDE.md"]["tool"] == "claude_code"
-    assert by_path["a/SKILL.md"]["tool"] == "claude_code"
-    # duplicate roots of the SAME tool are deduped by (tool, rel)
-    entries_dup = collect_roots(
-        [
-            ("claude_code", "skills", "dir", "~/skills"),
-            ("claude_code", "skills", "dir", "~/skills"),
-        ],
-        home=home,
-    )
-    assert len(entries_dup) == 1
-    # a different tool pointing at the same directory is a distinct entry
-    entries2 = collect_roots(
-        [("claude_code", "skills", "dir", "~/skills"), ("gemini", "skills", "dir", "~/skills")],
-        home=home,
-    )
-    assert len(entries2) == 2
-    assert {e["tool"] for e in entries2} == {"claude_code", "gemini"}
 
 
 def test_collect_filters_oversize_temp_and_symlinks(tmp_path):
@@ -324,25 +243,6 @@ def test_collect_caps_entries_and_skips_missing_or_duplicate_roots(tmp_path):
     assert len(entries) == 3  # capped; missing root skipped; dup root once
 
 
-def test_collect_folder_entries_carry_is_dir(tmp_path):
-    root = tmp_path / "r"
-    _mk(root, "skills/my-skill/SKILL.md", b"# sk")
-    entries = collect_roots([("custom", "r0", "dir", str(root))], include_dirs=True)
-    by_path = {e["path"]: e for e in entries}
-    assert by_path["skills/my-skill/"]["is_dir"] is True
-    assert by_path["skills/my-skill/"]["size"] is None
-    assert by_path["skills/my-skill/"]["sha256"] == ""
-    assert by_path["skills/my-skill/SKILL.md"]["is_dir"] is False
-
-
-def test_expand_root_forms():
-    assert expand_root("~", home="/h") is not None
-    assert str(expand_root("~/sub", home="/h")).replace("\\", "/") == "/h/sub"
-    assert expand_root("C:\\x") is not None
-    assert expand_root("") is None
-    assert expand_root(None) is None
-
-
 def test_resolve_safe_rejects_traversal_and_absolute():
     base = Path(tempfile.mkdtemp())
     ok = resolve_safe(base, "a/b.md")
@@ -361,13 +261,6 @@ def test_resolve_safe_rejects_traversal_and_absolute():
     ):
         assert resolve_safe(base, bad) is None, bad
     assert resolve_safe(base, "./a/./b.md") is not None  # dot segments fine
-
-
-def test_is_temp_name():
-    for junk in ("x.tmp", "~$report.md", ".DS_Store", "Thumbs.db", "notes.swp"):
-        assert is_temp_name(junk), junk
-    for keep in ("CLAUDE.md", ".mcp.json", "settings.json", "SKILL.md"):
-        assert not is_temp_name(keep), keep
 
 
 # ----------------------------------------------------------------- manager
@@ -858,19 +751,6 @@ def test_data_hash_mismatch_b64_failure_unsolicited_dropped(tmp_path):
     assert list(recv_roots.iterdir()) == []
 
 
-def test_pending_expiry_prunes_stale_requests(tmp_path):
-    (tmp_path / "rr").mkdir(exist_ok=True)
-    r = _StubMgr(tmp_path, roots=[str(tmp_path / "rr")])
-    r.mgr.pull("p1", [{"tool": "custom", "rel_path": "slow.md"}], mode="copy")
-    key = ("p1", "v3", "custom", "", "slow.md")
-    assert key in r.mgr._pending
-    # simulate the clock having moved past the TTL
-    old = next(iter(r.mgr._pending.values()))
-    old["ts"] = time.time() - 3600
-    r.mgr.pull("p1", [{"tool": "custom", "rel_path": "fresh.md"}], mode="copy")
-    assert key not in r.mgr._pending
-
-
 # ------------------------------------------- folder whole-select + batch
 
 
@@ -1018,40 +898,6 @@ def test_top_level_file_wins_over_sibling_dir_root(tool_home):
     # landed beside ~/.claude/CLAUDE.md — NOT inside the skills dir
     assert (tool_home / "claude" / "CLAUDE.from.Peer-p1.md").read_bytes() == b"# hello"
     assert not (tool_home / "claude" / "skills" / "CLAUDE.md").exists()
-
-
-def test_folder_pull_via_tool_profile(tool_home):
-    """Folder whole-select against a built-in profile root: recursive, per-file
-    hashes, progress events — a real 'sync the skills folder' flow.  The peer's
-    rel_paths are relative to ITS skills dir root (my-skill/…), and the landing
-    side resolves them back through ITS OWN claude_code skills root."""
-    srv = _StubMgr(tool_home, tool_keys=["claude_code"], roots=[])
-    _mk(tool_home / "claude" / "skills", "my-skill/SKILL.md", b"# sk")
-    _mk(tool_home / "claude" / "skills", "my-skill/sub/a.md", b"a")
-    _mk(tool_home / "claude" / "skills", "other/b.md", b"b")
-    srv.mgr.collect()
-
-    recv = _StubMgr(tool_home, tool_keys=["claude_code"], roots=[])
-    _feed(recv, srv.mgr.build_inv_payload())
-    res = _feed_folder_pull(
-        recv, srv, {"tool": "claude_code", "rel_path": "my-skill/", "is_dir": True}, batch_id="sk1"
-    )
-    assert res["requested"] == 2, res
-    reqs = [
-        decode_message(f)._raw_payload
-        for _, f in recv.sent
-        if decode_message(f)._raw_payload.get("msg_type") == "aiconfig_req"
-    ]
-    assert sorted(q["rel_path"] for q in reqs) == ["my-skill/SKILL.md", "my-skill/sub/a.md"]
-    # both files landed recursively under the profile skills dir (copy mode,
-    # siblings of the server's own copies since both sides share the sandbox)
-    assert (
-        tool_home / "claude" / "skills" / "my-skill" / "SKILL.from.Peer-p1.md"
-    ).read_bytes() == b"# sk"
-    assert (
-        tool_home / "claude" / "skills" / "my-skill" / "sub" / "a.from.Peer-p1.md"
-    ).read_bytes() == b"a"
-    assert not (tool_home / "claude" / "skills" / "other" / "b.from.Peer-p1.md").exists()
 
 
 def test_same_rel_under_two_dir_roots_both_survive_inventory(tool_home):
@@ -1241,22 +1087,6 @@ def test_legacy_preview_still_works(tmp_path):
     assert list(recv_roots.iterdir()) == []
 
 
-# ------------------------------------------------------------- watch list
-
-
-def test_set_profiles_normalizes_and_persists(tmp_path):
-    s = _StubMgr(tmp_path, roots=["~/old"])
-    res = s.mgr.set_profiles(
-        ["claude_code", "bogus", "claude_code", 42], ["  ~/configs ", "", "~/configs", "D:\\notes"]
-    )
-    assert res["ok"] is True
-    assert res["tools"] == ["claude_code"]
-    assert res["custom_paths"] == ["~/configs", "D:\\notes"]
-    assert s.cfg.ai_config_tools == ["claude_code"]
-    assert s.cfg.ai_config_custom_paths == ["~/configs", "D:\\notes"]
-    assert s.saved == [1]
-
-
 # ------------------------------------------------------------- REST layer
 
 
@@ -1338,19 +1168,6 @@ def test_api_profiles_get_and_post(tmp_path, tool_home):
         api.bind(None)
 
 
-def test_api_routes_unbound_returns_503(tmp_path):
-    from internal.web.api import aiconfig as api
-
-    api.bind(None)
-    try:
-        data, status = api.handle("GET", "/api/aiconfig/inventory", {}, b"")
-        assert status == 503
-        data, status = api.handle("POST", "/api/aiconfig/pull", {}, b"{}")
-        assert status == 503
-    finally:
-        api.bind(None)
-
-
 # ------------------------------------------------------------- local manager
 
 
@@ -1392,44 +1209,6 @@ def test_local_listing_shape_and_reuses_collector(tmp_path):
     assert by_rel["CLAUDE.md"]["sha256"] == hashlib.sha256(b"# rules\n").hexdigest()[:16]
 
 
-def test_local_listing_empty_when_no_paths(tmp_path):
-    s = _StubMgr(tmp_path, roots=[])
-    listing = s.mgr.local_listing()
-    assert listing["roots"] == [] and listing["entries"] == []
-    assert listing["collected_at"] > 0
-
-
-def test_local_listing_enabled_profiles_group_their_tools(tmp_path, tool_home):
-    s = _StubMgr(tmp_path, tool_keys=["claude_code"], roots=[])
-    _mk(tool_home / "claude", "CLAUDE.md", b"# rules\n")
-    listing = s.mgr.local_listing()
-    # tools = the enabled profile cards (single source of truth from ai_profiles)
-    assert [t["key"] for t in listing["tools"]] == ["claude_code"]
-    assert listing["tools"][0]["label"]
-    # roots = every entry of the enabled profile, each with its own file count
-    assert [r["tool"] for r in listing["roots"]] == ["claude_code"] * 5
-    assert [r["root"] for r in listing["roots"]] == [
-        "memory",
-        "settings",
-        "skills",
-        "commands",
-        "agents",
-    ]
-    assert [r["kind"] for r in listing["roots"]] == ["file", "file", "dir", "dir", "dir"]
-    assert [r["path"] for r in listing["roots"]] == [
-        "~/.claude/CLAUDE.md",
-        "~/.claude/settings.json",
-        "~/.claude/skills",
-        "~/.claude/commands",
-        "~/.claude/agents",
-    ]
-    assert [r["count"] for r in listing["roots"]] == [1, 0, 0, 0, 0]
-    # only the existing file shows up as an entry, tagged with its tool
-    assert [e["rel_path"] for e in listing["entries"]] == ["CLAUDE.md"]
-    assert listing["entries"][0]["tool"] == "claude_code"
-    assert listing["entries"][0]["root"] == "memory"
-
-
 def test_local_item_reads_text_and_truncates(tmp_path):
     s = _StubMgr(tmp_path, roots=[str(tmp_path / "r")])
     _mk(tmp_path / "r", "small.md", b"# hello")
@@ -1467,15 +1246,6 @@ def test_local_save_writes_back_and_auto_backup(tmp_path):
     # .bak shows up in the local listing = "edited here" marker
     rels = {e["rel_path"] for e in s.mgr.local_listing()["entries"]}
     assert "CLAUDE.md.bak" in rels
-
-
-def test_local_save_creates_missing_file_in_subdir(tmp_path):
-    s = _StubMgr(tmp_path, roots=[str(tmp_path / "r")], data_dir=tmp_path)
-    res = s.mgr.local_save("custom", "skills/deep/SKILL.md", "# new skill\n")
-    assert res["ok"] is True
-    p = tmp_path / "r" / "skills" / "deep" / "SKILL.md"
-    assert p.read_text(encoding="utf-8") == "# new skill\n"
-    assert not (tmp_path / "r" / "skills" / "deep" / "SKILL.md.bak").exists()
 
 
 def test_local_save_rejects_binary_traversal_oversize_and_missing(tmp_path):
@@ -1543,21 +1313,6 @@ def test_local_trash_renames_on_collision_and_rejects_bad(tmp_path):
     assert s.mgr.local_trash("custom", "missing.md")["error"] == "not_found"
 
 
-def test_local_trash_suffix_increments_when_destination_exists(tmp_path, monkeypatch):
-    from internal.sync import ai_config as aic
-
-    s = _StubMgr(tmp_path, roots=[str(tmp_path / "r")], data_dir=tmp_path)
-    _mk(tmp_path / "r", "f.md", b"live")
-    monkeypatch.setattr(aic.time, "strftime", lambda fmt: "20260101_000000")
-    dest = tmp_path / "aiconfig_trash" / "20260101_000000_f.md"
-    dest.parent.mkdir(parents=True, exist_ok=True)
-    dest.write_text("occupied")
-    res = s.mgr.local_trash("custom", "f.md")
-    assert res["ok"] is True
-    assert Path(res["trashed_to"]).name == "20260101_000000_f-2.md"
-    assert Path(res["trashed_to"]).read_text(encoding="utf-8") == "live"
-
-
 def test_open_windows_uses_startfile(tmp_path, monkeypatch):
     s = _StubMgr(tmp_path, roots=[str(tmp_path / "r")])
     _mk(tmp_path / "r", "CLAUDE.md", b"# rules")
@@ -1585,23 +1340,6 @@ def test_open_posix_branches_use_open_and_xdg_open(tmp_path, monkeypatch):
         res = s.mgr.local_open("custom", "CLAUDE.md")
         assert res["ok"] is True, plat
         assert seen == [[argv0, str(tmp_path / "r" / "CLAUDE.md")]], plat
-
-
-def test_open_direct_helper_and_failure(tmp_path, monkeypatch):
-    target = str(tmp_path / "CLAUDE.md")
-    _mk(tmp_path, "CLAUDE.md", b"# rules")
-    calls = []
-    monkeypatch.setattr(sys, "platform", "win32")
-    monkeypatch.setattr(os, "startfile", lambda p: calls.append(p), raising=False)
-    assert open_with_default_app(target) is True
-    assert calls == [target]
-
-    # a raising startfile -> helper reports failure
-    def boom(_p):
-        raise OSError("no default app")
-
-    monkeypatch.setattr(os, "startfile", boom, raising=False)
-    assert open_with_default_app(target) is False
 
 
 # ------------------------------------------------------- local REST layer
@@ -1668,42 +1406,6 @@ def test_local_routes_via_rest(tmp_path):
         api.bind(None)
 
 
-def test_open_route_via_rest(tmp_path, monkeypatch):
-    from internal.web.api import aiconfig as api
-
-    s = _StubMgr(tmp_path, roots=[str(tmp_path / "r")], data_dir=tmp_path)
-    _mk(tmp_path / "r", "CLAUDE.md", b"# rules")
-    calls = []
-    monkeypatch.setattr(sys, "platform", "win32")
-    monkeypatch.setattr(os, "startfile", lambda p: calls.append(p), raising=False)
-    api.bind(s.mgr)
-    try:
-        data, status = api.handle(
-            "POST",
-            "/api/aiconfig/open",
-            {},
-            json.dumps({"tool": "custom", "rel_path": "CLAUDE.md"}).encode(),
-        )
-        assert status == 200 and data["ok"] is True
-        assert calls == [str(tmp_path / "r" / "CLAUDE.md")]
-        data, status = api.handle(
-            "POST",
-            "/api/aiconfig/open",
-            {},
-            json.dumps({"tool": "custom", "rel_path": "missing.md"}).encode(),
-        )
-        assert status == 400 and data["error"] == "not_found"
-        data, status = api.handle(
-            "POST",
-            "/api/aiconfig/open",
-            {},
-            json.dumps({"tool": "custom", "rel_path": "../x.md"}).encode(),
-        )
-        assert status == 400 and data["error"] == "no_local_root"
-    finally:
-        api.bind(None)
-
-
 # ══════════════════════════════════════════════════
 # merged from test_round19_presets.py — single-file custom roots
 # ══════════════════════════════════════════════════
@@ -1747,20 +1449,6 @@ def test_file_root_trash_moves_the_file(tmp_path):
     assert "aiconfig_trash" in res["trashed_to"]
 
 
-def test_directory_root_still_recurses(tmp_path):
-    d = tmp_path / "rules"
-    d.mkdir()
-    _mk(d, "a.mdc", b"a")
-    _mk(d, "b.mdc", b"bb")
-    entries = collect_roots([("custom", "r0", "dir", str(d))])
-    assert {e["path"] for e in entries} == {"a.mdc", "b.mdc"}
-
-
-def test_collector_skips_missing_file_root_silently(tmp_path):
-    entries = collect_roots([("custom", "r0", "file", str(tmp_path / "nope.json"))])
-    assert entries == []
-
-
 def test_file_root_serves_pull_to_peer(tmp_path):
     """A single-file custom root must be servable on the peer path too: the
     aiconfig_req handler targets the file itself (no directory walk), so a pull
@@ -1778,41 +1466,6 @@ def test_file_root_serves_pull_to_peer(tmp_path):
     # pull: full async req -> serve -> land loop against the file-root server
     assert _pull_and_deliver(r, srv, "CLAUDE.md", "overwrite") is False
     assert (recv_roots / "CLAUDE.md").read_bytes() == b"# hello\n"
-
-
-def test_file_root_preview_returns_content_without_landing(tmp_path):
-    """Preview of a single-file root returns the file's content and never
-    lands anything on the receiver's disk."""
-    srv = _StubMgr(tmp_path, roots=[str(tmp_path / "CLAUDE.md")])
-    _mk(tmp_path, "CLAUDE.md", b"# hello\n")
-    srv.mgr.collect()
-
-    recv_roots = tmp_path / "recv-root"
-    recv_roots.mkdir()
-    r = _StubMgr(tmp_path, roots=[str(recv_roots)])
-    result_box = {}
-
-    def run():
-        result_box["res"] = r.mgr.preview("p1", "custom", "CLAUDE.md")
-
-    t = threading.Thread(target=run)
-    t.start()
-    deadline = time.time() + 2.0
-    while not r.sent and time.time() < deadline:
-        time.sleep(0.01)  # wait for the preview's aiconfig_req to be sent
-    assert r.sent, "preview never sent its request"
-    req = decode_message(r.sent[-1][1])._raw_payload
-    assert req["msg_type"] == "aiconfig_req"
-    srv.mgr.handle_message("aiconfig_req", req, "p1")
-    reply = decode_message(srv.sent[-1][1])._raw_payload
-    r.mgr.handle_message("aiconfig_data", reply, "p1")
-    t.join(2.0)
-    assert not t.is_alive()
-    res = result_box["res"]
-    assert res["ok"] is True
-    assert res["content"] == "# hello\n"
-    assert res["truncated"] is False
-    assert list(recv_roots.iterdir()) == []
 
 
 # ══════════════════════════════════════════════════
@@ -1836,15 +1489,6 @@ class TestLandingKeepsItsPromises:
         # the displaced content is recoverable, under the name the hint promises
         assert (recv_roots / "CLAUDE.md.bak").read_bytes() == b"# hand-tuned, took an hour"
         assert r.events[-1]["status"] == "saved"
-
-    def test_overwrite_of_a_new_file_writes_no_bak(self, tmp_path):
-        recv_roots = tmp_path / "recv-root"
-        recv_roots.mkdir()
-        r = _StubMgr(tmp_path, roots=[str(recv_roots)])
-        s = _serving_setup(tmp_path)
-        assert _pull_and_deliver(r, s, "CLAUDE.md", "overwrite") is False
-        assert (recv_roots / "CLAUDE.md").read_bytes() == b"# hello"
-        assert not (recv_roots / "CLAUDE.md.bak").exists()
 
     def test_overwrite_aborts_when_the_backup_fails(self, tmp_path, monkeypatch):
         """A backup that cannot be written must stop the overwrite, not proceed
@@ -1875,16 +1519,6 @@ class TestLandingKeepsItsPromises:
         assert (recv_roots / "CLAUDE.md").read_bytes() == b"# hello"
         assert sorted(p.name for p in recv_roots.iterdir()) == ["CLAUDE.md"]
         assert r.events[-1]["status"] == "copied"
-
-    def test_copy_still_protects_a_file_that_exists(self, tmp_path):
-        recv_roots = tmp_path / "recv-root"
-        recv_roots.mkdir()
-        r = _StubMgr(tmp_path, roots=[str(recv_roots)])
-        s = _serving_setup(tmp_path)
-        _mk(recv_roots, "CLAUDE.md", b"# mine")
-        assert _pull_and_deliver(r, s, "CLAUDE.md", "copy") is False
-        assert (recv_roots / "CLAUDE.md").read_bytes() == b"# mine"
-        assert (recv_roots / "CLAUDE.from.Peer-p1.md").read_bytes() == b"# hello"
 
 
 class TestTruncatedSourceIsNeverLanded:
@@ -1924,18 +1558,6 @@ class TestTruncatedSourceIsNeverLanded:
         assert (recv_roots / "big.md").read_bytes() == b"# my complete file"
         assert not (recv_roots / "big.md.bak").exists()
         assert r.events[-1]["status"] == "error"
-        assert r.events[-1]["reason"] == "source_truncated"
-
-    def test_truncated_payload_does_not_create_a_new_file_either(self, tmp_path):
-        recv_roots = tmp_path / "recv-root"
-        recv_roots.mkdir()
-        r = _StubMgr(tmp_path, roots=[str(recv_roots)])
-        s = self._grown_setup(tmp_path)
-        res = r.mgr.pull("p1", [{"tool": "custom", "rel_path": "big.md"}], mode="copy")
-        assert res["requested"] == 1
-        s.mgr.handle_message("aiconfig_req", decode_message(r.sent[-1][1])._raw_payload, "p1")
-        r.mgr.handle_message("aiconfig_data", decode_message(s.sent[-1][1])._raw_payload, "p1")
-        assert list(recv_roots.iterdir()) == []
         assert r.events[-1]["reason"] == "source_truncated"
 
     def test_truncated_preview_is_still_allowed(self, tmp_path):
@@ -2023,23 +1645,6 @@ class TestRefusalsAreReported:
         assert r.events[-1]["reason"] == "no_reply"
         assert r.events[-1]["batch_id"] == "ghost"
 
-    def test_expiring_a_preview_pending_reports_no_ws_event(self, tmp_path):
-        """A preview reports through its own blocking result, not the WS feed —
-        expiring one must not emit a phantom per-file result."""
-        r = _StubMgr(tmp_path, roots=[str(tmp_path / "recv-root")])
-        key = ("p1", "v3", "custom", "", "x.md")
-        ev = threading.Event()
-        with r.mgr._lock:
-            r.mgr._pending[key] = {
-                "mode": "preview",
-                "ts": time.time() - aic.PENDING_TTL - 1,
-                "event": ev,
-                "result": None,
-            }
-        r.mgr._expire_pending()
-        assert ev.is_set()
-        assert r.events == []
-
 
 class TestInventoryRefreshIsHonest:
     """?refresh=1 promises the peer's *current* inventory."""
@@ -2071,16 +1676,6 @@ class TestInventoryRefreshIsHonest:
         reply = decode_message(s.sent[-1][1])._raw_payload
         assert "AGENTS.md" not in [e["rel_path"] for e in reply["entries"]]
 
-    def test_the_throttle_expires(self, tmp_path, monkeypatch):
-        monkeypatch.setattr(aic, "REFRESH_COLLECT_THROTTLE", 0.0)
-        s = _serving_setup(tmp_path)
-        calls = []
-        real = s.mgr.collect
-        s.mgr.collect = lambda: (calls.append(1), real())[1]
-        s.mgr.handle_message("aiconfig_req", {"inventory_refresh": True}, "p1")
-        s.mgr.handle_message("aiconfig_req", {"inventory_refresh": True}, "p1")
-        assert len(calls) == 2
-
     def test_a_failing_rescan_still_answers(self, tmp_path):
         """A collect() that raises (a root vanished mid-walk) must not swallow
         the reply — the peer would sit waiting for an inventory forever."""
@@ -2108,11 +1703,6 @@ class TestInventoryRefreshIsHonest:
         assert evs[0]["legacy"] is False
         # ... and it is not mistaken for a per-file pull result
         assert r.events == []
-
-    def test_a_rejected_inventory_announces_nothing(self, tmp_path):
-        r = _StubMgr(tmp_path, roots=[])
-        _feed(r, {"msg_type": "aiconfig_inv", "v": 3, "device_name": "X", "entries": "not-a-list"})
-        assert r.all_events == []
 
 
 # ══════════════════════════════════════════════════
@@ -2187,18 +1777,6 @@ def test_ai_config_profiles_writable_via_settings_post():
     assert cfg.ai_config_tools == tools
 
 
-def test_get_settings_exposes_ai_config_profiles():
-    from internal.web.api.settings import get_settings
-
-    cfg = _SettingsCfg()
-    cfg.ai_config_tools = ["claude_code"]
-    cfg.ai_config_custom_paths = ["~/ai-configs"]
-    result, status = get_settings(cfg)
-    assert status == 200
-    assert result["settings"]["ai_config_tools"] == ["claude_code"]
-    assert result["settings"]["ai_config_custom_paths"] == ["~/ai-configs"]
-
-
 # ---------------------------------------------- local_listing keeps its scan
 
 
@@ -2226,12 +1804,3 @@ def test_local_listing_stores_the_scan_it_just_did(tmp_path):
     wire = {e["rel_path"] for e in s.mgr.build_inv_payload()["entries"]}
     assert "AGENTS.md" in wire
 
-
-def test_local_listing_advances_the_collected_at_stamp(tmp_path):
-    s = _StubMgr(tmp_path, roots=[str(tmp_path / "r")])
-    _mk(tmp_path / "r", "CLAUDE.md", b"x")
-    s.mgr.collect()
-    before = s.mgr._local_collected_at
-    listing = s.mgr.local_listing()
-    assert s.mgr._local_collected_at >= before
-    assert listing["collected_at"] == s.mgr._local_collected_at

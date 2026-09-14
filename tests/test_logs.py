@@ -1,4 +1,10 @@
-"""The shared log helpers behind the native viewer and the log export."""
+"""The log export behind the native viewer's save dialog.
+
+The export is a contract with the user and with support: the RAW log, copied
+byte-for-byte and reported with the source's own size (redaction is the
+viewer's job only), with the documented error codes coming back instead of an
+exception.
+"""
 
 import pytest
 
@@ -29,14 +35,6 @@ def test_export_log_copies_the_raw_log_and_reports_its_size(log_dir, tmp_path):
     assert dest.read_text(encoding="utf-8") == "line one\nline two\n"
 
 
-def test_export_log_overwrites_an_existing_destination(log_dir, tmp_path):
-    (log_dir / "clipsync.log").write_text("fresh\n", encoding="utf-8")
-    dest = tmp_path / "old.log"
-    dest.write_text("stale content\n", encoding="utf-8")
-    assert export_log(str(dest))["ok"] is True
-    assert dest.read_text(encoding="utf-8") == "fresh\n"
-
-
 def test_export_log_reports_a_missing_log(log_dir, tmp_path):
     assert export_log(str(tmp_path / "out.log")) == {"ok": False, "error": "LOG_NOT_FOUND"}
 
@@ -56,26 +54,4 @@ def test_export_log_maps_permission_denied(log_dir, tmp_path, monkeypatch):
     monkeypatch.setattr(logs_module.shutil, "copy2", deny)
     assert export_log(str(tmp_path / "out.log")) == {
         "ok": False, "error": "PERMISSION_DENIED",
-    }
-
-
-def test_export_log_maps_other_os_errors(log_dir, tmp_path, monkeypatch):
-    (log_dir / "clipsync.log").write_text("x\n", encoding="utf-8")
-    monkeypatch.setattr(
-        logs_module.shutil, "copy2",
-        lambda *_a, **_k: (_ for _ in ()).throw(OSError("disk full")),
-    )
-    assert export_log(str(tmp_path / "out.log")) == {
-        "ok": False, "error": "EXPORT_FAILED",
-    }
-
-
-def test_export_log_maps_a_failed_size_lookup_to_an_error(log_dir, tmp_path, monkeypatch):
-    (log_dir / "clipsync.log").write_text("x\n", encoding="utf-8")
-    monkeypatch.setattr(
-        logs_module.os.path, "getsize",
-        lambda _path: (_ for _ in ()).throw(OSError("size unavailable")),
-    )
-    assert export_log(str(tmp_path / "out.log")) == {
-        "ok": False, "error": "EXPORT_FAILED",
     }

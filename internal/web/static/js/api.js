@@ -20,6 +20,19 @@ var ClipsyncAPI = (function () {
   var _token = '';
 
   /**
+   * The bracketed previews `history_db` writes for a clip that has no text of
+   * its own, and the locale key that says the same thing to a reader.
+   *
+   * "[HTML]" is deliberately absent: it is the format's own name in both
+   * languages, so translating it would only be a second way to spell it.
+   */
+  var PREVIEW_LABELS = {
+    '[Image]': 'history.type_image',
+    '[Vector Image]': 'history.type_vector_image',
+    '[Rich Text]': 'history.type_rich_text',
+  };
+
+  /**
    * Shared implementation for previewAiConfigFile / previewAiConfigLegacy.
    * POSTs a {peer_id, ...tool+root|root_index, rel_path} body and resolves the
    * truncated-text response tolerantly (JSON {ok, content, truncated} or a
@@ -111,6 +124,29 @@ var ClipsyncAPI = (function () {
       if (t.indexOf('RTF') !== -1) return '📝';
       if (t.indexOf('FILE') !== -1) return '📄';
       return '📄';
+    },
+
+    /**
+     * A row's preview, with the placeholder labels in the reader's language.
+     *
+     * An image, a vector image and rich text have no text to preview, so
+     * `history_db` stores a bracketed English word in their place and every
+     * front end printed it verbatim -- a Chinese window read "[Image]" on the
+     * line above its own 图片 chip.  It is a label rather than the user's
+     * words, so it follows the interface language here.
+     *
+     * Only the rendering changes: the stored form is what the search index,
+     * the type filters and the chat merge all read, and it stays as it is.
+     *
+     * @param {string} preview - The row's `text_preview`
+     * @returns {string} The preview, or its label, in the active language
+     */
+    previewText: function (preview) {
+      var text = String(preview == null ? '' : preview);
+      // hasOwnProperty, not a bare lookup: the key comes from stored content,
+      // and `PREVIEW_LABELS['constructor']` is a function rather than a key.
+      if (!Object.prototype.hasOwnProperty.call(PREVIEW_LABELS, text)) return text;
+      return ClipsyncI18n.t(PREVIEW_LABELS[text]);
     },
 
     /* ═══════════════════════════════════════════════════════════════

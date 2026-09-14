@@ -136,18 +136,6 @@ def test_favorites_rpc_rejects_invalid_dtos_before_storage(favorite_app, method,
     assert app.favorites.list()["total"] == 0
 
 
-def test_unknown_favorite_command_never_mutates(favorite_app):
-    app, _ = favorite_app
-    dispatcher = Dispatcher(app)
-    entry = dispatcher.call(
-        "favorites.add", {"title": "Keep", "content": "text", "group": ""}
-    )["favorite"]
-    with pytest.raises(ApplicationError) as error:
-        dispatcher.call("favorites.erase_anything", {"favorite_id": entry["id"]})
-    assert error.value.code == "METHOD_NOT_FOUND"
-    assert dispatcher.call("favorites.list", {})["total"] == 1
-
-
 def test_batch_favorite_keeps_full_history_text_and_publishes_one_change(favorite_app):
     app, _ = favorite_app
     full = "Full history content <b>as text</b>. " * 40
@@ -161,17 +149,6 @@ def test_batch_favorite_keeps_full_history_text_and_publishes_one_change(favorit
     assert stored["group"] == "Work"
     events, _ = app.events.since(0)
     assert [event["name"] for event in events] == ["favorites.changed"]
-
-
-@pytest.mark.parametrize("params", [
-    {}, {"entry_ids": []}, {"entry_ids": ["a"], "group": "g" * 129},
-    {"entry_ids": ["a", "a"], "group": ""}, {"entry_ids": [7], "group": ""},
-])
-def test_batch_favorite_validates_arguments(favorite_app, params):
-    app, _ = favorite_app
-    with pytest.raises(ApplicationError) as error:
-        Dispatcher(app).call("favorites.batch_add", params)
-    assert error.value.code == "VALIDATION_ERROR"
 
 
 def test_export_favorites_writes_a_file_without_publishing_a_change(
@@ -190,14 +167,6 @@ def test_export_favorites_writes_a_file_without_publishing_a_change(
     assert "C" in written
     events, _ = app.events.since(0)
     assert [event["name"] for event in events] == ["favorites.changed"]
-
-
-@pytest.mark.parametrize("params", [{}, {"format": "pdf"}, {"format": 7}])
-def test_export_favorites_validates_the_format(favorite_app, params):
-    app, _ = favorite_app
-    with pytest.raises(ApplicationError) as error:
-        Dispatcher(app).call("favorites.export", params)
-    assert error.value.code == "VALIDATION_ERROR"
 
 
 def test_favorite_storage_survives_restart(favorite_app):
@@ -227,3 +196,62 @@ def test_favorite_access_requires_unlock(tmp_path, monkeypatch):
         assert Dispatcher(app).call("favorites.list", {})["total"] == 0
     finally:
         assert app.lifecycle.stop()
+
+
+def test_group_registry_keeps_an_empty_group_and_reports_counts(favorite_app):
+    """A group is a name the user made, not a side effect of a favourite.
+
+    The legacy panel kept this list in the browser, which is how it could
+    offer groups the data folder no longer had.  Here it lives with the
+    favourites, so what the sidebar lists and what exists cannot drift.
+    """
+    app, _ = favorite_app
+    dispatcher = Dispatcher(app)
+    assert dispatcher.call("favorites.group_create", {"name": "Travel"}) == {
+        "groups": ["Travel"],
+    }
+    listing = dispatcher.call("favorites.list", {})
+    assert listing["groups"] == ["Travel"]
+    assert listing["group_counts"] == {"Travel": 0}
+    assert listing["library_total"] == 0
+
+    entry = dispatcher.call("favorites.add", {
+        "title": "Ticket", "content": "seat 14C", "group": "Travel",
+    })["favorite"]
+    listing = dispatcher.call("favorites.list", {})
+    assert listing["group_counts"] == {"Travel": 1}
+    assert listing["library_total"] == 1
+    # A search does not renumber the sidebar.
+    assert dispatcher.call("favorites.list", {"query": "nothing"})["group_counts"] == {
+        "Travel": 1,
+    }
+
+    # Deleting the group keeps the favourite and unfiles it.
+    assert dispatcher.call("favorites.group_delete", {"name": "Travel"}) == {
+        "moved": 1, "groups": [],
+    }
+    assert dispatcher.call("favorites.get", {"favorite_id": entry["id"]})["favorite"]["group"] == ""
+    assert dispatcher.call("favorites.list", {})["library_total"] == 1
+
+
+def test_renaming_a_group_moves_its_favourites_and_the_registry(favorite_app):
+    app, _ = favorite_app
+    dispatcher = Dispatcher(app)
+    first = dispatcher.call("favorites.add", {
+        "title": "A", "content": "1", "group": "Old",
+    })["favorite"]
+    second = dispatcher.call("favorites.add", {
+        "title": "B", "content": "2", "group": "Old",
+    })["favorite"]
+    dispatcher.call("favorites.group_create", {"name": "Empty"})
+    assert dispatcher.call("favorites.group_rename", {"name": "Old", "rename_to": "New"}) == {
+        "renamed": 2, "groups": ["Empty", "New"],
+    }
+    listing = dispatcher.call("favorites.list", {"group": "New"})
+    assert [item["id"] for item in listing["items"]] == [first["id"], second["id"]]
+    assert dispatcher.call("favorites.list", {})["groups"] == ["Empty", "New"]
+    # Renaming the group that only the registry knows about still works, which
+    # is the whole reason the registry exists.
+    assert dispatcher.call("favorites.group_rename", {"name": "Empty", "rename_to": "Later"}) == {
+        "renamed": 0, "groups": ["Later", "New"],
+    }

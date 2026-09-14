@@ -1,7 +1,7 @@
 use crate::bridge::Bridge;
 use serde_json::Value;
 use std::sync::Arc;
-use tauri::AppHandle;
+use tauri::{AppHandle, Manager};
 use tauri_plugin_notification::NotificationExt;
 
 // Deliberately exclude history.changed: it has no incoming/outgoing provenance.
@@ -85,7 +85,30 @@ fn body(event: &Value, response: &Value, chats: &Value, own: &str) -> Option<Str
     Some(strings.notify_chat.to_owned())
 }
 
+/// Whether the window is in front of the reader at this moment.
+///
+/// A notification is a report about something off screen.  When the window is
+/// up and focused the reader is looking at it, and the window says the same
+/// thing itself — every event that reaches here also raises a line on the
+/// window's own status strip (see the store's `pushNotice`) — so a native
+/// notification on top of that is the same fact twice, the second time over
+/// whatever else is on the desktop.  The legacy dashboard drew its toast inside
+/// the window and only rang the tray when the window was not the one being
+/// looked at; this is the same rule.
+///
+/// Both flags are required, and neither is guessed: a window that is visible
+/// but behind something else is not one anybody can see, so suppressing for it
+/// would drop the report entirely rather than move it.
+fn in_front(visible: Option<bool>, focused: Option<bool>) -> bool {
+    visible.unwrap_or(false) && focused.unwrap_or(false)
+}
+
 pub async fn deliver(bridge: &Arc<Bridge>, app: &AppHandle, event: &Value) {
+    if let Some(window) = app.get_webview_window("main") {
+        if in_front(window.is_visible().ok(), window.is_focused().ok()) {
+            return;
+        }
+    }
     let empty = serde_json::json!({});
     let (chats, own) = if event["name"] == "chat.message" {
         let Ok(chats) = bridge.call("chat.sessions", empty.clone()).await else {
@@ -124,6 +147,22 @@ pub async fn deliver(bridge: &Arc<Bridge>, app: &AppHandle, event: &Value) {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn a_window_in_front_is_not_rung_again_but_a_covered_one_is() {
+        assert!(in_front(Some(true), Some(true)));
+        // Visible but behind something: nobody is reading it, so the report
+        // still has to be made.
+        assert!(!in_front(Some(true), Some(false)));
+        // Minimized, hidden or not yet shown.
+        assert!(!in_front(Some(false), Some(true)));
+        assert!(!in_front(Some(false), Some(false)));
+        // A host that cannot answer is treated as not looking, which keeps the
+        // notification rather than dropping it.
+        assert!(!in_front(None, Some(true)));
+        assert!(!in_front(Some(true), None));
+        assert!(!in_front(None, None));
+    }
 
     #[test]
     fn settings_get_response_contract_uses_nested_settings() {

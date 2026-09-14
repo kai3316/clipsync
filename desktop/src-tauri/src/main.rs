@@ -12,9 +12,10 @@ use error::BridgeError;
 use serde_json::{json, Value};
 use std::sync::Arc;
 use std::time::Duration;
-use tauri::{Manager, State, WebviewWindow, WindowEvent};
+use tauri::{Emitter, Manager, State, WebviewWindow, WindowEvent};
 use tokio::sync::Mutex;
 use tauri_plugin_autostart::ManagerExt;
+use tauri_plugin_updater::UpdaterExt;
 
 /// How many times the host brings a ready-then-dead sidecar back before it
 /// stops trying and leaves the retry to the user. The wait before attempt `n`
@@ -22,6 +23,12 @@ use tauri_plugin_autostart::ManagerExt;
 /// be respawned in a tight loop.
 const SIDECAR_RESTART_ATTEMPTS: u32 = 3;
 const SIDECAR_RESTART_BACKOFF: Duration = Duration::from_secs(2);
+
+/// How long the updater plugin may spend fetching the release manifest. The
+/// plugin sets no timeout of its own, and this lookup sits behind a settings
+/// card the user is watching with a spinner on it — the same ~8s the sidecar
+/// puts on its own release lookup.
+const UPDATE_LOOKUP_TIMEOUT: Duration = Duration::from_secs(8);
 
 /// The single sidecar this process owns.
 enum Slot {
@@ -189,13 +196,14 @@ async fn companion_status(window: WebviewWindow, host: State<'_, Host>) -> Resul
 }
 
 #[tauri::command]
-async fn configure_companion(window: WebviewWindow, host: State<'_, Host>, enabled: bool, port: u16, rotate_token: bool) -> Result<Value, BridgeError> {
+async fn configure_companion(window: WebviewWindow, host: State<'_, Host>, enabled: bool, port: u16, rotate_token: bool, clear_token: bool) -> Result<Value, BridgeError> {
     authorize(&window)?;
     if port == 0 {
         return Err(BridgeError::new("VALIDATION_ERROR", "Invalid companion port"));
     }
     host.bridge().await?.call("companion.configure", json!({
         "enabled": enabled, "port": port, "rotate_token": rotate_token,
+        "clear_token": clear_token,
     })).await
 }
 
@@ -494,6 +502,37 @@ async fn transfer_action(
         .await
 }
 
+/// Ask a paired device for the files behind one of its history entries.
+///
+/// The 下载 button on a row whose file lives on another machine.  What travels
+/// is the entry id: the peer resolves the paths against its own history, which
+/// is what keeps a request to files that peer published rather than to whatever
+/// path the caller could name.  The bounds mirror the sidecar's own so a frame
+/// it would reject never leaves here.
+#[tauri::command]
+async fn request_entry_files(
+    window: WebviewWindow,
+    host: State<'_, Host>,
+    entry_id: String,
+    device_id: Option<String>,
+) -> Result<Value, BridgeError> {
+    authorize(&window)?;
+    if entry_id.is_empty() || entry_id.chars().count() > 128 {
+        return Err(BridgeError::new("VALIDATION_ERROR", "Invalid entry id"));
+    }
+    let device_id = device_id.unwrap_or_default();
+    if device_id.chars().count() > 128 {
+        return Err(BridgeError::new("VALIDATION_ERROR", "Invalid identifier"));
+    }
+    host.bridge()
+        .await?
+        .call(
+            "transfers.request_entry_files",
+            json!({"entry_id": entry_id, "device_id": device_id}),
+        )
+        .await
+}
+
 /// Cancel every active transfer in one call.
 ///
 /// The sidecar reads the live list itself, so a transfer that arrived since the
@@ -627,6 +666,18 @@ async fn open_chat_file(window: WebviewWindow, host: State<'_, Host>, session_id
     command.arg(path).spawn().map_err(|_| BridgeError::new("OPEN_FAILED", "Could not open received file"))?;
     Ok(json!({"ok": true}))
 }
+#[tauri::command]
+async fn reveal_chat_file(window: WebviewWindow, host: State<'_, Host>, session_id: String, transfer_id: String) -> Result<Value, BridgeError> {
+    validate_id(&session_id)?;
+    validate_id(&transfer_id)?;
+    // Unlike `open_chat_file`, which resolves a path and launches it from here,
+    // the sidecar reveals the folder itself: `chat.reveal_file` goes through the
+    // same `reveal_folder` the transfer list's 打开所在文件夹 already uses, so
+    // one implementation decides how each platform's file manager is asked and
+    // this command only carries the answer — a failure included — back up.
+    chat_call(window, host, "chat.reveal_file", json!({"session_id": session_id, "transfer_id": transfer_id})).await
+}
+
 #[tauri::command]
 async fn invite_chat(window: WebviewWindow, host: State<'_, Host>, peer_id: String, peer_name: String) -> Result<Value, BridgeError> {
     validate_id(&peer_id)?;
@@ -951,6 +1002,24 @@ async fn internet_pairing_generate(window: WebviewWindow, host: State<'_, Host>)
     host.bridge().await?.call("internet_pairing.generate", json!({})).await
 }
 
+/// Probe the relay brokers the settings card has staged, or the saved ones.
+///
+/// The list is a parameter rather than read from the settings because a reader
+/// tests what they are about to save, and because a broker that will not answer
+/// is worth knowing about before it is written into the config the relay runs
+/// on.  Empty means the saved list, which is what the older panel's button did
+/// with an empty body.
+#[tauri::command]
+async fn internet_pairing_test(window: WebviewWindow, host: State<'_, Host>, brokers: Vec<String>) -> Result<Value, BridgeError> {
+    authorize(&window)?;
+    // Bounded here as well as in the sidecar: the probe opens a socket per
+    // entry, so a malformed frame must not become a thousand connections.
+    if brokers.len() > 16 || brokers.iter().any(|b| b.chars().count() > 2048) {
+        return Err(BridgeError::new("VALIDATION_ERROR", "Invalid relay broker list"));
+    }
+    host.bridge().await?.call("internet_pairing.test", json!({ "brokers": brokers })).await
+}
+
 #[tauri::command]
 async fn internet_pairing_enter(window: WebviewWindow, host: State<'_, Host>, code: String) -> Result<Value, BridgeError> {
     authorize(&window)?;
@@ -1212,6 +1281,33 @@ async fn copy_history(
 }
 
 #[tauri::command]
+async fn copy_text(
+    window: WebviewWindow,
+    host: State<'_, Host>,
+    text: String,
+) -> Result<Value, BridgeError> {
+    authorize(&window)?;
+    // Bounded exactly like push_text above, and for the same reason: the frame
+    // that carries this is read into memory whole.
+    if text.trim().is_empty() || text.chars().count() > 100000 {
+        return Err(BridgeError::new("VALIDATION_ERROR", "Invalid text"));
+    }
+    host.bridge()
+        .await?
+        .call("clipboard.copy", json!({"text": text}))
+        .await
+}
+
+#[tauri::command]
+async fn get_overview(
+    window: WebviewWindow,
+    host: State<'_, Host>,
+) -> Result<Value, BridgeError> {
+    authorize(&window)?;
+    host.bridge().await?.call("overview.get", json!({})).await
+}
+
+#[tauri::command]
 async fn read_history_text(
     window: WebviewWindow,
     host: State<'_, Host>,
@@ -1355,6 +1451,77 @@ async fn update_favorite(
             json!({"favorite_id": favorite_id, "title": title, "content": content, "group": group, "position": position}),
         )
         .await
+}
+
+#[tauri::command]
+async fn reorder_favorites(
+    window: WebviewWindow,
+    host: State<'_, Host>,
+    favorite_ids: Vec<String>,
+) -> Result<Value, BridgeError> {
+    authorize(&window)?;
+    validate_batch_ids(&favorite_ids)?;
+    host.bridge()
+        .await?
+        .call("favorites.reorder", json!({"favorite_ids": favorite_ids}))
+        .await
+}
+
+#[tauri::command]
+async fn create_favorite_group(
+    window: WebviewWindow,
+    host: State<'_, Host>,
+    name: String,
+) -> Result<Value, BridgeError> {
+    authorize(&window)?;
+    validate_group_name(&name)?;
+    host.bridge()
+        .await?
+        .call("favorites.group_create", json!({"name": name}))
+        .await
+}
+
+#[tauri::command]
+async fn rename_favorite_group(
+    window: WebviewWindow,
+    host: State<'_, Host>,
+    name: String,
+    rename_to: String,
+) -> Result<Value, BridgeError> {
+    authorize(&window)?;
+    validate_group_name(&name)?;
+    validate_group_name(&rename_to)?;
+    host.bridge()
+        .await?
+        .call(
+            "favorites.group_rename",
+            json!({"name": name, "rename_to": rename_to}),
+        )
+        .await
+}
+
+#[tauri::command]
+async fn delete_favorite_group(
+    window: WebviewWindow,
+    host: State<'_, Host>,
+    name: String,
+) -> Result<Value, BridgeError> {
+    authorize(&window)?;
+    validate_group_name(&name)?;
+    host.bridge()
+        .await?
+        .call("favorites.group_delete", json!({"name": name}))
+        .await
+}
+
+/// A group name the registry will accept: the same 128-character bound a
+/// favourite's `group` field carries, and not blank — a blank name is the
+/// absence of a group, not a group called nothing.
+fn validate_group_name(name: &str) -> Result<(), BridgeError> {
+    if name.chars().count() > 128 || name.trim().is_empty() {
+        return Err(BridgeError::new("VALIDATION_ERROR", "Invalid favorite group"));
+    }
+    Ok(())
 }
 
 #[tauri::command]
@@ -1507,12 +1674,51 @@ async fn diagnostics_request(
         .await
 }
 
+/// The updater plugin, with this app's timeout applied.
+fn updater(app: &tauri::AppHandle) -> Result<tauri_plugin_updater::Updater, BridgeError> {
+    Ok(app
+        .updater_builder()
+        .timeout(UPDATE_LOOKUP_TIMEOUT)
+        .build()?)
+}
+
+/// Push one update-state frame down the same pipe the sidecar uses. The store
+/// matches on `name` and merges `data.state` in place, so progress that
+/// originated in Rust renders without the front end knowing who sent it.
+fn emit_update_state(app: &tauri::AppHandle, state: Value) {
+    let _ = app.emit_to(
+        "main",
+        "sidecar:event",
+        json!({"name": "update.state", "data": {"state": state}}),
+    );
+}
+
 #[tauri::command]
-async fn update_check(window: WebviewWindow, host: State<'_, Host>) -> Result<Value, BridgeError> {
+async fn update_check(
+    app: tauri::AppHandle,
+    window: WebviewWindow,
+    host: State<'_, Host>,
+) -> Result<Value, BridgeError> {
     authorize(&window)?;
     // The sidecar bounds the release lookup itself (~8s) so a blocked GitHub
     // cannot pin this call; it answers "no update" instead of failing.
-    host.bridge().await?.call("update.check", json!({})).await
+    let mut result = host.bridge().await?.call("update.check", json!({})).await?;
+    // Whether this build can install what it finds is a different question with
+    // a different answer, and only the updater plugin knows it: `check` is what
+    // matches this machine's bundle against the release manifest, so an `Ok`
+    // is the entire answer.  Every failure — no manifest, no entry for this
+    // platform, GitHub unreachable — means "not installable" and must not
+    // travel as an error: the manifest is absent for every release published
+    // before this feature and for a few minutes after each tag, and on those
+    // the card still has a real answer to give from the sidecar's half.
+    let installable = match updater(&app) {
+        Ok(updater) => matches!(updater.check().await, Ok(Some(_))),
+        Err(_) => false,
+    };
+    if let Some(object) = result.as_object_mut() {
+        object.insert("installable".into(), json!(installable));
+    }
+    Ok(result)
 }
 
 #[tauri::command]
@@ -1542,6 +1748,90 @@ async fn update_open_folder(
     host.bridge().await?.call("update.open_folder", json!({})).await
 }
 
+/// Download the pending update and replace this installation with it.
+///
+/// The sidecar owns checking and fetching, but it cannot do this half: a
+/// process cannot replace the bundle it is running from.  Two easier paths were
+/// both worse.  Handing the WebView the updater plugin's own JavaScript API
+/// would give this window the ability to start a download and end the process,
+/// which is the one thing the capability file says it does not have.  Calling
+/// `download_and_install` would leave no seam to stop the sidecar in — and on
+/// Windows `install` launches the NSIS installer and then calls
+/// `process::exit(0)`, so `RunEvent::Exit` never fires and the shutdown hook
+/// that normally stops the sidecar never runs.  It would survive the update as
+/// an orphan holding the very data directory the new version is about to open.
+#[tauri::command]
+async fn update_install(
+    app: tauri::AppHandle,
+    window: WebviewWindow,
+    host: State<'_, Host>,
+) -> Result<Value, BridgeError> {
+    authorize(&window)?;
+    let Some(update) = updater(&app)?.check().await? else {
+        return Ok(json!({"ok": true, "installed": false, "reason": "up_to_date"}));
+    };
+    let version = update.version.clone();
+
+    // Fetch before anything is torn down, so a download that fails — the usual
+    // cause being a signature that does not verify — leaves a running app.  The
+    // callback reports each chunk's length and the response's Content-Length,
+    // not progress and not a running total, so the total is ours to keep.
+    let progress_app = app.clone();
+    let progress_version = version.clone();
+    let mut downloaded: u64 = 0;
+    let bytes = match update
+        .download(
+            move |chunk, total| {
+                downloaded += chunk as u64;
+                let fraction = match total {
+                    Some(total) if total > 0 => (downloaded as f64 / total as f64).min(1.0),
+                    _ => 0.0,
+                };
+                emit_update_state(
+                    &progress_app,
+                    json!({
+                        "phase": "downloading",
+                        "fraction": fraction,
+                        "downloaded": downloaded,
+                        "total": total.unwrap_or(0),
+                        "error": "",
+                        "version": progress_version,
+                        "path": "",
+                    }),
+                );
+            },
+            || {},
+        )
+        .await
+    {
+        Ok(bytes) => bytes,
+        // Every exit path has to leave a terminal phase behind: the card draws
+        // a progress bar for `downloading` and an error line for `failed`, and
+        // nothing at all for a phase that never arrives.
+        Err(err) => {
+            emit_update_state(&app, json!({"phase": "failed", "error": err.to_string()}));
+            return Err(err.into());
+        }
+    };
+
+    // The bytes are in hand and verified, so the sidecar's work is done and its
+    // lock has to go before the installer takes over — the same order
+    // `restart_app` uses, and on Windows the last moment it is possible.
+    if let Ok(bridge) = host.bridge().await {
+        bridge.stop().await;
+    }
+    emit_update_state(&app, json!({"phase": "installing", "version": version}));
+
+    if let Err(err) = update.install(&bytes) {
+        emit_update_state(&app, json!({"phase": "failed", "error": err.to_string()}));
+        return Err(err.into());
+    }
+    // Unreachable on Windows: a successful install hands the process to the
+    // installer, which brings the new version back up itself.  On macOS and
+    // Linux the swap happened inside this process, so the restart is ours.
+    app.restart();
+}
+
 #[tauri::command]
 async fn open_data_folder(
     window: WebviewWindow,
@@ -1556,6 +1846,26 @@ async fn open_data_folder(
     host.bridge()
         .await?
         .call("data.open_folder", json!({"which": which}))
+        .await
+}
+
+#[tauri::command]
+async fn share_file_to_phone(
+    window: WebviewWindow,
+    host: State<'_, Host>,
+    path: String,
+) -> Result<Value, BridgeError> {
+    authorize(&window)?;
+    // A path the user picked in the host's own file dialog, so unlike the two
+    // commands above it does cross the boundary.  The bound mirrors the
+    // sidecar's own; whether the path is a regular file rather than a directory
+    // or a device is decided there, next to the copy that needs it.
+    if path.is_empty() || path.chars().count() > 4096 {
+        return Err(BridgeError::new("VALIDATION_ERROR", "Invalid file path"));
+    }
+    host.bridge()
+        .await?
+        .call("companion.share_file", json!({"path": path}))
         .await
 }
 
@@ -1705,9 +2015,28 @@ fn main() {
     let app = tauri::Builder::default()
         .plugin(tauri_plugin_autostart::Builder::new().app_name("ClipSync").build())
         .plugin(tauri_plugin_notification::init())
+        // Registered for the Rust side only: this window is given no updater
+        // permission, so the plugin's own commands stay unreachable from the
+        // WebView and every update goes through `update_install` below.
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_single_instance::init(|app, _, _| {
             show_main_window(app);
         }))
+        .plugin(
+            // The window opens where it was left, at the size it was left, the
+            // way the legacy dashboard did — it wrote its own geometry to
+            // `dashboard_geometry.json` and put it back when that geometry was
+            // still on a screen.  Position and size only: visibility is
+            // deliberately not remembered, because closing this window hides it
+            // rather than destroying it, and a shell that restored "hidden"
+            // would start with no way in but the tray.
+            tauri_plugin_window_state::Builder::default()
+                .with_state_flags(
+                    tauri_plugin_window_state::StateFlags::POSITION
+                        | tauri_plugin_window_state::StateFlags::SIZE,
+                )
+                .build(),
+        )
         .setup(|app| {
             let host = Host {
                 bridge: Arc::new(Mutex::new(Slot::Idle)),
@@ -1804,11 +2133,13 @@ fn main() {
             cancel_all_transfers,
             clear_transfer_history,
             start_speed_test,
+            request_entry_files,
             list_chat_devices,
             list_chat_sessions,
             set_chat_muted,
             list_chat_messages,
             open_chat_file,
+            reveal_chat_file,
             invite_chat,
             chat_action,
             accept_chat_invite,
@@ -1840,6 +2171,7 @@ fn main() {
             unpair_device,
             internet_pairing_status,
             internet_pairing_generate,
+            internet_pairing_test,
             internet_pairing_enter,
             internet_pairing_rename,
             internet_pairing_unpair,
@@ -1862,14 +2194,20 @@ fn main() {
             pause_sync,
             resume_sync,
             copy_history,
+            copy_text,
+            get_overview,
             read_history_text,
             open_history_link,
             list_favorites,
             get_favorite,
             add_favorite,
             update_favorite,
+            reorder_favorites,
             delete_favorite,
             copy_favorite,
+            create_favorite_group,
+            rename_favorite_group,
+            delete_favorite_group,
             read_logs,
             restart_app,
             restart_sidecar,
@@ -1881,7 +2219,9 @@ fn main() {
             update_status,
             update_download,
             update_open_folder,
+            update_install,
             open_data_folder,
+            share_file_to_phone,
             export_logs,
             open_about_link,
             companion_qr,
@@ -1892,14 +2232,15 @@ fn main() {
         .expect("Could not initialize ClipSync desktop");
     app.run(|handle, event| {
         match event {
-            tauri::RunEvent::WindowEvent { label, event, .. } if label == "main" => {
-                if let WindowEvent::CloseRequested { api, .. } = event {
+            tauri::RunEvent::WindowEvent { label, event, .. } if label == "main" => match event {
+                WindowEvent::CloseRequested { api, .. } => {
                     if let Some(window) = handle.get_webview_window("main") {
                         api.prevent_close();
                         let _ = window.hide();
                     }
                 }
-            }
+                _ => {}
+            },
             tauri::RunEvent::Exit => {
                 tauri::async_runtime::block_on(handle.state::<Host>().stop_bridge());
             }
@@ -1994,6 +2335,23 @@ mod tests {
                     .unwrap_err()
                     .code,
                 "VALIDATION_ERROR"
+            );
+        }
+    }
+
+    #[test]
+    fn a_group_name_is_a_name_and_not_the_absence_of_one() {
+        // The bound is the one a favourite's own `group` field carries, and a
+        // blank name is refused here rather than stored as a group called
+        // nothing — the empty string means "no group", so it cannot also mean
+        // a group.
+        assert!(validate_group_name("Work").is_ok());
+        assert!(validate_group_name(&"\u{1f600}".repeat(128)).is_ok());
+        for name in ["", " ", "\t\n", &"a".repeat(129)] {
+            assert_eq!(
+                validate_group_name(name).unwrap_err().code,
+                "VALIDATION_ERROR",
+                "{name:?} should be refused"
             );
         }
     }

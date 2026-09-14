@@ -71,6 +71,13 @@ def make_dedup_key(content: ClipboardContent) -> str:
         # FILE content is the newline-joined file paths — hash them so
         # file-only copies dedup instead of falling through to a unique key.
         return "file:" + _h(content.types[ContentType.FILE])
+    if ContentType.FILE_REMOTE in content.types:
+        # Only ever seen on the receiving side: the offer carries the publisher's
+        # entry id, so the same offer arriving twice keys the same, while the
+        # same file copied again on the other device names a new entry and is
+        # genuinely a new row — which is how a local FILE capture already
+        # behaves, so a file reads the same on both ends.
+        return "file_remote:" + _h(content.types[ContentType.FILE_REMOTE])
     if ContentType.URL in content.types:
         return "url:" + _h(content.types[ContentType.URL])
     return "other:" + str(time.time())
@@ -90,6 +97,7 @@ CONTENT_TYPE_LABELS: dict[ContentType, str] = {
     ContentType.IMAGE_EMF: "IMAGE_EMF",
     ContentType.FILE: "FILE",
     ContentType.URL: "URL",
+    ContentType.FILE_REMOTE: "FILE_REMOTE",
 }
 LABEL_TYPE_MAP: dict[str, ContentType] = {label: ct for ct, label in CONTENT_TYPE_LABELS.items()}
 

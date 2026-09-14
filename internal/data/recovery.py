@@ -100,7 +100,9 @@ def config_problem(path: Path) -> str | None:
     if not isinstance(data, dict):
         return REASON_UNREADABLE
     version = data.get("config_version", 1)
-    if type(version) is not int or not 1 <= version <= 2:
+    # Bump the upper bound with the schema: a config this build itself wrote is
+    # not an unknown version, and reading it as one quarantines a healthy file.
+    if type(version) is not int or not 1 <= version <= 3:
         return REASON_UNREADABLE
     for field in IDENTITY_FIELDS:
         if field in data and not isinstance(data[field], str):

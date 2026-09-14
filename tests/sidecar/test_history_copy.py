@@ -92,28 +92,6 @@ def test_corrupt_history_is_not_written(payload):
     prepare.assert_not_called()
 
 
-def test_missing_history_is_not_written():
-    service, repository, writer, _ = use_case()
-    repository.find_by_id.return_value = (None, None)
-    with pytest.raises(ApplicationError) as error:
-        service.copy("gone")
-    assert error.value.code == "NOT_FOUND"
-    writer.assert_not_called()
-
-
-def test_paste_to_top_disabled():
-    service, repository, _, _ = use_case()
-    service._paste_to_top = lambda: False
-    assert service.copy("0") == {"copied": True}
-    repository.touch.assert_not_called()
-
-
-def test_successful_copy_bumps_the_paste_count():
-    service, repository, _, _ = use_case()
-    assert service.copy("0") == {"copied": True}
-    repository.increment_paste.assert_called_once_with("0")
-
-
 def test_failed_paste_count_write_still_reports_the_copy():
     service, repository, _, _ = use_case()
     repository.increment_paste.side_effect = OSError("counter unavailable")

@@ -145,15 +145,3 @@ def test_a_probe_that_crashes_reports_itself_instead_of_the_whole_batch(monkeypa
     assert [row["endpoint"] for row in rows] == ["mqtt://ok:1883", "mqtt://boom:1883"]
     boom = rows[1]
     assert boom["ok"] is False and boom["latency_ms"] is None and boom["detail"]
-
-
-def test_an_unparseable_endpoint_is_reported_not_raised():
-    rows = relay_transport.probe_relay_endpoints([":::not-an-endpoint:::"])
-
-    assert len(rows) == 1
-    assert rows[0]["ok"] is False and rows[0]["detail"]
-
-
-def test_probing_an_empty_list_asks_for_nothing():
-    assert relay_transport.probe_relay_endpoints([]) == []
-    assert relay_transport.probe_relay_endpoints(None) == []

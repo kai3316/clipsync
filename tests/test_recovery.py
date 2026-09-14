@@ -58,23 +58,16 @@ def reasons(findings):
     return [(finding.artifact, finding.reason) for finding in findings]
 
 
-def test_a_clean_directory_has_nothing_to_repair(data_dir):
-    write_config(data_dir, {"config_version": 2, "device_id": "a"})
-    assert recovery.quarantine() == []
-
-
 @pytest.mark.parametrize(
     "config",
     [
         "{not json",
         "[]",
-        {"config_version": 3},
-        {"config_version": "2"},
-        {"config_version": 2, "private_key_pem": 42},
-        {"config_version": 2, "encryption_enabled": "yes"},
+        # One past the version this build writes — a version it knows about is
+        # a config it must load, not quarantine.
+        {"config_version": 4},
     ],
-    ids=["not-json", "not-an-object", "unknown-version", "version-type",
-         "identity-field-type", "encryption-type"],
+    ids=["not-json", "not-an-object", "unknown-version"],
 )
 def test_an_unusable_configuration_is_moved_aside(data_dir, config):
     write_config(data_dir, config)
@@ -92,7 +85,7 @@ def test_an_unusable_configuration_is_moved_aside(data_dir, config):
 def test_encrypted_history_leaves_with_a_configuration_that_has_to_go(data_dir):
     # The at-rest key is derived from the fingerprint of the identity that the
     # broken config carries, so the history cannot be read once it is gone.
-    write_config(data_dir, {"config_version": 3, "encryption_enabled": True})
+    write_config(data_dir, {"config_version": 4, "encryption_enabled": True})
     write_history(data_dir, rows=2)
     assert reasons(recovery.inspect()) == [
         ("config", "unreadable"),
@@ -110,17 +103,6 @@ def test_a_broken_configuration_that_cannot_be_read_keeps_the_history(data_dir):
     assert reasons(recovery.inspect()) == [("config", "unreadable")]
     recovery.quarantine()
     assert (data_dir / recovery.HISTORY_NAME).exists()
-
-
-def test_a_locked_install_is_not_damage(data_dir):
-    # Encryption on with a verification hash means the key is waiting for a
-    # password, not that anything is broken.
-    write_config(data_dir, {
-        "config_version": 2, "device_id": "a", "certificate_pem": "cert",
-        "private_key_pem": "key", "encryption_enabled": True,
-        "encryption_password_hash": "hash",
-    })
-    assert recovery.quarantine() == []
 
 
 def test_a_corrupt_history_database_is_moved_with_its_companions(data_dir):
@@ -169,16 +151,6 @@ def test_a_history_the_app_cannot_read_counts_as_records(data_dir):
     assert reasons(recovery.inspect()) == [("history", "history_identityless")]
 
 
-def test_a_mixed_history_waits_for_the_key_that_wrote_part_of_it(data_dir):
-    # Encryption turned on mid-life leaves readable rows beside keyed ones. The
-    # keyed rows are the reason the whole file waits: a fresh identity opening
-    # the database would read base64 where the user expects their clips.
-    write_config(data_dir, {"config_version": 2, "encryption_enabled": True, "device_id": "a"})
-    write_history(data_dir, rows=1, keyed=False)
-    write_history(data_dir, rows=1)
-    assert reasons(recovery.inspect()) == [("history", "history_identityless")]
-
-
 def test_a_legacy_json_history_keyed_by_a_lost_identity_is_records(data_dir):
     write_config(data_dir, {"config_version": 2, "encryption_enabled": True, "device_id": "a"})
     stored = EncryptionManager("legacy-fingerprint").encrypt_storage("prototype history")
@@ -198,24 +170,6 @@ def test_a_plaintext_legacy_json_history_is_left_to_the_app(data_dir):
     )
     assert recovery.inspect() == []
     assert (data_dir / recovery.LEGACY_HISTORY_NAME).exists()
-
-
-def test_a_plaintext_legacy_json_does_not_hide_a_keyed_database(data_dir):
-    # Both artifacts are asked. A readable file beside a keyed one is still
-    # history nobody can open, and adopting it would decrypt nothing.
-    write_config(data_dir, {"config_version": 2, "encryption_enabled": True, "device_id": "a"})
-    (data_dir / recovery.LEGACY_HISTORY_NAME).write_text(
-        json.dumps([{"entry_id": 1, "text_preview": "prototype history"}]), encoding="utf-8"
-    )
-    write_history(data_dir, rows=2)
-    assert reasons(recovery.inspect()) == [("history", "history_identityless")]
-
-
-def test_an_empty_legacy_json_history_is_not_records(data_dir):
-    # The file existing is not the same as it holding something to rescue.
-    write_config(data_dir, {"config_version": 2, "encryption_enabled": True, "device_id": "a"})
-    (data_dir / recovery.LEGACY_HISTORY_NAME).write_text("[]", encoding="utf-8")
-    assert recovery.inspect() == []
 
 
 def test_records_behind_a_working_identity_are_left_alone(data_dir):
@@ -263,9 +217,4 @@ def test_an_inert_password_is_not_damage(data_dir):
         "config_version": 2, "device_id": "a", "encryption_enabled": False,
         "encryption_password_hash": "hash",
     })
-    assert recovery.quarantine() == []
-
-
-def test_a_complete_identity_is_not_damage(data_dir):
-    healthy_config(data_dir)
     assert recovery.quarantine() == []

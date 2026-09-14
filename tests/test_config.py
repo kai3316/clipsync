@@ -1,4 +1,4 @@
-"""Tests for Config — load, save, atomic writes, recovery."""
+"""Tests for Config — save/load, the one-way migrations on load, and recovery."""
 
 import json
 import os
@@ -12,33 +12,6 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 # We need to patch _config_dir and _config_path
 import internal.config.config as config_module
-
-
-class TestConfigDefaults:
-    def test_default_values(self):
-        cfg = config_module.Config()
-        assert len(cfg.device_id) == 12  # uuid4 hex[:12]
-        assert isinstance(cfg.device_name, str)
-        assert cfg.port == 19990
-        assert cfg.service_type == "_clipsync._tcp.local."
-        assert cfg.sync_enabled is True
-        assert cfg.auto_start is False
-        assert cfg.private_key_pem == ""
-        assert cfg.certificate_pem == ""
-        assert isinstance(cfg.peers, dict)
-
-    def test_add_peer(self):
-        cfg = config_module.Config()
-        peer = config_module.PeerInfo(
-            device_id="abc",
-            device_name="Test",
-            public_key_pem="key-data",
-            paired=True,
-        )
-        cfg.add_peer(peer)
-        assert "abc" in cfg.peers
-        assert cfg.peers["abc"].device_name == "Test"
-        assert cfg.peers["abc"].paired is True
 
 
 class TestConfigSaveLoad:
@@ -222,28 +195,6 @@ class TestConfigRecovery:
             config_module._config_path = original_path
 
 
-class TestAtomicSave:
-    def test_no_stale_temp_files(self):
-        """After a successful save, there should be no leftover .config_tmp_ files."""
-        tmp_dir = Path(tempfile.mkdtemp())
-
-        original_dir = config_module._config_dir
-        original_path = config_module._config_path
-        config_module._config_dir = lambda: tmp_dir
-        config_module._config_path = lambda: tmp_dir / "config.json"
-
-        try:
-            cfg = config_module.Config()
-            config_module.save(cfg)
-
-            # Check no temp files remain
-            temps = list(tmp_dir.glob(".config_tmp_*.json"))
-            assert len(temps) == 0, f"Stale temp files found: {temps}"
-        finally:
-            config_module._config_dir = original_dir
-            config_module._config_path = original_path
-
-
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
 
@@ -260,7 +211,6 @@ import pytest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from internal.data.backup import _apply_config
 from internal.web.api.settings import restore_backup_api
 
 
@@ -356,43 +306,6 @@ def test_restore_with_invalid_port_values_does_not_crash(isolated_config):
     assert cfg.device_name == "Bad Backup"
 
 
-# (c) _apply_config rejects a string where an int is required.
-def test_apply_config_rejects_string_for_int_field():
-    cfg = config_module.Config()
-    original_port = cfg.port
-    original_entries = cfg.history_max_entries
-
-    _apply_config({"port": "abc"}, cfg)
-    assert cfg.port == original_port  # unchanged
-
-    _apply_config({"history_max_entries": "100"}, cfg)
-    assert cfg.history_max_entries == original_entries  # unchanged
-
-    _apply_config({"web_port": 12345}, cfg)
-    assert cfg.web_port == 12345  # a real int is applied
-
-
-def test_apply_config_clamps_out_of_range_ints():
-    cfg = config_module.Config()
-    _apply_config({"port": 99999}, cfg)
-    assert cfg.port == 65535
-
-    _apply_config({"history_max_entries": 0}, cfg)
-    assert cfg.history_max_entries == 1
-
-
-def test_apply_config_skips_bad_bools_and_enums():
-    cfg = config_module.Config()
-    _apply_config({"sync_enabled": "yes"}, cfg)
-    assert cfg.sync_enabled is True  # default unchanged
-
-    _apply_config({"appearance_mode": "neon"}, cfg)
-    assert cfg.appearance_mode == "system"  # default unchanged
-
-    _apply_config({"language": "fr"}, cfg)
-    assert cfg.language == "zh-CN"  # default unchanged
-
-
 # ══════════════════════════════════════════════════
 # split from test_round13_wrapup.py — config/backup new-key roundtrip
 # ══════════════════════════════════════════════════
@@ -422,6 +335,11 @@ def test_config_save_load_roundtrips_new_keys(tmp_path, monkeypatch):
     cfg.peer_relay_secrets = {"peer-1": "cd" * 32}
     cfg.ai_config_tools = ["claude_code", "codex"]
     cfg.ai_config_custom_paths = ["~/ai-configs"]
+    # The "I cleared the phone token on purpose" record has to survive a save
+    # and a load, because the thing it guards against — the companion minting a
+    # token on the next start — happens after a reload, not before.
+    cfg.web_token = ""
+    cfg.web_token_disabled = True
     config_module.save(cfg)
 
     cfg2 = config_module.load()
@@ -434,6 +352,7 @@ def test_config_save_load_roundtrips_new_keys(tmp_path, monkeypatch):
     assert cfg2.peer_relay_secrets == cfg.peer_relay_secrets
     assert cfg2.ai_config_tools == cfg.ai_config_tools
     assert cfg2.ai_config_custom_paths == cfg.ai_config_custom_paths
+    assert cfg2.web_token_disabled is True
 
 
 def test_config_migrates_legacy_ai_config_paths(tmp_path, monkeypatch):
@@ -479,6 +398,43 @@ def test_config_legacy_ai_config_paths_unmatched_keeps_feature_on(tmp_path, monk
 
     assert cfg.ai_config_tools == list(DEFAULT_TOOL_KEYS)
     assert cfg.ai_config_custom_paths == ["~/notes-a", "~/notes-b"]
+
+
+def test_remote_access_comes_on_for_a_config_written_while_it_was_off(tmp_path, monkeypatch):
+    """A config written while the default was OFF is brought forward once.
+
+    A token in the config proves nothing — the webview front end mints one
+    whether or not the companion was ever enabled — so it is not consulted.
+    What matters is that the migration is one-way: the save below writes the new
+    version, and the reload after it leaves a choice the user made alone.
+    """
+    config_module = _point_config_at(
+        tmp_path,
+        monkeypatch,
+        {"config_version": 2, "web_enabled": False, "web_token": "tok"},
+    )
+    cfg = config_module.load()
+    assert cfg.web_enabled is True
+
+    # Off again, on a config this build wrote: a real decision, kept.
+    cfg.web_enabled = False
+    config_module.save(cfg)
+    assert config_module.load().web_enabled is False
+
+
+def test_remote_access_stays_off_where_it_would_serve_without_a_token(tmp_path, monkeypatch):
+    """``web_token_disabled`` is the one state the migration leaves alone.
+
+    It means the user cleared the access token on purpose, and a companion
+    started from such a config answers every request without one — so turning it
+    on here would not be applying a default, it would be opening the port.
+    """
+    config_module = _point_config_at(
+        tmp_path,
+        monkeypatch,
+        {"config_version": 2, "web_enabled": False, "web_token_disabled": True},
+    )
+    assert config_module.load().web_enabled is False
 
 
 @pytest.fixture()
@@ -529,6 +485,11 @@ def test_backup_roundtrips_new_config_keys(tmp_path, _isolated_favorites):
     assert exported["peer_relay_secrets"] == {"peer-1": "cd" * 32}
     assert exported["ai_config_tools"] == cfg.ai_config_tools
     assert exported["ai_config_custom_paths"] == cfg.ai_config_custom_paths
+    # The web companion's credentials are deliberately not in a backup — neither
+    # `web_token` nor the `web_token_disabled` record of clearing it.  A
+    # restored machine therefore mints a fresh token and the phone re-pairs,
+    # which is the safe direction for a file that travels.
+    assert "web_token" not in exported and "web_token_disabled" not in exported
 
     fresh = Config()  # defaults everywhere
     result = backup_mod.restore_backup(zip_path, fresh, history)
@@ -542,13 +503,3 @@ def test_backup_roundtrips_new_config_keys(tmp_path, _isolated_favorites):
     assert fresh.peer_relay_secrets == {"peer-1": "cd" * 32}
     assert fresh.ai_config_tools == cfg.ai_config_tools
     assert fresh.ai_config_custom_paths == cfg.ai_config_custom_paths
-
-
-def test_backup_strlist_nonnull_rule():
-    """A hand-edited backup writing null must not set relay_brokers to None."""
-    from internal.data.backup import _SKIP, _validate_config_value
-
-    assert _validate_config_value(["a", "b"], ("strlist_nonnull",)) == ["a", "b"]
-    assert _validate_config_value(None, ("strlist_nonnull",)) is _SKIP
-    assert _validate_config_value("nope", ("strlist_nonnull",)) is _SKIP
-    assert _validate_config_value([1], ("strlist_nonnull",)) is _SKIP

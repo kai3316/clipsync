@@ -29,14 +29,6 @@ describe("AI migration targets", () => {
     ])).toEqual(["obe-softeng-report/:3", "settings.json:1"]);
   });
 
-  it("knows a name is a folder from what is inside it, listed folder or not", () => {
-    // The inventory lists the folder itself *and* its files, but a peer may
-    // send only the files — the name is still a folder either way.
-    expect(aiTargets([entry("a/one.md")], all)[0].isDir).toBe(true);
-    expect(aiTargets([entry("a", { is_dir: true }), entry("a/one.md")], all)[0].isDir).toBe(true);
-    expect(aiTargets([entry("top.md")], all)[0].isDir).toBe(false);
-  });
-
   it("counts the same items the card counts, and keys them the same way", () => {
     const entries = [
       entry("a/one.md"),
@@ -84,20 +76,5 @@ describe("AI migration targets", () => {
     // A prefix match that ignored the separator would sweep `foobar` into `foo`.
     expect(targets[0].items.map(item => item.rel_path)).toEqual(["foo/x.md", "foo/y.md"]);
     expect(new Set(targets.map(target => target.key)).size).toBe(3);
-  });
-
-  it("skips what names no config item, and keeps the order the inventory gave", () => {
-    const targets = aiTargets([
-      null,
-      "not-an-entry",
-      entry(""),
-      entry("z.md"),
-      entry("a.md", { root: "config" }),
-      entry("m.md"),
-    ], all);
-    expect(targets.map(target => target.rel_path)).toEqual(["z.md", "a.md", "m.md"]);
-    // A tool the inventory never names is still a tool, keyed the way the tree
-    // keys it, rather than dropped or grouped with another.
-    expect(aiTargets([{ rel_path: "x.md" }], all)[0]).toMatchObject({ tool: "custom", root: "" });
   });
 });

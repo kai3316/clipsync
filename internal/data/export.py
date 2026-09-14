@@ -396,6 +396,10 @@ _CONTENT_LABELS: dict[str, str] = {
     "IMAGE": "Image",
     "IMAGE_EMF": "Vector image",
     "FILE": "File",
+    # A file this machine does not have, only an offer of one.  The fallback
+    # below would print the wire label FILE_REMOTE at a reader of a Markdown
+    # report, which is a name and not a kind.
+    "FILE_REMOTE": "File on another device",
     "URL": "Link",
 }
 

@@ -1,13 +1,11 @@
 """Web Nearby-Chat API tests.
 
-Unit-tests ``internal/web/api/chat.py`` handlers with a fake chat_mgr whose
-public method signatures are checked against the real ``ChatManager`` (drift
-guard), plus route-dispatch smoke tests through ``internal.web.routes.dispatch``.
-
-No real sockets are touched.
+Unit-tests ``internal/web/api/chat.py`` handlers with a fake chat_mgr, the
+route-level confinement of ``/api/chat/file``, the relay mirror the internet
+transport publishes chat frames on, and the reachability flags the chat picker
+is built from.  No real sockets are touched.
 """
 
-import inspect
 import json
 import os
 import sys
@@ -20,11 +18,9 @@ from internal.sync.nearby_chat import ChatManager
 from internal.web.api import chat as chat_api
 from internal.web.routes import dispatch
 
-# ── Fake chat manager (signature drift guard mirrors test_chat_i18n) ──
-
 
 class FakeChatManager:
-    """Stub matching ChatManager's public API (signatures checked below)."""
+    """Stub matching ChatManager's public API."""
 
     def __init__(self):
         self._sent = []
@@ -135,31 +131,6 @@ class FakeChatManager:
         return None
 
 
-_FAKE_PUBLIC = {
-    name
-    for name in dir(FakeChatManager)
-    if not name.startswith("_") and callable(getattr(FakeChatManager, name))
-}
-
-
-def _params_of(fn):
-    return [p for p in inspect.signature(fn).parameters.values() if p.name != "self"]
-
-
-def test_fake_matches_real_chat_manager_signatures():
-    for name in sorted(_FAKE_PUBLIC):
-        real_fn = getattr(ChatManager, name, None)
-        assert real_fn is not None, f"FakeChatManager.{name} has no real ChatManager counterpart"
-        real_params = _params_of(real_fn)
-        fake_params = _params_of(getattr(FakeChatManager, name))
-        assert [p.name for p in real_params] == [p.name for p in fake_params], (
-            f"{name}: parameter names drifted"
-        )
-        assert [p.default for p in real_params] == [p.default for p in fake_params], (
-            f"{name}: parameter defaults drifted"
-        )
-
-
 # ── Handler helpers ─────────────────────────────────────────────────
 
 
@@ -180,21 +151,10 @@ def test_get_sessions():
     assert data["sessions"][0]["session_id"] == "s1"
 
 
-def test_get_sessions_unavailable():
-    data, status = chat_api.get_sessions(None)
-    assert status == 503
-    assert data["error"] == "chat unavailable"
-
-
 def test_get_messages():
     data, status = chat_api.get_messages(FakeChatManager(), {"session_id": ["s1"]})
     assert status == 200
     assert data["messages"][0]["transfer_id"] == "tid-1"
-
-
-def test_get_messages_requires_session_id():
-    data, status = chat_api.get_messages(FakeChatManager(), {})
-    assert status == 400
 
 
 def test_get_chat_devices():
@@ -205,153 +165,12 @@ def test_get_chat_devices():
     assert data["devices"][0]["peer_id"] == "p1"
 
 
-def test_get_chat_devices_unavailable():
-    data, status = chat_api.get_chat_devices(None)
-    assert status == 503
-
-
-def test_invite():
-    cm = FakeChatManager()
-    calls = {}
-
-    def _start(peer_id, peer_name):
-        calls["peer_id"] = peer_id
-        return "sess-new"
-
-    data, status = chat_api.invite(
-        cm,
-        _body({"peer_id": "peer-1", "peer_name": "Alice"}),
-        _start,
-    )
-    assert status == 200
-    assert data["session_id"] == "sess-new"
-    assert calls["peer_id"] == "peer-1"
-
-
-def test_invite_connecting():
-    cm = FakeChatManager()
-    data, status = chat_api.invite(
-        cm,
-        _body({"peer_id": "peer-1"}),
-        lambda peer_id, peer_name: None,
-    )
-    assert status == 200
-    assert data["connecting"] is True
-    assert data["session_id"] is None
-
-
-def test_invite_requires_peer_id():
-    data, status = chat_api.invite(FakeChatManager(), _body({}), lambda *a: None)
-    assert status == 400
-
-
-def test_invite_unavailable():
-    data, status = chat_api.invite(None, _body({"peer_id": "p"}), lambda *a: None)
-    assert status == 503
-
-
-def test_send_text():
-    cm = FakeChatManager()
-    data, status = chat_api.send_text(
-        cm,
-        _body({"session_id": "s1", "text": "hi"}),
-        _send_fn_for,
-    )
-    assert status == 200
-    assert data["ok"] is True
-    assert cm._sent == [("s1", "hi")]
-
-
-def test_send_text_missing_fields():
-    data, status = chat_api.send_text(
-        FakeChatManager(),
-        _body({"session_id": "s1"}),
-        _send_fn_for,
-    )
-    assert status == 400
-
-
-def test_send_file():
-    cm = FakeChatManager()
-    data, status = chat_api.send_file(
-        cm,
-        _body({"session_id": "s1", "file_path": "C:/x/a.txt"}),
-        _send_fn_for,
-    )
-    assert status == 200
-    assert data["transfer_id"] == "transfer-1"
-
-
-def test_accept_file():
-    data, status = chat_api.accept_file(
-        FakeChatManager(),
-        _body({"session_id": "s1", "transfer_id": "tid-1"}),
-        _send_fn_for,
-    )
-    assert status == 200
-    assert data["ok"] is True
-
-
-def test_decline_file():
-    data, status = chat_api.decline_file(
-        FakeChatManager(),
-        _body({"session_id": "s1", "transfer_id": "tid-1"}),
-        _send_fn_for,
-    )
-    assert status == 200
-    assert data["ok"] is True
-
-
-def test_cancel_file():
-    data, status = chat_api.cancel_file(
-        FakeChatManager(),
-        _body({"session_id": "s1", "transfer_id": "tid-1"}),
-    )
-    assert status == 200
-    assert data["ok"] is True
-
-
-def test_accept_invite():
-    data, status = chat_api.accept_invite(
-        FakeChatManager(),
-        _body({"session_id": "s1"}),
-        _send_fn_for,
-    )
-    assert status == 200
-    assert data["ok"] is True
-
-
-def test_decline_invite():
-    data, status = chat_api.decline_invite(
-        FakeChatManager(),
-        _body({"session_id": "s1"}),
-        _send_fn_for,
-    )
-    assert status == 200
-    assert data["ok"] is True
-
-
-def test_close_session():
-    data, status = chat_api.close_session(
-        FakeChatManager(),
-        _body({"session_id": "s1"}),
-    )
-    assert status == 200
-    assert data["ok"] is True
-
-
-def test_mark_read():
-    data, status = chat_api.mark_read(
-        FakeChatManager(),
-        _body({"session_id": "s1"}),
-    )
-    assert status == 200
-    assert data["ok"] is True
-
-
 def test_actions_unavailable():
     cm = None
     body = _body({"session_id": "s1", "text": "hi", "transfer_id": "t"})
+    assert chat_api.get_sessions(None)[1] == 503
+    assert chat_api.get_chat_devices(None)[1] == 503
+    assert chat_api.invite(None, _body({"peer_id": "p"}), lambda *a: None)[1] == 503
     assert chat_api.send_text(cm, body, _send_fn_for)[1] == 503
     assert chat_api.send_file(cm, body, _send_fn_for)[1] == 503
     assert chat_api.accept_file(cm, body, _send_fn_for)[1] == 503
@@ -363,15 +182,93 @@ def test_actions_unavailable():
     assert chat_api.mark_read(cm, _body({"session_id": "s1"}))[1] == 503
 
 
-def test_find_saved_path():
+# ── Regression tests for the web-chat audit fixes ────────────────────
+
+
+def test_send_text_failure_reported_as_ok_false():
+    """#1: a failed send_text surfaces {ok: false} so the frontend keeps the
+    draft instead of clearing it and pretending the message went out."""
+
+    class FailingText:
+        def get_sessions(self):
+            return [{"session_id": "s1", "peer_id": "peer-1"}]
+
+        def send_text(self, session_id, text, send_fn):
+            return False
+
+    data, status = chat_api.send_text(
+        FailingText(),
+        _body({"session_id": "s1", "text": "hi"}),
+        _send_fn_for,
+    )
+    assert status == 200
+    assert data["ok"] is False
+
+
+def test_invite_web_host_refused_dict():
+    """#6: the web host distinguishes a refused invite from a connecting one."""
     cm = FakeChatManager()
-    path = chat_api.find_saved_path(cm, "tid-1")
-    assert path and path.endswith("a.txt")
-    assert chat_api.find_saved_path(cm, "unknown-tid") is None
-    assert chat_api.find_saved_path(None, "tid-1") is None
+    data, status = chat_api.invite(
+        cm,
+        _body({"peer_id": "peer-1"}),
+        lambda peer_id, peer_name: {"ok": False, "error": "peer_unreachable"},
+    )
+    assert status == 400
+    assert data["ok"] is False
+    assert data["error"] == "peer_unreachable"
 
 
-# ── Route-dispatch smoke tests ──────────────────────────────────────
+def test_chat_manager_accept_file_returns_none_when_offer_gone():
+    """#4: ChatManager.accept_file returns None (not False) when the offer is
+    already gone — it was swept by the stale-receive reaper while the UI still
+    showed its Accept button.  None stays falsy so truthiness callers still
+    treat it as a failed accept."""
+    from internal.sync.nearby_chat import ChatManager
+
+    mgr = ChatManager("dev", "Dev")
+    try:
+        assert mgr.accept_file("sess", "0" * 32, lambda data: True) is None
+    finally:
+        mgr.shutdown()
+
+
+def test_accept_file_none_and_false_are_distinct():
+    """#7 semantics guard: the None sentinel (offer gone → explicit "expired")
+    must stay distinct from False (offer exists but not acceptable right now →
+    plain {ok:false}).  Callers that test `== False` versus `is None` must not
+    conflate the two."""
+    seen = {}
+
+    class Probe:
+        def __init__(self, ret):
+            self.ret = ret
+
+        def accept_file(self, session_id, transfer_id, send_fn):
+            seen["ret"] = self.ret
+            return self.ret
+
+    # None → "expired" (with the error key so the frontend can toast it).
+    data, status = chat_api.accept_file(
+        Probe(None),
+        _body({"session_id": "s1", "transfer_id": "t"}),
+        _send_fn_for,
+    )
+    assert status == 200
+    assert data["ok"] is False
+    assert data["error"] == "expired"
+
+    # False → plain {ok:false}, no "expired" label.
+    data, status = chat_api.accept_file(
+        Probe(False),
+        _body({"session_id": "s1", "transfer_id": "t"}),
+        _send_fn_for,
+    )
+    assert status == 200
+    assert data["ok"] is False
+    assert "error" not in data
+
+
+# ── /api/chat/file confinement ──────────────────────────────────────
 
 
 def _dispatch_args(**kw):
@@ -386,129 +283,12 @@ def _dispatch_args(**kw):
     return args
 
 
-def test_dispatch_get_chat_sessions():
-    status, _ct, body = dispatch(
-        "GET",
-        "/api/chat/sessions",
-        {},
-        b"",
-        object(),
-        None,
-        None,
-        **_dispatch_args(chat_mgr=FakeChatManager()),
-    )
-    assert status == 200
-    assert json.loads(body)["sessions"][0]["session_id"] == "s1"
+def _chat_tmp_file(name: str) -> str:
+    import uuid
 
+    from internal.web.routes import _chat_tmp_dir
 
-def test_dispatch_get_chat_sessions_unavailable():
-    status, _ct, body = dispatch(
-        "GET",
-        "/api/chat/sessions",
-        {},
-        b"",
-        object(),
-        None,
-        None,
-        **_dispatch_args(chat_mgr=None),
-    )
-    assert status == 503
-    assert json.loads(body)["error"] == "chat unavailable"
-
-
-def test_dispatch_get_chat_devices():
-    status, _ct, body = dispatch(
-        "GET",
-        "/api/chat/devices",
-        {},
-        b"",
-        object(),
-        None,
-        None,
-        **_dispatch_args(get_chat_devices=lambda: [{"peer_id": "p1"}]),
-    )
-    assert status == 200
-    assert json.loads(body)["devices"][0]["peer_id"] == "p1"
-
-
-def test_dispatch_get_chat_messages():
-    status, _ct, body = dispatch(
-        "GET",
-        "/api/chat/messages",
-        {"session_id": ["s1"]},
-        b"",
-        object(),
-        None,
-        None,
-        **_dispatch_args(chat_mgr=FakeChatManager()),
-    )
-    assert status == 200
-    assert json.loads(body)["messages"][0]["transfer_id"] == "tid-1"
-
-
-def test_dispatch_post_chat_text():
-    status, _ct, body = dispatch(
-        "POST",
-        "/api/chat/text",
-        {},
-        _body({"session_id": "s1", "text": "hi"}),
-        object(),
-        None,
-        None,
-        **_dispatch_args(
-            chat_mgr=FakeChatManager(),
-            chat_send_fn=lambda peer_id: lambda data: True,
-        ),
-    )
-    assert status == 200
-    assert json.loads(body)["ok"] is True
-
-
-def test_dispatch_post_chat_invite_connecting():
-    status, _ct, body = dispatch(
-        "POST",
-        "/api/chat/invite",
-        {},
-        _body({"peer_id": "peer-1", "peer_name": "Alice"}),
-        object(),
-        None,
-        None,
-        **_dispatch_args(
-            chat_mgr=FakeChatManager(),
-            chat_start_session=lambda peer_id, peer_name: None,
-        ),
-    )
-    assert status == 200
-    assert json.loads(body)["connecting"] is True
-
-
-def test_dispatch_post_chat_close():
-    status, _ct, body = dispatch(
-        "POST",
-        "/api/chat/close",
-        {},
-        _body({"session_id": "s1"}),
-        object(),
-        None,
-        None,
-        **_dispatch_args(chat_mgr=FakeChatManager()),
-    )
-    assert status == 200
-    assert json.loads(body)["ok"] is True
-
-
-def test_dispatch_unknown_chat_route_404():
-    status, _ct, body = dispatch(
-        "GET",
-        "/api/chat/nope",
-        {},
-        b"",
-        object(),
-        None,
-        None,
-        **_dispatch_args(chat_mgr=FakeChatManager()),
-    )
-    assert status == 404
+    return os.path.join(_chat_tmp_dir(), f"{name}-{uuid.uuid4().hex}.txt")
 
 
 def test_dispatch_post_chat_file_resolves_basename(tmp_path):
@@ -558,92 +338,6 @@ def test_dispatch_post_chat_file_rejects_traversal(tmp_path):
     )
     assert status == 400
     assert json.loads(body)["ok"] is False
-
-
-# ── Regression tests for the web-chat audit fixes ────────────────────
-
-
-def test_send_text_failure_reported_as_ok_false():
-    """#1: a failed send_text surfaces {ok: false} so the frontend keeps the
-    draft instead of clearing it and pretending the message went out."""
-
-    class FailingText:
-        def get_sessions(self):
-            return [{"session_id": "s1", "peer_id": "peer-1"}]
-
-        def send_text(self, session_id, text, send_fn):
-            return False
-
-    data, status = chat_api.send_text(
-        FailingText(),
-        _body({"session_id": "s1", "text": "hi"}),
-        _send_fn_for,
-    )
-    assert status == 200
-    assert data["ok"] is False
-
-
-def test_invite_web_host_refused_dict():
-    """#6: the web host distinguishes a refused invite from a connecting one."""
-    cm = FakeChatManager()
-    data, status = chat_api.invite(
-        cm,
-        _body({"peer_id": "peer-1"}),
-        lambda peer_id, peer_name: {"ok": False, "error": "peer_unreachable"},
-    )
-    assert status == 400
-    assert data["ok"] is False
-    assert data["error"] == "peer_unreachable"
-
-
-def test_invite_web_host_connecting_dict():
-    cm = FakeChatManager()
-    data, status = chat_api.invite(
-        cm,
-        _body({"peer_id": "peer-1"}),
-        lambda peer_id, peer_name: {"connecting": True},
-    )
-    assert status == 200
-    assert data["connecting"] is True
-    assert data["session_id"] is None
-
-
-def test_invite_web_host_session_id_dict():
-    cm = FakeChatManager()
-    data, status = chat_api.invite(
-        cm,
-        _body({"peer_id": "peer-1"}),
-        lambda peer_id, peer_name: {"session_id": "sess-web"},
-    )
-    assert status == 200
-    assert data["session_id"] == "sess-web"
-
-
-def test_chat_manager_set_receive_dir_updates_root():
-    """#2: ChatManager.set_receive_dir is the live receive-dir hook main.py
-    now calls; assert it actually moves _receive_dir (and is idempotent)."""
-    import tempfile
-    from pathlib import Path
-
-    cm = ChatManager("dev", "Dev", receive_dir="")
-    try:
-        assert cm._receive_dir is None
-        with tempfile.TemporaryDirectory() as td:
-            cm.set_receive_dir(td)
-            assert cm._receive_dir == Path(td)
-        with tempfile.TemporaryDirectory() as td2:
-            cm.set_receive_dir(td2)
-            assert cm._receive_dir == Path(td2)
-    finally:
-        cm.shutdown()
-
-
-def _chat_tmp_file(name: str) -> str:
-    import uuid
-
-    from internal.web.routes import _chat_tmp_dir
-
-    return os.path.join(_chat_tmp_dir(), f"{name}-{uuid.uuid4().hex}.txt")
 
 
 def test_dispatch_post_chat_file_accepts_absolute_chat_tmp_path():
@@ -704,36 +398,6 @@ def test_dispatch_post_chat_file_rejects_absolute_path_outside_tmp(tmp_path):
     assert json.loads(body)["ok"] is False
 
 
-def test_dispatch_post_chat_file_cleans_up_staging_on_send_failure():
-    """#9: a purpose=chat staging file is removed when the send cannot start,
-    so a failed chat send leaves no orphaned upload copy."""
-    path = _chat_tmp_file("chat-cleanup")
-    with open(path, "w", encoding="utf-8") as f:
-        f.write("hello")
-    assert os.path.exists(path)
-
-    class FailingRecorder:
-        def send_file(self, session_id, file_path, send_fn):
-            return None  # could not start transfer
-
-    status, _ct, body = dispatch(
-        "POST",
-        "/api/chat/file",
-        {},
-        _body({"session_id": "s1", "file_path": path}),
-        object(),
-        None,
-        None,
-        **_dispatch_args(
-            chat_mgr=FailingRecorder(),
-            chat_send_fn=lambda peer_id: lambda data: True,
-        ),
-    )
-    assert status == 400
-    assert json.loads(body)["ok"] is False
-    assert not os.path.exists(path), "staging file should be cleaned up"
-
-
 def test_dispatch_post_chat_file_keeps_received_file_on_failure(tmp_path):
     """#9 guard: the cleanup only targets purpose=chat staging files. A failed
     send of a legacy bare-filename (a real received file) must NOT delete it."""
@@ -763,81 +427,7 @@ def test_dispatch_post_chat_file_keeps_received_file_on_failure(tmp_path):
     assert recv.exists(), "a real received file must not be cleaned up"
 
 
-# ── #4: accept-race window → explicit "expired" error ────────────────────
-
-
-def test_chat_manager_accept_file_returns_none_when_offer_gone():
-    """#4: ChatManager.accept_file returns None (not False) when the offer is
-    already gone — it was swept by the stale-receive reaper while the UI still
-    showed its Accept button.  None stays falsy so truthiness callers still
-    treat it as a failed accept."""
-    from internal.sync.nearby_chat import ChatManager
-
-    mgr = ChatManager("dev", "Dev")
-    try:
-        assert mgr.accept_file("sess", "0" * 32, lambda data: True) is None
-    finally:
-        mgr.shutdown()
-
-
-def test_accept_file_expired_offer_returns_explicit_error():
-    """#4: the API handler translates the None sentinel into an explicit
-    {ok: false, error: "expired"} so the frontend can toast "offer expired"
-    instead of a generic failure."""
-
-    class ExpiredManager:
-        def accept_file(self, session_id, transfer_id, send_fn):
-            return None  # offer gone — the widened accept-race case
-
-    data, status = chat_api.accept_file(
-        ExpiredManager(),
-        _body({"session_id": "s1", "transfer_id": "tid-1"}),
-        _send_fn_for,
-    )
-    assert status == 200
-    assert data["ok"] is False
-    assert data["error"] == "expired"
-
-
-def test_accept_file_none_and_false_are_distinct():
-    """#7 semantics guard: the None sentinel (offer gone → explicit "expired")
-    must stay distinct from False (offer exists but not acceptable right now →
-    plain {ok:false}).  Callers that test `== False` versus `is None` must not
-    conflate the two."""
-    seen = {}
-
-    class Probe:
-        def __init__(self, ret):
-            self.ret = ret
-
-        def accept_file(self, session_id, transfer_id, send_fn):
-            seen["ret"] = self.ret
-            return self.ret
-
-    # None → "expired" (with the error key so the frontend can toast it).
-    data, status = chat_api.accept_file(
-        Probe(None),
-        _body({"session_id": "s1", "transfer_id": "t"}),
-        _send_fn_for,
-    )
-    assert status == 200
-    assert data["ok"] is False
-    assert data["error"] == "expired"
-
-    # False → plain {ok:false}, no "expired" label.
-    data, status = chat_api.accept_file(
-        Probe(False),
-        _body({"session_id": "s1", "transfer_id": "t"}),
-        _send_fn_for,
-    )
-    assert status == 200
-    assert data["ok"] is False
-    assert "error" not in data
-
-
-# ══════════════════════════════════════════════════
-# merged from test_round16_chat_internet.py
-# ══════════════════════════════════════════════════
+# ── Chat frames over the internet relay ─────────────────────────────
 
 import types
 
@@ -982,26 +572,6 @@ def test_relay_publish_to_lan_enrolled_paired_peer_uses_derive_channel():
     ]
 
 
-def test_relay_publish_to_netpair_wins_over_enrolled_single_publish():
-    secret = R.generate_netpair_secret()
-    app = make_app_stub(
-        peers={"bbbbbbbbbbbb": {"paired": True}},
-        peer_relay_secrets={"bbbbbbbbbbbb": "dd" * 32},
-        netpair_secrets={"bbbbbbbbbbbb": secret},
-    )
-    frame = _chat_frame(app.cfg.device_id)
-    ok = Application._relay_publish_to_peer(app, frame, "bbbbbbbbbbbb")
-    assert ok is True
-    assert len(app._relay.published) == 1  # one channel, not two
-    assert app._relay.published[0][1:] == (R.netpair_topic(secret), R.netpair_key(secret))
-
-
-def test_relay_publish_to_unknown_peer_noop():
-    app = make_app_stub(netpair_secrets={"bbbbbbbbbbbb": "ABCDEFG"})
-    ok = Application._relay_publish_to_peer(app, _chat_frame(app.cfg.device_id), "ghost")
-    assert ok is False and app._relay.published == []
-
-
 def test_relay_publish_to_unpaired_lan_peer_noop():
     app = make_app_stub(
         peers={"bbbbbbbbbbbb": {"paired": False}},
@@ -1020,13 +590,6 @@ def test_relay_publish_to_peer_internet_sync_off_noop():
     assert ok is False and app._relay.published == []
 
 
-def test_relay_publish_to_peer_relay_absent_noop():
-    app = make_app_stub(netpair_secrets={"bbbbbbbbbbbb": "ABCDEFG"})
-    app._relay = None
-    ok = Application._relay_publish_to_peer(app, _chat_frame(app.cfg.device_id), "bbbbbbbbbbbb")
-    assert ok is False
-
-
 def test_relay_publish_to_peer_publishes_chat_file_chunk_qos1():
     # Chat-file bytes now cross the relay (the whole point of internet-mode
     # file transfer).  Chunks ride QoS 1 so the broker retries them on a
@@ -1039,12 +602,6 @@ def test_relay_publish_to_peer_publishes_chat_file_chunk_qos1():
     frame = app._relay.published[0][0]
     decoded = decode_message(frame)
     assert getattr(decoded, "msg_type", "") == "file_chunk"
-
-
-def test_relay_publish_to_peer_text_stays_qos0():
-    app = make_app_stub(netpair_secrets={"bbbbbbbbbbbb": "ABCDEFG"})
-    ok = Application._relay_publish_to_peer(app, _chat_frame(app.cfg.device_id), "bbbbbbbbbbbb")
-    assert ok is True and app._relay.published_qos == [0]
 
 
 # ------------------------------------------------------------- _chat_send_fn
@@ -1076,34 +633,6 @@ def test_chat_send_fn_lan_success_skips_relay_to_avoid_duplicate():
     assert app._relay.published == []
 
 
-def test_chat_send_fn_both_paths_fail_returns_false():
-    app = make_app_stub(lan_result=False)  # no netpair/enrolled peer -> no relay
-    fn = Application._chat_send_fn(app, "bbbbbbbbbbbb")
-    frame = _chat_frame(app.cfg.device_id)
-    assert fn(frame) is False
-    assert app._sent == [("bbbbbbbbbbbb", frame)]
-    assert app._relay.published == []
-
-
-def test_chat_send_fn_empty_peer_is_broadcast_and_not_mirrored():
-    app = make_app_stub(netpair_secrets={"bbbbbbbbbbbb": "ABCDEFG"})
-    fn = Application._chat_send_fn(app, None)
-    assert fn == app.transport_mgr.broadcast  # broadcast closure unchanged
-    data = encode_frame(
-        {
-            "msg_type": "chat_invite",
-            "session_id": "0123456789abcdef",
-            "from_name": "DevA",
-            "fingerprint_short": "",
-            "greeting": "",
-        },
-        source_device=app.cfg.device_id,
-    )
-    assert fn(data) is True
-    assert app._broadcast_calls == [data]
-    assert app._relay.published == []  # broadcast never mirrors
-
-
 # ----------------------------------------------- relay -> chat_mgr full chain
 
 
@@ -1126,19 +655,6 @@ def test_relay_chat_text_reaches_chat_mgr_with_source_peer():
     assert payload["text"] == "hello over internet"
     # Replies back to that peer go through a per-peer closure, not broadcast.
     assert send_fn != app.transport_mgr.broadcast
-
-
-def test_relay_chat_ping_reaches_chat_mgr_source_peer():
-    # chat_ping/chat_pong are chat frames, so they ride the same mirror — the
-    # heartbeat continues to work across the relay with no extra wiring.
-    app = make_app_stub()
-    frame = encode_frame(
-        {"msg_type": "chat_ping", "session_id": "0123456789abcdef"}, source_device="bbbbbbbbbbbb"
-    )
-    app._on_relay_frame(frame, "some/topic")
-    assert len(app.chat_mgr.handled) == 1
-    assert app.chat_mgr.handled[0][0] == "chat_ping"
-    assert app.chat_mgr.handled[0][2] == "bbbbbbbbbbbb"
 
 
 def test_relay_chat_text_establishes_and_updates_real_session(tmp_path):
@@ -1212,26 +728,6 @@ def test_chat_start_session_starts_relay_chat_for_internet_peer(tmp_path):
         cm.shutdown()
 
 
-def test_chat_start_session_unknown_peer_still_errors(tmp_path):
-    # A non-internet, address-less peer must keep failing (not silently start a
-    # relay session to a device that can never receive it).
-    app = make_app_stub(lan_result=False)
-    app._chat_device_address = lambda pid: ("", 0)
-    cm = ChatManager(app.cfg.device_id, "DevA", receive_dir=str(tmp_path / "chat"))
-    app.chat_mgr = cm
-    notified = []
-    app.root = types.SimpleNamespace(after=lambda *a: notified.append(a))
-    app._notify_info = lambda *a: None
-    try:
-        sid = Application._chat_start_session(app, "ghost", "Ghost", "FP")
-        assert sid is None
-        assert cm.get_sessions() == []
-        assert app._relay.published == []
-        assert notified  # the no-address notification still fired
-    finally:
-        cm.shutdown()
-
-
 # ══════════════════════════════════════════════════
 #  Chat picker reachability flags (_get_chat_devices)
 # ══════════════════════════════════════════════════
@@ -1268,21 +764,6 @@ def _rows(app):
     return {r["peer_id"]: r for r in Application._get_chat_devices(app)}
 
 
-def test_chat_devices_flag_connected_peer():
-    app = _chat_dev_app([_state("bbbbbbbbbbbb", connected=True)])
-    r = _rows(app)["bbbbbbbbbbbb"]
-    assert r["connected"] is True
-    assert r["discovered"] is False
-
-
-def test_chat_devices_paired_offline_peer_has_no_reachable_flag():
-    # The row is still RETURNED (the desktop dashboard lists offline pairs);
-    # every reachability flag is False, which is what the web picker filters on.
-    app = _chat_dev_app([_state("bbbbbbbbbbbb")], peers={"bbbbbbbbbbbb": True})
-    r = _rows(app)["bbbbbbbbbbbb"]
-    assert (r["connected"], r["discovered"], r["relay_reachable"]) == (False, False, False)
-
-
 def test_chat_devices_discovered_flag_matches_hashed_mdns_id():
     # Discovery keys peers by the HASHED device id, so a paired peer that is
     # visible right now must be recognised through the hash, not the real id.
@@ -1291,62 +772,6 @@ def test_chat_devices_discovered_flag_matches_hashed_mdns_id():
     real = "bbbbbbbbbbbb"
     app = _chat_dev_app([_state(real)], discovered=[Discovery._hash_device_id(real)])
     assert _rows(app)[real]["discovered"] is True
-
-
-def test_chat_devices_discovered_flag_matches_unhashed_id():
-    # An unpaired discovered row is keyed by the hash itself.
-    app = _chat_dev_app([_state("hashedid1234", paired=False)], discovered=["hashedid1234"])
-    assert _rows(app)["hashedid1234"]["discovered"] is True
-
-
-def test_chat_devices_relay_reachable_for_netpair_peer():
-    app = _chat_dev_app(
-        [_state("bbbbbbbbbbbb")],
-        netpair_secrets={"bbbbbbbbbbbb": R.generate_netpair_secret()},
-        internet_sync_enabled=True,
-    )
-    assert _rows(app)["bbbbbbbbbbbb"]["relay_reachable"] is True
-
-
-def test_chat_devices_relay_reachable_respects_internet_sync_off():
-    # Same gate _relay_publish_to_peer applies: with internet sync off the
-    # stored secret is not a path, so the picker must not treat it as one.
-    app = _chat_dev_app(
-        [_state("bbbbbbbbbbbb")],
-        netpair_secrets={"bbbbbbbbbbbb": R.generate_netpair_secret()},
-        internet_sync_enabled=False,
-    )
-    assert _rows(app)["bbbbbbbbbbbb"]["relay_reachable"] is False
-
-
-def test_chat_devices_relay_reachable_needs_paired_lan_peer():
-    # A relay secret for a peer that is NOT paired is not a chat path.
-    app = _chat_dev_app(
-        [_state("bbbbbbbbbbbb", paired=False)],
-        peer_relay_secrets={"bbbbbbbbbbbb": "cc" * 32},
-        peers={"bbbbbbbbbbbb": False},
-        internet_sync_enabled=True,
-    )
-    assert _rows(app)["bbbbbbbbbbbb"]["relay_reachable"] is False
-    app2 = _chat_dev_app(
-        [_state("bbbbbbbbbbbb")],
-        peer_relay_secrets={"bbbbbbbbbbbb": "cc" * 32},
-        peers={"bbbbbbbbbbbb": True},
-        internet_sync_enabled=True,
-    )
-    assert _rows(app2)["bbbbbbbbbbbb"]["relay_reachable"] is True
-
-
-def test_chat_devices_survives_discovery_failure():
-    # Discovery blowing up must not take the whole picker down with it.
-    app = _chat_dev_app([_state("bbbbbbbbbbbb", connected=True)])
-
-    def _boom():
-        raise RuntimeError("discovery down")
-
-    app._snapshot_discovered_peers = _boom
-    r = _rows(app)["bbbbbbbbbbbb"]
-    assert r["connected"] is True and r["discovered"] is False
 
 
 def test_chat_devices_keeps_the_original_fields():

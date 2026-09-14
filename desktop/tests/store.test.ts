@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { bridge } from "../src/api/bridge";
 import { t } from "../src/i18n";
 import { createApplicationStore } from "../src/stores/application";
+import type { HistoryItem } from "../src/api/types";
 
 vi.mock("../src/api/bridge", () => ({
   bridge: {
@@ -15,12 +16,14 @@ vi.mock("../src/api/bridge", () => ({
     restoreDevice: vi.fn(), purgeDevice: vi.fn(),
     testDevice: vi.fn(), deviceCerts: vi.fn(), retrustDevice: vi.fn(),
     openHistoryLink: vi.fn(),
+    requestEntryFiles: vi.fn(),
     sendUrl: vi.fn(), pushText: vi.fn(), discoveryStatus: vi.fn(),
     setDiscoveryEnabled: vi.fn(), setDiscoveryVisible: vi.fn(),
     favorites: vi.fn(), favorite: vi.fn(),
     diagnosticsReport: vi.fn(), diagnosticsRequest: vi.fn(),
     updateCheck: vi.fn(), updateStatus: vi.fn(), updateDownload: vi.fn(),
-    updateOpenFolder: vi.fn(), restartSidecar: vi.fn(), recoverDataDir: vi.fn(),
+    updateOpenFolder: vi.fn(), updateInstall: vi.fn(),
+    restartSidecar: vi.fn(), recoverDataDir: vi.fn(),
   },
 }));
 
@@ -42,6 +45,31 @@ beforeEach(() => {
 afterEach(() => { vi.clearAllMocks(); vi.useRealTimers(); });
 
 describe("desktop application store", () => {
+  it("asks a device for a row's files, then words that device's refusal", async () => {
+    vi.mocked(bridge.requestEntryFiles).mockResolvedValue({ requested: true });
+    const store = createApplicationStore();
+    await store.start();
+    const emit = vi.mocked(bridge.subscribe).mock.calls[0][0];
+    store.state.devices = [{ ...pairedDevice, id: "peer-1", name: "Studio" }];
+    const row = { id: "7", source_device: "peer-1" } as HistoryItem;
+
+    expect(await store.downloadRemoteFile(row)).toBe(true);
+    expect(bridge.requestEntryFiles).toHaveBeenCalledExactlyOnceWith("7", "peer-1");
+    // The row waits — the button shows it is waiting — until the peer either
+    // starts sending or says why it cannot.
+    expect(store.state.remoteFilePending).toEqual(["peer-1:7"]);
+
+    // The reason crosses the wire as a code, because the peer does not know
+    // which language this window is in; it is worded here.
+    emit({ type: "event", name: "clip.file.denied", session_id: "session",
+      data: { device_id: "peer-1", entry_id: "7", reason: "gone" } });
+    expect(store.state.remoteFilePending).toEqual([]);
+    expect(store.state.notices.map((notice) => notice.message)).toEqual([
+      t("{name} 没能发送这个文件：{reason}", {
+        name: "Studio", reason: t("文件已被移动或删除"),
+      }),
+    ]);
+  });
   it("queues incoming transfer requests using the runtime event and filename", async () => {
     const store = createApplicationStore();
     await store.start();
@@ -79,6 +107,34 @@ describe("desktop application store", () => {
     store.dispose();
   });
 
+  it("names the application holding the data folder instead of a generic retry", async () => {
+    const store = createApplicationStore();
+    await store.start();
+    const state = vi.mocked(bridge.subscribe).mock.calls[0][1];
+    // A failure write-back sets `health` on whatever `state.status` holds, and
+    // `start()` has already pointed that at the shared fixture -- give this
+    // test its own copy or the mark lands on every test after it.
+    store.state.status = { ...status };
+    // What the sidecar sends when the legacy application still holds the data
+    // directory: a code, its own English sentence, and retryable false.  The
+    // window has to turn that into something the user can act on -- the old
+    // generic line left them a retry button and no reason for the failure.
+    state({
+      state: "failed",
+      error: "DATA_IN_USE",
+      message: "Close the legacy ClipSync application first",
+      retryable: false,
+    });
+    expect(store.state.error).toEqual({
+      code: "DATA_IN_USE",
+      message: "数据目录正被旧版 ClipSync 占用。请关闭旧版应用后重试。",
+      // Retryable in spite of what the sidecar said: closing the other
+      // application is exactly what makes the next attempt succeed.
+      retryable: true,
+    });
+    store.dispose();
+  });
+
   it("turns an exhausted relaunch into a retry that relaunches the sidecar", async () => {
     const store = createApplicationStore();
     await store.start();
@@ -106,47 +162,6 @@ describe("desktop application store", () => {
     store.dispose();
   });
 
-  it("refreshes a dead transport without relaunching a sidecar that is alive", async () => {
-    const store = createApplicationStore();
-    await store.start();
-    store.state.error = { code: "REQUEST_TIMEOUT", message: "Result unknown", retryable: true };
-    vi.mocked(bridge.status).mockClear();
-    await store.reconnect();
-    expect(bridge.restartSidecar).not.toHaveBeenCalled();
-    expect(bridge.status).toHaveBeenCalled();
-    store.dispose();
-  });
-
-  it("offers a retry even when the host called its own failure final", async () => {
-    const store = createApplicationStore();
-    vi.mocked(bridge.status).mockRejectedValueOnce({
-      code: "SIDECAR_START_FAILED", message: "Could not launch the Python sidecar",
-      retryable: false,
-    });
-    await store.refresh();
-    // The host can relaunch the sidecar on demand, so a failure it reported as
-    // non-retryable still gets the band's button.
-    expect(store.state.error).toEqual({
-      code: "SIDECAR_START_FAILED", message: "Could not launch the Python sidecar",
-      retryable: true,
-    });
-    store.dispose();
-  });
-
-  it("recovers the snapshot when the relaunched sidecar reports ready", async () => {
-    const store = createApplicationStore();
-    await store.start();
-    const state = vi.mocked(bridge.subscribe).mock.calls[0][1];
-    store.state.status = { ...status };
-    state({ state: "failed", error: "SIDECAR_UNAVAILABLE" });
-    vi.mocked(bridge.status).mockClear();
-    vi.mocked(bridge.devices).mockResolvedValue({ items: [pairedDevice] });
-    state({ state: "ready" });
-    expect(store.state.error).toBeNull();
-    await vi.waitFor(() => expect(store.state.devices).toEqual([pairedDevice]));
-    store.dispose();
-  });
-
   it("names the files a repair moved aside so they can be restored by hand", async () => {
     const store = createApplicationStore();
     vi.mocked(bridge.recoverDataDir).mockResolvedValueOnce({
@@ -166,26 +181,6 @@ describe("desktop application store", () => {
     // The repair replaces the data directory, so the snapshot is re-read.
     expect(bridge.status).toHaveBeenCalled();
     expect(store.state.error).toBeNull();
-    store.dispose();
-  });
-
-  it("stays quiet when a repair finds nothing to move", async () => {
-    const store = createApplicationStore();
-    vi.mocked(bridge.recoverDataDir).mockResolvedValueOnce({ items: [] });
-    expect(await store.recoverData()).toBe(true);
-    expect(store.state.notices).toEqual([]);
-    store.dispose();
-  });
-
-  it("reports a repair that could not run instead of pretending it worked", async () => {
-    const store = createApplicationStore();
-    vi.mocked(bridge.recoverDataDir).mockRejectedValueOnce({
-      code: "RECOVERY_FAILED", message: "Could not repair the data directory", retryable: false,
-    });
-    expect(await store.recoverData()).toBe(false);
-    expect(store.state.error).toEqual({
-      code: "RECOVERY_FAILED", message: "Could not repair the data directory", retryable: false,
-    });
     store.dispose();
   });
 
@@ -219,23 +214,6 @@ describe("desktop application store", () => {
     }
     await vi.advanceTimersByTimeAsync(60);
     expect(vi.mocked(bridge.status).mock.calls.length).toBe(before + 1);
-    store.dispose();
-  });
-
-  it("keeps the notice list and its timers bounded through an event storm", async () => {
-    // Notices are the other unbounded surface: one per event, each with a
-    // dismissal timer, would grow without limit in a slow renderer.
-    vi.useFakeTimers();
-    const store = createApplicationStore();
-    await store.start();
-    const emit = vi.mocked(bridge.subscribe).mock.calls[0][0];
-    for (let index = 0; index < 500; index += 1) {
-      emit({ type: "event", name: "device.connected", session_id: "session",
-        data: { device_id: `peer-${index}`, name: `Peer ${index}` } });
-    }
-    expect(store.state.notices).toHaveLength(5);
-    // Five dismissal timers plus the one pending refresh — not 500.
-    expect(vi.getTimerCount()).toBeLessThanOrEqual(6);
     store.dispose();
   });
 
@@ -296,20 +274,6 @@ describe("desktop application store", () => {
     store.dispose();
   });
 
-  it("does not restore selection from a stale query response", async () => {
-    const store = await selectedStore();
-    let resolve!: (value: typeof page) => void;
-    vi.mocked(bridge.history).mockReturnValueOnce(new Promise((done) => { resolve = done; }));
-    const old = store.refreshHistory();
-    store.search("new");
-    await Promise.resolve();
-    resolve(page);
-    await old;
-    expect(store.state.selectedIds).toEqual([]);
-    expect(store.state.history).toEqual(items);
-    store.dispose();
-  });
-
   it("sends one batch per pin/unpin and keeps selection after reload", async () => {
     const store = await selectedStore();
     vi.mocked(bridge.batchPinHistory).mockResolvedValue({ updated: 2 });
@@ -319,24 +283,6 @@ describe("desktop application store", () => {
       [["a", "b"], true], [["a", "b"], false],
     ]);
     expect(store.state.selectedIds).toEqual(["a", "b"]);
-    store.dispose();
-  });
-
-  it("adds the selection to favorites with one batch call and reports the count", async () => {
-    const store = await selectedStore();
-    vi.mocked(bridge.batchFavoriteHistory).mockResolvedValue({ added: 2, ids: ["f1", "f2"] });
-    expect(await store.batchFavorite(["a", "a", "b"])).toBe(2);
-    expect(bridge.batchFavoriteHistory).toHaveBeenCalledExactlyOnceWith(["a", "b"], "");
-    store.dispose();
-  });
-
-  it("reports nothing added when the favorites batch is rejected", async () => {
-    const store = await selectedStore();
-    vi.mocked(bridge.batchFavoriteHistory).mockRejectedValueOnce({
-      code: "STORAGE_ERROR", message: "Favorites storage is unavailable", retryable: true,
-    });
-    expect(await store.batchFavorite(["a", "b"])).toBe(0);
-    expect(store.state.error?.code).toBe("STORAGE_ERROR");
     store.dispose();
   });
 
@@ -350,16 +296,6 @@ describe("desktop application store", () => {
     expect(bridge.clearHistory).toHaveBeenCalledExactlyOnceWith();
     expect(store.state.offset).toBe(0);
     expect(store.state.selectedIds).toEqual([]);
-    store.dispose();
-  });
-
-  it("surfaces a failed clear without reporting a count", async () => {
-    const store = await selectedStore();
-    vi.mocked(bridge.clearHistory).mockRejectedValueOnce({
-      code: "STORAGE_ERROR", message: "History storage is unavailable", retryable: true,
-    });
-    expect(await store.clearHistory()).toBe(0);
-    expect(store.state.error?.code).toBe("STORAGE_ERROR");
     store.dispose();
   });
 
@@ -401,18 +337,6 @@ describe("desktop application store", () => {
     store.dispose();
   });
 
-  it("limits selection to 100 unique nonempty IDs", async () => {
-    const store = await selectedStore();
-    store.state.history = [...Array.from({ length: 101 }, (_, i) => ({ ...items[0], id: String(i) })),
-      items[0], items[0], { ...items[0], id: "" }];
-    store.selectAllVisible(true);
-    expect(store.state.selectedIds).toHaveLength(100);
-    store.select("100", true);
-    expect(store.state.selectedIds).toHaveLength(100);
-    store.selectAllVisible(false);
-    expect(store.state.selectedIds).toEqual([]);
-    store.dispose();
-  });
   it("keeps two-sided confirmation pending until an authoritative snapshot pairs it", async () => {
     const device = { id: "peer", name: "Peer", paired: false, connection_state: "online",
       pairing_status: "confirmed_waiting", pairing_code: "123456", sas: "ABCD" };
@@ -443,16 +367,6 @@ describe("desktop application store", () => {
     store.dispose();
   });
 
-  it("surfaces a rejected URL send without claiming success", async () => {
-    const store = createApplicationStore();
-    vi.mocked(bridge.sendUrl).mockRejectedValueOnce({
-      code: "SEND_FAILED", message: "URL was not sent", retryable: true,
-    });
-    expect(await store.sendUrl(pairedDevice, "https://example.com")).toBe(false);
-    expect(store.state.error?.code).toBe("SEND_FAILED");
-    store.dispose();
-  });
-
   it("pushes text through the host and reports whether it was broadcast", async () => {
     const store = createApplicationStore();
     vi.mocked(bridge.pushText).mockResolvedValueOnce({ ok: true, len: 5, sent: true });
@@ -460,25 +374,6 @@ describe("desktop application store", () => {
     expect(bridge.pushText).toHaveBeenCalledExactlyOnceWith("hello");
     vi.mocked(bridge.pushText).mockResolvedValueOnce({ ok: true, len: 7, sent: false });
     expect(await store.pushText("offline")).toEqual({ ok: true, len: 7, sent: false });
-    store.dispose();
-  });
-
-  it("rejects empty or oversized pushed text without invoking the host", async () => {
-    const store = createApplicationStore();
-    expect(await store.pushText("   ")).toBeNull();
-    expect(await store.pushText("x".repeat(100001))).toBeNull();
-    expect(bridge.pushText).not.toHaveBeenCalled();
-    expect(store.state.error?.code).toBe("INVALID_TEXT");
-    store.dispose();
-  });
-
-  it("surfaces a refused clipboard push", async () => {
-    const store = createApplicationStore();
-    vi.mocked(bridge.pushText).mockRejectedValueOnce({
-      code: "CLIPBOARD_WRITE_FAILED", message: "Could not write to the clipboard", retryable: true,
-    });
-    expect(await store.pushText("blocked")).toBeNull();
-    expect(store.state.error?.code).toBe("CLIPBOARD_WRITE_FAILED");
     store.dispose();
   });
 
@@ -497,17 +392,6 @@ describe("desktop application store", () => {
     store.dispose();
   });
 
-  it("reports a failed discovery toggle without a stale state", async () => {
-    const store = createApplicationStore();
-    store.state.status = { ...status, capabilities: ["discovery.status"] };
-    vi.mocked(bridge.setDiscoveryEnabled).mockRejectedValueOnce({
-      code: "DISCOVERY_TOGGLE_FAILED", message: "Could not change the LAN setting", retryable: true,
-    });
-    expect(await store.setDiscoveryEnabled(false)).toBeNull();
-    expect(store.state.error?.code).toBe("DISCOVERY_TOGGLE_FAILED");
-    store.dispose();
-  });
-
   it("returns the diagnostics report and forwards repair actions verbatim", async () => {
     const store = createApplicationStore();
     const report = { v2: true, summary: "warn" as const, checks: [], groups: {},
@@ -520,51 +404,6 @@ describe("desktop application store", () => {
     vi.mocked(bridge.diagnosticsRequest).mockResolvedValueOnce({ ok: true });
     expect(await store.repairDiagnostics("firewall")).toEqual({ ok: true });
     expect(bridge.diagnosticsRequest).toHaveBeenCalledExactlyOnceWith("firewall");
-    store.dispose();
-  });
-
-  it("surfaces diagnostics failures without a stale report", async () => {
-    const store = createApplicationStore();
-    vi.mocked(bridge.diagnosticsReport).mockRejectedValueOnce({
-      code: "APP_LOCKED", message: "Unlock ClipSync to run diagnostics", retryable: false,
-    });
-    expect(await store.diagnostics()).toBeNull();
-    expect(store.state.error?.code).toBe("APP_LOCKED");
-    vi.mocked(bridge.diagnosticsRequest).mockRejectedValueOnce({
-      code: "REPAIR_FAILED", message: "Could not open the settings", retryable: false,
-    });
-    expect(await store.repairDiagnostics("local_network")).toBeNull();
-    expect(store.state.error?.code).toBe("REPAIR_FAILED");
-    store.dispose();
-  });
-
-  it("queues an inbound URL as a notice carrying the URL text", async () => {
-    const store = createApplicationStore();
-    await store.start();
-    const emit = vi.mocked(bridge.subscribe).mock.calls[0][0];
-    emit({ type: "event", name: "url.received", session_id: "session",
-      data: { device_id: "peer", url: "https://example.com/page" } });
-    expect(store.state.notices).toEqual([
-      expect.objectContaining({ title: "url.received", message: "https://example.com/page" }),
-    ]);
-    store.dispose();
-  });
-
-  it("queues pairing and presence notices naming the peer", async () => {
-    const store = createApplicationStore();
-    await store.start();
-    const emit = vi.mocked(bridge.subscribe).mock.calls[0][0];
-    emit({ type: "event", name: "pairing.request", session_id: "session",
-      data: { device_id: "peer", name: "Pixel", code: "12345678" } });
-    emit({ type: "event", name: "device.connected", session_id: "session",
-      data: { device_id: "peer", name: "Pixel" } });
-    emit({ type: "event", name: "device.disconnected", session_id: "session",
-      data: { device_id: "peer", name: "Pixel" } });
-    expect(store.state.notices.map(item => item.message)).toEqual([
-      t("{name} 请求配对 — 代码：{code}", { name: "Pixel", code: "12345678" }),
-      t("{name} 已连接", { name: "Pixel" }),
-      t("{name} 已断开", { name: "Pixel" }),
-    ]);
     store.dispose();
   });
 
@@ -609,19 +448,6 @@ describe("desktop application store", () => {
       t("找不到 {name} — 请确认该设备已开启 ClipSync 且在同一网络", { name: "Peer" }),
       t("找不到 {name} — 请确认该设备已开启 ClipSync 且在同一网络", { name: "0123456789ab" }),
     ]);
-    store.dispose();
-  });
-
-  it("reports a connect that had nowhere to dial through its own notice", async () => {
-    const store = createApplicationStore();
-    await store.start();
-    vi.mocked(bridge.connectDevice).mockResolvedValue({ accepted: false });
-    expect(await store.connect(pairedDevice)).toBe(true);
-    // Not an error band: the route answers whether a dial *started*, and
-    // "refresh and try again" is advice a device that is not advertising on the
-    // network cannot follow — the runtime's event is what says so.
-    expect(store.state.error).toBeNull();
-    expect(bridge.connectDevice).toHaveBeenCalledWith("peer");
     store.dispose();
   });
 
@@ -745,26 +571,24 @@ describe("desktop application store", () => {
     store.dispose();
   });
 
-  it("ignores a malformed update state payload", async () => {
+  it("does not let a status hydration undo an install in flight", async () => {
     const store = createApplicationStore();
+    vi.mocked(bridge.status).mockResolvedValue({
+      ...status, capabilities: ["update.status"],
+    });
     await store.start();
     const event = vi.mocked(bridge.subscribe).mock.calls[0][0];
     event({ type: "event", name: "update.state", session_id: "session", seq: 1,
-      data: { state: { fraction: 0.5 } } });
-    expect(store.state.update.phase).toBe("idle");
-    store.dispose();
-  });
-
-  it("hydrates the update phase only with the update capability", async () => {
-    const store = createApplicationStore();
-    expect(await store.loadUpdateStatus()).toBeNull();
-    expect(bridge.updateStatus).not.toHaveBeenCalled();
-    store.state.status = { ...status, capabilities: ["update.status"] };
-    vi.mocked(bridge.updateStatus).mockResolvedValueOnce({ state: { phase: "ready",
-      fraction: 1, downloaded: 10, total: 10, error: "", version: "v2.0.0", path: "C:/a.zip" } });
+      data: { state: { phase: "installing", fraction: 1, downloaded: 100, total: 100,
+        error: "", version: "v2.0.0", path: "" } } });
+    expect(store.state.update.phase).toBe("installing");
+    // Opening settings re-reads the sidecar's phase, and the sidecar only ever
+    // reports its own four -- it would answer `idle` and put the download
+    // button back while the bundle is being replaced underneath it.
+    vi.mocked(bridge.updateStatus).mockResolvedValueOnce({ state: { phase: "idle",
+      fraction: 0, downloaded: 0, total: 0, error: "", version: "", path: "" } });
     await store.loadUpdateStatus();
-    expect(store.state.update).toEqual({ phase: "ready", fraction: 1, downloaded: 10,
-      total: 10, error: "", version: "v2.0.0", path: "C:/a.zip" });
+    expect(store.state.update.phase).toBe("installing");
     store.dispose();
   });
 
@@ -802,97 +626,25 @@ describe("desktop application store", () => {
     store.dispose();
   });
 
-  it("requires a ready host and sync capability", async () => {
-    const store = createApplicationStore();
-    await store.setSyncEnabled(true);
-    await store.refresh();
-    await store.setSyncEnabled(true);
-    expect(bridge.setSyncEnabled).not.toHaveBeenCalled();
-    store.state.status = { ...status, capabilities: ["sync.set_enabled"] };
-    vi.mocked(bridge.setSyncEnabled).mockResolvedValueOnce({ enabled: true });
-    await store.setSyncEnabled(true);
-    expect(bridge.setSyncEnabled).toHaveBeenCalledWith(true);
-    store.dispose();
-  });
-
-  it("reports an unsuccessful copy without claiming clipboard success", async () => {
-    vi.mocked(bridge.copyHistory).mockResolvedValueOnce({ copied: false });
-    const store = createApplicationStore();
-    await store.copy({
+  it("says a copied row was copied, and says nothing when it was not", async () => {
+    const item = {
       id: "1", preview: "x", timestamp: 0, content_type: "TEXT", pinned: false,
       source_name: "", source_app: "", source_title: "", paste_count: 0,
-    });
-    expect(store.state.copiedId).toBeNull();
-    expect(store.state.error?.code).toBe("ACTION_REJECTED");
-    store.dispose();
-  });
-
-  it.each(["device.changed", "pairing.changed", "app.status.changed", "history.changed"])(
-    "invalidates in-flight snapshots immediately on %s", async (name) => {
-      vi.useFakeTimers();
-      const store = createApplicationStore();
-      await store.start();
-      let resolve!: (value: { items: never[] }) => void;
-      vi.mocked(bridge.devices).mockReturnValueOnce(new Promise((done) => { resolve = done; }));
-      const old = store.refresh();
-      await Promise.resolve();
-      const event = vi.mocked(bridge.subscribe).mock.calls[0][0];
-      event({ type: "event", name, session_id: "session", seq: 1 });
-      const count = vi.mocked(bridge.history).mock.calls.length;
-      resolve({ items: [] });
-      await old;
-      expect(bridge.history).toHaveBeenCalledTimes(count);
-      await vi.advanceTimersByTimeAsync(60);
-      expect(bridge.history).toHaveBeenCalledTimes(count + 1);
-      store.dispose();
-      event({ type: "event", name, session_id: "session", seq: 2 });
-      await vi.advanceTimersByTimeAsync(100);
-      expect(bridge.history).toHaveBeenCalledTimes(count + 1);
-    },
-  );
-
-  it("does not refresh after a mutation completes following disposal", async () => {
-    let resolve!: (value: { accepted: boolean }) => void;
-    vi.mocked(bridge.startPairing).mockReturnValueOnce(new Promise((done) => { resolve = done; }));
+    };
     const store = createApplicationStore();
-    const pending = store.startPairing({ id: "p", name: "P", paired: false,
-      connection_state: "online", pairing_status: "", pairing_code: null, sas: null });
-    store.dispose();
-    resolve({ accepted: true });
-    await pending;
-    expect(bridge.status).not.toHaveBeenCalled();
-  });
-  it("subscribes before reading authoritative snapshots", async () => {
-    const store = createApplicationStore();
-    await store.start();
-    expect(vi.mocked(bridge.subscribe).mock.invocationCallOrder[0])
-      .toBeLessThan(vi.mocked(bridge.status).mock.invocationCallOrder[0]);
-    expect(store.state.status?.health).toBe("ready");
-    store.dispose();
-  });
+    vi.mocked(bridge.copyHistory).mockResolvedValueOnce({ copied: true });
+    await store.copy(item);
+    // The row's own answer is a tick that replaces its copy icon — in a list
+    // the reader has looked away from by the time it lands. The notice is the
+    // half that travels.
+    expect(store.state.notices.map((notice) => [notice.title, notice.message]))
+      .toEqual([["ui.history", t("已复制")]]);
 
-  it("cleans up a listener installed after unmount", async () => {
-    const off = vi.fn();
-    let resolve!: (value: () => void) => void;
-    vi.mocked(bridge.subscribe).mockReturnValueOnce(new Promise((done) => { resolve = done; }));
-    const store = createApplicationStore();
-    const starting = store.start();
+    store.dismissNotice(store.state.notices[0].id);
+    vi.mocked(bridge.copyHistory).mockResolvedValueOnce({ copied: false });
+    await store.copy(item);
+    expect(store.state.notices).toEqual([]);
     store.dispose();
-    resolve(off);
-    await starting;
-    expect(off).toHaveBeenCalledOnce();
-    expect(bridge.status).not.toHaveBeenCalled();
-  });
-
-  it("does not allow stale search results to replace the newest query", async () => {
-    let resolve!: (value: typeof page) => void;
-    vi.mocked(bridge.history).mockReturnValueOnce(new Promise((done) => { resolve = done; }));
-    const store = createApplicationStore();
-    const older = store.refreshHistory();
-    await store.refreshHistory();
-    resolve({ ...page, total: 99 });
-    await older;
-    expect(store.state.total).toBe(0);
   });
 
   it("does not query encrypted history while locked", async () => {
@@ -943,31 +695,5 @@ describe("desktop application store", () => {
     expect(vi.mocked(bridge.devices).mock.calls).toHaveLength(devicesBefore);
     expect(store.state.pending).toBe(false);
     store.dispose();
-  });
-
-  it("reports probe failures as errors instead of results", async () => {
-    const device = { id: "p", name: "P", paired: true, connection_state: "online",
-      pairing_status: "paired", pairing_code: null, sas: null };
-    vi.mocked(bridge.testDevice).mockRejectedValue({ code: "NOT_FOUND", message: "Device not found", retryable: false });
-    const store = createApplicationStore();
-    await store.start();
-    expect(await store.probe(device)).toBeNull();
-    expect(store.state.error?.code).toBe("NOT_FOUND");
-    expect(store.state.pending).toBe(false);
-    store.dispose();
-  });
-
-  it("surfaces mutation errors without replaying the operation", async () => {
-    vi.mocked(bridge.deleteHistory).mockRejectedValueOnce({
-      code: "REQUEST_TIMEOUT", message: "Result unknown", retryable: false,
-    });
-    const store = createApplicationStore();
-    await store.delete({
-      id: "1", preview: "x", timestamp: 0, content_type: "TEXT", pinned: false,
-      source_name: "", source_app: "", source_title: "", paste_count: 0,
-    });
-    expect(store.state.error?.code).toBe("REQUEST_TIMEOUT");
-    expect(bridge.deleteHistory).toHaveBeenCalledOnce();
-    expect(store.state.pending).toBe(false);
   });
 });

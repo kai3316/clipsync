@@ -389,10 +389,19 @@ impl Bridge {
 
     async fn terminate(&self, app: &AppHandle, error: BridgeError) {
         self.fail(error.clone());
+        // The message and the retryable flag travel with the code. A refused
+        // data directory is the case that needs them: the sidecar knows which
+        // application holds the directory and says so, and asking the user to
+        // retry is wrong when retrying is exactly what cannot work.
         let _ = app.emit_to(
             "main",
             "sidecar:state",
-            json!({"state":"failed","error":error.code}),
+            json!({
+                "state": "failed",
+                "error": error.code,
+                "message": error.message,
+                "retryable": error.retryable,
+            }),
         );
         let mut child = self.child.lock().await;
         let _ = child.kill().await;

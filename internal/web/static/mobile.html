@@ -165,6 +165,29 @@ body::before {
 
 .tabs::-webkit-scrollbar { display: none; }
 
+/* A bar that scrolls with nothing saying so reads as a bar that is broken:
+   the tab at the edge is cut mid-word and there is no cue that the rest of
+   it exists.  The fades are the cue — an edge with more content past it
+   dissolves as it leaves, and stops fading once it is the end. */
+.tabs--more-right {
+  -webkit-mask-image: linear-gradient(90deg, #000 0, #000 calc(100% - 28px), transparent 100%);
+  mask-image: linear-gradient(90deg, #000 0, #000 calc(100% - 28px), transparent 100%);
+}
+
+.tabs--more-left {
+  -webkit-mask-image: linear-gradient(90deg, transparent 0, #000 28px, #000 100%);
+  mask-image: linear-gradient(90deg, transparent 0, #000 28px, #000 100%);
+}
+
+.tabs--more-left.tabs--more-right {
+  -webkit-mask-image: linear-gradient(90deg, transparent 0, #000 28px, #000 calc(100% - 28px), transparent 100%);
+  mask-image: linear-gradient(90deg, transparent 0, #000 28px, #000 calc(100% - 28px), transparent 100%);
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .tabs { scroll-behavior: smooth; }
+}
+
 .tab {
   flex: 1 0 auto;
   min-width: 76px;
@@ -1488,6 +1511,9 @@ body.light .upload-btn {
     fileDeleted: ZH ? '已删除' : 'Deleted',
     targetDevice: ZH ? '本电脑' : 'This computer',
     emptyPreview: ZH ? '(空)' : '(empty)',
+    tImage: ZH ? '图片' : 'Image',
+    tVectorImage: ZH ? '矢量图' : 'Vector Image',
+    tRichText: ZH ? '富文本' : 'Rich Text',
     loadFailHint: ZH ? '请确认手机与电脑在同一 Wi-Fi，且 ClipSync 正在运行。' : 'Make sure your phone is on the same Wi-Fi as the computer and ClipSync is running.',
     uploadTooLarge: ZH ? '文件过大（最大 128 MB）' : 'File too large (128 MB max)',
     uploadCancel: ZH ? '取消' : 'Cancel',
@@ -1705,10 +1731,32 @@ body.light .upload-btn {
 
   /* ── Tab switching ─────────────────────────────────────────── */
 
+  // Which edges of the tab bar still have content past them.  Selecting a tab
+  // has to bring it inside the bar as well as mark it: on a phone the last of
+  // the seven is off the right edge, so without this a reader taps a tab and
+  // it stays half outside the bar they tapped it in.
+  var tabBar = document.querySelector('.tabs');
+
+  function syncTabEdges() {
+    if (!tabBar) return;
+    var max = tabBar.scrollWidth - tabBar.clientWidth;
+    tabBar.classList.toggle('tabs--more-left', tabBar.scrollLeft > 2);
+    tabBar.classList.toggle('tabs--more-right', max > 2 && tabBar.scrollLeft < max - 2);
+  }
+
+  if (tabBar) {
+    tabBar.addEventListener('scroll', syncTabEdges, { passive: true });
+    window.addEventListener('resize', syncTabEdges);
+  }
+
   tabs.forEach(function (tab) {
     tab.addEventListener('click', function () {
       tabs.forEach(function (t) { t.classList.remove('tab--active'); });
       tab.classList.add('tab--active');
+      if (tab.scrollIntoView) {
+        tab.scrollIntoView({ block: 'nearest', inline: 'nearest' });
+      }
+      syncTabEdges();
       var name = tab.getAttribute('data-tab');
       panels.forEach(function (p) {
         p.classList.toggle('panel--active', p.id === 'panel' + name.charAt(0).toUpperCase() + name.slice(1));
@@ -1848,6 +1896,24 @@ body.light .upload-btn {
     if (t.indexOf('IMAGE') === 0) return '🖼';
     if (t === 'FILE') return '📄';
     return '📋';
+  }
+
+  /* A clip with no text of its own is stored under a bracketed English label
+     ("[Image]"), which is a label rather than the user's words -- so the phone
+     says the same thing in its own language.  "[HTML]" needs no entry: it is
+     the format's name in both. */
+  var PREVIEW_LABELS = {
+    '[Image]': 'tImage',
+    '[Vector Image]': 'tVectorImage',
+    '[Rich Text]': 'tRichText',
+  };
+
+  function previewText(item) {
+    var preview = item.text_preview || '';
+    // hasOwnProperty, not a bare lookup: the key comes from stored content,
+    // and `PREVIEW_LABELS['constructor']` is a function rather than a key.
+    if (!Object.prototype.hasOwnProperty.call(PREVIEW_LABELS, preview)) return preview;
+    return T[PREVIEW_LABELS[preview]] || preview;
   }
 
   function relTime(ts) {
@@ -2069,7 +2135,7 @@ body.light .upload-btn {
       el.innerHTML =
         '<div class="h-item__icon">' + typeIcon(item.content_type) + '</div>' +
         '<div class="h-item__body">' +
-          '<div class="h-item__text">' + esc(item.text_preview || item.content_type || T.emptyPreview) + '</div>' +
+          '<div class="h-item__text">' + esc(previewText(item) || item.content_type || T.emptyPreview) + '</div>' +
           '<div class="h-item__meta">' + (item.pinned ? '📌 ' : '') + esc(relTime(item.timestamp)) + '</div>' +
         '</div>';
       el.addEventListener('click', function () { openItem(i); });
@@ -2166,7 +2232,7 @@ body.light .upload-btn {
       modalImage.removeAttribute('src');
       modalText.style.display = '';
       modalCopyBtn.style.display = '';
-      modalText.textContent = getFullText(item) || item.text_preview || T.emptyPreview;
+      modalText.textContent = getFullText(item) || previewText(item) || T.emptyPreview;
     }
   }
 
@@ -4067,6 +4133,7 @@ body.light .upload-btn {
   applyTheme();
   loadHistory();
   startPolling();
+  syncTabEdges();
 
 })();
 </script>

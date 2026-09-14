@@ -1,29 +1,37 @@
 <script setup lang="ts">
 import { computed, nextTick, onMounted, onUnmounted, ref, watch } from "vue";
 import {
-  History, Monitor, Search, RefreshCw, Pin, Trash2, ChevronLeft, ChevronRight, Eraser, FileDown,
-  ShieldCheck, LockKeyhole, AlertCircle, X, LogOut, Circle, Copy, Check, Link, Unlink, PinOff, Star, Settings as SettingsIcon, Save, FileUp, FolderOpen, MessageCircle, Plug, PlugZap, RotateCcw, Activity, Fingerprint, Globe, SendHorizontal, Stethoscope, Wrench, Info, QrCode, ExternalLink, Wand2, Sparkles, Clock, Smartphone,
+  History, Monitor, Search, RefreshCw, Pin, Trash2, ChevronLeft, ChevronRight, Eraser, FileDown, Download,
+  ShieldCheck, ShieldOff, LockKeyhole, AlertCircle, X, LogOut, Circle, Copy, Check, Link, Unlink, PinOff, Star, Settings as SettingsIcon, Save, FileUp, FolderOpen, MessageCircle, Plug, PlugZap, RotateCcw, Activity, Fingerprint, Globe, SendHorizontal, Stethoscope, Wrench, Info, QrCode, ExternalLink, Wand2, Sparkles, Clock, Smartphone, Pencil,
 } from "@lucide/vue";
 import logo from "../../assets/icon.svg";
 import { bridge, inDesktop } from "./api/bridge";
-import type { Device, DeviceCertificate, DeviceProbeResult, DiagnosticAction, DiagnosticCheck, DiagnosticItem, DiagnosticsReport, HistoryItem } from "./api/types";
+import type { Device, DeviceCertificate, DeviceProbeResult, DiagnosticAction, DiagnosticCheck, DiagnosticItem, DiagnosticsReport, HistoryItem, RelayTestResult } from "./api/types";
 import { LOCALES, LOCALE_NAMES, currentLocale, setLocale, t } from "./i18n";
+import { dateTime, isPlaceholderPreview, previewText } from "./i18n/format";
 import { createApplicationStore } from "./stores/application";
 import { aiCompareState, aiEntryKey, aiDiffCounts, buildAiLocalIndex } from "./lib/aiconfig-diff";
 import { aiItemCount, aiTreeGroups, type AiGroup, type AiNode, type AiRow } from "./lib/aiconfig-tree";
 import { aiTargets, type AiTarget } from "./lib/aiconfig-targets";
 import { formatPairingCode, isPairingCodeComplete } from "./lib/pairing-code";
+import { openContextMenu, type ContextMenuItem } from "./lib/context-menu";
+import { copyText } from "./lib/clipboard";
+import { announce, clearStatus, statusMessage } from "./lib/status";
 import { deliveryIcon, deliveryLabel } from "./stores/delivery";
 import FavoritesView from "./components/FavoritesView.vue";
 import TransfersView from "./components/TransfersView.vue";
 import ChatView from "./components/ChatView.vue";
+import OverviewView from "./components/OverviewView.vue";
 import NoticeStack from "./components/NoticeStack.vue";
+import ContextMenu from "./components/ContextMenu.vue";
 
 const store = createApplicationStore();
 const { state } = store;
 /** Which page is on screen.  Named by the same list the sidebar draws from, so
- * a page cannot exist in one and not the other. */
-const tab = ref<(typeof PAGES)[number]>("history");
+ * a page cannot exist in one and not the other.  The window opens on the
+ * overview, which is where the legacy window opened too: it is the one page
+ * that answers "what is this machine doing" without being asked. */
+const tab = ref<(typeof PAGES)[number]>("overview");
 /** The history page's search box, so Ctrl+F has something to focus. */
 const searchInput = ref<HTMLInputElement | null>(null);
 const settings = ref<Record<string, any>>({});
@@ -35,6 +43,14 @@ const filterCategories = computed<Array<[string, string]>>(() => [
 ]);
 const settingsBusy = ref(false);
 const settingsSaved = ref(false);
+/** The relay broker test: busy, its answer, and its failure.
+ *
+ * The answer is the sidecar's whole payload rather than a sentence, because the
+ * reader needs the per-broker rows -- which endpoint, how fast, and why not --
+ * and the sentence is only the line above them. */
+const relayTestBusy = ref(false);
+const relayTestResult = ref<RelayTestResult | null>(null);
+const relayTestError = ref("");
 /** The form as the sidecar last confirmed it, serialized — `null` until the
  * first load.  What the save bar compares against to say whether anything on
  * the page is still unsaved.  A string rather than a copy of the object,
@@ -172,6 +188,17 @@ function openSettingsCard(id: string) {
   settingsSection.value = id;
   if (settingsSearching.value) clearSettingsSearch();
 }
+/** Open the settings page on its diagnostics card.
+ *
+ * The overview's network-health chip reports a verdict; the checks behind that
+ * verdict live on the card, and the chip is the only place they are reachable
+ * from one click.  Nothing is read here — the card's own button runs the
+ * suite, and a report read on the way in would be a second copy of what the
+ * chip already has. */
+function openDiagnosticsCard() {
+  void openSettings();
+  openSettingsCard("diagnostics");
+}
 /** Open a group from the strip: the first card in it, which is the one the
  * section row under the tab is listing.
  *
@@ -202,8 +229,13 @@ function openSettingsGroup(group: { items: Array<{ id: string }> }) {
  * 读取手机服务状态 is reporting on the page rather than on the service — and
  * the rows the service's own answer gates (its address, its QR code) are rows
  * a reader cannot find at all until an unrelated button is pressed.
+ *
+ * The overview carries the phone service's own read of itself for the same
+ * reason, and reads nothing else here: its counters are its own, and it reads
+ * them when it is mounted rather than when the page is chosen.
  */
 watch(tab, async (page) => {
+  if (page === "overview") { void refreshCompanion(); return; }
   if (page === "devices") {
     await nextTick();
     await Promise.all([refreshInternetPairing(), refreshCompanion()]);
@@ -293,6 +325,16 @@ function clampNumber(value: unknown, fallback: number, min: number, max: number)
   const parsed = Number(value);
   if (!Number.isFinite(parsed)) return fallback;
   return Math.min(max, Math.max(min, parsed));
+}
+/** The brokers a multi-line field stands for: one per line or comma, trimmed.
+ *
+ * Named once because two callers read the same field for different reasons --
+ * the save that writes it and the test that probes it -- and a test that
+ * disagreed with the save about what the list is would be testing something
+ * other than what gets stored.
+ */
+function brokerList(value: unknown): string[] {
+  return String(value || "").split(/\r?\n|,/).map((item) => item.trim()).filter(Boolean);
 }
 // Security: the encryption password keeps the rules the pairing passphrase had
 // (settings_window.password_rule_* in the legacy panel; the sidecar enforces
@@ -387,7 +429,32 @@ async function rotateCompanionToken() {
   companionRotatePending.value = false;
   await configureCompanion(true, true);
 }
+const companionClearPending = ref(false);
+const companionClearDialog = ref<HTMLDialogElement | null>(null);
+watch(companionClearPending, async (pending) => {
+  await nextTick();
+  if (pending) companionClearDialog.value?.showModal();
+  else companionClearDialog.value?.close();
+});
+/**
+ * Clear the companion's access token — the legacy web panel's 清除访问令牌.
+ *
+ * It asks first, the way rotating does, because it is the one companion action
+ * that lowers a guard rather than moving it: with the token gone the service
+ * lets in every device that can reach the port, and the only thing standing
+ * between a phone and the clipboard history is the network boundary.
+ */
+async function clearCompanionToken() {
+  if (!companionClearPending.value || companionBusy.value || !companion.value?.running) return;
+  companionClearPending.value = false;
+  await configureCompanion(true, false, true);
+  if (companion.value && !companion.value.access_url) announce(t("访问令牌已清除，任何能访问该端口的设备都可以直接连接"));
+}
 async function refreshCompanion() {
+  // Nothing to read on a runtime with no phone service: the read would come
+  // back refused, and the window would carry an error band for a card that is
+  // not even on screen.
+  if (!ready.value || !state.status?.capabilities?.includes("companion.status")) return;
   const generation = ++companionGeneration;
   try {
     const result = await bridge.companionStatus();
@@ -398,13 +465,16 @@ async function refreshCompanion() {
     if (generation === companionGeneration) state.error = error as any;
   }
 }
-async function configureCompanion(enabled: boolean, rotateToken = false) {
+async function configureCompanion(enabled: boolean, rotateToken = false, clearToken = false) {
   if (companionBusy.value) return;
   const generation = ++companionGeneration;
   companionBusy.value = true;
   try {
-    const port = enabled && !rotateToken ? companionPort.value : companion.value?.port ?? companionPort.value;
-    const result = await bridge.configureCompanion(enabled, port, rotateToken);
+    // Only the port field itself applies the typed port.  Rotating and clearing
+    // act on the running service, so they keep the port it is running on rather
+    // than a number the user may have typed and not applied.
+    const port = enabled && !rotateToken && !clearToken ? companionPort.value : companion.value?.port ?? companionPort.value;
+    const result = await bridge.configureCompanion(enabled, port, rotateToken, clearToken);
     if (generation !== companionGeneration) return;
     companion.value = result;
     companionPort.value = companion.value.port;
@@ -542,7 +612,173 @@ function isWebLink(item: HistoryItem) {
 }
 async function openHistoryLink(item: HistoryItem) {
   const result = await store.openLink(item);
-  if (result?.opened) announce(t("已在浏览器打开：{url}", { url: result.url }));
+  if (result?.opened) store.toast("ui.history", t("已在浏览器打开：{url}", { url: result.url }));
+}
+
+/** Whether a row is a file that lives on another device.
+ *
+ * Such a row has no bytes here — only the name, the size and the id of the
+ * entry that published it — so it is the one row whose action is 下载 rather
+ * than 复制.  Reading it off `content_type` and not the preview keeps that a
+ * property of the row rather than of how its name happens to look.
+ */
+function isRemoteFile(item: HistoryItem) {
+  return (item.content_type || "").toUpperCase() === "FILE_REMOTE";
+}
+/** The device a remote-file row came from, when this window can see it online.
+ *
+ * Not a gate on the button — the sidecar is the one that knows whether the peer
+ * is reachable, and it answers the click either way — but it is what the tooltip
+ * says, so the reason a download is about to fail is readable before the click
+ * rather than only after it.  A device this window cannot see at all counts as
+ * offline: the row would not have been offered otherwise, and saying it is not
+ * online is the nearest true thing left.
+ */
+function remoteFileDevice(item: HistoryItem) {
+  const id = item.source_device || "";
+  if (!id) return undefined;
+  return state.devices.find((device) => device.id === id && device.connection_state === "online");
+}
+function remoteFileBusy(item: HistoryItem) {
+  return state.remoteFilePending.includes(`${item.source_device || ""}:${item.id}`);
+}
+function remoteFileTitle(item: HistoryItem) {
+  if (remoteFileBusy(item)) return t("已请求下载，正在等待那台设备");
+  if (!remoteFileDevice(item)) return t("{name} 当前不在线", { name: item.source_name || t("未知") });
+  return t("从 {name} 下载这个文件", { name: item.source_name || t("未知") });
+}
+async function downloadRemoteFile(item: HistoryItem) {
+  if (await store.downloadRemoteFile(item)) {
+    store.toast("ui.transfers", t("已请求下载，对方开始发送后可在文件传输里查看"));
+  }
+}
+
+/** The right-click menu on a history row, in the legacy menu's own order.
+ *
+ * Every entry here is the row's own button under a different name — the menu
+ * is not a second set of capabilities, it is the same set reachable without
+ * hunting along the row.  That is why the conditions match the buttons' too:
+ * 翻译 stands down while a translate is already in flight, 打开链接 appears
+ * only for something the sidecar would actually open, and a row with no id
+ * cannot be pinned or deleted.
+ */
+function historyMenu(event: MouseEvent, item: HistoryItem) {
+  const hasId = !!item.id.trim();
+  openContextMenu(event, [
+    {
+      id: "copy", label: t("复制"), icon: Copy,
+      shortcut: MODIFIER.label === "Cmd" ? "⌘C" : "Ctrl+C",
+      // A file that lives on another device has nothing here to put on the
+      // clipboard, and the sidecar says so rather than quietly leaving the
+      // previous clipboard in place.  Offering it anyway would be a menu entry
+      // whose only outcome is an error.
+      disabled: isRemoteFile(item),
+      run: () => store.copy(item),
+    },
+    isRemoteFile(item)
+      ? {
+          id: "download-file", label: t("下载文件"), icon: Download,
+          disabled: !remoteFileDevice(item) || remoteFileBusy(item),
+          run: () => downloadRemoteFile(item),
+        }
+      : null,
+    {
+      id: "pin", label: item.pinned ? t("取消置顶") : t("置顶"),
+      icon: item.pinned ? PinOff : Pin, disabled: !hasId,
+      run: () => store.pin(item),
+    },
+    {
+      id: "favorite", label: t("添加到收藏"), icon: Star, disabled: !hasId,
+      run: () => addToFavorites(item),
+    },
+    {
+      id: "translate", label: t("翻译"), icon: Globe, disabled: translateItemReading.value,
+      run: () => openTranslateItem(item),
+    },
+    isWebLink(item)
+      ? { id: "open-link", label: t("在浏览器中打开链接"), icon: ExternalLink, run: () => openHistoryLink(item) }
+      : null,
+    {
+      id: "delete", label: t("删除"), icon: Trash2, divider: true, danger: true,
+      shortcut: MODIFIER.label === "Cmd" ? "⌘D" : "Del", disabled: !hasId,
+      // The row's own trash opens this same confirm, and Delete on the keyboard
+      // cursor does too: one record is not worth wiping on a stray click.
+      run: () => { deleteItem.value = item; },
+    },
+    {
+      id: "details", label: t("查看详情"), icon: Info, divider: true,
+      // The legacy 查看详情 was a toast, not a dialog: type, source and id on
+      // one line, which is everything a history row knows that the row itself
+      // does not already show.
+      run: () => announce(t("类型：{type} | 来源：{source} | ID：{id}", {
+        type: typeLabel(item), source: item.source_name || t("未知"), id: hasId ? item.id : "N/A",
+      })),
+    },
+  ]);
+}
+
+/** Put one row in the favourites, and say how many landed.
+ *
+ * The store's batch path is the only one there is (`favorites.batch_add`), so
+ * a single row goes through it the way the toolbar's button sends a selection;
+ * the count it answers with is what the report uses, because a favourite that
+ * was already there is not one that was added.
+ */
+async function addToFavorites(item: HistoryItem) {
+  const added = await store.batchFavorite([item.id]);
+  if (added) store.toast("ui.favorites", t("已加入收藏夹 {count} 条", { count: added }));
+}
+
+/** The right-click menu on a device row.
+ *
+ * 连接/断开 follow the row's own button and its rule: only one of them is ever
+ * offered, and neither is offered for a device this machine is not paired
+ * with.  打开聊天 is the one entry here the row has no button for — the chat
+ * page lists nearby devices of its own, but reaching a device from the device
+ * list was the legacy card's own action and there is no reason to make the
+ * reader walk to another page to start a conversation with the row in front of
+ * them.  重命名 writes the same alias the row's 设备备注 field does.
+ */
+function deviceMenu(event: MouseEvent, device: Device) {
+  const connected = device.connection_state === "online";
+  openContextMenu(event, [
+    device.paired
+      ? {
+          id: connected ? "disconnect" : "connect",
+          label: connected ? t("断开连接") : t("连接"),
+          icon: connected ? PlugZap : Plug,
+          // A device that is not reachable cannot be dialed, which is the rule
+          // the row's own connect button already applies.
+          disabled: !connected && device.connection_state === "offline",
+          run: () => (connected ? store.disconnect(device) : store.connect(device)),
+        }
+      : null,
+    device.paired && !connected
+      ? { id: "chat", label: t("打开聊天"), icon: MessageCircle, run: () => chatWith(device) }
+      : null,
+    { id: "rename", label: t("重命名"), icon: Pencil, run: () => { renameDevice.value = device; renameValue.value = device.note || ""; } },
+    { id: "copy-id", label: t("复制设备 ID"), icon: Copy, run: () => copyText(device.id) },
+    device.paired
+      ? { id: "forget", label: t("移除设备"), icon: Trash2, divider: true, danger: true, run: () => { forgetDevice.value = device; } }
+      : null,
+  ]);
+}
+
+/** Open a conversation with a device from its own row.
+ *
+ * Same call the chat page's 附近设备 list makes, and the same answer: a session
+ * id means the link was up and the conversation is open, anything else means
+ * the invite is still dialing — in which case the chat page is where it will
+ * appear, and it is opened either way so the reader can watch it arrive.
+ */
+async function chatWith(device: Device) {
+  try {
+    const result = await bridge.inviteChat(device.id, device.name);
+    chatSessionToOpen.value = result?.chat_session_id || "";
+    openPage("chat");
+  } catch (error: any) {
+    announce(error?.message || t("发送邀请失败"));
+  }
 }
 
 /** A row's kind in words, the way the panel's row named it.
@@ -557,8 +793,21 @@ function typeLabel(item: HistoryItem) {
   if (kind === "TEXT") return t("文本");
   if (kind === "URL" || kind === "LINK") return t("链接");
   if (kind === "FILE") return t("文件");
+  // A file on another device is a file; the row's own actions already say which
+  // machine it is on, so the label does not have to.
+  if (kind === "FILE_REMOTE") return t("文件");
   if (kind === "IMAGE" || kind === "IMAGE_PNG" || kind === "IMAGE_EMF") return t("图片");
   return kind || t("内容");
+}
+
+/** A row's preview as it is shown.
+ *
+ * Falls back to the kind in brackets for a row the sidecar sent no preview at
+ * all for, which is what the legacy panel shows — the label is translated by
+ * `previewText`, the bracketed kind is not, because it is a format name.
+ */
+function previewLabel(item: HistoryItem) {
+  return previewText(item.preview) || `[${item.content_type || t("内容")}]`;
 }
 
 /** How many times a clip has been pasted back, as a badge worth showing.
@@ -641,7 +890,12 @@ function kindUnavailable(id: string) {
  */
 const previewCard = ref<{ id: string; text: string } | null>(null);
 function showPreview(item: HistoryItem) {
-  if (item.preview) previewCard.value = { id: item.id, text: item.preview };
+  // Nothing to add for a clip with no text of its own: its "preview" is the
+  // kind's own label, which the row already shows, and this card exists to
+  // show the rest of a clip that was cut off.  There is no rest.
+  if (item.preview && !isPlaceholderPreview(item.preview)) {
+    previewCard.value = { id: item.id, text: item.preview };
+  }
 }
 function hidePreview(item: HistoryItem) {
   if (previewCard.value?.id === item.id) previewCard.value = null;
@@ -721,6 +975,16 @@ const aiRemoteItems = computed(() => aiInventories.value[aiPeerId.value]?.entrie
 /** Whether this peer speaks a pre-v3 protocol, which sends no usable root id and
  * so must be compared by path alone. */
 const aiRemoteLegacy = computed(() => aiInventories.value[aiPeerId.value]?.legacy === true);
+/** Whether a peer is known to be pre-v3, by id rather than by selection.
+ *
+ * The wizard lists every paired device, and legacy-ness is a property of the
+ * inventory a peer reports, so it is simply unknown until that peer has
+ * answered — which for a device nobody has read is not until it is selected.
+ * What is known is honoured; what is not is discovered by the note below
+ * rather than assumed either way. */
+function aiPeerIsLegacy(peerId: string): boolean {
+  return aiInventories.value[peerId]?.legacy === true;
+}
 /** Whether this peer has actually answered with an inventory.  An unread peer and
  * a peer with no config files both draw an empty list, and they are not the same
  * thing: a key that is absent means nobody has asked it yet. */
@@ -935,6 +1199,14 @@ function aiMigrateQualifies(item: Record<string, any>): boolean {
 /** What those files add up to, counted the way the list counts: a skill is one
  * item to migrate, and the files under it are what migrating it moves. */
 const aiMigrateTargets = computed(() => aiTargets(aiRemoteItems.value, aiMigrateQualifies));
+/** Whether the chosen source cannot be pulled from at all.
+ *
+ * A pre-v3 peer's inventory carries no root id, so its paths cannot be
+ * resolved to this machine's targets — the sidecar refuses the request
+ * outright.  The diff above is still true and still readable, which is why the
+ * wizard keeps it on screen and says why the last step is closed instead of
+ * hiding the device. */
+const aiMigrateBlocked = computed(() => aiPeerIsLegacy(aiPeerId.value));
 const aiMigrateItems = computed(() => aiMigrateTargets.value.flatMap(target => target.items));
 const aiMigrateSummary = computed(() => {
   const count = aiMigrateTargets.value.length;
@@ -968,7 +1240,7 @@ watch([aiMigrateOpen, aiMigrateStrategy, aiMigrateItems], () => {
 });
 async function startAiMigration() {
   const items = aiMigrateItems.value;
-  if (!items.length) return;
+  if (!items.length || aiMigrateBlocked.value) return;
   aiMigrateDialog.value?.close();
   aiMigrateOpen.value = false;
   if (aiMigrateStrategy.value === "skip" || aiMigrateStrategy.value === "copy") {
@@ -1184,8 +1456,6 @@ const batchDeleteIds = ref<string[] | null>(null);
 const batchDeleteDialog = ref<HTMLDialogElement | null>(null);
 const clearHistoryOpen = ref(false);
 const clearHistoryDialog = ref<HTMLDialogElement | null>(null);
-const statusMessage = ref("");
-let statusMessageTimer: ReturnType<typeof setTimeout> | undefined;
 const revokeDevice = ref<Device | null>(null);
 const revokeDialog = ref<HTMLDialogElement | null>(null);
 const forgetDevice = ref<Device | null>(null);
@@ -1193,6 +1463,17 @@ const forgetDialog = ref<HTMLDialogElement | null>(null);
 const purgeDevice = ref<Device | null>(null);
 const purgeDialog = ref<HTMLDialogElement | null>(null);
 const probeResults = ref<Record<string, DeviceProbeResult>>({});
+/** The device whose alias is being rewritten from the context menu.  The row
+ * has its own 设备备注 field for this; the menu entry is the same write with a
+ * dialog in front of it, which is what the legacy 重命名 was. */
+const renameDevice = ref<Device | null>(null);
+const renameValue = ref("");
+const renameDialog = ref<HTMLDialogElement | null>(null);
+/** The conversation the chat page should open when it next mounts, handed over
+ * by 打开聊天 on a device row.  The chat page owns which session is selected —
+ * it has to, since it is the one polling the list — so this is a request rather
+ * than a selection. */
+const chatSessionToOpen = ref("");
 const probeBusyId = ref("");
 const certificates = ref<DeviceCertificate[] | null>(null);
 const certDialog = ref<HTMLDialogElement | null>(null);
@@ -1268,6 +1549,8 @@ const qrBusy = ref(false);
 const qrImage = ref("");
 const qrUrl = ref("");
 const qrMessage = ref("");
+const qrShareBusy = ref(false);
+const qrShareMessage = ref("");
 let offMenuAction: (() => void) | undefined;
 let offFileDrop: (() => void) | undefined;
 /** Whether files are being dragged over the window at this instant.
@@ -1298,6 +1581,10 @@ const autoUpdateCheckBusy = ref(false);
 const updateState = computed(() => store.state.update);
 const updateAvailable = computed(() => store.state.updateCheck?.available === true);
 const updateLatest = computed(() => store.state.updateCheck?.latest || "");
+// Whether this build can replace itself. The host answers it by matching this
+// machine's bundle against the release manifest, so it is a different question
+// from "is there a newer version" and the card must be able to say no.
+const updateInstallable = computed(() => store.state.updateCheck?.installable === true);
 // Fixed group order, mirroring the legacy diagnostics panel: a group missing
 // from the payload is skipped rather than rendered empty.
 const diagnosticGroupOrder = ["system", "network", "internet", "ai_config", "chat", "transfer", "filesystem"];
@@ -1341,6 +1628,11 @@ watch(ready, async (isReady) => {
     // a user who never opens the settings page would otherwise never see it.
     settings.value.timed_pause_until = Number(loaded.settings.timed_pause_until || 0);
     maybePromptLanguage(loaded.settings.language_chosen);
+    // The phone service is read here as well as on the way into the two pages
+    // that show it, because the window opens on one of them: a switch drawn
+    // from a status nobody has read yet would show the service as off until
+    // the reader happened to visit the devices page.
+    void refreshCompanion();
   }
   catch { /* Settings can be retried by opening the settings view. */ }
 });
@@ -1381,10 +1673,10 @@ const languageChoices = computed(() => [
   { code: "zh-CN", native: t("简体中文"), other: "Simplified Chinese" },
   { code: "en", native: "English", other: t("英语") },
 ]);
+const overviewAvailable = computed(() => ready.value && !!state.status?.capabilities?.includes("overview.get"));
 const favoritesAvailable = computed(() => ready.value && !!state.status?.capabilities?.includes("favorites.list"));
 const syncLabel = computed(() => state.status?.sync_state === "running" ? t("同步运行中")
   : state.status?.sync_state === "paused" ? t("同步已暂停") : t("同步引擎未启动"));
-const syncAvailable = computed(() => ready.value && !!state.status?.capabilities?.includes("sync.set_enabled"));
 // The timed pause, as the dashboard's quick controls had it: the deadline the
 // runtime armed (epoch seconds, in the settings payload this shell already
 // fetches), re-read on a 15 s tick so the remaining minutes count down, and
@@ -1438,13 +1730,62 @@ const permissionsRepairCheck = computed(() =>
   diagnosticsReport.value?.checks?.find((check) => check.id === "permissions" && !check.ok) || null);
 const busy = computed(() => state.pending || state.refreshing || !ready.value);
 const historyBusy = computed(() => busy.value || state.loading);
+/**
+ * The two toolbar refreshes, which say what they found.
+ *
+ * A refresh is the one click that is allowed to change nothing: the list comes
+ * back as it was, the spinner is over before the eye reaches it, and the button
+ * is left looking exactly as it did before it was pressed. That is the case a
+ * reader cannot tell from a button that is broken, so each of these names the
+ * list it re-read and how much is in it now.
+ *
+ * Both wrap the store call rather than replacing it: the history read is also
+ * what the search box, the kind chips and the pager run, and the device read is
+ * the poller's, so neither can report on its own without reporting for them.
+ */
+async function refreshHistoryNow() {
+  await store.refreshHistory();
+  store.toast("ui.history", t("已刷新 · {count} 条记录", { count: state.total }));
+}
+/* The three panes that own their own buttons report through one of these: the
+ * notice stack is the window's, and which page a message belongs to is the
+ * window's to say — the pane only knows what happened, not whose colour the
+ * notice should carry. */
+const notifyFavorites = (message: string) => store.toast("ui.favorites", message);
+const notifyTransfers = (message: string) => store.toast("ui.transfers", message);
+const notifyChat = (message: string) => store.toast("ui.chat", message);
+async function refreshDevices() {
+  await store.refresh();
+  // The rows above 已移除的设备, which is the list this page is showing: a
+  // removed device is not one a refresh just went and found.
+  store.toast("ui.devices", t("已刷新 · {count} 台设备", { count: activeDevices.value.length }));
+}
+// Its own flag rather than the store's `pending`, because a merge spends most of
+// its time fetching each row's full text before it ever reaches the store.
+const mergeBusy = ref(false);
 const visibleIds = computed(() => [...new Set(state.history.map((item) => item.id).filter((id) => id.trim()))]);
 const allSelected = computed(() => !!visibleIds.value.length &&
   visibleIds.value.every((id) => state.selectedIds.includes(id)));
 const batchDeleteValid = computed(() => !!batchDeleteIds.value?.length &&
   batchDeleteIds.value.every((id) => state.selectedIds.includes(id)));
 async function confirmBatchDelete() {
-  if (batchDeleteIds.value && await store.batchDelete(batchDeleteIds.value)) batchDeleteIds.value = null;
+  const ids = batchDeleteIds.value;
+  if (!ids) return;
+  if (await store.batchDelete(ids)) {
+    // The dialog closes on the same click that commits, so without the count
+    // the reader cannot tell whether three rows went or thirty.
+    store.toast("ui.history", t("已删除 {count} 条", { count: ids.length }));
+    batchDeleteIds.value = null;
+  }
+}
+/** Pin or unpin the whole selection, reporting how many rows it covered. */
+async function pinSelected(pinned: boolean) {
+  const count = state.selectedIds.length;
+  if (await store.batchPin(pinned)) {
+    store.toast("ui.history", pinned
+      ? t("已置顶 {count} 条", { count })
+      : t("已取消置顶 {count} 条", { count }));
+  }
 }
 watch(batchDeleteIds, async (ids) => {
   await nextTick();
@@ -1452,20 +1793,60 @@ watch(batchDeleteIds, async (ids) => {
   else batchDeleteDialog.value?.close();
 });
 watch(() => [state.query, state.offset], () => { batchDeleteIds.value = null; }, { flush: "sync" });
-function announce(message: string) {
-  statusMessage.value = message;
-  clearTimeout(statusMessageTimer);
-  statusMessageTimer = setTimeout(() => { statusMessage.value = ""; }, 5000);
-}
 async function favoriteSelected() {
   const count = await store.batchFavorite([...state.selectedIds]);
-  if (count) announce(t("已加入收藏夹 {count} 条", { count }));
+  if (count) store.toast("ui.favorites", t("已加入收藏夹 {count} 条", { count }));
+}
+/**
+ * Merge the selected rows into one clip and push it to this machine's clipboard.
+ *
+ * This is the legacy web panel's 推送到电脑 (`history-panel.js`, `mergeCopySelected`),
+ * and it was the one batch action the new page had lost: the toolbar could pin,
+ * favorite and delete, but nothing could combine several clips into a single push.
+ *
+ * Two of its rules are load-bearing and are kept.  The rows merge in raw history
+ * order rather than the order they were ticked, so the result reads the way the
+ * list does.  And each row's FULL text is fetched first, because a list row
+ * carries a truncated preview — merging previews would push cut-off clips to
+ * every device.  A fetch that fails falls back to that row's preview instead of
+ * dropping it, so one entry vanishing mid-flight cannot lose the other nine.
+ */
+async function mergePushSelected() {
+  if (mergeBusy.value || historyBusy.value) return;
+  const ordered = state.history.filter((item) => state.selectedIds.includes(item.id));
+  if (!ordered.length) {
+    announce(t("没有可合并的记录"));
+    return;
+  }
+  mergeBusy.value = true;
+  try {
+    const texts: string[] = [];
+    for (const item of ordered) {
+      let text = item.preview;
+      try {
+        const detail = await bridge.readHistoryText(item.id);
+        if (detail?.text) text = detail.text;
+      } catch { /* the row went away; its preview is still what the list showed */ }
+      texts.push(text);
+    }
+    const merged = texts.join("\n---\n");
+    if (merged.length > 100000) {
+      // The store refuses anything longer, and its own message for that is
+      // about a typed-in paste, which would not explain what happened here.
+      announce(t("合并后内容过长，无法推送"));
+      return;
+    }
+    const result = await store.pushText(merged);
+    if (result) store.toast("ui.history", t("已合并推送 {count} 条到本机剪贴板", { count: texts.length }));
+  } finally {
+    mergeBusy.value = false;
+  }
 }
 async function confirmClearHistory() {
   const cleared = await store.clearHistory();
   if (cleared) {
     clearHistoryOpen.value = false;
-    announce(t("已清空 {count} 条历史记录", { count: cleared }));
+    store.toast("ui.history", t("已清空 {count} 条历史记录", { count: cleared }));
   }
 }
 watch(clearHistoryOpen, async (open) => {
@@ -1473,13 +1854,7 @@ watch(clearHistoryOpen, async (open) => {
   if (open) clearHistoryDialog.value?.showModal();
   else clearHistoryDialog.value?.close();
 });
-onUnmounted(() => clearTimeout(statusMessageTimer));
-  function toggleSync(event: Event) {
-  const input = event.target as HTMLInputElement;
-  const enabled = input.checked;
-  input.checked = state.status?.sync_state === "running";
-  void store.setSyncEnabled(enabled);
-}
+onUnmounted(() => clearStatus());
 async function pauseSync(minutes: number) {
   if (pauseBusy.value) return;
   pauseBusy.value = true;
@@ -1491,7 +1866,7 @@ async function pauseSync(minutes: number) {
     settings.value.timed_pause_until = Number(result?.until || 0);
     nowTick.value = Date.now();
     await store.refresh();
-    announce(t("同步已暂停 {minutes} 分钟", { minutes }));
+    store.toast("ui.sync", t("同步已暂停 {minutes} 分钟", { minutes }));
   }
   catch (reason: any) { state.error = reason?.message || t("暂停同步失败"); }
   finally { pauseBusy.value = false; }
@@ -1504,7 +1879,7 @@ async function resumeSync() {
     settings.value.timed_pause_until = 0;
     nowTick.value = Date.now();
     await store.refresh();
-    announce(t("同步已恢复"));
+    store.toast("ui.sync", t("同步已恢复"));
   }
   catch (reason: any) { state.error = reason?.message || t("恢复同步失败"); }
   finally { pauseBusy.value = false; }
@@ -1517,8 +1892,38 @@ function pairingLabel(device: Device) {
   return ({ pending: t("等待确认"), peer_confirmed: t("对方已确认"), confirmed_waiting: t("等待对方确认"),
     cancelled: t("已取消") } as Record<string, string>)[device.pairing_status] || t("未配对");
 }
-function connectionLabel(value: string) {
-  return ({ discovered: t("已发现"), connecting: t("连接中"), online: t("在线"), offline: t("离线") } as Record<string, string>)[value] || t("连接状态未知");
+/** A device's local link, as the chip under its name shows it.
+ *
+ * A paired peer that has gone away is retried, and while it is, the transport
+ * flips the connection state between 连接中 and 离线 on every attempt — a chip
+ * that flickered between two words said less than 离线 did, because it never
+ * said the app was still trying.  The attempt count is the whole difference
+ * between a retry in flight and a peer that is gone, so it replaces the state
+ * while there is one, and it is the one reading the legacy panel and the
+ * phone's device page both use.
+ *
+ * The count stands alone rather than after 本地·: a route name in front of it
+ * read as a third route beside 本地 and 互联网, when it is a state of the first
+ * one. */
+function connectionLabel(device: Device) {
+  if (device.reconnecting) {
+    const attempt = device.reconnect_attempt || 0;
+    const max = device.reconnect_max || 0;
+    // A ceiling of zero is no ceiling — the same reading `max_attempts` gets in
+    // the transport — so the count stands alone rather than as "2/0", which
+    // would name a limit of zero attempts for a retry that is on its second.
+    return max ? t("重连中 {attempt}/{max}", { attempt, max }) : t("重连中 {attempt}", { attempt });
+  }
+  return ({ discovered: t("已发现"), connecting: t("连接中"), online: t("在线"), offline: t("离线") } as Record<string, string>)[device.connection_state] || t("连接状态未知");
+}
+/** The local chip's words, which during a retry are the count alone. */
+function localChannelLabel(device: Device) {
+  return device.reconnecting ? connectionLabel(device) : `${t("本地")}·${connectionLabel(device)}`;
+}
+/** The local chip's colour, which during a retry is the in-flight one rather
+ *  than the 离线 it would otherwise read as. */
+function localChannelState(device: Device) {
+  return device.reconnecting ? "connecting" : (device.connection_state || "offline");
 }
 
 /** A device's internet pairing, joined to the device row by device id.
@@ -1554,13 +1959,51 @@ function relayChannelLabel(device: Device) {
 function relayLastSeen(device: Device) {
   const seen = Number(relayPeerFor(device)?.last_seen || 0);
   if (!seen) return "";
-  return t("最后在线 {when}", { when: date(seen) });
+  return t("最后在线 {when}", { when: dateTime(seen) });
 }
 async function saveDeviceNote(device: Device, event: Event) {
   const note = (event.target as HTMLInputElement).value;
   try { await bridge.setDeviceNote(device.id, note); await store.refresh(); }
   catch (reason: any) { state.error = reason?.message || t("保存设备备注失败"); }
 }
+/** Rename *this* machine, from the overview's own card.
+ *
+ * One field rather than the settings form's save: that form is only hydrated
+ * once its page has been opened, and this card is not on it — and the name is
+ * a fact about the device that the sidebar's footer and every peer's device
+ * list also show, so the status is re-read here to put it everywhere at once.
+ * The settings page takes its own copy from the backend the next time it is
+ * opened, which is why nothing else has to be told. */
+async function renameThisDevice(name: string) {
+  try {
+    await bridge.updateSettings({ device_name: name });
+    await store.refresh();
+    store.toast("ui.devices", t("设备名称已更新"));
+  } catch (reason: any) {
+    state.error = reason?.message || t("重命名失败");
+  }
+}
+/** Confirm the alias the menu's 重命名 collected.  The backend has one
+ * user-editable name per device — the alias the row's own field writes — so
+ * the rename goes through the same call rather than inventing a second one. */
+async function confirmRename() {
+  const device = renameDevice.value;
+  const alias = renameValue.value.trim();
+  if (!device) return;
+  try {
+    await bridge.setDeviceNote(device.id, alias);
+    await store.refresh();
+    renameDevice.value = null;
+    store.toast("ui.devices", t("已重命名为 {name}", { name: alias }));
+  } catch (reason: any) {
+    state.error = reason?.message || t("重命名失败");
+  }
+}
+watch(renameDevice, async (device) => {
+  await nextTick();
+  if (device) renameDialog.value?.showModal();
+  else renameDialog.value?.close();
+});
 async function confirmRevoke() {
   const current = state.devices.find((device) => device.id === revokeDevice.value?.id && device.paired);
   if (current && await store.unpair(current)) revokeDevice.value = null;
@@ -1653,7 +2096,7 @@ async function confirmSendUrl() {
     // Keep the dialog open on failure so the typed URL is not lost.
     if (await store.sendUrl(device, url)) {
       sendUrlDevice.value = null;
-      announce(t("已发送网址到 {name}", { name: device.name }));
+      store.toast("ui.devices", t("已发送网址到 {name}", { name: device.name }));
     }
   } finally {
     sendUrlBusy.value = false;
@@ -1677,7 +2120,7 @@ async function confirmPushText() {
     const result = await store.pushText(text);
     if (result) {
       pushTextOpen.value = false;
-      announce(result.sent
+      store.toast("ui.devices", result.sent
         ? t("已推送到本机剪贴板并同步到所有设备")
         : t("已推送到本机剪贴板（同步未开启，未广播）"));
     }
@@ -1729,6 +2172,7 @@ async function openCompanionQr() {
   qrImage.value = "";
   qrUrl.value = "";
   qrMessage.value = "";
+  qrShareMessage.value = "";
   qrOpen.value = true;
   qrBusy.value = true;
   try {
@@ -1738,6 +2182,27 @@ async function openCompanionQr() {
     else qrMessage.value = result.error === "COMPANION_NOT_RUNNING" ? t("手机服务未启动") : t("二维码不可用");
   } catch (error) { state.error = error as any; }
   finally { qrBusy.value = false; }
+}
+/** Hand a local file to the phone, the legacy 发送文件到手机按钮.
+ *
+ * The file is copied into the directory the phone's Files tab lists, so it is
+ * downloadable without pairing — the same one-way push the legacy Tk dialog
+ * made, offered here from the QR dialog because that is the surface the phone
+ * is reachable from.  The host only picks the path; the sanitising, the
+ * collision naming and the copy belong to the sidecar, beside the directory it
+ * owns.
+ */
+async function shareFileToPhone() {
+  if (qrShareBusy.value) return;
+  qrShareBusy.value = true;
+  qrShareMessage.value = "";
+  try {
+    const path = await bridge.chooseFile("any");
+    if (!path) return;
+    const result = await bridge.shareFileToPhone(path);
+    qrShareMessage.value = t("已发送到手机：{name}", { name: result.name });
+  } catch (error) { state.error = error as any; }
+  finally { qrShareBusy.value = false; }
 }
 // The phone's panel has no window of its own: its QR and send-URL buttons
 // arrive as events (see the store) and are answered by this window.
@@ -1782,6 +2247,24 @@ watch(diagnosticsOpen, async (open) => {
 function diagnosticLabel(item: DiagnosticItem) {
   return item.label_text || item.id;
 }
+/** Whether a group passed, warned or failed, from its own checks.
+ *
+ * A group with nothing in it is a warning, not a pass: an unreadable section
+ * is not the same as a healthy one, and the legacy panel read it the same way
+ * (`diagnostics-panel.js`, `groupStatus`). */
+function diagnosticVerdict(group: { items: DiagnosticItem[] }) {
+  if (!group.items.length) return "warn";
+  if (group.items.some((item) => item.status === "fail")) return "fail";
+  if (group.items.some((item) => item.status === "warn")) return "warn";
+  return "ok";
+}
+function diagnosticVerdictLabel(status: string) {
+  return ({ ok: t("正常"), warn: t("警告"), fail: t("失败") } as Record<string, string>)[status] || status;
+}
+/** The mark beside a check: the same three the legacy panel drew. */
+function diagnosticGlyph(status: string) {
+  return ({ ok: "✓", warn: "!", fail: "✕" } as Record<string, string>)[status] || "·";
+}
 function diagnosticDetail(item: DiagnosticItem) {
   return item.detail_text || item.detail || "";
 }
@@ -1808,6 +2291,19 @@ async function openDiagnostics() {
   diagnosticsReport.value = null;
   await refreshDiagnostics();
 }
+/** 重新检测, which reports itself.
+ *
+ * Each check reads the machine afresh and most of them come back the same, so
+ * the scan is worth a word — including the count, because how many of the
+ * checks passed is the answer the button was pressed for. */
+async function rerunDiagnostics() {
+  await refreshDiagnostics();
+  const checks = diagnosticsReport.value?.checks || [];
+  store.toast("ui.settings", t("已重新检测 · {ok}/{total} 项通过", {
+    ok: checks.filter((check) => check.ok).length,
+    total: checks.length,
+  }));
+}
 async function repairDiagnostics(kind: DiagnosticAction) {
   if (diagnosticsRepairBusy.value) return;
   diagnosticsRepairBusy.value = true;
@@ -1818,13 +2314,14 @@ async function repairDiagnostics(kind: DiagnosticAction) {
       state.error = { code: "DIAG_REPAIR_FAILED", message: result.error || t("无法打开系统设置"), retryable: false };
       return;
     }
-    announce(kind === "firewall" ? t("已请求修复防火墙规则") : t("已打开本地网络权限设置"));
+    store.toast("ui.settings", kind === "firewall" ? t("已请求修复防火墙规则") : t("已打开本地网络权限设置"));
     // The elevated rule may land a moment later, so re-scan after a pause.
     if (kind === "firewall") setTimeout(() => { if (diagnosticsOpen.value) void refreshDiagnostics(); }, 2500);
   } finally { diagnosticsRepairBusy.value = false; }
 }
 async function checkForUpdate() {
-  if (updateChecking.value || updateState.value.phase === "downloading") return;
+  if (updateChecking.value || updateState.value.phase === "downloading"
+    || updateState.value.phase === "installing") return;
   updateChecking.value = true;
   try {
     const result = await store.checkUpdate();
@@ -1840,6 +2337,14 @@ async function startUpdateDownload() {
   if (!result || !result.ok) {
     announce(t("更新下载失败") + (result?.error ? `：${result.error}` : ""));
   }
+}
+async function installUpdate() {
+  // A successful install replaces this process, so a reply is already a
+  // refusal. The host publishes the failing phase before it returns, and the
+  // card renders that, so the only case left to speak to is "nothing to do".
+  const result = await store.installUpdate();
+  if (!result) announce(t("更新安装失败"));
+  else if (!result.installed) announce(t("已是最新版本"));
 }
 async function openUpdateFolder() {
   const result = await store.openUpdateFolder();
@@ -1890,11 +2395,6 @@ async function toggleVisibility(hidden: boolean) {
 const health = computed(() => !native ? t("浏览器预览") : state.error ? t("连接异常")
   : state.status?.health === "locked" ? t("等待解锁") : ready.value ? t("已连接") : t("正在启动"));
 
-function date(value: number) {
-  return new Intl.DateTimeFormat("zh-CN", {
-    month: "short", day: "numeric", hour: "2-digit", minute: "2-digit",
-  }).format(value * 1000);
-}
 async function unlock() {
   const value = password.value;
   password.value = "";
@@ -1909,10 +2409,10 @@ watch(deleteItem, async (item) => {
   if (item) deleteDialog.value?.showModal();
   else deleteDialog.value?.close();
 });
-/** The sidebar, top to bottom: what Ctrl+1…7 counts.  The numbers belong to the
+/** The sidebar, top to bottom: what Ctrl+1…8 counts.  The numbers belong to the
  * rows the user can see, which is why this list has to stay in the order the
  * template renders them and not in whatever order would read better here. */
-const PAGES = ["history", "devices", "favorites", "transfers", "chat", "ai", "settings"] as const;
+const PAGES = ["overview", "history", "devices", "favorites", "transfers", "chat", "ai", "settings"] as const;
 /** How the chords are *named* — the tooltip and `aria-keyshortcuts`.  The
  * handler takes Ctrl or Cmd on either platform; a Mac user hunting for ⌘ should
  * not be told Ctrl. */
@@ -1941,6 +2441,7 @@ function openPage(page: (typeof PAGES)[number]) {
  * a count because its inventory is a disk walk: zero files here would be a
  * count the page has not established. */
 const PAGE_HEADINGS: Record<(typeof PAGES)[number], () => string> = {
+  overview: () => t("概览"),
   history: () => t("剪贴板历史"),
   devices: () => t("设备"),
   favorites: () => t("收藏库"),
@@ -1950,9 +2451,18 @@ const PAGE_HEADINGS: Record<(typeof PAGES)[number], () => string> = {
   settings: () => t("设置"),
 };
 const PAGE_SUMMARIES: Record<(typeof PAGES)[number], () => string> = {
+  // A sentence rather than a count, like the AI page's: the overview's own
+  // numbers are the page's, read when it is entered, and the header has no
+  // second copy of them to keep honest.
+  overview: () => t("本机状态与最近活动"),
   history: () => t("{count} 条记录", { count: state.total }),
   devices: () => t("{count} 台设备", { count: state.devices.length }),
-  favorites: () => t("{count} 条收藏", { count: store.favorites.state.total }),
+  // The library, not the page of it on screen and not the group being read:
+  // `total` is what the current group and search matched, so a subtitle reading
+  // it said 4 条收藏 the moment 工作 was picked — the header contradicting the
+  // rail beside it.  The list's own count is the pager's job, and it names the
+  // window it is counting.
+  favorites: () => t("{count} 条收藏", { count: store.favorites.state.libraryTotal }),
   transfers: () => t("文件发送与接收"),
   chat: () => t("与附近设备进行会话"),
   ai: () => t("读取、编辑本机与已配对设备的 AI 工具配置"),
@@ -1991,15 +2501,72 @@ const aiSections = computed<Array<{ id: AiSection; label: string }>>(() => [
   { id: "local", label: t("本机配置") },
   { id: "peer", label: t("其他设备") },
 ]);
-/** The window's own chords.  Neither shell had an in-window shortcut map — the
- * hotkey module is OS-wide and excluded by the user's scope exception — so this
- * is the desktop convention rather than a ported behaviour: the page numbers,
- * the search boxes and preferences.  Esc is deliberately absent: a native
- * `<dialog>` already owns it, and it works even where this would not. */
+/** True when the keystroke came from somewhere the reader is typing.  Every
+ * list shortcut stands down for these: Ctrl+A in the search box means "select
+ * this text", not "select every record". */
+function isTypingTarget(target: EventTarget | null): boolean {
+  const element = target as HTMLElement | null;
+  if (!element) return false;
+  return element.tagName === "INPUT" || element.tagName === "TEXTAREA" || element.isContentEditable;
+}
+/** Keep the row the keyboard cursor sits on inside the scrolling list.  Moving
+ * the cursor moves no focus, so nothing scrolls it into view on its own. */
+function scrollKbdIntoView() {
+  const row = document.querySelector(".history-row--kbd");
+  // Guarded because a DOM without layout has no `scrollIntoView` at all --
+  // the legacy panel's `_scrollKbdItem` carried the same check.
+  if (row?.scrollIntoView) row.scrollIntoView({ block: "nearest" });
+}
+
+/** The window's own chords: the history list's keys first, then the page
+ * numbers, the search boxes and preferences.  The page numbers are the desktop
+ * convention rather than a ported behaviour — the hotkey module is OS-wide and
+ * excluded by the user's scope exception — but ↑/↓/Enter/Delete and Ctrl+A
+ * *are* ported: the legacy panel drove its list entirely from the keyboard
+ * (`app.js:669`, `app.js:701-724`) and the new page shipped without it, which
+ * was a regression rather than a simplification.  Esc is deliberately absent
+ * here: a native `<dialog>` already owns it, and it works even where this
+ * would not. */
 function onShortcut(event: KeyboardEvent) {
-  if (!(event.ctrlKey || event.metaKey) || event.altKey) return;
   // An open dialog owns the keyboard, so nothing behind it moves.
   if (document.querySelector("dialog[open]")) return;
+
+  // Ctrl/Cmd+A takes the visible page.  History only: the favourites page has
+  // no multi-select of its own for a selection to land in, so the chord would
+  // mean nothing there and is left to the web view.
+  if ((event.ctrlKey || event.metaKey) && !event.altKey && (event.key === "a" || event.key === "A")) {
+    if (tab.value !== "history" || isTypingTarget(event.target)) return;
+    event.preventDefault();
+    store.selectAllVisible(true);
+    return;
+  }
+
+  // ↑/↓ walk a cursor down the history list, Enter copies the row under it and
+  // Delete removes it.  These are bare keys, so they have to be handled before
+  // the modifier guard below.  The two action keys stand down while focus sits
+  // on a control, or a focused row button would act and be acted on at once —
+  // the legacy handler drew the same line (`app.js:703-704`).
+  if (!event.ctrlKey && !event.metaKey && !event.altKey && tab.value === "history" && !isTypingTarget(event.target)) {
+    if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+      event.preventDefault();
+      store.kbdStep(event.key === "ArrowDown" ? 1 : -1);
+      void nextTick(scrollKbdIntoView);
+      return;
+    }
+    const actionKey = event.key === "Enter" || event.key === "Delete" || event.key === "Backspace";
+    const onControl = !!(event.target as HTMLElement | null)?.closest?.('button, a, select, [role="button"]');
+    const item = state.history[state.kbdIndex];
+    if (actionKey && !onControl && state.kbdIndex >= 0 && item) {
+      event.preventDefault();
+      if (event.key === "Enter") void store.copy(item);
+      // The row's own trash opens this same dialog, so Delete confirms too
+      // rather than wiping a record on one stray keypress.
+      else deleteItem.value = item;
+      return;
+    }
+  }
+
+  if (!(event.ctrlKey || event.metaKey) || event.altKey) return;
   // Ctrl+F goes to the search box.  The web view has no find bar of its own, so
   // this is not taking the chord from anything.  Which box depends on the page:
   // the settings page has one of its own, and a reader standing on it means the
@@ -2020,8 +2587,49 @@ function onShortcut(event: KeyboardEvent) {
   event.preventDefault();
   openPage(PAGES[index]);
 }
+/** How often the sidebar's unread count is read while the chat page is closed.
+ *
+ * The panel read it on its shared refresh, which was five seconds idle and
+ * under a second while a transfer or the chat panel was live; the difference
+ * was never the point — the count is a nudge, not a receipt, and anything
+ * faster would be a poll nothing on screen changes for. */
+const CHAT_UNREAD_POLL_MS = 5000;
+const chatUnread = ref(0);
+let chatUnreadTimer: ReturnType<typeof setInterval> | undefined;
+/** The unread total across every conversation, as the sidebar shows it.
+ *
+ * The reads here are the chat page's own (`bridge.chatSessions`), counted the
+ * same way its session rows count them, so the badge and the list can never
+ * disagree about how many messages are waiting. */
+async function refreshChatUnread() {
+  try {
+    const page = await bridge.chatSessions();
+    chatUnread.value = (page.sessions || [])
+      .reduce((total, session) => total + (Number(session.unread) || 0), 0);
+  } catch {
+    // The chat page's own poll is where a failure is actionable, and a bad
+    // count in a sidebar is worse than none: leave the last good one standing.
+  }
+}
 onMounted(() => {
   store.start();
+  void refreshChatUnread();
+  // The sidebar counts the unread chat for the same reason the panel put a
+  // count on its own 附近聊天 row: the cue has to reach a reader who is on
+  // another page, where every other sign of a message — the bubble, the
+  // session's own count — is behind a tab they have to open first.
+  //
+  // It stands down while the chat page is open, where the conversation list
+  // shows the same numbers a second time and polls them faster.  What that
+  // page cannot see is its own exit, so leaving it takes one reading on the
+  // way out — the counts it cleared are the ones the badge would otherwise
+  // still be showing.
+  chatUnreadTimer = setInterval(() => {
+    if (tab.value !== "chat") void refreshChatUnread();
+  }, CHAT_UNREAD_POLL_MS);
+  watch(tab, (page, previous) => {
+    if (previous === "chat" && page !== "chat") void refreshChatUnread();
+  });
   // The dashboard ticked its pause countdown every 15 s; the interval is the
   // same here because the label is whole minutes.  Only the deadline is refetched
   // — merging the whole settings payload would overwrite a half-edited form.
@@ -2077,6 +2685,7 @@ onMounted(() => {
 });
 onUnmounted(() => {
   if (pauseTickTimer) clearInterval(pauseTickTimer);
+  if (chatUnreadTimer) clearInterval(chatUnreadTimer);
   window.removeEventListener("keydown", onShortcut);
   ++aiInventoryGeneration;
   ++themeGeneration;
@@ -2260,6 +2869,50 @@ async function openSettings() {
   catch (error) { state.error = error as any; }
   finally { settingsLoading = false; }
 }
+/** What a tested broker's row says beside its address.
+ *
+ * A reachable broker is its latency, and an unreachable one is why — the
+ * probe's own words, shown as received, because they name the socket-level
+ * reason and there is no shorter true sentence.  A reachable row without a
+ * latency is neither of those, and says nothing rather than a latency it has
+ * not got.
+ */
+function relayRowNote(row: RelayTestResult["results"][number]): string {
+  if (!row.ok) return String(row.detail || t("不可达"));
+  return typeof row.latency_ms === "number" ? t("{ms} 毫秒", { ms: row.latency_ms }) : "";
+}
+/** The staged brokers, both lists as one, deduplicated in order.
+ *
+ * The old panel probed both groups as a single list and dropped repeats, so a
+ * broker staged in both fields was tested once.  Same reading here, and the
+ * order is the order they were typed rather than the order the answer comes
+ * back in — the rows are reported sorted, which is a different thing from which
+ * brokers were asked.
+ */
+function stagedRelayBrokers(): string[] {
+  const seen = new Set<string>();
+  return [...brokerList(settings.value.relay_brokers), ...brokerList(settings.value.relay_private_brokers)]
+    .filter((endpoint) => (seen.has(endpoint) ? false : (seen.add(endpoint), true)));
+}
+/** Probe the staged relay brokers, or the saved ones when nothing is staged.
+ *
+ * A test that could not say "nothing to test" would open a socket to nothing and
+ * report success, which is the one answer worse than an error: the reader would
+ * save a relay with no brokers believing it had been checked.
+ */
+async function testRelayBrokers() {
+  if (relayTestBusy.value) return;
+  relayTestBusy.value = true;
+  relayTestError.value = "";
+  relayTestResult.value = null;
+  try {
+    relayTestResult.value = await bridge.testRelayBrokers(stagedRelayBrokers());
+  } catch (error) {
+    relayTestError.value = (error as any)?.message || String(error);
+  } finally {
+    relayTestBusy.value = false;
+  }
+}
 async function saveSettings() {
   if (settingsBusy.value || !settingsLoaded.value) return;
   settingsBusy.value = true;
@@ -2291,8 +2944,8 @@ async function saveSettings() {
       source_tracking_enabled: settings.value.source_tracking_enabled,
       paste_to_top: settings.value.paste_to_top,
       internet_sync_enabled: settings.value.internet_sync_enabled,
-      relay_brokers: String(settings.value.relay_brokers || "").split(/\r?\n|,/).map((v) => v.trim()).filter(Boolean),
-      relay_private_brokers: String(settings.value.relay_private_brokers || "").split(/\r?\n|,/).map((v) => v.trim()).filter(Boolean),
+      relay_brokers: brokerList(settings.value.relay_brokers),
+      relay_private_brokers: brokerList(settings.value.relay_private_brokers),
       relay_username: settings.value.relay_username,
       relay_password: settings.value.relay_password,
       // Advanced/network fields.  Numbers are clamped to the sidecar's bounds so
@@ -2426,10 +3079,29 @@ async function previewAiRemote(item: Record<string, any>) {
     if (generation === aiRemoteGeneration) state.error = error as any;
   }
 }
+/** Why a pull was refused, in words, for the codes whose raw form is a name
+ * rather than an explanation.  A code with no entry is shown as it arrived:
+ * inventing a sentence for a failure this build has never seen would describe
+ * something that may not be what happened. */
+function aiPullErrorText(code: string): string {
+  // The one refusal a reader can act on: the peer is too old to be a source,
+  // and its files stay readable — which is the whole reason the wizard offers
+  // it at all rather than hiding it the way the older panel did.
+  if (code === "legacy_peer_read_only") return t("该设备版本过旧，只能浏览，不能作为迁移来源");
+  return code;
+}
 async function pullAiRemote(items: Array<Record<string, any>>, mode = "copy") {
   const peerId = aiPeerId.value;
   if (!items.length) return;
   if (!state.devices.some(device => device.id === peerId && device.paired)) return;
+  // Refused here as well as by the sidecar, because the reader is owed the
+  // reason before the work: a selected legacy peer disables the buttons, but a
+  // peer that downgrades between selection and click would otherwise reach the
+  // refusal through this path with nothing but the code to show for it.
+  if (aiPeerIsLegacy(peerId)) {
+    aiRemoteMessage.value = aiPullErrorText("legacy_peer_read_only");
+    return;
+  }
   const generation = ++aiRemoteGeneration;
   try {
     const payload = items.map(item => ({
@@ -2447,7 +3119,7 @@ async function pullAiRemote(items: Array<Record<string, any>>, mode = "copy") {
       ? { peerId, total: requested + errors.length, done: 0, failed: errors.length }
       : null;
     aiRemoteMessage.value = t("已发送 {count} 个拉取请求，等待文件接收", { count: requested }) +
-      (errors.length ? t("；部分请求失败：{errors}", { errors: errors.join(", ") }) : "");
+      (errors.length ? t("；部分请求失败：{errors}", { errors: errors.map(aiPullErrorText).join("，") }) : "");
     if (aiPullProgress.value && aiPullProgress.value.done + aiPullProgress.value.failed >= aiPullProgress.value.total) {
       finishAiPull();
     }
@@ -2549,6 +3221,11 @@ async function refreshBackups() {
   try { backups.value = (await bridge.listBackups()).backups; }
   catch (error) { state.error = error as any; }
 }
+/** 刷新备份, which reports what the folder holds. */
+async function refreshBackupsNow() {
+  await refreshBackups();
+  store.toast("ui.settings", t("已刷新 · {count} 个备份", { count: backups.value.length }));
+}
 async function refreshInternetPairing() {
   try {
     internetPairing.value = await bridge.internetPairingStatus();
@@ -2565,6 +3242,17 @@ async function refreshInternetPairing() {
 /** The send list's own refresh button: re-read the peers, then their ledgers. */
 async function refreshDeliveryStatus() {
   await refreshInternetPairing();
+}
+/** The two refreshes on the internet card, which are separate buttons over the
+ * one read and so are separate handlers: the card's own 刷新 reloads the
+ * pairing state, and the send list's reloads the ledgers under it. */
+async function refreshInternetPairingNow() {
+  await refreshInternetPairing();
+  store.toast("ui.settings", t("已刷新互联网配对状态"));
+}
+async function refreshDeliveryNow() {
+  await refreshDeliveryStatus();
+  store.toast("ui.settings", t("已刷新投递状态"));
 }
 async function generateInternetPairing() {
   try {
@@ -2724,20 +3412,32 @@ async function translateText() {
     <aside class="sidebar">
       <div class="brand"><img :src="logo" alt="" /><span>ClipSync</span></div>
       <nav :aria-label="t('主导航')">
-        <button :aria-label="t('剪贴板历史')" :title="pageTitle(t('剪贴板历史'), 0)" :aria-keyshortcuts="pageChord(0)" :class="{ active: tab === 'history' }" @click="tab = 'history'">
+        <!-- The dashboard is the first row and the page the window opens on,
+             as it was in the legacy window: it is a read of the whole machine
+             rather than of one collection, so it sits above the pages that each
+             hold one. -->
+        <button :aria-label="t('概览')" :title="pageTitle(t('概览'), 0)" :aria-keyshortcuts="pageChord(0)" :class="{ active: tab === 'overview' }" @click="tab = 'overview'">
+          <Activity :size="18" /><span>{{ t("概览") }}</span>
+        </button>
+        <button :aria-label="t('剪贴板历史')" :title="pageTitle(t('剪贴板历史'), 1)" :aria-keyshortcuts="pageChord(1)" :class="{ active: tab === 'history' }" @click="tab = 'history'">
           <History :size="18" /><span>{{ t("剪贴板历史") }}</span>
         </button>
-        <button :aria-label="t('设备')" :title="pageTitle(t('设备'), 1)" :aria-keyshortcuts="pageChord(1)" :class="{ active: tab === 'devices' }" @click="tab = 'devices'">
+        <button :aria-label="t('设备')" :title="pageTitle(t('设备'), 2)" :aria-keyshortcuts="pageChord(2)" :class="{ active: tab === 'devices' }" @click="tab = 'devices'">
           <Monitor :size="18" /><span>{{ t("设备") }}</span>
         </button>
-        <button :aria-label="t('收藏库')" :title="pageTitle(t('收藏库'), 2)" :aria-keyshortcuts="pageChord(2)" :class="{ active: tab === 'favorites' }" @click="tab = 'favorites'">
+        <button :aria-label="t('收藏库')" :title="pageTitle(t('收藏库'), 3)" :aria-keyshortcuts="pageChord(3)" :class="{ active: tab === 'favorites' }" @click="tab = 'favorites'">
           <Star :size="18" /><span>{{ t("收藏库") }}</span>
         </button>
-        <button :aria-label="t('文件传输')" :title="pageTitle(t('文件传输'), 3)" :aria-keyshortcuts="pageChord(3)" :class="{ active: tab === 'transfers' }" @click="tab = 'transfers'">
+        <button :aria-label="t('文件传输')" :title="pageTitle(t('文件传输'), 4)" :aria-keyshortcuts="pageChord(4)" :class="{ active: tab === 'transfers' }" @click="tab = 'transfers'">
           <FileUp :size="18" /><span>{{ t("文件传输") }}</span>
         </button>
-        <button :aria-label="t('附近聊天')" :title="pageTitle(t('附近聊天'), 4)" :aria-keyshortcuts="pageChord(4)" :class="{ active: tab === 'chat' }" @click="tab = 'chat'">
+        <button :aria-label="t('附近聊天')" :title="pageTitle(t('附近聊天'), 5)" :aria-keyshortcuts="pageChord(5)" :class="{ active: tab === 'chat' }" @click="tab = 'chat'">
           <MessageCircle :size="18" /><span>{{ t("附近聊天") }}</span>
+          <!-- The count reaches the reader on whatever page they are on, the
+               way the panel's own chat row carried it.  The label above stays
+               the page's name alone: a screen reader announcing the name and
+               then the number would read the two as one name. -->
+          <b v-if="chatUnread" class="nav-count" :aria-label="t('{count} 条未读消息', { count: chatUnread })">{{ chatUnread }}</b>
         </button>
         <!-- AI configuration is a page of its own rather than a card in the
              settings page: it is not a preference this machine holds but a
@@ -2746,14 +3446,14 @@ async function translateText() {
              the longest card in a window whose cards are meant to be one
              question each.  It sits with the pages that hold content rather
              than behind the rule with the window's own configuration. -->
-        <button :aria-label="t('AI 配置')" :title="pageTitle(t('AI 配置'), 5)" :aria-keyshortcuts="pageChord(5)" :class="{ active: tab === 'ai' }" @click="openAiPage">
+        <button :aria-label="t('AI 配置')" :title="pageTitle(t('AI 配置'), 6)" :aria-keyshortcuts="pageChord(6)" :class="{ active: tab === 'ai' }" @click="openAiPage">
           <Sparkles :size="18" /><span>{{ t("AI 配置") }}</span>
         </button>
         <!-- Settings is not another page of content: it is the window's own
              configuration, so it sits below the six pages that hold content,
              behind a rule, the way a mature desktop sidebar carries it. -->
         <div class="sidebar-settings">
-          <button :aria-label="t('设置')" :title="pageTitle(t('设置'), 6)" :aria-keyshortcuts="pageChord(6)" :class="{ active: tab === 'settings' }" @click="openSettings">
+          <button :aria-label="t('设置')" :title="pageTitle(t('设置'), 7)" :aria-keyshortcuts="pageChord(7)" :class="{ active: tab === 'settings' }" @click="openSettings">
             <SettingsIcon :size="18" /><span>{{ t("设置") }}</span>
           </button>
         </div>
@@ -2797,6 +3497,15 @@ async function translateText() {
           <button class="primary" type="submit" :disabled="state.pending || !password">{{ t("解锁") }}</button>
         </form>
 
+        <OverviewView v-else-if="tab === 'overview'"
+          :store="store" :enabled="overviewAvailable" :sync-running="state.status?.sync_state === 'running'"
+          :companion-on="!!companion?.enabled" :companion-url="companion?.access_url || null"
+          :pause-left-ms="pauseLeftMs" :pause-busy="pauseBusy"
+          @pause="pauseSync" @resume="resumeSync" @companion="configureCompanion"
+          @rename="renameThisDevice" @qr="openCompanionQr" @send-url="openSendUrlFromHost"
+          @devices="openPage('devices')" @history="openPage('history')" @diagnostics="openDiagnosticsCard"
+          @row-menu="historyMenu" />
+
         <template v-else-if="tab === 'history'">
           <div class="toolbar">
             <label class="search"><Search :size="17" /><input
@@ -2804,7 +3513,7 @@ async function translateText() {
               :value="state.query" :aria-label="t('搜索历史记录')" :placeholder="t('搜索历史记录')"
               :disabled="busy" @input="store.search(($event.target as HTMLInputElement).value)"
             /></label>
-            <button class="icon-button" :title="t('刷新')" :aria-label="t('刷新')" :disabled="historyBusy" @click="store.refreshHistory"><RefreshCw :size="18" :class="{ spinning: state.loading }" /></button>
+            <button class="icon-button" :title="t('刷新')" :aria-label="t('刷新')" :disabled="historyBusy" @click="refreshHistoryNow"><RefreshCw :size="18" :class="{ spinning: state.loading }" /></button>
             <button class="icon-button" :title="t('清空历史')" :aria-label="t('清空历史')" :disabled="historyBusy || !state.total" @click="clearHistoryOpen = true"><Eraser :size="18" /></button>
           </div>
           <div v-if="state.hasHistory" class="history-filters" role="group" :aria-label="t('按类型筛选历史记录')">
@@ -2828,14 +3537,15 @@ async function translateText() {
                 @change="store.selectAllVisible(($event.target as HTMLInputElement).checked)" />{{ t("全选当前页") }}</label>
               <span role="status">{{ t("已选择 {count} 条", { count: state.selectedIds.length }) }}</span>
               <div class="batch-actions">
-                <button class="icon-button" :aria-label="t('批量收藏')" :title="t('批量收藏')" :disabled="historyBusy || !state.selectedIds.length" @click="store.batchPin(true)"><Pin :size="17" /></button>
-                <button class="icon-button" :aria-label="t('批量取消收藏')" :title="t('批量取消收藏')" :disabled="historyBusy || !state.selectedIds.length" @click="store.batchPin(false)"><PinOff :size="17" /></button>
-                <button class="icon-button" :aria-label="t('加入收藏夹')" :title="t('加入收藏夹')" :disabled="historyBusy || !state.selectedIds.length" @click="favoriteSelected"><Star :size="17" /></button>
-                <button class="icon-button" :aria-label="t('批量删除')" :title="t('批量删除')" :disabled="historyBusy || !state.selectedIds.length" @click="batchDeleteIds = [...state.selectedIds]"><Trash2 :size="17" /></button>
+                <button class="icon-button" :aria-label="t('批量收藏')" :title="t('批量收藏')" :disabled="historyBusy || mergeBusy || !state.selectedIds.length" @click="pinSelected(true)"><Pin :size="17" /></button>
+                <button class="icon-button" :aria-label="t('批量取消收藏')" :title="t('批量取消收藏')" :disabled="historyBusy || mergeBusy || !state.selectedIds.length" @click="pinSelected(false)"><PinOff :size="17" /></button>
+                <button class="icon-button" :aria-label="t('加入收藏夹')" :title="t('加入收藏夹')" :disabled="historyBusy || mergeBusy || !state.selectedIds.length" @click="favoriteSelected"><Star :size="17" /></button>
+                <button class="icon-button" :aria-label="t('合并推送到电脑')" :title="t('合并推送到电脑')" :disabled="historyBusy || mergeBusy || !state.selectedIds.length" @click="mergePushSelected"><SendHorizontal :size="17" /></button>
+                <button class="icon-button" :aria-label="t('批量删除')" :title="t('批量删除')" :disabled="historyBusy || mergeBusy || !state.selectedIds.length" @click="batchDeleteIds = [...state.selectedIds]"><Trash2 :size="17" /></button>
               </div>
             </div>
-            <div v-if="state.loading && !state.history.length" class="empty" role="status"><RefreshCw class="spinning" :size="26" /><h2>{{ t("正在读取历史") }}</h2></div>
-            <div v-else-if="!state.history.length" class="empty">
+            <div v-if="state.loading && !state.history.length" class="empty empty--page" role="status"><RefreshCw class="spinning" :size="26" /><h2>{{ t("正在读取历史") }}</h2></div>
+            <div v-else-if="!state.history.length" class="empty empty--page">
               <History :size="36" />
               <!-- A search and a chip are different answers: when a chip is on,
                    the panel named the kind instead of saying there is no history
@@ -2845,14 +3555,16 @@ async function translateText() {
               <h2 v-else>{{ t("暂无历史记录") }}</h2>
               <p class="muted">{{ state.kind !== 'all' ? t("换个过滤条件，或清除过滤查看全部内容。") : (native ? t('当前数据目录中没有可显示的记录') : t('桌面窗口连接后显示本地记录')) }}</p>
             </div>
-            <article v-for="item in state.history" :key="item.id" class="history-row"
+            <article v-for="(item, index) in state.history" :key="item.id" class="history-row"
+              :class="{ 'history-row--kbd': state.kbdIndex === index }"
+              @contextmenu.prevent="historyMenu($event, item)"
               @mouseenter="showPreview(item)" @mouseleave="hidePreview(item)"
               @focusin="showPreview(item)" @focusout="hidePreview(item)">
               <label class="history-selection"><input type="checkbox" :aria-label="t('选择记录 {id}', { id: item.id })"
                 :checked="state.selectedIds.includes(item.id)"
                 :disabled="historyBusy || !item.id.trim() || (!state.selectedIds.includes(item.id) && state.selectedIds.length >= 100)"
                 @change="store.select(item.id, ($event.target as HTMLInputElement).checked)" /></label>
-              <div class="history-content"><p>{{ item.preview || `[${item.content_type || t('内容')}]` }}</p>
+              <div class="history-content"><p>{{ previewLabel(item) }}</p>
                 <span class="muted small">{{ typeLabel(item) }}<span v-if="item.pinned"> · {{ t("已收藏") }}</span></span>
                 <span class="history-meta">
                   <span v-if="item.source_app" class="badge" :title="item.source_app">{{ item.source_app }}</span>
@@ -2871,9 +3583,14 @@ async function translateText() {
                   <span v-if="pasteCount(item)" class="badge badge--count" :title="pasteCount(item)">{{ pasteCount(item) }}</span>
                 </span>
               </div>
-              <time :datetime="new Date(item.timestamp * 1000).toISOString()">{{ date(item.timestamp) }}</time>
+              <time :datetime="new Date(item.timestamp * 1000).toISOString()">{{ dateTime(item.timestamp) }}</time>
               <div class="row-actions">
-                <button class="icon-button" :aria-label="t('复制记录')" :title="t('复制记录')" :disabled="historyBusy" @click="store.copy(item)"><Check v-if="state.copiedId === item.id" :size="17" /><Copy v-else :size="17" /></button>
+                <button v-if="!isRemoteFile(item)" class="icon-button" :aria-label="t('复制记录')" :title="t('复制记录')" :disabled="historyBusy" @click="store.copy(item)"><Check v-if="state.copiedId === item.id" :size="17" /><Copy v-else :size="17" /></button>
+                <!-- The one row whose action is not 复制: the file is not on this
+                     machine, so what the row offers is the ask.  It replaces
+                     rather than sits beside the copy button — two buttons on one
+                     row where only one of them can work is worse than one. -->
+                <button v-if="isRemoteFile(item)" class="icon-button" :aria-label="t('下载文件')" :title="remoteFileTitle(item)" :disabled="historyBusy || remoteFileBusy(item)" @click="downloadRemoteFile(item)"><Check v-if="remoteFileBusy(item)" :size="17" /><Download v-else :size="17" /></button>
                 <button class="icon-button" :class="{ pinned: item.pinned }" :aria-label="item.pinned ? t('取消收藏') : t('收藏')" :title="item.pinned ? t('取消收藏') : t('收藏')" :disabled="historyBusy" @click="store.pin(item)"><Pin :size="17" /></button>
                 <button class="icon-button" :aria-label="t('翻译记录')" :title="t('翻译记录')" :disabled="historyBusy || translateItemReading" @click="openTranslateItem(item)"><Globe :size="17" /></button>
                 <button v-if="isWebLink(item)" class="icon-button" :aria-label="t('在浏览器打开')" :title="t('在浏览器打开')" :disabled="historyBusy" @click="openHistoryLink(item)"><ExternalLink :size="17" /></button>
@@ -2892,17 +3609,20 @@ async function translateText() {
           </footer>
         </template>
 
-        <FavoritesView v-else-if="tab === 'favorites'" :store="store.favorites" :enabled="favoritesAvailable" />
+        <FavoritesView v-else-if="tab === 'favorites'" :store="store.favorites"
+          :enabled="favoritesAvailable" :notify="notifyFavorites" />
         <TransfersView
           v-else-if="tab === 'transfers'"
           :devices="state.devices"
           :dropped="droppedPaths"
+          :notify="notifyTransfers"
           @dropped="droppedPaths = []"
         />
         <!-- The receipt map comes from the store rather than a chat-local
              fetch: it is fed by the event stream, so a message that was sent
              before this tab was ever opened still shows how it ended. -->
-        <ChatView v-else-if="tab === 'chat'" :receipts="delivery.state.messages" />
+        <ChatView v-else-if="tab === 'chat'" :receipts="delivery.state.messages"
+          :open-session="chatSessionToOpen" :notify="notifyChat" @opened="chatSessionToOpen = ''" />
         <!-- The AI page: the configuration files this machine's AI tools keep,
              and the same question asked of a paired device.  It was the
              settings page's longest card, and three things about it were wrong
@@ -3103,13 +3823,14 @@ async function translateText() {
                        answered, and a peer that answered with nothing. -->
                   <p v-else-if="aiRemoteRead" class="muted small setting-block">{{ t("该设备还没有可同步的配置项") }}</p>
                   <p v-else class="muted small setting-block">{{ t("尚未读取该设备的配置") }}</p>
+                  <p v-if="aiRemoteItems.length && aiRemoteLegacy" class="muted small setting-block" role="status">{{ t("该设备版本过旧，只能浏览，不能作为迁移来源") }}</p>
                   <div v-if="aiRemoteItems.length" class="setting-actions">
                     <label class="sync-toggle">
                       <input type="checkbox" :aria-label="t('选择本页全部远程配置')" :checked="aiRemotePageAllSelected" :indeterminate="aiRemotePageSomeSelected" @change="toggleAiRemotePage()" />
                       <span>{{ t("选择本页") }}</span>
                     </label>
                     <button type="button" :disabled="!aiDiff.missing" @click="selectAiRemoteMissing()">{{ t("选择缺失项（{count}）", { count: aiDiff.missing }) }}</button>
-                    <button type="button" :disabled="!aiRemoteSelectedTargets.length" @click="requestAiPullBatch()"><FileUp :size="16" />{{ t("拉取选中项（{count}）", { count: aiRemoteSelectedTargets.length }) }}</button>
+                    <button type="button" :disabled="aiRemoteLegacy || !aiRemoteSelectedTargets.length" @click="requestAiPullBatch()"><FileUp :size="16" />{{ t("拉取选中项（{count}）", { count: aiRemoteSelectedTargets.length }) }}</button>
                     <button type="button" :disabled="!aiRemoteSelected.length" @click="aiRemoteSelected = []">{{ t("清除选择") }}</button>
                   </div>
                   <nav v-if="aiRemotePageCount > 1" :aria-label="t('远程配置分页')" class="actions">
@@ -3251,6 +3972,27 @@ async function translateText() {
                     <span class="setting-name">{{ t("中继密码") }}</span>
                     <span class="setting-control"><input v-model="settings.relay_password" type="password" autocomplete="new-password" :placeholder="t('留空表示不修改')" /></span>
                   </label>
+                  <!-- The panel's own 测试 button.  Last in the card, because it
+                       is about the four fields above it rather than a fifth
+                       thing to fill in: the relay reads as one group of
+                       settings, and then one control that asks whether the
+                       brokers in it answer. -->
+                  <div class="setting-block relay-test-block">
+                    <button type="button" :disabled="relayTestBusy" @click="testRelayBrokers">
+                      <PlugZap :size="15" />{{ relayTestBusy ? t("正在测试…") : t("测试中继连接") }}
+                    </button>
+                    <p v-if="relayTestError" class="muted small setting-hint" role="alert">{{ relayTestError }}</p>
+                    <div v-else-if="relayTestResult" class="relay-test" role="status">
+                      <p class="setting-hint">{{ t("{total} 个中继中 {reachable} 个可达", { total: relayTestResult.total, reachable: relayTestResult.reachable }) }}</p>
+                      <ul class="relay-test-list">
+                        <li v-for="row in relayTestResult.results" :key="row.endpoint" :class="row.ok ? 'relay-test--ok' : 'relay-test--fail'">
+                          <span class="relay-test-mark" aria-hidden="true">{{ row.ok ? "✓" : "✕" }}</span>
+                          <span class="relay-test-endpoint">{{ row.endpoint }}</span>
+                          <span class="muted small">{{ relayRowNote(row) }}</span>
+                        </li>
+                      </ul>
+                    </div>
+                  </div>
                 </fieldset>
               </section>
               <section v-show="showSettingsCard('history')" id="settings-history" class="settings-section">
@@ -3458,12 +4200,12 @@ async function translateText() {
                 <p class="muted small setting-note">{{ t("密码会随“保存设置”一起提交，并同时用作设备配对的通道密钥；剪贴板历史的密钥在重启后更新。") }}</p>
                 <p class="muted setting-block">{{ settings.password_set ? t("已设置加密密码") : t("未设置加密密码") }}</p>
                 <div v-if="settings.password_set" class="setting-actions">
-                  <button type="button" class="danger" :disabled="securityBusy" @click="clearPasswordOpen = true"><Trash2 :size="16" />{{ t("清除加密密码") }}</button>
+                  <button type="button" class="danger-outline" :disabled="securityBusy" @click="clearPasswordOpen = true"><Trash2 :size="16" />{{ t("清除加密密码") }}</button>
                 </div>
                 <h3>{{ t("危险区域") }}</h3>
                 <p class="muted small setting-note">{{ t("恢复出厂设置会删除全部历史、收藏、配对和设备身份，并重新启动应用。此操作无法撤销。") }}</p>
                 <div class="setting-actions setting-actions--card">
-                  <button type="button" class="danger" :disabled="securityBusy" @click="factoryResetOpen = true"><Trash2 :size="16" />{{ t("恢复出厂设置") }}</button>
+                  <button type="button" class="danger-outline" :disabled="securityBusy" @click="factoryResetOpen = true"><Trash2 :size="16" />{{ t("恢复出厂设置") }}</button>
                 </div>
               </section>
               <section v-show="showSettingsCard('backup')" id="settings-backup" class="settings-section">
@@ -3486,7 +4228,7 @@ async function translateText() {
                      blocks above the list it refreshes. -->
                 <div class="setting-heading">
                   <h3>{{ t("可用备份") }}</h3>
-                  <button type="button" class="icon-button" :title="t('刷新备份')" :aria-label="t('刷新备份')" @click="refreshBackups"><RefreshCw :size="17" /></button>
+                  <button type="button" class="icon-button" :title="t('刷新备份')" :aria-label="t('刷新备份')" @click="refreshBackupsNow"><RefreshCw :size="17" /></button>
                 </div>
                 <ul v-if="backups.length" class="setting-block backup-list"><li v-for="item in backups" :key="String(item.path)">
                   <span class="backup-name">{{ item.filename || item.path }}</span>
@@ -3507,31 +4249,35 @@ async function translateText() {
                 </label>
                 <p class="muted small setting-note">{{ t("每约 6 小时检查一次 GitHub 是否有新版本；关闭后后台不再发起任何更新请求。") }}</p>
                 <div class="setting-actions setting-actions--card">
-                  <button type="button" :disabled="!updateAvailableForUi || updateChecking || updateState.phase === 'downloading'"
+                  <button type="button" :disabled="!updateAvailableForUi || updateChecking
+                      || updateState.phase === 'downloading' || updateState.phase === 'installing'"
                     @click="checkForUpdate">
                     <RefreshCw :size="17" :class="{ spinning: updateChecking }" />{{ updateChecking ? t('正在检查…') : t('立即检查更新') }}
                   </button>
                 </div>
                 <p v-if="updateAvailable" class="update-available setting-block setting-block--card" role="status">{{ t("发现新版本：") }}{{ updateLatest }}</p>
                 <div v-if="updateAvailable && updateState.phase === 'idle'" class="setting-actions setting-actions--card">
-                  <button type="button" class="primary" @click="startUpdateDownload">{{ t("下载更新") }}</button>
+                  <button v-if="updateInstallable" type="button" class="primary" @click="installUpdate">{{ t("下载并安装") }}</button>
+                  <button v-else type="button" class="primary" @click="startUpdateDownload">{{ t("下载更新") }}</button>
                 </div>
                 <div v-if="updateState.phase === 'downloading'" class="update-progress setting-block" role="progressbar"
                   :aria-valuenow="Math.round(updateState.fraction * 100)" aria-valuemin="0" aria-valuemax="100">
                   <div class="update-progress__bar" :style="{ width: (updateState.fraction * 100) + '%' }"></div>
                   <span class="update-progress__label">{{ t("正在下载…") }} {{ Math.round(updateState.fraction * 100) }}%</span>
                 </div>
+                <p v-if="updateState.phase === 'installing'" class="update-available setting-block setting-block--card" role="status">{{ t("正在安装更新，完成后应用会自动重启。") }}</p>
                 <template v-if="updateState.phase === 'ready'">
                   <p class="update-available setting-block setting-block--card" role="status">{{ t("新版本 {version} 已就绪", { version: updateState.version }) }}</p>
-                  <p class="muted small setting-note">{{ t("请退出当前应用，然后用下方文件替换旧版本。剪贴板历史与设备仍保留在本机。") }}</p>
+                  <p v-if="!updateInstallable" class="muted small setting-note">{{ t("请退出当前应用，然后用下方文件替换旧版本。剪贴板历史与设备仍保留在本机。") }}</p>
                   <p class="update-ready-path selectable setting-block">{{ updateState.path }}</p>
                   <div class="setting-actions setting-actions--card">
                     <button type="button" @click="openUpdateFolder">{{ t("打开所在文件夹") }}</button>
                   </div>
                 </template>
                 <p v-if="updateState.phase === 'failed'" class="update-failed setting-block setting-block--card" role="alert">
-                  {{ t("更新下载失败") }}{{ updateState.error ? '：' + updateState.error : '' }}</p>
-                <p class="muted small setting-note">{{ t("自动下载最新版本，下载完成后提示你手动替换旧版本。") }}</p>
+                  {{ t("更新失败") }}{{ updateState.error ? '：' + updateState.error : '' }}</p>
+                <p v-if="updateInstallable" class="muted small setting-note">{{ t("下载并安装最新版本，完成后应用会自动重启。") }}</p>
+                <p v-else class="muted small setting-note">{{ t("自动下载最新版本，下载完成后提示你手动替换旧版本。") }}</p>
               </section>
               <section v-show="showSettingsCard('diagnostics')" id="settings-diagnostics" class="settings-section">
                 <h2>{{ t("诊断与维护") }}</h2>
@@ -3586,10 +4332,11 @@ async function translateText() {
               <span v-if="devicesEngineStopped" id="devices-engine-note" class="muted small">{{ t("同步引擎未运行，推送文本与发送网址不可用。") }}</span>
               <button :aria-label="t('推送文本')" :title="t('推送文本到剪贴板并同步')" :disabled="busy || !pushTextAvailable" @click="openPushText"><SendHorizontal :size="17" />{{ t("推送文本") }}</button>
               <button class="icon-button" :aria-label="t('查看证书指纹')" :title="t('证书指纹')" :disabled="busy" @click="showCertificates"><Fingerprint :size="18" /></button>
-              <button class="icon-button" :aria-label="t('刷新设备')" :title="t('刷新设备')" :disabled="busy" @click="store.refresh"><RefreshCw :size="18" :class="{ spinning: state.refreshing }" /></button>
+              <button class="icon-button" :aria-label="t('刷新设备')" :title="t('刷新设备')" :disabled="busy" @click="refreshDevices"><RefreshCw :size="18" :class="{ spinning: state.refreshing }" /></button>
             </div>
-            <div v-if="!state.devices.length" class="empty"><Monitor :size="36" /><h2>{{ state.refreshing ? t('正在读取设备') : t('暂无设备') }}</h2></div>
-            <article v-for="device in activeDevices" :key="device.id" class="device-row">
+            <div v-if="!state.devices.length" class="empty empty--page"><Monitor :size="36" /><h2>{{ state.refreshing ? t('正在读取设备') : t('暂无设备') }}</h2></div>
+            <article v-for="device in activeDevices" :key="device.id" class="device-row"
+              @contextmenu.prevent="deviceMenu($event, device)">
               <Monitor :size="25" class="device-icon" />
               <div class="device-identity"><h2>{{ device.name }}</h2><span class="muted small">{{ device.id }}</span></div>
               <div class="row-actions">
@@ -3614,8 +4361,8 @@ async function translateText() {
                    internet" and "paired and away" are two different answers. -->
               <span class="device-channels">
                 <span class="channel channel--paired"><ShieldCheck :size="12" />{{ pairingLabel(device) }}</span>
-                <span class="channel" :class="`channel--${device.connection_state || 'offline'}`" :title="t('本地连接')">
-                  <Plug :size="12" />{{ t("本地") }}·{{ connectionLabel(device.connection_state) }}
+                <span class="channel" :class="`channel--${localChannelState(device)}`" :title="t('本地连接')">
+                  <Plug :size="12" />{{ localChannelLabel(device) }}
                 </span>
                 <span class="channel" :class="`channel--${relayChannel(device) === 'unpaired' ? 'unpaired' : (relayChannel(device) === 'online' ? 'online' : 'offline')}`"
                   :title="relayLastSeen(device) || t('互联网配对')">
@@ -3646,7 +4393,7 @@ async function translateText() {
                 <div class="device-identity"><h2>{{ device.name }}</h2><span class="muted small">{{ device.id }}</span></div>
                 <div class="row-actions">
                   <button :disabled="busy" @click="store.restore(device)"><RotateCcw :size="17" />{{ t("恢复") }}</button>
-                  <button class="danger" :disabled="busy" @click="purgeDevice = device"><Trash2 :size="17" />{{ t("彻底删除") }}</button>
+                  <button class="danger-outline" :disabled="busy" @click="purgeDevice = device"><Trash2 :size="17" />{{ t("彻底删除") }}</button>
                 </div>
                 <!-- The same second line the live rows carry, holding the one
                      fact an archived row has instead of a route: when it was
@@ -3654,7 +4401,7 @@ async function translateText() {
                      the column of second lines reads dates in the same place a
                      live row's routes are. -->
                 <span class="device-channels">
-                  <span class="channel">{{ t("移除于") }} {{ date(device.removed_at || 0) }}</span>
+                  <span class="channel">{{ t("移除于") }} {{ dateTime(device.removed_at || 0) }}</span>
                 </span>
               </article>
             </section>
@@ -3676,7 +4423,7 @@ async function translateText() {
               </p>
               <div class="setting-actions setting-actions--card">
                 <button type="button" @click="generateInternetPairing">{{ t("生成配对码") }}</button>
-                <button type="button" @click="refreshInternetPairing">{{ t("刷新") }}</button>
+                <button type="button" @click="refreshInternetPairingNow">{{ t("刷新") }}</button>
               </div>
               <p v-if="internetPairing.generated_code" class="setting-block setting-block--card">{{ t("本机配对码：") }}<strong>{{ internetPairing.generated_code }}</strong></p>
               <label class="setting">
@@ -3710,7 +4457,7 @@ async function translateText() {
               <ul v-if="internetPairingWaiting.length" class="setting-block peer-list peer-list--waiting" role="status">
                 <li v-for="row in internetPairingWaiting" :key="row.peer_id">
                   <div class="peer-line">
-                    <span class="pairing-wait" :title="row.since ? t('提交于 {when}', { when: date(row.since) }) : ''">
+                    <span class="pairing-wait" :title="row.since ? t('提交于 {when}', { when: dateTime(row.since) }) : ''">
                       <Clock :size="14" />{{ row.name ? t("等待 {name} 确认…", { name: row.name }) : t("等待对方确认…") }}
                     </span>
                     <button type="button" class="text-button" @click="unpairInternet(row.peer_id)">{{ t("撤销") }}</button>
@@ -3719,7 +4466,7 @@ async function translateText() {
                 </li>
               </ul>
               <p class="muted setting-block setting-block--card">{{ t("待投递消息：") }}{{ delivery.total }}
-                <button type="button" class="icon-button" :title="t('刷新投递状态')" :aria-label="t('刷新投递状态')" @click="refreshDeliveryStatus"><RefreshCw :size="15" /></button>
+                <button type="button" class="icon-button" :title="t('刷新投递状态')" :aria-label="t('刷新投递状态')" @click="refreshDeliveryNow"><RefreshCw :size="15" /></button>
               </p>
               <!-- One line per peer, the way the legacy card carried it: what
                    is still queued for this device, and how its newest send
@@ -3731,7 +4478,7 @@ async function translateText() {
                   <!-- 离线 alone left "away since breakfast" and "never seen"
                        looking the same, though the relay reports when it last
                        heard from the peer. -->
-                  <span class="muted" :title="peer.last_seen ? t('最后在线 {when}', { when: date(peer.last_seen) }) : t('尚未连接过')">{{ peer.online ? t('在线') : t('离线') }}</span>
+                  <span class="muted" :title="peer.last_seen ? t('最后在线 {when}', { when: dateTime(peer.last_seen) }) : t('尚未连接过')">{{ peer.online ? t('在线') : t('离线') }}</span>
                   <button type="button" class="icon-button" :title="t('解除互联网配对')" :aria-label="t('解除互联网配对')" @click="unpairInternet(peer.peer_id)"><Unlink :size="16" /></button>
                 </div>
                 <div v-if="delivery.shown(String(peer.peer_id))" class="peer-delivery">
@@ -3767,10 +4514,12 @@ async function translateText() {
                   <button type="button" :disabled="companionBusy || !Number.isInteger(companionPort) || companionPort < 1 || companionPort > 65535" @click="configureCompanion(true)">{{ t("启动 / 应用端口") }}</button>
                   <button type="button" :disabled="companionBusy || (!companion.enabled && !companion.running)" @click="configureCompanion(false)">{{ t("停止服务") }}</button>
                   <button type="button" :disabled="companionBusy || !companion.running" @click="companionRotatePending = true"><RefreshCw :size="16" />{{ t("更换访问令牌") }}</button>
+                  <button type="button" class="danger" :disabled="companionBusy || !companion.running || !companion.access_url" @click="companionClearPending = true"><ShieldOff :size="16" />{{ t("清除访问令牌") }}</button>
                 </div>
-                <label v-if="companion.running && companion.access_url" class="setting">
+                <p v-if="companion.running && !companion.access_url" class="setting-block setting-block--card">{{ t("访问令牌已清除，任何能访问该端口的设备都可以直接连接") }}</p>
+                <label v-if="companion.running && (companion.access_url || companion.url)" class="setting">
                   <span class="setting-name">{{ t("手机访问地址") }}</span>
-                  <span class="setting-control"><input :value="companion.access_url" class="setting-wide" readonly :aria-label="t('手机访问地址')" /></span>
+                  <span class="setting-control"><input :value="companion.access_url || companion.url || ''" class="setting-wide" readonly :aria-label="t('手机访问地址')" /></span>
                 </label>
                 <div class="setting-actions">
                   <button type="button" :disabled="companionBusy || !companion.running" @click="openCompanionQr"><QrCode :size="16" />{{ t("显示二维码") }}</button>
@@ -3782,30 +4531,22 @@ async function translateText() {
       </div>
       <div class="bottom-status"><ShieldCheck :size="14" />{{ t("本地数据") }}
         <span role="status">{{ state.pending ? t('正在处理') : (state.status?.runtime_error || syncLabel) }}</span>
-        <label class="sync-toggle"><input type="checkbox" role="switch" :aria-label="t('启用同步')"
-          :checked="state.status?.sync_state === 'running'" :disabled="!syncAvailable || busy"
-          @change="toggleSync" />{{ t("同步") }}</label>
-        <!-- The pause presets the dashboard offered.  While a deadline is
-             armed the row becomes its countdown and the way out of it; the
-             presets themselves are only offered while sync is running, because
-             they share this row with the plain resume a user needs after
-             turning sync off from the toggle beside them. -->
+        <!-- Status only, by the user's request: this bar used to carry the
+             sync switch and the timed-pause presets too, and every one of
+             them already sits on the overview page's 快速控制 card.  Two
+             copies of one control, one screen apart, is what made the bar
+             read as cluttered.  What stays is what the bar alone can say --
+             which state sync is in, and, when a pause is armed, how long is
+             left of it.  The controls themselves are on 概览, and the tray
+             keeps its own 15/30/60 submenu. -->
         <template v-if="pauseLeftMs > 0">
           <span class="pause-status">⏸ {{ t("已暂停 · 剩余 {minutes} 分钟", { minutes: pauseLeftMinutes }) }}</span>
-          <button class="status-action" :disabled="pauseBusy" @click="resumeSync">{{ t("立即恢复") }}</button>
         </template>
-        <template v-else-if="state.status?.sync_state === 'running'">
-          <span class="pause-label">{{ t("定时暂停同步") }}</span>
-          <button class="status-action" :disabled="pauseBusy" @click="pauseSync(15)">{{ t("15 分钟") }}</button>
-          <button class="status-action" :disabled="pauseBusy" @click="pauseSync(30)">{{ t("30 分钟") }}</button>
-          <button class="status-action" :disabled="pauseBusy" @click="pauseSync(60)">{{ t("1 小时") }}</button>
-        </template>
-        <button v-else class="status-action" :disabled="pauseBusy" @click="resumeSync">{{ t("恢复同步") }}</button>
         <!-- Legacy showed its notices as one floating toast rather than per
              page, and the footer is the surface that stays on screen: a message
              about a pause started here, or about a page the user has since left,
              is still readable. -->
-        <span v-if="statusMessage" class="muted small" role="status">{{ statusMessage }}</span>
+        <span v-if="statusMessage()" class="muted small status-message" role="status">{{ statusMessage() }}</span>
         <!-- The notice stack is placed against this bar rather than against the
              window: the stylesheet measures it from the bar's top edge, because
              the bar is the only element that knows where its own top edge is.
@@ -3866,7 +4607,13 @@ async function translateText() {
       <img v-else-if="qrImage" :src="qrImage" :alt="t('手机 Companion 二维码')" class="qr-image" width="220" height="220" />
       <p v-else class="muted" role="status">{{ qrMessage || t("二维码不可用") }}</p>
       <p v-if="qrUrl" class="muted small selectable">{{ qrUrl }}</p>
-      <div class="modal-actions"><button autofocus @click="qrOpen = false">{{ t("关闭") }}</button></div>
+      <p v-if="qrShareMessage" role="status" class="muted small">{{ qrShareMessage }}</p>
+      <div class="modal-actions">
+        <button type="button" :disabled="qrShareBusy" @click="shareFileToPhone">
+          <SendHorizontal :size="17" />{{ qrShareBusy ? t("正在发送…") : t("发送文件到手机") }}
+        </button>
+        <button autofocus @click="qrOpen = false">{{ t("关闭") }}</button>
+      </div>
     </dialog>
     <dialog ref="aboutDialog" aria-labelledby="about-title" class="modal" @close="aboutOpen = false" @cancel="aboutOpen = false">
       <h2 id="about-title">{{ t("关于 ClipSync") }}</h2>
@@ -3888,10 +4635,12 @@ async function translateText() {
         <p class="muted small">{{ diagnosticsOverview }}</p>
         <ul class="diag-list">
           <li v-for="group in diagnosticGroups" :key="group.id">
-            <h3>{{ group.label }}</h3>
+            <h3>{{ group.label }}<!-- The count and the verdict sit on the heading so a reader can
+              triage the whole report before opening anything: which section is
+              failing, and how much of it there is. --><span class="diag-count">{{ group.items.length }}</span><span class="diag-verdict" :class="`diag-summary--${diagnosticVerdict(group)}`">{{ diagnosticVerdictLabel(diagnosticVerdict(group)) }}</span></h3>
             <ul>
               <li v-for="item in group.items" :key="item.id" :class="`diag-${item.status}`">
-                <span class="diag-item"><span class="diag-label">{{ diagnosticLabel(item) }}</span>{{ diagnosticDetail(item) }}</span>
+                <span class="diag-item"><span class="diag-mark" aria-hidden="true">{{ diagnosticGlyph(item.status) }}</span><span class="diag-label">{{ diagnosticLabel(item) }}</span>{{ diagnosticDetail(item) }}</span>
                 <span v-if="diagnosticHint(item)" class="muted small">{{ diagnosticHint(item) }}</span>
                 <button v-if="item.id === 'firewall' && item.status !== 'ok'" type="button" class="status-action" :disabled="diagnosticsRepairBusy" @click="repairDiagnostics('firewall')"><Wrench :size="14" />{{ t("修复防火墙") }}</button>
               </li>
@@ -3908,7 +4657,7 @@ async function translateText() {
       </template>
       <p v-else class="muted">{{ t("暂时无法获取诊断信息") }}</p>
       <div class="modal-actions">
-        <button autofocus :disabled="diagnosticsBusy" @click="refreshDiagnostics">{{ t("重新检测") }}</button>
+        <button autofocus :disabled="diagnosticsBusy" @click="rerunDiagnostics">{{ t("重新检测") }}</button>
         <button @click="diagnosticsOpen = false">{{ t("关闭") }}</button>
       </div>
     </dialog>
@@ -3941,19 +4690,20 @@ async function translateText() {
         <span class="setting-name">{{ t("来源设备") }}</span>
         <span class="setting-control"><select v-model="aiPeerId" :aria-label="t('迁移来源设备')">
           <option value="">{{ t("选择已配对设备") }}</option>
-          <option v-for="device in state.devices.filter(device => device.paired)" :key="device.id" :value="device.id">{{ device.name }}</option>
+          <option v-for="device in state.devices.filter(device => device.paired)" :key="device.id" :value="device.id">{{ device.name }}{{ aiPeerIsLegacy(device.id) ? t("（只能浏览）") : "" }}</option>
         </select></span>
       </label>
       <p v-if="!aiPeerId" class="muted small">{{ t("先选择一台已配对设备") }}</p>
       <template v-else>
         <div v-if="aiRemoteWaiting" class="muted small">{{ t("已请求更新，等待对方返回库存") }}</div>
+        <p v-if="aiMigrateBlocked" class="muted small setting-note" role="status">{{ t("该设备版本过旧，只能浏览，不能作为迁移来源") }}</p>
         <label v-for="option in aiMigrateStrategies" :key="option.value" class="setting setting--check">
           <span class="setting-control"><input v-model="aiMigrateStrategy" type="radio" :value="option.value" :aria-label="option.label" /><span>{{ option.label }}</span></span>
         </label>
         <p class="muted small setting-note">{{ aiMigrateSummary }}</p>
         <div class="modal-actions">
           <button @click="aiMigrateDialog?.close()">{{ t("取消") }}</button>
-          <button class="primary" :disabled="!aiMigrateTargets.length" @click="startAiMigration">{{ t("开始迁移（{count}）", { count: aiMigrateTargets.length }) }}</button>
+          <button class="primary" :disabled="aiMigrateBlocked || !aiMigrateTargets.length" @click="startAiMigration">{{ t("开始迁移（{count}）", { count: aiMigrateTargets.length }) }}</button>
         </div>
       </template>
     </dialog>
@@ -3977,6 +4727,11 @@ async function translateText() {
       <p>{{ t("旧访问链接将失效，手机需要使用新地址重新连接。") }}</p>
       <div class="modal-actions"><button autofocus @click="companionRotatePending = false">{{ t("取消") }}</button><button class="danger" :disabled="companionBusy || !companionRotatePending || !companion?.running" @click="rotateCompanionToken">{{ t("更换令牌") }}</button></div>
     </dialog>
+    <dialog ref="companionClearDialog" aria-labelledby="companion-clear-title" class="modal" @close="companionClearPending = false" @cancel="companionClearPending = false">
+      <h2 id="companion-clear-title">{{ t("清除手机访问令牌？") }}</h2>
+      <p>{{ t("清除后手机不再需要令牌，任何能访问该端口的设备都可以直接连接。") }}</p>
+      <div class="modal-actions"><button autofocus @click="companionClearPending = false">{{ t("取消") }}</button><button class="danger" :disabled="companionBusy || !companionClearPending || !companion?.running" @click="clearCompanionToken">{{ t("清除令牌") }}</button></div>
+    </dialog>
     <dialog ref="aiDiscardDialog" aria-labelledby="ai-discard-title" class="modal" @close="aiNextFile = null" @cancel="aiNextFile = null">
       <h2 id="ai-discard-title">{{ t("放弃未保存的修改？") }}</h2>
       <p>{{ aiSelectedItem?.rel_path }}</p>
@@ -3996,7 +4751,7 @@ async function translateText() {
       <button class="icon-button modal-close" :aria-label="t('关闭')" :title="t('关闭')" @click="batchDeleteIds = null"><X :size="18" /></button>
       <h2 id="batch-delete-title">{{ t("删除所选的 {count} 条记录？", { count: batchDeleteIds?.length || 0 }) }}</h2>
       <p class="muted">{{ t("所选记录将从本地历史中移除，此操作无法撤销。") }}</p>
-      <p v-if="state.error" role="alert">{{ state.error.message }} ({{ state.error.code }})</p>
+      <p v-if="state.error" class="modal-error small" role="alert">{{ state.error.message }} ({{ state.error.code }})</p>
       <p v-if="batchDeleteIds && !batchDeleteValid" role="status">{{ t("所选记录已变化，请取消并重新选择。") }}</p>
       <div class="modal-actions"><button autofocus @click="batchDeleteIds = null">{{ t("取消") }}</button><button class="danger" :disabled="historyBusy || !batchDeleteValid" @click="confirmBatchDelete">{{ t("删除所选记录") }}</button></div>
     </dialog>
@@ -4004,7 +4759,7 @@ async function translateText() {
       <button class="icon-button modal-close" :aria-label="t('关闭')" :title="t('关闭')" @click="clearHistoryOpen = false"><X :size="18" /></button>
       <h2 id="clear-history-title">{{ t("清空全部历史记录？") }}</h2>
       <p class="muted">{{ t("共 {count} 条记录将被移除，此操作无法撤销。", { count: state.total }) }}</p>
-      <p v-if="state.error" role="alert">{{ state.error.message }} ({{ state.error.code }})</p>
+      <p v-if="state.error" class="modal-error small" role="alert">{{ state.error.message }} ({{ state.error.code }})</p>
       <div class="modal-actions"><button autofocus @click="clearHistoryOpen = false">{{ t("取消") }}</button><button class="danger" :disabled="historyBusy" @click="confirmClearHistory">{{ t("清空历史") }}</button></div>
     </dialog>
     <dialog ref="revokeDialog" aria-labelledby="revoke-title" class="modal" @close="revokeDevice = null" @cancel="revokeDevice = null">
@@ -4024,6 +4779,17 @@ async function translateText() {
       <h2 id="purge-title">{{ t("彻底删除这台设备？") }}</h2>
       <p class="muted">{{ t("{name} 的移除记录将被永久删除，此操作无法撤销。", { name: purgeDevice?.name }) }}</p>
       <div class="modal-actions"><button autofocus @click="purgeDevice = null">{{ t("取消") }}</button><button class="danger" :disabled="busy || !state.devices.some(device => device.id === purgeDevice?.id && device.archived)" @click="confirmPurge">{{ t("彻底删除") }}</button></div>
+    </dialog>
+    <!-- The context menu 重命名 entry. The row has its own 设备备注 field
+         writing this same alias, so the dialog is a second way in — not a
+         second setting. -->
+    <dialog ref="renameDialog" aria-labelledby="rename-title" class="modal" @close="renameDevice = null">
+      <button class="icon-button modal-close" :aria-label="t('关闭')" :title="t('关闭')" @click="renameDevice = null"><X :size="18" /></button>
+      <h2 id="rename-title">{{ t("重命名设备") }}</h2>
+      <p class="muted small">{{ t("名称只保存在这台设备上，对方看到的仍是自己的名字。") }}</p>
+      <input :value="renameValue" maxlength="512" :aria-label="t('设备名称')" autofocus
+        @input="renameValue = ($event.target as HTMLInputElement).value" @keydown.enter.prevent="confirmRename" />
+      <div class="modal-actions"><button @click="renameDevice = null">{{ t("取消") }}</button><button class="primary" :disabled="!renameValue.trim()" @click="confirmRename">{{ t("保存") }}</button></div>
     </dialog>
     <!-- A device whose certificate no longer matches its pin was refused, so
          this is the only place the user hears about it — and the answer is what
@@ -4083,5 +4849,8 @@ async function translateText() {
         <span class="muted small">{{ t("拖放不会自动发送，设备仍由您指定") }}</span>
       </div>
     </div>
+    <!-- One menu for the whole window, after every dialog so it paints above
+         the page and below the modals. -->
+    <ContextMenu />
   </div>
 </template>

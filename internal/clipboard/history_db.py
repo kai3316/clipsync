@@ -20,6 +20,7 @@ import time
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from internal.clipboard import file_ref
 from internal.clipboard.dedup import (
     CONTENT_TYPE_LABELS,
     adds_new_flavors,
@@ -29,7 +30,7 @@ from internal.clipboard.dedup import (
 from internal.clipboard.dedup import (
     make_dedup_key as _make_dedup_key,
 )
-from internal.clipboard.format import ClipboardContent, ContentType, strip_html
+from internal.clipboard.format import ClipboardContent, ContentType, split_paths, strip_html
 from internal.config.config import _config_dir
 
 if TYPE_CHECKING:
@@ -83,10 +84,42 @@ def set_max_age_days(days) -> None:
 
 
 def _build_preview(types: dict[ContentType, bytes]) -> str:
-    """Build a human-readable preview from clipboard content."""
+    """Build a human-readable preview from clipboard content.
+
+    Every kind a reader can recognise gets a line of its own: the text, the
+    words behind the markup, a word for a picture or a rich-text block, and now
+    the URL itself and the first of the dropped files.  Those last two used to
+    fall through to the empty string, which is a preview that says nothing —
+    a page showing them read it as "no content", and the phone's panel and the
+    overview's activity feed read the same field, so a clip whose only format
+    was a link or a file was blank in all three.
+    """
     if ContentType.TEXT in types:
         text = _safe_decode(types[ContentType.TEXT])
         return text[:200]
+    # A file copy on macOS also puts a `public.url` on the pasteboard — its own
+    # `file://` address — so the file list is asked first: the name of the thing
+    # beats a URI that is only a spelling of its path.
+    if ContentType.FILE in types:
+        paths = split_paths(_safe_decode(types[ContentType.FILE]))
+        if paths:
+            # The count carries the rest: a drop of twenty files named by one of
+            # them would look like a drop of one.
+            first = os.path.basename(paths[0]) or paths[0]
+            return first[:200] if len(paths) == 1 else f"{first[:200]} 等 {len(paths)} 个文件"
+    # A file on *another* device, and the one kind whose preview is not read off
+    # the payload's text: it carries a name, a size and an entry id, not the
+    # newline-joined path list the branch above reads out of a FILE payload.
+    if ContentType.FILE_REMOTE in types:
+        remote = file_ref.parse(types[ContentType.FILE_REMOTE])
+        if remote:
+            line = file_ref.summary(remote["files"], remote["total"])
+            if line:
+                return line[:200]
+    if ContentType.URL in types:
+        url = _safe_decode(types[ContentType.URL]).strip()
+        if url:
+            return url[:200]
     if ContentType.HTML in types:
         html = _safe_decode(types[ContentType.HTML])
         plain = strip_html(html)
@@ -456,11 +489,17 @@ class ClipboardHistoryDB:
     # Public API (identical to ClipboardHistory)
     # ------------------------------------------------------------------
 
-    def add(self, content: ClipboardContent, source_app: dict | None = None) -> None:
+    def add(self, content: ClipboardContent, source_app: dict | None = None) -> str | None:
         """Add a clipboard entry. Silently ignores empty content.
 
         Deduplicates: entries with the same primary content (text body or
         image bytes) within a short window are coalesced into one record.
+
+        Returns the id of the row this content is stored as — the new one, or
+        the row an existing copy was folded into.  ``None`` means the content
+        was not stored at all (it was empty).  A file entry's offer names this
+        id, so it doubles as "the row a peer's request may resolve to": see
+        `ClipboardContent.entry_id`.
         """
         if content.is_empty():
             return
@@ -497,7 +536,9 @@ class ClipboardHistoryDB:
                     and adds_new_flavors(top.get("types"), content.types)
                 ):
                     self._merge_into_top(top, content, source_app, captured_at)
-                return
+                # The row that already holds this content is the one an offer
+                # should name, whether or not this capture added a flavor to it.
+                return top.get("entry_id") if top is not None else None
             self._last_dedup_key = dedup_key
             self._last_dedup_time = now
 
@@ -513,7 +554,8 @@ class ClipboardHistoryDB:
                     and now - (top.get("timestamp") or 0.0) < self.FLAVOR_MERGE_WINDOW
                 ):
                     self._merge_into_top(top, content, source_app, captured_at)
-                    return
+                    # The same row, re-stamped: an offer names it either way.
+                    return top.get("entry_id")
 
             preview = _build_preview(content.types)
             entry: dict = {
@@ -569,6 +611,10 @@ class ClipboardHistoryDB:
                 }
                 self._entries = pinned + [e for e in unpinned if id(e) in keep_ids]
                 self._trim_db()
+
+            # The id is what a file entry's offer will name, so the capture path
+            # hands it straight to the encoder.
+            return entry.get("entry_id")
 
     # ------------------------------------------------------------------
     # Same-text flavor merge (mirrors ClipboardHistory)
@@ -758,6 +804,44 @@ class ClipboardHistoryDB:
                 if str(entry.get("entry_id")) == str(entry_id):
                     return i, dict(entry)
             return None, None
+
+    def file_entry_paths(self, entry_id: str) -> tuple[list[str], str]:
+        """The local paths a peer may fetch for *entry_id*, and why not when empty.
+
+        Answers the question a file offer deliberately leaves open.  An offer
+        carries names, sizes and this id — never a path — so a peer's request
+        is resolved *here*, against this machine's own row: the machine that
+        owns the files decides which paths a request can reach, and the
+        requesting machine never gets to name one.
+
+        Two of the four conditions are about the row rather than the request.
+        The row must exist, and it must have been captured on this machine
+        (``source_device`` empty): a row that came *from* a peer names files on
+        that peer, so serving it would be forwarding a path this machine cannot
+        vouch for — and a path is only meaningful on the machine it names,
+        which is the whole reason nothing else here travels as a path.
+
+        A path that has since been moved or deleted is dropped; if that leaves
+        nothing the whole request fails rather than arriving as a transfer that
+        dies mid-flight.  The second return value is the reason code, "" when
+        paths came back.
+        """
+        _index, entry = self.find_by_id(entry_id)
+        if entry is None:
+            return [], "not_found"
+        if entry.get("source_device"):
+            return [], "not_local"
+        raw = labels_to_types(entry.get("types")).get(ContentType.FILE)
+        if raw is None:
+            return [], "not_a_file"
+        paths = [
+            path
+            for path in split_paths(raw.decode("utf-8", errors="replace"))
+            if os.path.exists(path)
+        ]
+        if not paths:
+            return [], "gone"
+        return paths, ""
 
     def increment_paste(self, entry_id: str) -> int | None:
         """Increment the paste count for an entry. Returns new count or None if not found."""

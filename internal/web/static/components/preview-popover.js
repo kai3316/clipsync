@@ -75,6 +75,14 @@
         return ct === 'IMAGE' || ct === 'IMAGE_EMF';
       },
 
+      // Rich text has no text to preview either, and its stored preview is the
+      // bracketed label; see ClipsyncAPI.previewText.  Images never reach this
+      // branch -- the placeholder above is their own body.
+      previewText: function () {
+        return ClipsyncAPI.previewText((this.store.previewItem || {}).text_preview) ||
+          this.t('preview.empty');
+      },
+
       timestamp: function () {
         var ts = this.store.previewItem && this.store.previewItem.timestamp;
         if (!ts) return '';
@@ -123,7 +131,7 @@
               '<span class="text-muted">{{ t(\'preview.image_content\') }}</span>' +
             '</div>' +
             '<div v-else class="preview-popover__text">' +
-              '{{ store.previewItem.text_preview || t(\'preview.empty\') }}' +
+              '{{ previewText }}' +
             '</div>' +
           '</div>' +
 

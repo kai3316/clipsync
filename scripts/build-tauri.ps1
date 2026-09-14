@@ -25,8 +25,15 @@ try {
     # made every build fail with "resource path ... doesn't exist".
     # WriteAllText rather than Set-Content -Encoding utf8: under Windows
     # PowerShell 5.1 that writes a BOM, and Tauri will not parse the config.
-    $Override = @{ version = $Version; bundle = @{ externalBin = @("binaries/clipsync-sidecar") } } |
-        ConvertTo-Json -Depth 4
+    # `createUpdaterArtifacts` is asked for only when a signing key is actually
+    # in reach.  tauri.conf.json commits the public key, so the bundler treats
+    # "sign these" with no private key available as an error rather than a
+    # no-op; CI gates the same flag on the tag, because a pull request from a
+    # fork gets no secrets.  Without it a local build still produces every
+    # installer, just none of the updater payloads or their .sig files.
+    $Bundle = @{ externalBin = @("binaries/clipsync-sidecar") }
+    if ($env:TAURI_SIGNING_PRIVATE_KEY) { $Bundle.createUpdaterArtifacts = $true }
+    $Override = @{ version = $Version; bundle = $Bundle } | ConvertTo-Json -Depth 4
     [IO.File]::WriteAllText($Config, $Override)
     & npm exec tauri build -- --config $Config
     if ($LASTEXITCODE -ne 0) { throw "Tauri build failed" }
