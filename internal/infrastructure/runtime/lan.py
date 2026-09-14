@@ -1547,6 +1547,10 @@ class LanRuntime:
     def _tick_locked(self):
         self._refresh()
         self.delivery.tick()
+        # From the clock, not from the next pull: the panel waits for one event
+        # per request before it stops saying "waiting to receive files", and a
+        # reply that never arrives has no other moment to be reported at.
+        self.ai_config.expire_pulls()
         with self._lock:
             deferred = dict(self._deferred)
         connected = set(self.transport.get_connected_peers())
@@ -2011,6 +2015,7 @@ class LanRuntime:
             if publish:
                 self._persist()
             known = {p.device_id: p for p in self.pairing.get_known_peers()}
+            archived_ids = set(self.config.removed_peers)
             connected = {self._resolve(pid) for pid in self.transport.get_connected_peers()}
             with self._lock:
                 discovered = dict(self._discovered)
@@ -2024,6 +2029,41 @@ class LanRuntime:
                 paired = bool(peer and peer.paired)
                 request = pending.get(pid)
                 status = "paired" if paired else self.pairing.get_pairing_status(pid)
+                # A device earns a row by being someone the user has a
+                # relationship with, or by being here now.  `connect_to_peer`
+                # records the certificate of every peer it dials, with
+                # `paired=was_paired`, so without this an unpaired device that
+                # was merely seen once keeps a row for good -- it reads as a
+                # device that will not leave, and the list stops being a
+                # picture of the network.
+                #
+                # Kept: paired (that is what pairing bought, and
+                # `connection_state` already reports it offline), a pairing
+                # prompt in flight or a pairing that ended in a status the
+                # user has not seen (`cancelled`, `expired`), a note the user
+                # wrote, an archive entry (the recovery path), and anything
+                # connected or visible right now.
+                #
+                # `names` itself is deliberately left whole: the removed-peer
+                # block below reads it to keep an archived row from repeating
+                # one that is already listed.
+                #
+                # Nothing here touches the store.  `pairing._peers` holds the
+                # pinned fingerprints the certificate-change alarm compares
+                # against, and dropping a pin because its device went quiet
+                # would silence that alarm for good -- the list is what this
+                # filter is for, not the memory.
+                if not (
+                    status
+                    or request
+                    or pid in connected
+                    or pid in discovered_ids
+                    or pid in archived_ids
+                    # The note lives on the saved peer, not on the pinned
+                    # identity `peer` is: `PeerIdentity` carries no notes.
+                    or getattr(self.config.peers.get(pid), "notes", "")
+                ):
+                    continue
                 fingerprint = self.pairing.get_peer_fingerprint(pid)
                 mine = self.pairing.get_identity().fingerprint
                 rows.append(

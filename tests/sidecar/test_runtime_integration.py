@@ -251,16 +251,23 @@ def test_real_rpc_pairing_bidirectional_copy_and_restart_trust(
         left_item = left.call("history.list")["items"][0]["id"]
         right_item = right.call("history.list")["items"][0]["id"]
         assert left.call("pairing.start", device_id="right") == {"accepted": True}
-        left_devices = left.wait("devices.list", lambda d: bool(d["items"][0]["pairing_code"]))
-        right_devices = right.wait("devices.list", lambda d: bool(d["items"][0]["pairing_code"]))
+        # Until the two are connected no code exists, and a known-but-unpaired
+        # device that is not on the network yet has no row either -- so the
+        # wait has to read an empty list as "not yet", not crash on it.
+        left_devices = left.wait(
+            "devices.list", lambda d: bool(d["items"] and d["items"][0]["pairing_code"])
+        )
+        right_devices = right.wait(
+            "devices.list", lambda d: bool(d["items"] and d["items"][0]["pairing_code"])
+        )
         code = left_devices["items"][0]["pairing_code"]
         assert code == right_devices["items"][0]["pairing_code"]
         assert left_devices["items"][0]["sas"] == right_devices["items"][0]["sas"]
         assert not left.call("pairing.confirm", device_id="right", code=code)["paired"]
         assert not right.call("devices.list")["items"][0]["paired"]
         right.call("pairing.confirm", device_id="left", code=code)
-        left.wait("devices.list", lambda d: d["items"][0]["paired"])
-        right.wait("devices.list", lambda d: d["items"][0]["paired"])
+        left.wait("devices.list", lambda d: bool(d["items"]) and d["items"][0]["paired"])
+        right.wait("devices.list", lambda d: bool(d["items"]) and d["items"][0]["paired"])
 
         assert left.call("history.copy", entry_id=left_item) == {"copied": True}
         right.wait("history.list", lambda d: any(
@@ -387,13 +394,13 @@ def test_real_rpc_pairing_bidirectional_copy_and_restart_trust(
         assert left.call("app.status")["sync_state"] == "paused"
         assert left.call("devices.list")["items"][0]["paired"]
         assert right.call("devices.list")["items"][0]["paired"]
-        left.wait("devices.list", lambda d: d["items"][0]["connection_state"] in (
+        left.wait("devices.list", lambda d: bool(d["items"]) and d["items"][0]["connection_state"] in (
             "online", "connected"
         ))
         assert left.call("pairing.unpair", device_id="right") == {"accepted": True}
         assert not left.call("devices.list")["items"][0]["paired"]
         try:
-            right.wait("devices.list", lambda d: not d["items"][0]["paired"],
+            right.wait("devices.list", lambda d: bool(d["items"]) and not d["items"][0]["paired"],
                        timeout=NOTICE_BUDGET)
         except AssertionError as exc:
             # Both sides: this failure is one process not knowing what the

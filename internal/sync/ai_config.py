@@ -1285,6 +1285,19 @@ class AIConfigManager:
                 orphans.append((k, pending))
         return orphans
 
+    def expire_pulls(self) -> None:
+        """Report pulls whose replies never came.  Driven by the runtime's tick.
+
+        ``_prune_pending`` was reachable only from ``pull()`` and
+        ``_preview_wait()``, so a request the peer never answered was reported
+        when the user started *another* pull -- and not before.  The panel waits
+        for one event per request and shows "waiting to receive files" until it
+        has them, so a batch that lost a reply sat at N-1/N indefinitely, which
+        is the hang a folder pull hits far more often than a single file: it
+        sends one request per file, and any one of them is enough.
+        """
+        self._expire_pending()
+
     def _expire_pending(self) -> None:
         """Prune expired pendings and tell the UI about abandoned pulls.
 
