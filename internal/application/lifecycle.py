@@ -49,6 +49,12 @@ class ApplicationLifecycle:
                 resource = self._started[-1]
                 try:
                     if resource.stop() is False:
+                        # Naming it is what makes this useful: "a subsystem
+                        # refused" says nothing about which one, and the log is
+                        # often the only account a packaged app leaves behind.
+                        logger.warning(
+                            "Resource did not release ownership: %s", resource.name
+                        )
                         return False
                 except Exception:
                     logger.exception("Resource shutdown failed: %s", resource.name)

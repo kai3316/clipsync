@@ -1,3 +1,4 @@
+import logging
 import os
 from types import SimpleNamespace
 from unittest.mock import Mock
@@ -419,6 +420,58 @@ def test_sidecar_never_registers_python_as_desktop_autostart(runtime_app, monkey
         runtime_app._on_settings_change({"auto_start": enabled}, {})
     enable.assert_not_called()
     disable.assert_not_called()
+
+
+def test_a_stop_that_misses_its_budget_is_retried_before_giving_up(tmp_path, monkeypatch):
+    """`stop() is False` means "retain and retry", so something has to retry.
+
+    A drain that misses its budget is usually a straggler landing a moment
+    later rather than a subsystem that is wedged: the second attempt starts on
+    a cleanup that has had a whole budget more time to finish.  Giving up on
+    the first miss is how a clean exit became "the sidecar did not release its
+    runtime ownership".
+    """
+    monkeypatch.setenv("CLIPSYNC_CONFIG_DIR", str(tmp_path))
+    attempts = []
+
+    class SlowDrain:
+        def stop(self):
+            attempts.append(True)
+            return len(attempts) > 1
+
+    app = SidecarApplication()
+    app.runtime = SlowDrain()
+    app.internet_pairing = object()
+    assert app._stop_runtime() is True
+    assert len(attempts) == 2
+    assert app.runtime is None
+    assert app.internet_pairing is None
+
+
+def test_a_runtime_that_never_releases_ownership_still_reports_it(
+    tmp_path, monkeypatch, caplog
+):
+    """The retry is bounded, and the refusal names itself in the log.
+
+    Ownership is what the caller keeps on False -- history, identity and the
+    data lock all stay unreleased -- so a wedged runtime must still refuse
+    rather than let the process exit as if it had cleaned up.
+    """
+    monkeypatch.setenv("CLIPSYNC_CONFIG_DIR", str(tmp_path))
+    attempts = []
+
+    class Wedged:
+        def stop(self):
+            attempts.append(True)
+            return False
+
+    app = SidecarApplication()
+    app.runtime = Wedged()
+    with caplog.at_level(logging.WARNING, logger="internal.application.bootstrap"):
+        assert app._stop_runtime() is False
+    assert len(attempts) == SidecarApplication.RUNTIME_STOP_ATTEMPTS
+    assert app.runtime is not None
+    assert "did not release ownership" in caplog.text
 
 
 def test_failed_runtime_stop_keeps_history_identity_and_data_lock(runtime_app):

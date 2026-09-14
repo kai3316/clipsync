@@ -273,10 +273,32 @@ class SidecarApplication:
         self.runtime.start()
         self.internet_pairing = getattr(self.runtime, "internet_pairing", None)
 
+    # ``LanRuntime.stop()`` documents False as "retain this runtime, history and
+    # identity and retry".  A drain that missed its budget is usually one
+    # straggler still landing -- a callback finishing an encrypted write, say --
+    # rather than a subsystem that is wedged, and the second attempt starts on a
+    # cleanup that has had a whole budget more time to finish.  Retiring on the
+    # first miss is what turned a clean exit into "the sidecar did not release
+    # its runtime ownership" whenever teardown ran slow, which macOS did with
+    # two live peers.  Two attempts, so a runtime that is genuinely stuck still
+    # reports rather than holding the process open.
+    RUNTIME_STOP_ATTEMPTS = 2
+
     def _stop_runtime(self):
         if self.runtime is None:
             return True
-        if self.runtime.stop() is False:
+        stopped = False
+        for attempt in range(self.RUNTIME_STOP_ATTEMPTS):
+            stopped = self.runtime.stop() is not False
+            if stopped:
+                break
+            # Logged even when the retry rescues it: the log tail is what any
+            # later run of this has to reason from.
+            logger.warning(
+                "LAN runtime did not release ownership within its budget (attempt %d/%d)",
+                attempt + 1, self.RUNTIME_STOP_ATTEMPTS,
+            )
+        if not stopped:
             return False
         self.runtime = None
         self.internet_pairing = None

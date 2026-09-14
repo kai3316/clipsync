@@ -143,7 +143,15 @@ class PeerProcess:
         try:
             if self.process.poll() is None:
                 assert self.call("app.shutdown") == {"accepted": True}
-            assert self.process.wait(timeout=12) == 0
+            code = self.process.wait(timeout=12)
+            # A sidecar that cannot release its runtime exits 1 and says why in
+            # a traceback -- on the stderr this class already keeps.  A bare
+            # "1 == 0" leaves the cause to be re-derived from the source every
+            # time, which is exactly what the handshake above refuses to do.
+            assert code == 0, (
+                f"the sidecar exited {code} after shutdown\n"
+                f"  sidecar log tail:\n{self.log_tail()}"
+            )
         finally:
             if self.process.poll() is None:
                 self.process.kill()
