@@ -289,7 +289,15 @@ jobs:
           version="${tag#v}"
           base="https://github.com/$GITHUB_REPOSITORY/releases/download/$tag"
 
-          python3 - "$version" "$base" <<'PY'
+          # `> latest.json` is load-bearing, not tidiness.  The assembler's
+          # contract is to print the manifest on stdout -- the tests below
+          # exercise it exactly that way -- so without the redirect the file it
+          # is about to upload never exists; `set -e` then kills the step on the
+          # `cat`.  This step had never once been reached with artifacts to
+          # assemble, so the first release to get that far (1.0.4) published
+          # five installers and no manifest, leaving the app unable to see an
+          # update whose payload was already sitting on the page.
+          python3 - "$version" "$base" > latest.json <<'PY'
           import datetime
           import json
           import pathlib

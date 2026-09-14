@@ -186,6 +186,20 @@ def test_an_unsigned_artifact_is_never_published(tmp_path):
 def test_the_manifest_is_published_with_the_release(tmp_path):
     text = workflow_text()
     assert "latest.json" in text
+    # Something has to *create* it.  The assembler prints the manifest on
+    # stdout -- the cases above run it that way -- so only the shell redirect
+    # turns that into the file the upload reads.  Asserting the upload alone is
+    # what let 1.0.4 publish five installers and no manifest: `cat` failed,
+    # `set -e` ended the step, and nothing on the release page said the app
+    # would never be offered an update.
+    #
+    # Read off the invocation itself rather than searched for anywhere in the
+    # file: the comment above this line quotes the redirect, so a loose match
+    # would be satisfied by prose describing the thing it is meant to require.
+    invocation = next(
+        line for line in text.splitlines() if "python3" in line and "<<'PY'" in line
+    )
+    assert "> latest.json" in invocation, f"nothing writes latest.json: {invocation!r}"
     # It has to reach the release page, or the endpoint the app reads 404s.
     assert re.search(r"gh release upload .*latest\.json", text), "latest.json is never uploaded"
 
