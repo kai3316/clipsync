@@ -8,6 +8,7 @@ network event, so they get their own file.
 """
 
 import os
+import socket
 import sys
 import threading
 import time
@@ -196,5 +197,52 @@ def test_wake_detection_uses_both_clocks(wall_gap, mono_gap, expected, why):
     from internal.transport.connection import _looks_like_wake
 
     assert _looks_like_wake(wall_gap, mono_gap) is expected, why
+
+
+# ------------------------------------------------------ bounded address lookup
+
+
+def test_address_lookup_does_not_wait_out_a_stalled_resolver(monkeypatch):
+    """A name in no zone must not hold the caller for the resolver's timeout.
+
+    Enumerating this host's addresses calls getaddrinfo on the host name and on
+    the FQDN, and its callers are on the thread the user is waiting on: the
+    companion resolves the address it is reachable at while starting, and the
+    pairing QR resolves it while drawing.  Off a network that knows this
+    machine's name -- a macOS CI runner, a laptop that just joined a guest
+    network, anything behind a VPN that took the name server with it -- neither
+    name answers, and the caller sat in the resolver for the resolver's own
+    tens of seconds.  That is what timed the macOS sidecar suite out, on every
+    test that starts the companion, 60s apiece; Linux and Windows resolve their
+    own host name from /etc/hosts or the local resolver, so only macOS showed it.
+
+    The fake resolver answers for the host name and never answers for the FQDN:
+    a lookup that is merely slow to give up produces exactly that shape, and it
+    also pins the other half -- what did answer is still reported.
+    """
+    release = threading.Event()
+    real_getaddrinfo = socket.getaddrinfo
+    monkeypatch.setattr(D.socket, "gethostname", lambda: "clipsync-test")
+    monkeypatch.setattr(D.socket, "getfqdn", lambda: "clipsync-test.invalid")
+
+    def _getaddrinfo(name, *args, **kwargs):
+        if name == "clipsync-test":
+            return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("192.168.44.7", 0))]
+        release.wait(60)
+        return real_getaddrinfo(name, *args, **kwargs)
+
+    monkeypatch.setattr(D.socket, "getaddrinfo", _getaddrinfo)
+    try:
+        started = time.monotonic()
+        addresses = D.get_all_local_addresses()
+        elapsed = time.monotonic() - started
+    finally:
+        release.set()
+
+    assert elapsed < D.HOSTNAME_LOOKUP_TIMEOUT + 1.0, (
+        f"address enumeration waited {elapsed:.1f}s on a name that never resolves"
+    )
+    # The bound is a ceiling on waiting, not a licence to drop the answer.
+    assert "192.168.44.7" in addresses
 
 

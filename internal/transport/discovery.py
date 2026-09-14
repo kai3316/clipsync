@@ -27,6 +27,44 @@ logger = logging.getLogger(__name__)
 # ``_reconcile_after_resume``).
 RECONFIRM_GRACE_SECONDS = 4.0
 
+# How long the host-name and FQDN lookups may hold up address enumeration.  A
+# ceiling on a working-but-slow resolver, not a target: a name that resolves at
+# all resolves in single-digit milliseconds.  A name that is in no zone has
+# held callers of ``get_all_local_addresses`` for the better part of a minute,
+# and those callers include the app's startup path (the companion logs the URL
+# it is reachable at) and the pairing QR -- both of which are on the thread the
+# user is waiting on.
+HOSTNAME_LOOKUP_TIMEOUT = 2.0
+
+
+def _resolved_host_addresses(timeout: float) -> list[str]:
+    """Every IPv4 address the host name and the FQDN resolve to, bounded.
+
+    Both lookups share one worker thread and one deadline: the thread that
+    called us must never be the one sitting in the resolver.  ``getfqdn()`` is
+    in here rather than in the caller for the same reason -- it is a reverse
+    lookup of the host name, and on the machines this bound exists for it is
+    the slowest of the three.
+
+    The worker is a daemon and may outlive the wait, so what is returned is a
+    snapshot: an address it appends after the deadline is one this call does
+    not see, which is the same outcome as a lookup that failed.
+    """
+    found: list[str] = []
+
+    def _worker() -> None:
+        for name in (socket.gethostname(), socket.getfqdn()):
+            try:
+                for info in socket.getaddrinfo(name, None, family=socket.AF_INET):
+                    found.append(info[4][0])
+            except Exception:
+                logger.debug("Address lookup for %r failed", name, exc_info=True)
+
+    worker = threading.Thread(target=_worker, daemon=True, name="lan-address-lookup")
+    worker.start()
+    worker.join(timeout)
+    return list(found)
+
 
 def get_all_local_addresses():
     """Enumerate every non-loopback IPv4 address on this host.
@@ -68,19 +106,21 @@ def get_all_local_addresses():
     except Exception:
         pass
 
-    # 2. Hostname-resolved addresses (Windows usually returns all adapters).
-    try:
-        for info in socket.getaddrinfo(socket.gethostname(), None, family=socket.AF_INET):
-            _add(info[4][0])
-    except Exception:
-        pass
-
-    # 3. FQDN-resolved addresses (covers bare-hostname /etc/hosts gaps).
-    try:
-        for info in socket.getaddrinfo(socket.getfqdn(), None, family=socket.AF_INET):
-            _add(info[4][0])
-    except Exception:
-        pass
+    # 2+3. Hostname-resolved addresses (Windows usually returns all adapters)
+    #    plus the FQDN's, which covers the bare-hostname /etc/hosts gap.
+    #    Bounded, and for a reason worth naming: these are the only two calls
+    #    in this function that can take arbitrarily long.  On a host whose own
+    #    name no resolver knows -- a CI runner, a laptop that just joined a
+    #    guest network, anything behind a VPN that took the name server with it
+    #    -- they block for the resolver's own timeout, which is tens of
+    #    seconds, and this function is on the app's startup path.
+    #
+    #    The bound costs no correctness: step 1 resolves no names at all, so
+    #    the primary routable address is already in hand by the time it
+    #    applies, and a lookup that misses the deadline contributes exactly
+    #    what one that fails contributes.
+    for ip in _resolved_host_addresses(HOSTNAME_LOOKUP_TIMEOUT):
+        _add(ip)
 
     # Cap the advertised set: more IPs than this means unusual network
     # topology (many adapters) — advertising them all only broadens exposure.
