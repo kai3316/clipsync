@@ -291,7 +291,7 @@ internal/                     业务逻辑，两个界面共用
   web/                        手机伴侣与旧版网页面板（HTTP + WebSocket）
   ui/                         旧版 CustomTkinter 界面
 
-clipsync-sidecar.spec         把 Python 服务打成单文件（排除 tkinter）
+clipsync-sidecar.spec         打包 Python 服务（macOS 为目录，其它平台为单文件；排除 tkinter）
 docs/                         落地页（GitHub Pages 的根目录）
 ```
 

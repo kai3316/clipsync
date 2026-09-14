@@ -31,6 +31,10 @@ try {
     # no-op; CI gates the same flag on the tag, because a pull request from a
     # fork gets no secrets.  Without it a local build still produces every
     # installer, just none of the updater payloads or their .sig files.
+    # Windows keeps the onefile sidecar, so externalBin is right here.  macOS
+    # stages the same application as a directory and ships it as a resource
+    # instead -- see clipsync-sidecar.spec and the macOS branch in
+    # .github/workflows/desktop.yml, which is where that package is built.
     $Bundle = @{ externalBin = @("binaries/clipsync-sidecar") }
     if ($env:TAURI_SIGNING_PRIVATE_KEY) { $Bundle.createUpdaterArtifacts = $true }
     $Override = @{ version = $Version; bundle = $Bundle } | ConvertTo-Json -Depth 4
