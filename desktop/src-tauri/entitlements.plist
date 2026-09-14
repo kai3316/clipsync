@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <!--
+    The sidecar is a PyInstaller onefile build: its Python framework is packed
+    inside the executable and extracted to a temp directory at run time.  macOS
+    library validation is on by default under the hardened runtime the bundler
+    signs with, and it refuses to load that framework because its signing
+    identity is not the process's.  The sidecar then dies before it can send its
+    `ready` frame, and the application reports SIDECAR_UNAVAILABLE.
+
+    This entitlement is the switch that allows it.  The hardened runtime stays
+    on; only the library-identity check is relaxed.
+  -->
+  <key>com.apple.security.cs.disable-library-validation</key>
+  <true/>
+</dict>
+</plist>
