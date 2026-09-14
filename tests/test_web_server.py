@@ -313,50 +313,47 @@ def test_dispatch_delete_file_preserves_leading_trailing_spaces(tmp_path):
         assert not f.exists(), f"{name!r} should be deleted by its exact name"
 
 
-def test_chat_expire_stale_receives_defers_fire_outside_lock():
-    """#8: _expire_stale_receives collects the done callbacks and only fires
-    them when the caller requests inline firing — the heartbeat passes
-    defer_fire=True so a slow WS/UI callback can't freeze the chat lock."""
+def test_chat_stale_transfer_sweep_defers_fire_outside_lock():
+    """#8: the stall sweeper collects the done callbacks and fires none of them
+    itself.  The heartbeat calls it while holding the chat lock, so a slow
+    WS/UI callback running inline here would freeze every other chat thread."""
+    import tempfile
+    from pathlib import Path
+
     from internal.sync.nearby_chat import ChatManager
 
     mgr = ChatManager("x", "X")
+    tmp = tempfile.TemporaryDirectory()
     try:
+        src = Path(tmp.name) / "x.bin"
+        src.write_bytes(b"payload")
         mgr.handle_message(
             "chat_invite",
             {"session_id": "f" * 16, "from_name": "A", "fingerprint_short": "A1"},
             "peer-a",
             "A1",
-            None,
+            lambda data: True,
         )
         sid = mgr.get_sessions()[0]["session_id"]
-        # A working channel: since the honest-accept fix, activation only
-        # commits when the chat_accept frame actually goes out.
-        mgr.accept_invitation(sid, lambda data: True)
         done_events = []
         mgr.set_on_file_done(
             lambda s, tid, ok, path, st: done_events.append((tid, ok, st)),
         )
-        mgr.handle_message(
-            "chat_file_offer",
-            {
-                "session_id": sid,
-                "transfer_id": "b" * 32,
-                "file_name": "x.bin",
-                "file_size": 100,
-                "mime": "",
-            },
-            "peer-a",
-            "A1",
-            None,
+        # A send the peer never answers, aged past the stall window.
+        tid = mgr.send_file(sid, str(src), lambda data: True)
+        assert tid
+        mgr._sends[tid]["last_progress_mono"] = time.monotonic() - (
+            ChatManager.TRANSFER_STALL_TIMEOUT + 10
         )
-        mgr._receives["b" * 32]["entry"].ts -= ChatManager.INVITE_ACCEPT_TIMEOUT + 10
+        fired: list = []
         with mgr._lock:
-            done, changed = mgr._expire_stale_receives(defer_fire=True)
-        assert done == [(sid, "b" * 32, "declined")]
-        assert changed is True
-        assert done_events == [], "deferred mode must not fire callbacks inline"
+            done = mgr._expire_stale_transfers(fired)
+        assert any(d[1] == tid for d in done), "the stalled send was not collected"
+        assert fired, "the UI notice was not queued"
+        assert done_events == [], "the sweep must not fire callbacks inline"
     finally:
         mgr.shutdown()
+        tmp.cleanup()
 
 
 def test_history_api_limit_total_returns_authoritative_list(tmp_path):

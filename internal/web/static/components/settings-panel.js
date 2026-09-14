@@ -225,6 +225,10 @@
         dedupMethod: 'sha256',
         sourceTracking: true,
         plainTextOnly: false,
+        // Nearby chat's admission rule: true = anyone on the network may
+        // send straight to this device; false = each conversation and each
+        // file waits for an answer here.
+        chatOpenToAll: true,
 
         // Data locations
         dataDir: '',
@@ -594,6 +598,7 @@
         if (s.retry_capture_enabled !== undefined) this.retryCapture = !!s.retry_capture_enabled;
         if (s.dedup_method !== undefined) this.dedupMethod = s.dedup_method || 'sha256';
         if (s.source_tracking_enabled !== undefined) this.sourceTracking = !!s.source_tracking_enabled;
+        if (s.chat_open_to_all !== undefined) this.chatOpenToAll = !!s.chat_open_to_all;
         if (s.plain_text_only !== undefined) this.plainTextOnly = !!s.plain_text_only;
         if (s.auto_update_check !== undefined) this.autoUpdateCheck = !!s.auto_update_check;
         if (s.data_dir !== undefined) this.dataDir = s.data_dir || '';
@@ -646,6 +651,23 @@
           .catch(function () {
             // Revert so the UI stays truthful to the server setting.
             self.internetSyncEnabled = !self.internetSyncEnabled;
+            self.store.showToast(self.t('dialog.failed'), 2000);
+          });
+      },
+
+      toggleChatOpenToAll: function () {
+        var self = this;
+        this.chatOpenToAll = !this.chatOpenToAll;
+        // Saved through the ordinary settings path, which is also what the
+        // runtime hands to the running chat manager -- so the next invitation
+        // or file offer follows the rule just chosen, with no restart.
+        ClipsyncAPI.updateSettings({ chat_open_to_all: this.chatOpenToAll })
+          .then(function (res) {
+            if (res && res.updated) self.store.mergeSettings(res.updated);
+          })
+          .catch(function () {
+            // Revert so the switch keeps saying what the server actually does.
+            self.chatOpenToAll = !self.chatOpenToAll;
             self.store.showToast(self.t('dialog.failed'), 2000);
           });
       },
@@ -1959,6 +1981,16 @@
                     '<span class="settings-field__label">{{ t(\'network.local_address\') }}</span>' +
                     '<span class="settings-field__value settings-field__value--mono">{{ store.overview.localIp }}:{{ port || (store.settingsCache && store.settingsCache.port) || 53317 }}</span>' +
                   '</div>' +
+                  // Who may reach this device belongs with the address it is
+                  // reached at.  Applied the moment it is flipped, unlike the two
+                  // fields above, which need the save button.
+                  '<div class="settings-toggle-row" style="margin-top:12px">' +
+                    '<span class="settings-toggle-label">{{ t(\'settings_window.chat_open_to_all\') }}</span>' +
+                    '<button class="settings-toggle" role="switch" :aria-checked="chatOpenToAll" :aria-label="t(\'settings_window.chat_open_to_all\')" :class="{ \'settings-toggle--on\': chatOpenToAll }" @click="toggleChatOpenToAll">' +
+                      '<span class="settings-toggle__knob"></span>' +
+                    '</button>' +
+                  '</div>' +
+                  '<p class="settings-hint">{{ t(\'settings_window.chat_open_to_all_desc\') }}</p>' +
                   '<button class="settings-btn settings-btn--accent" @click="saveNetwork" :disabled="networkSaving" style="width:100%;margin-top:8px">' +
                     '{{ networkSaving ? \'...\' : t(\'settings_window.save_network\') }}' +
                   '</button>' +

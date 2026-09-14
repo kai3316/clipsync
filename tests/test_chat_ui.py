@@ -20,7 +20,7 @@ PEER = "peer-a"
 
 
 def _active_mgr() -> tuple[str, ChatManager]:
-    """A ChatManager with one ACTIVE session (incoming invite accepted)."""
+    """A ChatManager with one ACTIVE session (direct send: the invite alone)."""
     mgr = ChatManager("x", "X")
     mgr.handle_message(
         "chat_invite",
@@ -30,7 +30,7 @@ def _active_mgr() -> tuple[str, ChatManager]:
         None,
     )
     sid = mgr.get_sessions()[0]["session_id"]
-    assert mgr.accept_invitation(sid, lambda data: True)
+    assert mgr.get_sessions()[0]["status"] == "active"
     return sid, mgr
 
 
@@ -66,11 +66,12 @@ def test_failed_done_and_incoming_entries():
 
 
 def test_chat_status_key_mapping():
-    """The wire statuses a peer sends, mapped to the keys the row is labelled
-    with."""
-    assert _chat_status_key("inviting") == "chat.status.inviting"
-    assert _chat_status_key("invited") == "chat.status.pending"
+    """The two states a session can be in, mapped to the row's chip key.
+
+    There used to be four (inviting / invited / declined_remote / active):
+    a session now opens live, so liveness is the only thing left to show.
+    """
     assert _chat_status_key("active", online=True) == "chat.status.connected"
     assert _chat_status_key("active", online=False) == "chat.status.offline"
-    assert _chat_status_key("declined_remote") == "chat.status.declined"
     assert _chat_status_key("closed") == "chat.status.closed"
+    assert _chat_status_key("closed", online=False) == "chat.status.closed"

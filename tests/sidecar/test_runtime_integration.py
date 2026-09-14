@@ -304,18 +304,16 @@ def test_real_rpc_pairing_bidirectional_copy_and_restart_trust(
         # claims it -- fatally, which is a restart loop rather than a failed
         # command.  This call goes through `Peer.call` and so never meets that
         # check, which is exactly why the key went wrong here unnoticed.
-        invited = left.call("chat.invite", peer_id="right", peer_name="right")
-        assert invited["connecting"] is False, invited
-        session_id = invited["chat_session_id"]
-        right.wait("chat.sessions", lambda result: any(
-            row["session_id"] == session_id and row["status"] == "invited"
-            for row in result["sessions"]
-        ))
-        assert right.call("chat.action", action="accept", session_id=session_id)["ok"]
-        left.wait("chat.sessions", lambda result: any(
-            row["session_id"] == session_id and row["status"] == "active"
-            for row in result["sessions"]
-        ))
+        opened = left.call("chat.invite", peer_id="right", peer_name="right")
+        assert opened["connecting"] is False, opened
+        session_id = opened["chat_session_id"]
+        # Direct send: the invitation is the whole handshake, so both sides are
+        # live without an accept step between them.
+        for peer in (left, right):
+            peer.wait("chat.sessions", lambda result: any(
+                row["session_id"] == session_id and row["status"] == "active"
+                for row in result["sessions"]
+            ))
         for sender, receiver, text in (
             (left, right, "left to right over TLS"),
             (right, left, "right to left over TLS"),
@@ -342,13 +340,9 @@ def test_real_rpc_pairing_bidirectional_copy_and_restart_trust(
         attachment = left.call("chat.file", action="send", session_id=session_id, path=str(source))
         assert attachment["ok"]
         attachment_id = attachment["transfer_id"]
-        right.wait("chat.messages", lambda result: any(
-            row.get("transfer_id") == attachment_id and row["status"] == "await_accept"
-            for row in result["messages"]
-        ), session_id=session_id)
-        assert right.call(
-            "chat.file", action="accept", session_id=session_id, transfer_id=attachment_id
-        )["ok"]
+        # Direct send: nothing here accepts the offer.  An incoming attachment
+        # is taken on arrival and never stops at `await_accept`, so reaching
+        # `done` without that call is itself the proof that it was accepted.
         right.wait("chat.messages", lambda result: any(
             row.get("transfer_id") == attachment_id and row["status"] == "done"
             for row in result["messages"]

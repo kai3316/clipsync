@@ -637,13 +637,19 @@ class WebSocketManager:
             },
         )
 
-    def broadcast_chat_sessions(self, sessions=None):
+    def broadcast_chat_sessions(self, sessions=None, open_to_all=None):
         """Convenience: broadcast the full nearby-chat session list.
 
         ``sessions`` is the list of session dicts from ``ChatManager.get_sessions()``
-        (the web UI re-renders from the whole list on any change).
+        (the web UI re-renders from the whole list on any change).  ``open_to_all``
+        rides along for the same reason it does on ``GET /api/chat/sessions``:
+        an entry at ``await_accept`` looks alike in both modes, and only this
+        says whether the prompt that follows it is real.
         """
-        self.broadcast("chat_sessions", {"sessions": sessions or []})
+        payload = {"sessions": sessions or []}
+        if open_to_all is not None:
+            payload["open_to_all"] = bool(open_to_all)
+        self.broadcast("chat_sessions", payload)
 
     def broadcast_chat_message(self, session_id: str, entry: dict):
         """Convenience: broadcast one new chat message entry."""

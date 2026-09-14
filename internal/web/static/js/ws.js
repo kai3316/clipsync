@@ -528,7 +528,7 @@ var ClipsyncWS = (function () {
                 }
               }
             }
-            store.replaceChatSessions(sessList);
+            store.replaceChatSessions(sessList, data.open_to_all);
           }
           break;
 

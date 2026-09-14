@@ -603,7 +603,7 @@
         var self = this;
         return ClipsyncAPI.chatSessions().then(function (res) {
           if (res && res.sessions) {
-            store.replaceChatSessions(res.sessions);
+            store.replaceChatSessions(res.sessions, res.open_to_all);
           }
           // If a conversation is already open, refresh its messages too so a
           // reconnect doesn't leave the chat pane on stale entries.

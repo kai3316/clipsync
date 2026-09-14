@@ -76,14 +76,15 @@ def pair(left, right):
 
 
 def open_session(left, right):
-    """Open a chat session from *left* to *right* and return its id."""
-    invited = left.call("chat.invite", peer_id="right", peer_name="right")
-    session_id = invited["chat_session_id"]
+    """Open a chat session from *left* to *right* and return its id.
+
+    Direct send: the invitation is the whole handshake.  The opener's session is
+    live the moment it is minted and the peer's the moment the frame lands, so
+    there is nothing between the call and an active conversation to wait on.
+    """
+    opened = left.call("chat.invite", peer_id="right", peer_name="right")
+    session_id = opened["chat_session_id"]
     wait_for(right, "chat.sessions", lambda r: any(
-        row["session_id"] == session_id and row["status"] == "invited"
-        for row in r["sessions"]))
-    assert right.call("chat.action", action="accept", session_id=session_id)["ok"]
-    wait_for(left, "chat.sessions", lambda r: any(
         row["session_id"] == session_id and row["status"] == "active"
         for row in r["sessions"]))
     return session_id

@@ -1,4 +1,4 @@
-"""Nearby-chat service tests — consent gating, text/file roundtrips, abuse caps.
+"""Nearby-chat service tests — direct send, text/file roundtrips, abuse caps.
 
 Two ChatManagers are wired together through in-memory queues: every frame one
 side sends is decoded with the real codec decoder and fed into the other
@@ -57,8 +57,6 @@ class LinkedPair:
     def __init__(self, dir_a, dir_b):
         self.frames_a_to_b: list[bytes] = []
         self.frames_b_to_a: list[bytes] = []
-        self.invites_on_b: list[dict] = []
-        self.responses_on_a: list[tuple] = []
 
         self.a = ChatManager(DEV_A, "Device A", receive_dir=str(dir_a))
         self.b = ChatManager(DEV_B, "Device B", receive_dir=str(dir_b))
@@ -66,39 +64,47 @@ class LinkedPair:
         def send_from_b(data: bytes) -> bool:
             """B's outgoing wire: delivers into A."""
             self.frames_b_to_a.append(data)
-            return self._deliver(self.a, data, DEV_B)
+            return self._deliver(self.a, data, DEV_B, lambda d: self.send_from_a(d))
 
         def send_from_a(data: bytes) -> bool:
             """A's outgoing wire: delivers into B."""
             self.frames_a_to_b.append(data)
-            return self._deliver(self.b, data, DEV_A)
+            return self._deliver(self.b, data, DEV_A, lambda d: self.send_from_b(d))
 
         self.send_from_a = send_from_a
         self.send_from_b = send_from_b
-        self.b.set_on_incoming_invite(self.invites_on_b.append)
-        self.a.set_on_invite_response(
-            lambda sid, pid, ok: self.responses_on_a.append((sid, pid, ok)),
-        )
 
     @staticmethod
-    def _deliver(dst: ChatManager, data: bytes, sender_id: str) -> bool:
+    def _deliver(dst: ChatManager, data: bytes, sender_id: str, reply_fn=None) -> bool:
+        """Hand *data* to *dst* as if it arrived from *sender_id*.
+
+        *reply_fn* is the wire back to the sender — the receiving side stores
+        it and uses it to answer (a chat_accept, a file accept, a done ack), so
+        it must be a working transport rather than None: a receiver with no way
+        to reply rolls its own receive state back.
+        """
         msg = decode_message(data)
         if msg is None:
             return False
         msg_type = getattr(msg, "msg_type", "")
         if msg_type == "file_chunk":
-            return dst.handle_binary_chunk(msg._raw_payload, sender_id, None)
-        return dst.handle_message(msg_type, msg._raw_payload, sender_id, FP_A, None)
+            return dst.handle_binary_chunk(msg._raw_payload, sender_id, reply_fn)
+        return dst.handle_message(msg_type, msg._raw_payload, sender_id, FP_A, reply_fn)
 
     def establish(self) -> str:
-        """Invite → accept; returns the session id both sides share."""
+        """Open a session; returns the id both sides share.
+
+        Direct send: ``start_session`` births the opener active and the invite
+        frame alone opens the peer's side, so there is no accept step between
+        the two calls.
+        """
         sid = self.a.start_session(DEV_B, "Device B", FP_B, self.send_from_a)
         assert sid, "start_session returned None"
-        assert _wait_until(lambda: len(self.invites_on_b) == 1), "invite not seen on B"
-        assert self.b.accept_invitation(sid, self.send_from_b)
+        assert self.a.get_sessions()[0]["status"] == "active", "opener never went active"
         assert _wait_until(
-            lambda: any(s["status"] == "active" for s in self.a.get_sessions()),
-        ), "A never went active"
+            lambda: any(s["status"] == "active" for s in self.b.get_sessions()),
+        ), "B never opened the session"
+        assert self.b.get_sessions()[0]["session_id"] == sid, "ids diverged"
         return sid
 
     def close(self):
@@ -119,23 +125,108 @@ class TestInviteLifecycle:
         self.pair.close()
         self._tmp.cleanup()
 
-    def test_invite_accept_activates_both_sides(self):
+    def test_invite_opens_both_sides_without_a_consent_step(self):
+        """Direct send: the invite frame is the whole handshake.
+
+        Nothing waits on B agreeing, so A is live the moment ``start_session``
+        returns and B is live the moment the invite lands — there is no
+        intermediate state for a UI to render a dialog in.
+        """
         sid = self.pair.establish()
         sess_a = [s for s in self.pair.a.get_sessions() if s["peer_id"] == DEV_B][0]
         sess_b = self.pair.b.get_sessions()[0]
         assert sess_a["status"] == "active"
         assert sess_b["status"] == "active"
         assert sess_a["session_id"] == sid == sess_b["session_id"]
-        assert self.pair.responses_on_a == [(sid, DEV_B, True)]
-
-    def test_decline_marks_remote_declined(self):
-        sid = self.pair.a.start_session(DEV_B, "Device B", FP_B, self.pair.send_from_a)
-        assert _wait_until(lambda: len(self.pair.invites_on_b) == 1)
-        assert self.pair.b.decline_invitation(sid, self.pair.send_from_b)
+        # A message sent straight after the invite lands, with no accept in
+        # between.
+        assert self.pair.a.send_text(sid, "first word", self.pair.send_from_a)
         assert _wait_until(
-            lambda: self.pair.a.get_sessions()[0]["status"] == "declined_remote",
+            lambda: any(e["text"] == "first word" for e in self.pair.b.get_messages(sid)),
         )
-        assert self.pair.responses_on_a[-1] == (sid, DEV_B, False)
+
+    def test_crossing_open_converges_on_the_smaller_session_id(self):
+        """Two devices opening at once must end up on ONE session id.
+
+        Each side mints a random id, so a naive "always adopt theirs" swaps the
+        ids on both sides and leaves the two sessions permanently mismatched —
+        each then sends under an id the other has never seen.  Both sides apply
+        the same rule (smaller id wins), so they converge without a further
+        round trip.
+
+        The two invites are held on the wire and only then released: on a
+        synchronous link the second ``start_session`` would simply find the
+        first one's session already live and join it, and nothing would race.
+        """
+        to_b: list[bytes] = []
+        to_a: list[bytes] = []
+
+        def hold_for_b(data: bytes) -> bool:
+            to_b.append(data)
+            return True
+
+        def hold_for_a(data: bytes) -> bool:
+            to_a.append(data)
+            return True
+
+        sid_a = self.pair.a.start_session(DEV_B, "Device B", FP_B, hold_for_b)
+        sid_b = self.pair.b.start_session(DEV_A, "Device A", FP_A, hold_for_a)
+        assert sid_a and sid_b and sid_a != sid_b, "expected two independent ids"
+
+        # Release both invites so each side sees the other's id while its own
+        # session is already live.
+        for data in list(to_b):
+            LinkedPair._deliver(self.pair.b, data, DEV_A)
+        for data in list(to_a):
+            LinkedPair._deliver(self.pair.a, data, DEV_B)
+
+        winner = min(sid_a, sid_b)
+        assert self.pair.a.get_sessions()[0]["session_id"] == winner, "A kept the losing id"
+        assert self.pair.b.get_sessions()[0]["session_id"] == winner, "B kept the losing id"
+
+    def test_session_id_adoption_carries_the_flood_budget(self):
+        """Re-keying a session must not reset its rate-limit buckets.
+
+        Adoption happens whenever a peer re-invites with a smaller id.  If the
+        buckets were left under the old id, every re-invite would hand the peer
+        a fresh text budget — a flood bypass — and orphan the old buckets.
+        """
+        chat = ChatManager("x", "X")
+        try:
+            chat.handle_message(
+                "chat_invite",
+                {"session_id": "f" * 16, "from_name": "B", "fingerprint_short": "B1"},
+                PEER,
+                "B1",
+                lambda data: True,
+            )
+            sid = chat.get_sessions()[0]["session_id"]
+            for i in range(ChatManager.TEXT_RATE_LIMIT):
+                chat.handle_message(
+                    "chat_text",
+                    {"session_id": sid, "text": f"m{i}", "ts": time.time()},
+                    PEER,
+                    "B1",
+                    lambda data: True,
+                )
+            used = list(chat._text_times_in[sid])
+            assert len(used) == ChatManager.TEXT_RATE_LIMIT
+
+            # A re-invite with a smaller id wins the tiebreak and re-keys it.
+            smaller = "0" * 16
+            assert smaller < sid
+            chat.handle_message(
+                "chat_invite",
+                {"session_id": smaller, "from_name": "B", "fingerprint_short": "B1"},
+                PEER,
+                "B1",
+                lambda data: True,
+            )
+            assert chat.get_sessions()[0]["session_id"] == smaller
+            assert sid not in chat._text_times_in, "old bucket orphaned, not moved"
+            assert list(chat._text_times_in[smaller]) == used, "budget was reset by adoption"
+        finally:
+            chat.shutdown()
 
     def test_close_notifies_peer_with_system_entry(self):
         sid = self.pair.establish()
@@ -216,20 +307,31 @@ class TestAbuseCaps:
         self.pair.close()
         self._tmp.cleanup()
 
-    def test_pending_invite_cap_auto_declines(self):
-        # Distinct senders: one live session per peer, so the cap needs
-        # several peers knocking at once.
-        senders = [(f"peer-{i}", f"{i:016x}") for i in range(ChatManager.PENDING_INVITE_CAP + 2)]
-        for sender_id, sid in senders:
-            self.pair.b.handle_message(
+    def test_invite_flood_from_one_peer_is_rate_limited(self):
+        """The bound that applies in both modes.
+
+        With ``open_to_all`` on there is no backlog to cap — every invite opens
+        a live session at once — so the per-peer rate limit is what stops one
+        device from minting them in a loop.  (With it off the pending-invite
+        cap bounds the prompts too; see ``TestApprovalMode``.)
+        """
+        self.pair.establish()
+        accepted = 0
+        for i in range(ChatManager.INVITE_RATE_LIMIT + 3):
+            if self.pair.b.handle_message(
                 "chat_invite",
-                {"session_id": sid, "from_name": sender_id, "fingerprint_short": FP_A},
-                sender_id,
+                {"session_id": f"{i:016x}", "from_name": "A", "fingerprint_short": FP_A},
+                DEV_A,
                 FP_A,
                 self.pair.send_from_b,
-            )
-        invited = [s for s in self.pair.b.get_sessions() if s["status"] == "invited"]
-        assert len(invited) == ChatManager.PENDING_INVITE_CAP
+            ):
+                accepted += 1
+        # The establish() above already spent one, and the limit counts the
+        # whole window per peer.
+        assert accepted == ChatManager.INVITE_RATE_LIMIT - 1
+        # And none of it accumulated: one peer still holds exactly one session,
+        # however many times it knocked.
+        assert len(self.pair.b.get_sessions()) == 1
 
     def test_traversal_file_name_is_sanitized(self):
         sid = self.pair.establish()
@@ -280,8 +382,7 @@ class TestFileTransfer:
         src = self._make_source(ChatManager.CHUNK_SIZE * 2 + 1234)
         tid = self.pair.a.send_file(self.sid, str(src), self.pair.send_from_a)
         assert tid, "send_file returned None"
-        assert _wait_until(lambda: (self._b_entry(tid) or {}).get("status") == "await_accept")
-        assert self.pair.b.accept_file(self.sid, tid, self.pair.send_from_b)
+        # Nothing accepts on B: an offer is taken the moment it lands.
         assert _wait_until(lambda: (self._b_entry(tid) or {}).get("status") == "done")
         received = next(e for e in self.pair.b.get_messages(self.sid) if e["transfer_id"] == tid)
         assert received["saved_path"]
@@ -289,29 +390,41 @@ class TestFileTransfer:
 
     def test_collision_rename_avoids_overwrite(self):
         src = self._make_source(2048)
-        tid = self.pair.a.send_file(self.sid, str(src), self.pair.send_from_a)
-        assert _wait_until(lambda: (self._b_entry(tid) or {}).get("status") == "await_accept")
         # Pre-create the destination so the receiver must rename.
         (self.dir_b / "source.bin").write_bytes(b"precious")
-        assert self.pair.b.accept_file(self.sid, tid, self.pair.send_from_b)
+        tid = self.pair.a.send_file(self.sid, str(src), self.pair.send_from_a)
         assert _wait_until(lambda: (self._b_entry(tid) or {}).get("status") == "done")
         received = next(e for e in self.pair.b.get_messages(self.sid) if e["transfer_id"] == tid)
         assert received["saved_path"] != str(self.dir_b / "source.bin")
         assert open(self.dir_b / "source.bin", "rb").read() == b"precious"  # noqa: SIM115
 
-    def test_decline_file_marks_entry_declined(self):
+    def test_offer_that_cannot_be_received_rejects_back_to_the_sender(self):
+        """The one path that still answers an offer with a refusal.
+
+        With the accept dialog gone, nothing the *user* does declines a file —
+        but a receiver whose receive directory refuses the write must still
+        tell the sender, or the sender sits in ``await_accept`` until the
+        timeout expires.  A receive dir that cannot be created is that case.
+        """
         src = self._make_source(1024)
+        # A receive dir that validated at set time, then had the directory
+        # replaced by a file underneath it -- so the per-transfer mkdir() fails
+        # exactly where a full or unmounted disk would.
+        blocked = self.dir_b / "blocked"
+        self.pair.b.set_receive_dir(str(blocked))
+        blocked.rmdir()
+        blocked.write_bytes(b"not a directory")
         tid = self.pair.a.send_file(self.sid, str(src), self.pair.send_from_a)
-        assert _wait_until(lambda: (self._b_entry(tid) or {}).get("status") == "await_accept")
-        assert self.pair.b.decline_file(self.sid, tid, self.pair.send_from_b)
+        assert tid, "send_file returned None"
         assert _wait_until(
             lambda: (
-                next(e for e in self.pair.a.get_messages(self.sid) if e["transfer_id"] == tid)[
-                    "status"
-                ]
+                next(
+                    (e for e in self.pair.a.get_messages(self.sid) if e["transfer_id"] == tid),
+                    {},
+                ).get("status")
                 == "declined"
             ),
-        )
+        ), "the sender was never told the offer could not be received"
 
 
 class TestInternetRelayFileTransfers:
@@ -368,8 +481,6 @@ class TestInternetRelayFileTransfers:
         tid = self.pair.a.send_file(self.sid, str(src), self._relay_fn())
         assert tid, "send_file returned None"
         assert self._offer_chunk_size() == ChatManager.RELAY_CHUNK_SIZE
-        assert _wait_until(lambda: (self._b_entry(tid) or {}).get("status") == "await_accept")
-        assert self.pair.b.accept_file(self.sid, tid, self.pair.send_from_b)
         assert _wait_until(lambda: (self._b_entry(tid) or {}).get("status") == "done")
         # Every binary chunk frame must fit inside the relay payload cap.
         for frame in self.pair.frames_a_to_b:
@@ -417,6 +528,13 @@ class TestInternetRelayFileTransfers:
             "chunk_size": "not-a-number",
             "mime": "",
         }
+        # This offer is injected rather than sent by A, so A has no matching
+        # send state and would refuse the accept B answers it with.  On the
+        # real wire an accept frame goes out over a transport, not into a peer
+        # that can shrug at it, so give B a wire that reports success: what
+        # this test is about is the chunk_size the offer handler parses, not
+        # the round trip (the send_file cases above cover that).
+        self.pair.b._latest_send_fn[DEV_A] = lambda data: True
         assert (
             self.pair.b.handle_message(
                 "chat_file_offer", payload, DEV_A, FP_A, self.pair.send_from_b
@@ -424,7 +542,7 @@ class TestInternetRelayFileTransfers:
             is True
         )
         entry = next(e for e in self.pair.b.get_messages(self.sid) if e["transfer_id"] == "f" * 32)
-        assert entry["status"] == "await_accept"
+        assert entry["status"] == "sending"  # taken on arrival, no accept step
         recv = self.pair.b._receives.get("f" * 32)
         assert recv is not None
         assert recv["chunk_size"] == ChatManager.CHUNK_SIZE
@@ -444,9 +562,13 @@ class TestInternetRelayFileTransfers:
                 )
                 is True
             )
-            recv2 = self.pair.b._receives.get(tid)
+            recv2 = self.pair.b._receives.pop(tid, None)
             assert recv2 is not None and recv2["chunk_size"] == ChatManager.CHUNK_SIZE
-            self.pair.b._receives.pop(tid, None)
+            # The offer was auto-accepted, so the receive holds an open temp
+            # handle; close it rather than dropping the state on the floor (on
+            # Windows the directory cleanup would fail with it still open).
+            if recv2.get("fh") is not None:
+                recv2["fh"].close()
 
 
 class TestDisconnectAndSnapshots:
@@ -615,16 +737,16 @@ class TestStalledTransferSweep:
     ``.part`` temp files removed instead of leaking forever."""
 
     def _active_session(self, mgr):
+        # A working send_fn: the peer stores it and needs it back to answer a
+        # file offer with its accept, so None would strand the receive state.
         mgr.handle_message(
             "chat_invite",
             {"session_id": "f" * 16, "from_name": "A", "fingerprint_short": "A1"},
             "peer-a",
             "A1",
-            None,
+            lambda data: True,
         )
-        sid = mgr.get_sessions()[0]["session_id"]
-        mgr.accept_invitation(sid, lambda data: True)  # honest-accept fix: ack must go out
-        return sid
+        return mgr.get_sessions()[0]["session_id"]
 
     def test_stalled_receive_is_failed_and_temp_file_removed(self):
         import tempfile
@@ -646,13 +768,12 @@ class TestStalledTransferSweep:
                 },
                 "peer-a",
                 "A1",
-                None,
+                # A working send_fn: the auto-accept answers the sender with
+                # chat_file_accept, and a send that fails rolls the receive
+                # state back (that rollback is the point of the fix), leaving
+                # nothing here to stall.
+                lambda data: True,
             )
-            # Accepting opens the temp file; the wire ack itself is not needed.
-            # Use a working send_fn so the accept succeeds and the receive
-            # state persists (a failed accept now rolls the state back —
-            # that's the point of the rollback fix).
-            mgr.accept_file(sid, tid, lambda data: True)
             temp_path = mgr._receives[tid]["temp_path"]
             assert temp_path is not None and temp_path.exists()
             # Age the receive past the stall timeout so the sweep fails it.
@@ -676,16 +797,16 @@ class TestTextRateBudget:
     """#4: text flood budgets are per-direction."""
 
     def _active_session(self, mgr):
+        # A working send_fn: the peer stores it and needs it back to answer a
+        # file offer with its accept, so None would strand the receive state.
         mgr.handle_message(
             "chat_invite",
             {"session_id": "f" * 16, "from_name": "A", "fingerprint_short": "A1"},
             "peer-a",
             "A1",
-            None,
+            lambda data: True,
         )
-        sid = mgr.get_sessions()[0]["session_id"]
-        mgr.accept_invitation(sid, lambda data: True)  # honest-accept fix: ack must go out
-        return sid
+        return mgr.get_sessions()[0]["session_id"]
 
     def test_incoming_flood_does_not_consume_outgoing_budget(self):
         mgr = ChatManager("x", "X")
@@ -720,47 +841,56 @@ class TestR6AuditRegressions:
     """Regression tests for the deep-audit adversarial review fixes."""
 
     def _active_session(self, mgr):
+        # A working send_fn: the peer stores it and needs it back to answer a
+        # file offer with its accept, so None would strand the receive state.
         mgr.handle_message(
             "chat_invite",
             {"session_id": "f" * 16, "from_name": "A", "fingerprint_short": "A1"},
             "peer-a",
             "A1",
-            None,
+            lambda data: True,
         )
-        sid = mgr.get_sessions()[0]["session_id"]
-        mgr.accept_invitation(sid, lambda data: True)  # honest-accept fix: ack must go out
-        return sid
+        return mgr.get_sessions()[0]["session_id"]
 
-    def test_expired_offer_fires_done_callback(self):
-        """An offer the user never answered must notify the UI (declined) so
-        the Accept/Decline card stops offering dead actions."""
+    def test_an_older_peer_that_never_answers_times_out_on_our_side(self, monkeypatch):
+        """The accept timeout survives only for version skew.
+
+        A peer running an older build still gates a file behind a dialog, so
+        our send waits for a ``chat_file_accept`` that may never come.  The
+        sender worker must give up and report it, or the bubble stays pinned on
+        "waiting" for the life of the session.
+        """
+        import tempfile
+        from pathlib import Path
+
+        # Shrink the 300s window so the real worker thread times out here.
+        monkeypatch.setattr(ChatManager, "TRANSFER_ACCEPT_TIMEOUT", 0.2)
         mgr = ChatManager("x", "X")
+        tmp = tempfile.TemporaryDirectory()
         try:
             sid = self._active_session(mgr)
+            src = Path(tmp.name) / "x.bin"
+            src.write_bytes(b"payload")
             done_events = []
             mgr.set_on_file_done(
                 lambda s, tid, ok, path, st: done_events.append((tid, ok, st)),
             )
-            mgr.handle_message(
-                "chat_file_offer",
-                {
-                    "session_id": sid,
-                    "transfer_id": "b" * 32,
-                    "file_name": "x.bin",
-                    "file_size": 100,
-                    "mime": "",
-                },
-                "peer-a",
-                "A1",
-                None,
+            # Silence on the wire stands in for the older build's open dialog.
+            tid = mgr.send_file(sid, str(src), lambda data: True)
+            assert tid and mgr._sends[tid]["entry"].status == "await_accept"
+            assert _wait_until(
+                lambda: done_events and done_events[0][0] == tid,
+                timeout=5,
+            ), "the sender never gave up on the silent peer"
+            assert done_events[0] == (tid, False, "error_timeout")
+            assert mgr._sends.get(tid) is None, "the send state was left behind"
+            assert (
+                next(e for e in mgr.get_messages(sid) if e["transfer_id"] == tid)["status"]
+                == "failed"
             )
-            mgr._receives["b" * 32]["entry"].ts -= ChatManager.INVITE_ACCEPT_TIMEOUT + 10
-            with mgr._lock:
-                mgr._expire_stale_receives()
-            assert "b" * 32 not in mgr._receives
-            assert done_events == [("b" * 32, False, "declined")]
         finally:
             mgr.shutdown()
+            tmp.cleanup()
 
     def test_fail_receive_notifies_sender(self):
         """A disk-error on the receive side must send an error chat_file_complete
@@ -769,7 +899,15 @@ class TestR6AuditRegressions:
         try:
             sid = self._active_session(mgr)
             sent = []
-            mgr._latest_send_fn["peer-a"] = sent.append
+
+            def record(data: bytes) -> bool:
+                # Must report success, not just append: a falsy return is how
+                # the manager learns the wire is dead, and it rolls the receive
+                # state back when it thinks the accept never went out.
+                sent.append(data)
+                return True
+
+            mgr._latest_send_fn["peer-a"] = record
             mgr.handle_message(
                 "chat_file_offer",
                 {
@@ -785,13 +923,19 @@ class TestR6AuditRegressions:
             )
             with mgr._lock:
                 mgr._fail_receive_locked("c" * 32, "error_disk")
-            # The sender must receive an error frame (not silence).
-            assert sent, "receiver emitted no chat_file_complete error frame"
-
+            # The sender must receive an error frame (not silence).  It is not
+            # necessarily the only frame on this wire -- taking the offer also
+            # answers with a chat_file_accept -- so pick out the completion.
             from internal.protocol.codec import decode_message
 
-            decoded = decode_message(sent[0])
-            assert decoded._raw_payload["status"] == "error_disk"
+            completes = [
+                payload
+                for f in sent
+                if (payload := getattr(decode_message(f), "_raw_payload", {}))
+                and payload.get("msg_type") == "chat_file_complete"
+            ]
+            assert completes, "receiver emitted no chat_file_complete error frame"
+            assert completes[0]["status"] == "error_disk"
         finally:
             mgr.shutdown()
 
@@ -841,8 +985,6 @@ class _Stack:
         self.chat.set_own_fingerprint(self.pairing.get_identity().fingerprint)
         self.transport = TransportManager(device_id, device_name, _free_port(), self.pairing)
         self.transport.set_on_peer_message(self._route)
-        self.incoming_invites: list[dict] = []
-        self.chat.set_on_incoming_invite(self.incoming_invites.append)
 
     # ---- transport → chat wiring (mirrors the host router contract) --------
 
@@ -948,22 +1090,15 @@ class TestNearbyChatE2E:
     def test_chat_invite_text_file_roundtrip_over_tls(self, rig):
         a, b = rig.a, rig.b
 
-        # --- 1. invite → accept, both sessions active ---------------------
+        # --- 1. invite, both sessions active -------------------------------
         sid = a.chat.start_session(DEV_B, NAME_B, "", a.send_fn_to(DEV_B))
         assert sid, "start_session returned None"
-        assert _deadline(lambda: len(b.incoming_invites) == 1), (
-            "chat invite never reached B over TLS"
-        )
-        invite = b.incoming_invites[0]
-        assert invite["peer_id"] == DEV_A
-        assert invite["session_id"] == sid
-        assert b.chat.accept_invitation(invite["session_id"], b.send_fn_to(DEV_A))
-        assert _deadline(lambda: self._status(a, DEV_B) == "active"), (
-            "A session never became active"
-        )
+        assert self._status(a, DEV_B) == "active", "opener never went active"
         assert _deadline(lambda: self._status(b, DEV_A) == "active"), (
-            "B session never became active"
+            "chat invite never opened the session on B over TLS"
         )
+        sess_b = next(s for s in b.chat.get_sessions() if s["peer_id"] == DEV_A)
+        assert sess_b["session_id"] == sid, "the two sides diverged on the session id"
 
         # --- 2. text roundtrip ---------------------------------------------
         assert a.chat.send_text(sid, "hello over TLS", a.send_fn_to(DEV_B))
@@ -982,12 +1117,8 @@ class TestNearbyChatE2E:
         tid = a.chat.send_file(sid, str(src), a.send_fn_to(DEV_B))
         assert tid, "send_file returned None"
         assert _deadline(
-            lambda: (self._entry(b, sid, tid) or {}).get("status") == "await_accept"
-        ), "file offer never reached B"
-        assert b.chat.accept_file(sid, tid, b.send_fn_to(DEV_A))
-        assert _deadline(
             lambda: (self._entry(b, sid, tid) or {}).get("status") == "done", timeout=20
-        ), "B never finalized the received file"
+        ), "file offer never reached B, or B never took it"
         saved = (self._entry(b, sid, tid) or {}).get("saved_path")
         assert saved, "B did not record a saved path"
         assert os.path.getsize(saved) == len(payload)
@@ -1012,7 +1143,7 @@ PEER = "peer-b"
 
 
 def _active_mgr() -> ChatManager:
-    """A ChatManager with one ACTIVE session (incoming invite accepted)."""
+    """A ChatManager with one ACTIVE session (direct send: the invite alone)."""
     mgr = ChatManager("x", "X")
     mgr.handle_message(
         "chat_invite",
@@ -1021,8 +1152,6 @@ def _active_mgr() -> ChatManager:
         "B1",
         None,
     )
-    sid = mgr.get_sessions()[0]["session_id"]
-    assert mgr.accept_invitation(sid, lambda data: True)
     return mgr
 
 
@@ -1185,7 +1314,7 @@ PEER_RESEND = "peer-a"
 
 
 def _active_mgr_resend() -> ChatManager:
-    """A ChatManager with one ACTIVE session (incoming invite accepted)."""
+    """A ChatManager with one ACTIVE session (direct send: the invite alone)."""
     mgr = ChatManager("x", "X")
     mgr.handle_message(
         "chat_invite",
@@ -1194,9 +1323,6 @@ def _active_mgr_resend() -> ChatManager:
         "A1",
         None,
     )
-    sid = mgr.get_sessions()[0]["session_id"]
-    # Honest-accept: activation only commits when the ack frame goes out.
-    assert mgr.accept_invitation(sid, lambda data: True)
     return mgr
 
 
@@ -1345,6 +1471,20 @@ def _make_chat(tmpdir: str) -> ChatManager:
     return ChatManager("device-a", "Device A", receive_dir=tmpdir)
 
 
+def _wire(sink: list):
+    """A send_fn that records what it was asked to send, and reports success.
+
+    ``list.append`` is not a drop-in: it returns None, which ``_send_frame``
+    reads as a send that never went out.
+    """
+
+    def send(data: bytes) -> bool:
+        sink.append(data)
+        return True
+
+    return send
+
+
 def _deliver_invite(mgr: ChatManager, send_fn) -> str:
     """Feed an incoming chat_invite into *mgr*; return its session id."""
     payload = {
@@ -1359,34 +1499,233 @@ def _deliver_invite(mgr: ChatManager, send_fn) -> str:
 
 
 class TestChatInviteLifecycleResidue:
-    def test_accept_failure_keeps_session_invited(self, tmp_path):
-        """If the chat_accept frame never goes out, this side must stay in
-        'invited' (unread kept) rather than showing an active conversation
-        the peer knows nothing about."""
+    def test_invite_opens_the_session_even_when_the_ack_cannot_be_sent(self, tmp_path):
+        """The invite activates this side, and the ack is best-effort.
+
+        There is nothing to wait for any more, so a chat_accept that never
+        reaches the wire must not hold the conversation back: the peer's
+        message is already readable here, and the id it echoes is only ever
+        needed to settle a crossing open.
+        """
         chat = _make_chat(str(tmp_path))
         try:
-            sent_frames: list[bytes] = []
-
-            def working_send(data: bytes) -> bool:
-                sent_frames.append(data)
-                return True
-
-            sid = _deliver_invite(chat, working_send)
-            assert chat._session_by_sid[sid].status == "invited"
-
-            def refusing_send(data: bytes) -> bool:
-                return False
-
-            assert chat.accept_invitation(sid, refusing_send) is False
-            sess = chat._session_by_sid[sid]
-            assert sess.status == "invited"
-            assert sess.unread == 1  # unread marker survives the failed accept
-
-            # Retry with a working transport -> activates for real.
-            assert chat.accept_invitation(sid, working_send) is True
+            sid = _deliver_invite(chat, lambda data: False)
             sess = chat._session_by_sid[sid]
             assert sess.status == "active"
-            assert sess.unread == 0
-            assert any(b"chat_accept" in f for f in sent_frames)
+            assert chat.get_sessions()[0]["status"] == "active"
+            # And the conversation is usable in that state.
+            assert chat.send_text(sid, "hi", lambda data: True) is True
         finally:
             chat.shutdown()
+
+
+# ══════════════════════════════════════════════════
+# The approval switch (``open_to_all`` off)
+# ══════════════════════════════════════════════════
+
+
+class TestApprovalMode:
+    """``open_to_all`` off: each conversation and each file waits for the user.
+
+    The switch is the whole of the difference -- the frames, the codec and the
+    transfer channel are the ones the rest of this file already drives -- so
+    these flip the flag on the manager and check what changes.
+    """
+
+    def test_an_invitation_waits_for_this_users_answer(self, tmp_path):
+        chat = _make_chat(str(tmp_path))
+        chat.set_open_to_all(False)
+        try:
+            sent: list[bytes] = []
+            sid = _deliver_invite(chat, _wire(sent))
+            # Nothing answered it: an invitation waiting on a person must not
+            # also tell the peer the conversation is already open.
+            assert sent == []
+            assert chat.get_sessions()[0]["status"] == "invited"
+
+            assert chat.accept_invitation(sid, _wire(sent)) is True
+            assert [decode_message(f).msg_type for f in sent] == ["chat_accept"]
+            assert chat.get_sessions()[0]["status"] == "active"
+        finally:
+            chat.shutdown()
+
+    def test_a_refused_invitation_is_told_to_the_peer(self, tmp_path):
+        """A refusal the peer never hears about leaves it waiting out its timeout."""
+        chat = _make_chat(str(tmp_path))
+        chat.set_open_to_all(False)
+        try:
+            sent: list[bytes] = []
+            sid = _deliver_invite(chat, _wire(sent))
+            assert chat.decline_invitation(sid, _wire(sent)) is True
+            assert [decode_message(f).msg_type for f in sent] == ["chat_decline"]
+            assert chat.get_sessions()[0]["status"] == "closed"
+        finally:
+            chat.shutdown()
+
+    def test_saying_yes_to_one_that_is_already_gone_opens_nothing(self, tmp_path):
+        """A stale Accept on a row that was answered elsewhere.
+
+        The prompt sits on screen until the next poll, so the click can arrive
+        after the peer gave up.  Committing here would show a live conversation
+        the other side is not in, with every message failing.
+        """
+        chat = _make_chat(str(tmp_path))
+        chat.set_open_to_all(False)
+        try:
+            sid = _deliver_invite(chat, lambda data: True)
+            assert chat.close_session(sid) is True
+            assert chat.accept_invitation(sid, lambda data: True) is False
+            assert chat.get_sessions()[0]["status"] == "closed"
+        finally:
+            chat.shutdown()
+
+    def test_the_invite_cap_still_bounds_a_flood(self, tmp_path):
+        """Waiting for a person means the prompts pile up, so the cap matters.
+
+        It is the one abuse bound the open mode does not need: there an
+        invitation is a conversation, and the session limit already applies.
+        """
+        chat = _make_chat(str(tmp_path))
+        chat.set_open_to_all(False)
+        try:
+            sent: list[bytes] = []
+            for index in range(ChatManager.PENDING_INVITE_CAP):
+                assert chat.handle_message(
+                    "chat_invite",
+                    {
+                        "msg_type": "chat_invite",
+                        "session_id": f"{index:016x}",
+                        "from_name": f"Peer {index}",
+                        "fingerprint_short": "ABCD1234",
+                        "greeting": "",
+                    },
+                    f"device-{index}",
+                    "FP",
+                    _wire(sent),
+                )
+            assert len(chat.get_sessions()) == ChatManager.PENDING_INVITE_CAP
+
+            # One more is refused outright rather than queued behind them.
+            chat.handle_message(
+                "chat_invite",
+                {
+                    "msg_type": "chat_invite",
+                    "session_id": "ffffffffffffffff",
+                    "from_name": "One too many",
+                    "fingerprint_short": "ABCD1234",
+                    "greeting": "",
+                },
+                "device-overflow",
+                "FP",
+                _wire(sent),
+            )
+            assert len(chat.get_sessions()) == ChatManager.PENDING_INVITE_CAP
+            refusal = decode_message(sent[-1])
+            assert refusal.msg_type == "chat_decline"
+            assert refusal._raw_payload["reason"] == "busy"
+        finally:
+            chat.shutdown()
+
+    def test_an_offered_file_waits_here_and_starts_on_accept(self, tmp_path):
+        pair = LinkedPair(tmp_path / "a", tmp_path / "b")
+        try:
+            sid = pair.establish()
+            # Flipped after the conversation is open: the file rule is read per
+            # offer, so this is the switch that starts holding them.
+            pair.b.set_open_to_all(False)
+            src = tmp_path / "a" / "source.bin"
+            src.write_bytes(bytes(range(256)) * 8)
+
+            tid = pair.a.send_file(sid, str(src), pair.send_from_a)
+            assert tid, "send_file returned None"
+            entry = next(
+                (e for e in pair.b.get_messages(sid) if e["transfer_id"] == tid),
+                None,
+            )
+            assert entry is not None and entry["status"] == "await_accept"
+            # Nothing has moved while it waits for the answer.
+            assert not entry.get("saved_path")
+
+            assert pair.b.accept_file(sid, tid, pair.send_from_b) is True
+            assert _wait_until(
+                lambda: (
+                    next(
+                        (e for e in pair.b.get_messages(sid) if e["transfer_id"] == tid),
+                        {},
+                    ).get("status")
+                    == "done"
+                ),
+            ), "the file never arrived after being accepted"
+        finally:
+            pair.close()
+
+    def test_the_switch_leaves_a_live_conversation_alone(self, tmp_path):
+        """Flipping it mid-conversation must not tear down what is open.
+
+        The rule decides whether the *next* invitation is a prompt; a session
+        already running was admitted under the rule in force when it opened,
+        and closing it would end a conversation the user is in the middle of.
+        """
+        chat = _make_chat(str(tmp_path))
+        try:
+            sid = _deliver_invite(chat, lambda data: True)
+            assert chat.get_sessions()[0]["status"] == "active"
+
+            chat.set_open_to_all(False)
+
+            assert chat.get_sessions()[0]["status"] == "active"
+            assert chat.send_text(sid, "still here", lambda data: True) is True
+        finally:
+            chat.shutdown()
+
+    def test_both_sides_asking_at_once_settle_on_one_conversation(self, tmp_path):
+        """Two prompts for the same pair must not stay two prompts.
+
+        Both users asked at the same moment, so both sides hold a session the
+        other knows nothing about and each has to drop one.  There is no prompt
+        to answer here -- the tiebreak is what keeps the two from sitting on
+        each other's invitations -- so the SMALLER id wins on both sides.
+        "Adopt theirs" would swap the ids and leave the two permanently
+        disagreeing about which conversation this is.
+        """
+        pair = LinkedPair(tmp_path / "a", tmp_path / "b")
+        pair.a.set_open_to_all(False)
+        pair.b.set_open_to_all(False)
+        try:
+            # Both wires are held, so neither invitation is read until both are
+            # on the wire -- the crossing open.
+            a_out: list[bytes] = []
+            b_out: list[bytes] = []
+
+            def wire_a(data: bytes) -> bool:
+                a_out.append(data)
+                return True
+
+            def wire_b(data: bytes) -> bool:
+                b_out.append(data)
+                return True
+
+            sid_a = pair.a.start_session(DEV_B, "Device B", FP_B, wire_a)
+            sid_b = pair.b.start_session(DEV_A, "Device A", FP_A, wire_b)
+            assert sid_a and sid_b and sid_a != sid_b, "expected two independent ids"
+
+            # Drain in per-direction order, which is what a TCP link gives you:
+            # each side reads the other's invitation before the answer to it.
+            for _ in range(8):
+                batch_a, a_out[:] = list(a_out), []
+                batch_b, b_out[:] = list(b_out), []
+                if not batch_a and not batch_b:
+                    break
+                for data in batch_a:
+                    LinkedPair._deliver(pair.b, data, DEV_A, wire_b)
+                for data in batch_b:
+                    LinkedPair._deliver(pair.a, data, DEV_B, wire_a)
+            assert not a_out and not b_out, "the two sides are still talking past each other"
+
+            winner = min(sid_a, sid_b)
+            assert [s["session_id"] for s in pair.a.get_sessions()] == [winner], "A kept a loser"
+            assert [s["session_id"] for s in pair.b.get_sessions()] == [winner], "B kept a loser"
+            assert pair.a.get_sessions()[0]["status"] == "active"
+            assert pair.b.get_sessions()[0]["status"] == "active"
+        finally:
+            pair.close()

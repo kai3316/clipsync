@@ -600,9 +600,15 @@ class Application:
         self._pairing_req_track: dict[str, dict] = {}
         # peer_id -> threading.Timer holding a not-yet-fired pairing-code
         # notification.  Chat connections auto-generate a shared code for an
-        # unpaired peer; the chat invite (same connection, ~1s later) cancels
-        # this timer so chatting never surfaces as a pairing request.
+        # unpaired peer; opening a conversation cancels this timer so chatting
+        # never surfaces as a pairing request.
         self._pairing_notify_timers: dict[str, threading.Timer] = {}
+        # Peers whose pending pairing notice has already been retracted for a
+        # live chat.  The retraction runs from the session-changed callback,
+        # which fires on every message, so this keeps its web broadcast to one
+        # per peer instead of one per bubble.  One short id per peer ever
+        # chatted with; a device does not accumulate these without bound.
+        self._chat_notice_dropped: set[str] = set()
         # Set once the dashboard has been auto-opened for a silent pairing request
         # (notifications disabled), so we don't pop a window on every request.
         self._pairing_dashboard_opened = False
@@ -1278,12 +1284,12 @@ class Application:
         cm = self.chat_mgr
         if cm is None:
             return
-        cm.set_on_incoming_invite(self._on_chat_incoming_invite)
-        cm.set_on_invite_response(self._on_chat_invite_response)
         cm.set_on_sessions_changed(self._chat_sessions_changed)
         cm.set_on_message(self._on_chat_message)
         cm.set_on_file_progress(self._chat_file_progress)
         cm.set_on_file_done(self._chat_file_done)
+        cm.set_on_incoming_invite(self._on_chat_incoming_invite)
+        cm.set_on_invite_response(self._on_chat_invite_response)
 
     def _push_web_chat_sessions(self) -> None:
         """Push the full chat session list to web clients (thread-safe).
@@ -1292,15 +1298,18 @@ class Application:
         path so the web chat tab always reflects the current sessions.
         """
         try:
-            sessions = (
-                self.chat_mgr.get_sessions() if getattr(self, "chat_mgr", None) is not None else []
-            )
-            self._push_web("broadcast_chat_sessions", sessions)
+            mgr = getattr(self, "chat_mgr", None)
+            sessions = mgr.get_sessions() if mgr is not None else []
+            # The flag rides along so a web client can tell an offer that is
+            # waiting on this user from one that was taken on arrival.
+            open_to_all = bool(mgr.open_to_all) if mgr is not None else True
+            self._push_web("broadcast_chat_sessions", sessions, open_to_all)
         except Exception:
             logger.debug("Failed to push chat sessions to web", exc_info=True)
 
     def _chat_sessions_changed(self, *args) -> None:
         """Sessions changed on a worker thread: refresh desktop + push to web."""
+        self._chat_drop_pairing_notices()
         self._push_web_chat_sessions()
         self._chat_event_from_worker()
 
@@ -1361,119 +1370,86 @@ class Application:
     # ── Chat: incoming invitation + messages ─────────────────────
 
     def _on_chat_incoming_invite(self, invite: dict) -> None:
+        """Somebody wants to talk and this user asked to be the one who says so.
+
+        Only raised while ``chat_open_to_all`` is off -- with the default the
+        invitation opens the session and this callback never fires.  The
+        conversation pane already draws the banner with the accept/decline
+        buttons; this is what tells a user who is looking at another tab.
+        """
         try:
             self.root.after(0, lambda: self._chat_handle_incoming_invite(invite))
         except Exception:
             logger.debug("chat invite marshal failed", exc_info=True)
 
     def _chat_handle_incoming_invite(self, invite: dict) -> None:
-        sid = invite.get("session_id", "")
-        peer_name = invite.get("peer_name", "") or "?"
-        fp = invite.get("fingerprint_short", "") or ""
-        greeting = invite.get("greeting", "") or ""
-        if not sid:
-            return
-        # Paired peers are already trusted end-to-end (cert-pinned TLS), so
-        # skip the invite dialog for them — chatting with a known device is
-        # as frictionless as clipboard sync itself.  Unpaired strangers still
-        # always ask for explicit consent.
-        peer_id = invite.get("peer_id", "")
-        # A chat invite is its own consent flow (invite/accept + fingerprint);
-        # it must NOT also force a pairing request.  The connection handshake
-        # auto-generated a shared pairing code for this unpaired peer — drop
-        # it (and the web row) so chatting alone never surfaces as "wants to
-        # pair".  Paired peers have nothing pending to drop.
+        """Announce a waiting invitation on the Tk main thread."""
         try:
-            if (
-                peer_id
-                and self.pairing_mgr is not None
-                and not self.pairing_mgr.is_peer_paired(peer_id)
-            ):
-                # Cancel the debounced pairing notification before it fires so
-                # the other device never SEES a pairing prompt for a chat (the
-                # code was generated at connect time, before this invite frame).
+            name = invite.get("peer_name") or invite.get("peer_id") or "?"
+            fingerprint = invite.get("fingerprint_short") or ""
+            if not self._dashboard_visible():
+                self._web_toast(
+                    f"{T('chat.notify_invite_title')}: "
+                    + T("chat.notify_invite_msg", name=name, fingerprint=fingerprint)
+                )
+        except Exception:
+            logger.debug("chat invite toast failed", exc_info=True)
+        self._chat_event_on_main()
+
+    def _on_chat_invite_response(self, session_id: str, peer_id: str, accepted: bool) -> None:
+        """The other side answered an invitation this device sent.
+
+        Runs on the chat worker thread; the dashboard only has to re-read the
+        session list, which is where the new status shows up.
+        """
+        self._chat_event_from_worker()
+
+    def _chat_drop_pairing_notices(self) -> None:
+        """Chatting is not a pairing request — retract any notice saying it is.
+
+        Opening a conversation dials an unpaired peer, and that dial mints a
+        shared pairing code and schedules the "wants to pair" notice; the code
+        existed on both screens before the first chat frame was ever sent.  Any
+        peer we now hold a live chat session with must have that notice (and
+        its code) dropped, so a conversation never surfaces as a pairing
+        prompt.  Paired peers have nothing pending to drop.
+
+        Driven by the session list rather than by an incoming invite, because
+        with direct chat BOTH directions create the session: the device that
+        opens the conversation needs its own notice retracted just as much as
+        the one receiving it.
+        """
+        mgr = self.pairing_mgr
+        if mgr is None:
+            return
+        try:
+            sessions = self.chat_mgr.get_sessions() if self.chat_mgr is not None else []
+        except Exception:
+            logger.debug("chat sessions read failed", exc_info=True)
+            return
+        for session in sessions:
+            if session.get("status") != "active":
+                continue
+            peer_id = session.get("peer_id") or ""
+            # This runs on every session change, i.e. on every message, so the
+            # web broadcast has to be conditional: firing it unconditionally
+            # would put a pairing_resolved event on the wire per chat bubble.
+            if not peer_id or peer_id in self._chat_notice_dropped:
+                continue
+            if mgr.is_peer_paired(peer_id):
+                continue
+            try:
                 pending = self._pairing_notify_timers.pop(peer_id, None)
                 if pending is not None:
                     pending.cancel()
                 self._notified_pairings.pop(peer_id, None)
-                self.pairing_mgr.discard_pending_pairing(peer_id)
-                self._notified_pairings.pop(peer_id, None)
+                mgr.discard_pending_pairing(peer_id)
                 self._pairing_req_track.pop(peer_id, None)
-                self._push_web("broadcast", "pairing_resolved", {"peer_id": peer_id})
-        except Exception:
-            logger.debug("chat invite pairing cleanup failed", exc_info=True)
-        # Trusted-LAN direct chat: the invite is an internal session handshake,
-        # not a consent gate.  Any device reachable on the network can chat
-        # immediately — no accept/decline banner, no waiting for approval.
-        try:
-            if peer_id:
-                self._chat_respond_invite(sid, True)
-                return
-        except Exception:
-            logger.debug("chat auto-accept failed", exc_info=True)
-        title = T("chat.notify_invite_title")
-        message = T("chat.invite_banner_title", name=peer_name)
-        if fp:
-            message += "\n" + T("chat.invite_fingerprint", fingerprint=fp)
-        if greeting:
-            message += "\n" + T("chat.invite_greeting", greeting=greeting)
-        message += "\n" + T("chat.invite_prompt")
-        if self._is_webview():
-
-            def _on_result(result):
-                accepted = bool(result is not None and result.get("action") == "accept")
-                self._chat_respond_invite(sid, accepted)
-
-            try:
-                self._web_dialog_async(
-                    "confirm",
-                    _on_result,
-                    title=title,
-                    message=message,
-                    accept_label=T("chat.accept"),
-                    reject_label=T("chat.decline"),
-                    timeout=120,
-                )
             except Exception:
-                logger.debug("web invite dialog failed", exc_info=True)
-            # The chat tab needs the pending invite right away even though the
-            # consent dialog is handled out-of-band.
-            self._push_web_chat_sessions()
-            return
-        if self._dashboard_visible():
-            try:
-                accepted = ask_yesno(self.root, title, message)
-            except Exception:
-                accepted = False
-            self._chat_respond_invite(sid, accepted)
-        else:
-            # Window hidden: surface an in-app toast; the invite stays
-            # pending in the dashboard where the user can act on it later.
-            try:
-                self._web_toast(
-                    f"{title} · "
-                    + T("chat.notify_invite_msg", name=peer_name, fingerprint=fp or "—")
-                )
-            except Exception:
-                logger.debug("chat invite toast failed", exc_info=True)
-            self._chat_event_on_main()
-
-    def _chat_respond_invite(self, sid: str, accepted: bool) -> None:
-        peer_id = self._chat_peer_id_for_sid(sid)
-        send_fn = self._chat_send_fn(peer_id)
-        try:
-            if accepted:
-                self.chat_mgr.accept_invitation(sid, send_fn)
-            else:
-                self.chat_mgr.decline_invitation(sid, send_fn)
-        except Exception:
-            logger.debug("chat invite response failed", exc_info=True)
-        self._chat_event_on_main()
-
-    def _on_chat_invite_response(self, session_id: str, peer_id: str, accepted: bool) -> None:
-        # Answer to OUR invitation — nothing special to show right now; just
-        # refresh the dashboard so the session status updates.
-        self._chat_event_from_worker()
+                logger.debug("chat pairing cleanup failed", exc_info=True)
+                continue
+            self._chat_notice_dropped.add(peer_id)
+            self._push_web("broadcast", "pairing_resolved", {"peer_id": peer_id})
 
     def _on_chat_message(self, session_id: str, entry_dict: dict) -> None:
         # Web push is thread-safe (WebSocketManager.broadcast takes a manager
@@ -1950,6 +1926,18 @@ class Application:
         except Exception:
             return []
 
+    def _chat_get_open_to_all(self) -> bool:
+        """Whether nearby devices may send without asking (dashboard view).
+
+        Read separately from the session list because the dashboard takes that
+        as a plain list; the flag decides whether an offer sitting at
+        ``await_accept`` is one this user still has to answer.
+        """
+        try:
+            return bool(self.chat_mgr.open_to_all)
+        except Exception:
+            return True
+
     def _chat_select_session(self, session_id: str) -> None:
         """Open a chat session in the dashboard (Tk main thread only)."""
         try:
@@ -2003,10 +1991,10 @@ class Application:
             return None
 
     def _chat_accept_invite(self, session_id: str) -> bool:
+        """Allow an invitation this user was asked to decide on."""
         try:
             return self.chat_mgr.accept_invitation(
-                session_id,
-                self._chat_send_fn(self._chat_peer_id_for_sid(session_id)),
+                session_id, self._chat_send_fn(self._chat_peer_id_for_sid(session_id))
             )
         except Exception:
             return False
@@ -2014,29 +2002,13 @@ class Application:
     def _chat_decline_invite(self, session_id: str) -> bool:
         try:
             return self.chat_mgr.decline_invitation(
-                session_id,
-                self._chat_send_fn(self._chat_peer_id_for_sid(session_id)),
+                session_id, self._chat_send_fn(self._chat_peer_id_for_sid(session_id))
             )
         except Exception:
             return False
 
-    def _chat_close_session(self, session_id: str) -> bool:
-        try:
-            return self.chat_mgr.close_session(session_id)
-        except Exception:
-            return False
-
-    def _chat_cancel_file(self, session_id: str, entry_id: str) -> bool:
-        try:
-            return self.chat_mgr.cancel_file(session_id, entry_id)
-        except Exception:
-            return False
-
-    def _chat_accept_file(self, session_id: str, transfer_id: str) -> bool | None:
-        # ChatManager.accept_file returns None when the offer is already gone
-        # (swept by the stale-receive reaper) — a distinct sentinel from False
-        # (offer exists but can't be accepted right now).  Transmit it so the
-        # desktop UI can tell the user the offer expired instead of failing.
+    def _chat_accept_file(self, session_id: str, transfer_id: str):
+        """Take an offered file.  ``None`` means it is already gone."""
         try:
             return self.chat_mgr.accept_file(
                 session_id,
@@ -2053,6 +2025,18 @@ class Application:
                 transfer_id,
                 self._chat_send_fn(self._chat_peer_id_for_sid(session_id)),
             )
+        except Exception:
+            return False
+
+    def _chat_close_session(self, session_id: str) -> bool:
+        try:
+            return self.chat_mgr.close_session(session_id)
+        except Exception:
+            return False
+
+    def _chat_cancel_file(self, session_id: str, entry_id: str) -> bool:
+        try:
+            return self.chat_mgr.cancel_file(session_id, entry_id)
         except Exception:
             return False
 
@@ -3211,6 +3195,11 @@ class Application:
             self._monitor.set_source_tracking(updated["source_tracking_enabled"])
         if "notifications_enabled" in updated:
             notification_mgr.enabled = bool(updated["notifications_enabled"])
+        if "chat_open_to_all" in updated and self.chat_mgr is not None:
+            # Nearby chat's admission rule, applied to the running manager so
+            # the very next invitation or file offer follows it.  A session
+            # already live was admitted under the old rule and is left alone.
+            self.chat_mgr.set_open_to_all(bool(updated["chat_open_to_all"]))
         if "history_max_entries" in updated and self.clipboard_history is not None:
             try:
                 self.clipboard_history.MAX_ENTRIES = int(updated["history_max_entries"])
@@ -6390,6 +6379,7 @@ class Application:
             get_chat_devices=self._get_chat_devices,
             chat_start_session=self._chat_start_session,
             get_chat_sessions=self._chat_get_sessions,
+            get_chat_open_to_all=self._chat_get_open_to_all,
             get_chat_messages=self._chat_get_messages,
             mark_session_read=self._chat_mark_read,
             chat_send_text=self._chat_send_text,

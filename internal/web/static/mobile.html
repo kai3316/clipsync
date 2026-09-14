@@ -2751,6 +2751,11 @@ body.light .upload-btn {
   // the backend persists it and suppresses desktop notifications for muted
   // peers, so the phone bell mirrors the same state the desktop shows.
   var chatMutedSet = {};
+  // Whether nearby devices may send without asking, from the same response
+  // (`open_to_all`).  An offered file sits at `await_accept` for an instant in
+  // both modes, so this — not the status alone — is what says whether the
+  // Accept button below belongs to a decision the user still has to make.
+  var chatOpenToAll = true;
   // Chat file attachment: busy flag (rendered into the composer template so
   // poll re-renders keep the state) + the session the picked file belongs to.
   var chatFileBusy = false;
@@ -2885,7 +2890,7 @@ body.light .upload-btn {
     }
     // File card.
     var acts = '';
-    if (!m.outgoing && m.status === 'await_accept') {
+    if (!chatOpenToAll && !m.outgoing && m.status === 'await_accept') {
       acts += '<button class="chat-action-btn chat-action-btn--accept" data-file-action="accept" data-transfer-id="' + esc(m.transfer_id) + '">' + esc(T.chatAccept) + '</button>';
       acts += '<button class="chat-action-btn chat-action-btn--decline" data-file-action="decline" data-transfer-id="' + esc(m.transfer_id) + '">' + esc(T.chatDecline) + '</button>';
     } else if (m.status === 'sending') {
@@ -3024,6 +3029,7 @@ body.light .upload-btn {
       var mutedList = (out[1] && out[1].muted) || [];
       chatMutedSet = {};
       for (var mi = 0; mi < mutedList.length; mi++) chatMutedSet[mutedList[mi]] = true;
+      if (out[1] && typeof out[1].open_to_all === 'boolean') chatOpenToAll = out[1].open_to_all;
       refreshChatPeerTyping();
       if (!chatOpenSession) {
         chatLoading = false;

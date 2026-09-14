@@ -220,9 +220,9 @@ def test_invite_web_host_refused_dict():
 
 def test_chat_manager_accept_file_returns_none_when_offer_gone():
     """#4: ChatManager.accept_file returns None (not False) when the offer is
-    already gone — it was swept by the stale-receive reaper while the UI still
-    showed its Accept button.  None stays falsy so truthiness callers still
-    treat it as a failed accept."""
+    already gone — it was swept out from under a still-open receive.  None
+    stays falsy so the offer handler's ``is not True`` treats it as a failed
+    accept and tells the sender."""
     from internal.sync.nearby_chat import ChatManager
 
     mgr = ChatManager("dev", "Dev")
@@ -236,15 +236,13 @@ def test_accept_file_none_and_false_are_distinct():
     """#7 semantics guard: the None sentinel (offer gone → explicit "expired")
     must stay distinct from False (offer exists but not acceptable right now →
     plain {ok:false}).  Callers that test `== False` versus `is None` must not
-    conflate the two."""
-    seen = {}
+    conflate the two, and the web panel words the first one for the user."""
 
     class Probe:
         def __init__(self, ret):
             self.ret = ret
 
         def accept_file(self, session_id, transfer_id, send_fn):
-            seen["ret"] = self.ret
             return self.ret
 
     # None → "expired" (with the error key so the frontend can toast it).
@@ -682,7 +680,9 @@ def test_relay_chat_text_establishes_and_updates_real_session(tmp_path):
         app._on_relay_frame(invite, R.netpair_topic(secret))
         sess = next((s for s in cm.get_sessions() if s["session_id"] == sid), None)
         assert sess is not None and sess["peer_id"] == dev_a
-        assert cm.accept_invitation(sid, lambda data: True) is True
+        # The relayed invite opens the session outright -- no accept to send
+        # back over the relay before the peer's text can land.
+        assert sess["status"] == "active"
 
         text = encode_frame(
             {

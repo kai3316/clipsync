@@ -557,6 +557,8 @@ _EN: dict[str, str] = {
     "settings_window.connection_section": "Connection",
     "settings_window.max_reconnect": "Max Reconnect Attempts",
     "settings_window.max_reconnect_desc": "How many times to retry connecting to a lost peer (1–100). Restart required.",  # noqa: E501
+    "settings_window.chat_open_to_all": "Anyone nearby can send messages and files",
+    "settings_window.chat_open_to_all_desc": "Turn this off and a nearby device has to be allowed by you before its message or file arrives.",  # noqa: E501
     "settings_window.logging_section": "Logging & Notifications",
     "settings_window.log_level": "Log Level",
     "settings_window.enable_notifications": "Enable desktop notifications",
@@ -1404,6 +1406,8 @@ _ZH: dict[str, str] = {
     "settings_window.connection_section": "连接",
     "settings_window.max_reconnect": "最大重连次数",
     "settings_window.max_reconnect_desc": "尝试重新连接丢失对端的次数（1–100）。需重启。",
+    "settings_window.chat_open_to_all": "任何人可直接发来消息和文件",
+    "settings_window.chat_open_to_all_desc": "关掉以后，附近设备要先经过你同意，才能发消息和文件给你。",  # noqa: E501
     "settings_window.logging_section": "日志与通知",
     "settings_window.log_level": "日志级别",
     "settings_window.enable_notifications": "启用桌面通知",

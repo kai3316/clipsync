@@ -578,7 +578,7 @@ async fn send_chat_file(window: WebviewWindow, host: State<'_, Host>, session_id
 #[tauri::command]
 async fn chat_file_action(window: WebviewWindow, host: State<'_, Host>, action: String, session_id: String, transfer_id: String) -> Result<Value, BridgeError> {
     validate_id(&session_id)?;
-    if !matches!(action.as_str(), "accept" | "decline" | "cancel") {
+    if !matches!(action.as_str(), "cancel") {
         return Err(BridgeError::new("VALIDATION_ERROR", "Invalid chat file action"));
     }
     chat_call(window, host, "chat.file", json!({"action":action,"session_id":session_id,"transfer_id":transfer_id,"path":""})).await

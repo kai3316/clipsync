@@ -2931,6 +2931,9 @@ async function saveSettings() {
       // choice (legacy's panel set them; the phone panel still can).
       notify_pairing: settings.value.notify_pairing,
       notify_device_connect: settings.value.notify_device_connect,
+      // Applied to the live engine, not on restart: the runtime hands it
+      // straight to the running chat manager.
+      chat_open_to_all: settings.value.chat_open_to_all,
       app_filter_enabled: settings.value.app_filter_enabled,
       app_filter_mode: settings.value.app_filter_mode,
       app_filter_list: String(settings.value.app_filter_list || "").split(/\r?\n/).map(v => v.trim()).filter(Boolean),
@@ -4068,6 +4071,14 @@ async function translateText() {
                     @change="toggleVisibility(($event.target as HTMLInputElement).checked)" /><span>{{ t("隐藏本机（附近设备看不到此设备）") }}</span></span>
                 </label>
                 <p v-if="!discoveryAvailable" class="muted small setting-note">{{ t("同步引擎未运行，无法修改发现设置。") }}</p>
+                <!-- Who may reach this device is the same question the two rows
+                     above ask, so the answer sits with them.  Unlike them it is
+                     an ordinary saved setting, applied to the live chat engine
+                     the moment it is saved. -->
+                <label class="setting setting--check">
+                  <span class="setting-control"><input v-model="settings.chat_open_to_all" type="checkbox" /><span>{{ t("任何人可直接发来消息和文件") }}</span></span>
+                </label>
+                <p class="muted small setting-note">{{ t("关掉以后，附近设备要先经过你同意，才能发消息和文件给你。") }}</p>
               </section>
               <section v-show="showSettingsCard('advanced')" id="settings-advanced" class="settings-section">
                 <h2>{{ t("网络与高级") }}</h2>

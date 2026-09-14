@@ -470,6 +470,13 @@ def test_a_relayed_file_chunk_rides_at_qos_one(relay_rig):
 
 
 def test_a_relayed_chat_invite_reaches_the_chat_layer_and_is_acked(relay_rig):
+    """The invitation opens the conversation, and the peer answers it back.
+
+    Two frames leave this side: the transport-level ``relay_ack`` for the
+    envelope, and -- because a session is now live the moment the invitation
+    lands -- the ``chat_accept`` that tells the opener which id won.  They are
+    separate obligations and the relay carries both.
+    """
     runtime, relay = relay_rig.runtime, relay_rig.relay
     runtime._receive_relay(
         encode_frame(
@@ -486,12 +493,12 @@ def test_a_relayed_chat_invite_reaches_the_chat_layer_and_is_acked(relay_rig):
 
     sessions = runtime.chat_sessions()["sessions"]
     assert [(session["status"], session["peer_id"]) for session in sessions] == [
-        ("invited", "remote")
+        ("active", "remote")
     ]
-    acked = [decode_message(route[0]) for route in relay.published]
-    assert [(message.msg_type, message._raw_payload["msg_id"]) for message in acked] == [
-        ("relay_ack", "i1")
-    ]
+    out = [decode_message(route[0]) for route in relay.published]
+    assert [message.msg_type for message in out] == ["chat_accept", "relay_ack"]
+    assert out[0]._raw_payload["session_id"] == "abcdef0123456789"
+    assert out[1]._raw_payload["msg_id"] == "i1"
 
 
 def test_a_pairing_frame_over_the_relay_is_refused(relay_rig):

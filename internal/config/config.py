@@ -114,6 +114,10 @@ class Config:
     # Per-peer chat message mutes (peer_ids whose incoming messages must not
     # produce a desktop notification / sound).  Managed from the web chat UI.
     chat_muted_peers: list[str] = field(default_factory=list)
+    # Nearby chat's admission rule.  True (the default) lets any device that
+    # can reach this one open a conversation and send a file; False holds both
+    # for an explicit Allow on this machine.  See `internal/sync/nearby_chat.py`.
+    chat_open_to_all: bool = True
     # Security
     encryption_enabled: bool = True
     encryption_password: str = ""  # runtime only — never persisted
@@ -372,6 +376,7 @@ _FIELD_RULES: dict[str, tuple] = {
     "notify_pairing": ("bool",),
     "notify_sync": ("bool",),
     "chat_muted_peers": ("strlist_nonnull",),
+    "chat_open_to_all": ("bool",),
     "encryption_enabled": ("bool",),
     "encryption_password_hash": ("str",),
     "appearance_mode": ("str",),
@@ -627,6 +632,7 @@ def load() -> Config:
                 "notify_pairing",
                 "notify_sync",
                 "chat_muted_peers",
+                "chat_open_to_all",
                 "encryption_enabled",
                 "encryption_password_hash",
                 "appearance_mode",
@@ -796,6 +802,7 @@ def save(cfg: Config, enc_mgr: "EncryptionManager | None" = None):
             "notify_pairing": cfg.notify_pairing,
             "notify_sync": cfg.notify_sync,
             "chat_muted_peers": cfg.chat_muted_peers,
+            "chat_open_to_all": cfg.chat_open_to_all,
             "encryption_enabled": cfg.encryption_enabled,
             "encryption_password_hash": cfg.encryption_password_hash,
             "appearance_mode": cfg.appearance_mode,

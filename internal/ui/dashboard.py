@@ -331,6 +331,7 @@ class DashboardWindow:
         chat_cancel_file: Callable | None = None,
         chat_accept_file: Callable | None = None,
         chat_decline_file: Callable | None = None,
+        get_chat_open_to_all: Callable | None = None,
         on_chat_event: Callable | None = None,
         # Auto-reconnect progress ({id: {attempts, max_attempts}}, keyed by
         # real or hashed id) so offline paired devices show "Reconnecting N/M"
@@ -393,6 +394,7 @@ class DashboardWindow:
         self._chat_cancel_file = chat_cancel_file
         self._chat_accept_file = chat_accept_file
         self._chat_decline_file = chat_decline_file
+        self._get_chat_open_to_all = get_chat_open_to_all
         self._on_chat_event = on_chat_event
         self._get_reconnect_states = get_reconnect_states
 
@@ -3941,7 +3943,9 @@ class DashboardWindow:
 
         session_id = session.get("session_id", "")
 
-        # Invite banner when a session is waiting on us
+        # Invite banner when a session is waiting on us.  Only ever shown by a
+        # user who asked to approve each conversation: with the default
+        # (anyone nearby may send) the session is already active on arrival.
         if session.get("status") == "invited":
             self._chat_invite_banner(scroll, session, session_id)
 
@@ -4103,7 +4107,15 @@ class DashboardWindow:
         btns = ctk.CTkFrame(card, fg_color="transparent")
         btns.pack(fill="x", padx=8, pady=(2, 8))
 
-        if not outgoing and status == "await_accept" and session_id:
+        # Accept/Decline only for a user who asked to approve each file: with
+        # the default the offer is taken on arrival, and an entry only ever
+        # touches `await_accept` for an instant on its way to `sending`.
+        if (
+            not outgoing
+            and status == "await_accept"
+            and session_id
+            and not self._chat_open_to_all()
+        ):
             ctk.CTkButton(
                 btns,
                 text=T("chat.accept"),
@@ -4157,7 +4169,21 @@ class DashboardWindow:
                 command=lambda p=saved_path: self._chat_open_saved_path(p),
             ).pack(side="left", padx=2)
 
+    def _chat_open_to_all(self) -> bool:
+        """Whether nearby devices may send without asking.
+
+        Defaults to True when the host did not supply the callback, which is
+        the shipped setting and the one that keeps the prompt off screen.
+        """
+        if self._get_chat_open_to_all is None:
+            return True
+        try:
+            return bool(self._get_chat_open_to_all())
+        except Exception:
+            return True
+
     def _chat_invite_banner(self, parent, session: dict, session_id: str) -> None:
+        """The prompt shown when a conversation waits on this user's word."""
         name = session.get("peer_name", "") or session.get("peer_id", "")[:12]
         fp = session.get("fingerprint_short", "") or ""
         banner = ctk.CTkFrame(parent, fg_color=("#FEF3C7", "#3A2E10"), corner_radius=10)

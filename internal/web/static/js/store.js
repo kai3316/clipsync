@@ -131,6 +131,11 @@
     activeChatSession: '',     // selected session_id (empty = none selected)
     chatUnread: 0,             // total unread across sessions (sidebar badge)
     mutedChatPeers: new Set(), // peer_ids muted in the chat UI (no unread badge)
+    // Whether nearby devices may open a chat or send a file without asking.
+    // True by default and authoritative from the backend: an offered file sits
+    // at `await_accept` for an instant in both modes, so this — not the status
+    // — is what says whether an Accept button is one the user must press.
+    chatOpenToAll: true,
 
     /* ═══════════════════════════════════════════════════════════════
        AI-config sync (tool profiles + v3 root ids)
@@ -2216,7 +2221,8 @@
      * chat_sessions broadcast) and keep the unread badge in sync.
      * @param {Array} list
      */
-    replaceChatSessions: function (list) {
+    replaceChatSessions: function (list, openToAll) {
+      if (typeof openToAll === 'boolean') this.chatOpenToAll = openToAll;
       this.chatSessions.splice(0, this.chatSessions.length);
       for (var i = 0; i < list.length; i++) {
         this.chatSessions.push(list[i]);

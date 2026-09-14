@@ -143,12 +143,6 @@
         return false;
       },
 
-      // Incoming invitation awaiting accept/decline — show the invite banner.
-      isInvitedSession: function () {
-        var s = this.activeSession;
-        return !!(s && s.status === 'invited');
-      },
-
       canSend: function () {
         return !!this.store.activeChatSession &&
           !!((this.composing || '').trim()) &&
@@ -163,9 +157,18 @@
         return !!s && s.status === 'active' && this.peerTypingLocal;
       },
 
+      // True when this user asked to approve each conversation and each file.
+      // With the default (anyone nearby may send) an invitation opens the
+      // session on arrival, so `invited` never appears and the banner below
+      // never renders — the two modes share this one template.
+      invitePending: function () {
+        return !!(this.activeSession && this.activeSession.status === 'invited');
+      },
+
       // Most-recently-active first.  Closed conversations are hidden — a
       // closed session is a finished one (right-click "close/delete"), and the
-      // backend may still echo it as "closed" on the next snapshot.
+      // backend may still echo it as "closed" on the next snapshot.  A refusal
+      // is finished on the same terms: the peer was told no.
       sortedSessions: function () {
         var list = this.store.chatSessions.filter(function (s) {
           return s && s.status !== 'closed' && s.status !== 'declined' &&
@@ -348,8 +351,8 @@
           '</div>' +
 
           '<template v-else>' +
-            '<!-- Incoming invite banner -->' +
-            '<div v-if="isInvitedSession" class="chat-invite-banner">' +
+            '<!-- Incoming invite banner: only ever shown while the user asked to approve each conversation. -->' +
+            '<div v-if="invitePending" class="chat-invite-banner">' +
               '<div class="chat-invite-banner__title">{{ t(\'chat.invite_banner_title\') }}</div>' +
               '<div class="chat-invite-banner__peer">{{ chatPeerName(activeSession.peer_id, activeSession.peer_name) }}</div>' +
               '<div class="chat-invite-banner__fp">{{ t(\'chat.invite_fingerprint\') }}: {{ activeSession.fingerprint_short }}</div>' +
@@ -405,9 +408,12 @@
                       '</div>' +
                     '</div>' +
                     '<div class="chat-file__actions">' +
-                      '<button v-if="!m.outgoing && m.status === \'await_accept\'"' +
+                      // Accept/decline only while the user asked to approve
+                      // each file.  With the default they start arriving on
+                      // their own, and Cancel is what stops one.
+                      '<button v-if="!store.chatOpenToAll && !m.outgoing && m.status === \'await_accept\'"' +
                         ' class="chat-action-btn chat-action-btn--accept" :disabled="fileBusy === m.transfer_id" @click="fileAction(m, \'accept\')">{{ t(\'chat.accept\') }}</button>' +
-                      '<button v-if="!m.outgoing && m.status === \'await_accept\'"' +
+                      '<button v-if="!store.chatOpenToAll && !m.outgoing && m.status === \'await_accept\'"' +
                         ' class="chat-action-btn chat-action-btn--decline" :disabled="fileBusy === m.transfer_id" @click="fileAction(m, \'decline\')">{{ t(\'chat.decline\') }}</button>' +
                       '<button v-if="m.status === \'sending\'"' +
                         ' class="chat-action-btn chat-action-btn--danger" :disabled="fileBusy === m.transfer_id" @click="fileAction(m, \'cancel\')">{{ t(\'chat.cancel\') }}</button>' +
@@ -465,7 +471,7 @@
         ClipsyncAPI.chatSessions()
           .then(function (res) {
             if (res && res.sessions) {
-              self.store.replaceChatSessions(res.sessions);
+              self.store.replaceChatSessions(res.sessions, res.open_to_all);
             }
             // The response carries the authoritative per-peer mute set (the
             // backend also suppresses the desktop notification for it), so
@@ -613,7 +619,9 @@
                   peer_id: device.peer_id,
                   peer_name: device.name || device.peer_id,
                   fingerprint_short: device.fingerprint_short || '',
-                  status: 'inviting',
+                  // Asking to be prompted means this side waits for the peer's
+                  // answer; otherwise the invitation is the whole handshake.
+                  status: self.store.chatOpenToAll ? 'active' : 'inviting',
                   created_ts: Date.now() / 1000,
                   last_activity_ts: Date.now() / 1000,
                   unread: 0,
@@ -661,7 +669,8 @@
             }
             if (action === 'decline') {
               // The invite is settled — leave the conversation; the backend
-              // may drop the session or keep it in a declined state.
+              // drops the session and reports it as declined on the next
+              // snapshot, which the session list hides.
               self.store.activeChatSession = '';
               self.store.chatMessages.splice(0, self.store.chatMessages.length);
             } else {

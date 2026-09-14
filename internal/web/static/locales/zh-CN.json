@@ -1378,5 +1378,7 @@
   "transfer.retry_failed": "重新发送失败",
   "transfer.no_path": "该记录没有文件路径",
   "transfer.history_removed": "已从历史中删除",
-  "transfer.history_remove_failed": "从历史中删除失败"
+  "transfer.history_remove_failed": "从历史中删除失败",
+  "settings_window.chat_open_to_all": "任何人可直接发来消息和文件",
+  "settings_window.chat_open_to_all_desc": "关掉以后，附近设备要先经过你同意，才能发消息和文件给你。"
 }

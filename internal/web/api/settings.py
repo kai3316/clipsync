@@ -39,6 +39,8 @@ _SAFE_FIELDS = {
     "notify_transfer",
     "notify_pairing",
     "notify_sync",
+    # Nearby chat's admission rule (see `internal/sync/nearby_chat.py`).
+    "chat_open_to_all",
     "web_enabled",
     "web_port",
     "web_history_limit",
@@ -124,6 +126,8 @@ _MUTABLE_FIELDS = {
     "notify_transfer",
     "notify_pairing",
     "notify_sync",
+    # Nearby chat's admission rule (see `internal/sync/nearby_chat.py`).
+    "chat_open_to_all",
     "web_enabled",
     "web_port",
     "web_history_limit",

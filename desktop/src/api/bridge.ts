@@ -173,6 +173,8 @@ export const bridge = {
   // (`validate_result` in `internal/adapters/sidecar/rpc.py`).
   inviteChat: (peerId: string, peerName: string) =>
     command<{ chat_session_id: string | null; connecting: boolean }>("invite_chat", { peerId, peerName }),
+  // Only reachable with "anyone nearby may send" turned off: with it on, an
+  // invitation opens the conversation on arrival and there is nothing to accept.
   acceptChatInvite: (sessionId: string) => command<{ ok: boolean }>("accept_chat_invite", { sessionId }),
   declineChatInvite: (sessionId: string) => command<{ ok: boolean }>("decline_chat_invite", { sessionId }),
   sendChatText: (sessionId: string, text: string) =>

@@ -190,6 +190,9 @@ export const EN: Record<string, string> = {
     "The sync engine is not running, so discovery settings cannot be changed.",
   "同步引擎未运行，推送文本与发送网址不可用。":
     "The sync engine is not running; pushing text and sending links are unavailable.",
+  "任何人可直接发来消息和文件": "Anyone nearby can send messages and files",
+  "关掉以后，附近设备要先经过你同意，才能发消息和文件给你。":
+    "Turn this off and a nearby device has to be allowed by you before its message or file arrives.",
   "手机 Companion": "Phone Companion",
   "手机访问地址": "Phone access address",
   "手机服务端口": "Phone service port",

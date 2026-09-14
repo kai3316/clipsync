@@ -147,8 +147,6 @@ describe("browser isolation", () => {
     await bridge.chatSessions();
     await bridge.chatMessages("s");
     await bridge.inviteChat("p", "Peer");
-    await bridge.acceptChatInvite("s");
-    await bridge.declineChatInvite("s");
     await bridge.sendChatText("s", "hello");
     await bridge.markChatRead("s");
     await bridge.closeChat("s");
@@ -157,8 +155,6 @@ describe("browser isolation", () => {
       ["list_chat_sessions", undefined],
       ["list_chat_messages", { sessionId: "s" }],
       ["invite_chat", { peerId: "p", peerName: "Peer" }],
-      ["accept_chat_invite", { sessionId: "s" }],
-      ["decline_chat_invite", { sessionId: "s" }],
       ["send_chat_text", { sessionId: "s", text: "hello" }],
       ["mark_chat_read", { sessionId: "s" }],
       ["close_chat", { sessionId: "s" }],

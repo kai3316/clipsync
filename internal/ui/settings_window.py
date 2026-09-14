@@ -186,6 +186,7 @@ class SettingsWindow:
         self._log_level_var: tk.StringVar | None = None
         self._language_var: tk.StringVar | None = None
         self._notifications_var: tk.BooleanVar | None = None
+        self._chat_open_to_all_var: tk.BooleanVar | None = None
         # Web companion vars
         self._web_enabled_var: tk.BooleanVar | None = None
         self._web_port_var: tk.StringVar | None = None
@@ -1760,6 +1761,18 @@ class SettingsWindow:
         )
         _desc(card3, T("settings_window.max_reconnect_desc"))
 
+        # Who may reach this device belongs with the connection card.  Applied
+        # on save, like everything else here, and handed to the live chat
+        # manager rather than waiting for a restart.
+        self._chat_open_to_all_var = tk.BooleanVar(value=bool(cfg.chat_open_to_all))
+        ctk.CTkSwitch(
+            card3,
+            text=T("settings_window.chat_open_to_all"),
+            variable=self._chat_open_to_all_var,
+            font=ctk.CTkFont(size=12),
+        ).pack(anchor="w", padx=16, pady=(10, 2))
+        _desc(card3, T("settings_window.chat_open_to_all_desc"))
+
         # ── Card 4: Logging & Notifications ───────────────────────
         card4 = ctk.CTkFrame(scroll, corner_radius=12)
         card4.pack(fill="x", pady=(0, 12))
@@ -1966,6 +1979,8 @@ class SettingsWindow:
         chosen = self._language_var.get()
         cfg.language = _code_by_name.get(chosen, chosen)
         cfg.notifications_enabled = self._notifications_var.get()
+        if self._chat_open_to_all_var is not None:
+            cfg.chat_open_to_all = self._chat_open_to_all_var.get()
         # Apply the notification toggle live — no restart required.
         notification_mgr.enabled = cfg.notifications_enabled
         self._save_config()

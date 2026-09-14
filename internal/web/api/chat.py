@@ -93,16 +93,21 @@ def get_chat_devices(get_devices_cb):
 
 
 def get_sessions(chat_mgr, get_chat_muted=None):
-    """GET /api/chat/sessions → {sessions: [...], muted: [...]}.
+    """GET /api/chat/sessions → {sessions: [...], muted: [...], open_to_all}.
 
     ``muted`` is the current per-peer chat mute set, so the web chat UI can
     render the bell state from the same request that lists the sessions.
+    ``open_to_all`` says whether an incoming offer is waiting on this user or
+    was already taken on arrival.
     """
     err = _require_chat(chat_mgr)
     if err:
         return err
     try:
-        resp = {"sessions": chat_mgr.get_sessions() or []}
+        resp = {
+            "sessions": chat_mgr.get_sessions() or [],
+            "open_to_all": bool(getattr(chat_mgr, "open_to_all", True)),
+        }
         if get_chat_muted is not None:
             try:
                 resp["muted"] = get_chat_muted() or []
@@ -302,6 +307,11 @@ def send_file(chat_mgr, body, send_fn_for_peer):
 def accept_file(chat_mgr, body, send_fn_for_peer):
     """POST /api/chat/file/accept {session_id, transfer_id} → {ok}.
 
+    Only reachable while the receiver asked to be prompted: with the
+    "anyone may send" setting on, an incoming attachment is taken on arrival
+    and never stops at ``await_accept``, so there is nothing for this to
+    answer and the route is not what the UI calls.
+
     ``ChatManager.accept_file`` returns ``None`` when the offer is already
     gone (e.g. it expired under the stale-receive reaper while the UI still
     showed its Accept button).  Translate that into an explicit ``expired``
@@ -374,7 +384,12 @@ def cancel_file(chat_mgr, body):
 
 
 def accept_invite(chat_mgr, body, send_fn_for_peer):
-    """POST /api/chat/accept {session_id} → {ok}."""
+    """POST /api/chat/accept {session_id} → {ok}.
+
+    Only reachable while the receiver asked to be prompted: with the
+    "anyone may send" setting on, a session is live the moment the invitation
+    arrives and there is nothing left to accept.
+    """
     err = _require_chat(chat_mgr)
     if err:
         return err

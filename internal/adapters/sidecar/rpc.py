@@ -428,6 +428,9 @@ class Dispatcher:
                 "notify_transfer": (bool, lambda _: True),
                 "notify_pairing": (bool, lambda _: True),
                 "notify_device_connect": (bool, lambda _: True),
+                # Nearby chat's admission rule.  Applied live, not on restart:
+                # the runtime pushes it straight into the live ChatManager.
+                "chat_open_to_all": (bool, lambda _: True),
                 "app_filter_enabled": (bool, lambda _: True),
                 "app_filter_mode": (str, lambda v: v in ("blacklist", "whitelist")),
                 "app_filter_list": (list, lambda v: len(v) <= 256 and all(

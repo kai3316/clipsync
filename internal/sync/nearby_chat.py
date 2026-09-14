@@ -1,26 +1,49 @@
-"""Consent-gated nearby chat between devices that are NOT paired.
+"""Nearby chat between devices that are NOT paired.
 
 ClipSync's clipboard sync requires pairing (8-digit code + cert pinning).
-This module adds a lightweight, explicitly consensual channel for devices
-that merely discovered each other on the LAN:
+This module adds a lighter channel for devices that merely discovered each
+other on the LAN.  It has two modes, and which one is in force is the
+user's choice (``ChatManager.set_open_to_all``):
 
-* One device sends a ``chat_invite``; nothing at all flows until the other
-  user explicitly accepts.
-* Accepted sessions exchange short text messages and files (chunked with the
-  same binary-chunk framing clipboard file transfers use).
-* Every stage is gated: rate-limited invitations, per-session text flood
-  control, per-file user acceptance, sanitized file names confined to the
-  receive directory, and hard size caps.
+``open_to_all`` (the default)
+    One device sends a ``chat_invite`` and the session is live on both
+    sides the moment it lands; text and files flow without either user
+    confirming anything.
+
+``open_to_all`` off
+    The peer must be allowed by hand.  An incoming invitation lands as
+    ``invited`` and waits for :meth:`ChatManager.accept_invitation` or
+    :meth:`ChatManager.decline_invitation`, and an incoming file waits at
+    ``await_accept`` for :meth:`ChatManager.accept_file`.
+
+Both modes exchange short text messages and files (chunked with the same
+binary-chunk framing clipboard file transfers use), and both are gated
+against *abuse*: rate-limited session opening, per-session text flood
+control, sanitized file names confined to the receive directory, and hard
+size caps.
 
 Security model
 --------------
-Unpaired TLS sessions are encrypted but *not* authenticated against a pinned
-certificate (trust-on-first-use at best).  This channel therefore treats
-every remote peer as untrusted until a human accepts the invitation, and
-surfaces a short certificate fingerprint in the UI so users can visually
-compare codes out-of-band.  All application-level gates live here -- the
-transport only whitelists ``CHAT_MSG_TYPES`` frames through for unpaired
-peers; content rules are enforced in :meth:`ChatManager.handle_message`.
+The default mode has no acceptance step, and that is deliberate.  The reach
+of this channel is the LAN: reaching a peer at all means already being on
+the same network, and the frames only travel over the encrypted (if
+unpinned) session the discovery layer established.  Everything on a home or
+office LAN is therefore treated as trusted, and a device that knows the
+pairing code is trusted outright -- which is also why an unpaired peer may
+send directly.
+
+The consequence to be honest about: on a network you do not control -- a
+public Wi-Fi -- anyone who can reach your port can also open a session and
+send you a file.  The receive directory, the file-name sanitizer and the
+size caps are what bound that, not a dialog.  Turning ``open_to_all`` off
+replaces that judgement with a prompt on both the session and each file.  A
+short certificate fingerprint travels with the session and is shown in the
+UI either way, so a user who wants to check who they are talking to can
+compare it out of band.
+
+All application-level rules live here -- the transport only whitelists
+``CHAT_MSG_TYPES`` frames through for unpaired peers; content rules are
+enforced in :meth:`ChatManager.handle_message`.
 
 Threading
 ---------
@@ -119,6 +142,8 @@ class ChatSession:
     peer_id: str
     peer_name: str
     fingerprint_short: str  # <=32 chars, displayed for out-of-band comparison
+    # `inviting` / `invited` only ever appear while open_to_all is off: they
+    # are a session waiting on the far end and on this end respectively.
     status: str  # inviting|invited|active|declined_remote|closed
     created_ts: float
     last_seen_mono: float = 0.0  # time.monotonic() of last inbound frame
@@ -161,14 +186,26 @@ class ChatSession:
 
 
 class ChatManager:
-    """State machine + wire handlers for consent-gated nearby chat.
+    """State machine + wire handlers for direct nearby chat.
 
     Wire payloads (JSON frames built with
     :func:`internal.protocol.codec.encode_frame`):
 
-    - ``chat_invite``  ``{session_id, from_name, fingerprint_short, greeting}``
+    - ``chat_invite``  ``{session_id, from_name, fingerprint_short}``
+      -- with ``open_to_all`` on it opens the session on both sides and no
+      reply gates it; with it off the receiver holds the session at
+      ``invited`` until its user answers.  The fingerprint travels here in
+      both modes -- it is the only way the receiver learns who this is
     - ``chat_accept`` / ``chat_close``  ``{session_id}``
+      -- the answer to an invitation while the prompt is on, and in both
+      modes the carrier that settles which of two crossing session ids wins
+      (a session that is already live just reaffirms its id)
     - ``chat_decline`` ``{session_id, reason}``
+      -- a refused invitation, or a peer that stopped waiting on one:
+      ``reason`` is ``"duplicate"`` when an invitation lost the
+      crossing-open tiebreak and ``"busy"`` when the pending-invite cap is
+      full, and empty for a user's own refusal.  It never tears down a
+      session that is already live
     - ``chat_text``    ``{session_id, text, ts}``
     - ``chat_typing``  ``{session_id, typing}``  -- typing indicator; the
       sender throttles same-state frames to one per ``TYPING_THROTTLE``
@@ -186,7 +223,7 @@ class ChatManager:
     """
 
     # ---- anti-abuse caps ---------------------------------------------------
-    INVITE_RATE_LIMIT = 5  # invites per peer (each direction) per window
+    INVITE_RATE_LIMIT = 5  # session opens per peer (each direction) per window
     INVITE_RATE_WINDOW = 300.0
     TEXT_RATE_LIMIT = 30  # texts per active session per window
     TEXT_RATE_WINDOW = 10.0
@@ -201,7 +238,13 @@ class ChatManager:
     # wire format stays byte-identical for pre-update LAN peers.
     RELAY_CHUNK_SIZE = 224 * 1024
     RELAY_FILE_CAP = 5 * 1024 * 1024  # internet-relay file size cap (bytes)
-    INVITE_ACCEPT_TIMEOUT = 300.0  # sender waits this long for chat_file_accept
+    # How long a session may sit unanswered while open_to_all is off: the
+    # sender waits this long for a ``chat_accept``, and the receiver's own
+    # ``invited`` row is dropped after the same silence.  In the default mode
+    # no session is ever in either state, so this only ever elapses when the
+    # user turned the prompt on and then walked away.
+    INVITE_ACCEPT_TIMEOUT = 300.0
+    TRANSFER_ACCEPT_TIMEOUT = 300.0  # sender waits this long for chat_file_accept
     COMPLETION_WAIT_TIMEOUT = 60.0
     TRANSFER_STALL_TIMEOUT = 600.0  # no chunk progress this long => fail + remove .part
     MAX_CONCURRENT_INCOMING_FILES = 3
@@ -233,6 +276,10 @@ class ChatManager:
         self._sends: dict[str, dict] = {}  # transfer_id -> send state
         self._latest_send_fn: dict[str, SendFn] = {}  # peer_id -> newest send_fn
         self._receive_dir: Path | None = None
+        # Default mode: anyone who can reach this device may open a session and
+        # send a file.  See the module docstring; `set_open_to_all` is the
+        # switch a user turns when they want to be asked instead.
+        self._open_to_all = True
         if receive_dir:
             self.set_receive_dir(receive_dir)
 
@@ -256,18 +303,45 @@ class ChatManager:
     # Callback registration
     # ------------------------------------------------------------------
 
-    def set_on_incoming_invite(self, cb: Callable[[dict], None]) -> None:
-        """*cb(invite)* -- someone asks to chat; ``invite`` holds
-        ``session_id / peer_id / peer_name / fingerprint_short / greeting``."""
-        self._on_incoming_invite = cb
-
-    def set_on_invite_response(self, cb: Callable[[str, str, bool], None]) -> None:
-        """*cb(session_id, peer_id, accepted)* -- answer to OUR invitation."""
-        self._on_invite_response = cb
-
     def set_on_sessions_changed(self, cb: Callable[[], None]) -> None:
         """*cb()* -- coarse "something changed" signal (UI may just re-poll)."""
         self._on_sessions_changed = cb
+
+    def set_on_incoming_invite(self, cb: Callable[[dict], None]) -> None:
+        """*cb(invite_dict)* -- an invitation is waiting for this user's answer.
+
+        Only fires while ``open_to_all`` is off; the dict carries
+        ``session_id``, ``peer_id``, ``peer_name``, ``fingerprint_short``.
+        """
+        self._on_incoming_invite = cb
+
+    def set_on_invite_response(self, cb: Callable[[str, str, bool], None]) -> None:
+        """*cb(session_id, peer_id, accepted)* -- our own invitation was answered.
+
+        Only fires while ``open_to_all`` is off.
+        """
+        self._on_invite_response = cb
+
+    @property
+    def open_to_all(self) -> bool:
+        """Whether nearby devices may send without asking first.
+
+        Read by the front ends through the session list, so a UI knows
+        whether an incoming offer is waiting on this user or has already
+        been taken -- the two modes look the same in the session rows.
+        """
+        return self._open_to_all
+
+    def set_open_to_all(self, flag: bool) -> None:
+        """Choose whether nearby devices need this user's permission.
+
+        ``True`` (the default) opens a session and takes a file on arrival.
+        ``False`` holds both for an explicit accept.  Flipping the switch does
+        not disturb sessions that are already live -- they were admitted under
+        the rules in force when they opened, and tearing them down would drop
+        a conversation the user is in the middle of.
+        """
+        self._open_to_all = bool(flag)
 
     def set_on_message(self, cb: Callable[[str, dict], None]) -> None:
         """*cb(session_id, entry_dict)* -- a new entry was appended."""
@@ -336,9 +410,7 @@ class ChatManager:
         session.last_activity_ts = entry.ts
 
     def _live_session_count(self) -> int:
-        return sum(
-            1 for s in self._sessions.values() if s.status in ("inviting", "invited", "active")
-        )
+        return sum(1 for s in self._sessions.values() if s.status == "active")
 
     def _resolve_session(self, session_id: str, peer_id: str) -> ChatSession | None:
         """Find a session by id (bound to sender), or fall back to the peer."""
@@ -427,11 +499,18 @@ class ChatManager:
         fingerprint_short: str,
         send_fn: SendFn,
     ) -> str | None:
-        """Invite *peer_id* to chat.
+        """Open a chat with *peer_id*.
 
         Returns the session id of the NEW session, or of the EXISTING live
         session when one is already up (callers can simply select it).
         ``None`` means suppressed (rate limit / slots full / bad args).
+
+        The session is born ``active`` in the default mode -- the peer
+        receives a ``chat_invite``, but nothing about this side waits for an
+        answer, and the user can type into the conversation as soon as this
+        returns.  With ``open_to_all`` off it is born ``inviting`` and the
+        peer's ``chat_accept`` is what moves it to ``active``; the UI shows
+        it as waiting until then.
         """
         peer_id = (peer_id or "").strip()
         if not peer_id or send_fn is None:
@@ -440,16 +519,21 @@ class ChatManager:
         done_fired: list[tuple[str, str, str]] = []
         with self._lock:
             existing = self._sessions.get(peer_id)
-            if existing is not None and existing.status in ("inviting", "invited", "active"):
+            # `inviting` counts as live here: a second click while our
+            # invitation is still unanswered must hand back the id we already
+            # sent rather than mint a second session the peer has never heard
+            # of -- that would orphan the first in `_session_by_sid` and spend
+            # another slot against MAX_SESSIONS.
+            if existing is not None and existing.status in ("active", "inviting"):
                 self._remember_send_fn(peer_id, send_fn)
                 return existing.session_id
             out = self._invite_times_out.setdefault(peer_id, deque())
             self._prune_times(out, now, self.INVITE_RATE_WINDOW)
             if len(out) >= self.INVITE_RATE_LIMIT:
-                logger.info("chat: outgoing invite to %s rate-limited", peer_id[:12])
+                logger.info("chat: outgoing session open to %s rate-limited", peer_id[:12])
                 return None
             if self._live_session_count() >= self.MAX_SESSIONS:
-                logger.info("chat: session slots full, refusing invite")
+                logger.info("chat: session slots full, refusing session open")
                 return None
             out.append(now)
             session = ChatSession(
@@ -457,7 +541,7 @@ class ChatManager:
                 peer_id=peer_id,
                 peer_name=(peer_name or peer_id)[:80],
                 fingerprint_short=self.shorten_fingerprint(fingerprint_short)[:32],
-                status="inviting",
+                status="active" if self._open_to_all else "inviting",
                 created_ts=time.time(),
                 last_seen_mono=now,
                 last_activity_ts=time.time(),
@@ -471,18 +555,17 @@ class ChatManager:
                     "session_id": session.session_id,
                     "from_name": self._device_name[:80],
                     "fingerprint_short": self.shorten_fingerprint(self._own_fp)[:32],
-                    "greeting": "",
                 },
                 send_fn,
             )
             refused = False
             if not sent:
-                # The transport refused the invite frame -- tear the session
-                # down NOW instead of leaving a phantom "inviting" entry pinned
-                # for INVITE_ACCEPT_TIMEOUT: it would hold one of the
-                # MAX_SESSIONS slots and show a conversation that can never
-                # start.  Also roll back the invite-rate timestamp so the user
-                # can retry immediately once connectivity is back.
+                # The transport refused the invite frame, so the peer was
+                # never told this session exists: tear it down NOW instead of
+                # leaving an entry that holds one of the MAX_SESSIONS slots
+                # and shows a conversation the peer cannot see.  Also roll
+                # back the rate timestamp so the user can retry immediately
+                # once connectivity is back.
                 self._drop_session_locked(session, done_fired)
                 if out and out[-1] == now:
                     out.pop()
@@ -497,7 +580,12 @@ class ChatManager:
         return session.session_id
 
     def accept_invitation(self, session_id: str, send_fn: SendFn) -> bool:
-        """User accepted an incoming chat invitation."""
+        """This user allowed an incoming invitation (``open_to_all`` off).
+
+        Refuses unless the session is actually waiting at ``invited``, so a
+        stale click on a row that has since been answered cannot open a
+        conversation the peer is not in.
+        """
         with self._lock:
             session = self._session_by_sid.get(session_id)
             if session is None or session.status != "invited":
@@ -513,7 +601,7 @@ class ChatManager:
                 # conversation while the peer sits on its own "inviting"
                 # screen until its timeout, with every message failing.
                 session.status = "active"
-                # The user actively engaged with the invite — clear the unread
+                # The user actively engaged with the invite -- clear the unread
                 # marker raised when it arrived.
                 session.unread = 0
                 self._touch_seen(session)
@@ -522,6 +610,7 @@ class ChatManager:
         return ok
 
     def decline_invitation(self, session_id: str, send_fn: SendFn, reason: str = "") -> bool:
+        """This user refused an incoming invitation (``open_to_all`` off)."""
         with self._lock:
             session = self._session_by_sid.get(session_id)
             if session is None or session.status != "invited":
@@ -544,17 +633,33 @@ class ChatManager:
         done_fired: list[tuple[str, str, str]] = []
         with self._lock:
             session = self._session_by_sid.get(session_id)
+            # A session still waiting on an answer is closable too: that is
+            # how a user withdraws their own invitation, or drops somebody
+            # else's without answering it.
             if session is None or session.status not in ("inviting", "invited", "active"):
                 return False
-            was_active = session.status == "active"
+            was_status = session.status
             session.status = "closed"
             session.peer_typing_until_mono = 0.0
+            session.unread = 0
             self._fail_transfers_for_session(session, "cancelled", done_fired)
             # A closed session id is never reused; drop its text buckets so
             # the rate-limit dicts cannot grow without bound.
             self._text_times_out.pop(session.session_id, None)
             self._text_times_in.pop(session.session_id, None)
-            if notify_peer and was_active:
+            if notify_peer and was_status == "invited":
+                # Dropping an invitation without answering it would leave the
+                # sender on its "waiting to be allowed" screen until its
+                # INVITE_ACCEPT_TIMEOUT expires; refuse it properly instead.
+                self._send_frame(
+                    {
+                        "msg_type": "chat_decline",
+                        "session_id": session.session_id,
+                        "reason": "closed",
+                    },
+                    self._latest_send_fn.get(session.peer_id),
+                )
+            elif notify_peer and was_status == "active":
                 self._send_frame(
                     {"msg_type": "chat_close", "session_id": session.session_id},
                     self._latest_send_fn.get(session.peer_id),
@@ -817,17 +922,21 @@ class ChatManager:
         return transfer_id
 
     def accept_file(self, session_id: str, transfer_id: str, send_fn: SendFn):
-        """Accept an incoming file offer; start receiving.
+        """Start receiving an offered file.
+
+        With ``open_to_all`` on, :meth:`_handle_chat_file_offer` calls this the
+        moment an offer lands -- there is no user accept step -- so it is also
+        what answers the sender's ``chat_file_accept``.  With it off the offer
+        waits at ``await_accept`` and a front end calls this after the user
+        answers.
 
         Returns ``True`` on success, ``False`` when the offer still exists but
-        cannot be accepted right now (wrong session, or already past the
-        ``await_accept`` stage), and ``None`` when the offer is already gone
-        (``_receives`` no longer tracks it).  The ``None`` case is what the web
-        REST handler surfaces as an explicit "expired" error — the offer was
-        swept by the stale-receive reaper while the UI still showed its Accept
-        button, so the user should learn it expired rather than see a generic
-        failure.  ``None`` stays falsy, so callers that only test truthiness
-        (``if mgr.accept_file(...)``) still treat it as a failed accept.
+        cannot be accepted right now (wrong session, already past the
+        ``await_accept`` stage, or the receive directory refused the file),
+        and ``None`` when the offer is already gone (``_receives`` no longer
+        tracks it).  ``None`` stays falsy so callers testing truthiness treat
+        it as a failed accept; the offer handler only ever tests
+        ``is not True``, since either way the sender has to be told.
         """
         notify_peer_offline = False
         with self._lock:
@@ -915,7 +1024,7 @@ class ChatManager:
         return ok
 
     def decline_file(self, session_id: str, transfer_id: str, send_fn: SendFn) -> bool:
-        """User declined an incoming file offer."""
+        """This user refused an offered file (``open_to_all`` off)."""
         with self._lock:
             state = self._receives.pop(transfer_id, None)
             if state is None:
@@ -1008,7 +1117,7 @@ class ChatManager:
             # Wake any sender thread parked in accept/complete waits -- after
             # the state dicts are cleared its lookups return None and the
             # thread exits; without this it would sleep out its full timeout
-            # (up to INVITE_ACCEPT_TIMEOUT + COMPLETION_WAIT_TIMEOUT).
+            # (up to TRANSFER_ACCEPT_TIMEOUT + COMPLETION_WAIT_TIMEOUT).
             for state in self._sends.values():
                 state["accept_event"].set()
                 state["complete_event"].set()
@@ -1122,8 +1231,8 @@ class ChatManager:
         # any session teardown this invite triggers, and the outcome flags
         # decide which UI callbacks fire once the ``with`` block exits.
         done_fired: list[tuple[str, str, str]] = []
+        changed = False
         mutual_accepted: tuple[str, str] | None = None  # our invite lost the race
-        reaffirm_active = False  # already chatting; converged
         invite: dict | None = None
         with self._lock:
             dq = self._invite_times_in.setdefault(sender_id, deque())
@@ -1138,16 +1247,18 @@ class ChatManager:
 
             mine = self._sessions.get(sender_id)
             # Control chars in peer-supplied strings reach OS notifications
-            # and invite dialogs — strip them before use.
-            greeting = _clean(str(payload.get("greeting", "")))[: self.MAX_GREETING_LEN]
+            # and the session list — strip them before use.
             from_name = _clean(str(payload.get("from_name", "")))[:80]
+            greeting = _clean(str(payload.get("greeting", "")))[: self.MAX_GREETING_LEN]
             peer_fp = self.shorten_fingerprint(
                 str(payload.get("fingerprint_short", "") or fp_short or ""),
             )[:32]
 
-            if mine is not None and mine.status == "inviting":
-                # Mutual invite.  Resolve deterministically: the SMALLER
-                # session id wins, so both devices converge without a dialog.
+            if not self._open_to_all and mine is not None and mine.status == "inviting":
+                # Both of us asked at the same moment and both are waiting.
+                # Resolve deterministically: the SMALLER session id wins, so
+                # the two devices converge without either user answering a
+                # prompt the other cannot see.
                 if sid < mine.session_id:
                     self._drop_session_locked(mine, done_fired)
                     session = self._open_incoming_locked(
@@ -1170,40 +1281,42 @@ class ChatManager:
                         },
                         send_fn,
                     )
+                changed = True
 
             elif mine is not None and mine.status == "active":
-                # Already chatting.  If this invite carries a NEW session id
-                # (the peer closed its old session without telling us, then
-                # restarted), adopt the new id — otherwise both sides stay
-                # "active" with mismatched ids and every later message is
-                # dropped as an unknown session.
-                if mine.session_id != sid:
-                    old_sid = mine.session_id
-                    self._session_by_sid.pop(old_sid, None)
-                    self._session_by_sid[sid] = mine
-                    mine.session_id = sid
-                    # Carry the text-rate buckets to the new sid: adoption
-                    # must not reset the flood budget (or let an attacker
-                    # reset it by re-inviting) and must not orphan the old
-                    # buckets (unbounded growth).
-                    for bucket_name in ("_text_times_out", "_text_times_in"):
-                        bucket_map = getattr(self, bucket_name)
-                        old_bucket = bucket_map.pop(old_sid, None)
-                        if old_bucket:
-                            bucket_map[sid] = old_bucket
-                    # Same for the typing bookkeeping — keeps the throttle
-                    # continuous and avoids orphaning the old sid's entry.
-                    old_typing = self._typing_out.pop(old_sid, None)
-                    if old_typing is not None:
-                        self._typing_out[sid] = old_typing
-                # Reaffirm so their client converges too.
-                self._send_frame({"msg_type": "chat_accept", "session_id": sid}, send_fn)
+                # Already live with this peer.  Two things can be going on,
+                # and both settle the same way --
+                #
+                #   * the peer restarted its session without telling us (its
+                #     old id is gone), or
+                #   * the two of us opened sessions at the same moment, so we
+                #     each minted an id the other has never heard of.
+                #
+                # The SMALLER id wins.  Both sides apply the same rule to the
+                # same pair of ids, so they converge on one of them without a
+                # further round trip; the loser adopts and echoes the winner's
+                # id in its chat_accept.  Applying "always adopt theirs" here
+                # instead would swap the ids on both sides and leave the two
+                # sessions permanently mismatched.
+                if sid < mine.session_id:
+                    self._adopt_session_id_locked(mine, sid)
+                # Reaffirm with whichever id survived, so a peer that lost the
+                # tiebreak learns it lost.
+                self._send_frame(
+                    {"msg_type": "chat_accept", "session_id": mine.session_id},
+                    send_fn,
+                )
                 self._touch_seen(mine)
-                reaffirm_active = True
+                self._remember_send_fn(sender_id, send_fn)
+                changed = True
 
             else:
+                # Nothing of ours is live with this peer.  With the prompt
+                # switched off the invitation stands unanswered until the user
+                # answers it; with it on, the session is live the moment the
+                # frame lands.
                 pending = sum(1 for s in self._sessions.values() if s.status == "invited")
-                if pending >= self.PENDING_INVITE_CAP:
+                if not self._open_to_all and pending >= self.PENDING_INVITE_CAP:
                     logger.info(
                         "chat: pending invite cap reached -- auto-declining %s", sender_id[:12]
                     )
@@ -1224,13 +1337,28 @@ class ChatManager:
                         send_fn,
                         done_fired,
                     )
-                    invite = {
-                        "session_id": sid,
-                        "peer_id": sender_id,
-                        "peer_name": session.peer_name,
-                        "fingerprint_short": peer_fp,
-                        "greeting": greeting,
-                    }
+                    if self._open_to_all:
+                        # Live at once: no dialog stands between the peer's
+                        # first message and this side reading it.
+                        session.status = "active"
+                        session.unread = 0
+                        self._touch_seen(session)
+                        # Echo the id so the peer can settle a crossing open.
+                        # We have nothing to lose here -- we just adopted
+                        # their id.
+                        self._send_frame(
+                            {"msg_type": "chat_accept", "session_id": session.session_id},
+                            send_fn,
+                        )
+                    else:
+                        invite = {
+                            "session_id": sid,
+                            "peer_id": sender_id,
+                            "peer_name": session.peer_name,
+                            "fingerprint_short": peer_fp,
+                            "greeting": greeting,
+                        }
+                    changed = True
 
         for done_sid, tid, status in done_fired:
             self._fire("_on_file_done", done_sid, tid, False, "", status)
@@ -1238,9 +1366,31 @@ class ChatManager:
             self._fire("_on_invite_response", mutual_accepted[0], mutual_accepted[1], True)
         if invite is not None:
             self._fire("_on_incoming_invite", invite)
-        if mutual_accepted is not None or reaffirm_active or invite is not None:
+        if changed:
             self._fire("_on_sessions_changed")
         return True
+
+    def _adopt_session_id_locked(self, session: ChatSession, new_sid: str) -> None:
+        """Re-key *session* under *new_sid* (lock held).
+
+        The rate buckets and the typing bookkeeping follow the id: adoption
+        must not reset the flood budget (or let an attacker reset it just by
+        re-inviting), and the old sid's entries must not be orphaned.
+        """
+        old_sid = session.session_id
+        if old_sid == new_sid:
+            return
+        self._session_by_sid.pop(old_sid, None)
+        self._session_by_sid[new_sid] = session
+        session.session_id = new_sid
+        for bucket_name in ("_text_times_out", "_text_times_in"):
+            bucket_map = getattr(self, bucket_name)
+            old_bucket = bucket_map.pop(old_sid, None)
+            if old_bucket:
+                bucket_map[new_sid] = old_bucket
+        old_typing = self._typing_out.pop(old_sid, None)
+        if old_typing is not None:
+            self._typing_out[new_sid] = old_typing
 
     def _open_incoming_locked(
         self,
@@ -1256,6 +1406,9 @@ class ChatManager:
             peer_id=peer_id,
             peer_name=(peer_name or peer_id)[:80],
             fingerprint_short=(fp_short or "")[:32],
+            # The caller moves this to `active` when the invitation is taken
+            # without asking; while the prompt is on it stays `invited` and
+            # waits for `accept_invitation`.
             status="invited",
             created_ts=time.time(),
             last_seen_mono=time.monotonic(),
@@ -1273,13 +1426,57 @@ class ChatManager:
         return session
 
     def _activate_locked(self, session: ChatSession) -> None:
+        """Take an incoming invitation on the peer's behalf (lock held).
+
+        Only reached while ``open_to_all`` is off: this side's own invitation
+        lost the crossing-open race, so it is replaced by theirs and answered
+        in the same breath.
+        """
         session.status = "active"
+        session.unread = 0
         session.online = True
         session.offline_announced = False
+        self._touch_seen(session)
         self._send_frame(
             {"msg_type": "chat_accept", "session_id": session.session_id},
             self._latest_send_fn.get(session.peer_id),
         )
+
+    def _handle_chat_accept(self, payload, sender_id, fp_short) -> bool:
+        newly_active: tuple[str, str] | None = None
+        with self._lock:
+            session = self._resolve_session(str(payload.get("session_id", "")), sender_id)
+            if session is None:
+                return False
+            if not self._open_to_all:
+                # Our own invitation was answered.  `active` is accepted too
+                # so a repeated accept from a peer that lost the tiebreak is
+                # tolerated rather than refused.
+                if session.status not in ("inviting", "active"):
+                    return False
+                if session.status == "inviting":
+                    session.status = "active"
+                    newly_active = (session.session_id, session.peer_id)
+                self._touch_seen(session)
+                if fp_short and not session.fingerprint_short:
+                    session.fingerprint_short = self.shorten_fingerprint(fp_short)[:32]
+            else:
+                if session.status != "active":
+                    return False
+                # A chat_accept naming an id SMALLER than ours is the peer
+                # losing the crossing-open tiebreak and telling us which id to
+                # use.  Ours is normative otherwise: we already told them ours,
+                # and a later accept that repeats it changes nothing.
+                incoming = str(payload.get("session_id", ""))
+                if incoming and incoming < session.session_id:
+                    self._adopt_session_id_locked(session, incoming)
+                self._touch_seen(session)
+                if fp_short and not session.fingerprint_short:
+                    session.fingerprint_short = self.shorten_fingerprint(fp_short)[:32]
+        if newly_active is not None:
+            self._fire("_on_invite_response", newly_active[0], newly_active[1], True)
+        self._fire("_on_sessions_changed")
+        return True
 
     def _drop_session_locked(self, session: ChatSession, fired: list) -> None:
         """Tear a session down without notifying the peer (lock held).
@@ -1295,30 +1492,27 @@ class ChatManager:
             self._session_by_sid.pop(session.session_id, None)
         self._cleanup_rate_buckets_locked(session.peer_id, session.session_id)
 
-    def _handle_chat_accept(self, payload, sender_id, fp_short) -> bool:
-        with self._lock:
-            session = self._resolve_session(str(payload.get("session_id", "")), sender_id)
-            if session is None or session.status not in ("inviting", "active"):
-                return False
-            newly_active = session.status == "inviting"
-            session.status = "active"
-            self._touch_seen(session)
-            if fp_short and not session.fingerprint_short:
-                session.fingerprint_short = self.shorten_fingerprint(fp_short)[:32]
-            sid, pid = session.session_id, session.peer_id
-        if newly_active:
-            self._fire("_on_invite_response", sid, pid, True)
-        self._fire("_on_sessions_changed")
-        return True
-
     def _handle_chat_decline(self, payload, sender_id) -> bool:
+        """The peer refused our invitation, or stopped waiting on one.
+
+        Only reachable while ``open_to_all`` is off: with the prompt switched
+        off there is no question for a decline to answer, and a live session
+        stays live rather than being torn down by a stale frame.
+        """
+        refused: tuple[str, str] | None = None
         with self._lock:
             session = self._resolve_session(str(payload.get("session_id", "")), sender_id)
-            if session is None or session.status != "inviting":
+            if session is None:
                 return False
-            session.status = "declined_remote"
-            sid, pid = session.session_id, session.peer_id
-        self._fire("_on_invite_response", sid, pid, False)
+            if not self._open_to_all and session.status == "inviting":
+                session.status = "declined_remote"
+                session.unread = 0
+                refused = (session.session_id, session.peer_id)
+        if refused is None:
+            # Nothing of ours was waiting on an answer -- a stale decline, or
+            # one from a peer that never saw the prompt.  Nothing to report.
+            return True
+        self._fire("_on_invite_response", refused[0], refused[1], False)
         self._fire("_on_sessions_changed")
         return True
 
@@ -1329,7 +1523,7 @@ class ChatManager:
             if session is None:
                 # Fall back to the peer's live session regardless of id.
                 session = self._sessions.get(sender_id)
-            if session is None or session.status not in ("inviting", "invited", "active"):
+            if session is None or session.status != "active":
                 return False
             session.status = "closed"
             session.peer_typing_until_mono = 0.0
@@ -1557,7 +1751,33 @@ class ChatManager:
                 "last_progress_mono": time.monotonic(),
             }
             sid = session.session_id
+            peer_id = session.peer_id
+            open_to_all = self._open_to_all
         self._fire("_on_message", sid, entry.to_dict())
+        if not open_to_all:
+            # The user answers this one: the offer stays at `await_accept`
+            # until `accept_file` or `decline_file` is called for it, and the
+            # `_on_message` above is what raises the prompt.
+            self._fire("_on_sessions_changed")
+            return True
+        # No user stands between the offer and the bytes: start receiving at
+        # once, which also answers the sender's chat_file_accept in one round
+        # trip.  Doing it outside the lock keeps the callbacks accept_file
+        # fires off the chat lock, like every other sweep here.
+        accepted = self.accept_file(sid, transfer_id, self._latest_send_fn.get(peer_id))
+        if accepted is not True:
+            # The receive directory is unavailable or was not writable.  Tell
+            # the sender outright -- otherwise it sits in await_accept for the
+            # whole TRANSFER_ACCEPT_TIMEOUT and reports a stall that is really
+            # a refusal.
+            self._send_frame(
+                {
+                    "msg_type": "chat_file_reject",
+                    "session_id": sid,
+                    "transfer_id": transfer_id,
+                },
+                self._latest_send_fn.get(peer_id),
+            )
         self._fire("_on_sessions_changed")
         return True
 
@@ -1894,7 +2114,7 @@ class ChatManager:
             session = state["session"]
             accept_event = state["accept_event"]
             complete_event = state["complete_event"]
-        if not accept_event.wait(timeout=self.INVITE_ACCEPT_TIMEOUT):
+        if not accept_event.wait(timeout=self.TRANSFER_ACCEPT_TIMEOUT):
             with self._lock:
                 state = self._sends.pop(transfer_id, None)
                 if state is None or state["entry"].status != "await_accept":
@@ -2078,7 +2298,7 @@ class ChatManager:
         self._fire("_on_sessions_changed")
 
     def _heartbeat_loop(self) -> None:
-        """Ping active sessions and expire stale pending ones."""
+        """Ping active sessions and expire stale ones."""
         while not self._heartbeat_stop.wait(timeout=self.PING_INTERVAL / 2):
             now = time.monotonic()
             fired: list[tuple[str, dict]] = []
@@ -2091,14 +2311,22 @@ class ChatManager:
                     # Reap long-dead sessions so the map cannot grow without
                     # bound over a multi-day uptime.
                     if (
-                        session.status in ("closed", "declined_remote")
+                        session.status == "closed"
                         and time.time() - session.last_activity_ts > 3600.0
                     ):
                         self._sessions.pop(session.peer_id, None)
                         self._session_by_sid.pop(session.session_id, None)
                         self._cleanup_rate_buckets_locked(session.peer_id, session.session_id)
+                        # `get_sessions` still hands closed rows out, so a row
+                        # that is dropped here has to be announced or the list
+                        # keeps showing a conversation that no longer exists.
+                        # Queued, not fired: the fire below is outside the lock.
+                        reap_sessions_changed = True
                         continue
                     if session.status in ("inviting", "invited"):
+                        # Waiting on an answer that never came.  Only reachable
+                        # while open_to_all is off -- the default mode moves a
+                        # session out of these two states as it creates it.
                         if now - session.last_seen_mono > self.INVITE_ACCEPT_TIMEOUT:
                             self._drop_session_locked(session, file_done_fired)
                             # Fire below the lock like every other sweep --
@@ -2144,15 +2372,15 @@ class ChatManager:
                             {"msg_type": "chat_ping", "session_id": session.session_id},
                             self._latest_send_fn.get(session.peer_id),
                         )
-                # Both sweepers only mutate state under the lock and return
-                # the callbacks to fire — the actual fires happen BELOW so a
-                # slow WS/UI callback can never freeze the chat lock.
+                # The sweepers only mutate state under the lock and return the
+                # callbacks to fire — the actual fires happen BELOW so a slow
+                # WS/UI callback can never freeze the chat lock.
                 # (.extend, not reassignment: the offline/reap branches above
                 # already queued their own _on_file_done tuples.)
-                recv_done_fired, recv_sessions_changed = self._expire_stale_receives(
-                    defer_fire=True,
-                )
                 file_done_fired.extend(self._expire_stale_transfers(fired))
+                recv_done_fired, recv_sessions_changed = self._expire_stale_receives(
+                    defer_fire=True
+                )
             for sid, entry_dict in fired:
                 self._fire("_on_message", sid, entry_dict)
             for sid, tid, status in file_done_fired:
@@ -2165,9 +2393,10 @@ class ChatManager:
     def _expire_stale_receives(self, defer_fire: bool = False) -> tuple[list, bool]:
         """Drop incoming file offers the user never answered (lock held).
 
-        Without this, a few ignored offers would permanently pin the
-        per-session incoming-file cap, and an accepted-but-silent sender
-        could leak an open temp handle for the life of the session.
+        Only ever finds anything while ``open_to_all`` is off -- in the default
+        mode an offer is taken on arrival and is past ``await_accept`` before
+        the next sweep.  Without this, a few ignored offers would permanently
+        pin the per-session incoming-file cap.
 
         Returns ``(done_fired, sessions_changed)`` where *done_fired* holds
         ``(session_id, transfer_id, status)`` tuples for ``_on_file_done``.

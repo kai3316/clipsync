@@ -96,7 +96,10 @@ class PhonePush:
     # ---------------------------------------------------------------- chat
 
     def _chat_sessions(self, _data):
-        self._ws.broadcast_chat_sessions(self._runtime.chat_sessions().get("sessions") or [])
+        state = self._runtime.chat_sessions()
+        self._ws.broadcast_chat_sessions(
+            state.get("sessions") or [], state.get("open_to_all")
+        )
 
     def _chat_message(self, data):
         self._ws.broadcast_chat_message(

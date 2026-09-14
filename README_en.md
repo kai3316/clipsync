@@ -152,10 +152,11 @@ When the two machines are not on the same network (office ↔ home):
 ### Nearby chat
 
 - **No pairing needed** — talk to a device that has been discovered on the same LAN but not paired
-- **Strict mutual consent** — the other side must explicitly accept the invitation; nothing is revealed before that
-- Unpaired devices show a short certificate fingerprint to compare out of band; paired ones accept automatically
+- **Delivered straight through, no dialog** — every device on the LAN counts as trusted, and one that knows your pairing code more so: a session is live as soon as it opens and a file goes to the receive directory without a per-file prompt
+- The trade-off is that the peer's device name and short fingerprint arrive with the invitation (they used to wait for you to accept): compare the fingerprint out of band when you need to be sure who it is
+- **To ask for approval again** — Settings → LAN discovery → turn off "Anyone nearby can send messages and files". Every conversation and every file then waits for your Accept, and the peer's short fingerprint arrives ahead of the content so you can check it
 - Text and files both travel over the chunked transfer channel, reconnecting after a drop
-- Invitations, messages and files are all rate- and concurrency-limited; file names are sanitised and path traversal is refused
+- What arrives lands only in the receive directory: file names are sanitised, path traversal is refused, and size, rate and concurrency caps apply — on a network you do not control (public Wi-Fi, say) those caps are the whole of the defence
 
 ### AI config sync
 
@@ -319,6 +320,7 @@ Each device generates an Ed25519 key pair on first launch, and the public key is
 ```bash
 python -m pytest tests -q          # Python tests
 python -m ruff check .             # Python lint
+npm run test:web                   # frontend tests for the previous web panel (phone companion)
 
 cd desktop
 npm run build                      # typecheck + frontend build

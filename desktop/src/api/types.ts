@@ -271,6 +271,10 @@ export interface ChatEntry {
 export interface ChatSessionsPage {
   sessions: ChatSession[];
   muted?: string[];
+  // Whether nearby devices may send without asking.  An entry sits at
+  // `await_accept` for an instant in both modes, so this is what says whether
+  // the Accept button under it is one the user is actually expected to press.
+  open_to_all?: boolean;
 }
 
 export interface ChatMessagesPage {

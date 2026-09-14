@@ -32,8 +32,11 @@ class WebSocket:
     def broadcast_transfer_complete(self, transfer_id, success, cancelled=False):
         self.broadcast("transfer_complete", {"id": transfer_id, "success": success})
 
-    def broadcast_chat_sessions(self, sessions=None):
-        self.broadcast("chat_sessions", {"sessions": sessions or []})
+    def broadcast_chat_sessions(self, sessions=None, open_to_all=None):
+        payload = {"sessions": sessions or []}
+        if open_to_all is not None:
+            payload["open_to_all"] = bool(open_to_all)
+        self.broadcast("chat_sessions", payload)
 
     def broadcast_chat_message(self, session_id, entry):
         self.broadcast("chat_message", {"session_id": session_id, "entry": entry})
@@ -66,7 +69,11 @@ class WebSocket:
 def rig():
     ws = WebSocket()
     runtime = SimpleNamespace(
-        chat_sessions=lambda: {"sessions": [{"peer_id": "peer"}], "muted": []},
+        chat_sessions=lambda: {
+            "sessions": [{"peer_id": "peer"}],
+            "muted": [],
+            "open_to_all": True,
+        },
         current_relay_broker=lambda: "wss://broker:8884/mqtt",
     )
     journal = EventJournal()
@@ -107,7 +114,12 @@ def test_a_session_change_pushes_the_whole_list():
     r = rig()
     r.publish("chat.sessions.changed", {})
 
-    assert r.messages == [("chat_sessions", {"sessions": [{"peer_id": "peer"}]})]
+    # `open_to_all` rides along with the list: the phone renders Accept/Decline
+    # under an offered file only when the user asked to approve each one, and
+    # the row looks the same either way.
+    assert r.messages == [
+        ("chat_sessions", {"sessions": [{"peer_id": "peer"}], "open_to_all": True})
+    ]
 
 
 def test_the_relay_badge_carries_the_broker_it_landed_on():

@@ -59,6 +59,8 @@ const devices = ref<Device[]>([]);
 const sessions = ref<ChatSession[]>([]);
 const messages = ref<ChatEntry[]>([]);
 const muted = ref<string[]>([]);
+/** Whether nearby devices may send without asking — see `ChatSessionsPage`. */
+const openToAll = ref(true);
 const selectedId = ref("");
 const draft = ref("");
 const busy = ref(false);
@@ -127,6 +129,7 @@ async function refresh() {
     devices.value = deviceResult.devices || [];
     sessions.value = result.sessions || [];
     muted.value = result.muted || [];
+    openToAll.value = result.open_to_all !== false;
     if (!selectedId.value && sessions.value.length) await select(sessions.value[0]);
     if (selectedId.value) await load(selectedId.value);
     error.value = "";
@@ -268,6 +271,7 @@ async function invite(session: ChatSession) {
   catch (reason: any) { error.value = reason?.message || t("发送邀请失败"); }
   finally { busy.value = false; }
 }
+/** Answer an invitation this user was asked to decide on. */
 async function answer(session: ChatSession, accepted: boolean) {
   busy.value = true;
   try {
@@ -470,8 +474,8 @@ onUnmounted(() => { if (timer) clearInterval(timer); if (typingTimer) clearTimeo
             <div v-if="entry.kind === 'file' && entry.transfer_id" class="file-actions">
               <button v-if="!entry.outgoing && ['done','completed','success'].includes(entry.status) && entry.saved_path" :disabled="busy" @click="openFile(entry)">{{ t("打开") }}</button>
               <button v-if="!entry.outgoing && ['done','completed','success'].includes(entry.status) && entry.saved_path" :disabled="busy" @click="revealFile(entry)">{{ t("打开所在文件夹") }}</button>
-              <button v-if="!entry.outgoing && ['pending','await_accept'].includes(entry.status)" :disabled="busy" @click="fileAction(entry, 'accept')"><Check :size="14" />{{ t("接受") }}</button>
-              <button v-if="!entry.outgoing && ['pending','await_accept'].includes(entry.status)" :disabled="busy" @click="fileAction(entry, 'decline')"><X :size="14" />{{ t("拒绝") }}</button>
+              <button v-if="!openToAll && !entry.outgoing && ['pending','await_accept'].includes(entry.status)" :disabled="busy" @click="fileAction(entry, 'accept')"><Check :size="14" />{{ t("接受") }}</button>
+              <button v-if="!openToAll && !entry.outgoing && ['pending','await_accept'].includes(entry.status)" :disabled="busy" @click="fileAction(entry, 'decline')"><X :size="14" />{{ t("拒绝") }}</button>
               <button v-if="entry.outgoing && ['pending','sending','await_accept'].includes(entry.status)" :disabled="busy" @click="fileAction(entry, 'cancel')"><X :size="14" />{{ t("取消") }}</button>
             </div>
             <span v-if="entry.kind === 'text' && entry.outgoing && entry.status === 'failed'" class="chat-undelivered">{{ t("未送达") }}</span>

@@ -249,7 +249,13 @@ def test_chat_devices_matches_desktop_contract(rig):
     assert runtime.chat_devices()["devices"] == runtime.devices()["items"]
 
 
-def test_chat_invitation_uses_certificate_fingerprint_and_consent(rig):
+def test_chat_invitation_takes_the_fingerprint_from_the_frame(rig):
+    """Direct send: an invite opens the session, and it is the frame's own name.
+
+    The short fingerprint travels with the invitation because nothing stops to
+    ask -- there is no accept step left to carry it, so the peer's device name
+    and fingerprint arrive with the session rather than after it.
+    """
     runtime, pairing, transport, *_ = rig
     transport.connected.add("remote")
     runtime._receive(frame(
@@ -257,9 +263,8 @@ def test_chat_invitation_uses_certificate_fingerprint_and_consent(rig):
         from_name="Remote", fingerprint_short="FORGED",
     ), "remote")
     session = runtime.chat_sessions()["sessions"][0]
-    assert session["status"] == "invited"
+    assert session["status"] == "active"
     assert session["fingerprint_short"] == "FORGED"
-    assert runtime.chat_action("accept", session["session_id"])
     assert runtime.chat_action("send", session["session_id"], "Hello")
     assert any(message.msg_type == "chat_text" for _, message in transport.sent)
 
@@ -349,7 +354,7 @@ def test_chat_invite_dials_an_idle_peer_before_inviting(rig):
 
     assert transport.dials and session_id
     session = runtime.chat_sessions()["sessions"][0]
-    assert session["status"] == "inviting"
+    assert session["status"] == "active"
     # The invite itself then rides the freshly dialed link.
     assert [message.msg_type for _, message in transport.sent] == ["chat_invite"]
 
@@ -361,8 +366,8 @@ def test_a_chat_dial_does_not_offer_to_pair_but_an_ordinary_one_does(rig):
     paired with, and the ordinary dial offers the shared pairing code to exactly
     those — which is how two machines here come to trust each other.  Clicking a
     device in the chat list used to take that path, so a code appeared on both
-    screens for a consent neither side had given; chat has its own invite and
-    fingerprint consent instead.
+    screens for a consent neither side had given; chat has its own invite
+    instead, and it carries the peer's short fingerprint with it.
     """
     runtime, pairing, transport, *_ = rig
     pairing.add_peer("remote", "Remote", pairing.get_peer_certificate("remote"), paired=True)
@@ -1138,6 +1143,34 @@ def test_apply_settings_clears_a_pending_timed_pause(rig):
     runtime.config.timed_pause_until = time.time() + 600
     runtime.apply_settings({"device_name": "Renamed"})
     assert runtime.config.timed_pause_until > 0.0
+
+
+def test_the_approval_switch_reaches_the_manager_and_the_readout(rig):
+    """The switch is what tells a front end whether an Accept button is real.
+
+    A front end cannot read it off the session rows: an offered file sits at
+    ``await_accept`` for an instant in both modes, so a UI that went by the
+    status alone would flash buttons whose click answers "send failed".  The
+    flag therefore has to travel with the session list, and it has to reach the
+    running manager the moment the switch moves.
+    """
+    runtime, _, transport, *_ = rig
+    transport.connected.add("remote")
+    assert runtime.chat_sessions()["open_to_all"] is True
+
+    runtime.config.chat_open_to_all = False
+    runtime.apply_settings({"chat_open_to_all": False})
+
+    assert runtime.chat.open_to_all is False
+    assert runtime.chat_sessions()["open_to_all"] is False
+
+    # And the invitation that follows waits for this user instead of opening.
+    runtime._receive(invite_frame(), "remote")
+    assert runtime.chat_sessions()["sessions"][0]["status"] == "invited"
+
+    runtime.config.chat_open_to_all = True
+    runtime.apply_settings({"chat_open_to_all": True})
+    assert runtime.chat_sessions()["open_to_all"] is True
 
 
 def test_receive_ack_only_after_success_and_source_bound_to_connection(rig):
@@ -2269,12 +2302,12 @@ def test_a_chat_invite_drops_the_pending_pairing_card(rig):
 
     runtime._receive(invite_frame(), "remote")
 
-    # The consent-gated chat is the only thing the peer asked for: no pairing
-    # prompt is left behind, but the invite is still there to answer.
+    # The chat is the only thing the peer asked for: no pairing prompt is left
+    # behind, and the conversation is already open.
     assert runtime.pending_pairings() == []
     row = next(item for item in runtime.devices()["items"] if item["id"] == "remote")
     assert row["pairing_code"] == "" and not row["paired"]
-    assert runtime.chat_sessions()["sessions"][0]["status"] == "invited"
+    assert runtime.chat_sessions()["sessions"][0]["status"] == "active"
 
 
 def test_a_pairing_request_after_a_chat_invite_can_notify_again(rig):
@@ -2292,7 +2325,7 @@ def test_a_pairing_request_after_a_chat_invite_can_notify_again(rig):
     # request must notify again — the code is derived from both fingerprints,
     # so the forgotten de-duplication is what keeps it from being swallowed.
     session_id = runtime.chat_sessions()["sessions"][0]["session_id"]
-    assert runtime.chat_action("decline", session_id)
+    assert runtime.chat_action("close", session_id)
     pairing.generate_shared_pairing_code("remote")
     runtime._refresh()
     runtime._refresh()

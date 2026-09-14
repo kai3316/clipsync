@@ -1378,5 +1378,7 @@
   "transfer.retry_failed": "Failed to resend the file",
   "transfer.no_path": "No file path recorded for this entry",
   "transfer.history_removed": "Removed from history",
-  "transfer.history_remove_failed": "Could not remove from history"
+  "transfer.history_remove_failed": "Could not remove from history",
+  "settings_window.chat_open_to_all": "Anyone nearby can send messages and files",
+  "settings_window.chat_open_to_all_desc": "Turn this off and a nearby device has to be allowed by you before its message or file arrives."
 }

@@ -347,6 +347,18 @@ class LanRuntime:
                 },
             )
         )
+        # Only ever raised while `chat_open_to_all` is off: both are what turns
+        # "somebody wants to talk to you" into a prompt the user can answer.
+        self.chat.set_on_incoming_invite(
+            lambda invite: self._publish("chat.invite", invite)
+        )
+        self.chat.set_on_invite_response(
+            lambda sid, pid, accepted: self._publish(
+                "chat.invite.response",
+                {"session_id": sid, "peer_id": pid, "accepted": accepted},
+            )
+        )
+        self.chat.set_open_to_all(getattr(config, "chat_open_to_all", True))
         self.transport = (
             transport
             if transport is not None
@@ -1053,7 +1065,15 @@ class LanRuntime:
         return {"devices": self.devices()["items"]}
 
     def chat_sessions(self):
-        return {"sessions": self.chat.get_sessions(), "muted": sorted(self._chat_muted)}
+        # `open_to_all` rides along so a front end can tell an offer that is
+        # waiting on this user from one that was taken on arrival: an entry
+        # at `await_accept` exists for an instant in both modes, and only the
+        # setting says whether the prompt that follows it is real.
+        return {
+            "sessions": self.chat.get_sessions(),
+            "muted": sorted(self._chat_muted),
+            "open_to_all": self.chat.open_to_all,
+        }
 
     def set_chat_muted(self, peer_id, muted):
         def run():
@@ -1236,7 +1256,7 @@ class LanRuntime:
             if action == "accept":
                 return self.chat.accept_invitation(session_id, send_fn)
             if action == "decline":
-                return self.chat.decline_invitation(session_id, send_fn)
+                return self.chat.decline_invitation(session_id, send_fn, text)
             if action == "read":
                 self.chat.mark_session_read(session_id)
                 return True
@@ -2070,12 +2090,12 @@ class LanRuntime:
         not look like a pairing request — can suppress them, exactly like the
         legacy debounce.
         """
-        # Only a live conversation suppresses the notice: a closed or declined
-        # session must not silence this device's pairing notices forever.
+        # Only a live conversation suppresses the notice: a closed session
+        # must not silence this device's pairing notices forever.
         chat_peers = {
             session["peer_id"]
             for session in self.chat.get_sessions()
-            if session["status"] in ("inviting", "invited", "active")
+            if session["status"] == "active"
         }
         now = time.monotonic()
         events = []
@@ -2952,6 +2972,11 @@ class LanRuntime:
             self.sync.set_enabled(bool(self.config.sync_enabled))
         if "filter_enabled_categories" in updated:
             self.content_filter.enabled_categories = self.config.filter_enabled_categories
+        if "chat_open_to_all" in updated:
+            # Takes effect on the next invitation or file offer.  A session
+            # already live was admitted under the rule in force when it
+            # opened, and is deliberately left alone.
+            self.chat.set_open_to_all(bool(self.config.chat_open_to_all))
         self._publish("settings.live_applied", {"fields": list(updated)})
 
     def apply_encryption(self, encryption) -> None:
