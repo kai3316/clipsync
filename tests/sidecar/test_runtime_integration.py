@@ -60,7 +60,14 @@ class PeerProcess:
         self.closed = False
         try:
             frame = self.frames.get(timeout=15)
-            assert frame is not None and frame["type"] == "ready"
+            # A process that died before its handshake says so here, and the
+            # reason is on the stderr this class already keeps: without it the
+            # failure is a bare "None is not None" and the cause has to be
+            # re-derived from the source every time.
+            assert frame is not None and frame["type"] == "ready", (
+                f"the sidecar exited before it was ready\n"
+                f"  sidecar log tail:\n{self.log_tail()}"
+            )
         except BaseException:
             self.process.kill()
             self.process.wait(timeout=5)
@@ -167,9 +174,22 @@ def configure_pair(tmp_path, monkeypatch, encrypted, password):
         for name in ("left", "right"):
             listener = sockets.enter_context(socket.socket())
             listener.bind(("127.0.0.1", 0))
+            # The phone companion binds a port of its own, and it is on by
+            # default (``Config.web_enabled``).  Two sidecars on one machine
+            # would otherwise both want the default 19991, and whether that
+            # collides depends on the platform: Windows lets a second socket
+            # take a port that is already being listened on, so the clash is
+            # invisible there, while on macOS and Linux the second bind is
+            # EADDRINUSE and that process answers every command with
+            # COMPANION_START_FAILED.  Each peer gets its own, the way its sync
+            # port above already does -- two *machines* would each have one,
+            # which is what these two stand in for.
+            companion = sockets.enter_context(socket.socket())
+            companion.bind(("127.0.0.1", 0))
             cfg = Config(
                 device_id=name, device_name=name,
-                port=listener.getsockname()[1], encryption_enabled=encrypted,
+                port=listener.getsockname()[1],
+                web_port=companion.getsockname()[1], encryption_enabled=encrypted,
                 source_tracking_enabled=False, retry_capture_enabled=False,
                 sync_debounce=0.01, filter_enabled_categories=[],
                 file_receive_dir=str(tmp_path / name / "received"),
