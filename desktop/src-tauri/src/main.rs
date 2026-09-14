@@ -2054,7 +2054,20 @@ fn main() {
             // exit handling can run, including a launch failure, which is cached
             // so no command respawns it until the window asks for a retry.
             if let Err(error) = tauri::async_runtime::block_on(host.bridge()) {
-                emit_sidecar_state(app.handle(), json!({"state":"failed","error":error.code}));
+                // The message travels with the code. Emitting the code alone
+                // left the renderer to fall back to a generic "background
+                // process is unavailable", throwing away the one part that
+                // says *what* failed -- the file that could not be launched
+                // being the case worth knowing.
+                emit_sidecar_state(
+                    app.handle(),
+                    json!({
+                        "state":"failed",
+                        "error": error.code,
+                        "message": error.message,
+                        "retryable": error.retryable,
+                    }),
+                );
             }
             app.manage(host);
             // Built in the source language; `tray::refresh` below relabels it

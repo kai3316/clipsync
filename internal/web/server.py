@@ -718,24 +718,20 @@ class WebServer:
     # ── Firewall management ──────────────────────────────────────
 
     @staticmethod
-    def check_firewall_rule(ports: int | list[int] | None = None) -> tuple[bool, str]:
-        """Check that the ClipSync rule allows all the given ports.
+    def _firewall_rule_ports_netsh() -> set[str] | None:
+        """Read the rule's ports with netsh, or None when it cannot be read.
 
-        `ports` may be a single int or a list of ints. The app needs both the
-        TCP sync port and the web companion port open, and a Windows rule's
-        LocalPort is a comma-separated list — so every requested port must be
-        present. Returns (True, "OK") when all ports are allowed.
+        netsh prints its field *labels* in the OS display language — on a
+        Chinese Windows the line is ``本地端口: 19990,19991`` — so this fast
+        path only works where the system language is English; see
+        ``_firewall_rule_ports`` for the read that does not care.  None means
+        "could not read the answer", which is not the same as "no ports" and
+        must not be reported as a blockage.
         """
-        if sys.platform != "win32":
-            return (True, "")
-        if isinstance(ports, int):
-            ports = [ports]
-        ports = [str(p) for p in (ports or [])]
         import re
+        import subprocess
 
         try:
-            import subprocess
-
             check = subprocess.run(
                 [
                     "netsh",
@@ -751,18 +747,128 @@ class WebServer:
                 creationflags=subprocess.CREATE_NO_WINDOW,
                 timeout=10,
             )
-            out = decode_console_output(check.stdout)
-            if check.returncode != 0 or WebServer.FW_RULE_NAME not in out:
-                return (False, "Blocked")
-            m = re.search(r"LocalPort:\s+(\S+)", out)
-            present = set(m.group(1).split(",")) if m else set()
-            missing = [p for p in ports if p not in present]
-            if missing:
-                actual = m.group(1) if m else "none"
-                return (False, f"Wrong port (got {actual}, needs {','.join(missing)})")
-            return (True, "OK")
         except Exception:
+            return None
+        out = decode_console_output(check.stdout)
+        if check.returncode != 0 or WebServer.FW_RULE_NAME not in out:
+            # Either there is no such rule, or the output is in a language
+            # this cannot read — netsh says "no rules match" in that language
+            # too, so the two are not separable here.  Either way the answer
+            # is not available from this path.
+            return None
+        # Every match, not the first: repeated repairs used to be able to
+        # leave more than one rule under this name, and taking the first could
+        # answer for a stale one.
+        present: set[str] = set()
+        for value in re.findall(r"LocalPort:\s+(\S+)", out):
+            present.update(p for p in value.split(",") if p)
+        return present or None
+
+    @staticmethod
+    def _firewall_rule_ports_cim() -> set[str] | None:
+        """Read the rule's ports through PowerShell's firewall cmdlets.
+
+        The cmdlets hand back objects, so no label is involved and the answer
+        is the same in every language.  This is the slow path — starting
+        PowerShell and loading the NetSecurity module costs a couple of
+        seconds, against a fraction of one for netsh — so it is only reached
+        where netsh cannot be understood at all.
+        """
+        import subprocess
+
+        # Doubled quotes are how a single quote is escaped inside a PowerShell
+        # single-quoted string; the name is a constant, but this keeps the
+        # command well-formed if it ever stops being one.
+        name = WebServer.FW_RULE_NAME.replace("'", "''")
+        script = (
+            # A sentinel, because "no output" is ambiguous from here: it is
+            # what both "no such rule" and "the cmdlet never ran" look like.
+            "Write-Output 'CLIPSYNC-RULE'"
+            f";foreach($r in @(Get-NetFirewallRule -DisplayName '{name}'"
+            " -ErrorAction SilentlyContinue)){"
+            "$p=$r|Get-NetFirewallPortFilter;"
+            "Write-Output ($p.LocalPort -join ',')}"
+        )
+        try:
+            result = subprocess.run(
+                [
+                    "powershell.exe",
+                    # No -ExecutionPolicy: that switch governs script *files*,
+                    # and this is -Command, so there is nothing to relax.
+                    # -NoProfile keeps the user's profile out of the timing
+                    # and out of the output.
+                    "-NoProfile",
+                    "-NonInteractive",
+                    "-Command",
+                    script,
+                ],
+                capture_output=True,
+                creationflags=subprocess.CREATE_NO_WINDOW,
+                timeout=30,
+            )
+        except Exception:
+            return None
+        lines = [line.strip() for line in decode_console_output(result.stdout).splitlines()]
+        if "CLIPSYNC-RULE" not in lines:
+            return None
+        ports: set[str] = set()
+        for line in lines:
+            if not line or line == "CLIPSYNC-RULE":
+                continue
+            ports.update(p for p in line.split(",") if p)
+        return ports
+
+    @staticmethod
+    def _firewall_rule_ports() -> set[str] | None:
+        """The ports the ClipSync inbound rule allows, or None if unreadable.
+
+        A rule that allowed both ports used to be reported as allowing none:
+        the check matched the literal label ``LocalPort:``, and netsh prints
+        that label in the OS display language, so on a Chinese Windows the
+        line read ``本地端口:`` and nothing matched.  Diagnostics then said
+        "wrong port", "Request permission" deleted the rule and re-created it
+        identically, and the warning could never clear — the rule was correct
+        before the repair and correct after it.
+
+        Returns the union of the ports the rules of that name list, with
+        ``{"Any"}`` for a rule that allows everything and ``set()`` when no
+        such rule exists.  ``None`` means the question could not be answered,
+        which is not the same answer as "no".
+        """
+        ports = WebServer._firewall_rule_ports_netsh()
+        if ports is not None:
+            return ports
+        return WebServer._firewall_rule_ports_cim()
+
+    @staticmethod
+    def check_firewall_rule(ports: int | list[int] | None = None) -> tuple[bool, str]:
+        """Check that the ClipSync rule allows all the given ports.
+
+        `ports` may be a single int or a list of ints. The app needs both the
+        TCP sync port and the web companion port open, and a Windows rule's
+        LocalPort is a comma-separated list — so every requested port must be
+        present. Returns (True, "OK") when all ports are allowed.
+        """
+        if sys.platform != "win32":
+            return (True, "")
+        if isinstance(ports, int):
+            ports = [ports]
+        ports = [str(p) for p in (ports or [])]
+        allowed = WebServer._firewall_rule_ports()
+        if allowed is None:
+            # Rules unreadable: name that as the problem.  Claiming a wrong
+            # port here is what made the warning permanent.
             return (False, "Unknown")
+        if not allowed:
+            return (False, "Blocked")
+        if "Any" in allowed:
+            # A rule open to every port covers the ones we need.
+            return (True, "OK")
+        missing = [p for p in ports if p not in allowed]
+        if missing:
+            actual = ",".join(sorted(allowed, key=lambda p: (not p.isdigit(), int(p or 0))))
+            return (False, f"Wrong port (got {actual}, needs {','.join(missing)})")
+        return (True, "OK")
 
     @staticmethod
     def _open_firewall(port: int, web_port: int | None = None) -> bool:
@@ -781,8 +887,13 @@ class WebServer:
         ok, detail = WebServer.check_firewall_rule(ports)
         if ok:
             return True
-        if detail.startswith("Wrong port"):
-            logger.info("Deleting stale firewall rule with wrong port")
+        if detail.startswith("Wrong port") or detail == "Unknown":
+            # Delete before adding: netsh will happily create a second rule
+            # under the same name, so re-adding over an existing one piles up
+            # duplicates.  "Unknown" is included because the rule may well be
+            # there and merely unreadable — the replace is correct either way,
+            # and leaving a stale rule beside the new one is not.
+            logger.info("Replacing the firewall rule (%s)", detail)
             try:  # noqa: SIM105
                 subprocess.run(
                     [

@@ -20,6 +20,7 @@ import json
 import os
 import socket
 import struct
+import subprocess
 import sys
 import threading
 import time
@@ -646,6 +647,196 @@ def test_decode_console_output_handles_both_codepages():
     assert decode_console_output(None) == ""
     assert decode_console_output("already text") == "already text"
     assert decode_console_output(b"\xff\xfe\x00garbage")
+
+
+# ── The firewall rule must be read in any language netsh prints in ─────
+#
+# netsh localizes its field LABELS.  Reading the rule by matching the literal
+# `LocalPort:` therefore worked only on an English Windows: on a Chinese one
+# the line is `本地端口:`, nothing matched, and a rule that allowed both ports
+# was reported as allowing none.  The diagnostics said "wrong port", the
+# repair deleted the rule and re-created it identically, and the warning could
+# never clear -- the rule was correct before the repair and after it.
+
+# A correct rule as netsh prints it on a Chinese Windows, with the port line
+# this used to look for in English.
+CN_RULE = (
+    "\r\n规则名称:                             ClipSync Web Companion\r\n"
+    "----------------------------------------------------------------------\r\n"
+    "已启用:                               是\r\n"
+    "方向:                                 入\r\n"
+    "协议:                                 TCP\r\n"
+    "本地端口:                             19990,19991\r\n"
+    "操作:                                 允许\r\n"
+    "Ok.\r\n"
+)
+
+# The same rule on an English Windows.
+EN_RULE = (
+    "\r\nRule Name:                            ClipSync Web Companion\r\n"
+    "----------------------------------------------------------------------\r\n"
+    "Enabled:                              Yes\r\n"
+    "Direction:                            In\r\n"
+    "Protocol:                             TCP\r\n"
+    "LocalPort:                            19990,19991\r\n"
+    "Action:                               Allow\r\n"
+    "Ok.\r\n"
+)
+
+# What the PowerShell fallback prints: a sentinel, then one line per rule.
+CIM_PORTS = "CLIPSYNC-RULE\r\n19990,19991\r\n"
+# The sentinel with no rules under it -- the rule is genuinely absent.
+CIM_NONE = "CLIPSYNC-RULE\r\n"
+# netsh's answer when the rule is gone.
+NO_RULES = "No rules match the specified criteria.\r\n"
+
+
+@pytest.fixture
+def on_windows(monkeypatch):
+    """The rule reader is a Windows-only path; the suite runs on every OS."""
+    monkeypatch.setattr(sys, "platform", "win32")
+
+
+@pytest.fixture
+def off_windows(monkeypatch):
+    """The complement, pinned rather than taken from the host."""
+    monkeypatch.setattr(sys, "platform", "darwin")
+
+
+def _wire(value):
+    """The bytes the OS hands back, from what a test wrote.
+
+    These fixtures read as the text a console would show, which is the whole
+    point of them; encoding is what the pipe does, so it happens here.
+    """
+    return value.encode("utf-8") if isinstance(value, str) else value
+
+
+def _fake_commands(monkeypatch, netsh, powershell):
+    """Answer both probes out of the given output; return the programs asked.
+
+    Passing None for either makes that program fail to start, which is how a
+    test can assert a probe was never reached.
+    """
+    asked = []
+
+    def run(argv, **kwargs):
+        asked.append(argv[0])
+        if argv[0] == "netsh":
+            if netsh is None:
+                raise FileNotFoundError("netsh")
+            return SimpleNamespace(returncode=0, stdout=_wire(netsh), stderr=b"")
+        if argv[0] == "powershell.exe":
+            if powershell is None:
+                raise FileNotFoundError("powershell.exe")
+            return SimpleNamespace(returncode=0, stdout=_wire(powershell), stderr=b"")
+        raise AssertionError(f"unexpected program: {argv[0]}")
+
+    monkeypatch.setattr(subprocess, "run", run)
+    return asked
+
+
+class TestTheFirewallRuleIsReadInAnyLanguage:
+    def test_a_localized_rule_that_allows_the_ports_is_read_as_allowing_them(
+        self, monkeypatch, on_windows
+    ):
+        asked = _fake_commands(monkeypatch, netsh=CN_RULE, powershell=CIM_PORTS)
+        assert web_server.WebServer.check_firewall_rule([19990, 19991]) == (True, "OK")
+        # netsh could not be understood, so the cmdlet answered instead.
+        assert asked == ["netsh", "powershell.exe"]
+
+    def test_an_english_rule_is_read_without_starting_powershell(self, monkeypatch, on_windows):
+        # The fast path stays fast: loading the NetSecurity module costs a
+        # couple of seconds, and ordinary diagnostics must not pay it.
+        asked = _fake_commands(monkeypatch, netsh=EN_RULE, powershell=None)
+        assert web_server.WebServer.check_firewall_rule([19990, 19991]) == (True, "OK")
+        assert asked == ["netsh"]
+
+    def test_every_rule_of_that_name_is_read_and_not_just_the_first(
+        self, monkeypatch, on_windows
+    ):
+        # Repairs could leave more than one rule under this name, and taking
+        # whichever port line came first let a stale rule answer for the live
+        # one.
+        stale_then_live = (
+            EN_RULE.replace("19990,19991", "1234")
+            + "\r\nRule Name:                            ClipSync Web Companion\r\n"
+            + "LocalPort:                            19990,19991\r\n"
+        )
+        _fake_commands(monkeypatch, netsh=stale_then_live, powershell=None)
+        assert web_server.WebServer.check_firewall_rule([19990, 19991]) == (True, "OK")
+
+    def test_a_rule_open_to_every_port_covers_the_ones_we_need(self, monkeypatch, on_windows):
+        _fake_commands(monkeypatch, netsh=EN_RULE.replace("19990,19991", "Any"), powershell=None)
+        assert web_server.WebServer.check_firewall_rule([19990, 19991]) == (True, "OK")
+
+    def test_a_rule_missing_a_port_still_says_which_one(self, monkeypatch, on_windows):
+        one_port = EN_RULE.replace("19990,19991", "19990")
+        _fake_commands(monkeypatch, netsh=one_port, powershell=None)
+        ok, detail = web_server.WebServer.check_firewall_rule([19990, 19991])
+        # Names the ports actually allowed and the one that is not -- and the
+        # value is the real list, not the "none" the broken parse produced.
+        assert (ok, detail) == (False, "Wrong port (got 19990, needs 19991)")
+
+    def test_no_rule_at_all_is_reported_as_blocked(self, monkeypatch, on_windows):
+        _fake_commands(monkeypatch, netsh=NO_RULES, powershell=CIM_NONE)
+        assert web_server.WebServer.check_firewall_rule([19990, 19991]) == (False, "Blocked")
+
+    def test_an_unreadable_rule_says_unknown_rather_than_blaming_a_port(
+        self, monkeypatch, on_windows
+    ):
+        # Neither probe could be understood.  Claiming a wrong port here is what
+        # made the warning permanent, so this must not guess: "Unknown" is a
+        # different answer from "no".
+        asked = _fake_commands(monkeypatch, netsh=CN_RULE, powershell="")
+        assert web_server.WebServer.check_firewall_rule([19990, 19991]) == (False, "Unknown")
+        assert asked == ["netsh", "powershell.exe"]
+
+    def test_a_platform_without_the_rule_is_never_asked(self, monkeypatch, off_windows):
+        # Not a Windows path at all: no subprocess may be started.
+        asked = _fake_commands(monkeypatch, netsh=None, powershell=None)
+        assert web_server.WebServer.check_firewall_rule([19990, 19991]) == (True, "")
+        assert asked == []
+
+    @staticmethod
+    def _recording_run(commands, powershell_output, show_output):
+        def run(argv, **kwargs):
+            commands.append(list(argv))
+            if argv[0] == "powershell.exe":
+                return SimpleNamespace(returncode=0, stdout=_wire(powershell_output), stderr=b"")
+            if "show" in argv:
+                return SimpleNamespace(returncode=0, stdout=_wire(show_output), stderr=b"")
+            return SimpleNamespace(returncode=0, stdout=b"Ok.", stderr=b"")
+
+        return run
+
+    def test_repairing_an_unreadable_rule_replaces_it_instead_of_stacking_a_second(
+        self, monkeypatch, on_windows
+    ):
+        # netsh creates a SECOND rule under the same name rather than updating
+        # one, so adding without deleting first leaves duplicates behind on
+        # every repair.  An unreadable rule is now repaired too, so it has to
+        # take the same delete-then-add path the wrong-port case did.
+        commands = []
+        monkeypatch.setattr(
+            subprocess, "run", self._recording_run(commands, "", CN_RULE)
+        )
+        assert web_server.WebServer._open_firewall(19990, 19991) is True
+        assert [argv[3] for argv in commands if argv[0] == "netsh"] == [
+            "show",
+            "delete",
+            "add",
+        ]
+
+    def test_an_already_correct_rule_is_not_repaired(self, monkeypatch, on_windows):
+        # The other half of the same contract: nothing to fix must mean no UAC
+        # prompt, so the repair may not touch a rule that is already right.
+        commands = []
+        monkeypatch.setattr(
+            subprocess, "run", self._recording_run(commands, CIM_PORTS, CN_RULE)
+        )
+        assert web_server.WebServer._open_firewall(19990, 19991) is True
+        assert [argv[3] for argv in commands if argv[0] == "netsh"] == ["show"]
 
 
 # ── Stage 4: web backend hardening ─────────────────────────────────────

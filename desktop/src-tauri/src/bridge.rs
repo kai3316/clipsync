@@ -2,7 +2,8 @@ use crate::error::BridgeError;
 use crate::protocol;
 use serde_json::{json, Value};
 use std::{
-    collections::HashMap,
+    collections::{HashMap, VecDeque},
+    path::PathBuf,
     sync::{Arc, Mutex},
     time::Duration,
 };
@@ -14,7 +15,99 @@ use tokio::{
 };
 
 const MAX_FRAME: usize = 1024 * 1024;
+/// How much of the sidecar's stderr is kept to explain a failure. Bounded
+/// because it is a live process's output and this must not grow with runtime.
+const STDERR_LINES: usize = 40;
+/// One stored line. The last line of a traceback is the exception, and a
+/// `dyld` refusal is a sentence, so this is generous rather than tight.
+const STDERR_LINE_CHARS: usize = 300;
 type Reply = oneshot::Sender<Result<Value, BridgeError>>;
+
+/// The tail of a sidecar's stderr.
+///
+/// Kept because a sidecar that dies before it reports ready otherwise leaves
+/// no account of why anywhere: the app's own log view is an RPC to that same
+/// dead process, so the failure reached the user as "background process is
+/// unavailable" and nothing else.
+#[derive(Default)]
+struct StderrTail(Mutex<VecDeque<String>>);
+
+impl StderrTail {
+    fn note(&self, line: &str) {
+        let line = line.trim();
+        // Blank lines are dropped rather than stored: the buffer is a fixed
+        // number of lines, and a traceback's empty separators would spend
+        // them on nothing.
+        if line.is_empty() {
+            return;
+        }
+        let mut tail = self.0.lock().unwrap();
+        if tail.len() == STDERR_LINES {
+            tail.pop_front();
+        }
+        tail.push_back(line.chars().take(STDERR_LINE_CHARS).collect());
+    }
+
+    fn last(&self) -> Option<String> {
+        self.0.lock().unwrap().back().cloned()
+    }
+}
+
+/// The program a command will run. `as_std_mut` because tokio's `Command`
+/// exposes no accessor of its own.
+fn program_of(command: &mut tokio::process::Command) -> PathBuf {
+    PathBuf::from(command.as_std_mut().get_program())
+}
+
+/// The failure to report when the sidecar could not be launched at all.
+///
+/// Names the file it tried.  In a packaged build the sidecar is one specific
+/// path next to the main executable, so the bare sentence leaves a user -- and
+/// a bug report -- unable to tell a file missing from the bundle from one that
+/// is there and will not run; and the OS error that follows says which.
+fn launch_failed(program: &std::path::Path, error: &std::io::Error) -> BridgeError {
+    BridgeError::new(
+        "SIDECAR_START_FAILED",
+        &format!(
+            "Could not launch the Python sidecar ({}): {error}",
+            program.display()
+        ),
+    )
+}
+
+/// Attach the sidecar's own last words to a failure that has no reason of its
+/// own.
+///
+/// A sidecar that dies before reporting ready produced "ClipSync background
+/// process is unavailable" and nothing more, from a build where the one
+/// account of the cause -- its stderr -- was being copied into `io::sink()`.
+/// This is what turns that into something a user can act on or report.  It
+/// goes to the window the error is already drawn in, on the user's own
+/// machine, which is why a diagnosis here is not a disclosure.
+///
+/// Only the two codes that mean "the process itself failed": the rest carry a
+/// reason already, and a refused data directory or a rejected frame has no
+/// business being annotated with unrelated stderr noise.
+fn explain(error: BridgeError, line: Option<String>) -> BridgeError {
+    if error.code != "SIDECAR_UNAVAILABLE" && error.code != "STARTUP_TIMEOUT" {
+        return error;
+    }
+    let Some(line) = line else {
+        return error;
+    };
+    let BridgeError {
+        code,
+        message,
+        retryable,
+    } = error;
+    BridgeError {
+        code,
+        // One line, bounded: this rides in a banner, and a whole traceback
+        // would push the message it is explaining off the end of it.
+        message: format!("{message}: {line}"),
+        retryable,
+    }
+}
 
 fn fail_pending(
     pending: &Mutex<HashMap<String, Reply>>,
@@ -104,6 +197,12 @@ pub struct Bridge {
     session: Mutex<Option<String>>,
     stopping: std::sync::atomic::AtomicBool,
     notifications: tokio::sync::mpsc::Sender<Value>,
+    /// The tail of what the sidecar wrote to stderr, for explaining a failure
+    /// that carries no reason of its own. See `explain`.
+    stderr: StderrTail,
+    /// The task draining stderr, awaited before that tail is read so the last
+    /// thing the sidecar said is not still sitting unread in the pipe.
+    stderr_drain: Mutex<Option<tauri::async_runtime::JoinHandle<()>>>,
 }
 
 struct PendingGuard<'a> {
@@ -171,12 +270,11 @@ impl Bridge {
             .kill_on_drop(true);
         #[cfg(windows)]
         command.creation_flags(0x08000000);
-        let mut child = command.spawn().map_err(|_| {
-            BridgeError::new(
-                "SIDECAR_START_FAILED",
-                "Could not launch the Python sidecar",
-            )
-        })?;
+        // Read the program back before spawning it.
+        let program = program_of(&mut command);
+        let mut child = command
+            .spawn()
+            .map_err(|error| launch_failed(&program, &error))?;
         let input = child.stdin.take().ok_or_else(BridgeError::unavailable)?;
         let output = child.stdout.take().ok_or_else(BridgeError::unavailable)?;
         let stderr = child.stderr.take().ok_or_else(BridgeError::unavailable)?;
@@ -190,6 +288,8 @@ impl Bridge {
             session: Mutex::new(None),
             stopping: std::sync::atomic::AtomicBool::new(false),
             notifications,
+            stderr: StderrTail::default(),
+            stderr_drain: Mutex::new(None),
         });
         let notification_bridge = Arc::downgrade(&bridge);
         let notification_app = app.clone();
@@ -235,12 +335,33 @@ impl Bridge {
                 active.terminate(&app, error).await;
             }
         });
-        // Drain without forwarding raw sensitive diagnostics to the renderer.
-        tauri::async_runtime::spawn(async move {
+        // Keep the tail of stderr rather than discarding it.  When a sidecar
+        // dies before it reports ready this is the only account of why that
+        // exists anywhere: the app's own log view is an RPC to that same dead
+        // process, so a failure of this shape used to reach the user as
+        // "background process is unavailable" and nothing else.
+        //
+        // Read as bytes and decoded lossily: `read_line` rejects a line that
+        // is not valid UTF-8, which would end the drain at the first such line
+        // and lose everything after it -- including, on macOS, the `dyld`
+        // failure this exists to catch.
+        let stderr_bridge = Arc::downgrade(&bridge);
+        let drain = tauri::async_runtime::spawn(async move {
             let mut reader = BufReader::new(stderr);
-            let mut sink = tokio::io::sink();
-            let _ = tokio::io::copy(&mut reader, &mut sink).await;
+            let mut buffer = Vec::new();
+            loop {
+                buffer.clear();
+                match reader.read_until(b'\n', &mut buffer).await {
+                    Ok(0) | Err(_) => break,
+                    Ok(_) => {}
+                }
+                let Some(bridge) = stderr_bridge.upgrade() else {
+                    break;
+                };
+                bridge.stderr.note(&String::from_utf8_lossy(&buffer));
+            }
         });
+        *bridge.stderr_drain.lock().unwrap() = Some(drain);
         Ok(bridge)
     }
 
@@ -388,6 +509,17 @@ impl Bridge {
     }
 
     async fn terminate(&self, app: &AppHandle, error: BridgeError) {
+        // Let the stderr drain catch up before reading it.  The child is gone
+        // by the time this runs, but what it wrote is still in the pipe and
+        // the task copying it may not have been scheduled yet, so reading
+        // without waiting is a race that loses exactly the line worth having.
+        // Bounded, because a sidecar that left a grandchild holding the pipe
+        // must not stall the failure the user is waiting on.
+        let drain = self.stderr_drain.lock().unwrap().take();
+        if let Some(drain) = drain {
+            let _ = tokio::time::timeout(Duration::from_secs(2), drain).await;
+        }
+        let error = explain(error, self.stderr.last());
         self.fail(error.clone());
         // The message and the retryable flag travel with the code. A refused
         // data directory is the case that needs them: the sidecar knows which
@@ -549,12 +681,10 @@ pub(crate) async fn recover() -> Result<Value, BridgeError> {
         .kill_on_drop(true);
     #[cfg(windows)]
     command.creation_flags(0x08000000);
-    let mut child = command.spawn().map_err(|_| {
-        BridgeError::new(
-            "SIDECAR_START_FAILED",
-            "Could not launch the Python sidecar",
-        )
-    })?;
+    let program = program_of(&mut command);
+    let mut child = command
+        .spawn()
+        .map_err(|error| launch_failed(&program, &error))?;
     let output = child.stdout.take().ok_or_else(BridgeError::unavailable)?;
     // The frame arrives before the process does any other work, so this bound
     // only covers moving files aside and opening the history database.
@@ -587,6 +717,69 @@ pub(crate) async fn recover() -> Result<Value, BridgeError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_dying_sidecar_explains_itself_with_its_last_line() {
+        // The reported shape: a packaged macOS build spawned the sidecar, the
+        // process died before its ready frame, and the user got a band saying
+        // "background process is unavailable" with no way to find out why.
+        let error = explain(
+            BridgeError::unavailable(),
+            Some("dyld: Library not loaded: @rpath/Python".into()),
+        );
+        assert_eq!(error.code, "SIDECAR_UNAVAILABLE");
+        assert_eq!(
+            error.message,
+            "ClipSync background process is unavailable: \
+             dyld: Library not loaded: @rpath/Python"
+        );
+    }
+
+    #[test]
+    fn a_failure_that_has_its_own_reason_is_left_alone() {
+        // The sidecar naming the application holding its data directory is the
+        // case: asking the user to retry is wrong there, and unrelated stderr
+        // noise appended to the sentence would only muddy it.
+        let error = explain(
+            BridgeError {
+                code: "DATA_IN_USE".into(),
+                message: "Another ClipSync holds this directory".into(),
+                retryable: true,
+            },
+            Some("some unrelated warning".into()),
+        );
+        assert_eq!(error.message, "Another ClipSync holds this directory");
+        // The flag travels with the message, so annotating must not reset it.
+        assert!(error.retryable);
+    }
+
+    #[test]
+    fn a_silent_sidecar_still_reports_its_own_message() {
+        // Nothing to add is not an error, and must not leave a trailing colon.
+        let error = explain(BridgeError::unavailable(), None);
+        assert_eq!(error.message, "ClipSync background process is unavailable");
+    }
+
+    #[test]
+    fn the_kept_tail_is_bounded_and_ignores_blank_lines() {
+        let tail = StderrTail::default();
+        for index in 0..(STDERR_LINES + 10) {
+            tail.note(&format!("line {index}"));
+            tail.note("   ");
+        }
+        // Oldest lines fall off, so what survives is the *end* of the output --
+        // which is where a crash says what happened.
+        assert_eq!(tail.last().unwrap(), format!("line {}", STDERR_LINES + 9));
+        assert_eq!(tail.0.lock().unwrap().len(), STDERR_LINES);
+        assert!(tail.0.lock().unwrap().iter().all(|line| !line.trim().is_empty()));
+    }
+
+    #[test]
+    fn one_enormous_stderr_line_cannot_fill_the_banner() {
+        let tail = StderrTail::default();
+        tail.note(&"x".repeat(STDERR_LINE_CHARS * 4));
+        assert_eq!(tail.last().unwrap().chars().count(), STDERR_LINE_CHARS);
+    }
 
     #[tokio::test]
     async fn terminal_failure_drains_pending_and_preserves_first_error() {
