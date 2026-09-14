@@ -1626,7 +1626,12 @@ class TestRefusalsAreReported:
     def test_an_abandoned_pull_is_reported_when_its_pending_expires(self, tmp_path):
         """The old-peer path: a peer that refuses by staying silent.  The
         pending record expires and the batch must still reach a terminal
-        state instead of showing progress forever."""
+        state instead of showing progress forever.
+
+        Through ``expire_pulls``, which is what the runtime's tick calls.
+        The sweep itself was reachable all along — only from ``pull()`` and
+        ``_preview_wait()``, so nothing ran it while a batch was waiting, and
+        this test passing is what let that go unnoticed."""
         r = _StubMgr(tmp_path, roots=[str(tmp_path / "recv-root")])
         s = _serving_setup(tmp_path)
         _feed(r, s.mgr.build_inv_payload())
@@ -1639,7 +1644,7 @@ class TestRefusalsAreReported:
         with r.mgr._lock:
             for rec in r.mgr._pending.values():
                 rec["ts"] -= aic.PENDING_TTL + 1
-        r.mgr._expire_pending()
+        r.mgr.expire_pulls()
         assert r.mgr._pending == {}
         assert r.events[-1]["status"] == "error"
         assert r.events[-1]["reason"] == "no_reply"

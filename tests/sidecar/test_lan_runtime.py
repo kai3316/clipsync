@@ -31,6 +31,7 @@ from internal.security.pairing import (
     PAIRING_TIMEOUT,
     PairingManager,
 )
+from internal.sync.ai_config import PENDING_TTL
 from internal.system import updater
 from internal.transport.connection import TransportManager
 from internal.transport.ids import peer_id_hash
@@ -438,6 +439,69 @@ def test_discovery_hash_resolution_and_only_paired_auto_connect(rig):
     assert "remote" not in transport.connected
     assert runtime.config.peers["remote"].last_ip == "127.0.0.2"
     assert runtime.devices()["items"][0]["connection_state"] == "offline"
+
+
+def test_an_unpaired_device_that_is_not_here_gets_no_row(rig):
+    runtime, *_ = rig
+    # The rig's peer is known and unpaired with nothing discovered: this is
+    # the record `connect_to_peer` leaves for a device that was merely dialed,
+    # and it is the one that used to keep a row for good.
+    assert runtime.devices()["items"] == []
+
+
+def test_an_unpaired_device_that_is_here_keeps_its_row(rig):
+    runtime, _pairing, _transport, discovery, *_ = rig
+    discovery.found(peer_id_hash("remote"), "Remote-ad", "127.0.0.1", 9999)
+    items = runtime.devices()["items"]
+    assert [item["id"] for item in items] == ["remote"]
+    assert items[0]["connection_state"] == "discovered"
+
+
+def test_a_paired_device_that_is_away_keeps_its_row(rig):
+    runtime, pairing, _transport, discovery, *_ = rig
+    pairing.add_peer("remote", "Remote", pairing.get_peer_certificate("remote"), paired=True)
+    discovery.found(peer_id_hash("remote"), "Remote-ad", "127.0.0.1", 9999)
+    discovery.lost(peer_id_hash("remote"))
+    items = runtime.devices()["items"]
+    assert [item["id"] for item in items] == ["remote"]
+    assert items[0]["paired"] is True
+
+
+def test_hiding_a_row_leaves_the_pinned_identity_alone(rig):
+    runtime, pairing, *_ = rig
+    before = sorted(p.device_id for p in pairing.get_known_peers())
+    assert runtime.devices()["items"] == []
+    runtime._refresh()
+    assert sorted(p.device_id for p in pairing.get_known_peers()) == before
+    # The pin is what the certificate-change alarm compares against, so a row
+    # that is not drawn must not be a fingerprint that was forgotten.
+    assert pairing.get_peer_fingerprint("remote")
+
+
+def test_the_tick_reports_a_pull_whose_reply_never_came(rig):
+    """A batch that lost a reply has to be reported from the clock.
+
+    The panel counts events against the requests it sent and keeps saying
+    "waiting to receive files" until it has them, so a request nobody answered
+    left it there for good: `_expire_pending` was reachable only from `pull()`
+    and `_preview_wait()`, which is to say from the next pull.  A folder pull
+    sends one request per file, so any single unanswered reply is enough to
+    hang the batch -- and it does.
+    """
+    runtime, _pairing, _transport, _discovery, _clipboard, _history, events, *_ = rig
+    key = ("remote", "v3", "claude", "", "a.md")
+    with runtime.ai_config._lock:
+        runtime.ai_config._pending[key] = {
+            "mode": "copy",
+            "ts": time.time() - (PENDING_TTL + 1),
+            "batch_id": "ghost",
+            "root": "",
+        }
+    runtime._tick()
+    assert runtime.ai_config._pending == {}
+    reported = events_named(events, "aiconfig.file")
+    assert [entry["reason"] for entry in reported] == ["no_reply"]
+    assert reported[0]["batch_id"] == "ghost"
 
 
 def events_named(events, name):
@@ -925,7 +989,11 @@ def test_forget_archives_and_restore_returns_unpaired(rig):
     assert runtime.config.peers["remote"].paired is False
     assert not pairing.is_peer_paired("remote")
     assert transport.allowed[-1] == "remote"
-    assert [item["archived"] for item in runtime.devices()["items"]] == [False]
+    # Restored, but restored *unpaired* on purpose -- replaying trust would
+    # create one-sided consent.  An unpaired device with no note, no pairing
+    # status, no archive entry and no presence has no row; what came back is
+    # the peer record, so the device reappears the moment it is seen again.
+    assert runtime.devices()["items"] == []
 
 
 def test_forget_keeps_discovered_address_and_never_clobbers_archive(rig):

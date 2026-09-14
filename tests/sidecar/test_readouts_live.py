@@ -60,8 +60,15 @@ def pair(left, right):
     two-sidedness of the handshake from being mistaken for an accident.
     """
     assert left.call("pairing.start", device_id="right") == {"accepted": True}
-    left_rows = wait_for(left, "devices.list", lambda d: bool(d["items"][0]["pairing_code"]))
-    right_rows = wait_for(right, "devices.list", lambda d: bool(d["items"][0]["pairing_code"]))
+    # No code exists until the two are connected, and until then neither side
+    # lists the other -- a known-but-unpaired device that is not on the network
+    # has no row.  The wait reads an empty list as "not yet".
+    left_rows = wait_for(
+        left, "devices.list", lambda d: bool(d["items"] and d["items"][0]["pairing_code"])
+    )
+    right_rows = wait_for(
+        right, "devices.list", lambda d: bool(d["items"] and d["items"][0]["pairing_code"])
+    )
     code = left_rows["items"][0]["pairing_code"]
     # The short authentication string is what a person compares when the code is
     # read aloud, so it has to be the same string on both screens.
