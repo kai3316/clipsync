@@ -8,6 +8,14 @@ on:
     branches: [main, master]
   workflow_dispatch:
 
+# A run that a newer push has already superseded is testing a commit nobody
+# will ship, and it holds a runner until it finishes -- across a three-OS
+# matrix, that is the whole queue.  Cancel it instead of letting it compete
+# with the run that matters.
+concurrency:
+  group: test-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   # Lint and the web-UI tests are platform-independent, so they run once each
   # rather than across the OS matrix below.

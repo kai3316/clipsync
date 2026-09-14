@@ -7,6 +7,16 @@ on:
     tags: ['v*']
   workflow_dispatch:
 
+# Two runs for the same tag both carry a `release` job that uploads installers
+# to it with `--clobber`, so whichever finishes last decides what the release
+# holds.  Move the tag and that is the *older* commit's build -- the guard
+# build.yml already keeps for its half of the release, needed here for this
+# half.  Same ref supersedes same ref; a tag build is never cancelled by a
+# push to master, which is a different ref.
+concurrency:
+  group: desktop-${{ github.ref }}
+  cancel-in-progress: true
+
 permissions:
   contents: read
 
