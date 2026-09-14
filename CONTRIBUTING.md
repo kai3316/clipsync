@@ -16,8 +16,13 @@ pip install -e ".[dev]"
 2. Make your changes
 3. Run linting: `ruff check .`
 4. Run tests: `python -m pytest tests/ -v`
-5. Commit with a descriptive message
-6. Submit a pull request
+5. If you touched the desktop app, also run its type check and tests from
+   `desktop/`: `npm run typecheck && npm test`. `npm test` runs vitest, which
+   *strips* types rather than checking them, so a change to the shape of an RPC
+   reply can pass every test there and still fail the release build —
+   `npm run typecheck` is the only thing that checks it.
+6. Commit with a descriptive message
+7. Submit a pull request
 
 ## Code style
 

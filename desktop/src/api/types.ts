@@ -366,6 +366,12 @@ export interface UpdateCheckResult {
    *  against the release manifest.  Optional because it is the host's addition
    *  and an older one does not send it. */
   installable?: boolean;
+  /** Why the check has no answer, when it has none: the network error, the
+   *  HTTP status and GitHub's own message for it, or a reply with no release
+   *  in it.  Empty when `latest` is a real answer.  Optional for the same
+   *  reason as `installable` — an older host does not send it, and the panel
+   *  falls back to the sentence it used before. */
+  error?: string;
 }
 
 export interface UpdateInstallResult {
