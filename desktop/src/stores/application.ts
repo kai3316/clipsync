@@ -5,6 +5,21 @@ import type { AppStatus, BridgeError, Device, DiagnosticAction, HistoryItem, Rec
 import { createFavoritesStore } from "./favorites";
 import { createDeliveryStore } from "./delivery";
 
+/** A pairing handshake that has not finished yet.
+ *
+ * `confirm_pairing` answers `paired: false` for these, and that is not a
+ * failure: the confirm landed here and the other device has not answered —
+ * `confirmed_waiting` is the usual one, `peer_confirmed` is the same moment
+ * from the other side.  Mirrors the closed `PAIRING_STATUS_*` set in
+ * internal/security/pairing.py, and the three App.vue's `pairingPending`
+ * already treats as a live card.
+ */
+const PAIRING_IN_FLIGHT: readonly string[] = [
+  "pending",
+  "peer_confirmed",
+  "confirmed_waiting",
+];
+
 export function createApplicationStore() {
   const state = reactive({
     status: null as AppStatus | null,
@@ -824,6 +839,14 @@ export function createApplicationStore() {
      * A confirm that *did* pair says nothing: the row turns paired and the
      * runtime publishes `device.connected`, so a second message for the same
      * moment would only be noise.
+     *
+     * `paired: false` alone is not that case.  Confirming on this device while
+     * the other one has not answered yet answers `confirmed_waiting` — a
+     * handshake in flight, which the row already renders as 等待对方确认.  Read
+     * as failure it told the user the opposite of what was happening, so the
+     * status decides: only a handshake that is over (`cancelled`, or none at
+     * all) means the confirm did not take.  The set is closed and lives in
+     * `PAIRING_STATUS_*`, internal/security/pairing.py.
      */
     async confirmPairing(device: Device) {
       if (disposed || state.pending) return false;
@@ -833,7 +856,9 @@ export function createApplicationStore() {
         const result = await bridge.confirmPairing(device.id, device.pairing_code || "");
         if (disposed) return false;
         await refresh();
-        if (result.paired === false) pushNotice("pairing.failed", {});
+        if (result.paired === false && !PAIRING_IN_FLIGHT.includes(result.status)) {
+          pushNotice("pairing.failed", {});
+        }
         return true;
       } catch (error) {
         if (!disposed) setError(error);
