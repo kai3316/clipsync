@@ -25,15 +25,19 @@ def test_a_pid_held_by_something_else_is_not_running():
     """A recycled pid must not read as ClipSync, or a stale marker blocks the
     directory until the unrelated process happens to exit."""
     if sys.platform == "win32":
-        pytest.skip("no fork on Windows")
-    pid = os.fork()
-    if pid == 0:  # pragma: no cover - the child never returns
-        os.execv("/bin/sleep", ["sleep", "30"])
+        pytest.skip("no /bin/sleep on Windows")
+    # Popen, not a bare fork: it returns only once the child has actually
+    # exec'd.  ``os.fork()`` returns while the child is still a copy of *this*
+    # process, so the name the check reads is momentarily still pytest's --
+    # on Linux ``/proc/<pid>/cmdline`` says "python", the marker matches, and
+    # the assertion reads the race instead of the behaviour.  It passed on
+    # macOS and failed on Linux for no better reason than which one lost it.
+    process = subprocess.Popen(["/bin/sleep", "30"])
     try:
-        assert pid_running(pid) is False
+        assert pid_running(process.pid) is False
     finally:
-        os.kill(pid, 9)
-        os.waitpid(pid, 0)
+        process.kill()
+        process.wait()
 
 
 def test_a_live_process_that_is_not_clipsync_is_not_running():
