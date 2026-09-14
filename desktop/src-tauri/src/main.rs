@@ -285,6 +285,13 @@ fn windows_autostart_entry_exists() -> Result<bool, BridgeError> {
     autostart_entry_exists(result)
 }
 
+// Only the Windows path above calls this, so the dead-code lint is correct
+// about every other target -- but the mapping it holds is platform-independent,
+// and the case worth guarding is a permission failure being read as "not
+// registered", which would silently drop a user's auto-start setting.  That is
+// worth testing wherever it compiles, so this is annotated rather than cfg'd
+// out of the non-Windows builds, which would take the test with it.
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
 fn autostart_entry_exists<T>(result: std::io::Result<T>) -> Result<bool, BridgeError> {
     match result {
         Ok(_) => Ok(true),
