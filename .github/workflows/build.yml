@@ -71,6 +71,19 @@ jobs:
           fails, the app now names the cause instead of only the symptom -- and
           the cause is what a fix needs.
 
+          1.0.6 was published without any desktop installers.  Its desktop
+          build failed before packaging -- a field the new update-check reply
+          carries had not been added to the type the window reads it through,
+          and the front end's type check is part of the build -- so that
+          release holds only the four Python downloads below, and no
+          `latest.json`.  Because the update manifest is read through a pointer
+          that follows the newest release, that also left every installed
+          desktop app unable to see an update at all.
+
+          This release is the same three fixes with that type corrected, and it
+          publishes the desktop half 1.0.6 was missing.  If you run the desktop
+          app, this is the version to update to; nothing else changed.
+
           Neither application is notarized, because that needs a paid Apple
           Developer account.  Both macOS downloads are ad-hoc signed, which is
           what lets them start at all on Apple Silicon.
