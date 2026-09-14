@@ -1,9 +1,12 @@
 name: Tauri Desktop
 
 on:
-  pull_request:
+  # Tags and a manual dispatch, nothing else.  A push to a branch does not
+  # build three platforms' bundles here: that is expensive enough to be worth
+  # doing once per release, and the tests it used to run belong on the machine
+  # doing the work.  A dispatch on a branch still produces all of it -- it just
+  # cannot publish, because `release` is gated on the ref being a tag.
   push:
-    branches: [main, master]
     tags: ['v*']
   workflow_dispatch:
 
@@ -21,43 +24,6 @@ permissions:
   contents: read
 
 jobs:
-  desktop:
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [windows-latest, macos-latest, ubuntu-24.04]
-    runs-on: ${{ matrix.os }}
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: "22"
-          cache: npm
-          cache-dependency-path: desktop/package-lock.json
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-      - name: Linux native build dependencies
-        if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
-      - name: Rust toolchain
-        run: rustup toolchain install stable --profile minimal
-      - name: Install Python dependencies
-        run: python -m pip install -r requirements.txt pytest pytest-timeout
-      - name: Sidecar tests
-        run: python -m pytest tests/sidecar -q
-      - name: Frontend dependencies
-        working-directory: desktop
-        run: npm ci
-      - name: Frontend build and tests
-        working-directory: desktop
-        run: |
-          npm run build
-          npm test
-      - name: Rust IPC tests
-        working-directory: desktop/src-tauri
-        run: cargo test --locked
-
   package:
     # Unsigned bundles, on purpose: what this job establishes is that each
     # platform turns the tree into an installable artifact at all.  Signing,
@@ -140,7 +106,7 @@ jobs:
           # The updater's payloads and their detached signatures.  Asked for on
           # a release build only: tauri.conf.json carries the public key, so the
           # bundler treats "sign this" without a private key in reach as an
-          # error rather than a no-op, and a pull request from a fork gets no
+          # error rather than a no-op, and a manual dispatch on a branch has no
           # secrets.  Set here rather than in the committed config so that a
           # developer running `tauri build` locally is not required to hold the
           # signing key at all.
@@ -158,8 +124,8 @@ jobs:
         working-directory: desktop
         env:
           # Read by the bundler when `createUpdaterArtifacts` is on -- the
-          # contents of the minisign private key, not a path to it.  Empty on a
-          # pull request, which never turns that flag on.
+          # contents of the minisign private key, not a path to it.  Unset on a
+          # branch dispatch, which never turns that flag on.
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
         run: npm exec tauri build -- --config ../build/tauri-package.json --bundles ${{ matrix.bundles }}
       - name: Verify the macOS bundle is signed
@@ -232,8 +198,8 @@ jobs:
           if-no-files-found: error
       - name: Upload the updater payloads
         # Separate from the installers and tag-gated, because these exist only
-        # when the build was signed: on a pull request `createUpdaterArtifacts`
-        # is not even requested, so this glob would match nothing and
+        # when the build was signed: a branch dispatch never requests
+        # `createUpdaterArtifacts`, so this glob would match nothing and
         # `if-no-files-found` would fail the leg.  The `.app.tar.gz` is here
         # rather than above because it is an update payload, not an installer:
         # the updater extracts it over the installed bundle, and no human is
@@ -253,14 +219,17 @@ jobs:
     # desktop installers to it, so one Releases page carries both apps.
     # Nothing is created or deleted here.
     #
-    # `needs: desktop` is the release gate, and it is the reason `desktop` is
-    # named here rather than left to run alongside: the artifacts this job
-    # attaches are the ones a user downloads, so they must not come from a tree
-    # whose tests failed.  `package` deliberately stays ungated so the slow
-    # bundle builds still run in parallel with the tests -- a red test job costs
-    # the bundles, not the wall clock.
+    # `needs: package` is what makes the artifacts this job attaches the ones
+    # just built.  It is worth naming because dropping it would not fail the
+    # run: the job uploads whatever the download holds, so the release would
+    # quietly be assembled from a partial or stale set and nothing on the page
+    # would say so.
+    #
+    # The test gate that used to be named here (`needs: [package, desktop]`)
+    # went with the `desktop` job: the suite runs locally now, and what this
+    # workflow owes a tag is a signed bundle and an accurate manifest.
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: [package, desktop]
+    needs: [package]
     runs-on: ubuntu-latest
     permissions:
       contents: write
