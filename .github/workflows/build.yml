@@ -74,12 +74,13 @@ jobs:
             not something you download by hand
           - `latest.json` — the signed update manifest the app reads
 
-          Installing this release replaces 1.0.2 by hand one last time: 1.0.2
-          has no updater in it, so it cannot see or use any of the above.  From
-          this version on, the desktop app installs its own updates — it
-          downloads, installs and restarts, and on Linux the `.deb` asks for
-          your password once.  The previous Python application is unchanged and
-          still leaves replacing it to you.
+          Installing this release is a manual step one more time.  1.0.2 has no
+          updater in it at all, and 1.0.4 published its installers but no
+          `latest.json`, so it cannot see the updates above either.  From 1.0.5
+          on the desktop app installs its own updates — it downloads, installs
+          and restarts, and on Linux the `.deb` asks for your password once.
+          The previous Python application is unchanged and still leaves
+          replacing it to you.
 
           The previous Python application:
           - `clipsync-windows.zip` — Windows `.exe`

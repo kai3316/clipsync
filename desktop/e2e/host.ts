@@ -53,7 +53,7 @@ export const fixtures: Record<string, unknown> = {
   // this module (`install-host.ts`).  See its own `S`.
   sample: { lang: LANGUAGE, local: LOC, mac: MAC, mini: MINI },
   get_app_status: {
-    version: "1.0.4",
+    version: "1.0.5",
     health: "ready",
     device_name: LOC,
     device_id: "7f3c1a92-4e8b-4d21-9a55-2c6e0b7d4f18",
@@ -312,7 +312,7 @@ export const fixtures: Record<string, unknown> = {
   },
   autostart_status: true,
   update_status: { state: { phase: "idle", fraction: 0, downloaded: 0, total: 0, error: "", version: "", path: "" } },
-  update_check: { available: false, latest: "1.0.4", current: "1.0.4", url: "", installable: false },
+  update_check: { available: false, latest: "1.0.5", current: "1.0.5", url: "", installable: false },
   // A reply at all means the install did not happen, so this is the shape the
   // preview shows when there is nothing newer to install.
   update_install: { ok: true, installed: false, reason: "up_to_date" },
@@ -512,7 +512,7 @@ export const fixtures: Record<string, unknown> = {
     web_port: 8765,
     lan_ip: "192.168.1.7",
     os: "Windows 11",
-    version: "1.0.4",
+    version: "1.0.5",
   },
   get_overview: {
     connected_count: 1,
@@ -533,7 +533,7 @@ export const fixtures: Record<string, unknown> = {
     local_ip: "192.168.1.7",
     port: 51888,
     platform: "Windows",
-    version: "1.0.4",
+    version: "1.0.5",
     network_type: "lan",
     network_detail: S("有线连接 · 1 Gbps", "Wired · 1 Gbps"),
     // No `recent_items` here: the feed is the newest history rows, and
