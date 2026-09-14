@@ -44,6 +44,33 @@ jobs:
           NOTES=$(cat <<'EOF'
           Automated build of both applications for this tag.
 
+          What is new in this release:
+
+          - Windows no longer reports a firewall problem when there is none.
+            The check read the rule with `netsh`, which prints its field names in
+            the system language, so on a Windows that is not English the ports
+            came back empty and the app warned that 19990 and 19991 were not
+            allowed -- while they were.  The rule is now read through the
+            PowerShell firewall cmdlets, which return objects and so have no
+            field names to translate, and a rule that cannot be read at all is
+            reported as exactly that instead of as a wrong port.  Only the
+            warning was wrong: the ports were open the whole time.
+          - The macOS app now says why its background process stopped.  One that
+            exited before it was ready used to leave nothing behind but
+            "background process is unavailable", because its error output was
+            thrown away and the log view is a call into that same dead process.
+            Its last lines are now kept and shown with the message.
+          - Checking for updates says why it failed.  The check always knew --
+            no network, a rate limit, an API host this network does not route --
+            and threw the reason away one frame up, so all three reached the
+            user as the same four words.  It now travels with the answer and is
+            shown with it.
+
+          Two of these are diagnoses rather than repairs: where a macOS build
+          says its background process is unavailable, and where an update check
+          fails, the app now names the cause instead of only the symptom -- and
+          the cause is what a fix needs.
+
           Neither application is notarized, because that needs a paid Apple
           Developer account.  Both macOS downloads are ad-hoc signed, which is
           what lets them start at all on Apple Silicon.
@@ -74,15 +101,14 @@ jobs:
             not something you download by hand
           - `latest.json` — the signed update manifest the app reads
 
-          Installing this release is a manual step only if you are still on the
-          previous Python application (1.0.2 or earlier), which has no updater
-          in it at all.  Desktop installs update themselves: this is the first
-          release to publish a `latest.json`, and the app reads it through a
-          pointer that follows the newest release, so a 1.0.4 install is offered
-          this version and installs it without help — it downloads, installs and
-          restarts, and on Linux the `.deb` asks for your password once.  The
-          previous Python application is unchanged and still leaves replacing
-          it to you.
+          The desktop applications update themselves: every release publishes a
+          `latest.json`, and the app reads it through a pointer that follows the
+          newest release, so an installed desktop app is offered each new
+          version and installs it without help — it downloads, installs and
+          restarts, and on Linux the `.deb` asks for your password once.
+          Installing by hand is needed only for the previous Python application
+          (1.0.2 and earlier), which has no updater in it at all and still
+          leaves replacing it to you.
 
           The previous Python application:
           - `clipsync-windows.zip` — Windows `.exe`
