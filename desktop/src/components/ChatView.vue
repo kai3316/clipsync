@@ -55,10 +55,6 @@ const selectedId = ref("");
 const draft = ref("");
 const busy = ref(false);
 const error = ref("");
-// Not a failure and not an error: an invite whose link is still being dialed.
-// It reads in the same band as one because the reader is looking at the same
-// place, but it must not look like something went wrong.
-const notice = ref("");
 const attachmentError = ref("");
 const fileInput = ref<HTMLInputElement | null>(null);
 let timer: ReturnType<typeof setInterval> | undefined;
@@ -137,7 +133,6 @@ async function refresh() {
     if (!selectedId.value && sessions.value.length) await select(sessions.value[0]);
     if (selectedId.value) await load(selectedId.value);
     error.value = "";
-    notice.value = "";
   } catch (reason: any) { error.value = reason?.message || t("无法读取聊天会话"); }
 }
 /** The refresh button, which says what it found.
@@ -262,9 +257,12 @@ async function invite(session: ChatSession) {
     // A session id means the link was already up and the conversation is open;
     // otherwise the invite is dialing, and the row appears on its own when it
     // answers — the poll is what puts it in the list, so there is nothing to
-    // select yet.
+    // select yet.  That has to be said on the window's status line rather than
+    // in a band this page owns: the refresh below is what the 1.5s poll runs
+    // too, and it clears the page's own bands, so a sentence held there was
+    // gone before the click's effect could be seen.
     if (result.chat_session_id) selectedId.value = result.chat_session_id;
-    else notice.value = t("正在连接对方，连接上以后会话会出现在列表里。");
+    else announce(t("正在连接对方，连接上以后会话会出现在列表里。"));
     await refresh();
   }
   catch (reason: any) { error.value = reason?.message || t("发送邀请失败"); }
@@ -403,7 +401,6 @@ onUnmounted(() => { if (timer) clearInterval(timer); if (typingTimer) clearTimeo
 <template>
   <section class="chat-view">
     <p v-if="error" class="error-band" role="alert">{{ error }}</p>
-    <p v-if="notice" class="status-band" role="status">{{ notice }}</p>
     <p v-if="attachmentError" class="error-band" role="alert">{{ attachmentError }}</p>
 
     <!-- The devices and the conversations share one rail, devices first.

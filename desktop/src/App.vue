@@ -756,7 +756,7 @@ function deviceMenu(event: MouseEvent, device: Device) {
     device.paired && !connected
       ? { id: "chat", label: t("打开聊天"), icon: MessageCircle, run: () => chatWith(device) }
       : null,
-    { id: "rename", label: t("重命名"), icon: Pencil, run: () => { renameDevice.value = device; renameValue.value = device.note || ""; } },
+    { id: "rename", label: t("重命名"), icon: Pencil, run: () => { renameTarget.value = { kind: "device", id: device.id }; renameValue.value = device.note || ""; } },
     { id: "copy-id", label: t("复制设备 ID"), icon: Copy, run: () => copyText(device.id) },
     device.paired
       ? { id: "forget", label: t("移除设备"), icon: Trash2, divider: true, danger: true, run: () => { forgetDevice.value = device; } }
@@ -914,14 +914,39 @@ const previewCard = ref<{
  */
 const PREVIEW_DELAY_MS = 180;
 
-/** Cards already fetched, by entry id.  A row hovered twice is one read.
+/** Cards already fetched, by the entry they were fetched for.  A row hovered
+ * twice is one read.
  *
- * The sidecar does not push a change to a row's card, so an entry that is
- * edited elsewhere would keep a stale one — but nothing edits an entry's
- * *picture*: a row is replaced by a fresh row when its clip changes, and a
- * deleted row's card is never asked for again.
+ * The key carries the row's timestamp as well as its id because the id alone
+ * is not the row: `entry_id` is a plain SQLite integer with no AUTOINCREMENT,
+ * and the sidecar re-derives it on load as `max(entry_id) + 1`, so a row
+ * deleted as the newest one hands its id to the next clip after a restart.  A
+ * card kept under the bare id would then be shown for a different clip.
+ *
+ * The sidecar does not push a change to a row's card, so an entry edited
+ * elsewhere would keep a stale one — but nothing edits an entry's *picture*: a
+ * row is replaced by a fresh row when its clip changes, and what a delete
+ * leaves behind is only entries nothing will ask for again.  The cap is what
+ * bounds those rather than an invalidation the window has no event for.
  */
+const PREVIEW_CACHE_MAX = 64;
 const previewCache = new Map<string, HistoryPreview>();
+
+/** The cache key for one row.  Two rows that share an id are still two rows. */
+function previewKey(item: HistoryItem) {
+  return `${item.id}:${item.timestamp}`;
+}
+
+function rememberPreview(key: string, card: HistoryPreview) {
+  previewCache.set(key, card);
+  // A Map iterates in insertion order, so the entry dropped is the one that has
+  // been in the cache longest.
+  while (previewCache.size > PREVIEW_CACHE_MAX) {
+    const oldest = previewCache.keys().next().value;
+    if (oldest === undefined) break;
+    previewCache.delete(oldest);
+  }
+}
 
 /** Which row the pointer is on, so a fetch that lands late is dropped.
  * Not a ref: nothing renders from it, it only decides whether an answer that
@@ -969,7 +994,7 @@ function showPreview(item: HistoryItem) {
   // pointer.  It is what the card falls back to if the sidecar has nothing.
   previewWanted = item.id;
   clearTimeout(previewTimer);
-  const cached = previewCache.get(item.id);
+  const cached = previewCache.get(previewKey(item));
   if (cached) { applyPreview(item, cached); return; }
   previewTimer = setTimeout(() => void fetchPreview(item), PREVIEW_DELAY_MS);
 }
@@ -985,7 +1010,7 @@ async function fetchPreview(item: HistoryItem) {
     // the place for it, and there is no card to open either way.
     return;
   }
-  previewCache.set(item.id, card);
+  rememberPreview(previewKey(item), card);
   applyPreview(item, card);
 }
 
@@ -1591,10 +1616,19 @@ const forgetDialog = ref<HTMLDialogElement | null>(null);
 const purgeDevice = ref<Device | null>(null);
 const purgeDialog = ref<HTMLDialogElement | null>(null);
 const probeResults = ref<Record<string, DeviceProbeResult>>({});
-/** The device whose alias is being rewritten from the context menu.  The row
- * has its own 设备备注 field for this; the menu entry is the same write with a
- * dialog in front of it, which is what the legacy 重命名 was. */
-const renameDevice = ref<Device | null>(null);
+/** What the rename dialog is open on: a device on this machine's list, whose
+ * alias is rewritten from the context menu (the row has its own 设备备注 field
+ * for this, and the menu entry is the same write with a dialog in front of it,
+ * which is what the legacy 重命名 was), or a peer on the internet-pairing page,
+ * whose local alias is rewritten from the peer line.  One dialog serves both
+ * because the field and the two buttons are the same; only the call 保存 makes
+ * differs.  The internet page used to ask with `window.prompt`, which neither
+ * WKWebView nor WebKitGTK implements — on the macOS and Linux bundles the click
+ * opened nothing at all, so the peer could not be renamed there at all. */
+type RenameTarget =
+  | { kind: "device"; id: string }
+  | { kind: "internet"; peerId: string };
+const renameTarget = ref<RenameTarget | null>(null);
 const renameValue = ref("");
 const renameDialog = ref<HTMLDialogElement | null>(null);
 /** The conversation the chat page should open when it next mounts, handed over
@@ -2114,25 +2148,36 @@ async function renameThisDevice(name: string) {
     state.error = reason?.message || t("重命名失败");
   }
 }
-/** Confirm the alias the menu's 重命名 collected.  The backend has one
- * user-editable name per device — the alias the row's own field writes — so
- * the rename goes through the same call rather than inventing a second one. */
+/** Confirm the alias the rename dialog collected.  A device's name goes through
+ * the backend's one user-editable name per device — the alias the row's own
+ * 设备备注 field writes — rather than inventing a second one; a peer on the
+ * internet-pairing page has its own local alias and its own call. */
 async function confirmRename() {
-  const device = renameDevice.value;
+  const target = renameTarget.value;
   const alias = renameValue.value.trim();
-  if (!device) return;
+  if (!target) return;
   try {
-    await bridge.setDeviceNote(device.id, alias);
-    await store.refresh();
-    renameDevice.value = null;
-    store.toast("ui.devices", t("已重命名为 {name}", { name: alias }));
+    if (target.kind === "device") {
+      await bridge.setDeviceNote(target.id, alias);
+      await store.refresh();
+    } else {
+      await bridge.renameInternetPeer(target.peerId, alias);
+      await refreshInternetPairing();
+    }
+    renameTarget.value = null;
+    // The device list is one page of many, so its rename keeps the toast that
+    // names the page it happened on.  The internet peer is renamed on the page
+    // the reader is standing on and the line under the pointer changes with it,
+    // so that one reports on the always-visible status line instead.
+    if (target.kind === "device") store.toast("ui.devices", t("已重命名为 {name}", { name: alias }));
+    else announce(t("已重命名为 {name}", { name: alias }));
   } catch (reason: any) {
     state.error = reason?.message || t("重命名失败");
   }
 }
-watch(renameDevice, async (device) => {
+watch(renameTarget, async (target) => {
   await nextTick();
-  if (device) renameDialog.value?.showModal();
+  if (target) renameDialog.value?.showModal();
   else renameDialog.value?.close();
 });
 async function confirmRevoke() {
@@ -3513,12 +3558,13 @@ watch(() => store.state.netpairEvent?.revision, async () => {
   if (tab.value !== "devices" || deviceTab.value !== "internet") return;
   await refreshInternetPairing();
 });
+/** Open the rename dialog on an internet-pairing peer.  The alias is this
+ * machine's own name for the peer — the line the button sits on shows it — so
+ * the write is local, like a device's note. */
 async function renameInternet(peer: any) {
   const current = peer.alias || peer.name || "";
-  const name = window.prompt(t("设备别名"), current);
-  if (name === null) return;
-  try { await bridge.renameInternetPeer(peer.peer_id, name); await refreshInternetPairing(); }
-  catch (error) { state.error = error as any; }
+  renameTarget.value = { kind: "internet", peerId: peer.peer_id };
+  renameValue.value = current;
 }
 async function createBackup() {
   try {
@@ -5031,13 +5077,13 @@ async function translateText() {
     <!-- The context menu 重命名 entry. The row has its own 设备备注 field
          writing this same alias, so the dialog is a second way in — not a
          second setting. -->
-    <dialog ref="renameDialog" aria-labelledby="rename-title" class="modal" @close="renameDevice = null">
-      <button class="icon-button modal-close" :aria-label="t('关闭')" :title="t('关闭')" @click="renameDevice = null"><X :size="18" /></button>
+    <dialog ref="renameDialog" aria-labelledby="rename-title" class="modal" @close="renameTarget = null">
+      <button class="icon-button modal-close" :aria-label="t('关闭')" :title="t('关闭')" @click="renameTarget = null"><X :size="18" /></button>
       <h2 id="rename-title">{{ t("重命名设备") }}</h2>
       <p class="muted small">{{ t("名称只保存在这台设备上，对方看到的仍是自己的名字。") }}</p>
       <input :value="renameValue" maxlength="512" :aria-label="t('设备名称')" autofocus
         @input="renameValue = ($event.target as HTMLInputElement).value" @keydown.enter.prevent="confirmRename" />
-      <div class="modal-actions"><button @click="renameDevice = null">{{ t("取消") }}</button><button class="primary" :disabled="!renameValue.trim()" @click="confirmRename">{{ t("保存") }}</button></div>
+      <div class="modal-actions"><button @click="renameTarget = null">{{ t("取消") }}</button><button class="primary" :disabled="!renameValue.trim()" @click="confirmRename">{{ t("保存") }}</button></div>
     </dialog>
     <!-- A device whose certificate no longer matches its pin was refused, so
          this is the only place the user hears about it — and the answer is what

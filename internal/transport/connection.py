@@ -495,6 +495,16 @@ class PeerConnection:
 class TransportManager:
     """Manages peer connections — server and client side."""
 
+    # How many accepted connections may be mid-handshake at once.  Each one is
+    # a thread that lives for up to the TLS and identity timeouts (~25 s), so
+    # without a ceiling anything on the network that opens sockets faster than
+    # this machine can handshake them is an unbounded thread count on a desktop
+    # app -- the listening port is on the LAN, and a LAN is not necessarily
+    # ours.  Well above what a household of peers needs, and low enough that a
+    # flood cannot spend the machine's memory before the backlog (listen(5))
+    # and this ceiling start refusing work.
+    MAX_ACCEPT_WORKERS = 64
+
     def __init__(
         self,
         device_id: str,
@@ -603,6 +613,19 @@ class TransportManager:
         self._connections = {
             c for c in self._connections if c._recv_thread and c._recv_thread.is_alive()
         }
+
+    def _handshakes_full(self) -> bool:
+        """Whether MAX_ACCEPT_WORKERS accepted connections are already running."""
+        with self._lock:
+            # The set is pruned of finished threads by _start_worker, but this
+            # is asked before that runs, so prune here too: a stale entry is a
+            # slot a peer would be refused for.
+            live = sum(
+                1
+                for worker in self._workers
+                if worker.name == "clipsync-accept" and worker.is_alive()
+            )
+        return live >= self.MAX_ACCEPT_WORKERS
 
     def _start_worker(self, target, args=(), name=None):
         with self._lock:
@@ -1921,7 +1944,15 @@ class TransportManager:
             # half-open) client delayed every other peer trying to connect.
             try:
                 self._track_socket(client_sock)
-                if (
+                if self._handshakes_full():
+                    # Refused before a thread is spent on it, so a flood costs a
+                    # socket and a log line rather than a thread each.  A real
+                    # peer that lands in a full moment reaches its own retry on
+                    # the next reconnect, which is why this is a refusal and not
+                    # an error the UI is told about.
+                    logger.debug("Refusing an accepted connection: handshakes are at the ceiling")
+                    self._close_socket(client_sock)
+                elif (
                     self._start_worker(
                         self._handle_accepted, (client_sock, addr, ssl_context), "clipsync-accept"
                     )

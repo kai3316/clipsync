@@ -364,6 +364,7 @@ class FileTransferManager:
         broadcast_fn: Callable[[bytes], None],
         kind: str = "file",
         entry_id: str = "",
+        origin_paths: list[str] | None = None,
     ) -> str:
         """Start sending *file_path* to all connected peers.
 
@@ -382,6 +383,12 @@ class FileTransferManager:
             receiver can check the file against the request it made instead of
             taking the sender's word for the label.  Omitted from the frame when
             empty, which is every send that is not a ``clip_file``.
+        origin_paths:
+            What *file_path* was built from, when the send had to be archived to
+            travel (a folder, or several files picked at once).  Asked for only
+            to be carried into the history entry: the archive is a temp file its
+            maker reclaims when the transfer ends, so a retry cannot go back to
+            *file_path* and has to rebuild from these.
 
         Returns
         -------
@@ -410,6 +417,7 @@ class FileTransferManager:
                 "type": "outgoing",
                 "kind": kind,
                 "file_path": str(file_path),
+                "origin_paths": [str(path) for path in (origin_paths or [])],
                 "file_name": file_name,
                 "file_size": file_size,
                 "mime_type": mime_type,
@@ -1958,6 +1966,12 @@ class FileTransferManager:
             "status": status,
             "state": transfer.get("state", "unknown"),
             "source_path": transfer.get("file_path", ""),
+            # The selection the send was made from, when it had to be archived
+            # to travel: ``source_path`` names the archive, which is unlinked
+            # the moment the transfer ends, so this is the only thing a retry
+            # can still rebuild the send from.  Empty for a plain file send,
+            # whose own path is its source.
+            "origin_paths": list(transfer.get("origin_paths", [])),
             # Destination peer (outgoing transfers) so a failed row can be
             # retried against the same device without re-picking one.
             "peer_id": transfer.get("peer_id", ""),

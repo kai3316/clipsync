@@ -677,16 +677,21 @@ def _apply_config(data: dict, cfg: Config) -> None:
                     type(value).__name__,
                 )
                 continue
-            for p in peers:
-                existing = cfg.peers.get(p["device_id"])
-                if existing is not None:
-                    existing.device_name = p["device_name"]
-                    existing.paired = p["paired"]
-                    # Keep a user-assigned note unless the backup carries one.
-                    if p["notes"]:
-                        existing.notes = p["notes"]
-                else:
-                    cfg.peers[p["device_id"]] = PeerInfo(**p)
+            # Under the same lock the runtime's peer writer takes: a restore can
+            # run while the transport is publishing peer state, and this is the
+            # one place that adds to ``cfg.peers`` without holding it.
+            from internal.config.config import config_lock
+            with config_lock:
+                for p in peers:
+                    existing = cfg.peers.get(p["device_id"])
+                    if existing is not None:
+                        existing.device_name = p["device_name"]
+                        existing.paired = p["paired"]
+                        # Keep a user-assigned note unless the backup carries one.
+                        if p["notes"]:
+                            existing.notes = p["notes"]
+                    else:
+                        cfg.peers[p["device_id"]] = PeerInfo(**p)
             continue
         if key not in _APPLY_SCHEMA or not hasattr(cfg, key):
             continue

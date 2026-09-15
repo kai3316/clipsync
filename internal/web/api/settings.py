@@ -113,6 +113,15 @@ _RANGE_LIMITS = {
     "transfer_timeout": (5, 3600),
 }
 
+# Fields whose value must never reach the log.  Every update is logged, and the
+# log is served to any client holding the web token (`GET /api/logs`), so a line
+# naming a new value is that value leaving the device — which is exactly what
+# the field table above promises does not happen for the credentials in it
+# ("the value is never echoed back — only netpair_password_set is exposed").
+# The field name and the fact that it changed are what a reader of the log
+# needs; the value is what nobody needs.
+_SECRET_FIELDS = {"relay_password", "netpair_password", "web_token"}
+
 # Fields that the client is allowed to modify
 _MUTABLE_FIELDS = {
     "device_name",
@@ -427,7 +436,14 @@ def update_settings(body, cfg, on_settings_change=None, enc_mgr=None):
                     continue
             setattr(cfg, field, new_val)
             updated[field] = new_val
-            logger.info("Settings updated: %s = %s", field, new_val)
+            if field in _SECRET_FIELDS:
+                # Said, not shown: an emptied credential reads as cleared, and a
+                # set one says only that it is set.
+                logger.info(
+                    "Settings updated: %s = %s", field, "<cleared>" if not new_val else "<set>"
+                )
+            else:
+                logger.info("Settings updated: %s = %s", field, new_val)
 
     # A language change made through the web UI is a REAL first-run choice:
     # mark it so the desktop picker (gated by cfg.language_chosen) and the

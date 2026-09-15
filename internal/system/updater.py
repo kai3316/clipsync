@@ -467,20 +467,32 @@ def download_latest_release(
             # Verify the downloaded size AND SHA-256 against the release API, so
             # a truncated, corrupted, or tampered asset is rejected before it is
             # exposed as a valid installer. The API digest is "sha256:<hex>".
+            #
+            # Both are required rather than checked when present.  This is the
+            # path with nobody to answer to on arrival: the caller above takes
+            # "already size- and hash-checked while downloading" as the reason a
+            # GitHub download needs no further verification, and that is only
+            # true while a digest is published for the asset.  An asset the API
+            # describes without one therefore fails the download, which is the
+            # policy fetch_latest_asset_info already applies when it looks the
+            # digest up — the two paths agree that a release nothing can verify
+            # is not an installer.
             asset_size = matched.get("size")
-            if asset_size:
-                actual = os.path.getsize(temp_path)
-                if actual != int(asset_size):
-                    raise RuntimeError(
-                        f"download size mismatch: expected {asset_size}, got {actual}"
-                    )
+            if not asset_size:
+                raise RuntimeError("release asset has no published size")
+            actual = os.path.getsize(temp_path)
+            if actual != int(asset_size):
+                raise RuntimeError(
+                    f"download size mismatch: expected {asset_size}, got {actual}"
+                )
             digest = matched.get("digest") or ""
-            if digest.startswith("sha256:"):
-                actual_sha = sha256_file(temp_path)
-                if actual_sha != digest[len("sha256:") :]:
-                    raise RuntimeError(
-                        f"download checksum mismatch: expected {digest}, got sha256:{actual_sha}"
-                    )
+            if not digest.startswith("sha256:"):
+                raise RuntimeError("release asset has no published sha256 digest")
+            actual_sha = sha256_file(temp_path)
+            if actual_sha != digest[len("sha256:") :]:
+                raise RuntimeError(
+                    f"download checksum mismatch: expected {digest}, got sha256:{actual_sha}"
+                )
             os.replace(temp_path, dest_path)
         except Exception:
             with contextlib.suppress(OSError):

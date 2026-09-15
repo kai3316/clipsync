@@ -5440,9 +5440,13 @@ class Application:
                 T("transfer.sending_file", name=os.path.basename(file_path)),
             )
         except FileNotFoundError:
-            self._notify_error(T("ui.error_title"), f"{T('ui.file_not_found_msg')}{file_path}")
+            self._notify_error(
+                T("ui.file_not_found_title"), T("ui.file_not_found_msg", path=file_path)
+            )
         except PermissionError:
-            self._notify_error("Error", f"Permission denied reading:\n{file_path}")
+            self._notify_error(
+                T("ui.error_title"), f"{T('ui.permission_denied')}:\n{file_path}"
+            )
         except OSError as e:
             self._notify_error(T("ui.error_title"), f"{T('ui.send_failed_msg')}{e}")
             logger.error("Failed to send file: %s", e)
@@ -5797,7 +5801,7 @@ class Application:
                     0,
                     lambda e=e: (
                         dlg.destroy(),
-                        self._notify_error("Error", f"Failed to create archive:\n{e}"),
+                        self._notify_error(T("ui.error_title"), f"{T('ui.archive_failed')}\n{e}"),
                     ),
                 )
 

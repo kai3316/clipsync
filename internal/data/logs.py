@@ -42,6 +42,15 @@ def redact_sensitive_line(line: str, cfg) -> str:
     token = getattr(cfg, "web_token", "")
     if token:
         redact.append(token)
+    # The broker and pairing credentials, for the lines an older build wrote
+    # before the settings endpoint stopped naming a new value in the log.  A
+    # short one is skipped rather than armed: `str.replace` with a one-character
+    # needle would take the rest of the log apart with it, and the strength rule
+    # this app enforces on both fields never lets one be that short.
+    for field in ("relay_password", "netpair_password"):
+        secret = getattr(cfg, field, "") or ""
+        if len(secret) >= 8:
+            redact.append(secret)
     for r in redact:
         if r:
             line = line.replace(r, "[redacted]")

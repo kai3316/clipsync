@@ -900,15 +900,35 @@ def test_peer_first_and_bad_code_do_not_bypass_local_confirmation(rig):
 
 
 def test_unknown_confirm_cannot_create_trust(rig):
-    _, pairing, transport, *_ = rig
+    runtime, pairing, transport, _, _, _, events, *_ = rig
     transport.message(frame("pairing_confirm"), "unknown")
     transport.message(frame("pairing_confirm"), "remote")
     assert not pairing.is_peer_paired("remote")
-    # A refused confirm leaves no pairing in flight, and records no status to
-    # say otherwise: the peer reads back exactly what a merely-discovered
-    # device reads back, which is what keeps the devices page from drawing a
-    # confirm row for a device nobody has asked to pair with.
+    # A confirm with no link behind it and no request of ours leaves no pairing
+    # in flight and records no status to say otherwise: the peer reads back
+    # exactly what a merely-discovered device reads back, which is what keeps
+    # the devices page from drawing a confirm row for a device nobody has asked
+    # to pair with.
     assert pairing.get_pairing_status("remote") == PAIRING_STATUS_NONE
+    # The same frame from a peer this side *is* connected to is that peer asking:
+    # the code it confirmed is on its own screen, from a request that began on a
+    # link already open and so was never raised here.  The ask has to reach this
+    # side's user, which means the request goes out on the spot — the poll holds
+    # exactly this pairing back, because a chat with that peer is live.
+    transport.connected.add("remote")
+    transport.message(frame("pairing_confirm"), "remote")
+    assert not pairing.is_peer_paired("remote")
+    row = runtime.devices()["items"][0]
+    assert row["pairing_status"] == "peer_confirmed"
+    assert row["pairing_code"]
+    assert events_named(events, "pairing.request") == [
+        {
+            "device_id": "remote",
+            "name": "Remote",
+            "code": row["pairing_code"],
+            "sas": row["sas"],
+        }
+    ]
 
 
 def test_devices_report_a_pairing_only_while_one_is_in_flight(rig):
@@ -2385,7 +2405,7 @@ def test_a_folder_send_archives_it_and_the_archive_outlives_the_transfer(
     started = []
     monkeypatch.setattr(
         runtime.file_transfer, "send_file",
-        lambda path, send: (started.append(path), "tid")[1],
+        lambda path, send, **kwargs: (started.append(path), "tid")[1],
     )
     assert runtime.send_files([str(folder)], "remote") == "tid"
     # What the wire carries is the archive, not the folder: the transfer manager
@@ -2413,16 +2433,21 @@ def test_several_picks_go_as_one_archive_and_one_transfer(rig, monkeypatch, tmp_
     started = []
     monkeypatch.setattr(
         runtime.file_transfer, "send_file",
-        lambda path, send: (started.append(path), "tid")[1],
+        lambda path, send, **kwargs: (started.append((path, kwargs)), "tid")[1],
     )
     assert runtime.send_files([str(first), str(second)], "remote") == "tid"
     # One archive for the whole pick, so the receiver sees one transfer rather
     # than one per file -- the legacy 发送文件 dialog's multi-select.
     assert len(started) == 1
-    sent_path = Path(started[0])
+    sent_path, kwargs = started[0]
+    sent_path = Path(sent_path)
     assert sent_path.suffix == ".zip" and sent_path.name.startswith("files-2-")
     with zipfile.ZipFile(sent_path) as bundle:
         assert sorted(bundle.namelist()) == ["a.txt", "b.txt"]
+    # The picks ride on the transfer: the archive below is unlinked when the
+    # transfer ends, so without them the row's only path is a file that is gone
+    # and a retry could never rebuild the send.
+    assert kwargs["origin_paths"] == [str(first), str(second)]
     assert runtime._outgoing_archives == {"tid": str(sent_path)}
     runtime._on_transfer_complete("tid", True, False, "completed")
     assert not sent_path.exists()

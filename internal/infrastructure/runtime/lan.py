@@ -170,6 +170,11 @@ class LanRuntime:
 
     STOP_TIMEOUT = 5.0
     REFRESH_INTERVAL = 0.25
+    # How short the gap between two progress events may be.  Progress is
+    # reported once per 256 KB chunk and every event costs the desktop a whole
+    # snapshot refresh plus a WebSocket frame to the phone, so the events are
+    # spaced to what a bar can show rather than to what the disk can report.
+    PROGRESS_INTERVAL = 0.25
     PAIRING_SEND_WAIT = 12.0
     # How often a deferred ending notice re-dials a peer it cannot reach.  The
     # maintenance loop runs four times a second, which is far more often than a
@@ -232,6 +237,8 @@ class LanRuntime:
         self._probes_lock = threading.Lock()
         self._dirty = threading.Event()
         self._persist_dirty = False
+        # When a progress event was last published (see _progress_ready).
+        self._progress_at = 0.0
         # Presence and pairing transitions the legacy host detected by polling:
         # the last connected set, and per peer the pending code plus whether it
         # was already announced (``(code, first_seen, announced)``).
@@ -296,8 +303,8 @@ class LanRuntime:
             transfer_timeout=config.transfer_timeout,
         )
         self.file_transfer.set_on_transfer_progress(
-            lambda tid, progress: self._publish(
-                "transfer.progress", {"transfer_id": tid, "progress": progress}
+            lambda tid, progress: self._publish_progress(
+                "transfer.progress", {"transfer_id": tid, "progress": progress}, progress
             )
         )
         self.file_transfer.set_on_transfer_complete(
@@ -361,9 +368,10 @@ class LanRuntime:
         # the desktop progress row and the phone's chat file bubble sat at 0%
         # until the transfer finished.
         self.chat.set_on_file_progress(
-            lambda sid, tid, fraction: self._publish(
+            lambda sid, tid, fraction: self._publish_progress(
                 "chat.file.progress",
                 {"session_id": sid, "transfer_id": tid, "fraction": fraction},
+                fraction,
             )
         )
         self.chat.set_on_file_done(
@@ -557,56 +565,73 @@ class LanRuntime:
         arrive as one transfer, not as N.  A single pick keeps the old shape --
         a file goes as itself, a folder goes as its own archive -- so the wire
         and the receiving row read the same as they always did.
+
+        The selection also rides along on the transfer (``send_file``'s
+        ``origin_paths``) so a retry can rebuild the archive: the one this call
+        made is unlinked when the transfer ends, and a row whose only path is
+        that archive can never be sent again.  See ``transfer_action``.
         """
         picked = list(paths)
         if not picked or not all(isinstance(path, str) and path for path in picked):
             raise ApplicationError("INVALID_ARGUMENT", "No files to send")
+        # Blocking: the archive a folder or multi-file pick is sent as is built
+        # in here, which is as long as the selection is big.
+        return self._command(lambda: self._send_files(picked, device_id), blocking=True)
 
-        def run():
-            # A file's path is passed through exactly as it was handed in: this
-            # runtime is in no position to rewrite a caller's path, and a
-            # round trip through Path would do just that on Windows.
-            archive = ""
-            source = picked[0] if len(picked) == 1 else picked
-            if len(picked) > 1 or os.path.isdir(picked[0]):
-                try:
-                    archive_path, count = create_archive(source)
-                except ArchiveEmptyError:
-                    raise ApplicationError(
-                        "INVALID_ARGUMENT", "That folder has no files to send"
-                    ) from None
-                except OSError as error:
-                    # The pick can be a folder or several files, so the message
-                    # names the selection rather than a folder: a path that is
-                    # gone between the pick and the send lands here too.
-                    raise ApplicationError(
-                        "INVALID_ARGUMENT", f"Could not archive the selection: {error}"
-                    ) from error
-                archive = str(archive_path)
-                logger.info("Archived %s for sending (%d files)", archive_path.name, count)
-            subject = archive or picked[0]
-            if not device_id:
-                transfer_id = self.file_transfer.send_file(subject, self.transport.broadcast)
-            else:
-                pid = self._resolve(device_id)
-                if pid not in (self.transport.get_connected_peers() or []):
-                    if archive:
-                        Path(archive).unlink(missing_ok=True)
-                    raise ApplicationError("NOT_CONNECTED", "Device is not connected")
-                transfer_id = self.file_transfer.send_file(
-                    subject, lambda data: self.transport.send_to_peer(pid, data)
-                )
-            if archive:
-                if transfer_id:
-                    with self._archive_lock:
-                        self._outgoing_archives[transfer_id] = archive
-                else:
-                    # No transfer was started, so no completion event will come
-                    # to reclaim it: the panel dropped the archive here too.
+    def _send_files(self, picked, device_id):
+        """Start the send *picked* describes.  The caller holds the runtime.
+
+        A file's path is passed through exactly as it was handed in: this
+        runtime is in no position to rewrite a caller's path, and a round trip
+        through Path would do just that on Windows.
+        """
+        archive = ""
+        source = picked[0] if len(picked) == 1 else picked
+        if len(picked) > 1 or os.path.isdir(picked[0]):
+            try:
+                archive_path, count = create_archive(source)
+            except ArchiveEmptyError:
+                raise ApplicationError(
+                    "INVALID_ARGUMENT", "That folder has no files to send"
+                ) from None
+            except OSError as error:
+                # The pick can be a folder or several files, so the message
+                # names the selection rather than a folder: a path that is
+                # gone between the pick and the send lands here too.
+                raise ApplicationError(
+                    "INVALID_ARGUMENT", f"Could not archive the selection: {error}"
+                ) from error
+            archive = str(archive_path)
+            logger.info("Archived %s for sending (%d files)", archive_path.name, count)
+        subject = archive or picked[0]
+        # Only an archived send carries its selection: a plain file's own path
+        # is its source, so the row can be sent again from it as it stands, and
+        # the call stays exactly what every caller already made.
+        extra = {"origin_paths": picked} if archive else {}
+        if not device_id:
+            transfer_id = self.file_transfer.send_file(
+                subject, self.transport.broadcast, **extra
+            )
+        else:
+            pid = self._resolve(device_id)
+            if pid not in (self.transport.get_connected_peers() or []):
+                if archive:
                     Path(archive).unlink(missing_ok=True)
-            return transfer_id
-
-        return self._command(run)
+                raise ApplicationError("NOT_CONNECTED", "Device is not connected")
+            transfer_id = self.file_transfer.send_file(
+                subject,
+                lambda data: self.transport.send_to_peer(pid, data),
+                **extra,
+            )
+        if archive:
+            if transfer_id:
+                with self._archive_lock:
+                    self._outgoing_archives[transfer_id] = archive
+            else:
+                # No transfer was started, so no completion event will come
+                # to reclaim it: the panel dropped the archive here too.
+                Path(archive).unlink(missing_ok=True)
+        return transfer_id
 
     def transfer_action(self, action, transfer_id):
         def run():
@@ -633,13 +658,25 @@ class LanRuntime:
                 if not entry or entry.get("direction") != "up" or not entry.get("source_path"):
                     raise ApplicationError("INVALID_ARGUMENT", "Transfer cannot be retried")
                 peer_id = entry.get("peer_id") or ""
+                # A folder or a multi-file pick travelled as a temp archive that
+                # was unlinked the moment the transfer ended, so the row's own
+                # path is gone and re-sending it could only ever fail with a
+                # message about a file the user never chose.  The selection the
+                # send was made from is carried on the row instead, and the send
+                # is rebuilt from it -- archiving again, so a retry sends what is
+                # on disk now, exactly as a retried single file does.
+                origin = entry.get("origin_paths") or []
+                if origin:
+                    return self._send_files(list(origin), peer_id)
                 send_fn = (
                     (lambda data: self.transport.send_to_peer(peer_id, data))
                     if peer_id else self.transport.broadcast
                 )
                 return self.file_transfer.send_file(entry["source_path"], send_fn)
             raise ApplicationError("INVALID_ARGUMENT", "Unknown transfer action")
-        return self._command(run)
+        # Blocking: a retry re-archives its selection, and that is the slow half
+        # of this callback -- the other actions answer immediately.
+        return self._command(run, blocking=True)
 
     def cancel_all_transfers(self):
         """Cancel every active transfer through the same path a single ✕ takes.
@@ -952,14 +989,21 @@ class LanRuntime:
         send_fn = lambda data: self.transport.send_to_peer(pid, data)  # noqa: E731
         sent = 0
         orphaned: list[tuple[str, str]] = []
-        for subject, archive in prepared:
+        # walk the same order ``prepared`` was built in, so each entry keeps the
+        # path it came from: a directory's own archive is reclaimed when the
+        # transfer ends, and that path is what a retry rebuilds from.
+        for path, (subject, archive) in zip(paths, prepared, strict=False):
             try:
                 # One transfer per file, so what lands is the file the user saw
                 # rather than an archive they have to open; a *directory* has no
                 # other shape to travel in, so it goes as its own archive,
                 # exactly as a folder sent from the transfers page does.
                 transfer_id = self.file_transfer.send_file(
-                    subject, send_fn, kind="clip_file", entry_id=entry_id
+                    subject,
+                    send_fn,
+                    kind="clip_file",
+                    entry_id=entry_id,
+                    origin_paths=[path] if archive else None,
                 )
             except OSError as error:
                 logger.info("Could not send a file to a peer: %s", error)
@@ -1105,7 +1149,9 @@ class LanRuntime:
         Raises :class:`ApplicationError` when the peer cannot be reached, so the
         click that produced no traffic cannot look like one that did.
         """
-        return self._command(self._offer_device_update, device_id)
+        # Blocking: offering to an idle device dials it first, and that wait is
+        # the runtime's to hold, not the runtime's lock.
+        return self._command(self._offer_device_update, device_id, blocking=True)
 
     def _offer_device_update(self, device_id: str) -> dict:
         pid = self._resolve(device_id)
@@ -1410,7 +1456,8 @@ class LanRuntime:
         return text[:40] if text else (msg_type or "chat")
 
     def chat_invite(self, peer_id, peer_name):
-        return self._command(self._chat_invite, peer_id, peer_name)
+        # Blocking: the dial below can hold this for CHAT_CONNECT_TIMEOUT.
+        return self._command(self._chat_invite, peer_id, peer_name, blocking=True)
 
     def _chat_invite(self, peer_id, peer_name):
         """Open a chat session, dialing the peer first when it is not connected.
@@ -1561,22 +1608,51 @@ class LanRuntime:
         finally:
             self._leave()
 
-    def _command(self, callback, *args):
+    def _command(self, callback, *args, blocking=False):
+        """Run one runtime operation: accounted for, serialized, wrapped.
+
+        ``_pairing_ops`` is held across the whole callback, which is what every
+        operation that reads or moves trust state needs -- and what an operation
+        that *blocks for a long time* must not have.  The receive path and the
+        refresh tick take the same lock, so a callback that dials a peer and
+        waits for the link (``_connect_and_wait``, up to
+        ``CHAT_CONNECT_TIMEOUT``) froze every other command the window was
+        asking for, and every frame the peer sent while it waited, for as long
+        as it waited.  A callback that blocks on the disk -- the zip a folder
+        send is built from -- holds it just as long, for no better reason.
+
+        Those few pass ``blocking=True``.  They are marked, not unguarded: the
+        runtime is still held, the stop event is still checked and a failure is
+        still wrapped exactly as below.  ``test_device`` makes the same choice
+        by hand, from before this had a name.
+        """
         if not self._enter():
             raise ApplicationError("LAN_NOT_RUNNING", "LAN runtime is not running")
         try:
+            if blocking:
+                return self._checked_call(callback, *args)
             with self._pairing_ops:
-                if self._stop_event.is_set():
-                    raise ApplicationError("LAN_NOT_RUNNING", "LAN runtime is stopping")
-                return callback(*args)
+                return self._checked_call(callback, *args)
         except ApplicationError:
             raise
         except Exception:
+            # Logged here because nothing downstream will: the RPC layer answers
+            # an ApplicationError with its message and records nothing, and that
+            # message is deliberately one sentence for every cause.  The traceback
+            # is the only place the failing operation and its reason exist, so it
+            # goes to the log before ``from None`` drops it from the raise.
+            logger.error("LAN command failed", exc_info=True)
             raise ApplicationError(
                 "LAN_OPERATION_FAILED", "LAN operation failed", retryable=True
             ) from None
         finally:
             self._leave()
+
+    def _checked_call(self, callback, *args):
+        """Refuse a stopped runtime, then run the callback."""
+        if self._stop_event.is_set():
+            raise ApplicationError("LAN_NOT_RUNNING", "LAN runtime is stopping")
+        return callback(*args)
 
     def _on_transfer_complete(self, transfer_id, success, cancelled, status):
         """Report a finished transfer, then reclaim its archive if it had one.
@@ -1621,6 +1697,41 @@ class LanRuntime:
                 self.events.publish(name, data)
             except Exception:
                 logger.warning("LAN runtime: EVENT_PUBLISH_FAILED")
+
+    def _publish_progress(self, name, data, fraction):
+        """Publish one progress event, unless one has just gone out.
+
+        Progress arrives once per 256 KB chunk, so a 250 MB file is a thousand
+        events — and every one of them is answered by the desktop with a
+        whole-snapshot refresh (status, devices and history) and by the phone
+        with a WebSocket frame.  Those refreshes are what fill the bars, so the
+        events cannot be dropped; they can be spaced, because neither surface
+        shows more than the eye can read.  One gate for the process is enough
+        to space them: the desktop's refresh is not per-transfer, so whichever
+        event arrives refreshes every bar on screen.
+
+        The last event of a transfer is never held back — 1.0 is what fills the
+        bar, and it lands inside the window whenever the last chunk flushes
+        quickly after the one before it.
+        """
+        if fraction < 1.0 and not self._progress_ready():
+            return
+        self._publish(name, data)
+
+    def _progress_ready(self):
+        """Whether PROGRESS_INTERVAL has passed since the last progress event.
+
+        The timestamp is read and written without the lock on purpose: it is a
+        float under a gate that decides nothing but how often a bar is redrawn,
+        so two threads reaching it at once cost at most one extra event, and
+        taking _lock on every chunk of every transfer is the cost this exists to
+        avoid.
+        """
+        now = time.monotonic()
+        if now - self._progress_at < self.PROGRESS_INTERVAL:
+            return False
+        self._progress_at = now
+        return True
 
     def _error(self, code):
         logger.warning("LAN runtime: %s", code)
@@ -2723,6 +2834,54 @@ class LanRuntime:
         self._publish("pairing.resolved", {"device_id": peer_id, "status": ""})
         self._refresh()
 
+    def _adopt_peer_pairing(self, pid):
+        """Take a confirm from a peer this side never showed a request for.
+
+        A pairing can only be started from the machine it is started on: the
+        shared code is generated by whichever side opened the link, and only at
+        the moment it opens, so a request made on a link that is already up — a
+        declined prompt leaves the link standing, and a nearby chat opens one —
+        puts the code on one screen alone.  The peer's confirm is then the first
+        thing this side hears about the pairing, and reading it as an answer to
+        a request that does not exist here is how the machine that asked ended
+        up waiting for a confirmation nobody had been asked to give.
+
+        Deriving the code here is what that half of the handshake needs, and it
+        is the same code: the derivation is over both fingerprints, and the
+        peer's certificate was pinned by the handshake this frame arrived on.  So
+        what this raises is ``mark_peer_confirmed``'s own case — the peer
+        confirmed first — with the code on both screens for the user to compare.
+        """
+        if self.pairing.is_peer_paired(pid):
+            return
+        try:
+            code = self.pairing.generate_shared_pairing_code(pid)
+        except Exception:
+            # No certificate on record for that id: a peer that never handshaked
+            # cannot have a code derived for it, so it is not asking.  Nothing is
+            # recorded either, which is what keeps the devices page from drawing
+            # a confirm row for a device nobody has asked to pair with.
+            logger.debug("No pairing to adopt from %s", str(pid)[:12], exc_info=True)
+            return
+        self.pairing.mark_peer_confirmed(pid)
+        # Announced here rather than left to the poll, which announces requests
+        # nobody asked for and holds them back while a chat with that peer is
+        # live — the very state a pairing started from chat is in.  This request
+        # was asked for, so it goes out now, wherever in the window the reader
+        # is.  Saying so here means telling the poll as well, or it announces the
+        # same request again on its next tick.
+        with self._lock:
+            self._pairing_seen[pid] = (code, time.monotonic(), True)
+        self._publish(
+            "pairing.request",
+            {
+                "device_id": pid,
+                "name": self._peer_name(pid),
+                "code": code,
+                "sas": self._sas_for(pid),
+            },
+        )
+
     def _forget_device(self, device_id):
         pid = self._resolve(device_id)
         with config_lock:
@@ -3761,6 +3920,13 @@ class LanRuntime:
                 if kind == "pairing_confirm":
                     if pid in pending:
                         self.pairing.mark_peer_confirmed(pid)
+                    elif pid in self.transport.get_connected_peers():
+                        # Nothing of ours to answer, but a live peer that says
+                        # it confirmed: this is that peer asking, and the request
+                        # it is answering is the one it raised itself.  A confirm
+                        # arriving any other way — no link, no pinned certificate,
+                        # no request — stays the no-op it was.
+                        self._adopt_peer_pairing(pid)
                 else:
                     self.pairing.mark_peer_rejected(
                         pid

@@ -311,7 +311,7 @@ Files take the same connection; the payload is just 1 MB chunks with ACKs.
 
 ### Security model
 
-Each device generates an Ed25519 key pair on first launch, and the public key is its identity. The first time two devices connect, both show the same 8-digit pairing code derived from the TLS 1.3 session; once the user confirms, the peer's certificate fingerprint is pinned and any later change is treated as an alert. Data is encrypted twice in flight: TLS 1.3 provides transport security, and every frame body is separately encrypted with AES-256-GCM. The private key and clipboard history on disk use the same cipher.
+Each device generates an Ed25519 key pair on first launch, and the public key is its identity. The first time two devices connect, both show the same 8-digit pairing code, derived by hashing the two certificates' fingerprints in a fixed order so that each side arrives at the same digits; once the user confirms, the peer's certificate fingerprint is pinned and any later change is treated as an alert. Data is encrypted twice in flight: TLS 1.3 provides transport security, and every frame body is separately encrypted with AES-256-GCM. The private key and clipboard history on disk use the same cipher.
 
 ---
 

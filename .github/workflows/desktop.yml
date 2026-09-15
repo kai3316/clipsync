@@ -54,6 +54,29 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+      - name: Verify tag matches internal version
+        # The same guard build.yml applies to the legacy half, needed here for
+        # the desktop half -- and needed *before* the build, not at the manifest.
+        # This workflow bakes internal/version.py into the bundle but takes the
+        # manifest's version from the tag, so a tag pushed without the bump
+        # produces a correctly-signed bundle of the *old* version published
+        # under the new one.  The app then downloads it, verifies the signature
+        # (valid), installs it, restarts as the old version, and is offered the
+        # update again: an install loop no user action ends.  One leg runs it
+        # because the file it reads is the same in all of them, and a failing
+        # leg keeps `release` -- which needs every leg -- from writing the
+        # manifest at all.
+        if: startsWith(github.ref, 'refs/tags/v') && runner.os == 'Linux'
+        shell: bash
+        run: |
+          ACTUAL="${{ github.ref_name }}"
+          EXPECTED="v$(python -c 'from internal.version import __version__; print(__version__)')"
+          echo "Expected version tag: $EXPECTED"
+          echo "Actual tag at HEAD:   $ACTUAL"
+          if [ "$ACTUAL" != "$EXPECTED" ]; then
+            echo "::error::Tag '$ACTUAL' does not match internal.version.__version__ ('$EXPECTED'). Bump internal/version.py before tagging."
+            exit 1
+          fi
       - name: Linux native build dependencies
         if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf

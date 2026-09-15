@@ -21,6 +21,8 @@ import os
 import platform
 import subprocess
 
+from internal.i18n import T
+
 FIREWALL_PANE = "x-apple.systempreferences:com.apple.preference.security?Firewall"
 LOCAL_NETWORK_PANE = (
     "x-apple.systempreferences:com.apple.preference.security?Privacy_LocalNetwork"
@@ -104,6 +106,11 @@ def request(action: str, cfg) -> dict:
 
     Returns ``{"ok": bool}`` on success and ``{"ok": False, "error": str}``
     otherwise — never raises, so the caller can surface the reason verbatim.
+
+    The reason is worded here rather than left to a caller because both callers
+    do surface it verbatim: the failures below land in the desktop's top band
+    and in the legacy panel's dialog unchanged, and an English sentence in
+    either of them under a Chinese interface is the same defect twice.
     """
     try:
         system = platform.system()
@@ -117,7 +124,7 @@ def request(action: str, cfg) -> dict:
                 # System Settings — so open the exact pane.
                 if macos_open_settings(FIREWALL_PANE):
                     return {"ok": True}
-                return {"ok": False, "error": "Could not open the macOS firewall settings."}
+                return {"ok": False, "error": T("diagnostics.action.firewall_pane_failed")}
             if system == "Windows":
                 # Prefer re-applying the allow rule (idempotent). netsh needs
                 # admin rights — retry elevated via a UAC prompt, then fall
@@ -131,11 +138,7 @@ def request(action: str, cfg) -> dict:
                     return {"ok": True}
                 if open_windows_settings(WINDOWS_FIREWALL_URI):
                     return {"ok": True}
-                return {
-                    "ok": False,
-                    "error": "Could not create the firewall rule (admin rights may be "
-                    "required) or open the firewall settings.",
-                }
+                return {"ok": False, "error": T("diagnostics.action.firewall_rule_failed")}
             if system == "Linux":
                 # Grant both ports on the active firewall (ufw / firewalld)
                 # via a PolicyKit GUI auth prompt — the Linux equivalent of
@@ -149,8 +152,11 @@ def request(action: str, cfg) -> dict:
                     subprocess.Popen(["pkexec", "sh", "-c", script])
                     return {"ok": True}
                 except Exception:
-                    return {"ok": False, "error": f"Allow the ports manually as root: {script}"}
-            return {"ok": False, "error": "Firewall settings are not supported on this OS."}
+                    return {
+                        "ok": False,
+                        "error": T("diagnostics.action.firewall_manual", script=script),
+                    }
+            return {"ok": False, "error": T("diagnostics.action.firewall_unsupported")}
 
         if action == "local_network":
             if system == "Darwin":
@@ -158,24 +164,18 @@ def request(action: str, cfg) -> dict:
                 # cannot be granted by CLI — open the exact pane for it.
                 if macos_open_settings(LOCAL_NETWORK_PANE):
                     return {"ok": True}
-                return {
-                    "ok": False,
-                    "error": "Could not open the macOS Local Network permission settings.",
-                }
+                return {"ok": False, "error": T("diagnostics.action.local_network_pane_failed")}
             if system == "Windows":
                 # Windows has no dedicated local-network permission page on most
                 # builds — the firewall & network settings is the closest target.
                 if open_windows_settings(WINDOWS_FIREWALL_URI):
                     return {"ok": True}
-                return {
-                    "ok": False,
-                    "error": "Could not open the Windows network/firewall settings.",
-                }
+                return {"ok": False, "error": T("diagnostics.action.windows_settings_failed")}
             if system == "Linux":
                 # No local-network permission exists on Linux — nothing to do.
                 return {"ok": True}
-            return {"ok": False, "error": "Permission settings are not supported on this OS."}
+            return {"ok": False, "error": T("diagnostics.action.permission_unsupported")}
 
-        return {"ok": False, "error": f"Unknown action: {action}"}
+        return {"ok": False, "error": T("diagnostics.action.unknown", action=action)}
     except Exception as exc:
         return {"ok": False, "error": str(exc)}

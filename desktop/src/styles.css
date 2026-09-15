@@ -296,11 +296,6 @@ input[type="checkbox"] { width: 16px; height: 16px; flex-shrink: 0; accent-color
 .error-band strong { font-weight: 550; }
 .error-band small { display: block; margin-top: 3px; overflow-wrap: anywhere; }
 .error-band button { margin-left: auto; }
-/* The same band, for a wait rather than a failure: an invite whose link is
-   still being dialed.  It borrows the geometry and drops the alarm — same shape,
-   so the eye finds it where an error would be, and no red, because nothing has
-   gone wrong yet. */
-.status-band { display: flex; gap: 10px; align-items: center; padding: 14px var(--page-gutter); color: var(--accent-text); background: var(--accent-soft); border-bottom: 1px solid var(--accent-line); }
 .unlock { margin: auto; width: min(360px, 100%); padding: 35px; display: grid; gap: 16px; }
 .unlock input { min-width: 0; border: 1px solid var(--line); border-radius: 4px; padding: 10px; background: transparent; }
 button.primary { background: var(--accent-solid); color: var(--on-accent); }

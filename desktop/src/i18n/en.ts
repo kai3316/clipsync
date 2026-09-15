@@ -135,7 +135,6 @@ export const EN: Record<string, string> = {
   "此设备": "This device",
   "设备": "Devices",
   "设备名称": "Device name",
-  "设备别名": "Device alias",
   "设备备注": "Device note",
   "保存设备备注失败": "Could not save the device note",
   "刷新设备": "Refresh devices",

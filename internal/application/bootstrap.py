@@ -244,7 +244,15 @@ class SidecarApplication:
         config = self.config
         if config is not None:
             names[config.device_id] = config.device_name
-            names.update({peer.device_id: peer.device_name for peer in config.peers.values()})
+            # Under the lock that every writer of ``peers`` takes: this runs on
+            # the history read path, and a peer landing while the comprehension
+            # walks the dict is a "dictionary changed size during iteration" out
+            # of a page render rather than a stale name.
+            from internal.config.config import config_lock
+            with config_lock:
+                names.update(
+                    {peer.device_id: peer.device_name for peer in config.peers.values()}
+                )
         return source_name(
             source_device, names, config.device_name if config is not None else ""
         )
@@ -516,7 +524,13 @@ class SidecarApplication:
             self._start_runtime()
             self._start_companion()
         except Exception:
-            # Retain the owned instance for lifecycle cleanup; do not start a second runtime.
+            # Retire the half-started runtime before re-raising.  ``_start_runtime``
+            # returns early while ``self.runtime`` is set, so leaving the dead
+            # object in place made the retry the user is offered a no-op: the app
+            # reported itself ready with sync stopped and no companion, and only a
+            # restart could bring either back.  Stopping it also releases the port
+            # a failed bind was still holding, which is what the retry needs.
+            self._stop_runtime()
             self._health = "ready"
             raise
         self.events.publish("app.status.changed", {"health": self._health})
@@ -1308,8 +1322,12 @@ class SidecarApplication:
     def devices(self) -> dict:
         if self.runtime is not None:
             return self.runtime.devices()
-        return {
-            "items": [
+        # The no-runtime path: locked for the same reason as the naming above,
+        # and here the dict is walked from the window's own refresh while a peer
+        # can be added or archived underneath it.
+        from internal.config.config import config_lock
+        with config_lock:
+            items = [
                 {
                     "id": peer.device_id,
                     "name": peer.device_name,
@@ -1317,8 +1335,8 @@ class SidecarApplication:
                     "connection_state": "unknown",
                 }
                 for peer in self.config.peers.values()
-            ],
-        }
+            ]
+        return {"items": items}
 
     def _close(self) -> None:
         self.updates.stop()

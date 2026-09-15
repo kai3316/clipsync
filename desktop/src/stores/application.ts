@@ -548,6 +548,12 @@ export function createApplicationStore() {
             state.history = [];
             state.selectedIds = [];
             state.total = 0;
+            // The chips read the dead process's numbers otherwise: 暂无历史记录
+            // over an empty list, with 全部 128 · 文本 90 still on screen and
+            // still clickable, against a sidecar that is not there.
+            state.counts = {};
+            state.hasHistory = false;
+            state.kbdIndex = -1;
             if (state.status) state.status.health = "stopped";
             setError(restarting
               ? { code: "SIDECAR_RESTARTING",

@@ -46,49 +46,89 @@ jobs:
 
           What is new in this release:
 
-          - Nearby chat no longer asks anyone to pair.  Clicking a device on
-            the chat page used to put a pairing-code prompt on the *other*
-            device, so starting a conversation meant answering a question about
-            trust first.  The invitation carries no pairing request now, and the
-            code the receiving side generates for an incoming connection is
-            withdrawn as soon as a chat frame arrives.  The switch on the
-            settings page still decides whether a conversation opens on both
-            sides at once or waits for the other person to accept it.
-          - The nearby-chat page is one rail instead of two.  Devices and
-            conversations were separate columns, and the only way to start a
-            conversation was to go to the devices page first, click the device
-            there and then come back.  The device list is the empty-state of the
-            chat list now, so the thing you want is where you are looking.
-          - The device list shows the version each device is running.  A device
-            on the same platform and an older build of it can be sent one: the
-            button offers this machine's installer when it has one cached, and
-            otherwise tells the other device a newer version exists so its own
-            release check picks it up.  Neither direction needs a pairing.
-          - A device stopped appearing twice.  A device is advertised under a
-            hash of its id and stored under the id itself; removing it while it
-            was listed under the hash archived it under that hash, and when the
-            hash later resolved the live row and its archive no longer
-            recognised each other as one device.  One device, two rows -- one a
-            device, one its own removed copy.
-          - A device is listed under the name its own user chose.  The name
-            never crossed the network at all: the only one available was the
-            truncated label mDNS advertises, which is a handle rather than a
-            name, and a local rename did not reach the network until a restart.
-            The chosen name now travels with the advertisement and takes
-            precedence over anything recorded here, so renaming a device
-            renames it on every device that lists it, live.
-          - Error messages in a Chinese window are in Chinese.  Failures
-            travelled as an English sentence written for the log and were shown
-            as one; the sentence is now derived from the error's code, so each
-            surface showing a failure shows it in the window's own language.
-          - Clipboard history previews images and files on hover, instead of
-            showing a row you have to act on to identify.
-          - History keeps 500 entries by default rather than 50.
-          - The internet-pairing page has its own on/off switch.  It is the same
-            setting as the one on the settings page, so turning it off in
-            either place turns it off in both.
-          - Pairing and connecting are steadier.  Declining a pairing request no
-            longer makes later ones from that device decline themselves.
+          - A pairing started on a connection that is already up now appears on
+            both devices.  The shared code is derived by whichever side opens
+            the connection, and only at the moment it opens -- so a request made
+            on a link that was already standing (a declined prompt leaves one,
+            and nearby chat opens one) put the code on one screen alone.  The
+            other device's confirmation then arrived as the answer to a request
+            it had never shown, and was dropped: the machine that started the
+            pairing sat waiting for a confirmation nobody had been asked to
+            give.  The device that receives it now derives the same code from
+            the two pinned certificates and asks its own user, which is the
+            confirmation the other side was waiting for.
+          - A folder or a multi-file transfer can be retried.  Both travel as a
+            temporary archive, and that archive is deleted the moment the
+            transfer ends -- so the retry asked for a path that no longer
+            existed and failed every time.  The selection is kept with the
+            record now, and a retry archives it again, so what is sent is what
+            is on the disk at that moment, exactly as retrying one file sends
+            the file as it is now.
+          - Renaming a device on the internet-pairing page works on macOS and
+            Linux.  That page collected the new name with a browser prompt,
+            which neither of the two webviews behind the desktop window
+            implements, so the click opened nothing at all and the name could
+            not be changed there.  It uses the same rename dialog as the device
+            list.
+          - The failures 1.0.9 left in English are in Chinese too.  That release
+            gave the common error codes a sentence in the window's language; the
+            rest still arrived as the English written for the log, and the codes
+            that answer for a dozen different actions could not be given one
+            sentence that fits them all.  Those have one of their own now, and
+            the refusals a reader can bring about themselves -- an invalid group
+            name, a URL scheme nothing handles, a folder with nothing in it --
+            carry their own sentence, translated.  The previous Python
+            application's own notifications (a file that is gone, a file it may
+            not read, an archive it could not build) are translated with them.
+          - The window answers while it dials a device or archives a folder.
+            Both ran with the whole runtime held, so opening a conversation with
+            a device that had gone idle -- a wait of up to fifteen seconds --
+            froze every other call the window makes, and every frame the devices
+            sent while it lasted waited with them.
+          - Progress no longer re-reads the whole application.  Every 256 KB
+            chunk was an event, and the window answered each one by refreshing
+            its status, its devices and its history -- so one large transfer was
+            thousands of full refreshes.  The events are spaced to four a
+            second, which is more than a progress bar can show, and the last one
+            of a transfer is never held back.
+          - A damaged clipboard history is repaired on Windows.  The damaged
+            file was meant to be moved aside so a fresh one could be started,
+            but the connection that had failed was still open on it and Windows
+            will not rename an open file: the repair failed, and everything
+            copied for the rest of that session lived only in memory and was
+            gone at the next start.
+          - A clip is no longer lost after a restart.  A new row's id is the
+            largest one on disk plus one, and the largest was read off the
+            loaded list -- which is capped -- so the id of a row the cap had
+            dropped could be handed out a second time.  The write was refused
+            and the clip existed only in memory until the app closed.
+          - The overview stops showing a dead background process's numbers.  A
+            process that had failed and restarted left its counts on screen:
+            "no history yet" over an empty list, with the type filters still
+            counting clips that were not there and still clickable.
+          - Clipboard history previews show the clip under the pointer.  A
+            preview was remembered under the row's id alone, and an id is handed
+            out again once the newest row is deleted and the app restarts, so a
+            hover could show a different clip's picture.
+          - The chat page's "connecting to the other device" notice can be
+            read.  It was written into a band the page owns, and the page's own
+            poll -- once every 1.5 seconds, started by that same click -- clears
+            that band, so the sentence was gone almost as soon as it appeared
+            and an invitation that had to dial looked like a click that did
+            nothing.  It goes to the window's status line now, which the poll
+            does not touch.
+          - An update that cannot be verified is refused.  The downloaded
+            installer is checked against the size and the SHA-256 digest the
+            release publishes, and a file the release describes without both is
+            no longer installed on the strength of the download alone.
+          - The broker and pairing passwords no longer reach the log tail that
+            the desktop's diagnostics page and the phone's web panel can read.
+            Both go through the same redaction the web token already did.  The
+            log you export yourself is still the raw one.
+          - A device on the network can no longer exhaust this machine by
+            opening connections.  Every accepted connection is a thread, and
+            nothing capped how many could be mid-handshake at once.  There is a
+            ceiling now, well above what a household of devices needs.
 
           The device name is now published in the mDNS record, to the local
           network.  That is what lets devices show the name you chose rather

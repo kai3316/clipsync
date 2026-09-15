@@ -234,6 +234,19 @@ class ClipboardHistoryDB:
         history silently evaporates on the next restart.  The broken file is
         preserved as ``<name>.corrupt-<timestamp>`` for inspection.
         """
+        # Close the connection that failed before touching the files.  SQLite
+        # opens lazily, so the failure can come from ``_init_schema`` well after
+        # ``_get_conn`` assigned ``self._conn`` — and Windows refuses to rename a
+        # file that is still open, which is why the quarantine used to log
+        # "Could not quarantine corrupt DB file" and leave the session with a
+        # memory-only history.  The fresh connect below needs the handle
+        # released just as much.
+        conn, self._conn = self._conn, None
+        if conn is not None:
+            try:
+                conn.close()
+            except Exception:
+                logger.warning("Could not close the corrupt history DB before quarantining")
         stamp = time.strftime("%Y%m%d-%H%M%S")
         for suffix in ("-wal", "-shm", ""):
             src = Path(str(self._db_path) + suffix)
@@ -971,8 +984,14 @@ class ClipboardHistoryDB:
             # would report an inflated total to /api/history until then.
             self._entries = self._entries[: self.MAX_ENTRIES]
 
-            if self._entries:
-                self._next_id = max(e.get("entry_id", 0) for e in self._entries) + 1
+            # The next id comes from the table, not from the page above: the cap
+            # drops rows by display order, so the largest ``entry_id`` on disk can
+            # belong to a row the cap just dropped.  Numbering the next clip from
+            # the page would re-issue a live primary key — the INSERT is refused,
+            # the clip lives in memory only, and it is gone at the next restart.
+            highest = conn.execute("SELECT MAX(entry_id) FROM history").fetchone()[0]
+            if highest is not None:
+                self._next_id = int(highest) + 1
 
             if self._enc_mgr:
                 for entry in self._entries:
