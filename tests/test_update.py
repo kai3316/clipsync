@@ -352,26 +352,48 @@ def test_a_network_failure_names_itself_in_the_answer(monkeypatch):
 
     assert result["available"] is False
     assert result["latest"] == ""
-    # Not just "it failed": the OS-level reason survived to the caller.
-    assert "10054" in result["error"]
+    assert result["reason"] == updater_mod.UNREACHABLE
+    # Said in the reader's language, and the OS-level reason is still there for
+    # whoever has to work out why -- it is just no longer what is shown.
+    assert result["error"] == updater_mod.T("update.error_unreachable")
+    assert "10054" in result["detail"]
     assert result["url"] == updater_mod._RELEASES_PAGE
 
 
-def test_a_refused_request_reports_the_status_and_githubs_own_reason(monkeypatch):
+def test_a_rate_limit_is_not_retried(monkeypatch):
+    """Retrying a refusal spends the budget the refusal is about.
+
+    The check retried every failure three times, which for a rate limit is
+    three requests against the 60 an hour GitHub allows an IP -- from a click
+    that could not have worked, and with the third refusal as the answer.
+    """
     import io
     import urllib.error
 
-    # urllib's own text for this is "HTTP Error 403: Forbidden", which drops the
-    # body -- and the body is the whole answer: rate limit, not a bad request.
-    body = io.BytesIO(json.dumps({"message": "API rate limit exceeded for 1.2.3.4"}).encode())
-    _urlopen_raises(
-        monkeypatch,
-        urllib.error.HTTPError(updater_mod._LATEST_URL, 403, "Forbidden", {}, body),
-    )
+    calls = []
+
+    def explode(*args, **kwargs):
+        calls.append(1)
+        raise urllib.error.HTTPError(
+            updater_mod._LATEST_URL,
+            403,
+            "Forbidden",
+            {},
+            io.BytesIO(json.dumps({"message": "API rate limit exceeded"}).encode()),
+        )
+
+    monkeypatch.setattr(updater_mod.urllib.request, "urlopen", explode)
+    _no_retry_delay(monkeypatch)
 
     result = updater_mod.check_for_update()
 
-    assert result["error"] == "HTTP 403: API rate limit exceeded for 1.2.3.4"
+    # One request, and the refusal is named rather than quoted: GitHub's own
+    # sentence for this is written for a developer and ends with an aside about
+    # authenticating, which is not something to put in a status bar.
+    assert len(calls) == 1
+    assert result["reason"] == updater_mod.RATE_LIMITED
+    assert result["error"] == updater_mod.T("update.error_rate_limited")
+    assert result["detail"] == "HTTP 403: API rate limit exceeded"
 
 
 def test_a_release_with_no_tag_is_not_reported_as_a_network_failure(monkeypatch):
@@ -385,7 +407,8 @@ def test_a_release_with_no_tag_is_not_reported_as_a_network_failure(monkeypatch)
     result = updater_mod.check_for_update()
 
     assert result["available"] is False
-    assert result["error"] == "release has no tag_name"
+    assert result["reason"] == updater_mod.MALFORMED
+    assert result["error"] == updater_mod.T("update.error_malformed")
     assert "URLError" not in result["error"]
 
 

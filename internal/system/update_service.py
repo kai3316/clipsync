@@ -167,6 +167,12 @@ class UpdateService:
             # The keys above are a projection, and a projection that drops the
             # reason turns every failure into the same four-word sentence.
             "error": result.get("error", ""),
+            # The same failure twice more: as a code, and as the raw line the
+            # server or the OS produced.  `error` is what to show a reader --
+            # short, and in this app's language -- and these two are what to
+            # put in a report about it.
+            "reason": result.get("reason", ""),
+            "detail": result.get("detail", ""),
         }
 
     # ── download ─────────────────────────────────────────────────────────

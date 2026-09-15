@@ -14,6 +14,7 @@ import urllib.error
 import urllib.request
 from collections.abc import Callable
 
+from internal.i18n import T
 from internal.version import __version__
 
 logger = logging.getLogger(__name__)
@@ -89,6 +90,10 @@ def _describe(exc: Exception | None) -> str:
     where GitHub puts "API rate limit exceeded for <ip>".  That sentence is the
     difference between "wait an hour" and "something here is blocking the API",
     so it is read back and included.
+
+    This is the log's line, not the window's: it is GitHub's own English, and
+    it ends with an aside aimed at developers.  What a reader is shown comes
+    from :func:`_reason` and the catalog; this travels beside it as the detail.
     """
     if isinstance(exc, urllib.error.HTTPError):
         body = ""
@@ -103,18 +108,74 @@ def _describe(exc: Exception | None) -> str:
     return f"{type(exc).__name__}: {exc}"
 
 
-def _fetch_latest_release(timeout: float = 6.0, failure: list[str] | None = None) -> dict | None:
+# What the lookup's failures are, in the caller's terms.  The distinction that
+# matters is which of them a reader can do something about, and a rate limit is
+# the one that looks like a bug and is not: nothing is broken, the answer is
+# "ask again later".
+RATE_LIMITED = "rate_limited"
+UNREACHABLE = "unreachable"
+REFUSED = "refused"
+MALFORMED = "malformed"
+
+# The sentence each failure is said in.  Absent from here means the raw detail
+# is all there is to say, which is true of a failure this module has no name
+# for -- and a name for it would be a guess.
+_REASON_KEYS = {
+    RATE_LIMITED: "update.error_rate_limited",
+    UNREACHABLE: "update.error_unreachable",
+    REFUSED: "update.error_refused",
+    MALFORMED: "update.error_malformed",
+}
+
+
+def _reason(exc: Exception | None, detail: str) -> str:
+    """Which kind of failure *exc* is, as one of the codes above.
+
+    A 403 is GitHub's spelling of both "you are over the rate limit" and "this
+    is refused", and the body is what tells them apart -- the same body
+    :func:`_describe` already read for its message.
+    """
+    if exc is None:
+        return ""
+    if isinstance(exc, urllib.error.HTTPError):
+        if exc.code in (403, 429) and "rate limit" in detail.lower():
+            return RATE_LIMITED
+        return REFUSED
+    if isinstance(exc, (urllib.error.URLError, OSError, TimeoutError)):
+        return UNREACHABLE
+    return ""
+
+
+def _retryable(exc: Exception) -> bool:
+    """Whether trying again could plausibly answer differently.
+
+    A 4xx is a decision rather than a blip: GitHub answering 403 for a rate
+    limit answers 403 again one second later, and the retry spends another
+    request from the very budget the refusal is about.  That budget is 60
+    requests an hour per IP, shared by everything behind that IP, so three
+    attempts per click is a limit this app helps itself into -- and the third
+    refusal is the one that gets shown.
+    """
+    if isinstance(exc, urllib.error.HTTPError):
+        return not 400 <= exc.code < 500
+    return True
+
+
+def _fetch_latest_release(
+    timeout: float = 6.0, failure: list[tuple[str, str]] | None = None
+) -> dict | None:
     """Fetch the latest GitHub release JSON, or None on any failure.
 
     Retried a couple of times with a short backoff so a single transient
     network blip (Wi-Fi dropout, DNS hiccup) doesn't surface as a hard
-    "check failed" to a user who just clicked the tray item.
+    "check failed" to a user who just clicked the tray item -- but only for a
+    failure that a retry could clear (:func:`_retryable`).
 
     A caller that has to explain the failure passes ``failure`` -- a list it
-    owns, appended with one line saying what went wrong.  Without it the reason
-    is only logged, and that is how "could not reach the update server" reached
-    the user with no cause attached: the answer was known right here and
-    discarded one frame up.
+    owns, appended with ``(reason, detail)`` saying what went wrong.  Without it
+    the reason is only logged, and that is how "could not reach the update
+    server" reached the user with no cause attached: the answer was known right
+    here and discarded one frame up.
     """
     last_exc: Exception | None = None
     for attempt in range(3):
@@ -130,14 +191,27 @@ def _fetch_latest_release(timeout: float = 6.0, failure: list[str] | None = None
                 return json.loads(resp.read().decode("utf-8"))
         except Exception as exc:
             last_exc = exc
+            if not _retryable(exc):
+                break
             if attempt < 2:
                 import time as _time
 
                 _time.sleep(0.5 * (attempt + 1))
-    logger.debug("Update check failed after 3 attempts: %s", last_exc)
+    detail = _describe(last_exc)
+    logger.debug("Update check failed: %s", detail or last_exc)
     if failure is not None:
-        failure.append(_describe(last_exc))
+        failure.append((_reason(last_exc, detail), detail))
     return None
+
+
+def _say(reason: str, detail: str) -> str:
+    """The failure as a sentence in the active language, *detail* if unnamed."""
+    key = _REASON_KEYS.get(reason)
+    if key:
+        text = T(key)
+        if text != key:
+            return text
+    return detail
 
 
 def check_for_update(timeout: float = 6.0) -> dict:
@@ -160,19 +234,30 @@ def check_for_update(timeout: float = 6.0) -> dict:
         "latest": "",
         "current": __version__,
         "url": _RELEASES_PAGE,
+        # `error` is a sentence to show; `reason` is the same failure as a code,
+        # for a caller that wants to say it differently; `detail` is the raw
+        # one-liner (GitHub's own words, or the OS's) for the log.
         "error": "",
+        "reason": "",
+        "detail": "",
     }
-    failure: list[str] = []
+    failure: list[tuple[str, str]] = []
     data = _fetch_latest_release(timeout, failure)
     if not data:
-        result["error"] = failure[0] if failure else ""
+        reason, detail = failure[0] if failure else ("", "")
+        result["reason"] = reason
+        result["detail"] = detail
+        result["error"] = _say(reason, detail)
+        logger.debug("Update check has no answer: %s (%s)", reason or "unclassified", detail)
         return result
 
     latest = (data.get("tag_name") or "").strip()
     if not latest:
         # A 200 with no tag in it.  Nothing the user can act on, but it is not
         # a network problem and must not be reported as one.
-        result["error"] = "release has no tag_name"
+        result["reason"] = MALFORMED
+        result["detail"] = "release has no tag_name"
+        result["error"] = _say(MALFORMED, result["detail"])
         return result
 
     result["latest"] = latest

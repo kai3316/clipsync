@@ -845,6 +845,14 @@ _EN: dict[str, str] = {
     "web.import_path_not_allowed": "Import is limited to files in your Downloads folder or the ClipSync data directory",  # noqa: E501
     "web.update_no_release": "No release download is available for this platform ({name})",
     "web.update_server_unreachable": "Could not reach the release server",
+    # Why a release check has no answer.  GitHub's own words for these arrive
+    # with the response body and are written for a developer -- the rate-limit
+    # one ends with an aside about authenticating -- so the window says it in
+    # the reader's language and the raw line stays in the log.
+    "update.error_rate_limited": "GitHub is rate-limiting update checks. Try again in an hour.",
+    "update.error_unreachable": "Could not reach the release server. Check the network.",
+    "update.error_refused": "The release server refused the request.",
+    "update.error_malformed": "The release has no version in it.",
     "web.update_no_assets": "The latest release has no downloadable assets",
     "web.update_download_failed": "Download failed: {reason}",
     # Favorites
@@ -1717,6 +1725,10 @@ _ZH: dict[str, str] = {
     "web.import_path_not_allowed": "导入仅支持下载文件夹或 ClipSync 数据目录中的文件",
     "web.update_no_release": "此平台没有可用的发布下载（{name}）",
     "web.update_server_unreachable": "无法访问发布服务器",
+    "update.error_rate_limited": "GitHub 限制了本网络的检查更新次数，请过一小时再试。",
+    "update.error_unreachable": "无法访问发布服务器，请检查本机网络。",
+    "update.error_refused": "发布服务器拒绝了这次请求。",
+    "update.error_malformed": "发布信息里没有版本号。",
     "web.update_no_assets": "最新版本没有可下载的文件",
     "web.update_download_failed": "下载失败：{reason}",
     # Favorites
