@@ -394,9 +394,11 @@ def test_real_rpc_pairing_bidirectional_copy_and_restart_trust(
         assert left.call("app.status")["sync_state"] == "paused"
         assert left.call("devices.list")["items"][0]["paired"]
         assert right.call("devices.list")["items"][0]["paired"]
-        left.wait("devices.list", lambda d: bool(d["items"]) and d["items"][0]["connection_state"] in (
-            "online", "connected"
-        ))
+        left.wait(
+            "devices.list",
+            lambda d: bool(d["items"])
+            and d["items"][0]["connection_state"] in ("online", "connected"),
+        )
         assert left.call("pairing.unpair", device_id="right") == {"accepted": True}
         # Unpairing drops the link, and a device that is neither paired nor
         # present has no row at all -- so a missing row is the same answer as
