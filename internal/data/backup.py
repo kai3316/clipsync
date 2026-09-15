@@ -473,6 +473,7 @@ _LOG_LEVELS = {"DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"}
 # applied (unknown / not part of the known schema).  Rule shapes:
 #   ("int", lo, hi)      Python int (bool rejected); clamped to [lo, hi]
 #   ("float",)           int or float (bool rejected); coerced to float
+#   ("float", lo, hi)    as above, clamped to the inclusive range
 #   ("bool",)            only a Python bool
 #   ("str",)             any string
 #   ("enum", set)        string in the given set
@@ -505,8 +506,8 @@ _APPLY_SCHEMA: dict[str, tuple] = {
     "netpair_aliases": ("strdict",),
     "ai_config_tools": ("strlist_nonnull",),
     "ai_config_custom_paths": ("strlist_nonnull",),
-    "history_max_entries": ("int", 1, 100000),
-    "history_max_age_days": ("float",),
+    "history_max_entries": ("int", 10, 10000),
+    "history_max_age_days": ("float", 0, 36500),
     "file_receive_dir": ("str",),
     "sync_debounce": ("float",),
     "clipboard_poll_interval": ("float",),
@@ -559,7 +560,14 @@ def _validate_config_value(value: object, rule: tuple):
     if kind == "float":
         if not isinstance(value, (int, float)) or isinstance(value, bool):
             return _SKIP
-        return float(value)
+        coerced = float(value)
+        # Bounds are optional, the same as the "int" rule's: a field whose
+        # Config range is finite carries them so a restore cannot persist a
+        # value the loader would clamp back on the next start.
+        if len(rule) >= 3:
+            lo, hi = rule[1], rule[2]
+            return max(lo, min(hi, coerced))
+        return coerced
     if kind == "bool":
         return value if isinstance(value, bool) else _SKIP
     if kind == "str":

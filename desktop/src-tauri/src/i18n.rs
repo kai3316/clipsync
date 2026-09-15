@@ -1,5 +1,5 @@
-//! Strings for the native surfaces the renderer cannot reach: the tray menu
-//! and OS notifications.
+//! Strings for the native surfaces the renderer cannot reach: the tray menu,
+//! OS notifications, and the failures the host raises in its own right.
 //!
 //! The shell has its own layer (`desktop/src/i18n`, Chinese source strings);
 //! this is the Rust-side counterpart for the handful of labels the host draws
@@ -37,6 +37,94 @@ pub struct Strings {
     pub filter_backup: &'static str,
     /// Save-dialog filter for the log file.
     pub filter_log: &'static str,
+    /// The sentences for failures this host raises itself.
+    pub errors: Errors,
+}
+
+/// The failures the host reports in words of its own, one per code.
+///
+/// Every code here is one `BridgeError` raises with a sentence this process
+/// wrote, and each reached the window as English under a Chinese interface
+/// until this table existed — the failure band draws `state.error.message`
+/// directly, and nothing between the two translated it.
+///
+/// A code the sidecar sends is *not* here and must not be: those carry the
+/// sentence `internal/application/errors.py` already worded in the user's
+/// language, and a table entry for one of the names the two sides share
+/// (`VALIDATION_ERROR`, `NOT_FOUND`, `OPEN_FAILED`, `INTERNAL_ERROR`) would
+/// overwrite a sentence naming what actually went wrong with a generic one.
+/// [`host_error`] tells the two apart by which side raised the error, not by
+/// the code, which is why the overlap is safe.
+#[derive(Debug, PartialEq, Eq)]
+pub struct Errors {
+    /// A sentence's variable part goes where `{detail}` stands, and a sentence
+    /// that carries none keeps none of the message.  `{reason}` is the same
+    /// slot for the sidecar's own last words, which are quoted with a label —
+    /// [`Errors::reason_detail`] — and dropped whole when there are none, so a
+    /// sidecar that died quietly does not leave an empty label behind.
+    pub validation_error: &'static str,
+    pub protocol_error: &'static str,
+    pub protocol_mismatch: &'static str,
+    pub permission_denied: &'static str,
+    pub busy: &'static str,
+    pub not_found: &'static str,
+    pub open_failed: &'static str,
+    pub window_error: &'static str,
+    pub request_timeout: &'static str,
+    pub recovery_timeout: &'static str,
+    pub recovery_failed: &'static str,
+    pub autostart_failed: &'static str,
+    pub autostart_unavailable: &'static str,
+    pub autostart_rollback_failed: &'static str,
+    pub sidecar_unavailable: &'static str,
+    pub sidecar_start_failed: &'static str,
+    pub startup_timeout: &'static str,
+    pub update_error: &'static str,
+    /// What this language calls the sidecar's own last words (`{detail}`).
+    pub reason_detail: &'static str,
+}
+
+impl Errors {
+    /// This code's sentence, or `None` for a code this host did not raise.
+    fn sentence(&self, code: &str) -> Option<&'static str> {
+        Some(match code {
+            "VALIDATION_ERROR" => self.validation_error,
+            "PROTOCOL_ERROR" => self.protocol_error,
+            "PROTOCOL_MISMATCH" => self.protocol_mismatch,
+            "PERMISSION_DENIED" => self.permission_denied,
+            "BUSY" => self.busy,
+            "NOT_FOUND" => self.not_found,
+            "OPEN_FAILED" => self.open_failed,
+            "WINDOW_ERROR" => self.window_error,
+            "REQUEST_TIMEOUT" => self.request_timeout,
+            "RECOVERY_TIMEOUT" => self.recovery_timeout,
+            "RECOVERY_FAILED" => self.recovery_failed,
+            "AUTOSTART_FAILED" => self.autostart_failed,
+            "AUTOSTART_UNAVAILABLE" => self.autostart_unavailable,
+            "AUTOSTART_ROLLBACK_FAILED" => self.autostart_rollback_failed,
+            "SIDECAR_UNAVAILABLE" => self.sidecar_unavailable,
+            "SIDECAR_START_FAILED" => self.sidecar_start_failed,
+            "STARTUP_TIMEOUT" => self.startup_timeout,
+            "UPDATE_ERROR" => self.update_error,
+            _ => return None,
+        })
+    }
+
+    /// Fill a sentence's slot with the message's variable part.
+    fn fill(&self, template: &str, detail: &str) -> String {
+        let detail = detail.trim();
+        if let Some((head, tail)) = template.split_once("{reason}") {
+            if detail.is_empty() {
+                return format!("{head}{tail}");
+            }
+            let quoted = self.reason_detail.replace("{detail}", detail);
+            return format!("{head}{quoted}{tail}");
+        }
+        match template.split_once("{detail}") {
+            Some((head, tail)) => format!("{head}{detail}{tail}"),
+            None => template.to_owned(),
+        }
+    }
 }
 
 /// Tray menu labels, one field per entry.
@@ -130,6 +218,34 @@ const ZH: Strings = Strings {
     filter_history: "历史导出",
     filter_backup: "ClipSync 备份",
     filter_log: "日志文件",
+    errors: Errors {
+        // The ones the reader can only report: they mean this window sent the
+        // host something it should not have, so the sentence says the click
+        // did nothing rather than pretending to explain a field name.
+        validation_error: "请求的内容不符合预期，本次操作没有执行。",
+        protocol_error: "窗口与后台进程之间的数据无法解析。",
+        protocol_mismatch: "后台进程的接口版本与这个窗口不一致，请重新安装 ClipSync。",
+        permission_denied: "这个操作只能从主窗口发起。",
+        busy: "正在进行的操作太多，请稍后重试。",
+        // The ones the reader can do something about.
+        not_found: "要打开的接收文件已经不在了。",
+        open_failed: "无法打开这个文件，可能被其他程序占用。",
+        window_error: "无法最小化窗口。",
+        request_timeout: "后台进程没有在时限内答复，操作结果未知。请刷新后再试一次。",
+        recovery_timeout: "数据修复没有在时限内完成。",
+        recovery_failed: "后台进程在报告结果之前就退出了。",
+        autostart_failed: "无法更改开机自启设置。",
+        autostart_unavailable: "开机自启只在安装版中可用。",
+        autostart_rollback_failed: "开机自启设置失败，且没能恢复原来的设置。",
+        // The process itself failed.  The two that quote the sidecar's last
+        // words keep their diagnosis: it is what a bug report needs, and the
+        // words are the sidecar's own either way.
+        sidecar_unavailable: "ClipSync 后台进程不可用。{reason}",
+        sidecar_start_failed: "无法启动后台进程（{detail}）。",
+        startup_timeout: "后台进程没有在时限内就绪。{reason}",
+        update_error: "检查更新失败：{detail}",
+        reason_detail: "原因：{detail}",
+    },
 };
 
 const EN: Strings = Strings {
@@ -168,6 +284,27 @@ const EN: Strings = Strings {
     filter_history: "History export",
     filter_backup: "ClipSync backup",
     filter_log: "Log files",
+    errors: Errors {
+        validation_error: "The request was not in the form this build expects, so nothing was done.",
+        protocol_error: "A frame between this window and the background process could not be read.",
+        protocol_mismatch: "The background process speaks a different interface version. Reinstall ClipSync.",
+        permission_denied: "This operation has to be started from the main window.",
+        busy: "Too many operations are already in flight. Try again in a moment.",
+        not_found: "The received file is no longer there.",
+        open_failed: "Could not open the file — another program may be holding it.",
+        window_error: "Could not minimize the window.",
+        request_timeout: "The background process did not answer in time, so the result is unknown. Refresh before trying again.",
+        recovery_timeout: "Data recovery did not finish in time.",
+        recovery_failed: "The background process exited before reporting a result.",
+        autostart_failed: "Could not change the launch-at-login setting.",
+        autostart_unavailable: "Launch at login is only available in an installed build.",
+        autostart_rollback_failed: "Launch at login failed, and the previous setting could not be restored.",
+        sidecar_unavailable: "The ClipSync background process is unavailable. {reason}",
+        sidecar_start_failed: "Could not start the background process ({detail}).",
+        startup_timeout: "The background process did not become ready in time. {reason}",
+        update_error: "Could not check for updates: {detail}",
+        reason_detail: "Reason: {detail}",
+    },
 };
 
 /// Coerce anything the sidecar may hand us to a supported locale.
@@ -195,11 +332,29 @@ pub fn locale_from_settings(settings: &Value) -> &str {
 
 /// The locale last applied to the native surfaces.
 ///
-/// For code paths that cannot await a settings read — the native file dialogs
-/// are opened from a command, not from an event.  [`crate::tray::apply`] keeps
-/// it in step with the tray.
+/// The locale lives in a process-wide cell rather than in a value the app
+/// manages, because the readers are not all in a position to be handed one: a
+/// command can ask the app for state, but `Serialize` cannot, and the failures
+/// this host raises are worded through it.  [`crate::tray::apply`] is what
+/// keeps it in step with the tray, and it starts at the source language so a
+/// surface drawn before the first settings read is worded rather than blank.
+static CURRENT: Mutex<String> = Mutex::new(String::new());
+
+/// The locale in force, or the source language while nothing has set one.
+fn current() -> &'static str {
+    match CURRENT.lock() {
+        Ok(locale) => normalize(&locale),
+        Err(_) => DEFAULT_LOCALE,
+    }
+}
+
+/// The locale last applied to the native surfaces, as managed state.
+///
+/// A handle and nothing more: the locale itself is [`CURRENT`], so a caller
+/// that can reach the app and one that can only reach a `&self` read the same
+/// value.
 #[derive(Default)]
-pub struct CurrentLocale(Mutex<String>);
+pub struct CurrentLocale;
 
 impl CurrentLocale {
     /// Set the locale, reporting whether it actually changed.
@@ -209,7 +364,7 @@ impl CurrentLocale {
     /// have open, for nothing.
     pub fn set(&self, locale: &str) -> bool {
         let next = normalize(locale);
-        if let Ok(mut current) = self.0.lock() {
+        if let Ok(mut current) = CURRENT.lock() {
             if current.as_str() == next {
                 return false;
             }
@@ -219,13 +374,10 @@ impl CurrentLocale {
         false
     }
 
-    /// The strings for the current locale.  An unset or poisoned lock reads as
-    /// the source language rather than panicking a dialog open.
+    /// The strings for the current locale.  A poisoned lock reads as the source
+    /// language rather than panicking a dialog open.
     pub fn strings(&self) -> &'static Strings {
-        match self.0.lock() {
-            Ok(current) => strings(&current),
-            Err(_) => strings(DEFAULT_LOCALE),
-        }
+        strings(current())
     }
 
     /// The tray labels alone.  A dynamic tray label (the device name, the pause
@@ -236,13 +388,47 @@ impl CurrentLocale {
     }
 }
 
+/// The sentence for a failure this host raised, in the current language.
+///
+/// For a code the host did not raise this answers `message` unchanged — the
+/// sidecar words its own failures in this same language, and four of the codes
+/// the two sides share ([`Errors`] names them) mean different things on each.
+/// The code therefore cannot be what tells them apart, and the caller is the
+/// one that knows: [`crate::error::BridgeError::localized_message`] is the only
+/// caller, and it asks the error's own record of which side raised it.
+pub fn host_error(code: &str, message: &str) -> String {
+    let errors = &strings(current()).errors;
+    match errors.sentence(code) {
+        Some(template) => errors.fill(template, message),
+        None => message.to_owned(),
+    }
+}
+
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use serde_json::json;
 
-    /// Every field, so the two tests below cannot miss a new one.
-    fn all(strings: &Strings) -> [&'static str; 33] {
+    /// Serialises the tests that move the process-wide locale.
+    ///
+    /// `cargo test` runs these on threads in one process, so one test's `set`
+    /// is another's ambient language — and the assertion that a sentence is
+    /// Chinese is worth nothing if a test beside it left the cell on `en`.
+    static LOCALE: Mutex<()> = Mutex::new(());
+
+    /// Take the process-wide locale for one test, reset to the source language.
+    ///
+    /// A test that asserts what a sentence says has to know which language it
+    /// is in, and with one cell for the process that means both holding it and
+    /// starting from a known value.
+    pub(crate) fn locale() -> std::sync::MutexGuard<'static, ()> {
+        let held = LOCALE.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        CurrentLocale.set(DEFAULT_LOCALE);
+        held
+    }
+
+    /// Every field, so the tests below cannot miss a new one.
+    fn all(strings: &Strings) -> [&'static str; 52] {
         [
             strings.tray.device,
             strings.tray.sync,
@@ -277,6 +463,25 @@ mod tests {
             strings.filter_history,
             strings.filter_backup,
             strings.filter_log,
+            strings.errors.validation_error,
+            strings.errors.protocol_error,
+            strings.errors.protocol_mismatch,
+            strings.errors.permission_denied,
+            strings.errors.busy,
+            strings.errors.not_found,
+            strings.errors.open_failed,
+            strings.errors.window_error,
+            strings.errors.request_timeout,
+            strings.errors.recovery_timeout,
+            strings.errors.recovery_failed,
+            strings.errors.autostart_failed,
+            strings.errors.autostart_unavailable,
+            strings.errors.autostart_rollback_failed,
+            strings.errors.sidecar_unavailable,
+            strings.errors.sidecar_start_failed,
+            strings.errors.startup_timeout,
+            strings.errors.update_error,
+            strings.errors.reason_detail,
         ]
     }
 
@@ -302,6 +507,29 @@ mod tests {
             );
             let pairing = strings(locale).notify_pairing_request;
             assert!(pairing.contains("{name}") && pairing.contains("{code}"));
+        }
+    }
+
+    /// The two error slots have to survive translation too, and they are the
+    /// ones a translator can drop without the text reading wrong: a sentence
+    /// with no `{reason}` still reads as a finished sentence, it has just
+    /// thrown away the only account of why the process died.
+    #[test]
+    fn every_error_template_keeps_the_slot_it_fills() {
+        let source = &ZH.errors;
+        let english = &EN.errors;
+        assert_eq!(source.reason_detail.matches("{detail}").count(), 1);
+        assert_eq!(english.reason_detail.matches("{detail}").count(), 1);
+        for code in [
+            "SIDECAR_UNAVAILABLE",
+            "SIDECAR_START_FAILED",
+            "STARTUP_TIMEOUT",
+            "UPDATE_ERROR",
+        ] {
+            let zh = source.sentence(code).expect("a host code with no sentence");
+            let en = english.sentence(code).expect("a host code with no sentence");
+            let slot = if zh.contains("{reason}") { "{reason}" } else { "{detail}" };
+            assert!(en.contains(slot), "{code} lost {slot} in English");
         }
     }
 
@@ -335,6 +563,7 @@ mod tests {
 
     #[test]
     fn current_locale_starts_at_the_source_and_tracks_set() {
+        let _held = locale();
         let current = CurrentLocale::default();
         assert_eq!(current.strings(), &ZH);
         assert!(current.set("en"), "the first switch is a change");
@@ -346,6 +575,56 @@ mod tests {
         assert!(current.set("fr"));
         assert_eq!(current.strings(), &ZH);
         assert!(!current.set("zh-CN"));
+    }
+
+    #[test]
+    fn a_host_failure_is_worded_in_the_language_on_screen() {
+        let _held = locale();
+        let current = CurrentLocale::default();
+        // English in, English out of the way: the bug this table exists for is
+        // the band drawing `state.error.message`, which is this sentence.
+        assert_eq!(
+            host_error("VALIDATION_ERROR", "Invalid chat action"),
+            "请求的内容不符合预期，本次操作没有执行。"
+        );
+        current.set("en");
+        assert_eq!(
+            host_error("BUSY", "Too many pending commands"),
+            "Too many operations are already in flight. Try again in a moment."
+        );
+    }
+
+    #[test]
+    fn a_failure_that_quotes_the_sidecar_keeps_what_it_quoted() {
+        let _held = locale();
+        // The diagnosis is the sidecar's own words, and a bug report needs
+        // them: localising the sentence must not be localising the log line.
+        assert_eq!(
+            host_error("SIDECAR_UNAVAILABLE", "ModuleNotFoundError: no module named internal"),
+            "ClipSync 后台进程不可用。原因：ModuleNotFoundError: no module named internal"
+        );
+        assert_eq!(
+            host_error("SIDECAR_START_FAILED", "/opt/ClipSync/clipsync-sidecar: No such file"),
+            "无法启动后台进程（/opt/ClipSync/clipsync-sidecar: No such file）。"
+        );
+        // A sidecar that died quietly has nothing to quote, and the label goes
+        // with it rather than standing over an empty slot.
+        assert_eq!(
+            host_error("STARTUP_TIMEOUT", ""),
+            "后台进程没有在时限内就绪。"
+        );
+        assert_eq!(
+            host_error("STARTUP_TIMEOUT", "   "),
+            "后台进程没有在时限内就绪。"
+        );
+    }
+
+    #[test]
+    fn a_code_newer_than_this_table_still_says_something() {
+        // A `BridgeError::new` added without a sentence here reads as the
+        // sentence it was written with rather than as an empty band.
+        let _held = locale();
+        assert_eq!(host_error("SOMETHING_NEW", "whatever it said"), "whatever it said");
     }
 
     #[test]

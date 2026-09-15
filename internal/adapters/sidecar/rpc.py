@@ -237,6 +237,10 @@ class Dispatcher:
             # half is the existing ``pairing.unpair``: unpairing is what that
             # answer means, and the runtime voids the prompt with it.
             "devices.retrust": "retrust_device",
+            # Offering this build to a peer that is on an older one.  On the
+            # device list rather than the update page because the version it
+            # acts on is the *peer's*, which is what that list shows.
+            "devices.offer_update": "offer_device_update",
         }
         if method in device_commands:
             validate_params(
@@ -740,6 +744,16 @@ class Dispatcher:
                 params, {"entry_id": (str, lambda v: 0 < len(v) <= 64)}, ("entry_id",)
             )
             return self.app.require_history().text(params["entry_id"])
+        if method == "history.preview":
+            # A read, and the one this side makes without being asked: a hover
+            # card follows the pointer, so a sweep down a page fires a handful
+            # of these.  That is why the answer is a downscaled picture rather
+            # than the entry's own bytes, and why the card comes back empty
+            # rather than with an error for a row there is nothing to show.
+            validate_params(
+                params, {"entry_id": (str, lambda v: 0 < len(v) <= 64)}, ("entry_id",)
+            )
+            return self.app.require_history().preview(params["entry_id"])
         if method == "history.open_link":
             # Also a read, and the caller sends no URL: the window names the row
             # and the sidecar reads its text, so nothing a WebView holds can

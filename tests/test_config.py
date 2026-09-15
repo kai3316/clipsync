@@ -282,7 +282,8 @@ def test_restore_with_invalid_port_values_does_not_crash(isolated_config):
             "device_name": "Bad Backup",
             "port": "abc",  # wrong type -> skipped, stays default
             "web_port": 70000,  # out of range -> clamped to 65535
-            "history_max_entries": 5,
+            "history_max_entries": 250,  # in range -> applied
+            "history_max_age_days": -1,  # out of range -> clamped to 0
         },
     )
 
@@ -302,7 +303,10 @@ def test_restore_with_invalid_port_values_does_not_crash(isolated_config):
     assert cfg.web_port == 65535
     assert cfg.web_port != original_web_port
     # Other valid fields are still applied.
-    assert cfg.history_max_entries == 5
+    assert cfg.history_max_entries == 250
+    # A negative retention window is clamped into its own range too, so a
+    # restored config never holds a value the loader would refuse.
+    assert cfg.history_max_age_days == 0
     assert cfg.device_name == "Bad Backup"
 
 

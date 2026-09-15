@@ -1684,7 +1684,13 @@ class Application:
                 if real == self.cfg.device_id:
                     continue
                 d = _ensure(real)
-                d["name"] = info.get("name") or d["name"]
+                # The sighting's name is the peer's own answer only when the
+                # peer published one; otherwise it is this host's fallback
+                # reading of a truncated instance label, and the row — which is
+                # built from the config, under the name this device is actually
+                # known by — must keep the name it has.
+                if info.get("named") or not d.get("name"):
+                    d["name"] = info.get("name") or d["name"]
                 d["address"] = info.get("address", "")
                 d["port"] = info.get("port", 0)
                 seen_hashes.add(hash_id)
@@ -2916,7 +2922,25 @@ class Application:
             )
             dlg.wait_window()
 
-    def _on_peer_found(self, peer_id: str, peer_name: str, address: str, port: int) -> None:
+    def _on_peer_found(
+        self,
+        peer_id: str,
+        peer_name: str,
+        address: str,
+        port: int,
+        version: str = "",
+        os_name: str = "",
+        arch: str = "",
+        named: bool = False,
+    ) -> None:
+        """One mDNS sighting.
+
+        ``named`` says whether ``peer_name`` is the name the peer's own user
+        set, or this host's fallback reading of its truncated instance label.
+        It is carried into the sighting so ``get_device_states`` can tell the
+        two apart: a name the user chose may replace the one on the row, a
+        label may not.
+        """
         with self._discovered_lock:
             prev = self._discovered_peers.get(peer_id)
             # A peer that re-appeared at a NEW address must be re-connected
@@ -2924,12 +2948,24 @@ class Application:
             # targets the stale address, so clear the dedup guard here or the
             # _maybe_auto_connect below would return early and leave the peer
             # stuck "waiting for pairing" at its new address.
-            if prev is not None and (prev.get("address") != address or prev.get("port") != port):
+            if prev is not None and (
+                # The advertised version counts as a change for the same reason
+                # the address does: it is what the device page shows, and a peer
+                # that re-announces after an update from the same address and
+                # port is otherwise a sighting this host drops on the floor.
+                prev.get("address") != address
+                or prev.get("port") != port
+                or prev.get("version") != version
+            ):
                 self._auto_connect_pending.discard(peer_id)
             self._discovered_peers[peer_id] = {
                 "name": peer_name,
+                "named": named,
                 "address": address,
                 "port": port,
+                "version": version,
+                "os": os_name,
+                "arch": arch,
             }
         logger.info("Peer discovered: %s (%s) at %s:%d", peer_name, peer_id, address, port)
         # The device page is a live view of the network, so an arriving peer has

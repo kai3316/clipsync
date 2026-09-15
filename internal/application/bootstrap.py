@@ -561,7 +561,7 @@ class SidecarApplication:
             # source to hold both blocks to it.
             "capabilities": [
                 "history.list", "history.delete", "history.set_pinned", "history.copy",
-                "history.text", "history.open_link",
+                "history.text", "history.preview", "history.open_link",
                 "history.batch_delete", "history.batch_set_pinned", "history.clear",
                 "favorites.list", "favorites.get", "favorites.add", "favorites.update",
                 "favorites.delete", "favorites.copy", "favorites.batch_add", "favorites.export",
@@ -601,7 +601,7 @@ class SidecarApplication:
                 "pairing.start", "pairing.confirm", "pairing.reject", "pairing.unpair",
                 "devices.note", "devices.connect", "devices.disconnect", "devices.forget",
                 "devices.restore", "devices.purge", "devices.test", "devices.certs",
-                "devices.retrust",
+                "devices.retrust", "devices.offer_update",
                 "companion.configure",
                 "url.send", "clipboard.push", "discovery.status",
                 "discovery.set_enabled", "discovery.set_visible",

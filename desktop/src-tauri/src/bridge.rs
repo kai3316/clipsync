@@ -64,14 +64,12 @@ fn program_of(command: &mut tokio::process::Command) -> PathBuf {
 /// Names the file it tried.  In a packaged build the sidecar is one specific
 /// path next to the main executable, so the bare sentence leaves a user -- and
 /// a bug report -- unable to tell a file missing from the bundle from one that
-/// is there and will not run; and the OS error that follows says which.
+/// is there and will not run; and the OS error that follows says which.  The
+/// sentence this detail lands in is `i18n`'s, which is why none is built here.
 fn launch_failed(program: &std::path::Path, error: &std::io::Error) -> BridgeError {
     BridgeError::new(
         "SIDECAR_START_FAILED",
-        &format!(
-            "Could not launch the Python sidecar ({}): {error}",
-            program.display()
-        ),
+        &format!("{}: {error}", program.display()),
     )
 }
 
@@ -85,6 +83,10 @@ fn launch_failed(program: &std::path::Path, error: &std::io::Error) -> BridgeErr
 /// goes to the window the error is already drawn in, on the user's own
 /// machine, which is why a diagnosis here is not a disclosure.
 ///
+/// The line becomes the error's whole message: the sentence around it belongs
+/// to `i18n`, which is where it can be written in the language on screen, and
+/// appending to a message here meant composing the two in one language.
+///
 /// Only the two codes that mean "the process itself failed": the rest carry a
 /// reason already, and a refused data directory or a rejected frame has no
 /// business being annotated with unrelated stderr noise.
@@ -95,18 +97,9 @@ fn explain(error: BridgeError, line: Option<String>) -> BridgeError {
     let Some(line) = line else {
         return error;
     };
-    let BridgeError {
-        code,
-        message,
-        retryable,
-    } = error;
-    BridgeError {
-        code,
-        // One line, bounded: this rides in a banner, and a whole traceback
-        // would push the message it is explaining off the end of it.
-        message: format!("{message}: {line}"),
-        retryable,
-    }
+    // One line, bounded: this rides in a banner, and a whole traceback would
+    // push the sentence it is explaining off the end of it.
+    error.with_message(line)
 }
 
 fn fail_pending(
@@ -525,14 +518,10 @@ impl Bridge {
     }
 
     pub(crate) fn remote_error(value: &Value) -> BridgeError {
-        BridgeError {
-            code: value["code"].as_str().unwrap_or("INTERNAL_ERROR").into(),
-            message: value["message"]
-                .as_str()
-                .unwrap_or("Operation failed")
-                .into(),
-            retryable: value["retryable"].as_bool().unwrap_or(false),
-        }
+        // Built through the error's own constructor so it is marked as the
+        // sidecar's: that side worded the sentence in the user's language, and
+        // several of the codes mean something else when this side raises them.
+        BridgeError::from_sidecar(value)
     }
 
     fn fail(&self, error: BridgeError) {
@@ -556,13 +545,19 @@ impl Bridge {
         // data directory is the case that needs them: the sidecar knows which
         // application holds the directory and says so, and asking the user to
         // retry is wrong when retrying is exactly what cannot work.
+        //
+        // The message is the localized one, through the same call `Serialize`
+        // makes: this event is the other route to the failure band, and a
+        // sentence worded on one route but not the other is how half of them
+        // arrived in English.  Read before `code` moves into the frame below.
+        let message = error.localized_message();
         let _ = app.emit_to(
             "main",
             "sidecar:state",
             json!({
                 "state": "failed",
                 "error": error.code,
-                "message": error.message,
+                "message": message,
                 "retryable": error.retryable,
             }),
         );
@@ -754,15 +749,19 @@ mod tests {
         // The reported shape: a packaged macOS build spawned the sidecar, the
         // process died before its ready frame, and the user got a band saying
         // "background process is unavailable" with no way to find out why.
+        //
+        // What is kept is the line itself.  The sentence around it is `i18n`'s
+        // now, so the two are no longer glued together here in one language.
+        let _held = crate::i18n::tests::locale();
         let error = explain(
             BridgeError::unavailable(),
             Some("dyld: Library not loaded: @rpath/Python".into()),
         );
         assert_eq!(error.code, "SIDECAR_UNAVAILABLE");
+        assert_eq!(error.message, "dyld: Library not loaded: @rpath/Python");
         assert_eq!(
-            error.message,
-            "ClipSync background process is unavailable: \
-             dyld: Library not loaded: @rpath/Python"
+            error.localized_message(),
+            "ClipSync 后台进程不可用。原因：dyld: Library not loaded: @rpath/Python"
         );
     }
 
@@ -772,11 +771,11 @@ mod tests {
         // case: asking the user to retry is wrong there, and unrelated stderr
         // noise appended to the sentence would only muddy it.
         let error = explain(
-            BridgeError {
-                code: "DATA_IN_USE".into(),
-                message: "Another ClipSync holds this directory".into(),
-                retryable: true,
-            },
+            BridgeError::from_sidecar(&json!({
+                "code": "DATA_IN_USE",
+                "message": "Another ClipSync holds this directory",
+                "retryable": true,
+            })),
             Some("some unrelated warning".into()),
         );
         assert_eq!(error.message, "Another ClipSync holds this directory");
@@ -786,9 +785,13 @@ mod tests {
 
     #[test]
     fn a_silent_sidecar_still_reports_its_own_message() {
-        // Nothing to add is not an error, and must not leave a trailing colon.
+        // Nothing to add is not an error, and must not leave a trailing colon
+        // -- nor, now that the sentence is a template, a label over an empty
+        // slot saying "Reason:" with nothing after it.
+        let _held = crate::i18n::tests::locale();
         let error = explain(BridgeError::unavailable(), None);
-        assert_eq!(error.message, "ClipSync background process is unavailable");
+        assert_eq!(error.message, "");
+        assert_eq!(error.localized_message(), "ClipSync 后台进程不可用。");
     }
 
     #[test]

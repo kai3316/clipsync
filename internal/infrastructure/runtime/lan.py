@@ -2,6 +2,7 @@
 
 import logging
 import os
+import platform
 import secrets
 import threading
 import time
@@ -51,6 +52,7 @@ from internal.transport.connection import MAX_FRAME_SIZE, TransportManager
 from internal.transport.discovery import Discovery
 from internal.transport.ids import peer_id_hash
 from internal.transport.relay import RelayTransport, build_paho_client, netpair_device_tag
+from internal.version import __version__
 
 logger = logging.getLogger(__name__)
 
@@ -60,6 +62,25 @@ logger = logging.getLogger(__name__)
 # peer preparing a folder archive is still inside it, short enough that a
 # request abandoned by a crash stops being an open door.
 CLIP_FILE_WINDOW = 300.0
+
+# How long an update request licenses the answering peer to send the blob.  The
+# same idea one step tighter: an update asset is tens of megabytes, so the
+# window has to outlast the transfer rather than only its preparation, and it is
+# still bounded because what it leaves open is the one transfer kind that never
+# asks the user anything.
+UPDATE_WINDOW = 1800.0
+
+
+def _local_platform() -> tuple[str, str]:
+    """This machine's os/arch, spelled the way the mDNS TXT records spell them.
+
+    One spelling for both ends of the comparison: the values here are read
+    against a peer's advertised ``os``/``arch``, which come off its own TXT
+    records -- lowercased in one place and compared in the other, so the two
+    have to be produced the same way or every peer looks like a different
+    platform.
+    """
+    return platform.system().lower(), (platform.machine() or "").lower()
 
 
 def _short_fingerprint(certificate_pem):
@@ -296,6 +317,11 @@ class LanRuntime:
         # Whether an inbound `clip_file` may skip the consent prompt is not the
         # sender's to decide; the manager asks this machine's own ledger.
         self.file_transfer.set_clip_file_guard(self._clip_file_outstanding_for)
+        # And an `update` blob is one *this* device asked a peer for.  That
+        # request is the whole consent gate on an unpaired push: without it the
+        # kind alone would let any device on the network drop a file on this
+        # disk with nobody asked.
+        self.file_transfer.set_update_guard(self._update_outstanding_for)
         # The temp archives of folder sends, by transfer id, waiting to be
         # unlinked when their transfer reaches a terminal state.  Its own lock
         # rather than the runtime's: the completion callback runs on the
@@ -303,6 +329,11 @@ class LanRuntime:
         self._outgoing_archives = {}
         self._archive_lock = threading.Lock()
         self._update_sink = None
+        # peer device_id -> monotonic deadline, the ledger of peers this machine
+        # has actually asked for a cached update asset.  Consulted by the update
+        # guard above; a peer's answer that arrives inside the window is the only
+        # update blob this side accepts.
+        self._update_expectations: dict[str, float] = {}
         # Resolves an entry id a peer asked for into this machine's own paths —
         # set by the application layer, which is what owns the history store.
         # A callback rather than a history reference because the runtime is
@@ -1006,6 +1037,28 @@ class LanRuntime:
             },
         )
 
+    def _expect_update(self, pid: str) -> None:
+        """Record that this machine has asked *pid* for its cached asset.
+
+        The answer is a ``kind="update"`` transfer, the one kind that skips the
+        consent prompt -- so this ledger, not the frame's label, is what makes
+        such a blob acceptable.  See ``set_update_guard``."""
+        with self._lock:
+            self._update_expectations[pid] = time.monotonic() + UPDATE_WINDOW
+
+    def _update_outstanding_for(self, pid: str) -> bool:
+        """Whether *pid* was asked for an update and has not answered yet."""
+        with self._lock:
+            deadline = self._update_expectations.get(pid)
+            if deadline is None:
+                return False
+            if deadline <= time.monotonic():
+                # Expired rather than answered: forget it so the table does not
+                # grow one dead entry per peer per attempt.
+                self._update_expectations.pop(pid, None)
+                return False
+        return True
+
     def request_update_from_peers(self) -> None:
         """Ask connected peers for their cached release asset.
 
@@ -1014,17 +1067,149 @@ class LanRuntime:
         nothing ever waits on a peer.
         """
         try:
+            peers = list(self.transport.get_connected_peers())
+        except Exception:
+            peers = []
+        # Asked and answered over the same link, so the expectation is per
+        # connected peer: an answer from anybody else is not one of ours.
+        for pid in peers:
+            self._expect_update(pid)
+        try:
             self.transport.broadcast(
                 encode_frame(
-                    {"msg_type": "update_request"}, source_device=self.config.device_id
+                    {
+                        "msg_type": "update_request",
+                        # The asker's own build, so the answering side can tell a
+                        # peer of its own platform from one the asset is useless
+                        # to -- and can serve the latter without pairing.
+                        "version": __version__,
+                        "os": _local_platform()[0],
+                        "arch": _local_platform()[1],
+                    },
+                    source_device=self.config.device_id,
                 )
             )
             logger.info("Broadcast update_request to peers")
         except Exception:
             logger.warning("Failed to broadcast update_request", exc_info=True)
 
+    def offer_device_update(self, device_id: str) -> dict:
+        """Tell one peer a newer build is out, and offer our cached asset.
+
+        The half of the 免配对 update path that starts on the *newer* device:
+        this machine has the release, the peer is on an older build of the same
+        platform, and the person looking at the device list is the one who says
+        so.  The peer answers with an ``update_request`` it would otherwise have
+        had to pair to make, and the rest of the exchange is the M2 one.
+
+        Raises :class:`ApplicationError` when the peer cannot be reached, so the
+        click that produced no traffic cannot look like one that did.
+        """
+        return self._command(self._offer_device_update, device_id)
+
+    def _offer_device_update(self, device_id: str) -> dict:
+        pid = self._resolve(device_id)
+        if not self._address(pid) and pid not in {
+            p.device_id for p in self.pairing.get_known_peers()
+        }:
+            raise ApplicationError("NOT_FOUND", "Device not found")
+        if pid not in self.transport.get_connected_peers():
+            # Not a paired peer, so nothing here will dial it on its own -- and
+            # the offer is the one thing this side wants to send.  The dial
+            # carries no pairing request (`no_auto_pairing`): an update is not a
+            # reason to ask for a pairing code, on either device.
+            connected = self._connect_and_wait(pid, no_auto_pairing=True)
+            if connected is None:
+                raise ApplicationError(
+                    "update.peer_unreachable",
+                    f"Could not reach {self._peer_name(pid) or 'the device'}",
+                )
+            pid = connected
+        cached = updater.get_cached_asset()
+        try:
+            self.transport.send_to_peer(
+                pid,
+                encode_frame(
+                    {
+                        "msg_type": "update_offer",
+                        "version": __version__,
+                        "os": _local_platform()[0],
+                        "arch": _local_platform()[1],
+                        # Whether an answer would carry bytes.  A peer that is
+                        # told "no" has the release page to fall back on rather
+                        # than a transfer that never starts.
+                        "has_asset": bool(cached),
+                        "asset": os.path.basename(cached) if cached else "",
+                    },
+                    source_device=self.config.device_id,
+                ),
+            )
+        except Exception as exc:
+            logger.warning("Failed to offer an update to %s", str(pid)[:12], exc_info=True)
+            raise ApplicationError("update.offer_failed") from exc
+        logger.info("Offered update %s to peer %s", __version__, str(pid)[:12])
+        return {"sent": True}
+
+    def _on_update_offer(self, pid: str, payload: dict) -> None:
+        """A peer says it has a newer build; decide whether we want it.
+
+        Three things have to hold, and all three are read off the *receiving*
+        device rather than taken as the sender's word: the peer has to be
+        running what it claims, the build has to be newer than this one, and it
+        has to be for this platform.  Only then is anything asked for -- and
+        what is asked for is one frame, which is what licenses the blob.
+        """
+        version = str(payload.get("version") or "")
+        peer_os = str(payload.get("os") or "")
+        peer_arch = str(payload.get("arch") or "")
+        mine_os, mine_arch = _local_platform()
+        # An empty platform is a peer too old to say, not a match.
+        same_platform = bool(peer_os) and peer_os == mine_os and peer_arch == mine_arch
+        if not same_platform or not updater.is_newer(version, __version__):
+            logger.info(
+                "Ignoring update offer %r from %s: platform %s/%s vs %s/%s",
+                version, str(pid)[:12], peer_os, peer_arch, mine_os, mine_arch,
+            )
+            return
+        # The offer is only ever sent by a device whose device list was clicked,
+        # and the dial behind it is the same one a chat invite makes: it carries
+        # no pairing request, so the code this end generated for it has to go or
+        # the offer reads as "this device wants to pair" on the way in.
+        self._discard_pairing_for_chat(pid)
+        name = self._peer_name(pid) or ""
+        if not payload.get("has_asset"):
+            # Nothing to fetch from the peer itself, so the offer is a notice:
+            # this device's own release check is the way to get the build.
+            logger.info("Peer %s has no cached asset to serve", str(pid)[:12])
+            self._publish(
+                "update.peer_notice",
+                {"device_id": pid, "name": name, "version": version, "has_asset": False},
+            )
+            return
+        self._expect_update(pid)
+        try:
+            self.transport.send_to_peer(
+                pid,
+                encode_frame(
+                    {
+                        "msg_type": "update_request",
+                        "version": __version__,
+                        "os": mine_os,
+                        "arch": mine_arch,
+                    },
+                    source_device=self.config.device_id,
+                ),
+            )
+        except Exception:
+            logger.warning("Failed to ask %s for its update", str(pid)[:12], exc_info=True)
+            return
+        self._publish(
+            "update.peer_notice",
+            {"device_id": pid, "name": name, "version": version, "has_asset": True},
+        )
+
     def _serve_cached_update(self, pid: str) -> None:
-        """Answer a paired peer's update_request with our cached asset, if any."""
+        """Answer a peer's update_request with our cached asset, if any."""
         cached = updater.get_cached_asset()
         if not cached:
             logger.info("Peer asked for an update, but none is cached")
@@ -1035,6 +1220,37 @@ class LanRuntime:
             )
         except Exception:
             logger.exception("Failed to serve the cached update to a peer")
+
+    def _update_offerable(self, seen: dict) -> bool:
+        """Whether *seen* (one discovery sighting) is a device this build updates.
+
+        Both halves are the peer's own claims and both have to hold: the same
+        platform, because the asset we would send is the one for this one, and a
+        strictly older version, because an offer to a device that is already
+        current is a transfer nobody wants.  An empty version means a peer too
+        old to advertise — unknown, never "behind" — so it is not offered to.
+        """
+        version = str(seen.get("version") or "")
+        if not version:
+            return False
+        if (str(seen.get("os") or ""), str(seen.get("arch") or "")) != _local_platform():
+            return False
+        return updater.is_newer(__version__, version)
+
+    def _same_platform_peer(self, payload: dict) -> bool:
+        """Whether a request's sender says it is on this build's own platform.
+
+        Consulted only for a peer this machine has *not* paired with: the asset
+        we would answer with is the one for this platform, so a Windows zip sent
+        to a Mac is a transfer neither side can use.  The claim is the sender's,
+        but nothing is trusted on it -- the bytes still have to match the
+        published release digest on arrival before they can be installed."""
+        peer_os = str(payload.get("os") or "")
+        peer_arch = str(payload.get("arch") or "")
+        if not peer_os:
+            # A peer too old to say, which is not the same as a match.
+            return False
+        return (peer_os, peer_arch) == _local_platform()
 
     def _on_file_received(self, transfer_id, saved_path, _file_name):
         if self.file_transfer.take_received_kind(transfer_id) != "update":
@@ -1212,16 +1428,20 @@ class LanRuntime:
         consent neither side gave.
         """
         pid = self._resolve(peer_id)
-        if (
-            pid not in self.transport.get_connected_peers()
-            and self._address(pid) is not None
-            and not self._connect_and_wait(pid, no_auto_pairing=True)
-        ):
-            self._publish(
-                "chat.connect_timeout",
-                {"peer_id": pid, "name": self._peer_name(pid) or peer_name},
-            )
-            return None
+        if pid not in self.transport.get_connected_peers() and self._address(pid) is not None:
+            # The dial may hand back a different id than the one asked for --
+            # the hash this device is discovered by becomes the real device_id
+            # once the handshake lands -- and the session has to be keyed by the
+            # one the transport delivers to, or every message is sent to an
+            # address nothing is connected at.
+            connected = self._connect_and_wait(pid, no_auto_pairing=True)
+            if connected is None:
+                self._publish(
+                    "chat.connect_timeout",
+                    {"peer_id": pid, "name": self._peer_name(pid) or peer_name},
+                )
+                return None
+            pid = connected
         return self.chat.start_session(
             pid, peer_name,
             self.chat.shorten_fingerprint(self.pairing.get_peer_fingerprint(pid)),
@@ -1229,19 +1449,35 @@ class LanRuntime:
         )
 
     def _connect_and_wait(self, pid, timeout=None, no_auto_pairing=False):
-        """Dial one peer and wait for the link; True once it is up."""
+        """Dial one peer and wait for the link; the connected id, or None.
+
+        The id returned is not always the one passed in, and callers must key
+        their work by it.  A device this machine has never handshaked is known
+        only by its discovery hash, and ``_resolve`` cannot map that hash back
+        to a device_id until a handshake names it — while the transport keys
+        ``_peers`` by the real device_id throughout.  Polling for the hash
+        therefore waited out the whole timeout on a link that was up the entire
+        time and then reported a failure that never happened, which is how a
+        chat invite to a freshly discovered device went nowhere: no invite was
+        ever sent, so the peer's only way to learn the conversation was not a
+        pairing request never ran either.
+        """
         if pid in self.transport.get_connected_peers():
-            return True
+            return pid
         if not self._connect(pid, no_auto_pairing=no_auto_pairing):
-            return False
+            return None
         deadline = time.monotonic() + (
             self.CHAT_CONNECT_TIMEOUT if timeout is None else timeout
         )
-        while time.monotonic() < deadline and not self._stop_event.is_set():
-            if pid in self.transport.get_connected_peers():
-                return True
+        while True:
+            # Re-resolved every pass: the handshake that completes mid-wait is
+            # what makes the mapping exist, so this is the moment it appears.
+            real = self._resolve(pid)
+            if real in self.transport.get_connected_peers():
+                return real
+            if time.monotonic() >= deadline or self._stop_event.is_set():
+                return None
             time.sleep(0.1)
-        return pid in self.transport.get_connected_peers()
 
     def chat_action(self, action, session_id, text=""):
         def run():
@@ -1435,18 +1671,7 @@ class LanRuntime:
                     # Ephemeral ports are useful for isolated loopback runtimes.
                     self.discovery._port = self.transport._server_sock.getsockname()[1]
             if self.config.internet_sync_enabled:
-                self.relay = RelayTransport(
-                    list(self.config.relay_brokers),
-                    self.internet_pairing.channels,
-                    lambda frame, *args: self._background(self._receive_relay, frame, *args),
-                    self._relay_state_changed,
-                    client_factory=build_paho_client,
-                    username=getattr(self.config, "relay_username", ""),
-                    password=getattr(self.config, "relay_password", ""),
-                    private_brokers=list(getattr(self.config, "relay_private_brokers", []) or []),
-                )
-                self.internet_pairing.attach_relay(self.relay)
-                self.relay.start()
+                self._open_relay()
             if isinstance(self.discovery, Discovery) and not self.discovery.is_browsing:
                 raise RuntimeError("Discovery did not start")
             with self._lock:
@@ -1496,6 +1721,58 @@ class LanRuntime:
             self._state = "stopped"
             return True
 
+    def _open_relay(self):
+        """Build and start the relay from the live config; returns it.
+
+        One definition, because the internet-sync switch can now be turned on
+        while running as well as at startup, and both have to build the same
+        client — brokers, credentials and the runtime's own receive callback
+        included.
+        """
+        relay = RelayTransport(
+            list(self.config.relay_brokers),
+            self.internet_pairing.channels,
+            lambda frame, *args: self._background(self._receive_relay, frame, *args),
+            self._relay_state_changed,
+            client_factory=build_paho_client,
+            username=getattr(self.config, "relay_username", ""),
+            password=getattr(self.config, "relay_password", ""),
+            private_brokers=list(getattr(self.config, "relay_private_brokers", []) or []),
+        )
+        self.relay = relay
+        self.internet_pairing.attach_relay(relay)
+        relay.start()
+        return relay
+
+    def _close_relay(self):
+        """Detach and stop the relay; False only when stopping it failed."""
+        relay, self.relay = self.relay, None
+        self.internet_pairing.attach_relay(None)
+        if relay is None:
+            return True
+        try:
+            relay.stop()
+            return True
+        except Exception:
+            logger.debug("Relay stop failed", exc_info=True)
+            return False
+
+    def _apply_internet_sync_enabled(self, enabled):
+        """Bring the relay up or down for a switch flipped while running.
+
+        The relay used to be built in the startup path and nowhere else, so this
+        setting was one only a restart honoured: the page went on showing
+        whatever state the process started in.  Turning it *off* is the half
+        that matters — the relay carries the same clipboard frames the LAN
+        carries, over a public broker, and "off" has to mean they stop going
+        there rather than that they stop after the next launch.
+        """
+        if enabled:
+            if self.relay is None and not self._stop_event.is_set():
+                self._open_relay()
+        elif self.relay is not None:
+            self._close_relay()
+
     def _cleanup(self):
         self._start_done.wait()
         ok = True
@@ -1505,12 +1782,8 @@ class LanRuntime:
             self.chat.shutdown()
         except Exception:
             ok = False
-        if self.relay is not None:
-            try:
-                self.relay.stop()
-                self.relay = None
-            except Exception:
-                ok = False
+        if not self._close_relay():
+            ok = False
         for name, stop in (
             ("sync", self.sync.stop),
             ("discovery", self.discovery.stop),
@@ -1720,12 +1993,37 @@ class LanRuntime:
                 return peer.device_id
         return device_id
 
+    def _chosen_name(self, pid, fallback=""):
+        """The best name on record for *pid*, or *fallback* when there is none.
+
+        Better than the sighting's own name, which is only the peer's answer
+        when it published one: a peer that named itself is listed by that name,
+        one that did not keeps whatever name this machine already learned — the
+        relay's handshake, or a dial from a build that did publish one — rather
+        than being renamed to a truncation of its hostname by the next sighting.
+        """
+        with config_lock:
+            peer = self.config.peers.get(pid)
+            known = getattr(peer, "device_name", "") or ""
+        if not known:
+            known = self._peer_name(pid)
+        return known or fallback
+
     def _address(self, pid):
         with self._lock:
             discovered = dict(self._discovered)
         for key, info in discovered.items():
             if self._resolve(key) == pid:
-                return info
+                # The three the dialer takes, and no more: every caller unpacks
+                # them into ``connect_to_peer(pid, name, address, port)``.
+                #
+                # The name is handed to the transport, which records it as this
+                # peer's name — so a fallback label here becomes the peer's
+                # stored name on the far side of the dial.  Ask for a better one
+                # first; the address and port still come from the sighting,
+                # which is the only thing that knows where the peer is now.
+                name = info["name"] if info.get("named") else self._chosen_name(pid, info["name"])
+                return (name, info["address"], info["port"])
         saved = self.transport.get_saved_address(pid)
         if saved:
             return saved
@@ -1861,16 +2159,36 @@ class LanRuntime:
     def _relay_channels(self):
         return self.internet_pairing.channels()
 
-    def _peer_found(self, pid, name, address, port):
+    def _peer_found(self, pid, name, address, port, version="", os_name="", arch="", named=False):
+        """One mDNS sighting, with whatever the peer advertised about itself.
+
+        The row is a dict rather than the ``(name, address, port)`` tuple it used
+        to be: the advertised version and platform belong to the same sighting,
+        and a second structure beside this one would be a second thing to keep
+        in step with it.
+
+        ``named`` says whether ``name`` is the peer's own answer — the name its
+        user set — or this machine's fallback reading of its instance label.
+        Only the first may outrank a name already on record; see ``_refresh``.
+        """
         if pid in (self.config.device_id, peer_id_hash(self.config.device_id)):
             return
+        row = {
+            "name": name,
+            "named": named,
+            "address": address,
+            "port": port,
+            "version": version,
+            "os": os_name,
+            "arch": arch,
+        }
         with self._lock:
             previous = self._discovered.get(pid)
-            self._discovered[pid] = (name, address, port)
+            self._discovered[pid] = row
         real = self._resolve(pid)
         with self._lock:
             dialing = self._connecting.get(real, 0) > time.monotonic()
-        if self.pairing.is_peer_paired(real) and (not dialing or previous != (name, address, port)):
+        if self.pairing.is_peer_paired(real) and (not dialing or previous != row):
             self._connect(real)
         self._refresh()
 
@@ -2008,8 +2326,50 @@ class LanRuntime:
                 ) from None
             self._persist_dirty = False
 
+    def _rekey_archived(self):
+        """Move an archive entry to the id its device is really known by.
+
+        A device is listed under a hashed mDNS id until something resolves it
+        to the real one, and the user can remove it while it is still listed
+        that way.  The archive entry then keeps the hash as its key while the
+        device itself comes back under its real id — the removed-device block
+        suppressed itself on "this id is already listed", which it never was,
+        so the same device was drawn twice: once as a device, once as its own
+        archive.  Renaming the entry is the fix rather than comparing resolved
+        ids at read time, because restore and purge are given the id from the
+        row, and a key that changes underneath them is a key they cannot use.
+        """
+        with config_lock:
+            archived = dict(self.config.removed_peers)
+        moves = {
+            pid: real
+            for pid in archived
+            if (real := self._resolve(pid)) != pid
+        }
+        if not moves:
+            return
+        with config_lock:
+            for pid, real in moves.items():
+                peer = self.config.removed_peers.pop(pid, None)
+                if peer is None:
+                    continue
+                peer.device_id = real
+                existing = self.config.removed_peers.get(real)
+                if existing is None:
+                    self.config.removed_peers[real] = peer
+                else:
+                    # Both describe one device. The canonical entry is the one
+                    # the list drew, so it keeps its identity and its place;
+                    # only what the alias carried and it lacks is merged in.
+                    existing.notes = existing.notes or peer.notes
+                    if not existing.last_ip:
+                        existing.last_ip, existing.last_port = peer.last_ip, peer.last_port
+                    existing.removed_at = max(existing.removed_at, peer.removed_at)
+            self._persist_dirty = True
+
     def _refresh(self, publish=True):
         with self._pairing_ops:
+            self._rekey_archived()
             pending = {p[0]: p for p in self.pairing.get_pending_pairings()}
             self.pairing.drain_expiry_rollbacks()
             if publish:
@@ -2020,9 +2380,35 @@ class LanRuntime:
             with self._lock:
                 discovered = dict(self._discovered)
                 connecting = dict(self._connecting)
-            names = {self._resolve(pid): info[0] for pid, info in discovered.items()}
-            discovered_ids = set(names)
-            names.update({pid: p.device_name for pid, p in known.items()})
+            # What each peer advertises about itself, keyed the way the rows
+            # are: a device seen only over mDNS has no other source for these,
+            # and a paired one that is currently away keeps the last sighting's
+            # answer -- which is the version it will still be running when it
+            # comes back.
+            advertised = {
+                self._resolve(pid): info for pid, info in discovered.items()
+            }
+            # Which row gets which name:
+            #
+            # 1. The name the peer published about itself.  This is the peer's
+            #    own answer to "what is this device called", and it outranks the
+            #    name on record — a device renamed on the other side has to be
+            #    renamed here too, and a name written down when it was last
+            #    dialed can never learn that the peer's settings changed.
+            # 2. The name already on record (the relay handshake, an earlier
+            #    dial from a build that did publish one, the pairing prompt).
+            # 3. The truncated instance label, which fills in a peer that has
+            #    no name of its own yet — and which is all a peer running a
+            #    build older than the published-name field can offer.
+            #
+            # A label never replaces a name, though: it is a truncation of a
+            # hostname, and letting it write over a real one is how a listed
+            # device gets renamed to something nobody chose.
+            names = {pid: p.device_name for pid, p in known.items()}
+            for pid, info in advertised.items():
+                if info.get("named") or not names.get(pid):
+                    names[pid] = info["name"]
+            discovered_ids = set(advertised)
             rows = []
             for pid, name in sorted(names.items()):
                 peer = known.get(pid)
@@ -2066,12 +2452,30 @@ class LanRuntime:
                     continue
                 fingerprint = self.pairing.get_peer_fingerprint(pid)
                 mine = self.pairing.get_identity().fingerprint
+                seen = advertised.get(pid) or {}
                 rows.append(
                     {
                         "id": pid,
                         "name": name,
                         "note": (getattr(peer, "notes", "") or "") if peer else "",
                         "paired": paired,
+                        # What the peer said about itself in its mDNS records.
+                        # Empty for a peer that predates those fields, which is
+                        # why nothing may read them as "up to date".
+                        "version": seen.get("version", ""),
+                        "platform": seen.get("os", ""),
+                        "arch": seen.get("arch", ""),
+                        # Whether this build could update that device: same
+                        # platform, and a version this one is ahead of.  Decided
+                        # here rather than in a front end because the comparison
+                        # and the platform spelling are the sidecar's, and a
+                        # second implementation of either is a second answer to
+                        # the same question.
+                        "update_available": self._update_offerable(seen),
+                        # Whether the offer would carry the installer or only
+                        # the news.  A peer told "no" has its own release check
+                        # to fall back on.
+                        "update_cached": bool(updater.get_cached_asset()),
                         "connection_state": (
                             "online"
                             if pid in connected
@@ -2241,7 +2645,26 @@ class LanRuntime:
         return {"accepted": accepted}
 
     def _peer_name(self, pid):
-        """Best-effort display name for a peer, empty when nothing knows it."""
+        """Best-effort display name for a peer, empty when nothing knows it.
+
+        The name the peer publishes about itself comes first: it is the peer's
+        own answer, and it is the one that changes when its user renames it —
+        every other source here is a copy of what that answer used to be.
+        """
+        with self._lock:
+            advertised = dict(self._discovered)
+        # Resolved outside the lock: _resolve reads the transport and the
+        # pairing manager, and holding _lock across those invites the reverse
+        # order from whichever thread walks them the other way round.  A hash
+        # nothing has resolved yet is dropped rather than keyed under "", so an
+        # unresolved sighting cannot answer for an unnamed peer.
+        published = {
+            real: info["name"]
+            for key, info in advertised.items()
+            if info.get("named") and (real := self._resolve(key))
+        }
+        if published.get(pid):
+            return published[pid]
         peer = (getattr(self.config, "peers", None) or {}).get(pid)
         name = getattr(peer, "device_name", "") or ""
         if name:
@@ -2279,15 +2702,16 @@ class LanRuntime:
         return self._command(self._forget_device, device_id)
 
     def _discard_pairing_for_chat(self, peer_id):
-        """An incoming chat invite cancels the pairing prompt for that peer.
+        """An incoming chat invite or update offer cancels the pairing prompt.
 
         Every unpaired connection auto-generates a shared code, so a peer that
-        invites us to chat would otherwise surface as "wants to pair" as well.
-        Chatting is its own consent flow (the invite banner), so the pending
-        pairing is dropped and the notice de-duplication forgotten — the legacy
-        ``_chat_handle_incoming_invite`` did the same before answering. The
-        deferred pairing frames are left to :meth:`_tick_locked`, which drops
-        them for a peer that is neither pending nor paired.
+        dials us for something that is not pairing — a chat invite, an update
+        offer — would otherwise surface as "wants to pair" as well.  Each of
+        those is its own consent flow (the invite banner, the update card), so
+        the pending pairing is dropped and the notice de-duplication forgotten —
+        the legacy ``_chat_handle_incoming_invite`` did the same before
+        answering. The deferred pairing frames are left to :meth:`_tick_locked`,
+        which drops them for a peer that is neither pending nor paired.
         """
         if self.pairing.is_peer_paired(peer_id):
             return
@@ -2426,7 +2850,7 @@ class LanRuntime:
             discovered = dict(self._discovered)
         for key, info in discovered.items():
             if self._resolve(key) == pid:
-                return info
+                return (info["name"], info["address"], info["port"])
         address = self._address(pid)
         if address:
             return address
@@ -2493,14 +2917,13 @@ class LanRuntime:
         """Live mDNS sightings for the phone panel's Discovered section.
 
         Discovery keys peers by their hashed id and stores a
-        ``(name, address, port)`` tuple; the web devices API expects
-        ``{id: {"name", "address", "port"}}`` exactly like the legacy
-        ``Application._snapshot_discovered_peers``.
+        row; the web devices API expects ``{id: {"name", "address", "port"}}``
+        exactly like the legacy ``Application._snapshot_discovered_peers``.
         """
         with self._lock:
             discovered = dict(self._discovered)
         return {
-            pid: {"name": info[0], "address": info[1], "port": info[2]}
+            pid: {"name": info["name"], "address": info["address"], "port": info["port"]}
             for pid, info in discovered.items()
         }
 
@@ -2960,25 +3383,39 @@ class LanRuntime:
         try:
             notice_sent = self._send_pairing(pid, kind)
         finally:
-            self.transport.forget_peer(pid)
             if unpair:
+                # A deliberate break, and the only one that earns the permanent
+                # one: ``forget_peer`` blacklists the peer at the transport
+                # level, so nothing it sends is accepted until this machine
+                # dials it again.
+                self.transport.forget_peer(pid)
                 try:
                     # Unpaired stops the peer's relay retries too: nothing may
                     # keep trying to deliver to a device the user broke with.
                     self.delivery.clear_peer(pid)
                 except Exception:
                     logger.debug("Relay queue cleanup failed")
-            # A rejected/unpaired peer has no pending request left to answer.
+            # Declining one prompt is NOT a break with the device, so a plain
+            # reject stops here and leaves the link standing.  It used to run
+            # ``forget_peer`` as well, and that blacklist is what made a single
+            # "no" permanent: every later connection from that peer was refused
+            # before any handshake, and the one thing that lifts the blacklist is
+            # this machine's own outbound dial -- which a peer-initiated re-pair
+            # request can never be.  The next explicit request now just arrives
+            # as a fresh prompt, since the dedup was cleared above.
+            # A rejected or unpaired peer has no pending request left to answer.
             # Legacy pushed this without a status, so keep it empty.
             self._publish("pairing.resolved", {"device_id": pid, "status": ""})
             self._refresh()
         if not notice_sent:
             # The link was already down, so the peer was never told and would go
-            # on believing it is still paired -- and would keep auto-connecting
-            # to a device that has broken with it.  Hand the notice to the
+            # on believing the pairing is still live.  Hand the notice to the
             # maintenance tick, which retries it for PAIRING_SEND_WAIT and dials
-            # the peer itself: an explicit connect is what lifts the reject that
-            # forget_peer just installed.
+            # the peer itself; the dial here is the first attempt.  For an
+            # unpair that dial is also what lifts the blacklist ``forget_peer``
+            # just installed, the only thing that can -- a declaration of
+            # intent from this machine.  A mere reject installs no blacklist, so
+            # the dial only carries the notice.
             with self._lock:
                 self._deferred[pid] = (kind, time.monotonic() + self.PAIRING_SEND_WAIT)
             self._connect(pid)
@@ -2994,6 +3431,13 @@ class LanRuntime:
         if "device_name" in updated:
             self.sync.device_name = self.config.device_name
             self.transport.device_name = self.config.device_name
+            # ...and the advertisement, which is the third place our own name
+            # is published and the only one that reaches the other devices.
+            # Leaving it out is why the settings page had to promise the rename
+            # would take effect "after a restart" — and why a peer that had
+            # already listed this device never saw the new name at all.
+            self.discovery.set_device_name(self.config.device_name)
+            self._refresh()
         if "source_tracking_enabled" in updated:
             self.sync.monitor.set_source_tracking(self.config.source_tracking_enabled)
         if "sync_enabled" in updated:
@@ -3017,6 +3461,8 @@ class LanRuntime:
             # already live was admitted under the rule in force when it
             # opened, and is deliberately left alone.
             self.chat.set_open_to_all(bool(self.config.chat_open_to_all))
+        if "internet_sync_enabled" in updated:
+            self._apply_internet_sync_enabled(bool(self.config.internet_sync_enabled))
         self._publish("settings.live_applied", {"fields": list(updated)})
 
     def apply_encryption(self, encryption) -> None:
@@ -3271,8 +3717,22 @@ class LanRuntime:
                 self._handle_nav_url(getattr(msg, "_raw_payload", {}), pid)
             return
         if kind == "update_request":
-            if trusted:
+            # Answered for a paired peer as before, and -- M2's 免配对 half --
+            # for an unpaired one on this build's own platform.  The request is
+            # what a peer sends back after an `update_offer` from this machine's
+            # device list, so the person who asked for it is the one who started
+            # the exchange.  Nothing about the asset's *bytes* is relaxed: the
+            # receiving side still checks them against the published digest.
+            payload = getattr(msg, "_raw_payload", {}) or {}
+            if trusted or self._same_platform_peer(payload):
                 self._serve_cached_update(pid)
+            return
+        if kind == "update_offer":
+            # LAN only: the offer names the peer's version and offers a transfer,
+            # and a claim made on the public relay is a claim from nobody in
+            # particular.  Both are things the pinned LAN link establishes.
+            if not via_relay:
+                self._on_update_offer(pid, getattr(msg, "_raw_payload", {}) or {})
             return
         if kind in CLIP_FILE_MSG_TYPES:
             # Asked and answered on the LAN only.  The files travel over the
@@ -3307,7 +3767,15 @@ class LanRuntime:
                     ) if kind == "pairing_reject" else self.pairing.mark_peer_unpaired(pid)
                     with self._lock:
                         self._deferred.pop(pid, None)
-            if kind != "pairing_confirm":
+            if kind == "pairing_unpair":
+                # Only a declared break blacklists.  ``pairing_reject`` is the
+                # peer turning down one prompt, and putting this side's
+                # transport blacklist up for it is what made a single "no" stick
+                # from both ends at once: our own dial is the only lift, and the
+                # peer's next request arrives inbound, so the prompt could never
+                # come back.  Nothing here auto-dials an unpaired peer
+                # (``_peer_found`` dials paired peers only), so leaving the link
+                # unblacklisted costs no repeated prompting.
                 self.transport.forget_peer(pid)
             # A peer's own confirm/reject settles the prompt card on this side
             # too, without waiting for the next poll (legacy pairing_resolved).

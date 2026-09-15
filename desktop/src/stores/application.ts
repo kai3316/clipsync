@@ -137,6 +137,11 @@ export function createApplicationStore() {
       );
     }
     if (name === "pairing.failed") return t("配对失败。验证码可能已过期。请重新连接。");
+    // The engine's own failures.  The sidecar publishes one generic English
+    // sentence beside the code because it cannot know which language this
+    // window is in, and this is where that becomes a sentence a reader can act
+    // on — the title above already says 错误, so all this owes is which one.
+    if (name === "runtime.error") return t(runtimeErrorReason(String(data.code || "")));
     // The answer to "did it connect?", arriving whenever the other machine
     // answers — which is the one moment the internet-pairing card has something
     // good to report, and the only thing that distinguishes a pairing that
@@ -197,11 +202,52 @@ export function createApplicationStore() {
       default: return t("请稍后重试");
     }
   }
+  /** What the engine's own failure codes mean, in words.
+   *
+   * Every one of these is a thing that went wrong on this machine rather than
+   * between two of them, so each says which part of the sync engine stopped
+   * working and, where it is the reader's to fix, what to do about it.  An
+   * unrecognised code still says something true: a code is not an answer.
+   */
+  function runtimeErrorReason(code: string): string {
+    switch (code) {
+      case "CLIPBOARD_READ_FAILED": return t("无法读取本机剪贴板，可能被其他程序占用。");
+      case "CLIPBOARD_WRITE_FAILED": return t("无法写入本机剪贴板，同步的内容没有粘贴过来。");
+      case "CLIPBOARD_TOO_LARGE": return t("剪贴板内容太大，本次同步已跳过。");
+      case "HISTORY_WRITE_FAILED": return t("历史记录写入失败，本机磁盘可能已满。");
+      case "PAIRING_SEND_FAILED": return t("配对请求没有发出去，请确认设备仍在同一网络。");
+      case "RELAY_FRAME_INVALID": return t("中继收到一条无法解析的消息，已丢弃。");
+      case "LAN_CALLBACK_FAILED": return t("局域网同步的内部处理出错，本次操作未完成。");
+      default: return t("同步引擎遇到错误。");
+    }
+  }
+  /** The standing notice for each device's pairing request, by notice id.
+   *
+   * A pairing request is the one notice that asks the reader to go do something
+   * in another part of the window, so it has to go when the thing it points at
+   * goes. It is also the one notice the sidecar retracts (`pairing.resolved`),
+   * and a retraction is the only way this window hears about a prompt that was
+   * never its own to answer — a chat invite to an unpaired device cancels it,
+   * and so does the other machine's answer.
+   */
+  const pairingNotices = new Map<string, number>();
   function pushNotice(name: string, data: Record<string, unknown>) {
     const id = ++noticeSequence;
     state.notices.push({ id, title: name, message: noticeMessage(name, data) });
+    if (name === "pairing.request") {
+      const device = String(data.device_id || "");
+      if (device) pairingNotices.set(device, id);
+    }
     if (state.notices.length > 5) dismissNotice(state.notices[0].id);
     noticeTimers.set(id, setTimeout(() => dismissNotice(id), 6000));
+    return id;
+  }
+  /** Retract a device's pairing notice, if one is standing. */
+  function dismissPairingNotice(deviceId: string) {
+    const id = pairingNotices.get(deviceId);
+    if (id === undefined) return;
+    pairingNotices.delete(deviceId);
+    dismissNotice(id);
   }
 
   /** Say that a click did something, for the clicks that show nothing.
@@ -229,6 +275,12 @@ export function createApplicationStore() {
   function dismissNotice(id: number) {
     clearTimeout(noticeTimers.get(id));
     noticeTimers.delete(id);
+    // A dismissed notice is nobody's to retract any more: the map is keyed by
+    // device, so an entry left behind would let a later `pairing.resolved`
+    // dismiss whatever notice happens to hold that id now.
+    for (const [device, notice] of pairingNotices) {
+      if (notice === id) pairingNotices.delete(device);
+    }
     state.notices = state.notices.filter((notice) => notice.id !== id);
   }
   /** How long the certificate prompt waits for an answer before it gives up.
@@ -454,6 +506,15 @@ export function createApplicationStore() {
           if (event.name === "clip.file.denied") {
             pushNotice(event.name, data);
             clearRemoteFilePending(`${String(data.device_id || "")}:${String(data.entry_id || "")}`);
+          }
+          if (event.name === "pairing.resolved") {
+            // The prompt is over — answered, cancelled, or dropped because the
+            // peer was only inviting this device to a chat, which is not a
+            // pairing request at all.  The notice told the reader to go answer
+            // a card on the devices page, so it has to go with the card: six
+            // seconds of "wants to pair" over a pairing that no longer exists
+            // is how a chat invite reads as one.
+            dismissPairingNotice(String(data.device_id || ""));
           }
           if (event.name && ["runtime.error", "pairing.request", "transfer.request", "chat.message", "chat.connect_timeout", "url.received", "device.connected", "device.disconnected", "sync.redacted", "device.connection_rejected", "device.connection_unreachable"].includes(event.name)) {
             pushNotice(event.name, data);

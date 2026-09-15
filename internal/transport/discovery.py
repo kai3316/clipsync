@@ -220,6 +220,18 @@ def _get_local_address():
     return best
 
 
+def _clip_bytes(value: str, limit: int) -> str:
+    """Trim *value* to at most *limit* UTF-8 bytes, whole characters only.
+
+    Trimming by characters is not the same bound: the wire caps a TXT string
+    by bytes, and a name of emoji reaches it at half the character count.
+    """
+    encoded = value.encode("utf-8")
+    if len(encoded) <= limit:
+        return value
+    return encoded[:limit].decode("utf-8", errors="ignore")
+
+
 def _is_private_ip(ip: str) -> bool:
     """True if *ip* is an RFC1918 private LAN address."""
     parts = ip.split(".")
@@ -270,13 +282,10 @@ class Discovery:
         self._device_id = device_id
         self._device_name = device_name
         self._device_id_hash = self._hash_device_id(device_id)
-        # Truncate the visible part (the real hostname is deliberately NOT
-        # broadcast in plaintext on the LAN) and suffix a short id-hash so
-        # two devices whose names share their first 8 characters register
-        # distinct, non-colliding instances instead of fighting over one
-        # mDNS name and resolving to each other.
-        base = device_name[:8] if device_name else "ClipSync"
-        self._display_name = f"{base}-{self._device_id_hash[:4]}"
+        # The instance label is truncated and id-tagged (see _label); the name
+        # the user chose rides in the TXT record instead, which is what peers
+        # list this device under.
+        self._display_name = self._label(device_name, self._device_id_hash)
         self._port = port
         self._service_type = service_type
         self._zc: Zeroconf | None = None
@@ -300,12 +309,102 @@ class Discovery:
 
     def set_callbacks(self, on_found: Callable, on_lost: Callable):
         """Set callbacks for peer discovery events.
-        on_found(device_id, device_name, address, port)
-        on_lost(device_id)
+
+        ``on_found(peer_id_hash, name, address, port, version, os, arch, named)``
+
+        and ``on_lost(peer_id_hash)``.  The trailing fields are what the peer
+        advertised about itself; ``named`` says whether ``name`` is the one its
+        user chose (see ``_handle_service_added``), which is what tells a caller
+        whether it may replace a name it already holds.
         """
         with self._lock:
             self._on_peer_found = on_found
             self._on_peer_lost = on_lost
+
+    @staticmethod
+    def _label(device_name: str, device_id_hash: str) -> str:
+        """The mDNS instance label: 8 characters of the name, plus an id tag.
+
+        The hash suffix keeps two devices whose names share their first 8
+        characters on distinct instances instead of fighting over one mDNS
+        name and resolving to each other.
+        """
+        base = device_name[:8] if device_name else "ClipSync"
+        return f"{base}-{device_id_hash[:4]}"
+
+    def _published_name(self) -> str:
+        """The device name to put in the TXT record, or "" to publish none.
+
+        Peers list this device by the name the user gave it, and the truncated
+        instance label is only a fallback for peers that hear nothing else —
+        which is why the name has to travel somewhere, and why it travels here:
+        the label cannot hold it, since 8 characters is what makes it
+        collision-free.
+
+        Deliberately nothing while the name is still this machine's hostname.
+        The truncated label exists so a hostname is never broadcast in
+        plaintext on the LAN, and a hostname the user never chose is not
+        something this record should hand out. A name they did choose is a
+        label they meant to be seen, and this is what makes it seen.
+        """
+        name = (self._device_name or "").strip()
+        if not name or name == platform.node():
+            return ""
+        # A TXT string is capped at 255 bytes by the wire format, and the
+        # settings page puts no cap on the name. Character count is not that
+        # cap: 64 emoji are 256 bytes, which is a registration that raises
+        # instead of a device that advertises.
+        return _clip_bytes(_sanitize_peer_str(name), 200)
+
+    def _service_props(self) -> dict[bytes, bytes]:
+        """The TXT record we publish, for both registrations.
+
+        Built in one place because it is published twice — once by ``start``
+        and again by every ``start_advertising`` — and a field added to one
+        copy only would be there or not depending on whether this device had
+        been hidden and shown again.
+        """
+        # Use the hashed device_id to avoid exposing the real device identity
+        # in plaintext mDNS TXT records.
+        props = {
+            b"device_id_hash": self._device_id_hash.encode("utf-8"),
+            b"v": __version__.encode("utf-8"),
+            b"os": platform.system().lower().encode("utf-8"),
+            b"arch": (platform.machine() or "").lower().encode("utf-8"),
+        }
+        name = self._published_name()
+        if name:
+            props[b"n"] = name.encode("utf-8")
+        for i, ip in enumerate(get_all_local_addresses()):
+            props[f"alt_ip_{i}".encode()] = ip.encode()
+        return props
+
+    def set_device_name(self, device_name: str):
+        """Rename this device's advertisement, live.
+
+        The settings page said "takes effect for network discovery after a
+        restart" because the name was captured here once, at construction, and
+        nothing ever revisited it — the peers that had already listed this
+        device kept the old name until a restart, and the ones that had not
+        learned it from the TXT record but from a dial kept it forever.
+        """
+        name = (device_name or "").strip()
+        with self._lock:
+            if not name or name == self._device_name:
+                return
+            self._device_name = name
+            label = self._label(name, self._device_id_hash)
+            renamed = label != self._display_name
+            self._display_name = label
+            advertising = self._service_info is not None
+        if not (advertising and renamed):
+            return
+        # A service instance name is part of the registration, so a rename is a
+        # new registration: the old instance goes first, or both stay live and
+        # a peer that learned either name keeps resolving to the dead one.
+        self.stop_advertising()
+        self.start_advertising()
+        logger.info("Renamed this device to %s on the LAN", name)
 
     def start(self):
         """Register our service and start browsing for peers."""
@@ -315,19 +414,8 @@ class Discovery:
             logger.error("Failed to initialize mDNS: %s", e)
             return
 
-        # Build properties – use hashed device_id to avoid exposing the
-        # real device identity in plaintext mDNS TXT records.
-        props = {
-            b"device_id_hash": self._device_id_hash.encode("utf-8"),
-            b"v": __version__.encode("utf-8"),
-            b"os": platform.system().lower().encode("utf-8"),
-            b"arch": (platform.machine() or "").lower().encode("utf-8"),
-        }
-
+        props = self._service_props()
         all_ips = get_all_local_addresses()
-        for i, ip in enumerate(all_ips):
-            props[f"alt_ip_{i}".encode()] = ip.encode()
-
         local_ip = _get_local_address()
         self._our_ip = local_ip
         logger.info("Registering mDNS on %s (all IPs: %s)", local_ip, all_ips)
@@ -529,15 +617,8 @@ class Discovery:
             return
         # Rebuild service info (IPs may have changed, and ServiceInfo
         # can't be re-registered after unregistration).
-        props = {
-            b"device_id_hash": self._device_id_hash.encode("utf-8"),
-            b"v": __version__.encode("utf-8"),
-            b"os": platform.system().lower().encode("utf-8"),
-            b"arch": (platform.machine() or "").lower().encode("utf-8"),
-        }
+        props = self._service_props()
         all_ips = get_all_local_addresses()
-        for i, ip in enumerate(all_ips):
-            props[f"alt_ip_{i}".encode()] = ip.encode()
         local_ip = _get_local_address()
         self._our_ip = local_ip
         advertised = [socket.inet_aton(ip) for ip in all_ips]
@@ -652,12 +733,28 @@ class Discovery:
             return
 
         port = info.port
-        # Derive a privacy-safe display name from the service name.
-        # The service name is e.g. "<display_name>._clipsync._tcp.local."
+        # The name to list this peer under: the one the user on the other side
+        # chose, when they published it.  Falling back to the instance label —
+        # a privacy-safe truncation of whatever name that device started with,
+        # e.g. "<display_name>._clipsync._tcp.local." — which is all a peer
+        # running a build from before the TXT name can offer.
         try:
-            peer_display = _sanitize_peer_str(name.split(".")[0])
+            label = _sanitize_peer_str(name.split(".")[0])
         except (IndexError, TypeError):
-            peer_display = peer_id_hash
+            label = peer_id_hash
+        chosen = props.get(b"n", b"")
+        peer_name = ""
+        if chosen:
+            try:
+                peer_name = _sanitize_peer_str(chosen.decode("utf-8"))
+            except Exception:
+                peer_name = ""
+        # `named` is what tells the caller whether `peer_display` is the peer's
+        # own answer or this machine's fallback guess: a caller that keeps a
+        # name of its own (learned over the relay, say) must not have it
+        # replaced by a truncation of a hostname it already knows better.
+        named = bool(peer_name)
+        peer_display = peer_name or label
 
         our_ip = getattr(self, "_our_ip", None) or _get_local_address()
         address = _pick_best_address(candidates, our_ip)
@@ -677,17 +774,26 @@ class Discovery:
                     existing.get("address") == address
                     and existing.get("port") == port
                     and existing.get("name") == peer_display
+                    and existing.get("named") == named
+                    # The version is part of "changed": a peer that upgrades
+                    # re-announces from the same address and port, and that
+                    # re-announcement is the only word this machine gets that
+                    # the update landed.  Skipping it here left the device list
+                    # showing the old version until something else moved.
+                    and existing.get("version") == peer_version
                 ):
                     return
                 existing["address"] = address
                 existing["port"] = port
                 existing["name"] = peer_display
+                existing["named"] = named
                 existing["version"] = peer_version
                 existing["os"] = peer_os
                 existing["arch"] = peer_arch
             else:
                 self._known_peers[peer_id_hash] = {
                     "name": peer_display,
+                    "named": named,
                     "address": address,
                     "port": port,
                     "version": peer_version,
@@ -706,7 +812,22 @@ class Discovery:
         with self._lock:
             on_found = self._on_peer_found
         if on_found:
-            on_found(peer_id_hash, peer_display, address, port)
+            # The advertised version/platform/arch travel with the sighting: the
+            # device list shows them, and a peer on an older build of this
+            # platform is what the update offer is for.  They were read above
+            # and kept here, but the callback dropped them, so every consumer
+            # had to be told the device existed and then ask a second time for
+            # what the first answer already carried.
+            on_found(
+                peer_id_hash,
+                peer_display,
+                address,
+                port,
+                peer_version,
+                peer_os,
+                peer_arch,
+                named,
+            )
 
     def _handle_service_removed(self, name):
         with self._lock:

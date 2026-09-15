@@ -6,9 +6,9 @@ import {
 } from "@lucide/vue";
 import logo from "../../assets/icon.svg";
 import { bridge, inDesktop } from "./api/bridge";
-import type { Device, DeviceCertificate, DeviceProbeResult, DiagnosticAction, DiagnosticCheck, DiagnosticItem, DiagnosticsReport, HistoryItem, RelayTestResult } from "./api/types";
+import type { Device, DeviceCertificate, DeviceProbeResult, DiagnosticAction, DiagnosticCheck, DiagnosticItem, DiagnosticsReport, HistoryItem, HistoryPreview, HistoryPreviewFile, RelayTestResult } from "./api/types";
 import { LOCALES, LOCALE_NAMES, currentLocale, setLocale, t } from "./i18n";
-import { dateTime, isPlaceholderPreview, previewText } from "./i18n/format";
+import { dateTime, isPlaceholderPreview, previewText, size } from "./i18n/format";
 import { createApplicationStore } from "./stores/application";
 import { aiCompareState, aiEntryKey, aiDiffCounts, buildAiLocalIndex } from "./lib/aiconfig-diff";
 import { aiItemCount, aiTreeGroups, type AiGroup, type AiNode, type AiRow } from "./lib/aiconfig-tree";
@@ -880,26 +880,154 @@ function kindUnavailable(id: string) {
  *   reason to chase the mouse, and scrollable rather than inert, so a clip
  *   taller than the card can still be read to the end (the panel's card was
  *   `pointer-events: none` and flipped itself above the cursor instead);
- * - text only. The panel's card repeated the kind, the time, the source and the
- *   pin state, all of which the native row already shows beside the words, so
- *   repeating them here would be the noise rather than the preview.
+ * - no longer text only.  For a long time it was, because an image and a file
+ *   row have no words to show — their "preview" is the kind's own label and a
+ *   file name, both of which the row already says — so the card stayed empty
+ *   for exactly the two kinds a glance is worth most for.  What it shows for
+ *   those comes from the sidecar (`history.preview`), which is where the
+ *   picture is downscaled and the files are stat'd: the window never reads a
+ *   file or holds a full-size image, so hovering across a list costs a few
+ *   kilobytes a row.
  *
- * `aria-hidden` on the card, because the clamp is purely visual: the row's own
- * paragraph carries the whole preview in the DOM, so assistive tech already
- * reads all of it. This card is for the eyes that could not.
+ * `aria-hidden` on the card, because what it adds is purely visual: the row's
+ * own paragraph carries the whole text preview in the DOM, and a picture is
+ * read by looking at it.
  */
-const previewCard = ref<{ id: string; text: string } | null>(null);
-function showPreview(item: HistoryItem) {
-  // Nothing to add for a clip with no text of its own: its "preview" is the
-  // kind's own label, which the row already shows, and this card exists to
-  // show the rest of a clip that was cut off.  There is no rest.
-  if (item.preview && !isPlaceholderPreview(item.preview)) {
-    previewCard.value = { id: item.id, text: item.preview };
-  }
+const previewCard = ref<{
+  id: string;
+  /** `"text"`, `"image"`, `"files"` — which of the three the card is showing. */
+  kind: string;
+  text: string;
+  image: string;
+  width: number;
+  height: number;
+  files: HistoryPreviewFile[];
+  total: number;
+} | null>(null);
+
+/** How long the pointer must rest on a row before the sidecar is asked about it.
+ *
+ * A sweep down the list crosses a dozen rows, and every one of them would be a
+ * frame's worth of decode at the other end.  Short enough that a deliberate
+ * hover never notices, long enough that a sweep is one request rather than
+ * twelve.
+ */
+const PREVIEW_DELAY_MS = 180;
+
+/** Cards already fetched, by entry id.  A row hovered twice is one read.
+ *
+ * The sidecar does not push a change to a row's card, so an entry that is
+ * edited elsewhere would keep a stale one — but nothing edits an entry's
+ * *picture*: a row is replaced by a fresh row when its clip changes, and a
+ * deleted row's card is never asked for again.
+ */
+const previewCache = new Map<string, HistoryPreview>();
+
+/** Which row the pointer is on, so a fetch that lands late is dropped.
+ * Not a ref: nothing renders from it, it only decides whether an answer that
+ * arrived after the pointer moved is still worth showing.
+ */
+let previewWanted = "";
+let previewTimer: ReturnType<typeof setTimeout> | undefined;
+
+/** Whether a row's card has to come from the sidecar rather than from the row.
+ *
+ * The kind decides it, and the *presence* of a preview text must not: a file
+ * row's preview is the file's own name, which looks like something to show and
+ * is not — the row already says it in full, and what a card can add is the size
+ * and whether the file is still there.  Reading this off `content_type` keeps
+ * that a property of the row rather than of how its name happens to read.
+ */
+function previewable(item: HistoryItem) {
+  const kind = (item.content_type || "").toUpperCase();
+  return kind === "FILE" || kind === "FILE_REMOTE" || kind === "IMAGE_PNG" ||
+    kind === "IMAGE" || kind === "IMAGE_EMF";
 }
+
+/** The card the row's own preview is enough for, or null when it is not.
+ *
+ * An image's "preview" is the label `[Image]` and a file's is a name, so for
+ * those the placeholder test says nothing useful — the branch above has already
+ * claimed them.  What is left is the case the card was built for: a clip whose
+ * text was clamped to three lines and has more of itself to show.
+ */
+function textCard(item: HistoryItem) {
+  const text = item.preview && !isPlaceholderPreview(item.preview) ? item.preview : "";
+  return text
+    ? { id: item.id, kind: "text", text, image: "", width: 0, height: 0, files: [], total: 0 }
+    : null;
+}
+
+function showPreview(item: HistoryItem) {
+  if (!previewable(item)) {
+    previewCard.value = textCard(item);
+    return;
+  }
+  // The row's own text is held back rather than shown while the read is in
+  // flight: for a file row it is the name alone, so opening on it and then
+  // swapping it for the list would be the card changing its mind under the
+  // pointer.  It is what the card falls back to if the sidecar has nothing.
+  previewWanted = item.id;
+  clearTimeout(previewTimer);
+  const cached = previewCache.get(item.id);
+  if (cached) { applyPreview(item, cached); return; }
+  previewTimer = setTimeout(() => void fetchPreview(item), PREVIEW_DELAY_MS);
+}
+
+async function fetchPreview(item: HistoryItem) {
+  let card: HistoryPreview;
+  try {
+    card = await bridge.previewHistoryEntry(item.id);
+  } catch {
+    // The sidecar answers an empty card rather than an error for a row it
+    // cannot make sense of, so a rejection means the sidecar itself is gone —
+    // which the rest of the window will say in its own time.  A hover is not
+    // the place for it, and there is no card to open either way.
+    return;
+  }
+  previewCache.set(item.id, card);
+  applyPreview(item, card);
+}
+
+function applyPreview(item: HistoryItem, card: HistoryPreview) {
+  if (previewWanted !== item.id) return;
+  // An empty card is the sidecar saying it has nothing to add — a vector image
+  // it cannot render, a file list it could not parse — and then the row's own
+  // text is the card after all.
+  if (!card.kind) {
+    previewCard.value = textCard(item);
+    return;
+  }
+  previewCard.value = {
+    id: item.id,
+    kind: card.kind,
+    text: "",
+    image: card.image,
+    width: card.width,
+    height: card.height,
+    files: card.files,
+    total: card.total,
+  };
+}
+
 function hidePreview(item: HistoryItem) {
+  if (previewWanted === item.id) {
+    previewWanted = "";
+    clearTimeout(previewTimer);
+  }
   if (previewCard.value?.id === item.id) previewCard.value = null;
 }
+
+/** A card file's size, in the window's own units.
+ *
+ * `file_ref.human_size` on the sidecar writes the same string; this is the
+ * window's formatter, and a size crossing the IPC as a number is what lets both
+ * exist without the sidecar having to pick one language for it.
+ */
+function cardSize(file: HistoryPreviewFile) {
+  return file.kind === "dir" ? t("文件夹") : size(file.size);
+}
+
 /** A chip's own label, for the empty state that names the kind. */
 function kindLabel(id: string) {
   return kindChips.value.find((chip) => chip.id === id)?.label || id;
@@ -1475,6 +1603,9 @@ const renameDialog = ref<HTMLDialogElement | null>(null);
  * than a selection. */
 const chatSessionToOpen = ref("");
 const probeBusyId = ref("");
+/** The device an update offer is being sent to, and what came back. */
+const updateBusyId = ref("");
+const updateNotes = ref<Record<string, string>>({});
 const certificates = ref<DeviceCertificate[] | null>(null);
 const certDialog = ref<HTMLDialogElement | null>(null);
 const certAlertDialog = ref<HTMLDialogElement | null>(null);
@@ -1854,7 +1985,7 @@ watch(clearHistoryOpen, async (open) => {
   if (open) clearHistoryDialog.value?.showModal();
   else clearHistoryDialog.value?.close();
 });
-onUnmounted(() => clearStatus());
+onUnmounted(() => { clearStatus(); clearTimeout(previewTimer); });
 async function pauseSync(minutes: number) {
   if (pauseBusy.value) return;
   pauseBusy.value = true;
@@ -2051,6 +2182,33 @@ async function testConnection(device: Device) {
     if (result) probeResults.value = { ...probeResults.value, [device.id]: result };
   } finally {
     probeBusyId.value = "";
+  }
+}
+/** Offer this build to a device that is on an older one.
+ *
+ * Needs no pairing: the peer answers with a request for the installer, and the
+ * bytes it receives are checked against the published release digest on its
+ * side before they can be installed.  The row says what happened either way —
+ * a click that produced no traffic must not look like one that did.
+ */
+async function offerDeviceUpdate(device: Device) {
+  if (updateBusyId.value) return;
+  updateBusyId.value = device.id;
+  try {
+    await bridge.offerDeviceUpdate(device.id);
+    updateNotes.value = {
+      ...updateNotes.value,
+      [device.id]: device.update_cached
+        ? t("已把更新发送给 {name}", { name: device.name })
+        : t("已通知 {name} 有新版本，它可以从发布页下载", { name: device.name }),
+    };
+  } catch (error: any) {
+    updateNotes.value = {
+      ...updateNotes.value,
+      [device.id]: error?.message || t("发送更新失败"),
+    };
+  } finally {
+    updateBusyId.value = "";
   }
 }
 async function showCertificates() {
@@ -3262,6 +3420,29 @@ async function refreshDeliveryNow() {
   await refreshDeliveryStatus();
   store.toast("ui.settings", t("已刷新投递状态"));
 }
+/** The internet switch, on the card it turns on.
+ *
+ * It is the same field the settings page saves as 互联网同步 — one switch over
+ * one setting, because a second field would let the two disagree, and the one
+ * on the settings page is somewhere a reader only finds after they have already
+ * gone looking for the pairing card.  Saved on the spot rather than behind the
+ * settings page's save button, which this page does not have: the sidecar
+ * applies it to the running relay, so there is no restart to wait for either.
+ */
+const internetSyncBusy = ref(false);
+const internetPairingEnabled = computed(() => !!internetPairing.value.enabled);
+async function toggleInternetSync(enabled: boolean) {
+  if (internetSyncBusy.value) return;
+  internetSyncBusy.value = true;
+  try {
+    await bridge.updateSettings({ internet_sync_enabled: enabled });
+    // The settings page's own copy of the field follows, or switching tabs back
+    // would show the old value and save it again on the next 保存.
+    settings.value.internet_sync_enabled = enabled;
+    await refreshInternetPairing();
+  } catch (error) { state.error = error as any; }
+  finally { internetSyncBusy.value = false; }
+}
 async function generateInternetPairing() {
   try {
     const result = await bridge.generateInternetPairingCode();
@@ -3607,7 +3788,32 @@ async function translateText() {
               <!-- Non-interactive, so it never blocks the row's own controls or
                    the row below it — the panel's card was `pointer-events: none`
                    for the same reason. -->
-              <div v-if="previewCard?.id === item.id" class="history-preview" aria-hidden="true">{{ previewCard.text }}</div>
+              <div v-if="previewCard?.id === item.id" class="history-preview" aria-hidden="true">
+                <template v-if="previewCard.text">{{ previewCard.text }}</template>
+                <template v-else-if="previewCard.kind !== ''">
+                  <img v-if="previewCard.image" class="history-preview-image" :src="previewCard.image"
+                    :alt="t('预览图')" />
+                  <ul v-if="previewCard.files.length" class="history-preview-files">
+                    <li v-for="file in previewCard.files" :key="file.name + file.size">
+                      <span class="history-preview-name" :title="file.name">{{ file.name }}</span>
+                      <span class="history-preview-size muted">{{ cardSize(file) }}</span>
+                      <!-- The one thing a file row cannot say and a card can:
+                           whether the file is still there.  It is the answer to
+                           "why did this fail" that a user is most often after. -->
+                      <span v-if="!file.exists" class="history-preview-gone">{{ t("已不存在") }}</span>
+                    </li>
+                  </ul>
+                  <p v-if="previewCard.total > previewCard.files.length" class="history-preview-more muted">
+                    {{ t("共 {count} 个文件", { count: previewCard.total }) }}
+                  </p>
+                  <!-- The picture's own size, not the card's: a 4000 px
+                       screenshot shown at card width is still a 4000 px
+                       screenshot, and that is the part worth knowing. -->
+                  <p v-if="previewCard.image && previewCard.width" class="history-preview-more muted">
+                    {{ t("{width} × {height} 像素", { width: previewCard.width, height: previewCard.height }) }}
+                  </p>
+                </template>
+              </div>
             </article>
           </section>
           <footer class="pagination">
@@ -4362,9 +4568,16 @@ async function translateText() {
                 <button v-if="device.connection_state === 'online'" class="icon-button" :aria-label="t('断开连接')" :title="t('断开连接')" :disabled="busy" @click="store.disconnect(device)"><PlugZap :size="18" /></button>
                 <button v-if="device.paired" class="icon-button" :aria-label="t('测试连接')" :title="t('测试连接')" :disabled="busy || !!probeBusyId" @click="testConnection(device)"><Activity :size="18" :class="{ spinning: probeBusyId === device.id }" /></button>
                 <button v-if="device.paired" class="icon-button" :aria-label="t('发送网址')" :title="t('发送网址')" :aria-describedby="sendUrlAvailable ? undefined : 'devices-engine-note'" :disabled="busy || !sendUrlAvailable" @click="openSendUrl(device)"><Globe :size="18" /></button>
+                <!-- Offered to a device the sidecar says this build is ahead of
+                     — same platform, older version — and it needs no pairing:
+                     the peer requests the installer, and its own copy is
+                     checked against the published release digest before it can
+                     be installed. -->
+                <button v-if="device.update_available" class="icon-button" :aria-label="t('发送更新')" :title="device.update_cached ? t('把本机的安装包发送给该设备') : t('通知该设备有新版本')" :disabled="busy || !!updateBusyId" @click="offerDeviceUpdate(device)"><Download :size="18" :class="{ spinning: updateBusyId === device.id }" /></button>
                 <button class="icon-button" :aria-label="t('移除设备')" :title="t('移除设备')" :disabled="busy" @click="forgetDevice = device"><Trash2 :size="18" /></button>
               </div>
               <p v-if="probeResults[device.id]" class="muted small device-full" role="status">{{ t("连接测试：") }}{{ probeLabel(probeResults[device.id]) }}</p>
+              <p v-if="updateNotes[device.id]" class="muted small device-full" role="status">{{ updateNotes[device.id] }}</p>
               <!-- The chips under the name, one per route rather than one
                    sentence for both.  A paired-and-online pair of words named a
                    state without
@@ -4386,6 +4599,14 @@ async function translateText() {
                 </span>
                 <span v-if="delivery.pending(device.id) > 0" class="channel channel--pending"
                   :title="t('对方离线时内容暂存，上线后自动补发')">{{ t("待补发 {count}", { count: delivery.pending(device.id) }) }}</span>
+                <!-- What the device advertises about itself, and nothing when it
+                     advertises nothing: an older peer sends no version at all,
+                     and "unknown" is not the same as "up to date". -->
+                <span v-if="device.version" class="channel"
+                  :class="{ 'channel--offline': device.update_available }"
+                  :title="device.update_available ? t('该设备版本较旧，可以发送更新') : t('对方软件版本')">
+                  <Download :size="12" />{{ t("版本 {version}", { version: device.version }) }}
+                </span>
               </span>
               <input v-if="device.paired" class="device-note" :value="device.note || ''" maxlength="512" :placeholder="t('设备备注')" :aria-label="t('设备备注')" @change="saveDeviceNote(device, $event)" />
               <div v-if="pairingPending(device)" class="pairing-controls">
@@ -4427,18 +4648,29 @@ async function translateText() {
           <template v-else-if="deviceTab === 'internet'">
             <section class="settings-section">
               <h2>{{ t("互联网配对") }}</h2>
+              <!-- The switch for the feature this card is, at the top of it.
+                   Everything below needs the relay, so with this off the card
+                   had nothing to say about why: its buttons answered, its list
+                   stayed empty, and the only way to find out was the settings
+                   page, which carries the same switch under another name. -->
+              <label class="setting setting--check">
+                <span class="setting-control"><input type="checkbox" :aria-label="t('启用互联网同步')"
+                  :checked="internetPairingEnabled" :disabled="internetSyncBusy"
+                  @change="toggleInternetSync(($event.target as HTMLInputElement).checked)" /><span>{{ t("启用互联网同步") }}</span></span>
+              </label>
+              <p class="muted small setting-note">{{ t("关闭后设备之间不再通过中继配对或同步，剪贴板也不离开局域网；这与设置页里的同名开关是同一个设置。") }}</p>
               <!-- This machine's own link to the relay, above the peers rather
                    than beside them.  Every other 在线 in this card is the
                    relay's view of *another* device, so when our link is down
                    the whole list reads 离线 and nothing on screen says whether
                    they are away or we are.  It is the first line of the card
                    for that reason. -->
-              <p v-if="relayState" class="setting-block setting-block--card relay-state" :class="`relay-state--${relayState}`">
+              <p v-if="internetPairingEnabled && relayState" class="setting-block setting-block--card relay-state" :class="`relay-state--${relayState}`">
                 <Activity :size="14" />{{ t("本机中继") }}：<strong>{{ relayStateLabel }}</strong>
                 <span v-if="relayState !== 'online' && relayState !== 'connecting'" class="muted small">{{ t("对方在线与否以中继连接为准；本机中继不可用时，所有设备都会显示为离线。") }}</span>
               </p>
               <div class="setting-actions setting-actions--card">
-                <button type="button" @click="generateInternetPairing">{{ t("生成配对码") }}</button>
+                <button type="button" :disabled="!internetPairingEnabled || internetSyncBusy" @click="generateInternetPairing">{{ t("生成配对码") }}</button>
                 <button type="button" @click="refreshInternetPairingNow">{{ t("刷新") }}</button>
               </div>
               <p v-if="internetPairing.generated_code" class="setting-block setting-block--card">{{ t("本机配对码：") }}<strong>{{ internetPairing.generated_code }}</strong></p>
@@ -4452,11 +4684,11 @@ async function translateText() {
                      reading it off; see `lib/pairing-code.ts`. -->
                 <span class="setting-control"><input
                   :value="internetPairingCode" maxlength="14" autocomplete="off" spellcheck="false"
-                  autocapitalize="characters" :placeholder="t('XXXX-XXXX-XXXX')"
+                  autocapitalize="characters" :placeholder="t('XXXX-XXXX-XXXX')" :disabled="!internetPairingEnabled"
                   :aria-label="t('输入对方配对码')" @input="setInternetPairingCode($event)" /></span>
               </label>
               <div class="setting-actions">
-                <button type="button" @click="enterInternetPairing" :disabled="!internetPairingComplete">{{ t("提交配对码") }}</button>
+                <button type="button" @click="enterInternetPairing" :disabled="!internetPairingComplete || !internetPairingEnabled">{{ t("提交配对码") }}</button>
               </div>
               <!-- A refusal rather than a note: it names what to do about it,
                    and it stays beside the box that caused it. -->

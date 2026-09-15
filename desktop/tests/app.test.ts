@@ -73,7 +73,9 @@ vi.mock("../src/api/bridge", () => ({
     updateAiProfiles: vi.fn().mockResolvedValue({}),
     autostartStatus: vi.fn().mockResolvedValue(false),
     aiProfiles: vi.fn().mockResolvedValue({ tools: [], enabled: [], custom_paths: [] }),
-    internetPairingStatus: vi.fn().mockResolvedValue({ peers: [] }),
+    // `enabled` travels with every status the sidecar answers, and the card's
+    // switch and every control under it are read from it.
+    internetPairingStatus: vi.fn().mockResolvedValue({ peers: [], enabled: true }),
     // The answer names the provisional tag and admits the pairing is half done,
     // so the panel has no success to report even when the call succeeds.
     enterInternetPairingCode: vi.fn().mockResolvedValue({ peer_id: "", waiting: true }),
@@ -91,6 +93,12 @@ vi.mock("../src/api/bridge", () => ({
     aiPull: vi.fn(),
     translate: vi.fn(),
     readHistoryText: vi.fn(),
+    // The hover card's read.  It answers an empty card rather than an error for
+    // a row there is nothing to show about, so the default is the quietest
+    // answer a case that is not about the card can get.
+    previewHistoryEntry: vi.fn().mockResolvedValue(
+      { kind: "", image: "", width: 0, height: 0, files: [], total: 0 },
+    ),
     openHistoryLink: vi.fn().mockResolvedValue({ opened: true, url: "https://example.com" }),
     requestEntryFiles: vi.fn().mockResolvedValue({ requested: true }),
     // Opening the devices page reads the phone service's status whatever
@@ -111,6 +119,7 @@ vi.mock("../src/api/bridge", () => ({
     connectDevice: vi.fn().mockResolvedValue({ accepted: true }),
     disconnectDevice: vi.fn().mockResolvedValue({ disconnected: true }),
     forgetDevice: vi.fn().mockResolvedValue({ forgotten: true }),
+    offerDeviceUpdate: vi.fn().mockResolvedValue({ sent: true }),
     restoreDevice: vi.fn().mockResolvedValue({ restored: true }),
     purgeDevice: vi.fn().mockResolvedValue({ purged: true }),
     testDevice: vi.fn(),
@@ -1231,6 +1240,115 @@ describe("history rendering", () => {
       })]));
     }
   });
+  it("opens the hover card on an image row with the picture the sidecar drew", async () => {
+    vi.clearAllMocks();
+    vi.mocked(bridge.history).mockResolvedValue({ session_id: "s", seq: 0, offset: 0, total: 1, items: [
+      historyRow({ id: "img-1", content_type: "IMAGE_PNG", preview: "[Image]" }),
+    ] });
+    vi.mocked(bridge.previewHistoryEntry).mockResolvedValue({
+      kind: "image", image: "data:image/png;base64,AAAA", width: 1920, height: 1080,
+      files: [], total: 0,
+    });
+    const app = mountOn("history", document.body);
+    try {
+      await flushPromises();
+      // The row's own preview is the placeholder label, so the card has to come
+      // from the sidecar rather than from anything the row already holds.
+      vi.useFakeTimers();
+      await app.get(".history-row").trigger("mouseenter");
+      await vi.advanceTimersByTimeAsync(200);
+      await flushPromises();
+      const card = app.get(".history-preview");
+      expect(bridge.previewHistoryEntry).toHaveBeenCalledExactlyOnceWith("img-1");
+      expect(card.get("img").attributes("src")).toBe("data:image/png;base64,AAAA");
+      // The *source's* size, which is the part a card at this width cannot say.
+      expect(card.text()).toContain(t("{width} × {height} 像素", { width: 1920, height: 1080 }));
+      app.unmount();
+    } finally {
+      vi.useRealTimers();
+      vi.mocked(bridge.history).mockResolvedValue(historyPage([historyRow({
+        preview: '<img src=x onerror="window.injected=true">',
+      })]));
+    }
+  });
+  it("asks the sidecar once per row, and not at all for a row whose text is the card", async () => {
+    vi.clearAllMocks();
+    vi.mocked(bridge.history).mockResolvedValue({ session_id: "s", seq: 0, offset: 0, total: 2, items: [
+      historyRow({ id: "text-1", preview: "just a note" }),
+      historyRow({ id: "file-1", content_type: "FILE", preview: "报告.pdf · 2.0 KB" }),
+    ] });
+    vi.mocked(bridge.previewHistoryEntry).mockResolvedValue({
+      kind: "files", image: "", width: 0, height: 0, total: 1,
+      files: [{ name: "报告.pdf", size: 2048, kind: "file", exists: false }],
+    });
+    const app = mountOn("history", document.body);
+    try {
+      await flushPromises();
+      vi.useFakeTimers();
+      const rows = app.findAll(".history-row");
+      // A text row's card is the row's own preview, so it opens with no read at
+      // all — and opens at once, because there is nothing to wait for.
+      await rows[0].trigger("mouseenter");
+      expect(app.get(".history-preview").text()).toBe("just a note");
+      expect(bridge.previewHistoryEntry).not.toHaveBeenCalled();
+
+      // The pointer crosses a row on its way down the list: leaving before the
+      // delay is up means the read never happens.
+      await rows[0].trigger("mouseleave");
+      await rows[1].trigger("mouseenter");
+      await rows[1].trigger("mouseleave");
+      await vi.advanceTimersByTimeAsync(400);
+      expect(bridge.previewHistoryEntry).not.toHaveBeenCalled();
+
+      // Resting on it is what asks, and the card says what the row cannot: the
+      // file is gone.
+      await rows[1].trigger("mouseenter");
+      await vi.advanceTimersByTimeAsync(200);
+      await flushPromises();
+      expect(bridge.previewHistoryEntry).toHaveBeenCalledExactlyOnceWith("file-1");
+      expect(app.get(".history-preview").text()).toContain(t("已不存在"));
+
+      // Off and back on is the same card, read once.
+      await rows[1].trigger("mouseleave");
+      await rows[1].trigger("mouseenter");
+      await vi.advanceTimersByTimeAsync(400);
+      await flushPromises();
+      expect(bridge.previewHistoryEntry).toHaveBeenCalledTimes(1);
+      expect(app.find(".history-preview").exists()).toBe(true);
+      app.unmount();
+    } finally {
+      vi.useRealTimers();
+      vi.mocked(bridge.history).mockResolvedValue(historyPage([historyRow({
+        preview: '<img src=x onerror="window.injected=true">',
+      })]));
+    }
+  });
+  it("leaves the card shut when the sidecar cannot say anything about a row", async () => {
+    vi.clearAllMocks();
+    vi.mocked(bridge.history).mockResolvedValue({ session_id: "s", seq: 0, offset: 0, total: 1, items: [
+      historyRow({ id: "emf-1", content_type: "IMAGE_EMF", preview: "[Vector Image]" }),
+    ] });
+    // An empty card is what the sidecar answers for a row it cannot render,
+    // rather than an error — so a hover over one is silent.
+    vi.mocked(bridge.previewHistoryEntry).mockResolvedValue({
+      kind: "", image: "", width: 0, height: 0, files: [], total: 0,
+    });
+    const app = mountOn("history", document.body);
+    try {
+      await flushPromises();
+      vi.useFakeTimers();
+      await app.get(".history-row").trigger("mouseenter");
+      await vi.advanceTimersByTimeAsync(200);
+      await flushPromises();
+      expect(app.find(".history-preview").exists()).toBe(false);
+      app.unmount();
+    } finally {
+      vi.useRealTimers();
+      vi.mocked(bridge.history).mockResolvedValue(historyPage([historyRow({
+        preview: '<img src=x onerror="window.injected=true">',
+      })]));
+    }
+  });
   it("adds the selection to favorites and clears all history only after confirmation", async () => {
     HTMLDialogElement.prototype.showModal = vi.fn();
     HTMLDialogElement.prototype.close = vi.fn();
@@ -1684,6 +1802,70 @@ describe("history rendering", () => {
       vi.mocked(bridge.deviceCerts).mockResolvedValue({ devices: [] });
     }
   });
+  it("offers this build to a device the sidecar says is behind, and reports what happened", async () => {
+    vi.mocked(bridge.offerDeviceUpdate).mockResolvedValue({ sent: true });
+    vi.mocked(bridge.devices).mockResolvedValue({ items: [
+      { id: "t", name: "Studio", paired: false, connection_state: "discovered",
+        pairing_status: "", pairing_code: null, sas: null,
+        version: "1.0.7", platform: "windows", arch: "amd64",
+        update_available: true, update_cached: true },
+      // Same build, another platform, and one too old to advertise: three
+      // different reasons not to offer, and the row carries none of them as a
+      // button.  The decision is the sidecar's -- these rows only render it.
+      { id: "u", name: "Same", paired: false, connection_state: "discovered",
+        pairing_status: "", pairing_code: null, sas: null,
+        version: "1.0.8", platform: "windows", arch: "amd64",
+        update_available: false, update_cached: false },
+      { id: "v", name: "Silent", paired: false, connection_state: "discovered",
+        pairing_status: "", pairing_code: null, sas: null,
+        update_available: false, update_cached: false },
+    ] });
+    const app = mount(App);
+    try {
+      await flushPromises();
+      await app.get('[aria-label="设备"]').trigger("click");
+      await flushPromises();
+      // The version is shown for the device that advertises one, and a device
+      // that advertises nothing shows no chip rather than a guess.
+      expect(app.text()).toContain("版本 1.0.7");
+      const offers = app.findAll('[aria-label="发送更新"]');
+      expect(offers).toHaveLength(1);
+      await offers[0].trigger("click");
+      await flushPromises();
+      expect(bridge.offerDeviceUpdate).toHaveBeenCalledExactlyOnceWith("t");
+      expect(app.text()).toContain("已把更新发送给 Studio");
+    } finally {
+      app.unmount();
+      vi.mocked(bridge.devices).mockResolvedValue({ items: [] });
+      vi.mocked(bridge.offerDeviceUpdate).mockReset().mockResolvedValue({ sent: true });
+    }
+  });
+  it("says why an update offer did not go, instead of leaving the click silent", async () => {
+    vi.mocked(bridge.offerDeviceUpdate).mockRejectedValue({
+      code: "update.peer_unreachable", message: "无法连接到该设备，它可能已离线。", retryable: false,
+    });
+    vi.mocked(bridge.devices).mockResolvedValue({ items: [
+      { id: "t", name: "Studio", paired: false, connection_state: "discovered",
+        pairing_status: "", pairing_code: null, sas: null,
+        version: "1.0.7", platform: "windows", arch: "amd64",
+        update_available: true, update_cached: false },
+    ] });
+    const app = mount(App);
+    try {
+      await flushPromises();
+      await app.get('[aria-label="设备"]').trigger("click");
+      await flushPromises();
+      await app.get('[aria-label="发送更新"]').trigger("click");
+      await flushPromises();
+      // The sidecar's own sentence, which it localized: the row shows the
+      // reason rather than an English fallback of this file's own making.
+      expect(app.text()).toContain("无法连接到该设备，它可能已离线。");
+    } finally {
+      app.unmount();
+      vi.mocked(bridge.devices).mockResolvedValue({ items: [] });
+      vi.mocked(bridge.offerDeviceUpdate).mockReset().mockResolvedValue({ sent: true });
+    }
+  });
   it("stamps a relayed chat message with its receipt instead of repainting the clipboard", async () => {
     vi.useFakeTimers();
     let emit!: Parameters<typeof bridge.subscribe>[0];
@@ -1747,7 +1929,7 @@ describe("history rendering", () => {
       const field = () => app.get('[aria-label="输入对方配对码"]');
       const submit = () => app.findAll("button").find(node => node.text() === t("提交配对码"))!;
       await field().setValue("ABCD-EFGH-JKLM");
-      vi.mocked(bridge.internetPairingStatus).mockResolvedValue({ peers: [], waiting: [
+      vi.mocked(bridge.internetPairingStatus).mockResolvedValue({ peers: [], enabled: true, waiting: [
         { peer_id: "9EVR", name: "", since: 1700000000 },
       ] } as any);
       const submits = vi.mocked(bridge.internetPairingStatus).mock.calls.length;
@@ -1778,8 +1960,41 @@ describe("history rendering", () => {
       expect(app.find(".error-band").exists()).toBe(false);
     } finally {
       app.unmount();
-      vi.mocked(bridge.internetPairingStatus).mockResolvedValue({ peers: [] });
+      vi.mocked(bridge.internetPairingStatus).mockResolvedValue({ peers: [], enabled: true });
       vi.mocked(bridge.enterInternetPairingCode).mockResolvedValue({ peer_id: "", waiting: true });
+    }
+  });
+
+  it("switches internet sync from the card it turns on, and says what that turns off", async () => {
+    // The feature had no switch where it is used: a reader who had never opened
+    // the settings page found a card whose buttons answered and whose list
+    // stayed empty, and nothing on it said the relay was off.
+    vi.mocked(bridge.internetPairingStatus).mockResolvedValueOnce({ peers: [], enabled: false } as any);
+    const app = mountOn("history");
+    try {
+      await flushPromises();
+      await app.get('[aria-label="设备"]').trigger("click");
+      await flushPromises();
+      await openPanel(app, "互联网配对");
+      const toggle = () => app.get('[aria-label="启用互联网同步"]');
+      const generate = () => app.findAll("button").find(node => node.text() === t("生成配对码"))!;
+      expect((toggle().element as HTMLInputElement).checked).toBe(false);
+      // Everything on the card needs the relay, so nothing on it is offered.
+      expect(generate().attributes("disabled")).toBeDefined();
+      expect(app.get('[aria-label="输入对方配对码"]').attributes("disabled")).toBeDefined();
+      expect(app.find(".relay-state").exists()).toBe(false);
+
+      vi.mocked(bridge.internetPairingStatus).mockResolvedValue({ peers: [], enabled: true } as any);
+      await toggle().setValue(true);
+      await flushPromises();
+      // The same field the settings page saves under 互联网同步, saved at once:
+      // this page has no save button, and the sidecar applies it live.
+      expect(bridge.updateSettings).toHaveBeenCalledWith({ internet_sync_enabled: true });
+      expect((toggle().element as HTMLInputElement).checked).toBe(true);
+      expect(generate().attributes("disabled")).toBeUndefined();
+    } finally {
+      app.unmount();
+      vi.mocked(bridge.internetPairingStatus).mockResolvedValue({ peers: [], enabled: true });
     }
   });
 

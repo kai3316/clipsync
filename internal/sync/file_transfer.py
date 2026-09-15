@@ -259,6 +259,7 @@ class FileTransferManager:
         self._on_file_received: Callable[[str, str, str], None] | None = None
         self._on_transfer_request: Callable[[str, str, int, str, Callable], None] | None = None
         self._clip_file_guard: Callable[[str, str], bool] | None = None
+        self._update_guard: Callable[[str], bool] | None = None
 
     # ------------------------------------------------------------------
     # Callback registration
@@ -320,6 +321,18 @@ class FileTransferManager:
         rather than a label the sender may claim.  See ``_handle_file_request``
         for why that distinction is the whole of the consent gate."""
         self._clip_file_guard = callback
+
+    def set_update_guard(self, callback: Callable[[str], bool]) -> None:
+        """*callback(sender_device_id) -> bool* -- whether an ``update`` blob from
+        that peer is one this side asked for.
+
+        Same shape of exemption as ``set_clip_file_guard``, and for a harder
+        reason: an ``update`` transfer skips the accept prompt entirely, so if
+        the label alone were enough, any device on the network — paired or not —
+        could push a file at this disk with nobody asked.  With no guard
+        registered the old behaviour stands, which is what the paths that never
+        registered one keep."""
+        self._update_guard = callback
 
     def take_received_kind(self, transfer_id: str) -> str:
         """Pop and return the kind of a received transfer, or "file" if unknown.
@@ -778,6 +791,24 @@ class FileTransferManager:
         kind = payload.get("kind", "file")
         if kind not in ("file", "update", "clip_file"):
             kind = "file"
+
+        # An `update` transfer is the one kind that reaches this disk without a
+        # prompt, and its label is the *sender's* to write.  So the exemption is
+        # not the label -- it is an outstanding request from this side for that
+        # peer's cached asset (see `set_update_guard`), which is what makes an
+        # update offerable to a device this machine has never paired with.
+        if kind == "update" and self._update_guard is not None and not self._update_guard(
+            sender_device_id
+        ):
+            logger.warning(
+                "Refusing update transfer %s from %s: nothing on this side asked for it",
+                transfer_id[:8],
+                str(sender_device_id)[:12],
+            )
+            self._send_as_frame(
+                {"msg_type": "file_reject", "transfer_id": transfer_id}, send_fn
+            )
+            return
 
         # Validate/coerce file_size -- a malformed value must not crash the
         # message handler or slip an absurd file into the pipeline.

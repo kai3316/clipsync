@@ -186,6 +186,20 @@ header p { margin-top: 7px; font-size: 12px; }
    the hovered row, so the pointer can move onto it and read to the end, and it
    closes the moment the pointer reaches another row. */
 .history-preview { position: absolute; z-index: 6; left: 36px; top: calc(100% - 8px); max-width: min(620px, calc(100vw - 96px)); max-height: 42vh; overflow: auto; padding: 12px 14px; border: 1px solid var(--line); border-radius: 6px; background: var(--raised); box-shadow: var(--shadow); font-size: 12px; line-height: 1.6; white-space: pre-wrap; overflow-wrap: anywhere; user-select: text; }
+/* The three things a card can hold besides words.  The picture is capped by
+   the card's own width and never upscaled past it: a card shown larger than the
+   image would be a blurry claim about a size the row does not have. */
+.history-preview-image { display: block; max-width: 100%; max-height: 32vh; width: auto; height: auto; border: 1px solid var(--line); border-radius: 4px; background: var(--surface); object-fit: contain; }
+.history-preview-files { list-style: none; margin: 0; padding: 0; }
+.history-preview-files li { display: flex; align-items: baseline; gap: 8px; padding: 2px 0; }
+.history-preview-files li + li { border-top: 1px solid var(--line); }
+/* The name takes the room and the size keeps its own, so a long name is what
+   gets cut rather than the number beside it. */
+.history-preview-name { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.history-preview-size { flex: 0 0 auto; }
+.history-preview-gone { flex: 0 0 auto; color: var(--warn-text); }
+.history-preview-more { margin-top: 6px; }
+.history-preview-image + .history-preview-files, .history-preview-image + .history-preview-more { margin-top: 8px; }
 .history-content { min-width: 0; }
 .history-content p { white-space: pre-wrap; overflow-wrap: anywhere; display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; line-height: 1.6; margin-bottom: 6px; }
 .history-meta { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin-top: 6px; }

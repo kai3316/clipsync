@@ -71,6 +71,16 @@ def _is_newer(latest: str, current: str) -> bool:
     return lv > cv
 
 
+def is_newer(latest: str, current: str) -> bool:
+    """Whether *latest* is a higher version than *current*.
+
+    The public spelling of :func:`_is_newer`, for callers outside this module —
+    a peer's advertised version is the same question as a release tag's, and it
+    is answered by the same comparison or the two say different things about
+    the same pair of builds."""
+    return _is_newer(latest, current)
+
+
 def _describe(exc: Exception | None) -> str:
     """One line naming why the release lookup failed.
 

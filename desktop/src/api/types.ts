@@ -43,6 +43,41 @@ export interface TransfersPage {
   speed_test?: Record<string, unknown>;
 }
 
+/**
+ * What a history row's hover card can add about it.
+ *
+ * The card over a text row repeats the preview the row had to clamp.  An image
+ * and a file row have no words to repeat, so their card is this instead: a
+ * picture for the image, a list for the files, and `kind: ""` for every row
+ * there is nothing to add about — which is answered rather than raised, because
+ * a pointer crossing a row is not a request anybody made.
+ */
+export interface HistoryPreview {
+  /** `"image"`, `"files"`, or `""` for a row with nothing more to show. */
+  kind: string;
+  /** A `data:` URL, already downscaled to a card's width.  `""` when there is none. */
+  image: string;
+  /** The *source* picture's size, so a card can caption a 4000 px screenshot as one. */
+  width: number;
+  height: number;
+  files: HistoryPreviewFile[];
+  /** How many files the clip holds, which can exceed the ones listed here. */
+  total: number;
+}
+
+export interface HistoryPreviewFile {
+  name: string;
+  /** In bytes; `0` for a folder. */
+  size: number;
+  kind: "file" | "dir";
+  /**
+   * Whether the file is still on this machine.  Always true for a file that
+   * lives on another device: it never was here, and the card must not read
+   * that as a file that has gone missing.
+   */
+  exists: boolean;
+}
+
 export interface HistoryItem {
   id: string;
   timestamp: number;
@@ -106,6 +141,20 @@ export interface Device {
   reconnecting?: boolean;
   reconnect_attempt?: number;
   reconnect_max?: number;
+  /** What the peer advertises about itself in its mDNS records.  All three are
+   *  empty for a device this build has never seen announce them — a peer older
+   *  than those fields, or a row with no live sighting — so an empty version
+   *  means unknown, never "up to date". */
+  version?: string;
+  platform?: string;
+  arch?: string;
+  /** Whether this build could update that device — same platform, and a
+   *  version this one is ahead of.  The sidecar decides it: the comparison and
+   *  the platform spelling are both its, and a second implementation of either
+   *  would be a second answer to the same question. */
+  update_available?: boolean;
+  /** Whether an offer would carry the installer or only the news. */
+  update_cached?: boolean;
 }
 
 export interface DeviceProbeChannel {
@@ -141,6 +190,10 @@ export interface InternetPairingPeer {
 export interface InternetPairingStatus {
   generated_code?: string | null;
   peers: InternetPairingPeer[];
+  /** Whether internet sync is on, which is what decides whether the relay is
+   *  up at all.  Optional because a sidecar older than the switch sends no
+   *  key, and the page reads that as "off" rather than as "unknown". */
+  enabled?: boolean;
   /**
    * Codes entered on this machine that the other side has not answered yet.
    *

@@ -42,6 +42,20 @@ export const EN: Record<string, string> = {
   "错误": "Error",
   "配对请求": "Pairing request",
   "配对失败。验证码可能已过期。请重新连接。": "Pairing failed. The code may have expired. Try connecting again.",
+  "无法读取本机剪贴板，可能被其他程序占用。":
+    "Could not read this machine's clipboard; another program may be holding it.",
+  "无法写入本机剪贴板，同步的内容没有粘贴过来。":
+    "Could not write to this machine's clipboard, so the synced content is not there to paste.",
+  "剪贴板内容太大，本次同步已跳过。": "The clipboard was too large and this sync was skipped.",
+  "历史记录写入失败，本机磁盘可能已满。":
+    "Writing to the history failed — this machine's disk may be full.",
+  "配对请求没有发出去，请确认设备仍在同一网络。":
+    "The pairing request did not go out. Check that the device is still on this network.",
+  "中继收到一条无法解析的消息，已丢弃。":
+    "The relay received a message it could not parse, and dropped it.",
+  "局域网同步的内部处理出错，本次操作未完成。":
+    "Local network sync hit an internal error and this operation did not finish.",
+  "同步引擎遇到错误。": "The sync engine ran into a problem.",
   // The one good answer the internet-pairing card has to give, and it arrives
   // from the other machine rather than from anything this window did.
   "已与 {name} 完成互联网配对": "Internet pairing with {name} is complete",
@@ -410,7 +424,6 @@ export const EN: Record<string, string> = {
   "关闭": "Close",
   "关闭会话": "Close conversation",
   "会话": "Sessions",
-  "聊天页分区": "Chat sections",
   "附近没有可聊天的设备。": "No devices nearby to chat with.",
   "会话未关闭": "The session is still open",
   "选择已配对设备": "Choose a paired device",
@@ -426,6 +439,7 @@ export const EN: Record<string, string> = {
   "（只能浏览）": " (browse only)",
   "该设备版本过旧，只能浏览，不能作为迁移来源": "That device runs an older version; its files can be browsed but not migrated from",
   "选择一个会话": "Choose a conversation",
+  "或者点左边的设备，开始一段新对话。": "Or pick a device on the left to start a new one.",
   "暂无聊天会话": "No conversations",
   "暂无消息": "No messages",
   "还没有消息": "No messages yet",
@@ -792,6 +806,20 @@ export const EN: Record<string, string> = {
   "XXXX-XXXX-XXXX": "XXXX-XXXX-XXXX",
   "互联网同步": "Internet sync",
   "启用互联网同步": "Enable internet sync",
+  // The switch on the pairing card and the switch on the settings page are one
+  // setting, so the note under the first one has to say so: a reader who turns
+  // it off here and finds it off there should have been told.
+  "关闭后设备之间不再通过中继配对或同步，剪贴板也不离开局域网；这与设置页里的同名开关是同一个设置。":
+    "With this off, devices no longer pair or sync over the relay and the clipboard stays on the local network. This is the same switch as the one with this name on the settings page.",
+  "发送更新": "Send update",
+  "把本机的安装包发送给该设备": "Send this device's installer to it",
+  "通知该设备有新版本": "Tell the device a newer version is out",
+  "该设备版本较旧，可以发送更新": "This device is on an older version and can be updated",
+  "对方软件版本": "The version the other device is running",
+  "已把更新发送给 {name}": "Sending the update to {name}",
+  "已通知 {name} 有新版本，它可以从发布页下载":
+    "Told {name} a newer version is out; it can download it from the releases page",
+  "发送更新失败": "Could not send the update",
   "解除互联网配对": "Remove internet pairing",
   "中继": "Relay",
   "中继用户名": "Relay username",
@@ -888,6 +916,11 @@ export const EN: Record<string, string> = {
   "移入回收区 {path}": "Move {path} to trash",
   "编辑 {path}": "Edit {path}",
   "预览 {path}": "Preview {path}",
+  "预览图": "Preview image",
+  "文件夹": "Folder",
+  "已不存在": "no longer there",
+  "共 {count} 个文件": "{count} files in all",
+  "{width} × {height} 像素": "{width} × {height} px",
   "选择记录 {id}": "Select record {id}",
   "选择 {path}": "Select {path}",
   "选择文件夹 {path} 下的全部文件": "Select every file under {path}",

@@ -1101,6 +1101,20 @@ async fn disconnect_device(
 }
 
 #[tauri::command]
+async fn offer_device_update(
+    window: WebviewWindow,
+    host: State<'_, Host>,
+    device_id: String,
+) -> Result<Value, BridgeError> {
+    authorize(&window)?;
+    validate_id(&device_id)?;
+    host.bridge()
+        .await?
+        .call("devices.offer_update", json!({"device_id": device_id}))
+        .await
+}
+
+#[tauri::command]
 async fn forget_device(
     window: WebviewWindow,
     host: State<'_, Host>,
@@ -1325,6 +1339,27 @@ async fn read_history_text(
     host.bridge()
         .await?
         .call("history.text", json!({"entry_id": entry_id}))
+        .await
+}
+
+/// The picture and file list behind a row's hover card.
+///
+/// A read like `read_history_text`, and the only one the window makes without
+/// the user asking for it: the card follows the pointer, so this rides the same
+/// `validate_id` guard and nothing more — the sidecar decides what a card may
+/// show, and answers with an empty one rather than an error for a row there is
+/// nothing to show about.
+#[tauri::command]
+async fn preview_history_entry(
+    window: WebviewWindow,
+    host: State<'_, Host>,
+    entry_id: String,
+) -> Result<Value, BridgeError> {
+    authorize(&window)?;
+    validate_id(&entry_id)?;
+    host.bridge()
+        .await?
+        .call("history.preview", json!({"entry_id": entry_id}))
         .await
 }
 
@@ -2199,6 +2234,7 @@ fn main() {
             set_device_note,
             connect_device,
             disconnect_device,
+            offer_device_update,
             forget_device,
             restore_device,
             purge_device,
@@ -2217,6 +2253,7 @@ fn main() {
             copy_text,
             get_overview,
             read_history_text,
+            preview_history_entry,
             open_history_link,
             list_favorites,
             get_favorite,

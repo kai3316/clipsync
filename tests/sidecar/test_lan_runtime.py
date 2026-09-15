@@ -23,6 +23,7 @@ from internal.clipboard.clipboard import ClipboardMonitor
 from internal.clipboard.format import ClipboardContent, ContentType, SyncMessage
 from internal.clipboard.history_db import ClipboardHistoryDB as HistoryDB
 from internal.config.config import Config, PeerInfo
+from internal.infrastructure.runtime import lan
 from internal.infrastructure.runtime.lan import CLIP_FILE_WINDOW, LanRuntime
 from internal.protocol.codec import decode_message, encode_frame
 from internal.security.encryption import EncryptionManager
@@ -73,9 +74,13 @@ class Discovery:
     def __init__(self):
         self.browsing = False
         self.advertising = False
+        self.renames = []
 
     def set_callbacks(self, found, lost):
         self.found, self.lost = found, lost
+
+    def set_device_name(self, device_name):
+        self.renames.append(device_name)
 
     def start(self):
         self.running = True
@@ -360,6 +365,43 @@ def test_chat_invite_dials_an_idle_peer_before_inviting(rig):
     assert [message.msg_type for _, message in transport.sent] == ["chat_invite"]
 
 
+def test_chat_invite_to_a_never_handshaked_device_reaches_the_real_id(rig):
+    """The invite has to be keyed by the id the transport delivers to.
+
+    A device nobody here has handshaked with is known only by its discovery
+    hash, and the hash cannot be mapped back to a device_id until a handshake
+    names one.  Waiting for the *hash* to appear in the connected set therefore
+    burned the whole connect timeout on a link that came up immediately, and
+    reported the failure as a timeout — so no invite was ever sent, and the
+    accept side never learned the connection was a conversation rather than a
+    pairing request.
+    """
+    runtime, pairing, transport, *_ = rig
+    # Nobody has handshaked with it: it exists only as a discovery row.
+    pairing.remove_peer("remote")
+    alias = peer_id_hash("remote")
+    runtime._discovered[alias] = {
+        "name": "Remote", "address": "127.0.0.1", "port": 9999,
+        "version": "", "os": "", "arch": "",
+    }
+
+    def dial(pid, name, address, port, **kwargs):
+        transport.dials.append((pid, name, address, port))
+        # The handshake is what names it: from here the transport's peer table
+        # is keyed by the real device_id, and the hash resolves to it.
+        pairing.add_peer("remote", "Remote", None, paired=False)
+        transport.resolved[alias] = "remote"
+        transport.connected.add("remote")
+
+    transport.connect_to_peer = dial
+    session_id = runtime.chat_invite(alias, "Remote")
+
+    assert session_id
+    # The session, and therefore every frame it sends, uses the real id.
+    assert runtime.chat_sessions()["sessions"][0]["peer_id"] == "remote"
+    assert [message.msg_type for _, message in transport.sent] == ["chat_invite"]
+
+
 def test_a_chat_dial_does_not_offer_to_pair_but_an_ordinary_one_does(rig):
     """Opening a conversation is not a request to pair.
 
@@ -455,6 +497,81 @@ def test_an_unpaired_device_that_is_here_keeps_its_row(rig):
     items = runtime.devices()["items"]
     assert [item["id"] for item in items] == ["remote"]
     assert items[0]["connection_state"] == "discovered"
+
+
+def test_a_device_is_not_listed_as_its_own_archive(rig):
+    """The row and the archive entry for one device must not both be drawn.
+
+    A device is listed under its hashed mDNS id for as long as nothing has
+    resolved that hash to the real id, and the user can remove it while it is
+    listed that way.  The archive entry is then keyed by the hash while the
+    device itself comes back — dialed, handshaked, known — under its real id,
+    and the archive's "already listed" test compares the two and finds them
+    different.  One device, two rows: the device, and its own removal.
+    """
+    runtime, pairing, transport, discovery = rig[0], rig[1], rig[2], rig[3]
+    hashed = peer_id_hash("remote")
+    # Nothing has handshaked with it: it exists only as a discovery row.
+    pairing.remove_peer("remote")
+    discovery.found(hashed, "Remote-ad", "127.0.0.1", 9999)
+    assert [item["id"] for item in runtime.devices()["items"]] == [hashed]
+
+    runtime.forget_device(hashed)
+    assert [item["archived"] for item in runtime.devices()["items"]] == [True]
+
+    # The handshake names it, and it is still here.
+    pairing.add_peer("remote", "Remote", None, paired=False)
+    transport.resolved[hashed] = "remote"
+    discovery.found(hashed, "Remote-ad", "127.0.0.1", 9999)
+
+    items = runtime.devices()["items"]
+    assert [item["id"] for item in items] == ["remote"]
+    assert items[0]["archived"] is False
+    # ...and the archive moved with it, so restore has an id it can be given.
+    assert list(runtime.config.removed_peers) == ["remote"]
+
+
+def test_the_name_a_peer_publishes_outranks_the_one_recorded_for_it(rig):
+    """A device renamed on the other side is renamed here too.
+
+    The name this machine holds was written when it last dialed, so nothing in
+    it can learn that the peer's settings changed; the name the peer publishes
+    about itself is the peer's own answer, and it is the one to draw.
+    """
+    runtime, _pairing, _transport, discovery, *_ = rig
+    hashed = peer_id_hash("remote")
+    discovery.found(hashed, "Remote-ad", "127.0.0.1", 9999, "", "", "", True)
+    assert runtime.devices()["items"][0]["name"] == "Remote-ad"
+
+    discovery.found(hashed, "书房的笔记本", "127.0.0.1", 9999, "", "", "", True)
+    assert runtime.devices()["items"][0]["name"] == "书房的笔记本"
+
+
+def test_a_peer_that_publishes_no_name_keeps_the_one_already_known(rig):
+    """The fallback label is not an answer, and may not overwrite one.
+
+    A peer older than the published-name field is heard only as its truncated
+    instance label.  Its name is already on record — the relay handshake writes
+    one, and so does a dial from a build that does publish — and replacing that
+    with a truncation of a hostname is how a listed device gets renamed by
+    itself, with nobody having asked.
+    """
+    runtime, _pairing, _transport, discovery, *_ = rig
+    hashed = peer_id_hash("remote")
+    discovery.found(hashed, "Remote-ad", "127.0.0.1", 9999)
+    assert runtime.devices()["items"][0]["name"] == "Remote"
+
+
+def test_renaming_this_device_reaches_the_advertisement(rig):
+    """The rename has to be published, not just stored.
+
+    It was written to the config and handed to the sync and transport engines —
+    every copy of the name except the one the other devices actually read.
+    """
+    runtime, _pairing, _transport, discovery, *_ = rig
+    runtime.config.device_name = "书房的台式机"
+    runtime.apply_settings({"device_name": "书房的台式机"})
+    assert discovery.renames == ["书房的台式机"]
 
 
 def test_a_paired_device_that_is_away_keeps_its_row(rig):
@@ -858,8 +975,36 @@ def test_local_reject_unpair_notify_before_forget(rig, method, kind):
     pairing.generate_shared_pairing_code("remote")
     assert getattr(runtime, method)("remote") == {"accepted": True}
     assert transport.sent[-1][1].msg_type == kind
-    assert transport.forgotten[-1] == "remote"
     assert not runtime.config.peers["remote"].paired
+    # Declining a prompt and breaking with a device are different answers, and
+    # only the break is permanent: ``forget_peer`` blocks every later inbound
+    # connection, and the peer's next pairing request is exactly that.
+    if kind == "pairing_unpair":
+        assert transport.forgotten[-1] == "remote"
+    else:
+        assert "remote" not in transport.forgotten
+
+
+def test_a_declined_prompt_leaves_the_next_request_answerable(rig):
+    """One "no" must not become a standing refusal.
+
+    ``forget_peer`` blacklists the peer at the transport level and the only
+    thing that lifts it is this machine's own outbound dial — which a
+    peer-initiated re-pair request never is.  Rejecting used to install it, so
+    the peer could ask again as often as it liked and every request was refused
+    before a handshake could even offer a code.
+    """
+    runtime, pairing, transport, *_ = rig
+    transport.connected.add("remote")
+    pairing.generate_shared_pairing_code("remote")
+    runtime.reject_pairing("remote")
+
+    # The peer comes back and asks again: the link is still honoured, so the
+    # prompt reaches this side rather than being turned away at the transport.
+    assert "remote" not in transport.forgotten
+    pairing.generate_shared_pairing_code("remote")
+    assert "remote" in {entry[0] for entry in pairing.get_pending_pairings()}
+    assert pairing.get_pairing_status("remote") == "pending"
 
 
 def test_an_unpair_notice_a_dropped_link_swallowed_is_retried_until_it_lands(rig):
@@ -954,7 +1099,14 @@ def test_remote_reject_unpair_persist_revocation(rig, kind):
     transport.message(frame(kind), "remote")
     assert not pairing.is_peer_paired("remote")
     assert not runtime.config.peers["remote"].paired
-    assert "remote" in transport.forgotten
+    # The receiving half of the same rule: a peer that turned our prompt down
+    # gets the same standing as one that broke with us only if it declared a
+    # break.  Blacklisting on a plain reject is what let one "no" strand both
+    # machines at once -- neither side would accept the other's next request.
+    if kind == "pairing_unpair":
+        assert "remote" in transport.forgotten
+    else:
+        assert "remote" not in transport.forgotten
 
 
 def test_forget_archives_and_restore_returns_unpaired(rig):
@@ -1211,6 +1363,61 @@ def test_apply_settings_clears_a_pending_timed_pause(rig):
     runtime.config.timed_pause_until = time.time() + 600
     runtime.apply_settings({"device_name": "Renamed"})
     assert runtime.config.timed_pause_until > 0.0
+
+
+class _RelayStub:
+    """Stands in for the broker client: the switch only starts and stops it."""
+
+    def __init__(self):
+        self.stopped = False
+
+    def stop(self):
+        self.stopped = True
+
+
+def test_the_internet_switch_brings_the_relay_up_and_down_while_running(rig):
+    """The switch used to be one only a restart honoured.
+
+    The relay was built in the startup path and nowhere else, so flipping this
+    setting saved a value and changed nothing on screen — and, the other way,
+    turning it *off* left every topic subscribed, publishing the same clipboard
+    frames the LAN carries onto a public broker after the user asked for that
+    to stop.
+    """
+    runtime, *_ = rig
+    built = []
+
+    def open_relay():
+        built.append(_RelayStub())
+        runtime.relay = built[-1]
+
+    runtime._open_relay = open_relay
+
+    runtime.config.internet_sync_enabled = True
+    runtime.apply_settings({"internet_sync_enabled": True})
+    assert len(built) == 1 and runtime.relay is built[0]
+
+    runtime.config.internet_sync_enabled = False
+    runtime.apply_settings({"internet_sync_enabled": False})
+    assert runtime.relay is None
+    assert built[0].stopped is True
+
+    # Another field moving says nothing about the relay.
+    runtime.apply_settings({"device_name": "Renamed"})
+    assert len(built) == 1
+
+
+def test_the_internet_switch_leaves_a_running_relay_alone(rig):
+    """Turning it on again must not stack a second client on the first."""
+    runtime, *_ = rig
+    built = []
+    runtime._open_relay = lambda: built.append(True)
+    runtime.relay = _RelayStub()
+
+    runtime.config.internet_sync_enabled = True
+    runtime.apply_settings({"internet_sync_enabled": True})
+    assert built == []
+    assert runtime.relay is not None
 
 
 def test_the_approval_switch_reaches_the_manager_and_the_readout(rig):
@@ -1763,6 +1970,11 @@ def test_update_request_serves_the_cached_asset_to_a_paired_peer(rig, monkeypatc
 
 
 def test_an_unpaired_peer_cannot_request_a_cached_update(rig, monkeypatch, tmp_path):
+    """A request from a device that says nothing about itself is not answered.
+
+    Its own platform is the whole of what an unpaired peer may claim here, and a
+    peer too old to advertise one has not claimed it.
+    """
     runtime, _, transport, *_ = rig
     transport.connected.add("remote")
     asset = tmp_path / "clipsync-windows.zip"
@@ -1774,6 +1986,189 @@ def test_an_unpaired_peer_cannot_request_a_cached_update(rig, monkeypatch, tmp_p
     assert transport.sent == []
 
 
+def test_an_unpaired_peer_on_this_platform_is_served_the_cached_asset(
+    rig, monkeypatch, tmp_path
+):
+    """The 免配对 half: the answer to an offer needs no pairing to be served."""
+    runtime, _, transport, *_ = rig
+    transport.connected.add("remote")
+    asset = tmp_path / "clipsync-windows.zip"
+    asset.write_bytes(b"release-bytes")
+    monkeypatch.setattr(updater, "get_cached_asset", lambda: str(asset))
+    monkeypatch.setattr(lan, "_local_platform", lambda: ("windows", "amd64"))
+
+    transport.message(
+        frame("update_request", version="1.0.7", os="windows", arch="amd64"), "remote"
+    )
+
+    sent = [msg for _, msg in transport.sent]
+    assert [msg.msg_type for msg in sent] == ["file_request"]
+    assert sent[0]._raw_payload["kind"] == "update"
+
+
+def test_a_request_from_another_platform_is_not_answered(rig, monkeypatch, tmp_path):
+    """The asset is the one for this platform; a Mac has nothing to do with it."""
+    runtime, _, transport, *_ = rig
+    transport.connected.add("remote")
+    asset = tmp_path / "clipsync-windows.zip"
+    asset.write_bytes(b"release-bytes")
+    monkeypatch.setattr(updater, "get_cached_asset", lambda: str(asset))
+    monkeypatch.setattr(lan, "_local_platform", lambda: ("windows", "amd64"))
+
+    transport.message(
+        frame("update_request", version="1.0.7", os="darwin", arch="arm64"), "remote"
+    )
+
+    assert transport.sent == []
+
+
+def test_an_offer_from_a_newer_same_platform_peer_is_asked_for(rig, monkeypatch):
+    runtime, _, transport, *_ = rig
+    transport.connected.add("remote")
+    monkeypatch.setattr(lan, "_local_platform", lambda: ("windows", "amd64"))
+    monkeypatch.setattr(lan, "__version__", "1.0.8")
+
+    transport.message(
+        frame("update_offer", version="1.0.9", os="windows", arch="amd64", has_asset=True),
+        "remote",
+    )
+
+    requests = [m for _, m in transport.sent if m.msg_type == "update_request"]
+    assert len(requests) == 1
+    # And the answer is one this side will accept, because it is the one that
+    # asked: the upload guard reads this ledger, not the frame's label.
+    assert runtime._update_outstanding_for("remote")
+    assert events_named(runtime.events, "update.peer_notice")
+
+
+def test_an_offer_from_an_older_or_other_platform_peer_is_ignored(rig, monkeypatch):
+    runtime, _, transport, *_ = rig
+    transport.connected.add("remote")
+    monkeypatch.setattr(lan, "_local_platform", lambda: ("windows", "amd64"))
+    monkeypatch.setattr(lan, "__version__", "1.0.8")
+
+    for payload in (
+        {"version": "1.0.7", "os": "windows", "arch": "amd64"},  # older
+        {"version": "1.0.8", "os": "windows", "arch": "amd64"},  # same
+        {"version": "1.0.9", "os": "darwin", "arch": "arm64"},   # another platform
+        {"version": "1.0.9"},                                    # says nothing
+    ):
+        transport.message(frame("update_offer", has_asset=True, **payload), "remote")
+
+    assert transport.sent == []
+    assert not runtime._update_outstanding_for("remote")
+
+
+def test_an_offer_with_no_cached_asset_is_only_the_news(rig, monkeypatch):
+    """The fallback half: nothing to send, so the peer is told to fetch it."""
+    runtime, _, transport, *_ = rig
+    transport.connected.add("remote")
+    monkeypatch.setattr(lan, "_local_platform", lambda: ("windows", "amd64"))
+    monkeypatch.setattr(lan, "__version__", "1.0.8")
+
+    transport.message(
+        frame("update_offer", version="1.0.9", os="windows", arch="amd64", has_asset=False),
+        "remote",
+    )
+
+    assert transport.sent == []
+    notices = events_named(runtime.events, "update.peer_notice")
+    assert notices and notices[-1]["has_asset"] is False
+
+
+def test_an_update_blob_nobody_asked_for_is_refused(rig, tmp_path):
+    """The label alone must not be enough to reach this disk unprompted."""
+    runtime, pairing, transport, *_ = rig
+    runtime.file_transfer._output_dir = tmp_path
+    pairing.add_peer("remote", "Remote", pairing.get_peer_certificate("remote"), paired=True)
+    transport.connected.add("remote")
+    staged = []
+    runtime.set_update_sink(staged.append)
+
+    transport.message(
+        decode_message(
+            encode_frame(
+                {
+                    "msg_type": "file_request",
+                    "transfer_id": "u1",
+                    "file_name": "clipsync-windows.zip",
+                    "file_size": 4,
+                    "mime_type": "application/zip",
+                    "kind": "update",
+                }
+            )
+        ),
+        "remote",
+    )
+
+    rejected = [m for _, m in transport.sent if m.msg_type == "file_reject"]
+    assert rejected and rejected[0]._raw_payload["transfer_id"] == "u1"
+    assert staged == []
+    assert not (tmp_path / "clipsync-windows.zip").exists()
+
+
+def test_asking_peers_for_an_update_licenses_their_answer(rig, monkeypatch):
+    runtime, _, transport, *_ = rig
+    transport.connected.add("remote")
+    assert not runtime._update_outstanding_for("remote")
+
+    runtime.request_update_from_peers()
+
+    assert runtime._update_outstanding_for("remote")
+    assert [msg.msg_type for msg in transport.broadcasts] == ["update_request"]
+    # The asker's own build rides along, so a platform mismatch is decidable on
+    # the answering side without pairing.
+    assert transport.broadcasts[0]._raw_payload["os"]
+
+
+def test_an_expired_update_expectation_stops_licensing_an_upload(rig):
+    runtime, *_ = rig
+    runtime._expect_update("remote")
+    runtime._update_expectations["remote"] = time.monotonic() - 1
+
+    assert not runtime._update_outstanding_for("remote")
+    assert "remote" not in runtime._update_expectations
+
+
+def test_a_device_row_says_when_this_build_could_update_it(rig, monkeypatch):
+    """The row carries the decision, so the window does not make its own.
+
+    The version comparison and the platform spelling are both the sidecar's,
+    and a second implementation of either in a front end would be a second
+    answer to the same question -- with the two disagreeing on exactly the
+    cases that matter (a peer too old to advertise anything, a same-version
+    peer, another platform's build).
+    """
+    runtime, pairing, transport, discovery, *_ = rig
+    monkeypatch.setattr(lan, "_local_platform", lambda: ("windows", "amd64"))
+    monkeypatch.setattr(lan, "__version__", "1.0.8")
+    alias = peer_id_hash("remote")
+    seen = {
+        "name": "Remote", "address": "127.0.0.1", "port": 9999,
+        "version": "1.0.7", "os": "windows", "arch": "amd64",
+    }
+    runtime._discovered[alias] = dict(seen)
+    runtime._refresh()
+    row = runtime.devices()["items"][0]
+    assert (row["version"], row["platform"], row["arch"]) == ("1.0.7", "windows", "amd64")
+    assert row["update_available"] is True
+
+    runtime._discovered[alias] = {**seen, "version": "1.0.8"}
+    runtime._refresh()
+    assert runtime.devices()["items"][0]["update_available"] is False
+
+    runtime._discovered[alias] = {**seen, "os": "darwin", "arch": "arm64"}
+    runtime._refresh()
+    assert runtime.devices()["items"][0]["update_available"] is False
+
+    # A peer too old to advertise a version is unknown, not behind.
+    runtime._discovered[alias] = {**seen, "version": ""}
+    runtime._refresh()
+    row = runtime.devices()["items"][0]
+    assert row["version"] == ""
+    assert row["update_available"] is False
+
+
 def test_a_peer_sent_update_blob_reaches_the_update_sink(rig, tmp_path):
     runtime, pairing, transport, *_ = rig
     # Received blobs must not land in the real receive folder during a test.
@@ -1782,6 +2177,9 @@ def test_a_peer_sent_update_blob_reaches_the_update_sink(rig, tmp_path):
     transport.connected.add("remote")
     staged = []
     runtime.set_update_sink(staged.append)
+    # An update blob is accepted because this side asked for it, not because the
+    # frame says "update" -- see `test_an_update_blob_nobody_asked_for_is_refused`.
+    runtime._expect_update("remote")
 
     payload = b"verified release archive"
     transport.message(
@@ -2294,6 +2692,7 @@ def test_a_received_file_beeps_but_a_peer_update_blob_does_not(rig, tmp_path, mo
 
     staged = []
     runtime.set_update_sink(staged.append)
+    runtime._expect_update("remote")
     transport.message(
         decode_message(
             encode_frame(

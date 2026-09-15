@@ -1905,7 +1905,7 @@ class SettingsWindow:
 
         try:
             history_max = int(self._history_max_var.get())
-            if not 10 <= history_max <= 1000:
+            if not 10 <= history_max <= 10000:
                 raise ValueError
         except ValueError:
             errors.append(T("settings_window.val_history_entries"))

@@ -45,16 +45,6 @@ function receiptText(entry: ChatEntry) {
   return status ? deliveryLabel(status) : "";
 }
 
-/** Which of the page's two questions is on screen — see the tab strip's own
- *  comment.  A plain ref rather than a route: this page has no router, and the
- *  other two tabbed pages hold theirs the same way. */
-type ChatTab = "sessions" | "nearby";
-const tab = ref<ChatTab>("sessions");
-const sections = computed<Array<{ id: ChatTab; label: string }>>(() => [
-  { id: "sessions", label: t("会话") },
-  { id: "nearby", label: t("附近设备") },
-]);
-
 const devices = ref<Device[]>([]);
 const sessions = ref<ChatSession[]>([]);
 const messages = ref<ChatEntry[]>([]);
@@ -74,6 +64,20 @@ const fileInput = ref<HTMLInputElement | null>(null);
 let timer: ReturnType<typeof setInterval> | undefined;
 let typingTimer: ReturnType<typeof setTimeout> | undefined;
 const selected = computed(() => sessions.value.find((s) => s.session_id === selectedId.value));
+
+/** The statuses a conversation is still live in — see `nearby`. */
+const LIVE_STATUS = ["active", "inviting", "invited"];
+/**
+ * The devices this machine could start a conversation with.
+ *
+ * A device the reader is already talking to is left out: it is in the
+ * conversation list below, where its row opens the same session this one would
+ * hand back, and two rows for one device is how a list stops being readable.
+ * A *closed* conversation does not count — that device is free to talk to
+ * again, and dropping it from this list would leave no way to say so.
+ */
+const nearby = computed(() => devices.value.filter((device) =>
+  !sessions.value.some((s) => s.peer_id === device.id && LIVE_STATUS.includes(s.status))));
 const messageList = ref<HTMLElement | null>(null);
 /** Whether the list is sitting at the newest message — see `trackScroll`. */
 let following = true;
@@ -259,13 +263,8 @@ async function invite(session: ChatSession) {
     // otherwise the invite is dialing, and the row appears on its own when it
     // answers — the poll is what puts it in the list, so there is nothing to
     // select yet.
-    if (result.chat_session_id) {
-      selectedId.value = result.chat_session_id;
-      // The conversation is up, and it is behind the other tab: inviting a
-      // device and being left looking at the device list would hide the one
-      // thing the click was for.
-      tab.value = "sessions";
-    } else notice.value = t("正在连接对方，连接上以后会话会出现在列表里。");
+    if (result.chat_session_id) selectedId.value = result.chat_session_id;
+    else notice.value = t("正在连接对方，连接上以后会话会出现在列表里。");
     await refresh();
   }
   catch (reason: any) { error.value = reason?.message || t("发送邀请失败"); }
@@ -388,8 +387,6 @@ watch([() => props.openSession, sessions], ([wanted]) => {
   if (!wanted) return;
   const match = sessions.value.find((session) => session.session_id === wanted);
   if (!match) return;
-  // 打开聊天 on a device row means the conversation, which is on the other tab.
-  tab.value = "sessions";
   void select(match);
   emit("opened");
 }, { immediate: true });
@@ -405,28 +402,33 @@ onUnmounted(() => { if (timer) clearInterval(timer); if (typingTimer) clearTimeo
 
 <template>
   <section class="chat-view">
-    <!-- Two questions, one at a time: the conversations this machine has, and
-         the machines near it that it could start one with.  The device list was
-         the last section of the sessions rail, under every conversation — so
-         starting a chat with a device took scrolling past the whole list of
-         chats, which is the same shape the devices page was fixed out of. -->
-    <nav class="page-tabs" :aria-label="t('聊天页分区')">
-      <button v-for="section in sections" :key="section.id" type="button"
-        :class="{ 'page-tab--active': tab === section.id }"
-        :aria-current="tab === section.id ? 'page' : undefined"
-        @click="tab = section.id">{{ section.label }}</button>
-    </nav>
-
     <p v-if="error" class="error-band" role="alert">{{ error }}</p>
     <p v-if="notice" class="status-band" role="status">{{ notice }}</p>
     <p v-if="attachmentError" class="error-band" role="alert">{{ attachmentError }}</p>
 
-    <div v-if="tab === 'sessions'" class="chat-layout">
+    <!-- The devices and the conversations share one rail, devices first.
+         They were two tabs, and then two sections of one rail with the devices
+         underneath every conversation; both put the way to start a chat
+         somewhere the reader had to already know about.  Above the
+         conversations, the devices are the first thing the page says, and the
+         rail scrolls as one list rather than the device list scrolling past
+         under it. -->
+    <div class="chat-layout">
       <aside class="chat-sessions">
         <div class="chat-heading">
-          <h2>{{ t("会话") }}</h2>
+          <h2>{{ t("附近设备") }}</h2>
           <button class="icon-button" :aria-label="t('刷新聊天')" :title="t('刷新聊天')" @click="refreshNow"><RefreshCw :size="17" /></button>
         </div>
+        <button v-for="device in nearby" :key="`chat-${device.id}`" class="chat-device"
+          :disabled="busy || device.connection_state === 'offline'"
+          :title="device.connection_state === 'offline' ? t('{name} 当前不在线', { name: device.name }) : undefined"
+          @click="invite({ peer_id: device.id, peer_name: device.name } as ChatSession)">
+          <MessageCircle :size="16" /><span>{{ device.name }}</span>
+          <small>{{ device.connection_state === 'offline' ? t("离线") : device.paired ? t("已配对") : t("未配对") }}</small>
+        </button>
+        <p v-if="!nearby.length" class="chat-nearby-empty">{{ t("附近没有可聊天的设备。") }}</p>
+
+        <h3 class="chat-section">{{ t("会话") }}</h3>
         <div v-for="session in sessions" :key="session.session_id" class="chat-session"
           :class="{ active: selectedId === session.session_id }" role="button" tabindex="0"
           @click="select(session)" @keydown.enter="select(session)" @contextmenu.prevent="sessionMenu($event, session)">
@@ -489,21 +491,14 @@ onUnmounted(() => { if (timer) clearInterval(timer); if (typingTimer) clearTimeo
           <button class="primary icon-button" :aria-label="t('发送消息')" :title="t('发送消息')" :disabled="!draft.trim() || busy"><Send :size="18" /></button>
         </form>
       </div>
-      <div v-else class="empty chat-empty"><MessageCircle :size="42" /><h2>{{ t("选择一个会话") }}</h2></div>
-    </div>
-
-    <div v-else class="chat-nearby">
-      <div class="chat-heading">
-        <h2>{{ t("附近设备") }}</h2>
-        <button class="icon-button" :aria-label="t('刷新聊天')" :title="t('刷新聊天')" @click="refreshNow"><RefreshCw :size="17" /></button>
+      <!-- Nothing selected, which on a machine that has never chatted is the
+           page's first sight.  It names the device list rather than assuming
+           the reader has found it. -->
+      <div v-else class="empty chat-empty">
+        <MessageCircle :size="42" />
+        <h2>{{ t("选择一个会话") }}</h2>
+        <p>{{ t("或者点左边的设备，开始一段新对话。") }}</p>
       </div>
-      <div v-if="!devices.length" class="empty"><MessageCircle :size="30" /><p>{{ t("附近没有可聊天的设备。") }}</p></div>
-      <button v-for="device in devices" :key="`chat-${device.id}`" class="chat-device"
-        :disabled="busy || device.connection_state === 'offline'"
-        @click="invite({ peer_id: device.id, peer_name: device.name } as ChatSession)">
-        <MessageCircle :size="16" /><span>{{ device.name }}</span>
-        <small>{{ device.paired ? t("已配对") : t("未配对") }}</small>
-      </button>
     </div>
   </section>
 </template>
@@ -522,19 +517,7 @@ onUnmounted(() => { if (timer) clearInterval(timer); if (typingTimer) clearTimeo
    no height left to divide.  Both are the same mistake one level apart: a height
    taken from the content it was meant to bound. */
 .chat-view { flex: 1; min-height: 0; min-width: 0; display: flex; flex-direction: column; }
-/* The page's tab strip is the shared one, and it takes the gutter the layout
-   below it takes, because this page has no wrapper of its own to carry it. */
-.chat-view > .page-tabs { flex: 0 0 auto; padding: 14px var(--page-gutter) 0; }
-.chat-layout { display: grid; grid-template-columns: minmax(220px, 280px) minmax(0, 1fr); grid-template-rows: minmax(0, 1fr); flex: 1; min-height: 560px; margin: 0 var(--page-gutter) 28px; border: 1px solid var(--line); border-radius: var(--radius-lg); overflow: hidden; }
-/* The nearby devices are a list and nothing else, so they take the card the
-   conversation takes — the same edges, so the two tabs do not jump. */
-.chat-nearby { flex: 1; min-height: 0; overflow: auto; margin: 0 var(--page-gutter) 28px;
-  border: 1px solid var(--line); border-radius: var(--radius-lg); }
-.chat-nearby .chat-heading { border-bottom: 1px solid var(--line); }
-/* Outside the rail, a device row is the whole width of the card rather than one
-   row of a 240px column, so it takes the heading's own padding. */
-.chat-nearby .chat-device { padding: 12px 16px; }
-.chat-nearby .chat-device:last-child { border-bottom: 0; }
+.chat-layout { display: grid; grid-template-columns: minmax(220px, 280px) minmax(0, 1fr); grid-template-rows: minmax(0, 1fr); flex: 1; min-height: 560px; margin: 14px var(--page-gutter) 28px; border: 1px solid var(--line); border-radius: var(--radius-lg); overflow: hidden; }
 .chat-conversation { display: grid; grid-template-rows: auto auto minmax(0, 1fr) auto; min-width: 0; min-height: 0; }
 /* The four bands, pinned to their tracks rather than placed by document order.
    The invite band is optional — a session that is already active renders none —
@@ -549,8 +532,15 @@ onUnmounted(() => { if (timer) clearInterval(timer); if (typingTimer) clearTimeo
 .chat-conversation > .chat-composer { grid-row: 4; }
 .chat-heading { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 12px 16px; }
 .chat-heading h2 { margin: 0; font-size: 17px; }
-/* The session list: one row per conversation, the unread count at its right. */
+/* The rail: the devices this machine could talk to, then the conversations it
+   has.  One scrolling list rather than two, with the devices on top — reaching
+   them was the whole complaint, and putting them under every conversation is
+   what made reaching them cost a scroll through the chats. */
 .chat-sessions { border-right: 1px solid var(--line); padding: 8px; overflow: auto; }
+/* The heading of the second section.  Smaller than the rail's own 附近设备 and
+   quieter, because it labels what is under it rather than opening the page. */
+.chat-section { margin: 14px 0 2px; padding: 0 8px; font-size: 13px; font-weight: 600; color: var(--muted); }
+.chat-nearby-empty { margin: 2px 0 0; padding: 4px 8px 8px; color: var(--muted); font-size: 13px; }
 .chat-session { width: 100%; display: flex; align-items: center; gap: 9px; padding: 11px 8px; text-align: left; border: 0; border-bottom: 1px solid var(--line); background: transparent; }
 .chat-session.active { background: var(--accent-soft); color: var(--accent-text); }
 .chat-session span { min-width: 0; flex: 1; display: grid; gap: 3px; }
@@ -598,8 +588,9 @@ onUnmounted(() => { if (timer) clearInterval(timer); if (typingTimer) clearTimeo
    left to `auto` it would take its content's height instead. */
 @media (max-width: 700px) {
   .chat-layout { grid-template-columns: minmax(0, 1fr); grid-template-rows: auto minmax(0, 1fr); }
-  .chat-sessions { border-right: 0; border-bottom: 1px solid var(--line); max-height: 220px; }
-  .chat-nearby .chat-device { padding: 12px var(--page-gutter); }
-  .chat-nearby .chat-heading { padding: 12px var(--page-gutter); }
+  /* The rail on top, and taller than it was: it carries the device list too,
+     and a 220px window onto both sections shows the devices and nothing of the
+     conversations they were meant to introduce. */
+  .chat-sessions { border-right: 0; border-bottom: 1px solid var(--line); max-height: 46vh; }
 }
 </style>

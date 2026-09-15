@@ -184,7 +184,7 @@ class ClipboardHistoryDB:
     def __init__(
         self,
         storage_path: str | None = None,
-        max_entries: int = 50,
+        max_entries: int = 500,
         enc_mgr: "EncryptionManager | None" = None,
     ):
         if storage_path:

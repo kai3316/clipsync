@@ -68,32 +68,69 @@ describe("the conversation view", () => {
   });
 });
 
-/** The page asks two questions, and the reader picks one:
+/** The devices and the conversations share one rail.
  *
- *   the conversations this machine has, and the machines near it that it could
- *   start one with.  The second used to be the last section of the sessions
- *   rail, under every conversation in the list. */
-describe("the chat page's two tabs", () => {
+ *   They were two tabs, and before that two sections of one rail with the
+ *   devices last.  Both put the way to start a chat somewhere the reader had to
+ *   already know about, which is what these two cover: the devices are on
+ *   screen without a tab to find, and a device already being talked to is not
+ *   offered a second time. */
+describe("the rail the devices and the conversations share", () => {
   const device = { id: "peer-one", name: "Pixel 8 Pro", paired: true, connection_state: "online" };
-  const tabs = () => wrapper.findAll(".page-tabs button");
+  const devices = () => wrapper.findAll(".chat-device");
+  const rows = () => wrapper.findAll(".chat-session");
 
   beforeEach(() => {
     vi.mocked(bridge.chatDevices).mockResolvedValue({ devices: [device] } as any);
   });
 
-  it("moves to the conversation once an invite is answered", async () => {
+  it("shows the devices with no tab to find first", async () => {
+    wrapper = mount(ChatView);
+    await flushPromises();
+    expect(wrapper.find(".page-tabs").exists()).toBe(false);
+    expect(devices().map((row) => row.text())).toEqual(["Pixel 8 Pro已配对"]);
+  });
+
+  it("opens the conversation once an invite is answered", async () => {
     // The invite was answered with a session id, which means the conversation
-    // is already up — behind the other tab, where the reader would not see it.
-    vi.mocked(bridge.chatSessions).mockResolvedValue({
-      sessions: [{ ...session, session_id: "two" }],
-    } as any);
+    // is already up; the reader clicked a device to get one, so being left
+    // looking at the list would hide the thing the click was for.
+    //
+    // The first read is the one before the click, and it has to come back
+    // without that conversation: a live session for this peer is what takes the
+    // device off the list, and there would be nothing to click.
+    vi.mocked(bridge.chatSessions)
+      .mockResolvedValueOnce({ sessions: [] } as any)
+      .mockResolvedValue({
+        sessions: [{ ...session, session_id: "two", status: "active" }],
+      } as any);
     vi.mocked(bridge.inviteChat).mockResolvedValue({ chat_session_id: "two" } as any);
     wrapper = mount(ChatView);
     await flushPromises();
-    await tabs()[1].trigger("click");
-    await wrapper.get(".chat-device").trigger("click");
+    await devices()[0].trigger("click");
     await flushPromises();
     expect(wrapper.find(".chat-conversation").exists()).toBe(true);
-    expect(wrapper.find(".chat-nearby").exists()).toBe(false);
+  });
+
+  it("drops a device from the device list once it has a live conversation", async () => {
+    // Its conversation is one row below and opens the same session, so keeping
+    // it here would be two rows for one device.
+    vi.mocked(bridge.chatSessions).mockResolvedValue({
+      sessions: [{ ...session, status: "active" }],
+    } as any);
+    wrapper = mount(ChatView);
+    await flushPromises();
+    expect(devices()).toHaveLength(0);
+    expect(rows()).toHaveLength(1);
+    // And the page says why the list is empty rather than leaving a gap.
+    expect(wrapper.get(".chat-nearby-empty").text()).toBe("附近没有可聊天的设备。");
+  });
+
+  it("offers a device again once its conversation is closed", async () => {
+    // The mocked session is `closed`, so the device is free to talk to — and
+    // dropping it would leave no way to start the next conversation.
+    wrapper = mount(ChatView);
+    await flushPromises();
+    expect(devices()).toHaveLength(1);
   });
 });

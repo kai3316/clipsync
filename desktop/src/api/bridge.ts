@@ -2,7 +2,7 @@ import { invoke, isTauri } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { getCurrentWebview, type DragDropEvent } from "@tauri-apps/api/webview";
 import { t } from "../i18n";
-import type { AppStatus, ChatMessagesPage, ChatSessionsPage, Device, DeviceCertificate, DeviceProbeResult, DiagnosticAction, DiagnosticsReport, Favorite, FavoritesPage, HistoryPage, InternetPairingStatus, Overview, RelayTestResult, Settings, SidecarEvent, TransfersPage, UpdateCheckResult, UpdateDownloadResult, UpdateInstallResult, UpdateOpenFolderResult, UpdateStatusResult } from "./types";
+import type { AppStatus, ChatMessagesPage, ChatSessionsPage, Device, DeviceCertificate, DeviceProbeResult, DiagnosticAction, DiagnosticsReport, Favorite, FavoritesPage, HistoryPage, HistoryPreview, InternetPairingStatus, Overview, RelayTestResult, Settings, SidecarEvent, TransfersPage, UpdateCheckResult, UpdateDownloadResult, UpdateInstallResult, UpdateOpenFolderResult, UpdateStatusResult } from "./types";
 
 export function inDesktop(): boolean {
   return isTauri();
@@ -82,6 +82,12 @@ export const bridge = {
   connectDevice: (deviceId: string) => command<{ accepted: boolean }>("connect_device", { deviceId }),
   disconnectDevice: (deviceId: string) => command<{ disconnected: boolean }>("disconnect_device", { deviceId }),
   forgetDevice: (deviceId: string) => command<{ forgotten: boolean }>("forget_device", { deviceId }),
+  /** Tell a device on an older build that this one has a newer one, and offer
+   *  it the cached installer.  Needs no pairing: the peer answers with a
+   *  request for the asset, and the bytes it gets are checked against the
+   *  published release digest before they can be installed. */
+  offerDeviceUpdate: (deviceId: string) =>
+    command<{ sent: boolean }>("offer_device_update", { deviceId }),
   restoreDevice: (deviceId: string) => command<{ restored: boolean }>("restore_device", { deviceId }),
   purgeDevice: (deviceId: string) => command<{ purged: boolean }>("purge_device", { deviceId }),
   testDevice: (deviceId: string) => command<DeviceProbeResult>("test_device", { deviceId }),
@@ -218,6 +224,11 @@ export const bridge = {
   overview: () => command<Overview>("get_overview"),
   readHistoryText: (entryId: string) =>
     command<{ id: string; text: string; truncated: boolean }>("read_history_text", { entryId }),
+  // The hover card's read.  It answers with an empty card rather than an error
+  // for a row there is nothing to show about, so an unreachable sidecar is the
+  // only way this rejects — and the card simply stays as it was.
+  previewHistoryEntry: (entryId: string) =>
+    command<HistoryPreview>("preview_history_entry", { entryId }),
   openHistoryLink: (entryId: string) =>
     command<{ opened: boolean; url: string }>("open_history_link", { entryId }),
   unlock: (password: string) => command("unlock_app", { password }),

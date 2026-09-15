@@ -1,0 +1,233 @@
+"""What this device says about itself on the LAN, and what it believes of others.
+
+The mDNS record is the only place a device describes itself without being
+asked, and it carries two names: the truncated instance label, which is what
+keeps two devices with similar names from colliding, and — for a device whose
+user chose one — the name itself.  Peers list a device by the second, and the
+first is only what a peer older than that field can offer.
+"""
+
+import os
+import sys
+from types import SimpleNamespace
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+from internal.transport import discovery as discovery_module  # noqa: E402
+from internal.transport.discovery import Discovery  # noqa: E402
+
+
+def service(device_name="Desktop", device_id="peer-1"):
+    return Discovery(device_id, device_name, 9999, "_clipsync._tcp.local.")
+
+
+def fast_addresses(monkeypatch, addresses=("192.168.1.5",)):
+    monkeypatch.setattr(discovery_module, "get_all_local_addresses", lambda: list(addresses))
+    monkeypatch.setattr(discovery_module, "_get_local_address", lambda: addresses[0])
+
+
+def hostname(monkeypatch, name):
+    monkeypatch.setattr(discovery_module.platform, "node", lambda: name)
+
+
+# ── what we publish ─────────────────────────────────────────────────────
+
+
+def test_the_label_stays_truncated_and_id_tagged(monkeypatch):
+    """The instance name is a collision-free handle, not a name to read.
+
+    Two devices whose names share their first 8 characters both advertise under
+    "<8 chars>-<id hash>", which is what stops them resolving to each other.
+    """
+    long_name = "书房的台式机"
+    label = Discovery._label(long_name, Discovery._hash_device_id("peer-1"))
+    assert label == f"{long_name[:8]}-{Discovery._hash_device_id('peer-1')[:4]}"
+
+
+def test_a_chosen_name_is_published_in_the_txt_record(monkeypatch):
+    """Peers have to be able to learn the name; the label cannot carry it."""
+    fast_addresses(monkeypatch)
+    hostname(monkeypatch, "sukai-desktop")
+    props = service("书房的台式机")._service_props()
+    assert props[b"n"].decode("utf-8") == "书房的台式机"
+    # Alongside what the record already carried, not instead of it.
+    assert props[b"device_id_hash"] == Discovery._hash_device_id("peer-1").encode()
+    assert b"v" in props and b"os" in props and b"arch" in props
+
+
+def test_the_hostname_is_not_published(monkeypatch):
+    """A name the user never chose is not something this record hands out.
+
+    The truncated label exists so a hostname is not broadcast in plaintext on
+    the LAN, and the default device name IS the hostname.
+    """
+    fast_addresses(monkeypatch)
+    hostname(monkeypatch, "sukai-desktop")
+    assert b"n" not in service("sukai-desktop")._service_props()
+    # A name the user did choose goes out even when it reads like one.
+    assert b"n" in service("sukai-laptop")._service_props()
+
+
+def test_a_name_too_long_for_a_txt_string_is_trimmed(monkeypatch):
+    """The wire caps a TXT string at 255 bytes; the settings page caps nothing.
+
+    Character count is not that cap — 64 emoji are 256 bytes — and a record
+    that cannot be packed is a registration that raises rather than a device
+    that advertises.
+    """
+    fast_addresses(monkeypatch)
+    hostname(monkeypatch, "sukai-desktop")
+    published = service("🎈" * 200)._service_props()[b"n"]
+    assert len(published) <= 200
+    assert published.decode("utf-8") == "🎈" * 50, "whole characters only"
+
+
+def test_a_rename_is_registered_rather_than_only_stored(monkeypatch):
+    """An instance name is part of the registration, so a rename is a new one.
+
+    Both instances must not stay live: a peer that learned the old name keeps
+    resolving to it, which is a device that is present and unreachable.
+    """
+    fast_addresses(monkeypatch)
+    hostname(monkeypatch, "sukai-desktop")
+    registered, unregistered = [], []
+    subject = service("书房的台式机")
+    subject._zc = SimpleNamespace(
+        register_service=registered.append,
+        unregister_service=unregistered.append,
+    )
+    # Not None: this device is advertising.
+    subject._service_info = SimpleNamespace(
+        name=f"{subject._display_name}.{subject._service_type}"
+    )
+    old_label = subject._display_name
+
+    subject.set_device_name("书房的笔记本")
+
+    assert [info.name for info in unregistered] == [f"{old_label}._clipsync._tcp.local."]
+    assert [info.name for info in registered] == [
+        f"{Discovery._label('书房的笔记本', subject._device_id_hash)}._clipsync._tcp.local."
+    ]
+    assert registered[0].properties[b"n"] == "书房的笔记本".encode()
+
+
+def test_a_rename_of_only_the_hostname_changes_nothing_to_register(monkeypatch):
+    """Same 8 characters means the same instance name: nothing to re-register."""
+    fast_addresses(monkeypatch)
+    hostname(monkeypatch, "sukai-desktop")
+    registered = []
+    subject = service("sukai-desktop-one")
+    subject._zc = SimpleNamespace(
+        register_service=registered.append,
+        unregister_service=lambda _info: None,
+    )
+    subject._service_info = SimpleNamespace(
+        name=f"{subject._display_name}.{subject._service_type}"
+    )
+
+    subject.set_device_name("sukai-desktop-two")
+
+    # It is stored — the address book of who we are is not the label — but no
+    # second instance is registered for a name peers cannot tell apart anyway.
+    assert subject._device_name == "sukai-desktop-two"
+    assert registered == []
+
+
+def test_renaming_to_the_same_name_is_not_a_change(monkeypatch):
+    fast_addresses(monkeypatch)
+    hostname(monkeypatch, "sukai-desktop")
+    registered = []
+    subject = service("书房的台式机")
+    subject._zc = SimpleNamespace(
+        register_service=registered.append,
+        unregister_service=lambda _info: None,
+    )
+    subject._service_info = SimpleNamespace(
+        name=f"{subject._display_name}.{subject._service_type}"
+    )
+    subject.set_device_name("书房的台式机")
+    assert registered == []
+
+
+# ── what we believe of others ───────────────────────────────────────────
+
+
+def sighting(properties, address="192.168.1.7", name="Kitchen-9f2a._clipsync._tcp.local."):
+    """The three arguments the browser hands _handle_service_added."""
+    info = SimpleNamespace(
+        properties=properties,
+        addresses=[__import__("socket").inet_aton(address)],
+        port=9999,
+    )
+    zc = SimpleNamespace(get_service_info=lambda *_: info)
+    return zc, "_clipsync._tcp.local.", name
+
+
+def discovered():
+    seen = []
+    subject = service()
+    subject._our_ip = "192.168.1.5"
+    subject.set_callbacks(
+        lambda *args: seen.append(args),
+        lambda *_args: None,
+    )
+    return subject, seen
+
+
+def test_a_peer_that_published_its_name_is_listed_under_it(monkeypatch):
+    fast_addresses(monkeypatch)
+    subject, seen = discovered()
+    zc, service_type, name = sighting({
+        b"device_id_hash": Discovery._hash_device_id("peer-2").encode(),
+        b"n": "厨房的树莓派".encode(),
+    })
+
+    subject._handle_service_added(zc, service_type, name)
+
+    peer_id, peer_name, address, port, *_rest, named = seen[0]
+    assert (peer_id, peer_name, address, port) == (
+        Discovery._hash_device_id("peer-2"), "厨房的树莓派", "192.168.1.7", 9999,
+    )
+    assert named is True, "the peer's own answer may outrank a name on record"
+
+
+def test_a_peer_that_published_nothing_falls_back_to_its_label(monkeypatch):
+    """Older builds send no name; the truncated label is all they offer."""
+    fast_addresses(monkeypatch)
+    subject, seen = discovered()
+    zc, service_type, name = sighting({
+        b"device_id_hash": Discovery._hash_device_id("peer-2").encode(),
+    })
+
+    subject._handle_service_added(zc, service_type, name)
+
+    *_, named = seen[0]
+    assert seen[0][1] == "Kitchen-9f2a"
+    assert named is False, "a label is not a name, and may not replace one"
+
+
+def test_a_rename_re_announces_as_a_change(monkeypatch):
+    """The re-announcement is the only word this machine gets of a rename."""
+    fast_addresses(monkeypatch)
+    subject, seen = discovered()
+    hashed = Discovery._hash_device_id("peer-2").encode()
+    before = sighting({b"device_id_hash": hashed, b"n": "厨房的树莓派".encode()})
+    after = sighting({b"device_id_hash": hashed, b"n": "客厅的树莓派".encode()})
+
+    subject._handle_service_added(*before)
+    subject._handle_service_added(*after)
+
+    assert [call[1] for call in seen] == ["厨房的树莓派", "客厅的树莓派"]
+
+
+def test_the_same_sighting_twice_is_not_reported_twice(monkeypatch):
+    """mDNS re-announces constantly, and every report is a device-list rebuild."""
+    fast_addresses(monkeypatch)
+    subject, seen = discovered()
+    properties = {
+        b"device_id_hash": Discovery._hash_device_id("peer-2").encode(),
+        b"n": "厨房的树莓派".encode(),
+    }
+    subject._handle_service_added(*sighting(properties))
+    subject._handle_service_added(*sighting(properties))
+    assert len(seen) == 1

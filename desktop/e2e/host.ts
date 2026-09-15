@@ -61,7 +61,7 @@ export const fixtures: Record<string, unknown> = {
     sync_state: "running",
     capabilities: [
       "history.list", "history.delete", "history.set_pinned", "history.copy",
-      "history.text", "history.open_link", "history.batch_delete",
+      "history.text", "history.preview", "history.open_link", "history.batch_delete",
       "history.batch_set_pinned", "history.clear",
       "favorites.list", "favorites.get", "favorites.add", "favorites.update",
       "favorites.delete", "favorites.copy", "favorites.batch_add", "favorites.export",
@@ -83,7 +83,7 @@ export const fixtures: Record<string, unknown> = {
       "pairing.start", "pairing.confirm", "pairing.reject", "pairing.unpair",
       "devices.note", "devices.connect", "devices.disconnect", "devices.forget",
       "devices.restore", "devices.purge", "devices.test", "devices.certs",
-      "devices.retrust", "companion.configure",
+      "devices.retrust", "devices.offer_update", "companion.configure",
       "url.send", "clipboard.push", "discovery.status",
       "discovery.set_enabled", "discovery.set_visible",
       "transfers.list", "transfers.send", "transfers.action",

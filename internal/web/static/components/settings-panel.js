@@ -208,7 +208,7 @@
         translateSaving: false,
 
         // Advanced
-        historyMax: 200,
+        historyMax: 500,
         historyMaxAgeDays: 0,
         syncDebounce: 0.5,
         pollInterval: 0.5,
@@ -1169,7 +1169,7 @@
         var maxAgeDays = parseFloat(self.historyMaxAgeDays);
         if (isNaN(maxAgeDays) || maxAgeDays < 0) maxAgeDays = 0;
         ClipsyncAPI.updateSettings({
-          history_max_entries: parseInt(self.historyMax, 10) || 200,
+          history_max_entries: parseInt(self.historyMax, 10) || 500,
           history_max_age_days: maxAgeDays,
           sync_debounce: parseFloat(self.syncDebounce) || 0.5,
           clipboard_poll_interval: parseFloat(self.pollInterval) || 0.5,

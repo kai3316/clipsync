@@ -11,15 +11,19 @@ from __future__ import annotations
 import base64
 import binascii
 import logging
+import os
 import re
 from collections.abc import Callable
+from io import BytesIO
 from typing import Protocol
 
 from internal.application.errors import ApplicationError
+from internal.clipboard import file_ref
 from internal.clipboard.format import (
     HISTORY_ONLY_TYPES,
     ClipboardContent,
     ContentType,
+    split_paths,
     strip_html,
 )
 
@@ -37,6 +41,189 @@ WEB_SOURCE_LABEL = "\U0001f4f1 Web"
 #: title is chosen by whichever application happened to be in front and every
 #: row of every page would otherwise carry it in full.
 SOURCE_TITLE_LIMIT = 200
+
+#: How long a hover card's picture may be on its longest edge.  A card is a
+#: glance, not the image: past this the picture is the thing itself, and the
+#: user who wants that has 复制 and the clipboard for it.
+PREVIEW_EDGE = 480
+
+#: What an encoded picture may weigh.  A frame is capped at 1 MiB by the IPC
+#: profile and base64 costs a third on top, so this leaves the frame room for
+#: its own keys.  A screenshot at card width lands far under it; a photograph
+#: is what goes over, and is what the JPEG fallback below is for.
+PREVIEW_BUDGET = 320 * 1024
+
+#: How many files a card lists.  A clipboard entry can carry a directory's
+#: worth of paths — ``file_ref.MAX_OFFER_ENTRIES`` is about what may cross the
+#: wire, not about what fits under a cursor — so the list stops here and the
+#: count carries the rest.
+PREVIEW_FILES = 8
+
+#: Largest source a card will read to make a picture of.  A pointer crossing a
+#: row must not turn into a 200 MB read.
+PREVIEW_SOURCE_BYTES = 32 * 1024 * 1024
+
+#: The extensions a *file* clip is thumbnailed from.  A clip that carries a
+#: picture as bytes is the image branch's business; this is the other way a
+#: picture arrives in the history — copied in a file manager, so the entry
+#: holds a path and the bytes are read here.
+IMAGE_EXTS = frozenset(
+    {".png", ".jpg", ".jpeg", ".gif", ".bmp", ".webp", ".tif", ".tiff"}
+)
+
+#: The stored names a bitmap travels under.  ``IMAGE`` is what rows written
+#: before the wire name settled carry; ``decode_formats`` maps the same pair.
+IMAGE_NAMES = ("IMAGE_PNG", "IMAGE")
+
+#: The empty card.  Returned for every entry there is nothing to show for, and
+#: returned rather than raised — see ``preview``.
+NO_PREVIEW: dict = {"kind": "", "image": "", "width": 0, "height": 0, "files": [], "total": 0}
+
+
+def _bitmap_over_budget(stored: dict) -> bool:
+    """Whether this entry's bitmap is larger than a hover may decode.
+
+    Read off the stored base64 rather than off the decoded bytes, because the
+    decode is the cost being avoided: an image clip's bitmap is the one member
+    of the bag that can be tens of megabytes while the rest of it is kilobytes,
+    and a pointer crossing a row cannot pay to decode all of it into memory in
+    order to downscale one of it.
+    """
+    ceiling = PREVIEW_SOURCE_BYTES * 4 // 3 + 4
+    return any(
+        isinstance(stored.get(name), str) and len(stored[name]) > ceiling
+        for name in IMAGE_NAMES
+    )
+
+
+def _encode_picture(picture) -> tuple[bytes, str]:
+    """*picture* as bytes and the format they are in.
+
+    PNG first, because the picture a hover card is usually asked about is a
+    screenshot: flat colours, crisp edges, and small.  A photograph is the case
+    PNG cannot hold inside the budget, and it is also the case where the loss
+    does not show, so the fallback is a JPEG of the same pixels.
+    """
+    out = BytesIO()
+    picture.save(out, format="PNG", optimize=True)
+    if out.tell() <= PREVIEW_BUDGET:
+        return out.getvalue(), "png"
+    out = BytesIO()
+    picture.convert("RGB").save(out, format="JPEG", quality=85)
+    return out.getvalue(), "jpeg"
+
+
+def picture_of(data: bytes) -> tuple[str, int, int]:
+    """*data* as a data URL a card can show, with the picture's own size.
+
+    Empty and zeroes for anything this build cannot decode — a vector image, a
+    bitmap in a container PIL does not read — which is not a failure: the card
+    simply has no picture to add, and the row it is over says what kind of clip
+    it is either way.  The size that comes back is the *source's*, so the card
+    can caption a 4000 px screenshot as one after downscaling it.
+    """
+    try:
+        from PIL import Image
+
+        with Image.open(BytesIO(data)) as image:
+            image.load()
+            width, height = image.size
+            keeps_alpha = image.mode in ("RGBA", "LA") or (
+                image.mode == "P" and "transparency" in image.info
+            )
+            scaled = image.convert("RGBA" if keeps_alpha else "RGB")
+            scaled.thumbnail((PREVIEW_EDGE, PREVIEW_EDGE), Image.LANCZOS)
+            encoded, fmt = _encode_picture(scaled)
+    except Exception:
+        logger.debug("History preview could not be decoded", exc_info=True)
+        return "", 0, 0
+    return f"data:image/{fmt};base64,{base64.b64encode(encoded).decode('ascii')}", width, height
+
+
+def _read_picture(path: str, limit: int) -> bytes:
+    """At most *limit* bytes of *path*, or nothing if it cannot be read.
+
+    Bounded rather than ``read()``: the size was checked against the same limit
+    a moment ago, and a file growing between the two must not be able to turn a
+    hover into an unbounded read.
+    """
+    try:
+        with open(path, "rb") as handle:
+            return handle.read(limit)
+    except (OSError, ValueError):
+        return b""
+
+
+def _file_card(paths: list[str]) -> dict:
+    """A file clip as a card: what the files are, and the picture if there is one.
+
+    The paths are stat'd, never listed and never sent.  A history DTO carries no
+    source paths — this module's own rule — and it holds here for a reason the
+    rule already gives: the card is read, not acted on, and everything a reader
+    would do with a path is already a row action (在文件夹中显示, 下载).  What the
+    row cannot say and the card can is whether the file still exists, which is
+    the answer to "why did this download fail" a user is most often after.
+    """
+    files = []
+    for path in paths[:PREVIEW_FILES]:
+        try:
+            stat = os.stat(path)
+        except (OSError, ValueError):
+            files.append(
+                {"name": file_ref.file_name(path), "size": 0, "kind": "file", "exists": False}
+            )
+            continue
+        is_dir = os.path.isdir(path)
+        files.append(
+            {
+                "name": file_ref.file_name(path),
+                "size": 0 if is_dir else int(stat.st_size),
+                "kind": "dir" if is_dir else "file",
+                "exists": True,
+            }
+        )
+    card = dict(NO_PREVIEW, kind="files", files=files, total=len(paths))
+    # One path is the case a picture answers: a clip of a single file is how a
+    # picture copied in a file manager arrives, and one path is also what keeps
+    # the read bounded to the thing under the cursor rather than to a drop.
+    if (
+        len(paths) == 1
+        and files[0]["exists"]
+        and files[0]["kind"] == "file"
+        and files[0]["size"] <= PREVIEW_SOURCE_BYTES
+        and os.path.splitext(paths[0])[1].lower() in IMAGE_EXTS
+    ):
+        url, width, height = picture_of(_read_picture(paths[0], PREVIEW_SOURCE_BYTES))
+        card["image"], card["width"], card["height"] = url, width, height
+    return card
+
+
+def _remote_file_card(payload: bytes) -> dict:
+    """A file clip that lives on another device, as a card.
+
+    There are no bytes to thumbnail and no path to stat — this machine holds the
+    file's *description*, which is what ``file_ref`` put on the wire: a name, a
+    size and whether it is a folder.  So the list is the whole card, and the
+    sizes are the ones the publishing device reported rather than anything read
+    here.
+    """
+    remote = file_ref.parse(payload)
+    if remote is None:
+        return dict(NO_PREVIEW)
+    offered = remote.get("files") or []
+    files = [
+        {
+            "name": str(item.get("name", "")),
+            "size": int(item.get("size") or 0),
+            "kind": "dir" if item.get("kind") == "dir" else "file",
+            # Not "whether it is there" — it never was, on this machine — so the
+            # card shows no missing marker for one of these.
+            "exists": True,
+        }
+        for item in offered[:PREVIEW_FILES]
+    ]
+    total = int(remote.get("total") or len(offered))
+    return dict(NO_PREVIEW, kind="files", files=files, total=total)
 
 
 #: The kind chips the panel's history page offered, in the panel's order.
@@ -338,6 +525,55 @@ class HistoryUseCase:
             "text": text[:TEXT_READ_LIMIT],
             "truncated": len(text) > TEXT_READ_LIMIT,
         }
+
+    def preview(self, entry_id: str) -> dict:
+        """What a hover card can add about one row: its picture, or its files.
+
+        The card over a text row shows the words the row had to clamp.  An image
+        and a file row have no words — their "preview" is the kind's own label
+        (``[Image]``) and a file name, both of which the row already shows — so
+        the card was empty for exactly the two kinds a glance is worth most for.
+
+        This is the *small* read behind it, and it is small in two ways: a
+        picture is downscaled to a card's width before it travels, so hovering
+        across a page costs a few kilobytes a row rather than the entries
+        themselves; and a file clip is stat'd rather than opened, with the one
+        exception of a single picture, which is the case a thumbnail answers.
+
+        **Nothing here raises.**  Every other read in this class turns a row it
+        cannot make sense of into ``NOT_FOUND`` or ``DATA_INVALID``, and every
+        one of them is answering something the user asked for.  A hover is not
+        asked for — it is where the pointer happens to be — so a row that was
+        deleted, or whose payload needs recovery, answers with an empty card
+        rather than with an error the user never requested and cannot act on.
+        """
+        _, entry = self.repository.find_by_id(entry_id)
+        if entry is None:
+            return dict(NO_PREVIEW)
+        stored = entry.get("types")
+        if isinstance(stored, dict) and _bitmap_over_budget(stored):
+            logger.debug("History preview of %s: bitmap past the preview budget", entry_id[:8])
+            return dict(NO_PREVIEW)
+        try:
+            types = decode_formats(entry)
+        except (ValueError, TypeError, binascii.Error):
+            logger.debug("History preview of %s needs recovery", entry_id[:8])
+            return dict(NO_PREVIEW)
+        if ContentType.IMAGE_PNG in types:
+            url, width, height = picture_of(types[ContentType.IMAGE_PNG])
+            if not url:
+                # A bitmap this build cannot decode.  The card says nothing
+                # about it rather than promising a picture it has not got.
+                return dict(NO_PREVIEW)
+            return dict(NO_PREVIEW, kind="image", image=url, width=width, height=height)
+        if ContentType.FILE in types:
+            raw = types[ContentType.FILE].decode("utf-8", errors="replace")
+            return _file_card(split_paths(raw))
+        if ContentType.FILE_REMOTE in types:
+            return _remote_file_card(types[ContentType.FILE_REMOTE])
+        # Text, a link, markup, a vector image: the row's own preview is already
+        # the whole of what there is to show.
+        return dict(NO_PREVIEW)
 
     def open_link(self, entry_id: str) -> dict:
         """Open an entry's own text in the browser when that text is a web link.

@@ -189,13 +189,17 @@ describe("desktop application store", () => {
     const store = createApplicationStore();
     await store.start();
     const emit = vi.mocked(bridge.subscribe).mock.calls[0][0];
+    // The engine's failures are worded from their code, so two codes are two
+    // different notices — which is what makes the expiry of one visible against
+    // the other still standing.
     emit({ type: "event", name: "runtime.error", session_id: "session",
-      data: { message: "first" } });
+      data: { code: "CLIPBOARD_READ_FAILED" } });
     await vi.advanceTimersByTimeAsync(3000);
     emit({ type: "event", name: "runtime.error", session_id: "session",
-      data: { message: "second" } });
+      data: { code: "HISTORY_WRITE_FAILED" } });
     await vi.advanceTimersByTimeAsync(3000);
-    expect(store.state.notices.map(item => item.message)).toEqual(["second"]);
+    expect(store.state.notices.map(item => item.message))
+      .toEqual(["历史记录写入失败，本机磁盘可能已满。"]);
     store.dispose();
     expect(store.state.notices).toEqual([]);
     expect(vi.getTimerCount()).toBe(0);

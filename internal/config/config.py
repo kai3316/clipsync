@@ -94,7 +94,7 @@ class Config:
     private_key_pem: str = ""
     certificate_pem: str = ""
     # Advanced settings
-    history_max_entries: int = 50
+    history_max_entries: int = 500
     # Age-based cleanup for unpinned history entries, in days (dual limit
     # together with history_max_entries).  0 disables age-based cleanup.
     history_max_age_days: float = 0.0
