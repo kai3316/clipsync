@@ -46,33 +46,54 @@ jobs:
 
           What is new in this release:
 
-          - The macOS desktop app starts again.  Every macOS build since 1.0.5
-            has opened to "the background process is unavailable", and two
-            faults were behind it.  The first: that process is a Python runtime
-            packed by PyInstaller, and the copy inside the bundle was ad-hoc
-            signed with the hardened runtime and no entitlements -- under that
-            runtime macOS refuses to load a library whose signing identity
-            differs from its process's, so the process died before it could
-            announce itself.  The second fault hid behind the first: the host
-            allowed 15s for a start that takes about 15s, so a start that did
-            get through was killed just the same.  Both are fixed.
-          - The macOS background process no longer unpacks itself on every
-            launch.  It now ships as a directory rather than a single
-            self-extracting file, which removes that unpacking and the
-            signature check macOS runs over everything it writes.  Measured
-            before the sync engine starts: about 6.8s to 0.24s.
-          - The device list keeps a row for the devices you have a relationship
-            with, not for every device this machine has merely exchanged
-            certificates with.  Those used to sit in the list as offline for
-            good, and "refresh" could not correct it because nothing was wrong.
-          - A pairing that is waiting on the other device now says so.  Both
-            sides confirming answers "waiting for the other device" on the side
-            that confirmed first, and that answer was read as a failure.
-          - A configuration pull whose reply never arrives is reported as
-            failed.  The panel counts events against the requests it sent and
-            waits until it has them all, so a reply nobody sent left it waiting
-            -- and it was reported only on the *next* pull.  A folder pull sends
-            one request per file and any single one is enough to stall it.
+          - Nearby chat no longer asks anyone to pair.  Clicking a device on
+            the chat page used to put a pairing-code prompt on the *other*
+            device, so starting a conversation meant answering a question about
+            trust first.  The invitation carries no pairing request now, and the
+            code the receiving side generates for an incoming connection is
+            withdrawn as soon as a chat frame arrives.  The switch on the
+            settings page still decides whether a conversation opens on both
+            sides at once or waits for the other person to accept it.
+          - The nearby-chat page is one rail instead of two.  Devices and
+            conversations were separate columns, and the only way to start a
+            conversation was to go to the devices page first, click the device
+            there and then come back.  The device list is the empty-state of the
+            chat list now, so the thing you want is where you are looking.
+          - The device list shows the version each device is running.  A device
+            on the same platform and an older build of it can be sent one: the
+            button offers this machine's installer when it has one cached, and
+            otherwise tells the other device a newer version exists so its own
+            release check picks it up.  Neither direction needs a pairing.
+          - A device stopped appearing twice.  A device is advertised under a
+            hash of its id and stored under the id itself; removing it while it
+            was listed under the hash archived it under that hash, and when the
+            hash later resolved the live row and its archive no longer
+            recognised each other as one device.  One device, two rows -- one a
+            device, one its own removed copy.
+          - A device is listed under the name its own user chose.  The name
+            never crossed the network at all: the only one available was the
+            truncated label mDNS advertises, which is a handle rather than a
+            name, and a local rename did not reach the network until a restart.
+            The chosen name now travels with the advertisement and takes
+            precedence over anything recorded here, so renaming a device
+            renames it on every device that lists it, live.
+          - Error messages in a Chinese window are in Chinese.  Failures
+            travelled as an English sentence written for the log and were shown
+            as one; the sentence is now derived from the error's code, so each
+            surface showing a failure shows it in the window's own language.
+          - Clipboard history previews images and files on hover, instead of
+            showing a row you have to act on to identify.
+          - History keeps 500 entries by default rather than 50.
+          - The internet-pairing page has its own on/off switch.  It is the same
+            setting as the one on the settings page, so turning it off in
+            either place turns it off in both.
+          - Pairing and connecting are steadier.  Declining a pairing request no
+            longer makes later ones from that device decline themselves.
+
+          The device name is now published in the mDNS record, to the local
+          network.  That is what lets devices show the name you chose rather
+          than a truncation of it; a device still on its default name publishes
+          nothing, so a machine's hostname is not broadcast by it.
 
           1.0.7 published a macOS installer that cannot start at all, and its
           update check lives in the background process that never comes up, so
