@@ -398,10 +398,19 @@ def test_real_rpc_pairing_bidirectional_copy_and_restart_trust(
             "online", "connected"
         ))
         assert left.call("pairing.unpair", device_id="right") == {"accepted": True}
-        assert not left.call("devices.list")["items"][0]["paired"]
+        # Unpairing drops the link, and a device that is neither paired nor
+        # present has no row at all -- so a missing row is the same answer as
+        # one that is no longer paired, not a different one.  Read either as
+        # "left no longer counts it as paired"; which of the two it is depends
+        # on whether the connection outlived the unpair.
+        left_rows = left.call("devices.list")["items"]
+        assert not left_rows or not left_rows[0]["paired"]
         try:
-            right.wait("devices.list", lambda d: bool(d["items"]) and not d["items"][0]["paired"],
-                       timeout=NOTICE_BUDGET)
+            right.wait(
+                "devices.list",
+                lambda d: not d["items"] or not d["items"][0]["paired"],
+                timeout=NOTICE_BUDGET,
+            )
         except AssertionError as exc:
             # Both sides: this failure is one process not knowing what the
             # other did, so which log is empty is itself the finding.
