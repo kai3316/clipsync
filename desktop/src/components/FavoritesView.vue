@@ -243,7 +243,7 @@ function report(saved: boolean) {
       <div v-if="state.error" class="error-band" role="alert">{{ state.error.message }} ({{ state.error.code }})</div>
 
       <div v-if="tab === 'browse'" class="page-col">
-        <div class="toolbar">
+        <div class="toolbar toolbar--inset">
           <label class="search"><Search :size="17" /><input :aria-label="t('搜索收藏')" :placeholder="t('搜索收藏')"
             :value="state.query" maxlength="512" :disabled="busy"
             @input="store.search(($event.target as HTMLInputElement).value)" /></label>
@@ -251,8 +251,8 @@ function report(saved: boolean) {
           <button :aria-label="t('新建收藏')" :disabled="busy" @click="editHere(store.create)"><Plus :size="18" />{{ t("新建") }}</button>
           <button class="icon-button" :aria-label="t('导出全部收藏')" :title="t('将全部收藏导出为 Markdown 文件')" :disabled="busy || !state.libraryTotal" @click="exportAll"><Download :size="18" /></button>
         </div>
-        <p v-if="exported" class="muted small" role="status">{{ t("已导出 {count} 条收藏 → {path}", { count: exported.count, path: exported.filepath }) }}</p>
-        <div class="favorites-workspace">
+        <p v-if="exported" class="note" role="status">{{ t("已导出 {count} 条收藏 → {path}", { count: exported.count, path: exported.filepath }) }}</p>
+        <div class="favorites-workspace card card--flush">
           <aside class="favorites-groups" :aria-label="t('收藏分组')">
             <div class="list-heading"><span>{{ t("收藏分组") }}</span>
               <button class="icon-button" :aria-label="t('新建分组')" :title="t('新建分组')" :disabled="busy || creating" @click="creating = true; newGroupInputShown()"><FolderPlus :size="16" /></button></div>
@@ -301,7 +301,7 @@ function report(saved: boolean) {
                      and reading as a mystery to anyone who had not opened the
                      editor.  Placement is what the handle and, on a touch screen,
                      the arrows are for. -->
-                <span class="muted small">{{ item.group || t('未分组') }}<template v-if="item.created"> · {{ shortTime(item.created) }}</template></span></div>
+                <span class="note">{{ item.group || t('未分组') }}<template v-if="item.created"> · {{ shortTime(item.created) }}</template></span></div>
               <div v-if="coarse" class="row-step">
                 <button class="icon-button" :aria-label="t('上移')" :title="t('上移')" :disabled="busy || index === 0" @click="step(index, -1)"><ChevronUp :size="16" /></button>
                 <button class="icon-button" :aria-label="t('下移')" :title="t('下移')" :disabled="busy || index === state.items.length - 1" @click="step(index, 1)"><ChevronDown :size="16" /></button>
@@ -322,8 +322,8 @@ function report(saved: boolean) {
       </div>
 
       <div v-else class="page-col">
-        <form v-if="state.editorOpen" class="favorite-editor" :aria-label="t('收藏编辑器')" :aria-busy="state.detailLoading || state.pending" @submit.prevent="store.save">
-          <div class="editor-heading"><h2>{{ state.selectedId ? t('编辑收藏') : t('新建收藏') }}{{ state.dirty ? ' *' : '' }}</h2>
+        <form v-if="state.editorOpen" class="favorite-editor settings-section" :aria-label="t('收藏编辑器')" :aria-busy="state.detailLoading || state.pending" @submit.prevent="store.save">
+          <div class="editor-heading card-head"><h2>{{ state.selectedId ? t('编辑收藏') : t('新建收藏') }}{{ state.dirty ? ' *' : '' }}</h2>
             <button class="icon-button" type="button" :aria-label="t('关闭收藏编辑器')" :title="t('关闭编辑器')" :disabled="busy" @click="closeEditor"><X :size="18" /></button></div>
           <p v-if="state.detailLoading" role="status">{{ t("正在读取完整内容") }}</p>
           <p v-if="state.stale" role="status">{{ t("收藏已在其他位置更新。") }}</p>
@@ -347,7 +347,7 @@ function report(saved: boolean) {
         <div v-else class="empty">
           <Pencil :size="30" />
           <h2>{{ t("没有正在编辑的收藏") }}</h2>
-          <p>{{ t("在收藏列表里点一条右边的铅笔来编辑它，或者在这里新建一条。") }}</p>
+          <p class="note">{{ t("在收藏列表里点一条右边的铅笔来编辑它，或者在这里新建一条。") }}</p>
           <button :disabled="busy" @click="editHere(store.create)"><Plus :size="18" />{{ t("新建收藏") }}</button>
         </div>
       </div>

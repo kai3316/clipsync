@@ -135,7 +135,10 @@ onUnmounted(() => {
   border: 1px solid var(--line);
   border-radius: var(--radius);
   background: var(--surface);
-  box-shadow: 0 16px 40px rgb(0 0 0 / 26%);
+  /* The pop layer's own shadow: a menu is the one thing in the window that
+     floats over everything, and the window's two other shadows are for a card
+     that floats over a page and a toast that floats over a card. */
+  box-shadow: var(--shadow-pop);
   outline: none;
 }
 .context-menu-rule { height: 1px; margin: 5px 4px; border: 0; background: var(--line); }
@@ -146,7 +149,7 @@ onUnmounted(() => {
   gap: 9px;
   padding: 7px 9px;
   border: 0;
-  border-radius: calc(var(--radius) - 4px);
+  border-radius: var(--radius);
   background: transparent;
   color: inherit;
   font: inherit;

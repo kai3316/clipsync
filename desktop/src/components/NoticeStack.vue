@@ -52,7 +52,7 @@ function title(name: string): string {
        one that arrives along with the stack itself. -->
   <TransitionGroup v-if="props.store.state.notices.length" tag="ul" name="notice" appear
     class="notice-stack" role="status" aria-live="polite">
-    <li v-for="notice in props.store.state.notices" :key="notice.id" class="notice">
+    <li v-for="notice in props.store.state.notices" :key="notice.id" class="notice strip">
       <div>
         <strong>{{ title(notice.title) }}</strong>
         <p class="small">{{ notice.message }}</p>

@@ -34,6 +34,14 @@
   --page: #fff;
   --chrome: #f4f6f5;
   --raised: #fff;
+  /* What a card is filled with.  It is `--raised` rather than the page's own
+     colour so that every card in the window sits on the same layer: in the light
+     theme the two are the same white and this changes nothing, and in the dark
+     theme the overview's cards were already a step lighter than the page while
+     the settings page's cards were not, which made two kinds of card on one
+     window.  Named separately from `--raised` because what a card is filled with
+     is a decision about cards, not about the elevation scale. */
+  --card-bg: var(--raised);
   --surface: #f5f7f6;
   --code: #f4f5f4;
   --line: #e5e9e8;
@@ -79,12 +87,38 @@
   --state-connected: var(--accent);
   --state-paired: #7cb2a2;
   --state-discovered: #bccbc5;
+  /* Three shadows, one per layer something can float on: `--shadow` under a
+     thing that overlays the page it belongs to, `--shadow-soft` under a strip
+     that floats with no rule behind it to hold it down, and `--shadow-pop`
+     under the menu that floats over everything — it is the only one of the
+     three that has to be found against whatever happens to be behind it. */
   --shadow: 0 8px 24px rgb(0 0 0 / 12%);
   --shadow-soft: 0 6px 18px rgb(0 0 0 / 12%);
+  --shadow-pop: 0 16px 40px rgb(0 0 0 / 26%);
   --radius: 5px;
   --radius-lg: 8px;
-  /* One height for every control, so a row of them lines up whatever they are. */
+  /* One height for every control, so a row of them lines up whatever they are.
+     The small size is for the controls that live *inside* a row — a list row's
+     own buttons, the pencil beside a name — where the row's line height rather
+     than the window's is what they have to match.  Four rules used to write out
+     four different sizes for those (30, 28, 22, and the full 36), which put four
+     different button heights in one column of rows. */
   --control: 36px;
+  --control-sm: 30px;
+  /* The card's own measurements: the indent a card keeps its contents at, the
+     space between two cards (or two page-level blocks), and the padding a list
+     row takes.  A card is `0 var(--card-pad) 16px` and its title row is what
+     carries the space above it, so these three are what keep two cards on two
+     pages the same shape — the transfer page's two lists and the settings page's
+     cards were the same kind of thing drawn with three different paddings. */
+  --card-pad: 22px;
+  --card-gap: 16px;
+  --row-pad: 16px;
+  --row-gap: 14px;
+  /* A row of a list *inside* a card: the peer list, the backup list, the AI
+     card's inventories.  Half a list row's air, because the card already
+     supplies the space around the list. */
+  --row-pad-tight: 8px;
   /* The indent every page-level strip is placed by: the page header, the
      toolbar, the lists and their filter rows and footers, the error band, the
      settings panel.  Ten rules used to write `32px` out for themselves, and a
@@ -102,11 +136,57 @@ button:hover:not(:disabled) { background: var(--surface); }
 button:disabled { opacity: .45; cursor: default; }
 button:focus-visible, input:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
 select:focus-visible, textarea:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
-h1, h2, p { margin: 0; }
+/* The browser's own margins belong to a document, and this is not one: every
+   block in the window is placed by a grid's gap or by a rule, and an inherited
+   1em above and below a heading is a number no rule in this file knows about.
+   The reset used to stop at `h2`, so every `h3` in the window carried the
+   browser's margins and each place that used one wrote `margin: 0` back out for
+   itself — the pair halves' title, the peers' heading — and a heading added
+   later would have carried them again.  Lists and fieldsets are the same story:
+   the ones this window draws all set their own margins where they are used, and
+   the ones that did not were lists inside a card, whose margins came from
+   whichever rule happened to match them first. */
+h1, h2, h3, h4, p, ul, ol, dl, fieldset { margin: 0; }
 h1 { font-size: 23px; font-weight: 650; }
 h2 { font-size: 17px; font-weight: 600; }
+/* The window's third heading level, and the only one it has: a part of a card, a
+   group inside a dialog.  It needs a rule of its own for the same reason `h3`'s
+   margins did — the browser's own is `1.17em`, which inside this 14px page is
+   16px, a size nothing here chose.  One size for every one of them, so a card's
+   sub-heading, a dialog's group heading and the heading over a list of peers are
+   the same weight of small print. */
+/* `.card-sub` is in this list because it is that same level worn by a `div`: a
+   part-heading that carries a control on its line cannot be an `h3` without
+   putting a button inside a heading.  Written without it, the one in the
+   template fell back to the page's own 13px/400 and every `h3` beside it in the
+   same card was heavier than it was. */
+h3, h4, .card-sub { font-size: 12px; font-weight: 600; letter-spacing: .02em; }
 .muted { color: var(--muted); }
 .small { font-size: 12px; }
+/* A sentence that is part of a page's furniture rather than part of its content:
+   a hint under a list, a panel's relay line, the count under a card, the note
+   under a field.  Every one of those was spelled `class="muted small"` — one
+   size written twice on every page that needed it — and the settings page wrote
+   it a third time as `.setting-hint`.  This is the window's one quiet line; the
+   only thing a page adds to it is its own margin (`.setting-note`,
+   `.setting-block`).  `--muted` on its own is still the colour utility, for the
+   places that take their size from somewhere else. */
+.note { margin: 0; font-size: 12px; color: var(--muted); line-height: 1.5; }
+/* The same sentence given a band of its own, for the ones that stand between two
+   blocks instead of inside one — a file staged for sending, a toast, a speed
+   test's verdict.  A fill, a hairline and a bar down the left edge naming its
+   tone; `.staged-drop` and `.notice` drew this twice, with two fills and two
+   radii, and the bar's colour is the whole of the difference. */
+.strip { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; padding: 12px 14px; background: var(--surface); border: 1px solid var(--line); border-left: 3px solid var(--accent); border-radius: var(--radius-lg); }
+.strip--warn { border-left-color: var(--warn); }
+.strip--fail { border-left-color: var(--danger); }
+/* A strip that spans the card it is in rather than sitting in one.  It takes the
+   card's whole width, so it can have no corners and its rule is the card's own
+   separator along the bottom; the accent keeps its place at the left edge as an
+   inset bar, which is what a `border-left` is when the border is a rule. */
+.strip--band { border-radius: 0; border-width: 0 0 1px; box-shadow: inset 3px 0 0 var(--accent); padding: 12px 16px; }
+.strip--band.strip--warn { box-shadow: inset 3px 0 0 var(--warn); }
+.strip--band.strip--fail { box-shadow: inset 3px 0 0 var(--danger); }
 /* The shell is a fixed frame with one scrolling region inside it: the sidebar,
    the page header and the status bar all stay put while a page scrolls.  A
    desktop window that scrolls its whole furniture away reads as a web page in
@@ -133,7 +213,7 @@ nav button.active { color: var(--accent-text); background: var(--accent-soft); }
    column down the sidebar and reads as a mark on the row rather than as part
    of the page's name.  It is the accent's own colour and not a warning one:
    a message waiting is the ordinary thing this app is for, not a fault. */
-nav .nav-count { margin-left: auto; padding: 1px 7px; border-radius: 999px; background: var(--accent-soft); color: var(--accent-text); font-size: 11px; font-weight: 600; font-variant-numeric: tabular-nums; }
+nav .nav-count { margin-left: auto; background: var(--accent-soft); color: var(--accent-text); font-weight: 600; font-variant-numeric: tabular-nums; }
 /* The settings row is set apart from the pages above it by a rule, so the
    sidebar reads as "five places to look, and the window's own settings"
    rather than as six rows of the same kind.  The rule belongs to the row, not
@@ -148,7 +228,7 @@ main { min-width: 0; display: flex; flex-direction: column; overflow: hidden; }
 header { display: flex; justify-content: space-between; align-items: center; gap: 15px; flex-shrink: 0; padding: 26px var(--page-gutter) 20px; border-bottom: 1px solid var(--line); }
 header p { margin-top: 7px; font-size: 12px; }
 .connection { display: flex; align-items: center; gap: 7px; font-size: 12px; white-space: nowrap; color: var(--muted); }
-.connected { color: var(--accent); }
+.connected { color: var(--accent-text); }
 /* Search, refresh and the page's own controls ride the top of the scrolling
    region: on a long history the search box is the one control worth never
    scrolling back for.  Opaque, so rows pass under it rather than through it. */
@@ -166,30 +246,49 @@ header p { margin-top: 7px; font-size: 12px; }
    them keeps the controls at the height they have today, and keeps a line of
    them centred once the row has become two. */
 .toolbar { position: sticky; top: 0; z-index: 4; padding: 20px var(--page-gutter); display: flex; flex-wrap: wrap; align-items: center; gap: 12px; background: var(--page); }
+/* The same row in its second placement: a page whose pinned row is its tab strip
+   — the favorites page — puts its toolbar in the flow below the strip, where the
+   sticky offset would land it on top of the strip.  One row, two placements. */
+.toolbar--inset { position: static; padding: 0; }
 /* A `<select>` in a toolbar takes the row's control height and what the row has
    left rather than its own preferred width, because the row it sits in is the row
    that wraps.  Both pages that have one wrote this rule out for themselves, with
    the same declarations under two different selectors; it is the toolbar's. */
-.toolbar select { max-width: 100%; min-width: 0; min-height: var(--control); padding: 8px; background: var(--surface); border: 1px solid var(--line); border-radius: 4px; }
-.search { max-width: 420px; width: 100%; display: flex; align-items: center; gap: 8px; color: var(--muted); background: var(--surface); border: 1px solid var(--line); border-radius: 5px; padding: 0 12px; }
+.toolbar select { max-width: 100%; min-width: 0; min-height: var(--control); padding: 8px; background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius); }
+.search { max-width: 420px; width: 100%; display: flex; align-items: center; gap: 8px; color: var(--muted); background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius); padding: 0 12px; }
 .search input { border: 0; background: transparent; min-width: 0; width: 100%; height: var(--control); outline-offset: 0; }
 .icon-button { width: var(--control); height: var(--control); min-width: var(--control); padding: 0; flex-shrink: 0; }
+/* Two sizes of control, and this is the second one.  The window had four: the
+   36px icon button, a 30px one for the AI card's inventories, a 28px one beside
+   the local device's name and a 22px one in a group's header — three numbers
+   that all meant "smaller than a control", each chosen where it was written and
+   each a little different from the next.  One smaller control now, and the same
+   one wherever a row needs its buttons to sit inside the row's own height. */
+.icon-button--sm { width: var(--control-sm); height: var(--control-sm); min-width: var(--control-sm); }
+.button--sm, .overview-button { min-height: var(--control-sm); padding: 4px 11px; gap: 6px; font-size: 12px; }
 .history-list { margin: 0 var(--page-gutter); flex: 1; }
 /* The devices page is a list of rows and nothing else, so it carries the space
    under its own last row: the archived list ends where the scroll does, and a
    row sitting flush against the bottom bar reads as a list that was cut off. */
 .device-list { margin: 0 var(--page-gutter); flex: 1; padding-bottom: 28px; }
-.list-heading { display: flex; justify-content: space-between; padding: 10px 0; border-bottom: 1px solid var(--line); font-size: 12px; color: var(--muted); }
-.history-row { position: relative; display: grid; grid-template-columns: 36px minmax(0, 1fr) auto auto; align-items: center; gap: 13px; padding: 18px 0; border-bottom: 1px solid var(--line); }
+/* A list's own head: the row above a borderless list that names it and holds
+   what acts on the whole of it.  It is the card's title row — the same flex that
+   puts the name and its controls on one line, the same rule under it — without
+   the card's title, because a list that is the page is not a card: 12px of small
+   print rather than a 15px heading, and 10px of air rather than 17.  It carries
+   its own flex rather than borrowing `.card-head`'s, so the two recipes cannot
+   argue about the padding they disagree about. */
+.list-heading { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px 12px; padding: 10px 0; border-bottom: 1px solid var(--line); font-size: 12px; color: var(--muted); }
+.history-row { position: relative; display: grid; grid-template-columns: 36px minmax(0, 1fr) auto auto; align-items: center; gap: var(--row-gap); padding: var(--row-pad) 0; border-bottom: 1px solid var(--line); }
 /* The full clip, for a row whose three clamped lines cut it off.  It overlays
    the rows below, which is why it is capped and scrollable: the card is inside
    the hovered row, so the pointer can move onto it and read to the end, and it
    closes the moment the pointer reaches another row. */
-.history-preview { position: absolute; z-index: 6; left: 36px; top: calc(100% - 8px); max-width: min(620px, calc(100vw - 96px)); max-height: 42vh; overflow: auto; padding: 12px 14px; border: 1px solid var(--line); border-radius: 6px; background: var(--raised); box-shadow: var(--shadow); font-size: 12px; line-height: 1.6; white-space: pre-wrap; overflow-wrap: anywhere; user-select: text; }
+.history-preview { position: absolute; z-index: 6; left: 36px; top: calc(100% - 8px); max-width: min(620px, calc(100vw - 96px)); max-height: 42vh; overflow: auto; padding: 12px 14px; border: 1px solid var(--line); border-radius: var(--radius-lg); background: var(--raised); box-shadow: var(--shadow); font-size: 12px; line-height: 1.6; white-space: pre-wrap; overflow-wrap: anywhere; user-select: text; }
 /* The three things a card can hold besides words.  The picture is capped by
    the card's own width and never upscaled past it: a card shown larger than the
    image would be a blurry claim about a size the row does not have. */
-.history-preview-image { display: block; max-width: 100%; max-height: 32vh; width: auto; height: auto; border: 1px solid var(--line); border-radius: 4px; background: var(--surface); object-fit: contain; }
+.history-preview-image { display: block; max-width: 100%; max-height: 32vh; width: auto; height: auto; border: 1px solid var(--line); border-radius: var(--radius); background: var(--surface); object-fit: contain; }
 .history-preview-files { list-style: none; margin: 0; padding: 0; }
 .history-preview-files li { display: flex; align-items: baseline; gap: 8px; padding: 2px 0; }
 .history-preview-files li + li { border-top: 1px solid var(--line); }
@@ -203,8 +302,30 @@ header p { margin-top: 7px; font-size: 12px; }
 .history-content { min-width: 0; }
 .history-content p { white-space: pre-wrap; overflow-wrap: anywhere; display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; line-height: 1.6; margin-bottom: 6px; }
 .history-meta { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin-top: 6px; }
-.badge { background: var(--surface); border: 1px solid var(--line); border-radius: 999px; padding: 1px 8px; font-size: 11px; color: var(--muted); max-width: 220px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.badge--count { background: var(--accent-soft); border-color: var(--accent-line); color: var(--accent-text); }
+/* ── The pill ──────────────────────────────────────────────────────────────
+   One shape for every small label in the window: the history row's badges, a
+   device's route, a tool-profile's version, the speed test's verdict, a peer's
+   delivery state.  Each of those used to be its own rule with its own padding
+   and its own size — 11px at 1px 8px, 11px at 1px 6px, 11px at 1px 7px, 12px at
+   2px 8px — which put two heights of pill on one line wherever a row carried
+   two of them, and left `border-radius: 9px` on two more from an older shape.
+   They are named for their own states below; the `--*` names are the tones. */
+.badge, .ai-version, .speed-quality, .channel, .overview-chip, .nav-count, .overview-health {
+  display: inline-flex; align-items: center; gap: 5px;
+  padding: 2px 9px; border: 1px solid var(--line); border-radius: 999px;
+  background: var(--surface); color: var(--muted); font-size: 12px;
+  line-height: 1.35; white-space: nowrap;
+}
+.badge { max-width: 220px; overflow: hidden; text-overflow: ellipsis; }
+/* The four tones, and what each one is for: the accent for a count or a state
+   this window's own green already means, the warning for a reading that is
+   neither good nor a failure, the danger for one that wants a decision.  Each
+   names the pair of tokens it is made of, so a pill and the sentence beside it
+   cannot end up different colours — and the three pairs are the same three the
+   rest of the window draws its chips and bands from. */
+.badge--count, .badge--accent, .speed-quality--fast, .channel--paired, .channel--online, .nav-count { background: var(--accent-soft); border-color: var(--accent-line); color: var(--accent-text); }
+.badge--warn, .speed-quality--good { background: var(--warn-soft); color: var(--warn-text); }
+.badge--danger, .ai-version--missing, .speed-quality--slow { background: var(--danger-soft); border-color: var(--danger-line); color: var(--danger-text); }
 .history-source-title { font-size: 11px; color: var(--muted); max-width: 320px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 /* The route a record arrived on, beside the device it came from.  It wears the
    device list's own chip for the same two links, at the size of the metadata
@@ -215,10 +336,16 @@ header p { margin-top: 7px; font-size: 12px; }
 .history-route { font-size: 11px; }
 /* The chip row under the search toolbar. */
 .history-filters { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; padding: 0 var(--page-gutter) 10px; }
-.chip { display: inline-flex; align-items: center; gap: 6px; padding: 4px 10px; border: 1px solid var(--line); border-radius: 999px; background: var(--page); color: var(--muted); font-size: 12px; }
-.chip:hover:not(:disabled) { border-color: var(--accent); color: var(--accent); }
+/* The chip is the *interactive* pill — a page's own filter row — so it is the
+   height of a control and says so under the pointer, and it rests on the same
+   fill every other field in the window rests on.  The labels that happen to be
+   clickable (the dashboard's device chips) stay labels: the row they sit in is
+   read rather than operated, and a card's worth of 36px pills would be the
+   loudest thing on a page whose subject is numbers. */
+.chip { display: inline-flex; align-items: center; gap: 6px; min-height: var(--control); padding: 4px 12px; border: 1px solid var(--line); border-radius: 999px; background: var(--surface); color: var(--muted); font-size: 12px; }
+.chip:hover:not(:disabled) { background: var(--accent-soft); border-color: var(--accent-line); color: var(--accent-text); }
 .chip:disabled { opacity: 0.45; }
-.chip--active { background: var(--accent-solid); border-color: var(--accent-solid); color: var(--on-accent); }
+.chip--active, .chip--active:hover:not(:disabled) { background: var(--accent-solid); border-color: var(--accent-solid); color: var(--on-accent); }
 .chip-count { font-size: 11px; color: inherit; opacity: 0.75; }
 .chip--sort { margin-left: auto; }
 time { font-size: 12px; color: var(--muted); }
@@ -245,15 +372,20 @@ time { font-size: 12px; color: var(--muted); }
    A device's are the only way to act on it, so they keep theirs. */
 .row-actions button { border: 0; }
 /* The device's own controls: the first row's right-hand column, and the one
-   thing in the row that never wraps to a second line of its own. */
-.device-row .row-actions { grid-row: 1; grid-column: 3; justify-self: end; gap: 5px; flex-wrap: wrap; justify-content: flex-end; }
-.device-row .row-actions button { border: 1px solid var(--line); }
+   thing in the row that never wraps to a second line of its own.  The internet
+   card's peers wear the same strip — they are devices drawn as devices — and
+   they are a wrap-anywhere row rather than a grid, so the two grid placements
+   are inert for them and only the gap and the borders are what the two share. */
+.device-row .row-actions, .peer-list--devices .row-actions { grid-row: 1; grid-column: 3; justify-self: end; gap: 5px; flex-wrap: wrap; justify-content: flex-end; }
+.device-row .row-actions button, .peer-list--devices .row-actions button { border: 1px solid var(--line); }
 .history-selection { display: grid; place-items: center; width: 36px; height: 36px; }
 input[type="checkbox"] { width: 16px; height: 16px; flex-shrink: 0; accent-color: var(--accent); }
-.selection-toolbar { align-items: center; flex-wrap: wrap; gap: 8px 14px; }
 .select-visible { display: inline-flex; align-items: center; gap: 6px; }
-.batch-actions { display: flex; gap: 2px; margin-left: auto; }
-.pinned { color: var(--accent); }
+/* The row's two ends are the head's business: it already spreads its children,
+   and a group that pushed itself right as well was the same edge placed twice,
+   which is what put the selection count and the buttons in each other's way. */
+.batch-actions { display: flex; gap: 2px; }
+.pinned { color: var(--accent-text); }
 /* A placeholder carries the weight of what it stands in for, and the window has
    two sizes of that, not one.  `.empty` is the placeholder of a *region* — a
    card, a rail, a conversation — and is the height of what it says, so a list
@@ -268,6 +400,11 @@ input[type="checkbox"] { width: 16px; height: 16px; flex-shrink: 0; accent-color
    the tokens — `#8d9c96` — and a literal cannot follow the window into the dark
    theme, where it left the empty state's icon darker than its own sentence. */
 .empty > svg { color: var(--muted); }
+/* A placeholder's title names a state; it is not a heading in a document.  At
+   `h2`'s 17px it was the largest type on three pages whose subject was a list
+   that happened to be empty — louder than the page's own title.  It is the size
+   every other title row in the window uses. */
+.empty h2 { font-size: 15px; }
 .empty p { max-width: 350px; line-height: 1.6; }
 .pagination { padding: 18px var(--page-gutter); display: flex; justify-content: flex-end; align-items: center; gap: 8px; font-size: 12px; color: var(--muted); }
 /* Except inside a list that carries the gutter itself, where the strip is the
@@ -276,13 +413,16 @@ input[type="checkbox"] { width: 16px; height: 16px; flex-shrink: 0; accent-color
    and its count and chevrons stood 32px in from the rows above them.  The
    narrow block used to undo the padding at that one width, which is what a
    strip placed by two rules looks like. */
-.favorites-list .pagination { padding-inline: 0; }
+/* A pager that is one part of a card rather than a band at the foot of a page:
+   the card has already put the reader at its own left edge, and the page gutter
+   inside it was a second indent for the same column. */
+.favorites-list .pagination, .card .pagination, .settings-section .pagination { padding-inline: 0; }
 .pagination > span { margin-right: 12px; }
 /* The window's last strip, and the box everything that floats above it is
    measured from: a notice sits one gap over this bar's top edge, and the only
    element that knows where that edge is is the bar itself.  `position: relative`
    is what makes it that box. */
-.bottom-status { position: relative; flex-shrink: 0; display: flex; align-items: center; gap: 6px; padding: 11px 22px; border-top: 1px solid var(--line); color: var(--muted); font-size: 11px; }
+.bottom-status { position: relative; flex-shrink: 0; display: flex; align-items: center; gap: 6px; padding: 11px var(--page-gutter); border-top: 1px solid var(--line); color: var(--muted); font-size: 11px; }
 /* The label stays at the left and the runtime status takes the free space, so
    the state sits against the right edge the way a status bar's does; the pause
    countdown and the notice that follow it must not each claim a share of that
@@ -297,7 +437,7 @@ input[type="checkbox"] { width: 16px; height: 16px; flex-shrink: 0; accent-color
 .error-band small { display: block; margin-top: 3px; overflow-wrap: anywhere; }
 .error-band button { margin-left: auto; }
 .unlock { margin: auto; width: min(360px, 100%); padding: 35px; display: grid; gap: 16px; }
-.unlock input { min-width: 0; border: 1px solid var(--line); border-radius: 4px; padding: 10px; background: transparent; }
+.unlock input { min-width: 0; border: 1px solid var(--line); border-radius: var(--radius); padding: 10px; background: transparent; }
 button.primary { background: var(--accent-solid); color: var(--on-accent); }
 /* A device is one row of three parts: who it is, everything you can do to it at
    the row's right edge, and under both of those the facts about the *link*
@@ -310,7 +450,7 @@ button.primary { background: var(--accent-solid); color: var(--on-accent); }
    belonging to the device below.  A grid puts the identity in a track that
    absorbs the slack and the controls at a fixed edge, so the buttons sit on the
    same vertical line down the whole list whatever the window is. */
-.device-row { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; align-items: center; gap: 8px 14px; padding: 16px 0; border-bottom: 1px solid var(--line); }
+.device-row { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; align-items: center; gap: 8px var(--row-gap); padding: var(--row-pad) 0; border-bottom: 1px solid var(--line); }
 /* Rows 1 and 2, so the glyph is centred against the name and its chips rather
    than against the name alone — the note and the pairing fields start below it. */
 .device-icon { grid-area: 1 / 1 / 3 / 2; color: var(--muted); }
@@ -324,11 +464,16 @@ button.primary { background: var(--accent-solid); color: var(--on-accent); }
 /* One chip is one answer about one route.  A glyph and a word carry it — the
    colour only repeats what the word already says — because the two routes are
    peers of each other and neither is the exception: 本地·在线 beside
-   互联网·离线 is a normal state, not a fault. */
-.channel { display: inline-flex; align-items: center; gap: 4px; padding: 2px 8px; border: 1px solid var(--line); border-radius: 999px; background: var(--surface); color: var(--muted); font-size: 12px; white-space: nowrap; }
+   互联网·离线 is a normal state, not a fault.  The shape is every other small
+   label's, from `.badge` above; what is here is what the routes say. */
 .channel svg { flex-shrink: 0; }
-.channel--paired, .channel--online { border-color: var(--accent-line); background: var(--accent-soft); color: var(--accent-text); }
 .channel--pending { border-color: var(--accent-line); color: var(--accent-text); }
+/* The settled-but-away state: the template has carried this class in four places
+   and the stylesheet had no rule for it, so it wore whatever the pill's own grey
+   is — the same colour as a state nothing has decided yet.  Not the warning's
+   amber either, which is the retry's: a peer that is merely away is not being
+   worked on. */
+.channel--offline { color: var(--muted); }
 /* A retry in flight is work being done, not the failure it will become if the
    attempts run out — so it is the one chip that is neither the accent's own
    colour (it is not a working link) nor grey (it is not settled), and it wears
@@ -339,12 +484,26 @@ button.primary { background: var(--accent-solid); color: var(--on-accent); }
    now, and where a second pinned row's own top would have to be is the strip's
    height, which changes when the strip wraps.  The tabs are the page's pinned
    row; this one scrolls with the list it acts on. */
-.device-toolbar { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; padding: 16px 0 10px; }
+.device-toolbar { display: flex; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: 8px; padding: 16px 0 10px; }
+/* The sentence this row sometimes carries goes to the far end from the controls,
+   and the controls stay together at theirs.  Spreading the row instead would put
+   a lone fingerprint button in the middle of the page whenever the sentence is
+   absent — which is most of the time, since it only appears when the sync engine
+   is down. */
+.device-toolbar > .muted { margin-right: auto; }
 /* A pairing in progress is a block inside the row rather than a row of its own:
    the codes have to be read against the device they belong to, and the row is
    still the one thing the reader is looking at. */
-.device-row > .pairing-controls { min-width: 0; display: grid; gap: 9px; padding: 12px 14px; background: var(--surface); border-radius: var(--radius); }
-.device-full { margin: 0; }
+/* A panel inside a card: a pairing in progress, and the AI page's editor.  One
+   surface, one padding, one radius — the pairing panel was drawn without the
+   hairline the editor has, so the two read as two kinds of box for the same job.
+   What is the pairing panel's own is where it is placed, and that stays on the
+   row's rule. */
+.device-row > .pairing-controls, .ai-editor { min-width: 0; display: grid; gap: 9px; padding: 13px; border: 1px solid var(--line); border-radius: var(--radius); background: var(--surface); }
+/* `.device-full` has no rule of its own: it is a `p` spanning the row and it
+   asks for that with the grid-column it shares at the top of the device
+   section.  All it used to say here was `margin: 0`, which is what `.note`
+   says. */
 /* The note is edited in place — it is a row of the device list, not something
    behind an edit button — so it takes the width the column leaves, stopping at
    the same right edge the controls above it do, and wears the same control
@@ -363,7 +522,7 @@ button.primary { background: var(--accent-solid); color: var(--on-accent); }
    `auto-fit` of 560px tracks for a page that wanted two columns of cards — and
    nothing has drawn one since the devices page and the AI page each became a
    strip of tabs over a single column. */
-.page-col { display: grid; gap: 16px; align-content: start; }
+.page-col { display: grid; gap: var(--card-gap); align-content: start; }
 /* A long page drawn as a few questions that share one title.  The devices page
    and the AI page were each a single scroll of three cards, so the card the
    reader came for sat behind the whole of the one before it — and the AI page's
@@ -469,7 +628,7 @@ button.primary { background: var(--accent-solid); color: var(--on-accent); }
    line of text on the dialog's own surface with nothing saying it could be typed
    into, and the label's words ran straight into the box beside them. */
 .modal input:not([type="checkbox"]):not([type="radio"]), .modal select, .modal textarea {
-  width: 100%; min-width: 0; border: 1px solid var(--line); border-radius: 4px;
+  width: 100%; min-width: 0; border: 1px solid var(--line); border-radius: var(--radius);
   background: var(--surface); padding: 8px 10px; color: inherit;
 }
 /* One height for the single-line controls, so a label followed by a picker and
@@ -512,9 +671,14 @@ button.primary { background: var(--accent-solid); color: var(--on-accent); }
 /* The per-check mark, in the border's colour: the stripe says "this row is a
    warning" to someone scanning, the glyph says which of the three it is. */
 .diag-mark { margin-right: 6px; font-weight: 700; }
-li.diag-ok > .diag-mark { color: var(--accent); }
-li.diag-warn > .diag-mark { color: var(--warn-text); }
-li.diag-fail > .diag-mark { color: var(--danger-text); }
+/* The mark is inside the check's own line, not a child of the row, which is why
+   the three rules that painted it named a child that is not there and the glyph
+   inherited the dialog's body colour instead — the stripe said "warning" and the
+   glyph beside it said nothing.  The tone is the row's own, and there are three
+   rows that have one. */
+.diag-ok .diag-mark { color: var(--accent-text); }
+.diag-warn .diag-mark { color: var(--warn-text); }
+.diag-fail .diag-mark { color: var(--danger-text); }
 button.danger { color: #fff; background: var(--danger); border-color: var(--danger); }
 /* A destructive control that stands on a page or a row rather than in a dialog.
    The fill belongs to the button that actually commits the deletion, and a page
@@ -542,22 +706,24 @@ button.danger-outline:hover:not(:disabled),
 .favorites-view > .page-col { margin: 20px 0 32px; }
 /* The toolbar is the history page's, pinned to the window's top edge.  Here the
    tab strip is the pinned row, and two opaque strips at `top: 0` would sit on
-   each other — the same reason the devices page's own toolbar gave it up. */
-.favorites-view .toolbar { position: static; padding: 0; }
-.favorites-workspace { display: grid; min-width: 0; grid-template-columns: minmax(150px, 200px) minmax(0, 1fr); gap: 24px; }
-.favorites-list { min-width: 0; }
-.favorites-groups { min-width: 0; display: flex; flex-direction: column; gap: 2px; align-content: start; }
-.favorites-groups .list-heading { display: flex; justify-content: space-between; align-items: center; gap: 8px; }
+   each other — the same reason the devices page's own toolbar gave it up.  It is
+   the same toolbar in its second placement: `.toolbar--inset`. */
+/* The library is one card holding two panes — the groups, and the list they
+   filter — and the rule between them is the card's, not a column gap's.  It is
+   the shape the chat page has: a rail, a divider, the room the rail is for. */
+.favorites-workspace { display: grid; min-width: 0; grid-template-columns: minmax(150px, 200px) minmax(0, 1fr); }
+.favorites-list { min-width: 0; padding: 0 var(--card-pad) 16px; }
+.favorites-groups { min-width: 0; display: flex; flex-direction: column; gap: 2px; align-content: start; padding: 14px; border-right: 1px solid var(--line); }
 /* A group's row and the way into its menu.  The row is the filter and takes
-   what is left; the button beside it holds a fixed 22px so a column of names
+   what is left; the button beside it is the small control, so a column of names
    starts at the same x whether or not the row beside it has one. */
 .group-line { display: flex; align-items: center; gap: 2px; }
 .group-line .group-row { flex: 1; min-width: 0; }
-.group-more { display: flex; align-items: center; justify-content: center; flex: 0 0 22px; width: 22px; height: 22px;
-  padding: 0; border: 0; border-radius: 6px; background: none; color: var(--muted); cursor: pointer; }
+.group-more { display: flex; align-items: center; justify-content: center; flex: 0 0 var(--control-sm); width: var(--control-sm); height: var(--control-sm);
+  padding: 0; border: 0; border-radius: var(--radius); background: none; color: var(--muted); cursor: pointer; }
 .group-more:hover:not(:disabled) { background: var(--surface); color: inherit; }
 .group-row { display: flex; justify-content: space-between; align-items: center; gap: 8px; width: 100%;
-  padding: 7px 10px; border: 0; border-radius: 8px; background: none; color: inherit;
+  padding: 7px 10px; border: 0; border-radius: var(--radius-lg); background: none; color: inherit;
   text-align: left; cursor: pointer; font: inherit; }
 .group-row:hover:not(:disabled) { background: var(--surface); }
 /* The active group is the one the list under it is filtered to, so it is
@@ -565,33 +731,39 @@ button.danger-outline:hover:not(:disabled),
 .group-row.active { background: var(--surface); font-weight: 600; }
 .group-row .group-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .group-row .group-count { color: var(--muted); font-variant-numeric: tabular-nums; font-size: 12px; }
-.group-input { width: 100%; min-width: 0; padding: 5px 8px; font: inherit; border-radius: 8px; }
-.favorite-row { padding: 18px 0; border-bottom: 1px solid var(--line); display: flex; flex-wrap: wrap; gap: 12px; align-items: center; }
+.group-input { width: 100%; min-width: 0; padding: 5px 8px; font: inherit; border-radius: var(--radius-lg); }
+.favorite-row { padding: var(--row-pad) 0; border-bottom: 1px solid var(--line); display: flex; flex-wrap: wrap; gap: var(--row-gap); align-items: center; }
 .favorite-row.selected { border-left: 3px solid var(--accent); padding-left: 10px; }
 /* A drag in progress, and the row the pointer is over: one is lifted, the
    other shows where it would land. */
 .favorite-row.dragging { opacity: 0.5; }
 .favorite-row.drag-over { box-shadow: inset 0 2px 0 var(--accent); }
-.drag-handle { display: flex; align-items: center; color: var(--muted); cursor: grab; }
+/* The handle stays at the top of the row.  Centred, it sat level with the middle
+   of a three-line summary, which reads as a glyph floating below the title it
+   belongs to — and it is the row's first line that it drags. */
+.drag-handle { display: flex; align-items: center; align-self: flex-start; color: var(--muted); cursor: grab; }
 .drag-handle:active { cursor: grabbing; }
 .row-step { display: flex; flex-direction: column; gap: 2px; }
 .favorite-summary { flex: 1 1 160px; min-width: 0; overflow-wrap: anywhere; }
 .favorite-summary h2 { font-size: 15px; margin-bottom: 8px; }
 .favorite-summary p { white-space: pre-wrap; line-height: 1.6; margin-bottom: 8px; display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; }
 /* The editor has the page to itself now, and a textarea as wide as the window
-   is a line no one can read: the form takes a measure and leaves the rest. */
-.favorite-editor { min-width: 0; max-width: 760px; padding: 0 0 24px; }
+   is a line no one can read: the form takes a measure and leaves the rest.  It
+   is a card — the same one the settings page draws, whose field chrome and
+   section rhythm it now shares instead of restating. */
+.favorite-editor { min-width: 0; max-width: 760px; margin-bottom: 24px; }
 /* The band is full-bleed and brings its own gutter, so it cancels the page's —
    the negative margin the overview's band already carries for the same reason.
    It sits above the panels rather than inside one, because a refused write can
    come from either: a group rename from the library, a save from the editor. */
 .favorites-view > .error-band { margin: 0 calc(var(--page-gutter) * -1); }
-.editor-heading { display: flex; justify-content: space-between; align-items: center; gap: 10px; margin-bottom: 12px; }
+/* The editor's title row is the card's own.  It had a rule for the div and none
+   for the h2 inside it, so the title fell back to the browser's 17px while every
+   other card title in the window was 15px, and no rule ran under it. */
+.editor-heading { margin-bottom: 4px; }
 .favorite-editor fieldset { border: 0; padding: 0; margin: 12px 0 0; min-width: 0; display: grid; gap: 10px; }
-.favorite-editor input, .favorite-editor textarea { width: 100%; min-width: 0; border: 1px solid var(--line); border-radius: 4px; background: var(--surface); padding: 9px; }
-.favorite-editor textarea { resize: vertical; min-height: 180px; white-space: pre-wrap; overflow-wrap: anywhere; }
+.favorite-editor textarea { min-height: 180px; white-space: pre-wrap; overflow-wrap: anywhere; }
 .favorite-editor fieldset > button { justify-self: start; }
-.favorite-editor p { line-height: 1.6; overflow-wrap: anywhere; }
 /* Settings.
    The page was one 620px column in which every field, hint, heading and button
    shared a single 16px gap — so a hint sat as far from its own field as one
@@ -645,7 +817,7 @@ button.danger-outline:hover:not(:disabled),
    text matched, so a row's name lights up rather than the whole row. */
 .settings-hit { color: var(--accent-text); }
 .settings-form { display: grid; gap: 16px; min-width: 0; }
-.settings-section {
+.settings-section, .card {
   /* The two column widths live on the card because three kinds of child have to
      agree on them: the rows (`.setting`), the fieldsets, and the blocks that
      belong under a row's controls rather than under its name.  Those blocks used
@@ -655,24 +827,59 @@ button.danger-outline:hover:not(:disabled),
      three cannot drift apart. */
   --setting-name: 168px;
   --setting-gap: 22px;
+  background: var(--card-bg);
   border: 1px solid var(--line); border-radius: var(--radius-lg);
-  padding: 0 22px 16px; min-width: 0; scroll-margin-top: 12px;
+  padding: 0 var(--card-pad) 16px; min-width: 0; scroll-margin-top: 12px;
 }
+/* A card that holds panes rather than rows: the chat page's rail beside its
+   conversation, the favorites page's groups beside its list.  The panes carry
+   their own indent, so the card supplies none — a card that padded them would
+   have its rail's head start 22px in from the card's own edge while the rows
+   under it started 8px in, which is two left edges in one column. */
+.card--flush { padding: 0; overflow: hidden; }
 /* The card's own title, and the rule that closes it off from its rows.  Without
    the rule the title and the first row read as two lines of one list, and a card
-   that opens with a note reads as a card that opens with a stray sentence. */
-.settings-section > h2 { font-size: 15px; padding: 17px 0 11px; border-bottom: 1px solid var(--line); }
-/* A heading for the blocks inside a section that are not settings of their own
-   — the danger zone, the available-backups list.  It spans the card and carries
-   the same rule the title does: what follows it is a new part of the card rather
-   than another row of the list above it.  Indented into the control column it
-   read as the first label of that new part. */
-.settings-section > h3 { font-size: 12px; font-weight: 600; letter-spacing: .02em; color: var(--muted); margin: 16px 0 0; padding: 14px 0 2px; border-top: 1px solid var(--line); }
-/* A heading that carries the control belonging to what it heads — "available
-   backups" and the button that asks for them again.  The rule and the heading
-   styling are the same as a heading on its own, so the two cannot drift. */
-.setting-heading { display: flex; align-items: center; gap: 6px; margin: 16px 0 0; padding-top: 14px; border-top: 1px solid var(--line); }
-.setting-heading > h3 { font-size: 12px; font-weight: 600; letter-spacing: .02em; color: var(--muted); margin: 0; }
+   that opens with a note reads as a card that opens with a stray sentence.
+
+   Two shapes wear it, because a card either has controls on its title's line or
+   it does not: a bare `<h2>` as the card's direct child, and `.card-head`, the
+   row that holds the title and whatever belongs beside it.  They share the
+   decoration — the title's own padding, the rule under it, the size — and the
+   row adds the flex that puts the two on one line.
+
+   The row exists because a wrapper is what puts a title on the card's top
+   border: as a div around the h2 it matches no `> h2` rule, which is how the
+   internet card's title came to sit on the border with the refresh button and
+   the switch drawn across it.  Anything that wraps a card's title wears this
+   class, and nothing writes the title's padding out a second time. */
+.settings-section > h2, .card > h2, .card-head { font-size: 15px; padding: 17px 0 11px; border-bottom: 1px solid var(--line); }
+.card-head { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px 12px; }
+/* The heading takes the room and its controls keep their own size, so a long
+   title is what gives way rather than the switch beside it. */
+.card-head h2 { flex: 1 1 auto; min-width: 0; font-size: 15px; }
+.card-head-actions { display: flex; align-items: center; gap: 10px; }
+/* A heading for the blocks inside a card that are not settings of their own —
+   the danger zone, the available-backups list, the paired devices under the
+   exchange.  It spans the card and carries a rule above it: what follows it is a
+   new part of the card rather than another row of the list above it.  Indented
+   into the control column it read as the first label of that new part.
+   The four places that had one of these were four copies of the same padding,
+   the same rule and the same two sizes — 12px here and 14px on the peers — so
+   the peers' heading was a size bigger than the backups' for no reason either
+   of them could state. */
+.settings-section > h3, .card-sub {
+  display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 8px;
+  margin: 16px 0 0; padding: 14px 0 2px; border-top: 1px solid var(--line);
+  color: var(--muted);
+}
+/* The same heading with the control that belongs to it on its line — "available
+   backups" and the button that asks for them again, the peers and their count.
+   Centred rather than on the baseline: a 36px button beside a 12px line has no
+   baseline in common with it. */
+.card-sub--row { align-items: center; gap: 6px; }
+/* The note a part-heading carries — how many peers, how many backups — with its
+   glyph: kept on one line and centred against the words beside it. */
+.card-sub > .muted { display: inline-flex; align-items: center; gap: 4px; }
 /* One setting: what it is called on the left, what you change on the right.
    The two columns are fixed, so a long label — Chinese ones often are — and a
    long hint each grow inside their own column, and every control on the page
@@ -687,7 +894,11 @@ button.danger-outline:hover:not(:disabled),
    first line sits on the same line as the control's. */
 .setting-name { grid-column: 1; padding-top: 9px; line-height: 1.45; }
 .setting-control { grid-column: 2; min-width: 0; display: grid; gap: 5px; align-content: start; }
-.setting-hint { color: var(--muted); font-size: 12px; line-height: 1.5; }
+/* The hint under a field used to be `.setting-hint`, which was `.note` written
+   out a second time — the same three declarations, under a name that said which
+   page it was on.  There is one quiet line in this window and it is `.note`;
+   what the settings page adds to it is its own top margin, which is
+   `.setting-note`. */
 /* A checkbox has no name of its own, so its box goes in the column the controls
    above it start in and the text follows the box: one vertical line of controls
    down the card, whatever kind they are.  The template keeps both columns —
@@ -730,14 +941,6 @@ button.danger-outline:hover:not(:disabled),
    it.  The indent exists to hang a block under the control it belongs to; a
    status line at the card's own left edge is not under any control. */
 .setting-block--card { margin-inline-start: 0; }
-/* The blocks that are card content wherever they appear, so they need no class
-   of their own: the inventory of internet peers, the list of backups, the
-   progress and the path of a download.  Each is either under a heading that is
-   already the card's own or the whole of what a card-level button produced, and
-   each is a list of long strings — a path per row held in the width the controls
-   leave wraps into a column of fragments. */
-.settings-section .peer-list, .settings-section .backup-list,
-.settings-section .update-progress, .settings-section .update-ready-path { margin-inline-start: 0; }
 /* A remark about the whole card rather than about one row, so it keeps the
    card's own left edge while the rows above and below it are indented. */
 .setting-note { margin: 10px 0 0; }
@@ -747,23 +950,23 @@ button.danger-outline:hover:not(:disabled),
    holds for it on the next.  The line is the legacy device card's, which is
    where the shell's own device list has no room for it. */
 .peer-list { padding-left: 0; list-style: none; }
-.peer-list > li { display: grid; gap: 4px; padding: 8px 0; border-bottom: 1px solid var(--line); }
+.peer-list > li { display: grid; gap: 4px; padding: var(--row-pad-tight) 0; border-bottom: 1px solid var(--line); }
 .peer-list > li:last-child { border-bottom: 0; }
 /* One backup per row: the name, then how old and how big it is, and the button
    that restores it against the right edge — the shape the legacy panel gave the
    same list.  A bare run of filenames said nothing about which was worth
    restoring or how to restore it without a file dialog. */
 .backup-list { padding-left: 0; list-style: none; }
-.backup-list > li { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; padding: 9px 0; border-bottom: 1px solid var(--line); }
+.backup-list > li { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; padding: var(--row-pad-tight) 0; border-bottom: 1px solid var(--line); }
 .backup-list > li:last-child { border-bottom: 0; }
 .backup-name { min-width: 0; overflow-wrap: anywhere; }
 .backup-list > li .muted { flex: 1; min-width: 140px; }
 .peer-line { display: flex; align-items: center; gap: 8px; }
 .peer-line .muted { flex: 1; font-size: 12px; }
-.peer-delivery { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; font-size: 12px; }
-/* "待补发 N" — a count that only appears when there is one, so a device with
-   nothing queued shows no badge at all rather than a zero. */
-.delivery-badge { border: 1px solid var(--accent-line); background: var(--accent-soft); color: var(--accent-text); border-radius: 9px; padding: 1px 7px; font-size: 11px; }
+/* How the last delivery to a device ended: a receipt's glyph and its word, on the
+   line under the peer's name.  It wears the pill's own shape (the template gives
+   it `channel`), and the two endings differ by colour — the accent for one that
+   arrived, the failure red for one that did not. */
 .delivery-result { display: inline-flex; align-items: center; gap: 4px; color: var(--muted); }
 .delivery-result--delivered { color: var(--accent-text); }
 .delivery-result--failed { color: var(--danger-text); }
@@ -795,18 +998,12 @@ button.danger-outline:hover:not(:disabled),
    *exchange* — one code, made here or typed here — so the switch that governs
    the whole card sits with the title, and the two directions of the exchange
    sit side by side. */
-/* The head is this card's title row, so it carries the title's own padding and
-   the rule under it.  As a div wrapping the h2 it matched none of
-   `.settings-section > h2` — that rule names a direct child — so the card's
-   first line sat on the card's top border, with the refresh button and the
-   switch drawn across it, and this was the one card whose title had no rule
-   under it either. */
-.internet-head { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px 12px; padding: 17px 0 11px; border-bottom: 1px solid var(--line); }
-/* The heading rule belongs to the title, so the row it heads keeps the rule and
-   the controls beside it sit on the title's own line — at the size of a card
-   title, not of the page's own h2. */
-.internet-head h2 { flex: 1 1 auto; min-width: 0; font-size: 15px; }
-.internet-head-actions { display: flex; align-items: center; gap: 10px; }
+/* This card's title row is the window's `.card-head` — the recipe was written
+   here first, as a div wrapping the h2, which matched none of
+   `.settings-section > h2`: that rule names a direct child.  So the card's first
+   line sat on the card's top border, with the refresh button and the switch drawn
+   across it, and this was the one card whose title had no rule under it either.
+   The recipe now lives in one place and is reached by name. */
 
 /* A switch rather than a checkbox: this one setting turns on everything else on
    the card, and as a ticked box in a column of ticked boxes it read like one
@@ -820,7 +1017,12 @@ button.danger-outline:hover:not(:disabled),
 .switch-thumb { position: absolute; top: 2px; left: 2px; width: 16px; height: 16px; border-radius: 50%; background: var(--muted); transition: transform .15s ease, background .15s ease; }
 .switch--on .switch-track { background: var(--accent-soft); border-color: var(--accent-line); }
 .switch--on .switch-thumb { transform: translateX(18px); background: var(--accent-text); }
-.switch-input:focus-visible + .switch-track { outline: 2px solid var(--accent-line); outline-offset: 2px; }
+/* The window's one focus ring.  The switch drew its own — the accent's soft line
+   at 2px — because the ring is drawn on the track the input does not show, and a
+   keyboard reader had two rings to learn depending on what they had tabbed to.
+   It is the same ring as everything else's; the track is just where this control
+   paints it. */
+.switch-input:focus-visible + .switch-track { outline: 2px solid var(--accent); outline-offset: 3px; }
 .switch-text { font-size: 13px; color: var(--muted); }
 .switch--on .switch-text { color: var(--accent-text); }
 
@@ -829,10 +1031,9 @@ button.danger-outline:hover:not(:disabled),
 .pair-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 12px; margin-top: 14px; }
 .pair-half { display: grid; gap: 8px; align-content: start; padding: 14px; border: 1px solid var(--line); border-radius: var(--radius-lg); background: var(--surface); }
 .pair-half .setting-actions { margin: 0; }
-/* `margin: 0` because the reset stops at h2, which leaves every h3 carrying the
-   browser's own 1em margins: in a grid whose gap is 8px that is 22px above and
-   below this title and 8px around everything under it. */
-.pair-half-title { display: flex; align-items: center; gap: 7px; margin: 0; font-size: 14px; }
+/* A panel's own title: a size up from a card's sub-heading, because a half is a
+   panel inside a card rather than a part of one. */
+.pair-half-title { display: flex; align-items: center; gap: 7px; font-size: 14px; }
 /* The code itself: monospace and letter-spaced, because it is read aloud to
    another person and typed from their screen, and every glyph that can be
    mistaken for its neighbour costs a pairing.  The generator already leaves the
@@ -846,12 +1047,9 @@ button.danger-outline:hover:not(:disabled),
    the same identity block, the same chips and the same trailing actions, so a
    device reads as itself wherever it is listed. */
 /* The peers are a new part of the card rather than the tail of the exchange
-   above them, so this heading opens it with the same rule every other
-   part-heading in the page carries, and its own margins are zeroed for the same
-   reason the pair halves' are. */
-.internet-peers-head { display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between; gap: 6px 12px; margin-top: 16px; padding-top: 14px; border-top: 1px solid var(--line); }
-.internet-peers-head h3 { margin: 0; font-size: 14px; }
-.internet-peers-head .muted { display: inline-flex; align-items: center; gap: 4px; }
+   above them, so their heading is the window's `.card-sub--row` — the recipe was
+   written here first, at 14px, which made it a size bigger than the backups'
+   heading on the settings page for no reason either of them could state. */
 .peer-list--devices > li { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 12px; }
 .peer-list--devices .device-identity { flex: 1 1 160px; min-width: 0; }
 .peer-list--devices .device-channels { flex: 1 1 auto; }
@@ -924,6 +1122,13 @@ button.danger-outline:hover:not(:disabled),
    way, there is something to save". */
 .settings-save-status { font-size: 12px; color: var(--muted); }
 .settings-section p { overflow-wrap: anywhere; line-height: 1.6; }
+/* A list inside a card starts at the card's own left edge, and its bullets are
+   the card's own indent.  The `margin` is a shorthand on purpose: several of
+   these lists are also written `setting-block` in the template, which asks for
+   the *row's* indent, and a list of an inventory's paths indented 190px under a
+   heading at the card's edge is not what any of them meant.  A list that really
+   does hang under a control says so the other way round — `setting-block--card`
+   is its opposite, and the block classes are where the indent is granted. */
 .settings-section ul { margin: 10px 0 0; padding-left: 20px; }
 /* Live password checklist: each rule turns green as the typed value meets it. */
 .password-rules { list-style: none; padding-left: 0; display: grid; gap: 4px; font-size: 12px; }
@@ -931,9 +1136,9 @@ button.danger-outline:hover:not(:disabled),
    general `ul` rule must not put the bullet's indent back. */
 .settings-section .password-rules, .settings-section .ai-local-list { padding-left: 0; }
 .password-rules li::before { content: "•"; margin-right: 6px; }
-.password-rules li.met { color: var(--accent); }
+.password-rules li.met { color: var(--accent-text); }
 .password-rules li.met::before { content: "✓"; }
-.update-available { color: var(--accent); font-weight: 550; }
+.update-available { color: var(--accent-text); font-weight: 550; }
 .update-failed { color: var(--danger-text); }
 .update-progress { position: relative; margin-top: 12px; height: 22px; border: 1px solid var(--line); border-radius: 4px; background: var(--surface); overflow: hidden; }
 .update-progress__bar { height: 100%; background: var(--accent); transition: width .2s linear; }
@@ -957,6 +1162,9 @@ button.danger-outline:hover:not(:disabled),
    half starts below a screenful of rows the reader is not looking at. */
 .ai-local-list { list-style: none; display: grid; gap: 0; font-size: 13px; max-height: 340px; overflow: auto; }
 .ai-local-list li { display: flex; align-items: center; gap: 6px; padding: 5px 0; border-bottom: 1px solid var(--line); }
+/* The last row's rule would sit in the card's own bottom padding, reading as a
+   rule under nothing — the same reason the transfer rows drop theirs. */
+.ai-local-list li:last-child { border-bottom: 0; }
 .ai-local-list li > span { flex: 1; min-width: 0; overflow-wrap: anywhere; }
 /* The tick box holds its size while the path beside it wraps. */
 .ai-local-list li > input[type="checkbox"] { flex: 0 0 auto; margin: 0; }
@@ -968,6 +1176,9 @@ button.danger-outline:hover:not(:disabled),
    belong to — hence a header wherever the tool changes, not one per page. */
 .ai-local-list li.ai-group-head { gap: 6px; padding: 10px 0 4px; font-size: 12px; font-weight: 600; }
 .ai-local-list li.ai-group-head > span { flex: 0 0 auto; }
+/* A tool's own count beside its name, in the page's small print: it is a
+   parenthetical on the label rather than a status of its own, which is why it is
+   the one count in the window that is not a pill. */
 .ai-group-count { color: var(--muted); font-weight: 400; }
 /* The fold control, in the column the tick boxes use, so a row's name starts in
    the same place whether the row is a folder or a file.  A row with no folder
@@ -982,10 +1193,13 @@ button.danger-outline:hover:not(:disabled),
 /* Which root a row is under, where one tool watches more than one: two roots can
    hold the same relative path, so without it the row is ambiguous. */
 .ai-root-hint { flex: 0 0 auto; color: var(--muted); font-size: 12px; }
-.ai-local-list .icon-button { width: 30px; height: 30px; min-width: 30px; }
+/* The row's own buttons are the window's small control, worn as
+   `.icon-button--sm` in the template.  They used to have a 30px rule here, which
+   was the same 30px under a name of its own — and the 28px beside the local
+   device's name and the 22px in a group's header were the other two copies. */
 /* The editor a picked file opens into: a panel inside the card, not another row,
    so it spans the card and stands on a surface of its own. */
-.ai-editor { display: grid; gap: 9px; margin: 14px 0 0; padding: 13px; border: 1px solid var(--line); border-radius: var(--radius); background: var(--surface); }
+.ai-editor { margin: 14px 0 0; }
 .ai-editor strong { overflow-wrap: anywhere; font-size: 13px; }
 .ai-editor textarea { background: var(--page); }
 .ai-editor button { justify-self: start; }
@@ -996,13 +1210,12 @@ button.danger-outline:hover:not(:disabled),
    one state that needs a decision from the reader, so it carries the only
    warning colour; the two "newer" states are mirror images of each other and are
    told apart by their words, not by a colour to memorise. */
-.ai-version { flex: 0 0 auto; padding: 1px 6px; border-radius: 999px; border: 1px solid var(--line); background: var(--surface); color: var(--muted); font-size: 11px; white-space: nowrap; }
-.ai-version--missing { border-color: var(--danger-line); background: var(--danger-soft); color: var(--danger-text); }
+.ai-version { flex: 0 0 auto; }
 /* A folder's badge counts the files under it, so one row can carry several
    states at once and each one needs its number told apart from its label: a
    badge reading "缺失 3" has to be two things, not one glyph. */
 .ai-version-count { margin-left: 3px; font-weight: 600; }
-.ai-diff-ok { color: var(--accent); }
+.ai-diff-ok { color: var(--accent-text); }
 /* How a pull is going and how it ended, on one line under the strategy picker.
    It is a wait while it runs and a report when it stops, so the colour changes
    with the outcome rather than the shape — a reader looking for the answer finds
@@ -1010,51 +1223,48 @@ button.danger-outline:hover:not(:disabled),
 .ai-pull-status { display: flex; align-items: center; gap: 6px; }
 .ai-pull-status--done { color: var(--accent-text); }
 .ai-pull-status--failed { color: var(--danger-text); }
-.transfers-view { flex: 1; min-width: 0; }
-/* Where the internet-paired devices went.  It answers the picker above it, so it
-   lines up with the picker's column — same gutter as the list below, and the
-   gutter again above it so it does not sit against the toolbar rule. */
-.transfers-relay-note { margin: 10px var(--page-gutter) 0; }
-/* The speed test and the cancel result sit between the toolbar and the list, so
-   they line up with the list rather than with the toolbar: they are part of the
-   page's column, not of the bar above it. */
-.transfer-list { margin: 0 var(--page-gutter) 28px; }
-.transfer-list h2 { padding: 12px 0; border-bottom: 1px solid var(--line); }
-/* A card's title and the one action that belongs to the whole card rather than
-   to a row: the rule under them is the title's, so the two sit on one line and
-   the button does not push the rule down. */
-.transfer-list-header { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 4px 12px; border-bottom: 1px solid var(--line); }
-.transfer-list-header h2 { border-bottom: 0; }
+.transfers-view { flex: 1; min-width: 0; padding-bottom: 16px; }
+/* Everything on this page between the toolbar and the bottom is the page's own
+   column: the relay note, the drop's band, the speed test, the bulk report and
+   the two cards all take the gutter and the card gap, so a sentence about a
+   transfer and the transfer's own card share one left edge.  The five of them
+   used to carry five margins — 10px, 12px, 4px, 28px and none — and two of the
+   sentences sat closer to the toolbar than to the list they were about. */
+.transfers-view > *:not(.toolbar):not(.error-band) { margin: 0 var(--page-gutter) var(--card-gap); }
+/* A card's title and the one action that belongs to the whole card rather than to
+   a row: the title row is the window's `.card-head`, so the two sit on one line
+   under one rule.  The list's own `h2` rule is gone with it — its padding and its
+   `border-bottom` were both overridden by the header's, which is what a title and
+   a rule written twice looks like. */
+.transfer-list { min-width: 0; }
+/* The last row's rule would otherwise sit in the card's own bottom padding,
+   reading as a rule under nothing. */
+.transfer-list .transfer-row:last-child { border-bottom: 0; }
 /* The panel's own summary of the history card, under the header it belonged to.
    It carries a little air below it so the first row's rule does not sit close
    enough to the sentence to read as a rule under the sentence. */
-.transfer-history-stats { margin: 0; padding: 8px 0 2px; }
-/* The last bulk action's report — "cancel all" and clearing history write to
-   the same line, because it is the same question: what did that button do. */
-.bulk-status { margin: 0 var(--page-gutter); }
-/* What a drop brought, and the one question it left open.  It sits where the
-   bulk-status line sits — the page's own column — because it is the same kind of
-   thing: a statement about the file list, not a control on the toolbar. */
-.staged-drop { display: flex; align-items: center; gap: 12px; margin: 0 var(--page-gutter) 12px; padding: 12px 14px; background: var(--surface); border: 1px solid var(--line); border-left: 3px solid var(--accent); border-radius: 6px; }
+.transfer-history-stats { margin: 0; padding: var(--row-pad-tight) 0 2px; }
+/* What a drop brought, and the one question it left open.  It is a `.strip` —
+   the band the toast wears — because it is the same kind of thing: a statement
+   about the file list, not a control on the toolbar. */
+.staged-drop { gap: 12px; }
 .staged-drop > svg { flex-shrink: 0; color: var(--accent-text); }
 .staged-drop-main { min-width: 0; display: grid; gap: 3px; flex: 1; }
 /* The names are one line however many were dropped: the count is already said,
    and the row's height is the answer's, not the list's. */
 .staged-drop-names { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.speed-test { display: flex; align-items: center; gap: 8px; margin: 0 var(--page-gutter) 4px; font-size: 12px; color: var(--muted); }
+.speed-test { display: flex; align-items: center; gap: 8px; font-size: 12px; color: var(--muted); }
 /* The panel's word for how good the measurement is.  Its three colours are the
    panel's three readings — a fast link is the accent's own green, a middling one
    the warning amber, a slow one the failure red — which is also why this is the
    one place on the page where a speed is colour-graded rather than merely
-   printed: the number says how fast, the colour says whether that is fine. */
-.speed-quality { padding: 1px 7px; border-radius: 999px; font-size: 11px; font-weight: 600; }
-.speed-quality--fast { background: var(--accent-soft); color: var(--accent-text); }
-.speed-quality--good { background: var(--warn-soft); color: var(--warn-text); }
-.speed-quality--slow { background: var(--danger-soft); color: var(--danger-text); }
+   printed: the number says how fast, the colour says whether that is fine.  The
+   chip itself is the window's pill; the graded part is only its tone, which is
+   why the three names here are not the declaration of a shape. */
 /* A test that ended without a measurement is the panel's failure line, in the
    panel's failure colour — not a speed of zero presented as a reading. */
 .speed-failed { color: var(--danger-text); }
-.transfer-row { display: grid; grid-template-columns: minmax(0, 1fr) minmax(120px, 240px) auto auto auto; gap: 12px; align-items: center; padding: 15px 0; border-bottom: 1px solid var(--line); }
+.transfer-row { display: grid; grid-template-columns: minmax(0, 1fr) minmax(120px, 240px) auto auto auto; gap: 12px; align-items: center; padding: var(--row-pad) 0; border-bottom: 1px solid var(--line); }
 .transfer-main { min-width: 0; display: grid; gap: 5px; overflow-wrap: anywhere; }
 .transfer-row progress { width: 100%; accent-color: var(--accent); }
 /* The history card's rows are not the running card's rows.  A running row has a
@@ -1073,7 +1283,7 @@ button.danger-outline:hover:not(:disabled),
 .transfer-list--history .transfer-row { display: flex; align-items: center; gap: 12px; }
 .transfer-list--history .transfer-main { flex: 1 1 auto; }
 .transfer-list--history .transfer-row > :not(.transfer-main) { flex: 0 0 auto; }
-.transfer-ok { color: var(--accent); }
+.transfer-ok { color: var(--accent-text); }
 .transfer-failed { color: var(--danger-text); }
 /* Legacy toasts: bottom-right, above the page, gone on their own timer.
    "Above the page" is the whole of it, and it took two rules to say: the stack
@@ -1089,7 +1299,10 @@ button.danger-outline:hover:not(:disabled),
    page-level strip — and `100%` here is the page column, so at a narrow window
    the toast stays beside the rail rather than over it. */
 .notice-stack { position: absolute; right: var(--page-gutter); bottom: calc(100% + 12px); z-index: 20; margin: 0; padding: 0; list-style: none; display: grid; gap: 10px; max-width: min(360px, calc(100% - var(--page-gutter) * 2)); }
-.notice { display: flex; gap: 10px; align-items: flex-start; padding: 12px 12px 12px 14px; background: var(--raised); border: 1px solid var(--line); border-left: 3px solid var(--accent); border-radius: 6px; box-shadow: var(--shadow-soft); }
+/* The toast wears `.strip`'s band, and differs from it in the two things that are
+   a toast's own: it stands on the raised layer, because it floats over a page,
+   and it carries a shadow, because there is no rule behind it to hold it down. */
+.notice { align-items: flex-start; padding: 12px; background: var(--raised); box-shadow: var(--shadow-soft); }
 .notice > div { min-width: 0; }
 .notice p { margin-top: 4px; overflow-wrap: anywhere; line-height: 1.5; }
 .notice button { border: 0; flex-shrink: 0; }
@@ -1125,7 +1338,7 @@ button.danger-outline:hover:not(:disabled),
    ring — all say their numbers in words beside the shape rather than inside
    it.  A colour here is always a second copy of something already written
    down, never the only copy of it. */
-.overview-view { flex: 1; min-width: 0; margin: 0 var(--page-gutter); padding: 20px 0 28px; display: grid; gap: 16px; align-content: start; }
+.overview-view { flex: 1; min-width: 0; margin: 0 var(--page-gutter); padding: 20px 0 28px; display: grid; gap: var(--card-gap); align-content: start; }
 /* A read that failed is news about the whole page, so its band spans the page
    rather than sitting inset inside it like the cards it replaces. */
 .overview-view > .error-band { margin: 0 calc(var(--page-gutter) * -1); }
@@ -1137,7 +1350,7 @@ button.danger-outline:hover:not(:disabled),
 .overview-status { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; min-height: 40px; padding: 6px 14px; background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius-lg); font-size: 13px; }
 .overview-sep { width: 1px; align-self: stretch; margin: 2px 1px; background: var(--line); }
 .overview-gap { flex: 1; }
-.overview-health { min-height: 26px; padding: 3px 10px; gap: 6px; font-size: 12px; color: var(--muted); background: transparent; }
+.overview-health { min-height: 26px; padding: 3px 10px; background: transparent; }
 .overview-health--ok { color: var(--accent-text); }
 .overview-health--warn { color: var(--warn-text); }
 .overview-health--fail { color: var(--danger-text); }
@@ -1157,23 +1370,22 @@ button.danger-outline:hover:not(:disabled),
    different heights and whose bottom edges never lined up — the raggedness a
    reader calls 乱 without being able to name it.  Equal columns and one shared
    height put every card title on its row's own line. */
-.overview-row { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; align-items: stretch; }
-.overview-card { min-width: 0; display: grid; gap: 12px; align-content: start; padding: 16px 18px 18px; background: var(--raised); border: 1px solid var(--line); border-radius: var(--radius-lg); }
-/* A card's title is a label on a box rather than a heading in a document: it
-   says what the box is and then gets out of the way of what is under it. */
-.overview-card > h2, .overview-card-head > h2 { font-size: 13px; font-weight: 600; color: var(--muted); }
-/* A title that has a way out of its card beside it.  The pair sits on one line
-   and the action is the card's own button, not the page's: 查看全部 belongs to
-   最近活动 the way 显示二维码 belongs to 已连接设备. */
-.overview-card-head { display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between; gap: 4px 12px; }
+.overview-row { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: var(--card-gap); align-items: stretch; }
+/* The overview's cards are the window's cards — `.card` in the template supplies
+   the fill, the border, the radius and the padding, and `.card > h2` (or
+   `.card-head` where the title shares its line with a way out of the card) the
+   title.  All this adds is what an overview card holds: a column of unlike
+   things — a name, a fact list, a row of chips, a ring, a feed — that are a
+   column rather than a list, so they are spaced by one gap instead of by rules. */
+.overview-card { display: grid; gap: 12px; align-content: start; }
 /* ── This machine ── */
 .overview-name { display: flex; align-items: center; gap: 9px; font-size: 15px; font-weight: 600; }
 .overview-name > svg { flex-shrink: 0; color: var(--accent-text); }
 .overview-name-text { min-width: 0; overflow-wrap: anywhere; }
-/* The pencil and the box it opens keep the line's own height: this is a name
-   being corrected in place, not a form being opened. */
-.overview-name .icon-button { width: 28px; height: 28px; min-width: 28px; }
-.overview-name-input { flex: 1; min-width: 0; min-height: 28px; padding: 3px 8px; font: inherit; font-size: 15px; font-weight: 600; color: inherit; background: var(--surface); border: 1px solid var(--line); border-radius: 4px; }
+/* The box the name is corrected in keeps the line's own height, which is the
+   window's small control: this is a name being edited in place, not a form being
+   opened.  The pencil beside it is `.icon-button--sm` in the template. */
+.overview-name-input { flex: 1; min-width: 0; min-height: var(--control-sm); padding: 3px 8px; font: inherit; font-size: 15px; font-weight: 600; color: inherit; background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius); }
 .overview-facts { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 5px 12px; margin: 0; font-size: 12px; }
 .overview-facts dt { color: var(--muted); }
 .overview-facts dd { margin: 0; min-width: 0; overflow-wrap: anywhere; }
@@ -1181,23 +1393,26 @@ button.danger-outline:hover:not(:disabled),
    two machines, so it is set in the face that makes a hex string comparable. */
 .overview-facts .overview-mono { font-family: var(--font-mono); font-size: 11px; }
 .overview-chips { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin: 0; }
-.overview-chip { display: inline-flex; align-items: center; gap: 6px; min-height: 26px; max-width: 100%; padding: 3px 10px; font-size: 12px; color: var(--muted); background: var(--surface); border: 1px solid var(--line); border-radius: 999px; overflow-wrap: anywhere; }
-/* A chip that leads somewhere says so under the pointer, in the accent every
-   other link-shaped control in the window uses. */
+.overview-chip { max-width: 100%; overflow-wrap: anywhere; }
+/* It is the same pill as everywhere else, in the one row where a label can be
+   clicked: `--link` marks the device names that lead to the page they name, and
+   it colours under the pointer rather than changing its fill, so the row stays a
+   row of readings. */
 .overview-chip--link { cursor: pointer; }
-.overview-chip--link:hover { color: var(--accent-text); border-color: var(--accent-line); }
+.overview-chip--link:hover { background: var(--accent-soft); border-color: var(--accent-line); color: var(--accent-text); }
 .overview-address { display: flex; flex-wrap: wrap; align-items: center; gap: 9px; margin: 0; }
-.overview-address code { min-width: 0; padding: 3px 8px; font-family: var(--font-mono); font-size: 12px; background: var(--code); border: 1px solid var(--line); border-radius: 4px; overflow-wrap: anywhere; }
-/* The page's own buttons are the height of the strip they sit in rather than
-   the window's 36px control: five of them at full height would be the loudest
-   thing on a page whose subject is numbers. */
-.overview-button { min-height: 30px; padding: 4px 11px; gap: 6px; font-size: 12px; }
+.overview-address code { min-width: 0; padding: 3px 8px; font-family: var(--font-mono); font-size: 12px; background: var(--code); border: 1px solid var(--line); border-radius: var(--radius); overflow-wrap: anywhere; }
+/* The page's own buttons are the height of the strip they sit in rather than the
+   window's 36px control: five of them at full height would be the loudest thing
+   on a page whose subject is numbers.  That is the window's small button — the
+   page's own name for it rides on that rule's selector group, so `.overview-button`
+   still means what it always meant at the eight places the template wears it. */
 /* ── The switches ── */
 .overview-switch { display: flex; align-items: center; justify-content: space-between; gap: 12px; min-height: 30px; font-size: 13px; }
 .overview-pause { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin: 0; padding-top: 10px; border-top: 1px solid var(--line); }
 /* ── The counters ── */
 .overview-stats { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 16px; }
-.overview-stat { display: grid; grid-template-columns: auto minmax(0, 1fr); align-items: center; gap: 0 9px; padding: 14px 16px; background: var(--raised); border: 1px solid var(--line); border-radius: var(--radius-lg); }
+.overview-stat { display: grid; grid-template-columns: auto minmax(0, 1fr); align-items: center; gap: 0 9px; padding: 14px 16px; background: var(--card-bg); border: 1px solid var(--line); border-radius: var(--radius-lg); }
 .overview-stat > svg { color: var(--muted); }
 /* Digits that line up: four counters read side by side are compared by their
    numbers, and a proportional face shifts each one off the column above it. */
@@ -1250,7 +1465,7 @@ button.danger-outline:hover:not(:disabled),
    history page's own green — the same confirmation the history rows and the
    favourites rows give, for the same action.  It takes the pin's place rather
    than sitting beside it, so the row's right edge is one width. */
-.overview-feed-row .overview-feed-copied { color: var(--accent); }
+.overview-feed-row .overview-feed-copied { color: var(--accent-text); }
 @media (max-width: 700px) {
   /* The gutter is the one number a narrow window moves, and everything placed by
      it moves with it: the page header, the toolbar, the lists and their filter
@@ -1299,7 +1514,7 @@ button.danger-outline:hover:not(:disabled),
      page.  Narrow, it has room for what the app is doing and nothing else —
      which since 2026-09-14 is all it carries: the switch and the three pause
      presets moved out to the overview's own card, where they already were. */
-  .error-band, .status-band { padding: 12px var(--page-gutter); align-items: flex-start; }
+  .error-band { padding: 12px var(--page-gutter); align-items: flex-start; }
   .settings-panel { margin: 0 var(--page-gutter) 28px; }
   /* Narrow: the two-column setting row folds to one, so a long label and a long
      hint cannot squeeze each other into a column 40px wide.  The strip takes

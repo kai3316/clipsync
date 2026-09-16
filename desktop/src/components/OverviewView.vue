@@ -350,10 +350,10 @@ const connectedNames = computed(() => (overview.value?.connected_names || []).sl
       <RefreshCw v-if="starting" class="spinning" :size="26" />
       <Activity v-else :size="36" />
       <h2>{{ starting ? t("正在读取概览") : t("概览暂不可用") }}</h2>
-      <p v-if="!starting" class="muted">{{ t("同步引擎未运行，无法读取概览。") }}</p></div>
+      <p v-if="!starting" class="note">{{ t("同步引擎未运行，无法读取概览。") }}</p></div>
     <div v-else-if="!overview" class="empty empty--page">
-      <Activity :size="30" /><h2>{{ loading ? t("正在读取概览") : t("概览暂不可用") }}</h2>
-      <p v-if="failed" class="muted small">{{ failed }}</p>
+      <Activity :size="36" /><h2>{{ loading ? t("正在读取概览") : t("概览暂不可用") }}</h2>
+      <p v-if="failed" class="note">{{ failed }}</p>
     </div>
     <template v-else>
       <div v-if="failed" class="error-band" role="alert">{{ failed }}</div>
@@ -374,17 +374,17 @@ const connectedNames = computed(() => (overview.value?.connected_names || []).sl
           :title="t('打开网络诊断')" @click="emit('diagnostics')">
           <span class="overview-dot" :class="`overview-dot--${health || 'unknown'}`" aria-hidden="true"></span>{{ healthLabel }}
         </button>
-        <span v-if="overview.local_ip" class="muted small">{{ overview.local_ip }}:{{ overview.port }}</span>
+        <span v-if="overview.local_ip" class="note">{{ overview.local_ip }}:{{ overview.port }}</span>
       </div>
 
       <div class="overview-row">
-        <section class="overview-card">
+        <section class="overview-card card">
           <h2>{{ t("此设备") }}</h2>
           <div class="overview-name">
             <Monitor :size="17" aria-hidden="true" />
             <template v-if="!renaming">
               <span class="overview-name-text">{{ deviceName }}</span>
-              <button class="icon-button" :aria-label="t('编辑设备名称')" :title="t('编辑设备名称')"
+              <button class="icon-button icon-button--sm" :aria-label="t('编辑设备名称')" :title="t('编辑设备名称')"
                 :disabled="busy" @click="startRename"><Pencil :size="15" /></button>
             </template>
             <input v-else ref="nameInput" class="overview-name-input" :aria-label="t('编辑设备名称')"
@@ -405,13 +405,13 @@ const connectedNames = computed(() => (overview.value?.connected_names || []).sl
             <span class="overview-chip">{{ t("运行时间") }} {{ uptime(overview.uptime_seconds) }}</span>
           </p>
           <p v-if="overview.web_enabled && overview.local_ip" class="overview-address">
-            <span class="muted small">{{ t("本地地址") }}</span>
+            <span class="note">{{ t("本地地址") }}</span>
             <code>{{ address }}</code>
             <button class="overview-button" :disabled="busy" @click="copyAddress"><Copy :size="15" />{{ t("复制地址") }}</button>
           </p>
         </section>
 
-        <section class="overview-card">
+        <section class="overview-card card">
           <h2>{{ t("快速控制") }}</h2>
           <label class="overview-switch">
             <span>{{ t("剪贴板同步") }}</span>
@@ -434,11 +434,11 @@ const connectedNames = computed(() => (overview.value?.connected_names || []).sl
               :disabled="busy" @change="toggleCompanion" />
           </label>
           <p v-if="pauseLeftMs > 0" class="overview-pause">
-            <span class="muted small">{{ t("已暂停 · 剩余 {minutes} 分钟", { minutes: pauseLeftMinutes }) }}</span>
+            <span class="note">{{ t("已暂停 · 剩余 {minutes} 分钟", { minutes: pauseLeftMinutes }) }}</span>
             <button class="overview-button" :disabled="pauseBusy" @click="emit('resume')">{{ t("立即恢复") }}</button>
           </p>
           <p v-else-if="syncRunning" class="overview-pause">
-            <span class="muted small">{{ t("定时暂停同步") }}</span>
+            <span class="note">{{ t("定时暂停同步") }}</span>
             <button v-for="preset in pausePresets" :key="preset.minutes" class="overview-button"
               :disabled="pauseBusy" @click="emit('pause', preset.minutes)">{{ preset.label }}</button>
           </p>
@@ -468,7 +468,7 @@ const connectedNames = computed(() => (overview.value?.connected_names || []).sl
       </div>
 
       <div class="overview-row">
-        <section class="overview-card">
+        <section class="overview-card card">
           <h2>{{ t("网络地图") }}</h2>
           <div class="overview-ring-wrap">
             <!-- The legend is the drawing's own text: it carries all three
@@ -486,7 +486,7 @@ const connectedNames = computed(() => (overview.value?.connected_names || []).sl
           </div>
         </section>
 
-        <section class="overview-card">
+        <section class="overview-card card">
           <h2>{{ t("已连接设备") }}<span v-if="connectedNames.length" class="badge badge--count">{{ connectedNames.length }}</span></h2>
           <div v-if="connectedNames.length" class="overview-chips">
             <button v-for="name in connectedNames" :key="name" class="overview-chip overview-chip--link"
@@ -494,7 +494,7 @@ const connectedNames = computed(() => (overview.value?.connected_names || []).sl
               <span class="overview-dot overview-dot--on" aria-hidden="true"></span>{{ name }}
             </button>
           </div>
-          <p v-else class="muted small">{{ t("还没有已连接的设备——复制内容并配对一台设备即可开始同步。") }}</p>
+          <p v-else class="note">{{ t("还没有已连接的设备——复制内容并配对一台设备即可开始同步。") }}</p>
           <div class="overview-actions">
             <button class="overview-button" :disabled="busy" @click="emit('qr')"><QrCode :size="16" />{{ t("显示二维码") }}</button>
             <button class="overview-button" :disabled="busy" @click="emit('send-url')"><SendHorizontal :size="16" />{{ t("发送链接到设备") }}</button>
@@ -502,13 +502,13 @@ const connectedNames = computed(() => (overview.value?.connected_names || []).sl
         </section>
       </div>
 
-      <section class="overview-card">
+      <section class="overview-card card">
         <!-- The way into the history is on the card, not on its rows.  A row
              used to be a link to the history page, which cost the reader a page
              change for the thing they most often wanted — the clip itself —
              and left the right-click doing nothing at all.  The row copies
              now, and 查看全部 is the route it gave up. -->
-        <div class="overview-card-head">
+        <div class="overview-card-head card-head">
           <h2>{{ t("最近活动") }}</h2>
           <button class="overview-button" @click="emit('history')">{{ t("查看全部") }}</button>
         </div>
@@ -526,11 +526,11 @@ const connectedNames = computed(() => (overview.value?.connected_names || []).sl
                 <Check v-if="state.copiedId === item.id" :size="13" class="overview-feed-copied" :aria-label="t('已复制')" />
                 <Pin v-else-if="item.pinned" :size="13" :aria-label="t('已置顶')" />
               </span>
-              <span class="muted small overview-feed-age">{{ ago(item.timestamp) }}</span>
+              <span class="note overview-feed-age">{{ ago(item.timestamp) }}</span>
             </button>
           </li>
         </ul>
-        <p v-else class="muted small">{{ t("复制文本、图片和文件时，剪贴板活动将显示在这里。") }}</p>
+        <p v-else class="note">{{ t("复制文本、图片和文件时，剪贴板活动将显示在这里。") }}</p>
       </section>
     </template>
   </section>

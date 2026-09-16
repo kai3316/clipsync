@@ -947,6 +947,19 @@ function previewLabel(item: HistoryItem) {
   return previewText(item.preview) || `[${item.content_type || t("内容")}]`;
 }
 
+/** The line under the preview: what kind of clip it is, and whether it is kept.
+ *
+ * The kind is left out when the line above already says it.  An image has no
+ * text of its own, so the sidecar's "[Image]" previews as 图片 — the same word
+ * the kind gives, on the line directly above this one.  Nothing is lost by
+ * staying quiet there: the word is still on screen, and the reader is already
+ * looking at it.
+ */
+function typeLine(item: HistoryItem) {
+  const label = typeLabel(item);
+  return [label === previewLabel(item) ? "" : label, item.pinned ? t("已收藏") : ""].filter(Boolean).join(" · ");
+}
+
 /** How many times a clip has been pasted back, as a badge worth showing.
  *
  * Nothing at zero: a badge saying "0 pastes" on every fresh clip is noise, and
@@ -3977,7 +3990,7 @@ async function translateText() {
         <!-- What this window is running, in the same words the About dialog uses.
              The framework it is built with is not the reader's business, and
              "Tauri Desktop · 1.0.0" read as a build stamp rather than a product. -->
-        <span v-if="state.status" class="muted small">{{ t("版本 {version}", { version: state.status.version }) }}</span>
+        <span v-if="state.status" class="note">{{ t("版本 {version}", { version: state.status.version }) }}</span>
         <!-- No window action here.  退出 belongs to the tray, and the window is
              decorated, so its title bar already carries minimize: a second
              control for the same thing was a duplicate of a title-bar button.
@@ -4044,7 +4057,7 @@ async function translateText() {
             </button>
           </div>
           <section class="history-list" :aria-label="t('历史记录')" :aria-busy="state.loading">
-            <div class="list-heading selection-toolbar">
+            <div class="list-heading">
               <label class="select-visible"><input type="checkbox" :aria-label="t('全选当前页')"
                 :checked="allSelected" :indeterminate="state.selectedIds.length > 0 && !allSelected"
                 :disabled="historyBusy || !visibleIds.length || visibleIds.length > 100"
@@ -4058,7 +4071,7 @@ async function translateText() {
                 <button class="icon-button" :aria-label="t('批量删除')" :title="t('批量删除')" :disabled="historyBusy || mergeBusy || !state.selectedIds.length" @click="batchDeleteIds = [...state.selectedIds]"><Trash2 :size="17" /></button>
               </div>
             </div>
-            <div v-if="state.loading && !state.history.length" class="empty empty--page" role="status"><RefreshCw class="spinning" :size="26" /><h2>{{ t("正在读取历史") }}</h2></div>
+            <div v-if="state.loading && !state.history.length" class="empty empty--page" role="status"><RefreshCw class="spinning" :size="36" /><h2>{{ t("正在读取历史") }}</h2></div>
             <div v-else-if="!state.history.length" class="empty empty--page">
               <History :size="36" />
               <!-- A search and a chip are different answers: when a chip is on,
@@ -4067,7 +4080,7 @@ async function translateText() {
               <h2 v-if="state.query">{{ t("没有匹配的记录") }}</h2>
               <h2 v-else-if="state.kind !== 'all'">{{ t("还没有{type}", { type: kindLabel(state.kind) }) }}</h2>
               <h2 v-else>{{ t("暂无历史记录") }}</h2>
-              <p class="muted">{{ state.kind !== 'all' ? t("换个过滤条件，或清除过滤查看全部内容。") : (native ? t('当前数据目录中没有可显示的记录') : t('桌面窗口连接后显示本地记录')) }}</p>
+              <p class="note">{{ state.kind !== 'all' ? t("换个过滤条件，或清除过滤查看全部内容。") : (native ? t('当前数据目录中没有可显示的记录') : t('桌面窗口连接后显示本地记录')) }}</p>
             </div>
             <article v-for="(item, index) in state.history" :key="item.id" class="history-row"
               :class="{ 'history-row--kbd': state.kbdIndex === index }"
@@ -4079,7 +4092,7 @@ async function translateText() {
                 :disabled="historyBusy || !item.id.trim() || (!state.selectedIds.includes(item.id) && state.selectedIds.length >= 100)"
                 @change="store.select(item.id, ($event.target as HTMLInputElement).checked)" /></label>
               <div class="history-content"><p>{{ previewLabel(item) }}</p>
-                <span class="muted small">{{ typeLabel(item) }}<span v-if="item.pinned"> · {{ t("已收藏") }}</span></span>
+                <span v-if="typeLine(item)" class="note">{{ typeLine(item) }}</span>
                 <span class="history-meta">
                   <span v-if="item.source_app" class="badge" :title="item.source_app">{{ item.source_app }}</span>
                   <span v-if="item.source_title" class="history-source-title" :title="item.source_title">{{ item.source_title }}</span>
@@ -4201,13 +4214,13 @@ async function translateText() {
                 <label v-for="tool in aiTools" :key="tool.key" class="setting setting--check">
                   <span class="setting-control"><input type="checkbox" :value="tool.key" v-model="aiEnabled" /><span>{{ tool.label }}</span></span>
                 </label>
-                <p v-if="!aiProfilesLoaded" class="muted small setting-block">{{ t("正在读取本机可用的 AI 工具…") }}</p>
-                <p v-else-if="!aiTools.length" class="muted small setting-block">{{ t("本机没有可同步的 AI 工具。") }}</p>
+                <p v-if="!aiProfilesLoaded" class="note setting-block setting-block--card">{{ t("正在读取本机可用的 AI 工具…") }}</p>
+                <p v-else-if="!aiTools.length" class="note setting-block setting-block--card">{{ t("本机没有可同步的 AI 工具。") }}</p>
                 <label class="setting">
                   <span class="setting-name">{{ t("自定义配置路径") }}</span>
                   <span class="setting-control"><textarea v-model="aiCustomPaths" rows="3" :placeholder="t('每行一个路径')"></textarea></span>
                 </label>
-                <p class="muted small setting-note">{{ t("勾选要同步的 AI 工具；工具不认识的目录写在下面，每行一个路径。") }}</p>
+                <p class="note setting-note">{{ t("勾选要同步的 AI 工具；工具不认识的目录写在下面，每行一个路径。") }}</p>
                 <div class="setting-actions setting-actions--card">
                   <button type="button" class="primary" :disabled="aiProfilesBusy || !aiProfilesLoaded" @click="saveAiProfiles"><Save :size="16" />{{ t("保存 AI 配置") }}</button>
                   <span v-if="aiProfilesDirty" class="settings-save-status" role="status">{{ t("有未保存的更改") }}</span>
@@ -4228,8 +4241,11 @@ async function translateText() {
                 <div class="setting-actions setting-actions--card">
                   <button type="button" @click="refreshAiLocal"><RefreshCw :size="16" />{{ t("读取本机配置") }}</button>
                 </div>
-                <p v-if="aiMessage" class="muted setting-block">{{ aiMessage }}</p>
-                <p v-if="aiLocalItems.length" class="setting-block"><input v-model="aiLocalQuery" type="search" class="ai-filter" :aria-label="t('搜索本机配置')" :placeholder="t('筛选路径…')" /></p>
+                <p v-if="aiMessage" class="muted setting-block setting-block--card">{{ aiMessage }}</p>
+                <!-- A `div`, not a `p`: what it holds is a form control, and a
+                     field inside a paragraph is markup the browser has to close
+                     for itself — which is where the list's indent came from. -->
+                <div v-if="aiLocalItems.length" class="setting-block"><input v-model="aiLocalQuery" type="search" class="ai-filter" :aria-label="t('搜索本机配置')" :placeholder="t('筛选路径…')" /></div>
                 <ul v-if="aiLocalPageItems.length" class="ai-local-list setting-block">
                   <!-- A header wherever the tool changes, including at the top of a
                        page that continues one: the rows are paged, not the groups, so
@@ -4251,16 +4267,16 @@ async function translateText() {
                            the row itself: a folder the tree built from its children
                            is opened by its name, and nothing here has a file to edit
                            or a listed folder to move. -->
-                      <button v-if="row.entry && !row.isDir" type="button" class="icon-button" :disabled="aiMutationBusy" :aria-label="t('编辑 {path}', { path: aiRowPath(row) })" :title="t('编辑')" @click="requestAiRead(aiRowItem(row))"><FileUp :size="15" /></button>
-                      <button type="button" class="icon-button" :aria-label="t('打开 {path}', { path: aiRowPath(row) })" :title="t('打开')" @click="openAiLocal(aiRowItem(row))"><LogOut :size="15" /></button>
-                      <button v-if="row.entry" type="button" class="icon-button" :disabled="aiMutationBusy" :aria-label="t('移入回收区 {path}', { path: aiRowPath(row) })" :title="t('移入回收区')" @click="aiTrashItem = aiRowItem(row)"><Trash2 :size="15" /></button>
+                      <button v-if="row.entry && !row.isDir" type="button" class="icon-button icon-button--sm" :disabled="aiMutationBusy" :aria-label="t('编辑 {path}', { path: aiRowPath(row) })" :title="t('编辑')" @click="requestAiRead(aiRowItem(row))"><FileUp :size="15" /></button>
+                      <button type="button" class="icon-button icon-button--sm" :aria-label="t('打开 {path}', { path: aiRowPath(row) })" :title="t('打开')" @click="openAiLocal(aiRowItem(row))"><LogOut :size="15" /></button>
+                      <button v-if="row.entry" type="button" class="icon-button icon-button--sm" :disabled="aiMutationBusy" :aria-label="t('移入回收区 {path}', { path: aiRowPath(row) })" :title="t('移入回收区')" @click="aiTrashItem = aiRowItem(row)"><Trash2 :size="15" /></button>
                     </li>
                   </template>
                 </ul>
                 <!-- Says so rather than showing an empty list: a filter that matched
                      nothing and an inventory that is empty look identical otherwise. -->
-                <p v-else-if="aiLocalItems.length" class="muted small setting-block">{{ t("没有匹配的配置项") }}</p>
-                <nav v-if="aiLocalPageCount > 1" :aria-label="t('本地配置分页')" class="actions">
+                <p v-else-if="aiLocalItems.length" class="note setting-block">{{ t("没有匹配的配置项") }}</p>
+                <nav v-if="aiLocalPageCount > 1" :aria-label="t('本地配置分页')" class="pagination">
                   <button type="button" class="icon-button" :aria-label="t('上一页本地配置')" :title="t('上一页')" :disabled="aiLocalPage === 0" @click="aiLocalPage--"><ChevronLeft :size="16" /></button>
                   <span>{{ aiLocalPage + 1 }} / {{ aiLocalPageCount }}</span>
                   <button type="button" class="icon-button" :aria-label="t('下一页本地配置')" :title="t('下一页')" :disabled="aiLocalPage + 1 >= aiLocalPageCount" @click="aiLocalPage++"><ChevronRight :size="16" /></button>
@@ -4325,9 +4341,9 @@ async function translateText() {
                   </p>
                   <!-- The line the page exists for: how this machine and the
                        peer disagree, before anything is pulled. -->
-                  <p v-if="aiRemoteItems.length && aiLocalIndex" class="muted small setting-block" :class="{ 'ai-diff-ok': aiDiff.total === 0 }">{{ aiDiff.total === 0 ? t("与对方一致") : t("与对方不同：缺失 {missing}、对方较新 {remote}、本机较新 {local}", { missing: aiDiff.missing, remote: aiDiff.remote_newer, local: aiDiff.local_newer }) }}</p>
-                  <p v-else-if="aiRemoteItems.length" class="muted small setting-block">{{ t("尚未读取本机配置，暂时无法对比版本差异") }}</p>
-                  <p v-if="aiRemoteItems.length" class="setting-block"><input v-model="aiRemoteQuery" type="search" class="ai-filter" :aria-label="t('搜索远程配置')" :placeholder="t('筛选路径…')" /></p>
+                  <p v-if="aiRemoteItems.length && aiLocalIndex" class="note setting-block" :class="{ 'ai-diff-ok': aiDiff.total === 0 }">{{ aiDiff.total === 0 ? t("与对方一致") : t("与对方不同：缺失 {missing}、对方较新 {remote}、本机较新 {local}", { missing: aiDiff.missing, remote: aiDiff.remote_newer, local: aiDiff.local_newer }) }}</p>
+                  <p v-else-if="aiRemoteItems.length" class="note setting-block">{{ t("尚未读取本机配置，暂时无法对比版本差异") }}</p>
+                  <div v-if="aiRemoteItems.length" class="setting-block"><input v-model="aiRemoteQuery" type="search" class="ai-filter" :aria-label="t('搜索远程配置')" :placeholder="t('筛选路径…')" /></div>
                   <ul v-if="aiRemotePageItems.length" class="ai-local-list setting-block">
                     <template v-for="(row, index) in aiRemotePageItems" :key="row.key">
                       <li v-if="index === 0 || aiRemotePageItems[index - 1].tool !== row.tool" class="ai-group-head">
@@ -4354,18 +4370,18 @@ async function translateText() {
                              it, which is the one place they cannot see it from. -->
                         <span v-for="badge in aiFolderDiff(row)" :key="badge.state" class="ai-version" :class="`ai-version--${badge.state}`">{{ badge.label }}<span class="ai-version-count">{{ badge.count }}</span></span>
                         <span v-if="!row.isDir && aiRowDiff(row.entry) && aiRowDiff(row.entry) !== 'same'" class="ai-version" :class="`ai-version--${aiRowDiff(row.entry)}`">{{ aiRowDiffLabel(row.entry) }}</span>
-                        <button v-if="row.entry && !row.isDir" type="button" class="icon-button" :title="t('预览')" :aria-label="t('预览 {path}', { path: aiRowPath(row) })" @click="previewAiRemote(aiRowItem(row))"><Search :size="15" /></button>
-                        <button v-if="row.entry && !row.isDir" type="button" class="icon-button" :title="t('拉取')" :aria-label="t('拉取 {path}', { path: aiRowPath(row) })" @click="requestAiPull(aiRowItem(row))"><FileUp :size="15" /></button>
+                        <button v-if="row.entry && !row.isDir" type="button" class="icon-button icon-button--sm" :title="t('预览')" :aria-label="t('预览 {path}', { path: aiRowPath(row) })" @click="previewAiRemote(aiRowItem(row))"><Search :size="15" /></button>
+                        <button v-if="row.entry && !row.isDir" type="button" class="icon-button icon-button--sm" :title="t('拉取')" :aria-label="t('拉取 {path}', { path: aiRowPath(row) })" @click="requestAiPull(aiRowItem(row))"><FileUp :size="15" /></button>
                       </li>
                     </template>
                   </ul>
-                  <p v-else-if="aiRemoteItems.length" class="muted small setting-block">{{ t("没有匹配的配置项") }}</p>
+                  <p v-else-if="aiRemoteItems.length" class="note setting-block">{{ t("没有匹配的配置项") }}</p>
                   <!-- An empty list is two different states, and the reader needs
                        to be able to tell them apart: a peer that has never
                        answered, and a peer that answered with nothing. -->
-                  <p v-else-if="aiRemoteRead" class="muted small setting-block">{{ t("该设备还没有可同步的配置项") }}</p>
-                  <p v-else class="muted small setting-block">{{ t("尚未读取该设备的配置") }}</p>
-                  <p v-if="aiRemoteItems.length && aiRemoteLegacy" class="muted small setting-block" role="status">{{ t("该设备版本过旧，只能浏览，不能作为迁移来源") }}</p>
+                  <p v-else-if="aiRemoteRead" class="note setting-block">{{ t("该设备还没有可同步的配置项") }}</p>
+                  <p v-else class="note setting-block">{{ t("尚未读取该设备的配置") }}</p>
+                  <p v-if="aiRemoteItems.length && aiRemoteLegacy" class="note setting-block" role="status">{{ t("该设备版本过旧，只能浏览，不能作为迁移来源") }}</p>
                   <div v-if="aiRemoteItems.length" class="setting-actions">
                     <label class="sync-toggle">
                       <input type="checkbox" :aria-label="t('选择本页全部远程配置')" :checked="aiRemotePageAllSelected" :indeterminate="aiRemotePageSomeSelected" @change="toggleAiRemotePage()" />
@@ -4375,13 +4391,13 @@ async function translateText() {
                     <button type="button" :disabled="aiRemoteLegacy || !aiRemoteSelectedTargets.length" @click="requestAiPullBatch()"><FileUp :size="16" />{{ t("拉取选中项（{count}）", { count: aiRemoteSelectedTargets.length }) }}</button>
                     <button type="button" :disabled="!aiRemoteSelected.length" @click="aiRemoteSelected = []">{{ t("清除选择") }}</button>
                   </div>
-                  <nav v-if="aiRemotePageCount > 1" :aria-label="t('远程配置分页')" class="actions">
+                  <nav v-if="aiRemotePageCount > 1" :aria-label="t('远程配置分页')" class="pagination">
                     <button type="button" class="icon-button" :aria-label="t('上一页远程配置')" :title="t('上一页')" :disabled="aiRemotePage === 0" @click="aiRemotePage--"><ChevronLeft :size="16" /></button>
                     <span>{{ aiRemotePage + 1 }} / {{ aiRemotePageCount }}</span>
                     <button type="button" class="icon-button" :aria-label="t('下一页远程配置')" :title="t('下一页')" :disabled="aiRemotePage + 1 >= aiRemotePageCount" @click="aiRemotePage++"><ChevronRight :size="16" /></button>
                   </nav>
                 </div>
-                <p v-else class="muted small setting-block">{{ t("选择一台已配对设备后，可以对比并拉取它的 AI 工具配置。") }}</p>
+                <p v-else class="note setting-block setting-block--card">{{ t("选择一台已配对设备后，可以对比并拉取它的 AI 工具配置。") }}</p>
               </section>
           </div>
         </section>
@@ -4496,14 +4512,14 @@ async function translateText() {
                     <span class="setting-name">{{ t("公共中继地址") }}</span>
                     <span class="setting-control">
                       <textarea v-model="settings.relay_brokers" rows="3" :aria-label="t('公共中继地址')" :placeholder="t('每行一个地址')"></textarea>
-                      <span class="setting-hint">{{ t("兜底通道：私有中继不可达时启用，并作为镜像让落在不同中继的设备仍能互通。公共中继接受任何客户端，也绝不会拿到你的中继密码。") }}</span>
+                      <span class="note">{{ t("兜底通道：私有中继不可达时启用，并作为镜像让落在不同中继的设备仍能互通。公共中继接受任何客户端，也绝不会拿到你的中继密码。") }}</span>
                     </span>
                   </label>
                   <label class="setting">
                     <span class="setting-name">{{ t("私有中继地址") }}</span>
                     <span class="setting-control">
                       <textarea v-model="settings.relay_private_brokers" rows="3" :aria-label="t('私有中继地址')" :placeholder="t('每行一个地址')"></textarea>
-                      <span class="setting-hint">{{ t("主通道：剪贴板数据优先走这些端点，用下方用户名和密码登录。留空则只使用上面的公共中继。") }}</span>
+                      <span class="note">{{ t("主通道：剪贴板数据优先走这些端点，用下方用户名和密码登录。留空则只使用上面的公共中继。") }}</span>
                     </span>
                   </label>
                   <label class="setting">
@@ -4525,7 +4541,7 @@ async function translateText() {
                     <span class="setting-name">{{ t("单条消息大小上限") }}</span>
                     <span class="setting-control">
                       <input v-model.number="settings.relay_max_message_kb" :aria-label="t('单条消息大小上限')" type="number" :min="MIN_RELAY_MAX_MESSAGE_KB" :max="MAX_RELAY_MAX_MESSAGE_KB" step="1" />
-                      <span class="setting-hint">{{ t("单位 KB。填中继服务器允许的单条消息上限，传输文件时每个数据块都会按它切分——超出会被服务器直接丢弃。免费中继常见 64 KB，公共中继为 256 KB。修改后需重启生效。") }}</span>
+                      <span class="note">{{ t("单位 KB。填中继服务器允许的单条消息上限，传输文件时每个数据块都会按它切分——超出会被服务器直接丢弃。免费中继常见 64 KB，公共中继为 256 KB。修改后需重启生效。") }}</span>
                     </span>
                   </label>
                   <!-- The panel's own 测试 button.  Last in the card, because it
@@ -4537,14 +4553,14 @@ async function translateText() {
                     <button type="button" :disabled="relayTestBusy" @click="testRelayBrokers">
                       <PlugZap :size="15" />{{ relayTestBusy ? t("正在测试…") : t("测试中继连接") }}
                     </button>
-                    <p v-if="relayTestError" class="muted small setting-hint" role="alert">{{ relayTestError }}</p>
+                    <p v-if="relayTestError" class="note" role="alert">{{ relayTestError }}</p>
                     <div v-else-if="relayTestResult" class="relay-test" role="status">
-                      <p class="setting-hint">{{ t("{total} 个中继中 {reachable} 个可达", { total: relayTestResult.total, reachable: relayTestResult.reachable }) }}</p>
+                      <p class="note">{{ t("{total} 个中继中 {reachable} 个可达", { total: relayTestResult.total, reachable: relayTestResult.reachable }) }}</p>
                       <ul class="relay-test-list">
                         <li v-for="row in relayTestResult.results" :key="row.endpoint" :class="row.ok ? 'relay-test--ok' : 'relay-test--fail'">
                           <span class="relay-test-mark" aria-hidden="true">{{ row.ok ? "✓" : "✕" }}</span>
                           <span class="relay-test-endpoint">{{ row.endpoint }}</span>
-                          <span class="muted small">{{ relayRowNote(row) }}</span>
+                          <span class="note">{{ relayRowNote(row) }}</span>
                         </li>
                       </ul>
                     </div>
@@ -4573,7 +4589,7 @@ async function translateText() {
                      is this machine's history and this is the web page's. -->
                 <label class="setting">
                   <span class="setting-name">{{ t("显示历史条数") }}</span>
-                  <span class="setting-control"><input v-model.number="settings.web_history_limit" :aria-label="t('显示历史条数')" type="number" min="1" max="500" step="1" /><span class="setting-hint">{{ t("网页上显示最近多少条剪贴板记录（1–500）") }}</span></span>
+                  <span class="setting-control"><input v-model.number="settings.web_history_limit" :aria-label="t('显示历史条数')" type="number" min="1" max="500" step="1" /><span class="note">{{ t("网页上显示最近多少条剪贴板记录（1–500）") }}</span></span>
                 </label>
                 <fieldset>
                   <legend>{{ t("敏感内容过滤") }}</legend>
@@ -4612,7 +4628,7 @@ async function translateText() {
                     :checked="discoveryState ? !discoveryState.visible : false" :disabled="!discoveryAvailable || discoveryBusy"
                     @change="toggleVisibility(($event.target as HTMLInputElement).checked)" /><span>{{ t("隐藏本机（附近设备看不到此设备）") }}</span></span>
                 </label>
-                <p v-if="!discoveryAvailable" class="muted small setting-note">{{ t("同步引擎未运行，无法修改发现设置。") }}</p>
+                <p v-if="!discoveryAvailable" class="note setting-note">{{ t("同步引擎未运行，无法修改发现设置。") }}</p>
                 <!-- Who may reach this device is the same question the two rows
                      above ask, so the answer sits with them.  Unlike them it is
                      an ordinary saved setting, applied to the live chat engine
@@ -4620,7 +4636,7 @@ async function translateText() {
                 <label class="setting setting--check">
                   <span class="setting-control"><input v-model="settings.chat_open_to_all" type="checkbox" /><span>{{ t("任何人可直接发来消息和文件") }}</span></span>
                 </label>
-                <p class="muted small setting-note">{{ t("关掉以后，附近设备要先经过你同意，才能发消息和文件给你。") }}</p>
+                <p class="note setting-note">{{ t("关掉以后，附近设备要先经过你同意，才能发消息和文件给你。") }}</p>
               </section>
               <section v-show="showSettingsCard('advanced')" id="settings-advanced" class="settings-section">
                 <h2>{{ t("网络与高级") }}</h2>
@@ -4628,7 +4644,7 @@ async function translateText() {
                      than under the last row of the page: it is about every field
                      here, and it read as a footnote to whichever row happened to
                      be above it. -->
-                <p class="muted small setting-note">{{ t("部分更改将在重启后生效。") }}</p>
+                <p class="note setting-note">{{ t("部分更改将在重启后生效。") }}</p>
                 <!-- The legacy Advanced window split these fields into four
                      cards of its own.  They are the same four groups, named the
                      way it named them — the fields it held keep their own
@@ -4639,7 +4655,7 @@ async function translateText() {
                   <legend>{{ t("剪贴板与同步") }}</legend>
                   <label class="setting">
                     <span class="setting-name">{{ t("同步去抖（秒）") }}</span>
-                    <span class="setting-control"><input v-model.number="settings.sync_debounce" :aria-label="t('同步去抖（秒）')" type="number" min="0.05" max="10" step="0.05" /><span class="setting-hint">{{ t("两次发送同步之间的最小间隔（0.05–10 秒）") }}</span></span>
+                    <span class="setting-control"><input v-model.number="settings.sync_debounce" :aria-label="t('同步去抖（秒）')" type="number" min="0.05" max="10" step="0.05" /><span class="note">{{ t("两次发送同步之间的最小间隔（0.05–10 秒）") }}</span></span>
                   </label>
                   <label class="setting">
                     <span class="setting-name">{{ t("剪贴板轮询间隔（秒）") }}</span>
@@ -4664,21 +4680,21 @@ async function translateText() {
                   </label>
                   <label class="setting">
                     <span class="setting-name">{{ t("传输超时（秒）") }}</span>
-                    <span class="setting-control"><input v-model.number="settings.transfer_timeout" :aria-label="t('传输超时（秒）')" type="number" min="5" max="3600" step="1" /><span class="setting-hint">{{ t("文件传输超过此时间视为失效（5–3600 秒）") }}</span></span>
+                    <span class="setting-control"><input v-model.number="settings.transfer_timeout" :aria-label="t('传输超时（秒）')" type="number" min="5" max="3600" step="1" /><span class="note">{{ t("文件传输超过此时间视为失效（5–3600 秒）") }}</span></span>
                   </label>
                 </fieldset>
                 <fieldset>
                   <legend>{{ t("连接") }}</legend>
                   <label class="setting">
                     <span class="setting-name">{{ t("TCP 端口") }}</span>
-                    <span class="setting-control"><input v-model.number="settings.port" :aria-label="t('TCP 端口')" type="number" min="1024" max="65535" step="1" /><span class="setting-hint">{{ t("（1024–65535，需重启）") }}</span></span>
+                    <span class="setting-control"><input v-model.number="settings.port" :aria-label="t('TCP 端口')" type="number" min="1024" max="65535" step="1" /><span class="note">{{ t("（1024–65535，需重启）") }}</span></span>
                   </label>
                   <!-- This hint describes the service-type row, not the card, and
                        it used to sit above the port row instead — where it read as
                        a description of the card and explained the wrong field. -->
                   <label class="setting">
                     <span class="setting-name">{{ t("mDNS 服务类型") }}</span>
-                    <span class="setting-control"><input v-model="settings.service_type" :aria-label="t('mDNS 服务类型')" maxlength="128" /><span class="setting-hint">{{ t("通过 mDNS 广播的零配置服务类型。除非你知道自己在做什么，否则保持默认。重启后生效。") }}</span></span>
+                    <span class="setting-control"><input v-model="settings.service_type" :aria-label="t('mDNS 服务类型')" maxlength="128" /><span class="note">{{ t("通过 mDNS 广播的零配置服务类型。除非你知道自己在做什么，否则保持默认。重启后生效。") }}</span></span>
                   </label>
                   <label class="setting">
                     <span class="setting-name">{{ t("最大重连次数") }}</span>
@@ -4698,7 +4714,7 @@ async function translateText() {
                      invented for it here would be a guess rather than a port. -->
                 <label class="setting">
                   <span class="setting-name">{{ t("数据目录") }}</span>
-                  <span class="setting-control"><input v-model="settings.data_dir" class="setting-wide" :aria-label="t('数据目录')" maxlength="4096" :placeholder="t('留空使用默认')" /><span class="setting-hint">{{ t("配置 / 历史 / 收藏的存储位置。重启后生效。") }}</span></span>
+                  <span class="setting-control"><input v-model="settings.data_dir" class="setting-wide" :aria-label="t('数据目录')" maxlength="4096" :placeholder="t('留空使用默认')" /><span class="note">{{ t("配置 / 历史 / 收藏的存储位置。重启后生效。") }}</span></span>
                 </label>
               </section>
               <section v-show="showSettingsCard('translation')" id="settings-translation" class="settings-section">
@@ -4709,7 +4725,7 @@ async function translateText() {
                 </label>
                 <label class="setting">
                   <span class="setting-name">{{ t("翻译 API 密钥") }}</span>
-                  <span class="setting-control"><input v-model="translationKey" class="setting-wide" type="password" autocomplete="new-password" maxlength="4096" :aria-label="t('翻译 API 密钥')" :disabled="translationKeyBusy" /><span class="setting-hint">{{ settings.translate_key_set ? t('密钥已设置') : t('未设置密钥') }}</span></span>
+                  <span class="setting-control"><input v-model="translationKey" class="setting-wide" type="password" autocomplete="new-password" maxlength="4096" :aria-label="t('翻译 API 密钥')" :disabled="translationKeyBusy" /><span class="note">{{ settings.translate_key_set ? t('密钥已设置') : t('未设置密钥') }}</span></span>
                 </label>
                 <div class="setting-actions">
                   <button type="button" :disabled="translationKeyBusy || !translationKey.trim()" @click="saveTranslationKey(false)"><Save :size="16" />{{ t("保存密钥") }}</button>
@@ -4737,7 +4753,7 @@ async function translateText() {
                 <label class="setting setting--check">
                   <span class="setting-control"><input v-model="settings.encryption_enabled" :aria-label="t('启用端到端加密')" type="checkbox" /><span>{{ t("启用端到端加密") }}</span></span>
                 </label>
-                <p class="muted small setting-note">{{ t("加密设备之间的剪贴板、文件与聊天流量。设置密码后，重启应用需要输入密码解锁。") }}</p>
+                <p class="note setting-note">{{ t("加密设备之间的剪贴板、文件与聊天流量。设置密码后，重启应用需要输入密码解锁。") }}</p>
                 <label class="setting">
                   <span class="setting-name">{{ settings.password_set ? t("更换加密密码") : t("设置加密密码") }}</span>
                   <span class="setting-control"><input v-model="securityPassword" :aria-label="t('加密密码')" type="password" autocomplete="new-password" maxlength="200" :disabled="securityBusy" /></span>
@@ -4749,14 +4765,14 @@ async function translateText() {
                 <ul v-if="securityPassword" class="password-rules setting-block">
                   <li v-for="[rule, met] in passwordRules" :key="rule" :class="{ met }">{{ rule }}</li>
                 </ul>
-                <p v-if="passwordMismatch" class="muted small setting-block">{{ t("两次输入的密码不一致。") }}</p>
-                <p class="muted small setting-note">{{ t("密码会随“保存设置”一起提交，并同时用作设备配对的通道密钥；剪贴板历史的密钥在重启后更新。") }}</p>
+                <p v-if="passwordMismatch" class="note setting-block">{{ t("两次输入的密码不一致。") }}</p>
+                <p class="note setting-note">{{ t("密码会随“保存设置”一起提交，并同时用作设备配对的通道密钥；剪贴板历史的密钥在重启后更新。") }}</p>
                 <p class="muted setting-block">{{ settings.password_set ? t("已设置加密密码") : t("未设置加密密码") }}</p>
                 <div v-if="settings.password_set" class="setting-actions">
                   <button type="button" class="danger-outline" :disabled="securityBusy" @click="clearPasswordOpen = true"><Trash2 :size="16" />{{ t("清除加密密码") }}</button>
                 </div>
                 <h3>{{ t("危险区域") }}</h3>
-                <p class="muted small setting-note">{{ t("恢复出厂设置会删除全部历史、收藏、配对和设备身份，并重新启动应用。此操作无法撤销。") }}</p>
+                <p class="note setting-note">{{ t("恢复出厂设置会删除全部历史、收藏、配对和设备身份，并重新启动应用。此操作无法撤销。") }}</p>
                 <div class="setting-actions setting-actions--card">
                   <button type="button" class="danger-outline" :disabled="securityBusy" @click="factoryResetOpen = true"><Trash2 :size="16" />{{ t("恢复出厂设置") }}</button>
                 </div>
@@ -4779,13 +4795,13 @@ async function translateText() {
                 <!-- The list had no name and no way to ask it again: the refresh
                      button sat in the row of create/export actions, several
                      blocks above the list it refreshes. -->
-                <div class="setting-heading">
+                <div class="card-sub card-sub--row">
                   <h3>{{ t("可用备份") }}</h3>
                   <button type="button" class="icon-button" :title="t('刷新备份')" :aria-label="t('刷新备份')" @click="refreshBackupsNow"><RefreshCw :size="17" /></button>
                 </div>
                 <ul v-if="backups.length" class="setting-block backup-list"><li v-for="item in backups" :key="String(item.path)">
                   <span class="backup-name">{{ item.filename || item.path }}</span>
-                  <span class="muted small">{{ backupMeta(item) }}</span>
+                  <span class="note">{{ backupMeta(item) }}</span>
                   <!-- One button per row would otherwise be one repeated label
                        to a screen reader; the name says which backup this one
                        restores. -->
@@ -4800,7 +4816,7 @@ async function translateText() {
                     :disabled="autoUpdateCheckBusy" :aria-label="t('自动检查更新')"
                     @change="toggleAutoUpdateCheck(($event.target as HTMLInputElement).checked)" /><span>{{ t("自动检查更新") }}</span></span>
                 </label>
-                <p class="muted small setting-note">{{ t("每约 6 小时检查一次 GitHub 是否有新版本；关闭后后台不再发起任何更新请求。") }}</p>
+                <p class="note setting-note">{{ t("每约 6 小时检查一次 GitHub 是否有新版本；关闭后后台不再发起任何更新请求。") }}</p>
                 <div class="setting-actions setting-actions--card">
                   <button type="button" :disabled="!updateAvailableForUi || updateChecking
                       || updateState.phase === 'downloading' || updateState.phase === 'installing'"
@@ -4821,7 +4837,7 @@ async function translateText() {
                 <p v-if="updateState.phase === 'installing'" class="update-available setting-block setting-block--card" role="status">{{ t("正在安装更新，完成后应用会自动重启。") }}</p>
                 <template v-if="updateState.phase === 'ready'">
                   <p class="update-available setting-block setting-block--card" role="status">{{ t("新版本 {version} 已就绪", { version: updateState.version }) }}</p>
-                  <p v-if="!updateInstallable" class="muted small setting-note">{{ t("请退出当前应用，然后用下方文件替换旧版本。剪贴板历史与设备仍保留在本机。") }}</p>
+                  <p v-if="!updateInstallable" class="note setting-note">{{ t("请退出当前应用，然后用下方文件替换旧版本。剪贴板历史与设备仍保留在本机。") }}</p>
                   <p class="update-ready-path selectable setting-block">{{ updateState.path }}</p>
                   <div class="setting-actions setting-actions--card">
                     <!-- A blob that arrived from a peer is staged here and checked
@@ -4836,8 +4852,8 @@ async function translateText() {
                 </template>
                 <p v-if="updateState.phase === 'failed'" class="update-failed setting-block setting-block--card" role="alert">
                   {{ t("更新失败") }}{{ updateState.error ? '：' + updateState.error : '' }}</p>
-                <p v-if="updateInstallable" class="muted small setting-note">{{ t("下载并安装最新版本，完成后应用会自动重启。") }}</p>
-                <p v-else class="muted small setting-note">{{ t("自动下载最新版本，下载完成后提示你手动替换旧版本。") }}</p>
+                <p v-if="updateInstallable" class="note setting-note">{{ t("下载并安装最新版本，完成后应用会自动重启。") }}</p>
+                <p v-else class="note setting-note">{{ t("自动下载最新版本，下载完成后提示你手动替换旧版本。") }}</p>
               </section>
               <section v-show="showSettingsCard('diagnostics')" id="settings-diagnostics" class="settings-section">
                 <h2>{{ t("诊断与维护") }}</h2>
@@ -4889,7 +4905,7 @@ async function translateText() {
                    so the sentence is written once, here, and the row button is
                    described by it — a title on a disabled control is not read
                    everywhere, and the row is where the reader is looking. -->
-              <span v-if="devicesEngineStopped" id="devices-engine-note" class="muted small">{{ t("同步引擎未运行，推送文本与发送网址不可用。") }}</span>
+              <span v-if="devicesEngineStopped" id="devices-engine-note" class="note">{{ t("同步引擎未运行，推送文本与发送网址不可用。") }}</span>
               <button :aria-label="t('推送文本')" :title="t('推送文本到剪贴板并同步')" :disabled="busy || !pushTextAvailable" @click="openPushText"><SendHorizontal :size="17" />{{ t("推送文本") }}</button>
               <button class="icon-button" :aria-label="t('查看证书指纹')" :title="t('证书指纹')" :disabled="busy" @click="showCertificates"><Fingerprint :size="18" /></button>
               <button class="icon-button" :aria-label="t('刷新设备')" :title="t('刷新设备')" :disabled="busy" @click="refreshDevices"><RefreshCw :size="18" :class="{ spinning: state.refreshing }" /></button>
@@ -4898,7 +4914,7 @@ async function translateText() {
             <article v-for="device in activeDevices" :key="device.id" class="device-row"
               @contextmenu.prevent="deviceMenu($event, device)">
               <Monitor :size="25" class="device-icon" />
-              <div class="device-identity"><h2>{{ device.name }}</h2><span class="muted small">{{ device.id }}</span></div>
+              <div class="device-identity"><h2>{{ device.name }}</h2><span class="note">{{ device.id }}</span></div>
               <!-- A device paired by internet code gets its own set, because
                    almost every button in the other one names something a code
                    pairing does not have: no certificate to revoke, no address
@@ -4952,8 +4968,8 @@ async function translateText() {
                 <button v-if="device.update_fetchable" class="icon-button" :aria-label="t('获取更新')" :title="t('从该设备获取新版本安装包并安装')" :disabled="busy || !!fetchBusyId" @click="fetchDeviceUpdate(device)"><Download :size="18" :class="{ spinning: fetchBusyId === device.id }" /></button>
                 <button class="icon-button" :aria-label="t('移除设备')" :title="t('移除设备')" :disabled="busy" @click="forgetDevice = device"><Trash2 :size="18" /></button>
               </div>
-              <p v-if="probeResults[device.id]" class="muted small device-full" role="status">{{ t("连接测试：") }}{{ probeLabel(probeResults[device.id]) }}</p>
-              <p v-if="updateNotes[device.id]" class="muted small device-full" role="status">{{ updateNotes[device.id] }}</p>
+              <p v-if="probeResults[device.id]" class="note device-full" role="status">{{ t("连接测试：") }}{{ probeLabel(probeResults[device.id]) }}</p>
+              <p v-if="updateNotes[device.id]" class="note device-full" role="status">{{ updateNotes[device.id] }}</p>
               <!-- The chips under the name, one per route rather than one
                    sentence for both.  A paired-and-online pair of words named a
                    state without
@@ -5007,7 +5023,7 @@ async function translateText() {
               <div v-if="pairingPending(device)" class="pairing-controls">
                 <p v-if="device.pairing_code">{{ t("配对码：") }}<strong>{{ device.pairing_code }}</strong></p>
                 <p v-if="device.sas">{{ t("安全代码：") }}<strong>{{ device.sas }}</strong></p>
-                <p class="muted small">{{ t("请核对两台设备上的代码，仅在一致时确认。") }}</p>
+                <p class="note">{{ t("请核对两台设备上的代码，仅在一致时确认。") }}</p>
                 <div class="pairing-actions">
                   <button :disabled="busy || !device.pairing_code || device.pairing_status === 'confirmed_waiting'" @click="store.confirmPairing(device)"><Check :size="17" />{{ t("确认配对") }}</button>
                   <button :disabled="busy" @click="store.rejectPairing(device)"><X :size="17" />{{ t("拒绝") }}</button>
@@ -5019,10 +5035,10 @@ async function translateText() {
                  question of their own, and the two ways a device that is not on
                  this network becomes one are that question and have tabs. -->
             <section v-if="archivedDevices.length" class="archived-devices">
-              <h2 class="muted small">{{ t("已移除的设备") }}</h2>
+              <h2 class="card-sub">{{ t("已移除的设备") }}</h2>
               <article v-for="device in archivedDevices" :key="device.id" class="device-row">
                 <Monitor :size="25" class="device-icon" />
-                <div class="device-identity"><h2>{{ device.name }}</h2><span class="muted small">{{ device.id }}</span></div>
+                <div class="device-identity"><h2>{{ device.name }}</h2><span class="note">{{ device.id }}</span></div>
                 <div class="row-actions">
                   <button :disabled="busy" @click="store.restore(device)"><RotateCcw :size="17" />{{ t("恢复") }}</button>
                   <button class="danger-outline" :disabled="busy" @click="purgeDevice = device"><Trash2 :size="17" />{{ t("彻底删除") }}</button>
@@ -5051,9 +5067,9 @@ async function translateText() {
                    answered, its list stayed empty, and the only way to find out
                    was the settings page, which carries the same switch under
                    another name. -->
-              <div class="internet-head">
+              <div class="internet-head card-head">
                 <h2>{{ t("互联网配对") }}</h2>
-                <div class="internet-head-actions">
+                <div class="internet-head-actions card-head-actions">
                   <!-- Unconditional, and outside the relay-state line below:
                        that line only exists once the relay has reported a state,
                        and "the relay has not reported" is exactly when a reader
@@ -5068,7 +5084,7 @@ async function translateText() {
                   </label>
                 </div>
               </div>
-              <p class="muted small setting-note">{{ t("关闭后设备之间不再通过中继配对或同步，剪贴板也不离开局域网；这与设置页里的同名开关是同一个设置。") }}</p>
+              <p class="note setting-note">{{ t("关闭后设备之间不再通过中继配对或同步，剪贴板也不离开局域网；这与设置页里的同名开关是同一个设置。") }}</p>
               <!-- This machine's own link to the relay, above the peers rather
                    than beside them.  Every other 在线 in this card is the
                    relay's view of *another* device, so when our link is down
@@ -5077,7 +5093,7 @@ async function translateText() {
                    for that reason. -->
               <p v-if="internetPairingEnabled && relayState" class="setting-block setting-block--card relay-state" :class="`relay-state--${relayState}`">
                 <Activity :size="14" />{{ t("本机中继") }}：<strong>{{ relayStateLabel }}</strong>
-                <span v-if="relayState !== 'online' && relayState !== 'connecting'" class="muted small">{{ t("对方在线与否以中继连接为准；本机中继不可用时，所有设备都会显示为离线。") }}</span>
+                <span v-if="relayState !== 'online' && relayState !== 'connecting'" class="note">{{ t("对方在线与否以中继连接为准；本机中继不可用时，所有设备都会显示为离线。") }}</span>
               </p>
               <!-- One act, two machines, and the card drew it as two unrelated
                    rows — a button pair, then a labelled text box — so a reader
@@ -5087,7 +5103,7 @@ async function translateText() {
               <div class="pair-grid">
                 <section class="pair-half">
                   <h3 class="pair-half-title"><Link :size="15" />{{ t("本机配对码") }}</h3>
-                  <p class="muted small">{{ t("把这串码给对方，让它在自己的设备上输入。") }}</p>
+                  <p class="note">{{ t("把这串码给对方，让它在自己的设备上输入。") }}</p>
                   <p v-if="internetPairing.generated_code" class="pair-code">
                     <code>{{ internetPairing.generated_code }}</code>
                     <button type="button" class="icon-button" :title="t('复制')" :aria-label="t('复制配对码')"
@@ -5102,7 +5118,7 @@ async function translateText() {
                 </section>
                 <section class="pair-half">
                   <h3 class="pair-half-title"><Globe :size="15" />{{ t("输入对方配对码") }}</h3>
-                  <p class="muted small">{{ t("对方生成了一串码，输在这里提交，两台设备即通过中继配对。") }}</p>
+                  <p class="note">{{ t("对方生成了一串码，输在这里提交，两台设备即通过中继配对。") }}</p>
                   <!-- The field shows the code in the shape this machine generates
                        one — upper case, four at a time — and takes a paste in any
                        shape of it.  A plain text box let a reader type the code
@@ -5138,7 +5154,7 @@ async function translateText() {
                     </span>
                     <button type="button" class="text-button" @click="unpairInternet(row.peer_id)">{{ t("撤销") }}</button>
                   </div>
-                  <p class="muted small">{{ t("配对码已提交，对方通过中继确认后即会出现在上方设备列表中。") }}</p>
+                  <p class="note">{{ t("配对码已提交，对方通过中继确认后即会出现在上方设备列表中。") }}</p>
                 </li>
               </ul>
               <!-- The paired devices, drawn as the rows on the other tab are —
@@ -5147,10 +5163,10 @@ async function translateText() {
                    a bare 在线 beside them, which is the shape the device list
                    deliberately stopped using: a paired device is a device, and
                    it reads as one in both places now. -->
-              <div class="internet-peers-head">
+              <div class="internet-peers-head card-sub card-sub--row">
                 <h3>{{ t("已配对的设备") }}</h3>
-                <span class="muted small">{{ t("待投递消息：") }}{{ delivery.total }}
-                  <button type="button" class="icon-button" :title="t('刷新投递状态')" :aria-label="t('刷新投递状态')" @click="refreshDeliveryNow"><RefreshCw :size="15" /></button>
+                <span class="note">{{ t("待投递消息：") }}{{ delivery.total }}
+                  <button type="button" class="icon-button icon-button--sm" :title="t('刷新投递状态')" :aria-label="t('刷新投递状态')" @click="refreshDeliveryNow"><RefreshCw :size="15" /></button>
                 </span>
               </div>
               <ul class="peer-list peer-list--devices">
@@ -5158,7 +5174,7 @@ async function translateText() {
                   <Monitor :size="20" class="device-icon" />
                   <div class="device-identity">
                     <h2>{{ peer.alias || peer.name || peer.peer_id }}</h2>
-                    <span class="muted small">{{ peer.peer_id }}</span>
+                    <span class="note">{{ peer.peer_id }}</span>
                   </div>
                   <span class="device-channels">
                     <span class="channel channel--paired"><ShieldCheck :size="12" />{{ t("已配对") }}</span>
@@ -5191,7 +5207,7 @@ async function translateText() {
                   </div>
                 </li>
               </ul>
-              <p v-if="internetPairingEnabled && !internetPairing.peers.length" class="muted small setting-note">{{ t("还没有互联网配对的设备。上面两个方向任选一个，两台设备就能隔着网络配对。") }}</p>
+              <p v-if="internetPairingEnabled && !internetPairing.peers.length" class="note setting-note">{{ t("还没有互联网配对的设备。上面两个方向任选一个，两台设备就能隔着网络配对。") }}</p>
             </section>
           </template>
 
@@ -5217,7 +5233,7 @@ async function translateText() {
                   <button type="button" :disabled="companionBusy || !Number.isInteger(companionPort) || companionPort < 1 || companionPort > 65535" @click="configureCompanion(true)">{{ t("启动 / 应用端口") }}</button>
                   <button type="button" :disabled="companionBusy || (!companion.enabled && !companion.running)" @click="configureCompanion(false)">{{ t("停止服务") }}</button>
                   <button type="button" :disabled="companionBusy || !companion.running" @click="companionRotatePending = true"><RefreshCw :size="16" />{{ t("更换访问令牌") }}</button>
-                  <button type="button" class="danger" :disabled="companionBusy || !companion.running || !companion.access_url" @click="companionClearPending = true"><ShieldOff :size="16" />{{ t("清除访问令牌") }}</button>
+                  <button type="button" class="danger-outline" :disabled="companionBusy || !companion.running || !companion.access_url" @click="companionClearPending = true"><ShieldOff :size="16" />{{ t("清除访问令牌") }}</button>
                 </div>
                 <p v-if="companion.running && !companion.access_url" class="setting-block setting-block--card">{{ t("访问令牌已清除，任何能访问该端口的设备都可以直接连接") }}</p>
                 <label v-if="companion.running && (companion.access_url || companion.url)" class="setting">
@@ -5249,7 +5265,7 @@ async function translateText() {
              page, and the footer is the surface that stays on screen: a message
              about a pause started here, or about a page the user has since left,
              is still readable. -->
-        <span v-if="statusMessage()" class="muted small status-message" role="status">{{ statusMessage() }}</span>
+        <span v-if="statusMessage()" class="note status-message" role="status">{{ statusMessage() }}</span>
         <!-- The notice stack is placed against this bar rather than against the
              window: the stylesheet measures it from the bar's top edge, because
              the bar is the only element that knows where its own top edge is.
@@ -5279,7 +5295,7 @@ async function translateText() {
     <dialog ref="translateItemDialog" aria-labelledby="translate-item-title" class="modal" @close="translateItemOpen = false" @cancel="translateItemOpen = false">
       <h2 id="translate-item-title">{{ t("翻译记录") }}</h2>
       <pre class="translate-source" tabindex="0" :aria-label="t('记录原文')">{{ translateItemText }}</pre>
-      <p v-if="translateItemTruncated" class="muted small translate-truncated">{{ t("记录过长，只读取并翻译了前 {count} 个字符", { count: translateItemText.length }) }}</p>
+      <p v-if="translateItemTruncated" class="note translate-truncated">{{ t("记录过长，只读取并翻译了前 {count} 个字符", { count: translateItemText.length }) }}</p>
       <label>{{ t("源语言") }}<select v-model="translationSource" :aria-label="t('翻译源语言')"><option value="auto">{{ t("自动检测") }}</option><option v-for="[code, name] in translationLanguages" :key="code" :value="code">{{ name }}</option></select></label>
       <label>{{ t("目标语言") }}<select v-model="translationTarget" :aria-label="t('翻译目标语言')"><option v-for="[code, name] in translationLanguages" :key="code" :value="code">{{ name }}</option></select></label>
       <p v-if="translateItemResult" class="translation-result">{{ translateItemResult }}</p>
@@ -5305,7 +5321,7 @@ async function translateText() {
       <p v-if="logsBusy" class="muted">{{ t("正在读取日志…") }}</p>
       <pre v-else-if="shownLogLines.length" class="log-view" :aria-label="t('日志内容')">{{ shownLogLines.join("\n") }}</pre>
       <p v-else class="muted">{{ logView === "problems" ? t("没有需要排查的日志") : t("暂无日志") }}</p>
-      <p v-if="logExportMessage" role="status" class="muted small">{{ logExportMessage }}</p>
+      <p v-if="logExportMessage" role="status" class="note">{{ logExportMessage }}</p>
       <div class="modal-actions">
         <button type="button" :disabled="logsExporting" @click="exportLogs">
           <Save :size="17" />{{ logsExporting ? t("正在导出…") : t("导出日志…") }}
@@ -5319,8 +5335,8 @@ async function translateText() {
       <p v-if="qrBusy" class="muted">{{ t("正在生成二维码…") }}</p>
       <img v-else-if="qrImage" :src="qrImage" :alt="t('手机 Companion 二维码')" class="qr-image" width="220" height="220" />
       <p v-else class="muted" role="status">{{ qrMessage || t("二维码不可用") }}</p>
-      <p v-if="qrUrl" class="muted small selectable">{{ qrUrl }}</p>
-      <p v-if="qrShareMessage" role="status" class="muted small">{{ qrShareMessage }}</p>
+      <p v-if="qrUrl" class="note selectable">{{ qrUrl }}</p>
+      <p v-if="qrShareMessage" role="status" class="note">{{ qrShareMessage }}</p>
       <div class="modal-actions">
         <button type="button" :disabled="qrShareBusy" @click="shareFileToPhone">
           <SendHorizontal :size="17" />{{ qrShareBusy ? t("正在发送…") : t("发送文件到手机") }}
@@ -5333,7 +5349,7 @@ async function translateText() {
       <p class="about-version">ClipSync {{ state.status ? state.status.version : "…" }}</p>
       <p class="muted">{{ t("跨平台剪贴板共享，支持 Windows、macOS 和 Linux。") }}</p>
       <p class="muted">{{ t("在设备之间实时共享剪贴板内容与文件。") }}</p>
-      <p v-if="aboutMessage" role="status" class="muted small">{{ aboutMessage }}</p>
+      <p v-if="aboutMessage" role="status" class="note">{{ aboutMessage }}</p>
       <div class="modal-actions">
         <button type="button" :disabled="aboutBusy" @click="openAboutLink('homepage')"><Link :size="17" />{{ t("项目主页") }}</button>
         <button type="button" :disabled="aboutBusy" @click="openAboutLink('releases')"><Globe :size="17" />{{ t("最新版本") }}</button>
@@ -5345,7 +5361,7 @@ async function translateText() {
       <p v-if="diagnosticsBusy" class="muted">{{ t("正在检测…") }}</p>
       <template v-else-if="diagnosticsReport">
         <p role="status">{{ t("总体状态：") }}<strong :class="`diag-summary--${diagnosticsReport.summary}`">{{ diagnosticsSummaryLabel(diagnosticsReport.summary) }}</strong></p>
-        <p class="muted small">{{ diagnosticsOverview }}</p>
+        <p class="note">{{ diagnosticsOverview }}</p>
         <ul class="diag-list">
           <li v-for="group in diagnosticGroups" :key="group.id">
             <h3>{{ group.label }}<!-- The count and the verdict sit on the heading so a reader can
@@ -5354,15 +5370,15 @@ async function translateText() {
             <ul>
               <li v-for="item in group.items" :key="item.id" :class="`diag-${item.status}`">
                 <span class="diag-item"><span class="diag-mark" aria-hidden="true">{{ diagnosticGlyph(item.status) }}</span><span class="diag-label">{{ diagnosticLabel(item) }}</span>{{ diagnosticDetail(item) }}</span>
-                <span v-if="diagnosticHint(item)" class="muted small">{{ diagnosticHint(item) }}</span>
+                <span v-if="diagnosticHint(item)" class="note">{{ diagnosticHint(item) }}</span>
                 <button v-if="item.id === 'firewall' && item.status !== 'ok'" type="button" class="status-action" :disabled="diagnosticsRepairBusy" @click="repairDiagnostics('firewall')"><Wrench :size="14" />{{ t("修复防火墙") }}</button>
               </li>
             </ul>
           </li>
         </ul>
         <template v-if="permissionsRepairCheck">
-          <p class="muted small">{{ diagnosticsCheckText(permissionsRepairCheck) }}</p>
-          <p v-if="permissionsRepairCheck.guidance_text || permissionsRepairCheck.guidance" class="muted small">{{ permissionsRepairCheck.guidance_text || permissionsRepairCheck.guidance }}</p>
+          <p class="note">{{ diagnosticsCheckText(permissionsRepairCheck) }}</p>
+          <p v-if="permissionsRepairCheck.guidance_text || permissionsRepairCheck.guidance" class="note">{{ permissionsRepairCheck.guidance_text || permissionsRepairCheck.guidance }}</p>
           <div class="actions">
             <button type="button" :disabled="diagnosticsRepairBusy" @click="repairDiagnostics('local_network')"><Wrench :size="15" />{{ t("打开本地网络权限") }}</button>
           </div>
@@ -5398,7 +5414,7 @@ async function translateText() {
     <dialog ref="aiMigrateDialog" aria-labelledby="ai-migrate-title" class="modal" @close="aiMigrateOpen = false" @cancel="aiMigrateOpen = false">
       <button class="icon-button modal-close" :aria-label="t('关闭')" :title="t('关闭')" @click="aiMigrateDialog?.close()"><X :size="18" /></button>
       <h2 id="ai-migrate-title">{{ t("AI 配置迁移向导") }}</h2>
-      <p class="muted small">{{ t("把来源设备的配置与技能带到本机：先对比，再选冲突策略，最后一次拉取。") }}</p>
+      <p class="note">{{ t("把来源设备的配置与技能带到本机：先对比，再选冲突策略，最后一次拉取。") }}</p>
       <label class="setting">
         <span class="setting-name">{{ t("来源设备") }}</span>
         <span class="setting-control"><select v-model="aiPeerId" :aria-label="t('迁移来源设备')">
@@ -5406,14 +5422,14 @@ async function translateText() {
           <option v-for="device in state.devices.filter(device => device.paired && !device.relay)" :key="device.id" :value="device.id">{{ device.name }}{{ aiPeerIsLegacy(device.id) ? t("（只能浏览）") : "" }}</option>
         </select></span>
       </label>
-      <p v-if="!aiPeerId" class="muted small">{{ t("先选择一台已配对设备") }}</p>
+      <p v-if="!aiPeerId" class="note">{{ t("先选择一台已配对设备") }}</p>
       <template v-else>
-        <div v-if="aiRemoteWaiting" class="muted small">{{ t("已请求更新，等待对方返回库存") }}</div>
-        <p v-if="aiMigrateBlocked" class="muted small setting-note" role="status">{{ t("该设备版本过旧，只能浏览，不能作为迁移来源") }}</p>
+        <div v-if="aiRemoteWaiting" class="note">{{ t("已请求更新，等待对方返回库存") }}</div>
+        <p v-if="aiMigrateBlocked" class="note setting-note" role="status">{{ t("该设备版本过旧，只能浏览，不能作为迁移来源") }}</p>
         <label v-for="option in aiMigrateStrategies" :key="option.value" class="setting setting--check">
           <span class="setting-control"><input v-model="aiMigrateStrategy" type="radio" :value="option.value" :aria-label="option.label" /><span>{{ option.label }}</span></span>
         </label>
-        <p class="muted small setting-note">{{ aiMigrateSummary }}</p>
+        <p class="note setting-note">{{ aiMigrateSummary }}</p>
         <div class="modal-actions">
           <button @click="aiMigrateDialog?.close()">{{ t("取消") }}</button>
           <button class="primary" :disabled="aiMigrateBlocked || !aiMigrateTargets.length" @click="startAiMigration">{{ t("开始迁移（{count}）", { count: aiMigrateTargets.length }) }}</button>
@@ -5511,7 +5527,7 @@ async function translateText() {
     <dialog ref="renameDialog" aria-labelledby="rename-title" class="modal" @close="renameTarget = null">
       <button class="icon-button modal-close" :aria-label="t('关闭')" :title="t('关闭')" @click="renameTarget = null"><X :size="18" /></button>
       <h2 id="rename-title">{{ t("重命名设备") }}</h2>
-      <p class="muted small">{{ t("名称只保存在这台设备上，对方看到的仍是自己的名字。") }}</p>
+      <p class="note">{{ t("名称只保存在这台设备上，对方看到的仍是自己的名字。") }}</p>
       <input :value="renameValue" maxlength="512" :aria-label="t('设备名称')" autofocus
         @input="renameValue = ($event.target as HTMLInputElement).value" @keydown.enter.prevent="confirmRename" />
       <div class="modal-actions"><button @click="renameTarget = null">{{ t("取消") }}</button><button class="primary" :disabled="!renameValue.trim()" @click="confirmRename">{{ t("保存") }}</button></div>
@@ -5522,8 +5538,8 @@ async function translateText() {
     <dialog ref="certAlertDialog" aria-labelledby="cert-alert-title" class="modal" @cancel.prevent @close="certPromptOpen = false">
       <h2 id="cert-alert-title">{{ t("设备身份变更") }}</h2>
       <p>{{ t("设备“{name}”的证书已变更（可能已重装或重置）。", { name: certAlertName }) }}</p>
-      <p class="muted small">{{ t("这是您信任的设备吗？") }}</p>
-      <p v-if="!state.certAlert?.can_trust" class="muted small">{{ t("该设备需要再次连接后才能信任新证书。") }}</p>
+      <p class="note">{{ t("这是您信任的设备吗？") }}</p>
+      <p v-if="!state.certAlert?.can_trust" class="note">{{ t("该设备需要再次连接后才能信任新证书。") }}</p>
       <p v-if="state.error" class="modal-error small" role="alert">{{ state.error.message }}</p>
       <!-- Gated on `pending`, not on `busy`: the store's action refuses while a
            request is in flight, and a snapshot refresh must never hold up the
@@ -5536,12 +5552,12 @@ async function translateText() {
     <dialog ref="certDialog" aria-labelledby="cert-title" class="modal" @close="certificates = null" @cancel="certificates = null">
       <button class="icon-button modal-close" :aria-label="t('关闭')" :title="t('关闭')" @click="certDialog?.close()"><X :size="18" /></button>
       <h2 id="cert-title">{{ t("已固定证书指纹") }}</h2>
-      <p class="muted small">{{ t("同步与聊天只接受指纹一致的设备，发现不一致请撤销信任后重新配对。") }}</p>
+      <p class="note">{{ t("同步与聊天只接受指纹一致的设备，发现不一致请撤销信任后重新配对。") }}</p>
       <ul v-if="certificates?.length" class="cert-list">
         <li v-for="item in certificates" :key="item.device_id">
           <strong>{{ item.device_name || item.device_id }}</strong>
-          <span class="muted small fingerprint">{{ item.fingerprint_short || t("未固定") }}</span>
-          <span class="muted small">{{ item.paired ? t("已配对") : t("未配对") }}</span>
+          <span class="note fingerprint">{{ item.fingerprint_short || t("未固定") }}</span>
+          <span class="note">{{ item.paired ? t("已配对") : t("未配对") }}</span>
         </li>
       </ul>
       <p v-else class="muted">{{ t("暂无已固定的设备证书") }}</p>
@@ -5554,11 +5570,11 @@ async function translateText() {
       <button class="icon-button modal-close" :aria-label="t('关闭')" :title="t('关闭')" @click="languagePromptOpen = false"><X :size="18" /></button>
       <h2 id="language-title">ClipSync</h2>
       <p class="language-picker-lead">{{ t("选择语言 · Choose Language") }}</p>
-      <p class="muted small">{{ t("首次使用 ClipSync，请选择界面语言") }}<br />Please choose your interface language</p>
+      <p class="note">{{ t("首次使用 ClipSync，请选择界面语言") }}<br />Please choose your interface language</p>
       <div class="language-choices">
         <button v-for="choice in languageChoices" :key="choice.code" type="button" class="language-choice" @click="chooseLanguage(choice.code)">
           <strong>{{ choice.native }}</strong>
-          <span class="muted small">{{ choice.other }}</span>
+          <span class="note">{{ choice.other }}</span>
         </button>
       </div>
     </dialog>
@@ -5571,7 +5587,7 @@ async function translateText() {
       <div class="drop-veil-card">
         <FileDown :size="28" />
         <strong>{{ t("松开后在“文件传输”页选择设备") }}</strong>
-        <span class="muted small">{{ t("拖放不会自动发送，设备仍由您指定") }}</span>
+        <span class="note">{{ t("拖放不会自动发送，设备仍由您指定") }}</span>
       </div>
     </div>
     <!-- One menu for the whole window, after every dialog so it paints above

@@ -2129,9 +2129,11 @@ describe("history rendering", () => {
     setLocale("zh-CN");
     const zh = mountOn("history");
     await flushPromises();
-    // The paragraph, not the row: the kind chip beside it says 图片 too, as it
-    // does on the panel, and this case is about the preview line.
+    // The paragraph, not the row: this case is about the preview line, and the
+    // row is where the line under it lives -- which no longer repeats the word,
+    // because the preview said it first.
     expect(zh.find(".history-content p").text()).toBe("图片");
+    expect(zh.find(".history-content .note").exists()).toBe(false);
     zh.unmount();
 
     // The window renders in the saved language, so that is what the second

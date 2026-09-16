@@ -440,9 +440,9 @@ onUnmounted(() => { if (timer) clearInterval(timer); if (typingTimer) clearTimeo
          conversations, the devices are the first thing the page says, and the
          rail scrolls as one list rather than the device list scrolling past
          under it. -->
-    <div class="chat-layout">
+    <div class="chat-layout card card--flush">
       <aside class="chat-sessions">
-        <div class="chat-heading">
+        <div class="chat-heading card-head">
           <h2>{{ t("附近设备") }}</h2>
           <button class="icon-button" :aria-label="t('刷新聊天')" :title="t('刷新聊天')" @click="refreshNow"><RefreshCw :size="17" /></button>
         </div>
@@ -458,35 +458,35 @@ onUnmounted(() => { if (timer) clearInterval(timer); if (typingTimer) clearTimeo
                not — which for it is the relay's own view of the peer. -->
           <small>{{ reachable(device) ? nearbyRoute(device) : t("离线") }}</small>
         </button>
-        <p v-if="!nearby.length" class="chat-nearby-empty">{{ t("附近没有可聊天的设备。") }}</p>
+        <p v-if="!nearby.length" class="note chat-nearby-empty">{{ t("附近没有可聊天的设备。") }}</p>
 
-        <h3 class="chat-section">{{ t("会话") }}</h3>
+        <h3 class="chat-section card-sub">{{ t("会话") }}</h3>
         <div v-for="session in sessions" :key="session.session_id" class="chat-session"
           :class="{ active: selectedId === session.session_id }" role="button" tabindex="0"
           @click="select(session)" @keydown.enter="select(session)" @contextmenu.prevent="sessionMenu($event, session)">
           <MessageCircle :size="17" />
           <span><strong>{{ session.peer_name }}</strong><small>{{ label(session) }} · {{ session.last_preview || t("暂无消息") }}<template v-if="session.last_activity_ts"> · {{ shortTime(session.last_activity_ts) }}</template></small></span>
           <button class="icon-button" :aria-label="muted.includes(session.peer_id) ? t('取消静音') : t('静音')" :title="muted.includes(session.peer_id) ? t('取消静音') : t('静音')" @click.stop="toggleMute(session)"><BellOff v-if="muted.includes(session.peer_id)" :size="14" /><Bell v-else :size="14" /></button>
-          <b v-if="session.unread">{{ session.unread }}</b>
+          <b v-if="session.unread" class="badge badge--count">{{ session.unread }}</b>
         </div>
-        <div v-if="!sessions.length" class="empty"><MessageCircle :size="30" /><p>{{ t("暂无聊天会话") }}</p></div>
+        <div v-if="!sessions.length" class="empty"><MessageCircle :size="30" /><p class="note">{{ t("暂无聊天会话") }}</p></div>
       </aside>
 
       <div class="chat-conversation" v-if="selected">
-        <header class="chat-heading">
+        <header class="chat-heading card-head">
           <div><h2>{{ selected.peer_name }}</h2><small class="muted">{{ t("{label} · 指纹 {code}", { label: selected.peer_typing ? t('对方正在输入…') : label(selected), code: selected.fingerprint_short || t('未提供') }) }}</small></div>
           <button class="icon-button" :aria-label="t('关闭会话')" :title="t('关闭会话')" @click="close(selected)"><X :size="18" /></button>
         </header>
 
-        <div v-if="selected.status === 'invited'" class="chat-invite">
-          <strong>{{ t("{name} 邀请你聊天", { name: selected.peer_name }) }}</strong><span>{{ t("请核对指纹后决定。") }}</span>
+        <div v-if="selected.status === 'invited'" class="chat-invite strip strip--band">
+          <strong>{{ t("{name} 邀请你聊天", { name: selected.peer_name }) }}</strong><span class="note">{{ t("请核对指纹后决定。") }}</span>
           <button class="primary" @click="answer(selected, true)" :disabled="busy"><Check :size="16" />{{ t("接受") }}</button>
           <button @click="answer(selected, false)" :disabled="busy">{{ t("拒绝") }}</button>
         </div>
-        <div v-if="selected.status === 'inviting'" class="chat-invite">{{ t("正在等待对方接受邀请…") }}</div>
+        <div v-if="selected.status === 'inviting'" class="chat-invite strip strip--band note">{{ t("正在等待对方接受邀请…") }}</div>
 
         <div ref="messageList" class="chat-messages" aria-live="polite" @scroll.passive="trackScroll">
-          <div v-if="!messages.length" class="empty"><MessageCircle :size="28" /><p>{{ t("还没有消息") }}</p></div>
+          <div v-if="!messages.length" class="empty"><MessageCircle :size="28" /><p class="note">{{ t("还没有消息") }}</p></div>
           <article v-for="entry in messages" :key="entry.entry_id" class="chat-message"
             :class="{ outgoing: entry.outgoing, system: entry.kind === 'system' }"
             @contextmenu.prevent="messageMenu($event, entry)">
@@ -529,7 +529,7 @@ onUnmounted(() => { if (timer) clearInterval(timer); if (typingTimer) clearTimeo
       <div v-else class="empty chat-empty">
         <MessageCircle :size="42" />
         <h2>{{ t("选择一个会话") }}</h2>
-        <p>{{ t("或者点左边的设备，开始一段新对话。") }}</p>
+        <p class="note">{{ t("或者点左边的设备，开始一段新对话。") }}</p>
       </div>
     </div>
   </section>
@@ -539,17 +539,25 @@ onUnmounted(() => { if (timer) clearInterval(timer); if (typingTimer) clearTimeo
 /* The chat page is a page like any other inside `.content`: it takes the height
    it is given and scrolls its own message list.
 
-   Each part of that is a rule of its own here, because the height has to be
-   handed down the whole way.  `.chat-view` carries no floor of its own, so as a
-   flex item it refused to shrink below its content and the pane grew past the
-   window instead of the list scrolling inside it — a conversation of any real
-   length ran off the bottom of the page and took the composer with it.
-   `.chat-layout`'s single row was implicit (`auto`), so the conversation was
-   sized by its messages rather than by the window, and the `1fr` inside it had
-   no height left to divide.  Both are the same mistake one level apart: a height
-   taken from the content it was meant to bound. */
+   What is left here is only what the chat page has and no other page does — the
+   height handed down the whole way, the bubbles, the two file bars, the rail's
+   own indent inside the card.  Everything the page shares with the rest of the
+   window is worn as a class in the template: the two panes are the window's
+   `.card--flush` (a card that holds panes, so it pads none of them), both heads
+   are `.card-head`, the second section's label is `.card-sub`, the invite band
+   is a `.strip--band`, and the three sentences are `.note`.
+
+   Each part of the height is a rule of its own, because it has to be handed down
+   the whole way.  `.chat-view` carries no floor of its own, so as a flex item it
+   refused to shrink below its content and the pane grew past the window instead
+   of the list scrolling inside it — a conversation of any real length ran off
+   the bottom of the page and took the composer with it.  `.chat-layout`'s single
+   row was implicit (`auto`), so the conversation was sized by its messages
+   rather than by the window, and the `1fr` inside it had no height left to
+   divide.  Both are the same mistake one level apart: a height taken from the
+   content it was meant to bound. */
 .chat-view { flex: 1; min-height: 0; min-width: 0; display: flex; flex-direction: column; }
-.chat-layout { display: grid; grid-template-columns: minmax(220px, 280px) minmax(0, 1fr); grid-template-rows: minmax(0, 1fr); flex: 1; min-height: 560px; margin: 14px var(--page-gutter) 28px; border: 1px solid var(--line); border-radius: var(--radius-lg); overflow: hidden; }
+.chat-layout { display: grid; grid-template-columns: minmax(220px, 280px) minmax(0, 1fr); grid-template-rows: minmax(0, 1fr); flex: 1; min-height: 560px; margin: var(--card-gap) var(--page-gutter) 28px; }
 .chat-conversation { display: grid; grid-template-rows: auto auto minmax(0, 1fr) auto; min-width: 0; min-height: 0; }
 /* The four bands, pinned to their tracks rather than placed by document order.
    The invite band is optional — a session that is already active renders none —
@@ -558,34 +566,50 @@ onUnmounted(() => { if (timer) clearInterval(timer); if (typingTimer) clearTimeo
    instead of scrolling in the `1fr`, and the composer landed in the `1fr`, where
    a textarea that stretches to fill its row drew 125px of empty box under a
    44px field with the two send buttons stranded at its top. */
-.chat-conversation > .chat-heading { grid-row: 1; border-bottom: 1px solid var(--line); }
+.chat-conversation > .chat-heading { grid-row: 1; }
 .chat-conversation > .chat-invite { grid-row: 2; }
 .chat-conversation > .chat-messages { grid-row: 3; }
 .chat-conversation > .chat-composer { grid-row: 4; }
-.chat-heading { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 12px 16px; }
-.chat-heading h2 { margin: 0; font-size: 17px; }
+/* Both heads are the window's `.card-head`; what is theirs is only how far in
+   from the card's edge they start.  The rail's is inset by the rail's own 8px so
+   that its title, the rules under it and the rows' names all share one left
+   edge; the conversation's takes the messages' 16px. */
+.chat-sessions > .chat-heading { padding: 14px 8px 11px; }
+.chat-conversation > .chat-heading { padding: 14px 16px 11px; }
+.chat-heading > div { min-width: 0; }
+.chat-heading small { font-size: 12px; }
 /* The rail: the devices this machine could talk to, then the conversations it
    has.  One scrolling list rather than two, with the devices on top — reaching
    them was the whole complaint, and putting them under every conversation is
-   what made reaching them cost a scroll through the chats. */
+   what made reaching them cost a scroll through the chats.
+
+   It pads itself because the card around it pads nothing: the rows' names and
+   the rules between them come from here, not from the card. */
 .chat-sessions { border-right: 1px solid var(--line); padding: 8px; overflow: auto; }
-/* The heading of the second section.  Smaller than the rail's own 附近设备 and
-   quieter, because it labels what is under it rather than opening the page. */
-.chat-section { margin: 14px 0 2px; padding: 0 8px; font-size: 13px; font-weight: 600; color: var(--muted); }
-.chat-nearby-empty { margin: 2px 0 0; padding: 4px 8px 8px; color: var(--muted); font-size: 13px; }
+/* The heading of the second section, on the rail's own indent: it labels what is
+   under it rather than opening the page, so it is the card's part-heading with
+   the rail's 8px rather than the card's 22px. */
+.chat-section { padding: 14px 8px 2px; }
+.chat-nearby-empty { padding: 4px 8px 8px; }
+/* A row is a button, and a button with no hover is a row a reader cannot tell is
+   one.  Selected is the window's selected: the accent's own wash, and the
+   accent's own text so the name reads as chosen rather than merely filled. */
 .chat-session { width: 100%; display: flex; align-items: center; gap: 9px; padding: 11px 8px; text-align: left; border: 0; border-bottom: 1px solid var(--line); background: transparent; }
+.chat-session:hover:not(.active) { background: var(--surface); }
 .chat-session.active { background: var(--accent-soft); color: var(--accent-text); }
 .chat-session span { min-width: 0; flex: 1; display: grid; gap: 3px; }
 .chat-session small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--muted); }
-.chat-session b { background: var(--accent-solid); color: var(--on-accent); border-radius: 9px; padding: 2px 6px; font-size: 11px; }
 .chat-device { width: 100%; display: flex; align-items: center; gap: 8px; padding: 9px 8px; border: 0; border-bottom: 1px solid var(--line); background: transparent; text-align: left; }
+.chat-device:hover:not(:disabled) { background: var(--surface); }
 .chat-device span { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .chat-device small { color: var(--muted); }
 .chat-device:disabled { opacity: .5; cursor: not-allowed; }
-/* The band above the messages that offers the pairing, when there is one. */
-.chat-invite { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; padding: 12px 16px; background: var(--surface); }
+/* The band above the messages that offers the pairing, when there is one.  Its
+   shape is the window's `.strip--band`; all that is the invite's is the note
+   under the sentence taking a line of its own, so the two buttons sit together
+   rather than trailing the sentence. */
 .chat-invite span { flex: 1 1 100%; }
-.chat-messages { padding: 18px; overflow: auto; display: flex; flex-direction: column; gap: 9px; }
+.chat-messages { padding: 16px; overflow: auto; display: flex; flex-direction: column; gap: 9px; }
 /* A bubble: three lines of text and the time under them. */
 .chat-message { align-self: flex-start; max-width: 75%; padding: 9px 12px; border: 1px solid var(--line); border-radius: var(--radius-lg); display: grid; gap: 3px; overflow-wrap: anywhere; }
 .chat-message.outgoing { align-self: flex-end; background: var(--accent-soft); border-color: var(--accent-line); }

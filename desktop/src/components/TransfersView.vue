@@ -386,23 +386,23 @@ onUnmounted(() => {
     <!-- Where the internet-paired devices went, and why.  A picker that lists
          none of them and says nothing reads as a device that is missing rather
          than as a route this page does not have. -->
-    <p v-if="relayOnlyTargets.length" class="muted small transfers-relay-note" role="status">
+    <p v-if="relayOnlyTargets.length" class="note transfers-relay-note" role="status">
       {{ t("互联网配对的设备请到聊天页发送文件：中继单块上限更小，附件已按此切分，最大 5 MB。") }}
     </p>
     <!-- A drop answers the picker, not the target: the files it brought are
          shown with the one question it left open — which machine — and nothing
          goes out until that is answered.  The names are the OS's own paths' last
          segments, because that is what the reader recognises. -->
-    <div v-if="staged.length" class="staged-drop" role="status">
+    <div v-if="staged.length" class="staged-drop strip" role="status">
       <FileDown :size="17" />
       <div class="staged-drop-main">
         <strong>{{ t("已拖入 {count} 个文件", { count: staged.length }) }}</strong>
-        <span class="muted small staged-drop-names" :title="staged.join('\n')">{{ staged.map(baseName).join(" · ") }}</span>
+        <span class="note staged-drop-names" :title="staged.join('\n')">{{ staged.map(baseName).join(" · ") }}</span>
       </div>
       <button class="icon-button" :disabled="busy" :aria-label="t('清除')" :title="t('清除')" @click="staged = []"><X :size="16" /></button>
       <button class="primary" :disabled="busy || !target" @click="sendStaged"><FileUp :size="17" />{{ t("发送文件") }}</button>
     </div>
-    <p v-if="bulkMessage" class="muted small bulk-status" role="status">{{ bulkMessage }}</p>
+    <p v-if="bulkMessage" class="note bulk-status" role="status">{{ bulkMessage }}</p>
     <div class="speed-test" role="status">
       <span v-if="speed.state === 'sending'">{{ t("测速中 {sent}/{total}", { sent: speed.chunks_sent || 0, total: speed.total_chunks || 0 }) }}</span>
       <!-- The reading and the word for it, the way the panel put both beside
@@ -419,40 +419,40 @@ onUnmounted(() => {
          that *start* work belong, and every one of them needs a target first.
          It cancels every row at once; the sidecar reads the live list, so a
          transfer that arrived since the last poll is included. -->
-    <div class="transfer-list transfer-list--active">
-      <div class="transfer-list-header">
+    <div class="transfer-list transfer-list--active card">
+      <div class="transfer-list-header card-head">
         <h2>{{ t("进行中的传输") }}</h2>
         <button class="danger-outline" :disabled="busy || !active.length" @click="cancelAll"><X :size="17" />{{ t("全部取消") }}</button>
       </div>
-      <div v-if="!active.length" class="empty"><FileUp :size="34" /><p>{{ t("暂无进行中的传输") }}</p></div>
+      <div v-if="!active.length" class="empty"><FileUp :size="30" /><p class="note">{{ t("暂无进行中的传输") }}</p></div>
       <article v-for="item in active" :key="item.id" class="transfer-row">
-        <div class="transfer-main"><strong>{{ item.filename || t("未知文件") }}</strong><span class="muted small">{{ [item.direction === "up" ? t("发送") : t("接收"), activeStatus(item), formatSize(item.size), formatSpeed(item.speed), item.eta].filter(Boolean).join(" · ") }}</span></div>
+        <div class="transfer-main"><strong>{{ item.filename || t("未知文件") }}</strong><span class="note">{{ [item.direction === "up" ? t("发送") : t("接收"), activeStatus(item), formatSize(item.size), formatSpeed(item.speed), item.eta].filter(Boolean).join(" · ") }}</span></div>
         <progress :value="item.progress || 0" max="100" :aria-label="t('{name} 进度', { name: item.filename || t('未知文件') })" /><span class="small">{{ item.progress || 0 }}%</span>
         <template v-if="item.direction === 'down' && item.status === 'pending'">
-          <button class="icon-button" :disabled="busy" :aria-label="t('接受文件')" :title="t('接受文件')" @click="action('accept', item.id)"><Check :size="16" /></button>
-          <button class="icon-button" :disabled="busy" :aria-label="t('拒绝文件')" :title="t('拒绝文件')" @click="action('reject', item.id)"><X :size="16" /></button>
+          <button class="icon-button icon-button--sm" :disabled="busy" :aria-label="t('接受文件')" :title="t('接受文件')" @click="action('accept', item.id)"><Check :size="16" /></button>
+          <button class="icon-button icon-button--sm" :disabled="busy" :aria-label="t('拒绝文件')" :title="t('拒绝文件')" @click="action('reject', item.id)"><X :size="16" /></button>
         </template>
         <template v-else>
-          <button v-if="item.status === 'paused'" class="icon-button" :disabled="busy" :aria-label="t('恢复传输')" :title="t('恢复传输')" @click="action('resume', item.id)"><Play :size="16" /></button>
-          <button v-else-if="['sending', 'receiving', 'awaiting_retransmit'].includes(item.status)" class="icon-button" :disabled="busy" :aria-label="t('暂停传输')" :title="t('暂停传输')" @click="action('pause', item.id)"><Pause :size="16" /></button>
-          <button class="icon-button" :disabled="busy" :aria-label="t('取消传输')" :title="t('取消传输')" @click="action('cancel', item.id)"><X :size="16" /></button>
+          <button v-if="item.status === 'paused'" class="icon-button icon-button--sm" :disabled="busy" :aria-label="t('恢复传输')" :title="t('恢复传输')" @click="action('resume', item.id)"><Play :size="16" /></button>
+          <button v-else-if="['sending', 'receiving', 'awaiting_retransmit'].includes(item.status)" class="icon-button icon-button--sm" :disabled="busy" :aria-label="t('暂停传输')" :title="t('暂停传输')" @click="action('pause', item.id)"><Pause :size="16" /></button>
+          <button class="icon-button icon-button--sm" :disabled="busy" :aria-label="t('取消传输')" :title="t('取消传输')" @click="action('cancel', item.id)"><X :size="16" /></button>
         </template>
       </article>
     </div>
-    <div class="transfer-list transfer-list--history">
+    <div class="transfer-list transfer-list--history card">
       <!-- The header carries the one action that is about the whole list rather
            than a row: the legacy panel put its 清除 button in this same header,
            right-aligned, and it went on the history card only — a running
            transfer is not a record, so clearing records cannot touch one. -->
-      <div class="transfer-list-header">
+      <div class="transfer-list-header card-head">
         <h2>{{ t("传输历史") }}</h2>
         <button class="danger-outline" :disabled="busy || !history.length" @click="clearOpen = true"><Eraser :size="16" />{{ t("清除传输历史") }}</button>
       </div>
       <!-- The panel's own summary of the list, under the header it belonged to.
            It is stated once for the card rather than counted per row, which is
            what a user checks before clearing the list. -->
-      <p v-if="historyStats" class="muted small transfer-history-stats">{{ historyStats }}</p>
-      <div v-if="!history.length" class="empty"><p>{{ t("暂无传输记录") }}</p></div>
+      <p v-if="historyStats" class="note transfer-history-stats">{{ historyStats }}</p>
+      <div v-if="!history.length" class="empty"><FileUp :size="30" /><p class="note">{{ t("暂无传输记录") }}</p></div>
       <article v-for="item in history" :key="item.id" class="transfer-row" @contextmenu.prevent="rowMenu($event, item)">
         <!-- The panel's history rows put the reason in the badge, where the
              native row's slot beside the name used to say only that it was not
@@ -463,11 +463,11 @@ onUnmounted(() => {
         </div>
         <Check v-if="item.status === 'completed'" class="transfer-ok" :size="17" />
         <template v-if="item.direction !== 'up' && item.path">
-          <button class="icon-button" :disabled="busy" :aria-label="t('打开文件')" :title="t('打开文件')" @click="action('open', item.id)"><ExternalLink :size="16" /></button>
-          <button class="icon-button" :disabled="busy" :aria-label="t('打开所在文件夹')" :title="t('打开所在文件夹')" @click="action('reveal', item.id)"><FolderOpen :size="16" /></button>
+          <button class="icon-button icon-button--sm" :disabled="busy" :aria-label="t('打开文件')" :title="t('打开文件')" @click="action('open', item.id)"><ExternalLink :size="16" /></button>
+          <button class="icon-button icon-button--sm" :disabled="busy" :aria-label="t('打开所在文件夹')" :title="t('打开所在文件夹')" @click="action('reveal', item.id)"><FolderOpen :size="16" /></button>
         </template>
-        <button v-if="retryable(item)" class="icon-button" :aria-label="t('重试传输')" :title="t('重试传输')" @click="action('retry', item.id)"><RefreshCw :size="16" /></button>
-        <button class="icon-button" :aria-label="t('删除传输记录')" :title="t('删除传输记录')" @click="action('delete', item.id)"><Trash2 :size="16" /></button>
+        <button v-if="retryable(item)" class="icon-button icon-button--sm" :aria-label="t('重试传输')" :title="t('重试传输')" @click="action('retry', item.id)"><RefreshCw :size="16" /></button>
+        <button class="icon-button icon-button--sm" :aria-label="t('删除传输记录')" :title="t('删除传输记录')" @click="action('delete', item.id)"><Trash2 :size="16" /></button>
       </article>
     </div>
     <!-- The legacy panel asked before clearing (`transfers.clear_title` /
