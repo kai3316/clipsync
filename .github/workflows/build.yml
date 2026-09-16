@@ -54,13 +54,25 @@ jobs:
 
           What is new in this release:
 
-          - The reason the device list gives for a device on another platform
-            reads the same from either entry.  It was written from the sending
-            side -- "this machine's installer is no use to it" -- and the same
-            cause dims the 获取更新 entry whenever the device on the other
-            platform is the newer of the two, so a reader asking to fetch was
-            told what this machine had to send.  The sentence is about the pair
-            now: neither one's installer works on the other.
+          - The whole window is drawn to the standard the internet-pairing card
+            set.  That card was the one block with a title row and a hairline
+            under it, a heading of its own for each part, one shape for its
+            labels and one band for the sentences between blocks; every other
+            page had grown its own version of each, so the same idea looked
+            slightly different depending on which page you were on.  Cards,
+            title rows, part-headings, pills, small buttons, quiet lines and row
+            heights are now shared parts that each page asks for by name --
+            which is why this release touches every page without adding a
+            feature to any of them.
+
+          - As part of that: the peer list inside the internet-pairing card had
+            been indented 20px past the rest of that card; a transfer list's
+            heading drew a rule inside a header that already drew one, and the
+            favorites editor's heading was drawn at a page title's size with no
+            rule at all; a device row's toolbar left its lone refresh button in
+            the middle of the page whenever the sentence beside it was absent;
+            and an image with no text of its own said 图片 on two lines instead
+            of one.
 
           The device name is now published in the mDNS record, to the local
           network.  That is what lets devices show the name you chose rather
