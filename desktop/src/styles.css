@@ -323,15 +323,11 @@ button.primary { background: var(--accent-solid); color: var(--on-accent); }
 .device-channels { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
 /* One chip is one answer about one route.  A glyph and a word carry it — the
    colour only repeats what the word already says — because the two routes are
-   peers of each other and neither is the exception: 本地·在线 next to
-   互联网·未配对 is a normal state, not a fault. */
+   peers of each other and neither is the exception: 本地·在线 beside
+   互联网·离线 is a normal state, not a fault. */
 .channel { display: inline-flex; align-items: center; gap: 4px; padding: 2px 8px; border: 1px solid var(--line); border-radius: 999px; background: var(--surface); color: var(--muted); font-size: 12px; white-space: nowrap; }
 .channel svg { flex-shrink: 0; }
 .channel--paired, .channel--online { border-color: var(--accent-line); background: var(--accent-soft); color: var(--accent-text); }
-/* 未配对 is not a fault to be warned about — it is the ordinary state of a
-   device on this network — so it is set apart by being *unfilled* rather than
-   by a second warning colour. */
-.channel--unpaired { border-style: dashed; background: transparent; }
 .channel--pending { border-color: var(--accent-line); color: var(--accent-text); }
 /* A retry in flight is work being done, not the failure it will become if the
    attempts run out — so it is the one chip that is neither the accent's own
@@ -799,10 +795,17 @@ button.danger-outline:hover:not(:disabled),
    *exchange* — one code, made here or typed here — so the switch that governs
    the whole card sits with the title, and the two directions of the exchange
    sit side by side. */
-.internet-head { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px 12px; }
+/* The head is this card's title row, so it carries the title's own padding and
+   the rule under it.  As a div wrapping the h2 it matched none of
+   `.settings-section > h2` — that rule names a direct child — so the card's
+   first line sat on the card's top border, with the refresh button and the
+   switch drawn across it, and this was the one card whose title had no rule
+   under it either. */
+.internet-head { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px 12px; padding: 17px 0 11px; border-bottom: 1px solid var(--line); }
 /* The heading rule belongs to the title, so the row it heads keeps the rule and
-   the controls beside it sit on the title's own line. */
-.internet-head h2 { flex: 1 1 auto; min-width: 0; }
+   the controls beside it sit on the title's own line — at the size of a card
+   title, not of the page's own h2. */
+.internet-head h2 { flex: 1 1 auto; min-width: 0; font-size: 15px; }
 .internet-head-actions { display: flex; align-items: center; gap: 10px; }
 
 /* A switch rather than a checkbox: this one setting turns on everything else on
@@ -826,7 +829,10 @@ button.danger-outline:hover:not(:disabled),
 .pair-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 12px; margin-top: 14px; }
 .pair-half { display: grid; gap: 8px; align-content: start; padding: 14px; border: 1px solid var(--line); border-radius: var(--radius-lg); background: var(--surface); }
 .pair-half .setting-actions { margin: 0; }
-.pair-half-title { display: flex; align-items: center; gap: 7px; font-size: 14px; }
+/* `margin: 0` because the reset stops at h2, which leaves every h3 carrying the
+   browser's own 1em margins: in a grid whose gap is 8px that is 22px above and
+   below this title and 8px around everything under it. */
+.pair-half-title { display: flex; align-items: center; gap: 7px; margin: 0; font-size: 14px; }
 /* The code itself: monospace and letter-spaced, because it is read aloud to
    another person and typed from their screen, and every glyph that can be
    mistaken for its neighbour costs a pairing.  The generator already leaves the
@@ -839,8 +845,12 @@ button.danger-outline:hover:not(:disabled),
 /* The paired devices, in the shape the other tab's rows use — the same icon,
    the same identity block, the same chips and the same trailing actions, so a
    device reads as itself wherever it is listed. */
-.internet-peers-head { display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between; gap: 6px 12px; margin-top: 18px; }
-.internet-peers-head h3 { font-size: 14px; }
+/* The peers are a new part of the card rather than the tail of the exchange
+   above them, so this heading opens it with the same rule every other
+   part-heading in the page carries, and its own margins are zeroed for the same
+   reason the pair halves' are. */
+.internet-peers-head { display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between; gap: 6px 12px; margin-top: 16px; padding-top: 14px; border-top: 1px solid var(--line); }
+.internet-peers-head h3 { margin: 0; font-size: 14px; }
 .internet-peers-head .muted { display: inline-flex; align-items: center; gap: 4px; }
 .peer-list--devices > li { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 12px; }
 .peer-list--devices .device-identity { flex: 1 1 160px; min-width: 0; }
