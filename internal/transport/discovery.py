@@ -15,6 +15,7 @@ from collections.abc import Callable
 from zeroconf import ServiceBrowser, ServiceInfo, Zeroconf
 
 from internal.platform import decode_console_output
+from internal.system.updater import running_shell
 from internal.transport.ids import peer_id_hash
 from internal.transport.ids import sanitize_peer_str as _sanitize_peer_str
 from internal.version import __version__
@@ -310,7 +311,7 @@ class Discovery:
     def set_callbacks(self, on_found: Callable, on_lost: Callable):
         """Set callbacks for peer discovery events.
 
-        ``on_found(peer_id_hash, name, address, port, version, os, arch, named)``
+        ``on_found(peer_id_hash, name, address, port, version, os, arch, app, named)``
 
         and ``on_lost(peer_id_hash)``.  The trailing fields are what the peer
         advertised about itself; ``named`` says whether ``name`` is the one its
@@ -371,6 +372,14 @@ class Discovery:
             b"v": __version__.encode("utf-8"),
             b"os": platform.system().lower().encode("utf-8"),
             b"arch": (platform.machine() or "").lower().encode("utf-8"),
+            # Which of the two applications published from this repository this
+            # device is running.  Both are one release with two assets per
+            # platform, so (os, arch) does not say which one a peer can use --
+            # a Windows device here may be running either, and the installer
+            # for one is not installable by the other.  It travels with the
+            # same three fields for the same reason: the device list reads it
+            # to decide whether an update exchange is even possible.
+            b"app": running_shell().encode("utf-8"),
         }
         name = self._published_name()
         if name:
@@ -699,6 +708,10 @@ class Discovery:
         peer_version = props.get(b"v", b"").decode("utf-8", errors="replace")
         peer_os = props.get(b"os", b"").decode("utf-8", errors="replace")
         peer_arch = props.get(b"arch", b"").decode("utf-8", errors="replace")
+        # Which application the peer runs (see ``_service_props``).  Empty for
+        # any build that predates the field, which is not the same as this
+        # one's shell -- an unknown peer is one whose answer cannot be read.
+        peer_app = props.get(b"app", b"").decode("utf-8", errors="replace")
 
         # Collect every candidate address: all mDNS A/AAAA records plus the
         # alt_ip_N TXT records we advertise. mDNS may list them in any order
@@ -790,6 +803,7 @@ class Discovery:
                 existing["version"] = peer_version
                 existing["os"] = peer_os
                 existing["arch"] = peer_arch
+                existing["app"] = peer_app
             else:
                 self._known_peers[peer_id_hash] = {
                     "name": peer_display,
@@ -799,6 +813,7 @@ class Discovery:
                     "version": peer_version,
                     "os": peer_os,
                     "arch": peer_arch,
+                    "app": peer_app,
                 }
 
         logger.info(
@@ -812,12 +827,12 @@ class Discovery:
         with self._lock:
             on_found = self._on_peer_found
         if on_found:
-            # The advertised version/platform/arch travel with the sighting: the
-            # device list shows them, and a peer on an older build of this
-            # platform is what the update offer is for.  They were read above
-            # and kept here, but the callback dropped them, so every consumer
-            # had to be told the device existed and then ask a second time for
-            # what the first answer already carried.
+            # The advertised version/platform/arch/app travel with the sighting:
+            # the device list shows them, and a peer on an older build of this
+            # platform -- running this application -- is what the update offer is
+            # for.  They were read above and kept here, but the callback dropped
+            # them, so every consumer had to be told the device existed and then
+            # ask a second time for what the first answer already carried.
             on_found(
                 peer_id_hash,
                 peer_display,
@@ -826,6 +841,7 @@ class Discovery:
                 peer_version,
                 peer_os,
                 peer_arch,
+                peer_app,
                 named,
             )
 

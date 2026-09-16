@@ -13,6 +13,7 @@ from types import SimpleNamespace
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+from internal.system.updater import running_shell  # noqa: E402
 from internal.transport import discovery as discovery_module  # noqa: E402
 from internal.transport.discovery import Discovery  # noqa: E402
 
@@ -53,6 +54,10 @@ def test_a_chosen_name_is_published_in_the_txt_record(monkeypatch):
     # Alongside what the record already carried, not instead of it.
     assert props[b"device_id_hash"] == Discovery._hash_device_id("peer-1").encode()
     assert b"v" in props and b"os" in props and b"arch" in props
+    # Which of the two applications this is.  Both are published from one
+    # repository and one release, so a Windows device here may be running
+    # either, and the installer for one is not installable by the other.
+    assert props[b"app"] == running_shell().encode("utf-8")
 
 
 def test_the_hostname_is_not_published(monkeypatch):
@@ -180,6 +185,7 @@ def test_a_peer_that_published_its_name_is_listed_under_it(monkeypatch):
     zc, service_type, name = sighting({
         b"device_id_hash": Discovery._hash_device_id("peer-2").encode(),
         b"n": "厨房的树莓派".encode(),
+        b"app": b"tauri",
     })
 
     subject._handle_service_added(zc, service_type, name)
@@ -188,6 +194,10 @@ def test_a_peer_that_published_its_name_is_listed_under_it(monkeypatch):
     assert (peer_id, peer_name, address, port) == (
         Discovery._hash_device_id("peer-2"), "厨房的树莓派", "192.168.1.7", 9999,
     )
+    # Which application the peer runs travels with the rest of what it said: it
+    # is not a property of the OS, and the device list needs it to know whether
+    # an update exchange is possible at all.
+    assert seen[0][7] == "tauri"
     assert named is True, "the peer's own answer may outrank a name on record"
 
 

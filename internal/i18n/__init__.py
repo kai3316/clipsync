@@ -45,6 +45,11 @@ _EN: dict[str, str] = {
     "error.update_offer_failed": "The update could not be offered to that device.",
     "error.update_peer_unreachable": "Could not reach that device. It may be offline.",
     "error.update_fetch_failed": "The update could not be requested from that device.",
+    "error.update_no_asset": (
+        "This device has no installer to send: it keeps the one its own "
+        "upgrade downloaded, and has not been upgraded here yet. The other "
+        "device can download the update itself."
+    ),
     "error.app_not_ready": "ClipSync is still starting up. Try again in a moment.",
     "error.invalid_argument": "Something in that request was not valid, so nothing was done.",
     "error.validation_error": "That request was not in the form this build expects.",
@@ -1016,6 +1021,10 @@ _ZH: dict[str, str] = {
     "error.update_offer_failed": "无法向该设备提供更新。",
     "error.update_peer_unreachable": "无法连接到该设备，它可能已离线。",
     "error.update_fetch_failed": "无法向该设备索取安装包。",
+    "error.update_no_asset": (
+        "本机还没有安装包可发送：本机只保留自己升级时下载的那一个，"
+        "而本机还没有在这里升级过。可让对方设备自行下载更新。"
+    ),
     "error.app_not_ready": "ClipSync 仍在启动中，请稍后再试。",
     "error.invalid_argument": "这次请求的参数不符合要求，没有执行。",
     "error.validation_error": "请求的格式不符合预期，本次操作没有执行。",

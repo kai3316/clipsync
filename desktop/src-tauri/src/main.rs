@@ -1806,6 +1806,58 @@ async fn update_open_folder(
     host.bridge().await?.call("update.open_folder", json!({})).await
 }
 
+/// Leave the installer this upgrade downloaded behind, for other devices.
+///
+/// A newer machine is the one that can bring an older one up to date, and until
+/// now the only way it could send the file was to fetch a second copy of it —
+/// the same bytes, from the same release, on a machine that had just downloaded
+/// them.  The download here is already verified by the updater plugin's own
+/// signature check, so what it leaves in the cache is a file a peer can be given
+/// as it stands; the peer checks it against the published digest either way.
+///
+/// Best effort, and silent about failing: this is a courtesy to the *next*
+/// exchange, while the install it runs beside is the thing the user asked for.
+/// A name the sidecar will not recognise, a temp directory that cannot be
+/// written, a bridge that is already gone — each costs one more download later
+/// and nothing now.  The bytes cannot cross the pipe themselves (the frame cap
+/// is a megabyte), so they are written to a file of the asset's own name and the
+/// *name* travels with the path.
+async fn keep_downloaded_installer(host: &Host, url: &tauri::Url, bytes: &[u8]) {
+    // The asset's filename, which is the last segment of its download URL.  It
+    // is the only name this file has: the plugin streams into memory, and a
+    // macOS payload (`ClipSync.app.tar.gz`) is deliberately not an asset the
+    // sidecar keeps, so a refusal there is the expected answer rather than a
+    // fault.
+    let Some(name) = url
+        .path_segments()
+        .and_then(|segments| segments.last())
+        .filter(|name| !name.is_empty())
+    else {
+        return;
+    };
+    let dir = std::env::temp_dir().join("clipsync-update-cache");
+    let _ = std::fs::remove_dir_all(&dir);
+    if std::fs::create_dir_all(&dir).is_err() {
+        return;
+    }
+    let path = dir.join(name);
+    if tokio::fs::write(&path, bytes).await.is_ok() {
+        if let Ok(bridge) = host.bridge().await {
+            let _ = bridge
+                .call(
+                    "update.cache_asset",
+                    json!({"path": path.to_string_lossy(), "name": name}),
+                )
+                .await;
+        }
+    }
+    // Removed whatever happened: the sidecar copies what it keeps, and a copy
+    // that did not happen leaves an installer in a temp directory that nothing
+    // will ever clean up.  Whether it was kept is the sidecar's to say, and it
+    // does -- its own log carries the refusal, with the name it refused.
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// Download the pending update and replace this installation with it.
 ///
 /// The sidecar owns checking and fetching, but it cannot do this half: a
@@ -1829,6 +1881,7 @@ async fn update_install(
         return Ok(json!({"ok": true, "installed": false, "reason": "up_to_date"}));
     };
     let version = update.version.clone();
+    let asset_url = update.download_url.clone();
 
     // Fetch before anything is torn down, so a download that fails — the usual
     // cause being a signature that does not verify — leaves a running app.  The
@@ -1871,6 +1924,11 @@ async fn update_install(
             return Err(err.into());
         }
     };
+
+    // Keep the installer for the next device that needs it, before the sidecar
+    // goes: this is the only moment the file exists, and the only process that
+    // can read it is the one that is about to be replaced.
+    keep_downloaded_installer(&host, &asset_url, &bytes).await;
 
     // The bytes are in hand and verified, so the sidecar's work is done and its
     // lock has to go before the installer takes over — the same order

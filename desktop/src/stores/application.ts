@@ -166,7 +166,11 @@ export function createApplicationStore() {
     // because a click that produced neither would be indistinguishable from a
     // broken button: the request went out, and this is what came back.
     if (name === "update.peer_unavailable") {
-      return t("{name} 上没有可发送的安装包，请在那台设备上检查更新", { name: peerLabel(data) });
+      // The device that was asked keeps only the installer its own upgrade
+      // downloaded, so "nothing to send" means the asking device is the one
+      // that has to fetch it -- from the same release, which its own update
+      // page does.
+      return t("{name} 上没有可发送的安装包，请在本机检查更新", { name: peerLabel(data) });
     }
     if (name === "update.peer_notice") {
       // The other direction: a peer announcing a build. Its own device list

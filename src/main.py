@@ -2935,6 +2935,7 @@ class Application:
         version: str = "",
         os_name: str = "",
         arch: str = "",
+        app: str = "",
         named: bool = False,
     ) -> None:
         """One mDNS sighting.
@@ -2944,6 +2945,11 @@ class Application:
         It is carried into the sighting so ``get_device_states`` can tell the
         two apart: a name the user chose may replace the one on the row, a
         label may not.
+
+        ``app`` is which application the peer announced it runs.  This
+        application has no update exchange to gate on it -- that is the Tauri
+        side's device list -- so it is accepted and dropped, which is what
+        keeps one callback signature for both shells.
         """
         with self._discovered_lock:
             prev = self._discovered_peers.get(peer_id)

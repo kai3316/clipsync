@@ -403,6 +403,21 @@ class Dispatcher:
         if method == "update.download":
             validate_params(params, {})
             return self.app.update_download()
+        if method == "update.cache_asset":
+            # The host's own upgrade, handing over the installer it just
+            # installed rather than downloading another one to pass on.  Both
+            # fields are the host's paths and name, and the name is what the
+            # cache files it under -- the application layer checks it against
+            # this application's own asset names before anything is copied.
+            validate_params(
+                params,
+                {
+                    "path": (str, lambda v: 0 < len(v) <= 4096),
+                    "name": (str, lambda v: len(v) <= 255),
+                },
+                ("path",),
+            )
+            return self.app.update_cache_asset(params["path"], params.get("name", ""))
         if method == "update.open_folder":
             validate_params(params, {})
             return self.app.update_open_folder()

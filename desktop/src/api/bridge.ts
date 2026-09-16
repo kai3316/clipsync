@@ -87,12 +87,12 @@ export const bridge = {
    *  request for the asset, and the bytes it gets are checked against the
    *  published release digest before they can be installed.
    *
-   *  `needs_download` is the truthful half of the click: this machine has no
-   *  cached installer yet, so it has to fetch the release before it can send
-   *  anything.  The offer still went out, and the send completes by itself once
-   *  the download lands — the caller only owes the user a sentence saying so. */
+   *  The installer is the one this machine's own upgrade downloaded and kept,
+   *  so the click either sends it or fails; nothing here downloads anything.
+   *  A machine with nothing installed from this feature yet is refused with
+   *  `update.no_asset`, and the row says so. */
   offerDeviceUpdate: (deviceId: string) =>
-    command<{ sent: boolean; needs_download: boolean }>("offer_device_update", { deviceId }),
+    command<{ sent: boolean }>("offer_device_update", { deviceId }),
   /** Ask a device on a newer build to send this one its installer, which is
    *  verified against the published release digest and then staged for install.
    *  The same exchange as `offerDeviceUpdate`, started from the older device —

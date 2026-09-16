@@ -822,21 +822,19 @@ export const EN: Record<string, string> = {
     "With this off, devices no longer pair or sync over the relay and the clipboard stays on the local network. This is the same switch as the one with this name on the settings page.",
   "发送更新": "Send update",
   "把本机的安装包发送给该设备": "Send this device's installer to it",
-  "对方版本较旧：先下载本机安装包，再发送给它":
-    "The other device is on an older version: download this machine's installer, then send it over",
   "获取更新": "Get the update",
   "从该设备获取新版本安装包并安装": "Fetch the newer installer from that device and install it",
   "该设备版本较旧，可以发送更新": "This device is on an older version and can be updated",
   "对方软件版本": "The version the other device is running",
   "已把更新发送给 {name}": "Sending the update to {name}",
-  "正在下载本机安装包，下好后会自动发送给 {name}":
-    "Downloading this machine's installer; it will be sent to {name} as soon as it lands",
+  "本机还没有安装包可发送：本机只保留自己升级时下载的那一个，对方可自行检查更新":
+    "Nothing to send: this machine only keeps the installer its own upgrade downloaded, and has none. The other device can run its own update check",
   "已向 {name} 索取安装包，收到后可在更新页安装":
     "Asked {name} for its installer; install it from the update page once it arrives",
   "发送更新失败": "Could not send the update",
   "获取更新失败": "Could not fetch the update",
-  "{name} 上没有可发送的安装包，请在那台设备上检查更新":
-    "{name} has no installer to send; run an update check on that device",
+  "{name} 上没有可发送的安装包，请在本机检查更新":
+    "{name} has no installer to send; run an update check here to download it",
   "{name} 有新版本 {version}，可在设备列表向它获取":
     "{name} has version {version}; get it from that device in the device list",
   "{name} 正在把新版本 {version} 发送过来":

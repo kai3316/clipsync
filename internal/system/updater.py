@@ -180,6 +180,19 @@ def _is_newer(latest: str, current: str) -> bool:
     return lv > cv
 
 
+def _version_in_name(name: str) -> tuple:
+    """The version a release asset's filename carries, or ``()`` for none.
+
+    The Tauri bundles name their version (``ClipSync_1.0.10_x64-setup.exe``) and
+    the legacy bundles name nothing, so this is what tells two cached installers
+    of the same application apart -- and it is read back with the same parser
+    the comparison uses, so a name and a tag cannot disagree about which of two
+    builds is later.
+    """
+    match = re.search(r"\d+(?:\.\d+)+", name or "")
+    return _parse_version(match.group(0)) if match else ()
+
+
 def is_newer(latest: str, current: str) -> bool:
     """Whether *latest* is a higher version than *current*.
 
@@ -593,21 +606,59 @@ def _cache_dir() -> str:
     return os.path.join(_config_dir(), "update_cache")
 
 
-def cache_asset(asset_path: str) -> str | None:
-    """Copy the verified *asset_path* into the update cache for later P2P
-    serving. Returns the cached path, or None on failure (never raises)."""
+def cache_asset(asset_path: str, name: str = "") -> str | None:
+    """Keep the verified *asset_path* in the update cache, for serving to a peer.
+
+    *name* is the release asset's own filename, for a caller whose path does not
+    end in one: the desktop downloads through a temporary file of the host's
+    naming, so the name travels beside the path and is what the file is kept
+    under.  It is checked against this process's own asset patterns before
+    anything is copied, which is two things at once -- a file that is not an
+    installer of *this* application never fills the cache, and a name that is
+    not a filename never names a destination (`..`, a separator, a drive).
+
+    The cache holds one installer of each application: a machine upgrades
+    through one release after another, so the same name-pattern accumulates,
+    and the older files are what a peer that is behind would be sent by
+    :func:`get_cached_asset` if they were left.  The other application's asset
+    is not this one's to delete -- one cache directory is shared by both, and a
+    machine that has run the legacy app and the Tauri app has one of each here.
+
+    Returns the cached path, or None on failure (never raises).
+    """
     import shutil
 
+    base = os.path.basename(name or asset_path)
+    if not any(matcher.match(base) for matcher in _asset_matchers()):
+        logger.warning("Refusing to cache %r: not an installer for this shell", base)
+        return None
     try:
         d = _cache_dir()
         os.makedirs(d, exist_ok=True)
-        dest = os.path.join(d, os.path.basename(asset_path))
+        dest = os.path.join(d, base)
+        # Copied rather than moved: the caller still owns the file.  The update
+        # service stages the same download for the user to install by hand, and
+        # that move has to find it where the download left it.
         shutil.copyfile(asset_path, dest)
+        for other in os.listdir(d):
+            if other == base or not any(m.match(other) for m in _asset_matchers()):
+                continue
+            with contextlib.suppress(OSError):
+                os.remove(os.path.join(d, other))
         logger.info("Cached update asset at %s", dest)
         return dest
     except OSError as exc:
         logger.warning("Failed to cache update asset: %s", exc)
         return None
+
+
+def _cache_rank(path: str) -> tuple:
+    """How a cached asset is ordered against its siblings: version, then age."""
+    try:
+        mtime = os.path.getmtime(path)
+    except OSError:
+        mtime = 0.0
+    return (_version_in_name(os.path.basename(path)), mtime)
 
 
 def get_cached_asset() -> str | None:
@@ -620,15 +671,24 @@ def get_cached_asset() -> str | None:
     platform is the mistake this naming exists to prevent.  The peer checks what
     it is sent against its own platform's digest before it will install it, so a
     mismatch is caught there too -- but it costs a transfer to find out.
+
+    The newest match is the one served.  Sorting the names would be the obvious
+    way and is the wrong one: it is the text that is compared, and "1.0.9" is
+    greater than "1.0.10" as text.  So the version in the name is parsed back
+    out, and a file whose name carries no version at all -- the legacy bundles
+    -- ranks below any that does.
     """
     directory = _cache_dir()
     try:
-        names = sorted(os.listdir(directory))
+        names = os.listdir(directory)
     except OSError:
         return None
     for matcher in _asset_matchers():
-        for name in names:
-            path = os.path.join(directory, name)
-            if matcher.match(name) and os.path.isfile(path):
-                return path
+        found = [
+            os.path.join(directory, name)
+            for name in names
+            if matcher.match(name) and os.path.isfile(os.path.join(directory, name))
+        ]
+        if found:
+            return max(found, key=_cache_rank)
     return None

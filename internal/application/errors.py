@@ -61,6 +61,7 @@ ERROR_KEYS: dict[str, str] = {
     "DATA_IN_USE": "error.data_in_use",
     "update.offer_failed": "error.update_offer_failed",
     "update.fetch_failed": "error.update_fetch_failed",
+    "update.no_asset": "error.update_no_asset",
     "update.peer_unreachable": "error.update_peer_unreachable",
 }
 

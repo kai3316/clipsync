@@ -540,10 +540,10 @@ def test_the_name_a_peer_publishes_outranks_the_one_recorded_for_it(rig):
     """
     runtime, _pairing, _transport, discovery, *_ = rig
     hashed = peer_id_hash("remote")
-    discovery.found(hashed, "Remote-ad", "127.0.0.1", 9999, "", "", "", True)
+    discovery.found(hashed, "Remote-ad", "127.0.0.1", 9999, "", "", "", "", True)
     assert runtime.devices()["items"][0]["name"] == "Remote-ad"
 
-    discovery.found(hashed, "书房的笔记本", "127.0.0.1", 9999, "", "", "", True)
+    discovery.found(hashed, "书房的笔记本", "127.0.0.1", 9999, "", "", "", "", True)
     assert runtime.devices()["items"][0]["name"] == "书房的笔记本"
 
 
@@ -2013,157 +2013,82 @@ def test_update_request_serves_the_cached_asset_to_a_paired_peer(rig, monkeypatc
     assert sent[0]._raw_payload["file_name"] == "clipsync-windows.zip"
 
 
-def test_a_request_with_nothing_cached_fetches_the_release_for_that_peer(
-    rig, monkeypatch, tmp_path
-):
-    """The device that is behind is the one that clicks, so its click fetches.
+def test_a_request_with_nothing_cached_is_answered_by_saying_so(rig, monkeypatch):
+    """The cache is the whole of what this machine can send, and the answer is
+    the same whether the peer clicked or a timer on its side ran.
 
-    Answering "nothing here" would make the fix depend on the *other* machine's
-    owner having pressed something first, which is exactly the wait this feature
-    exists to remove.
+    Fetching the release here to hand it over would be the same file from the
+    same place fetched twice -- once on a machine that does not need it -- and
+    the device that is behind is the one with a reason to spend the bandwidth.
     """
     runtime, pairing, transport, *_ = rig
     pairing.add_peer("remote", "Remote", pairing.get_peer_certificate("remote"), paired=True)
     transport.connected.add("remote")
     monkeypatch.setattr(updater, "get_cached_asset", lambda: None)
     monkeypatch.setattr(lan, "__version__", "1.0.9")
-    started = []
-    runtime.set_update_downloader(lambda: started.append(True) or {"started": True})
-
-    # `on_demand` is what a device-list click sends; a broadcast request -- the
-    # timer-driven kind -- is answered without a download.
-    transport.message(frame("update_request", version="1.0.7", on_demand=True), "remote")
-
-    assert started == [True]
-    # Nothing is sent yet -- the file does not exist -- and nothing is refused
-    # either: the peer's own row is waiting on a transfer that is coming.
-    assert transport.sent == []
-    assert runtime._update_expectations == {}
-    assert runtime._pending_update_serves == {"remote"}
-
-    # The release lands, and the peer that asked gets the file its click was for
-    # without asking again.
-    asset = tmp_path / "clipsync-windows.zip"
-    asset.write_bytes(b"release-bytes")
-    monkeypatch.setattr(updater, "get_cached_asset", lambda: str(asset))
-    runtime.events.publish("update.state", {"state": {"phase": "ready"}})
-
-    deadline = time.monotonic() + 3
-    while not transport.sent and time.monotonic() < deadline:
-        time.sleep(0.01)
-    sent = [msg for _, msg in transport.sent]
-    assert [msg.msg_type for msg in sent] == ["file_request"]
-    assert sent[0]._raw_payload["kind"] == "update"
-    assert sent[0]._raw_payload["file_name"] == "clipsync-windows.zip"
-    assert runtime._pending_update_serves == set()
-
-
-def test_a_timer_driven_request_does_not_spend_the_bandwidth(rig, monkeypatch):
-    """A broadcast is a loop that ran; only a click may pull a release.
-
-    ``request_update_from_peers`` asks every connected peer on the update
-    service's own schedule, and ``auto_update_check`` is the switch that governs
-    whether this machine makes update requests of its own.  Fetching on the
-    strength of one would be that switch quietly overruled by a peer's timer.
-    """
-    runtime, pairing, transport, *_ = rig
-    pairing.add_peer("remote", "Remote", pairing.get_peer_certificate("remote"), paired=True)
-    transport.connected.add("remote")
-    monkeypatch.setattr(updater, "get_cached_asset", lambda: None)
-    monkeypatch.setattr(lan, "__version__", "1.0.9")
-    runtime.set_update_downloader(lambda: pytest.fail("a timer is not a click"))
 
     transport.message(frame("update_request", version="1.0.7"), "remote")
 
     sent = [msg for _, msg in transport.sent]
     assert [msg.msg_type for msg in sent] == ["update_unavailable"]
-    assert runtime._pending_update_serves == set()
+    assert runtime._update_expectations == {}
 
 
-def test_a_peer_that_is_not_behind_is_told_there_is_nothing_here(rig, monkeypatch):
-    """A request is not a licence to pull a release nobody needs.
+def test_a_peer_that_is_not_behind_is_told_there_is_nothing_here(rig, monkeypatch, tmp_path):
+    """A request is not a licence to send an installer nobody needs.
 
     Its version is the peer's own claim, but the claim is only used to *decline*:
-    a device at or past this build is asking for something that is not an update,
-    and starting a download on that word would be work no click asked for.
+    a device at or past this build is asking for a file it would refuse on
+    arrival, and sending it would be a transfer spent to be thrown away.
     """
     runtime, pairing, transport, *_ = rig
     pairing.add_peer("remote", "Remote", pairing.get_peer_certificate("remote"), paired=True)
     transport.connected.add("remote")
-    monkeypatch.setattr(updater, "get_cached_asset", lambda: None)
+    asset = tmp_path / "clipsync-windows.zip"
+    asset.write_bytes(b"release-bytes")
+    monkeypatch.setattr(updater, "get_cached_asset", lambda: str(asset))
     monkeypatch.setattr(lan, "__version__", "1.0.8")
-    runtime.set_update_downloader(lambda: pytest.fail("no download for a current peer"))
 
     transport.message(frame("update_request", version="1.0.8"), "remote")
 
     sent = [msg for _, msg in transport.sent]
     assert [msg.msg_type for msg in sent] == ["update_unavailable"]
-    assert runtime._pending_update_serves == set()
 
 
-def test_a_failed_release_download_is_answered_instead_of_left_waiting(rig, monkeypatch):
-    """The one terminal a waiting peer cannot be left in: a download that dies.
+def test_the_send_click_carries_the_cached_installer_it_kept(rig, monkeypatch, tmp_path):
+    """发送更新 sends the installer this machine's own upgrade downloaded.
 
-    The failure is this machine's, and the peer can do nothing about it -- but
-    the wait has to end, and ``update_unavailable`` is how the peer's row stops
-    spinning.
-    """
-    runtime, pairing, transport, *_ = rig
-    pairing.add_peer("remote", "Remote", pairing.get_peer_certificate("remote"), paired=True)
-    transport.connected.add("remote")
-    monkeypatch.setattr(updater, "get_cached_asset", lambda: None)
-    monkeypatch.setattr(lan, "__version__", "1.0.9")
-    runtime.set_update_downloader(lambda: {"started": True})
-
-    transport.message(frame("update_request", version="1.0.7", on_demand=True), "remote")
-    transport.sent.clear()
-    # What the update service publishes when its download gives up.  The notice
-    # goes out on a thread of its own -- the publisher is the download worker and
-    # must not be held up by it -- so the answer arrives just after this line.
-    runtime.events.publish("update.state", {"state": {"phase": "failed", "error": "offline"}})
-
-    deadline = time.monotonic() + 3
-    while not transport.sent and time.monotonic() < deadline:
-        time.sleep(0.01)
-    sent = [msg for _, msg in transport.sent]
-    assert [msg.msg_type for msg in sent] == ["update_unavailable"]
-    assert runtime._pending_update_serves == set()
-
-
-def test_the_offer_is_finished_once_the_release_it_promised_lands(rig, monkeypatch):
-    """The other end of the same wait: 发送更新 pressed before anything is cached.
-
-    The click promises a file, so it cannot be left as the notice it used to be.
-    The device is remembered, and the release download -- which the shell starts,
-    because the progress card is the update page's -- is what completes it.
+    The click either transfers that file or comes back with a reason, so a
+    machine that has kept nothing is refused before anything is dialled: a
+    device there is nothing to hand to must not be reached across the network,
+    least of all one that has not agreed to a pairing.
     """
     runtime, pairing, transport, *_ = rig
     pairing.add_peer("remote", "Remote", pairing.get_peer_certificate("remote"), paired=True)
     transport.connected.add("remote")
     transport.addresses["remote"] = ("Remote", "10.0.0.2", 1)
     monkeypatch.setattr(lan, "_local_platform", lambda: ("windows", "amd64"))
-    cached = []
-    monkeypatch.setattr(updater, "get_cached_asset", lambda: cached[0] if cached else None)
+    dialled = []
+    monkeypatch.setattr(
+        runtime, "_connect_and_wait", lambda pid, **kw: dialled.append(pid) or pid
+    )
 
-    result = runtime.offer_device_update("remote")
+    monkeypatch.setattr(updater, "get_cached_asset", lambda: None)
+    with pytest.raises(ApplicationError) as refused:
+        runtime.offer_device_update("remote")
+    assert refused.value.code == "update.no_asset"
+    assert transport.sent == []
+    assert dialled == []
 
-    assert result == {"sent": True, "needs_download": True}
+    cached = tmp_path / "ClipSync_1.0.9_x64-setup.exe"
+    cached.write_bytes(b"release-bytes")
+    monkeypatch.setattr(updater, "get_cached_asset", lambda: str(cached))
+    transport.sent.clear()
+
+    assert runtime.offer_device_update("remote") == {"sent": True}
     offers = [msg for _, msg in transport.sent if msg.msg_type == "update_offer"]
-    assert offers[-1]._raw_payload["has_asset"] is False
-    assert runtime._pending_update_sends == {"remote"}
-
-    # The download lands, which is what the update service publishes.
-    cached.append("/tmp/clipsync-windows.zip")
-    runtime.events.publish("update.state", {"state": {"phase": "ready"}})
-
-    deadline = time.monotonic() + 3
-    while len(transport.sent) < 2 and time.monotonic() < deadline:
-        time.sleep(0.01)
-    offers = [msg for _, msg in transport.sent if msg.msg_type == "update_offer"]
-    assert len(offers) == 2
     assert offers[-1]._raw_payload["has_asset"] is True
-    assert offers[-1]._raw_payload["asset"] == "clipsync-windows.zip"
-    assert runtime._pending_update_sends == set()
+    assert offers[-1]._raw_payload["asset"] == "ClipSync_1.0.9_x64-setup.exe"
 
 
 def test_an_unpaired_peer_cannot_request_a_cached_update(rig, monkeypatch, tmp_path):
@@ -2334,7 +2259,7 @@ def test_a_device_row_says_when_this_build_could_update_it(rig, monkeypatch):
     and a second implementation of either in a front end would be a second
     answer to the same question -- with the two disagreeing on exactly the
     cases that matter (a peer too old to advertise anything, a same-version
-    peer, another platform's build).
+    peer, another platform's build, the other application entirely).
     """
     runtime, pairing, transport, discovery, *_ = rig
     monkeypatch.setattr(lan, "_local_platform", lambda: ("windows", "amd64"))
@@ -2343,6 +2268,7 @@ def test_a_device_row_says_when_this_build_could_update_it(rig, monkeypatch):
     seen = {
         "name": "Remote", "address": "127.0.0.1", "port": 9999,
         "version": "1.0.7", "os": "windows", "arch": "amd64",
+        "app": updater.running_shell(),
     }
     runtime._discovered[alias] = dict(seen)
     runtime._refresh()
@@ -2364,6 +2290,19 @@ def test_a_device_row_says_when_this_build_could_update_it(rig, monkeypatch):
     row = runtime.devices()["items"][0]
     assert row["version"] == ""
     assert row["update_available"] is False
+
+    # Both applications are published from one release, so a same-platform peer
+    # is as likely to be running the *other* one -- whose installer this build
+    # cannot be upgraded with, and which has no update exchange to offer at all.
+    # A peer that does not say which it runs is in the same position: the offer
+    # would reach it as a dial, and a dial is a pairing request to a device that
+    # cannot read "this is not one".
+    for other in ("legacy" if updater.running_shell() == "tauri" else "tauri", ""):
+        runtime._discovered[alias] = {**seen, "app": other}
+        runtime._refresh()
+        row = runtime.devices()["items"][0]
+        assert row["update_available"] is False, other
+        assert row["update_fetchable"] is False, other
 
 
 def test_a_peer_sent_update_blob_reaches_the_update_sink(rig, tmp_path):

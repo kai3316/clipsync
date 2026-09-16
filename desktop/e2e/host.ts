@@ -76,6 +76,7 @@ export const fixtures: Record<string, unknown> = {
       "app.open_link", "app.factory_reset",
       "diagnostics.report", "diagnostics.request",
       "update.check", "update.status", "update.download", "update.open_folder",
+      "update.cache_asset",
       "data.open_folder",
       "companion.share_file",
       "internet_pairing.test",

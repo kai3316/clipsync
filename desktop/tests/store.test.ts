@@ -483,7 +483,7 @@ describe("desktop application store", () => {
       t("{name} 已将本机移除 — 需要重新在对方配对", { name: "Pixel" }),
       t("找不到 {name} — 请确认该设备已开启 ClipSync 且在同一网络", { name: "Peer" }),
       t("找不到 {name} — 请确认该设备已开启 ClipSync 且在同一网络", { name: "0123456789ab" }),
-      t("{name} 上没有可发送的安装包，请在那台设备上检查更新", { name: "Pixel" }),
+      t("{name} 上没有可发送的安装包，请在本机检查更新", { name: "Pixel" }),
       t("{name} 正在把新版本 {version} 发送过来", { name: "Pixel", version: "1.0.9" }),
     ]);
     // The same answer is left on the device row, where the click that asked for

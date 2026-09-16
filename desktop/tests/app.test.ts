@@ -119,7 +119,7 @@ vi.mock("../src/api/bridge", () => ({
     connectDevice: vi.fn().mockResolvedValue({ accepted: true }),
     disconnectDevice: vi.fn().mockResolvedValue({ disconnected: true }),
     forgetDevice: vi.fn().mockResolvedValue({ forgotten: true }),
-    offerDeviceUpdate: vi.fn().mockResolvedValue({ sent: true, needs_download: false }),
+    offerDeviceUpdate: vi.fn().mockResolvedValue({ sent: true }),
     fetchDeviceUpdate: vi.fn().mockResolvedValue({ sent: true }),
     restoreDevice: vi.fn().mockResolvedValue({ restored: true }),
     purgeDevice: vi.fn().mockResolvedValue({ purged: true }),
@@ -1809,7 +1809,7 @@ describe("history rendering", () => {
     }
   });
   it("carries an update in whichever direction the two builds are apart", async () => {
-    vi.mocked(bridge.offerDeviceUpdate).mockResolvedValue({ sent: true, needs_download: false });
+    vi.mocked(bridge.offerDeviceUpdate).mockResolvedValue({ sent: true });
     vi.mocked(bridge.fetchDeviceUpdate).mockResolvedValue({ sent: true });
     vi.mocked(bridge.devices).mockResolvedValue({ items: [
       { id: "t", name: "Studio", paired: false, connection_state: "discovered",
@@ -1858,15 +1858,17 @@ describe("history rendering", () => {
     } finally {
       app.unmount();
       vi.mocked(bridge.devices).mockResolvedValue({ items: [] });
-      vi.mocked(bridge.offerDeviceUpdate).mockReset().mockResolvedValue({ sent: true, needs_download: false });
+      vi.mocked(bridge.offerDeviceUpdate).mockReset().mockResolvedValue({ sent: true });
       vi.mocked(bridge.fetchDeviceUpdate).mockReset().mockResolvedValue({ sent: true });
     }
   });
-  it("starts the release download when an offer has no installer behind it yet", async () => {
-    // The click promises the file, and the file is not on this machine: the
-    // download is what makes the promise good, so it is started with the offer
-    // rather than left to the reader to find the update page.
-    vi.mocked(bridge.offerDeviceUpdate).mockResolvedValue({ sent: true, needs_download: true });
+  it("offers nothing when this machine has no installer to offer", async () => {
+    // The send button carries the installer this machine's own upgrade kept, so
+    // a machine that has kept none has nothing to send: the row says so and
+    // starts nothing.  Downloading one here to pass on would be the same file
+    // from the same place, fetched twice, on the machine that does not need it
+    // -- the device being offered can fetch it itself.
+    vi.mocked(bridge.offerDeviceUpdate).mockResolvedValue({ sent: true });
     vi.mocked(bridge.devices).mockResolvedValue({ items: [
       { id: "t", name: "Studio", paired: false, connection_state: "discovered",
         pairing_status: "", pairing_code: null, sas: null,
@@ -1881,14 +1883,17 @@ describe("history rendering", () => {
       // The download mock is shared with the update-page case above and nothing
       // clears it between cases, so the count starts from here.
       vi.mocked(bridge.updateDownload).mockClear();
-      await app.get('[aria-label="发送更新"]').trigger("click");
+      const send = app.get('[aria-label="发送更新"]');
+      expect(send.attributes("disabled")).toBeDefined();
+      expect(send.attributes("title")).toContain("本机还没有安装包可发送");
+      await send.trigger("click");
       await flushPromises();
-      expect(bridge.updateDownload).toHaveBeenCalledOnce();
-      expect(app.text()).toContain("正在下载本机安装包，下好后会自动发送给 Studio");
+      expect(bridge.offerDeviceUpdate).not.toHaveBeenCalled();
+      expect(bridge.updateDownload).not.toHaveBeenCalled();
     } finally {
       app.unmount();
       vi.mocked(bridge.devices).mockResolvedValue({ items: [] });
-      vi.mocked(bridge.offerDeviceUpdate).mockReset().mockResolvedValue({ sent: true, needs_download: false });
+      vi.mocked(bridge.offerDeviceUpdate).mockReset().mockResolvedValue({ sent: true });
       vi.mocked(bridge.updateDownload).mockClear();
     }
   });
@@ -1900,7 +1905,7 @@ describe("history rendering", () => {
       { id: "t", name: "Studio", paired: false, connection_state: "discovered",
         pairing_status: "", pairing_code: null, sas: null,
         version: "1.0.7", platform: "windows", arch: "amd64",
-        update_available: true, update_cached: false },
+        update_available: true, update_cached: true },
     ] });
     const app = mount(App);
     try {
@@ -1915,7 +1920,7 @@ describe("history rendering", () => {
     } finally {
       app.unmount();
       vi.mocked(bridge.devices).mockResolvedValue({ items: [] });
-      vi.mocked(bridge.offerDeviceUpdate).mockReset().mockResolvedValue({ sent: true, needs_download: false });
+      vi.mocked(bridge.offerDeviceUpdate).mockReset().mockResolvedValue({ sent: true });
     }
   });
   it("stamps a relayed chat message with its receipt instead of repainting the clipboard", async () => {

@@ -42,6 +42,7 @@ from internal.infrastructure.security.device_identity import (
 )
 from internal.security.encryption import EncryptionManager, make_password_hash, verify_password
 from internal.security.pairing import fingerprint_pem
+from internal.system import updater
 from internal.system.qr import png_data_url
 from internal.system.update_service import UpdateService
 from internal.transport.relay import probe_relay_endpoints
@@ -272,14 +273,6 @@ class SidecarApplication:
         set_sink = getattr(self.runtime, "set_update_sink", None)
         if set_sink is not None:
             set_sink(self.updates.finish_from_peer)
-        # The mirror of that: a peer whose own build is behind asks this machine
-        # for the installer, and the common case is that nobody here has ever
-        # downloaded it.  The runtime starts the download through the service
-        # rather than fetching the release itself, so the progress the window is
-        # already rendering and the asset a peer is sent are the same one.
-        set_downloader = getattr(self.runtime, "set_update_downloader", None)
-        if set_downloader is not None:
-            set_downloader(self.updates.start_download)
         # A peer may ask this machine for the files behind a history entry it
         # published to us; the store, not the runtime, answers which paths a
         # request may reach — so the runtime is handed the store's own resolver.
@@ -603,6 +596,12 @@ class SidecarApplication:
                 "app.open_link", "app.factory_reset",
                 "diagnostics.report", "diagnostics.request",
                 "update.check", "update.status", "update.download", "update.open_folder",
+                # The host's own upgrade hands the installer it is about to
+                # install over through this one, so that a peer can be given
+                # that file instead of this machine fetching a second copy.
+                # Nothing about it needs the runtime, which is why it is in
+                # this block rather than the one below.
+                "update.cache_asset",
                 "data.open_folder",
                 # Staging a file for the phone needs neither the engine nor a
                 # running companion: it copies into the share directory, and the
@@ -811,6 +810,23 @@ class SidecarApplication:
                 except Exception:
                     logger.debug("Peer update request failed", exc_info=True)
         return self.updates.start_download()
+
+    def update_cache_asset(self, path: str, name: str = "") -> dict:
+        """Keep an installer this machine already has, for serving to a peer.
+
+        The desktop's own upgrade downloads its installer inside the host
+        process, which is the one place that cannot keep it: the host is about
+        to replace itself, and the file it downloaded is in memory.  So the host
+        writes it out and hands it over here, and what the machine is left with
+        is the installer for the release it is now running -- which is exactly
+        the file a peer that is behind needs, and the reason no device has to
+        download a second copy of it to pass one on.
+
+        *name* is the release asset's filename; :func:`updater.cache_asset`
+        decides whether it is one of this application's, and refuses the rest.
+        """
+        cached = updater.cache_asset(path, name)
+        return {"ok": bool(cached), "cached": Path(cached).name if cached else ""}
 
     def update_open_folder(self) -> dict:
         """Reveal the staged archive's folder (ready phase only)."""

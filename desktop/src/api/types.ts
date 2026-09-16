@@ -153,7 +153,10 @@ export interface Device {
    *  the platform spelling are both its, and a second implementation of either
    *  would be a second answer to the same question. */
   update_available?: boolean;
-  /** Whether an offer would carry the installer or only the news. */
+  /** Whether this machine has an installer to offer.  It keeps the one its own
+   *  upgrade downloaded, so a machine that has not been upgraded here since
+   *  that feature exists has none, and an offer is a click that cannot be
+   *  kept — the row disables it and says why. */
   update_cached?: boolean;
   /** The mirror of `update_available`, and the direction the feature is meant
    *  to run in: that device is newer, so this one can ask it for the installer.

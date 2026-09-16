@@ -177,6 +177,12 @@ def test_get_cached_asset_picks_this_shells_file_from_a_shared_cache(monkeypatch
     monkeypatch.setenv(updater_mod.SHELL_ENV, "tauri")
     monkeypatch.setattr(updater_mod, "_cache_dir", lambda: str(tmp_path))
     (tmp_path / "clipsync-macos-arm64.zip").write_bytes(b"legacy")
+    # Two releases of the same application, because that is what a machine that
+    # upgrades through one release after another accumulates.  The newest is the
+    # one to hand over, and it is not the last name in the directory: "1.0.9" is
+    # greater than "1.0.10" as text, which is why the version is parsed back out
+    # of the name rather than the names being sorted.
+    (tmp_path / "ClipSync_1.0.9_aarch64.dmg").write_bytes(b"older tauri")
     (tmp_path / "ClipSync_1.0.10_aarch64.dmg").write_bytes(b"tauri")
     assert updater_mod.get_cached_asset() == str(tmp_path / "ClipSync_1.0.10_aarch64.dmg")
     monkeypatch.setenv(updater_mod.SHELL_ENV, "legacy")

@@ -2375,27 +2375,21 @@ async function testConnection(device: Device) {
  * side before they can be installed.  The row says what happened either way —
  * a click that produced no traffic must not look like one that did.
  *
- * When this machine has no cached installer, the click is still kept: the offer
- * goes out, and the runtime sends the asset the moment the release download
- * lands.  That download is the update page's own flow, so it is started here
- * rather than behind the scenes — the user gets the progress card they know, and
- * the sentence under the row says what is being waited for.
+ * What is sent is the installer this machine's own upgrade kept, so the click
+ * either transfers the file or comes back with a reason.  It never downloads:
+ * fetching the release here to hand to a device that can fetch it itself is the
+ * same file from the same place, twice, on the machine that does not need it —
+ * and a machine with nothing kept answers `update.no_asset` instead, which the
+ * row shows as it stands.
  */
 async function offerDeviceUpdate(device: Device) {
   if (updateBusyId.value) return;
   updateBusyId.value = device.id;
   try {
-    const result = await bridge.offerDeviceUpdate(device.id);
-    if (!device.update_cached || result.needs_download) {
-      // The offer is already out and the runtime sends the asset when this
-      // lands, so nothing here waits on it.
-      await startUpdateDownload();
-    }
+    await bridge.offerDeviceUpdate(device.id);
     updateNotes.value = {
       ...updateNotes.value,
-      [device.id]: device.update_cached
-        ? t("已把更新发送给 {name}", { name: device.name })
-        : t("正在下载本机安装包，下好后会自动发送给 {name}", { name: device.name }),
+      [device.id]: t("已把更新发送给 {name}", { name: device.name }),
     };
   } catch (error: any) {
     updateNotes.value = {
@@ -4862,8 +4856,11 @@ async function translateText() {
                      — same platform, older version — and it needs no pairing:
                      the peer requests the installer, and its own copy is
                      checked against the published release digest before it can
-                     be installed. -->
-                <button v-if="device.update_available" class="icon-button" :aria-label="t('发送更新')" :title="device.update_cached ? t('把本机的安装包发送给该设备') : t('对方版本较旧：先下载本机安装包，再发送给它')" :disabled="busy || !!updateBusyId" @click="offerDeviceUpdate(device)"><FileUp :size="18" :class="{ spinning: updateBusyId === device.id }" /></button>
+                     be installed.  What it sends is the installer this machine's
+                     own upgrade kept, so a machine that has none to send has
+                     nothing to offer, and says why rather than reaching for the
+                     network: the device being offered can download it itself. -->
+                <button v-if="device.update_available" class="icon-button" :aria-label="t('发送更新')" :title="device.update_cached ? t('把本机的安装包发送给该设备') : t('本机还没有安装包可发送：本机只保留自己升级时下载的那一个，对方可自行检查更新')" :disabled="busy || !!updateBusyId || !device.update_cached" @click="offerDeviceUpdate(device)"><FileUp :size="18" :class="{ spinning: updateBusyId === device.id }" /></button>
                 <!-- The mirror of the button above, and the direction the
                      feature is meant to run in: this device is the one behind,
                      so this is the side with a reason to click.  It asks the
