@@ -46,45 +46,53 @@ jobs:
 
           What is new in this release:
 
-          - Updating the new desktop downloads the new desktop.  Both
-            applications are built from this one release, so every platform has
-            two downloads and only one of them is the application you are
-            running: on an Apple Silicon Mac the installers are
-            `ClipSync_<version>_aarch64.dmg` and the previous Python
-            application's `clipsync-macos-arm64.zip`.  The check knew the
-            platform and not the application -- that is not something the
-            operating system can be asked -- so it offered the zip.  It asks the
-            window it is running under now, and an answer it does not recognise
-            stays on the old names rather than guessing at a new one.
-          - The new desktop installs its updates instead of asking you to.
-            The window chooses between installing and downloading by hand from
-            whether this build can replace itself, and only the application can
-            answer that: the check that finds a new version runs in the
-            background process, which knows nothing about installing.  The
-            notice therefore arrived with no answer, the window read that as
-            "cannot install in place", and every launch whose check found a
-            newer release offered the manual download -- on a build that could
-            have installed it.  The answer travels with the notice now.
-          - Devices paired with an internet code are in the device list.  A
-            pairing code is a pairing, and it was the one kind of device that
-            page did not show: it could be renamed and unpaired on the pairing
-            card and otherwise not touched -- no chat, no connection test, no
-            way to send it a link.  It is listed as the device it is, marked as
-            internet-paired, saying whether the relay has it.  The card that
-            pairs it is laid out as an exchange now: the switch that governs it
-            sits with the heading, and the code you make and the code you type
-            sit side by side instead of stacked as rows of a form.
-          - Messages and files reach a device paired over the internet.  Only
-            the clipboard crossed the relay, for two reasons.  A device with no
-            row cannot be started a conversation from -- that is the one above.
-            And the chunks were too large for the relay: its size limit is on
-            the encrypted envelope, which is a third larger than the data it
-            carries, and the check was measuring the data, so a chunk passed it
-            and was then dropped by the broker while the sender had already been
-            told it was delivered.  Chunks fit the limit now.  Files go from the
-            chat page, up to 5 MB each; the transfers page stays on the local
-            network, where a transfer can be paused and resumed, and says so
-            rather than offering a send it cannot finish.
+          - The device that is behind asks for the update.  Updating another
+            machine was a push, in one direction: the newer side had to hold the
+            installer and the older side had to be watched while it arrived.
+            获取更新 on the newer device's row now does the asking -- it requests
+            the installer that device already downloaded, checks it against the
+            published release digest and installs it.  Sending is still there
+            and still works; either end can start the exchange, and what a click
+            that could not be answered does is say so instead of going quiet.
+          - A device that removed this one says so, once, and in those words.
+            The refusal is the answer to a connection this side opened, and the
+            runtime publishes it on every attempt it makes -- the peer's own
+            reconnects included -- so the reader got the same notice over and
+            over, or a refusal over a removal that had not happened.  It names
+            the removal, says the pairing has to be made again at the other
+            device, and is said once per device per session, because nothing
+            here can undo it.
+          - The log viewer opens on what went wrong.  It had two problems.  It
+            showed 暂无日志 on every build, because the background process wrote
+            its log to a terminal and never created the file the viewer read.
+            And it held one long account of a run, in which the two lines worth
+            reading sit among thousands that are routine.  It reads the file
+            now, and it is split into 问题 and 全部.
+          - Notifications come from the application, not from the system.  Both
+            were sent for the same event, so a clip, a pairing or a transfer
+            arrived twice: once as a system notification and once in the window.
+            The system ones are gone.  This is a background program; the events
+            that need the user open the window, and the notice is there.
+          - The relay's per-message size is a setting.  A broker that refuses a
+            message over its limit does so by dropping it, so a file chunk too
+            large for the relay dies in flight while the sender has already
+            counted it sent.  The public brokers allow 256 KB and that figure
+            was built in; a free tier commonly allows 64 KB.  Set what the relay
+            in use publishes, and every chunk is sized to fit under it.
+          - Pairing, pairing again, and the device list, seen from several
+            devices at once.  A device can hold two pairings -- a pinned one on
+            the local network, and one made with a code -- and each of the
+            actions that ends trust was answered for one of them.  Removing a
+            device ended its local pairing and left the code pairing standing,
+            so a device the list called removed could still send clipboard, chat
+            and files over the relay, and restoring it brought that back to
+            life; revoking trust had the same hole, under a dialog that promises
+            the device will not sync again.  A device paired both ways was drawn
+            as two rows, one of them with no internet pairing and one with no
+            local route.  Now a removed or revoked device is one on both routes,
+            a device is one row carrying both its routes and every action either
+            of them can carry, and a pairing left behind by an older build is
+            dropped rather than kept.
 
           The device name is now published in the mDNS record, to the local
           network.  That is what lets devices show the name you chose rather
