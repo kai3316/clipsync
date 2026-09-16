@@ -769,13 +769,17 @@ function blockedUpdateLabel(device: Device) {
 }
 
 /** And why it is dimmed, in words.  The code says which of the three it is; the
- * sentence is the shell's, because the shell is where the two languages live. */
+ * sentence is the shell's, because the shell is where the two languages live.
+ * None of the three is about which application the peer runs — the sidecar
+ * stopped deciding on that, so there is nothing here to explain about it. */
 function blockedUpdateReason(device: Device) {
   const cause = String(device.update_blocked || "").split(":")[1];
-  // No wording for which application the peer runs: the sidecar stopped
-  // deciding on it, so nothing here has to explain it.
   if (cause === "too_old") return t("对方版本过旧，本机不能直接给它发送安装包；先让它自己检查更新升级一次");
-  if (cause === "other_platform") return t("对方与本机不是同一个平台，本机的安装包对它没有用");
+  // Neutral about the direction, because this cause is not the send one's
+  // alone: a device that is *ahead* on another platform dims the fetch entry
+  // with it, and a sentence about what this machine has to send would answer a
+  // question the reader did not ask.
+  if (cause === "other_platform") return t("对方与本机不是同一个平台，双方的安装包都用不了");
   return t("两台设备版本相同，没有需要发送的安装包");
 }
 
