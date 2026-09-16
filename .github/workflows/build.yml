@@ -54,25 +54,25 @@ jobs:
 
           What is new in this release:
 
-          - Nothing but a pairing puts a pairing code on screen.  A device on
-            the previous application was getting one: 发送更新 has to dial the
-            other device, that dial has to say it is not a request to pair, and
-            that is a sentence only this build reads -- so the older device read
-            the dial as an invitation and put a code on screen with 同意 and
-            拒绝 that had no pairing behind them.  An update is now offered to a
-            device running the same application as this one, which is also the
-            only kind that could install what it would be sent; a device that
-            cannot say which application it runs is not offered to at all.
-          - Sending an update no longer downloads it first.  A newer device is
-            the one that can bring an older one up to date, and the installer it
-            sends is one it already had: the copy its own upgrade downloaded is
-            kept, one per application, newest first.  A device that has never
-            upgraded here has none, and its 发送更新 is greyed out with the
-            reason on it instead of fetching the release to pass along -- the
-            device being offered can fetch the same file from the same place
-            itself, and doing it here would be the same download twice.  A
-            device with nothing to give now says so when it is asked for one
-            (获取更新), and the asking device gets the release on its own.
+          - An update that cannot be checked is no longer an update you are told
+            to install by hand.  A release is read twice: the background process
+            asks GitHub whether a newer version exists, and the desktop
+            application asks the release's manifest whether it can replace
+            itself with it.  Those two answers were being folded into one, so a
+            manifest that could not be read -- GitHub unreachable, or the few
+            minutes between a release appearing and its manifest being attached
+            -- came out as "this build cannot install updates", and the card
+            sent you to download the installer and replace the files yourself.
+            A check that failed is now its own answer: the card offers the
+            install the application performs by itself, and if that download
+            cannot be made either, it says what went wrong.
+          - A release becomes visible when it can be installed, not before.  The
+            release page is what the update check reads, so a release that shows
+            up before its manifest does is one every client is offered and none
+            can install.  Releases are now created hidden and appear once the
+            manifest is attached to them -- or, if that build fails, after half
+            an hour, so a broken desktop build cannot hide a release from the
+            previous application, which installs by hand.
 
           The device name is now published in the mDNS record, to the local
           network.  That is what lets devices show the name you chose rather
