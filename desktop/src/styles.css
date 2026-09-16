@@ -789,6 +789,59 @@ button.danger-outline:hover:not(:disabled),
    from, rather than in the band at the top of the window in English. */
 .pairing-message { margin: 0; font-size: 13px; }
 .pairing-message--failed { color: var(--danger-text); }
+
+/* ── The internet pairing card ─────────────────────────────────────────────
+   The card is a device-management card, not a preference page, and it read as
+   a preference page: a checkbox heading a list of rows.  Its own shape is an
+   *exchange* — one code, made here or typed here — so the switch that governs
+   the whole card sits with the title, and the two directions of the exchange
+   sit side by side. */
+.internet-head { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px 12px; }
+/* The heading rule belongs to the title, so the row it heads keeps the rule and
+   the controls beside it sit on the title's own line. */
+.internet-head h2 { flex: 1 1 auto; min-width: 0; }
+.internet-head-actions { display: flex; align-items: center; gap: 10px; }
+
+/* A switch rather than a checkbox: this one setting turns on everything else on
+   the card, and as a ticked box in a column of ticked boxes it read like one
+   more preference among the ones it governs.  The input is still the control —
+   focus, keyboard, the accessible name and the change event are all its own —
+   and the track and thumb are its drawn state. */
+.switch { display: inline-flex; align-items: center; gap: 8px; cursor: pointer; }
+.switch--busy { cursor: progress; opacity: .7; }
+.switch-input { position: absolute; width: 1px; height: 1px; opacity: 0; pointer-events: none; }
+.switch-track { position: relative; flex: none; width: 40px; height: 22px; border-radius: 11px; border: 1px solid var(--line); background: var(--surface); transition: background .15s ease, border-color .15s ease; }
+.switch-thumb { position: absolute; top: 2px; left: 2px; width: 16px; height: 16px; border-radius: 50%; background: var(--muted); transition: transform .15s ease, background .15s ease; }
+.switch--on .switch-track { background: var(--accent-soft); border-color: var(--accent-line); }
+.switch--on .switch-thumb { transform: translateX(18px); background: var(--accent-text); }
+.switch-input:focus-visible + .switch-track { outline: 2px solid var(--accent-line); outline-offset: 2px; }
+.switch-text { font-size: 13px; color: var(--muted); }
+.switch--on .switch-text { color: var(--accent-text); }
+
+/* The exchange, both directions.  Two columns while there is room for two —
+   they are read together or not at all — and one when there is not. */
+.pair-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 12px; margin-top: 14px; }
+.pair-half { display: grid; gap: 8px; align-content: start; padding: 14px; border: 1px solid var(--line); border-radius: var(--radius-lg); background: var(--surface); }
+.pair-half .setting-actions { margin: 0; }
+.pair-half-title { display: flex; align-items: center; gap: 7px; font-size: 14px; }
+/* The code itself: monospace and letter-spaced, because it is read aloud to
+   another person and typed from their screen, and every glyph that can be
+   mistaken for its neighbour costs a pairing.  The generator already leaves the
+   confusable letters out; the spacing is what makes the groups findable. */
+.pair-code { display: flex; align-items: center; gap: 8px; margin: 0; }
+.pair-code code { font-size: 19px; letter-spacing: .14em; font-family: var(--font-mono); overflow-wrap: anywhere; }
+.pair-code--empty { color: var(--muted); font-size: 13px; }
+.pair-input { font-size: 16px; letter-spacing: .12em; text-transform: uppercase; font-family: var(--font-mono); }
+
+/* The paired devices, in the shape the other tab's rows use — the same icon,
+   the same identity block, the same chips and the same trailing actions, so a
+   device reads as itself wherever it is listed. */
+.internet-peers-head { display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between; gap: 6px 12px; margin-top: 18px; }
+.internet-peers-head h3 { font-size: 14px; }
+.internet-peers-head .muted { display: inline-flex; align-items: center; gap: 4px; }
+.peer-list--devices > li { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 12px; }
+.peer-list--devices .device-identity { flex: 1 1 160px; min-width: 0; }
+.peer-list--devices .device-channels { flex: 1 1 auto; }
 /* The chrome belongs to the card rather than to the page that holds it.  A
    `.settings-section` is one card on the settings page and on the devices page
    — and the two cards that moved to the devices page kept their rows and lost
@@ -945,6 +998,10 @@ button.danger-outline:hover:not(:disabled),
 .ai-pull-status--done { color: var(--accent-text); }
 .ai-pull-status--failed { color: var(--danger-text); }
 .transfers-view { flex: 1; min-width: 0; }
+/* Where the internet-paired devices went.  It answers the picker above it, so it
+   lines up with the picker's column — same gutter as the list below, and the
+   gutter again above it so it does not sit against the toolbar rule. */
+.transfers-relay-note { margin: 10px var(--page-gutter) 0; }
 /* The speed test and the cancel result sit between the toolbar and the list, so
    they line up with the list rather than with the toolbar: they are part of the
    page's column, not of the bar above it. */

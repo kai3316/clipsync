@@ -614,6 +614,13 @@ class LanRuntime:
             )
         else:
             pid = self._resolve(device_id)
+            # This protocol stays LAN-only: its chunks are 256 KiB before the
+            # envelope's base64 and would not fit the relay, and pause/resume
+            # has no way to pick a transfer back up off a public broker.  Files
+            # cross the internet as chat attachments instead, which chunk to the
+            # relay's size and cap the file — a device paired by code therefore
+            # arrives here as NOT_CONNECTED, and the transfers page is where it
+            # is told so (see `TransfersView.vue::targets`).
             if pid not in (self.transport.get_connected_peers() or []):
                 if archive:
                     Path(archive).unlink(missing_ok=True)
@@ -2521,6 +2528,12 @@ class LanRuntime:
                     names[pid] = info["name"]
             discovered_ids = set(advertised)
             rows = []
+            # Which ids the loop below actually drew a row for, as opposed to
+            # which ones it looked at.  The internet pairs are added after it
+            # and need the difference: a device this machine also knows on the
+            # LAN is already a row, and drawing it twice is the one thing a
+            # device list cannot survive.
+            listed = set()
             for pid, name in sorted(names.items()):
                 peer = known.get(pid)
                 paired = bool(peer and peer.paired)
@@ -2564,6 +2577,7 @@ class LanRuntime:
                 fingerprint = self.pairing.get_peer_fingerprint(pid)
                 mine = self.pairing.get_identity().fingerprint
                 seen = advertised.get(pid) or {}
+                listed.add(pid)
                 rows.append(
                     {
                         "id": pid,
@@ -2601,6 +2615,74 @@ class LanRuntime:
                         "sas": sas_code(mine, fingerprint) if mine and fingerprint else "",
                         "archived": False,
                         "removed_at": 0.0,
+                    }
+                )
+            # The devices paired by code, which until now were the one kind of
+            # device this list did not show.  A pairing code is a pairing: it is
+            # how two machines that have never met on a network are introduced,
+            # and it left the user a card in one tab and nothing in the one
+            # place devices are managed — so an internet peer could be renamed
+            # and unpaired and otherwise not touched: no chat, no test, no send.
+            #
+            # Their rows cannot come from the pairing repository.  That
+            # repository is the TLS trust store, and the LAN handshake reads "is
+            # this id paired" as "was this certificate pinned here"; a peer
+            # whose identity is bound by a relay channel's shared secret has no
+            # certificate to pin, so writing it in would let anyone on this
+            # network who claims that device id be trusted as it.  The rows come
+            # from the relay pairing itself instead, carrying the route they
+            # have (`relay`) so a front end can offer what the relay can carry
+            # and withhold what it cannot.
+            for net in self.internet_pairing.paired_peers():
+                pid = net["peer_id"]
+                if pid in listed or pid in archived_ids or pid in names:
+                    # A device this machine also knows on the LAN is already a
+                    # row, and its 互联网 chip is this same join read from the
+                    # other side.
+                    continue
+                last_seen = net.get("last_seen")
+                rows.append(
+                    {
+                        "id": pid,
+                        # The alias first, exactly as the pairing card reads it:
+                        # it is the name the user chose for this device, and it
+                        # outranks the one the peer published about itself.
+                        "name": net.get("alias") or net.get("name") or pid,
+                        # No note.  Notes live on a saved LAN peer, and there is
+                        # none for a device this machine has never pinned; the
+                        # row's rename writes the alias instead.
+                        "note": "",
+                        "paired": True,
+                        # A device with no local route advertises nothing here:
+                        # an internet peer has not announced these, and an empty
+                        # version means unknown, never "up to date".
+                        "version": "",
+                        "platform": "",
+                        "arch": "",
+                        "update_available": False,
+                        "update_cached": False,
+                        # For a device whose only route is the relay, the relay's
+                        # own view of it *is* its connection state — there is no
+                        # second link for this field to describe.  `relay` is what
+                        # marks that reading, so the consumers that would
+                        # otherwise misread it (dialing the peer, offering it as
+                        # a transfer target) can tell the two apart.
+                        "connection_state": "online" if net.get("online") else "offline",
+                        "pairing_status": "paired",
+                        "pairing_code": "",
+                        "sas": "",
+                        "archived": False,
+                        "removed_at": 0.0,
+                        # This row's route, and what it is worth naming: the LAN
+                        # handshake never established it, so every LAN-only
+                        # action is one the card must not offer.
+                        "relay": True,
+                        # The name the user chose, on its own, because it is what
+                        # the rename writes and a field that could only be read
+                        # back off `name` would make "no alias" and "alias equal
+                        # to the peer's own name" the same string.
+                        "alias": net.get("alias") or "",
+                        "last_seen": float(last_seen or 0.0),
                     }
                 )
             with config_lock:
@@ -3201,9 +3283,11 @@ class LanRuntime:
             if self._stop_event.is_set():
                 raise ApplicationError("LAN_NOT_RUNNING", "LAN runtime is stopping")
             pid = self._resolve(device_id)
-            if pid not in {peer.device_id for peer in self.pairing.get_known_peers()}:
+            reachable = self._peer_is_internet_reachable(pid)
+            known = {peer.device_id for peer in self.pairing.get_known_peers()}
+            if pid not in known and not reachable:
                 raise ApplicationError("NOT_FOUND", "Device not found")
-            if not self.pairing.is_peer_paired(pid):
+            if not self.pairing.is_peer_paired(pid) and not reachable:
                 raise ApplicationError("NOT_PAIRED", "Device is not paired")
             data = encode_frame(
                 {"msg_type": "nav_url", "url": url}, source_device=self.config.device_id
@@ -3213,6 +3297,13 @@ class LanRuntime:
             except Exception:
                 logger.debug("URL send failed", exc_info=True)
                 sent = False
+            if not sent:
+                # The receiving side has read a `nav_url` off the relay since the
+                # relay learned to route one (``_on_peer_message`` trusts it for
+                # any internet-reachable peer); the send side was the half that
+                # never used it, so a URL to an internet-paired device came back
+                # as "not sent" while the same device took clipboard fine.
+                sent = self._relay_publish_to_peer(data, pid)
             if not sent:
                 raise ApplicationError("SEND_FAILED", "URL was not sent", retryable=True)
             self._publish("url.sent", {"device_id": pid, "url": url})
@@ -3297,7 +3388,15 @@ class LanRuntime:
             if self._stop_event.is_set():
                 raise ApplicationError("LAN_NOT_RUNNING", "LAN runtime is stopping")
             pid = self._resolve(device_id)
-            if pid not in {p.device_id for p in self.pairing.get_known_peers()}:
+            # A device paired by code is not in the pairing repository and is
+            # still a device this machine can reach: the probe's relay channel
+            # exists for exactly this case, and refusing the request before it
+            # could answer left the row's 测试连接 button failing on a pairing
+            # that works.
+            if (
+                pid not in {p.device_id for p in self.pairing.get_known_peers()}
+                and not self._peer_is_internet_reachable(pid)
+            ):
                 raise ApplicationError("NOT_FOUND", "Device not found")
             return self._probe_device(pid)
         finally:

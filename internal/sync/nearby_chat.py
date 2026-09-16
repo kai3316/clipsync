@@ -233,10 +233,15 @@ class ChatManager:
     MAX_SESSIONS = 8  # simultaneously live sessions
     # ---- transfer tuning (mirrors FileTransferManager) ----------------------
     CHUNK_SIZE = 256 * 1024
-    # Chunks for internet-only peers must fit inside the relay payload cap
-    # (MAX_RELAY_PAYLOAD - envelope overhead); LAN peers keep CHUNK_SIZE so the
-    # wire format stays byte-identical for pre-update LAN peers.
-    RELAY_CHUNK_SIZE = 224 * 1024
+    # Chunks for internet-only peers must fit inside the relay payload cap, and
+    # the cap applies to the published envelope — 4/3 of this chunk, plus the
+    # 46-byte binary header, plus the GCM tag and the JSON shell around them.
+    # 224 KiB did not: base64 turned it into a ~306 KB envelope, past the
+    # broker's 256 KB, which dropped the chunk in flight while the sender
+    # counted it sent.  176 KiB lands at ~240 KB with the chunk header, leaving
+    # the public broker room for its own framing.  LAN peers keep CHUNK_SIZE so
+    # the wire format stays byte-identical for pre-update LAN peers.
+    RELAY_CHUNK_SIZE = 176 * 1024
     RELAY_FILE_CAP = 5 * 1024 * 1024  # internet-relay file size cap (bytes)
     # How long a session may sit unanswered while open_to_all is off: the
     # sender waits this long for a ``chat_accept``, and the receiver's own

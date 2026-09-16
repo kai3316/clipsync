@@ -421,7 +421,12 @@ onUnmounted(() => { if (timer) clearInterval(timer); if (typingTimer) clearTimeo
           :title="device.connection_state === 'offline' ? t('{name} 当前不在线', { name: device.name }) : undefined"
           @click="invite({ peer_id: device.id, peer_name: device.name } as ChatSession)">
           <MessageCircle :size="16" /><span>{{ device.name }}</span>
-          <small>{{ device.connection_state === 'offline' ? t("离线") : device.paired ? t("已配对") : t("未配对") }}</small>
+          <!-- A device paired by code is named as that rather than 已配对: it is
+               the one row here whose conversation crosses the internet, and the
+               reader should know before the first message which route it takes.
+               It is offered on the same rule as the rest — reachable now or
+               not — which for it is the relay's own view of the peer. -->
+          <small>{{ device.connection_state === 'offline' ? t("离线") : device.relay ? t("互联网") : device.paired ? t("已配对") : t("未配对") }}</small>
         </button>
         <p v-if="!nearby.length" class="chat-nearby-empty">{{ t("附近没有可聊天的设备。") }}</p>
 

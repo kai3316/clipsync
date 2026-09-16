@@ -540,28 +540,23 @@ class InternetPairingService:
                 return "connecting"
         return "off" if not getattr(self.config, "internet_sync_enabled", False) else "connecting"
 
-    def status(self):
+    def paired_peers(self):
+        """The confirmed internet pairs, in the shape one device row needs.
+
+        Split out of :meth:`status` because the device list draws these peers as
+        cards and has to answer exactly what the pairing card answers — the
+        alias, the relay's own view of liveness, when it was last heard from —
+        and a second computation of ``online`` would be a second answer to the
+        same question, free to drift the moment either window changes.
+
+        A provisional base32 tag key is not a device and is absent from here for
+        the same reason it is absent from ``status``'s peer list: it only means
+        "we entered a code and the peer has not confirmed its identity yet".
+        """
         now = time.time()
-        self._prune_pending()
         peers = []
-        waiting = []
         for pid in sorted(self.config.netpair_secrets or {}):
-            # A provisional base32 tag key (see enter) is not a confirmed pair:
-            # it only means "we entered a code and the peer has not confirmed
-            # its identity yet".  It is not a device and must not be listed as
-            # one — but it is the state the page is *in* after a code is
-            # submitted, and hiding it left the one moment the user most needs
-            # an answer with nothing on screen at all.  It is reported instead
-            # under its own name, where it can say "waiting" and offer a way
-            # back out.
             if is_provisional_key(pid):
-                waiting.append(
-                    {
-                        "peer_id": pid,
-                        "name": self._names.get(pid, ""),
-                        "since": self._waiting_since.get(pid),
-                    }
-                )
                 continue
             name = self._names.get(pid, "")
             if not name:
@@ -578,11 +573,31 @@ class InternetPairingService:
                     "paired": True,
                 }
             )
+        return peers
+
+    def status(self):
+        self._prune_pending()
+        waiting = []
+        for pid in sorted(self.config.netpair_secrets or {}):
+            # A code entered on this machine whose partner has not answered is
+            # not a device and must not be listed as one — but it is the state
+            # the page is *in* after a code is submitted, and hiding it left the
+            # one moment the user most needs an answer with nothing on screen at
+            # all.  It is reported instead under its own name, where it can say
+            # "waiting" and offer a way back out.
+            if is_provisional_key(pid):
+                waiting.append(
+                    {
+                        "peer_id": pid,
+                        "name": self._names.get(pid, ""),
+                        "since": self._waiting_since.get(pid),
+                    }
+                )
         return {
             "generated_code": next(iter(self._pending), None),
             "relay": self.relay_state(),
             "enabled": bool(getattr(self.config, "internet_sync_enabled", False)),
-            "peers": peers,
+            "peers": self.paired_peers(),
             # Codes entered on this machine whose partner has not answered yet.
             # Distinct from ``generated_code``, which is the other direction: a
             # code *we* made and are waiting for somebody to type.

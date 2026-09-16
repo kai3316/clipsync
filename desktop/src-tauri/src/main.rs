@@ -1717,7 +1717,10 @@ async fn diagnostics_request(
 }
 
 /// The updater plugin, with this app's timeout applied.
-fn updater(app: &tauri::AppHandle) -> Result<tauri_plugin_updater::Updater, BridgeError> {
+///
+/// `pub(crate)` because the bridge asks it the same question when it forwards the
+/// sidecar's silent "an update exists" notice — see `bridge.rs`.
+pub(crate) fn updater(app: &tauri::AppHandle) -> Result<tauri_plugin_updater::Updater, BridgeError> {
     Ok(app
         .updater_builder()
         .timeout(UPDATE_LOOKUP_TIMEOUT)

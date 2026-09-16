@@ -52,12 +52,20 @@ function activeStatus(item: Transfer): string {
   return "";
 }
 
-/** The peers a file can be sent to: paired and currently reachable.
+/** The peers a file can be sent to: paired and currently reachable over the LAN.
  *
  * Same rule the send-URL dialog picks from (``App.vue::openSendUrlFromHost``),
  * and the same one the legacy transfers page applied: it listed connected
  * devices only, and refused to start an upload with no target chosen
  * (``transfer.select_target``) rather than sending to everyone.
+ *
+ * A device paired by internet code is left out, and `relayOnlyTargets` is how
+ * the page says so rather than showing an empty picker: this protocol's chunks
+ * are 256 KiB before the envelope's base64 and pause/resume cannot pick a
+ * transfer back up off a public broker, which is why files reach an
+ * internet-paired device as *chat attachments* instead — chunked to the relay's
+ * size and capped at 5 MB.  The sidecar refuses the send with NOT_CONNECTED,
+ * so offering the target here would be a button whose click cannot work.
  */
 const props = defineProps<{
   devices?: Device[];
@@ -69,7 +77,12 @@ const props = defineProps<{
 }>();
 const emit = defineEmits<{ dropped: [] }>();
 const targets = computed(() =>
-  (props.devices || []).filter((device) => device.paired && device.connection_state === "online"));
+  (props.devices || []).filter((device) =>
+    device.paired && !device.relay && device.connection_state === "online"));
+/** The internet-paired devices this page cannot send to, so the picker's
+ *  silence about them can be a sentence instead. */
+const relayOnlyTargets = computed(() =>
+  (props.devices || []).filter((device) => device.paired && device.relay && !device.archived));
 // Nothing is preselected: a file is the one thing here the user cannot take
 // back, so the machine it goes to is named rather than assumed.
 const target = ref("");
@@ -370,6 +383,12 @@ onUnmounted(() => {
       <button class="icon-button" :title="t('刷新')" :aria-label="t('刷新传输')" :disabled="busy" @click="refreshNow"><RefreshCw :size="18" /></button>
       <button :disabled="busy || speed.state === 'sending'" @click="speedTest">{{ t("速度测试") }}</button>
     </div>
+    <!-- Where the internet-paired devices went, and why.  A picker that lists
+         none of them and says nothing reads as a device that is missing rather
+         than as a route this page does not have. -->
+    <p v-if="relayOnlyTargets.length" class="muted small transfers-relay-note" role="status">
+      {{ t("互联网配对的设备请到聊天页发送文件：中继单块上限更小，附件已按此切分，最大 5 MB。") }}
+    </p>
     <!-- A drop answers the picker, not the target: the files it brought are
          shown with the one question it left open — which machine — and nothing
          goes out until that is answered.  The names are the OS's own paths' last

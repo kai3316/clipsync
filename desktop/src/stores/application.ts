@@ -441,6 +441,13 @@ export function createApplicationStore() {
               latest: String(data.latest || ""),
               current: String(data.current || ""),
               url: String(data.url || ""),
+              // The host answers this before forwarding the notice (see
+              // `bridge.rs`), so by the time the window sees it the answer is
+              // definitive and the card can offer the install it can actually
+              // perform.  Spelled through a boolean test rather than copied:
+              // an older host does not send the field at all, and a truthy
+              // string would otherwise read as "yes".
+              installable: typeof data.installable === "boolean" ? data.installable : undefined,
             };
             return;
           }

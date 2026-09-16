@@ -14,6 +14,8 @@ Covered here:
 import hashlib
 import json
 import os
+import platform
+import re
 import sys
 import time
 from pathlib import Path
@@ -112,7 +114,73 @@ def test_verify_no_release_info_p2p_rejected_github_ok(tmp_path):
 
 
 def _patch_platform(monkeypatch, name="clipsync-test.zip"):
-    monkeypatch.setattr(updater_mod, "_platform_asset_name", lambda: name)
+    monkeypatch.setattr(
+        updater_mod, "_asset_matchers", lambda: [re.compile("^" + re.escape(name) + "$")]
+    )
+
+
+# ══════════════════════════════════════════════════════════════════════
+# Which application's asset this process names
+#
+# Two desktops are published from one release, so each platform has two assets
+# and the sidecar has to pick the one belonging to the shell that started it.
+# Getting this wrong is not a failed download: it is a successful download of
+# the *other* application, offered to the user as their update.
+# ══════════════════════════════════════════════════════════════════════
+
+
+def _platform(monkeypatch, system, machine):
+    monkeypatch.setattr(platform, "system", lambda: system)
+    monkeypatch.setattr(platform, "machine", lambda: machine)
+
+
+def test_tauri_shell_names_the_tauri_installer_not_the_legacy_zip(monkeypatch):
+    """The bug the user hit: a Tauri Mac downloading the old app's zip."""
+    _platform(monkeypatch, "Darwin", "arm64")
+    monkeypatch.setenv(updater_mod.SHELL_ENV, "tauri")
+    assert updater_mod.running_shell() == updater_mod.SHELL_TAURI
+    # Both assets are on the release, exactly as the real one publishes them.
+    picked = updater_mod._select_asset(
+        [
+            {"name": "clipsync-macos-arm64.zip"},
+            {"name": "ClipSync_1.0.10_aarch64.dmg"},
+            # The plugin's payload is on the page too, and it is not a file a
+            # person installs -- picking it would leave the user with something
+            # they cannot open.
+            {"name": "ClipSync.app.tar.gz"},
+        ]
+    )
+    assert picked == {"name": "ClipSync_1.0.10_aarch64.dmg"}
+
+
+def test_unknown_shell_reads_as_legacy(monkeypatch):
+    """An unrecognised value must not silently become the Tauri branch.
+
+    Unset is the same case as unrecognised and the more common one: the legacy
+    application runs this code in its own process, where nothing sets the
+    variable.
+    """
+    _platform(monkeypatch, "Windows", "AMD64")
+    monkeypatch.delenv(updater_mod.SHELL_ENV, raising=False)
+    assert updater_mod.running_shell() == updater_mod.SHELL_LEGACY
+    monkeypatch.setenv(updater_mod.SHELL_ENV, "something-else")
+    assert updater_mod.running_shell() == updater_mod.SHELL_LEGACY
+    assert updater_mod._select_asset([{"name": "clipsync-windows.zip"}]) == {
+        "name": "clipsync-windows.zip"
+    }
+
+
+def test_get_cached_asset_picks_this_shells_file_from_a_shared_cache(monkeypatch, tmp_path):
+    """One cache directory holds both applications' assets on a machine that
+    has run both; the peer must be sent its own platform's file."""
+    _platform(monkeypatch, "Darwin", "arm64")
+    monkeypatch.setenv(updater_mod.SHELL_ENV, "tauri")
+    monkeypatch.setattr(updater_mod, "_cache_dir", lambda: str(tmp_path))
+    (tmp_path / "clipsync-macos-arm64.zip").write_bytes(b"legacy")
+    (tmp_path / "ClipSync_1.0.10_aarch64.dmg").write_bytes(b"tauri")
+    assert updater_mod.get_cached_asset() == str(tmp_path / "ClipSync_1.0.10_aarch64.dmg")
+    monkeypatch.setenv(updater_mod.SHELL_ENV, "legacy")
+    assert updater_mod.get_cached_asset() == str(tmp_path / "clipsync-macos-arm64.zip")
 
 
 def test_fetch_asset_info_without_digest_is_none(monkeypatch):

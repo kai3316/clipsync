@@ -9,6 +9,7 @@ import contextlib
 import json
 import logging
 import os
+import re
 import ssl
 import urllib.error
 import urllib.request
@@ -22,6 +23,113 @@ logger = logging.getLogger(__name__)
 _GITHUB_REPO = "kai3316/clipsync"
 _LATEST_URL = f"https://api.github.com/repos/{_GITHUB_REPO}/releases/latest"
 _RELEASES_PAGE = f"https://github.com/{_GITHUB_REPO}/releases/latest"
+
+# Two desktop applications are published from this repository and they share one
+# release, so the same platform has two assets and only one of them is the
+# application this process belongs to.  Which one is not a property of the OS --
+# it is a property of the shell that started this process, and the shell is the
+# only party that knows it: the Tauri host names itself in the environment when
+# it spawns the sidecar, and the legacy application runs this code in its own
+# process, where nothing sets the variable.
+SHELL_ENV = "CLIPSYNC_SHELL"
+SHELL_TAURI = "tauri"
+SHELL_LEGACY = "legacy"
+
+
+def running_shell() -> str:
+    """Which desktop shell this process is running under.
+
+    Anything unrecognised -- unset, empty, or a value from a future shell this
+    build has never heard of -- reads as the legacy shell rather than as the
+    Tauri one.  That direction is the safe one: the legacy asset names are the
+    ones this code has always returned, so an unrecognised shell gets the
+    behaviour it had before the distinction existed instead of a new one it
+    cannot install.
+    """
+    return (
+        SHELL_TAURI
+        if (os.environ.get(SHELL_ENV) or "").strip().lower() == SHELL_TAURI
+        else SHELL_LEGACY
+    )
+
+
+def _machine() -> tuple[str, bool]:
+    """(``platform.system()``, whether this CPU is 64-bit ARM)."""
+    import platform as _platform
+
+    machine = (_platform.machine() or "").lower()
+    return _platform.system(), ("aarch64" in machine or "arm64" in machine)
+
+
+def _legacy_asset_name() -> str:
+    """The legacy application's release asset for this platform.
+
+    One fixed name per platform, written by the packaging job.  Intel macOS is
+    no longer built, and the name this returns there matches no asset, so a
+    download on such a machine reports "no release for this platform" rather
+    than guessing at one.
+    """
+    system, is_arm = _machine()
+    if system == "Darwin":
+        return "clipsync-macos-arm64.zip" if is_arm else "clipsync-macos-x64.zip"
+    if system == "Windows":
+        return "clipsync-windows.zip"
+    if is_arm:
+        return "clipsync-linux-arm64.tar.gz"
+    return "clipsync-linux.tar.gz"
+
+
+def _asset_matchers() -> list[re.Pattern]:
+    """Patterns this process's release asset must match, best first.
+
+    The legacy bundles have one fixed name each, so their pattern is the name
+    itself.  The Tauri bundles carry the version in the filename
+    (``ClipSync_1.0.10_x64-setup.exe``), which no fixed string can name, so they
+    are matched by shape.
+
+    ``ClipSync.app.tar.gz`` is deliberately not among them even on macOS, where
+    it is published: it is that application's *update payload*, which its own
+    updater plugin unpacks over the installed bundle, and it is not a file a
+    person installs.  What a user is handed here -- the .dmg, the -setup.exe,
+    the AppImage -- is the thing they can actually run.
+    """
+    system, is_arm = _machine()
+    if running_shell() != SHELL_TAURI:
+        return [re.compile("^" + re.escape(_legacy_asset_name()) + "$")]
+    if system == "Darwin":
+        return [re.compile(r"^ClipSync_.*_%s\.dmg$" % ("aarch64" if is_arm else "x64"))]
+    if system == "Windows":
+        return [re.compile(r"^ClipSync_.*_%s-setup\.exe$" % ("arm64" if is_arm else "x64"))]
+    return [re.compile(r"^ClipSync_.*_%s\.(?:AppImage|deb)$" % ("aarch64" if is_arm else "amd64"))]
+
+
+def _platform_asset_label() -> str:
+    """What this platform's asset is called in a sentence to the user.
+
+    The legacy shell's answer is its filename, because that is a thing the
+    reader can look for on the releases page.  The Tauri shell has no single
+    filename to give -- the version is part of it -- so it says what the file is
+    instead.
+    """
+    if running_shell() != SHELL_TAURI:
+        return _legacy_asset_name()
+    system, is_arm = _machine()
+    machine = {"Darwin": "macOS", "Windows": "Windows"}.get(system, "Linux")
+    return f"ClipSync ({machine} {'arm64' if is_arm else 'x64'})"
+
+
+def _select_asset(assets: list) -> dict | None:
+    """This platform's asset from a release's asset list, or None.
+
+    Patterns are tried in order and each is matched against every asset before
+    the next is tried, so the first pattern is a genuine preference rather than
+    a tie-break between whatever the API happened to list first.
+    """
+    for matcher in _asset_matchers():
+        for asset in assets:
+            if matcher.match(asset.get("name") or ""):
+                return asset
+    return None
 
 
 def _https_context() -> ssl.SSLContext:
@@ -266,29 +374,6 @@ def check_for_update(timeout: float = 6.0) -> dict:
     return result
 
 
-def _platform_asset_name() -> str:
-    """Return the release asset filename for the current platform + arch.
-
-    macOS (Apple Silicon) → clipsync-macos-arm64.zip, Windows → clipsync-windows.zip,
-    Linux x86_64 → clipsync-linux.tar.gz, Linux arm64 → clipsync-linux-arm64.tar.gz.
-    Intel macOS is no longer built; that branch returns a name matching no asset,
-    so the downloader reports "no release for this platform" gracefully.
-    """
-    import platform as _platform
-
-    system = _platform.system()
-    machine = (_platform.machine() or "").lower()
-    is_arm = "aarch64" in machine or "arm64" in machine
-    if system == "Darwin":
-        return "clipsync-macos-arm64.zip" if is_arm else "clipsync-macos-x64.zip"
-    if system == "Windows":
-        return "clipsync-windows.zip"
-    # Linux
-    if is_arm:
-        return "clipsync-linux-arm64.tar.gz"
-    return "clipsync-linux.tar.gz"
-
-
 def sha256_file(path: str) -> str:
     """Streaming SHA-256 of *path*, returned as lowercase hex."""
     import hashlib
@@ -319,21 +404,20 @@ def fetch_latest_asset_info(timeout: float = 10.0) -> dict | None:
     tag = (data.get("tag_name") or "").strip()
     if not tag:
         return None
-    asset_name = _platform_asset_name()
-    for asset in data.get("assets") or []:
-        if asset.get("name") != asset_name:
-            continue
-        digest = asset.get("digest") or ""
-        if not digest.startswith("sha256:") or len(digest) <= len("sha256:"):
-            logger.info("Release %s has no sha256 digest for %s", tag, asset_name)
-            return None
-        return {
-            "version": tag,
-            "asset": asset_name,
-            "sha256": digest[len("sha256:") :].lower(),
-        }
-    logger.info("Latest release %s has no asset named %s", tag, asset_name)
-    return None
+    matched = _select_asset(data.get("assets") or [])
+    asset_name = (matched or {}).get("name") or ""
+    if not matched:
+        logger.info("Latest release %s has no asset for %s", tag, _platform_asset_label())
+        return None
+    digest = matched.get("digest") or ""
+    if not digest.startswith("sha256:") or len(digest) <= len("sha256:"):
+        logger.info("Release %s has no sha256 digest for %s", tag, asset_name)
+        return None
+    return {
+        "version": tag,
+        "asset": asset_name,
+        "sha256": digest[len("sha256:") :].lower(),
+    }
 
 
 def verify_update_blob(
@@ -418,15 +502,12 @@ def download_latest_release(
             logger.warning("Latest release has no downloadable assets")
             return None, T("web.update_no_assets"), ""
 
-        asset_name = _platform_asset_name()
-        matched = None
-        for asset in assets:
-            if asset.get("name") == asset_name:
-                matched = asset
-                break
+        matched = _select_asset(assets)
         if not matched or not matched.get("browser_download_url"):
-            logger.warning("No download asset found for platform: %s", asset_name)
-            return None, T("web.update_no_release", name=asset_name), ""
+            label = _platform_asset_label()
+            logger.warning("No download asset found for platform: %s", label)
+            return None, T("web.update_no_release", name=label), ""
+        asset_name = matched["name"]
         browser_url = matched["browser_download_url"]
         version = (data.get("tag_name") or "").strip()
 
@@ -530,6 +611,24 @@ def cache_asset(asset_path: str) -> str | None:
 
 
 def get_cached_asset() -> str | None:
-    """Return the cached update asset path for this platform, or None."""
-    p = os.path.join(_cache_dir(), _platform_asset_name())
-    return p if os.path.isfile(p) else None
+    """The cached update asset for this platform and shell, or None.
+
+    Looked up by pattern rather than by name because the Tauri bundles carry the
+    version in their filename, and because one cache directory can hold both
+    applications' assets: a machine that has run the legacy app and the Tauri
+    app has one of each here, and serving the wrong one to a peer of the same
+    platform is the mistake this naming exists to prevent.  The peer checks what
+    it is sent against its own platform's digest before it will install it, so a
+    mismatch is caught there too -- but it costs a transfer to find out.
+    """
+    directory = _cache_dir()
+    try:
+        names = sorted(os.listdir(directory))
+    except OSError:
+        return None
+    for matcher in _asset_matchers():
+        for name in names:
+            path = os.path.join(directory, name)
+            if matcher.match(name) and os.path.isfile(path):
+                return path
+    return None

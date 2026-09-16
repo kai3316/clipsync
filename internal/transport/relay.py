@@ -22,9 +22,10 @@ Replay protection: every envelope carries a wall-clock timestamp; envelopes
 outside +/- RELAY_TS_WINDOW seconds are dropped, and exact duplicate blobs are
 dropped via a bounded LRU of recent ciphertext hashes.
 
-Size cap: single envelopes larger than MAX_RELAY_PAYLOAD are refused (the
-relay path is for clipboard text/images/small payloads; big files keep using
-LAN transfers).
+Size cap: a frame too large for its envelope to fit under MAX_RELAY_PAYLOAD is
+refused (the relay path is for clipboard text/images/small payloads; files
+cross the internet in chat chunks, which are cut to fit — see
+``MAX_RELAY_FRAME``).
 
 Everything here is deliberately decoupled from paho so the logic is testable
 without a network: ``RelayTransport`` takes a ``client_factory`` and only the
@@ -55,7 +56,18 @@ RELAY_TS_WINDOW = 1800  # seconds of tolerated clock skew either way.
 # Kept generous (30 min) so real-world clock
 # drift can't silently break internet pairing /
 # relay sync — the window still bounds replay.
-MAX_RELAY_PAYLOAD = 256 * 1024  # refuse to carry anything larger than this
+MAX_RELAY_PAYLOAD = 256 * 1024  # refuse to publish anything larger than this
+# What that cap applies to is the *envelope*, because the envelope is what goes
+# to the broker — and an envelope is 4/3 of the frame it carries (the ciphertext
+# in base64) plus the GCM tag and the JSON shell around it.  The check used to
+# run on the frame against this same number, which is a different, larger limit
+# wearing the same name: it passed a 224 KiB chat chunk, base64 turned it into a
+# ~306 KB envelope, and the broker dropped a message the sender had already been
+# told was delivered.  The truthful frame limit is therefore this, derived
+# rather than written down, so it cannot drift when the payload cap moves.
+#   3/4 of the payload (base64's ratio), less the GCM tag, less room for the
+#   JSON shell — the largest frame whose envelope still fits under the cap.
+MAX_RELAY_FRAME = (MAX_RELAY_PAYLOAD - 64) * 3 // 4 - 16
 _SEEN_CAP = 512  # recent ciphertext hashes remembered
 
 # ── Internet pairing code (Round 14) ──────────────────────────────────────
@@ -321,8 +333,8 @@ def netpair_passphrase_error(pw: str) -> str | None:
 
 def pack_envelope(frame_bytes: bytes, key: bytes, now: float) -> bytes:
     """Wrap an encoded ClipSync frame into an encrypted relay envelope."""
-    if len(frame_bytes) > MAX_RELAY_PAYLOAD:
-        raise ValueError(f"frame too large for relay: {len(frame_bytes)} > {MAX_RELAY_PAYLOAD}")
+    if len(frame_bytes) > MAX_RELAY_FRAME:
+        raise ValueError(f"frame too large for relay: {len(frame_bytes)} > {MAX_RELAY_FRAME}")
     ct = encrypt(frame_bytes, key)
     env = {
         "v": ENVELOPE_VERSION,

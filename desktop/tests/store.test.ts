@@ -592,9 +592,13 @@ describe("desktop application store", () => {
     await vi.advanceTimersByTimeAsync(120);
     expect(bridge.status).toHaveBeenCalledTimes(statusCalls);
     event({ type: "event", name: "update.available", session_id: "session", seq: 2,
-      data: { latest: "v2.0.0", current: "1.0.0", url: "https://example.com" } });
+      data: { latest: "v2.0.0", current: "1.0.0", url: "https://example.com",
+        installable: true } });
+    // `installable` rides with the notice: without it the card reads the host's
+    // silence as "cannot install in place" and offers the manual download, which
+    // is how a self-installing build sent the user another application.
     expect(store.state.updateCheck).toEqual({ available: true, latest: "v2.0.0",
-      current: "1.0.0", url: "https://example.com" });
+      current: "1.0.0", url: "https://example.com", installable: true });
     await vi.advanceTimersByTimeAsync(120);
     expect(bridge.status).toHaveBeenCalledTimes(statusCalls);
     store.dispose();

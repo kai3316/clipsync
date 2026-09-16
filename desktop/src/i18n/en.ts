@@ -149,7 +149,17 @@ export const EN: Record<string, string> = {
   "提交配对码": "Submit pairing code",
   "配对码已生成": "Pairing code generated",
   "配对码：": "Pairing code:",
-  "本机配对码：": "This device's pairing code:",
+  "本机配对码": "This device's pairing code",
+  "把这串码给对方，让它在自己的设备上输入。":
+    "Give this code to the other device to enter on its own screen.",
+  "复制配对码": "Copy pairing code",
+  "尚未生成": "Not generated yet",
+  "重新生成": "Regenerate",
+  "对方生成了一串码，输在这里提交，两台设备即通过中继配对。":
+    "If the other device made a code, type it here and submit; that pairs the two devices over the relay.",
+  "已配对的设备": "Paired devices",
+  "还没有互联网配对的设备。上面两个方向任选一个，两台设备就能隔着网络配对。":
+    "No internet-paired devices yet. Either direction above pairs two devices across the network.",
   "输入对方配对码": "Enter the other device's pairing code",
   "安全代码：": "Security code:",
   "确认配对": "Confirm pairing",
@@ -805,6 +815,8 @@ export const EN: Record<string, string> = {
   "XXXX-XXXX-XXXX": "XXXX-XXXX-XXXX",
   "互联网同步": "Internet sync",
   "启用互联网同步": "Enable internet sync",
+  "已开启": "On",
+  "刷新互联网配对": "Refresh internet pairing",
   // The switch on the pairing card and the switch on the settings page are one
   // setting, so the note under the first one has to say so: a reader who turns
   // it off here and finds it off there should have been told.
@@ -820,6 +832,11 @@ export const EN: Record<string, string> = {
     "Told {name} a newer version is out; it can download it from the releases page",
   "发送更新失败": "Could not send the update",
   "解除互联网配对": "Remove internet pairing",
+  "解除互联网配对？": "Remove this internet pairing?",
+  "{name} 将不再通过中继与这台设备同步，恢复需要重新配对一次。":
+    "{name} will stop syncing with this device over the relay; bringing it back needs a new pairing",
+  "互联网配对的设备请到聊天页发送文件：中继单块上限更小，附件已按此切分，最大 5 MB。":
+    "Send files to an internet-paired device from the chat page: a relay chunk is smaller, so attachments are cut to fit, up to 5 MB",
   "中继": "Relay",
   "中继用户名": "Relay username",
   "中继密码": "Relay password",

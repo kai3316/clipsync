@@ -26,7 +26,12 @@ from internal.infrastructure.runtime.relay_delivery import (
     MAX_RETRIES,
     RelayDelivery,
 )
-from internal.protocol.codec import decode_message, encode_frame, encode_message
+from internal.protocol.codec import (
+    decode_message,
+    encode_binary_chunk,
+    encode_frame,
+    encode_message,
+)
 from internal.sync.nearby_chat import ChatManager
 from internal.transport.relay import (
     derive_key,
@@ -36,6 +41,7 @@ from internal.transport.relay import (
     netpair_device_tag,
     netpair_key,
     netpair_topic,
+    pack_envelope,
 )
 from tests.sidecar.test_lan_runtime import (
     Clipboard,
@@ -452,6 +458,22 @@ def test_an_internet_only_peer_gets_relay_safe_file_chunks(relay_rig):
     send = runtime._chat_send_fn("remote")
     assert send.chunk_size == ChatManager.RELAY_CHUNK_SIZE
     assert send.internet_cap == ChatManager.RELAY_FILE_CAP
+
+    # ...and it has to be a number the relay will actually take.  Asserting it
+    # equals the constant does not say that, and did not: it was 224 KiB, every
+    # chunk was dropped at the broker, and this case passed throughout.  The cap
+    # is on the *envelope*, and an envelope is 4/3 of the frame it carries plus
+    # the tag and shell around it, so the check that matters is the one the
+    # sender runs — the frame this chunk size produces, through the packer.
+    key = derive_key("a-secret", "another-secret")
+    tid = "0123456789abcdef0123456789abcdef"
+    assert pack_envelope(
+        encode_binary_chunk(tid, 0, 1, b"x" * send.chunk_size), key, time.time()
+    )
+    # And the size that was wrong, on the same path, is refused rather than
+    # published for the broker to drop.
+    with pytest.raises(ValueError):
+        pack_envelope(encode_binary_chunk(tid, 0, 1, b"x" * (224 * 1024)), key, time.time())
 
     # A LAN-connected peer keeps the 256 KiB wire format peers already speak.
     transport.connected.add("remote")

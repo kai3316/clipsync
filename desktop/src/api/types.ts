@@ -155,6 +155,20 @@ export interface Device {
   update_available?: boolean;
   /** Whether an offer would carry the installer or only the news. */
   update_cached?: boolean;
+  /** Set on a device paired by internet pairing code, whose only route is the
+   *  public relay.  There is no pinned LAN certificate behind such a device, so
+   *  every LAN-only action — dialing it, pairing it, offering it an update,
+   *  naming it a file-transfer target — is one the card must not offer.
+   *
+   *  On such a row `connection_state` is the relay's own view of the peer,
+   *  because that link is the only one this device has: there is no second
+   *  route for the field to describe.  `relay` is what marks that reading. */
+  relay?: boolean;
+  /** The name the user gave an internet-paired device.  Empty when there is
+   *  none, which `name` cannot say: it falls back to the peer's own name. */
+  alias?: string;
+  /** When the relay last heard from an internet-paired device. */
+  last_seen?: number;
 }
 
 export interface DeviceProbeChannel {

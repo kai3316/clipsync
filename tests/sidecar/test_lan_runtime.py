@@ -583,6 +583,30 @@ def test_a_paired_device_that_is_away_keeps_its_row(rig):
     assert [item["id"] for item in items] == ["remote"]
     assert items[0]["paired"] is True
 
+    # A device paired by *code* is a paired device that is away, and it draws a
+    # row for the same reason: the user has a relationship with it, and a list
+    # of devices that omits the ones paired over the internet is not a list of
+    # devices.  Its row comes from the relay pairing and not from the pairing
+    # repository, deliberately — that repository is the TLS trust store, and this
+    # peer has no certificate to pin, so a row written in there would let anyone
+    # on this network claiming its id be trusted as it.
+    runtime.config.internet_sync_enabled = True
+    runtime.config.netpair_secrets["a1b2c3d4e5f6"] = "netpair-secret"
+    runtime._refresh()
+    items = runtime.devices()["items"]
+    assert [item["id"] for item in items] == ["remote", "a1b2c3d4e5f6"]
+    net = items[1]
+    assert (net["paired"], net["relay"]) == (True, True)
+    # Its liveness is the relay's, and the relay has not reported one; and it is
+    # not a LAN row wearing a relay flag, which is what `relay` marks.
+    assert net["connection_state"] == "offline"
+    assert (net["alias"], net["last_seen"]) == ("", 0.0)
+    assert not pairing.is_peer_paired("a1b2c3d4e5f6")
+    assert all(p.device_id != "a1b2c3d4e5f6" for p in pairing.get_known_peers())
+    # The chat page lists it, which is the only way a conversation can be
+    # started at all: it is the same list.
+    assert "a1b2c3d4e5f6" in [row["id"] for row in runtime.chat_devices()["devices"]]
+
 
 def test_hiding_a_row_leaves_the_pinned_identity_alone(rig):
     runtime, pairing, *_ = rig

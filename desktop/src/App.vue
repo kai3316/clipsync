@@ -738,8 +738,23 @@ async function addToFavorites(item: HistoryItem) {
  * list was the legacy card's own action and there is no reason to make the
  * reader walk to another page to start a conversation with the row in front of
  * them.  重命名 writes the same alias the row's 设备备注 field does.
+ *
+ * A device paired by internet code has none of the local half of that: there is
+ * no link to dial and no certificate pinned to revoke, and its name is the
+ * alias the pairing card writes rather than a note on a saved peer.  Its menu is
+ * therefore built from its own entries — talk to it, rename it, break the
+ * pairing — instead of a set of local ones with holes cut in it.
  */
 function deviceMenu(event: MouseEvent, device: Device) {
+  if (device.relay) {
+    openContextMenu(event, [
+      { id: "chat", label: t("打开聊天"), icon: MessageCircle, run: () => chatWith(device) },
+      { id: "rename", label: t("重命名"), icon: Pencil, run: () => renameRelayDevice(device) },
+      { id: "copy-id", label: t("复制设备 ID"), icon: Copy, run: () => copyText(device.id) },
+      { id: "unpair", label: t("解除互联网配对"), icon: Unlink, divider: true, danger: true, run: () => { relayUnpairDevice.value = device; } },
+    ]);
+    return;
+  }
   const connected = device.connection_state === "online";
   openContextMenu(event, [
     device.paired
@@ -762,6 +777,18 @@ function deviceMenu(event: MouseEvent, device: Device) {
       ? { id: "forget", label: t("移除设备"), icon: Trash2, divider: true, danger: true, run: () => { forgetDevice.value = device; } }
       : null,
   ]);
+}
+
+/** Rename an internet-paired device from its own row.
+ *
+ * The alias, not a note: an internet peer has no saved LAN peer for a note to
+ * live on, and the name the row shows is already the alias.  Both entry points
+ * — the row's menu and the pairing card — open the same dialog on the same
+ * field, so there is one answer to "what is this device called".
+ */
+function renameRelayDevice(device: Device) {
+  renameTarget.value = { kind: "internet", peerId: device.id };
+  renameValue.value = device.alias || "";
 }
 
 /** Open a conversation with a device from its own row.
@@ -1613,6 +1640,13 @@ const revokeDevice = ref<Device | null>(null);
 const revokeDialog = ref<HTMLDialogElement | null>(null);
 const forgetDevice = ref<Device | null>(null);
 const forgetDialog = ref<HTMLDialogElement | null>(null);
+/** The internet-paired device a 解除互联网配对 is being confirmed for.  It has
+ * its own dialog rather than sharing 撤销信任's: that one names a pinned
+ * certificate this machine holds and the pairing repository it drops, and an
+ * internet peer has neither — what ends is a code pairing, and the sentence
+ * that says so is a different sentence. */
+const relayUnpairDevice = ref<Device | null>(null);
+const relayUnpairDialog = ref<HTMLDialogElement | null>(null);
 const purgeDevice = ref<Device | null>(null);
 const purgeDialog = ref<HTMLDialogElement | null>(null);
 const probeResults = ref<Record<string, DeviceProbeResult>>({});
@@ -2106,8 +2140,15 @@ function relayPeerFor(device: Device) {
  * for it.  `unpaired` is a state of its own rather than a missing one: a device
  * this machine only knows on the local network is not "offline over the
  * internet", it has no internet pairing at all, and those two read the same
- * unless the row says which. */
+ * unless the row says which.
+ *
+ * A device paired by code carries the relay's own view of itself on its own row
+ * — it is drawn from the pairing, and the page re-reads its rows on every
+ * change — so that reading wins over the join below, which is refreshed only
+ * when the pairing card is and would be the stale one of the two.
+ */
 function relayChannel(device: Device): "online" | "offline" | "unpaired" {
+  if (device.relay) return device.connection_state === "online" ? "online" : "offline";
   const peer = relayPeerFor(device);
   if (!peer) return "unpaired";
   return peer.online ? "online" : "offline";
@@ -2122,7 +2163,9 @@ function relayChannelLabel(device: Device) {
  * tooltip: the fact a bare 离线 leaves out, and the one that separates "away
  * for a minute" from "gone since Tuesday". */
 function relayLastSeen(device: Device) {
-  const seen = Number(relayPeerFor(device)?.last_seen || 0);
+  // The row's own field on a device paired by code, and the join's on one that
+  // is in the pairing card — see `relayChannel` for why those are two sources.
+  const seen = Number((device.relay ? device.last_seen : relayPeerFor(device)?.last_seen) || 0);
   if (!seen) return "";
   return t("最后在线 {when}", { when: dateTime(seen) });
 }
@@ -2193,6 +2236,26 @@ async function confirmForget() {
   const target = forgetDevice.value;
   if (target && await store.forget(target)) forgetDevice.value = null;
 }
+/** Break an internet pairing from the device list.
+ *
+ * The write is the pairing card's own `unpairInternet`, so the two places a
+ * pairing can be ended end it the same way — including the call that drops the
+ * peer's queued relay frames, and the re-read that takes the row off the list.
+ * The dialog closes only on success, and a refusal is said on the status line:
+ * closing it either way would leave the device on screen with nothing said
+ * about why the click did nothing.
+ */
+async function confirmRelayUnpair() {
+  const target = relayUnpairDevice.value;
+  if (!target) return;
+  if (await unpairInternet(target.id)) relayUnpairDevice.value = null;
+  else announce(t("解除互联网配对失败"));
+}
+watch(relayUnpairDevice, async (device) => {
+  await nextTick();
+  if (device) relayUnpairDialog.value?.showModal();
+  else relayUnpairDialog.value?.close();
+});
 async function confirmPurge() {
   const target = purgeDevice.value;
   if (target && await store.purge(target)) purgeDevice.value = null;
@@ -3537,16 +3600,26 @@ async function enterInternetPairing() {
     internetPairingMessage.value = pairingErrorText(error);
   }
 }
-async function unpairInternet(peerId: string) {
+/** End an internet pairing, and answer whether it ended.
+ *
+ * The answer is what the device list needs: it offers the same action from
+ * outside the pairing card, where a failure reported into the card's own
+ * message line would be a message on a page the reader is not looking at.  The
+ * card's line is still written here — the call is the card's — and the caller
+ * that has somewhere better to say it decides for itself.
+ */
+async function unpairInternet(peerId: string): Promise<boolean> {
   try {
     await bridge.unpairInternetPeer(peerId);
     internetPairingMessage.value = "";
     internetPairingFailed.value = false;
     await refreshInternetPairing();
+    return true;
   }
   catch (error) {
     internetPairingFailed.value = true;
     internetPairingMessage.value = (error as any)?.message || t("解除互联网配对失败");
+    return false;
   }
 }
 // One frame from the other machine is what turns a submitted code into a
@@ -4008,7 +4081,10 @@ async function translateText() {
                   <span class="setting-name">{{ t("查看设备") }}</span>
                   <span class="setting-control"><select v-model="aiPeerId" class="setting-wide" :aria-label="t('AI 配置远程设备')">
                     <option value="">{{ t("请选择设备") }}</option>
-                    <option v-for="device in state.devices.filter(device => device.paired)" :key="device.id" :value="device.id">{{ device.name }}{{ aiPeerDiffSuffix(device.id) }}</option>
+                    <!-- A device paired by code is left out: this card reads a
+                         peer's inventory over the LAN link, and a device that
+                         has none would be an option whose every button fails. -->
+                    <option v-for="device in state.devices.filter(device => device.paired && !device.relay)" :key="device.id" :value="device.id">{{ device.name }}{{ aiPeerDiffSuffix(device.id) }}</option>
                   </select></span>
                 </label>
                 <div class="setting-actions setting-actions--card">
@@ -4607,7 +4683,22 @@ async function translateText() {
               @contextmenu.prevent="deviceMenu($event, device)">
               <Monitor :size="25" class="device-icon" />
               <div class="device-identity"><h2>{{ device.name }}</h2><span class="muted small">{{ device.id }}</span></div>
-              <div class="row-actions">
+              <!-- A device paired by internet code gets its own set, because
+                   almost every button in the other one names something a code
+                   pairing does not have: no certificate to revoke, no address
+                   to dial, no update to offer (a peer with no local sighting
+                   advertises no version).  What the relay *can* carry is a
+                   conversation, a URL and a reachability test, and 打开聊天 is
+                   a button here rather than only a menu entry because a device
+                   that cannot be talked to from its own row is the thing this
+                   list was missing. -->
+              <div v-if="device.relay" class="row-actions">
+                <button class="icon-button" :aria-label="t('打开聊天')" :title="t('打开聊天')" :disabled="busy" @click="chatWith(device)"><MessageCircle :size="18" /></button>
+                <button class="icon-button" :aria-label="t('测试连接')" :title="t('测试连接')" :disabled="busy || !!probeBusyId" @click="testConnection(device)"><Activity :size="18" :class="{ spinning: probeBusyId === device.id }" /></button>
+                <button class="icon-button" :aria-label="t('发送网址')" :title="t('发送网址')" :aria-describedby="sendUrlAvailable ? undefined : 'devices-engine-note'" :disabled="busy || !sendUrlAvailable" @click="openSendUrl(device)"><Globe :size="18" /></button>
+                <button class="icon-button" :aria-label="t('解除互联网配对')" :title="t('解除互联网配对')" :disabled="busy" @click="relayUnpairDevice = device"><Unlink :size="18" /></button>
+              </div>
+              <div v-else class="row-actions">
                 <button v-if="device.paired" class="icon-button" :aria-label="t('撤销信任')" :title="t('撤销信任')" :disabled="busy" @click="revokeDevice = device"><Unlink :size="18" /></button>
                 <button v-else-if="!pairingPending(device)" :disabled="busy || device.connection_state === 'offline'" @click="store.startPairing(device)"><Link :size="17" />{{ t("配对") }}</button>
                 <button v-if="device.paired && device.connection_state !== 'online'" class="icon-button" :aria-label="t('连接设备')" :title="t('连接设备')" :disabled="busy" @click="store.connect(device)"><Plug :size="18" /></button>
@@ -4635,10 +4726,17 @@ async function translateText() {
                    so rather than showing nothing, because "not paired over the
                    internet" and "paired and away" are two different answers. -->
               <span class="device-channels">
-                <span class="channel channel--paired"><ShieldCheck :size="12" />{{ pairingLabel(device) }}</span>
-                <span class="channel" :class="`channel--${localChannelState(device)}`" :title="t('本地连接')">
-                  <Plug :size="12" />{{ localChannelLabel(device) }}
-                </span>
+                <!-- A device paired by code says which pairing it is rather
+                     than 已配对, and then not the local chip at all: 本地·离线
+                     on a device that has no local route reads as a fault, and
+                     there is nothing here it could ever say but that. -->
+                <span v-if="device.relay" class="channel channel--paired"><ShieldCheck :size="12" />{{ t("互联网配对") }}</span>
+                <template v-else>
+                  <span class="channel channel--paired"><ShieldCheck :size="12" />{{ pairingLabel(device) }}</span>
+                  <span class="channel" :class="`channel--${localChannelState(device)}`" :title="t('本地连接')">
+                    <Plug :size="12" />{{ localChannelLabel(device) }}
+                  </span>
+                </template>
                 <span class="channel" :class="`channel--${relayChannel(device) === 'unpaired' ? 'unpaired' : (relayChannel(device) === 'online' ? 'online' : 'offline')}`"
                   :title="relayLastSeen(device) || t('互联网配对')">
                   <Globe :size="12" />{{ t("互联网") }}·{{ relayChannelLabel(device) }}
@@ -4654,7 +4752,11 @@ async function translateText() {
                   <Download :size="12" />{{ t("版本 {version}", { version: device.version }) }}
                 </span>
               </span>
-              <input v-if="device.paired" class="device-note" :value="device.note || ''" maxlength="512" :placeholder="t('设备备注')" :aria-label="t('设备备注')" @change="saveDeviceNote(device, $event)" />
+              <!-- A note lives on a saved LAN peer, and an internet-paired
+                   device has none to hold one — its name is the alias the
+                   pairing card writes, so the field would be a box that saves
+                   nothing.  It gets the same dialog instead, from 重命名. -->
+              <input v-if="device.paired && !device.relay" class="device-note" :value="device.note || ''" maxlength="512" :placeholder="t('设备备注')" :aria-label="t('设备备注')" @change="saveDeviceNote(device, $event)" />
               <div v-if="pairingPending(device)" class="pairing-controls">
                 <p v-if="device.pairing_code">{{ t("配对码：") }}<strong>{{ device.pairing_code }}</strong></p>
                 <p v-if="device.sas">{{ t("安全代码：") }}<strong>{{ device.sas }}</strong></p>
@@ -4692,18 +4794,33 @@ async function translateText() {
           </template>
 
           <template v-else-if="deviceTab === 'internet'">
-            <section class="settings-section">
-              <h2>{{ t("互联网配对") }}</h2>
-              <!-- The switch for the feature this card is, at the top of it.
-                   Everything below needs the relay, so with this off the card
-                   had nothing to say about why: its buttons answered, its list
-                   stayed empty, and the only way to find out was the settings
-                   page, which carries the same switch under another name. -->
-              <label class="setting setting--check">
-                <span class="setting-control"><input type="checkbox" :aria-label="t('启用互联网同步')"
-                  :checked="internetPairingEnabled" :disabled="internetSyncBusy"
-                  @change="toggleInternetSync(($event.target as HTMLInputElement).checked)" /><span>{{ t("启用互联网同步") }}</span></span>
-              </label>
+            <section class="settings-section internet-card">
+              <!-- The title and the switch for the whole feature on one line,
+                   and the switch is a switch: this is the one setting on the
+                   card that turns everything else on it on, and as a checkbox
+                   in a list of rows it read like one more preference among the
+                   ones it governs.  Everything below needs the relay, so with
+                   this off the card had nothing to say about why: its buttons
+                   answered, its list stayed empty, and the only way to find out
+                   was the settings page, which carries the same switch under
+                   another name. -->
+              <div class="internet-head">
+                <h2>{{ t("互联网配对") }}</h2>
+                <div class="internet-head-actions">
+                  <!-- Unconditional, and outside the relay-state line below:
+                       that line only exists once the relay has reported a state,
+                       and "the relay has not reported" is exactly when a reader
+                       wants to ask it again. -->
+                  <button type="button" class="icon-button" :title="t('刷新')" :aria-label="t('刷新互联网配对')" @click="refreshInternetPairingNow"><RefreshCw :size="17" /></button>
+                  <label class="switch" :class="{ 'switch--on': internetPairingEnabled, 'switch--busy': internetSyncBusy }">
+                    <input class="switch-input" type="checkbox" :aria-label="t('启用互联网同步')"
+                      :checked="internetPairingEnabled" :disabled="internetSyncBusy"
+                      @change="toggleInternetSync(($event.target as HTMLInputElement).checked)" />
+                    <span class="switch-track" aria-hidden="true"><span class="switch-thumb"></span></span>
+                    <span class="switch-text">{{ internetPairingEnabled ? t("已开启") : t("已关闭") }}</span>
+                  </label>
+                </div>
+              </div>
               <p class="muted small setting-note">{{ t("关闭后设备之间不再通过中继配对或同步，剪贴板也不离开局域网；这与设置页里的同名开关是同一个设置。") }}</p>
               <!-- This machine's own link to the relay, above the peers rather
                    than beside them.  Every other 在线 in this card is the
@@ -4715,31 +4832,49 @@ async function translateText() {
                 <Activity :size="14" />{{ t("本机中继") }}：<strong>{{ relayStateLabel }}</strong>
                 <span v-if="relayState !== 'online' && relayState !== 'connecting'" class="muted small">{{ t("对方在线与否以中继连接为准；本机中继不可用时，所有设备都会显示为离线。") }}</span>
               </p>
-              <div class="setting-actions setting-actions--card">
-                <button type="button" :disabled="!internetPairingEnabled || internetSyncBusy" @click="generateInternetPairing">{{ t("生成配对码") }}</button>
-                <button type="button" @click="refreshInternetPairingNow">{{ t("刷新") }}</button>
+              <!-- One act, two machines, and the card drew it as two unrelated
+                   rows — a button pair, then a labelled text box — so a reader
+                   had to work out that the code they generate is the code the
+                   other side types.  The two halves sit side by side now, each
+                   saying what it is for in the direction it is used. -->
+              <div class="pair-grid">
+                <section class="pair-half">
+                  <h3 class="pair-half-title"><Link :size="15" />{{ t("本机配对码") }}</h3>
+                  <p class="muted small">{{ t("把这串码给对方，让它在自己的设备上输入。") }}</p>
+                  <p v-if="internetPairing.generated_code" class="pair-code">
+                    <code>{{ internetPairing.generated_code }}</code>
+                    <button type="button" class="icon-button" :title="t('复制')" :aria-label="t('复制配对码')"
+                      @click="copyText(String(internetPairing.generated_code))"><Copy :size="16" /></button>
+                  </p>
+                  <p v-else class="pair-code pair-code--empty">{{ t("尚未生成") }}</p>
+                  <div class="setting-actions">
+                    <button type="button" :disabled="!internetPairingEnabled || internetSyncBusy" @click="generateInternetPairing">
+                      {{ internetPairing.generated_code ? t("重新生成") : t("生成配对码") }}
+                    </button>
+                  </div>
+                </section>
+                <section class="pair-half">
+                  <h3 class="pair-half-title"><Globe :size="15" />{{ t("输入对方配对码") }}</h3>
+                  <p class="muted small">{{ t("对方生成了一串码，输在这里提交，两台设备即通过中继配对。") }}</p>
+                  <!-- The field shows the code in the shape this machine generates
+                       one — upper case, four at a time — and takes a paste in any
+                       shape of it.  A plain text box let a reader type the code
+                       they were shown, in the case they were shown it, and watch
+                       the box render it differently from the screen they were
+                       reading it off; see `lib/pairing-code.ts`. -->
+                  <input class="pair-input"
+                    :value="internetPairingCode" maxlength="14" autocomplete="off" spellcheck="false"
+                    autocapitalize="characters" :placeholder="t('XXXX-XXXX-XXXX')" :disabled="!internetPairingEnabled"
+                    :aria-label="t('输入对方配对码')" @input="setInternetPairingCode($event)" />
+                  <div class="setting-actions">
+                    <button type="button" @click="enterInternetPairing" :disabled="!internetPairingComplete || !internetPairingEnabled">{{ t("提交配对码") }}</button>
+                  </div>
+                  <!-- A refusal rather than a note: it names what to do about it,
+                       and it stays beside the box that caused it. -->
+                  <p v-if="internetPairingMessage" class="setting-block pairing-message"
+                    :class="{ 'pairing-message--failed': internetPairingFailed }" role="status">{{ internetPairingMessage }}</p>
+                </section>
               </div>
-              <p v-if="internetPairing.generated_code" class="setting-block setting-block--card">{{ t("本机配对码：") }}<strong>{{ internetPairing.generated_code }}</strong></p>
-              <label class="setting">
-                <span class="setting-name">{{ t("输入对方配对码") }}</span>
-                <!-- The field shows the code in the shape this machine generates
-                     one — upper case, four at a time — and takes a paste in any
-                     shape of it.  A plain text box let a reader type the code
-                     they were shown, in the case they were shown it, and watch
-                     the box render it differently from the screen they were
-                     reading it off; see `lib/pairing-code.ts`. -->
-                <span class="setting-control"><input
-                  :value="internetPairingCode" maxlength="14" autocomplete="off" spellcheck="false"
-                  autocapitalize="characters" :placeholder="t('XXXX-XXXX-XXXX')" :disabled="!internetPairingEnabled"
-                  :aria-label="t('输入对方配对码')" @input="setInternetPairingCode($event)" /></span>
-              </label>
-              <div class="setting-actions">
-                <button type="button" @click="enterInternetPairing" :disabled="!internetPairingComplete || !internetPairingEnabled">{{ t("提交配对码") }}</button>
-              </div>
-              <!-- A refusal rather than a note: it names what to do about it,
-                   and it stays beside the box that caused it. -->
-              <p v-if="internetPairingMessage" class="setting-block pairing-message"
-                :class="{ 'pairing-message--failed': internetPairingFailed }" role="status">{{ internetPairingMessage }}</p>
               <!-- Codes entered here whose partner has not answered yet.  The
                    status keeps them out of the peer list on purpose — a 4-char
                    tag cannot be reached, sent to or renamed, and listing it as a
@@ -4759,30 +4894,57 @@ async function translateText() {
                   <p class="muted small">{{ t("配对码已提交，对方通过中继确认后即会出现在上方设备列表中。") }}</p>
                 </li>
               </ul>
-              <p class="muted setting-block setting-block--card">{{ t("待投递消息：") }}{{ delivery.total }}
-                <button type="button" class="icon-button" :title="t('刷新投递状态')" :aria-label="t('刷新投递状态')" @click="refreshDeliveryNow"><RefreshCw :size="15" /></button>
-              </p>
-              <!-- One line per peer, the way the legacy card carried it: what
-                   is still queued for this device, and how its newest send
-                   ended.  Both are hidden until the ledger has answered, so a
-                   backend that cannot report never reads as "nothing sent". -->
-              <ul class="setting-block peer-list"><li v-for="peer in internetPairing.peers" :key="peer.peer_id">
-                <div class="peer-line">
-                  <button type="button" class="text-button" @click="renameInternet(peer)">{{ peer.alias || peer.name || peer.peer_id }}</button>
-                  <!-- 离线 alone left "away since breakfast" and "never seen"
-                       looking the same, though the relay reports when it last
-                       heard from the peer. -->
-                  <span class="muted" :title="peer.last_seen ? t('最后在线 {when}', { when: dateTime(peer.last_seen) }) : t('尚未连接过')">{{ peer.online ? t('在线') : t('离线') }}</span>
-                  <button type="button" class="icon-button" :title="t('解除互联网配对')" :aria-label="t('解除互联网配对')" @click="unpairInternet(peer.peer_id)"><Unlink :size="16" /></button>
-                </div>
-                <div v-if="delivery.shown(String(peer.peer_id))" class="peer-delivery">
-                  <span v-if="delivery.pending(String(peer.peer_id)) > 0" class="delivery-badge"
-                    :title="t('对方离线时内容暂存，上线后自动补发')">{{ t("待补发 {count}", { count: delivery.pending(String(peer.peer_id)) }) }}</span>
-                  <span v-if="deliveryGlyph(peer.peer_id)" class="delivery-result" :class="`delivery-result--${delivery.lastStatus(String(peer.peer_id))}`">
-                    <component :is="deliveryGlyphs[deliveryGlyph(peer.peer_id)!]" :size="13" />{{ deliveryText(peer.peer_id) }}
+              <!-- The paired devices, drawn as the rows on the other tab are —
+                   an icon, a name, the route chips, then the one action that
+                   belongs to the row.  They were a column of text buttons with
+                   a bare 在线 beside them, which is the shape the device list
+                   deliberately stopped using: a paired device is a device, and
+                   it reads as one in both places now. -->
+              <div class="internet-peers-head">
+                <h3>{{ t("已配对的设备") }}</h3>
+                <span class="muted small">{{ t("待投递消息：") }}{{ delivery.total }}
+                  <button type="button" class="icon-button" :title="t('刷新投递状态')" :aria-label="t('刷新投递状态')" @click="refreshDeliveryNow"><RefreshCw :size="15" /></button>
+                </span>
+              </div>
+              <ul class="peer-list peer-list--devices">
+                <li v-for="peer in internetPairing.peers" :key="peer.peer_id" class="internet-peer">
+                  <Monitor :size="20" class="device-icon" />
+                  <div class="device-identity">
+                    <h2>{{ peer.alias || peer.name || peer.peer_id }}</h2>
+                    <span class="muted small">{{ peer.peer_id }}</span>
+                  </div>
+                  <span class="device-channels">
+                    <span class="channel channel--paired"><ShieldCheck :size="12" />{{ t("已配对") }}</span>
+                    <span class="channel" :class="`channel--${peer.online ? 'online' : 'offline'}`"
+                      :title="peer.last_seen ? t('最后在线 {when}', { when: dateTime(peer.last_seen) }) : t('尚未连接过')">
+                      <Globe :size="12" />{{ t("互联网") }}·{{ peer.online ? t("在线") : t("离线") }}
+                    </span>
+                    <!-- 离线 alone left "away since breakfast" and "never seen"
+                         looking the same, though the relay reports when it last
+                         heard from the peer. -->
+                    <span v-if="peer.last_seen && !peer.online" class="channel channel--offline">
+                      <Clock :size="12" />{{ t("最后在线 {when}", { when: dateTime(peer.last_seen) }) }}
+                    </span>
+                    <span v-if="delivery.pending(String(peer.peer_id)) > 0" class="channel channel--pending"
+                      :title="t('对方离线时内容暂存，上线后自动补发')">{{ t("待补发 {count}", { count: delivery.pending(String(peer.peer_id)) }) }}</span>
+                    <!-- How the newest send to this device ended, a chip like
+                         the rest rather than a line of its own: it is one more
+                         fact about the route, and it is hidden until the ledger
+                         has answered so a backend that cannot report never
+                         reads as "nothing sent". -->
+                    <span v-if="delivery.shown(String(peer.peer_id)) && deliveryGlyph(peer.peer_id)"
+                      class="channel delivery-result" :class="`delivery-result--${delivery.lastStatus(String(peer.peer_id))}`">
+                      <component :is="deliveryGlyphs[deliveryGlyph(peer.peer_id)!]" :size="12" />{{ deliveryText(peer.peer_id) }}
+                    </span>
                   </span>
-                </div>
-              </li></ul>
+                  <div class="row-actions">
+                    <button type="button" class="icon-button" :title="t('打开聊天')" :aria-label="t('打开聊天')" @click="chatWith({ id: String(peer.peer_id), name: peer.alias || peer.name || String(peer.peer_id) } as Device)"><MessageCircle :size="17" /></button>
+                    <button type="button" class="icon-button" :title="t('重命名')" :aria-label="t('重命名')" @click="renameInternet(peer)"><Pencil :size="17" /></button>
+                    <button type="button" class="icon-button" :title="t('解除互联网配对')" :aria-label="t('解除互联网配对')" @click="unpairInternet(peer.peer_id)"><Unlink :size="17" /></button>
+                  </div>
+                </li>
+              </ul>
+              <p v-if="internetPairingEnabled && !internetPairing.peers.length" class="muted small setting-note">{{ t("还没有互联网配对的设备。上面两个方向任选一个，两台设备就能隔着网络配对。") }}</p>
             </section>
           </template>
 
@@ -4984,7 +5146,7 @@ async function translateText() {
         <span class="setting-name">{{ t("来源设备") }}</span>
         <span class="setting-control"><select v-model="aiPeerId" :aria-label="t('迁移来源设备')">
           <option value="">{{ t("选择已配对设备") }}</option>
-          <option v-for="device in state.devices.filter(device => device.paired)" :key="device.id" :value="device.id">{{ device.name }}{{ aiPeerIsLegacy(device.id) ? t("（只能浏览）") : "" }}</option>
+          <option v-for="device in state.devices.filter(device => device.paired && !device.relay)" :key="device.id" :value="device.id">{{ device.name }}{{ aiPeerIsLegacy(device.id) ? t("（只能浏览）") : "" }}</option>
         </select></span>
       </label>
       <p v-if="!aiPeerId" class="muted small">{{ t("先选择一台已配对设备") }}</p>
@@ -5061,6 +5223,18 @@ async function translateText() {
       <h2 id="revoke-title">{{ t("撤销设备信任？") }}</h2>
       <p class="muted">{{ t("{name} 将无法继续同步，重新连接需要双方再次配对。", { name: revokeDevice?.name }) }}</p>
       <div class="modal-actions"><button autofocus @click="revokeDevice = null">{{ t("取消") }}</button><button class="danger" :disabled="busy || !state.devices.some(device => device.id === revokeDevice?.id && device.paired)" @click="confirmRevoke">{{ t("撤销信任") }}</button></div>
+    </dialog>
+    <!-- What ends here is a code pairing and nothing else: no certificate is
+         dropped (an internet peer never had one pinned) and the device is not
+         archived (it was never in the removed-device list to be recovered
+         from).  The sentence says what actually goes away — the two machines
+         stop reaching each other over the relay — rather than borrowing the
+         LAN wording for a pairing that was never LAN. -->
+    <dialog ref="relayUnpairDialog" aria-labelledby="relay-unpair-title" class="modal" @close="relayUnpairDevice = null" @cancel="relayUnpairDevice = null">
+      <button class="icon-button modal-close" :aria-label="t('关闭')" :title="t('关闭')" @click="relayUnpairDevice = null"><X :size="18" /></button>
+      <h2 id="relay-unpair-title">{{ t("解除互联网配对？") }}</h2>
+      <p class="muted">{{ t("{name} 将不再通过中继与这台设备同步，恢复需要重新配对一次。", { name: relayUnpairDevice?.name }) }}</p>
+      <div class="modal-actions"><button autofocus @click="relayUnpairDevice = null">{{ t("取消") }}</button><button class="danger" :disabled="busy" @click="confirmRelayUnpair">{{ t("解除互联网配对") }}</button></div>
     </dialog>
     <dialog ref="forgetDialog" aria-labelledby="forget-title" class="modal" @close="forgetDevice = null" @cancel="forgetDevice = null">
       <button class="icon-button modal-close" :aria-label="t('关闭')" :title="t('关闭')" @click="forgetDevice = null"><X :size="18" /></button>

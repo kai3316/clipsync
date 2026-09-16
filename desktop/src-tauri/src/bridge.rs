@@ -385,7 +385,7 @@ impl Bridge {
             if std::env::var_os("CLIPSYNC_CONFIG_DIR").is_none() {
                 command.env("CLIPSYNC_CONFIG_DIR", root.join(".tauri-dev-data"));
             }
-            Ok(command)
+            Ok(Self::declare_shell(command))
         }
         #[cfg(all(not(debug_assertions), target_os = "macos"))]
         {
@@ -401,12 +401,12 @@ impl Bridge {
                 .parent()
                 .and_then(|macos| macos.parent())
                 .ok_or_else(BridgeError::unavailable)?;
-            Ok(Command::new(
+            Ok(Self::declare_shell(Command::new(
                 bundle
                     .join("Resources")
                     .join("sidecar")
                     .join("clipsync-sidecar"),
-            ))
+            )))
         }
         #[cfg(all(not(debug_assertions), not(target_os = "macos")))]
         {
@@ -416,8 +416,25 @@ impl Bridge {
             } else {
                 "clipsync-sidecar"
             };
-            Ok(Command::new(exe.with_file_name(name)))
+            Ok(Self::declare_shell(Command::new(exe.with_file_name(name))))
         }
+    }
+
+    /// Tell the sidecar which desktop shell is starting it.
+    ///
+    /// Both applications share one release and therefore publish two assets per
+    /// platform, and the sidecar picks between them for its own download
+    /// fallback with no other way to know which one it belongs to.  Left
+    /// unsaid it assumes the legacy shell, whose asset is a different program
+    /// entirely: the Tauri window would offer to update itself and hand the
+    /// user the old application's installer.
+    ///
+    /// Every branch above goes through here rather than setting the variable
+    /// where the child is built, because the one branch that forgot would be
+    /// the one nobody runs until release.
+    fn declare_shell(mut command: Command) -> Command {
+        command.env("CLIPSYNC_SHELL", "tauri");
+        command
     }
 
     fn receive(self: &Arc<Self>, app: &AppHandle, value: Value) -> Result<(), BridgeError> {
@@ -504,6 +521,39 @@ impl Bridge {
                     if let Some(window) = app.get_webview_window("main") {
                         let _ = window.hide();
                     }
+                }
+                if value["name"] == "update.available" {
+                    // Held back until this side has answered the one question
+                    // the sidecar cannot: whether this build can replace itself.
+                    //
+                    // The window decides between "下载并安装" and a manual
+                    // download from that answer alone, but the silent check
+                    // originates in the sidecar, which knows nothing of the
+                    // plugin.  Forwarded as it arrives, the notice reached the
+                    // window with no answer attached, so the window read "not
+                    // installable" and offered the manual path — the same wrong
+                    // conclusion as a real refusal, on a machine that could have
+                    // installed it, and on every launch whose silent check found
+                    // a newer release.
+                    //
+                    // Spawned rather than awaited: this runs on the stdout
+                    // reader, and the manifest fetch must not stall the pipe.
+                    let handle = app.clone();
+                    let frame = value.clone();
+                    tauri::async_runtime::spawn(async move {
+                        let installable = match crate::updater(&handle) {
+                            Ok(updater) => matches!(updater.check().await, Ok(Some(_))),
+                            Err(_) => false,
+                        };
+                        let mut frame = frame;
+                        if let Some(data) =
+                            frame.get_mut("data").and_then(|data| data.as_object_mut())
+                        {
+                            data.insert("installable".into(), json!(installable));
+                        }
+                        let _ = handle.emit_to("main", "sidecar:event", frame);
+                    });
+                    return Ok(());
                 }
                 let _ = app.emit_to("main", "sidecar:event", value);
             }
