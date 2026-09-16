@@ -54,25 +54,16 @@ jobs:
 
           What is new in this release:
 
-          - An update that cannot be checked is no longer an update you are told
-            to install by hand.  A release is read twice: the background process
-            asks GitHub whether a newer version exists, and the desktop
-            application asks the release's manifest whether it can replace
-            itself with it.  Those two answers were being folded into one, so a
-            manifest that could not be read -- GitHub unreachable, or the few
-            minutes between a release appearing and its manifest being attached
-            -- came out as "this build cannot install updates", and the card
-            sent you to download the installer and replace the files yourself.
-            A check that failed is now its own answer: the card offers the
-            install the application performs by itself, and if that download
-            cannot be made either, it says what went wrong.
-          - A release becomes visible when it can be installed, not before.  The
-            release page is what the update check reads, so a release that shows
-            up before its manifest does is one every client is offered and none
-            can install.  Releases are now created hidden and appear once the
-            manifest is attached to them -- or, if that build fails, after half
-            an hour, so a broken desktop build cannot hide a release from the
-            previous application, which installs by hand.
+          - The relay line on the internet-pairing card keeps up on its own.
+            It read whatever the relay was doing at the moment the card was
+            opened and then stayed there -- a relay that came up two seconds
+            later still read "connecting", and one that dropped still read
+            "online", until the refresh button beside it was pressed.  The
+            background process announces every transition as it happens, and the
+            window listens to it now, so connecting, online, error and off all
+            arrive on their own.  The older Python application's panel has
+            always worked this way; this brings the desktop onto the same
+            announcement.
 
           The device name is now published in the mDNS record, to the local
           network.  That is what lets devices show the name you chose rather
