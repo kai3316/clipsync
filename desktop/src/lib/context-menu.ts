@@ -26,6 +26,10 @@ export interface ContextMenuItem {
   icon?: Component;
   /** Shown right-aligned, e.g. `Ctrl+C`. */
   shortcut?: string;
+  /** A tooltip, for the entries whose label cannot hold the whole answer — a
+   *  dimmed entry that has to say *why* it is dimmed, in a menu 224px wide that
+   *  truncates anything longer than a few words. */
+  title?: string;
   /** Drawn in the danger colour, for the one action that destroys something. */
   danger?: boolean;
   /** Shown but not runnable — a row with no id to act on. */

@@ -826,6 +826,15 @@ export const EN: Record<string, string> = {
   "从该设备获取新版本安装包并安装": "Fetch the newer installer from that device and install it",
   "该设备版本较旧，可以发送更新": "This device is on an older version and can be updated",
   "对方软件版本": "The version the other device is running",
+  // Why a device row offers no update action in either direction.  The sidecar
+  // sends the code and the shell says it in words.  None of them is about which
+  // application the peer runs: the sidecar stopped deciding on that.
+  "对方版本过旧，本机不能直接给它发送安装包；先让它自己检查更新升级一次":
+    "That device is on too old a version to be sent an installer directly; let it run its own update check once",
+  "对方与本机不是同一个平台，本机的安装包对它没有用":
+    "That device is not on this machine's platform, and this machine's installer is no use to it",
+  "两台设备版本相同，没有需要发送的安装包":
+    "Both devices are on the same version; there is no installer to send",
   "已把更新发送给 {name}": "Sending the update to {name}",
   "本机还没有安装包可发送：本机只保留自己升级时下载的那一个，对方可自行检查更新":
     "Nothing to send: this machine only keeps the installer its own upgrade downloaded, and has none. The other device can run its own update check",

@@ -757,6 +757,28 @@ async function addToFavorites(item: HistoryItem) {
  * therefore built from its own entries — talk to it, rename it, break the
  * pairing — instead of a set of local ones with holes cut in it.
  */
+
+/** The entry a device with no update action would have had, named.
+ *
+ * The sidecar's `update_blocked` carries the direction in its first half, so
+ * the reader sees the action they came looking for — 发送更新 on a device this
+ * build is ahead of, 获取更新 on one it is behind — rather than nothing at all,
+ * which is what every blocked row used to look like. */
+function blockedUpdateLabel(device: Device) {
+  return String(device.update_blocked || "").startsWith("fetch") ? t("获取更新") : t("发送更新");
+}
+
+/** And why it is dimmed, in words.  The code says which of the three it is; the
+ * sentence is the shell's, because the shell is where the two languages live. */
+function blockedUpdateReason(device: Device) {
+  const cause = String(device.update_blocked || "").split(":")[1];
+  // No wording for which application the peer runs: the sidecar stopped
+  // deciding on it, so nothing here has to explain it.
+  if (cause === "too_old") return t("对方版本过旧，本机不能直接给它发送安装包；先让它自己检查更新升级一次");
+  if (cause === "other_platform") return t("对方与本机不是同一个平台，本机的安装包对它没有用");
+  return t("两台设备版本相同，没有需要发送的安装包");
+}
+
 function deviceMenu(event: MouseEvent, device: Device) {
   if (device.relay) {
     openContextMenu(event, [
@@ -790,6 +812,51 @@ function deviceMenu(event: MouseEvent, device: Device) {
       : null,
     { id: "rename", label: t("重命名"), icon: Pencil, run: () => renameDeviceRow(device) },
     { id: "copy-id", label: t("复制设备 ID"), icon: Copy, run: () => copyText(device.id) },
+    // The update group: what the row's own two buttons do, plus the version
+    // they are about, plus — when neither is on offer — the entry that would
+    // have been there, dimmed, saying why.  A device that advertises no version
+    // gets none of it: the field is what every line here is read off, and the
+    // sidecar leaves the reason empty for exactly that peer.
+    device.version
+      ? {
+          id: "version", label: t("版本 {version}", { version: device.version }),
+          icon: Info, divider: true, disabled: true,
+          // The sentence the row's version chip shows, so the two agree.
+          title: device.update_available
+            ? t("该设备版本较旧，可以发送更新")
+            : device.update_fetchable ? t("从该设备获取新版本安装包并安装") : t("对方软件版本"),
+          // Nothing to run: the row is the version itself, and `disabled` is
+          // what keeps it from looking like an action.
+          run: () => {},
+        }
+      : null,
+    device.update_available
+      ? {
+          id: "send-update", label: t("发送更新"), icon: FileUp,
+          // The row's button, its rule and its two sentences: what this machine
+          // can send is the installer its own upgrade kept.
+          disabled: busy.value || !!updateBusyId.value || !device.update_cached,
+          title: device.update_cached
+            ? t("把本机的安装包发送给该设备")
+            : t("本机还没有安装包可发送：本机只保留自己升级时下载的那一个，对方可自行检查更新"),
+          run: () => offerDeviceUpdate(device),
+        }
+      : null,
+    device.update_fetchable
+      ? {
+          id: "fetch-update", label: t("获取更新"), icon: Download,
+          disabled: busy.value || !!fetchBusyId.value,
+          title: t("从该设备获取新版本安装包并安装"),
+          run: () => fetchDeviceUpdate(device),
+        }
+      : null,
+    device.update_blocked
+      ? {
+          id: "update-blocked", label: blockedUpdateLabel(device),
+          icon: String(device.update_blocked).startsWith("fetch") ? Download : FileUp,
+          disabled: true, title: blockedUpdateReason(device), run: () => {},
+        }
+      : null,
     relay.paired
       ? { id: "relay-unpair", label: t("解除互联网配对"), icon: Unlink, divider: true, danger: true, run: () => { relayUnpairDevice.value = device; } }
       : null,
@@ -2226,27 +2293,25 @@ function relayPairing(device: Device) {
   const peer = relayPeerFor(device);
   return { paired: !!peer, online: peer?.online === true, last_seen: Number(peer?.last_seen || 0) };
 }
-/** Which of the three internet-pairing states this device is in, and the words
- * for it.  `unpaired` is a state of its own rather than a missing one: a device
- * this machine only knows on the local network is not "offline over the
- * internet", it has no internet pairing at all, and those two read the same
- * unless the row says which.
+/** Whether the relay sees this device up, for a row that holds an internet
+ *  pairing at all.
+ *
+ * There is no third state to name here any more: the chip is drawn only on a
+ * row that has an internet pairing (see the device row), so 未配对 is the
+ * absence of the chip rather than a word in it.  It used to be a word — on
+ * every row, beside a local 未配对 that is about a different pairing, which put
+ * the same answer twice on a device that had simply never been paired by code.
  *
  * A device paired by code carries the relay's own view of itself on its own row
  * — it is drawn from the pairing, and the page re-reads its rows on every
  * change — so that reading wins over the join below, which is refreshed only
  * when the pairing card is and would be the stale one of the two.
  */
-function relayChannel(device: Device): "online" | "offline" | "unpaired" {
-  const relay = relayPairing(device);
-  if (!relay.paired) return "unpaired";
-  return relay.online ? "online" : "offline";
+function relayChannel(device: Device): "online" | "offline" {
+  return relayPairing(device).online ? "online" : "offline";
 }
 function relayChannelLabel(device: Device) {
-  const channel = relayChannel(device);
-  if (channel === "online") return t("在线");
-  if (channel === "offline") return t("离线");
-  return t("未配对");
+  return relayChannel(device) === "online" ? t("在线") : t("离线");
 }
 /** When this device was last heard from over the relay, as a line for the row's
  * tooltip: the fact a bare 离线 leaves out, and the one that separates "away
@@ -4907,7 +4972,15 @@ async function translateText() {
                     <Plug :size="12" />{{ localChannelLabel(device) }}
                   </span>
                 </template>
-                <span class="channel" :class="`channel--${relayChannel(device) === 'unpaired' ? 'unpaired' : (relayChannel(device) === 'online' ? 'online' : 'offline')}`"
+                <!-- Only on a row that holds an internet pairing.  Every row
+                     used to carry 互联网·未配对, which put 未配对 on one row twice
+                     with two meanings — the chip beside it is the *local*
+                     pairing — and told the reader nothing to act on: no
+                     internet pairing is the ordinary state of a device this
+                     machine knows on its own network, and the card above is
+                     where one is made.  Paired, the chip stays: 在线/离线 is
+                     the half of a device's reach no other line here reports. -->
+                <span v-if="relayPairing(device).paired" class="channel" :class="`channel--${relayChannel(device)}`"
                   :title="relayLastSeen(device) || t('互联网配对')">
                   <Globe :size="12" />{{ t("互联网") }}·{{ relayChannelLabel(device) }}
                 </span>

@@ -163,6 +163,16 @@ export interface Device {
    *  Both flags are the same comparison read from opposite ends — at most one is
    *  ever set — and neither is set when the two builds are level. */
   update_fetchable?: boolean;
+  /** Why neither of the two flags above is set, as a code the shell renders —
+   *  `<direction>:<cause>`, where direction is the entry to dim (`send` for a
+   *  device this build is ahead of, `fetch` for one it is behind) and cause is
+   *  `too_old` (a build from before this machine may dial it) or
+   *  `other_platform`.  `level` is the whole value for a pair that is level,
+   *  and the empty string means nothing is being withheld: an action is
+   *  offered, or the device advertised no version for the question to have an
+   *  answer.  Decided by the sidecar, like the flags — the shell only says it
+   *  in words. */
+  update_blocked?: string;
   /** Set on a device paired by internet pairing code, whose only route is the
    *  public relay.  There is no pinned LAN certificate behind such a device, so
    *  every LAN-only action — dialing it, pairing it, offering it an update,

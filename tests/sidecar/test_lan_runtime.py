@@ -2258,31 +2258,53 @@ def test_a_device_row_says_when_this_build_could_update_it(rig, monkeypatch):
     The version comparison and the platform spelling are both the sidecar's,
     and a second implementation of either in a front end would be a second
     answer to the same question -- with the two disagreeing on exactly the
-    cases that matter (a peer too old to advertise anything, a same-version
-    peer, another platform's build, the other application entirely).
+    cases that matter (a peer too old to advertise anything, one too old to be
+    dialled at all, a same-version peer, another platform's build).
     """
     runtime, pairing, transport, discovery, *_ = rig
     monkeypatch.setattr(lan, "_local_platform", lambda: ("windows", "amd64"))
-    monkeypatch.setattr(lan, "__version__", "1.0.8")
+    monkeypatch.setattr(lan, "__version__", "1.0.16")
     alias = peer_id_hash("remote")
     seen = {
         "name": "Remote", "address": "127.0.0.1", "port": 9999,
-        "version": "1.0.7", "os": "windows", "arch": "amd64",
+        "version": "1.0.15", "os": "windows", "arch": "amd64",
+        # Which application the peer names is not asked about any more, so it
+        # cannot change any answer below.
         "app": updater.running_shell(),
     }
     runtime._discovered[alias] = dict(seen)
     runtime._refresh()
     row = runtime.devices()["items"][0]
-    assert (row["version"], row["platform"], row["arch"]) == ("1.0.7", "windows", "amd64")
+    assert (row["version"], row["platform"], row["arch"]) == ("1.0.15", "windows", "amd64")
     assert row["update_available"] is True
+    # Nothing withheld, so nothing to explain: the row yields no reason.
+    assert row["update_blocked"] == ""
 
-    runtime._discovered[alias] = {**seen, "version": "1.0.8"}
+    # A peer that names the *other* application is in the same position.  The
+    # gate stopped asking, because a wrong installer cannot be installed by the
+    # machine it reaches: the blob is checked against that shell's own published
+    # digest first.
+    runtime._discovered[alias] = {**seen, "app": "legacy"}
     runtime._refresh()
-    assert runtime.devices()["items"][0]["update_available"] is False
+    row = runtime.devices()["items"][0]
+    assert row["update_available"] is True
+    assert row["update_blocked"] == ""
+
+    runtime._discovered[alias] = {**seen, "version": "1.0.16"}
+    runtime._refresh()
+    row = runtime.devices()["items"][0]
+    assert row["update_available"] is False
+    # Level, and the one reason that names no direction: there is nothing to
+    # send and nothing to fetch, and the row's entry is the send one.
+    assert row["update_blocked"] == "level"
 
     runtime._discovered[alias] = {**seen, "os": "darwin", "arch": "arm64"}
     runtime._refresh()
-    assert runtime.devices()["items"][0]["update_available"] is False
+    row = runtime.devices()["items"][0]
+    assert row["update_available"] is False
+    # `send`: this build is the newer one, so the entry the window dims and
+    # explains is the one that would have sent it.
+    assert row["update_blocked"] == "send:other_platform"
 
     # A peer too old to advertise a version is unknown, not behind.
     runtime._discovered[alias] = {**seen, "version": ""}
@@ -2290,19 +2312,20 @@ def test_a_device_row_says_when_this_build_could_update_it(rig, monkeypatch):
     row = runtime.devices()["items"][0]
     assert row["version"] == ""
     assert row["update_available"] is False
+    # Nothing was said, so there is no answer here either -- and no version chip
+    # for a sentence about one to sit under.
+    assert row["update_blocked"] == ""
 
-    # Both applications are published from one release, so a same-platform peer
-    # is as likely to be running the *other* one -- whose installer this build
-    # cannot be upgraded with, and which has no update exchange to offer at all.
-    # A peer that does not say which it runs is in the same position: the offer
-    # would reach it as a dial, and a dial is a pairing request to a device that
-    # cannot read "this is not one".
-    for other in ("legacy" if updater.running_shell() == "tauri" else "tauri", ""):
-        runtime._discovered[alias] = {**seen, "app": other}
-        runtime._refresh()
-        row = runtime.devices()["items"][0]
-        assert row["update_available"] is False, other
-        assert row["update_fetchable"] is False, other
+    # The floor, and the reason the window has a sentence to show: a build from
+    # before the no-pairing marker is behind, on this platform, and still cannot
+    # be offered to -- calling it would put a pairing card on that device's
+    # screen, so the row dims its send entry and says why instead of hiding it.
+    runtime._discovered[alias] = {**seen, "version": "1.0.11", "app": ""}
+    runtime._refresh()
+    row = runtime.devices()["items"][0]
+    assert row["update_available"] is False
+    assert row["update_fetchable"] is False
+    assert row["update_blocked"] == "send:too_old"
 
 
 def test_a_peer_sent_update_blob_reaches_the_update_sink(rig, tmp_path):

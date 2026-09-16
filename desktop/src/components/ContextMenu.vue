@@ -113,6 +113,7 @@ onUnmounted(() => {
         role="menuitem"
         type="button"
         :aria-disabled="item.disabled || undefined"
+        :title="item.title || undefined"
         @mouseenter="hover(index)"
         @click="runContextMenuItem(item)"
       >

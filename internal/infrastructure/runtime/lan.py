@@ -48,7 +48,11 @@ from internal.sync.manager import SyncManager
 from internal.sync.nearby_chat import CHAT_MSG_TYPES, ChatManager
 from internal.system import updater
 from internal.system.archive import ArchiveEmptyError, create_archive
-from internal.transport.connection import MAX_FRAME_SIZE, TransportManager
+from internal.transport.connection import (
+    MAX_FRAME_SIZE,
+    NO_PAIRING_MARKER_SINCE,
+    TransportManager,
+)
 from internal.transport.discovery import Discovery
 from internal.transport.ids import peer_id_hash
 from internal.transport.relay import (
@@ -1436,29 +1440,52 @@ class LanRuntime:
             },
         )
 
+    def _update_dialable(self, seen: dict) -> bool:
+        """Whether this machine may call *seen* without asking its user to pair.
+
+        Every dial this build makes on a user's behalf carries the no-pairing
+        marker, and only a peer from
+        :data:`~internal.transport.connection.NO_PAIRING_MARKER_SINCE` reads
+        one: an older build parses the certificate and ignores the tail, so the
+        call arrives as a pairing request and puts a pairing card in front of
+        someone who asked for nothing.
+
+        This is a version, not a capability the peer advertises -- there is no
+        field for it.  The peer's ``app`` used to stand in for one, because only
+        builds that have the field know the marker, which is the coincidence the
+        update gates rested on while they also required the applications to
+        match.  They no longer ask about the application, so the question is
+        asked directly.
+        """
+        version = str(seen.get("version") or "")
+        return bool(version) and not updater.is_newer(NO_PAIRING_MARKER_SINCE, version)
+
     def _update_offerable(self, seen: dict) -> bool:
         """Whether *seen* (one discovery sighting) is a device this build updates.
 
-        Three claims of the peer's, and all three have to hold: the same
-        application, because an installer for one of the two published here
-        cannot be installed by the other; the same platform, because the asset
-        we would send is the one for this one; and a strictly older version,
-        because an offer to a device that is already current is a transfer
-        nobody wants.
+        Two claims of the peer's, and both have to hold: the same platform,
+        because the asset we would send is the one for this one; and a strictly
+        older version, because an offer to a device that is already current is a
+        transfer nobody wants.
 
-        An empty version, or an empty app, means a peer too old to advertise --
-        unknown, never "behind" -- so it is not offered to.  The app field
-        decides more than which asset fits: reaching a peer that is not
-        connected means dialling it, the dial carries no pairing request only
-        for a build that reads one (``NO_PAIRING_MARKER``), and a dial a peer
-        reads as a pairing request is a pairing code on that device's screen.
-        A peer that cannot say which application it runs cannot be told that,
-        so this machine does not call it.
+        Which application the peer runs is not one of them.  It used to be, on
+        the argument that an installer for one of the two applications published
+        from this repository cannot be installed by the other -- which is true,
+        and is also a question that machine settles by itself: the blob is
+        checked against its own release digest before it can be installed, so a
+        wrong offer is refused there rather than mis-installed here.  Requiring
+        it cost every peer older than the field that answers it (``app``, 1.0.13
+        and later) the ability to be updated from this side at all, and the
+        legacy shell it was guarding against is being retired.
+
+        What the question still costs is the dial, so the peer has to be one
+        this machine may call -- see :meth:`_update_dialable`.  An empty version
+        means a peer too old to advertise: unknown, never "behind".
         """
         version = str(seen.get("version") or "")
         if not version:
             return False
-        if str(seen.get("app") or "") != updater.running_shell():
+        if not self._update_dialable(seen):
             return False
         if (str(seen.get("os") or ""), str(seen.get("arch") or "")) != _local_platform():
             return False
@@ -1469,11 +1496,12 @@ class LanRuntime:
 
         The mirror of :meth:`_update_offerable`, and the direction the update
         path is meant to run in: the device that is behind is the one with a
-        reason to act, so its own list is where the button belongs.  Same three
-        claims, read the other way -- same application, same platform, and the
-        peer's version strictly newer than this one -- and the same reason for
-        the first of them: the request is a dial, and this machine will not
-        make one it cannot mark as not-a-pairing-request.
+        reason to act, so its own list is where the button belongs.  Same two
+        claims, read the other way -- same platform, and the peer's version
+        strictly newer than this one -- and the same reason for leaving the
+        application out of them: what the peer would send is an installer for
+        whatever shell *it* runs, and the digest check that refuses the wrong
+        one at this end is the same check either way.
 
         Nothing is trusted on the sighting: the blob it sends is checked against
         the published release digest before it can be installed, exactly as a
@@ -1483,11 +1511,54 @@ class LanRuntime:
         version = str(seen.get("version") or "")
         if not version:
             return False
-        if str(seen.get("app") or "") != updater.running_shell():
+        if not self._update_dialable(seen):
             return False
         if (str(seen.get("os") or ""), str(seen.get("arch") or "")) != _local_platform():
             return False
         return updater.is_newer(version, __version__)
+
+    def _update_blocked(self, seen: dict) -> str:
+        """Why this row offers no update action, as a code the window renders.
+
+        Neither flag above being set has more than one cause, and the row could
+        only show all of them the same way: as a button that is not there.  That
+        reads identically whether this machine has nothing to send, the peer is
+        too old to be called at all, the two are on different platforms, or the
+        builds are simply level -- so this says which, and the window says it in
+        words.
+
+        A code rather than a sentence, like every other per-device word the
+        window draws (``connection_state``, ``pairing_status``): the shell is
+        where the two languages live, and a sentence composed here could not be
+        translated there.  A code makes the entry un-actionable; the reason is
+        what tells the reader the difference between "nothing to do" and "not
+        from this machine".
+
+        Form is ``<direction>:<cause>``, the direction being the entry the
+        window dims and explains -- ``send`` when the peer is the one behind,
+        ``fetch`` when it is the one ahead.  Empty when an action *is* offered
+        (the flags say so, and nothing is being withheld), and empty for a peer
+        that advertised no version at all: a device that has said nothing about
+        itself has no answer here, exactly as it has no version chip.
+
+        The causes are read in the order that decides the question: whether the
+        peer can be dialled at all -- a build from before the no-pairing marker
+        is one this machine will not call -- then the platform the asset would
+        have to fit.  What is left, with both agreeing, is the versions.
+        """
+        version = str(seen.get("version") or "")
+        if not version:
+            return ""
+        if self._update_offerable(seen) or self._update_fetchable(seen):
+            return ""
+        behind = updater.is_newer(__version__, version)
+        if not self._update_dialable(seen):
+            cause = "too_old"
+        elif (str(seen.get("os") or ""), str(seen.get("arch") or "")) != _local_platform():
+            cause = "other_platform"
+        else:
+            return "level"
+        return f"{'send' if behind else 'fetch'}:{cause}"
 
     def _same_platform_peer(self, payload: dict) -> bool:
         """Whether a request's sender says it is on this build's own platform.
@@ -2897,6 +2968,13 @@ class LanRuntime:
                         # the news.  A peer told "no" has its own release check
                         # to fall back on.
                         "update_cached": bool(updater.get_cached_asset()),
+                        # And, when neither flag is set, why not -- a code the
+                        # window turns into a sentence on the row's own update
+                        # entry.  Without it the only way this row could report
+                        # "the peer is behind and nothing will happen" was by
+                        # showing no button, which is what a level pair, a peer
+                        # too old to call and another platform all look like.
+                        "update_blocked": self._update_blocked(seen),
                         # This device's internet pairing, on this row because
                         # the row is the device's and this is one of its two
                         # routes.  A front end that could only see the join its

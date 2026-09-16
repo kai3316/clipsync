@@ -1840,12 +1840,13 @@ describe("history rendering", () => {
         version: "1.0.9", platform: "windows", arch: "amd64",
         update_available: false, update_fetchable: true },
       // Same build, another platform, and one too old to advertise: three
-      // different reasons not to offer, and the row carries none of them as a
-      // button.  The decision is the sidecar's -- these rows only render it.
+      // different reasons not to offer, and none of them is a button.  The
+      // decision is the sidecar's -- these rows only render it -- and so is the
+      // reason, which rides along as a code for the row's menu to say in words.
       { id: "u", name: "Same", paired: false, connection_state: "discovered",
         pairing_status: "", pairing_code: null, sas: null,
         version: "1.0.8", platform: "windows", arch: "amd64",
-        update_available: false, update_cached: false },
+        update_available: false, update_cached: false, update_blocked: "level" },
       { id: "v", name: "Silent", paired: false, connection_state: "discovered",
         pairing_status: "", pairing_code: null, sas: null,
         update_available: false, update_cached: false },
@@ -1872,6 +1873,39 @@ describe("history rendering", () => {
       await flushPromises();
       expect(bridge.fetchDeviceUpdate).toHaveBeenCalledExactlyOnceWith("n");
       expect(app.text()).toContain("已向 Newer 索取安装包，收到后可在更新页安装");
+      // The same two actions on the row's own menu, which is where a reader who
+      // wants to push a version to a device looks first: what the version is,
+      // and the entry that sends it.  Nothing is clicked here -- both actions
+      // were just exercised through the row -- so what these hold is that the
+      // menu offers them at all, on the row's own terms.
+      const rowMenu = async (index: number) => {
+        await app.findAll(".device-row")[index].trigger("contextmenu");
+        await flushPromises();
+        return app.findAll(".context-menu-item");
+      };
+      let entries = await rowMenu(0);
+      const version = entries.find(entry => entry.text().includes("版本 1.0.7"))!;
+      // Information, not an action: the row is the version itself.
+      expect(version.attributes("aria-disabled")).toBeDefined();
+      const send = entries.find(entry => entry.text().includes("发送更新"))!;
+      expect(send.attributes("aria-disabled")).toBeUndefined();
+      expect(send.attributes("title")).toContain("把本机的安装包发送给该设备");
+      closeContextMenu();
+      // The row that has no action to offer says which of the reasons it is,
+      // on the entry that would have been there.  Without it the whole state
+      // was a button that was not drawn -- indistinguishable from a level pair,
+      // another platform, or a device this machine has nothing to send to.
+      entries = await rowMenu(2);
+      const blocked = entries.find(entry => entry.text().includes("发送更新"))!;
+      expect(blocked.attributes("aria-disabled")).toBeDefined();
+      expect(blocked.attributes("title")).toContain("两台设备版本相同");
+      closeContextMenu();
+      // And a device that advertises nothing gets none of it: there is no
+      // version to name and no reason to give.
+      entries = await rowMenu(3);
+      expect(entries.filter(entry => entry.text().includes("更新"))).toHaveLength(0);
+      expect(entries.filter(entry => entry.text().includes("版本"))).toHaveLength(0);
+      closeContextMenu();
     } finally {
       app.unmount();
       vi.mocked(bridge.devices).mockResolvedValue({ items: [] });

@@ -78,6 +78,17 @@ _REJECT_MARKER = b"\xff\xff\xff\xffRJCT"
 # pin can see it: both hash the DER.
 NO_PAIRING_MARKER = "\n#clipsync-no-pairing"
 
+# The first release that reads the marker above, and therefore the floor for
+# every dial this build makes on a user's behalf: a call to an older peer is a
+# pairing card on that screen, which is the one outcome the marker exists to
+# prevent, so a peer older than this one is not called at all.
+#
+# It is a release rather than something the peer advertises, because the advert
+# has no word for it.  ``app`` was standing in for one — only 1.0.13 and later
+# broadcast a field at all — and that stand-in is gone now that the update offer
+# no longer asks which application a peer runs.
+NO_PAIRING_MARKER_SINCE = "1.0.12"
+
 # How long a manual disconnect keeps the peer's reconnects out.
 #
 # ``disconnect_peer(reject=True)`` used to park the peer in
