@@ -36,6 +36,7 @@ from internal.sync.nearby_chat import ChatManager
 from internal.transport.relay import (
     derive_key,
     derive_topic,
+    frame_limit_for,
     generate_netpair_code,
     generate_netpair_secret,
     netpair_device_tag,
@@ -474,6 +475,18 @@ def test_an_internet_only_peer_gets_relay_safe_file_chunks(relay_rig):
     # published for the broker to drop.
     with pytest.raises(ValueError):
         pack_envelope(encode_binary_chunk(tid, 0, 1, b"x" * (224 * 1024)), key, time.time())
+
+    # A relay with a smaller ceiling moves the chunk with it: the size the
+    # setting names is the size the sender has to cut to, and what proves the
+    # cut fits is the same packer the publish path runs.
+    relay_rig.config.relay_max_message_bytes = 64 * 1024
+    small = runtime._chat_send_fn("remote")
+    assert small.chunk_size == ChatManager.relay_chunk_for(64 * 1024)
+    assert pack_envelope(
+        encode_binary_chunk(tid, 0, 1, b"x" * small.chunk_size), key, time.time(),
+        max_frame=frame_limit_for(64 * 1024),
+    )
+    assert small.chunk_size < send.chunk_size
 
     # A LAN-connected peer keeps the 256 KiB wire format peers already speak.
     transport.connected.add("remote")

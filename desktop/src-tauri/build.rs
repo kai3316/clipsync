@@ -28,6 +28,7 @@ fn main() {
             "device_certs",
             "device_retrust",
             "offer_device_update",
+            "fetch_device_update",
             "send_url",
             "push_text",
             "discovery_status",

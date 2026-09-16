@@ -447,6 +447,9 @@ button.primary { background: var(--accent-solid); color: var(--on-accent); }
    an error.  It is a line rather than a band — the dialog is already the frame,
    and a second frame inside it would be two borders for one failure. */
 .modal-error { color: var(--danger-text); }
+/* The log level switch sits directly above the log it filters, so it carries no
+   spacing of its own on the bottom — the log's own top margin is the gap. */
+.log-filters { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin: 14px 0 0; }
 .log-view { max-height: 46vh; overflow: auto; margin: 12px 0 20px; padding: 10px; background: var(--code); border: 1px solid var(--line); border-radius: 4px; font-family: var(--font-mono); font-size: 12px; line-height: 1.55; white-space: pre-wrap; overflow-wrap: anywhere; }
 /* A clip's own text, read-only and selectable. It scrolls rather than growing
    the dialog: a clip is not bounded by the dialog's height, and the text is the

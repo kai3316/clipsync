@@ -241,6 +241,11 @@ class Dispatcher:
             # device list rather than the update page because the version it
             # acts on is the *peer's*, which is what that list shows.
             "devices.offer_update": "offer_device_update",
+            # The same exchange started from the other end: this device is the
+            # older one and asks the peer for its build.  The direction the
+            # feature is meant to run in, and the reason both device lists carry
+            # a button rather than only the newer one.
+            "devices.fetch_update": "fetch_device_update",
         }
         if method in device_commands:
             validate_params(
@@ -491,6 +496,10 @@ class Dispatcher:
                 "relay_private_brokers": (list, _broker_list),
                 "relay_username": (str, lambda v: len(v) <= 256),
                 "relay_password": (str, lambda v: len(v) <= 1024),
+                "relay_max_message_bytes": (
+                    int,
+                    lambda v: 32 * 1024 <= v <= 1024 * 1024,
+                ),
             }
             validate_params(params, fields)
             return self.app.update_settings(params)

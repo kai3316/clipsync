@@ -240,6 +240,15 @@ class Config:
     # treatment as the translation API key.
     relay_username: str = "clipsync_mqtt"
     relay_password: str = "Y*CT$#qgn_Ft#p6JG+"
+    # The largest single message the relay will carry, in bytes.
+    #
+    # A property of the server, not of this app: a broker that refuses a message
+    # over its limit does so by dropping it, so a file chunk too large for it
+    # dies in flight while the sender has already counted it sent.  Lower this
+    # to the smallest message the relay in use will accept and every chunk is
+    # sized to fit under it.  256 KiB is what the public brokers carry and what
+    # this app has always assumed; a free tier commonly allows 64 KiB.
+    relay_max_message_bytes: int = 256 * 1024
     # This device's own relay secret — generated lazily on first use and
     # never transmitted in the clear (enrollment rides the TLS LAN channel).
     relay_secret: str = ""
@@ -411,6 +420,7 @@ _FIELD_RULES: dict[str, tuple] = {
     "relay_private_brokers": ("strlist_nonnull",),
     "relay_username": ("str",),
     "relay_password": ("str",),
+    "relay_max_message_bytes": ("int",),
     "relay_secret": ("str",),
     "peer_relay_secrets": ("strdict",),
     "netpair_secrets": ("strdict",),
@@ -438,6 +448,12 @@ _FIELD_RANGES: dict[str, tuple] = {
     "clipboard_poll_interval": (0.1, 60.0),
     "max_reconnect_attempts": (0, 100),
     "transfer_timeout": (5, 3600),
+    # A free broker's 64 KiB sits inside this range with room on both sides:
+    # 32 KiB is the floor because below it a file chunk gets too small to be
+    # worth the round trip (see ``ChatManager.relay_chunk_for``), and 1 MiB the
+    # ceiling because past it the figure is no longer a broker's published
+    # limit but a typo.
+    "relay_max_message_bytes": (32 * 1024, 1024 * 1024),
 }
 
 # Sentinel returned by _validate_field when a value must be skipped.
@@ -667,6 +683,7 @@ def load() -> Config:
                 "relay_private_brokers",
                 "relay_username",
                 "relay_password",
+                "relay_max_message_bytes",
                 "relay_secret",
                 "peer_relay_secrets",
                 "netpair_secrets",
@@ -837,6 +854,7 @@ def save(cfg: Config, enc_mgr: "EncryptionManager | None" = None):
             "relay_private_brokers": cfg.relay_private_brokers,
             "relay_username": cfg.relay_username,
             "relay_password": cfg.relay_password,
+            "relay_max_message_bytes": cfg.relay_max_message_bytes,
             "relay_secret": cfg.relay_secret,
             "peer_relay_secrets": cfg.peer_relay_secrets,
             "netpair_secrets": cfg.netpair_secrets,

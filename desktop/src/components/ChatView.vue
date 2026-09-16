@@ -75,6 +75,36 @@ const LIVE_STATUS = ["active", "inviting", "invited"];
 const nearby = computed(() => devices.value.filter((device) =>
   !sessions.value.some((s) => s.peer_id === device.id && LIVE_STATUS.includes(s.status))));
 const messageList = ref<HTMLElement | null>(null);
+
+/**
+ * Whether a row in 附近设备 can be reached right now, over either of its routes.
+ *
+ * `connection_state` describes one route and which one depends on the row: a
+ * relay-only row carries the relay's own reading of the peer, a row with a
+ * local link carries the local one.  A device can hold both pairings, so a row
+ * whose local link is down may still be up on the relay — and calling that one
+ * offline greys out a conversation that would connect.
+ */
+function reachable(device: Device) {
+  // A relay-only row's connection state *is* the relay's reading of the peer,
+  // so it is the only one there is; a row with a local link can still be
+  // reachable over the relay while that link is down.
+  if (device.relay) return device.connection_state !== "offline";
+  return Boolean(device.relay_paired && device.relay_online) || device.connection_state !== "offline";
+}
+
+/** The route in the row's own small print — the device list's two chips in one
+ *  word, because this list gives that slot one word.  A device holding an
+ *  internet pairing is named as one whether or not the relay currently sees it:
+ *  未配对 is a claim about pairing, and it is the one answer that would be
+ *  false about such a device, whose reachability the device list already
+ *  reports as 互联网·离线. */
+function nearbyRoute(device: Device) {
+  if (device.relay || device.relay_paired) return reachable(device) ? t("互联网") : t("离线");
+  if (device.connection_state === "offline") return t("离线");
+  return device.paired ? t("已配对") : t("未配对");
+}
+
 /** Whether the list is sitting at the newest message — see `trackScroll`. */
 let following = true;
 
@@ -417,8 +447,8 @@ onUnmounted(() => { if (timer) clearInterval(timer); if (typingTimer) clearTimeo
           <button class="icon-button" :aria-label="t('刷新聊天')" :title="t('刷新聊天')" @click="refreshNow"><RefreshCw :size="17" /></button>
         </div>
         <button v-for="device in nearby" :key="`chat-${device.id}`" class="chat-device"
-          :disabled="busy || device.connection_state === 'offline'"
-          :title="device.connection_state === 'offline' ? t('{name} 当前不在线', { name: device.name }) : undefined"
+          :disabled="busy || !reachable(device)"
+          :title="reachable(device) ? undefined : t('{name} 当前不在线', { name: device.name })"
           @click="invite({ peer_id: device.id, peer_name: device.name } as ChatSession)">
           <MessageCircle :size="16" /><span>{{ device.name }}</span>
           <!-- A device paired by code is named as that rather than 已配对: it is
@@ -426,7 +456,7 @@ onUnmounted(() => { if (timer) clearInterval(timer); if (typingTimer) clearTimeo
                reader should know before the first message which route it takes.
                It is offered on the same rule as the rest — reachable now or
                not — which for it is the relay's own view of the peer. -->
-          <small>{{ device.connection_state === 'offline' ? t("离线") : device.relay ? t("互联网") : device.paired ? t("已配对") : t("未配对") }}</small>
+          <small>{{ reachable(device) ? nearbyRoute(device) : t("离线") }}</small>
         </button>
         <p v-if="!nearby.length" class="chat-nearby-empty">{{ t("附近没有可聊天的设备。") }}</p>
 

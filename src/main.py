@@ -1566,11 +1566,15 @@ class Application:
             except Exception:
                 connected = set()
             if peer_id not in connected and self._peer_is_internet_reachable(peer_id):
-                # RELAY_CHUNK_SIZE / RELAY_FILE_CAP are class attributes on
+                # RELAY_FILE_CAP and relay_chunk_for are class attributes on
                 # ChatManager (already imported at module scope) — no local
                 # import here: a NameError inside the send closure would be
                 # swallowed by chat's frame handler and kill the whole chat.
-                _send.chunk_size = ChatManager.RELAY_CHUNK_SIZE
+                # The chunk follows the relay limit the user configured.
+                relay_limit = getattr(
+                    self.cfg, "relay_max_message_bytes", Config.relay_max_message_bytes
+                )
+                _send.chunk_size = ChatManager.relay_chunk_for(relay_limit)
                 _send.internet_cap = ChatManager.RELAY_FILE_CAP
         return _send
 
@@ -8162,7 +8166,11 @@ class Application:
     def _start_internet_sync(self) -> None:
         if self._relay is not None:
             return
-        from internal.transport.relay import RelayTransport, build_paho_client
+        from internal.transport.relay import (
+            MAX_RELAY_PAYLOAD,
+            RelayTransport,
+            build_paho_client,
+        )
 
         transport = RelayTransport(
             brokers=list(self.cfg.relay_brokers),
@@ -8174,6 +8182,10 @@ class Application:
             client_factory=build_paho_client,
             username=getattr(self.cfg, "relay_username", "") or "",
             password=getattr(self.cfg, "relay_password", "") or "",
+            max_payload=int(
+                getattr(self.cfg, "relay_max_message_bytes", MAX_RELAY_PAYLOAD)
+                or MAX_RELAY_PAYLOAD
+            ),
         )
         self._relay = transport
         transport.start()

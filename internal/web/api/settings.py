@@ -80,6 +80,12 @@ _SAFE_FIELDS = {
     # The relay broker *username* is exposed so the web UI can prefill it; the
     # password is not — only relay_password_set is exposed (see get_settings).
     "relay_username",
+    # The broker's per-message ceiling, in bytes.  A property of the server the
+    # user pointed this app at, not a secret, and the size a file chunk is
+    # derived from.  Exposed here though the panel draws no row for it: the
+    # control is the desktop settings page's, and this API is where that page
+    # and a phone-side save meet.
+    "relay_max_message_bytes",
     "data_dir",
     "hotkeys",
     "hotkeys_enabled",
@@ -111,6 +117,9 @@ _RANGE_LIMITS = {
     "clipboard_poll_interval": (0.1, 60.0),
     "max_reconnect_attempts": (0, 100),
     "transfer_timeout": (5, 3600),
+    # Mirrors config._FIELD_RANGES: a free broker commonly allows 64 KiB, and
+    # 32 KiB is the floor below which file chunks get too small to be useful.
+    "relay_max_message_bytes": (32 * 1024, 1024 * 1024),
 }
 
 # Fields whose value must never reach the log.  Every update is logged, and the
@@ -170,6 +179,7 @@ _MUTABLE_FIELDS = {
     "relay_private_brokers",
     "relay_username",
     "relay_password",
+    "relay_max_message_bytes",
     # Legacy pairing passphrase (v1.0.84 unification: the single encryption
     # password in the Security tab now derives the netpair channel keys, so
     # the web UI no longer sends this field — it is kept only so an older

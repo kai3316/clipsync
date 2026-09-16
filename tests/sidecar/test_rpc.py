@@ -209,6 +209,9 @@ def test_settings_round_trip_and_unknown_field_rejection(app):
             "notify_transfer": False,
             "history_max_entries": 125,
             "history_max_age_days": 7,
+            # The relay's per-message ceiling.  Read when the relay is built,
+            # so the assertion is on what was stored and echoed back.
+            "relay_max_message_bytes": 64 * 1024,
         },
     )
     assert result["ok"] is True
@@ -217,23 +220,33 @@ def test_settings_round_trip_and_unknown_field_rejection(app):
     assert Dispatcher(app).call("settings.get", {})["settings"]["notify_transfer"] is False
     assert app._repository.MAX_ENTRIES == 125
     assert Dispatcher(app).call("settings.get", {})["settings"]["history_max_age_days"] == 7
+    assert Dispatcher(app).call("settings.get", {})["settings"][
+        "relay_max_message_bytes"
+    ] == 64 * 1024
     with pytest.raises(ApplicationError):
         Dispatcher(app).call("settings.update", {"history_max_entries": 0})
     with pytest.raises(ApplicationError):
         Dispatcher(app).call("settings.update", {"notify_transfer": "false"})
+    # Outside the range the config and every other surface enforce: a limit the
+    # relay could never carry is refused rather than stored.
+    with pytest.raises(ApplicationError):
+        Dispatcher(app).call("settings.update", {"relay_max_message_bytes": 1024})
     with pytest.raises(ApplicationError, match="Unexpected"):
         Dispatcher(app).call("settings.update", {"private_key_pem": "secret"})
 
 
 def test_notification_switches_round_trip_but_the_unread_one_is_refused(app):
-    """The per-type switches the native host reads are settable; the fourth is not.
+    """The per-type switches stay settable; the fourth is refused.
 
-    ``notify_pairing`` and ``notify_device_connect`` gate the OS notifications the
-    Rust host builds itself, so a window that could read them but not set them
-    would offer a switch the user cannot move.  ``notify_sync`` stays refused on
-    purpose: nothing native reads it, and a control that changes nothing is worse
-    than no control.  The web panel keeps its own control through the legacy
-    route, which is why the key exists in the config at all.
+    The Tauri host builds no OS notifications at all — its notices come from the
+    event stream — so nothing in this app reads the three.  They stay settable
+    anyway, because they are config fields with a live reader elsewhere: the
+    legacy Tk host's own notifier, and the phone panel's toggles, which write
+    these same keys through the web API.  A field this RPC mirrored yesterday
+    and refuses today breaks the shells that set it.
+
+    ``notify_sync`` stays refused on purpose: nothing has ever read it, and a
+    control that changes nothing is worse than no control.
     """
     rpc = Dispatcher(app)
     assert rpc.call("settings.get", {})["settings"]["notify_pairing"] is True
@@ -246,8 +259,8 @@ def test_notification_switches_round_trip_but_the_unread_one_is_refused(app):
     assert settings["notify_pairing"] is False
     assert settings["notify_device_connect"] is False
     # A later update that does not mention them must not quietly re-default them:
-    # the host reads these on every notification, so a reset here is a reset the
-    # user never asked for and would not see.
+    # a reader consults these at the moment it notifies, so a reset here is a
+    # reset the user never asked for and would not see.
     assert rpc.call("settings.update", {"device_name": "Desk"})["ok"] is True
     settings = rpc.call("settings.get", {})["settings"]
     assert settings["device_name"] == "Desk"

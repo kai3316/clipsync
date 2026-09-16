@@ -1,13 +1,21 @@
-"""Tail of the application log, with locally-sensitive strings removed.
+"""The application log: who writes it, and the tail of it that may be read.
 
 Shared by the legacy ``GET /api/logs`` route and the native ``logs.tail``
 command so the two cannot drift on either the tail window or the redaction
 rules. Log lines are never sent anywhere until they pass
 :func:`redact_sensitive_line`.
+
+The record's shape — path, rotation, format, levels — is defined here rather
+than at whichever entry point happens to call :func:`setup_file_logging`,
+because the reader below parses the level field back out of it.
 """
 
+import logging
+import logging.handlers
 import os
+import re
 import shutil
+import sys
 from pathlib import Path
 
 # Read only the tail (last 256 KB) so an oversized log is not fully loaded
@@ -17,6 +25,106 @@ MAX_TAIL_BYTES = 256 * 1024
 DEFAULT_LINES = 200
 MIN_LINES = 1
 MAX_LINES = 1000
+
+LOG_FILE_NAME = "clipsync.log"
+LOG_MAX_BYTES = 5 * 1024 * 1024
+LOG_BACKUP_COUNT = 3
+LOG_FORMAT = (
+    "%(asctime)s.%(msecs)03d [%(levelname)-8s] %(threadName)-12s "
+    "%(name)s:%(lineno)d  %(message)s"
+)
+LOG_DATE_FORMAT = "%Y-%m-%d %H:%M:%S"
+
+# A line at one of these levels reports something that went wrong, and is what
+# someone reads the log to find; everything else is the running account of what
+# the application did. WARNING is the boundary rather than ERROR: a warning is
+# already a departure from the expected path, and the alternative is a log view
+# whose "problems" tab is silent for the failure that only warned.
+PROBLEM_LEVELS = frozenset({"WARNING", "ERROR", "CRITICAL"})
+
+# The level is the first bracketed field, straight after the timestamp
+# :data:`LOG_FORMAT` writes. Anchored to that position so a message that
+# happens to quote "[ERROR]" cannot promote its own line.
+_LEVEL_FIELD = re.compile(r"^\d{4}-\d{2}-\d{2} [\d:.]+\s+\[([A-Z]+)\s*\]")
+
+
+def setup_file_logging(stderr_level: int = logging.WARNING) -> bool:
+    """Log to the rotating file the log view reads, and to stderr above *stderr_level*.
+
+    The root logger is left at DEBUG so records reach the file handler, which is
+    what decides how much is kept; stderr keeps its own higher level so the
+    parent process's pipe is not flooded with the running account.
+
+    Idempotent, and never raises: a log directory that cannot be created is not
+    a reason for the application to refuse to start. Returns whether the file
+    handler is in place.
+    """
+    root = logging.getLogger()
+    root.setLevel(logging.DEBUG)
+    _quiet_noisy_loggers()
+
+    if not any(
+        isinstance(handler, logging.StreamHandler)
+        and not isinstance(handler, logging.FileHandler)
+        for handler in root.handlers
+    ):
+        stream = logging.StreamHandler(sys.stderr)
+        stream.setLevel(stderr_level)
+        stream.setFormatter(
+            logging.Formatter(
+                "%(asctime)s [%(levelname)-8s] %(name)-28s  %(message)s",
+                datefmt="%H:%M:%S",
+            )
+        )
+        root.addHandler(stream)
+
+    if any(isinstance(handler, logging.FileHandler) for handler in root.handlers):
+        return True
+    path = log_path()
+    if path is None:
+        return False
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        handler = logging.handlers.RotatingFileHandler(
+            path,
+            maxBytes=LOG_MAX_BYTES,
+            backupCount=LOG_BACKUP_COUNT,
+            encoding="utf-8",
+        )
+    except OSError as exc:
+        logging.getLogger(__name__).warning("Could not open the log file %s: %s", path, exc)
+        return False
+    handler.setLevel(logging.DEBUG)
+    handler.setFormatter(logging.Formatter(LOG_FORMAT, datefmt=LOG_DATE_FORMAT))
+    root.addHandler(handler)
+    return True
+
+
+def _quiet_noisy_loggers() -> None:
+    """Keep the third-party chatter that is never about this application out."""
+    for noisy in ("zeroconf", "PIL", "cryptography", "urllib3"):
+        logging.getLogger(noisy).setLevel(logging.WARNING)
+
+
+def split_log_lines(lines) -> tuple[list[str], list[str]]:
+    """Return ``(problems, rest)``, each keeping the order it was given.
+
+    A line whose level field is not recognised counts as *rest* — unless it
+    directly follows a problem line, which is how a traceback's continuation
+    lines stay with the failure that raised them. Those lines are the ones that
+    make an error worth reading, and they carry no level of their own. Any wider
+    guess is what would put the running account into the one list the user reads
+    to find the problem.
+    """
+    problems: list[str] = []
+    rest: list[str] = []
+    in_problem = False
+    for line in lines:
+        match = _LEVEL_FIELD.match(line)
+        if match:
+            in_problem = match.group(1) in PROBLEM_LEVELS
+        (problems if in_problem else rest).append(line)
+    return problems, rest
 
 
 def redact_sensitive_line(line: str, cfg) -> str:
@@ -124,7 +232,7 @@ def log_path():
     from internal.config.config import _log_dir
 
     try:
-        return _log_dir() / "clipsync.log"
+        return _log_dir() / LOG_FILE_NAME
     except Exception:
         return None
 

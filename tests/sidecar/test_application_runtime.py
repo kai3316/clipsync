@@ -204,18 +204,41 @@ def test_logs_tail_reads_the_shared_log_and_redacts_local_secrets(
     monkeypatch.setattr(config_module, "_log_dir", lambda: log_dir)
     home = os.path.expanduser("~")
     runtime_app.config.web_token = "tok-secret"
+    # Held in a name of its own to keep the two secrets it carries on one line.
+    error_line = (
+        "2026-09-16 09:13:01.000 [ERROR   ] SyncThread   t:3  "
+        f"opened {home}/secret tok-secret"
+    )
     (log_dir / "clipsync.log").write_text(
         "\n".join(
             [f"line {i}" for i in range(300)]
-            + [f"opened {home}/secret tok-secret"]
+            + [
+                "2026-09-16 09:13:00.000 [WARNING ] SyncThread   t:2  relay frame dropped",
+                error_line,
+                "Traceback (most recent call last):",
+                "  ValueError: no address",
+            ]
         )
         + "\n",
         encoding="utf-8",
     )
     assert "logs.tail" in runtime_app.status()["capabilities"]
-    result = Dispatcher(runtime_app).call("logs.tail", {"lines": 2})
-    assert result["logs"] == ["line 299", "opened [redacted]/secret [redacted]"]
+    result = Dispatcher(runtime_app).call("logs.tail", {"lines": 4})
+    assert result["logs"] == [
+        "2026-09-16 09:13:00.000 [WARNING ] SyncThread   t:2  relay frame dropped",
+        "2026-09-16 09:13:01.000 [ERROR   ] SyncThread   t:3  "
+        "opened [redacted]/secret [redacted]",
+        "Traceback (most recent call last):",
+        "  ValueError: no address",
+    ]
+    # The WARNING and the ERROR, plus the traceback lines that belong to the
+    # latter: they carry no level of their own and are only readable with it.
+    # The 300 unformatted lines above are not evidence of a failure.
+    assert result["problems"] == result["logs"]
     assert len(Dispatcher(runtime_app).call("logs.tail", {})["logs"]) == 200
+    # The same four out of a two-hundred-line tail: the unformatted bulk around
+    # them is the running account, not a problem to read.
+    assert Dispatcher(runtime_app).call("logs.tail", {})["problems"] == result["problems"]
 
 
 def test_logs_export_copies_the_raw_log_to_the_host_chosen_path(
@@ -534,6 +557,8 @@ def test_pairing_commands_call_only_the_closed_runtime_surface(runtime_app, meth
         ("devices.purge", "purge_device"),
         ("devices.test", "test_device"),
         ("devices.retrust", "retrust_device"),
+        ("devices.offer_update", "offer_device_update"),
+        ("devices.fetch_update", "fetch_device_update"),
     ],
 )
 def test_device_commands_call_only_the_closed_runtime_surface(runtime_app, method, member):

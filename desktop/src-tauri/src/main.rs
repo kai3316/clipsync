@@ -3,7 +3,6 @@
 mod bridge;
 mod error;
 mod i18n;
-mod notifications;
 mod protocol;
 mod tray;
 
@@ -1115,6 +1114,20 @@ async fn offer_device_update(
 }
 
 #[tauri::command]
+async fn fetch_device_update(
+    window: WebviewWindow,
+    host: State<'_, Host>,
+    device_id: String,
+) -> Result<Value, BridgeError> {
+    authorize(&window)?;
+    validate_id(&device_id)?;
+    host.bridge()
+        .await?
+        .call("devices.fetch_update", json!({"device_id": device_id}))
+        .await
+}
+
+#[tauri::command]
 async fn forget_device(
     window: WebviewWindow,
     host: State<'_, Host>,
@@ -2059,7 +2072,6 @@ fn tray_call(app: &tauri::AppHandle, method: &str, params: Value) {
 fn main() {
     let app = tauri::Builder::default()
         .plugin(tauri_plugin_autostart::Builder::new().app_name("ClipSync").build())
-        .plugin(tauri_plugin_notification::init())
         // Registered for the Rust side only: this window is given no updater
         // permission, so the plugin's own commands stay unreachable from the
         // WebView and every update goes through `update_install` below.
@@ -2238,6 +2250,7 @@ fn main() {
             connect_device,
             disconnect_device,
             offer_device_update,
+            fetch_device_update,
             forget_device,
             restore_device,
             purge_device,

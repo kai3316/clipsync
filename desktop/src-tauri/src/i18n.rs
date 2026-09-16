@@ -1,5 +1,5 @@
-//! Strings for the native surfaces the renderer cannot reach: the tray menu,
-//! OS notifications, and the failures the host raises in its own right.
+//! Strings for the native surfaces the renderer cannot reach: the tray menu and
+//! the failures the host raises in its own right.
 //!
 //! The shell has its own layer (`desktop/src/i18n`, Chinese source strings);
 //! this is the Rust-side counterpart for the handful of labels the host draws
@@ -19,18 +19,6 @@ pub const DEFAULT_LOCALE: &str = "zh-CN";
 pub struct Strings {
     /// Tray menu labels.
     pub tray: Tray,
-    /// Body of the "incoming file transfer" notification.
-    pub notify_transfer: &'static str,
-    /// Body of the "a phone uploaded a file" notification.
-    pub notify_file_received: &'static str,
-    /// Body of the "new chat message" notification.
-    pub notify_chat: &'static str,
-    /// Body of the "a device wants to pair" notification (`{name}`, `{code}`).
-    pub notify_pairing_request: &'static str,
-    /// Body of the "a device connected" notification (`{name}`).
-    pub notify_device_connected: &'static str,
-    /// Body of the "a device disconnected" notification (`{name}`).
-    pub notify_device_disconnected: &'static str,
     /// Save-dialog filter for a history export (JSON/CSV).
     pub filter_history: &'static str,
     /// Save-dialog filter for a backup archive.
@@ -209,12 +197,6 @@ const ZH: Strings = Strings {
         about: "关于 ClipSync",
         quit: "退出 ClipSync",
     },
-    notify_transfer: "收到文件传输请求",
-    notify_file_received: "收到文件",
-    notify_chat: "收到新的聊天消息",
-    notify_pairing_request: "设备 \"{name}\" 请求配对 — 代码：{code}",
-    notify_device_connected: "{name} 已连接",
-    notify_device_disconnected: "{name} 已断开",
     filter_history: "历史导出",
     filter_backup: "ClipSync 备份",
     filter_log: "日志文件",
@@ -275,12 +257,6 @@ const EN: Strings = Strings {
         about: "About ClipSync",
         quit: "Quit ClipSync",
     },
-    notify_transfer: "Incoming file transfer request",
-    notify_file_received: "File received",
-    notify_chat: "New incoming chat message",
-    notify_pairing_request: "Device \"{name}\" wants to pair — code: {code}",
-    notify_device_connected: "{name} is now connected",
-    notify_device_disconnected: "{name} has disconnected",
     filter_history: "History export",
     filter_backup: "ClipSync backup",
     filter_log: "Log files",
@@ -428,7 +404,7 @@ pub(crate) mod tests {
     }
 
     /// Every field, so the tests below cannot miss a new one.
-    fn all(strings: &Strings) -> [&'static str; 52] {
+    fn all(strings: &Strings) -> [&'static str; 46] {
         [
             strings.tray.device,
             strings.tray.sync,
@@ -454,12 +430,6 @@ pub(crate) mod tests {
             strings.tray.check_update,
             strings.tray.about,
             strings.tray.quit,
-            strings.notify_transfer,
-            strings.notify_file_received,
-            strings.notify_chat,
-            strings.notify_pairing_request,
-            strings.notify_device_connected,
-            strings.notify_device_disconnected,
             strings.filter_history,
             strings.filter_backup,
             strings.filter_log,
@@ -505,8 +475,6 @@ pub(crate) mod tests {
                 tray.device_entry.contains("{name}") && tray.device_entry.contains("{state}"),
                 "{locale} lost a device-row placeholder"
             );
-            let pairing = strings(locale).notify_pairing_request;
-            assert!(pairing.contains("{name}") && pairing.contains("{code}"));
         }
     }
 

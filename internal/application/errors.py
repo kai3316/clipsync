@@ -60,6 +60,7 @@ ERROR_KEYS: dict[str, str] = {
     "INTERNAL_ERROR": "error.internal_error",
     "DATA_IN_USE": "error.data_in_use",
     "update.offer_failed": "error.update_offer_failed",
+    "update.fetch_failed": "error.update_fetch_failed",
     "update.peer_unreachable": "error.update_peer_unreachable",
 }
 

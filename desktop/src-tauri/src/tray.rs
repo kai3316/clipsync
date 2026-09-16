@@ -124,11 +124,19 @@ impl DeviceState {
 
 /// Classify a `devices.list` row the way the devices page does.
 ///
-/// The same predicate set as the window's `pairingPending` and
-/// `connectionLabel`, so the two native surfaces cannot describe one device in
-/// two different ways.
-fn classify(paired: bool, connection_state: &str, pairing_status: &str) -> DeviceState {
-    let online = connection_state == "online";
+/// The same predicate set as the window's `pairingPending` and `pairingLabel`,
+/// so the two native surfaces cannot describe one device in two different ways.
+/// A device can hold two pairings at once — a pinned local one and a code
+/// pairing that crosses the internet — and one word has to answer for both: the
+/// local link is what the row reports while it is up, and the relay's own view
+/// of the peer answers when it is not.  A device paired only by code is paired,
+/// which is what the page's `pairingLabel` says about the same row; calling it
+/// 已发现 here was the tray disagreeing with the page.
+fn classify(device: &Value) -> DeviceState {
+    let relay_paired = device["relay_paired"] == true;
+    let paired = device["paired"] == true || relay_paired;
+    let online = device["connection_state"] == "online"
+        || (relay_paired && device["relay_online"] == true);
     if paired {
         return if online {
             DeviceState::Connected
@@ -136,7 +144,7 @@ fn classify(paired: bool, connection_state: &str, pairing_status: &str) -> Devic
             DeviceState::Offline
         };
     }
-    if is_pairing(pairing_status) {
+    if is_pairing(device["pairing_status"].as_str().unwrap_or_default()) {
         return DeviceState::Pairing;
     }
     // Talking to us without being trusted yet — a consented chat session —
@@ -165,11 +173,7 @@ fn device_lines(response: &Value) -> Vec<DeviceLine> {
         .filter(|device| device["archived"] != true)
         .map(|device| DeviceLine {
             name: device["name"].as_str().unwrap_or_default().to_owned(),
-            state: classify(
-                device["paired"] == true,
-                device["connection_state"].as_str().unwrap_or_default(),
-                device["pairing_status"].as_str().unwrap_or_default(),
-            ),
+            state: classify(device),
         })
         .collect();
     lines.sort_by(|a, b| a.state.rank().cmp(&b.state.rank()).then(a.name.cmp(&b.name)));
@@ -738,26 +742,61 @@ mod tests {
     fn a_paired_device_reads_offline_the_moment_its_connection_drops() {
         // Paired is the trust, connection_state is the link: the row follows
         // the link, which is what the user is asking about.
-        assert_eq!(classify(true, "online", "paired"), DeviceState::Connected);
+        assert_eq!(
+            classify(&json!({"paired": true, "connection_state": "online"})),
+            DeviceState::Connected
+        );
         for gone in ["offline", "discovered", "connecting", ""] {
-            assert_eq!(classify(true, gone, "paired"), DeviceState::Offline, "{gone}");
+            assert_eq!(
+                classify(&json!({"paired": true, "connection_state": gone})),
+                DeviceState::Offline,
+                "{gone}"
+            );
         }
+        // And a device whose only pairing is the code pairing is paired too:
+        // its word is the relay's own view of it, which is the reading the
+        // devices page carries on the same row's 互联网 chip.
+        assert_eq!(
+            classify(&json!({"relay_paired": true, "relay_online": true,
+                             "connection_state": "offline"})),
+            DeviceState::Connected
+        );
+        assert_eq!(
+            classify(&json!({"relay_paired": true, "relay_online": false,
+                             "connection_state": "discovered"})),
+            DeviceState::Offline
+        );
     }
 
     #[test]
     fn an_unpaired_device_says_which_of_the_two_it_is() {
         // Mid-pairing is the one to wait for, so it gets its own word.
         for pending in ["pending", "peer_confirmed", "confirmed_waiting"] {
-            assert_eq!(classify(false, "connecting", pending), DeviceState::Pairing);
+            assert_eq!(
+                classify(&json!({"connection_state": "connecting", "pairing_status": pending})),
+                DeviceState::Pairing
+            );
             // Even while its link is up: pairing outranks connected here,
             // because it is the state that needs the user.
-            assert_eq!(classify(false, "online", pending), DeviceState::Pairing);
+            assert_eq!(
+                classify(&json!({"connection_state": "online", "pairing_status": pending})),
+                DeviceState::Pairing
+            );
         }
         // Talking to us without being trusted — a consented chat — reads the
         // same as a paired device, as the legacy tray had it.
-        assert_eq!(classify(false, "online", ""), DeviceState::Connected);
-        assert_eq!(classify(false, "discovered", ""), DeviceState::Found);
-        assert_eq!(classify(false, "offline", "rejected"), DeviceState::Found);
+        assert_eq!(
+            classify(&json!({"connection_state": "online"})),
+            DeviceState::Connected
+        );
+        assert_eq!(
+            classify(&json!({"connection_state": "discovered"})),
+            DeviceState::Found
+        );
+        assert_eq!(
+            classify(&json!({"connection_state": "offline", "pairing_status": "rejected"})),
+            DeviceState::Found
+        );
     }
 
     #[test]

@@ -472,11 +472,35 @@ describe("desktop application store", () => {
       data: { device_id: "peer", name: "" } });
     emit({ type: "event", name: "device.connection_unreachable", session_id: "session",
       data: { device_id: "0123456789abcdef", name: "" } });
+    // And the update exchange's two answers, which are the same kind of thing:
+    // a click whose outcome only the peer knows.  They carry a name and an id
+    // of their own, so the snapshot fallback is not used for them.
+    emit({ type: "event", name: "update.peer_unavailable", session_id: "session",
+      data: { device_id: "peer", name: "Pixel", version: "1.0.9" } });
+    emit({ type: "event", name: "update.peer_notice", session_id: "session",
+      data: { device_id: "peer", name: "Pixel", version: "1.0.9", has_asset: true } });
     expect(store.state.notices.map((notice) => notice.message)).toEqual([
-      t("{name} 拒绝了连接 — 该设备可能已将你移除", { name: "Pixel" }),
+      t("{name} 已将本机移除 — 需要重新在对方配对", { name: "Pixel" }),
       t("找不到 {name} — 请确认该设备已开启 ClipSync 且在同一网络", { name: "Peer" }),
       t("找不到 {name} — 请确认该设备已开启 ClipSync 且在同一网络", { name: "0123456789ab" }),
+      t("{name} 上没有可发送的安装包，请在那台设备上检查更新", { name: "Pixel" }),
+      t("{name} 正在把新版本 {version} 发送过来", { name: "Pixel", version: "1.0.9" }),
     ]);
+    // The same answer is left on the device row, where the click that asked for
+    // it put a note promising a transfer: the notice above expires and that note
+    // does not, so a refusal the row never hears is a row that lies for good.
+    expect(store.state.updatePeerEvent).toMatchObject({
+      device_id: "peer",
+      message: t("{name} 正在把新版本 {version} 发送过来", { name: "Pixel", version: "1.0.9" }),
+    });
+    // The runtime reports the refusal on every attempt it makes, so a second
+    // one for the same device is the same news: no room left in the stack for
+    // the notices that would say something new.
+    emit({ type: "event", name: "device.connection_rejected", session_id: "session",
+      data: { device_id: "peer", name: "Pixel" } });
+    expect(store.state.notices.filter(
+      (notice) => notice.message === t("{name} 已将本机移除 — 需要重新在对方配对", { name: "Pixel" }),
+    )).toHaveLength(1);
     store.dispose();
   });
 

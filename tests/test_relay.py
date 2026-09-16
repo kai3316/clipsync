@@ -494,6 +494,7 @@ def cfg_stub(**over):
     c.peer_relay_secrets = dict(over.get("secrets", {}))
     c.netpair_secrets = dict(over.get("netpair_secrets", {}))
     c.relay_brokers = ["wss://x:8884/mqtt"]
+    c.relay_max_message_bytes = over.get("max_message_bytes", 256 * 1024)
 
     peers = {}
     for pid, paired in over.get("peers", {"p1": True}).items():
@@ -566,8 +567,14 @@ def test_start_internet_sync_enrolls_paired_peers_only(monkeypatch):
             password="",
             private_brokers=None,
             on_undecryptable=None,
+            max_payload=None,
         ):
             started["args"] = (brokers, get_channels, on_frame, on_state)
+            # The other end of the setting that bounds a relayed file chunk: the
+            # legacy host has to pass the configured message ceiling through, or
+            # the transport falls back to this build's own default and a small
+            # broker drops every chunk it publishes.
+            started["max_payload"] = max_payload
 
         def start(self):
             started["started"] = True
@@ -579,13 +586,19 @@ def test_start_internet_sync_enrolls_paired_peers_only(monkeypatch):
 
     monkeypatch.setattr(R, "RelayTransport", FakeTransport)
 
-    app = make_app_stub(peers={"p1": True, "off": False})
+    app = make_app_stub(
+        cfg=cfg_stub(peers={"p1": True, "off": False}, max_message_bytes=64 * 1024)
+    )
     app.cfg.peers["ghost"] = types.SimpleNamespace(device_id="g", paired=False)
     Application._start_internet_sync(app)
     assert started.get("started") is True
     sent_ids = [pid for pid, _ in app.peers_sent]
     assert sent_ids == ["p1"]
     assert app._relay is not None
+    # The relay was built with the message ceiling the config names, not the
+    # default: a 64 KB broker drops anything larger, so a value that stopped
+    # here would leave every file chunk it publishes refused in flight.
+    assert started["max_payload"] == 64 * 1024
 
 
 # ══════════════════════════════════════════════════

@@ -335,6 +335,7 @@ def test_config_save_load_roundtrips_new_keys(tmp_path, monkeypatch):
     cfg.relay_private_brokers = ["mqtt://mqttyyc.top:1883"]
     cfg.relay_username = "clipsync_mqtt"
     cfg.relay_password = "s3cret!"
+    cfg.relay_max_message_bytes = 64 * 1024
     cfg.relay_secret = "ab" * 32
     cfg.peer_relay_secrets = {"peer-1": "cd" * 32}
     cfg.ai_config_tools = ["claude_code", "codex"]
@@ -352,6 +353,7 @@ def test_config_save_load_roundtrips_new_keys(tmp_path, monkeypatch):
     assert cfg2.relay_private_brokers == cfg.relay_private_brokers
     assert cfg2.relay_username == cfg.relay_username
     assert cfg2.relay_password == cfg.relay_password
+    assert cfg2.relay_max_message_bytes == cfg.relay_max_message_bytes
     assert cfg2.relay_secret == cfg.relay_secret
     assert cfg2.peer_relay_secrets == cfg.peer_relay_secrets
     assert cfg2.ai_config_tools == cfg.ai_config_tools
@@ -470,6 +472,7 @@ def test_backup_roundtrips_new_config_keys(tmp_path, _isolated_favorites):
     cfg.relay_private_brokers = ["mqtt://mqttyyc.top:1883", "ws://mqttyyc.top:8083/mqtt"]
     cfg.relay_username = "clipsync_mqtt"
     cfg.relay_password = "s3cret!"
+    cfg.relay_max_message_bytes = 64 * 1024
     cfg.relay_secret = "ab" * 32
     cfg.peer_relay_secrets = {"peer-1": "cd" * 32}
     cfg.ai_config_tools = ["gemini"]
@@ -486,6 +489,7 @@ def test_backup_roundtrips_new_config_keys(tmp_path, _isolated_favorites):
     assert exported["relay_private_brokers"] == cfg.relay_private_brokers
     assert exported["relay_username"] == cfg.relay_username
     assert exported["relay_password"] == cfg.relay_password
+    assert exported["relay_max_message_bytes"] == cfg.relay_max_message_bytes
     assert exported["peer_relay_secrets"] == {"peer-1": "cd" * 32}
     assert exported["ai_config_tools"] == cfg.ai_config_tools
     assert exported["ai_config_custom_paths"] == cfg.ai_config_custom_paths
@@ -503,6 +507,7 @@ def test_backup_roundtrips_new_config_keys(tmp_path, _isolated_favorites):
     assert fresh.relay_private_brokers == cfg.relay_private_brokers
     assert fresh.relay_username == cfg.relay_username
     assert fresh.relay_password == cfg.relay_password
+    assert fresh.relay_max_message_bytes == cfg.relay_max_message_bytes
     assert fresh.relay_secret == cfg.relay_secret
     assert fresh.peer_relay_secrets == {"peer-1": "cd" * 32}
     assert fresh.ai_config_tools == cfg.ai_config_tools

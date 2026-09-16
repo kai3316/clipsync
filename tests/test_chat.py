@@ -450,12 +450,13 @@ class TestInternetRelayFileTransfers:
         self.pair.close()
         self._tmp.cleanup()
 
-    def _relay_fn(self):
-        # Mirrors main._chat_send_fn's tagging for an internet-only peer.
+    def _relay_fn(self, max_message_bytes: int = MAX_RELAY_PAYLOAD):
+        # Mirrors main._chat_send_fn's tagging for an internet-only peer,
+        # including the chunk size it derives from the configured relay limit.
         def fn(data: bytes) -> bool:
             return self.pair.send_from_a(data)
 
-        fn.chunk_size = ChatManager.RELAY_CHUNK_SIZE
+        fn.chunk_size = ChatManager.relay_chunk_for(max_message_bytes)
         fn.internet_cap = ChatManager.RELAY_FILE_CAP
         return fn
 
@@ -476,18 +477,33 @@ class TestInternetRelayFileTransfers:
                 return int(payload.get("chunk_size") or 0)
         raise AssertionError("no chat_file_offer frame captured")
 
-    def test_internet_file_uses_relay_chunk_size_and_preserves_bytes(self):
-        src = self._source(ChatManager.RELAY_CHUNK_SIZE * 2 + 1234)
-        tid = self.pair.a.send_file(self.sid, str(src), self._relay_fn())
+    @pytest.mark.parametrize(
+        "max_message_bytes",
+        [
+            MAX_RELAY_PAYLOAD,  # the public brokers this app ships against
+            64 * 1024,  # a free tier's per-message ceiling
+        ],
+    )
+    def test_internet_file_uses_relay_chunk_size_and_preserves_bytes(self, max_message_bytes):
+        """A file sent over the relay is chunked to fit the relay's own limit.
+
+        Both limits are exercised because the chunk is derived from the one the
+        user configured: the low one is the case the setting exists for, and a
+        chunk that only fits a 256 KB broker is dropped in flight by a 64 KB
+        one while the sender has already counted it sent.
+        """
+        chunk = ChatManager.relay_chunk_for(max_message_bytes)
+        src = self._source(chunk * 2 + 1234)
+        tid = self.pair.a.send_file(self.sid, str(src), self._relay_fn(max_message_bytes))
         assert tid, "send_file returned None"
-        assert self._offer_chunk_size() == ChatManager.RELAY_CHUNK_SIZE
+        assert self._offer_chunk_size() == chunk
         assert _wait_until(lambda: (self._b_entry(tid) or {}).get("status") == "done")
         # Every binary chunk frame must fit inside the relay payload cap.
         for frame in self.pair.frames_a_to_b:
             msg = decode_message(frame)
             if getattr(msg, "msg_type", "") == "file_chunk":
-                assert len(frame) <= MAX_RELAY_PAYLOAD, (
-                    f"chunk frame {len(frame)}B exceeds relay cap"
+                assert len(frame) <= max_message_bytes, (
+                    f"chunk frame {len(frame)}B exceeds the relay's {max_message_bytes}B cap"
                 )
         received = next(e for e in self.pair.b.get_messages(self.sid) if e["transfer_id"] == tid)
         assert open(received["saved_path"], "rb").read() == src.read_bytes()  # noqa: SIM115

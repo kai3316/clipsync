@@ -552,11 +552,20 @@ class InternetPairingService:
         A provisional base32 tag key is not a device and is absent from here for
         the same reason it is absent from ``status``'s peer list: it only means
         "we entered a code and the peer has not confirmed its identity yet".
+
+        Neither is a device this machine has removed.  Removing one ends both of
+        its routes, and the secret goes with the removal; this is the answer for
+        the installs that removed a device on a build where it did not, whose
+        secret is still on disk.  The relay gate refuses the same ids
+        (``_peer_is_internet_reachable``), so the peer is already locked out —
+        what this keeps is the pairing card from listing a device the device
+        list shows as removed.
         """
+        removed = set(getattr(self.config, "removed_peers", {}) or {})
         now = time.time()
         peers = []
         for pid in sorted(self.config.netpair_secrets or {}):
-            if is_provisional_key(pid):
+            if is_provisional_key(pid) or pid in removed:
                 continue
             name = self._names.get(pid, "")
             if not name:

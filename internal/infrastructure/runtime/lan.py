@@ -8,6 +8,7 @@ import threading
 import time
 import uuid
 import webbrowser
+from collections.abc import Callable
 from copy import deepcopy
 from dataclasses import replace
 from pathlib import Path
@@ -51,7 +52,12 @@ from internal.system.archive import ArchiveEmptyError, create_archive
 from internal.transport.connection import MAX_FRAME_SIZE, TransportManager
 from internal.transport.discovery import Discovery
 from internal.transport.ids import peer_id_hash
-from internal.transport.relay import RelayTransport, build_paho_client, netpair_device_tag
+from internal.transport.relay import (
+    MAX_RELAY_PAYLOAD,
+    RelayTransport,
+    build_paho_client,
+    netpair_device_tag,
+)
 from internal.version import __version__
 
 logger = logging.getLogger(__name__)
@@ -341,6 +347,23 @@ class LanRuntime:
         # guard above; a peer's answer that arrives inside the window is the only
         # update blob this side accepts.
         self._update_expectations: dict[str, float] = {}
+        # Peers whose 发送更新 click this machine has not kept yet: the click was
+        # made with no cached asset, so the release still has to be downloaded
+        # before the offer can carry anything.  See ``_serve_pending_update_sends``.
+        self._pending_update_sends: set[str] = set()
+        # Peers that asked this machine for an update it does not have cached.
+        # The ask is a click on their device list, so answering it with silence
+        # leaves them on a spinner -- the release is fetched instead, and the
+        # peers named here are served the moment it lands.  See
+        # ``_request_release_download``.
+        self._pending_update_serves: set[str] = set()
+        # Starts a release download, handed over by the application layer the
+        # same way the update sink above is.  Optional because a runtime built
+        # without one still answers requests -- it just cannot fetch a release
+        # that nobody has downloaded yet.
+        self._start_update_download: Callable[[], dict] | None = None
+        # The journal tap set up by ``_watch_update_ready``, dropped on stop.
+        self._unsubscribe_update_state: Callable[[], None] | None = None
         # Resolves an entry id a peer asked for into this machine's own paths —
         # set by the application layer, which is what owns the history store.
         # A callback rather than a history reference because the runtime is
@@ -851,6 +874,21 @@ class LanRuntime:
         """Where a peer-sent update blob goes (the update service's stage step)."""
         self._update_sink = sink
 
+    def set_update_downloader(self, start) -> None:
+        """How to fetch the release, for the peers that ask before anyone has.
+
+        The other half of the sink above: that one is a blob arriving, this one
+        is a blob that has to be gone and got.  A peer's request is the whole
+        reason to start it -- the device that clicks 获取更新 is the device that
+        is behind, and making its user wait for the *other* machine's owner to
+        press something first is what the request exists to avoid.
+
+        ``start`` is called with no arguments and returns the update service's
+        own ``{"started": bool}`` answer, so a refusal (an install already in
+        progress) is distinguishable from a download now under way.
+        """
+        self._start_update_download = start
+
     # ── files pulled from a peer's history ───────────────────────────────
     def set_clip_file_source(self, source) -> None:
         """Set the ``entry_id -> (paths, reason)`` resolver for file offers.
@@ -1179,6 +1217,17 @@ class LanRuntime:
                 )
             pid = connected
         cached = updater.get_cached_asset()
+        if not cached:
+            # The click means "share this machine's installer", and the installer
+            # is not here yet -- so remember the device and let the download
+            # finish the job.  ``_serve_pending_update_sends`` re-offers the
+            # moment the release lands, which is what turns the click into a
+            # transfer instead of a notice.  A later click for the same device is
+            # the same request twice, so a set.  The download itself is the
+            # shell's to start -- the progress card the user watches is the
+            # update page's own -- which is why the answer says `needs_download`.
+            with self._lock:
+                self._pending_update_sends.add(pid)
         try:
             self.transport.send_to_peer(
                 pid,
@@ -1198,10 +1247,184 @@ class LanRuntime:
                 ),
             )
         except Exception as exc:
+            with self._lock:
+                self._pending_update_sends.discard(pid)
             logger.warning("Failed to offer an update to %s", str(pid)[:12], exc_info=True)
             raise ApplicationError("update.offer_failed") from exc
         logger.info("Offered update %s to peer %s", __version__, str(pid)[:12])
+        return {"sent": True, "needs_download": not cached}
+
+    def fetch_device_update(self, device_id: str) -> dict:
+        """Ask one peer for its cached build; the answer is staged for install.
+
+        The primary direction of the 免配对 update path: the device on the older
+        build is the one that has a reason to act, so this is the button its own
+        device list carries.  The exchange is the offer's, started from the other
+        end -- this side asks, the peer serves, and the bytes are checked against
+        the published release digest on arrival before anything is staged.
+
+        Raises :class:`ApplicationError` when the peer cannot be reached, so a
+        click that produced no traffic cannot look like one that did.
+        """
+        # Blocking for the offer's reason: an idle device is dialed first, and
+        # that wait is the runtime's to hold, not the runtime's lock.
+        return self._command(self._fetch_device_update, device_id, blocking=True)
+
+    def _fetch_device_update(self, device_id: str) -> dict:
+        pid = self._resolve(device_id)
+        if not self._address(pid) and pid not in {
+            p.device_id for p in self.pairing.get_known_peers()
+        }:
+            raise ApplicationError("NOT_FOUND", "Device not found")
+        if pid not in self.transport.get_connected_peers():
+            # The dial carries no pairing request, exactly as the offer's does:
+            # an update is not a reason to ask for a pairing code on either
+            # device, in either direction.
+            connected = self._connect_and_wait(pid, no_auto_pairing=True)
+            if connected is None:
+                raise ApplicationError(
+                    "update.peer_unreachable",
+                    f"Could not reach {self._peer_name(pid) or 'the device'}",
+                )
+            pid = connected
+        mine_os, mine_arch = _local_platform()
+        try:
+            delivered = self.transport.send_to_peer(
+                pid,
+                encode_frame(
+                    {
+                        "msg_type": "update_request",
+                        "version": __version__,
+                        "os": mine_os,
+                        "arch": mine_arch,
+                        # A person pressed 获取更新, which is what makes it worth
+                        # the peer's bandwidth to go and download a release it
+                        # does not have -- a broadcast request is a timer, and
+                        # the peer is the one that decides what a timer is worth.
+                        "on_demand": True,
+                    },
+                    source_device=self.config.device_id,
+                ),
+            )
+        except Exception as exc:
+            logger.warning("Failed to ask %s for its update", str(pid)[:12], exc_info=True)
+            raise ApplicationError("update.fetch_failed") from exc
+        if not delivered:
+            logger.warning("Peer %s was not reachable for the update request", str(pid)[:12])
+            raise ApplicationError("update.fetch_failed")
+        # The ledger entry is what licenses the blob that comes back: an incoming
+        # ``kind="update"`` transfer skips the consent prompt, and this is the
+        # record that it was asked for.  Written once the request is away, never
+        # before -- an entry armed for a request that never left is a licence for
+        # a blob nobody asked for, standing for the whole window.
+        self._expect_update(pid)
+        logger.info("Asked peer %s for its update", str(pid)[:12])
         return {"sent": True}
+
+    def _watch_update_ready(self) -> None:
+        """Tap the update service's own state, for the offers it has to finish.
+
+        The journal is the one thing both sides already hold, so the runtime
+        learns a download finished the way the window does -- without either
+        object being handed a reference to the other.
+        """
+        try:
+            self._unsubscribe_update_state = self.events.subscribe(self._on_update_state)
+        except Exception:
+            logger.debug("Could not subscribe to update state", exc_info=True)
+
+    def _unwatch_update_ready(self) -> None:
+        """Drop the journal tap, so a stopped runtime is not still referenced.
+
+        The listener is already inert once stopped -- every path through it ends
+        at the runtime's own entry guard -- so this is tidiness rather than a fix:
+        the journal outlives every runtime built against it.
+        """
+        unsubscribe = getattr(self, "_unsubscribe_update_state", None)
+        if unsubscribe is None:
+            return
+        self._unsubscribe_update_state = None
+        try:
+            unsubscribe()
+        except Exception:
+            logger.debug("Could not unsubscribe from update state", exc_info=True)
+
+    def _on_update_state(self, name: str, data: dict) -> None:
+        """Notice an asset arriving, and serve the clicks that were waiting on it.
+
+        A listener runs on whichever thread published, and the publisher here is
+        the download worker -- so the work goes to a thread of its own, the same
+        way the arrival of a peer's blob does, and for the same reason: the
+        publisher must not be held up by what this side does next.
+
+        Both terminals are acted on, because both end a wait this side started:
+        ``ready`` is the asset to hand over, and ``failed`` is the peer's answer
+        that there will not be one.  Leaving a peer waiting through the second
+        is the spinner this whole exchange exists to avoid.
+        """
+        if name != "update.state":
+            return
+        state = data.get("state") if isinstance(data, dict) else None
+        if not isinstance(state, dict):
+            return
+        phase = state.get("phase")
+        if phase == "ready":
+            threading.Thread(
+                target=lambda: self._background(self._serve_pending_update_sends),
+                name="update-offer-pending",
+                daemon=True,
+            ).start()
+        elif phase == "failed":
+            threading.Thread(
+                target=lambda: self._background(self._answer_pending_update_serves),
+                name="update-fetch-failed",
+                daemon=True,
+            ).start()
+
+    def _serve_pending_update_sends(self) -> None:
+        """Hand the landed release to every device still owed it.
+
+        Two sets, one moment: the devices this machine's own 发送更新 click
+        promised an offer, and the devices that asked for the file themselves
+        while there was nothing to send.  Both waited on the same download, and
+        both are answered here.
+        """
+        with self._lock:
+            asked = list(self._pending_update_serves)
+            self._pending_update_serves.clear()
+        for pid in asked:
+            if pid not in self.transport.get_connected_peers():
+                logger.info("Update ready, but %s is no longer connected", str(pid)[:12])
+                continue
+            # The request is what licensed the transfer on the peer's side, and
+            # it is still standing: the peer's own expectation window is longer
+            # than any download.  Serving it directly is the file the click was
+            # for, where a fresh offer would only ask it to ask again.
+            #
+            # Answered rather than re-fetched if the cache is *still* empty: the
+            # download this state reports is the one that was meant to fill it,
+            # and asking for another would be the same wait a second time.
+            if not updater.get_cached_asset():
+                logger.warning("Update reported ready with nothing cached")
+                self._say_no_update_here(pid)
+                continue
+            self._serve_cached_update(pid)
+        with self._lock:
+            waiting = list(self._pending_update_sends)
+        for pid in waiting:
+            # Consumed either way: an offer that cannot be made now is not one to
+            # retry forever, and a later ready state re-arms only a later click.
+            with self._lock:
+                self._pending_update_sends.discard(pid)
+            if pid not in self.transport.get_connected_peers():
+                logger.info(
+                    "Update ready, but %s is no longer connected", str(pid)[:12]
+                )
+                continue
+            try:
+                self._offer_device_update(self._resolve(pid))
+            except ApplicationError:
+                logger.info("Could not finish the pending update offer to %s", str(pid)[:12])
 
     def _on_update_offer(self, pid: str, payload: dict) -> None:
         """A peer says it has a newer build; decide whether we want it.
@@ -1239,9 +1462,8 @@ class LanRuntime:
                 {"device_id": pid, "name": name, "version": version, "has_asset": False},
             )
             return
-        self._expect_update(pid)
         try:
-            self.transport.send_to_peer(
+            delivered = self.transport.send_to_peer(
                 pid,
                 encode_frame(
                     {
@@ -1256,16 +1478,54 @@ class LanRuntime:
         except Exception:
             logger.warning("Failed to ask %s for its update", str(pid)[:12], exc_info=True)
             return
+        if not delivered:
+            logger.warning("Peer %s was not reachable for the update request", str(pid)[:12])
+            return
+        # Armed only now the request is away, for the reason ``_fetch_device_update``
+        # gives: the entry is what lets the peer's blob in without a prompt.
+        self._expect_update(pid)
         self._publish(
             "update.peer_notice",
             {"device_id": pid, "name": name, "version": version, "has_asset": True},
         )
 
-    def _serve_cached_update(self, pid: str) -> None:
-        """Answer a peer's update_request with our cached asset, if any."""
+    def _answer_pending_update_serves(self) -> None:
+        """Tell the peers waiting on a failed download that it is not coming.
+
+        The release the download was meant to fetch is the same one this machine
+        would have installed, so its failure is not something a peer can do
+        anything about -- but it *is* the end of the wait, and a wait with no end
+        is the one answer a click cannot use.
+        """
+        with self._lock:
+            waiting = list(self._pending_update_serves)
+            self._pending_update_serves.clear()
+        for pid in waiting:
+            if pid not in self.transport.get_connected_peers():
+                continue
+            self._say_no_update_here(pid)
+
+    def _serve_cached_update(
+        self, pid: str, peer_version: str = "", on_demand: bool = False
+    ) -> None:
+        """Answer a peer's update_request: the cached asset, or why not.
+
+        The request can be a background broadcast, which nobody is waiting on,
+        or a device-list click, which somebody is.  Both get the same answer --
+        silence is indistinguishable from a transfer that is about to start, and
+        the click would sit on a spinner forever.
+
+        Not having the release cached is not a refusal: the peer asking is the
+        device that is behind, so this is the moment to go and get it.  Only a
+        download that cannot be started at all, or a peer that turns out not to
+        be behind after all, is answered with ``update_unavailable``.
+        """
         cached = updater.get_cached_asset()
         if not cached:
+            if self._request_release_download(pid, peer_version, on_demand):
+                return
             logger.info("Peer asked for an update, but none is cached")
+            self._say_no_update_here(pid)
             return
         try:
             self.file_transfer.send_file(
@@ -1273,6 +1533,107 @@ class LanRuntime:
             )
         except Exception:
             logger.exception("Failed to serve the cached update to a peer")
+            self._say_no_update_here(pid)
+
+    def _request_release_download(
+        self, pid: str, peer_version: str, on_demand: bool
+    ) -> bool:
+        """Start fetching the release so *pid* can be served when it lands.
+
+        Whether to make the peer wait is decided here rather than by the
+        download's outcome, because the peer has to be told *something* now and
+        the two answers are not interchangeable: a wait that ends in a failure
+        is a notice, and a refusal is an immediate one.
+
+        The version the peer reported is what keeps a stray request from pulling
+        a release nobody needs: the asset this machine would send is the one it
+        runs, so a peer at or past that version is asking for something that is
+        not an update.  An empty version is a peer too old to say -- not newer,
+        so it is served like any other.
+        """
+        if peer_version and not updater.is_newer(__version__, peer_version):
+            logger.info(
+                "Peer %s asked for an update but runs %s", str(pid)[:12], peer_version
+            )
+            return False
+        with self._lock:
+            promised = pid in self._pending_update_sends
+        if promised:
+            # This machine's own 发送更新 click already promised this device the
+            # file, and the download behind that promise is the one running now.
+            # The re-offer that follows it is what serves the peer, so nothing is
+            # queued here: the same file would otherwise go out twice, once from
+            # that re-offer's answer and once from this queue.
+            return True
+        if not on_demand:
+            # A broadcast is a background check, not a person: it is
+            # ``request_update_from_peers`` asking every connected peer on a
+            # timer, and whether this machine spends the backend's bandwidth on
+            # its own is what ``auto_update_check`` governs.  A click is a
+            # different thing from a loop that ran, and only the click fetches.
+            return False
+        start = self._start_update_download
+        if start is None:
+            return False
+        with self._lock:
+            # Registered before the start call, not after: a download that was
+            # already running can reach "ready" while this line is still in
+            # flight, and a peer added afterwards would wait for the next one.
+            self._pending_update_serves.add(pid)
+        try:
+            started = start()
+        except Exception:
+            logger.warning("Could not start the release download", exc_info=True)
+            with self._lock:
+                self._pending_update_serves.discard(pid)
+            return False
+        # A run already in progress is as good as one started here: it publishes
+        # the same ready or failed state, and that is what serves this peer.
+        waiting = isinstance(started, dict) and (
+            bool(started.get("started"))
+            or started.get("error") == "update already in progress"
+        )
+        if not waiting:
+            with self._lock:
+                self._pending_update_serves.discard(pid)
+        return waiting
+
+    def _say_no_update_here(self, pid: str) -> None:
+        """Tell a peer that asked for an update that this machine has none."""
+        try:
+            self.transport.send_to_peer(
+                pid,
+                encode_frame(
+                    {
+                        "msg_type": "update_unavailable",
+                        "version": __version__,
+                        "os": _local_platform()[0],
+                        "arch": _local_platform()[1],
+                    },
+                    source_device=self.config.device_id,
+                ),
+            )
+        except Exception:
+            logger.debug("Could not answer %s about the update", str(pid)[:12], exc_info=True)
+
+    def _on_update_unavailable(self, pid: str, payload: dict) -> None:
+        """A peer we asked has no installer to send.
+
+        The refusal is the peer's word, and it is acted on as nothing more than
+        news: no transfer is expected any more, so the ledger entry goes, and the
+        window is told the click is over rather than left waiting on a file that
+        is not coming.
+        """
+        with self._lock:
+            self._update_expectations.pop(pid, None)
+        self._publish(
+            "update.peer_unavailable",
+            {
+                "device_id": pid,
+                "name": self._peer_name(pid) or "",
+                "version": str(payload.get("version") or ""),
+            },
+        )
 
     def _update_offerable(self, seen: dict) -> bool:
         """Whether *seen* (one discovery sighting) is a device this build updates.
@@ -1289,6 +1650,27 @@ class LanRuntime:
         if (str(seen.get("os") or ""), str(seen.get("arch") or "")) != _local_platform():
             return False
         return updater.is_newer(__version__, version)
+
+    def _update_fetchable(self, seen: dict) -> bool:
+        """Whether *seen* is a device this build can be updated *from*.
+
+        The mirror of :meth:`_update_offerable`, and the direction the update
+        path is meant to run in: the device that is behind is the one with a
+        reason to act, so its own list is where the button belongs.  Same two
+        claims, read the other way -- same platform, and the peer's version
+        strictly newer than this one.
+
+        Nothing is trusted on the sighting: the blob it sends is checked against
+        the published release digest before it can be installed, exactly as a
+        GitHub download is.  This only decides whether offering the button is
+        truthful at the moment the list is drawn.
+        """
+        version = str(seen.get("version") or "")
+        if not version:
+            return False
+        if (str(seen.get("os") or ""), str(seen.get("arch") or "")) != _local_platform():
+            return False
+        return updater.is_newer(version, __version__)
 
     def _same_platform_peer(self, payload: dict) -> bool:
         """Whether a request's sender says it is on this build's own platform.
@@ -1331,7 +1713,15 @@ class LanRuntime:
             logger.exception("Could not stage a peer-sent update blob")
 
     def chat_devices(self):
-        return {"devices": self.devices()["items"]}
+        """The devices this machine could open a conversation with.
+
+        The same list the devices page draws, minus the removals: an archived
+        row is a device the user took away, and it was still being offered as a
+        chat target — greyed out only because a removed row's connection state is
+        offline, which reads as "away" rather than as "gone".  The archive is
+        managed on the devices page, not from the chat rail.
+        """
+        return {"devices": [row for row in self.devices()["items"] if not row.get("archived")]}
 
     def chat_sessions(self):
         # `open_to_all` rides along so a front end can tell an offer that is
@@ -1420,10 +1810,12 @@ class LanRuntime:
             # Every file byte has to ride the relay for a peer with no live LAN
             # connection, so chat chunks the file relay-safe and refuses
             # anything past the relay cap — a 256 KiB chunk would exceed
-            # MAX_RELAY_PAYLOAD and stall the transfer.  A LAN-connected peer
-            # keeps the LAN wire format so peers that predate the relay keep
-            # interoperating unchanged.
-            send.chunk_size = ChatManager.RELAY_CHUNK_SIZE
+            # MAX_RELAY_PAYLOAD and stall the transfer.  The configured relay
+            # limit picks the chunk: a broker that carries less than this app
+            # assumes needs smaller chunks, not dropped ones.  A LAN-connected
+            # peer keeps the LAN wire format so peers that predate the relay
+            # keep interoperating unchanged.
+            send.chunk_size = ChatManager.relay_chunk_for(self.config.relay_max_message_bytes)
             send.internet_cap = ChatManager.RELAY_FILE_CAP
         return send
 
@@ -1790,6 +2182,9 @@ class LanRuntime:
                     self.discovery._port = self.transport._server_sock.getsockname()[1]
             if self.config.internet_sync_enabled:
                 self._open_relay()
+            # An offer clicked with nothing cached is finished by the download
+            # that follows it, which reports itself on the journal.
+            self._watch_update_ready()
             if isinstance(self.discovery, Discovery) and not self.discovery.is_browsing:
                 raise RuntimeError("Discovery did not start")
             with self._lock:
@@ -1821,6 +2216,7 @@ class LanRuntime:
             if self._state == "created":
                 self._start_done.set()
             self._state = "stopping"
+            self._unwatch_update_ready()
             self._stop_event.set()
             self._dirty.set()
             inside = threading.current_thread() in self._active
@@ -1856,6 +2252,10 @@ class LanRuntime:
             username=getattr(self.config, "relay_username", ""),
             password=getattr(self.config, "relay_password", ""),
             private_brokers=list(getattr(self.config, "relay_private_brokers", []) or []),
+            max_payload=int(
+                getattr(self.config, "relay_max_message_bytes", MAX_RELAY_PAYLOAD)
+                or MAX_RELAY_PAYLOAD
+            ),
         )
         self.relay = relay
         self.internet_pairing.attach_relay(relay)
@@ -2031,6 +2431,52 @@ class LanRuntime:
         self.delivery.clear_peer(peer_id)
         self._publish("netpair.peer.changed", {"peer_id": peer_id, "status": "unpaired"})
 
+    def _drop_internet_pairing(self, peer_id):
+        """Break this device's code pairing, when trust with it is broken.
+
+        A device can hold two pairings at once — a pinned LAN certificate and a
+        code pairing over the relay — and both are trust in the same machine, so
+        an action that ends trust has to end it on both.  Leaving the code
+        pairing standing after 移除设备 left a device the user had removed still
+        able to publish clipboard, chat and files into this machine (a relay
+        frame's gate is reachability, and reachability was the secret that was
+        never dropped), still listed as paired on the internet pairing card, and
+        still reachable by a chat invite this side sent.  The removal notice
+        promises the peer has to pair again; this is what makes that true.
+        """
+        if peer_id not in (getattr(self.config, "netpair_secrets", {}) or {}):
+            return
+        try:
+            self.internet_pairing.unpair(peer_id)
+        except Exception:
+            # Nothing here is worth failing the removal for: the reachability
+            # gate refuses a removed device on its own, and this is the state
+            # cleanup that keeps the pairing card honest.
+            logger.debug(
+                "Could not drop the internet pairing for %s", str(peer_id)[:12], exc_info=True
+            )
+
+    def _drop_stranded_internet_pairings(self):
+        """Finish a removal that a build older than this one left half done.
+
+        Removal ends both of a device's routes, and the code pairing is dropped
+        with the rest of it (``_drop_internet_pairing``).  A config written
+        before that was so keeps the secret: the device is archived, the list
+        says 已移除, and the relay pairing is still on disk — one restore away
+        from coming back to life, which is the opposite of what the removal
+        notice promised the user.  Repairing it here rather than filtering it at
+        every read means the secret is gone rather than merely unspoken, and it
+        runs in the same slot as the other repair over the archive
+        (``_rekey_archived``) — before anything reads the state it fixes.
+        """
+        with config_lock:
+            stranded = sorted(
+                set(self.config.removed_peers or {}) & set(self.config.netpair_secrets or {})
+            )
+        for pid in stranded:
+            logger.info("Dropping the internet pairing of removed device %s", str(pid)[:12])
+            self._drop_internet_pairing(pid)
+
     def _delivery_changed(self, peer_id, msg_id, status, content_hash, kind, session_id):
         """Publish one send-ledger transition (legacy ``internet_delivery``)."""
         self._publish("relay.delivery.changed", {
@@ -2109,6 +2555,20 @@ class LanRuntime:
         for peer in self.pairing.get_known_peers():
             if device_id in (peer.device_id, peer_id_hash(peer.device_id)):
                 return peer.device_id
+        # A third way this machine knows a device: by internet pairing code.  A
+        # device paired that way is not in the local repository, so its hashed
+        # sighting used to stay unresolved — and an unresolved sighting is a row
+        # keyed by the hash, while the pairing it holds is keyed by the real id.
+        # The same device was then drawn twice, as a device with no internet
+        # pairing and as an internet peer this machine has never seen here, with
+        # neither row carrying what the other knew.  Resolving it here is what
+        # makes one row answer for both routes.  Nothing is relaxed by it: a
+        # frame that is not from the relay still has to come from a peer in the
+        # repository (see ``_on_peer_message``), and the relay has its own gate
+        # (``_peer_is_internet_reachable``).
+        for pid in (getattr(self.config, "netpair_secrets", {}) or {}):
+            if pid != device_id and peer_id_hash(pid) == device_id:
+                return pid
         return device_id
 
     def _chosen_name(self, pid, fallback=""):
@@ -2488,6 +2948,7 @@ class LanRuntime:
     def _refresh(self, publish=True):
         with self._pairing_ops:
             self._rekey_archived()
+            self._drop_stranded_internet_pairings()
             pending = {p[0]: p for p in self.pairing.get_pending_pairings()}
             self.pairing.drain_expiry_rollbacks()
             if publish:
@@ -2527,6 +2988,16 @@ class LanRuntime:
                 if info.get("named") or not names.get(pid):
                     names[pid] = info["name"]
             discovered_ids = set(advertised)
+            # This machine's internet pairings, by device id.  Every row reads
+            # them, not only the ones the pairing below draws: a device can hold
+            # both routes at once — a pairing code is how two machines that have
+            # never met are introduced, and the same two can then meet on a
+            # network — and there is one row per device, so whichever producer
+            # draws it has to carry the other join's facts.  Read once per pass
+            # rather than per row; it is two config tables.
+            internet = {
+                net["peer_id"]: net for net in self.internet_pairing.paired_peers()
+            }
             rows = []
             # Which ids the loop below actually drew a row for, as opposed to
             # which ones it looked at.  The internet pairs are added after it
@@ -2577,6 +3048,7 @@ class LanRuntime:
                 fingerprint = self.pairing.get_peer_fingerprint(pid)
                 mine = self.pairing.get_identity().fingerprint
                 seen = advertised.get(pid) or {}
+                net = internet.get(pid)
                 listed.add(pid)
                 rows.append(
                     {
@@ -2597,10 +3069,34 @@ class LanRuntime:
                         # second implementation of either is a second answer to
                         # the same question.
                         "update_available": self._update_offerable(seen),
+                        # The same question the other way round: whether *that*
+                        # device could update this one.  Both can be false, and
+                        # both true is impossible -- they are opposite readings
+                        # of one version comparison.
+                        "update_fetchable": self._update_fetchable(seen),
                         # Whether the offer would carry the installer or only
                         # the news.  A peer told "no" has its own release check
                         # to fall back on.
                         "update_cached": bool(updater.get_cached_asset()),
+                        # This device's internet pairing, on this row because
+                        # the row is the device's and this is one of its two
+                        # routes.  A front end that could only see the join its
+                        # own producer knew about read the other one as absent:
+                        # a device paired by code, met on this network, kept the
+                        # LAN card -- whose chat, test and send-URL actions are
+                        # each gated on the LAN pairing it does not have -- and
+                        # lost every one of them, while the 互联网 chip beside
+                        # them said the peer was online.  `relay` stays False:
+                        # that flag marks the row that exists *only* for the
+                        # relay join, which decides what a row may offer.
+                        "relay": False,
+                        "relay_paired": net is not None,
+                        "relay_online": bool(net.get("online")) if net else False,
+                        # The user's own name for it, and when the relay last
+                        # heard from it — the two facts an internet-paired peer
+                        # contributes to a row it does not own.
+                        "alias": (net.get("alias") or "") if net else "",
+                        "last_seen": float(net.get("last_seen") or 0.0) if net else 0.0,
                         "connection_state": (
                             "online"
                             if pid in connected
@@ -2633,12 +3129,13 @@ class LanRuntime:
             # from the relay pairing itself instead, carrying the route they
             # have (`relay`) so a front end can offer what the relay can carry
             # and withhold what it cannot.
-            for net in self.internet_pairing.paired_peers():
+            for net in internet.values():
                 pid = net["peer_id"]
                 if pid in listed or pid in archived_ids or pid in names:
                     # A device this machine also knows on the LAN is already a
                     # row, and its 互联网 chip is this same join read from the
-                    # other side.
+                    # other side — the `relay_paired`/`relay_online`/`last_seen`
+                    # fields every row above carries for exactly this reason.
                     continue
                 last_seen = net.get("last_seen")
                 rows.append(
@@ -2660,6 +3157,7 @@ class LanRuntime:
                         "platform": "",
                         "arch": "",
                         "update_available": False,
+                        "update_fetchable": False,
                         "update_cached": False,
                         # For a device whose only route is the relay, the relay's
                         # own view of it *is* its connection state — there is no
@@ -2677,6 +3175,11 @@ class LanRuntime:
                         # handshake never established it, so every LAN-only
                         # action is one the card must not offer.
                         "relay": True,
+                        # The same two facts the rows above carry, so a consumer
+                        # can ask "is this device internet-paired" of any row
+                        # rather than of the rows the pairing drew.
+                        "relay_paired": True,
+                        "relay_online": bool(net.get("online")),
                         # The name the user chose, on its own, because it is what
                         # the rename writes and a field that could only be read
                         # back off `name` would make "no alias" and "alias equal
@@ -3005,6 +3508,10 @@ class LanRuntime:
             self._pending_certs.pop(pid, None)
             self._cert_alert_seen.pop(pid, None)
         self.transport.forget_peer(pid)
+        # Removed is removed on every route: the code pairing carries no LAN pin,
+        # so nothing else in this method would end it, and the peer would go on
+        # reaching this machine over the relay while the list called it removed.
+        self._drop_internet_pairing(pid)
         try:
             # An unpaired peer must stop burning relay retries, and its base64
             # payloads must not linger on disk in relay_pending.json.
@@ -3482,6 +3989,16 @@ class LanRuntime:
 
     def _peer_is_internet_reachable(self, pid):
         """True when *pid* can be reached over the public relay."""
+        # A device this machine has removed is reachable nowhere.  The LAN side
+        # says so three times over (a blacklisted peer, a dropped pin, a row that
+        # is no longer drawn from the repository); this is the relay's own copy
+        # of the rule, and the one that matters for a device whose relay secret
+        # was still on disk -- a config written before removal dropped it, or an
+        # unpair that failed to save.  Reachability is the whole gate a relay
+        # frame passes, so without this a removed device could still hand this
+        # machine clipboard content, chat and files.
+        if pid in (getattr(self.config, "removed_peers", {}) or {}):
+            return False
         if pid in (getattr(self.config, "netpair_secrets", {}) or {}):
             return True
         if pid in (getattr(self.config, "peer_relay_secrets", {}) or {}):
@@ -3499,6 +4016,12 @@ class LanRuntime:
         two).
         """
         if self.relay is None or not self.config.internet_sync_enabled or not peer_id:
+            return False
+        # The same rule the inbound gate applies (``_peer_is_internet_reachable``):
+        # a device this machine has removed is reachable nowhere.  Chat and the
+        # delivery receipts both leave through here, and a removal has to stop
+        # the traffic in both directions and not only in the one that arrives.
+        if peer_id in (getattr(self.config, "removed_peers", {}) or {}):
             return False
         from internal.transport.relay import (
             derive_key,
@@ -3647,6 +4170,12 @@ class LanRuntime:
                 # level, so nothing it sends is accepted until this machine
                 # dials it again.
                 self.transport.forget_peer(pid)
+                # ...and a deliberate break is a break on both routes.  The
+                # dialog behind this button says the device will no longer sync
+                # and needs pairing again on both sides; a device that kept its
+                # code pairing would go on syncing over the relay, which is the
+                # one thing that sentence rules out.
+                self._drop_internet_pairing(pid)
                 try:
                     # Unpaired stops the peer's relay retries too: nothing may
                     # keep trying to deliver to a device the user broke with.
@@ -3831,8 +4360,16 @@ class LanRuntime:
         # machine, never one per peer.
         secret = ""
         netpair_secrets = getattr(self.config, "netpair_secrets", {}) or {}
+        # A device this machine has removed is sent nothing, on either derived
+        # channel, whatever its secret still says on disk.  The LAN-derived half
+        # is already covered -- a removed peer is no longer in ``peers``, and the
+        # loop below requires it there -- but the pairing-code half reads the
+        # secret table directly, and removal is the one act that has to stop
+        # this machine's clipboard from being mirrored to a device the user
+        # took away.
+        removed = set(getattr(self.config, "removed_peers", {}) or {})
         for peer_id, peer_secret in (self.config.peer_relay_secrets or {}).items():
-            if not peer_secret or peer_id in netpair_secrets:
+            if not peer_secret or peer_id in netpair_secrets or peer_id in removed:
                 continue
             peer = self.config.peers.get(peer_id)
             if peer is None or not getattr(peer, "paired", False):
@@ -3843,7 +4380,7 @@ class LanRuntime:
                                      derive_key(secret, peer_secret))
             self._record_relay_send(peer_id, ok, delivery, data)
         for peer_id, peer_secret in netpair_secrets.items():
-            if not peer_secret or peer_id == self.config.device_id:
+            if not peer_secret or peer_id == self.config.device_id or peer_id in removed:
                 continue  # a stray self-entry must never mirror to ourselves
             ok = self._relay_publish(
                 relay, data, netpair_topic(peer_secret),
@@ -3983,7 +4520,11 @@ class LanRuntime:
             # receiving side still checks them against the published digest.
             payload = getattr(msg, "_raw_payload", {}) or {}
             if trusted or self._same_platform_peer(payload):
-                self._serve_cached_update(pid)
+                self._serve_cached_update(
+                    pid,
+                    str(payload.get("version") or ""),
+                    bool(payload.get("on_demand")),
+                )
             return
         if kind == "update_offer":
             # LAN only: the offer names the peer's version and offers a transfer,
@@ -3991,6 +4532,14 @@ class LanRuntime:
             # particular.  Both are things the pinned LAN link establishes.
             if not via_relay:
                 self._on_update_offer(pid, getattr(msg, "_raw_payload", {}) or {})
+            return
+        if kind == "update_unavailable":
+            # The answer to an ``update_request``, so it is held to the same two
+            # callers that request may come from -- and to no more, since its
+            # only effect is to stop this side waiting.
+            payload = getattr(msg, "_raw_payload", {}) or {}
+            if trusted or self._same_platform_peer(payload):
+                self._on_update_unavailable(pid, payload)
             return
         if kind in CLIP_FILE_MSG_TYPES:
             # Asked and answered on the LAN only.  The files travel over the
@@ -4042,6 +4591,12 @@ class LanRuntime:
                 # (``_peer_found`` dials paired peers only), so leaving the link
                 # unblacklisted costs no repeated prompting.
                 self.transport.forget_peer(pid)
+                # The peer declared the break, and it ends the same trust this
+                # side ends with its own 撤销信任 — the code pairing included,
+                # which the peer's side of this frame has just dropped too.
+                # Leaving ours standing would keep publishing into a topic
+                # nothing listens on, and keep listing it as paired here.
+                self._drop_internet_pairing(pid)
             # A peer's own confirm/reject settles the prompt card on this side
             # too, without waiting for the next poll (legacy pairing_resolved).
             self._publish(

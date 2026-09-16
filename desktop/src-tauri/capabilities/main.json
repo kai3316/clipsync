@@ -33,6 +33,7 @@
     "allow-device-certs",
     "allow-device-retrust",
     "allow-offer-device-update",
+    "allow-fetch-device-update",
     "allow-send-url",
     "allow-push-text",
     "allow-discovery-status",

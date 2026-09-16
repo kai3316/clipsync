@@ -64,9 +64,10 @@ export const EN: Record<string, string> = {
   "设备已断开": "Device disconnected",
   "剪贴板同步": "Clipboard sync",
   "在浏览器打开": "Open in browser",
-  // A Connect click that came to nothing, in legacy's own words.
-  "{name} 拒绝了连接 — 该设备可能已将你移除":
-    "{name} refused the connection — that device may have removed you",
+  // A refused connection: the other device only sends the refusal for a peer
+  // its user removed, so this names the state and the repair.
+  "{name} 已将本机移除 — 需要重新在对方配对":
+    "{name} has removed this device — pair again from that device",
   "找不到 {name} — 请确认该设备已开启 ClipSync 且在同一网络":
     "Can't find {name} — make sure it is running ClipSync and on the same network",
   // The certificate-change prompt. Wording follows the legacy dialog's.
@@ -259,9 +260,6 @@ export const EN: Record<string, string> = {
   "已发送网址到 {name}": "Sent the URL to {name}",
   "项目主页": "Project home",
   "显示行数": "Lines shown",
-  "文件传输通知": "File transfer notifications",
-  "配对请求通知": "Pairing request notifications",
-  "设备连接通知": "Device connect/disconnect notifications",
   "待投递消息：": "Pending deliveries: ",
   // Relay send states.  These name the same four transitions the ledger
   // records, so the words have to travel with the status, not with a panel.
@@ -613,11 +611,8 @@ export const EN: Record<string, string> = {
   "收藏未复制": "The favorite was not copied",
 
   // ── Settings: appearance and behaviour ───────────────────────────────
-  // The settings page's own chrome: the first card's heading, the
-  // notifications card's heading, and the rail's label.
+  // The settings page's own chrome: the first card's heading.
   "常规": "General",
-  "通知": "Notifications",
-  // The settings rail's five group headings.
   "通用": "General",
   "连接": "Connectivity",
   "数据": "Data",
@@ -640,7 +635,6 @@ export const EN: Record<string, string> = {
   "简体中文": "简体中文",
   "英语": "英语",
   "启用动画": "Enable animations",
-  "启用通知": "Enable notifications",
   "启用声音": "Enable sounds",
   "同步": "Sync",
   "恢复同步": "Resume sync",
@@ -716,6 +710,10 @@ export const EN: Record<string, string> = {
   "查看日志": "View log",
   "日志行数": "Log lines",
   "日志内容": "Log contents",
+  "按级别筛选日志": "Filter the log by level",
+  "问题": "Problems",
+  // "全部" is already translated above — the log filter reuses that entry.
+  "没有需要排查的日志": "Nothing to troubleshoot",
   "暂无日志": "No log entries",
   "正在读取日志…": "Loading log…",
   "导出日志…": "Export log…",
@@ -824,13 +822,25 @@ export const EN: Record<string, string> = {
     "With this off, devices no longer pair or sync over the relay and the clipboard stays on the local network. This is the same switch as the one with this name on the settings page.",
   "发送更新": "Send update",
   "把本机的安装包发送给该设备": "Send this device's installer to it",
-  "通知该设备有新版本": "Tell the device a newer version is out",
+  "对方版本较旧：先下载本机安装包，再发送给它":
+    "The other device is on an older version: download this machine's installer, then send it over",
+  "获取更新": "Get the update",
+  "从该设备获取新版本安装包并安装": "Fetch the newer installer from that device and install it",
   "该设备版本较旧，可以发送更新": "This device is on an older version and can be updated",
   "对方软件版本": "The version the other device is running",
   "已把更新发送给 {name}": "Sending the update to {name}",
-  "已通知 {name} 有新版本，它可以从发布页下载":
-    "Told {name} a newer version is out; it can download it from the releases page",
+  "正在下载本机安装包，下好后会自动发送给 {name}":
+    "Downloading this machine's installer; it will be sent to {name} as soon as it lands",
+  "已向 {name} 索取安装包，收到后可在更新页安装":
+    "Asked {name} for its installer; install it from the update page once it arrives",
   "发送更新失败": "Could not send the update",
+  "获取更新失败": "Could not fetch the update",
+  "{name} 上没有可发送的安装包，请在那台设备上检查更新":
+    "{name} has no installer to send; run an update check on that device",
+  "{name} 有新版本 {version}，可在设备列表向它获取":
+    "{name} has version {version}; get it from that device in the device list",
+  "{name} 正在把新版本 {version} 发送过来":
+    "{name} is sending version {version} over",
   "解除互联网配对": "Remove internet pairing",
   "解除互联网配对？": "Remove this internet pairing?",
   "{name} 将不再通过中继与这台设备同步，恢复需要重新配对一次。":
@@ -840,6 +850,12 @@ export const EN: Record<string, string> = {
   "中继": "Relay",
   "中继用户名": "Relay username",
   "中继密码": "Relay password",
+  // The broker's own per-message ceiling.  Kilobytes, because that is the unit
+  // a broker's limits are published in; the row says so, and says that the
+  // relay reads it at startup.
+  "单条消息大小上限": "Max message size",
+  "单位 KB。填中继服务器允许的单条消息上限，传输文件时每个数据块都会按它切分——超出会被服务器直接丢弃。免费中继常见 64 KB，公共中继为 256 KB。修改后需重启生效。":
+    "In KB. Enter the largest single message your relay server accepts; file transfers cut every chunk to fit under it, since the server silently drops anything larger. A free tier commonly allows 64 KB, the public relays 256 KB. Takes effect after a restart.",
   "中继离线": "Relay offline",
   "公共中继地址": "Public relay addresses",
   "私有中继地址": "Private relay addresses",

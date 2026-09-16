@@ -2013,6 +2013,159 @@ def test_update_request_serves_the_cached_asset_to_a_paired_peer(rig, monkeypatc
     assert sent[0]._raw_payload["file_name"] == "clipsync-windows.zip"
 
 
+def test_a_request_with_nothing_cached_fetches_the_release_for_that_peer(
+    rig, monkeypatch, tmp_path
+):
+    """The device that is behind is the one that clicks, so its click fetches.
+
+    Answering "nothing here" would make the fix depend on the *other* machine's
+    owner having pressed something first, which is exactly the wait this feature
+    exists to remove.
+    """
+    runtime, pairing, transport, *_ = rig
+    pairing.add_peer("remote", "Remote", pairing.get_peer_certificate("remote"), paired=True)
+    transport.connected.add("remote")
+    monkeypatch.setattr(updater, "get_cached_asset", lambda: None)
+    monkeypatch.setattr(lan, "__version__", "1.0.9")
+    started = []
+    runtime.set_update_downloader(lambda: started.append(True) or {"started": True})
+
+    # `on_demand` is what a device-list click sends; a broadcast request -- the
+    # timer-driven kind -- is answered without a download.
+    transport.message(frame("update_request", version="1.0.7", on_demand=True), "remote")
+
+    assert started == [True]
+    # Nothing is sent yet -- the file does not exist -- and nothing is refused
+    # either: the peer's own row is waiting on a transfer that is coming.
+    assert transport.sent == []
+    assert runtime._update_expectations == {}
+    assert runtime._pending_update_serves == {"remote"}
+
+    # The release lands, and the peer that asked gets the file its click was for
+    # without asking again.
+    asset = tmp_path / "clipsync-windows.zip"
+    asset.write_bytes(b"release-bytes")
+    monkeypatch.setattr(updater, "get_cached_asset", lambda: str(asset))
+    runtime.events.publish("update.state", {"state": {"phase": "ready"}})
+
+    deadline = time.monotonic() + 3
+    while not transport.sent and time.monotonic() < deadline:
+        time.sleep(0.01)
+    sent = [msg for _, msg in transport.sent]
+    assert [msg.msg_type for msg in sent] == ["file_request"]
+    assert sent[0]._raw_payload["kind"] == "update"
+    assert sent[0]._raw_payload["file_name"] == "clipsync-windows.zip"
+    assert runtime._pending_update_serves == set()
+
+
+def test_a_timer_driven_request_does_not_spend_the_bandwidth(rig, monkeypatch):
+    """A broadcast is a loop that ran; only a click may pull a release.
+
+    ``request_update_from_peers`` asks every connected peer on the update
+    service's own schedule, and ``auto_update_check`` is the switch that governs
+    whether this machine makes update requests of its own.  Fetching on the
+    strength of one would be that switch quietly overruled by a peer's timer.
+    """
+    runtime, pairing, transport, *_ = rig
+    pairing.add_peer("remote", "Remote", pairing.get_peer_certificate("remote"), paired=True)
+    transport.connected.add("remote")
+    monkeypatch.setattr(updater, "get_cached_asset", lambda: None)
+    monkeypatch.setattr(lan, "__version__", "1.0.9")
+    runtime.set_update_downloader(lambda: pytest.fail("a timer is not a click"))
+
+    transport.message(frame("update_request", version="1.0.7"), "remote")
+
+    sent = [msg for _, msg in transport.sent]
+    assert [msg.msg_type for msg in sent] == ["update_unavailable"]
+    assert runtime._pending_update_serves == set()
+
+
+def test_a_peer_that_is_not_behind_is_told_there_is_nothing_here(rig, monkeypatch):
+    """A request is not a licence to pull a release nobody needs.
+
+    Its version is the peer's own claim, but the claim is only used to *decline*:
+    a device at or past this build is asking for something that is not an update,
+    and starting a download on that word would be work no click asked for.
+    """
+    runtime, pairing, transport, *_ = rig
+    pairing.add_peer("remote", "Remote", pairing.get_peer_certificate("remote"), paired=True)
+    transport.connected.add("remote")
+    monkeypatch.setattr(updater, "get_cached_asset", lambda: None)
+    monkeypatch.setattr(lan, "__version__", "1.0.8")
+    runtime.set_update_downloader(lambda: pytest.fail("no download for a current peer"))
+
+    transport.message(frame("update_request", version="1.0.8"), "remote")
+
+    sent = [msg for _, msg in transport.sent]
+    assert [msg.msg_type for msg in sent] == ["update_unavailable"]
+    assert runtime._pending_update_serves == set()
+
+
+def test_a_failed_release_download_is_answered_instead_of_left_waiting(rig, monkeypatch):
+    """The one terminal a waiting peer cannot be left in: a download that dies.
+
+    The failure is this machine's, and the peer can do nothing about it -- but
+    the wait has to end, and ``update_unavailable`` is how the peer's row stops
+    spinning.
+    """
+    runtime, pairing, transport, *_ = rig
+    pairing.add_peer("remote", "Remote", pairing.get_peer_certificate("remote"), paired=True)
+    transport.connected.add("remote")
+    monkeypatch.setattr(updater, "get_cached_asset", lambda: None)
+    monkeypatch.setattr(lan, "__version__", "1.0.9")
+    runtime.set_update_downloader(lambda: {"started": True})
+
+    transport.message(frame("update_request", version="1.0.7", on_demand=True), "remote")
+    transport.sent.clear()
+    # What the update service publishes when its download gives up.  The notice
+    # goes out on a thread of its own -- the publisher is the download worker and
+    # must not be held up by it -- so the answer arrives just after this line.
+    runtime.events.publish("update.state", {"state": {"phase": "failed", "error": "offline"}})
+
+    deadline = time.monotonic() + 3
+    while not transport.sent and time.monotonic() < deadline:
+        time.sleep(0.01)
+    sent = [msg for _, msg in transport.sent]
+    assert [msg.msg_type for msg in sent] == ["update_unavailable"]
+    assert runtime._pending_update_serves == set()
+
+
+def test_the_offer_is_finished_once_the_release_it_promised_lands(rig, monkeypatch):
+    """The other end of the same wait: 发送更新 pressed before anything is cached.
+
+    The click promises a file, so it cannot be left as the notice it used to be.
+    The device is remembered, and the release download -- which the shell starts,
+    because the progress card is the update page's -- is what completes it.
+    """
+    runtime, pairing, transport, *_ = rig
+    pairing.add_peer("remote", "Remote", pairing.get_peer_certificate("remote"), paired=True)
+    transport.connected.add("remote")
+    transport.addresses["remote"] = ("Remote", "10.0.0.2", 1)
+    monkeypatch.setattr(lan, "_local_platform", lambda: ("windows", "amd64"))
+    cached = []
+    monkeypatch.setattr(updater, "get_cached_asset", lambda: cached[0] if cached else None)
+
+    result = runtime.offer_device_update("remote")
+
+    assert result == {"sent": True, "needs_download": True}
+    offers = [msg for _, msg in transport.sent if msg.msg_type == "update_offer"]
+    assert offers[-1]._raw_payload["has_asset"] is False
+    assert runtime._pending_update_sends == {"remote"}
+
+    # The download lands, which is what the update service publishes.
+    cached.append("/tmp/clipsync-windows.zip")
+    runtime.events.publish("update.state", {"state": {"phase": "ready"}})
+
+    deadline = time.monotonic() + 3
+    while len(transport.sent) < 2 and time.monotonic() < deadline:
+        time.sleep(0.01)
+    offers = [msg for _, msg in transport.sent if msg.msg_type == "update_offer"]
+    assert len(offers) == 2
+    assert offers[-1]._raw_payload["has_asset"] is True
+    assert offers[-1]._raw_payload["asset"] == "clipsync-windows.zip"
+    assert runtime._pending_update_sends == set()
+
+
 def test_an_unpaired_peer_cannot_request_a_cached_update(rig, monkeypatch, tmp_path):
     """A request from a device that says nothing about itself is not answered.
 

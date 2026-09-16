@@ -85,9 +85,20 @@ export const bridge = {
   /** Tell a device on an older build that this one has a newer one, and offer
    *  it the cached installer.  Needs no pairing: the peer answers with a
    *  request for the asset, and the bytes it gets are checked against the
-   *  published release digest before they can be installed. */
+   *  published release digest before they can be installed.
+   *
+   *  `needs_download` is the truthful half of the click: this machine has no
+   *  cached installer yet, so it has to fetch the release before it can send
+   *  anything.  The offer still went out, and the send completes by itself once
+   *  the download lands — the caller only owes the user a sentence saying so. */
   offerDeviceUpdate: (deviceId: string) =>
-    command<{ sent: boolean }>("offer_device_update", { deviceId }),
+    command<{ sent: boolean; needs_download: boolean }>("offer_device_update", { deviceId }),
+  /** Ask a device on a newer build to send this one its installer, which is
+   *  verified against the published release digest and then staged for install.
+   *  The same exchange as `offerDeviceUpdate`, started from the older device —
+   *  which is the one with a reason to click. */
+  fetchDeviceUpdate: (deviceId: string) =>
+    command<{ sent: boolean }>("fetch_device_update", { deviceId }),
   restoreDevice: (deviceId: string) => command<{ restored: boolean }>("restore_device", { deviceId }),
   purgeDevice: (deviceId: string) => command<{ purged: boolean }>("purge_device", { deviceId }),
   testDevice: (deviceId: string) => command<DeviceProbeResult>("test_device", { deviceId }),
@@ -243,7 +254,8 @@ export const bridge = {
     command<{ added: number; ids: string[] }>(
       "batch_favorite_history", { entryIds: batchIds(entryIds), group }),
   clearHistory: () => command<{ cleared: number }>("clear_history"),
-  readLogs: (lines = 200) => command<{ logs: string[] }>("read_logs", { lines }),
+  readLogs: (lines = 200) =>
+    command<{ logs: string[]; problems: string[] }>("read_logs", { lines }),
   exportLogs: (defaultName: string) =>
     command<{ cancelled?: boolean; path?: string; bytes?: number }>("export_logs", { defaultName }),
   diagnosticsReport: () => command<DiagnosticsReport>("diagnostics_report"),

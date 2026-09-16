@@ -7,6 +7,7 @@ import sys
 from internal.adapters.sidecar.rpc import RpcServer, encode_frame
 from internal.application.bootstrap import SidecarApplication
 from internal.application.errors import ApplicationError
+from internal.data.logs import setup_file_logging
 
 
 def _fatal(error: dict) -> None:
@@ -66,7 +67,10 @@ def main(argv=None) -> int:
         help="Move damaged configuration, identity or history aside, then exit",
     )
     args = parser.parse_args(argv)
-    logging.basicConfig(stream=sys.stderr, level=logging.WARNING)
+    # The log view reads a file, so the process it reads about has to write one:
+    # stderr alone is a pipe the parent drains and forgets, which left every log
+    # view in the new desktop showing an empty list over a file nothing created.
+    setup_file_logging()
     if args.recover:
         return _recover()
     app = None

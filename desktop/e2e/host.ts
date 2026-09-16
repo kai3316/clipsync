@@ -83,7 +83,8 @@ export const fixtures: Record<string, unknown> = {
       "pairing.start", "pairing.confirm", "pairing.reject", "pairing.unpair",
       "devices.note", "devices.connect", "devices.disconnect", "devices.forget",
       "devices.restore", "devices.purge", "devices.test", "devices.certs",
-      "devices.retrust", "devices.offer_update", "companion.configure",
+      "devices.retrust", "devices.offer_update", "devices.fetch_update",
+      "companion.configure",
       "url.send", "clipboard.push", "discovery.status",
       "discovery.set_enabled", "discovery.set_visible",
       "transfers.list", "transfers.send", "transfers.action",
@@ -300,14 +301,20 @@ export const fixtures: Record<string, unknown> = {
       { path: "C:\\Users\\sukai\\AppData\\Roaming\\ClipSync\\backups\\backup-2026-09-01.zip", filename: "backup-2026-09-01.zip", date: "2026-09-01 21:04", size: 1720320 },
     ],
   },
+  // The shape `internal/data/logs.py` writes, because the viewer parses the
+  // level back out of it — and `problems` is the subset of `logs` at WARNING or
+  // above, which is what the dialog opens on.
   read_logs: {
     logs: [
-      "2026-09-14 09:12:03 INFO  clipsync.startup: sidecar ready in 412ms",
-      `2026-09-14 09:12:04 INFO  clipsync.discovery: advertising as ${LOC} on 51888`,
-      "2026-09-14 09:12:05 INFO  clipsync.pairing: MacBook Pro connected over LAN (192.168.1.22)",
-      "2026-09-14 09:13:19 INFO  clipsync.history: captured 218 bytes, type=text, app=Code.exe",
-      "2026-09-14 09:14:02 WARN  clipsync.transfer: retrying chunk 41/128 after 2.1s",
-      "2026-09-14 09:14:11 INFO  clipsync.companion: phone panel served to 192.168.1.33",
+      "2026-09-14 09:12:03.412 [INFO    ] main         clipsync.startup:41  sidecar ready in 412ms",
+      `2026-09-14 09:12:04.087 [INFO    ] discovery    clipsync.discovery:118  advertising as ${LOC} on 51888`,
+      "2026-09-14 09:12:05.551 [INFO    ] pairing      clipsync.pairing:203  MacBook Pro connected over LAN (192.168.1.22)",
+      "2026-09-14 09:13:19.220 [INFO    ] history      clipsync.history:96  captured 218 bytes, type=text, app=Code.exe",
+      "2026-09-14 09:14:02.884 [WARNING ] transfer     clipsync.transfer:412  retrying chunk 41/128 after 2.1s",
+      "2026-09-14 09:14:11.006 [INFO    ] companion    clipsync.companion:75  phone panel served to 192.168.1.33",
+    ],
+    problems: [
+      "2026-09-14 09:14:02.884 [WARNING ] transfer     clipsync.transfer:412  retrying chunk 41/128 after 2.1s",
     ],
   },
   autostart_status: true,

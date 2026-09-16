@@ -63,6 +63,38 @@ ANON_CONN_MAX_LIFE = 60
 # schedule a reconnect.
 _REJECT_MARKER = b"\xff\xff\xff\xffRJCT"
 
+# Appended to the identity frame's PEM by a dialer whose connection is not a
+# pairing request — a chat invite, an update offer, an update fetch.  The
+# accepting side reads it and skips generating a shared code, which is the one
+# thing that puts a pairing card, and a "wants to pair" notice, in front of a
+# user who asked for neither.
+#
+# ``connect_to_peer(no_auto_pairing=True)`` used to be a promise only the dialer
+# kept: the flag never crossed the wire, so the accepting end generated a code
+# anyway and the offer arrived looking like a pairing request.  A PEM comment
+# line is the whole mechanism — it rides the frame that already exists, an older
+# peer parses the PEM and ignores what follows it, and a newer peer strips the
+# tail before the PEM reaches anything that reads it.  Neither fingerprint nor
+# pin can see it: both hash the DER.
+NO_PAIRING_MARKER = "\n#clipsync-no-pairing"
+
+# How long a manual disconnect keeps the peer's reconnects out.
+#
+# ``disconnect_peer(reject=True)`` used to park the peer in
+# ``_rejected_peer_ids`` — the same set, and the same rejection marker, as
+# ``forget_peer``.  The two are not the same act: one means "not now", the
+# other means "you are removed".  Sharing the state made a device whose user
+# pressed 断开连接 indistinguishable from one that had deleted this device, so
+# the other side reported a removal that never happened and — because nothing
+# but this device's own outbound dial clears that set — kept reporting it for
+# the rest of the session, through every later attempt to pair.
+#
+# A hold expires, so the peer comes back on its own; a removal does not, and is
+# reported as one.  The window is longer than the ~3-30 s reconnect backoff it
+# has to outlast, and short enough that a user who disconnects and then changes
+# their mind is not left waiting.
+DISCONNECT_HOLD_SECONDS = 180.0
+
 # A health tick this far out of line with the expected 15 s interval means the
 # process was frozen.
 WAKE_GAP_SECONDS = 60.0
@@ -544,6 +576,9 @@ class TransportManager:
         self._max_reconnect_attempts = max_reconnect_attempts
         self._hash_to_real_id: dict[str, str] = {}
         self._rejected_peer_ids: set[str] = set()
+        # peer id -> monotonic deadline: refused for a while, not for good.
+        # See DISCONNECT_HOLD_SECONDS.
+        self._connect_holds: dict[str, float] = {}
         self._enc_mgr = None
         self._on_security_alert: Callable | None = None
         self._on_connect_rejected: Callable | None = None
@@ -791,11 +826,29 @@ class TransportManager:
                     p.unlink()
 
     @staticmethod
-    def _send_identity(sock: ssl.SSLSocket, cert_pem: str):
-        """Send our certificate PEM as the first application-level frame."""
+    def _send_identity(sock: ssl.SSLSocket, cert_pem: str, no_auto_pairing: bool = False):
+        """Send our certificate PEM as the first application-level frame.
+
+        *no_auto_pairing* appends :data:`NO_PAIRING_MARKER`, telling the
+        accepting side that this connection is not a pairing request.
+        """
+        if no_auto_pairing:
+            cert_pem += NO_PAIRING_MARKER
         data = cert_pem.encode("ascii")
         frame = struct.pack(">I", len(data)) + data
         sock.sendall(frame)
+
+    @staticmethod
+    def _identity_payload(data: bytes) -> tuple[str, bool]:
+        """Split a received identity frame into ``(cert_pem, no_auto_pairing)``.
+
+        The tail is removed before the PEM reaches a parser or a pin, so a
+        frame that carries it is byte-for-byte the frame that did not.
+        """
+        text = data.decode("ascii", errors="replace")
+        if text.endswith(NO_PAIRING_MARKER):
+            return text[: -len(NO_PAIRING_MARKER)], True
+        return text, False
 
     @staticmethod
     def _recv_identity(sock: ssl.SSLSocket, timeout: float = 10.0) -> bytes | None:
@@ -1003,6 +1056,7 @@ class TransportManager:
                     ids_to_clear.add(h)
             for pid in ids_to_clear:
                 self._rejected_peer_ids.discard(pid)
+                self._connect_holds.pop(pid, None)
             if peer_id in self._peers:
                 logger.debug(
                     "[%s] connect_to_peer: already connected (peer_id=%s), skipping",
@@ -1053,7 +1107,14 @@ class TransportManager:
                 # Exchange identity at application level: send our cert,
                 # then read the server's cert from its identity frame.
                 identity = self._pairing_mgr.get_identity()
-                self._send_identity(ssl_sock, identity.certificate_pem)
+                # The flag has to travel with the frame: the accepting side is
+                # the one that generates the code, and it cannot read an
+                # argument that stayed on this machine.
+                self._send_identity(
+                    ssl_sock,
+                    identity.certificate_pem,
+                    no_auto_pairing=no_auto_pairing,
+                )
                 logger.info("[%s] sent identity frame", peer_name)
 
                 # Read server's identity frame (cert PEM)
@@ -1084,7 +1145,7 @@ class TransportManager:
 
                 real_peer_id = peer_id
                 if server_cert_data:
-                    peer_cert_pem = server_cert_data.decode("ascii")
+                    peer_cert_pem, _server_flags = self._identity_payload(server_cert_data)
                     peer_cert = x509.load_pem_x509_certificate(peer_cert_pem.encode())
 
                     # Bind the TLS-presented cert to the app-layer identity cert:
@@ -1386,12 +1447,12 @@ class TransportManager:
             return [(pid, conn.device_name) for pid, conn in self._peers.items()]
 
     def disconnect_peer(self, peer_id: str, reject: bool = False):
-        """Disconnect a peer and optionally reject reconnections.
+        """Disconnect a peer and optionally hold its reconnections off.
 
-        When *reject* is True, incoming connections from this peer are
-        refused until the next explicit connect_to_peer() call.  Use this
-        for user-initiated disconnects to prevent the remote side from
-        immediately reconnecting.
+        When *reject* is True, incoming connections from this peer are refused
+        for :data:`DISCONNECT_HOLD_SECONDS` — long enough that the button is not
+        undone by the peer's next reconnect, and expiring so that a disconnect
+        is never mistaken for a removal.  ``forget_peer`` is the permanent one.
         """
         timers_to_cancel = []
         with self._lock:
@@ -1411,15 +1472,30 @@ class TransportManager:
                 self._reconnect_attempts.pop(pid, None)
                 self._cert_pin_blocked.pop(pid, None)
             if reject:
-                self._rejected_peer_ids.add(peer_id)
-                if real_id != peer_id:
-                    self._rejected_peer_ids.add(real_id)
+                deadline = time.monotonic() + DISCONNECT_HOLD_SECONDS
+                self._connect_holds[peer_id] = deadline
+                self._connect_holds[real_id] = deadline
         for t in timers_to_cancel:
             t.cancel()
         if conn:
             logger.info("[%s] manual disconnect%s", peer_id[:12], " (rejected)" if reject else "")
             conn.set_on_disconnect(None)
             conn.stop()
+
+    def _on_hold(self, peer_id: str) -> bool:
+        """Whether a manual disconnect is still keeping this peer out.
+
+        Expired entries are dropped as they are met, so the map stays the size
+        of the disconnects still in force.
+        """
+        with self._lock:
+            deadline = self._connect_holds.get(peer_id)
+            if deadline is None:
+                return False
+            if deadline <= time.monotonic():
+                self._connect_holds.pop(peer_id, None)
+                return False
+            return True
 
     def forget_peer(self, peer_id: str):
         """Disconnect and permanently reject this peer.
@@ -1492,12 +1568,13 @@ class TransportManager:
     def allow_peer(self, peer_id: str):
         """Lift a previous reject/forget so this peer may connect again.
 
-        ``forget_peer`` and ``disconnect_peer(reject=True)`` park a peer in
-        ``_rejected_peer_ids``, which refuses its INBOUND connections.  Only an
-        outbound ``connect_to_peer`` clears that, so a device restored from the
-        removed archive could not be paired *from the other side* — its
-        connection was silently refused.  Restoring calls this instead, which
-        clears the flag without opening a connection (restore must not pair).
+        ``forget_peer`` parks a peer in ``_rejected_peer_ids``, which refuses
+        its INBOUND connections; ``disconnect_peer(reject=True)`` holds it off
+        for a while.  Only an outbound ``connect_to_peer`` clears those, so a
+        device restored from the removed archive could not be paired *from the
+        other side* — its connection was silently refused.  Restoring calls
+        this instead, which clears both without opening a connection (restore
+        must not pair).
 
         Covers the real device_id, its hashed mDNS form, and any hash that
         resolves to it — the same id fan-out forget_peer used to set the flag.
@@ -1516,6 +1593,7 @@ class TransportManager:
                 logger.debug("allow_peer: could not hash %s", peer_id[:12], exc_info=True)
             for pid in ids:
                 self._rejected_peer_ids.discard(pid)
+                self._connect_holds.pop(pid, None)
         logger.info("[%s] rejection lifted — peer may connect again", peer_id[:12])
 
     def get_connected_peers(self) -> list[str]:
@@ -1995,7 +2073,7 @@ class TransportManager:
 
             client_cert_data = self._recv_identity(ssl_sock)
             if client_cert_data:
-                peer_cert_pem = client_cert_data.decode("ascii")
+                peer_cert_pem, peer_no_auto_pairing = self._identity_payload(client_cert_data)
                 peer_cert = x509.load_pem_x509_certificate(peer_cert_pem.encode())
 
                 # Bind the TLS-presented cert to the app-layer identity cert
@@ -2039,11 +2117,23 @@ class TransportManager:
                 # Refuse connections from peers the user has explicitly
                 # rejected or forgotten.
                 if peer_id and peer_id in self._rejected_peer_ids:
-                    logger.info(
-                        "[%s] incoming connection from rejected peer — refusing",
+                    logger.warning(
+                        "[%s] incoming connection from a peer this device removed — refusing; "
+                        "pairing must be redone from that device",
                         peer_id[:12],
                     )
                     self._send_rejection(ssl_sock)
+                    ssl_sock.close()
+                    return
+                # A manual disconnect holds the peer off without the marker and
+                # without the removal notice: it is a pause, and the peer's own
+                # reconnect brings it back once the hold expires.
+                if peer_id and self._on_hold(peer_id):
+                    logger.info(
+                        "[%s] incoming connection while held after a manual disconnect — "
+                        "refusing for now",
+                        peer_id[:12],
+                    )
                     ssl_sock.close()
                     return
                 was_paired = self._pairing_mgr.is_peer_paired(peer_id)
@@ -2053,7 +2143,7 @@ class TransportManager:
                     peer_cert_pem,
                     paired=was_paired,
                 )
-                if not was_paired and peer_id:
+                if not was_paired and peer_id and not peer_no_auto_pairing:
                     try:
                         shared_code = self._pairing_mgr.generate_shared_pairing_code(peer_id)
                         logger.info(
@@ -2063,6 +2153,13 @@ class TransportManager:
                         )
                     except Exception as e:
                         logger.debug("Could not generate shared pairing code: %s", e)
+                elif not was_paired and peer_id:
+                    # The dialer said this connection is not a pairing request,
+                    # so no code — and no card or notice asking to compare one.
+                    logger.info(
+                        "[%s] connected without a pairing request — no code generated",
+                        peer_name or peer_id,
+                    )
             else:
                 logger.warning(
                     "No identity frame from %s:%d — anonymous connection", addr[0], addr[1]

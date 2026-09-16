@@ -76,7 +76,6 @@ const settingsGroups = computed<Array<{ label: string; items: Array<{ id: string
   { label: t("通用"), items: [
     { id: "general", label: t("常规") },
     { id: "history", label: t("剪贴板历史") },
-    { id: "notifications", label: t("通知") },
   ] },
   { label: t("连接"), items: [
     { id: "sync", label: t("同步") },
@@ -336,6 +335,19 @@ function clampNumber(value: unknown, fallback: number, min: number, max: number)
 function brokerList(value: unknown): string[] {
   return String(value || "").split(/\r?\n|,/).map((item) => item.trim()).filter(Boolean);
 }
+/** The relay's per-message ceiling, in the three units it is spoken in.
+ *
+ * The sidecar stores bytes and enforces 32 KiB – 1 MiB (config._FIELD_RANGES,
+ * mirrored by the RPC validator, the web API's _RANGE_LIMITS and the backup
+ * schema); the row is typed in kilobytes, because that is the unit a broker's
+ * price list uses — "≤ 64 KB per message" — and the only unit this number is
+ * ever read in.  256 KiB is what the public brokers carry and what the app
+ * assumed before the setting existed, so it is the fallback for a sidecar too
+ * old to send the field at all.
+ */
+const DEFAULT_RELAY_MAX_MESSAGE_BYTES = 256 * 1024;
+const MIN_RELAY_MAX_MESSAGE_KB = 32;
+const MAX_RELAY_MAX_MESSAGE_KB = 1024;
 // Security: the encryption password keeps the rules the pairing passphrase had
 // (settings_window.password_rule_* in the legacy panel; the sidecar enforces
 // the same rules server-side through netpair_passphrase_error).  The password
@@ -756,6 +768,11 @@ function deviceMenu(event: MouseEvent, device: Device) {
     return;
   }
   const connected = device.connection_state === "online";
+  // This row can answer for two pairings at once — see `relayPairing` — so the
+  // entries below are drawn per route and not per row.  连接/断开 and 移除设备
+  // belong to the local pairing; 打开聊天 and 解除互联网配对 reach the device over
+  // the relay and are owed to a reader whose only pairing with it is the code.
+  const relay = relayPairing(device);
   openContextMenu(event, [
     device.paired
       ? {
@@ -768,13 +785,18 @@ function deviceMenu(event: MouseEvent, device: Device) {
           run: () => (connected ? store.disconnect(device) : store.connect(device)),
         }
       : null,
-    device.paired && !connected
+    (device.paired || relay.paired) && !connected
       ? { id: "chat", label: t("打开聊天"), icon: MessageCircle, run: () => chatWith(device) }
       : null,
-    { id: "rename", label: t("重命名"), icon: Pencil, run: () => { renameTarget.value = { kind: "device", id: device.id }; renameValue.value = device.note || ""; } },
+    { id: "rename", label: t("重命名"), icon: Pencil, run: () => renameDeviceRow(device) },
     { id: "copy-id", label: t("复制设备 ID"), icon: Copy, run: () => copyText(device.id) },
+    relay.paired
+      ? { id: "relay-unpair", label: t("解除互联网配对"), icon: Unlink, divider: true, danger: true, run: () => { relayUnpairDevice.value = device; } }
+      : null,
+    // The divider only on the first of the two dangerous entries, so a device
+    // holding both pairings gets one separator rather than two in a row.
     device.paired
-      ? { id: "forget", label: t("移除设备"), icon: Trash2, divider: true, danger: true, run: () => { forgetDevice.value = device; } }
+      ? { id: "forget", label: t("移除设备"), icon: Trash2, divider: !relay.paired, danger: true, run: () => { forgetDevice.value = device; } }
       : null,
   ]);
 }
@@ -789,6 +811,23 @@ function deviceMenu(event: MouseEvent, device: Device) {
 function renameRelayDevice(device: Device) {
   renameTarget.value = { kind: "internet", peerId: device.id };
   renameValue.value = device.alias || "";
+}
+
+/** 重命名 on a device row, which is one field or the other depending on which
+ *  pairing the row holds.
+ *
+ * A note lives on a saved local peer; a device paired by code has no such peer,
+ * so the note call answers NOT_FOUND and the menu entry could only fail.  That
+ * device's name is its alias, which is the field the pairing card's own rename
+ * writes — one name per device either way, and the dialog is the same one.
+ */
+function renameDeviceRow(device: Device) {
+  if (device.paired) {
+    renameTarget.value = { kind: "device", id: device.id };
+    renameValue.value = device.note || "";
+    return;
+  }
+  renameRelayDevice(device);
 }
 
 /** Open a conversation with a device from its own row.
@@ -1549,6 +1588,12 @@ watch(() => state.aiInventoryEvent, (update) => {
     void refreshAiRemote(false);
   }
 });
+watch(() => state.updatePeerEvent, (answer) => {
+  // A device's answer to the update exchange, replacing the note the click left
+  // on its row. The store worded it; this only puts it where the click was.
+  if (!answer || !answer.device_id) return;
+  updateNotes.value = { ...updateNotes.value, [answer.device_id]: answer.message };
+});
 watch(aiPeerId, () => {
   aiPullPending.value = null;
   ++aiRemoteGeneration;
@@ -1674,6 +1719,8 @@ const probeBusyId = ref("");
 /** The device an update offer is being sent to, and what came back. */
 const updateBusyId = ref("");
 const updateNotes = ref<Record<string, string>>({});
+/** The device this machine is asking for a newer installer. */
+const fetchBusyId = ref("");
 const certificates = ref<DeviceCertificate[] | null>(null);
 const certDialog = ref<HTMLDialogElement | null>(null);
 const certAlertDialog = ref<HTMLDialogElement | null>(null);
@@ -1734,6 +1781,9 @@ const pushTextBusy = ref(false);
 const logsOpen = ref(false);
 const logsDialog = ref<HTMLDialogElement | null>(null);
 const logLines = ref<string[]>([]);
+/** The subset of `logLines` that reports a failure — what the dialog opens on. */
+const logProblems = ref<string[]>([]);
+const logView = ref<"problems" | "all">("problems");
 const logCount = ref(200);
 const logsBusy = ref(false);
 const logsExporting = ref(false);
@@ -2088,6 +2138,10 @@ function pairingPending(device: Device) {
 }
 function pairingLabel(device: Device) {
   if (device.paired) return t("已配对");
+  // Paired, just not here: a device holding a code pairing and no LAN pairing
+  // is not an unpaired device, and 未配对 beside an 互联网·在线 chip said it was.
+  // The 本地 chip beside this one still carries the local half of the answer.
+  if (relayPairing(device).paired) return t("互联网配对");
   return ({ pending: t("等待确认"), peer_confirmed: t("对方已确认"), confirmed_waiting: t("等待对方确认"),
     cancelled: t("已取消") } as Record<string, string>)[device.pairing_status] || t("未配对");
 }
@@ -2136,6 +2190,31 @@ function localChannelState(device: Device) {
 function relayPeerFor(device: Device) {
   return internetPairing.value.peers.find(peer => String(peer.peer_id) === device.id) || null;
 }
+/** This device's internet pairing: whether it holds one, whether the relay sees
+ *  it up, and when it was last heard from.
+ *
+ * The row carries all three — on every row, not only the ones the pairing drew,
+ * because a device can be paired by code *and* on this network and then one row
+ * answers for both joins.  The pairing card's list is the fallback for a row
+ * without the fields: an archived row, which the sidecar leaves out of the join
+ * because it is no longer a device, or a sidecar older than them.
+ *
+ * Reading the row rather than the card is also what keeps this fresh: the card
+ * is re-read when it changes, while these rows are rebuilt several times a
+ * second, so a peer whose relay link has gone quiet stops reading 在线 without
+ * anything having to be published for it.
+ */
+function relayPairing(device: Device) {
+  if (typeof device.relay_paired === "boolean") {
+    return {
+      paired: device.relay_paired,
+      online: device.relay_online === true,
+      last_seen: Number(device.last_seen || 0),
+    };
+  }
+  const peer = relayPeerFor(device);
+  return { paired: !!peer, online: peer?.online === true, last_seen: Number(peer?.last_seen || 0) };
+}
 /** Which of the three internet-pairing states this device is in, and the words
  * for it.  `unpaired` is a state of its own rather than a missing one: a device
  * this machine only knows on the local network is not "offline over the
@@ -2148,10 +2227,9 @@ function relayPeerFor(device: Device) {
  * when the pairing card is and would be the stale one of the two.
  */
 function relayChannel(device: Device): "online" | "offline" | "unpaired" {
-  if (device.relay) return device.connection_state === "online" ? "online" : "offline";
-  const peer = relayPeerFor(device);
-  if (!peer) return "unpaired";
-  return peer.online ? "online" : "offline";
+  const relay = relayPairing(device);
+  if (!relay.paired) return "unpaired";
+  return relay.online ? "online" : "offline";
 }
 function relayChannelLabel(device: Device) {
   const channel = relayChannel(device);
@@ -2163,9 +2241,7 @@ function relayChannelLabel(device: Device) {
  * tooltip: the fact a bare 离线 leaves out, and the one that separates "away
  * for a minute" from "gone since Tuesday". */
 function relayLastSeen(device: Device) {
-  // The row's own field on a device paired by code, and the join's on one that
-  // is in the pairing card — see `relayChannel` for why those are two sources.
-  const seen = Number((device.relay ? device.last_seen : relayPeerFor(device)?.last_seen) || 0);
+  const seen = relayPairing(device).last_seen;
   if (!seen) return "";
   return t("最后在线 {when}", { when: dateTime(seen) });
 }
@@ -2298,17 +2374,28 @@ async function testConnection(device: Device) {
  * bytes it receives are checked against the published release digest on its
  * side before they can be installed.  The row says what happened either way —
  * a click that produced no traffic must not look like one that did.
+ *
+ * When this machine has no cached installer, the click is still kept: the offer
+ * goes out, and the runtime sends the asset the moment the release download
+ * lands.  That download is the update page's own flow, so it is started here
+ * rather than behind the scenes — the user gets the progress card they know, and
+ * the sentence under the row says what is being waited for.
  */
 async function offerDeviceUpdate(device: Device) {
   if (updateBusyId.value) return;
   updateBusyId.value = device.id;
   try {
-    await bridge.offerDeviceUpdate(device.id);
+    const result = await bridge.offerDeviceUpdate(device.id);
+    if (!device.update_cached || result.needs_download) {
+      // The offer is already out and the runtime sends the asset when this
+      // lands, so nothing here waits on it.
+      await startUpdateDownload();
+    }
     updateNotes.value = {
       ...updateNotes.value,
       [device.id]: device.update_cached
         ? t("已把更新发送给 {name}", { name: device.name })
-        : t("已通知 {name} 有新版本，它可以从发布页下载", { name: device.name }),
+        : t("正在下载本机安装包，下好后会自动发送给 {name}", { name: device.name }),
     };
   } catch (error: any) {
     updateNotes.value = {
@@ -2317,6 +2404,32 @@ async function offerDeviceUpdate(device: Device) {
     };
   } finally {
     updateBusyId.value = "";
+  }
+}
+/** Ask a device that is on a newer build to send this one its installer.
+ *
+ * The direction the feature is meant to run in, and the reason the older
+ * device's list carries a button at all: this side is the one that is behind.
+ * The blob is verified against the published release digest on arrival and then
+ * staged, so the update card takes over from here — this function only owes the
+ * row a sentence for the wait.
+ */
+async function fetchDeviceUpdate(device: Device) {
+  if (fetchBusyId.value) return;
+  fetchBusyId.value = device.id;
+  try {
+    await bridge.fetchDeviceUpdate(device.id);
+    updateNotes.value = {
+      ...updateNotes.value,
+      [device.id]: t("已向 {name} 索取安装包，收到后可在更新页安装", { name: device.name }),
+    };
+  } catch (error: any) {
+    updateNotes.value = {
+      ...updateNotes.value,
+      [device.id]: error?.message || t("获取更新失败"),
+    };
+  } finally {
+    fetchBusyId.value = "";
   }
 }
 async function showCertificates() {
@@ -2404,6 +2517,7 @@ async function loadLogs(lines = logCount.value) {
   try {
     const result = await bridge.readLogs(lines);
     logLines.value = result.logs;
+    logProblems.value = result.problems ?? [];
     logCount.value = lines;
   } catch (error) { state.error = error as any; }
   finally { logsBusy.value = false; }
@@ -2412,7 +2526,13 @@ async function openLogs() {
   logsOpen.value = true;
   logExportMessage.value = "";
   await loadLogs();
+  // Open on the lines worth reading, and fall back to the whole log when there
+  // is nothing to read for: an empty "problems" tab over a log full of lines
+  // reads as "no logs", which is the state this view used to be stuck in.
+  logView.value = logProblems.value.length ? "problems" : "all";
 }
+const shownLogLines = computed(() =>
+  logView.value === "problems" ? logProblems.value : logLines.value);
 function logExportFilename() {
   const now = new Date();
   const pad = (value: number) => String(value).padStart(2, "0");
@@ -3120,6 +3240,16 @@ async function openSettings() {
         filterCategories.value.filter(([key]) => key !== "email").map(([key]) => key),
       relay_brokers: Array.isArray(loaded.relay_brokers) ? loaded.relay_brokers.join("\n") : (loaded.relay_brokers || ""),
       relay_private_brokers: Array.isArray(loaded.relay_private_brokers) ? loaded.relay_private_brokers.join("\n") : (loaded.relay_private_brokers || ""),
+      // The broker's limit is stored in bytes and typed in kilobytes, so the
+      // form gets a key of its own rather than a value whose unit depends on
+      // which side of the save it is on.  Bound as `relay_max_message_kb` and
+      // multiplied back on save; see the relay card's own row.
+      relay_max_message_kb: clampNumber(
+        Math.round(Number(loaded.relay_max_message_bytes ?? DEFAULT_RELAY_MAX_MESSAGE_BYTES) / 1024),
+        DEFAULT_RELAY_MAX_MESSAGE_BYTES / 1024,
+        MIN_RELAY_MAX_MESSAGE_KB,
+        MAX_RELAY_MAX_MESSAGE_KB,
+      ),
     };
     if (native) {
       try { settings.value.auto_start = await bridge.autostartStatus(); }
@@ -3195,13 +3325,6 @@ async function saveSettings() {
       device_name: settings.value.device_name,
       appearance_mode: settings.value.appearance_mode,
       plain_text_only: settings.value.plain_text_only,
-      notifications_enabled: settings.value.notifications_enabled,
-      notify_transfer: settings.value.notify_transfer,
-      // The host gates its own pairing and device-connect notifications on
-      // these two, so they have to be settable here or a user could lose the
-      // choice (legacy's panel set them; the phone panel still can).
-      notify_pairing: settings.value.notify_pairing,
-      notify_device_connect: settings.value.notify_device_connect,
       // Applied to the live engine, not on restart: the runtime hands it
       // straight to the running chat manager.
       chat_open_to_all: settings.value.chat_open_to_all,
@@ -3222,6 +3345,15 @@ async function saveSettings() {
       relay_private_brokers: brokerList(settings.value.relay_private_brokers),
       relay_username: settings.value.relay_username,
       relay_password: settings.value.relay_password,
+      // Typed in KB, stored in bytes.  Read when the relay is built, so a
+      // changed limit reaches the chunks after a restart — the row's hint says
+      // so, next to the control.
+      relay_max_message_bytes: clampNumber(
+        settings.value.relay_max_message_kb,
+        DEFAULT_RELAY_MAX_MESSAGE_BYTES / 1024,
+        MIN_RELAY_MAX_MESSAGE_KB,
+        MAX_RELAY_MAX_MESSAGE_KB,
+      ) * 1024,
       // Advanced/network fields.  Numbers are clamped to the sidecar's bounds so
       // a cleared input falls back instead of failing the whole save.
       port: clampNumber(settings.value.port, 19990, 1024, 65535),
@@ -4308,6 +4440,20 @@ async function translateText() {
                     <span class="setting-name">{{ t("中继密码") }}</span>
                     <span class="setting-control"><input v-model="settings.relay_password" type="password" autocomplete="new-password" :placeholder="t('留空表示不修改')" /></span>
                   </label>
+                  <!-- The broker's own limit, not this app's: a broker that
+                       refuses a message over its ceiling drops it silently, so
+                       a file chunk sized past it never arrives while the sender
+                       has already counted it sent.  Set to what the relay in
+                       use allows and every chunk is cut to fit under it — the
+                       reason a free tier (64 KB per message) needs this at all,
+                       after a chunk that only fits a 256 KB broker stalled. -->
+                  <label class="setting">
+                    <span class="setting-name">{{ t("单条消息大小上限") }}</span>
+                    <span class="setting-control">
+                      <input v-model.number="settings.relay_max_message_kb" :aria-label="t('单条消息大小上限')" type="number" :min="MIN_RELAY_MAX_MESSAGE_KB" :max="MAX_RELAY_MAX_MESSAGE_KB" step="1" />
+                      <span class="setting-hint">{{ t("单位 KB。填中继服务器允许的单条消息上限，传输文件时每个数据块都会按它切分——超出会被服务器直接丢弃。免费中继常见 64 KB，公共中继为 256 KB。修改后需重启生效。") }}</span>
+                    </span>
+                  </label>
                   <!-- The panel's own 测试 button.  Last in the card, because it
                        is about the four fields above it rather than a fifth
                        thing to fill in: the relay reads as one group of
@@ -4376,21 +4522,10 @@ async function translateText() {
                   </label>
                 </fieldset>
               </section>
-              <section v-show="showSettingsCard('notifications')" id="settings-notifications" class="settings-section">
-                <h2>{{ t("通知") }}</h2>
-                <label class="setting setting--check">
-                  <span class="setting-control"><input v-model="settings.notifications_enabled" type="checkbox" /><span>{{ t("启用通知") }}</span></span>
-                </label>
-                <label class="setting setting--check">
-                  <span class="setting-control"><input v-model="settings.notify_transfer" type="checkbox" :disabled="!settings.notifications_enabled" /><span>{{ t("文件传输通知") }}</span></span>
-                </label>
-                <label class="setting setting--check">
-                  <span class="setting-control"><input v-model="settings.notify_pairing" type="checkbox" :disabled="!settings.notifications_enabled" /><span>{{ t("配对请求通知") }}</span></span>
-                </label>
-                <label class="setting setting--check">
-                  <span class="setting-control"><input v-model="settings.notify_device_connect" type="checkbox" :disabled="!settings.notifications_enabled" /><span>{{ t("设备连接通知") }}</span></span>
-                </label>
-              </section>
+              <!-- No notification card: this window raises no OS notification, so
+                   the switches that used to live here would control nothing. The
+                   rows the window does show — the status strip, the pairing card —
+                   are the notifications. -->
               <section v-show="showSettingsCard('discovery')" id="settings-discovery" class="settings-section">
                 <h2>{{ t("局域网发现") }}</h2>
                 <label class="setting setting--check">
@@ -4615,6 +4750,13 @@ async function translateText() {
                   <p v-if="!updateInstallable" class="muted small setting-note">{{ t("请退出当前应用，然后用下方文件替换旧版本。剪贴板历史与设备仍保留在本机。") }}</p>
                   <p class="update-ready-path selectable setting-block">{{ updateState.path }}</p>
                   <div class="setting-actions setting-actions--card">
+                    <!-- A blob that arrived from a peer is staged here and checked
+                         against the release digest, but only the host's own
+                         verified download can replace the bundle — so the
+                         install the card can actually perform is offered beside
+                         the folder, rather than leaving the reader to end the
+                         exchange by hand. -->
+                    <button v-if="updateInstallable" type="button" class="primary" @click="installUpdate">{{ t("下载并安装") }}</button>
                     <button type="button" @click="openUpdateFolder">{{ t("打开所在文件夹") }}</button>
                   </div>
                 </template>
@@ -4703,14 +4845,34 @@ async function translateText() {
                 <button v-else-if="!pairingPending(device)" :disabled="busy || device.connection_state === 'offline'" @click="store.startPairing(device)"><Link :size="17" />{{ t("配对") }}</button>
                 <button v-if="device.paired && device.connection_state !== 'online'" class="icon-button" :aria-label="t('连接设备')" :title="t('连接设备')" :disabled="busy" @click="store.connect(device)"><Plug :size="18" /></button>
                 <button v-if="device.connection_state === 'online'" class="icon-button" :aria-label="t('断开连接')" :title="t('断开连接')" :disabled="busy" @click="store.disconnect(device)"><PlugZap :size="18" /></button>
-                <button v-if="device.paired" class="icon-button" :aria-label="t('测试连接')" :title="t('测试连接')" :disabled="busy || !!probeBusyId" @click="testConnection(device)"><Activity :size="18" :class="{ spinning: probeBusyId === device.id }" /></button>
-                <button v-if="device.paired" class="icon-button" :aria-label="t('发送网址')" :title="t('发送网址')" :aria-describedby="sendUrlAvailable ? undefined : 'devices-engine-note'" :disabled="busy || !sendUrlAvailable" @click="openSendUrl(device)"><Globe :size="18" /></button>
+                <!-- The relay's own actions, on a row that has a local route as
+                     well.  A device can be paired by code *and* be here, and
+                     then this row is its only row: the two buttons below reach
+                     it over the relay (the sidecar's own rule is
+                     reachability, not the LAN pin), and the conversation and
+                     the internet pairing are things only the relay knows about.
+                     Without them the row kept every button gated on the LAN
+                     pairing the device does not have, while the 互联网 chip
+                     beside them reported it online. -->
+                <button v-if="relayPairing(device).paired && !device.paired" class="icon-button" :aria-label="t('打开聊天')" :title="t('打开聊天')" :disabled="busy" @click="chatWith(device)"><MessageCircle :size="18" /></button>
+                <button v-if="device.paired || relayPairing(device).paired" class="icon-button" :aria-label="t('测试连接')" :title="t('测试连接')" :disabled="busy || !!probeBusyId" @click="testConnection(device)"><Activity :size="18" :class="{ spinning: probeBusyId === device.id }" /></button>
+                <button v-if="device.paired || relayPairing(device).paired" class="icon-button" :aria-label="t('发送网址')" :title="t('发送网址')" :aria-describedby="sendUrlAvailable ? undefined : 'devices-engine-note'" :disabled="busy || !sendUrlAvailable" @click="openSendUrl(device)"><Globe :size="18" /></button>
+                <button v-if="relayPairing(device).paired" class="icon-button" :aria-label="t('解除互联网配对')" :title="t('解除互联网配对')" :disabled="busy" @click="relayUnpairDevice = device"><Unlink :size="18" /></button>
                 <!-- Offered to a device the sidecar says this build is ahead of
                      — same platform, older version — and it needs no pairing:
                      the peer requests the installer, and its own copy is
                      checked against the published release digest before it can
                      be installed. -->
-                <button v-if="device.update_available" class="icon-button" :aria-label="t('发送更新')" :title="device.update_cached ? t('把本机的安装包发送给该设备') : t('通知该设备有新版本')" :disabled="busy || !!updateBusyId" @click="offerDeviceUpdate(device)"><Download :size="18" :class="{ spinning: updateBusyId === device.id }" /></button>
+                <button v-if="device.update_available" class="icon-button" :aria-label="t('发送更新')" :title="device.update_cached ? t('把本机的安装包发送给该设备') : t('对方版本较旧：先下载本机安装包，再发送给它')" :disabled="busy || !!updateBusyId" @click="offerDeviceUpdate(device)"><FileUp :size="18" :class="{ spinning: updateBusyId === device.id }" /></button>
+                <!-- The mirror of the button above, and the direction the
+                     feature is meant to run in: this device is the one behind,
+                     so this is the side with a reason to click.  It asks the
+                     peer for the installer it already downloaded, and the blob
+                     is checked against the published release digest before it
+                     can be staged.  Shown only when the peer really is ahead —
+                     same platform, newer version — which is what the sidecar
+                     decided for this row. -->
+                <button v-if="device.update_fetchable" class="icon-button" :aria-label="t('获取更新')" :title="t('从该设备获取新版本安装包并安装')" :disabled="busy || !!fetchBusyId" @click="fetchDeviceUpdate(device)"><Download :size="18" :class="{ spinning: fetchBusyId === device.id }" /></button>
                 <button class="icon-button" :aria-label="t('移除设备')" :title="t('移除设备')" :disabled="busy" @click="forgetDevice = device"><Trash2 :size="18" /></button>
               </div>
               <p v-if="probeResults[device.id]" class="muted small device-full" role="status">{{ t("连接测试：") }}{{ probeLabel(probeResults[device.id]) }}</p>
@@ -5045,9 +5207,19 @@ async function translateText() {
           <option :value="200">200</option><option :value="500">500</option><option :value="1000">1000</option>
         </select>
       </label>
+      <div class="log-filters" role="group" :aria-label="t('按级别筛选日志')">
+        <button type="button" class="chip" :class="{ 'chip--active': logView === 'problems' }"
+          :aria-pressed="logView === 'problems'" :disabled="logsBusy" @click="logView = 'problems'">
+          {{ t("问题") }}<span class="chip-count">{{ logProblems.length }}</span>
+        </button>
+        <button type="button" class="chip" :class="{ 'chip--active': logView === 'all' }"
+          :aria-pressed="logView === 'all'" :disabled="logsBusy" @click="logView = 'all'">
+          {{ t("全部") }}<span class="chip-count">{{ logLines.length }}</span>
+        </button>
+      </div>
       <p v-if="logsBusy" class="muted">{{ t("正在读取日志…") }}</p>
-      <pre v-else-if="logLines.length" class="log-view" :aria-label="t('日志内容')">{{ logLines.join("\n") }}</pre>
-      <p v-else class="muted">{{ t("暂无日志") }}</p>
+      <pre v-else-if="shownLogLines.length" class="log-view" :aria-label="t('日志内容')">{{ shownLogLines.join("\n") }}</pre>
+      <p v-else class="muted">{{ logView === "problems" ? t("没有需要排查的日志") : t("暂无日志") }}</p>
       <p v-if="logExportMessage" role="status" class="muted small">{{ logExportMessage }}</p>
       <div class="modal-actions">
         <button type="button" :disabled="logsExporting" @click="exportLogs">

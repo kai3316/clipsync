@@ -75,6 +75,7 @@ from internal.protocol.codec import (
 # Same-package reuse: received-file names MUST be sanitized exactly like
 # clipboard file transfers, so share the one implementation.
 from internal.sync.file_transfer import MAX_FILE_SIZE, _sanitize_file_name
+from internal.transport.relay import MAX_RELAY_FRAME, frame_limit_for
 
 logger = logging.getLogger(__name__)
 
@@ -263,6 +264,32 @@ class ChatManager:
 
     MESSAGE_HISTORY_MAX = 500  # entries kept per session (oldest trimmed)
     SEND_FN_CACHE_MAX = 32  # most-recent peers kept in _latest_send_fn
+
+    @classmethod
+    def relay_chunk_for(cls, max_message_bytes: int) -> int:
+        """The chunk size to send internet peers over a relay of this limit.
+
+        :data:`RELAY_CHUNK_SIZE` is the answer for the 256 KiB broker this app
+        ships against, and it stays the answer at that limit exactly — the
+        scale below is by the shipped pair, so the default relay's wire format
+        is untouched.  A different limit is that pair scaled rather than
+        recomputed from the envelope arithmetic: the shipped chunk was measured
+        against the shipped frame limit, and the ratio between them holds for
+        the GCM tag, the JSON shell and the broker's own framing alike.
+
+        Scaled by the *frame* limit rather than the payload, because the frame
+        limit is the number the publish path actually refuses against (see
+        ``relay.frame_limit_for``).  Scaling by the payload would leave the
+        result depending on a floor that can exceed what a small relay carries,
+        which is the one outcome this function exists to prevent.
+
+        Capped at :data:`CHUNK_SIZE`, because the *receiver* refuses to
+        reassemble a chunk larger than that: a relay carrying more than 256 KiB
+        must not make this side advertise more than the peer will take.
+        """
+        frame_limit = frame_limit_for(max(1, int(max_message_bytes)))
+        scaled = cls.RELAY_CHUNK_SIZE * frame_limit // MAX_RELAY_FRAME
+        return max(1, min(scaled, cls.CHUNK_SIZE))
 
     def __init__(self, device_id: str, device_name: str, receive_dir: str = ""):
         self._device_id = device_id

@@ -23,6 +23,11 @@ def _relay_reachable(cfg, peer_id: str) -> bool:
     """
     if not peer_id or not getattr(cfg, "internet_sync_enabled", False):
         return False
+    # A device this machine has removed is reachable nowhere, which the runtime
+    # says in the same words (``_peer_is_internet_reachable``); a page that
+    # offered it chat and a probe would be offering buttons the host refuses.
+    if peer_id in (getattr(cfg, "removed_peers", {}) or {}):
+        return False
     if peer_id in (getattr(cfg, "netpair_secrets", {}) or {}):
         return True
     if peer_id in (getattr(cfg, "peer_relay_secrets", {}) or {}):

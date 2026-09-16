@@ -81,6 +81,11 @@ export function createApplicationStore() {
     // and the answer either re-pins the certificate or unpairs the device.
     // `can_trust` is false when the alert carried no certificate to pin.
     certAlert: null as { device_id: string; name: string; can_trust: boolean } | null,
+    // A peer's answer to the update this window asked it for, already worded.
+    // Worded here rather than in the page because the notice stack says the same
+    // thing in the same words, and two spellings of one answer is how a reader
+    // ends up wondering whether they are looking at two answers.
+    updatePeerEvent: null as { revision: number; device_id: string; message: string } | null,
     // Update lifecycle, mirrored from `update.state` events and hydrated from
     // `update.status`; `updateCheck` holds the last manual lookup (null = never
     // checked), which is what drives the new-version line.
@@ -128,7 +133,12 @@ export function createApplicationStore() {
     // reason next to the bare `{accepted: false}` answer, so the click never
     // looks like a silent no-op; the wording is legacy's, advice included.
     if (name === "device.connection_rejected") {
-      return t("{name} 拒绝了连接 — 该设备可能已将你移除", { name: peerLabel(data) });
+      // The other device answered our connection with an explicit refusal,
+      // which it only sends for a peer its user removed. Say what happened and
+      // where it can be undone: the repair is at the other device, and this
+      // side cannot make it. The sentence this replaces hedged over whether a
+      // removal had happened at all, over a marker that names it exactly.
+      return t("{name} 已将本机移除 — 需要重新在对方配对", { name: peerLabel(data) });
     }
     if (name === "device.connection_unreachable") {
       return t(
@@ -152,6 +162,25 @@ export function createApplicationStore() {
     }
     if (name === "device.connected") return t("{name} 已连接", { name: device });
     if (name === "device.disconnected") return t("{name} 已断开", { name: device });
+    // The two answers to "get me that other device's installer". Both exist
+    // because a click that produced neither would be indistinguishable from a
+    // broken button: the request went out, and this is what came back.
+    if (name === "update.peer_unavailable") {
+      return t("{name} 上没有可发送的安装包，请在那台设备上检查更新", { name: peerLabel(data) });
+    }
+    if (name === "update.peer_notice") {
+      // The other direction: a peer announcing a build. Its own device list
+      // already offers the fetch, so this only says which of the two happened.
+      return data.has_asset === false
+        ? t("{name} 有新版本 {version}，可在设备列表向它获取", {
+            name: peerLabel(data),
+            version: String(data.version || ""),
+          })
+        : t("{name} 正在把新版本 {version} 发送过来", {
+            name: peerLabel(data),
+            version: String(data.version || ""),
+          });
+    }
     // The sidecar published this from the day the filter was wired and nothing
     // ever read it, so a clip that left the device with its sensitive values
     // replaced left silently. Legacy said so; the wording is legacy's.
@@ -231,6 +260,15 @@ export function createApplicationStore() {
    * and so does the other machine's answer.
    */
   const pairingNotices = new Map<string, number>();
+  /**
+   * Peers whose removal this window has already reported.
+   *
+   * The runtime publishes the refusal on every attempt it makes — the peer's
+   * reconnects and the reader's own clicks alike — and a removal cannot be
+   * undone from here, so the second telling is not news. One per peer per
+   * session, which is also what the reader asked for: say it, do not repeat it.
+   */
+  const removalNotices = new Set<string>();
   function pushNotice(name: string, data: Record<string, unknown>) {
     const id = ++noticeSequence;
     state.notices.push({ id, title: name, message: noticeMessage(name, data) });
@@ -523,7 +561,28 @@ export function createApplicationStore() {
             // is how a chat invite reads as one.
             dismissPairingNotice(String(data.device_id || ""));
           }
-          if (event.name && ["runtime.error", "pairing.request", "transfer.request", "chat.message", "chat.connect_timeout", "url.received", "device.connected", "device.disconnected", "sync.redacted", "device.connection_rejected", "device.connection_unreachable"].includes(event.name)) {
+          // Suppressed, not dropped: the rest of the handler still has to run —
+          // the refusal changes this device's connection state like any other
+          // disconnect event.
+          if (event.name === "update.peer_unavailable" || event.name === "update.peer_notice") {
+            // The device row carries a note from the click that started this, and
+            // it says the transfer is on its way.  The notice stack says the same
+            // thing for six seconds; the note stays until this overwrites it, so
+            // an answer that is never written here leaves the row promising a
+            // file that is not coming.
+            state.updatePeerEvent = {
+              revision: (state.updatePeerEvent?.revision || 0) + 1,
+              device_id: String(data.device_id || ""),
+              message: noticeMessage(event.name, data),
+            };
+          }
+          let alreadyReportedRemoval = false;
+          if (event.name === "device.connection_rejected") {
+            const peer = String(data.device_id || "");
+            alreadyReportedRemoval = removalNotices.has(peer);
+            removalNotices.add(peer);
+          }
+          if (!alreadyReportedRemoval && event.name && ["runtime.error", "pairing.request", "transfer.request", "chat.message", "chat.connect_timeout", "url.received", "device.connected", "device.disconnected", "sync.redacted", "device.connection_rejected", "device.connection_unreachable", "update.peer_unavailable", "update.peer_notice"].includes(event.name)) {
             pushNotice(event.name, data);
           }
           if (event.name === "favorites.changed" || event.name === "data.changed" || event.type === "resync") favorites.invalidate();

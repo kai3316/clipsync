@@ -189,7 +189,6 @@ pub struct Bridge {
     ready: watch::Sender<Option<Result<(), BridgeError>>>,
     session: Mutex<Option<String>>,
     stopping: std::sync::atomic::AtomicBool,
-    notifications: tokio::sync::mpsc::Sender<Value>,
     /// The tail of what the sidecar wrote to stderr, for explaining a failure
     /// that carries no reason of its own. See `explain`.
     stderr: StderrTail,
@@ -272,7 +271,6 @@ impl Bridge {
         let output = child.stdout.take().ok_or_else(BridgeError::unavailable)?;
         let stderr = child.stderr.take().ok_or_else(BridgeError::unavailable)?;
         let (ready, _) = watch::channel(None);
-        let (notifications, mut notification_events) = tokio::sync::mpsc::channel(32);
         let bridge = Arc::new(Self {
             input: AsyncMutex::new(input),
             child: AsyncMutex::new(child),
@@ -280,22 +278,8 @@ impl Bridge {
             ready,
             session: Mutex::new(None),
             stopping: std::sync::atomic::AtomicBool::new(false),
-            notifications,
             stderr: StderrTail::default(),
             stderr_drain: Mutex::new(None),
-        });
-        let notification_bridge = Arc::downgrade(&bridge);
-        let notification_app = app.clone();
-        tauri::async_runtime::spawn(async move {
-            let mut last_sequence = 0;
-            while let Some(event) = notification_events.recv().await {
-                let Some(bridge) = notification_bridge.upgrade() else { break };
-                if bridge.is_stopping() { break; }
-                let sequence = event["seq"].as_u64().unwrap_or(0);
-                if sequence <= last_sequence { continue; }
-                last_sequence = sequence;
-                crate::notifications::deliver(&bridge, &notification_app, &event).await;
-            }
         });
         let startup = bridge.clone();
         let startup_app = app.clone();
@@ -484,10 +468,12 @@ impl Bridge {
                 if !value["session_id"].is_string() {
                     return Err(BridgeError::new("PROTOCOL_ERROR", "Invalid event session"));
                 }
-                if value["type"] == "event" && crate::notifications::candidate(&value) {
-                    // Never wait for notification RPC replies inside the stdout reader.
-                    let _ = self.notifications.try_send(value.clone());
-                }
+                // No native notification is raised for any event: the window
+                // says everything the event means, on its own status strip, and
+                // this host is a background process whose reader opens it when
+                // they go to pair or to look.  Ringing the desktop as well said
+                // the same fact twice, the second time over whatever the reader
+                // was actually doing.
                 // The native tray follows the saved state; this fires for
                 // changes made from the web UI or the phone too, which never
                 // reach a Tauri command.

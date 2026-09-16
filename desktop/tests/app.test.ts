@@ -119,7 +119,8 @@ vi.mock("../src/api/bridge", () => ({
     connectDevice: vi.fn().mockResolvedValue({ accepted: true }),
     disconnectDevice: vi.fn().mockResolvedValue({ disconnected: true }),
     forgetDevice: vi.fn().mockResolvedValue({ forgotten: true }),
-    offerDeviceUpdate: vi.fn().mockResolvedValue({ sent: true }),
+    offerDeviceUpdate: vi.fn().mockResolvedValue({ sent: true, needs_download: false }),
+    fetchDeviceUpdate: vi.fn().mockResolvedValue({ sent: true }),
     restoreDevice: vi.fn().mockResolvedValue({ restored: true }),
     purgeDevice: vi.fn().mockResolvedValue({ purged: true }),
     testDevice: vi.fn(),
@@ -127,7 +128,7 @@ vi.mock("../src/api/bridge", () => ({
     retrustDevice: vi.fn().mockResolvedValue({ trusted: true }),
     sendUrl: vi.fn().mockResolvedValue({ sent: true, device_id: "p" }),
     pushText: vi.fn().mockResolvedValue({ ok: true, len: 5, sent: true }),
-    readLogs: vi.fn().mockResolvedValue({ logs: ["line 1", "line 2"] }),
+    readLogs: vi.fn().mockResolvedValue({ logs: ["line 1", "line 2"], problems: ["problem 1"] }),
     exportLogs: vi.fn().mockResolvedValue({ path: "C:/logs/clipsync.log", bytes: 12 }),
     restartApp: vi.fn().mockResolvedValue(null),
     factoryReset: vi.fn().mockResolvedValue(null),
@@ -1547,6 +1548,11 @@ describe("history rendering", () => {
     await app.findAll("button").find((button) => button.text().includes("查看日志"))!.trigger("click");
     await flushPromises();
     expect(bridge.readLogs).toHaveBeenCalledExactlyOnceWith(200);
+    // Opens on the failures: the tab that answers "why is this broken" is the
+    // one worth showing first when it has anything in it.
+    expect(app.get('[aria-label="日志内容"]').text()).toContain("problem 1");
+    await app.findAll("button").find((button) => button.text().includes("全部"))!.trigger("click");
+    await flushPromises();
     expect(app.get('[aria-label="日志内容"]').text()).toContain("line 1");
     await app.findAll("button").find((button) => button.text().includes("重启应用"))!.trigger("click");
     await flushPromises();
@@ -1802,13 +1808,20 @@ describe("history rendering", () => {
       vi.mocked(bridge.deviceCerts).mockResolvedValue({ devices: [] });
     }
   });
-  it("offers this build to a device the sidecar says is behind, and reports what happened", async () => {
-    vi.mocked(bridge.offerDeviceUpdate).mockResolvedValue({ sent: true });
+  it("carries an update in whichever direction the two builds are apart", async () => {
+    vi.mocked(bridge.offerDeviceUpdate).mockResolvedValue({ sent: true, needs_download: false });
+    vi.mocked(bridge.fetchDeviceUpdate).mockResolvedValue({ sent: true });
     vi.mocked(bridge.devices).mockResolvedValue({ items: [
       { id: "t", name: "Studio", paired: false, connection_state: "discovered",
         pairing_status: "", pairing_code: null, sas: null,
         version: "1.0.7", platform: "windows", arch: "amd64",
         update_available: true, update_cached: true },
+      // The direction the feature is meant to run in: this device is the one
+      // behind, so its row offers the fetch rather than the send.
+      { id: "n", name: "Newer", paired: false, connection_state: "discovered",
+        pairing_status: "", pairing_code: null, sas: null,
+        version: "1.0.9", platform: "windows", arch: "amd64",
+        update_available: false, update_fetchable: true },
       // Same build, another platform, and one too old to advertise: three
       // different reasons not to offer, and the row carries none of them as a
       // button.  The decision is the sidecar's -- these rows only render it.
@@ -1834,10 +1847,49 @@ describe("history rendering", () => {
       await flushPromises();
       expect(bridge.offerDeviceUpdate).toHaveBeenCalledExactlyOnceWith("t");
       expect(app.text()).toContain("已把更新发送给 Studio");
+      // And the other way round, off the same list: the device that is behind
+      // asks, and says so while it waits for the blob.
+      const fetches = app.findAll('[aria-label="获取更新"]');
+      expect(fetches).toHaveLength(1);
+      await fetches[0].trigger("click");
+      await flushPromises();
+      expect(bridge.fetchDeviceUpdate).toHaveBeenCalledExactlyOnceWith("n");
+      expect(app.text()).toContain("已向 Newer 索取安装包，收到后可在更新页安装");
     } finally {
       app.unmount();
       vi.mocked(bridge.devices).mockResolvedValue({ items: [] });
-      vi.mocked(bridge.offerDeviceUpdate).mockReset().mockResolvedValue({ sent: true });
+      vi.mocked(bridge.offerDeviceUpdate).mockReset().mockResolvedValue({ sent: true, needs_download: false });
+      vi.mocked(bridge.fetchDeviceUpdate).mockReset().mockResolvedValue({ sent: true });
+    }
+  });
+  it("starts the release download when an offer has no installer behind it yet", async () => {
+    // The click promises the file, and the file is not on this machine: the
+    // download is what makes the promise good, so it is started with the offer
+    // rather than left to the reader to find the update page.
+    vi.mocked(bridge.offerDeviceUpdate).mockResolvedValue({ sent: true, needs_download: true });
+    vi.mocked(bridge.devices).mockResolvedValue({ items: [
+      { id: "t", name: "Studio", paired: false, connection_state: "discovered",
+        pairing_status: "", pairing_code: null, sas: null,
+        version: "1.0.7", platform: "windows", arch: "amd64",
+        update_available: true, update_cached: false },
+    ] });
+    const app = mount(App);
+    try {
+      await flushPromises();
+      await app.get('[aria-label="设备"]').trigger("click");
+      await flushPromises();
+      // The download mock is shared with the update-page case above and nothing
+      // clears it between cases, so the count starts from here.
+      vi.mocked(bridge.updateDownload).mockClear();
+      await app.get('[aria-label="发送更新"]').trigger("click");
+      await flushPromises();
+      expect(bridge.updateDownload).toHaveBeenCalledOnce();
+      expect(app.text()).toContain("正在下载本机安装包，下好后会自动发送给 Studio");
+    } finally {
+      app.unmount();
+      vi.mocked(bridge.devices).mockResolvedValue({ items: [] });
+      vi.mocked(bridge.offerDeviceUpdate).mockReset().mockResolvedValue({ sent: true, needs_download: false });
+      vi.mocked(bridge.updateDownload).mockClear();
     }
   });
   it("says why an update offer did not go, instead of leaving the click silent", async () => {
@@ -1863,7 +1915,7 @@ describe("history rendering", () => {
     } finally {
       app.unmount();
       vi.mocked(bridge.devices).mockResolvedValue({ items: [] });
-      vi.mocked(bridge.offerDeviceUpdate).mockReset().mockResolvedValue({ sent: true });
+      vi.mocked(bridge.offerDeviceUpdate).mockReset().mockResolvedValue({ sent: true, needs_download: false });
     }
   });
   it("stamps a relayed chat message with its receipt instead of repainting the clipboard", async () => {

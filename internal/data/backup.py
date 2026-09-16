@@ -205,6 +205,10 @@ def create_backup(
             "relay_private_brokers": list(cfg.relay_private_brokers),
             "relay_username": cfg.relay_username,
             "relay_password": cfg.relay_password,
+            # The relay's per-message ceiling, which sizes the file chunks sent
+            # over it.  Restoring onto a device that then talks to the same
+            # broker needs the same number, or its chunks get dropped in flight.
+            "relay_max_message_bytes": cfg.relay_max_message_bytes,
             "relay_secret": cfg.relay_secret,
             "peer_relay_secrets": {
                 k: v
@@ -500,6 +504,9 @@ _APPLY_SCHEMA: dict[str, tuple] = {
     "relay_private_brokers": ("strlist_nonnull",),
     "relay_username": ("str",),
     "relay_password": ("str",),
+    # Same bounds as config._FIELD_RANGES: applied on restore, so a hand-edited
+    # backup cannot set a limit the running app would refuse.
+    "relay_max_message_bytes": ("int", 32 * 1024, 1024 * 1024),
     "relay_secret": ("str",),
     "peer_relay_secrets": ("strdict",),
     "netpair_secrets": ("strdict",),

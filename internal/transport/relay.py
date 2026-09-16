@@ -22,10 +22,12 @@ Replay protection: every envelope carries a wall-clock timestamp; envelopes
 outside +/- RELAY_TS_WINDOW seconds are dropped, and exact duplicate blobs are
 dropped via a bounded LRU of recent ciphertext hashes.
 
-Size cap: a frame too large for its envelope to fit under MAX_RELAY_PAYLOAD is
+Size cap: a frame too large for its envelope to fit under the payload cap is
 refused (the relay path is for clipboard text/images/small payloads; files
 cross the internet in chat chunks, which are cut to fit — see
-``MAX_RELAY_FRAME``).
+``MAX_RELAY_FRAME``).  The cap defaults to MAX_RELAY_PAYLOAD and follows
+``Config.relay_max_message_bytes`` when the relay in use publishes a different
+one; ``frame_limit_for`` is the same derivation for any of them.
 
 Everything here is deliberately decoupled from paho so the logic is testable
 without a network: ``RelayTransport`` takes a ``client_factory`` and only the
@@ -68,6 +70,16 @@ MAX_RELAY_PAYLOAD = 256 * 1024  # refuse to publish anything larger than this
 #   3/4 of the payload (base64's ratio), less the GCM tag, less room for the
 #   JSON shell — the largest frame whose envelope still fits under the cap.
 MAX_RELAY_FRAME = (MAX_RELAY_PAYLOAD - 64) * 3 // 4 - 16
+
+
+def frame_limit_for(max_payload: int) -> int:
+    """The largest frame whose envelope still fits under *max_payload* bytes.
+
+    The same derivation as :data:`MAX_RELAY_FRAME`, for a relay whose limit is
+    not this build's default — see ``Config.relay_max_message_bytes``.
+    """
+    return (max(64, int(max_payload)) - 64) * 3 // 4 - 16
+
 _SEEN_CAP = 512  # recent ciphertext hashes remembered
 
 # ── Internet pairing code (Round 14) ──────────────────────────────────────
@@ -331,10 +343,17 @@ def netpair_passphrase_error(pw: str) -> str | None:
     return None
 
 
-def pack_envelope(frame_bytes: bytes, key: bytes, now: float) -> bytes:
-    """Wrap an encoded ClipSync frame into an encrypted relay envelope."""
-    if len(frame_bytes) > MAX_RELAY_FRAME:
-        raise ValueError(f"frame too large for relay: {len(frame_bytes)} > {MAX_RELAY_FRAME}")
+def pack_envelope(
+    frame_bytes: bytes, key: bytes, now: float, max_frame: int | None = None
+) -> bytes:
+    """Wrap an encoded ClipSync frame into an encrypted relay envelope.
+
+    *max_frame* overrides :data:`MAX_RELAY_FRAME` for a relay whose per-message
+    limit the user set lower (or higher) than this build's default.
+    """
+    limit = MAX_RELAY_FRAME if max_frame is None else max_frame
+    if len(frame_bytes) > limit:
+        raise ValueError(f"frame too large for relay: {len(frame_bytes)} > {limit}")
     ct = encrypt(frame_bytes, key)
     env = {
         "v": ENVELOPE_VERSION,
@@ -633,7 +652,15 @@ class RelayTransport:
         password: str = "",
         private_brokers: list[str] | None = None,
         on_undecryptable: Callable[[str], None] | None = None,
+        max_payload: int | None = None,
     ):
+        # The broker's own ceiling, in bytes.  ``None`` keeps the default this
+        # module has always used; a configured value moves the envelope check
+        # here and, through :func:`frame_limit_for`, the chunk size chat
+        # derives from it (``ChatManager.relay_chunk_for``).
+        self._max_frame = frame_limit_for(
+            MAX_RELAY_PAYLOAD if max_payload is None else max_payload
+        )
         self._free_brokers = [b for b in brokers if isinstance(b, str) and b]
         self._private_brokers = [b for b in (private_brokers or []) if isinstance(b, str) and b]
         # Private endpoints first: a self-hosted broker is the preferred
@@ -841,9 +868,18 @@ class RelayTransport:
         if not primary_online and not mirrors:
             return False
         try:
-            blob = pack_envelope(frame_bytes, key, time.time())
+            blob = pack_envelope(frame_bytes, key, time.time(), max_frame=self._max_frame)
         except ValueError:
-            logger.debug("relay publish skipped (oversized frame)")
+            # Warning, not debug: this is the frame that never arrives, and the
+            # size the user set is the only thing that can explain it.  Saying so
+            # here is what turns "file transfer stalls halfway" into a line that
+            # names the limit and the frame that missed it.
+            logger.warning(
+                "relay publish skipped: %d-byte frame exceeds this relay's %d-byte limit "
+                "(see the relay message size setting)",
+                len(frame_bytes),
+                self._max_frame,
+            )
             return False
         except Exception:
             logger.debug("relay pack failed", exc_info=True)

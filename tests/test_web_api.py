@@ -723,6 +723,7 @@ class _SettingsCfg:
         self.private_key_pem = "KEY"
         self.relay_username = ""
         self.relay_password = ""
+        self.relay_max_message_bytes = 256 * 1024
 
 
 @pytest.fixture()
@@ -856,11 +857,19 @@ def test_get_settings_exposes_relay_username_and_password_flag():
     assert data["settings"]["relay_username"] == ""
     assert data["settings"]["relay_password_set"] is False
     assert "relay_password" not in data["settings"]
+    # The broker's per-message ceiling is a plain number and not a credential —
+    # so it is a value, where the password beside it is a flag.  It is readable
+    # and settable through this API even though the legacy panel draws no row
+    # for it: the desktop settings page is where the control lives, and an API
+    # that dropped the key would let a phone-side save reset it.
+    assert data["settings"]["relay_max_message_bytes"] == 256 * 1024
     cfg.relay_username = "clipsync_mqtt"
     cfg.relay_password = "s3cret!"
+    cfg.relay_max_message_bytes = 64 * 1024
     data, _ = settings_api.get_settings(cfg)
     assert data["settings"]["relay_username"] == "clipsync_mqtt"
     assert data["settings"]["relay_password_set"] is True
+    assert data["settings"]["relay_max_message_bytes"] == 64 * 1024
     assert "relay_password" not in data["settings"]
 
 

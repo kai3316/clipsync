@@ -155,6 +155,11 @@ export interface Device {
   update_available?: boolean;
   /** Whether an offer would carry the installer or only the news. */
   update_cached?: boolean;
+  /** The mirror of `update_available`, and the direction the feature is meant
+   *  to run in: that device is newer, so this one can ask it for the installer.
+   *  Both flags are the same comparison read from opposite ends — at most one is
+   *  ever set — and neither is set when the two builds are level. */
+  update_fetchable?: boolean;
   /** Set on a device paired by internet pairing code, whose only route is the
    *  public relay.  There is no pinned LAN certificate behind such a device, so
    *  every LAN-only action — dialing it, pairing it, offering it an update,
@@ -162,8 +167,23 @@ export interface Device {
    *
    *  On such a row `connection_state` is the relay's own view of the peer,
    *  because that link is the only one this device has: there is no second
-   *  route for the field to describe.  `relay` is what marks that reading. */
+   *  route for the field to describe.  `relay` is what marks that reading.
+   *
+   *  It marks the row, not the pairing: a device can hold both routes at once,
+   *  and the row it gets is whichever producer drew it — see `relay_paired`,
+   *  which is on every row. */
   relay?: boolean;
+  /** Whether this device holds an internet pairing, on *every* row and not only
+   *  on the ones the relay pairing drew.  A device paired by code can also be
+   *  paired over the LAN (and the reverse), and one row has to answer for both:
+   *  without this, a device paired by code that appeared on this network kept
+   *  the LAN card, whose chat, test and send-URL actions are each gated on the
+   *  LAN pairing it does not have. */
+  relay_paired?: boolean;
+  /** Whether the relay itself sees that device up.  The same reading
+   *  `connection_state` carries on a relay-only row, and the relay's answer on
+   *  a row that has a local route of its own. */
+  relay_online?: boolean;
   /** The name the user gave an internet-paired device.  Empty when there is
    *  none, which `name` cannot say: it falls back to the peer's own name. */
   alias?: string;

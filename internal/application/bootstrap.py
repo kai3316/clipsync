@@ -23,7 +23,7 @@ from internal.application.use_cases.overview import build_overview
 from internal.clipboard.format import ClipboardContent, ContentType
 from internal.clipboard.history_db import ClipboardHistoryDB
 from internal.config.config import config_dir, load, save
-from internal.data.logs import export_log, read_log_tail
+from internal.data.logs import export_log, read_log_tail, split_log_lines
 from internal.data.recovery import (
     config_problem,
     history_problem,
@@ -272,6 +272,14 @@ class SidecarApplication:
         set_sink = getattr(self.runtime, "set_update_sink", None)
         if set_sink is not None:
             set_sink(self.updates.finish_from_peer)
+        # The mirror of that: a peer whose own build is behind asks this machine
+        # for the installer, and the common case is that nobody here has ever
+        # downloaded it.  The runtime starts the download through the service
+        # rather than fetching the release itself, so the progress the window is
+        # already rendering and the asset a peer is sent are the same one.
+        set_downloader = getattr(self.runtime, "set_update_downloader", None)
+        if set_downloader is not None:
+            set_downloader(self.updates.start_download)
         # A peer may ask this machine for the files behind a history entry it
         # published to us; the store, not the runtime, answers which paths a
         # request may reach — so the runtime is handed the store's own resolver.
@@ -615,7 +623,7 @@ class SidecarApplication:
                 "pairing.start", "pairing.confirm", "pairing.reject", "pairing.unpair",
                 "devices.note", "devices.connect", "devices.disconnect", "devices.forget",
                 "devices.restore", "devices.purge", "devices.test", "devices.certs",
-                "devices.retrust", "devices.offer_update",
+                "devices.retrust", "devices.offer_update", "devices.fetch_update",
                 "companion.configure",
                 "url.send", "clipboard.push", "discovery.status",
                 "discovery.set_enabled", "discovery.set_visible",
@@ -675,10 +683,17 @@ class SidecarApplication:
         }
 
     def read_logs(self, lines=200) -> dict:
-        """Tail the application log, redacted, for the native log viewer."""
+        """Tail the application log, redacted, for the native log viewer.
+
+        ``problems`` is the subset of those same lines that reports something
+        going wrong, so the viewer can open on what is worth reading and keep
+        the running account one click away.
+        """
         if self.config is None:
             raise ApplicationError("APP_LOCKED", "Unlock ClipSync to read logs")
-        return {"logs": read_log_tail(self.config, lines)}
+        entries = read_log_tail(self.config, lines)
+        problems, _rest = split_log_lines(entries)
+        return {"logs": entries, "problems": problems}
 
     def export_logs(self, dest: str) -> dict:
         """Copy the log file to a destination the user chose in a save dialog.
