@@ -94,6 +94,7 @@ describe("desktop application store", () => {
     store.state.status = { ...status };
     store.state.devices = [pairedDevice];
     store.state.total = 7;
+    store.state.relayState = "connecting";
     state({ state: "restarting", attempt: 2, error: "SIDECAR_UNAVAILABLE" });
     expect(store.state.error).toEqual({
       code: "SIDECAR_RESTARTING",
@@ -104,6 +105,7 @@ describe("desktop application store", () => {
     // rather than left on screen looking live.
     expect(store.state.devices).toEqual([]);
     expect(store.state.total).toBe(0);
+    expect(store.state.relayState).toBe("");
     store.dispose();
   });
 

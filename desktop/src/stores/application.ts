@@ -72,6 +72,14 @@ export function createApplicationStore() {
     // submitted it returned.  Nothing else tells the pairing card to re-read:
     // its own pull happened before the partner had said anything.
     netpairEvent: null as { revision: number; data: Record<string, any> } | null,
+    // This machine's own relay link, mirrored from `relay.state.changed`.  The
+    // pairing card's line reads it live: the sidecar publishes every transition
+    // as it happens, where the status snapshot only says what was true when it
+    // was read — and for a relay that comes up seconds after the window opened,
+    // that was the moment before it connected, so the line sat on 连接中 until
+    // the reader pressed 刷新.  Empty = this session has not been told, and the
+    // snapshot is all there is.
+    relayState: "",
     // A dialog the phone's panel asked this window to open. The request travels
     // as an event because the host has no window of its own; `revision` makes
     // two identical requests distinguishable.
@@ -529,6 +537,14 @@ export function createApplicationStore() {
           if (event.name === "aiconfig.file" && data.type === "aiconfig_file") {
             state.aiFileEvent = { revision: (state.aiFileEvent?.revision || 0) + 1, data };
           }
+          // The relay link itself: coming up, dropping, or failing.  Folded in
+          // place, since the payload *is* the state — there is nothing to
+          // re-read.  It is also the one line on that card that changes with no
+          // user action behind it, so an event is the only thing that can keep
+          // it honest between reads.
+          if (event.name === "relay.state.changed") {
+            state.relayState = String(data.state || "");
+          }
           // A delivery receipt describes one send, not the clipboard: fold it
           // in place and stop.  Left to the fall-through below it would repaint
           // the whole history list on every transition — a screenshot of a
@@ -610,6 +626,12 @@ export function createApplicationStore() {
             const restarting = update.state === "restarting";
             favorites.reset();
             delivery.reset();
+            // The relay state too: it is a claim about a process that is gone,
+            // and the relaunched one publishes its own as it comes up.  Kept, it
+            // would outlive the sidecar and outrank the first status read of the
+            // new one — the card line is drawn from this value before anything
+            // else, so a stale 连接中 would sit over a relay that is already up.
+            state.relayState = "";
             clearTimeout(refreshTimer);
             ++statusSequence;
             ++requestSequence;

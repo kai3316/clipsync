@@ -1624,8 +1624,14 @@ const internetPairingCode = ref("");
 /** This machine's own relay link, in the runtime's words (off/connecting/
  * online/error).  Reported beside the peer list because a list that reads 离线
  * throughout means one thing when we are on the relay and another when we are
- * not — and only this separates the two. */
-const relayState = computed(() => String(internetPairing.value.relay || ""));
+ * not — and only this separates the two.
+ *
+ * The sidecar's own transition event outranks the status read, and deliberately:
+ * both name the same value, but the event is published as the relay changes
+ * while the snapshot only says what was true when it was read — so the read is
+ * the answer until the relay says otherwise, and the line follows the link
+ * rather than waiting for a 刷新. */
+const relayState = computed(() => store.state.relayState || String(internetPairing.value.relay || ""));
 const relayStateLabel = computed(() => {
   const state = relayState.value;
   if (state === "online") return t("在线");
