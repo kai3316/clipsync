@@ -453,8 +453,10 @@ export interface UpdateCheckResult {
   url: string;
   /** Whether this build can install what it finds in place, which only the
    *  host knows: it is the updater plugin matching this machine's bundle
-   *  against the release manifest.  Optional because it is the host's addition
-   *  and an older one does not send it. */
+   *  against the release manifest.  Absent when the plugin could not read the
+   *  manifest at all, which is not the same answer as `false` — the card offers
+   *  the in-place install for everything but a definite no, so an absent field
+   *  reads as "try it" rather than "replace the files by hand". */
   installable?: boolean;
   /** Why the check has no answer, when it has none — a sentence to show a
    *  reader, in this window's language.  Empty when `latest` is a real answer.

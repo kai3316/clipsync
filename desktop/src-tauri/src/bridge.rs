@@ -513,14 +513,14 @@ impl Bridge {
                     // the sidecar cannot: whether this build can replace itself.
                     //
                     // The window decides between "下载并安装" and a manual
-                    // download from that answer alone, but the silent check
-                    // originates in the sidecar, which knows nothing of the
-                    // plugin.  Forwarded as it arrives, the notice reached the
-                    // window with no answer attached, so the window read "not
-                    // installable" and offered the manual path — the same wrong
-                    // conclusion as a real refusal, on a machine that could have
-                    // installed it, and on every launch whose silent check found
-                    // a newer release.
+                    // download from that answer, and the silent check originates
+                    // in the sidecar, which knows nothing of the plugin.  Only a
+                    // definite "no" rules the in-place install out over there, so
+                    // a notice forwarded with no answer attached would offer an
+                    // install this build cannot perform — which is why the answer
+                    // is fetched first and travels with the frame.  The three
+                    // answers are told apart in `main.rs::update_check`; a lookup
+                    // that failed leaves the field off rather than claiming "no".
                     //
                     // Spawned rather than awaited: this runs on the stdout
                     // reader, and the manifest fetch must not stall the pipe.
@@ -528,13 +528,18 @@ impl Bridge {
                     let frame = value.clone();
                     tauri::async_runtime::spawn(async move {
                         let installable = match crate::updater(&handle) {
-                            Ok(updater) => matches!(updater.check().await, Ok(Some(_))),
-                            Err(_) => false,
+                            Ok(updater) => match updater.check().await {
+                                Ok(Some(_)) => Some(true),
+                                Ok(None) => Some(false),
+                                Err(_) => None,
+                            },
+                            Err(_) => None,
                         };
                         let mut frame = frame;
-                        if let Some(data) =
-                            frame.get_mut("data").and_then(|data| data.as_object_mut())
-                        {
+                        if let (Some(data), Some(installable)) = (
+                            frame.get_mut("data").and_then(|data| data.as_object_mut()),
+                            installable,
+                        ) {
                             data.insert("installable".into(), json!(installable));
                         }
                         let _ = handle.emit_to("main", "sidecar:event", frame);

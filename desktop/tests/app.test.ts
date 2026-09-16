@@ -1573,8 +1573,12 @@ describe("history rendering", () => {
       emit = callback;
       return () => {};
     });
+    // A definite "this build has nothing it could install" is what keeps the
+    // manual download in the card; the in-place install is the other case (see
+    // the case below).  The download this drives is the sidecar's.
     vi.mocked(bridge.updateCheck).mockResolvedValueOnce({
-      available: true, latest: "v2.0.0", current: "1.0.0", url: "https://example.com" });
+      available: true, latest: "v2.0.0", current: "1.0.0", url: "https://example.com",
+      installable: false });
     const app = mount(App);
     try {
       await flushPromises();
@@ -1616,7 +1620,7 @@ describe("history rendering", () => {
     }
   });
 
-  it("offers to install in place when the host says the update is installable", async () => {
+  it("offers to install in place unless the host says this build cannot", async () => {
     vi.mocked(bridge.status).mockResolvedValue({ version: "test", health: "ready",
       device_name: "Local", session_id: "s", seq: 0, sync_state: "not_started",
       capabilities: ["update.status"] } as any);
@@ -1626,20 +1630,33 @@ describe("history rendering", () => {
       return () => {};
     });
     // `installable` is the host's answer to a different question from
-    // `available`: there is a newer release, and this build can replace itself
-    // with it.  Both true is the case the label has to follow.
+    // `available`, and only a definite no takes the install away.  A host that
+    // could not read the release manifest leaves the field off entirely, which
+    // is the first check here: a lookup that failed says nothing about what
+    // this build can do, so the reader is offered the install this application
+    // performs rather than told to replace the files by hand.
     vi.mocked(bridge.updateCheck).mockResolvedValueOnce({
-      available: true, latest: "v2.0.0", current: "1.0.0", url: "https://example.com",
-      installable: true });
+      available: true, latest: "v2.0.0", current: "1.0.0", url: "https://example.com" });
     const app = mount(App);
     try {
       await flushPromises();
       await app.get('[aria-label="设置"]').trigger("click");
       await flushPromises();
-      await app.findAll("button").find((button) => button.text().includes("立即检查更新"))!
-        .trigger("click");
-      await flushPromises();
+      const check = () => app.findAll("button")
+        .find((button) => button.text().includes("立即检查更新"))!;
       const labels = () => app.findAll("button").map((button) => button.text());
+      await check().trigger("click");
+      await flushPromises();
+      expect(labels()).toContain("下载并安装");
+      expect(labels()).not.toContain("下载更新");
+
+      // And the same offer for the host that answered "yes": there is a newer
+      // release, and this build can replace itself with it.
+      vi.mocked(bridge.updateCheck).mockResolvedValueOnce({
+        available: true, latest: "v2.0.0", current: "1.0.0", url: "https://example.com",
+        installable: true });
+      await check().trigger("click");
+      await flushPromises();
       expect(labels()).toContain("下载并安装");
       // The manual path must be gone, not merely joined: the card cannot both
       // promise to install and tell the reader to replace the files by hand.

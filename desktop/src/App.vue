@@ -1830,10 +1830,15 @@ const autoUpdateCheckBusy = ref(false);
 const updateState = computed(() => store.state.update);
 const updateAvailable = computed(() => store.state.updateCheck?.available === true);
 const updateLatest = computed(() => store.state.updateCheck?.latest || "");
-// Whether this build can replace itself. The host answers it by matching this
-// machine's bundle against the release manifest, so it is a different question
-// from "is there a newer version" and the card must be able to say no.
-const updateInstallable = computed(() => store.state.updateCheck?.installable === true);
+// Whether the card offers the install this application performs itself. The
+// host answers it by matching this machine's bundle against the release
+// manifest, so it is a different question from "is there a newer version" --
+// and only a *definite* no takes the install away. The host leaves the field
+// off when it could not read the manifest at all, which says nothing about what
+// this build can do; reading that as "no" is what turned a dropped connection
+// into an instruction to replace the application by hand, when the same click
+// would have installed it once the network was back.
+const updateInstallable = computed(() => store.state.updateCheck?.installable !== false);
 // Fixed group order, mirroring the legacy diagnostics panel: a group missing
 // from the payload is skipped rather than rendered empty.
 const diagnosticGroupOrder = ["system", "network", "internet", "ai_config", "chat", "transfer", "filesystem"];

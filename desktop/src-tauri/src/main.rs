@@ -1763,17 +1763,29 @@ async fn update_check(
     let mut result = host.bridge().await?.call("update.check", json!({})).await?;
     // Whether this build can install what it finds is a different question with
     // a different answer, and only the updater plugin knows it: `check` is what
-    // matches this machine's bundle against the release manifest, so an `Ok`
-    // is the entire answer.  Every failure — no manifest, no entry for this
-    // platform, GitHub unreachable — means "not installable" and must not
-    // travel as an error: the manifest is absent for every release published
-    // before this feature and for a few minutes after each tag, and on those
-    // the card still has a real answer to give from the sidecar's half.
+    // matches this machine's bundle against the release manifest.  It has three
+    // answers, and the field carries the plugin's own, never a failure dressed
+    // as one:
+    //
+    // * `Ok(Some(_))` — there is a payload for this platform: true.
+    // * `Ok(None)` — a real refusal, this build has nothing it could install:
+    //   false, and the card keeps the manual path, which is then the truth.
+    // * anything else — the manifest could not be read (GitHub unreachable, or
+    //   the release not carrying one yet): no field at all, which the window
+    //   reads as "could not ask" and answers by offering the install it would
+    //   otherwise have performed.  Reported as `false`, this turned a transient
+    //   failure into a sentence telling the reader to replace the application
+    //   by hand, on a machine that would have installed it without help a
+    //   minute later.
     let installable = match updater(&app) {
-        Ok(updater) => matches!(updater.check().await, Ok(Some(_))),
-        Err(_) => false,
+        Ok(updater) => match updater.check().await {
+            Ok(Some(_)) => Some(true),
+            Ok(None) => Some(false),
+            Err(_) => None,
+        },
+        Err(_) => None,
     };
-    if let Some(object) = result.as_object_mut() {
+    if let (Some(object), Some(installable)) = (result.as_object_mut(), installable) {
         object.insert("installable".into(), json!(installable));
     }
     Ok(result)
@@ -1877,8 +1889,18 @@ async fn update_install(
     host: State<'_, Host>,
 ) -> Result<Value, BridgeError> {
     authorize(&window)?;
-    let Some(update) = updater(&app)?.check().await? else {
-        return Ok(json!({"ok": true, "installed": false, "reason": "up_to_date"}));
+    let update = match updater(&app)?.check().await {
+        Ok(Some(update)) => update,
+        Ok(None) => return Ok(json!({"ok": true, "installed": false, "reason": "up_to_date"})),
+        // A manifest that could not be read is not "nothing to install", and the
+        // card offers this command for exactly that case (see `update_check`).
+        // The failing phase is published before the error travels up, so the
+        // card can say what went wrong instead of the click appearing to do
+        // nothing at all.
+        Err(err) => {
+            emit_update_state(&app, json!({"phase": "failed", "error": err.to_string()}));
+            return Err(err.into());
+        }
     };
     let version = update.version.clone();
     let asset_url = update.download_url.clone();
