@@ -54,33 +54,13 @@ jobs:
 
           What is new in this release:
 
-          - The device list's right-click menu carries the version question
-            now: which version a device is on, and the entry that changes it.
-            A device behind this one can be sent this machine's installer, one
-            ahead can be fetched from -- and when neither is offered, the entry
-            is drawn dimmed with the reason in its tooltip rather than simply
-            not being there.  "Nothing to send", "too old to call" and "another
-            platform" all used to look the same: a button that was absent.
-          - A device no longer has to announce which application it runs to be
-            updated from here.  The installer for the other application cannot
-            pass the digest check on the machine it reaches, so a wrong offer is
-            refused there rather than never made here -- and requiring the
-            announcement left every device on 1.0.12 and earlier un-updatable
-            from this side, which is where a device that had not yet updated
-            itself still sat.  Devices older than 1.0.12 are still not called: a
-            call to one of those arrives as a pairing request and puts a pairing
-            code on that screen.
-          - The 互联网 chip on a device row appears only once that device has an
-            internet pairing.  It read 互联网·未配对 on every device on the
-            network, beside the 未配对 that stands for the local pairing and
-            means something else.
-          - The internet-pairing card has its space back.  Its title row sat on
-            the card's top border, with the refresh button and the switch drawn
-            across it, and it was the one card on the page whose title had no
-            rule under it.  Each of the two code panels' headings sat 22px from
-            what it heads while the rows under it sat 8px apart, and the paired
-            devices are opened now by the same rule the page's other sections
-            use.
+          - The reason the device list gives for a device on another platform
+            reads the same from either entry.  It was written from the sending
+            side -- "this machine's installer is no use to it" -- and the same
+            cause dims the 获取更新 entry whenever the device on the other
+            platform is the newer of the two, so a reader asking to fetch was
+            told what this machine had to send.  The sentence is about the pair
+            now: neither one's installer works on the other.
 
           The device name is now published in the mDNS record, to the local
           network.  That is what lets devices show the name you chose rather
