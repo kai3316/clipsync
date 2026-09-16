@@ -283,8 +283,19 @@ jobs:
   release:
     # build.yml creates the release in its `prepare` job the moment the tag
     # lands, precisely so this uploader cannot race it; this job adds the
-    # desktop installers to it, so one Releases page carries both apps.
-    # Nothing is created or deleted here.
+    # desktop installers to it, so one Releases page carries both apps, and it
+    # is what publishes the release once they are there.
+    #
+    # The release is created as a draft because publication is what puts a
+    # version in front of every installed application: they read the newest
+    # *published* release, and the desktop client then reads `latest.json` off
+    # it.  That manifest is written below, minutes after the tag lands, and a
+    # release published before it exists leaves every client asking for a file
+    # that is not there -- which the app can only report as "cannot install
+    # this one".  So the publication happens here, as the last step, when the
+    # release is complete; build.yml's `release` job publishes as well, on a
+    # timeout, so that a failure on this side cannot hide a release the
+    # previous application is waiting for.
     #
     # `needs: package` is what makes the artifacts this job attaches the ones
     # just built.  It is worth naming because dropping it would not fail the
@@ -434,3 +445,14 @@ jobs:
 
           cat latest.json
           gh release upload "$tag" --repo "$GITHUB_REPOSITORY" --clobber latest.json
+
+      - name: Publish the release
+        # The last step of the last job that touches this release, so publishing
+        # here is publishing a complete one: the installers, their signatures
+        # inside the manifest, and the manifest itself are all up by now.  No-op
+        # if build.yml's job got there first.
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release edit "${{ github.ref_name }}" --repo "$GITHUB_REPOSITORY" \
+            --draft=false --latest

@@ -24,8 +24,16 @@ jobs:
     # -- and a macOS runner queue of 28 minutes blew straight past the Tauri
     # side's 10-minute budget, failing its uploader permanently.  Creating the
     # release up front means it exists within seconds, so neither uploader can
-    # race the other.  A release is briefly visible with no assets; that is the
-    # price of not having a timeout decide whether the desktop app ships.
+    # race the other.
+    #
+    # A draft, not a published release, and the difference is the whole update
+    # check: every installed application reads the newest *published* release,
+    # and the desktop client then reads `latest.json` off it -- a file only the
+    # Tauri build produces, minutes later.  Published here, the release told
+    # every client a new version was out and then 404'd the manifest that makes
+    # it installable, which the card could only read as "install this one by
+    # hand".  It is published by the desktop job that attaches the manifest, or
+    # by `release` below if that never happens (see the timeout there).
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     steps:
@@ -127,7 +135,8 @@ jobs:
           if gh release view "$TAG" --repo "$REPO" >/dev/null 2>&1; then
             echo "Release $TAG already exists; leaving it in place."
           else
-            gh release create "$TAG" --repo "$REPO" --title "ClipSync $TAG" --notes "$NOTES"
+            gh release create "$TAG" --repo "$REPO" --title "ClipSync $TAG" \
+              --notes "$NOTES" --draft
           fi
 
   build:
@@ -312,3 +321,30 @@ jobs:
               echo "Skipping missing artifact: $f"
             fi
           done
+
+      - name: Publish the release once it carries its update manifest
+        # The desktop workflow attaches `latest.json` and publishes on the back
+        # of it; this is the backstop for a desktop build that fails or never
+        # finishes.  Waiting first is the point of it: a release whose manifest
+        # is missing is visible to every installed application, and tells them
+        # there is a new version and then fails to give them one to install.
+        # Bounded at 30 minutes, the order of the worst runner queue seen here,
+        # and published anyway when the wait runs out -- a broken desktop build
+        # must not be able to hide a release the previous application installs.
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TAG="${{ github.ref_name }}"
+          REPO="$GITHUB_REPOSITORY"
+          has_manifest() {
+            gh release view "$TAG" --repo "$REPO" --json assets --jq '.assets[].name' \
+              | grep -qx latest.json
+          }
+          for _ in $(seq 1 90); do
+            if has_manifest; then break; fi
+            sleep 20
+          done
+          if ! has_manifest; then
+            echo "::warning::No latest.json on $TAG after 30 minutes; publishing without a desktop update manifest."
+          fi
+          gh release edit "$TAG" --repo "$REPO" --draft=false --latest
