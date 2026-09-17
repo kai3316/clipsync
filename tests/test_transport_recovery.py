@@ -27,7 +27,7 @@ def _relay(monkeypatch):
     t = R.RelayTransport(
         ["wss://broker.example:8884/mqtt"],
         get_channels=lambda: {},
-        on_frame=lambda frame, _topic=None: None,
+        on_frame=lambda frame, _topic=None, _key_index=0: None,
         on_state=lambda s: None,
         client_factory=lambda: None,
         sleeper=lambda s: None,

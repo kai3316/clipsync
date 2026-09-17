@@ -64,7 +64,7 @@ function activeStatus(item: Transfer): string {
  * are 256 KiB before the envelope's base64 and pause/resume cannot pick a
  * transfer back up off a public broker, which is why files reach an
  * internet-paired device as *chat attachments* instead — chunked to the relay's
- * size and capped at 5 MB.  The sidecar refuses the send with NOT_CONNECTED,
+ * size.  The sidecar refuses the send with NOT_CONNECTED,
  * so offering the target here would be a button whose click cannot work.
  */
 const props = defineProps<{
@@ -387,7 +387,7 @@ onUnmounted(() => {
          none of them and says nothing reads as a device that is missing rather
          than as a route this page does not have. -->
     <p v-if="relayOnlyTargets.length" class="note transfers-relay-note" role="status">
-      {{ t("互联网配对的设备请到聊天页发送文件：中继单块上限更小，附件已按此切分，最大 5 MB。") }}
+      {{ t("互联网配对的设备请到聊天页发送文件：中继单块上限更小，附件已按此切分。") }}
     </p>
     <!-- A drop answers the picker, not the target: the files it brought are
          shown with the one question it left open — which machine — and nothing

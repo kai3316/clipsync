@@ -854,14 +854,9 @@
           return;
         }
         var file = files[0];
-        // Internet-only peers ship bytes through the public relay, which caps
-        // the file at 5 MB.  Reject client-side so the user hears the reason
-        // immediately instead of waiting for an upload + server round-trip.
-        if (this.activePeerIsInternetOnly && file.size > 5 * 1024 * 1024) {
-          this.store.showToast(this.t('chat.err_internet_file_cap'), 3000);
-          e.target.value = '';
-          return;
-        }
+        // No size gate here: the relay caps a *message*, and the sender chunks
+        // the file to fit one, so any file the app accepts can cross it.  Only
+        // the app-wide limit is left, and the server is what enforces it.
         this.sendingFile = true;
         // purpose=chat lands the file in a temp dir on the server (never the
         // received-files dir) and skips the receive notification/sound/Files
@@ -877,11 +872,10 @@
           .then(function (res) {
             e.target.value = '';
             if (res && res.ok === false) {
-              // The server only answers this specific code when the peer is
-              // internet-only and the file exceeds the relay cap (a race the
-              // client-side gate above can miss when the peer was offline).
-              if (res.error === 'internet_file_cap') {
-                self.store.showToast(self.t('chat.err_internet_file_cap'), 3000);
+              // The server answers this specific code when the file is past
+              // the app-wide size cap; anything else is a real send failure.
+              if (res.error === 'file_too_large') {
+                self.store.showToast(self.t('chat.err_file_too_large'), 3000);
               } else {
                 self.store.showToast(self.t('chat.err_send_failed'), 2500);
               }
@@ -1072,14 +1066,18 @@
           sending: 'chat.file.status.sending',
           failed: 'chat.file.status.failed',
           declined: 'chat.file.status.declined',
-          rejected: 'chat.file.status.declined',
+          // A receiver-reported failure is not a decline: nobody decided
+          // anything, something went wrong on the far side.  Each code says
+          // which, so the sender is not left asking the other person why they
+          // refused a file they never refused.
+          rejected: 'chat.file.status.failed',
           cancelled: 'chat.file.status.cancelled',
           cancelled_by_peer: 'chat.file.status.cancelled',
           peer_offline: 'chat.file.status.failed',
-          error_timeout: 'chat.file.status.failed',
-          error_size_mismatch: 'chat.file.status.failed',
-          error_security: 'chat.file.status.failed',
-          error_disk: 'chat.file.status.failed',
+          error_timeout: 'chat.file.status.error_timeout',
+          error_size_mismatch: 'chat.file.status.error_size_mismatch',
+          error_security: 'chat.file.status.error_security',
+          error_disk: 'chat.file.status.error_disk',
         };
         return this.t(map[st] || 'chat.file.status.pending');
       },

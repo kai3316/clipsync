@@ -459,12 +459,24 @@ def make_app_stub(**attrs):
         relay_secret=attrs.get("relay_secret", "aa" * 32),
         peer_relay_secrets=dict(attrs.get("peer_relay_secrets", {})),
         netpair_secrets=dict(attrs.get("netpair_secrets", {})),
+        # The key-agreement state a real config carries; empty here, so a
+        # pairing that has exchanged no public key stays on the code-derived
+        # channel key (which is what a peer on an older build gets too).
+        netpair_dh_key="",
+        netpair_peer_keys={},
         relay_brokers=["wss://x:8884/mqtt"],
         peers=peers,
     )
     app.cfg = c
     app._netpair_last_seen = dict(attrs.get("_netpair_last_seen", {}))
     app._netpair_pw = lambda _a=app: Application._netpair_pw(_a)
+    app._netpair_dh_private = lambda _a=app: Application._netpair_dh_private(_a)
+    app._netpair_dh_public = lambda _a=app: Application._netpair_dh_public(_a)
+    app._netpair_peer_dh = lambda pid, _a=app: Application._netpair_peer_dh(_a, pid)
+    app._note_netpair_peer_dh = lambda pid, pub, _a=app: Application._note_netpair_peer_dh(
+        _a, pid, pub
+    )
+    app._netpair_key_for = lambda secret, pid, _a=app: Application._netpair_key_for(_a, secret, pid)
 
     class Relay:
         def __init__(self):

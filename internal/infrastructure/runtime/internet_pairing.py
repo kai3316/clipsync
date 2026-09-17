@@ -160,6 +160,117 @@ class InternetPairingService:
             getattr(self.config, "netpair_password", "") or ""
         )
 
+    def ensure_netpair_dh_key(self) -> str:
+        """This machine's X25519 private key for netpair channels, created once.
+
+        Persisted beside ``relay_secret``, and never transmitted: only its
+        public half goes out, inside the pairing hello.  The channel key is
+        derived from what the two halves agree on, so a recording of a pairing
+        carries nothing that can be used to rederive it — which is what the
+        35-bit code alone could never provide.
+        """
+        private = str(getattr(self.config, "netpair_dh_key", "") or "")
+        if private:
+            return private
+        from internal.security.keyexchange import generate_keypair
+
+        private, _public = generate_keypair()
+        self.config.netpair_dh_key = private
+        try:
+            self._save_config()
+        except Exception:
+            # The live value is what this run's channels are derived from; it
+            # is the next start that has to find it on disk.
+            logger.warning("Could not persist the netpair key-agreement key", exc_info=True)
+        return private
+
+    def netpair_public_key(self) -> str:
+        """The public half of :meth:`ensure_netpair_dh_key`, for the hello."""
+        from internal.security.keyexchange import public_from_private
+
+        return public_from_private(self.ensure_netpair_dh_key()) or ""
+
+    def peer_dh_key(self, peer_id) -> str:
+        """The stored public key of *peer_id*, or "" when it is not known yet."""
+        if not isinstance(peer_id, str) or not peer_id:
+            return ""
+        return str((getattr(self.config, "netpair_peer_keys", {}) or {}).get(peer_id, "") or "")
+
+    def note_peer_dh_key(self, peer_id, public_key) -> bool:
+        """Store the public key a peer's hello carried; True when it changed.
+
+        A change means the peer reinstalled or reset its config, and the channel
+        key moves with it.  Nothing has to be told: every publish and every
+        decryption derives from the stored value on the spot.  Rejecting a value
+        that is not a 32-byte public key is what keeps a peer from writing
+        something unusable into the config — the frame it arrived on is one a
+        peer sent, so it is data to check, not a value to trust.
+        """
+        from internal.security.keyexchange import is_public_key
+
+        if not isinstance(peer_id, str) or not peer_id or not is_public_key(public_key):
+            return False
+        keys = self.config.netpair_peer_keys
+        if keys.get(peer_id) == public_key:
+            return False
+        keys[peer_id] = public_key
+        return True
+
+    def netpair_key_for(self, secret: str, peer_id) -> bytes | None:
+        """The key one netpair channel is under, or None when it has none.
+
+        The session key once the peer's public half is known — which is every
+        frame after the pairing handshake, and the goal of the whole exercise —
+        and the code-derived key before that, because the handshake hello is
+        what carries the public half and so has to be readable without it.
+        """
+        from internal.security.keyexchange import shared_secret
+        from internal.transport.relay import netpair_key, netpair_session_key
+
+        if not secret:
+            return None
+        peer_key = self.peer_dh_key(peer_id)
+        if peer_key:
+            shared = shared_secret(self.ensure_netpair_dh_key(), peer_key)
+            if shared is not None:
+                return netpair_session_key(secret, shared, self.netpair_password())
+        return netpair_key(secret, self.netpair_password())
+
+    def netpair_keys_for_topic(self, topic: str) -> list[bytes]:
+        """Every key a frame on *topic* may be under, session key first.
+
+        The list is what ``RelayTransport`` walks when decrypting, so a channel
+        keeps reading the handshake while the pairing moves onto the session
+        key — and a peer that has not yet learned our public half is still
+        heard.  Once a pairing's peer key is stored, the code-derived key stays
+        on the list for exactly one kind of frame; the runtime enforces that
+        (see ``_receive_relay``), because the list itself cannot tell one frame
+        from another.
+        """
+        if not topic:
+            return []
+        from internal.transport.relay import netpair_key, netpair_session_key, netpair_topic
+
+        for owner, secret in self._all_secrets().items():
+            if not secret or netpair_topic(secret) != topic:
+                continue
+            keys = []
+            peer_key = self.peer_dh_key(owner)
+            if peer_key:
+                from internal.security.keyexchange import shared_secret
+
+                shared = shared_secret(self.ensure_netpair_dh_key(), peer_key)
+                if shared is not None:
+                    keys.append(netpair_session_key(secret, shared, self.netpair_password()))
+            keys.append(netpair_key(secret, self.netpair_password()))
+            return keys
+        return []
+
+    def channel_key(self, topic: str) -> bytes | None:
+        """The key to *publish* on *topic* under, or None when it is not ours."""
+        keys = self.netpair_keys_for_topic(topic)
+        return keys[0] if keys else None
+
     def ensure_relay_secret(self) -> str:
         """This machine's own relay secret, generated and persisted on first use.
 
@@ -203,18 +314,21 @@ class InternetPairingService:
         this machine had not subscribed to, which reads exactly like a peer that
         is simply not there.
         """
-        from internal.transport.relay import (
-            derive_key,
-            derive_topic,
-            netpair_key,
-            netpair_topic,
-        )
+        from internal.transport.relay import derive_key, derive_topic, netpair_topic
 
-        channels = {
-            netpair_topic(secret): netpair_key(secret, self.netpair_password())
-            for secret in self._all_secrets().values()
-            if secret
-        }
+        # A netpair channel is a *list* of keys — the DH session key first, the
+        # code-derived one after it — because the handshake hello is what
+        # carries the public halves the session key is made from, so it has to
+        # be readable before that key exists.  The transport tries them in
+        # order.  Everything else is a single key and stays one.
+        channels = {}
+        for owner, secret in self._all_secrets().items():
+            if not secret:
+                continue
+            keys = self.netpair_keys_for_topic(netpair_topic(secret))
+            if not keys:
+                keys = [self.netpair_key_for(secret, owner)]
+            channels[netpair_topic(secret)] = keys
         enrolled = [
             (pid, secret)
             for pid, secret in (getattr(self.config, "peer_relay_secrets", {}) or {}).items()
@@ -454,17 +568,37 @@ class InternetPairingService:
             return False
         from internal.protocol.codec import encode_frame
         from internal.transport.relay import netpair_key, netpair_topic
+
+        topic = netpair_topic(secret)
         frame = encode_frame(
             {"msg_type": "netpair_hello", "peer_id": target_peer_id,
+             # The public half of our key-agreement key.  This frame is the
+             # only place it is ever published, and it is what the peer needs
+             # to derive the channel key that this frame itself cannot be
+             # protected by.
+             "dh_pub": self.netpair_public_key(),
              "device_name": getattr(self.config, "device_name", "") or "", "ts": time.time()},
             source_device=self.config.device_id,
         )
-        return bool(self.relay.publish(
-            frame, netpair_topic(secret),
-            netpair_key(secret, self.netpair_password()),
-        ))
+        # The code-derived key, and only it.  This frame is the handshake: it
+        # is what tells the peer our public half, so it cannot be protected by
+        # the agreed key it exists to establish, and the channel keeps the
+        # code-derived key on its read list for exactly this frame (see
+        # ``netpair_keys_for_topic``).  Publishing it under the agreed key as
+        # well would buy nothing — a peer holds the code key whenever it holds
+        # the secret — and would cost something real: a peer that has not
+        # learned our public half yet cannot open it, and the transport reads a
+        # frame it cannot open as a password mismatch and says so to the user,
+        # in the middle of an ordinary pairing.
+        sent = False
+        try:
+            key = netpair_key(secret, self.netpair_password())
+            sent = bool(self.relay.publish(frame, topic, key))
+        except Exception:
+            logger.debug("netpair hello publish failed", exc_info=True)
+        return sent
 
-    def handle_hello(self, source_device, incoming_tag, name="", topic=""):
+    def handle_hello(self, source_device, incoming_tag, name="", topic="", dh_pub=""):
         """One ``netpair_hello`` off the relay, resolved into a pairing step.
 
         Two halves, told apart by the identity the hello addresses rather than
@@ -508,6 +642,10 @@ class InternetPairingService:
         self.config.netpair_secrets[source_device] = secret
         self._waiting_since.pop(source_device, None)
         self.note_hello(source_device, name or "")
+        # The peer's public key, which turns this channel from code-keyed into
+        # DH-keyed.  Recorded before the reply is published (the caller does
+        # that next), so the reply already rides the session key.
+        self.note_peer_dh_key(source_device, dh_pub)
         try:
             self._save()
         except Exception:
@@ -633,6 +771,10 @@ class InternetPairingService:
             raise ApplicationError("NOT_FOUND", "Internet peer not found")
         self.config.netpair_secrets.pop(peer_id, None)
         self.config.netpair_aliases.pop(peer_id, None)
+        # The peer's key-agreement public key goes with the secret it keys: a
+        # pairing that is undone leaves no material behind, and one that is
+        # made again stores the peer's current key from its next hello.
+        (getattr(self.config, "netpair_peer_keys", {}) or {}).pop(peer_id, None)
         self._names.pop(peer_id, None)
         self._last_seen.pop(peer_id, None)
         # Which is also how a pairing that is still waiting is called off: its

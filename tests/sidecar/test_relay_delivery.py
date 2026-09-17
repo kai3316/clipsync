@@ -455,10 +455,11 @@ def test_a_lan_delivered_chat_frame_waits_for_its_relay_ack(relay_rig):
 def test_an_internet_only_peer_gets_relay_safe_file_chunks(relay_rig):
     runtime, transport = relay_rig.runtime, relay_rig.transport
     # Not connected, but paired over the relay: every byte has to fit an
-    # envelope, so chat must chunk relay-safe and refuse anything past the cap.
+    # envelope, so chat must chunk relay-safe.  There is no cap on the file
+    # itself — the relay limits one *message*, and chunking already cuts to it.
     send = runtime._chat_send_fn("remote")
     assert send.chunk_size == ChatManager.RELAY_CHUNK_SIZE
-    assert send.internet_cap == ChatManager.RELAY_FILE_CAP
+    assert not hasattr(send, "internet_cap")
 
     # ...and it has to be a number the relay will actually take.  Asserting it
     # equals the constant does not say that, and did not: it was 224 KiB, every
@@ -747,7 +748,12 @@ def test_the_relay_channels_cover_both_ways_a_peer_can_be_paired(relay_rig):
 
     channels = service.channels()
 
-    assert channels[netpair_topic("netpair-secret")] == netpair_key("netpair-secret", "")
+    # A netpair channel carries a *list* of acceptable keys — the agreed one
+    # first, the code-derived one after it — because the handshake hello is
+    # what carries the public halves the agreed key is made from.  With no
+    # peer key stored there is nothing to agree with yet, so the list is the
+    # code-derived key alone.
+    assert channels[netpair_topic("netpair-secret")] == [netpair_key("netpair-secret", "")]
     assert channels[derive_topic("our-relay-secret", "enrolled-secret")] == derive_key(
         "our-relay-secret", "enrolled-secret"
     )
@@ -804,18 +810,18 @@ def test_the_netpair_key_follows_the_one_password_the_user_sets(relay_rig):
     config.encryption_password = "the-users-password"
     config.netpair_password = ""
     assert service.netpair_password() == "the-users-password"
-    assert service.channels()[netpair_topic("netpair-secret")] == netpair_key(
-        "netpair-secret", "the-users-password"
-    )
+    assert service.channels()[netpair_topic("netpair-secret")] == [
+        netpair_key("netpair-secret", "the-users-password")
+    ]
 
     # The older field is still honoured where there is no encryption password to
     # prefer, so a passphrase saved before the two were merged keeps working.
     config.encryption_password = ""
     config.netpair_password = "legacy-only"
     assert service.netpair_password() == "legacy-only"
-    assert service.channels()[netpair_topic("netpair-secret")] == netpair_key(
-        "netpair-secret", "legacy-only"
-    )
+    assert service.channels()[netpair_topic("netpair-secret")] == [
+        netpair_key("netpair-secret", "legacy-only")
+    ]
 # ------------------------------------------- the secret that opens the channel
 #
 # The enrolled channel is derived from two secrets, one per machine, so neither
@@ -918,7 +924,7 @@ def test_an_enroll_with_an_unusable_secret_changes_nothing(relay_rig):
     # same claim: a bad secret is not an enrollment.
     assert len(transport.sent) == sent
     assert runtime.internet_pairing.channels() == {
-        netpair_topic("netpair-secret"): netpair_key("netpair-secret", "")
+        netpair_topic("netpair-secret"): [netpair_key("netpair-secret", "")]
     }
 
 

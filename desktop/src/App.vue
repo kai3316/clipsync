@@ -1637,7 +1637,12 @@ function aiFolderDiff(row: AiRow): Array<{ state: string; label: string; count: 
  * a sent-requests line and then nothing — the files landing changed the
  * inventory silently.  This is the second half: which peer, how many were
  * asked for, and how they have come back. */
-const aiPullProgress = ref<{ peerId: string; total: number; done: number; failed: number } | null>(null);
+const aiPullProgress = ref<{ peerId: string; total: number; done: number; failed: number;
+  /** One line per file that did not land: "<rel_path>：<why>".  Kept so the
+   * completion message can say why instead of only how many — five files
+   * failing on every retry with nothing naming the reason is what a bare count
+   * looked like. */
+  failures: string[] } | null>(null);
 /** How the last pull ended, for the line that reports it: empty while a pull is
  * running or before one has. */
 const aiPullOutcome = ref<"" | "done" | "failed">("");
@@ -3583,6 +3588,16 @@ function aiPullErrorText(code: string): string {
   if (code === "legacy_peer_read_only") return t("该设备版本过旧，只能浏览，不能作为迁移来源");
   return code;
 }
+
+/** Why a file did not land, in words.  Same rule as above: an unknown code is
+ * shown as it arrived. */
+function aiLandReasonText(reason: string): string {
+  if (reason === "append_not_text") return t("不是文本文件，无法追加合并");
+  if (reason === "backup_failed") return t("本地文件备份失败");
+  if (reason === "io_error") return t("本地文件写入失败");
+  if (reason === "no_local_root") return t("本机没有与之匹配的监控目录");
+  return reason;
+}
 async function pullAiRemote(items: Array<Record<string, any>>, mode = "copy") {
   const peerId = aiPeerId.value;
   if (!items.length) return;
@@ -3609,7 +3624,10 @@ async function pullAiRemote(items: Array<Record<string, any>>, mode = "copy") {
     // refused outright failed here rather than by never arriving, so those are
     // counted into the same report as the files that fail to land.
     aiPullProgress.value = requested || errors.length
-      ? { peerId, total: requested + errors.length, done: 0, failed: errors.length }
+      ? {
+          peerId, total: requested + errors.length, done: 0, failed: errors.length,
+          failures: errors.map(aiPullErrorText),
+        }
       : null;
     aiRemoteMessage.value = t("已发送 {count} 个拉取请求，等待文件接收", { count: requested }) +
       (errors.length ? t("；部分请求失败：{errors}", { errors: errors.map(aiPullErrorText).join("，") }) : "");
@@ -3632,7 +3650,10 @@ function finishAiPull() {
   aiPullProgress.value = null;
   if (pull.failed) {
     aiPullOutcome.value = "failed";
-    aiRemoteMessage.value = t("拉取完成：{ok} 个成功、{failed} 个失败", { ok: pull.done, failed: pull.failed });
+    aiRemoteMessage.value = t("拉取完成：{ok} 个成功、{failed} 个失败", { ok: pull.done, failed: pull.failed }) +
+      // The reasons, not just the count: without them the same files fail on
+      // every retry and nothing on screen says what would have to change.
+      (pull.failures.length ? t("：{reasons}", { reasons: pull.failures.join("；") }) : "");
   } else {
     aiPullOutcome.value = "done";
     aiRemoteMessage.value = t("拉取完成：{count} 个文件已更新", { count: pull.done });
@@ -3652,8 +3673,16 @@ watch(() => state.aiFileEvent, (update) => {
   if (!update || !pull) return;
   const data = update.data || {};
   if (String(data.peer_id || "") !== pull.peerId) return;
-  if (data.status === "error") pull.failed += 1;
-  else pull.done += 1;
+  if (data.status === "error") {
+    pull.failed += 1;
+    // The sidecar reports why it refused to land the file next to the status
+    // ("append_not_text", "io_error", …); keep it with the file it belongs to.
+    const reason = String(data.reason || "");
+    pull.failures.push(
+      reason ? `${String(data.rel_path || "")}：${aiLandReasonText(reason)}`
+             : String(data.rel_path || ""),
+    );
+  } else pull.done += 1;
   if (pull.done + pull.failed >= pull.total) finishAiPull();
 });
 

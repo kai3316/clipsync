@@ -28,6 +28,7 @@ import pytest
 from internal.clipboard.format import ClipboardContent, ContentType, SyncMessage
 from internal.protocol import codec
 from internal.protocol.codec import decode_message, encode_frame
+from internal.security import keyexchange
 from internal.sync.manager import SyncManager
 from internal.transport import relay as R  # noqa: N812
 
@@ -217,6 +218,14 @@ def make_app_stub(**attrs):
         relay_secret=attrs.get("relay_secret", "aa" * 32),
         peer_relay_secrets=dict(attrs.get("peer_relay_secrets", {})),
         netpair_secrets=dict(attrs.get("netpair_secrets", {})),
+        # The key-agreement state a real config carries: this device's X25519
+        # private key (minted on first use) and the public halves of the peers
+        # that have sent one.  Both empty here, so a pairing that never
+        # exchanges one stays on the code-derived key — which is exactly what
+        # an older build on the other end gets, and the reason the two versions
+        # keep talking.
+        netpair_dh_key="",
+        netpair_peer_keys={},
         relay_brokers=["wss://x:8884/mqtt"],
         peers=peers,
     )
@@ -270,9 +279,21 @@ def make_app_stub(**attrs):
     app._handle_netpair_hello = lambda payload, source, topic, _a=app: (
         Application._handle_netpair_hello(_a, payload, source, topic)
     )
-    app._on_relay_frame = lambda frame, topic, _a=app: Application._on_relay_frame(_a, frame, topic)
+    app._on_relay_frame = lambda frame, topic, key_index=0, _a=app: Application._on_relay_frame(
+        _a, frame, topic, key_index
+    )
     app._relay_channels = lambda _a=app: Application._relay_channels(_a)
     app._netpair_secrets_all = lambda _a=app: Application._netpair_secrets_all(_a)
+    app._netpair_dh_private = lambda _a=app: Application._netpair_dh_private(_a)
+    app._netpair_dh_public = lambda _a=app: Application._netpair_dh_public(_a)
+    app._netpair_peer_dh = lambda pid, _a=app: Application._netpair_peer_dh(_a, pid)
+    app._note_netpair_peer_dh = lambda pid, pub, _a=app: Application._note_netpair_peer_dh(
+        _a, pid, pub
+    )
+    app._netpair_key_for = lambda secret, pid, _a=app: Application._netpair_key_for(_a, secret, pid)
+    app._netpair_keys_for_topic = lambda topic, _a=app: Application._netpair_keys_for_topic(
+        _a, topic
+    )
     app._netpair_secret_for_topic = lambda topic, _a=app: Application._netpair_secret_for_topic(
         _a, topic
     )
@@ -294,7 +315,7 @@ def test_generate_subscribes_netpair_topic_and_returns_code():
     assert app._relay.refreshed == 1
     channels = app._relay_channels()
     assert R.netpair_topic(secret) in channels
-    assert channels[R.netpair_topic(secret)] == R.netpair_key(secret)
+    assert channels[R.netpair_topic(secret)] == [R.netpair_key(secret)]
 
 
 def test_generate_requires_internet_sync():
@@ -311,7 +332,11 @@ def test_enter_establishes_mapping_and_persists():
     data, status = app._netpair_enter(code)
     assert status == 200 and data["ok"] is True and data["peer_id"] == tag
     assert app.cfg.netpair_secrets.get(tag) == secret
-    assert app._saved["n"] == 1
+    # Two saves, and both are the pairing's: the first stores the secret, and
+    # the second stores the key-agreement key the hello it publishes carries
+    # (minted on this, its first use — see ``_netpair_dh_private``).
+    assert app._saved["n"] == 2
+    assert app.cfg.netpair_dh_key
     # hello was published to the secret's channel with B's real source id
     assert len(app._relay.published) == 1
     frame, topic, key = app._relay.published[0]
@@ -409,11 +434,23 @@ def test_hello_roundtrip_with_layered_password():
     assert b_key != R.netpair_key(secret)
     a._on_relay_frame(b_frame, b_topic)
     assert a.cfg.netpair_secrets == {"bbbbbbbbbbbb": secret}
-    # A replied with the same layered key.
-    a_frame, a_topic, a_key = a._relay.published[0]
-    assert a_topic == topic and a_key == R.netpair_key(secret, pw)
+    # A replied on the same topic under the code-derived layered key: the reply
+    # is itself a handshake frame, and the agreed key cannot carry it (B has
+    # not learned A's public half yet).  What the agreement changes is where
+    # the two ends go *after* this — the key each of them will next publish
+    # under, which is what B's own channel now derives.
+    a_frames = [(topic_, key) for _frame, topic_, key in a._relay.published]
+    assert [topic_ for topic_, _key in a_frames] == [topic]
+    assert a_frames[0][1] == R.netpair_key(secret, pw)
+    shared = keyexchange.shared_secret(b.cfg.netpair_dh_key, a._netpair_dh_public())
+    assert a._netpair_key_for(secret, "bbbbbbbbbbbb") == R.netpair_session_key(secret, shared, pw)
+    a_frame, a_topic, _a_key = a._relay.published[0]
     b._on_relay_frame(a_frame, a_topic)
     assert b.cfg.netpair_secrets == {"a1b2c3d4e5f6": secret}
+    # ...and now that B has learned A's public half too, the two ends derive
+    # the SAME key from the same code and the same passphrase — one from
+    # (A's private, B's public), the other from (B's private, A's public).
+    assert b._netpair_key_for(secret, "a1b2c3d4e5f6") == R.netpair_session_key(secret, shared, pw)
 
 
 # ---------------------------------------------- device probe (test connection)
@@ -702,6 +739,8 @@ def test_backup_roundtrip_includes_netpair_secrets(tmp_path, _isolated_favorites
     cfg = Config()
     cfg.netpair_secrets = {"peer-1": "ABCDEFG", "peer-2": "2345678"}
     cfg.peer_relay_secrets = {"peer-1": "cd" * 32}
+    cfg.netpair_dh_key = keyexchange.generate_keypair()[0]
+    cfg.netpair_peer_keys = {"peer-1": keyexchange.generate_keypair()[1]}
 
     history = ClipboardHistoryDB(storage_path=str(tmp_path / "h.db"))
     zip_path = backup_mod.create_backup(cfg, history, backup_dir=str(tmp_path / "bk"))
@@ -715,6 +754,13 @@ def test_backup_roundtrip_includes_netpair_secrets(tmp_path, _isolated_favorites
     assert result["config"] is True
     assert fresh.netpair_secrets == {"peer-1": "ABCDEFG", "peer-2": "2345678"}
     assert fresh.peer_relay_secrets == {"peer-1": "cd" * 32}
+    # The key-agreement material rides along with the secrets it keys.  Kept
+    # secrets but a fresh key would leave the restored device on the
+    # code-derived key while its peer had moved to the agreed one, and a
+    # channel that has agreed refuses everything else but the handshake: the
+    # pairing would read as confirmed and sync nothing.
+    assert fresh.netpair_dh_key == cfg.netpair_dh_key
+    assert fresh.netpair_peer_keys == cfg.netpair_peer_keys
 
 
 def test_backup_restore_ignores_malformed_netpair_secrets(tmp_path, _isolated_favorites):
@@ -826,6 +872,8 @@ def make_app_stub_mgmt(**attrs):
         peer_relay_secrets=dict(attrs.get("peer_relay_secrets", {})),
         netpair_secrets=dict(attrs.get("netpair_secrets", {})),
         netpair_aliases=dict(attrs.get("netpair_aliases", {})),
+        netpair_dh_key="",
+        netpair_peer_keys={},
         relay_brokers=["wss://x:8884/mqtt"],
         peers=peers,
     )
@@ -1147,6 +1195,8 @@ def make_app_stub_audit(**attrs):
         peer_relay_secrets=dict(attrs.get("peer_relay_secrets", {})),
         netpair_secrets=dict(attrs.get("netpair_secrets", {})),
         netpair_aliases=dict(attrs.get("netpair_aliases", {})),
+        netpair_dh_key="",
+        netpair_peer_keys={},
         relay_brokers=["wss://x:8884/mqtt"],
         peers=peers,
     )
@@ -1203,6 +1253,16 @@ def make_app_stub_audit(**attrs):
     app._stop_internet_sync = lambda _a=app: Application._stop_internet_sync(_a)
     app._get_relay_state = lambda _a=app: Application._get_relay_state(_a)
     app._ensure_relay_secret = lambda _a=app: Application._ensure_relay_secret(_a)
+    app._netpair_dh_private = lambda _a=app: Application._netpair_dh_private(_a)
+    app._netpair_dh_public = lambda _a=app: Application._netpair_dh_public(_a)
+    app._netpair_peer_dh = lambda pid, _a=app: Application._netpair_peer_dh(_a, pid)
+    app._note_netpair_peer_dh = lambda pid, pub, _a=app: Application._note_netpair_peer_dh(
+        _a, pid, pub
+    )
+    app._netpair_key_for = lambda secret, pid, _a=app: Application._netpair_key_for(_a, secret, pid)
+    app._netpair_keys_for_topic = lambda topic, _a=app: Application._netpair_keys_for_topic(
+        _a, topic
+    )
     app._on_relay_frame = lambda fb, topic=None, now=None, _a=app: Application._on_relay_frame(
         _a, fb, topic, now=now
     )

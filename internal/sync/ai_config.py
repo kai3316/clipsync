@@ -49,6 +49,7 @@ Wire payloads (JSON):
 """
 
 import base64
+import codecs
 import contextlib
 import hashlib
 import logging
@@ -94,8 +95,10 @@ TRASH_DIR_NAME = "aiconfig_trash"
 PENDING_TTL = 60.0
 # How long preview() blocks waiting for the peer's aiconfig_data.
 PREVIEW_TIMEOUT = 5.0
-# Extensions for which "append" mode is allowed (text/markdown only).
-APPEND_EXTS = {".txt", ".md", ".markdown"}
+# How much of a file "append" sniffs to decide it is text.  Sampled rather
+# than read whole: the target being appended to is whatever the user already
+# has (possibly hundreds of MB), and a binary's NUL is in its first bytes.
+TEXT_SNIFF_BYTES = 64 * 1024
 _SHA16_RE = re.compile(r"^[0-9a-f]{16}$")
 # Filename characters allowed to survive into "<name>.from.<device>.<ext>".
 _SANITIZE_RE = re.compile(r"[^A-Za-z0-9._-]+")
@@ -137,6 +140,36 @@ def is_temp_name(name: str) -> bool:
     """True for editor/OS temp junk excluded from inventories."""
     low = name.lower()
     return low.endswith(_TEMP_SUFFIXES) or name.startswith(_TEMP_PREFIXES) or name in _TEMP_NAMES
+
+
+def looks_like_text(data: bytes, *, complete: bool = True) -> bool:
+    """True when *data* can be appended as text: no NUL byte, and valid UTF-8.
+
+    "Append" needs one fact — is this text — and a file's extension cannot
+    answer it.  The old rule was a three-item whitelist (``.txt``/``.md``/
+    ``.markdown``), which refused the files people actually wanted to merge
+    (``.json``, ``.yaml``, ``.toml`` — AI-tool config, all of it text) while
+    letting a ``.md`` full of PNG bytes through to be appended anyway.  The
+    bytes decide now.
+
+    NUL is the binary tell: no text file this app handles contains one, and
+    every common binary format does within its first bytes.  UTF-8 is checked
+    incrementally, so validating a large payload does not hold a second copy
+    of it.  *complete* is False when *data* is a sample cut at an arbitrary
+    offset, where a truncated multi-byte character at the end is expected
+    rather than a sign of binary content.
+    """
+    if b"\x00" in data:
+        return False
+    decoder = codecs.getincrementaldecoder("utf-8")()
+    try:
+        for start in range(0, len(data), TEXT_SNIFF_BYTES):
+            decoder.decode(data[start : start + TEXT_SNIFF_BYTES])
+        if complete:
+            decoder.decode(b"", True)
+    except UnicodeDecodeError:
+        return False
+    return True
 
 
 def _hash_file(path: Path, max_bytes: int = MAX_CONFIG_FILE_SIZE) -> tuple[str, int] | None:
@@ -1191,12 +1224,17 @@ class AIConfigManager:
                 candidate.write_bytes(data)
                 return "copied", None
             if mode == "append":
-                if target.suffix.lower() not in APPEND_EXTS:
+                # Both halves have to be text: the incoming bytes (else the
+                # append corrupts the target) and what is already there (else
+                # appending text to a binary file corrupts that instead).
+                if not looks_like_text(data):
                     return "error", "append_not_text"
                 target.parent.mkdir(parents=True, exist_ok=True)
                 prefix = b""
                 if target.exists() and target.stat().st_size > 0:
                     with open(target, "rb") as f:
+                        if not looks_like_text(f.read(TEXT_SNIFF_BYTES), complete=False):
+                            return "error", "append_not_text"
                         f.seek(-1, os.SEEK_END)
                         if f.read(1) != b"\n":
                             prefix = b"\n"

@@ -269,6 +269,17 @@ class Config:
     # window.  Empty string = passphrase off, original derivation unchanged.
     # The value itself never leaves this device (GET only exposes a boolean).
     netpair_password: str = ""
+    # Round 23: the X25519 private key netpair channel keys are derived from,
+    # generated on first pairing and never transmitted — only its public half
+    # goes out, inside the pairing hello.  A netpair channel used to be keyed by
+    # the pairing code alone, and 35 bits is enumerable: anyone who recorded a
+    # session could take the ciphertext home and try every code at GPU speed.
+    # With agreement in the path, the recording carries only public keys.
+    netpair_dh_key: str = ""
+    # peer device_id → that peer's X25519 public key, as carried by its hello.
+    # Missing = the peer has not been heard from since it learned to agree, and
+    # its channel is still on the code-derived key.
+    netpair_peer_keys: dict[str, str] = field(default_factory=dict)
 
     # AI-config sync (refactor round 1): enabled tool profiles + user custom
     # paths whose AI tool config files (CLAUDE.md, memory notes, skills/,
@@ -425,6 +436,8 @@ _FIELD_RULES: dict[str, tuple] = {
     "peer_relay_secrets": ("strdict",),
     "netpair_secrets": ("strdict",),
     "netpair_aliases": ("strdict",),
+    "netpair_dh_key": ("str",),
+    "netpair_peer_keys": ("strdict",),
     "ai_config_tools": ("strlist_nonnull",),
     "ai_config_custom_paths": ("strlist_nonnull",),
 }
@@ -688,6 +701,8 @@ def load() -> Config:
                 "peer_relay_secrets",
                 "netpair_secrets",
                 "netpair_aliases",
+                "netpair_dh_key",
+                "netpair_peer_keys",
                 "ai_config_tools",
                 "ai_config_custom_paths",
             ):
@@ -859,6 +874,8 @@ def save(cfg: Config, enc_mgr: "EncryptionManager | None" = None):
             "peer_relay_secrets": cfg.peer_relay_secrets,
             "netpair_secrets": cfg.netpair_secrets,
             "netpair_aliases": cfg.netpair_aliases,
+            "netpair_dh_key": cfg.netpair_dh_key,
+            "netpair_peer_keys": cfg.netpair_peer_keys,
             "ai_config_tools": cfg.ai_config_tools,
             "ai_config_custom_paths": cfg.ai_config_custom_paths,
             "peers": [

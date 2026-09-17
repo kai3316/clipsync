@@ -33,10 +33,6 @@
 
   var H = window.__CLIPSYNC_AICONFIG_HELPERS__ || {};
 
-  // "append" mode only lands on text/markdown files (mirrors the backend's
-  // APPEND_EXTS: .txt / .md / .markdown).
-  var TEXT_EXT_RE = /\.(md|markdown|txt)$/i;
-
   // Tree-node keys join tool + root + path; '' cannot appear in any of the
   // three.  The root id is part of the key because rel_path is relative to its
   // OWN root: skills/ and commands/ can each hold a `foo/x.md`, and keying on
@@ -529,13 +525,6 @@
       },
 
       /* ── Pull (batched, per-file WS results) ──────────────────── */
-      hasNonTextSelection: function (items) {
-        for (var i = 0; i < items.length; i++) {
-          if (!TEXT_EXT_RE.test(items[i].rel_path || '')) return true;
-        }
-        return false;
-      },
-
       pull: function () {
         var self = this;
         var peer = this.currentPeer;
@@ -548,10 +537,10 @@
           if (e && !e.is_dir) items.push({ tool: String(e.tool || 'custom'), root: String(e.root || ''), rel_path: e.rel_path });
         });
         if (items.length === 0) return;
-        if (this.mode === 'append' && this.hasNonTextSelection(items)) {
-          this.store.showToast(this.t('aiconfig.append_ext_warning'), 3500, 'warning');
-          return;
-        }
+        // No extension pre-check: whether a file can be appended to is decided
+        // by its bytes, and only the side holding them can say.  A filename
+        // whitelist here refused .json/.yaml config — the files people
+        // actually merge — before the pull that would have landed them.
         var batchId = 'aiconfig_' + Date.now() + '_' + Math.random().toString(36).slice(2, 8);
         this.store.startAiConfigBatch(batchId, items.length, peer.id);
         this.activeBatchId = batchId;

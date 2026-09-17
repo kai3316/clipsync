@@ -1696,15 +1696,15 @@ class LanRuntime:
             connected = set()
         if peer_id not in connected and self._peer_is_internet_reachable(peer_id):
             # Every file byte has to ride the relay for a peer with no live LAN
-            # connection, so chat chunks the file relay-safe and refuses
-            # anything past the relay cap — a 256 KiB chunk would exceed
-            # MAX_RELAY_PAYLOAD and stall the transfer.  The configured relay
-            # limit picks the chunk: a broker that carries less than this app
-            # assumes needs smaller chunks, not dropped ones.  A LAN-connected
-            # peer keeps the LAN wire format so peers that predate the relay
-            # keep interoperating unchanged.
+            # connection, so chat chunks the file relay-safe — a 256 KiB chunk
+            # would exceed MAX_RELAY_PAYLOAD and stall the transfer.  The
+            # configured relay limit picks the chunk: a broker that carries
+            # less than this app assumes needs smaller chunks, not dropped
+            # ones.  Only the *message* has a relay limit; the file's total
+            # size is the app's own MAX_FILE_SIZE and nothing narrower.  A
+            # LAN-connected peer keeps the LAN wire format so peers that
+            # predate the relay keep interoperating unchanged.
             send.chunk_size = ChatManager.relay_chunk_for(self.config.relay_max_message_bytes)
-            send.internet_cap = ChatManager.RELAY_FILE_CAP
         return send
 
     def _note_chat_sent(self, peer_id, msg):
@@ -2520,17 +2520,53 @@ class LanRuntime:
         self.transport.connect_to_peer(pid, *address, no_auto_pairing=no_auto_pairing)
         return True
 
-    def _receive_relay(self, frame, topic=""):
+    def _receive_relay(self, frame, topic="", key_index=0):
         if not frame or self._stop_event.is_set():
             return
         msg = decode_message(frame)
         if msg is None:
             self._error("RELAY_FRAME_INVALID")
             return
+        # Which key of the channel's list opened this frame: 0 is the channel's
+        # current one, and a higher index means the frame rode the code-derived
+        # key that a netpair channel keeps only so the handshake can be read
+        # before the key agreement has happened (see
+        # ``InternetPairingService.netpair_keys_for_topic``).  Once both ends
+        # know each other's public key, that older key must buy nothing but the
+        # handshake itself: it is derived from the 35-bit pairing code, so
+        # anyone who has enumerated the code — the exact attack the agreement
+        # exists to defeat — can produce frames under it.  Accepting them would
+        # leave the channel as forgeable as it was before.
+        if key_index and getattr(msg, "msg_type", "") != "netpair_hello":
+            logger.warning(
+                "Dropping relay frame: it rode the pairing-code key on a channel "
+                "that has moved to key agreement"
+            )
+            return
         source = getattr(msg, "source_device", "") or ""
-        if not source or source == self.config.device_id:
+        if source == self.config.device_id:
             return
         kind = getattr(msg, "msg_type", "")
+        # The identity the channel itself is bound to: a topic is derived from a
+        # shared secret, so it — never a frame's self-declared source — says who
+        # may speak on that channel.
+        ident = self.internet_pairing.topic_identity(topic)
+        if not source:
+            # Chat file BYTES ride the compact binary frame, whose 46-byte
+            # header is transfer_id + indices and has nowhere to put a device
+            # id.  Landing one used to end on the line above — ``not source``
+            # returned with nothing logged — so over the internet every chunk of
+            # a chat attachment was dropped (the offer/accept/complete frames
+            # are JSON and routed fine, which is why the transfer reached the
+            # receiver's finalize check with 0 bytes on disk and died there as
+            # a size mismatch).  The LAN path was unaffected: there the peer
+            # comes from the pinned connection, not from the frame.  The
+            # channel resolves the identity either way, so attribute the frame
+            # to the peer whose secret derives the topic it arrived on; a
+            # provisional netpair tag names no device yet, so those still drop.
+            if kind != "file_chunk" or ident is None or is_provisional_key(ident):
+                return
+            source = ident
         # A frame is proof of two things before it is routed: that its sender is
         # alive, and — when it is a peer whose confirmation hello was lost — who
         # that sender really is.  The second re-keys the entry the code was
@@ -2550,7 +2586,8 @@ class LanRuntime:
             # whole exchange exists to deliver — arrived on a topic we were
             # listening to and was discarded here, silently, on both machines.
             result = self.internet_pairing.handle_hello(
-                source, payload.get("peer_id", ""), payload.get("device_name", "") or "", topic
+                source, payload.get("peer_id", ""), payload.get("device_name", "") or "", topic,
+                dh_pub=payload.get("dh_pub", ""),
             )
             if not result["accepted"]:
                 return
@@ -2578,8 +2615,8 @@ class LanRuntime:
         # second paired device's id in ``source_device`` and have everything it
         # sent — clipboard content, chat, receipts — attributed to that second
         # device, which holds a pairing it never used.  Legacy bound the frame
-        # in the same place, in the same three cases.
-        ident = self.internet_pairing.topic_identity(topic)
+        # in the same place, in the same three cases.  (``ident`` was resolved
+        # above, where a source-less binary frame takes it as its source.)
         if ident is not None and source:
             if is_provisional_key(ident):
                 # The peer's real id is not known until its hello confirms it,
@@ -3923,14 +3960,18 @@ class LanRuntime:
         from internal.transport.relay import (
             derive_key,
             derive_topic,
-            netpair_key,
             netpair_topic,
         )
 
         secret = (getattr(self.config, "netpair_secrets", {}) or {}).get(peer_id)
         if isinstance(secret, str) and secret:
             topic = netpair_topic(secret)
-            key = netpair_key(secret, self.internet_pairing.netpair_password())
+            # The key agreement's session key once this peer's public half is
+            # known, and the code-derived key before that — a peer that has
+            # never sent us a hello has no other way to read us.
+            key = self.internet_pairing.netpair_key_for(secret, peer_id)
+            if key is None:
+                return False
         else:
             peer_secret = (getattr(self.config, "peer_relay_secrets", {}) or {}).get(peer_id)
             peer = self.config.peers.get(peer_id)
@@ -4246,7 +4287,6 @@ class LanRuntime:
         from internal.transport.relay import (
             derive_key,
             derive_topic,
-            netpair_key,
             netpair_topic,
         )
 
@@ -4279,10 +4319,13 @@ class LanRuntime:
         for peer_id, peer_secret in netpair_secrets.items():
             if not peer_secret or peer_id == self.config.device_id or peer_id in removed:
                 continue  # a stray self-entry must never mirror to ourselves
-            ok = self._relay_publish(
-                relay, data, netpair_topic(peer_secret),
-                netpair_key(peer_secret, self.internet_pairing.netpair_password()),
-            )
+            # Same key the peer's own channel will be read under: the session
+            # key when the handshake has happened, the code-derived one until
+            # then (see ``netpair_key_for``).
+            key = self.internet_pairing.netpair_key_for(peer_secret, peer_id)
+            if key is None:
+                continue
+            ok = self._relay_publish(relay, data, netpair_topic(peer_secret), key)
             self._record_relay_send(peer_id, ok, delivery, data)
 
     def _relay_publish(self, relay, data: bytes, topic, key) -> bool:

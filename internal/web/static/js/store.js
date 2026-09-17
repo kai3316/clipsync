@@ -45,6 +45,16 @@
   // client-side net for the case where even that report never arrives.
   var AICONFIG_BATCH_TIMEOUT_MS = 75000;
 
+  // The landing failures a pull result can carry, in the UI's words. Keys the
+  // backend can send and this map does not know still show up (as the raw
+  // tag) rather than being swallowed.
+  var AICONFIG_ERROR_REASONS = {
+    append_not_text: 'aiconfig.reason_append_not_text',
+    backup_failed: 'aiconfig.reason_backup_failed',
+    io_error: 'aiconfig.reason_io_error',
+    no_local_root: 'aiconfig.reason_no_local_root',
+  };
+
   // Local i18n helper — the store is a plain object (not a Vue component),
   // so it reaches the global translator directly. Falls back to the key when
   // i18n hasn't been initialised yet.
@@ -2781,12 +2791,23 @@
           }
         }
       }
-      var key = entry.status === 'error' ? 'aiconfig.result_error'
-        : entry.status === 'copied' ? 'aiconfig.result_copied'
+      // An error toast names the file AND why it failed.  "Pull failed: x.md"
+      // on its own is what made a batch of five refusals unreadable: the same
+      // five files failed on every retry with nothing saying what would have
+      // to change.  Reasons with no translation fall back to the raw tag,
+      // which is still more than the path alone said.
+      if (entry.status === 'error') {
+        var reasonKey = AICONFIG_ERROR_REASONS[entry.reason];
+        this.showToast(t('aiconfig.result_error_reason', {
+          path: entry.rel_path,
+          reason: reasonKey ? t(reasonKey) : (entry.reason || ''),
+        }), 3500, 'error');
+        return;
+      }
+      var key = entry.status === 'copied' ? 'aiconfig.result_copied'
         : entry.status === 'appended' ? 'aiconfig.result_appended'
         : 'aiconfig.result_saved';
-      this.showToast(t(key, { path: entry.rel_path }), 2800,
-        entry.status === 'error' ? 'error' : 'success');
+      this.showToast(t(key, { path: entry.rel_path }), 2800, 'success');
     },
 
     /**

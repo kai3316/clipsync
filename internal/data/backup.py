@@ -220,6 +220,19 @@ def create_backup(
                 for k, v in (cfg.netpair_secrets or {}).items()
                 if isinstance(k, str) and isinstance(v, str)
             },
+            # ...and the key-agreement material those secrets now key, for the
+            # same reason.  A restore that kept the secrets but not these would
+            # come back on the code-derived key while the peer still held the
+            # restored device's *old* public key and had moved to the agreed
+            # one — and a channel that has agreed refuses everything on the old
+            # key but the handshake, so the pairing would read as confirmed and
+            # sync nothing, in one direction, with no error anywhere.
+            "netpair_dh_key": cfg.netpair_dh_key,
+            "netpair_peer_keys": {
+                k: v
+                for k, v in (getattr(cfg, "netpair_peer_keys", {}) or {}).items()
+                if isinstance(k, str) and isinstance(v, str)
+            },
             # Round 15: user-assigned per-peer aliases ride along so a
             # backup→restore cycle keeps the friendly names users set on the
             # device page (strictly local — never sent to the peer).
@@ -511,6 +524,8 @@ _APPLY_SCHEMA: dict[str, tuple] = {
     "peer_relay_secrets": ("strdict",),
     "netpair_secrets": ("strdict",),
     "netpair_aliases": ("strdict",),
+    "netpair_dh_key": ("str",),
+    "netpair_peer_keys": ("strdict",),
     "ai_config_tools": ("strlist_nonnull",),
     "ai_config_custom_paths": ("strlist_nonnull",),
     "history_max_entries": ("int", 10, 10000),

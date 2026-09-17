@@ -852,8 +852,8 @@ export const EN: Record<string, string> = {
   "解除互联网配对？": "Remove this internet pairing?",
   "{name} 将不再通过中继与这台设备同步，恢复需要重新配对一次。":
     "{name} will stop syncing with this device over the relay; bringing it back needs a new pairing",
-  "互联网配对的设备请到聊天页发送文件：中继单块上限更小，附件已按此切分，最大 5 MB。":
-    "Send files to an internet-paired device from the chat page: a relay chunk is smaller, so attachments are cut to fit, up to 5 MB",
+  "互联网配对的设备请到聊天页发送文件：中继单块上限更小，附件已按此切分。":
+    "Send files to an internet-paired device from the chat page: a relay chunk is smaller, so attachments are cut to fit",
   "中继": "Relay",
   "中继用户名": "Relay username",
   "中继密码": "Relay password",

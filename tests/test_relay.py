@@ -109,10 +109,18 @@ def test_build_paho_client_scheme_selects_transport_and_tls(monkeypatch):
         def __init__(self, api_version, protocol, transport):
             self.transport = transport
             self.tls_called = False
+            self.queued = None
+            self.inflight = None
             created.append(transport)
 
         def tls_set(self, **kwargs):
             self.tls_called = True
+
+        def max_queued_messages_set(self, n):
+            self.queued = n
+
+        def max_inflight_messages_set(self, n):
+            self.inflight = n
 
     class FakeModule:
         class CallbackAPIVersion:
@@ -146,6 +154,13 @@ def test_build_paho_client_scheme_selects_transport_and_tls(monkeypatch):
     assert R.build_paho_client(None).tls_called is True
     assert R.build_paho_client("broker.example:8884").transport == "websockets"
 
+    # The outgoing QoS>0 queue is bounded on every client (paho's own default
+    # is unlimited, which holds a whole attachment in RAM now that a relay
+    # attachment is not capped at a few MiB).
+    assert mqtt_tls.queued == R.MAX_QUEUED_MESSAGES
+    assert mqtt_tls.inflight == R.MAX_INFLIGHT_MESSAGES
+    assert mqtt_plain.queued == R.MAX_QUEUED_MESSAGES
+
 
 # ------------------------------------------------------------- fake client
 
@@ -155,7 +170,11 @@ class FakeClient:
 
     def __init__(self):
         self.subscribed = []
+        self.subscribe_qos = []
         self.published = []
+        self.publish_qos = []
+        self.max_queued = None
+        self.max_inflight = None
         self.on_connect = None
         self.on_disconnect = None
         self.on_message = None
@@ -181,16 +200,28 @@ class FakeClient:
     def loop_start(self):
         pass
 
-    def subscribe(self, topic):
+    def subscribe(self, topic, qos=0):
+        # qos is recorded, not ignored: delivery is the lower of the publish's
+        # QoS and the subscription's, so a fake that swallowed it would let a
+        # QoS-0 subscription pass while QoS-1 chunks were downgraded to
+        # best-effort in the field.
         self.subscribed.append(topic)
+        self.subscribe_qos.append(qos)
 
     def publish(self, topic, payload, qos=0):
         self.published.append((topic, bytes(payload)))
+        self.publish_qos.append(qos)
 
         class Info:
             rc = 0
 
         return Info()
+
+    def max_queued_messages_set(self, n):
+        self.max_queued = n
+
+    def max_inflight_messages_set(self, n):
+        self.max_inflight = n
 
     def disconnect(self):
         self.disconnected = True
@@ -244,7 +275,7 @@ def make_transport(channels_dict, brokers=None, private_brokers=None):
     t = R.RelayTransport(
         brokers or ["wss://broker.example:8884/mqtt"],
         get_channels=lambda: dict(channels_dict),
-        on_frame=lambda frame, _topic=None: received.append(frame),
+        on_frame=lambda frame, _topic=None, _key_index=0: received.append(frame),
         on_state=states.append,
         client_factory=factory,
         sleeper=lambda s: None,
@@ -266,6 +297,11 @@ def test_offline_states_and_subscribe_on_connect(channels):
     clients[0].fire_connect(0, t)
     assert t.state == R.STATE_ONLINE
     assert clients[0].subscribed == [topic]
+    # ...and at QoS 1, or the broker delivers the QoS-1 file chunks to this
+    # side best-effort (delivery is the *lower* of publish and subscribe QoS),
+    # throwing away the redelivery the publish is paying for.
+    assert clients[0].subscribe_qos == [R.SUBSCRIBE_QOS]
+    assert R.SUBSCRIBE_QOS == 1
     t.stop()
     assert t.state == R.STATE_OFF
     assert clients[0].disconnected
@@ -332,6 +368,22 @@ def test_netpair_channel_rejects_passphrase_keyed_envelope():
     clients[0].fire_message(t, topic, right)
     assert received == [b"y"]
     t.stop()
+
+    # A channel that has moved onto key agreement holds BOTH keys, the agreed
+    # one first: the handshake hello — the only frame that can still be under
+    # the code-derived key — has to stay readable on a channel that has already
+    # agreed, or a re-pairing is never heard.  Either key therefore decrypts
+    # here; which one did is what the transport reports on to whoever has to
+    # tell a hello from everything else.
+    t2, clients2, received2, _ = make_transport(
+        {topic: [R.netpair_key(secret, "Passw0rd!123"), R.netpair_key(secret)]}
+    )
+    t2.start()
+    clients2[0].fire_connect(0, t2)
+    clients2[0].fire_message(t2, topic, wrong)
+    clients2[0].fire_message(t2, topic, right)
+    assert received2 == [b"x", b"y"]
+    t2.stop()
 
 
 def test_failover_to_next_broker():
@@ -810,7 +862,7 @@ def make_sync_transport(channels_dict, brokers, down=None):
     t = R.RelayTransport(
         brokers,
         get_channels=lambda: dict(channels_dict),
-        on_frame=lambda frame, _topic=None: received.append(frame),
+        on_frame=lambda frame, _topic=None, _key_index=0: received.append(frame),
         on_state=states.append,
         client_factory=factory,
         sleeper=lambda s: None,

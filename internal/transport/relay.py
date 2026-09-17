@@ -82,6 +82,26 @@ def frame_limit_for(max_payload: int) -> int:
 
 _SEEN_CAP = 512  # recent ciphertext hashes remembered
 
+# The QoS a subscription asks for.  Delivery QoS is the *lower* of the publish's
+# and the subscription's, so subscribing at the default 0 threw away the
+# redelivery the chunk publishes are paying for: a chunk went out at QoS 1,
+# the broker accepted it (PUBACK) and then delivered it best-effort to a
+# subscription that had only asked for 0 — one dropped packet, one lost chunk,
+# and a receiver left holding a short file.  Chunk frames therefore need both
+# halves at 1.  Asking for 1 costs nothing on the loss-tolerant frames: a
+# QoS-0 publish stays QoS 0 no matter what the subscription asked for.
+SUBSCRIBE_QOS = 1
+
+# How many QoS>0 messages may sit in paho's outgoing queue before publish()
+# refuses more.  Only reachable on a slow link: the file sender streams as
+# fast as it can read, so an unbounded queue is the whole attachment in RAM
+# (a relay attachment is now up to MAX_FILE_SIZE, not the 5 MiB it used to be
+# capped at).  When it fills, publish() reports the refusal and the sender
+# backs off instead of buffering — bounded memory, and a stall the app can
+# name rather than an OOM it cannot.
+MAX_QUEUED_MESSAGES = 256
+MAX_INFLIGHT_MESSAGES = 20
+
 # ── Internet pairing code (Round 14) ──────────────────────────────────────
 # A self-contained shared-secret bootstrap for devices that have NEVER met:
 # one device generates a short human-readable code (device tag + secret +
@@ -197,6 +217,14 @@ def build_paho_client(endpoint: str | None = None):
             client.tls_set(ca_certs=ca, cert_reqs=ssl.CERT_REQUIRED)
         else:
             client.tls_set(cert_reqs=ssl.CERT_REQUIRED)
+    # Bound the outgoing QoS>0 queue (see MAX_QUEUED_MESSAGES).  paho's default
+    # is 0 — unlimited — which is only safe while nothing large is published;
+    # best-effort, since a client that lacks these is still usable.
+    try:
+        client.max_queued_messages_set(MAX_QUEUED_MESSAGES)
+        client.max_inflight_messages_set(MAX_INFLIGHT_MESSAGES)
+    except Exception:
+        logger.debug("relay client queue bounds not applied", exc_info=True)
     return client
 
 
@@ -318,6 +346,29 @@ def netpair_key(secret: str, password: str = "") -> bytes:
     i = 1
     while len(key) < 32:
         key = hmac.new(prk, b"clipsync-netpair-key" + bytes([i]), hashlib.sha256).digest()
+        i += 1
+    return key[:32]
+
+
+def netpair_session_key(secret: str, shared: bytes, password: str = "") -> bytes:
+    """The netpair channel key once the peer's X25519 public key is known.
+
+    *shared* is ``DH(our private, their public)`` from
+    :mod:`internal.security.keyexchange` — a value neither end ever transmits,
+    which is the whole point: it is what makes a recording of the channel
+    useless to someone who later cracks the 35-bit code.  The code secret and
+    the optional passphrase are still mixed in, and still matter — they are
+    what an active attacker must know to sit in the middle of the handshake,
+    and what keeps two different pairings at the same code from sharing a key.
+    """
+    keying = b"clipsync-netpair-dh|" + shared + b"|" + secret.encode("utf-8")
+    if password:
+        keying = keying + b"\x00" + password.encode("utf-8")
+    prk = hmac.new(b"clipsync-netpair-dh-salt", keying, hashlib.sha256).digest()
+    key = b""
+    i = 1
+    while len(key) < 32:
+        key = hmac.new(prk, b"clipsync-netpair-dh-key" + bytes([i]), hashlib.sha256).digest()
         i += 1
     return key[:32]
 
@@ -626,9 +677,14 @@ class RelayTransport:
                            public broker must not see them.
       get_channels      -- returns {topic: key}; re-read on reconnect and when
                            ``refresh_channels`` is called (new enrollments)
-      on_frame          -- called with (inner frame bytes, topic) for received
-                           frames; the topic lets the owner map a frame back to
-                           the channel/secret it arrived on (netpair handshake)
+      on_frame          -- called with (inner frame bytes, topic, key_index) for
+                           received frames; the topic lets the owner map a frame
+                           back to the channel/secret it arrived on (netpair
+                           handshake), and key_index says which entry of that
+                           channel's key list decrypted it — 0 is the channel's
+                           current key, and anything else means the frame rode
+                           an older key the channel keeps only for the handshake
+                           (see ``_decrypt_keys``)
       on_state          -- called with one of STATE_* on every change
       on_undecryptable  -- called with the topic when a frame arrives on a
                            subscribed channel but will not decrypt (the two
@@ -823,7 +879,7 @@ class RelayTransport:
             if topic in self._subscribed:
                 continue
             try:
-                client.subscribe(topic)
+                client.subscribe(topic, qos=SUBSCRIBE_QOS)
                 # _on_connect reassigns self._subscribed under the lock, so
                 # guard the mutation to avoid a lost update on a reconnect race.
                 with self._lock:
@@ -1200,7 +1256,7 @@ class RelayTransport:
                 self._subscribed = set(self._safe_channels())
             for topic in list(self._subscribed):
                 try:
-                    client.subscribe(topic)
+                    client.subscribe(topic, qos=SUBSCRIBE_QOS)
                 except Exception:
                     logger.debug("subscribe %s failed", topic, exc_info=True)
             logger.info("Relay online via broker #%d", index)
@@ -1233,10 +1289,30 @@ class RelayTransport:
 
         return _on_disconnect
 
+    def _decrypt_keys(self, topic) -> list[bytes]:
+        """Every key a frame on *topic* may be under, most current first.
+
+        One key for almost every channel.  A netpair channel has two while a
+        pairing is being established: the DH-derived session key, and the
+        code-derived key the handshake hello itself rides — the hello is where
+        each side learns the other's public key, so it cannot be protected by
+        the session key it exists to establish.  The runtime builds that pair
+        (see ``InternetPairingService.channels``); this only has to try them.
+        """
+        entry = self._safe_channels().get(topic)
+        if entry is None:
+            return []
+        if isinstance(entry, (bytes, bytearray)):
+            return [bytes(entry)]
+        try:
+            return [bytes(key) for key in entry]
+        except TypeError:
+            logger.debug("relay channel key for %s is unusable", topic, exc_info=True)
+            return []
+
     def _on_message(self, client, userdata, msg):
-        channels = self._safe_channels()
-        key = channels.get(msg.topic)
-        if key is None:
+        keys = self._decrypt_keys(msg.topic)
+        if not keys:
             return
         blob_hash = hashlib.sha256(bytes(msg.payload)).hexdigest()
         with self._lock:
@@ -1245,8 +1321,21 @@ class RelayTransport:
             self._seen[blob_hash] = None
             while len(self._seen) > _SEEN_CAP:
                 self._seen.popitem(last=False)
-        frame, why = open_envelope_ex(bytes(msg.payload), key, time.time())
+        frame = None
+        reasons = []
+        key_index = 0
+        for index, key in enumerate(keys):
+            frame, why = open_envelope_ex(bytes(msg.payload), key, time.time())
+            if frame is not None:
+                key_index = index
+                break
+            reasons.append(why)
         if frame is None:
+            # "auth" only when every key said so: one of them disagreeing means
+            # this was never our envelope, and reporting a password mismatch
+            # over someone else's frame would send the user after the wrong
+            # thing.
+            why = "auth" if reasons and all(r == "auth" for r in reasons) else reasons[0]
             logger.debug("relay frame dropped (%s)", why)
             if why == "auth" and self._on_undecryptable is not None:
                 # Right envelope on a channel we subscribe to, wrong key — the
@@ -1257,6 +1346,6 @@ class RelayTransport:
                     logger.debug("on_undecryptable callback failed", exc_info=True)
             return
         try:
-            self._on_frame(frame, msg.topic)
+            self._on_frame(frame, msg.topic, key_index)
         except Exception:
             logger.debug("relay on_frame callback failed", exc_info=True)

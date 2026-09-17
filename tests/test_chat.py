@@ -29,6 +29,7 @@ from internal.protocol.codec import (
     encode_frame,
 )
 from internal.security.pairing import PairingManager
+from internal.sync.file_transfer import MAX_FILE_SIZE
 from internal.sync.nearby_chat import ChatFileTooLargeError, ChatManager
 from internal.transport.connection import PeerConnection, PortInUseError, TransportManager
 from internal.transport.relay import MAX_RELAY_PAYLOAD
@@ -451,13 +452,13 @@ class TestInternetRelayFileTransfers:
         self._tmp.cleanup()
 
     def _relay_fn(self, max_message_bytes: int = MAX_RELAY_PAYLOAD):
-        # Mirrors main._chat_send_fn's tagging for an internet-only peer,
-        # including the chunk size it derives from the configured relay limit.
+        # Mirrors main._chat_send_fn's tagging for an internet-only peer: the
+        # chunk size it derives from the configured relay limit, and nothing
+        # else — the relay cap is on the message, never on the file.
         def fn(data: bytes) -> bool:
             return self.pair.send_from_a(data)
 
         fn.chunk_size = ChatManager.relay_chunk_for(max_message_bytes)
-        fn.internet_cap = ChatManager.RELAY_FILE_CAP
         return fn
 
     def _source(self, size: int):
@@ -508,14 +509,21 @@ class TestInternetRelayFileTransfers:
         received = next(e for e in self.pair.b.get_messages(self.sid) if e["transfer_id"] == tid)
         assert open(received["saved_path"], "rb").read() == src.read_bytes()  # noqa: SIM115
 
-    def test_internet_file_cap_refused(self):
-        src = self._source(ChatManager.RELAY_FILE_CAP + 1)
-        try:
+    def test_an_oversize_file_is_refused_before_any_offer(self):
+        """Only ``MAX_FILE_SIZE`` refuses now — the relay's 5 MiB file cap is gone.
+
+        The relay limits one *message*, not the file, and ``send_file`` already
+        cuts chunks to that limit — so a file far past any single envelope still
+        crosses (the case above sends three chunks of one).  What is left is the
+        app's own ceiling, and it has to raise rather than return None so the UI
+        can name the reason instead of reporting a transfer that never started.
+        The file is truncated into place: 2 GiB of real bytes is not the point.
+        """
+        src = self.dir_a / "huge.bin"
+        with open(src, "wb") as fh:
+            fh.truncate(MAX_FILE_SIZE + 1)
+        with pytest.raises(ChatFileTooLargeError):
             self.pair.a.send_file(self.sid, str(src), self._relay_fn())
-        except ChatFileTooLargeError:
-            pass
-        else:
-            raise AssertionError("expected ChatFileTooLargeError")
         # No offer frame should have left the sender.
         assert not any(
             (getattr(decode_message(f), "_raw_payload", {}) or {}).get("msg_type")

@@ -1555,9 +1555,10 @@ class Application:
 
         # Internet-only peer (internet-reachable but with no live LAN P2P
         # connection): every file byte must ride the relay, so tell
-        # ChatManager to chunk the file relay-safe and refuse files past the
-        # relay cap — otherwise a 256 KiB chunk would exceed MAX_RELAY_PAYLOAD
-        # and the transfer would stall exactly like it used to.  A
+        # ChatManager to chunk the file relay-safe — otherwise a 256 KiB chunk
+        # would exceed MAX_RELAY_PAYLOAD and the transfer would stall exactly
+        # like it used to.  Only the *message* has a relay limit; the file's
+        # total size is the app's own MAX_FILE_SIZE and nothing narrower.  A
         # LAN-connected (dual) peer keeps the 256 KiB LAN wire format so
         # pre-update LAN peers still interoperate unchanged.
         if peer_id:
@@ -1566,16 +1567,15 @@ class Application:
             except Exception:
                 connected = set()
             if peer_id not in connected and self._peer_is_internet_reachable(peer_id):
-                # RELAY_FILE_CAP and relay_chunk_for are class attributes on
-                # ChatManager (already imported at module scope) — no local
-                # import here: a NameError inside the send closure would be
-                # swallowed by chat's frame handler and kill the whole chat.
-                # The chunk follows the relay limit the user configured.
+                # relay_chunk_for is a class attribute on ChatManager (already
+                # imported at module scope) — no local import here: a NameError
+                # inside the send closure would be swallowed by chat's frame
+                # handler and kill the whole chat.  The chunk follows the relay
+                # limit the user configured.
                 relay_limit = getattr(
                     self.cfg, "relay_max_message_bytes", Config.relay_max_message_bytes
                 )
                 _send.chunk_size = ChatManager.relay_chunk_for(relay_limit)
-                _send.internet_cap = ChatManager.RELAY_FILE_CAP
         return _send
 
     def _peer_is_internet_reachable(self, peer_id: str) -> bool:
@@ -7842,8 +7842,9 @@ class Application:
                 logger.debug("Failed persisting new relay secret", exc_info=True)
         return self.cfg.relay_secret
 
-    def _relay_channels(self) -> dict[str, bytes]:
-        """{topic: key} for every paired peer whose relay secret we know, plus
+    def _relay_channels(self) -> dict[str, object]:
+        """{topic: key or key list} for every paired peer whose relay secret we
+        know, plus
         every ACTIVE netpair channel (persisted pairs + generated-but-not-yet-
         confirmed pairing codes, so the partner's hello can arrive).
 
@@ -7853,12 +7854,11 @@ class Application:
         from internal.transport.relay import (
             derive_key,
             derive_topic,
-            netpair_key,
             netpair_topic,
         )
 
         my_secret = self._ensure_relay_secret()
-        channels: dict[str, bytes] = {}
+        channels: dict[str, object] = {}
         for pid, peer_secret in list(self.cfg.peer_relay_secrets.items()):
             peer = self.cfg.peers.get(pid)
             if peer is None or not peer.paired or not peer_secret:
@@ -7869,7 +7869,14 @@ class Application:
                 continue
             if pid == self.cfg.device_id or pid == f"pending:{self.cfg.device_id}":
                 continue  # never listen on a channel derived from our own code
-            channels[netpair_topic(secret)] = netpair_key(secret, self._netpair_pw())
+            # A netpair channel is a *list* of keys — the agreed session key
+            # first, the code-derived one after it — because the handshake hello
+            # is what carries the public halves the session key is made from and
+            # so has to be readable before that key exists.  Everything else
+            # stays a single key.
+            keys = self._netpair_keys_for_topic(netpair_topic(secret))
+            if keys:
+                channels[netpair_topic(secret)] = keys
         return channels
 
     def _netpair_pw(self) -> str:
@@ -7890,6 +7897,119 @@ class Application:
             or getattr(self.cfg, "netpair_password", "")
             or ""
         )
+
+    # ------------------------------------------------ netpair key agreement
+
+    def _netpair_dh_private(self) -> str:
+        """This machine's X25519 private key for netpair channels, created once.
+
+        Persisted beside ``relay_secret`` and never transmitted: only its
+        public half goes out, inside the pairing hello.  See
+        ``internal/security/keyexchange`` for why the 35-bit pairing code is
+        not enough on its own — a recording of a session keyed by it can be
+        taken away and brute-forced at leisure.
+        """
+        private = str(getattr(self.cfg, "netpair_dh_key", "") or "")
+        if private:
+            return private
+        from internal.security.keyexchange import generate_keypair
+
+        private, _public = generate_keypair()
+        self.cfg.netpair_dh_key = private
+        try:
+            self._save_cfg_and_peers()
+        except Exception:
+            # The live value is what this run's channels are derived from; it is
+            # the next start that has to find it on disk.
+            logger.debug("Failed persisting the netpair key-agreement key", exc_info=True)
+        return private
+
+    def _netpair_dh_public(self) -> str:
+        """The public half of :meth:`_netpair_dh_private`, for the hello."""
+        from internal.security.keyexchange import public_from_private
+
+        return public_from_private(self._netpair_dh_private()) or ""
+
+    def _netpair_peer_dh(self, peer_id) -> str:
+        """A peer's stored public key, or "" when it has not been heard from."""
+        if not isinstance(peer_id, str) or not peer_id:
+            return ""
+        return str((getattr(self.cfg, "netpair_peer_keys", {}) or {}).get(peer_id, "") or "")
+
+    def _note_netpair_peer_dh(self, peer_id, public_key) -> None:
+        """Store the public key a peer's hello carried.
+
+        A changed key means the peer reinstalled or reset its config, and the
+        channel key moves with it; publishes read the stored value fresh, so
+        nothing else has to be told.
+        """
+        from internal.security.keyexchange import is_public_key
+
+        if not isinstance(peer_id, str) or not peer_id or not is_public_key(public_key):
+            return
+        keys = getattr(self.cfg, "netpair_peer_keys", None)
+        if not isinstance(keys, dict) or keys.get(peer_id) == public_key:
+            return
+        keys[peer_id] = public_key
+        try:
+            self._save_cfg_and_peers()
+        except Exception:
+            logger.debug("Failed persisting a peer's key-agreement key", exc_info=True)
+
+    def _netpair_key_for(self, secret: str, peer_id) -> bytes | None:
+        """The key one netpair channel is under, or None when it has none.
+
+        The session key once the peer's public half is known — every frame
+        after the handshake — and the code-derived key before that, because the
+        hello is how the public half travels and so has to be readable without
+        it.  A peer that never sends one is an older build and stays on the
+        code key on both sides, which is what keeps the two versions talking.
+        """
+        if not secret:
+            return None
+        from internal.security.keyexchange import shared_secret
+        from internal.transport.relay import netpair_key, netpair_session_key
+
+        peer_key = self._netpair_peer_dh(peer_id)
+        if peer_key:
+            shared = shared_secret(self._netpair_dh_private(), peer_key)
+            if shared is not None:
+                return netpair_session_key(secret, shared, self._netpair_pw())
+        return netpair_key(secret, self._netpair_pw())
+
+    def _netpair_keys_for_topic(self, topic: str) -> list[bytes]:
+        """Every key a frame on *topic* may be under, most current first.
+
+        The session key first, the code-derived one after it: the list is what
+        ``RelayTransport`` walks when decrypting, so a channel keeps reading the
+        handshake while the pairing moves onto the agreed key.  From the moment
+        a peer's public half is known the older key buys nothing but the
+        handshake itself — ``_on_relay_frame`` enforces that, because the list
+        itself cannot tell one frame from another.
+        """
+        if not topic:
+            return []
+        from internal.transport.relay import netpair_topic
+
+        for pid, secret in self._netpair_secrets_all().items():
+            if not secret or netpair_topic(secret) != topic:
+                continue
+            if pid == self.cfg.device_id or pid == f"pending:{self.cfg.device_id}":
+                return []  # never listen on a channel derived from our own code
+            keys = []
+            peer_key = self._netpair_peer_dh(pid)
+            if peer_key:
+                from internal.security.keyexchange import shared_secret
+                from internal.transport.relay import netpair_session_key
+
+                shared = shared_secret(self._netpair_dh_private(), peer_key)
+                if shared is not None:
+                    keys.append(netpair_session_key(secret, shared, self._netpair_pw()))
+            from internal.transport.relay import netpair_key
+
+            keys.append(netpair_key(secret, self._netpair_pw()))
+            return keys
+        return []
 
     # ------------------------------------------- internet pairing code state
 
@@ -8059,7 +8179,12 @@ class Application:
             return "connecting"
 
     def _on_relay_frame(
-        self, frame_bytes: bytes, topic: str | None = None, *, now: float | None = None
+        self,
+        frame_bytes: bytes,
+        topic: str | None = None,
+        key_index: int = 0,
+        *,
+        now: float | None = None,
     ) -> None:
         """A clipboard frame arrived through the public relay.
 
@@ -8078,6 +8203,20 @@ class Application:
             logger.debug("Relay frame failed to decode", exc_info=True)
             return
         if sync_msg is None:
+            return
+        # Which key of the channel's list opened this frame: 0 is the channel's
+        # current one, and a higher index means it rode the code-derived key
+        # that a netpair channel keeps only so the handshake can be read before
+        # the key agreement has happened.  Once both ends know each other's
+        # public key that older key must buy nothing but the handshake: it is
+        # derived from the 35-bit pairing code, so anyone who has enumerated the
+        # code — the very attack the agreement exists to defeat — can produce
+        # frames under it.
+        if key_index and getattr(sync_msg, "msg_type", "") != "netpair_hello":
+            logger.warning(
+                "Dropping relay frame: it rode the pairing-code key on a channel "
+                "that has moved to key agreement"
+            )
             return
         # Never ingest our own frames: a self-entered netpair code or a
         # self-published relay-enroll topic would otherwise echo straight
@@ -8142,6 +8281,22 @@ class Application:
         # entitles a peer to speak AS the identity bound to that channel — it
         # must not let one paired peer impersonate another device id.
         ident = getattr(self, "_relay_topic_identity", lambda _t: None)(topic or "")
+        if (
+            ident is not None
+            and not source
+            and getattr(sync_msg, "msg_type", "") == "file_chunk"
+        ):
+            # Chat file BYTES ride the compact binary frame, whose 46-byte
+            # header is transfer_id + indices and has nowhere to put a device
+            # id — over the relay that left ``peer_id`` None and the chat layer
+            # dropped every chunk as coming from an unexpected peer, so a chat
+            # attachment reached the receiver's finalize check with 0 bytes on
+            # disk.  The channel resolves the identity, so attribute the frame
+            # to the peer whose secret derives the topic it arrived on; a
+            # provisional netpair tag names no device yet, so those still drop.
+            if _is_provisional_netpair_key(ident):
+                return
+            source = ident
         if ident is not None and source:
             from internal.transport.relay import netpair_device_tag
 
@@ -8332,19 +8487,21 @@ class Application:
         # Netpair channels: mirror to every CONFIRMED pairing-code peer too.
         # (Generated-but-unconfirmed codes stay subscribed but are not used for
         # clipboard mirroring — nothing has been confirmed yet.)
-        from internal.transport.relay import netpair_key, netpair_topic
+        from internal.transport.relay import netpair_topic
 
         for pid, peer_secret in list(netpair_secrets.items()):
             if not isinstance(peer_secret, str) or not peer_secret:
                 continue
             if pid == self.cfg.device_id:
                 continue  # a stray self-entry must never mirror to ourselves
+            # The key the peer's own channel is read under: the agreed session
+            # key once the handshake has happened, the code-derived one until
+            # then (see ``_netpair_key_for``).
+            key = self._netpair_key_for(peer_secret, pid)
+            if key is None:
+                continue
             try:
-                ok = transport.publish(
-                    frame_bytes,
-                    netpair_topic(peer_secret),
-                    netpair_key(peer_secret, self._netpair_pw()),
-                )
+                ok = transport.publish(frame_bytes, netpair_topic(peer_secret), key)
             except Exception:
                 logger.debug("netpair publish failed", exc_info=True)
                 ok = False
@@ -8410,13 +8567,18 @@ class Application:
         from internal.transport.relay import (
             derive_key,
             derive_topic,
-            netpair_key,
             netpair_topic,
         )
 
         secret = (getattr(self.cfg, "netpair_secrets", {}) or {}).get(peer_id)
         if isinstance(secret, str) and secret:
-            topic, key = netpair_topic(secret), netpair_key(secret, self._netpair_pw())
+            # Agreed session key once this peer's public half is known, the
+            # code-derived key before that — a peer that has never sent us a
+            # hello has no other way to read us.
+            key = self._netpair_key_for(secret, peer_id)
+            if key is None:
+                return False
+            topic = netpair_topic(secret)
         else:
             peer_secret = (getattr(self.cfg, "peer_relay_secrets", {}) or {}).get(peer_id)
             peer = self.cfg.peers.get(peer_id)
@@ -9187,6 +9349,10 @@ class Application:
             return {"ok": False, "error": "unknown peer"}, 400
         secrets.pop(peer_id, None)
         (getattr(self.cfg, "netpair_aliases", {}) or {}).pop(peer_id, None)
+        # The peer's key-agreement public key goes with the secret it keys: an
+        # undone pairing leaves no material behind, and one made again stores
+        # the peer's current key from its next hello.
+        (getattr(self.cfg, "netpair_peer_keys", {}) or {}).pop(peer_id, None)
         self._netpair_names.pop(peer_id, None)
         getattr(self, "_netpair_last_seen", {}).pop(peer_id, None)
         try:
@@ -9428,11 +9594,26 @@ class Application:
             payload = {
                 "msg_type": "netpair_hello",
                 "peer_id": target_peer_id,
+                # The public half of our key-agreement key.  This frame is the
+                # only place it is ever published, and it is what the peer needs
+                # to derive the channel key this frame itself cannot be
+                # protected by.
+                "dh_pub": self._netpair_dh_public(),
                 "device_name": self.cfg.device_name,
                 "ts": time.time(),
             }
             frame = encode_frame(payload, source_device=self.cfg.device_id)
-            transport.publish(frame, netpair_topic(secret), netpair_key(secret, self._netpair_pw()))
+            # The code-derived key, and only it.  This frame is the handshake:
+            # it is what tells the peer our public half, so it cannot be
+            # protected by the agreed key it exists to establish.  Sending it
+            # under the agreed key as well would buy nothing — a peer holds the
+            # code key whenever it holds the secret — and would cost something
+            # real: a peer that has not learned our public half yet cannot open
+            # it, and the transport reads a frame it cannot open as a password
+            # mismatch and says so to the user, mid-pairing.
+            transport.publish(
+                frame, netpair_topic(secret), netpair_key(secret, self._netpair_pw())
+            )
         except Exception:
             logger.debug("netpair hello publish failed", exc_info=True)
 
@@ -9465,6 +9646,12 @@ class Application:
         # machine) must never become a paired peer.
         if peer_id and peer_id == self.cfg.device_id:
             return
+        # The peer's key-agreement public key, which turns this channel from
+        # code-keyed into agreement-keyed.  Recorded before the reply goes out
+        # below, so the reply already rides the agreed key.  A peer that sends
+        # none is an older build: nothing is stored, both ends stay on the
+        # code-derived key, and the two versions keep talking.
+        self._note_netpair_peer_dh(peer_id, payload.get("dh_pub", ""))
         our_tag = netpair_device_tag(self.cfg.device_id)
         if incoming_tag == self.cfg.device_id:
             # Reply to us — we are the ENTERER.  Only accept when we are not

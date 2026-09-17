@@ -657,25 +657,53 @@ def test_pull_three_modes_landing(tmp_path):
     assert (recv_roots / "notes.from.Peer-p1-2.md").exists()
 
     # append: lands at the SAME relative path locally, newline-separated,
-    # text extensions only (the pulled block follows the local content).
+    # text only — decided by the bytes, not by the extension (the pulled
+    # block follows the local content).
     _mk(recv_roots, "notes.md", b"local notes")  # overwrite the earlier copy
     assert _pull_and_deliver(r, s, "notes.md", "append") is False
     assert (recv_roots / "notes.md").read_bytes() == b"local notes\nline1\n"
     assert r.events[-1]["status"] == "appended"
 
 
-def test_append_rejects_non_text_extensions(tmp_path):
+def test_append_refuses_binary_content_and_takes_any_text(tmp_path):
+    """The append rule is about content, not a filename whitelist.
+
+    Two halves, because the rule flipped sides: what used to be refused for its
+    extension (``.json`` — text, and exactly the AI-tool config people merge)
+    now lands, and what used to slip through on its extension (a ``.md`` full
+    of PNG bytes) is what gets turned away.
+    """
     recv_roots = tmp_path / "recv-root"
     recv_roots.mkdir()
     r = _StubMgr(tmp_path, roots=[str(recv_roots)])
     srv_root = tmp_path / "bin-root"
-    _mk(srv_root, "blob.png", b"\x89PNG")
+    _mk(srv_root, "blob.png", b"\x89PNG")  # invalid UTF-8: not text
+    _mk(srv_root, "settings.json", b'{"a": 1}')  # text, off the old whitelist
     s = _StubMgr(tmp_path, roots=[str(srv_root)])
     s.mgr.collect()
-    assert _pull_and_deliver(r, s, "blob.png", "append") is False
+
+    # Off the old whitelist, and it lands: .json is text.
+    _pull_and_deliver(r, s, "settings.json", "append")
+    assert r.events[-1]["status"] == "appended"
+    assert (recv_roots / "settings.json").read_bytes() == b'{"a": 1}\n'
+
+    # The incoming bytes decide first: PNG magic is not UTF-8, so it is
+    # refused whatever it is called — including when it is called .md.
+    _mk(srv_root, "notes.md", b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR")
+    s.mgr.collect()
+    _pull_and_deliver(r, s, "notes.md", "append")
     assert r.events[-1]["status"] == "error"
     assert r.events[-1]["reason"] == "append_not_text"
-    assert list(recv_roots.iterdir()) == []  # nothing landed
+    assert not (recv_roots / "notes.md").exists()  # nothing landed
+
+    # ...and the local file has to be text too, or the append corrupts it.
+    _mk(recv_roots, "local.md", b"\x00\x01\x02")
+    _mk(srv_root, "local.md", b"plain text")
+    s.mgr.collect()
+    _pull_and_deliver(r, s, "local.md", "append")
+    assert r.events[-1]["status"] == "error"
+    assert r.events[-1]["reason"] == "append_not_text"
+    assert (recv_roots / "local.md").read_bytes() == b"\x00\x01\x02"  # untouched
 
 
 def test_pull_unknown_mode_falls_back_to_copy(tmp_path):

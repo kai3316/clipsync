@@ -83,7 +83,15 @@ SendFn = Callable[[bytes], Any]
 
 
 class ChatFileTooLargeError(Exception):
-    """A file was refused because it exceeds the internet-relay payload cap."""
+    """A file was refused because it exceeds :data:`MAX_FILE_SIZE`.
+
+    The relay no longer has a size cap of its own: what the public broker
+    limits is the *message*, and a chat attachment is already cut into chunks
+    that fit one (see :meth:`ChatManager.relay_chunk_for`).  Capping the total
+    as well refused the files users actually wanted to send — a 9 MB installer
+    or an 80 MB PDF — for a reason that is nothing but the sum of chunks the
+    transport was built to carry.
+    """
 
 
 def _default_receive_dir() -> Path:
@@ -243,7 +251,6 @@ class ChatManager:
     # the public broker room for its own framing.  LAN peers keep CHUNK_SIZE so
     # the wire format stays byte-identical for pre-update LAN peers.
     RELAY_CHUNK_SIZE = 176 * 1024
-    RELAY_FILE_CAP = 5 * 1024 * 1024  # internet-relay file size cap (bytes)
     # How long a session may sit unanswered while open_to_all is off: the
     # sender waits this long for a ``chat_accept``, and the receiver's own
     # ``invited`` row is dropped after the same silence.  In the default mode
@@ -253,6 +260,15 @@ class ChatManager:
     TRANSFER_ACCEPT_TIMEOUT = 300.0  # sender waits this long for chat_file_accept
     COMPLETION_WAIT_TIMEOUT = 60.0
     TRANSFER_STALL_TIMEOUT = 600.0  # no chunk progress this long => fail + remove .part
+    # A chunk the transport refuses is retried before the transfer is failed.
+    # Over the relay a refusal is usually backpressure rather than a dead peer:
+    # the relay's outgoing queue is bounded (relay.MAX_QUEUED_MESSAGES), so a
+    # receiver on a slow link fills it and the next publish is refused.  Giving
+    # it a moment to drain keeps a slow link slow instead of turning it into a
+    # failed attachment — while a genuinely offline peer still fails, just
+    # CHUNK_SEND_ATTEMPTS * CHUNK_SEND_RETRY_DELAY seconds later.
+    CHUNK_SEND_ATTEMPTS = 8
+    CHUNK_SEND_RETRY_DELAY = 0.5
     MAX_CONCURRENT_INCOMING_FILES = 3
     MAX_CONCURRENT_OUTGOING_FILES = 3
     # ---- liveness ------------------------------------------------------------
@@ -873,21 +889,19 @@ class ChatManager:
             logger.debug("chat: send_file stat failed for %s", file_path)
             return None
         if size > MAX_FILE_SIZE:
-            logger.info("chat: refusing to send %s (%d bytes > cap)", path.name, size)
-            return None
+            # The one size limit left, and a real one: refuse early and loudly
+            # so the UI can name it instead of reporting a transfer that never
+            # started for no stated reason.
+            raise ChatFileTooLargeError(f"{path.name}: {size} bytes exceeds the file size cap")
         with self._lock:
             session = self._session_by_sid.get(session_id)
             if session is None or session.status != "active" or not session.online:
                 return None
             fn = send_fn or self._latest_send_fn.get(session.peer_id)
-            # Internet-only peers ship bytes through the relay, which caps
-            # both per-chunk and total size; refuse early and loudly so the
-            # UI can tell the user why instead of hanging at 0%.
-            internet_cap = getattr(fn, "internet_cap", None)
-            if internet_cap and size > internet_cap:
-                raise ChatFileTooLargeError(
-                    f"{path.name}: {size} bytes exceeds relay cap {internet_cap}"
-                )
+            # Internet-only peers ship bytes through the relay in chunks sized
+            # by the relay's *message* limit (``relay_chunk_for``, tagged on the
+            # closure).  No total-size cap rides along with it: the transport
+            # carries any file the app accepts.
             chunk_size = getattr(fn, "chunk_size", None) or self.CHUNK_SIZE
             # Mirror the incoming cap so a UI bug (or a fast-clicking user)
             # cannot spawn an unbounded number of chunk threads per session.
@@ -1916,7 +1930,8 @@ class ChatManager:
                 # transcript doesn't claim the file was delivered.
                 # (The dead ``peer_completed`` write was removed in v1.0.29.1:
                 # nothing reads it — ``_file_sender`` consults ``error_status``
-                # alone to decide between "done" and "declined".)
+                # alone to decide between "done" and the receiver's own error
+                # code.)
                 if status not in ("", "ok", "sent"):
                     send_state["error_status"] = status
                 send_state["complete_event"].set()
@@ -2179,7 +2194,7 @@ class ChatManager:
                     if not chunk:
                         break
                     frame = encode_binary_chunk(transfer_id, index, total_chunks, chunk)
-                    if not self._send_frame_raw(frame, send_fn):
+                    if not self._send_chunk_with_backoff(transfer_id, frame, send_fn):
                         with self._lock:
                             state = self._sends.pop(transfer_id, None)
                             if state is not None:
@@ -2225,10 +2240,13 @@ class ChatManager:
                 return
             if err_status:
                 # The receiver reported a failure (e.g. size mismatch) — the
-                # transfer did NOT succeed.  Mark the sender's entry declined
-                # so a REST refetch matches the live card (the WS maps the
-                # "rejected" code to the declined label) instead of "done".
-                state["entry"].status = "declined"
+                # transfer did NOT succeed.  The entry keeps the receiver's own
+                # code rather than collapsing to "declined": a decline is a
+                # decision the peer's user made, and this is a fault on the
+                # receiving side.  Reporting it as 已拒绝 is what sent a reader
+                # to ask the other person why they refused, over a transfer
+                # nobody had refused.
+                state["entry"].status = err_status
             else:
                 state["entry"].status = "done"
                 state["entry"].fraction = 1.0
@@ -2253,6 +2271,26 @@ class ChatManager:
         except Exception:
             logger.debug("chat: chunk send failed", exc_info=True)
             return False
+
+    def _send_chunk_with_backoff(self, transfer_id: str, frame: bytes, send_fn: SendFn) -> bool:
+        """One file chunk, retried while the transport keeps refusing it.
+
+        Returns True once the transport takes it, False after
+        ``CHUNK_SEND_ATTEMPTS`` — see the constant for why a refusal is worth
+        retrying (relay backpressure) rather than failing on the spot.  A
+        cancel during a wait ends the retries: the user said stop, and the
+        caller's cancel path is the one that should report it.
+        """
+        for attempt in range(self.CHUNK_SEND_ATTEMPTS):
+            if self._send_frame_raw(frame, send_fn):
+                return True
+            with self._lock:
+                state = self._sends.get(transfer_id)
+                cancelled = state is None or state["cancel"]
+            if cancelled or attempt == self.CHUNK_SEND_ATTEMPTS - 1:
+                return False
+            time.sleep(self.CHUNK_SEND_RETRY_DELAY)
+        return False
 
     # ------------------------------------------------------------------
     # Liveness / teardown

@@ -293,9 +293,9 @@ def send_file(chat_mgr, body, send_fn_for_peer):
     try:
         transfer_id = chat_mgr.send_file(session_id, file_path, send_fn)
     except ChatFileTooLargeError:
-        # The peer is internet-only and the file exceeds the relay cap; tell
-        # the UI so it can show a specific message instead of a generic one.
-        return {"ok": False, "error": "internet_file_cap"}, 400
+        # Over the app's own size cap; tell the UI so it can show a specific
+        # message instead of a generic one.
+        return {"ok": False, "error": "file_too_large"}, 400
     except Exception:
         logger.debug("chat: send_file failed", exc_info=True)
         transfer_id = None

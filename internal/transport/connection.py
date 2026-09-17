@@ -1448,7 +1448,12 @@ class TransportManager:
         with self._lock:
             conn = self._peers.get(peer_id)
         if conn is None:
-            logger.warning("send_to_peer: peer %s not found", peer_id[:12])
+            # Debug, not warning: an internet-paired peer has no LAN connection
+            # by design, and the callers that route through the relay ask here
+            # first — so every heartbeat for such a peer logged a warning that
+            # named a routine state.  The False return is the answer; the
+            # caller decides whether that is worth telling the user.
+            logger.debug("send_to_peer: peer %s not connected", peer_id[:12])
             return False
         return conn.send(data)
 
