@@ -54,25 +54,82 @@ jobs:
 
           What is new in this release:
 
-          - The whole window is drawn to the standard the internet-pairing card
-            set.  That card was the one block with a title row and a hairline
-            under it, a heading of its own for each part, one shape for its
-            labels and one band for the sentences between blocks; every other
-            page had grown its own version of each, so the same idea looked
-            slightly different depending on which page you were on.  Cards,
-            title rows, part-headings, pills, small buttons, quiet lines and row
-            heights are now shared parts that each page asks for by name --
-            which is why this release touches every page without adding a
-            feature to any of them.
+          - An internet pairing's channel key is no longer derived from the
+            pairing code alone.  That code carries 35 bits of secret, so anyone
+            who recorded the channel could enumerate it offline in minutes and
+            then read everything sent on it -- and forge frames that looked like
+            yours for as long as the pairing lasted.  The two devices now agree
+            a key between themselves: each keeps an X25519 private key that
+            never leaves the machine and sends only its public half in the
+            pairing hello, and each mixes its own private half with the other's
+            public half.  That value is the same on both machines and was never
+            on the wire.  The code still matters -- the hello rides it and it is
+            mixed into the result -- but cracking it no longer opens the
+            channel.  What is left is an attacker sitting in the middle of the
+            exchange as it happens, which is a far harder thing than enumerating
+            a short code after the fact.  Pairing with a device still on an
+            older build keeps working exactly as it did, without the agreement,
+            until that device is updated.  And once two devices have agreed a
+            key, a frame that arrives under the old code-derived key is dropped
+            unless it is the hello itself: otherwise the code key -- the one an
+            attacker who has cracked the code holds -- would still buy a forgery
+            on the very channel the agreement exists to protect.
 
-          - As part of that: the peer list inside the internet-pairing card had
-            been indented 20px past the rest of that card; a transfer list's
-            heading drew a rule inside a header that already drew one, and the
-            favorites editor's heading was drawn at a page title's size with no
-            rule at all; a device row's toolbar left its lone refresh button in
-            the middle of the page whenever the sentence beside it was absent;
-            and an image with no text of its own said 图片 on two lines instead
-            of one.
+          - Chat attachments between internet-paired devices now arrive.  The
+            file's bytes travel in a compact binary frame whose 46-byte header
+            is a transfer id and two indices, with nowhere to put a device id,
+            and the relay path dropped any frame that did not name its sender --
+            so every chunk of every attachment was discarded on arrival.  The
+            offer, the accept and the completion are JSON frames that do carry a
+            sender, so the transfer looked healthy right up to the point it
+            failed with an empty file at the other end.  The channel a frame
+            arrived on says who sent it, so those frames are now attributed to
+            the peer whose pairing secret derives that topic.
+
+          - The 5 MB limit on those attachments is gone.  What the public broker
+            limits is a single message, and the sender already cuts the file
+            into chunks that fit one, so capping the total as well refused the
+            files people actually wanted to send -- a 9 MB installer, an 80 MB
+            PDF -- for a reason that was nothing but the sum of chunks the
+            transport was built to carry.  The one size limit left is the app's
+            own, and it is now reported rather than leaving the transfer at 0%.
+
+          - A slow link no longer turns into a lost file.  The relay
+            subscription was asking for best-effort delivery, and a broker
+            delivers at the lower of what the publisher asked for and what the
+            subscriber asked for -- so every chunk was published reliably, paid
+            for, and then handed over best-effort anyway; a single dropped
+            packet meant a lost chunk and a short file at the far end.  The
+            subscription now asks for the same level the chunks are published
+            at.  A chunk the transport refuses is retried before the transfer is
+            failed, since over the relay a refusal is usually a slow link rather
+            than an absent peer, and the client's outgoing queue is bounded so a
+            fast sender cannot put a whole attachment in memory.
+
+          - A transfer the receiving side aborted was shown as 已拒绝 -- a
+            decline -- but a decline is a decision the other person makes, and
+            nobody had made one; readers went and asked the other person why
+            they had refused a file they never refused.  Each receiving-side
+            failure now says which one it was: the sizes did not match, the file
+            could not be written, it was refused for security reasons, or the
+            far side did not answer in time.  AI-config pulls say why in the
+            per-file message and in the summary line: "Pull failed:
+            settings.json" now adds that it was not a text file, or that no
+            local folder matched it, or that the local file could not be
+            written.
+
+          - Append merge decides by content rather than by file extension.  It
+            accepted .txt, .md and .markdown and nothing else, which refused
+            .json, .yaml and .toml -- the AI-tool configuration this page exists
+            to move, all of it text -- while accepting a .md full of PNG bytes
+            and appending those to a text file anyway.  The bytes decide now: no
+            NUL byte and valid UTF-8, checked on the incoming file and on what
+            is already in the target.
+
+          - A heartbeat to an internet-paired device no longer logs a warning
+            that the peer was not found.  Such a device has no local connection
+            by design and the relay path asks there first, so a routine state
+            was being reported as a fault several times a minute.
 
           The device name is now published in the mDNS record, to the local
           network.  That is what lets devices show the name you chose rather
