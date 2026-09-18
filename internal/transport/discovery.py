@@ -59,8 +59,14 @@ def _resolved_host_addresses(timeout: float) -> list[str]:
             try:
                 for info in socket.getaddrinfo(name, None, family=socket.AF_INET):
                     found.append(info[4][0])
-            except Exception:
-                logger.debug("Address lookup for %r failed", name, exc_info=True)
+            except Exception as exc:
+                # One line, not a traceback: this runs on every enumeration --
+                # the network watcher alone calls it twice a minute -- and on
+                # macOS the FQDN is the reverse name of the host's own `::`,
+                # which no resolver answers.  A four-frame traceback per minute
+                # said nothing the name and the errno do not, and buried the
+                # lines that mattered in a log the user is asked to send.
+                logger.debug("Address lookup for %r failed: %s", name, exc)
 
     worker = threading.Thread(target=_worker, daemon=True, name="lan-address-lookup")
     worker.start()
