@@ -54,89 +54,58 @@ jobs:
 
           What is new in this release:
 
-          - Unpairing an internet pairing now actually cuts the relay.  A
-            device paired both ways holds *two* credentials -- one derived from
-            the pairing code, and one exchanged over the LAN link -- and the
-            unpair dropped only the first.  The second is keyed on the *LAN*
-            pairing, which the unpair deliberately leaves alone, so the test
-            for "can this peer be reached over the relay" fell through to the
-            survivor: clipboard, chat and attachments kept flowing to a device
-            the card had just stopped listing, frames arriving from it were
-            still trusted, and no button anywhere could stop it, because that
-            channel has no row of its own.  Both credentials go now.  It is not
-            permanent: two machines on the same LAN re-enrol each other the next
-            time the link comes up, which is the LAN fallback working as
-            designed, and the device row still shows the LAN pairing that owns
-            it.
+          - A device this machine has only ever been *called by* can be called
+            back.  The address book the transport dials from is written when
+            this machine places a call, and never when the other device places
+            one, so a peer that had only ever dialed us had no address anywhere
+            here -- not in memory, not on disk -- and every attempt to reach it
+            ended at "no saved address" without a packet leaving the machine.
+            In the window that is a pairing that fails, a 连接 that does
+            nothing, and a device the network can see and this machine can
+            never reach.  The identity frame a caller sends already carried the
+            caller's certificate; it now carries the port that caller listens
+            on as well, and the address the connection arrived from is
+            remembered against it.
 
-          - A file sent to a device that is on both routes no longer dies when
-            the LAN drops halfway through it.  The chunk size is fixed when the
-            offer is made -- the receiver slices by the size it was told -- while
-            the route is chosen per frame, LAN first and the relay as the
-            fallback.  A transfer that started on the LAN and lost it mid-way
-            therefore handed every remaining 256 KiB frame to a relay that
-            refuses anything past its own envelope limit, failing a transfer
-            that had already delivered most of itself.  A peer that can be
-            reached over the relay is now chunked for the relay from the start,
-            whether its LAN link is up or not.  A device with no relay
-            credential is untouched and keeps the wire format peers already
-            speak.
+            That address is kept apart from the one automatic reconnect reads.
+            It is somewhere a *user* asked us to dial, and remembering it must
+            not revive the redial that a refusal or a 断开连接 is meant to
+            stop.
 
-          - 发送消息 to a device reachable only over the relay opens the
-            conversation instead of doing nothing.  The invite dialed the last
-            address it knew, waited 15 seconds for a link that was never going
-            to come up, gave up and reported the device unreachable -- while the
-            very next thing the user clicked would have worked, because that
-            peer answers on the relay whatever its LAN link is doing.  The
-            address it dialed is usually not the peer's anyway: with no live
-            sighting it falls back to a cached address and then to one persisted
-            on disk, and a dial that fails clears neither, so a device that
-            changed network keeps being dialed at where it used to be.  A failed
-            dial now ends the conversation only for a peer the relay cannot
-            carry either.
+          - 配对 was disabled on exactly the devices that needed it.  It was
+            gated on `connection_state`, which answers "is there a connection
+            right now" and not "can this device be reached" -- a peer that has
+            gone quiet but left an address behind is 离线 and dialable at the
+            same time.  The row now carries the sidecar's own answer, and both
+            the button and the right-click 连接 entry are gated on it.
 
-          - Clipboard content the LAN already delivered is no longer reported as
-            未送达.  The delivery ledger settles a queued send on the receipt the
-            far side publishes back, and the receiver sends one over the LAN for
-            every frame it accepts there -- but only the relay's copy of that
-            receipt was being read.  So a clip captured while the relay was down
-            (the LAN delivered it, the relay publish was queued up) came back as
-            a duplicate once the relay returned, the receiver's dedup dropped
-            it, and a dropped frame earns no receipt of any kind; the ack window
-            then expired and the row failed for content the other machine was
-            already holding.  The LAN receipt settles the row now, and it
-            settles it at once -- which also closes the window in which a late
-            republish of content that had already arrived showed up a second
-            time in the other machine's history.
+          - 配对 on a device with no address now says so.  The call could not
+            leave the machine, and what came back was a bare "nothing
+            happened" -- no card, no toast, no change to the row -- which reads
+            exactly like a click that missed.  It reports the same 找不到该设备
+            the 连接 button does.
 
-          - The update buttons are greyed on a device with no local connection.
-            Both directions ride the LAN and nothing else -- the sidecar refuses
-            an offer that arrives over the relay, and the offer it sends has no
-            relay fallback -- but the buttons were gated on an mDNS sighting,
-            and a sighting keeps naming the version a device runs long after it
-            stopped being dialable.  A peer whose port is blocked, or one that
-            has just left the network, kept a live 发送更新 that answered the
-            click with a 15-second dial and then 无法连接到该设备，它可能已离线。.
-            The row's own 本地·离线 chip is the reason, and it sits beside the
-            button.
+          - A refusal is no longer the last word this window says about a
+            device.  The notice stack allows one entry per device per session,
+            which is right for a refusal nobody asked for and wrong for one
+            that answers a click: after 拒绝, the next attempt was silent --
+            the second 配对 produced nothing at all on either side.  A click
+            that places a call re-arms the notice.
 
-          - The internet pairing card's 在线/离线 is live.  It is a reading
-            rather than an event, and the card treated it as one: the sidecar
-            decides it when asked, from a 90-second window over the last frame
-            heard from each peer, and the only things that asked again were the
-            card's own refresh button and an event that fires when a pairing is
-            made or broken -- never when the window lapses, and never when a
-            peer that had gone quiet speaks again.  So a peer that came back
-            stayed 离线 and one that went away stayed 在线, for as long as the
-            page stayed open.  The card re-reads itself while it is open.
-
-          - 待投递消息 appears only when something is waiting.  It is a sum of
-            the per-row 待补发 chips and it drew itself unconditionally, above
-            rows that already said nothing, and its zero could not tell "nothing
-            is queued" from "no ledger has answered yet" -- the same zero the
-            per-row line refuses to draw.  The chips carry the detail, so this
-            line is now the one thing they cannot say: that some peer has
-            something waiting.
+          - mDNS recovers from a network change instead of staying dead.
+            zeroconf binds one socket per local address when it is
+            constructed, and never rebinds them: when an interface comes or
+            goes -- a VPN switched on, a VPN switched off, Wi-Fi to Ethernet, a
+            wake from sleep -- the sockets bound to addresses that no longer
+            exist log `[Errno 65] No route to host` and are left in the poll
+            set.  Both halves of discovery then run on addresses that are gone:
+            the device answers no query, hears no announcement, and stays
+            invisible to the network until the application is restarted -- and
+            switching the VPN back off does not undo it, because the sockets
+            are still the ones bound to the addresses the VPN took away.  The
+            watcher that notices the address set change now replaces the
+            zeroconf instance outright instead of re-registering the service
+            on the dead one, and wake-from-sleep takes the same path.
 
           The device name is now published in the mDNS record, to the local
           network.  That is what lets devices show the name you chose rather
