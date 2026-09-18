@@ -25,7 +25,6 @@ export const EN: Record<string, string> = {
   "同步已开启": "Sync is on",
   "同步已关闭": "Sync is off",
   "已刷新互联网配对状态": "Internet pairing state refreshed",
-  "已刷新投递状态": "Delivery state refreshed",
   "已重新检测 · {ok}/{total} 项通过": "Re-checked · {ok}/{total} checks passed",
   "已复制收藏内容": "Favourite copied",
   "已置顶这条记录": "Record pinned",
@@ -870,7 +869,6 @@ export const EN: Record<string, string> = {
   // The two hints under the relay lists, from the legacy panel's own copy.
   "兜底通道：私有中继不可达时启用，并作为镜像让落在不同中继的设备仍能互通。公共中继接受任何客户端，也绝不会拿到你的中继密码。": "Fallback path: used when the private relay is unreachable, and as a mirror so devices sitting on different relays still reach each other. The public relays accept any client and never see your relay password.",
   "主通道：剪贴板数据优先走这些端点，用下方用户名和密码登录。留空则只使用上面的公共中继。": "Primary path: clipboard data goes through these first, logging in with the username and password below. Leave empty to use only the public relays above.",
-  "刷新投递状态": "Refresh delivery status",
 
   // ── AI config ────────────────────────────────────────────────────────
   "AI 配置": "AI config",
@@ -941,6 +939,15 @@ export const EN: Record<string, string> = {
   "拉取完成：{count} 个文件已更新": "Pull complete: {count} files updated",
   "拉取完成：{ok} 个成功、{failed} 个失败":
     "Pull complete: {ok} succeeded, {failed} failed",
+  // Why a pulled file did not land, one per reason the sidecar reports.  These
+  // four and the reasons suffix below were added to the shell without entries
+  // here, which the catalog test catches: a reader running in English saw the
+  // Chinese sentence.
+  "不是文本文件，无法追加合并": "Not a text file; append merge does not apply",
+  "本地文件备份失败": "The local file could not be backed up",
+  "本地文件写入失败": "The local file could not be written",
+  "本机没有与之匹配的监控目录": "No watched folder on this machine matched it",
+  "：{reasons}": ": {reasons}",
   "备份已创建：{path}": "Backup created: {path}",
   "已打开：{path}": "Opened: {path}",
   "恢复完成：{result}": "Restore complete: {result}",

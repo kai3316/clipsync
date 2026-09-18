@@ -9353,6 +9353,14 @@ class Application:
         # undone pairing leaves no material behind, and one made again stores
         # the peer's current key from its next hello.
         (getattr(self.cfg, "netpair_peer_keys", {}) or {}).pop(peer_id, None)
+        # The secret this peer enrolled over the LAN goes too.  A device paired
+        # both ways holds two credentials, and the enrolled one is keyed on the
+        # LAN pin -- which this unpair deliberately leaves in place -- so
+        # dropping only the code secret left the peer reachable over the relay
+        # (see ``_peer_is_internet_reachable``, which falls through to
+        # ``peer_relay_secrets``) and still trusted on the way in.  Same fix as
+        # the sidecar's ``InternetPairingService.unpair``.
+        (getattr(self.cfg, "peer_relay_secrets", {}) or {}).pop(peer_id, None)
         self._netpair_names.pop(peer_id, None)
         getattr(self, "_netpair_last_seen", {}).pop(peer_id, None)
         try:

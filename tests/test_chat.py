@@ -532,7 +532,12 @@ class TestInternetRelayFileTransfers:
         )
 
     def test_lan_untagged_fn_keeps_default_chunk_size(self):
-        # A dual/LAN peer's send_fn carries no tag → LAN wire format unchanged.
+        # An untagged closure — what ``LanRuntime._chat_send_fn`` hands back for
+        # a peer with no relay credential — keeps the default, so the LAN wire
+        # format peers already speak is unchanged.  A dual-paired peer is *not*
+        # untagged any more: it is sized for the relay even while its LAN link
+        # is up, because the chunk size is fixed at offer time and the route is
+        # chosen per frame.
         src = self._source(ChatManager.CHUNK_SIZE + 1234)
         tid = self.pair.a.send_file(self.sid, str(src), self.pair.send_from_a)
         assert tid

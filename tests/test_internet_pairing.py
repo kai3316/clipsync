@@ -1004,11 +1004,18 @@ def test_unpair_cleans_all_state_and_refreshes():
         netpair_aliases={"peer-1": "Alias"},
         _netpair_names={"peer-1": "DevB"},
         _netpair_last_seen={"peer-1": 1234.0},
+        # The credential this peer enrolled over the LAN.  A device paired both
+        # ways holds two of them, and the enrolled one is keyed on the LAN pin
+        # rather than on the code -- which the unpair leaves alone -- so a peer
+        # that kept it stayed reachable over the relay, and trusted on the way
+        # in, on a pairing the card had stopped listing.
+        peer_relay_secrets={"peer-1": "ENROLLED"},
     )
     data, status = app._netpair_unpair("peer-1")
     assert status == 200 and data["ok"] is True
     assert app.cfg.netpair_secrets == {}
     assert app.cfg.netpair_aliases == {}
+    assert app.cfg.peer_relay_secrets == {}
     assert app._netpair_names == {}
     assert app._netpair_last_seen == {}
     assert app._relay.refreshed == 1  # channel re-read so the sub disappears

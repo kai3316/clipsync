@@ -1689,21 +1689,27 @@ class LanRuntime:
                 return True
             return self._relay_publish_to_peer(data, peer_id)
 
-        try:
-            connected = set(self.transport.get_connected_peers() or [])
-        except Exception:
-            logger.debug("Chat send: connected peers unavailable", exc_info=True)
-            connected = set()
-        if peer_id not in connected and self._peer_is_internet_reachable(peer_id):
-            # Every file byte has to ride the relay for a peer with no live LAN
-            # connection, so chat chunks the file relay-safe — a 256 KiB chunk
-            # would exceed MAX_RELAY_PAYLOAD and stall the transfer.  The
-            # configured relay limit picks the chunk: a broker that carries
-            # less than this app assumes needs smaller chunks, not dropped
-            # ones.  Only the *message* has a relay limit; the file's total
-            # size is the app's own MAX_FILE_SIZE and nothing narrower.  A
-            # LAN-connected peer keeps the LAN wire format so peers that
-            # predate the relay keep interoperating unchanged.
+        if self._peer_is_internet_reachable(peer_id):
+            # A peer that *can* be reached over the relay is chunked relay-safe
+            # even while its LAN link is up, because the chunk size is fixed
+            # when the offer is made and the route is chosen per frame.  Sizing
+            # by the LAN alone meant a link that dropped halfway through a file
+            # handed every remaining 256 KiB frame to a relay that refuses
+            # anything past MAX_RELAY_FRAME (``pack_envelope``), failing a
+            # transfer that had already delivered most of itself.
+            #
+            # Only the *message* has a relay limit; the file's total size is
+            # the app's own MAX_FILE_SIZE and nothing narrower, and the
+            # configured relay limit picks the chunk, since a broker that
+            # carries less than this app assumes needs smaller chunks rather
+            # than dropped ones.
+            #
+            # This does not narrow what a peer may be: the condition is
+            # ``_peer_is_internet_reachable``, which needs a netpair or an
+            # enrolled secret, and a build that predates the relay has neither
+            # -- so the peers the LAN wire format exists to keep interoperating
+            # keep it, and the ones that lose it are exactly the ones already
+            # parsing ``chunk_size`` out of the offer.
             send.chunk_size = ChatManager.relay_chunk_for(self.config.relay_max_message_bytes)
         return send
 
@@ -1770,12 +1776,26 @@ class LanRuntime:
             # address nothing is connected at.
             connected = self._connect_and_wait(pid, no_auto_pairing=True)
             if connected is None:
-                self._publish(
-                    "chat.connect_timeout",
-                    {"peer_id": pid, "name": self._peer_name(pid) or peer_name},
-                )
-                return None
-            pid = connected
+                # A dial that never lands is the end of the conversation only
+                # for a peer the relay cannot carry either.  A dual-paired peer
+                # answers on the relay whatever its LAN link is doing, and the
+                # send closure falls back there per frame -- so returning None
+                # here reported a device as unreachable while the very next
+                # thing the user clicked would have worked.
+                #
+                # The address that just failed is often not the peer's anyway:
+                # ``_address`` falls back to a cached, then a persisted, address
+                # when no live sighting exists, and a dial that fails does not
+                # clear either -- so a device that changed network keeps being
+                # dialed at where it used to be.
+                if not self._peer_is_internet_reachable(pid):
+                    self._publish(
+                        "chat.connect_timeout",
+                        {"peer_id": pid, "name": self._peer_name(pid) or peer_name},
+                    )
+                    return None
+            else:
+                pid = connected
         return self.chat.start_session(
             pid, peer_name,
             self.chat.shorten_fingerprint(self.pairing.get_peer_fingerprint(pid)),
@@ -4440,6 +4460,20 @@ class LanRuntime:
             self._peer_is_internet_reachable(pid) if via_relay
             else self.pairing.is_peer_paired(pid)
         )
+        if kind == "relay_ack":
+            # A receipt for one of this machine's own sends, arriving on the
+            # LAN.  The receiver emits one for every frame it accepted here (see
+            # ``_receive``) and reading it only off the relay left rows the LAN
+            # had already delivered unsettled: the relay copy was deduped at the
+            # far end, a deduped frame earns no ack of any kind, and the ack
+            # window then failed content the peer was holding -- the row read
+            # 未送达 for a clip already in the other machine's history.  The
+            # link has established who is speaking and the receipt is keyed by
+            # msg_id, so this one is worth what the relay's is.
+            ack_id = getattr(msg, "_raw_payload", {}).get("msg_id", "")
+            if trusted and isinstance(ack_id, str) and ack_id:
+                self.delivery.note_ack(pid, ack_id)
+            return
         if kind.startswith("aiconfig_"):
             self.ai_config.handle_message(kind, getattr(msg, "_raw_payload", {}), pid)
             return

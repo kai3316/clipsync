@@ -911,11 +911,15 @@ def test_entering_a_pairing_code_from_the_phone_needs_the_relay_online(internet_
 
 
 def test_unpairing_from_the_phone_severs_the_internet_pair(internet_panel):
-    """The route drops the secret + alias; the sibling-tab push comes from the
-    runtime (see test_relay_delivery), so every caller of the unpair reaches it."""
+    """The route drops the secret + alias + the peer's enrolled relay secret; the
+    sibling-tab push comes from the runtime (see test_relay_delivery), so every
+    caller of the unpair reaches it."""
     cfg = internet_panel.app.config
     cfg.netpair_secrets = {"remote": "secret"}
     cfg.netpair_aliases["remote"] = "Desk"
+    # Learned over the LAN, and the half that decides whether the peer is still
+    # reachable on the relay once the code pairing is gone.
+    cfg.peer_relay_secrets["remote"] = "enrolled-secret"
     base, token = internet_panel.base, internet_panel.token
 
     assert request_json(
@@ -926,6 +930,7 @@ def test_unpairing_from_the_phone_severs_the_internet_pair(internet_panel):
         base, token, "POST", "/api/internetpair/unpair", {"peer_id": "remote"}
     ) == (200, {"ok": True})
     assert cfg.netpair_secrets == {} and cfg.netpair_aliases == {}
+    assert cfg.peer_relay_secrets == {}
 
 
 def test_the_phone_relay_test_probes_the_brokers_it_was_given(internet_panel):

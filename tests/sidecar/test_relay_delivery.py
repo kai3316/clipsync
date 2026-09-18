@@ -345,6 +345,25 @@ def test_a_failed_relay_publish_is_queued_and_flushed_by_a_peer_frame(relay_rig)
     assert runtime.delivery_counts() == {"peers": {}}
     assert len(relay.published) == 2
 
+    # The same queue, settled by the receipt the LAN sent.  The receiver emits
+    # one for every frame it accepts on that link, and reading receipts only off
+    # the relay left a row the LAN had already delivered to time out as 未送达
+    # for a clip the peer was holding: the relay copy arrives as a duplicate,
+    # the receiver's dedup drops it, and a dropped frame earns no ack at all.
+    relay.ok = False
+    assert runtime._on_local_sync(clipboard_message("m6"))
+    assert runtime.delivery_counts() == {"peers": {"remote": 1}}
+    runtime._receive(
+        decode_message(
+            encode_frame({"msg_type": "relay_ack", "msg_id": "m6"}, source_device="remote")
+        ),
+        "remote",
+    )
+    assert {row["msg_id"]: row["status"] for row in runtime.relay_delivery_status()["items"]}[
+        "m6"
+    ] == "delivered"
+    assert runtime.delivery_counts() == {"peers": {}}
+
 
 def test_going_online_flushes_every_queued_send(relay_rig):
     runtime, relay = relay_rig.runtime, relay_rig.relay
@@ -489,9 +508,19 @@ def test_an_internet_only_peer_gets_relay_safe_file_chunks(relay_rig):
     )
     assert small.chunk_size < send.chunk_size
 
-    # A LAN-connected peer keeps the 256 KiB wire format peers already speak.
+    # A LAN link coming up does not take the tag away.  The chunk size is fixed
+    # when the offer is made — the receiver slices by the one it was told — and
+    # the route is chosen per frame, so a peer that left the LAN mid-transfer
+    # handed the relay the 256 KiB frames it refuses, failing a transfer that had
+    # already delivered most of itself.  Sizing for the relay from the start
+    # costs a LAN-connected peer a little framing and makes the route change
+    # work.
     transport.connected.add("remote")
-    assert not hasattr(runtime._chat_send_fn("remote"), "chunk_size")
+    assert runtime._chat_send_fn("remote").chunk_size == small.chunk_size
+
+    # A peer with no relay credential is untouched: it has no fallback to size
+    # for, and keeps the LAN wire format peers already speak.
+    assert not hasattr(runtime._chat_send_fn("no-relay-credential"), "chunk_size")
 
 
 def test_a_relayed_file_chunk_rides_at_qos_one(relay_rig):

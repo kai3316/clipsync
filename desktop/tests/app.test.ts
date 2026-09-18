@@ -1829,13 +1829,18 @@ describe("history rendering", () => {
     vi.mocked(bridge.offerDeviceUpdate).mockResolvedValue({ sent: true });
     vi.mocked(bridge.fetchDeviceUpdate).mockResolvedValue({ sent: true });
     vi.mocked(bridge.devices).mockResolvedValue({ items: [
-      { id: "t", name: "Studio", paired: false, connection_state: "discovered",
+      // Online, because an update can only be offered down a live local link:
+      // the sidecar refuses an offer that arrives over the relay, and the one
+      // it sends has no relay fallback.  A sighting keeps saying what version
+      // a device runs long after it stopped being dialable, so a row gated on
+      // the sighting alone offered a button whose click could only fail.
+      { id: "t", name: "Studio", paired: false, connection_state: "online",
         pairing_status: "", pairing_code: null, sas: null,
         version: "1.0.7", platform: "windows", arch: "amd64",
         update_available: true, update_cached: true },
       // The direction the feature is meant to run in: this device is the one
       // behind, so its row offers the fetch rather than the send.
-      { id: "n", name: "Newer", paired: false, connection_state: "discovered",
+      { id: "n", name: "Newer", paired: false, connection_state: "online",
         pairing_status: "", pairing_code: null, sas: null,
         version: "1.0.9", platform: "windows", arch: "amd64",
         update_available: false, update_fetchable: true },
@@ -1953,7 +1958,12 @@ describe("history rendering", () => {
       code: "update.peer_unreachable", message: "无法连接到该设备，它可能已离线。", retryable: false,
     });
     vi.mocked(bridge.devices).mockResolvedValue({ items: [
-      { id: "t", name: "Studio", paired: false, connection_state: "discovered",
+      // Online, because an update can only be offered down a live local link:
+      // the sidecar refuses an offer that arrives over the relay, and the one
+      // it sends has no relay fallback.  A sighting keeps saying what version
+      // a device runs long after it stopped being dialable, so a row gated on
+      // the sighting alone offered a button whose click could only fail.
+      { id: "t", name: "Studio", paired: false, connection_state: "online",
         pairing_status: "", pairing_code: null, sas: null,
         version: "1.0.7", platform: "windows", arch: "amd64",
         update_available: true, update_cached: true },

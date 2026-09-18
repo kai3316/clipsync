@@ -775,6 +775,24 @@ class InternetPairingService:
         # pairing that is undone leaves no material behind, and one that is
         # made again stores the peer's current key from its next hello.
         (getattr(self.config, "netpair_peer_keys", {}) or {}).pop(peer_id, None)
+        # The secret this peer enrolled over the LAN goes as well, and this is
+        # the half that actually severs the internet route.  A device paired
+        # both ways holds *two* credentials, and the enrolled one is keyed on
+        # the LAN pin rather than on the code -- which this unpair deliberately
+        # leaves alone.  Dropping only the netpair secret therefore left
+        # ``_peer_is_internet_reachable`` answering True off the survivor: every
+        # clipboard, chat and attachment frame kept flowing to a peer the card
+        # had just stopped listing, over the enrolled topic, and the inbound
+        # gate kept trusting it.  Nothing in the UI could stop it either, since
+        # the enrolled channel has no row of its own.
+        #
+        # This does not survive a re-enrollment: if the two machines are on the
+        # same LAN, the peer's next ``relay_enroll`` offer stores its secret
+        # again -- which is the LAN fallback working as designed, not the
+        # unpair coming undone, and the device row still shows the LAN pairing
+        # that owns it.
+        (getattr(self.config, "peer_relay_secrets", {}) or {}).pop(peer_id, None)
+        self._enrolled.discard(peer_id)
         self._names.pop(peer_id, None)
         self._last_seen.pop(peer_id, None)
         # Which is also how a pairing that is still waiting is called off: its

@@ -839,7 +839,7 @@ function deviceMenu(event: MouseEvent, device: Device) {
           id: "send-update", label: t("发送更新"), icon: FileUp,
           // The row's button, its rule and its two sentences: what this machine
           // can send is the installer its own upgrade kept.
-          disabled: busy.value || !!updateBusyId.value || !device.update_cached,
+          disabled: busy.value || !!updateBusyId.value || !device.update_cached || !updateReachable(device),
           title: device.update_cached
             ? t("把本机的安装包发送给该设备")
             : t("本机还没有安装包可发送：本机只保留自己升级时下载的那一个，对方可自行检查更新"),
@@ -849,7 +849,7 @@ function deviceMenu(event: MouseEvent, device: Device) {
     device.update_fetchable
       ? {
           id: "fetch-update", label: t("获取更新"), icon: Download,
-          disabled: busy.value || !!fetchBusyId.value,
+          disabled: busy.value || !!fetchBusyId.value || !updateReachable(device),
           title: t("从该设备获取新版本安装包并安装"),
           run: () => fetchDeviceUpdate(device),
         }
@@ -2279,6 +2279,20 @@ function localChannelState(device: Device) {
   return device.reconnecting ? "connecting" : (device.connection_state || "offline");
 }
 
+/** Whether an update may be sent to this device, or asked of it.
+ *
+ * Both directions ride the LAN link and nothing else: the sidecar drops an
+ * ``update_offer`` that arrives over the relay, and the offer it sends is a
+ * bare ``send_to_peer`` with no relay fallback.  The buttons were gated on a
+ * *sighting* instead, and an mDNS record keeps naming the version a device
+ * runs long after it stopped being dialable — so a peer whose port is blocked,
+ * or one that has just left the network, kept a live 发送更新 and answered the
+ * click with a 15-second dial and 无法连接到该设备，它可能已离线。.  The row's own
+ * 本地·离线 chip is the reason, and it sits beside the button. */
+function updateReachable(device: Device) {
+  return device.connection_state === "online";
+}
+
 /** A device's internet pairing, joined to the device row by device id.
  *
  * The relay's peer list and this machine's device list are two views of the
@@ -3079,6 +3093,13 @@ function onShortcut(event: KeyboardEvent) {
 const CHAT_UNREAD_POLL_MS = 5000;
 const chatUnread = ref(0);
 let chatUnreadTimer: ReturnType<typeof setInterval> | undefined;
+/** How often the open internet card re-reads its peers' 在线 state.
+ *
+ * The sidecar's own online window is 90 s, so this only has to be quick enough
+ * that a chip does not visibly lag the truth it is reporting; the read is local
+ * and returns a handful of rows. */
+const NETPAIR_STATUS_POLL_MS = 5000;
+let netpairStatusTimer: ReturnType<typeof setInterval> | undefined;
 /** The unread total across every conversation, as the sidebar shows it.
  *
  * The reads here are the chat page's own (`bridge.chatSessions`), counted the
@@ -3110,6 +3131,23 @@ onMounted(() => {
   chatUnreadTimer = setInterval(() => {
     if (tab.value !== "chat") void refreshChatUnread();
   }, CHAT_UNREAD_POLL_MS);
+  // The internet card's per-device 在线/离线 is a reading rather than an event,
+  // and the card treated it as one.  ``paired_peers`` decides ``online`` when
+  // it is read, from a 90-second window over the last frame heard from each
+  // peer, and the only things that re-read it were the card's own 刷新 button
+  // and the ``netpair.peer.changed`` event — which fires when a pairing is made
+  // or broken, and never when the window lapses or when a peer that had gone
+  // quiet speaks again.  Both directions were therefore stuck for as long as
+  // the page stayed open: a peer that came back stayed 离线, and one that went
+  // away stayed 在线.  The expiry has no event to ride at all, since silence is
+  // what it is made of, so it is a poll — on the tab that draws the answer, and
+  // nowhere else.  It re-reads the ledgers with the peers, which is what keeps
+  // the 待补发 chips on the same rows in step.
+  netpairStatusTimer = setInterval(() => {
+    if (tab.value === "devices" && deviceTab.value === "internet") {
+      void refreshInternetPairing();
+    }
+  }, NETPAIR_STATUS_POLL_MS);
   watch(tab, (page, previous) => {
     if (previous === "chat" && page !== "chat") void refreshChatUnread();
   });
@@ -3169,6 +3207,7 @@ onMounted(() => {
 onUnmounted(() => {
   if (pauseTickTimer) clearInterval(pauseTickTimer);
   if (chatUnreadTimer) clearInterval(chatUnreadTimer);
+  if (netpairStatusTimer) clearInterval(netpairStatusTimer);
   window.removeEventListener("keydown", onShortcut);
   ++aiInventoryGeneration;
   ++themeGeneration;
@@ -3761,20 +3800,14 @@ async function refreshInternetPairing() {
   }
   catch (error) { state.error = error as any; }
 }
-/** The send list's own refresh button: re-read the peers, then their ledgers. */
-async function refreshDeliveryStatus() {
-  await refreshInternetPairing();
-}
-/** The two refreshes on the internet card, which are separate buttons over the
- * one read and so are separate handlers: the card's own 刷新 reloads the
- * pairing state, and the send list's reloads the ledgers under it. */
+/** The internet card's own refresh, and now the only one over that read.  The
+ * send list had a second button asking the same question — the ledger it
+ * reloads rides on this call — and the card's status is a poll while the tab is
+ * open, so the button is the manual nudge rather than the way it stays current.
+ */
 async function refreshInternetPairingNow() {
   await refreshInternetPairing();
   store.toast("ui.settings", t("已刷新互联网配对状态"));
-}
-async function refreshDeliveryNow() {
-  await refreshDeliveryStatus();
-  store.toast("ui.settings", t("已刷新投递状态"));
 }
 /** The internet switch, on the card it turns on.
  *
@@ -3841,8 +3874,12 @@ async function enterInternetPairing() {
     internetPairingCode.value = "";
     internetPairingMessage.value = "";
     internetPairingFailed.value = false;
+    // One read, not two: this call already re-reads the peers and every
+    // ledger under them, and the second one that used to follow was the same
+    // request sent twice (``refreshDeliveryStatus`` was that call and nothing
+    // else).  Both ``load``s are fire-and-forget, so awaiting a second round
+    // did not wait for the ledgers either.
     await refreshInternetPairing();
-    await refreshDeliveryStatus();
   } catch (error) {
     internetPairingFailed.value = true;
     internetPairingMessage.value = pairingErrorText(error);
@@ -4985,7 +5022,7 @@ async function translateText() {
                      own upgrade kept, so a machine that has none to send has
                      nothing to offer, and says why rather than reaching for the
                      network: the device being offered can download it itself. -->
-                <button v-if="device.update_available" class="icon-button" :aria-label="t('发送更新')" :title="device.update_cached ? t('把本机的安装包发送给该设备') : t('本机还没有安装包可发送：本机只保留自己升级时下载的那一个，对方可自行检查更新')" :disabled="busy || !!updateBusyId || !device.update_cached" @click="offerDeviceUpdate(device)"><FileUp :size="18" :class="{ spinning: updateBusyId === device.id }" /></button>
+                <button v-if="device.update_available" class="icon-button" :aria-label="t('发送更新')" :title="device.update_cached ? t('把本机的安装包发送给该设备') : t('本机还没有安装包可发送：本机只保留自己升级时下载的那一个，对方可自行检查更新')" :disabled="busy || !!updateBusyId || !device.update_cached || !updateReachable(device)" @click="offerDeviceUpdate(device)"><FileUp :size="18" :class="{ spinning: updateBusyId === device.id }" /></button>
                 <!-- The mirror of the button above, and the direction the
                      feature is meant to run in: this device is the one behind,
                      so this is the side with a reason to click.  It asks the
@@ -4994,7 +5031,7 @@ async function translateText() {
                      can be staged.  Shown only when the peer really is ahead —
                      same platform, newer version — which is what the sidecar
                      decided for this row. -->
-                <button v-if="device.update_fetchable" class="icon-button" :aria-label="t('获取更新')" :title="t('从该设备获取新版本安装包并安装')" :disabled="busy || !!fetchBusyId" @click="fetchDeviceUpdate(device)"><Download :size="18" :class="{ spinning: fetchBusyId === device.id }" /></button>
+                <button v-if="device.update_fetchable" class="icon-button" :aria-label="t('获取更新')" :title="t('从该设备获取新版本安装包并安装')" :disabled="busy || !!fetchBusyId || !updateReachable(device)" @click="fetchDeviceUpdate(device)"><Download :size="18" :class="{ spinning: fetchBusyId === device.id }" /></button>
                 <button class="icon-button" :aria-label="t('移除设备')" :title="t('移除设备')" :disabled="busy" @click="forgetDevice = device"><Trash2 :size="18" /></button>
               </div>
               <p v-if="probeResults[device.id]" class="note device-full" role="status">{{ t("连接测试：") }}{{ probeLabel(probeResults[device.id]) }}</p>
@@ -5194,9 +5231,17 @@ async function translateText() {
                    it reads as one in both places now. -->
               <div class="internet-peers-head card-sub card-sub--row">
                 <h3>{{ t("已配对的设备") }}</h3>
-                <span class="note">{{ t("待投递消息：") }}{{ delivery.total }}
-                  <button type="button" class="icon-button icon-button--sm" :title="t('刷新投递状态')" :aria-label="t('刷新投递状态')" @click="refreshDeliveryNow"><RefreshCw :size="15" /></button>
-                </span>
+                <!-- Drawn only when there is something to say.  A permanent
+                     待投递消息：0 above rows that already say nothing was there
+                     in every state of the card, and its zero was the one the
+                     store's own ``shown()`` refuses to draw: 0 before any
+                     ledger has answered and 0 when nothing is queued are not
+                     the same fact, and the line could not tell them apart.  The
+                     per-row 待补发 chips carry the detail, and the poll that
+                     keeps those live keeps this in step too — which is what the
+                     separate 刷新投递状态 button did, over the same read as the
+                     card's own 刷新, so it went with the unconditional line. -->
+                <span v-if="delivery.total > 0" class="note">{{ t("待投递消息：") }}{{ delivery.total }}</span>
               </div>
               <ul class="peer-list peer-list--devices">
                 <li v-for="peer in internetPairing.peers" :key="peer.peer_id" class="internet-peer">
