@@ -54,82 +54,89 @@ jobs:
 
           What is new in this release:
 
-          - An internet pairing's channel key is no longer derived from the
-            pairing code alone.  That code carries 35 bits of secret, so anyone
-            who recorded the channel could enumerate it offline in minutes and
-            then read everything sent on it -- and forge frames that looked like
-            yours for as long as the pairing lasted.  The two devices now agree
-            a key between themselves: each keeps an X25519 private key that
-            never leaves the machine and sends only its public half in the
-            pairing hello, and each mixes its own private half with the other's
-            public half.  That value is the same on both machines and was never
-            on the wire.  The code still matters -- the hello rides it and it is
-            mixed into the result -- but cracking it no longer opens the
-            channel.  What is left is an attacker sitting in the middle of the
-            exchange as it happens, which is a far harder thing than enumerating
-            a short code after the fact.  Pairing with a device still on an
-            older build keeps working exactly as it did, without the agreement,
-            until that device is updated.  And once two devices have agreed a
-            key, a frame that arrives under the old code-derived key is dropped
-            unless it is the hello itself: otherwise the code key -- the one an
-            attacker who has cracked the code holds -- would still buy a forgery
-            on the very channel the agreement exists to protect.
+          - Unpairing an internet pairing now actually cuts the relay.  A
+            device paired both ways holds *two* credentials -- one derived from
+            the pairing code, and one exchanged over the LAN link -- and the
+            unpair dropped only the first.  The second is keyed on the *LAN*
+            pairing, which the unpair deliberately leaves alone, so the test
+            for "can this peer be reached over the relay" fell through to the
+            survivor: clipboard, chat and attachments kept flowing to a device
+            the card had just stopped listing, frames arriving from it were
+            still trusted, and no button anywhere could stop it, because that
+            channel has no row of its own.  Both credentials go now.  It is not
+            permanent: two machines on the same LAN re-enrol each other the next
+            time the link comes up, which is the LAN fallback working as
+            designed, and the device row still shows the LAN pairing that owns
+            it.
 
-          - Chat attachments between internet-paired devices now arrive.  The
-            file's bytes travel in a compact binary frame whose 46-byte header
-            is a transfer id and two indices, with nowhere to put a device id,
-            and the relay path dropped any frame that did not name its sender --
-            so every chunk of every attachment was discarded on arrival.  The
-            offer, the accept and the completion are JSON frames that do carry a
-            sender, so the transfer looked healthy right up to the point it
-            failed with an empty file at the other end.  The channel a frame
-            arrived on says who sent it, so those frames are now attributed to
-            the peer whose pairing secret derives that topic.
+          - A file sent to a device that is on both routes no longer dies when
+            the LAN drops halfway through it.  The chunk size is fixed when the
+            offer is made -- the receiver slices by the size it was told -- while
+            the route is chosen per frame, LAN first and the relay as the
+            fallback.  A transfer that started on the LAN and lost it mid-way
+            therefore handed every remaining 256 KiB frame to a relay that
+            refuses anything past its own envelope limit, failing a transfer
+            that had already delivered most of itself.  A peer that can be
+            reached over the relay is now chunked for the relay from the start,
+            whether its LAN link is up or not.  A device with no relay
+            credential is untouched and keeps the wire format peers already
+            speak.
 
-          - The 5 MB limit on those attachments is gone.  What the public broker
-            limits is a single message, and the sender already cuts the file
-            into chunks that fit one, so capping the total as well refused the
-            files people actually wanted to send -- a 9 MB installer, an 80 MB
-            PDF -- for a reason that was nothing but the sum of chunks the
-            transport was built to carry.  The one size limit left is the app's
-            own, and it is now reported rather than leaving the transfer at 0%.
+          - 发送消息 to a device reachable only over the relay opens the
+            conversation instead of doing nothing.  The invite dialed the last
+            address it knew, waited 15 seconds for a link that was never going
+            to come up, gave up and reported the device unreachable -- while the
+            very next thing the user clicked would have worked, because that
+            peer answers on the relay whatever its LAN link is doing.  The
+            address it dialed is usually not the peer's anyway: with no live
+            sighting it falls back to a cached address and then to one persisted
+            on disk, and a dial that fails clears neither, so a device that
+            changed network keeps being dialed at where it used to be.  A failed
+            dial now ends the conversation only for a peer the relay cannot
+            carry either.
 
-          - A slow link no longer turns into a lost file.  The relay
-            subscription was asking for best-effort delivery, and a broker
-            delivers at the lower of what the publisher asked for and what the
-            subscriber asked for -- so every chunk was published reliably, paid
-            for, and then handed over best-effort anyway; a single dropped
-            packet meant a lost chunk and a short file at the far end.  The
-            subscription now asks for the same level the chunks are published
-            at.  A chunk the transport refuses is retried before the transfer is
-            failed, since over the relay a refusal is usually a slow link rather
-            than an absent peer, and the client's outgoing queue is bounded so a
-            fast sender cannot put a whole attachment in memory.
+          - Clipboard content the LAN already delivered is no longer reported as
+            未送达.  The delivery ledger settles a queued send on the receipt the
+            far side publishes back, and the receiver sends one over the LAN for
+            every frame it accepts there -- but only the relay's copy of that
+            receipt was being read.  So a clip captured while the relay was down
+            (the LAN delivered it, the relay publish was queued up) came back as
+            a duplicate once the relay returned, the receiver's dedup dropped
+            it, and a dropped frame earns no receipt of any kind; the ack window
+            then expired and the row failed for content the other machine was
+            already holding.  The LAN receipt settles the row now, and it
+            settles it at once -- which also closes the window in which a late
+            republish of content that had already arrived showed up a second
+            time in the other machine's history.
 
-          - A transfer the receiving side aborted was shown as 已拒绝 -- a
-            decline -- but a decline is a decision the other person makes, and
-            nobody had made one; readers went and asked the other person why
-            they had refused a file they never refused.  Each receiving-side
-            failure now says which one it was: the sizes did not match, the file
-            could not be written, it was refused for security reasons, or the
-            far side did not answer in time.  AI-config pulls say why in the
-            per-file message and in the summary line: "Pull failed:
-            settings.json" now adds that it was not a text file, or that no
-            local folder matched it, or that the local file could not be
-            written.
+          - The update buttons are greyed on a device with no local connection.
+            Both directions ride the LAN and nothing else -- the sidecar refuses
+            an offer that arrives over the relay, and the offer it sends has no
+            relay fallback -- but the buttons were gated on an mDNS sighting,
+            and a sighting keeps naming the version a device runs long after it
+            stopped being dialable.  A peer whose port is blocked, or one that
+            has just left the network, kept a live 发送更新 that answered the
+            click with a 15-second dial and then 无法连接到该设备，它可能已离线。.
+            The row's own 本地·离线 chip is the reason, and it sits beside the
+            button.
 
-          - Append merge decides by content rather than by file extension.  It
-            accepted .txt, .md and .markdown and nothing else, which refused
-            .json, .yaml and .toml -- the AI-tool configuration this page exists
-            to move, all of it text -- while accepting a .md full of PNG bytes
-            and appending those to a text file anyway.  The bytes decide now: no
-            NUL byte and valid UTF-8, checked on the incoming file and on what
-            is already in the target.
+          - The internet pairing card's 在线/离线 is live.  It is a reading
+            rather than an event, and the card treated it as one: the sidecar
+            decides it when asked, from a 90-second window over the last frame
+            heard from each peer, and the only things that asked again were the
+            card's own refresh button and an event that fires when a pairing is
+            made or broken -- never when the window lapses, and never when a
+            peer that had gone quiet speaks again.  So a peer that came back
+            stayed 离线 and one that went away stayed 在线, for as long as the
+            page stayed open.  The card re-reads itself while it is open.
 
-          - A heartbeat to an internet-paired device no longer logs a warning
-            that the peer was not found.  Such a device has no local connection
-            by design and the relay path asks there first, so a routine state
-            was being reported as a fault several times a minute.
+          - 待投递消息 appears only when something is waiting.  It is a sum of
+            the per-row 待补发 chips and it drew itself unconditionally, above
+            rows that already said nothing, and its zero could not tell "nothing
+            is queued" from "no ledger has answered yet" -- the same zero the
+            per-row line refuses to draw.  The chips carry the detail, so this
+            line is now the one thing they cannot say: that some peer has
+            something waiting.
 
           The device name is now published in the mDNS record, to the local
           network.  That is what lets devices show the name you chose rather
