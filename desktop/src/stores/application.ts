@@ -281,6 +281,21 @@ export function createApplicationStore() {
    * session, which is also what the reader asked for: say it, do not repeat it.
    */
   const removalNotices = new Set<string>();
+  /** Forget that this peer's removal was reported, so a refusal may say it again.
+   *
+   * The rule above is for the refusals this window did not ask for: a peer the
+   * user removed keeps dialing us, and the second telling is not news. A refusal
+   * that answers the reader's own click is the opposite case — it is the only
+   * thing that click produced — so the clicks that dial clear the mark first and
+   * let the answer through. Without this the first refusal of the session was
+   * also the last thing this window ever said about that device, and every later
+   * 配对 or 连接 was a click with no reply: the bug where a device that removed
+   * this one could not be re-paired from here, silently.
+   */
+  function rearmRemovalNotice(deviceId: string) {
+    const device = String(deviceId || "");
+    if (device) removalNotices.delete(device);
+  }
   function pushNotice(name: string, data: Record<string, unknown>) {
     const id = ++noticeSequence;
     state.notices.push({ id, title: name, message: noticeMessage(name, data) });
@@ -986,7 +1001,11 @@ export function createApplicationStore() {
       }, REMOTE_FILE_TIMEOUT));
       return true;
     },
-    startPairing: (device: Device) => action(() => bridge.startPairing(device.id)),
+    startPairing: (device: Device) =>
+      action(() => {
+        rearmRemovalNotice(device.id);
+        return bridge.startPairing(device.id);
+      }),
     /** Confirm the code, and say so when it did not take.
      *
      * The runtime answers `{paired, status}` rather than the `accepted` the
@@ -1060,7 +1079,11 @@ export function createApplicationStore() {
      * start arrives as the card's own state (or a refusal from the peer), never as
      * an optimistic "connected" from here.
      */
-    connect: (device: Device) => action(() => bridge.connectDevice(device.id), ["accepted"]),
+    connect: (device: Device) =>
+      action(() => {
+        rearmRemovalNotice(device.id);
+        return bridge.connectDevice(device.id);
+      }, ["accepted"]),
     disconnect: (device: Device) => action(() => bridge.disconnectDevice(device.id)),
     /** Open a clip that is a web link in the browser.
      *

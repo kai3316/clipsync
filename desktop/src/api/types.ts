@@ -130,6 +130,15 @@ export interface Device {
   note?: string;
   paired: boolean;
   connection_state: string;
+  /** Whether a click can place a call to this device — the answer the row's
+   *  配对 and 连接 buttons are drawn on.  Not `connection_state`: that field
+   *  describes the connection that exists, and a device that went quiet but
+   *  left an address behind (a saved address, or one its own call to us
+   *  taught the transport) is 离线 and dialable at the same time.  Gating the
+   *  button on the state instead left it disabled on exactly the devices the
+   *  user needed it for — the ones this machine cannot currently see, whose
+   *  only way back was to be called. */
+  dialable?: boolean;
   pairing_status: string;
   pairing_code: string | null;
   sas: string | null;

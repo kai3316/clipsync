@@ -806,8 +806,8 @@ function deviceMenu(event: MouseEvent, device: Device) {
           label: connected ? t("断开连接") : t("连接"),
           icon: connected ? PlugZap : Plug,
           // A device that is not reachable cannot be dialed, which is the rule
-          // the row's own connect button already applies.
-          disabled: !connected && device.connection_state === "offline",
+          // the row's own connect button already applies — see `canDial`.
+          disabled: !connected && !canDial(device),
           run: () => (connected ? store.disconnect(device) : store.connect(device)),
         }
       : null,
@@ -2235,6 +2235,21 @@ async function resumeSync() {
 }
 function pairingPending(device: Device) {
   return !device.paired && ["pending", "peer_confirmed", "confirmed_waiting"].includes(device.pairing_status);
+}
+/** Whether a click on this row can place a call to that device.
+ *
+ * `dialable` is the sidecar's own answer, and the only one that can be right:
+ * it counts the address a peer's call taught the transport and the one written
+ * down the last time this machine could reach it, so a device that has gone
+ * quiet while an address is still on file reads 离线 and can be dialed at the
+ * same time.  Gating a button on the connection state instead is what left it
+ * disabled on exactly the devices whose only way back was to be called.
+ *
+ * The field is absent only on a sidecar older than it, where the old reading —
+ * a connection that is not there — is all there is to go on.
+ */
+function canDial(device: Device) {
+  return device.dialable ?? device.connection_state !== "offline";
 }
 function pairingLabel(device: Device) {
   if (device.paired) return t("已配对");
@@ -4998,7 +5013,9 @@ async function translateText() {
               </div>
               <div v-else class="row-actions">
                 <button v-if="device.paired" class="icon-button" :aria-label="t('撤销信任')" :title="t('撤销信任')" :disabled="busy" @click="revokeDevice = device"><Unlink :size="18" /></button>
-                <button v-else-if="!pairingPending(device)" :disabled="busy || device.connection_state === 'offline'" @click="store.startPairing(device)"><Link :size="17" />{{ t("配对") }}</button>
+                <!-- Drawn on whether a dial can be placed, not on the connection
+                     there happens to be — see `canDial`. -->
+                <button v-else-if="!pairingPending(device)" :disabled="busy || !canDial(device)" @click="store.startPairing(device)"><Link :size="17" />{{ t("配对") }}</button>
                 <button v-if="device.paired && device.connection_state !== 'online'" class="icon-button" :aria-label="t('连接设备')" :title="t('连接设备')" :disabled="busy" @click="store.connect(device)"><Plug :size="18" /></button>
                 <button v-if="device.connection_state === 'online'" class="icon-button" :aria-label="t('断开连接')" :title="t('断开连接')" :disabled="busy" @click="store.disconnect(device)"><PlugZap :size="18" /></button>
                 <!-- The relay's own actions, on a row that has a local route as

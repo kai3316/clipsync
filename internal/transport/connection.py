@@ -78,6 +78,23 @@ _REJECT_MARKER = b"\xff\xff\xff\xffRJCT"
 # pin can see it: both hash the DER.
 NO_PAIRING_MARKER = "\n#clipsync-no-pairing"
 
+# Prepended to the identity frame's PEM by a dialer: the port its own server
+# listens on.  The accepting side has the dialer's address — ``addr[0]`` off the
+# socket — but not the port to dial it back on: ``addr[1]`` is the ephemeral
+# port the call came FROM, and a connection to it reaches nothing.  So a device
+# that has only ever been dialed had no way back, and a peer that ended a call
+# (a rejected pairing offer, a manual disconnect) stayed unreachable until it
+# happened to dial again — which, on a network where its own mDNS sighting of
+# us is missing, is never.
+#
+# Same mechanism as the marker below, at the other end of the frame: a PEM
+# comment line.  A reader that does not know the field still loads the same
+# certificate (a PEM parser scans for the BEGIN line), and the fingerprint — so
+# the pin, and the certificate-change alarm — is taken from the DER bytes, which
+# the decoration cannot reach.  A peer that sends no line means "unknown", not
+# "port 0": an older build's frame is exactly what it always was.
+LISTEN_PORT_PREFIX = "#clipsync-listen="
+
 # The first release that reads the marker above, and therefore the floor for
 # every dial this build makes on a user's behalf: a call to an older peer is a
 # pairing card on that screen, which is the one outcome the marker exists to
@@ -578,6 +595,14 @@ class TransportManager:
         self._last_health_tick = 0.0
         self._last_health_mono = 0.0
         self._peer_addresses: dict[str, tuple[str, str, int]] = {}
+        # peer_id -> (name, address, port) for peers that dialed US, learned
+        # from the call itself.  Kept apart from _peer_addresses because the
+        # two answer different questions: that map is where auto-reconnect
+        # dials from (_schedule_reconnect, wake recovery), and a peer whose call
+        # we ended — a rejected pairing offer, a manual 断开连接 — must not be
+        # called again behind the user's back.  This one is for the user's own
+        # 配对/连接设备 click, and for the row that offers it.
+        self._callback_addresses: dict[str, tuple[str, str, int]] = {}
         self._reconnect_attempts: dict[str, int] = {}
         self._reconnect_timers: dict[str, threading.Timer] = {}
         # peer_id -> (real_id, fingerprint refused on).  A cert-pin mismatch
@@ -837,29 +862,57 @@ class TransportManager:
                     p.unlink()
 
     @staticmethod
-    def _send_identity(sock: ssl.SSLSocket, cert_pem: str, no_auto_pairing: bool = False):
+    def _send_identity(
+        sock: ssl.SSLSocket,
+        cert_pem: str,
+        no_auto_pairing: bool = False,
+        listen_port: int = 0,
+    ):
         """Send our certificate PEM as the first application-level frame.
 
         *no_auto_pairing* appends :data:`NO_PAIRING_MARKER`, telling the
         accepting side that this connection is not a pairing request.
+
+        *listen_port* prepends the port this device's own server accepts on, so
+        the side that takes the call can dial back (see
+        :data:`LISTEN_PORT_PREFIX`).  Zero sends nothing.
         """
+        text = f"{LISTEN_PORT_PREFIX}{int(listen_port)}\n{cert_pem}" if listen_port else cert_pem
         if no_auto_pairing:
-            cert_pem += NO_PAIRING_MARKER
-        data = cert_pem.encode("ascii")
+            text += NO_PAIRING_MARKER
+        data = text.encode("ascii")
         frame = struct.pack(">I", len(data)) + data
         sock.sendall(frame)
 
     @staticmethod
-    def _identity_payload(data: bytes) -> tuple[str, bool]:
-        """Split a received identity frame into ``(cert_pem, no_auto_pairing)``.
+    def _identity_payload(data: bytes) -> tuple[str, bool, int]:
+        """Split an identity frame into ``(cert_pem, no_auto_pairing, listen_port)``.
 
-        The tail is removed before the PEM reaches a parser or a pin, so a
-        frame that carries it is byte-for-byte the frame that did not.
+        The marker is removed before the PEM reaches a parser or a pin, so a
+        frame that carries it is byte-for-byte the frame that did not.  The
+        listen-port line, when there is one, is removed from the returned PEM
+        too — a caller that pins the string should not be pinning a comment —
+        and reported as 0 when absent, which is what every frame from a build
+        older than the field looks like.
         """
         text = data.decode("ascii", errors="replace")
-        if text.endswith(NO_PAIRING_MARKER):
-            return text[: -len(NO_PAIRING_MARKER)], True
-        return text, False
+        no_auto_pairing = text.endswith(NO_PAIRING_MARKER)
+        if no_auto_pairing:
+            text = text[: -len(NO_PAIRING_MARKER)]
+        listen_port = 0
+        if text.startswith(LISTEN_PORT_PREFIX):
+            head, sep, rest = text.partition("\n")
+            if sep and rest:
+                # A line we cannot read is left in place: dropping it would
+                # drop the PEM with it, and an unreadable field is not worth
+                # an unreadable certificate.
+                with contextlib.suppress(ValueError):
+                    listen_port = int(head[len(LISTEN_PORT_PREFIX) :])
+                if listen_port > 0:
+                    text = rest
+                else:
+                    listen_port = 0
+        return text, no_auto_pairing, listen_port
 
     @staticmethod
     def _recv_identity(sock: ssl.SSLSocket, timeout: float = 10.0) -> bytes | None:
@@ -1120,11 +1173,15 @@ class TransportManager:
                 identity = self._pairing_mgr.get_identity()
                 # The flag has to travel with the frame: the accepting side is
                 # the one that generates the code, and it cannot read an
-                # argument that stayed on this machine.
+                # argument that stayed on this machine.  The port travels with
+                # it for the same reason: the accepting side is the one that
+                # needs to call back, and the socket only tells it where this
+                # call came from.
                 self._send_identity(
                     ssl_sock,
                     identity.certificate_pem,
                     no_auto_pairing=no_auto_pairing,
+                    listen_port=self._port,
                 )
                 logger.info("[%s] sent identity frame", peer_name)
 
@@ -1156,7 +1213,13 @@ class TransportManager:
 
                 real_peer_id = peer_id
                 if server_cert_data:
-                    peer_cert_pem, _server_flags = self._identity_payload(server_cert_data)
+                    # The peer's own listen port is not used here: what this
+                    # side keeps is the address it just dialed, which reached
+                    # the peer by definition.  Undecorated all the same, so
+                    # nothing downstream pins a comment.
+                    peer_cert_pem, _server_flags, _peer_port = self._identity_payload(
+                        server_cert_data
+                    )
                     peer_cert = x509.load_pem_x509_certificate(peer_cert_pem.encode())
 
                     # Bind the TLS-presented cert to the app-layer identity cert:
@@ -1545,14 +1608,15 @@ class TransportManager:
                 if r == real_id:
                     ids_to_reject.add(h)
 
-            # Also find any hashed IDs stored in _peer_addresses that
+            # Also find any hashed IDs stored under either address table that
             # share the same (address, port) and are not yet covered
-            addr_info = self._peer_addresses.get(peer_id)
+            addr_info = self._peer_addresses.get(peer_id) or self._callback_addresses.get(peer_id)
             if addr_info:
                 _, addr, port = addr_info
-                for pid, (_, a, p) in list(self._peer_addresses.items()):
-                    if a == addr and p == port:
-                        ids_to_reject.add(pid)
+                for table in (self._peer_addresses, self._callback_addresses):
+                    for pid, (_, a, p) in list(table.items()):
+                        if a == addr and p == port:
+                            ids_to_reject.add(pid)
 
             # Purge every collected ID from all tracking structures
             timers_to_cancel = []
@@ -1560,6 +1624,10 @@ class TransportManager:
             for pid in ids_to_reject:
                 self._rejected_peer_ids.add(pid)
                 self._peer_addresses.pop(pid, None)
+                # A removal takes the way back with it: the address this peer's
+                # own call taught us would otherwise keep it dialable in the
+                # list the user just removed it from.
+                self._callback_addresses.pop(pid, None)
                 self._reconnect_attempts.pop(pid, None)
                 t = self._reconnect_timers.pop(pid, None)
                 if t:
@@ -1647,9 +1715,16 @@ class TransportManager:
             return dict(self._hash_to_real_id)
 
     def get_peer_addresses(self) -> dict[str, tuple[str, str, int]]:
-        """Return a copy of all last-known peer addresses (real-id → tuple)."""
+        """Return a copy of all last-known peer addresses (real-id → tuple).
+
+        Includes the addresses learned from peers that dialed us: both are
+        "where this peer is", and the callers of this method — persisting the
+        addresses so a restart can still reach a peer — want the union.
+        """
         with self._lock:
-            return dict(self._peer_addresses)
+            merged = dict(self._callback_addresses)
+            merged.update(self._peer_addresses)
+            return merged
 
     def get_saved_address(self, peer_id: str) -> tuple[str, str, int] | None:
         """Return the last known (name, address, port) for a peer, or None.
@@ -1657,21 +1732,26 @@ class TransportManager:
         Handles real device IDs, the hashed mDNS IDs used during discovery,
         and the hash→real mapping, so callers can reconnect to a known peer
         even when it is momentarily absent from mDNS.
+
+        Addresses we dialed come first; addresses a peer's own call taught us
+        (see :data:`LISTEN_PORT_PREFIX`) answer for peers we have never dialed,
+        which is every peer that reached us first.
         """
 
         def _hashed(pid: str) -> str:
             return peer_id_hash(pid)
 
         with self._lock:
-            if peer_id in self._peer_addresses:
-                return self._peer_addresses[peer_id]
-            hashed = _hashed(peer_id)
-            if hashed in self._peer_addresses:
-                return self._peer_addresses[hashed]
-            # Any hashed mDNS ID that resolves to this real ID
-            for h, r in self._hash_to_real_id.items():
-                if r == peer_id and h in self._peer_addresses:
-                    return self._peer_addresses[h]
+            for table in (self._peer_addresses, self._callback_addresses):
+                if peer_id in table:
+                    return table[peer_id]
+                hashed = _hashed(peer_id)
+                if hashed in table:
+                    return table[hashed]
+                # Any hashed mDNS ID that resolves to this real ID
+                for h, r in self._hash_to_real_id.items():
+                    if r == peer_id and h in table:
+                        return table[h]
         return None
 
     def get_reconnect_states(self) -> dict[str, dict]:
@@ -2089,7 +2169,9 @@ class TransportManager:
 
             client_cert_data = self._recv_identity(ssl_sock)
             if client_cert_data:
-                peer_cert_pem, peer_no_auto_pairing = self._identity_payload(client_cert_data)
+                peer_cert_pem, peer_no_auto_pairing, peer_listen_port = self._identity_payload(
+                    client_cert_data
+                )
                 peer_cert = x509.load_pem_x509_certificate(peer_cert_pem.encode())
 
                 # Bind the TLS-presented cert to the app-layer identity cert
@@ -2211,6 +2293,19 @@ class TransportManager:
                     conn.stop()
                     return
                 if peer_id:
+                    # Remember how to reach this peer.  It dialed us, so the
+                    # address it came from is one we can dial back — with the
+                    # port its own server listens on, which is the half the
+                    # socket cannot tell us: ``addr[1]`` is the ephemeral port
+                    # the call came from and reaching it reaches nothing.  A
+                    # peer that sent no port (an older build) leaves whatever we
+                    # already had, rather than a port we made up.
+                    if peer_listen_port:
+                        self._callback_addresses[peer_id] = (
+                            peer_name,
+                            addr[0],
+                            peer_listen_port,
+                        )
                     # Cancel any pending reconnect — the peer is reaching out
                     # to us, so we don't need to reconnect to them.
                     timer = self._reconnect_timers.pop(peer_id, None)

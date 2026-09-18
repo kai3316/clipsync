@@ -2996,6 +2996,12 @@ class LanRuntime:
                 mine = self.pairing.get_identity().fingerprint
                 seen = advertised.get(pid) or {}
                 net = internet.get(pid)
+                # Read the same address a click would dial with, once, rather
+                # than per front end.  A sighting answers first, then the
+                # transport's own memory of the peer — which now includes the
+                # address the peer's own call taught it — and last the address
+                # written down the last time this machine could reach it.
+                dialable = pid in connected or self._address(pid) is not None
                 listed.add(pid)
                 rows.append(
                     {
@@ -3060,6 +3066,14 @@ class LanRuntime:
                             if not paired and pid in discovered_ids
                             else "offline"
                         ),
+                        # Whether a click can place a call.  This is not
+                        # `connection_state`, and the difference is the whole
+                        # of a device that reads 离线 while the one button on
+                        # its row is the way back to it: that field describes
+                        # the connection that exists, not the one that could be
+                        # made, and a peer that went quiet but left an address
+                        # behind is dialable throughout.
+                        "dialable": dialable,
                         "pairing_status": status,
                         "pairing_code": request[1] if request else "",
                         "sas": sas_code(mine, fingerprint) if mine and fingerprint else "",
@@ -3120,6 +3134,11 @@ class LanRuntime:
                         # otherwise misread it (dialing the peer, offering it as
                         # a transfer target) can tell the two apart.
                         "connection_state": "online" if net.get("online") else "offline",
+                        # No LAN route, so no LAN dial to offer.  Said in the
+                        # same field the other rows answer with, so a front end
+                        # asking "can this be dialed" of any row gets the truth
+                        # for a relay-only device too.
+                        "dialable": False,
                         "pairing_status": "paired",
                         "pairing_code": "",
                         "sas": "",
@@ -3156,6 +3175,10 @@ class LanRuntime:
                         "note": peer.notes or "",
                         "paired": False,
                         "connection_state": "offline",
+                        # Removed is removed: the address the archive kept is
+                        # for the recovery path to restore, not for a dial from
+                        # the row that says the device is gone.
+                        "dialable": False,
                         "pairing_status": "",
                         "pairing_code": "",
                         "sas": "",
@@ -4068,6 +4091,16 @@ class LanRuntime:
             with self._pairing_ops:
                 if not self.pairing.is_peer_paired(pid):
                     self.pairing.generate_shared_pairing_code(pid)
+        if not accepted and not self._stop_event.is_set():
+            # Same reason, same event as _connect_device above: 配对 on a peer
+            # with no address is a dial that never leaves this machine, and
+            # {accepted: false} renders as nothing at all.  That is the click
+            # the user reads as "no reaction": the button is live, the route
+            # only says false, and nothing follows it.
+            self._publish(
+                "device.connection_unreachable",
+                {"device_id": pid, "name": self._peer_name(pid)},
+            )
         self._refresh()
         return {"accepted": accepted}
 

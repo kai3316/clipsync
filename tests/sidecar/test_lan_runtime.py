@@ -1172,6 +1172,10 @@ def test_forget_archives_and_restore_returns_unpaired(rig):
             "note": "",
             "paired": False,
             "connection_state": "offline",
+            # An archived row is not dialable, whatever address the archive
+            # kept: that address is for the restore path, not for a call from
+            # the row that says the device is gone.
+            "dialable": False,
             "pairing_status": "",
             "pairing_code": "",
             "sas": "",
