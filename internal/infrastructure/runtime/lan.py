@@ -4217,7 +4217,14 @@ class LanRuntime:
             self.discovery.set_device_name(self.config.device_name)
             self._refresh()
         if "source_tracking_enabled" in updated:
-            self.sync.monitor.set_source_tracking(self.config.source_tracking_enabled)
+            # ``_monitor``, which is the name SyncManager holds it under and the
+            # name the capture path already reads it by.  ``monitor`` is what
+            # the legacy host's sync object called it; there is no such
+            # attribute here, so this raised AttributeError on every change --
+            # swallowed by the settings API into one ERROR line and an
+            # "ok" response, leaving the switch to take effect at the next
+            # restart and never before.
+            self.sync._monitor.set_source_tracking(self.config.source_tracking_enabled)
         if "sync_enabled" in updated:
             # An explicit toggle outranks a pending timed pause (the legacy
             # host's ``_clear_pause_state``): drop the deadline in memory AND
