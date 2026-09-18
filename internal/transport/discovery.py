@@ -4,6 +4,7 @@ Registers this device as a _clipsync._tcp service and discovers
 other devices running ClipSync on the same local network.
 """
 
+import contextlib
 import json
 import logging
 import platform
@@ -501,13 +502,13 @@ class Discovery:
         ).start()
 
     def _network_watch_loop(self):
-        """Re-advertise when the local IP set changes (no sleep involved).
+        """Rebuild mDNS when the local IP set changes (no sleep involved).
 
         Sleep/wake recovery rides the transport's wake callback; an ordinary
         interface switch does not.  A cheap socket-level enumeration every
-        30 s notices a changed address set and rebuilds the registration with
-        the fresh addresses, so peers can find us again immediately instead
-        of only after an app restart.
+        30 s notices a changed address set and rebuilds the Zeroconf instance
+        outright — both the registration *and* the browse sockets — so peers
+        can find us again immediately instead of only after an app restart.
         """
         CHECK_INTERVAL = 30.0  # noqa: N806
         while not self._netmon_stop.wait(CHECK_INTERVAL):
@@ -522,7 +523,7 @@ class Discovery:
                 # registration rather than re-advertising 127.0.0.1.
                 continue
             logger.info(
-                "Local addresses changed (%s -> %s) — re-registering mDNS",
+                "Local addresses changed (%s -> %s) — rebuilding mDNS",
                 sorted(self._advertised_ips),
                 sorted(current),
             )
@@ -531,7 +532,7 @@ class Discovery:
             # registration.  Claiming it up front made a failed re-register
             # permanent -- the next tick saw current == _advertised_ips and
             # never tried again, leaving peers pointed at the dead address.
-            self._wake_recovery()
+            self._restart_zeroconf()
 
     def stop(self):
         self._netmon_stop.set()
@@ -656,23 +657,55 @@ class Discovery:
         logger.info("Resumed advertising this device on port %d", self._port)
 
     def _wake_recovery(self):
-        """Re-register the mDNS service after wake-from-sleep.
+        """Rebuild mDNS after wake-from-sleep (the transport's wake callback).
 
-        After sleep, network interfaces may have changed and the mDNS
-        registration may be stale. We rebuild the service info with fresh
-        addresses rather than re-registering the stale one, so other devices
-        can discover us again on the new network.
+        Same problem as an interface change: the address set the sockets were
+        bound to is gone.
         """
-        if not self._zc:
+        self._restart_zeroconf()
+
+    def _restart_zeroconf(self):
+        """Replace the Zeroconf instance, re-registering and re-browsing.
+
+        A ``Zeroconf`` object binds one socket per local address *when it is
+        constructed* and never rebinds them.  zeroconf only logs the resulting
+        ``[Errno 65] No route to host`` (its ``error_received``) and keeps the
+        dead socket in the poll set, so once an interface comes or goes — a
+        VPN toggle, a Wi-Fi switch, a sleep — both halves of discovery go on
+        using addresses that no longer exist: we answer nothing, we hear
+        nothing, and every query leaves through a socket with no route.  Peers
+        then stay invisible for the rest of the session, which is why the only
+        thing that ever cleared this was restarting the app's sync.
+
+        Re-registering on the same instance (what this used to do after a
+        sleep, and what the network watcher used to do on every change) cannot
+        fix that: a registration rides those same stale sockets.  The instance
+        is cheap, so it is replaced outright.
+
+        The replacement is built *before* the old one is torn down, so a
+        construction failure leaves the working state untouched and the
+        caller's next tick simply retries.
+        """
+        if self._netmon_stop.is_set() or self._zc is None:
             return
-        with self._lock:
-            info, self._service_info = self._service_info, None
         try:
-            if info is not None:
-                self._zc.unregister_service(info)
-        except Exception:
-            pass
+            fresh = Zeroconf()
+        except Exception as e:
+            logger.warning("Could not rebuild mDNS after a network change: %s", e)
+            return
+        if self._netmon_stop.is_set():
+            # stop() ran while we were constructing; do not leave it behind.
+            with contextlib.suppress(Exception):
+                fresh.close()
+            return
+        self.stop_browsing()
+        self.stop_advertising()  # unregisters on the instance we are leaving
+        old, self._zc = self._zc, fresh
+        with contextlib.suppress(Exception):
+            old.close()
         self.start_advertising()
+        self.start_browsing()
+        logger.info("Rebuilt mDNS sockets after a network change")
 
     def _on_service_state_change(self, zeroconf, service_type, name, state_change):
         """Handle mDNS service add/update/remove events."""
