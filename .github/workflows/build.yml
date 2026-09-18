@@ -54,43 +54,22 @@ jobs:
 
           What is new in this release:
 
-          - A device this machine has only ever been *called by* can be called
-            back.  The address book the transport dials from is written when
-            this machine places a call, and never when the other device places
-            one, so a peer that had only ever dialed us had no address anywhere
-            here -- not in memory, not on disk -- and every attempt to reach it
-            ended at "no saved address" without a packet leaving the machine.
-            In the window that is a pairing that fails, a 连接 that does
-            nothing, and a device the network can see and this machine can
-            never reach.  The identity frame a caller sends already carried the
-            caller's certificate; it now carries the port that caller listens
-            on as well, and the address the connection arrived from is
-            remembered against it.
+          - 复制来源追踪 takes effect when it is switched.  The live half of a
+            settings change reached for the clipboard monitor under the name
+            the previous application's sync object gave it, and this one keeps
+            it under another; the settings API caught the resulting
+            AttributeError, logged one ERROR line and answered "ok".  So the
+            switch saved, reported success, and did nothing at all until the
+            next restart -- which is where a machine that had it turned on
+            looked like a machine whose 来源 column was simply empty.
 
-            That address is kept apart from the one automatic reconnect reads.
-            It is somewhere a *user* asked us to dial, and remembering it must
-            not revive the redial that a refusal or a 断开连接 is meant to
-            stop.
-
-          - 配对 was disabled on exactly the devices that needed it.  It was
-            gated on `connection_state`, which answers "is there a connection
-            right now" and not "can this device be reached" -- a peer that has
-            gone quiet but left an address behind is 离线 and dialable at the
-            same time.  The row now carries the sidecar's own answer, and both
-            the button and the right-click 连接 entry are gated on it.
-
-          - 配对 on a device with no address now says so.  The call could not
-            leave the machine, and what came back was a bare "nothing
-            happened" -- no card, no toast, no change to the row -- which reads
-            exactly like a click that missed.  It reports the same 找不到该设备
-            the 连接 button does.
-
-          - A refusal is no longer the last word this window says about a
-            device.  The notice stack allows one entry per device per session,
-            which is right for a refusal nobody asked for and wrong for one
-            that answers a click: after 拒绝, the next attempt was silent --
-            the second 配对 produced nothing at all on either side.  A click
-            that places a call re-arms the notice.
+          - The log no longer carries a four-frame traceback per minute.  Every
+            mDNS address enumeration resolves the host name and the FQDN, and on
+            macOS the FQDN is the reverse name of the machine's own `::`, which
+            no resolver answers: the failure logged the whole stack, for a name
+            and an errno that say all of it, twice a minute and for as long as
+            the application ran.  A log a user is asked to send was mostly
+            that.  It is one line now.
 
           - mDNS recovers from a network change instead of staying dead.
             zeroconf binds one socket per local address when it is
