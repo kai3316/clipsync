@@ -54,91 +54,54 @@ jobs:
 
           What is new in this release:
 
-          - The devices page lists devices, and no longer the machine you are
-            sitting at.  A row for it sat above the peers, drawn to the same
-            shape and the same height as everything under it, and every part of
-            it was something a device row offers while none of it could act on
-            anything: this is the machine the window is already on, so there was
-            nothing here to pair with, nothing to dial and nothing to send to.
-            It counted, too -- "{count} 台设备" over three peers read four -- and
-            the count under the heading is the number of rows the page draws
-            now.  The name, the device id, the platform and the version are on
-            the overview card, where the name is edited and the id is written
-            out in full beside a button that copies it.
+          - Devices are found, and stay found.  An mDNS record was announced
+            three times, 225 ms apart, as the application started, and never
+            again: a peer's cached address records expired two minutes later,
+            the library's own browser reports a device only when a record is
+            *new*, and the re-query that library schedules runs at three
+            quarters of a PTR lifetime, which is tens of minutes.  A machine
+            that was on the network the whole time became one nobody could see,
+            and the peers that were listed went the same way as their caches
+            aged.  This device asks the local network who is here every ten
+            seconds now, and answers that question when it is put to it.  One
+            question refreshes everybody: the answers are multicast, so a single
+            query updates every device's cache at once -- and it reaches a
+            device running an older build, because what answers is the library's
+            own responder rather than anything this release added.
 
-          - 发送更新 is offered on a device that has only been seen.  Both
-            directions of that exchange ride the LAN link and nothing else -- an
-            offer that arrives over the relay is dropped -- and the two entries
-            were gated on 在线, which is a state only a *paired* device reaches:
-            a device this machine has not paired with is sighted and never
-            dialled, so its chip never reads 在线 and its 发送更新 button was
-            disabled for good.  That is the row a push is for -- the machine
-            that has never been paired, on a network where the release endpoint
-            is out of reach -- and the dead button read as though a pairing were
-            the step that was missing.  Neither end of the exchange ever needed
-            one: the offer is dialled with automatic pairing switched off, and
-            what arrives is held against the released version's own digest
-            before it is kept.
+          - A device that has really gone leaves the list in about thirty
+            seconds.  It was five minutes, and before that nothing at all: a
+            device that is switched off, unplugged or out of range says nothing
+            on the way out, and a list that waits to be told goodbye keeps every
+            device that ever was.  Two rounds in a row without an answer is what
+            it takes now, which is also the budget for one dropped multicast
+            packet, and what a row is *made of* -- the name that device
+            published, the address a click would dial, the version the update
+            buttons are decided from -- is kept for the full five minutes.  A
+            device that is merely quiet is still a device this machine knows how
+            to reach.
 
-          - An update sent from another device installs itself.  The two
-            machines agreed, the archive came across, was checked against the
-            released digest and was staged -- and there the exchange ended, on a
-            card: the button under it fetched the same release a second time on
-            a machine that could reach the release endpoint, and on the machine
-            the exchange exists for -- one that cannot reach it -- the card said
-            to replace the application by hand.  A peer's archive is installed
-            as it lands now, and the window's status line says so as the
-            installer starts, because a window that disappears into an installer
-            with nothing said reads as a crash.  The card's button, 立即安装,
-            installs the file that is already on disk rather than fetching the
-            same release again, and where this build cannot replace itself with
-            the file it has -- a macOS `.dmg`, a Linux `.deb` -- the card says
-            the rest instead of failing quietly.
+          - A device that comes back is on the list again within one round.  It
+            does not have to re-announce itself first, and neither machine has
+            to be restarted.  A device that has been reported lost is one the
+            library will not report as new again -- it holds the cached record
+            for the rest of its lifetime -- so the question "is it here" is
+            answered from the answers themselves, every round, rather than from
+            the browser's idea of what is new.
 
-          - A device that goes quiet for a moment keeps its row.  An mDNS
-            announcement is the advertiser's to schedule and the network's to
-            drop, and it does both: one working day's log holds the same Mac
-            found and lost four seconds apart, four times over, and twice gone
-            for fifty minutes from a machine that was on the network
-            throughout.  The row was deleted on the first missed goodbye, so a
-            device that had not moved flickered in and out of the list, and a
-            device that was not paired lost its row altogether -- a machine that
-            is present and listed nowhere.  A lapsed sighting stays readable for
-            five minutes now.  Whether a device has really gone is decided by
-            the connection, which is a reading rather than an announcement, and
-            a peer that leaves is dropped there.
+          - 刷新设备 asks the network rather than redrawing what it last heard.
+            The button announces this device, queries the local network and
+            waits for the answers before the list is read, so what it shows is
+            the list that was just asked for.  With discovery switched off it
+            says so, instead of answering with a network that has no devices on
+            it.
 
-          - A device is not declared lost while it is being asked.  Resuming an
-            mDNS browse is followed by a reconcile that drops the peers the
-            browser has not re-reported, and the browser re-asks on a schedule
-            of its own -- immediately, then at +1, +4 and +9 seconds.  The
-            reconcile ran at four, between two of those questions, so a peer
-            whose answer was still in flight had already been dropped and was
-            reported lost on the network it was sitting on.  It is not a rare
-            window: a VPN coming up or going down changes this machine's address
-            set, which rebuilds the mDNS sockets, and every rebuild started the
-            same countdown.  The reconcile now outlasts the browser's questions,
-            so one missed multicast answer costs a re-ask rather than a device.
-
-          - A VPN no longer disturbs discovery.  A tunnel's address is private
-            by range -- WireGuard's 10.x, OpenVPN's 172.16-31.x -- and the test
-            that keeps this device's record on the local network is exactly that
-            test, so a live tunnel address went out in the record beside the
-            real one and every peer on the network was handed it to dial.  It
-            happened in the other direction as well: a peer offering two private
-            addresses ranked them equally and settled the tie by sorting the
-            strings, which puts "10." and "172." before "192.", so a laptop
-            advertising its tunnel address alongside its LAN address was dialled
-            at the tunnel.  A tunnel address is not advertised while a real
-            adapter has one, and a peer is dialled at the address this machine's
-            own routing table would reach over a real interface.  Which adapter
-            is which is read from its description rather than its name: the name
-            is whatever the vendor, the installer or the locale made it, and
-            "VirtualNet" and "Heysocks" match nothing a list of tunnel names
-            would hold, while the description says Tunnel and TAP-Windows
-            Adapter V9.  A virtual adapter also ranks below even an adapter this
-            code cannot name, because that is where a real one with a localized
-            name lands.
+          - Every minute this device also announces itself, without being asked,
+            because a device still running an older build asks nothing after its
+            own startup.  Pausing discovery and resuming it no longer costs
+            anything either: the devices that answer the browse which just
+            started are read back in before anything is decided about them, so a
+            resume does not empty the list and fill it again.
 
           The device name is now published in the mDNS record, to the local
           network.  That is what lets devices show the name you chose rather
