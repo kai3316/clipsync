@@ -380,6 +380,10 @@ export const EN: Record<string, string> = {
   "{name} 请求配对 — 代码：{code}": 'Device "{name}" wants to pair — code: {code}',
   "{name} 已连接": "{name} is now connected",
   "{name} 已断开": "{name} has disconnected",
+  // A nearby-chat message, in full: the sender, then what they said.  The
+  // notice for an attachment has no text to carry, so it names the file.
+  "{name}：{text}": "{name}: {text}",
+  "{name} 发来文件：{file}": "{name} sent a file: {file}",
   "文本": "Text",
   "内容": "Content",
   // A history row's kind, and the badges the row carries.  The wire names

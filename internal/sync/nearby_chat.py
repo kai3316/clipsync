@@ -1196,6 +1196,23 @@ class ChatManager:
                 return []
             return [e.to_dict() for e in session.entries]
 
+    def session_peer(self, session_id: str) -> dict:
+        """The device a conversation belongs to, for a caller holding only its id.
+
+        An entry is published with the session it went into and nothing else:
+        the entry knows its conversation but not who is on the other end of it,
+        and a surface that has to name the sender in a sentence -- the desktop
+        words a notice for each arriving message -- cannot get the name out of a
+        session id.  Answers empty for an unknown session rather than raising:
+        the entry has already been published, and a closed conversation's last
+        entry can arrive after the session behind it is gone.
+        """
+        with self._lock:
+            session = self._session_by_sid.get(session_id)
+            if session is None:
+                return {}
+            return {"peer_id": session.peer_id, "peer_name": session.peer_name}
+
     # ------------------------------------------------------------------
     # Incoming JSON frames (transport recv thread)
     # ------------------------------------------------------------------

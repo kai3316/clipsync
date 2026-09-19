@@ -85,6 +85,43 @@ describe("desktop application store", () => {
     store.dispose();
   });
 
+  it("says what a nearby-chat message said, and stays quiet when it is not news", async () => {
+    const store = createApplicationStore();
+    await store.start();
+    const emit = vi.mocked(bridge.subscribe).mock.calls[0][0];
+    const message = (data: Record<string, unknown>) =>
+      emit({ type: "event", name: "chat.message", session_id: "session", data });
+
+    // The sender's own message comes back through the same event — the engine
+    // fires its callback for outgoing entries too — and the sender does not
+    // need telling about the message they just typed.
+    message({ session_id: "s1", peer_name: "Studio", peer_id: "peer-1",
+      entry: { kind: "text", outgoing: true, text: "在吗" } });
+    expect(store.state.notices).toEqual([]);
+
+    // An incoming one names the device and carries the message itself: the
+    // notice is the message, not a pointer to it.
+    message({ session_id: "s1", peer_name: "Studio", peer_id: "peer-1",
+      entry: { kind: "text", outgoing: false, text: "在吗" } });
+    expect(store.state.notices.map((notice) => notice.message)).toEqual(["Studio：在吗"]);
+
+    // Unless the conversation is already on screen, where the bubble arriving
+    // is the notification.
+    store.setOpenChatSession("s1");
+    message({ session_id: "s1", peer_name: "Studio", peer_id: "peer-1",
+      entry: { kind: "text", outgoing: false, text: "收到了吗" } });
+    expect(store.state.notices).toHaveLength(1);
+
+    // Another conversation is still news, and an attachment has no text to
+    // carry, so it says what arrived instead.
+    store.setOpenChatSession("s2");
+    message({ session_id: "s1", peer_name: "Studio", peer_id: "peer-1",
+      entry: { kind: "file", outgoing: false, file_name: "report.pdf" } });
+    expect(store.state.notices.map((notice) => notice.message))
+      .toEqual(["Studio：在吗", "Studio 发来文件：report.pdf"]);
+    store.dispose();
+  });
+
   it("announces a relaunch without offering a retry the host is already doing", async () => {
     const store = createApplicationStore();
     await store.start();

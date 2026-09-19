@@ -30,7 +30,7 @@ const props = withDefaults(defineProps<{
   receipts: () => ({}),
   openSession: "",
 });
-const emit = defineEmits<{ opened: [] }>();
+const emit = defineEmits<{ opened: []; selected: [sessionId: string] }>();
 /** The receipt to stamp on a bubble, or null when there is nothing to say. */
 function receipt(entry: ChatEntry) {
   return chatReceipt(entry, props.receipts);
@@ -423,6 +423,16 @@ watch([() => props.openSession, sessions], ([wanted]) => {
 // list — the poll replaces the array on every tick, so this is also what keeps
 // a conversation pinned to its newest message while it is arriving.
 watch(messages, toNewest, { flush: "post" });
+
+// Which conversation is on screen, told to the window.  The message event uses
+// it to stay quiet for a message that arrives in the conversation the reader is
+// already looking at — the bubble appearing in front of them is the
+// notification — and this page is the only thing that knows.  Reported on the
+// way out too (`""`), because the page is unmounted the moment its tab is left
+// and a session kept from there would silence the notice for a conversation
+// nobody is looking at any more.
+watch(selectedId, (id) => emit("selected", id), { immediate: true });
+onUnmounted(() => emit("selected", ""));
 
 onMounted(() => { void refresh(); timer = setInterval(() => void refresh(), 1500); });
 onUnmounted(() => { if (timer) clearInterval(timer); if (typingTimer) clearTimeout(typingTimer); });

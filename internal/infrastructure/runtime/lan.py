@@ -369,9 +369,7 @@ class LanRuntime:
         self.chat.set_own_fingerprint(pairing.get_identity().fingerprint)
         self.chat.set_on_sessions_changed(lambda: self._publish("chat.sessions.changed", {}))
         self.chat.set_on_message(
-            lambda sid, entry: self._publish(
-                "chat.message", {"session_id": sid, "entry": entry}
-            )
+            lambda sid, entry: self._publish("chat.message", self._chat_entry(sid, entry))
         )
         # Chat file transfers report their own progress/outcome; without these
         # the desktop progress row and the phone's chat file bubble sat at 0%
@@ -1633,6 +1631,25 @@ class LanRuntime:
             self._save_config()
             return {"ok": True, "muted": sorted(self._chat_muted)}
         return self._command(run)
+
+    def _chat_entry(self, session_id, entry):
+        """One conversation entry as an event, with the device it belongs to.
+
+        The entry carries the session it went into and nothing about who is on
+        the other end of it, and a message is the one chat event a surface has
+        to word for a reader who is not looking at it — the desktop's notice
+        names the sender — so the peer is added here, from the session.  An
+        entry whose session has already gone is published without it; the entry
+        is the news either way, and the notice can fall back to the device list
+        or to the id.
+        """
+        peer = self.chat.session_peer(session_id)
+        return {
+            "session_id": session_id,
+            "entry": entry,
+            "peer_id": peer.get("peer_id", ""),
+            "peer_name": peer.get("peer_name", ""),
+        }
 
     def chat_messages(self, session_id):
         return {"messages": self.chat.get_messages(session_id)}

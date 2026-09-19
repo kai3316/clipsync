@@ -4255,7 +4255,8 @@ async function translateText() {
              fetch: it is fed by the event stream, so a message that was sent
              before this tab was ever opened still shows how it ended. -->
         <ChatView v-else-if="tab === 'chat'" :receipts="delivery.state.messages"
-          :open-session="chatSessionToOpen" :notify="notifyChat" @opened="chatSessionToOpen = ''" />
+          :open-session="chatSessionToOpen" :notify="notifyChat" @opened="chatSessionToOpen = ''"
+          @selected="store.setOpenChatSession" />
         <!-- The AI page: the configuration files this machine's AI tools keep,
              and the same question asked of a paired device.  It was the
              settings page's longest card, and three things about it were wrong

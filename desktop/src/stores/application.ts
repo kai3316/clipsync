@@ -60,6 +60,12 @@ export function createApplicationStore() {
     remoteFilePending: [] as string[],
     error: null as BridgeError | null,
     notices: [] as Array<{ id: number; title: string; message: string }>,
+    // The conversation the chat page currently has open, or "" for none.
+    // Reported by that page rather than owned here — it is the one polling the
+    // session list, so it is the one that knows — and read by the message
+    // event, which does not raise a notice for a message arriving in the very
+    // conversation on screen.
+    openChatSession: "",
     aiInventoryEvent: null as { revision: number; event: SidecarEvent } | null,
     // One pulled AI-config file landing (or failing to).  The pull itself
     // answers with how many requests the peer accepted; the files arrive
@@ -121,11 +127,15 @@ export function createApplicationStore() {
    * refused handshake carries whatever the peer announced, and "nowhere to dial"
    * carries whatever the runtime could look up — so an unnamed peer is named
    * from the snapshot, and only then by its short id.
+   *
+   * A chat message names its device `peer_name`/`peer_id` rather than
+   * `name`/`device_id`: it is published from the session it went into, where
+   * those are the field names, and the runtime says so in `_chat_entry`.
    */
   function peerLabel(data: Record<string, unknown>): string {
-    const name = String(data.name || "");
+    const name = String(data.name || data.peer_name || "");
     if (name) return name;
-    const id = String(data.device_id || "");
+    const id = String(data.device_id || data.peer_id || "");
     return state.devices.find((known) => known.id === id)?.name || id.slice(0, 12);
   }
   /** The text of a notice; peer-supplied fields are inserted, never parsed. */
@@ -136,6 +146,20 @@ export function createApplicationStore() {
     }
     if (name === "chat.connect_timeout") {
       return t("无法连接到 {name}，设备可能已离线。", { name: device });
+    }
+    // A message arriving in a nearby conversation. The sentence is the message:
+    // this notice used to carry the event's own name, so a reader was told that
+    // a message had arrived and had to open the conversation to find out what
+    // it said — a notification doing none of the work. An attachment has no
+    // text to show, so it says what arrived instead.
+    if (name === "chat.message") {
+      const entry = (data.entry || {}) as Record<string, unknown>;
+      if (entry.kind === "file") {
+        return t("{name} 发来文件：{file}", {
+          name: peerLabel(data), file: String(entry.file_name || ""),
+        });
+      }
+      return t("{name}：{text}", { name: peerLabel(data), text: String(entry.text || "") });
     }
     // The two ways a Connect click comes to nothing. The runtime publishes the
     // reason next to the bare `{accepted: false}` answer, so the click never
@@ -612,13 +636,31 @@ export function createApplicationStore() {
               message: noticeMessage(event.name, data),
             };
           }
+          // A nearby-chat message arriving.  Two ways it is not news, and both
+          // are silence rather than a shorter notice:
+          //
+          //   - it is this window's own message coming back.  The engine fires
+          //     its message callback for outgoing entries too — the sender's
+          //     own echo — so the sender was told about the message they had
+          //     just typed, on the same screen they typed it on.
+          //   - the conversation it belongs to is already open in front of
+          //     them, where the bubble arriving *is* the notification.  Only
+          //     that conversation: a message in another one is still news, and
+          //     the chat page is unmounted the moment its tab is left, which is
+          //     when the open session is forgotten.
+          if (event.name === "chat.message") {
+            const entry = (data.entry || {}) as Record<string, unknown>;
+            if (entry.outgoing !== true && String(data.session_id || "") !== state.openChatSession) {
+              pushNotice(event.name, data);
+            }
+          }
           let alreadyReportedRemoval = false;
           if (event.name === "device.connection_rejected") {
             const peer = String(data.device_id || "");
             alreadyReportedRemoval = removalNotices.has(peer);
             removalNotices.add(peer);
           }
-          if (!alreadyReportedRemoval && event.name && ["runtime.error", "pairing.request", "transfer.request", "chat.message", "chat.connect_timeout", "url.received", "device.connected", "device.disconnected", "sync.redacted", "device.connection_rejected", "device.connection_unreachable", "update.peer_unavailable", "update.peer_notice"].includes(event.name)) {
+          if (!alreadyReportedRemoval && event.name && ["runtime.error", "pairing.request", "transfer.request", "chat.connect_timeout", "url.received", "device.connected", "device.disconnected", "sync.redacted", "device.connection_rejected", "device.connection_unreachable", "update.peer_unavailable", "update.peer_notice"].includes(event.name)) {
             pushNotice(event.name, data);
           }
           if (event.name === "favorites.changed" || event.name === "data.changed" || event.type === "resync") favorites.invalidate();
@@ -820,6 +862,10 @@ export function createApplicationStore() {
   return {
     state, favorites, delivery, start, refreshHistory,
     dismissNotice, toast,
+    /** Which conversation the chat page has on screen, or "" for none. */
+    setOpenChatSession(sessionId: string) {
+      state.openChatSession = String(sessionId || "");
+    },
     refresh() { state.error = null; return refresh(); },
     // The error band's retry: relaunches a dead sidecar, then refreshes.
     reconnect,
