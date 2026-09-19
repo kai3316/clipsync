@@ -54,49 +54,69 @@ jobs:
 
           What is new in this release:
 
-          - A connected device is no longer listed 离线 because its mDNS
-            announcement lapsed.  The "peer lost" callback tore down that
-            peer's live connection -- and the retry timer behind it -- on the
-            reading that a disappeared record means a device that left.  It
-            does not: a record expires on the advertiser's own schedule, and it
-            can lapse while the device is still answering device probes on the
-            network, which is what left a working device reading 离线 and
-            stopped the reconnection that would have brought it back.  mDNS is
-            unauthenticated besides, so anything else on the network could
-            force the same by announcing that the service had gone.  Whether a
-            peer is still there is the transport's answer now, read from the
-            socket: a closed one is noticed at once, an unreachable one within
-            the keepalive budget.
+          - A device you rename is now shown under the new name everywhere, and
+            the `.local` name stops coming back.  What a device was called came
+            from its certificate: a name written once, when that identity was
+            first minted -- which on a machine that had never been renamed was
+            the machine's own `.local` name.  Every device that paired with it
+            took a copy of that name, and nothing ever revised either copy, so
+            renaming a device changed the name on that device alone and every
+            other machine went on showing the old one.  The `.local` name came
+            back on the machine that had paired with it: a peer's row falls back
+            to the stored record whenever its mDNS announcement lapses, and that
+            record held the certificate's copy -- which is why a Mac called
+            "Kais-MacBook-Air" was listed by the machine paired with it as
+            "Kais-MacBook-Air.local".  The certificate cannot be reissued to fix
+            this, because its fingerprint is what each paired device pins and a
+            new one reads as an impostor.  The name travels
+            beside it instead: every handshake announces the name the sender
+            answers with, and a device that hears a rename keeps it, so a
+            renamed device is shown correctly the next time the two connect --
+            no re-pairing, and nothing to do on the other machine.
 
-          - A device that is away reads 离线, not 重连中 10/10 for as long as it
-            stays away.  Past its ten fast attempts the transport keeps
-            dialling once every 30 seconds -- a background poll rather than a
-            reconnection anyone is waiting on -- but the row went on reporting
-            it as a retry still counting, capped at the ceiling and never
-            retired.  The state a reader is meant to see when the transport has
-            given up was therefore unreachable for exactly the devices it was
-            written for.  The slow retry still runs; the row returns to 在线 the
-            moment the device answers.
+          - The settings page no longer undoes a change made elsewhere.  The
+            form was read when it first opened and never again, so a rename made
+            from the overview card, from the phone or from another window sat in
+            that page as the old value -- and saving any card on it wrote the
+            stale copy back, silently reverting the rename.  Opening the page
+            re-reads it now, unless there is an unsaved edit in it, in which
+            case the fields that actually changed are folded in and everything
+            else you have typed stays where it is.
 
-          - The log says which retry it is scheduling.  Past that budget the
-            counter climbed while the message kept printing it as a fraction of
-            the ceiling, so a machine that had been unreachable overnight had
-            the log read `scheduling reconnect attempt 69/10` -- a counter that
-            looks like it escaped its own limit, rather than the slow retry it
-            is.
+          - This device's own name follows the runtime on the web and the
+            phone.  It was written into the page once, when the server rendered
+            it, so a device renamed afterwards -- from the desktop window, from
+            the phone, from another browser -- kept the old name in the title
+            bar, the overview and the about card for as long as that page stayed
+            open.  Those read it from the overview the page already polls every
+            five seconds.
 
-          - A nearby-chat message now says what it says.  The notice raised for
-            every message carried the event's own name -- "chat.message" --
-            instead of the message, so it told the reader that something had
-            arrived and left them to open the conversation to find out what; a
-            notice with nothing in it is not worth raising.  It names the sender
-            and shows the message now, and says which file arrived when the
-            message was one.  Two of those notices were not news and are gone:
-            the sender's own message coming back, because the engine reports
-            outgoing entries through the same callback and both machines were
-            announcing the message one of them had just typed, and a message
-            arriving in the conversation that is already open on screen, where
-            the bubble appearing in front of the reader is the notice.
+          - The 在线 chip beside an internet-paired device is re-read.  It is a
+            reading rather than an event -- the backend decides it when it is
+            read, over the last frames heard from that device -- so nothing
+            announced the moment that window lapsed, or the moment a device that
+            had gone quiet spoke again, and the peers were re-read only when the
+            tab opened or a pairing was made or broken.  Both directions stayed
+            wrong for as long as the page was open; that card is polled every
+            five seconds now, as the desktop window already polled it.
+
+          - Muting a device in nearby chat reaches every surface.  The mute set
+            travels with the session list and the list is pushed, but the set
+            was not in the payload, so a phone or a second window that had not
+            done the muting went on counting an unread badge for a device the
+            user had already silenced.
+
+          - A nearby-chat device coming back online is announced.  Going offline
+            was: that edge is a timer running out.  Coming back has no timer --
+            it is the next frame from that device, whenever it comes -- and the
+            session list is what every surface draws that state from, so a
+            device that came back kept reading 离线 until something unrelated
+            moved the list.
+
+          - A sync pause armed or ended from the phone appears in the desktop
+            window at once, and so does a flip of the two LAN discovery
+            switches.  Both were read on the way into the page that draws them,
+            and both are taken from the events that already carry them now.
 
           The device name is now published in the mDNS record, to the local
           network.  That is what lets devices show the name you chose rather
