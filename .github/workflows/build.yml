@@ -54,68 +54,91 @@ jobs:
 
           What is new in this release:
 
-          - Downloading a file from the clipboard history fetches the file you
-            asked for, the first time.  A clip copied on another machine arrives
-            here as an offer, and the offer names the row the *other* machine
-            stored it as -- an id from that machine's own history, because each
-            device numbers its rows with a counter of its own.  The same clip
-            therefore has two different ids, and 下载 asked for the one this
-            window was showing: the peer looked that number up among its own
-            rows and answered with whatever its row of that number happened to
-            be.  So the first click failed, and every click after it sent the
-            file from the previous clip -- the two histories had drifted apart
-            by exactly the clips captured since.  The id from the offer is what
-            travels now, and a row whose offer this build cannot read offers no
-            download at all rather than one that would name the wrong record on
-            the other side.
+          - The devices page lists devices, and no longer the machine you are
+            sitting at.  A row for it sat above the peers, drawn to the same
+            shape and the same height as everything under it, and every part of
+            it was something a device row offers while none of it could act on
+            anything: this is the machine the window is already on, so there was
+            nothing here to pair with, nothing to dial and nothing to send to.
+            It counted, too -- "{count} 台设备" over three peers read four -- and
+            the count under the heading is the number of rows the page draws
+            now.  The name, the device id, the platform and the version are on
+            the overview card, where the name is edited and the id is written
+            out in full beside a button that copies it.
 
-          - A device can be talked to, and removed, from its row on the devices
-            page.  打开聊天 was drawn only for a device paired by code and *not*
-            on this network, which left the commonest row in the list -- paired
-            and online, the machine in the next room -- with no way to open a
-            conversation from it, while the chat page offered the same device
-            one.  It is offered on whether the device answers, over either of the
-            two routes it can hold, and the row's menu carries it on every row,
-            dimmed with the reason where there is no answer.  移除设备 was drawn
-            only for a device with a local pairing, which made the device
-            reachable *only* over the internet the one row that could not be
-            taken out of the list: 解除互联网配对 ends the code pairing but
-            archives nothing and forgets the name you gave it.  The two removals
-            are told apart by their icons now as well -- the shield for
-            撤销信任, the cloud for 解除互联网配对 -- where a row holding both
-            pairings wore the same broken link twice.
+          - 发送更新 is offered on a device that has only been seen.  Both
+            directions of that exchange ride the LAN link and nothing else -- an
+            offer that arrives over the relay is dropped -- and the two entries
+            were gated on 在线, which is a state only a *paired* device reaches:
+            a device this machine has not paired with is sighted and never
+            dialled, so its chip never reads 在线 and its 发送更新 button was
+            disabled for good.  That is the row a push is for -- the machine
+            that has never been paired, on a network where the release endpoint
+            is out of reach -- and the dead button read as though a pairing were
+            the step that was missing.  Neither end of the exchange ever needed
+            one: the offer is dialled with automatic pairing switched off, and
+            what arrives is held against the released version's own digest
+            before it is kept.
 
-          - A row says what the machine is.  The platform and architecture a
-            device advertises are shown as a chip: the same two facts the update
-            entries beside it are decided on, and what the refusal about two
-            devices not being on the same platform left the reader to guess at,
-            on a row that named no platform anywhere.  A device renamed here now
-            heads its row with the name you gave it, and the name the peer goes
-            by stays on the row underneath, so the row can still be matched
-            against the tray, the chat page and the pairing card, which call the
-            device by its own name.
+          - An update sent from another device installs itself.  The two
+            machines agreed, the archive came across, was checked against the
+            released digest and was staged -- and there the exchange ended, on a
+            card: the button under it fetched the same release a second time on
+            a machine that could reach the release endpoint, and on the machine
+            the exchange exists for -- one that cannot reach it -- the card said
+            to replace the application by hand.  A peer's archive is installed
+            as it lands now, and the window's status line says so as the
+            installer starts, because a window that disappears into an installer
+            with nothing said reads as a crash.  The card's button, 立即安装,
+            installs the file that is already on disk rather than fetching the
+            same release again, and where this build cannot replace itself with
+            the file it has -- a macOS `.dmg`, a Linux `.deb` -- the card says
+            the rest instead of failing quietly.
 
-          - The device list is ordered, and starts with this machine.  The rows
-            came over in device-id order, which is stable but says nothing, so a
-            machine that had just appeared sat wherever its id happened to fall
-            and the reader scanned the whole list to find it.  They are ranked
-            the way the tray ranks its own list -- what is up now, then a
-            handshake on its way, then the devices this machine knows and cannot
-            reach, then the ones merely seen -- and read within a rank by the
-            name each row shows.  Above them all is the machine you are sitting
-            at, with the name and the device id that another device needs in
-            order to pair with it: every peer row offered its id to copy while
-            the row for this machine offered nothing.  An empty list says how a
-            device gets into it, and the 配对 button that cannot be pressed says
-            why rather than sitting there dead.
+          - A device that goes quiet for a moment keeps its row.  An mDNS
+            announcement is the advertiser's to schedule and the network's to
+            drop, and it does both: one working day's log holds the same Mac
+            found and lost four seconds apart, four times over, and twice gone
+            for fifty minutes from a machine that was on the network
+            throughout.  The row was deleted on the first missed goodbye, so a
+            device that had not moved flickered in and out of the list, and a
+            device that was not paired lost its row altogether -- a machine that
+            is present and listed nowhere.  A lapsed sighting stays readable for
+            five minutes now.  Whether a device has really gone is decided by
+            the connection, which is a reading rather than an announcement, and
+            a peer that leaves is dropped there.
 
-          - A pairing request that ran out of time reads 已过期, not 已取消.  The
-            two were the same status, and they ask the reader for different
-            things: a cancellation is somebody's answer -- the other side said
-            no -- while an expiry is nobody's, and what it wants is another
-            attempt rather than a search for a fault at the other end.  The code
-            a device shows while it waits can be copied now, for a reader
-            comparing it with somebody standing at the other machine.
+          - A device is not declared lost while it is being asked.  Resuming an
+            mDNS browse is followed by a reconcile that drops the peers the
+            browser has not re-reported, and the browser re-asks on a schedule
+            of its own -- immediately, then at +1, +4 and +9 seconds.  The
+            reconcile ran at four, between two of those questions, so a peer
+            whose answer was still in flight had already been dropped and was
+            reported lost on the network it was sitting on.  It is not a rare
+            window: a VPN coming up or going down changes this machine's address
+            set, which rebuilds the mDNS sockets, and every rebuild started the
+            same countdown.  The reconcile now outlasts the browser's questions,
+            so one missed multicast answer costs a re-ask rather than a device.
+
+          - A VPN no longer disturbs discovery.  A tunnel's address is private
+            by range -- WireGuard's 10.x, OpenVPN's 172.16-31.x -- and the test
+            that keeps this device's record on the local network is exactly that
+            test, so a live tunnel address went out in the record beside the
+            real one and every peer on the network was handed it to dial.  It
+            happened in the other direction as well: a peer offering two private
+            addresses ranked them equally and settled the tie by sorting the
+            strings, which puts "10." and "172." before "192.", so a laptop
+            advertising its tunnel address alongside its LAN address was dialled
+            at the tunnel.  A tunnel address is not advertised while a real
+            adapter has one, and a peer is dialled at the address this machine's
+            own routing table would reach over a real interface.  Which adapter
+            is which is read from its description rather than its name: the name
+            is whatever the vendor, the installer or the locale made it, and
+            "VirtualNet" and "Heysocks" match nothing a list of tunnel names
+            would hold, while the description says Tunnel and TAP-Windows
+            Adapter V9.  A virtual adapter also ranks below even an adapter this
+            code cannot name, because that is where a real one with a localized
+            name lands.
 
           The device name is now published in the mDNS record, to the local
           network.  That is what lets devices show the name you chose rather
