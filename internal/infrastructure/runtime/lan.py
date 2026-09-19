@@ -2718,11 +2718,25 @@ class LanRuntime:
         self._refresh()
 
     def _peer_lost(self, pid):
+        """The peer stopped advertising itself over mDNS: drop the sighting.
+
+        The record is all that goes.  An mDNS announcement is unauthenticated
+        and expires on whatever schedule the advertiser chose, so it is not a
+        statement about the connection underneath it — and this used to read it
+        as one, tearing down a live link and the retry loop behind it whenever a
+        record lapsed.  A device still answering a probe while its record had
+        gone was listed 离线 on a working connection, and anyone on the LAN
+        could force the same by forging a goodbye packet for that service name.
+
+        Liveness is the transport's to decide, from the socket: a peer that
+        really left is noticed there (a closed socket at once, an unreachable
+        one within the keepalive budget) and the retry scheduler starts from
+        that, which is also where a peer that comes back is picked up.
+        """
         real = self._resolve(pid)
         with self._lock:
             self._discovered.pop(pid, None)
             self._connecting.pop(real, None)
-        self.transport.disconnect_peer(real)
         self._refresh()
 
     def _new_pairing(self, *_args):

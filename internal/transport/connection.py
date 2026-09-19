@@ -1759,18 +1759,28 @@ class TransportManager:
 
         Keyed by whichever id form reconnect scheduling used (the real device
         id or the hashed mDNS id — callers should try both).  Each value
-        carries ``attempts`` (reconnect attempts already initiated, capped at
-        ``max_attempts`` — past that the peer is in slow-retry mode) and
-        ``max_attempts``; a peer absent from the map is either connected or
-        never scheduled.
+        carries ``attempts`` (reconnect attempts already initiated, always
+        inside the fast budget) and ``max_attempts``.
+
+        A peer past that budget is not listed at all.  Past it the transport is
+        on slow retry — one dial every ``MAX_RECONNECT_BACKOFF`` seconds, for as
+        long as the peer stays away — and that is a background poll rather than
+        a reconnection anyone is waiting on.  Reported anyway (capped at the
+        ceiling, as the counter used to be), it kept every front end saying
+        重连中 10/10 for as long as the peer was gone, so the state the row is
+        meant to reach when the transport gives up — offline, per
+        ``rpc.attach_reconnect_progress`` — was unreachable for exactly the
+        peers a reader wanted it for.  A peer absent from the map is connected,
+        never scheduled, or given up on.
         """
         with self._lock:
             return {
                 pid: {
-                    "attempts": min(attempts, self._max_reconnect_attempts),
+                    "attempts": attempts,
                     "max_attempts": self._max_reconnect_attempts,
                 }
                 for pid, attempts in self._reconnect_attempts.items()
+                if attempts < self._max_reconnect_attempts
             }
 
     def _on_peer_disconnected(self, peer_id: str, conn=None):
@@ -1886,13 +1896,26 @@ class TransportManager:
             else:
                 delay = max(MIN_RECONNECT_DELAY, min(2**attempts, MAX_RECONNECT_BACKOFF))
             self._reconnect_attempts[peer_id] = attempts + 1
-            logger.debug(
-                "[%s] scheduling reconnect attempt %d/%d in %.0fs",
-                peer_id[:12],
-                attempts + 1,
-                self._max_reconnect_attempts,
-                delay,
-            )
+            if attempts < self._max_reconnect_attempts:
+                logger.debug(
+                    "[%s] scheduling reconnect attempt %d/%d in %.0fs",
+                    peer_id[:12],
+                    attempts + 1,
+                    self._max_reconnect_attempts,
+                    delay,
+                )
+            else:
+                # Past the budget the count is no fraction of anything: "69/10"
+                # in the log reads as a counter that escaped its ceiling rather
+                # than as the slow retry it is.
+                logger.debug(
+                    "[%s] retrying slowly (attempt %d, %d fast attempts spent) "
+                    "in %.0fs",
+                    peer_id[:12],
+                    attempts + 1,
+                    self._max_reconnect_attempts,
+                    delay,
+                )
             # Atomically replace any existing timer: pop + insert under one
             # lock so two concurrent calls can't leak a stale timer.
             old = self._reconnect_timers.pop(peer_id, None)

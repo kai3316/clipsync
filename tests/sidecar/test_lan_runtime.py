@@ -478,8 +478,21 @@ def test_discovery_hash_resolution_and_only_paired_auto_connect(rig):
     assert len(transport.dials) == 2
     transport.connected.add("remote")
     discovery.lost(hashed)
-    assert "remote" not in transport.connected
+    # A lapsed announcement is not a lost peer: the sighting goes, the link
+    # stays, and the row keeps reading the transport rather than the record.
+    # Tearing the connection down here is what listed a working device 离线,
+    # and what a forged mDNS goodbye packet could trigger from anywhere on the
+    # network.
+    assert "remote" in transport.connected
+    assert not transport.disconnected
     assert runtime.config.peers["remote"].last_ip == "127.0.0.2"
+    assert runtime.devices()["items"][0]["connection_state"] == "online"
+    # With the link actually gone it is the transport that says so, and the
+    # paired device keeps its row -- offline, not absent.  The second loss is
+    # the refresh: in the field that is the transport reporting the closed
+    # socket, which is the same `_refresh()`.
+    transport.connected.clear()
+    discovery.lost(hashed)
     assert runtime.devices()["items"][0]["connection_state"] == "offline"
 
 

@@ -3025,12 +3025,9 @@ class Application:
             self._discovered_peers.pop(peer_id, None)
             # Allow a future re-discovery to auto-connect again.
             self._auto_connect_pending.discard(peer_id)
-        self.transport_mgr.disconnect_peer(peer_id)
-        # Fail any outgoing file transfers destined for this peer immediately
-        # instead of letting them hang in "awaiting_ack"/"finalizing" for the
-        # full 60-120s timeout.  Discovery reports the *hashed* id here, while
-        # transfers are keyed by the real device id — resolve the hash first
-        # (same lookup _maybe_auto_connect uses) or the fast-fail matches nothing.
+        # Discovery reports the *hashed* id here, while transfers and chat
+        # sessions are keyed by the real device id — resolve the hash first
+        # (same lookup _maybe_auto_connect uses) or nothing below matches.
         real_id = None
         try:
             if self.pairing_mgr is not None:
@@ -3041,6 +3038,21 @@ class Application:
         except Exception:
             logger.debug("Failed to resolve hashed peer id", exc_info=True)
         resolved_id = real_id or peer_id
+        # A lapsed announcement is not a peer that left.  An mDNS record
+        # expires on the advertiser's own schedule -- and is unauthenticated,
+        # so anything on the network can announce that it went -- which made
+        # this tear down a live connection, cancel its retry timer and fail
+        # the transfers running over it for a device that was still answering.
+        # Whether the peer is really gone is the transport's answer, from the
+        # socket; the sighting above is all this event decides.
+        connected = set(self.transport_mgr.get_connected_peers())
+        if resolved_id in connected or peer_id in connected:
+            self._push_web("broadcast_devices")
+            return
+        self.transport_mgr.disconnect_peer(peer_id)
+        # Fail any outgoing file transfers destined for this peer immediately
+        # instead of letting them hang in "awaiting_ack"/"finalizing" for the
+        # full 60-120s timeout.
         if self.file_transfer_mgr is not None:
             self.file_transfer_mgr.fail_peer_transfers(resolved_id)
         # Nearby chat sessions are keyed by the real device id (extracted
