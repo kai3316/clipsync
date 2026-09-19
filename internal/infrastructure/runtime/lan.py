@@ -1629,6 +1629,13 @@ class LanRuntime:
             with config_lock:
                 self.config.chat_muted_peers = sorted(self._chat_muted)
             self._save_config()
+            # The list travels in the chat sessions payload, and this is the one
+            # way it changes — so it has to be announced the way every other
+            # change to that payload is, or the surface that did not make the
+            # change keeps the old list: the phone is pushed the sessions
+            # without it, and a second window reads it only when something else
+            # moves a conversation.
+            self._publish("chat.sessions.changed", {})
             return {"ok": True, "muted": sorted(self._chat_muted)}
         return self._command(run)
 

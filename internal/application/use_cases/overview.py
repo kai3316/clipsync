@@ -128,6 +128,11 @@ def build_overview(cfg, history, runtime, start_time, lan_ip="", source_label=No
         "port": getattr(cfg, "web_port", 0),
         "platform": friendly_platform_name(platform.system()),
         "version": __version__,
+        # This device's own name.  The dashboard and the phone both read it from
+        # here rather than from the page they were served, which is the copy
+        # that a rename on another surface leaves behind — the name is a fact
+        # about the device, and this payload is the only one they re-read.
+        "device_name": getattr(cfg, "device_name", ""),
         "network_type": network_type,
         "network_detail": network_detail,
         # The feed is the newest six history rows, built by the same helper the

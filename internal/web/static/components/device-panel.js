@@ -59,6 +59,7 @@
         netpairExpanded: true,    // default expanded; fold it if the page is busy
         _netpairLoadInFlight: false,
         netpairClockTimer: null,  // refreshes relative "last sync" times
+        netpairStatusTimer: null, // re-reads the peers' 在线 state (see mounted)
 
         // Section collapsibility — every section defaults to expanded (same
         // default as the internet-pairing header), foldable by its title.
@@ -1023,12 +1024,29 @@
       this.netpairClockTimer = setInterval(function () {
         try { self.$forceUpdate(); } catch (e) { /* component unmounted */ }
       }, 30000);
+      // The 在线 chip on those peers is a reading rather than an event: the
+      // backend decides it when it is read, from a 90-second window over the
+      // last frame heard from each peer, and nothing publishes the moment that
+      // window lapses — silence is what the expiry is made of — or the moment a
+      // peer that had gone quiet speaks again.  The peers were re-read when
+      // this tab mounted and on the ``netpair_peer`` event, which fires only
+      // when a pairing is made or broken, so both directions stayed wrong for
+      // as long as the page was open.  Same interval the desktop window polls
+      // the same card with.
+      this.netpairStatusTimer = setInterval(function () {
+        if (document.hidden) return;
+        self.store.fetchInternetPairStatus();
+      }, 5000);
     },
 
     beforeUnmount: function () {
       if (this.netpairClockTimer) {
         clearInterval(this.netpairClockTimer);
         this.netpairClockTimer = null;
+      }
+      if (this.netpairStatusTimer) {
+        clearInterval(this.netpairStatusTimer);
+        this.netpairStatusTimer = null;
       }
     },
   };

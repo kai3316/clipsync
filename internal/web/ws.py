@@ -637,7 +637,7 @@ class WebSocketManager:
             },
         )
 
-    def broadcast_chat_sessions(self, sessions=None, open_to_all=None):
+    def broadcast_chat_sessions(self, sessions=None, open_to_all=None, muted=None):
         """Convenience: broadcast the full nearby-chat session list.
 
         ``sessions`` is the list of session dicts from ``ChatManager.get_sessions()``
@@ -645,10 +645,18 @@ class WebSocketManager:
         rides along for the same reason it does on ``GET /api/chat/sessions``:
         an entry at ``await_accept`` looks alike in both modes, and only this
         says whether the prompt that follows it is real.
+
+        ``muted`` is the same mute set that endpoint returns.  It rides here for
+        the same reason: a client that mutes a peer somewhere else — the desktop
+        window, another browser — is not told, and this snapshot is what it
+        reads the mute state from, so leaving it out left a page counting an
+        unread badge for a device it believes is silent.
         """
         payload = {"sessions": sessions or []}
         if open_to_all is not None:
             payload["open_to_all"] = bool(open_to_all)
+        if muted is not None:
+            payload["muted"] = list(muted)
         self.broadcast("chat_sessions", payload)
 
     def broadcast_chat_message(self, session_id: str, entry: dict):

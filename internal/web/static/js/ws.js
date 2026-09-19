@@ -529,6 +529,12 @@ var ClipsyncWS = (function () {
               }
             }
             store.replaceChatSessions(sessList, data.open_to_all);
+            // The mute set travels with the snapshot so a client that did not
+            // make the change still reads it: muting a peer on the desktop or
+            // in another browser is announced as a session-list change, and
+            // without this the badge here went on counting a device the user
+            // had already silenced.
+            if (Array.isArray(data.muted)) store.replaceChatMuted(data.muted);
           }
           break;
 

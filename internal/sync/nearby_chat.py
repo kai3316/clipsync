@@ -470,10 +470,19 @@ class ChatManager:
             return by_peer
         return None
 
-    def _touch_seen(self, session: ChatSession) -> None:
+    def _touch_seen(self, session: ChatSession) -> bool:
+        """Mark a session as just heard from; True when that brought it back.
+
+        The peer's online state is part of what the session list shows, and a
+        peer that had gone quiet and speaks again changes it — so the answer is
+        the caller's cue to announce the list.  It is the caller's because this
+        runs under the chat lock, where nothing may be fired.
+        """
+        was_offline = not session.online
         session.last_seen_mono = time.monotonic()
         session.online = True
         session.offline_announced = False
+        return was_offline
 
     def _prune_times(self, dq: deque, now: float, window: float) -> None:
         while dq and now - dq[0] > window:
@@ -1704,26 +1713,36 @@ class ChatManager:
         return True
 
     def _handle_chat_ping(self, payload, sender_id, send_fn) -> bool:
+        came_back = False
         with self._lock:
             session = self._resolve_session(
                 str(payload.get("session_id", "")), sender_id
             ) or self._sessions.get(sender_id)
             if session is None or session.status != "active":
                 return False
-            self._touch_seen(session)
+            came_back = self._touch_seen(session)
             self._send_frame(
                 {"msg_type": "chat_pong", "session_id": session.session_id},
                 send_fn or self._latest_send_fn.get(session.peer_id),
             )
+        # A peer that had gone silent and is pinging again is 在线 again, and
+        # this ping is the only thing that says so: this side stopped pinging it
+        # when it went quiet (see the heartbeat's offline edge), so the pong
+        # handler never sees it.  Fired below the lock, like every other.
+        if came_back:
+            self._fire("_on_sessions_changed")
         return True
 
     def _handle_chat_pong(self, payload, sender_id) -> bool:
+        came_back = False
         with self._lock:
             session = self._sessions.get(sender_id)
-            if session is not None and session.status == "active":
-                self._touch_seen(session)
-                return True
-        return False
+            if session is None or session.status != "active":
+                return False
+            came_back = self._touch_seen(session)
+        if came_back:
+            self._fire("_on_sessions_changed")
+        return True
 
     # ------------------------------------------------------------------
     # Files
@@ -2393,6 +2412,10 @@ class ChatManager:
             recv_done_fired: list[tuple[str, str, str]] = []
             recv_sessions_changed = False
             reap_sessions_changed = False
+            # Separate from the reap: this one is a session that is still here
+            # and still active, but whose peer has gone quiet.  The list shows
+            # that as 离线, and this edge is the only place it is decided.
+            offline_sessions_changed = False
             with self._lock:
                 for session in list(self._sessions.values()):
                     # Reap long-dead sessions so the map cannot grow without
@@ -2432,6 +2455,7 @@ class ChatManager:
                         # once no transfer is actively moving.
                         if not self._session_has_active_transfer(session):
                             session.online = False
+                            offline_sessions_changed = True
                             session.offline_announced = True
                             session.peer_typing_until_mono = 0.0
                             self._append_entry(
@@ -2474,7 +2498,7 @@ class ChatManager:
                 self._fire("_on_file_done", sid, tid, False, "", status)
             for sid, tid, status in recv_done_fired:
                 self._fire("_on_file_done", sid, tid, False, "", status)
-            if reap_sessions_changed or recv_sessions_changed:
+            if reap_sessions_changed or recv_sessions_changed or offline_sessions_changed:
                 self._fire("_on_sessions_changed")
 
     def _expire_stale_receives(self, defer_fire: bool = False) -> tuple[list, bool]:

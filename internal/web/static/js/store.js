@@ -1057,6 +1057,13 @@
             self.overview.historyImages = o.history_images || 0;
             self.overview.transferCompleted = o.transfer_completed || 0;
             self.overview.version = o.version || '';
+            // This device's own name, which every panel that shows it — the
+            // title bar, the overview hero, the about card — reads from the
+            // store.  It was set once from the page the server rendered, so a
+            // rename made anywhere else (the desktop window, another browser,
+            // the phone) left those panels showing the old name for as long as
+            // the page stayed open.  This poll runs every five seconds.
+            if (o.device_name) self.deviceName = o.device_name;
             self.overview.recentItems = o.recent_items || [];
           }
         })

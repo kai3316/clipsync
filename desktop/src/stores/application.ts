@@ -86,6 +86,30 @@ export function createApplicationStore() {
     // the reader pressed 刷新.  Empty = this session has not been told, and the
     // snapshot is all there is.
     relayState: "",
+    // Settings the sidecar has applied and this window has not folded in, named.
+    // Both hosts name what they changed — `settings.changed` for a save through
+    // the web/phone API, `settings.live_applied` for the live apply behind every
+    // save — and the settings page is a form hydrated once and then edited in
+    // place, so a name is what lets it take a change made on another surface
+    // without re-reading the whole form over whatever else is being typed in
+    // it.  Kept until that page takes them (see `consumeSettingsFields`), which
+    // is what makes a change made while the page was closed arrive when it is
+    // opened.  `fields` is empty once taken; `revision` marks each arrival.
+    settingsEvent: null as { revision: number; fields: string[] } | null,
+    // The LAN discovery switches as last announced, mirrored from
+    // `discovery.changed`.  The same two switches are drawn on the phone's
+    // panel and the web dashboard, and flipping one there left this window
+    // showing the state it read last — for as long as it stayed open, since
+    // nothing else re-read them.
+    discoveryState: null as { enabled: boolean; visible: boolean } | null,
+    // When the sync pause runs out, mirrored from `sync.state.changed`.  The
+    // countdown is drawn from the settings form, which is read when the window
+    // starts and on the way into the settings page — so a pause armed from the
+    // phone's panel, or ended early from one, went unseen here until this
+    // window's own deadline had already passed, and a pause it had never heard
+    // of (deadline 0) was never picked up at all.  Zero = no pause, which is
+    // also what an event carrying no deadline says.
+    syncPauseUntil: 0,
     // A dialog the phone's panel asked this window to open. The request travels
     // as an event because the host has no window of its own; `revision` makes
     // two identical requests distinguishable.
@@ -592,6 +616,33 @@ export function createApplicationStore() {
             delivery.apply(data);
             return;
           }
+          // The LAN switches, folded in place: the event *is* the state, so
+          // there is nothing to re-read — and it is published from whichever
+          // surface threw the switch, which is the whole point of mirroring it.
+          if (event.name === "discovery.changed") {
+            state.discoveryState = {
+              enabled: data.enabled === true,
+              visible: data.visible === true,
+            };
+          }
+          // What a save from another surface changed, by name.  Kept for the
+          // settings page rather than applied here: that page holds the only
+          // copy of these fields, and it is the one that can put a new value in
+          // its own box without disturbing the rest of what is on screen.  Left
+          // to fall through as well — the snapshot carries the rest of what a
+          // save moves.
+          if (event.name === "settings.changed" || event.name === "settings.live_applied") {
+            const named = Array.isArray(data.fields) ? data.fields.map(String) : [];
+            const fields = [...(state.settingsEvent?.fields || [])];
+            for (const field of named) if (!fields.includes(field)) fields.push(field);
+            state.settingsEvent = { revision: (state.settingsEvent?.revision || 0) + 1, fields };
+          }
+          // The one settings value with a clock attached, so it is folded in
+          // place: the page draws it as a countdown and nothing else has to be
+          // re-read to put it on screen.
+          if (event.name === "sync.state.changed") {
+            state.syncPauseUntil = Number(data.until || 0);
+          }
           if (event.name === "netpair.peer.changed") {
             // Kept, and then left to fall through: the card has to re-read the
             // peers (the event carries one row, not the list), and a confirmed
@@ -865,6 +916,16 @@ export function createApplicationStore() {
     /** Which conversation the chat page has on screen, or "" for none. */
     setOpenChatSession(sessionId: string) {
       state.openChatSession = String(sessionId || "");
+    },
+    /** Take the settings another surface changed, by name, for the settings
+     * page to fold in.  Empty when there is nothing waiting, which is also what
+     * a second call after one arrival returns: the revision is deliberately left
+     * standing, since it marks the arrival the page is already answering and
+     * bumping it here would wake the watcher a second time. */
+    consumeSettingsFields(): string[] {
+      const fields = state.settingsEvent?.fields || [];
+      if (fields.length) state.settingsEvent = { ...state.settingsEvent!, fields: [] };
+      return fields;
     },
     refresh() { state.error = null; return refresh(); },
     // The error band's retry: relaunches a dead sidecar, then refreshes.

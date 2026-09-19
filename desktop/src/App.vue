@@ -3366,37 +3366,113 @@ function openAiPage() {
   void loadAiProfiles();
   void primeAiInventories();
 }
+/** The settings form as the sidecar's payload spells it.
+ *
+ * One shape for both ways the page is filled — the whole-form load and the
+ * field-by-field fold-in below — because a second transform for the partial
+ * path is how one field ends up spelled two ways: a broker list as lines here
+ * and as a list there, a byte limit as kilobytes in the box and as bytes on
+ * disk, an absent boolean as a default in one place and as `undefined` in the
+ * other. */
+function buildSettingsForm(loaded: Record<string, any>): Record<string, any> {
+  return {
+    ...loaded,
+    app_filter_enabled: loaded.app_filter_enabled ?? false,
+    app_filter_mode: loaded.app_filter_mode ?? "blacklist",
+    app_filter_list: Array.isArray(loaded.app_filter_list) ? loaded.app_filter_list.join("\n") : "",
+    filter_enabled_categories: loaded.filter_enabled_categories ??
+      filterCategories.value.filter(([key]) => key !== "email").map(([key]) => key),
+    relay_brokers: Array.isArray(loaded.relay_brokers) ? loaded.relay_brokers.join("\n") : (loaded.relay_brokers || ""),
+    relay_private_brokers: Array.isArray(loaded.relay_private_brokers) ? loaded.relay_private_brokers.join("\n") : (loaded.relay_private_brokers || ""),
+    // The broker's limit is stored in bytes and typed in kilobytes, so the
+    // form gets a key of its own rather than a value whose unit depends on
+    // which side of the save it is on.  Bound as `relay_max_message_kb` and
+    // multiplied back on save; see the relay card's own row.
+    relay_max_message_kb: clampNumber(
+      Math.round(Number(loaded.relay_max_message_bytes ?? DEFAULT_RELAY_MAX_MESSAGE_BYTES) / 1024),
+      DEFAULT_RELAY_MAX_MESSAGE_BYTES / 1024,
+      MIN_RELAY_MAX_MESSAGE_KB,
+      MAX_RELAY_MAX_MESSAGE_KB,
+    ),
+  };
+}
+/** Config names the form spells differently.
+ *
+ * The sidecar reports what changed under the name the config stores it by, and
+ * the one field whose form key is not that name is the relay's message limit —
+ * typed in kilobytes, stored in bytes. */
+const SETTINGS_FIELD_ALIASES: Record<string, string> = {
+  relay_max_message_bytes: "relay_max_message_kb",
+};
+/** Fold the settings another surface changed into the form, by name.
+ *
+ * The event names what moved; the value is read back from the sidecar, so a
+ * field whose spelling differs between disk and form goes through the same
+ * transform a load does, and the box ends up holding what is stored rather
+ * than what the event happened to carry.  A field this page does not draw — a
+ * value only the snapshot shows — is skipped: there is no box to put it in.
+ *
+ * Only the named fields are touched, so an edit in progress on another card
+ * survives a change made on another surface.  A field that is itself the change
+ * is the one exception, and there the stored value is the truthful one: the
+ * reader's version of it is not saved anywhere yet. */
+async function foldSettingsFields(fields: string[]) {
+  if (!fields.length) return;
+  let loaded: Record<string, any>;
+  try {
+    loaded = (await bridge.settings()).settings;
+  } catch {
+    // The page keeps what it has, which is no worse than before the change
+    // arrived; the next arrival — or opening the page — asks again.
+    return;
+  }
+  const form = buildSettingsForm(loaded);
+  const wasClean = !settingsDirty.value;
+  for (const field of fields) {
+    const key = SETTINGS_FIELD_ALIASES[field] || field;
+    if (key in form) settings.value[key] = form[key];
+  }
+  // The three that are not boxes on this page: the auto-update switch is its
+  // own ref, and the theme and the language are drawn by the shell.
+  if (fields.includes("auto_update_check")) autoUpdateCheck.value = loaded.auto_update_check !== false;
+  if (fields.includes("appearance_mode")) applyTheme(settings.value.appearance_mode);
+  if (fields.includes("language")) setLocale(loaded.language);
+  // A form that had nothing pending is holding stored state again, and the
+  // save bar has to stop offering to save what the sidecar just said out loud.
+  // One that did have something pending keeps its own snapshot: the pending
+  // edit is still pending, and the fields folded in above are not it.
+  if (wasClean) savedSettings.value = settingsFormSnapshot();
+}
 async function openSettings() {
   tab.value = "settings";
   void loadDiscovery();
   // Hydrate the live phase so a download that began before this window opened
   // still renders (the sidecar owns the state; this is a read-only mirror).
   void store.loadUpdateStatus();
-  if (settingsLoaded.value || settingsLoading) return;
+  if (settingsLoading) return;
+  if (!settingsLoaded.value) return void hydrateSettings();
+  const pending = store.consumeSettingsFields();
+  // This page holds an unsaved edit the moment it has one, so re-opening it
+  // cannot simply re-read the form.  But a change made while the reader was on
+  // another page — a rename from the overview card, a save from the phone — is
+  // a change this form is now wrong about, and the one it would otherwise save
+  // back over the top of.  With nothing pending here the page is re-read whole,
+  // which is also how the values that live outside the form (auto-start, the
+  // theme) catch up; with an edit pending, only the fields that actually moved
+  // are folded in, by name.
+  if (!settingsDirty.value) return void hydrateSettings();
+  await foldSettingsFields(pending);
+}
+/** Read the whole settings form from the sidecar.
+ *
+ * The one place the page is filled end to end: when it opens with nothing
+ * loaded, and when it is re-opened with nothing pending in it. */
+async function hydrateSettings() {
   settingsLoading = true;
   try {
     const loaded = (await bridge.settings()).settings;
     autoUpdateCheck.value = loaded.auto_update_check !== false;
-    settings.value = {
-      ...loaded,
-      app_filter_enabled: loaded.app_filter_enabled ?? false,
-      app_filter_mode: loaded.app_filter_mode ?? "blacklist",
-      app_filter_list: Array.isArray(loaded.app_filter_list) ? loaded.app_filter_list.join("\n") : "",
-      filter_enabled_categories: loaded.filter_enabled_categories ??
-        filterCategories.value.filter(([key]) => key !== "email").map(([key]) => key),
-      relay_brokers: Array.isArray(loaded.relay_brokers) ? loaded.relay_brokers.join("\n") : (loaded.relay_brokers || ""),
-      relay_private_brokers: Array.isArray(loaded.relay_private_brokers) ? loaded.relay_private_brokers.join("\n") : (loaded.relay_private_brokers || ""),
-      // The broker's limit is stored in bytes and typed in kilobytes, so the
-      // form gets a key of its own rather than a value whose unit depends on
-      // which side of the save it is on.  Bound as `relay_max_message_kb` and
-      // multiplied back on save; see the relay card's own row.
-      relay_max_message_kb: clampNumber(
-        Math.round(Number(loaded.relay_max_message_bytes ?? DEFAULT_RELAY_MAX_MESSAGE_BYTES) / 1024),
-        DEFAULT_RELAY_MAX_MESSAGE_BYTES / 1024,
-        MIN_RELAY_MAX_MESSAGE_KB,
-        MAX_RELAY_MAX_MESSAGE_KB,
-      ),
-    };
+    settings.value = buildSettingsForm(loaded);
     if (native) {
       try { settings.value.auto_start = await bridge.autostartStatus(); }
       catch { /* Keep the persisted preference when the OS query is unavailable. */ }
@@ -3416,6 +3492,38 @@ async function openSettings() {
   catch (error) { state.error = error as any; }
   finally { settingsLoading = false; }
 }
+/** Fold in a settings change made while this page is on screen.
+ *
+ * The store keeps the names until something takes them, so an arrival while the
+ * reader is on another page waits for `openSettings` above.  Here the page is in
+ * front of them and the field is folded in where they can watch it move — only
+ * what moved, which is what the names are for: a rename made from the phone
+ * changes the name box and leaves every other box on the page as typed. */
+watch(() => store.state.settingsEvent?.revision, () => {
+  if (tab.value !== "settings" || !settingsLoaded.value) return;
+  const fields = store.consumeSettingsFields();
+  if (fields.length) void foldSettingsFields(fields);
+});
+/** A sync pause armed, or ended early, from another surface.
+ *
+ * The countdown is drawn from the deadline in the settings form, and nothing
+ * re-read that form on its own: a pause armed from the phone's panel was
+ * invisible here until this window's own deadline had already passed, and one
+ * this window had never heard of — no deadline at all — was never picked up, so
+ * the badge never appeared.  The deadline is the event's own payload, so it is
+ * taken from there rather than by re-reading a form that may hold an edit. */
+watch(() => store.state.syncPauseUntil, (until) => {
+  settings.value.timed_pause_until = until;
+});
+/** The two LAN switches, as the sidecar last announced them.
+ *
+ * Both are drawn here — the overview card's toggle and the settings page's own
+ * pair — and they were read on the way into those surfaces, so a flip from the
+ * phone's panel or the web dashboard, which draw the same two, was invisible
+ * here until the page was re-opened. */
+watch(() => store.state.discoveryState, (announced) => {
+  if (announced) discoveryState.value = announced;
+});
 /** What a tested broker's row says beside its address.
  *
  * A reachable broker is its latency, and an unreachable one is why — the

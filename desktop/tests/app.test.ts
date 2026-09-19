@@ -675,11 +675,22 @@ describe("history rendering", () => {
       await flushPromises();
       expect(save.attributes("disabled")).toBeUndefined();
       expect((name().element as HTMLInputElement).value).toBe("restored");
-      // And a page that loaded is not read again: the form is the reader's while
-      // it is open, so a later visit keeps what is on screen.
+      // A page that loaded is read again on the next visit, because a value it
+      // is showing may have been changed somewhere else in the meantime — the
+      // overview card's own rename, the phone's panel, the web dashboard — and
+      // the copy held here would otherwise be saved back over the newer one.
+      vi.mocked(bridge.settings).mockResolvedValue({ settings: { device_name: "renamed-elsewhere" } });
+      await app.get('[aria-label="设置"]').trigger("click");
+      await flushPromises();
+      expect((name().element as HTMLInputElement).value).toBe("renamed-elsewhere");
+      // An edit on the page is the reader's until they save it, though: a visit
+      // that finds one folds in only what another surface changed, by name, and
+      // never re-reads the form over the top of what is being typed in it.
+      await name().setValue("half-typed");
       const reads = vi.mocked(bridge.settings).mock.calls.length;
       await app.get('[aria-label="设置"]').trigger("click");
       await flushPromises();
+      expect((name().element as HTMLInputElement).value).toBe("half-typed");
       expect(vi.mocked(bridge.settings).mock.calls.length).toBe(reads);
     } finally {
       app.unmount();

@@ -32,10 +32,12 @@ class WebSocket:
     def broadcast_transfer_complete(self, transfer_id, success, cancelled=False):
         self.broadcast("transfer_complete", {"id": transfer_id, "success": success})
 
-    def broadcast_chat_sessions(self, sessions=None, open_to_all=None):
+    def broadcast_chat_sessions(self, sessions=None, open_to_all=None, muted=None):
         payload = {"sessions": sessions or []}
         if open_to_all is not None:
             payload["open_to_all"] = bool(open_to_all)
+        if muted is not None:
+            payload["muted"] = list(muted)
         self.broadcast("chat_sessions", payload)
 
     def broadcast_chat_message(self, session_id, entry):
@@ -116,9 +118,14 @@ def test_a_session_change_pushes_the_whole_list():
 
     # `open_to_all` rides along with the list: the phone renders Accept/Decline
     # under an offered file only when the user asked to approve each one, and
-    # the row looks the same either way.
+    # the row looks the same either way.  The mute set rides along too, for the
+    # same reason the sessions endpoint returns it: this snapshot is what a
+    # phone that did not do the muting reads the mute state from.
     assert r.messages == [
-        ("chat_sessions", {"sessions": [{"peer_id": "peer"}], "open_to_all": True})
+        (
+            "chat_sessions",
+            {"sessions": [{"peer_id": "peer"}], "open_to_all": True, "muted": []},
+        )
     ]
 
 
