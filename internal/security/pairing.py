@@ -47,12 +47,23 @@ PAIRING_TIMEOUT = 300  # 5 minutes
 #   confirmed_waiting  — local user confirmed, awaiting the peer's confirm
 #   peer_confirmed     — peer confirmed, awaiting the local user's confirm
 #   paired             — both sides confirmed
-#   cancelled          — rejected / expired / unpaired
+#   cancelled          — rejected / unpaired
+#   expired            — nobody answered within ``PAIRING_TIMEOUT``
 PAIRING_STATUS_PENDING = "pending"
 PAIRING_STATUS_CONFIRMED_WAITING = "confirmed_waiting"
 PAIRING_STATUS_PEER_CONFIRMED = "peer_confirmed"
 PAIRING_STATUS_PAIRED = "paired"
 PAIRING_STATUS_CANCELLED = "cancelled"
+# Its own word rather than ``cancelled``, which it used to share.  A rejection
+# is somebody's answer — the other side said no — while an expiry is nobody's:
+# the request simply ran out of time, and a user who left the prompt on screen
+# came back to 已取消, which reads as a refusal they never gave and cannot tell
+# apart from one they would have to answer differently (retry deliberately
+# rather than look for a fault on the other end).
+PAIRING_STATUS_EXPIRED = "expired"
+# The statuses that mean the handshake is over and cannot be revived: a late
+# ``pairing_confirm`` from the peer must not resurrect either one.
+PAIRING_STATUS_DEAD = (PAIRING_STATUS_CANCELLED, PAIRING_STATUS_EXPIRED)
 # Not a lifecycle state so much as the absence of one: this peer has no pairing
 # in flight.  It is what a merely-discovered device reports, and it is spelled
 # with the same empty string the removed-device rows already use for the field.
@@ -380,9 +391,11 @@ class PairingManager:
             # must no longer be confirmable — mirror get_pending_pairings().
             if now - _timestamp > PAIRING_TIMEOUT:
                 self._pending_pairings.pop(peer_id, None)
-                # Mark the lifecycle cancelled too, so a stale "pending" does
-                # not linger in _pairing_status after the request is gone.
-                self._pairing_status[peer_id] = PAIRING_STATUS_CANCELLED
+                # Mark the lifecycle over too, so a stale "pending" does not
+                # linger in _pairing_status after the request is gone.  Expired
+                # rather than cancelled: this is the clock running out, not an
+                # answer.
+                self._pairing_status[peer_id] = PAIRING_STATUS_EXPIRED
                 logger.info("Pairing request for %s expired before confirmation", peer_id)
                 return False
 
@@ -507,7 +520,7 @@ class PairingManager:
                 if peer_id in self._peers:
                     self._peers[peer_id].paired = True
                 return PAIRING_STATUS_PAIRED
-            if current == PAIRING_STATUS_CANCELLED:
+            if current in PAIRING_STATUS_DEAD:
                 return current
             # peer confirmed first, or we never had a status
             self._pairing_status[peer_id] = PAIRING_STATUS_PEER_CONFIRMED
@@ -554,7 +567,7 @@ class PairingManager:
                 result.append((pid, code, name, status))
             for pid in expired:
                 self._pending_pairings.pop(pid, None)
-                self._pairing_status[pid] = PAIRING_STATUS_CANCELLED
+                self._pairing_status[pid] = PAIRING_STATUS_EXPIRED
                 # Roll back a half-completed single-sided confirm on expiry,
                 # matching mark_peer_rejected.
                 peer = self._peers.get(pid)

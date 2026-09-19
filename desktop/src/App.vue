@@ -2,7 +2,7 @@
 import { computed, nextTick, onMounted, onUnmounted, ref, watch } from "vue";
 import {
   History, Monitor, Search, RefreshCw, Pin, Trash2, ChevronLeft, ChevronRight, Eraser, FileDown, Download,
-  ShieldCheck, ShieldOff, LockKeyhole, AlertCircle, X, LogOut, Circle, Copy, Check, Link, Unlink, PinOff, Star, Settings as SettingsIcon, Save, FileUp, FolderOpen, MessageCircle, Plug, PlugZap, RotateCcw, Activity, Fingerprint, Globe, SendHorizontal, Stethoscope, Wrench, Info, QrCode, ExternalLink, Wand2, Sparkles, Clock, Smartphone, Pencil,
+  ShieldCheck, ShieldOff, LockKeyhole, AlertCircle, X, LogOut, Circle, Copy, Check, Link, CloudOff, Laptop, PinOff, Star, Settings as SettingsIcon, Save, FileUp, FolderOpen, MessageCircle, Plug, PlugZap, RotateCcw, Activity, Fingerprint, Globe, SendHorizontal, Stethoscope, Wrench, Info, QrCode, ExternalLink, Wand2, Sparkles, Clock, Smartphone, Pencil,
 } from "@lucide/vue";
 import logo from "../../assets/icon.svg";
 import { bridge, inDesktop } from "./api/bridge";
@@ -14,6 +14,7 @@ import { aiCompareState, aiEntryKey, aiDiffCounts, buildAiLocalIndex } from "./l
 import { aiItemCount, aiTreeGroups, type AiGroup, type AiNode, type AiRow } from "./lib/aiconfig-tree";
 import { aiTargets, type AiTarget } from "./lib/aiconfig-targets";
 import { formatPairingCode, isPairingCodeComplete } from "./lib/pairing-code";
+import { PAIRING_LIVE_STATUSES, chatReachable, deviceLabel, deviceRank, platformLabel } from "./lib/device-row";
 import { openContextMenu, type ContextMenuItem } from "./lib/context-menu";
 import { copyText } from "./lib/clipboard";
 import { announce, clearStatus, statusMessage } from "./lib/status";
@@ -797,21 +798,44 @@ function blockedUpdateReason(device: Device) {
   return t("两台设备版本相同，没有需要发送的安装包");
 }
 
+/** A device row's menu, on the two routes it can hold.
+ *
+ * 打开聊天 is drawn on both, and always: a conversation is the one thing every
+ * device in this list can be offered, the chat page's own 附近设备 list offers it
+ * to any of them, and the row's button only appears while the device answers —
+ * so the menu is where the entry lives when it cannot be reached, dimmed with
+ * the reason rather than missing.
+ *
+ * 移除设备 is drawn on both as well.  The sidecar's own removal is not a LAN
+ * operation: it archives the device, ends a local pairing *and* drops an
+ * internet one, so a row whose only route is the relay was the one device in
+ * the list that could not be taken out of it — 解除互联网配对 leaves nothing
+ * archived and forgets the alias the user gave it. */
 function deviceMenu(event: MouseEvent, device: Device) {
+  const reachable = chatReachable(device);
+  const chat: ContextMenuItem = {
+    id: "chat", label: t("打开聊天"), icon: MessageCircle,
+    disabled: !reachable,
+    title: reachable ? undefined : t("{name} 当前不在线", { name: deviceLabel(device) }),
+    run: () => chatWith(device),
+  };
   if (device.relay) {
     openContextMenu(event, [
-      { id: "chat", label: t("打开聊天"), icon: MessageCircle, run: () => chatWith(device) },
+      chat,
       { id: "rename", label: t("重命名"), icon: Pencil, run: () => renameRelayDevice(device) },
       { id: "copy-id", label: t("复制设备 ID"), icon: Copy, run: () => copyText(device.id) },
-      { id: "unpair", label: t("解除互联网配对"), icon: Unlink, divider: true, danger: true, run: () => { relayUnpairDevice.value = device; } },
+      { id: "unpair", label: t("解除互联网配对"), icon: CloudOff, divider: true, danger: true, run: () => { relayUnpairDevice.value = device; } },
+      { id: "forget", label: t("移除设备"), icon: Trash2, danger: true, run: () => { forgetDevice.value = device; } },
     ]);
     return;
   }
   const connected = device.connection_state === "online";
   // This row can answer for two pairings at once — see `relayPairing` — so the
-  // entries below are drawn per route and not per row.  连接/断开 and 移除设备
-  // belong to the local pairing; 打开聊天 and 解除互联网配对 reach the device over
-  // the relay and are owed to a reader whose only pairing with it is the code.
+  // entries below are drawn per route and not per row.  连接/断开 belongs to the
+  // local pairing; 解除互联网配对 reaches the device over the relay and is owed
+  // to a reader whose only pairing with it is the code.  打开聊天 and 移除设备
+  // are drawn on every row, on reachability and on the device itself rather
+  // than on either route; see `deviceMenu`'s own note above.
   const relay = relayPairing(device);
   openContextMenu(event, [
     device.paired
@@ -825,9 +849,7 @@ function deviceMenu(event: MouseEvent, device: Device) {
           run: () => (connected ? store.disconnect(device) : store.connect(device)),
         }
       : null,
-    (device.paired || relay.paired) && !connected
-      ? { id: "chat", label: t("打开聊天"), icon: MessageCircle, run: () => chatWith(device) }
-      : null,
+    chat,
     { id: "rename", label: t("重命名"), icon: Pencil, run: () => renameDeviceRow(device) },
     { id: "copy-id", label: t("复制设备 ID"), icon: Copy, run: () => copyText(device.id) },
     // The update group: what the row's own two buttons do, plus the version
@@ -876,7 +898,7 @@ function deviceMenu(event: MouseEvent, device: Device) {
         }
       : null,
     relay.paired
-      ? { id: "relay-unpair", label: t("解除互联网配对"), icon: Unlink, divider: true, danger: true, run: () => { relayUnpairDevice.value = device; } }
+      ? { id: "relay-unpair", label: t("解除互联网配对"), icon: CloudOff, divider: true, danger: true, run: () => { relayUnpairDevice.value = device; } }
       : null,
     // The divider only on the first of the two dangerous entries, so a device
     // holding both pairings gets one separator rather than two in a row.
@@ -1953,8 +1975,35 @@ const updateInstallable = computed(() => store.state.updateCheck?.installable !=
 const diagnosticGroupOrder = ["system", "network", "internet", "ai_config", "chat", "transfer", "filesystem"];
 const discoveryState = ref<{ enabled: boolean; visible: boolean } | null>(null);
 const discoveryBusy = ref(false);
-const activeDevices = computed(() => state.devices.filter((device) => !device.archived));
+/** The live rows, ordered the way the tray orders its own list.
+ *
+ * The sidecar hands its rows over in device-id order, which is stable but says
+ * nothing: a machine that just appeared sat wherever its id happened to fall,
+ * so the reader had to scan the whole list to find the device they came for.
+ * `deviceRank` is the tray's ranking — what is up now, then a handshake on its
+ * way, then the devices this machine knows and cannot reach, then the ones
+ * merely seen — and within a rank the names are read the way a reader reads
+ * them rather than the way a byte comparison does, which for a list of Chinese
+ * names is not the same order at all.
+ *
+ * Sorted by what each row *shows* — a device the user renamed sorts under the
+ * name they gave it, not under the one its owner published.  That is the one
+ * place this list can differ from the tray, which has no room for the label.
+ */
+const activeDevices = computed(() => state.devices
+  .filter((device) => !device.archived)
+  .sort((left, right) =>
+    deviceRank(left) - deviceRank(right)
+    || deviceLabel(left).localeCompare(deviceLabel(right), undefined, { numeric: true, sensitivity: "base" })
+    || left.id.localeCompare(right.id)));
 const archivedDevices = computed(() => state.devices.filter((device) => device.archived));
+/** This machine's own row on the devices tab, off the status payload the
+ *  sidebar already reads — so the row costs no request of its own. */
+const localDevice = computed(() => ({
+  name: state.status?.device_name || "",
+  id: state.status?.device_id || "",
+  version: state.status?.version || "",
+}));
 const native = inDesktop();
 const ready = computed(() => state.status?.health === "ready");
 let themeGeneration = 0;
@@ -2248,7 +2297,7 @@ async function resumeSync() {
   finally { pauseBusy.value = false; }
 }
 function pairingPending(device: Device) {
-  return !device.paired && ["pending", "peer_confirmed", "confirmed_waiting"].includes(device.pairing_status);
+  return !device.paired && PAIRING_LIVE_STATUSES.includes(String(device.pairing_status || ""));
 }
 /** Whether a click on this row can place a call to that device.
  *
@@ -2265,14 +2314,28 @@ function pairingPending(device: Device) {
 function canDial(device: Device) {
   return device.dialable ?? device.connection_state !== "offline";
 }
+/** The line under a row's heading.
+ *
+ * The device id, and — when the heading is a name the user gave the device
+ * rather than the one it goes by — the name the peer published about itself as
+ * well.  A reader who renamed a device here should still be able to match the
+ * row against the tray, the chat list and the pairing card, which call it by
+ * its own name, and this is the one line where the two can meet. */
+function deviceSubtitle(device: Device) {
+  if (deviceLabel(device) === device.name) return device.id;
+  return [device.name, device.id].filter(Boolean).join(" · ");
+}
 function pairingLabel(device: Device) {
   if (device.paired) return t("已配对");
   // Paired, just not here: a device holding a code pairing and no LAN pairing
   // is not an unpaired device, and 未配对 beside an 互联网·在线 chip said it was.
   // The 本地 chip beside this one still carries the local half of the answer.
   if (relayPairing(device).paired) return t("互联网配对");
+  // 已过期 is its own word, not 已取消: a request that ran out of time was not
+  // refused by anybody, and the two ask the reader for different things — try
+  // again deliberately, rather than go looking for a fault on the other end.
   return ({ pending: t("等待确认"), peer_confirmed: t("对方已确认"), confirmed_waiting: t("等待对方确认"),
-    cancelled: t("已取消") } as Record<string, string>)[device.pairing_status] || t("未配对");
+    cancelled: t("已取消"), expired: t("已过期") } as Record<string, string>)[device.pairing_status] || t("未配对");
 }
 /** A device's local link, as the chip under its name shows it.
  *
@@ -5114,11 +5177,47 @@ async function translateText() {
               <button class="icon-button" :aria-label="t('查看证书指纹')" :title="t('证书指纹')" :disabled="busy" @click="showCertificates"><Fingerprint :size="18" /></button>
               <button class="icon-button" :aria-label="t('刷新设备')" :title="t('刷新设备')" :disabled="busy" @click="refreshDevices"><RefreshCw :size="18" :class="{ spinning: state.refreshing }" /></button>
             </div>
-            <div v-if="!state.devices.length" class="empty empty--page"><Monitor :size="36" /><h2>{{ state.refreshing ? t('正在读取设备') : t('暂无设备') }}</h2></div>
+            <!-- This machine, at the head of its own device list.
+                 Everything under it is a machine this one can pair with, and
+                 the two facts the other side needs in order to pair with *this*
+                 one were the ones no page in this window showed: the name it
+                 answers to, and the device id the sidecar knows it by — which
+                 every peer row offered to copy while the row for the machine in
+                 front of the reader offered nothing.
+                 Read-only: the name is edited where the other settings are (and
+                 on the overview's own card), and this row is here to be read
+                 off, not to become a second place to change it. -->
+            <article v-if="localDevice.id" class="device-row device-row--local">
+              <Laptop :size="25" class="device-icon" />
+              <div class="device-identity">
+                <h2>{{ localDevice.name || t('此设备') }}</h2>
+                <span class="note">{{ localDevice.id }}</span>
+              </div>
+              <div class="row-actions">
+                <button class="icon-button" :aria-label="t('复制本机设备 ID')" :title="t('复制本机设备 ID')" @click="copyText(localDevice.id)"><Copy :size="18" /></button>
+              </div>
+              <span class="device-channels">
+                <span class="channel"><Monitor :size="12" />{{ t("本机") }}</span>
+                <span class="channel" :title="t('本机软件版本')"><Download :size="12" />{{ t("版本 {version}", { version: localDevice.version }) }}</span>
+              </span>
+            </article>
+            <div v-if="!activeDevices.length" class="empty empty--page">
+              <Monitor :size="36" />
+              <h2>{{ state.refreshing ? t('正在读取设备') : t('暂无设备') }}</h2>
+              <!-- What the reader does next.  A page that says 暂无设备 and stops
+                   leaves the one question it raises — how does a device get
+                   here? — to be answered by the two other tabs, which is where
+                   the two ways in already live. -->
+              <p class="note">{{ t("同一网络里的设备打开 ClipSync 后会自己出现在这里；不在同一网络的设备，在“互联网配对”里用配对码添加。") }}</p>
+            </div>
             <article v-for="device in activeDevices" :key="device.id" class="device-row"
               @contextmenu.prevent="deviceMenu($event, device)">
               <Monitor :size="25" class="device-icon" />
-              <div class="device-identity"><h2>{{ device.name }}</h2><span class="note">{{ device.id }}</span></div>
+              <!-- The heading is the name this list calls the device — the one
+                   the user gave it, when there is one; the sub-line keeps the
+                   name the peer goes by, so nothing is lost to it (see
+                   `deviceLabel` and `deviceSubtitle`). -->
+              <div class="device-identity"><h2>{{ deviceLabel(device) }}</h2><span class="note">{{ deviceSubtitle(device) }}</span></div>
               <!-- A device paired by internet code gets its own set, because
                    almost every button in the other one names something a code
                    pairing does not have: no certificate to revoke, no address
@@ -5127,33 +5226,56 @@ async function translateText() {
                    conversation, a URL and a reachability test, and 打开聊天 is
                    a button here rather than only a menu entry because a device
                    that cannot be talked to from its own row is the thing this
-                   list was missing. -->
+                   list was missing.  It is drawn on the same rule the local row
+                   uses — whether the device answers — so a relay that is down
+                   leaves the entry to the menu, which says why. -->
               <div v-if="device.relay" class="row-actions">
-                <button class="icon-button" :aria-label="t('打开聊天')" :title="t('打开聊天')" :disabled="busy" @click="chatWith(device)"><MessageCircle :size="18" /></button>
+                <button v-if="chatReachable(device)" class="icon-button" :aria-label="t('打开聊天')" :title="t('打开聊天')" :disabled="busy" @click="chatWith(device)"><MessageCircle :size="18" /></button>
                 <button class="icon-button" :aria-label="t('测试连接')" :title="t('测试连接')" :disabled="busy || !!probeBusyId" @click="testConnection(device)"><Activity :size="18" :class="{ spinning: probeBusyId === device.id }" /></button>
                 <button class="icon-button" :aria-label="t('发送网址')" :title="t('发送网址')" :aria-describedby="sendUrlAvailable ? undefined : 'devices-engine-note'" :disabled="busy || !sendUrlAvailable" @click="openSendUrl(device)"><Globe :size="18" /></button>
-                <button class="icon-button" :aria-label="t('解除互联网配对')" :title="t('解除互联网配对')" :disabled="busy" @click="relayUnpairDevice = device"><Unlink :size="18" /></button>
+                <!-- The cloud, not the generic broken link the local row's
+                     撤销信任 wears: this entry ends the pairing that runs over the
+                     relay, and the two icons sat side by side on a row holding
+                     both pairings with nothing to tell them apart. -->
+                <button class="icon-button" :aria-label="t('解除互联网配对')" :title="t('解除互联网配对')" :disabled="busy" @click="relayUnpairDevice = device"><CloudOff :size="18" /></button>
+                <!-- Removal, which the sidecar implements for exactly this row
+                     too: it archives the device and ends both routes, where the
+                     entry above leaves no archive to restore from and forgets
+                     the alias the user chose.  Without it, a device reachable
+                     only over the internet could not be taken out of the list
+                     at all. -->
+                <button class="icon-button" :aria-label="t('移除设备')" :title="t('移除设备')" :disabled="busy" @click="forgetDevice = device"><Trash2 :size="18" /></button>
               </div>
               <div v-else class="row-actions">
-                <button v-if="device.paired" class="icon-button" :aria-label="t('撤销信任')" :title="t('撤销信任')" :disabled="busy" @click="revokeDevice = device"><Unlink :size="18" /></button>
+                <button v-if="device.paired" class="icon-button" :aria-label="t('撤销信任')" :title="t('撤销信任')" :disabled="busy" @click="revokeDevice = device"><ShieldOff :size="18" /></button>
                 <!-- Drawn on whether a dial can be placed, not on the connection
                      there happens to be — see `canDial`. -->
-                <button v-else-if="!pairingPending(device)" :disabled="busy || !canDial(device)" @click="store.startPairing(device)"><Link :size="17" />{{ t("配对") }}</button>
+                <!-- A pairing starts with a call to the device, so a device
+                     that cannot be called cannot be paired with — and the one
+                     button in this row that explains that is the button itself,
+                     dimmed.  It says which of the two it is: a device that is
+                     merely not answering right now, or one the engine is
+                     holding out of reach. -->
+                <button v-else-if="!pairingPending(device)" :disabled="busy || !canDial(device)"
+                  :title="canDial(device) ? t('与该设备配对') : t('该设备当前不可达，无法发起配对；等它上线或检查两端的网络连接')"
+                  @click="store.startPairing(device)"><Link :size="17" />{{ t("配对") }}</button>
                 <button v-if="device.paired && device.connection_state !== 'online'" class="icon-button" :aria-label="t('连接设备')" :title="t('连接设备')" :disabled="busy" @click="store.connect(device)"><Plug :size="18" /></button>
                 <button v-if="device.connection_state === 'online'" class="icon-button" :aria-label="t('断开连接')" :title="t('断开连接')" :disabled="busy" @click="store.disconnect(device)"><PlugZap :size="18" /></button>
-                <!-- The relay's own actions, on a row that has a local route as
-                     well.  A device can be paired by code *and* be here, and
-                     then this row is its only row: the two buttons below reach
-                     it over the relay (the sidecar's own rule is
-                     reachability, not the LAN pin), and the conversation and
-                     the internet pairing are things only the relay knows about.
-                     Without them the row kept every button gated on the LAN
-                     pairing the device does not have, while the 互联网 chip
-                     beside them reported it online. -->
-                <button v-if="relayPairing(device).paired && !device.paired" class="icon-button" :aria-label="t('打开聊天')" :title="t('打开聊天')" :disabled="busy" @click="chatWith(device)"><MessageCircle :size="18" /></button>
+                <!-- The conversation, offered on whether the device answers
+                     rather than on which pairing it holds.  It used to be drawn
+                     only for a device paired by code and *not* on this network,
+                     which left the commonest row in the list — paired and
+                     online, the device on the desk next to this one — with no
+                     way to open a chat from it at all, while the chat page
+                     offered the same device a conversation.  A device that is
+                     merely discovered is offered it too, because talking to a
+                     device without pairing is what the chat page does; one
+                     that is not reachable is left to the menu, which says why
+                     (a dimmed icon in a row of live ones says nothing). -->
+                <button v-if="chatReachable(device)" class="icon-button" :aria-label="t('打开聊天')" :title="t('打开聊天')" :disabled="busy" @click="chatWith(device)"><MessageCircle :size="18" /></button>
                 <button v-if="device.paired || relayPairing(device).paired" class="icon-button" :aria-label="t('测试连接')" :title="t('测试连接')" :disabled="busy || !!probeBusyId" @click="testConnection(device)"><Activity :size="18" :class="{ spinning: probeBusyId === device.id }" /></button>
                 <button v-if="device.paired || relayPairing(device).paired" class="icon-button" :aria-label="t('发送网址')" :title="t('发送网址')" :aria-describedby="sendUrlAvailable ? undefined : 'devices-engine-note'" :disabled="busy || !sendUrlAvailable" @click="openSendUrl(device)"><Globe :size="18" /></button>
-                <button v-if="relayPairing(device).paired" class="icon-button" :aria-label="t('解除互联网配对')" :title="t('解除互联网配对')" :disabled="busy" @click="relayUnpairDevice = device"><Unlink :size="18" /></button>
+                <button v-if="relayPairing(device).paired" class="icon-button" :aria-label="t('解除互联网配对')" :title="t('解除互联网配对')" :disabled="busy" @click="relayUnpairDevice = device"><CloudOff :size="18" /></button>
                 <!-- Offered to a device the sidecar says this build is ahead of
                      — same platform, older version — and it needs no pairing:
                      the peer requests the installer, and its own copy is
@@ -5212,6 +5334,23 @@ async function translateText() {
                 </span>
                 <span v-if="delivery.pending(device.id) > 0" class="channel channel--pending"
                   :title="t('对方离线时内容暂存，上线后自动补发')">{{ t("待补发 {count}", { count: delivery.pending(device.id) }) }}</span>
+                <!-- Which machine this is, of the two facts a sighting carries
+                     that nothing else on the row reported: the platform and the
+                     architecture.  It is what the update entries beside it are
+                     decided on — the sidecar refuses a send across platforms —
+                     and what 对方与本机不是同一个平台 leaves the reader to guess at,
+                     on a row that until now named no platform anywhere.  The
+                     architecture rides in the tooltip rather than beside it:
+                     Windows/amd64 and Windows/arm64 are a distinction the
+                     installer cares about and the reader rarely does.
+
+                     Nothing is drawn when the device advertises nothing, which
+                     is what a peer with no local sighting does — the same rule
+                     the version chip follows. -->
+                <span v-if="device.platform" class="channel"
+                  :title="device.arch ? t('{platform} · {arch}', { platform: platformLabel(device.platform), arch: device.arch }) : t('对方平台')">
+                  <Laptop :size="12" />{{ platformLabel(device.platform) }}
+                </span>
                 <!-- What the device advertises about itself, and nothing when it
                      advertises nothing: an older peer sends no version at all,
                      and "unknown" is not the same as "up to date". -->
@@ -5227,9 +5366,19 @@ async function translateText() {
                    nothing.  It gets the same dialog instead, from 重命名. -->
               <input v-if="device.paired && !device.relay" class="device-note" :value="device.note || ''" maxlength="512" :placeholder="t('设备备注')" :aria-label="t('设备备注')" @change="saveDeviceNote(device, $event)" />
               <div v-if="pairingPending(device)" class="pairing-controls">
-                <p v-if="device.pairing_code">{{ t("配对码：") }}<strong>{{ device.pairing_code }}</strong></p>
+                <!-- The code is meant to be read off this screen and compared
+                     with the one the other machine is showing, which is fine
+                     for a reader standing at both and impossible for one
+                     talking to somebody at the other end on the phone.  The
+                     copy button is what the internet pairing card's own code
+                     has, on the same reasoning. -->
+                <p v-if="device.pairing_code">{{ t("配对码：") }}<strong>{{ device.pairing_code }}</strong>
+                  <button type="button" class="icon-button" :title="t('复制')" :aria-label="t('复制配对码')"
+                    @click="copyText(String(device.pairing_code))"><Copy :size="15" /></button>
+                </p>
                 <p v-if="device.sas">{{ t("安全代码：") }}<strong>{{ device.sas }}</strong></p>
                 <p class="note">{{ t("请核对两台设备上的代码，仅在一致时确认。") }}</p>
+                <p class="note">{{ t("请求超过五分钟未处理会过期，设备行会显示“已过期”，重新配对即可。") }}</p>
                 <div class="pairing-actions">
                   <button :disabled="busy || !device.pairing_code || device.pairing_status === 'confirmed_waiting'" @click="store.confirmPairing(device)"><Check :size="17" />{{ t("确认配对") }}</button>
                   <button :disabled="busy" @click="store.rejectPairing(device)"><X :size="17" />{{ t("拒绝") }}</button>
@@ -5244,7 +5393,7 @@ async function translateText() {
               <h2 class="card-sub">{{ t("已移除的设备") }}</h2>
               <article v-for="device in archivedDevices" :key="device.id" class="device-row">
                 <Monitor :size="25" class="device-icon" />
-                <div class="device-identity"><h2>{{ device.name }}</h2><span class="note">{{ device.id }}</span></div>
+                <div class="device-identity"><h2>{{ deviceLabel(device) }}</h2><span class="note">{{ deviceSubtitle(device) }}</span></div>
                 <div class="row-actions">
                   <button :disabled="busy" @click="store.restore(device)"><RotateCcw :size="17" />{{ t("恢复") }}</button>
                   <button class="danger-outline" :disabled="busy" @click="purgeDevice = device"><Trash2 :size="17" />{{ t("彻底删除") }}</button>
@@ -5417,7 +5566,7 @@ async function translateText() {
                   <div class="row-actions">
                     <button type="button" class="icon-button" :title="t('打开聊天')" :aria-label="t('打开聊天')" @click="chatWith({ id: String(peer.peer_id), name: peer.alias || peer.name || String(peer.peer_id) } as Device)"><MessageCircle :size="17" /></button>
                     <button type="button" class="icon-button" :title="t('重命名')" :aria-label="t('重命名')" @click="renameInternet(peer)"><Pencil :size="17" /></button>
-                    <button type="button" class="icon-button" :title="t('解除互联网配对')" :aria-label="t('解除互联网配对')" @click="unpairInternet(peer.peer_id)"><Unlink :size="17" /></button>
+                    <button type="button" class="icon-button" :title="t('解除互联网配对')" :aria-label="t('解除互联网配对')" @click="unpairInternet(peer.peer_id)"><CloudOff :size="17" /></button>
                   </div>
                 </li>
               </ul>

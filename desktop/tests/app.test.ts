@@ -1229,8 +1229,11 @@ describe("history rendering", () => {
       { id: "peer-1", name: "Studio", paired: true, connection_state: "online",
         pairing_status: "paired", pairing_code: null, sas: null },
     ] });
-    vi.mocked(bridge.history).mockResolvedValue({ session_id: "s", seq: 0, offset: 0, total: 1, items: [
+    vi.mocked(bridge.history).mockResolvedValue({ session_id: "s", seq: 0, offset: 0, total: 2, items: [
       historyRow({ id: "7", content_type: "FILE_REMOTE", preview: "report.pdf",
+        source_device: "peer-1", source_name: "Studio", offer_entry: "42" }),
+      // The same row as an offer this build cannot read: nothing to ask with.
+      historyRow({ id: "9", content_type: "FILE_REMOTE", preview: "later.pdf",
         source_device: "peer-1", source_name: "Studio" }),
     ] });
     const app = mountOn("history");
@@ -1241,9 +1244,19 @@ describe("history rendering", () => {
       expect(app.find('[aria-label="复制记录"]').exists()).toBe(false);
       await app.get('[aria-label="下载文件"]').trigger("click");
       await flushPromises();
-      // The row's own id and the device it came from, and nothing else: the peer
-      // resolves which of its paths that row may reach.
-      expect(bridge.requestEntryFiles).toHaveBeenCalledExactlyOnceWith("7", "peer-1");
+      // The id out of the row's offer, not the row's own: history ids are
+      // numbered per machine, so "7" here names a different record over there —
+      // the ask would come back as that record's file, or as a refusal.
+      expect(bridge.requestEntryFiles).toHaveBeenCalledExactlyOnceWith("42", "peer-1");
+      // The id on the wire is also what a refusal comes back with, so it is
+      // what marks the row as waiting.
+      expect(app.get('[aria-label="下载文件"]').attributes("title"))
+        .toBe(t("已请求下载，正在等待那台设备"));
+      // A row whose offer named no entry is not offered a click that could only
+      // ask the peer for the wrong record.
+      const unreadable = app.findAll('[aria-label="下载文件"]')[1];
+      expect(unreadable.attributes("disabled")).toBeDefined();
+      expect(unreadable.attributes("title")).toBe(t("这条记录无法下载"));
       app.unmount();
     } finally {
       vi.mocked(bridge.devices).mockResolvedValue({ items: [] });
@@ -1894,12 +1907,18 @@ describe("history rendering", () => {
       // and the entry that sends it.  Nothing is clicked here -- both actions
       // were just exercised through the row -- so what these hold is that the
       // menu offers them at all, on the row's own terms.
-      const rowMenu = async (index: number) => {
-        await app.findAll(".device-row")[index].trigger("contextmenu");
+      // Found by name, not by position: the list is ordered by state and then
+      // by name (`activeDevices`), so a row's index is the page's own choice
+      // and nothing a test about the menu should be pinned to.  This machine's
+      // own row heads the list and carries no menu, so it is skipped.
+      const rowMenu = async (name: string) => {
+        const row = app.findAll(".device-row").find(entry =>
+          !entry.classes("device-row--local") && entry.text().includes(name))!;
+        await row.trigger("contextmenu");
         await flushPromises();
         return app.findAll(".context-menu-item");
       };
-      let entries = await rowMenu(0);
+      let entries = await rowMenu("Studio");
       const version = entries.find(entry => entry.text().includes("版本 1.0.7"))!;
       // Information, not an action: the row is the version itself.
       expect(version.attributes("aria-disabled")).toBeDefined();
@@ -1911,14 +1930,14 @@ describe("history rendering", () => {
       // on the entry that would have been there.  Without it the whole state
       // was a button that was not drawn -- indistinguishable from a level pair,
       // another platform, or a device this machine has nothing to send to.
-      entries = await rowMenu(2);
+      entries = await rowMenu("Same");
       const blocked = entries.find(entry => entry.text().includes("发送更新"))!;
       expect(blocked.attributes("aria-disabled")).toBeDefined();
       expect(blocked.attributes("title")).toContain("两台设备版本相同");
       closeContextMenu();
       // And a device that advertises nothing gets none of it: there is no
       // version to name and no reason to give.
-      entries = await rowMenu(3);
+      entries = await rowMenu("Silent");
       expect(entries.filter(entry => entry.text().includes("更新"))).toHaveLength(0);
       expect(entries.filter(entry => entry.text().includes("版本"))).toHaveLength(0);
       closeContextMenu();

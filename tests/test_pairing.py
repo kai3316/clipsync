@@ -24,6 +24,7 @@ from internal.security.pairing import (  # noqa: E402
     PAIRING_CODE_LENGTH,
     PAIRING_STATUS_CANCELLED,
     PAIRING_STATUS_CONFIRMED_WAITING,
+    PAIRING_STATUS_EXPIRED,
     PAIRING_STATUS_PAIRED,
     PAIRING_STATUS_PEER_CONFIRMED,
     PAIRING_STATUS_PENDING,
@@ -291,15 +292,25 @@ class TestPairingConfirmLifecycle:
         assert mgr.mark_peer_confirmed("peer-b") == PAIRING_STATUS_PAIRED
         assert mgr.mark_peer_confirmed("peer-b") == PAIRING_STATUS_PAIRED
 
-    def test_expired_confirmation_cancels_lifecycle_status(self):
+    def test_expired_confirmation_expires_the_lifecycle_status(self):
+        """A timeout is its own answer, and not the peer's.
+
+        Reading back ``cancelled`` here made a request nobody answered — the
+        prompt left on screen, the clock run out — indistinguishable from one
+        the other side refused, which is the one case the user has to act on
+        differently (retry deliberately rather than look for a fault there).
+        """
         mgr = self._mgr()
         code = mgr.generate_pairing_code("peer-c")
         # Age the request past PAIRING_TIMEOUT (300 s).
         pending_code, _ts = mgr._pending_pairings["peer-c"]
         mgr._pending_pairings["peer-c"] = (pending_code, time.time() - 400)
         assert mgr.confirm_pairing("peer-c", code) is False
-        assert mgr.get_pairing_status("peer-c") == PAIRING_STATUS_CANCELLED
+        assert mgr.get_pairing_status("peer-c") == PAIRING_STATUS_EXPIRED
         assert mgr.get_pending_pairings() == []
+        # A late confirm from the peer cannot revive it either: the request is
+        # gone, and the row is not waiting on anybody any more.
+        assert mgr.mark_peer_confirmed("peer-c") == PAIRING_STATUS_EXPIRED
 
     def test_wrong_code_then_correct_within_window(self):
         mgr = self._mgr()

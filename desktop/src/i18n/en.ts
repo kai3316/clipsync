@@ -133,6 +133,13 @@ export const EN: Record<string, string> = {
   "已发现": "Discovered",
   "已移除的设备": "Removed device",
   "此设备": "This device",
+  "本机": "This device",
+  "复制本机设备 ID": "Copy this device's ID",
+  "本机软件版本": "The version running here",
+  "对方平台": "The platform the other device runs",
+  "{platform} · {arch}": "{platform} · {arch}",
+  "同一网络里的设备打开 ClipSync 后会自己出现在这里；不在同一网络的设备，在“互联网配对”里用配对码添加。":
+    "Devices on this network appear here on their own once ClipSync is running on them; for one that is not on it, add it with a pairing code under Internet pairing.",
   "设备": "Devices",
   "设备名称": "Device name",
   "设备备注": "Device note",
@@ -145,6 +152,9 @@ export const EN: Record<string, string> = {
   "重新连接": "Reconnect",
   "测试连接": "Test connection",
   "配对": "Pair",
+  "与该设备配对": "Pair with this device",
+  "该设备当前不可达，无法发起配对；等它上线或检查两端的网络连接":
+    "This device cannot be reached right now, so pairing cannot start. Wait for it to come online, or check the connection at both ends.",
   "生成配对码": "Generate pairing code",
   "提交配对码": "Submit pairing code",
   "配对码已生成": "Pairing code generated",
@@ -166,6 +176,11 @@ export const EN: Record<string, string> = {
   "等待对方确认": "Waiting for the other device",
   "等待确认": "Waiting for confirmation",
   "对方已确认": "The other device confirmed",
+  // Not 已取消: a request nobody answered reads as one the other side refused,
+  // which is the case the reader has to act on differently.
+  "已过期": "Expired",
+  "请求超过五分钟未处理会过期，设备行会显示“已过期”，重新配对即可。":
+    "A request left unanswered for five minutes expires; the device row reads “Expired” and pairing again is all it takes.",
   // A code that has been sent but whose partner has not answered yet. Not the
   // same sentence as "submitted": this one is about the other machine, and it
   // is the only thing the card can honestly say in that window.

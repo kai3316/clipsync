@@ -6,6 +6,7 @@ import { t } from "../i18n";
 import { systemText } from "../i18n/chat";
 import { shortTime, size } from "../i18n/format";
 import { openContextMenu } from "../lib/context-menu";
+import { chatReachable } from "../lib/device-row";
 import { announce } from "../lib/status";
 import { copyText } from "../lib/clipboard";
 import { chatReceipt, deliveryIcon, deliveryLabel, type DeliveryStatus } from "../stores/delivery";
@@ -76,22 +77,11 @@ const nearby = computed(() => devices.value.filter((device) =>
   !sessions.value.some((s) => s.peer_id === device.id && LIVE_STATUS.includes(s.status))));
 const messageList = ref<HTMLElement | null>(null);
 
-/**
- * Whether a row in 附近设备 can be reached right now, over either of its routes.
- *
- * `connection_state` describes one route and which one depends on the row: a
- * relay-only row carries the relay's own reading of the peer, a row with a
- * local link carries the local one.  A device can hold both pairings, so a row
- * whose local link is down may still be up on the relay — and calling that one
- * offline greys out a conversation that would connect.
- */
-function reachable(device: Device) {
-  // A relay-only row's connection state *is* the relay's reading of the peer,
-  // so it is the only one there is; a row with a local link can still be
-  // reachable over the relay while that link is down.
-  if (device.relay) return device.connection_state !== "offline";
-  return Boolean(device.relay_paired && device.relay_online) || device.connection_state !== "offline";
-}
+/** Whether a row in 附近设备 can be reached right now, over either of its
+ *  routes — the devices page's own rule, which offers the conversation from a
+ *  device's row on the same answer; see `lib/device-row.ts`, where it is spelled
+ *  once so the two pages cannot disagree about a device they both list. */
+const reachable = chatReachable;
 
 /** The route in the row's own small print — the device list's two chips in one
  *  word, because this list gives that slot one word.  A device holding an

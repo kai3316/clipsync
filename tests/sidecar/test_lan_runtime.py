@@ -1025,7 +1025,10 @@ def test_expiry_before_remote_confirm_rolls_back_and_persists(rig):
     transport.message(frame("pairing_confirm"), "remote")
     assert not pairing.is_peer_paired("remote")
     assert not runtime.config.peers["remote"].paired
-    assert runtime.devices()["items"][0]["pairing_status"] == "cancelled"
+    # `expired`, not `cancelled`: the late confirm arrived after the request ran
+    # out, which is nobody's refusal, and the row says so rather than reading as
+    # one the other side gave.
+    assert runtime.devices()["items"][0]["pairing_status"] == "expired"
     runtime._tick()
     assert "remote" not in runtime._deferred
 
