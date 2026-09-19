@@ -185,6 +185,20 @@ class LanRuntime:
     # spaced to what a bar can show rather than to what the disk can report.
     PROGRESS_INTERVAL = 0.25
     PAIRING_SEND_WAIT = 12.0
+    # How long a device keeps its row after its mDNS record lapses.
+    #
+    # An mDNS announcement is the advertiser's to schedule and the network's to
+    # drop, and this one comes and goes while the device has not moved: the log
+    # of one working day holds the same Mac found and lost four seconds apart,
+    # then found again two seconds later, four times over -- and, twice, gone
+    # for fifty minutes on a machine that was on the network throughout.  The
+    # row was deleted on the first missed goodbye, so a device that never left
+    # flickered in and out of the list, and the one the reader was looking for
+    # was usually not on screen.  A sighting that is stale is not a device that
+    # has gone; the transport is what decides *that*, from the socket, and a
+    # peer that really left is dropped there.  This is only how long the last
+    # thing a device said about itself stays on its row.
+    SIGHTING_GRACE = 300.0
     # How often a deferred ending notice re-dials a peer it cannot reach.  The
     # maintenance loop runs four times a second, which is far more often than a
     # connection attempt needs and would keep several in flight at once.
@@ -237,6 +251,10 @@ class LanRuntime:
         self._cleanup_ok = False
         self._started = set()
         self._discovered = {}
+        # Sightings whose mDNS record has lapsed, and when they lapsed: see
+        # SIGHTING_GRACE.  Kept apart from ``_discovered`` so the live set stays
+        # exactly that -- what is being announced now.
+        self._lost_sightings = {}
         self._connecting = {}
         self._deferred = {}
         self._ending_dial_at = {}
@@ -2515,10 +2533,38 @@ class LanRuntime:
             known = self._peer_name(pid)
         return known or fallback
 
-    def _address(self, pid):
+    def _sightings(self):
+        """Every sighting this runtime still trusts: live ones, and lapsed ones
+        still inside ``SIGHTING_GRACE``.
+
+        A lapsed sighting is a real answer to every question a live one answers
+        -- where the device is, what it calls itself, what version it runs --
+        and the only thing that has changed is that its record is not being
+        announced this second.  Entries past the grace are dropped here, on the
+        way out, so the map cannot grow without a reader (``_refresh`` runs
+        four times a second).
+
+        Live sightings win over lapsed ones for the same id: a device that moved
+        (DHCP renewal, Wi-Fi reconnect) announces from its new address, and the
+        entry it replaces is the stale one.  Callers get a copy and walk it
+        outside ``_lock``, which is what keeps ``_resolve`` -- the transport and
+        the pairing repository -- out of the lock.
+        """
+        now = time.monotonic()
         with self._lock:
-            discovered = dict(self._discovered)
-        for key, info in discovered.items():
+            for pid in [
+                pid
+                for pid, (_, when) in self._lost_sightings.items()
+                if now - when > self.SIGHTING_GRACE
+            ]:
+                del self._lost_sightings[pid]
+            sightings = {pid: info for pid, (info, _) in self._lost_sightings.items()}
+            sightings.update(self._discovered)
+        return sightings
+
+    def _address(self, pid):
+        sightings = self._sightings()
+        for key, info in sightings.items():
             if self._resolve(key) == pid:
                 # The three the dialer takes, and no more: every caller unpacks
                 # them into ``connect_to_peer(pid, name, address, port)``.
@@ -2732,7 +2778,10 @@ class LanRuntime:
             "app": app,
         }
         with self._lock:
+            # Announced again: whatever it said before it went quiet is replaced
+            # by what it is saying now, and it is no longer a lapsed sighting.
             previous = self._discovered.get(pid)
+            self._lost_sightings.pop(pid, None)
             self._discovered[pid] = row
         real = self._resolve(pid)
         if named:
@@ -2769,7 +2818,12 @@ class LanRuntime:
         """
         real = self._resolve(pid)
         with self._lock:
-            self._discovered.pop(pid, None)
+            info = self._discovered.pop(pid, None)
+            if info is not None:
+                # Kept as a lapsed sighting rather than dropped: see
+                # SIGHTING_GRACE.  The row outlives the record, which is the
+                # difference between a device that is here and one that blinks.
+                self._lost_sightings[pid] = (info, time.monotonic())
             self._connecting.pop(real, None)
         self._refresh()
 
@@ -2951,8 +3005,13 @@ class LanRuntime:
             known = {p.device_id: p for p in self.pairing.get_known_peers()}
             archived_ids = set(self.config.removed_peers)
             connected = {self._resolve(pid) for pid in self.transport.get_connected_peers()}
+            # Live sightings and lapsed ones still inside the grace (see
+            # ``_sightings``): a device whose record has just lapsed is still
+            # this machine's picture of that device, and dropping it here is
+            # what emptied a row of its version and platform, and took it off
+            # the list entirely when it was not paired.
+            sightings = self._sightings()
             with self._lock:
-                discovered = dict(self._discovered)
                 connecting = dict(self._connecting)
             # What each peer advertises about itself, keyed the way the rows
             # are: a device seen only over mDNS has no other source for these,
@@ -2960,7 +3019,7 @@ class LanRuntime:
             # answer -- which is the version it will still be running when it
             # comes back.
             advertised = {
-                self._resolve(pid): info for pid, info in discovered.items()
+                self._resolve(pid): info for pid, info in sightings.items()
             }
             # Which row gets which name:
             #
@@ -3372,16 +3431,17 @@ class LanRuntime:
         own answer, and it is the one that changes when its user renames it —
         every other source here is a copy of what that answer used to be.
         """
-        with self._lock:
-            advertised = dict(self._discovered)
         # Resolved outside the lock: _resolve reads the transport and the
         # pairing manager, and holding _lock across those invites the reverse
         # order from whichever thread walks them the other way round.  A hash
         # nothing has resolved yet is dropped rather than keyed under "", so an
-        # unresolved sighting cannot answer for an unnamed peer.
+        # unresolved sighting cannot answer for an unnamed peer.  Lapsed
+        # sightings count: the name a peer published is the answer this exists
+        # for, and it is the one thing that must not go back to being unknown
+        # the moment its record stops being announced.
         published = {
             real: info["name"]
-            for key, info in advertised.items()
+            for key, info in self._sightings().items()
             if info.get("named") and (real := self._resolve(key))
         }
         if published.get(pid):
@@ -3526,6 +3586,11 @@ class LanRuntime:
             self._connecting.pop(pid, None)
             self._discovered.pop(pid, None)
             self._discovered.pop(peer_id_hash(pid), None)
+            # A lapsed sighting is a sighting: removing the device has to take
+            # it too, or the row the user just removed comes back from the
+            # grace period with nothing behind it.
+            self._lost_sightings.pop(pid, None)
+            self._lost_sightings.pop(peer_id_hash(pid), None)
             # Removed is terminal: forget the pairing notice de-duplication.
             self._pairing_seen.pop(pid, None)
             # A forgotten device has no pin to replace, and its prompt must not
@@ -3619,9 +3684,7 @@ class LanRuntime:
 
     def _removal_info(self, pid):
         """Best known name/address for a device, for archiving on forget."""
-        with self._lock:
-            discovered = dict(self._discovered)
-        for key, info in discovered.items():
+        for key, info in self._sightings().items():
             if self._resolve(key) == pid:
                 return (info["name"], info["address"], info["port"])
         address = self._address(pid)
@@ -3693,11 +3756,9 @@ class LanRuntime:
         row; the web devices API expects ``{id: {"name", "address", "port"}}``
         exactly like the legacy ``Application._snapshot_discovered_peers``.
         """
-        with self._lock:
-            discovered = dict(self._discovered)
         return {
             pid: {"name": info["name"], "address": info["address"], "port": info["port"]}
-            for pid, info in discovered.items()
+            for pid, info in self._sightings().items()
         }
 
     def resolved_hashes(self):

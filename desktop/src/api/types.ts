@@ -508,7 +508,10 @@ export interface UpdateInstallResult {
   /** False only when there was nothing to install — a reply at all means the
    *  install did not happen, because a successful one replaces this process. */
   installed: boolean;
-  /** `up_to_date` when the manifest had nothing newer than what is running. */
+  /** `up_to_date` when the manifest had nothing newer than what is running, and
+   *  `manual` when the archive is staged but this build cannot replace itself
+   *  with that kind of file — a `.dmg`, a `.deb`, an AppImage.  Optional
+   *  because an older host sends neither. */
   reason?: string | null;
 }
 

@@ -133,9 +133,6 @@ export const EN: Record<string, string> = {
   "已发现": "Discovered",
   "已移除的设备": "Removed device",
   "此设备": "This device",
-  "本机": "This device",
-  "复制本机设备 ID": "Copy this device's ID",
-  "本机软件版本": "The version running here",
   "对方平台": "The platform the other device runs",
   "{platform} · {arch}": "{platform} · {arch}",
   "同一网络里的设备打开 ClipSync 后会自己出现在这里；不在同一网络的设备，在“互联网配对”里用配对码添加。":
@@ -756,6 +753,7 @@ export const EN: Record<string, string> = {
   "更新安装失败": "Update install failed",
   "下载更新": "Download update",
   "下载并安装": "Download and install",
+  "立即安装": "Install now",
   "下载并安装最新版本，完成后应用会自动重启。":
     "Downloads and installs the latest version, then restarts the app.",
   "自动下载最新版本，下载完成后提示你手动替换旧版本。":

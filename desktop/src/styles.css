@@ -456,11 +456,6 @@ button.primary { background: var(--accent-solid); color: var(--on-accent); }
 .device-icon { grid-area: 1 / 1 / 3 / 2; color: var(--muted); }
 .device-identity { grid-row: 1; grid-column: 2; min-width: 0; overflow-wrap: anywhere; }
 .device-row h2 { margin-bottom: 5px; }
-/* This machine's own row, which heads the same list in the same shape.  The
-   glyph is the accent's, so a scan down the column of device rows does not
-   stop on it looking for what can be done to it: there is nothing to pair,
-   connect, rename or remove here, and the row is here to be read off. */
-.device-row--local .device-icon { color: var(--accent-text); }
 /* The second line of the row: the chips, the note and a pairing's own controls.
    They start where the name starts and run to the row's right edge, so one
    vertical line holds the identity, the chips and the note field together. */
@@ -1397,6 +1392,8 @@ button.danger-outline:hover:not(:disabled),
 /* The device ID is read back on the other screen to prove these are the same
    two machines, so it is set in the face that makes a hex string comparable. */
 .overview-facts .overview-mono { font-family: var(--font-mono); font-size: 11px; }
+.overview-facts .overview-id { display: flex; align-items: center; gap: 6px; }
+.overview-facts .overview-id span { min-width: 0; overflow-wrap: anywhere; }
 .overview-chips { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin: 0; }
 .overview-chip { max-width: 100%; overflow-wrap: anywhere; }
 /* It is the same pill as everywhere else, in the one row where a label can be

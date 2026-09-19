@@ -182,6 +182,32 @@ fn hides_main_window(value: &Value) -> bool {
     value["type"] == "event" && value["name"] == "app.window_close_requested"
 }
 
+/// Whether a sidecar frame is an update a peer sent, checked and staged here.
+///
+/// Two things the frame has to say, and both are load-bearing: `ready` is what
+/// makes the archive installable at all, and `source` is what tells a peer's
+/// blob from this machine's own download. Whether the file is still on disk is
+/// the installer's own question, asked a moment later.
+///
+/// The `source` field is the whole of this test's reason to exist. A local
+/// download reaches `ready` when the reader clicked 下载更新 and asked for a
+/// file, not for a restart — the card is in front of them with a button. A peer
+/// blob reaches it because somebody *else* clicked 发送更新, and the reader here
+/// asked for nothing: the receiving side answers an offer with a request of its
+/// own (see `_on_update_offer`), so the archive arriving is the exchange working
+/// as designed, and an update left staged is one the machine that can least
+/// reach the release endpoint has to finish by hand.
+///
+/// `source` is absent on a sidecar older than it, and absent reads as "not a
+/// peer's" — the same silence this frame got before the field existed.
+fn peer_sent_update(value: &Value) -> bool {
+    if value["type"] != "event" || value["name"] != "update.state" {
+        return false;
+    }
+    let state = &value["data"]["state"];
+    state["phase"] == "ready" && state["source"] == "p2p"
+}
+
 pub struct Bridge {
     input: AsyncMutex<ChildStdin>,
     child: AsyncMutex<Child>,
@@ -545,6 +571,28 @@ impl Bridge {
                         let _ = handle.emit_to("main", "sidecar:event", frame);
                     });
                     return Ok(());
+                }
+                if peer_sent_update(&value) {
+                    // The exchange's last step, and the one that was missing: a
+                    // peer's archive is checked and staged by the sidecar, and
+                    // then installed without a click.  Nobody here asked for
+                    // anything, which is the point — the receiving side already
+                    // answered the offer with a request of its own, and the
+                    // bytes were held to the published release digest before
+                    // they were staged, so there is nothing left to ask a
+                    // reader that the file itself has not already answered.
+                    //
+                    // Spawned rather than awaited, for the reason the restart
+                    // above gives: this runs on the stdout reader, and an
+                    // install that stops the sidecar must not be started from
+                    // inside the task that reads it.  A refusal is not fatal —
+                    // the card still draws the ready archive with its own
+                    // button, which is how the reader finishes by hand.
+                    let bridge = self.clone();
+                    let handle = app.clone();
+                    tauri::async_runtime::spawn(async move {
+                        let _ = crate::install_staged_update(&handle, &bridge).await;
+                    });
                 }
                 let _ = app.emit_to("main", "sidecar:event", value);
             }

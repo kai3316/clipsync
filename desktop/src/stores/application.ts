@@ -1399,6 +1399,24 @@ export function createApplicationStore() {
         if (!disposed) state.pending = false;
       }
     },
+    async installReadyUpdate() {
+      // The install the card can run on an archive that is already on disk.
+      // Unlike `installUpdate` a reply here can be good news: what this build
+      // cannot install itself it hands to the reader, and the caller has to say
+      // which of the two happened rather than leave a click with nothing after
+      // it.
+      if (disposed || state.pending) return null;
+      state.pending = true;
+      state.error = null;
+      try {
+        return await bridge.updateInstallReady();
+      } catch (error) {
+        if (!disposed) setError(error);
+        return null;
+      } finally {
+        if (!disposed) state.pending = false;
+      }
+    },
     async downloadUpdate() {
       // Returns immediately; progress arrives as `update.state` events.
       if (disposed || state.pending) return null;

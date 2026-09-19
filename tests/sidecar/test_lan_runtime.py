@@ -2455,7 +2455,14 @@ def test_discovered_peers_shape_matches_the_web_devices_api(rig):
     assert runtime.discovered_peers() == {
         hashed: {"name": "Remote-ad", "address": "127.0.0.1", "port": 9999}
     }
+    # A lapsed announcement is not a device that left, so the entry keeps the
+    # shape it is listed under — and it is the grace, not the goodbye, that
+    # eventually takes it away.
     discovery.lost(hashed)
+    assert runtime.discovered_peers() == {
+        hashed: {"name": "Remote-ad", "address": "127.0.0.1", "port": 9999}
+    }
+    runtime.SIGHTING_GRACE = 0.0
     assert runtime.discovered_peers() == {}
 
 

@@ -1830,11 +1830,12 @@ async fn update_open_folder(
 /// Best effort, and silent about failing: this is a courtesy to the *next*
 /// exchange, while the install it runs beside is the thing the user asked for.
 /// A name the sidecar will not recognise, a temp directory that cannot be
-/// written, a bridge that is already gone — each costs one more download later
-/// and nothing now.  The bytes cannot cross the pipe themselves (the frame cap
+/// written, a sidecar that has already stopped answering — each costs one more
+/// download later and nothing now.  The bytes cannot cross the pipe themselves
+/// (the frame cap
 /// is a megabyte), so they are written to a file of the asset's own name and the
 /// *name* travels with the path.
-async fn keep_downloaded_installer(host: &Host, url: &tauri::Url, bytes: &[u8]) {
+async fn keep_downloaded_installer(bridge: &Arc<Bridge>, url: &tauri::Url, bytes: &[u8]) {
     // The asset's filename, which is the last segment of its download URL.  It
     // is the only name this file has: the plugin streams into memory, and a
     // macOS payload (`ClipSync.app.tar.gz`) is deliberately not an asset the
@@ -1854,14 +1855,12 @@ async fn keep_downloaded_installer(host: &Host, url: &tauri::Url, bytes: &[u8]) 
     }
     let path = dir.join(name);
     if tokio::fs::write(&path, bytes).await.is_ok() {
-        if let Ok(bridge) = host.bridge().await {
-            let _ = bridge
-                .call(
-                    "update.cache_asset",
-                    json!({"path": path.to_string_lossy(), "name": name}),
-                )
-                .await;
-        }
+        let _ = bridge
+            .call(
+                "update.cache_asset",
+                json!({"path": path.to_string_lossy(), "name": name}),
+            )
+            .await;
     }
     // Removed whatever happened: the sidecar copies what it keeps, and a copy
     // that did not happen leaves an installer in a temp directory that nothing
@@ -1889,6 +1888,7 @@ async fn update_install(
     host: State<'_, Host>,
 ) -> Result<Value, BridgeError> {
     authorize(&window)?;
+    let bridge = host.bridge().await?;
     let update = match updater(&app)?.check().await {
         Ok(Some(update)) => update,
         Ok(None) => return Ok(json!({"ok": true, "installed": false, "reason": "up_to_date"})),
@@ -1902,6 +1902,162 @@ async fn update_install(
             return Err(err.into());
         }
     };
+    fetch_and_install(&app, &bridge, update).await
+}
+
+/// Install the update the sidecar has verified and staged on this disk.
+///
+/// The second route to an install, and the one the peer exchange needs.  The
+/// file is one this process neither fetched nor can fetch: the sidecar staged it
+/// from its own download, or from a blob a peer sent, which was checked against
+/// the published release digest before it was staged.  That is the whole point
+/// of the peer path — it runs on a machine whose release endpoint may be out of
+/// reach — so finishing it must not need one either.
+///
+/// The plugin is still asked first, because it is the better answer whenever it
+/// has one: it fetches this platform's *update payload* and verifies the
+/// manifest's signature, and the staged archive is not always that payload — a
+/// `.dmg` is not the `.app.tar.gz` the plugin unpacks over a macOS bundle, and
+/// the sidecar keeps only what a person would install.  Its three answers are
+/// told apart the way `update_check` tells them apart:
+///
+/// * `Ok(Some(_))` — there is a payload for this platform: fetch and install it,
+///   which is `update_install`'s own path.
+/// * `Ok(None)` — this build is already at the released version, and the staged
+///   archive is pinned by digest to a published release, so it cannot be newer
+///   than what is running.  Nothing to do, and said rather than run.
+/// * `Err(_)` — the manifest could not be read.  This is the case the peer path
+///   exists for: the staged file is the only installer in reach, so it is the
+///   one that runs (see `run_staged_installer`).
+#[tauri::command]
+async fn update_install_ready(
+    app: tauri::AppHandle,
+    window: WebviewWindow,
+    host: State<'_, Host>,
+) -> Result<Value, BridgeError> {
+    authorize(&window)?;
+    let bridge = host.bridge().await?;
+    install_staged_update(&app, &bridge).await
+}
+
+/// [`update_install_ready`]'s body, reachable from the event reader as well.
+///
+/// `pub(crate)` for the same reason [`updater`] is: the bridge runs this on its
+/// own when a peer's update arrives, and that frame comes down the sidecar's
+/// stdout rather than through a command.
+pub(crate) async fn install_staged_update(
+    app: &tauri::AppHandle,
+    bridge: &Arc<Bridge>,
+) -> Result<Value, BridgeError> {
+    let status = bridge.call("update.status", json!({})).await?;
+    let state = status.get("state").cloned().unwrap_or(Value::Null);
+    let path = state
+        .get("path")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_owned();
+    let version = state
+        .get("version")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_owned();
+    // The sidecar's own answer to "may this be installed", read rather than
+    // inferred: that side is the one that checked the bytes, and a path that has
+    // gone since it said so is the same refusal.
+    if state.get("phase").and_then(Value::as_str) != Some("ready")
+        || path.is_empty()
+        || !std::path::Path::new(&path).is_file()
+    {
+        return Err(BridgeError::new("NOT_FOUND", "No verified update is staged"));
+    }
+    if let Ok(updater) = updater(app) {
+        match updater.check().await {
+            Ok(Some(update)) => return fetch_and_install(app, bridge, update).await,
+            Ok(None) => {
+                return Ok(json!({"ok": true, "installed": false, "reason": "up_to_date"}))
+            }
+            // Not a failure to report, and not one to publish either: the
+            // staged archive is the answer to it, and it is the answer this
+            // command was written for.
+            Err(_) => {}
+        }
+    }
+    run_staged_installer(app, bridge, &path, &version).await
+}
+
+/// Run the installer the sidecar staged, on the one platform where that is a
+/// thing this process may do on the reader's behalf.
+///
+/// A Tauri NSIS payload is an installer a person would otherwise double-click,
+/// so the same file can be run for them and the update finishes where the click
+/// that started it, on the *other* machine, said it would.  A macOS `.dmg`, a
+/// Linux `.deb` and an AppImage are not that: they are files a person opens and
+/// acts on, and replacing a running bundle with one of them is what the plugin's
+/// `.app.tar.gz` route does — a file the sidecar deliberately does not keep,
+/// because it is not a file a person installs.  So everywhere else the folder is
+/// revealed and the answer says the rest of the install is the reader's, which
+/// is the card's existing manual wording rather than a spinner over nothing.
+async fn run_staged_installer(
+    app: &tauri::AppHandle,
+    bridge: &Arc<Bridge>,
+    path: &str,
+    version: &str,
+) -> Result<Value, BridgeError> {
+    #[cfg(target_os = "windows")]
+    {
+        // Only the release's own installer, by shape: the sidecar's asset
+        // matcher is what picked this file, and the one thing worth re-checking
+        // before running something is that it is still that kind of file.
+        if !path.to_ascii_lowercase().ends_with("-setup.exe") {
+            let _ = bridge.call("update.open_folder", json!({})).await;
+            return Ok(json!({"ok": true, "installed": false, "reason": "manual"}));
+        }
+        // The arguments the plugin passes for the install mode this app sets
+        // (`passive`, in tauri.conf.json): a progress bar rather than the
+        // installer's own pages, an upgrade rather than a fresh install, and the
+        // relaunch at the end — which is the restart the user is promised, and
+        // it comes from the installer rather than from here.
+        //
+        // Started before the sidecar is stopped, so a file that cannot be run at
+        // all is an error the card can show over a working app, rather than the
+        // last thing a half-torn-down one did.
+        let child = std::process::Command::new(path)
+            .args(["/P", "/UPDATE", "/R"])
+            .spawn();
+        let child = match child {
+            Ok(child) => child,
+            Err(err) => {
+                emit_update_state(app, json!({"phase": "failed", "error": err.to_string()}));
+                return Err(BridgeError::new("UPDATE_ERROR", &err.to_string()));
+            }
+        };
+        drop(child);
+        bridge.stop().await;
+        emit_update_state(app, json!({"phase": "installing", "version": version}));
+        // Unreachable in practice, and for the reason the plugin exits here too:
+        // the installer replaces the running executable and brings the new
+        // version back up itself, and the file it is replacing is this one.
+        std::process::exit(0);
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = (app, version);
+        let _ = bridge.call("update.open_folder", json!({})).await;
+        Ok(json!({"ok": true, "installed": false, "reason": "manual"}))
+    }
+}
+
+/// Fetch *update*, keep the installer for the next device that needs it, and
+/// replace this installation with it.
+///
+/// Split out of `update_install` because `update_install_ready` reaches an
+/// install by a second route, and the order of the steps below is the whole of
+/// the Windows caveat in that command's own note.
+async fn fetch_and_install(
+    app: &tauri::AppHandle,
+    bridge: &Arc<Bridge>,
+    update: tauri_plugin_updater::Update,
+) -> Result<Value, BridgeError> {
     let version = update.version.clone();
     let asset_url = update.download_url.clone();
 
@@ -1942,7 +2098,7 @@ async fn update_install(
         // a progress bar for `downloading` and an error line for `failed`, and
         // nothing at all for a phase that never arrives.
         Err(err) => {
-            emit_update_state(&app, json!({"phase": "failed", "error": err.to_string()}));
+            emit_update_state(app, json!({"phase": "failed", "error": err.to_string()}));
             return Err(err.into());
         }
     };
@@ -1950,18 +2106,16 @@ async fn update_install(
     // Keep the installer for the next device that needs it, before the sidecar
     // goes: this is the only moment the file exists, and the only process that
     // can read it is the one that is about to be replaced.
-    keep_downloaded_installer(&host, &asset_url, &bytes).await;
+    keep_downloaded_installer(bridge, &asset_url, &bytes).await;
 
     // The bytes are in hand and verified, so the sidecar's work is done and its
     // lock has to go before the installer takes over — the same order
     // `restart_app` uses, and on Windows the last moment it is possible.
-    if let Ok(bridge) = host.bridge().await {
-        bridge.stop().await;
-    }
-    emit_update_state(&app, json!({"phase": "installing", "version": version}));
+    bridge.stop().await;
+    emit_update_state(app, json!({"phase": "installing", "version": version}));
 
     if let Err(err) = update.install(&bytes) {
-        emit_update_state(&app, json!({"phase": "failed", "error": err.to_string()}));
+        emit_update_state(app, json!({"phase": "failed", "error": err.to_string()}));
         return Err(err.into());
     }
     // Unreachable on Windows: a successful install hands the process to the
@@ -2373,6 +2527,7 @@ fn main() {
             update_download,
             update_open_folder,
             update_install,
+            update_install_ready,
             open_data_folder,
             share_file_to_phone,
             export_logs,

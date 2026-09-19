@@ -145,6 +145,11 @@ vi.mock("../src/api/bridge", () => ({
     updateDownload: vi.fn().mockResolvedValue({ ok: true, started: true, error: null }),
     updateOpenFolder: vi.fn().mockResolvedValue({ ok: true }),
     updateInstall: vi.fn().mockResolvedValue({ ok: true, installed: false, reason: "up_to_date" }),
+    // Installs the archive already on disk.  A reply means the install did not
+    // replace this process, and `manual` is the one reply that is not a refusal:
+    // the archive is staged and this build cannot swap itself for that kind of
+    // file, so a case about the manual wording says so itself.
+    updateInstallReady: vi.fn().mockResolvedValue({ ok: true, installed: false, reason: "up_to_date" }),
     openDataFolder: vi.fn().mockResolvedValue({ ok: true, folder: "C:/data" }),
     openAboutLink: vi.fn().mockResolvedValue({ ok: true, url: "https://github.com/kai3316/clipsync" }),
     onMenuAction: vi.fn().mockResolvedValue(() => {}),

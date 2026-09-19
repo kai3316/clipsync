@@ -875,7 +875,7 @@ function deviceMenu(event: MouseEvent, device: Device) {
           id: "send-update", label: t("发送更新"), icon: FileUp,
           // The row's button, its rule and its two sentences: what this machine
           // can send is the installer its own upgrade kept.
-          disabled: busy.value || !!updateBusyId.value || !device.update_cached || !updateReachable(device),
+          disabled: busy.value || !!updateBusyId.value || !device.update_cached || !canDial(device),
           title: device.update_cached
             ? t("把本机的安装包发送给该设备")
             : t("本机还没有安装包可发送：本机只保留自己升级时下载的那一个，对方可自行检查更新"),
@@ -885,7 +885,7 @@ function deviceMenu(event: MouseEvent, device: Device) {
     device.update_fetchable
       ? {
           id: "fetch-update", label: t("获取更新"), icon: Download,
-          disabled: busy.value || !!fetchBusyId.value || !updateReachable(device),
+          disabled: busy.value || !!fetchBusyId.value || !canDial(device),
           title: t("从该设备获取新版本安装包并安装"),
           run: () => fetchDeviceUpdate(device),
         }
@@ -1970,6 +1970,24 @@ const updateLatest = computed(() => store.state.updateCheck?.latest || "");
 // into an instruction to replace the application by hand, when the same click
 // would have installed it once the network was back.
 const updateInstallable = computed(() => store.state.updateCheck?.installable !== false);
+// Set when the install was attempted and the archive turned out to be one this
+// build cannot replace itself with -- a `.dmg`, a `.deb`, an AppImage: files a
+// person opens. The host answers that with the folder revealed rather than with
+// an error, so without this the click ended in silence over a card still saying
+// the update was ready. Kept apart from `updateInstallable`, which is the
+// manifest's answer before anything was tried, because the two arrive from
+// different places and either one is reason enough to say the rest is manual.
+const updateReadyManual = ref(false);
+// Said on the window's own status line rather than left to the card, because
+// the card is not where the reader is looking: the update that installs without
+// any click here is the one a peer sent, and a window that disappears into an
+// installer with nothing said reads as a crash. The card draws the same
+// sentence for the installs the reader did ask for.
+watch(() => updateState.value.phase, (phase, previous) => {
+  if (phase === "installing" && previous !== "installing") {
+    announce(t("正在安装更新，完成后应用会自动重启。"));
+  }
+});
 // Fixed group order, mirroring the legacy diagnostics panel: a group missing
 // from the payload is skipped rather than rendered empty.
 const diagnosticGroupOrder = ["system", "network", "internet", "ai_config", "chat", "transfer", "filesystem"];
@@ -1997,13 +2015,6 @@ const activeDevices = computed(() => state.devices
     || deviceLabel(left).localeCompare(deviceLabel(right), undefined, { numeric: true, sensitivity: "base" })
     || left.id.localeCompare(right.id)));
 const archivedDevices = computed(() => state.devices.filter((device) => device.archived));
-/** This machine's own row on the devices tab, off the status payload the
- *  sidebar already reads — so the row costs no request of its own. */
-const localDevice = computed(() => ({
-  name: state.status?.device_name || "",
-  id: state.status?.device_id || "",
-  version: state.status?.version || "",
-}));
 const native = inDesktop();
 const ready = computed(() => state.status?.health === "ready");
 let themeGeneration = 0;
@@ -2310,6 +2321,24 @@ function pairingPending(device: Device) {
  *
  * The field is absent only on a sidecar older than it, where the old reading —
  * a connection that is not there — is all there is to go on.
+ *
+ * The two update entries are gated on it too, and they were the worst case of
+ * the old reading.  Both directions ride the LAN link and nothing else — the
+ * sidecar drops an ``update_offer`` that arrives over the relay — so gating them
+ * on 在线 looked right, but the runtime only ever dials *paired* peers: an
+ * unpaired device is sighted and never connected, its state never reads 在线, and
+ * the 发送更新 button beside its version chip was disabled for good — which is
+ * what made a push look like something a pairing was needed for first.  Both
+ * ends of the offer have always supported an unpaired peer: it dials with
+ * auto-pairing switched off, and the receiving side checks what arrives against
+ * the published release digest — so the sighting was the only thing standing in
+ * the way, and `dialable` counts the sighting.
+ *
+ * What the old reading did get right is that a live mDNS record outlives the
+ * connection: a peer whose port is blocked, or one that has just left, keeps
+ * naming the version it runs.  `dialable` is that same judgment made by the
+ * sidecar, which is the side that knows whether an address is still on file, so
+ * the click still ends in a dial and 无法连接到该设备 rather than a dead button.
  */
 function canDial(device: Device) {
   return device.dialable ?? device.connection_state !== "offline";
@@ -2369,20 +2398,6 @@ function localChannelLabel(device: Device) {
  *  than the 离线 it would otherwise read as. */
 function localChannelState(device: Device) {
   return device.reconnecting ? "connecting" : (device.connection_state || "offline");
-}
-
-/** Whether an update may be sent to this device, or asked of it.
- *
- * Both directions ride the LAN link and nothing else: the sidecar drops an
- * ``update_offer`` that arrives over the relay, and the offer it sends is a
- * bare ``send_to_peer`` with no relay fallback.  The buttons were gated on a
- * *sighting* instead, and an mDNS record keeps naming the version a device
- * runs long after it stopped being dialable — so a peer whose port is blocked,
- * or one that has just left the network, kept a live 发送更新 and answered the
- * click with a 15-second dial and 无法连接到该设备，它可能已离线。.  The row's own
- * 本地·离线 chip is the reason, and it sits beside the button. */
-function updateReachable(device: Device) {
-  return device.connection_state === "online";
 }
 
 /** A device's internet pairing, joined to the device row by device id.
@@ -2935,6 +2950,21 @@ async function installUpdate() {
   if (!result) announce(t("更新安装失败"));
   else if (!result.installed) announce(t("已是最新版本"));
 }
+async function installReadyUpdate() {
+  // The install for an archive that is already on disk: this machine's own
+  // verified download, or the one a peer sent. The host prefers the manifest's
+  // payload when it has one and installs the staged file when it does not -- so
+  // no fetching is promised here, and the two answers that come back are the
+  // ones worth naming. A `.dmg` or a `.deb` is a file a person opens, and this
+  // build can only hand it over: the sentence stays on the card, under the path
+  // it is about, rather than on a status line that expires in five seconds.
+  const result = await store.installReadyUpdate();
+  if (!result) announce(t("更新安装失败"));
+  else if (!result.installed) {
+    updateReadyManual.value = result.reason === "manual";
+    if (!updateReadyManual.value) announce(t("已是最新版本"));
+  }
+}
 async function openUpdateFolder() {
   const result = await store.openUpdateFolder();
   if (!result || !result.ok) announce(result?.error || t("无法打开所在文件夹"));
@@ -3045,7 +3075,12 @@ const PAGE_SUMMARIES: Record<(typeof PAGES)[number], () => string> = {
   // second copy of them to keep honest.
   overview: () => t("本机状态与最近活动"),
   history: () => t("{count} 条记录", { count: state.total }),
-  devices: () => t("{count} 台设备", { count: state.devices.length }),
+  // The rows this page is about, which is the list it draws under the heading:
+  // the archived tail has its own heading and its own count to be read under,
+  // and the toast a refresh raises names the same number this does — a header
+  // saying 5 台设备 over three rows was the refresh and the line above it
+  // disagreeing about what had just been read.
+  devices: () => t("{count} 台设备", { count: activeDevices.value.length }),
   // The library, not the page of it on screen and not the group being read:
   // `total` is what the current group and search matched, so a subtitle reading
   // it said 4 条收藏 the moment 工作 was picked — the header contradicting the
@@ -5104,16 +5139,20 @@ async function translateText() {
                 <p v-if="updateState.phase === 'installing'" class="update-available setting-block setting-block--card" role="status">{{ t("正在安装更新，完成后应用会自动重启。") }}</p>
                 <template v-if="updateState.phase === 'ready'">
                   <p class="update-available setting-block setting-block--card" role="status">{{ t("新版本 {version} 已就绪", { version: updateState.version }) }}</p>
-                  <p v-if="!updateInstallable" class="note setting-note">{{ t("请退出当前应用，然后用下方文件替换旧版本。剪贴板历史与设备仍保留在本机。") }}</p>
+                  <p v-if="!updateInstallable || updateReadyManual" class="note setting-note">{{ t("请退出当前应用，然后用下方文件替换旧版本。剪贴板历史与设备仍保留在本机。") }}</p>
                   <p class="update-ready-path selectable setting-block">{{ updateState.path }}</p>
                   <div class="setting-actions setting-actions--card">
-                    <!-- A blob that arrived from a peer is staged here and checked
-                         against the release digest, but only the host's own
-                         verified download can replace the bundle — so the
-                         install the card can actually perform is offered beside
-                         the folder, rather than leaving the reader to end the
-                         exchange by hand. -->
-                    <button v-if="updateInstallable" type="button" class="primary" @click="installUpdate">{{ t("下载并安装") }}</button>
+                    <!-- The archive is on disk and already checked — this
+                         machine's own download, or the one a peer sent, held to
+                         the published release digest before it was staged. So
+                         the install reads what is here rather than fetching the
+                         same release a second time, which is the whole of what
+                         the peer path is for: a machine that cannot reach the
+                         release endpoint. What that install still cannot do is
+                         replace this build with a file a person opens, and the
+                         host says so instead of failing — the sentence above
+                         and the folder beside it are the rest of that answer. -->
+                    <button v-if="updateInstallable" type="button" class="primary" @click="installReadyUpdate">{{ t("立即安装") }}</button>
                     <button type="button" @click="openUpdateFolder">{{ t("打开所在文件夹") }}</button>
                   </div>
                 </template>
@@ -5177,30 +5216,17 @@ async function translateText() {
               <button class="icon-button" :aria-label="t('查看证书指纹')" :title="t('证书指纹')" :disabled="busy" @click="showCertificates"><Fingerprint :size="18" /></button>
               <button class="icon-button" :aria-label="t('刷新设备')" :title="t('刷新设备')" :disabled="busy" @click="refreshDevices"><RefreshCw :size="18" :class="{ spinning: state.refreshing }" /></button>
             </div>
-            <!-- This machine, at the head of its own device list.
-                 Everything under it is a machine this one can pair with, and
-                 the two facts the other side needs in order to pair with *this*
-                 one were the ones no page in this window showed: the name it
-                 answers to, and the device id the sidecar knows it by — which
-                 every peer row offered to copy while the row for the machine in
-                 front of the reader offered nothing.
-                 Read-only: the name is edited where the other settings are (and
-                 on the overview's own card), and this row is here to be read
-                 off, not to become a second place to change it. -->
-            <article v-if="localDevice.id" class="device-row device-row--local">
-              <Laptop :size="25" class="device-icon" />
-              <div class="device-identity">
-                <h2>{{ localDevice.name || t('此设备') }}</h2>
-                <span class="note">{{ localDevice.id }}</span>
-              </div>
-              <div class="row-actions">
-                <button class="icon-button" :aria-label="t('复制本机设备 ID')" :title="t('复制本机设备 ID')" @click="copyText(localDevice.id)"><Copy :size="18" /></button>
-              </div>
-              <span class="device-channels">
-                <span class="channel"><Monitor :size="12" />{{ t("本机") }}</span>
-                <span class="channel" :title="t('本机软件版本')"><Download :size="12" />{{ t("版本 {version}", { version: localDevice.version }) }}</span>
-              </span>
-            </article>
+            <!-- No row for this machine.  There was one, at the head of the
+                 list, holding the two facts a peer needs in order to pair with
+                 *this* one — the name it answers to and the device id the
+                 sidecar knows it by — and it read as a device among devices:
+                 the same row shape, the same chips, sorted into the same list,
+                 when it is the machine the reader is sitting at and not
+                 something on the other end of a link.  Everything it said is on
+                 the overview's own card, which is where this machine's facts
+                 belong and where its name is edited, and the id there is
+                 selectable text rather than a copy button away.  The count in
+                 the header follows the rows that are left: see `devices`. -->
             <div v-if="!activeDevices.length" class="empty empty--page">
               <Monitor :size="36" />
               <h2>{{ state.refreshing ? t('正在读取设备') : t('暂无设备') }}</h2>
@@ -5284,7 +5310,7 @@ async function translateText() {
                      own upgrade kept, so a machine that has none to send has
                      nothing to offer, and says why rather than reaching for the
                      network: the device being offered can download it itself. -->
-                <button v-if="device.update_available" class="icon-button" :aria-label="t('发送更新')" :title="device.update_cached ? t('把本机的安装包发送给该设备') : t('本机还没有安装包可发送：本机只保留自己升级时下载的那一个，对方可自行检查更新')" :disabled="busy || !!updateBusyId || !device.update_cached || !updateReachable(device)" @click="offerDeviceUpdate(device)"><FileUp :size="18" :class="{ spinning: updateBusyId === device.id }" /></button>
+                <button v-if="device.update_available" class="icon-button" :aria-label="t('发送更新')" :title="device.update_cached ? t('把本机的安装包发送给该设备') : t('本机还没有安装包可发送：本机只保留自己升级时下载的那一个，对方可自行检查更新')" :disabled="busy || !!updateBusyId || !device.update_cached || !canDial(device)" @click="offerDeviceUpdate(device)"><FileUp :size="18" :class="{ spinning: updateBusyId === device.id }" /></button>
                 <!-- The mirror of the button above, and the direction the
                      feature is meant to run in: this device is the one behind,
                      so this is the side with a reason to click.  It asks the
@@ -5293,7 +5319,7 @@ async function translateText() {
                      can be staged.  Shown only when the peer really is ahead —
                      same platform, newer version — which is what the sidecar
                      decided for this row. -->
-                <button v-if="device.update_fetchable" class="icon-button" :aria-label="t('获取更新')" :title="t('从该设备获取新版本安装包并安装')" :disabled="busy || !!fetchBusyId || !updateReachable(device)" @click="fetchDeviceUpdate(device)"><Download :size="18" :class="{ spinning: fetchBusyId === device.id }" /></button>
+                <button v-if="device.update_fetchable" class="icon-button" :aria-label="t('获取更新')" :title="t('从该设备获取新版本安装包并安装')" :disabled="busy || !!fetchBusyId || !canDial(device)" @click="fetchDeviceUpdate(device)"><Download :size="18" :class="{ spinning: fetchBusyId === device.id }" /></button>
                 <button class="icon-button" :aria-label="t('移除设备')" :title="t('移除设备')" :disabled="busy" @click="forgetDevice = device"><Trash2 :size="18" /></button>
               </div>
               <p v-if="probeResults[device.id]" class="note device-full" role="status">{{ t("连接测试：") }}{{ probeLabel(probeResults[device.id]) }}</p>

@@ -108,12 +108,14 @@ describe("browser isolation", () => {
     await bridge.updateDownload();
     await bridge.updateOpenFolder();
     await bridge.updateInstall();
+    await bridge.updateInstallReady();
     expect(vi.mocked(invoke).mock.calls).toEqual([
       ["update_check", undefined],
       ["update_status", undefined],
       ["update_download", undefined],
       ["update_open_folder", undefined],
       ["update_install", undefined],
+      ["update_install_ready", undefined],
     ]);
   });
   it("releases the first listener when the second subscription fails", async () => {

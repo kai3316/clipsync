@@ -88,6 +88,13 @@ class UpdateService:
             "error": "",
             "version": "",
             "path": "",
+            # Where the archive came from: "github" for this machine's own
+            # download, "p2p" for one a peer sent.  The host reads it because
+            # the two are installed differently -- a peer-sent archive is the
+            # only one whose whole point is that the release endpoint may be
+            # out of reach, so it is installed from the file already staged
+            # rather than by fetching the same bytes again.
+            "source": "",
         }
         self._downloading = False
         self._installing = False
@@ -184,7 +191,9 @@ class UpdateService:
             if self._installing or self._downloading:
                 return {"ok": False, "started": False, "error": "update already in progress"}
             self._downloading = True
-        self._set_state(phase="downloading", fraction=0, downloaded=0, total=0, error="")
+        self._set_state(
+            phase="downloading", fraction=0, downloaded=0, total=0, error="", source="github"
+        )
         threading.Thread(
             target=self._download_worker, name="update-download", daemon=True
         ).start()
@@ -236,7 +245,9 @@ class UpdateService:
                 )
                 return
         if not path:
-            self._set_state(phase="failed", error=reason or T("tray.update_install_failed"))
+            self._set_state(
+                phase="failed", error=reason or T("tray.update_install_failed"), source=source
+            )
             return
 
         # The GitHub path was already size- and hash-checked while downloading.
@@ -268,7 +279,7 @@ class UpdateService:
                 self._pending_version = ""
                 self.start_download()
                 return
-            self._discard(path, verdict)
+            self._discard(path, verdict, source)
             return
         if release_info:
             # The digest match pins this blob to that release, so its version is
@@ -293,9 +304,10 @@ class UpdateService:
             version=self._pending_version or "",
             path=dest,
             fraction=1,
+            source=source,
         )
 
-    def _discard(self, path: str, verdict: str) -> None:
+    def _discard(self, path: str, verdict: str, source: str = "github") -> None:
         """Throw away a rejected blob and report why."""
         try:
             os.remove(path)
@@ -306,7 +318,7 @@ class UpdateService:
             if verdict == "hash_mismatch"
             else "notify.update_rejected_old"
         )
-        self._set_state(phase="failed", error=T(key))
+        self._set_state(phase="failed", error=T(key), source=source)
 
     # ── reveal ───────────────────────────────────────────────────────────
     def open_folder(self) -> dict:

@@ -22,7 +22,7 @@ vi.mock("../src/api/bridge", () => ({
     favorites: vi.fn(), favorite: vi.fn(),
     diagnosticsReport: vi.fn(), diagnosticsRequest: vi.fn(),
     updateCheck: vi.fn(), updateStatus: vi.fn(), updateDownload: vi.fn(),
-    updateOpenFolder: vi.fn(), updateInstall: vi.fn(),
+    updateOpenFolder: vi.fn(), updateInstall: vi.fn(), updateInstallReady: vi.fn(),
     restartSidecar: vi.fn(), recoverDataDir: vi.fn(),
   },
 }));

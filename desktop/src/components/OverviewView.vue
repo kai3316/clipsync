@@ -244,6 +244,13 @@ function cancelRename() {
  * phone being told a token — and otherwise the plain page address, which is
  * what the reader is being shown. */
 const address = computed(() => (overview.value ? `${overview.value.local_ip}:${overview.value.port}` : ""));
+/** The id another machine needs to find this one.  It lives here because the
+ * devices page no longer draws a row for this machine, and a value written out
+ * in full is still one you have to select by hand to send to somebody. */
+async function copyDeviceId() {
+  if (deviceId.value) await copyText(deviceId.value);
+}
+
 async function copyAddress() {
   const value = props.companionUrl
     || (overview.value?.local_ip ? `http://${overview.value.local_ip}:${overview.value.port}/mobile.html` : "");
@@ -394,7 +401,12 @@ const connectedNames = computed(() => (overview.value?.connected_names || []).sl
           </div>
           <dl class="overview-facts">
             <dt>{{ t("设备 ID") }}</dt>
-            <dd class="overview-mono">{{ deviceId }}</dd>
+            <dd class="overview-mono overview-id">
+              <span>{{ deviceId }}</span>
+              <button class="icon-button icon-button--sm" :aria-label="t('复制设备 ID')"
+                :title="t('复制设备 ID')" :disabled="!deviceId" @click="copyDeviceId">
+                <Copy :size="13" /></button>
+            </dd>
             <dt>{{ t("平台") }}</dt>
             <dd>{{ overview.platform }} · v{{ overview.version }}</dd>
           </dl>

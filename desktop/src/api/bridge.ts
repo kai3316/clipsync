@@ -266,6 +266,7 @@ export const bridge = {
   updateDownload: () => command<UpdateDownloadResult>("update_download"),
   updateOpenFolder: () => command<UpdateOpenFolderResult>("update_open_folder"),
   updateInstall: () => command<UpdateInstallResult>("update_install"),
+  updateInstallReady: () => command<UpdateInstallResult>("update_install_ready"),
   openDataFolder: (which: "data" | "backups") =>
     command<{ ok: boolean; folder: string }>("open_data_folder", { which }),
   openAboutLink: (target: "homepage" | "releases") =>
