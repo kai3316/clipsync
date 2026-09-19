@@ -54,37 +54,49 @@ jobs:
 
           What is new in this release:
 
-          - 复制来源追踪 takes effect when it is switched.  The live half of a
-            settings change reached for the clipboard monitor under the name
-            the previous application's sync object gave it, and this one keeps
-            it under another; the settings API caught the resulting
-            AttributeError, logged one ERROR line and answered "ok".  So the
-            switch saved, reported success, and did nothing at all until the
-            next restart -- which is where a machine that had it turned on
-            looked like a machine whose 来源 column was simply empty.
+          - A connected device is no longer listed 离线 because its mDNS
+            announcement lapsed.  The "peer lost" callback tore down that
+            peer's live connection -- and the retry timer behind it -- on the
+            reading that a disappeared record means a device that left.  It
+            does not: a record expires on the advertiser's own schedule, and it
+            can lapse while the device is still answering device probes on the
+            network, which is what left a working device reading 离线 and
+            stopped the reconnection that would have brought it back.  mDNS is
+            unauthenticated besides, so anything else on the network could
+            force the same by announcing that the service had gone.  Whether a
+            peer is still there is the transport's answer now, read from the
+            socket: a closed one is noticed at once, an unreachable one within
+            the keepalive budget.
 
-          - The log no longer carries a four-frame traceback per minute.  Every
-            mDNS address enumeration resolves the host name and the FQDN, and on
-            macOS the FQDN is the reverse name of the machine's own `::`, which
-            no resolver answers: the failure logged the whole stack, for a name
-            and an errno that say all of it, twice a minute and for as long as
-            the application ran.  A log a user is asked to send was mostly
-            that.  It is one line now.
+          - A device that is away reads 离线, not 重连中 10/10 for as long as it
+            stays away.  Past its ten fast attempts the transport keeps
+            dialling once every 30 seconds -- a background poll rather than a
+            reconnection anyone is waiting on -- but the row went on reporting
+            it as a retry still counting, capped at the ceiling and never
+            retired.  The state a reader is meant to see when the transport has
+            given up was therefore unreachable for exactly the devices it was
+            written for.  The slow retry still runs; the row returns to 在线 the
+            moment the device answers.
 
-          - mDNS recovers from a network change instead of staying dead.
-            zeroconf binds one socket per local address when it is
-            constructed, and never rebinds them: when an interface comes or
-            goes -- a VPN switched on, a VPN switched off, Wi-Fi to Ethernet, a
-            wake from sleep -- the sockets bound to addresses that no longer
-            exist log `[Errno 65] No route to host` and are left in the poll
-            set.  Both halves of discovery then run on addresses that are gone:
-            the device answers no query, hears no announcement, and stays
-            invisible to the network until the application is restarted -- and
-            switching the VPN back off does not undo it, because the sockets
-            are still the ones bound to the addresses the VPN took away.  The
-            watcher that notices the address set change now replaces the
-            zeroconf instance outright instead of re-registering the service
-            on the dead one, and wake-from-sleep takes the same path.
+          - The log says which retry it is scheduling.  Past that budget the
+            counter climbed while the message kept printing it as a fraction of
+            the ceiling, so a machine that had been unreachable overnight had
+            the log read `scheduling reconnect attempt 69/10` -- a counter that
+            looks like it escaped its own limit, rather than the slow retry it
+            is.
+
+          - A nearby-chat message now says what it says.  The notice raised for
+            every message carried the event's own name -- "chat.message" --
+            instead of the message, so it told the reader that something had
+            arrived and left them to open the conversation to find out what; a
+            notice with nothing in it is not worth raising.  It names the sender
+            and shows the message now, and says which file arrived when the
+            message was one.  Two of those notices were not news and are gone:
+            the sender's own message coming back, because the engine reports
+            outgoing entries through the same callback and both machines were
+            announcing the message one of them had just typed, and a message
+            arriving in the conversation that is already open on screen, where
+            the bubble appearing in front of the reader is the notice.
 
           The device name is now published in the mDNS record, to the local
           network.  That is what lets devices show the name you chose rather
