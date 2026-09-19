@@ -622,6 +622,7 @@ class SidecarApplication:
                 "pairing.start", "pairing.confirm", "pairing.reject", "pairing.unpair",
                 "devices.note", "devices.connect", "devices.disconnect", "devices.forget",
                 "devices.restore", "devices.purge", "devices.test", "devices.certs",
+                "devices.scan",
                 "devices.retrust", "devices.offer_update", "devices.fetch_update",
                 "companion.configure",
                 "url.send", "clipboard.push", "discovery.status",

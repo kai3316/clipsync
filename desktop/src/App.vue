@@ -2178,6 +2178,13 @@ const notifyFavorites = (message: string) => store.toast("ui.favorites", message
 const notifyTransfers = (message: string) => store.toast("ui.transfers", message);
 const notifyChat = (message: string) => store.toast("ui.chat", message);
 async function refreshDevices() {
+  // Before the read, not after: the list the store is about to read is the one
+  // this asks for. A device that is on the network but has not been heard from
+  // for a while — the thing this button exists for — is not on the list until
+  // somebody asks, and that is what the scan does: it announces this machine,
+  // queries the LAN and waits for the answers. The store's own read would only
+  // report what the last background round happened to leave behind.
+  await bridge.scanDevices();
   await store.refresh();
   // The rows above 已移除的设备, which is the list this page is showing: a
   // removed device is not one a refresh just went and found.

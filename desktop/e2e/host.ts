@@ -84,6 +84,7 @@ export const fixtures: Record<string, unknown> = {
       "pairing.start", "pairing.confirm", "pairing.reject", "pairing.unpair",
       "devices.note", "devices.connect", "devices.disconnect", "devices.forget",
       "devices.restore", "devices.purge", "devices.test", "devices.certs",
+      "devices.scan",
       "devices.retrust", "devices.offer_update", "devices.fetch_update",
       "companion.configure",
       "url.send", "clipboard.push", "discovery.status",
@@ -281,6 +282,12 @@ export const fixtures: Record<string, unknown> = {
     ],
   },
   discovery_status: { enabled: true, visible: true },
+  // Same shape, because it is the same question asked once, on the caller's
+  // behalf: the refresh button's scan announces this device, asks the local
+  // network and waits for the answers, then reports the flags it ran under.  The
+  // refreshed rows come through `devices.changed`, which a preview has no
+  // reason to simulate.
+  scan_devices: { enabled: true, visible: true },
   companion_status: {
     enabled: true,
     port: 8765,

@@ -212,6 +212,15 @@ async fn list_devices(window: WebviewWindow, host: State<'_, Host>) -> Result<Va
     host.bridge().await?.call("devices.list", json!({})).await
 }
 
+/// The refresh button: asks the LAN who is here before answering, so the list
+/// the window reads next is one that was just asked for rather than whatever
+/// the last background round left behind.
+#[tauri::command]
+async fn scan_devices(window: WebviewWindow, host: State<'_, Host>) -> Result<Value, BridgeError> {
+    authorize(&window)?;
+    host.bridge().await?.call("devices.scan", json!({})).await
+}
+
 #[tauri::command]
 async fn get_settings(window: WebviewWindow, host: State<'_, Host>) -> Result<Value, BridgeError> {
     authorize(&window)?;
@@ -2416,6 +2425,7 @@ fn main() {
         .invoke_handler(tauri::generate_handler![
             get_app_status,
             list_devices,
+            scan_devices,
             companion_status,
             configure_companion,
             get_settings,

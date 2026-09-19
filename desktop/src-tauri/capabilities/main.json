@@ -8,6 +8,7 @@
     "core:event:allow-unlisten",
     "allow-get-app-status",
     "allow-list-devices",
+    "allow-scan-devices",
     "allow-companion-status",
     "allow-configure-companion",
     "allow-list-history",

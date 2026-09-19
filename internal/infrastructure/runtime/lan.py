@@ -124,6 +124,11 @@ class _OwnedDiscovery(Discovery):
     def _network_watch_loop(self):
         return self._owner._background(super()._network_watch_loop)
 
+    def _presence_loop(self):
+        # Accounted for like the network watcher: it is a loop of this runtime's
+        # own, and a stop waits for the threads it started (see _cleanup).
+        return self._owner._background(super()._presence_loop)
+
     def _wake_recovery(self):
         return self._owner._background(super()._wake_recovery)
 
@@ -199,6 +204,20 @@ class LanRuntime:
     # peer that really left is dropped there.  This is only how long the last
     # thing a device said about itself stays on its row.
     SIGHTING_GRACE = 300.0
+    # How long a lapsed sighting still counts as *here* -- as opposed to what it
+    # is still allowed to answer about.  Short, because "the record lapsed" is no
+    # longer a guess about a network that drops packets: the presence round has
+    # established that the device went quiet for twenty seconds and stopped
+    # answering questions.  One round of grace on top of that, so a goodbye, or
+    # an answer that missed the round's window, cannot flicker the row — and the
+    # round after it is what proves the device was never gone.
+    #
+    # Only membership reads this: it decides whether an unpaired device is on
+    # the list.  Everything a row is *made of* — the name a peer published, the
+    # address a click would dial, the version and platform the update buttons
+    # are decided from — keeps reading SIGHTING_GRACE, because a device that is
+    # merely quiet is still the device this machine knows how to reach.
+    PRESENCE_GRACE = 10.0
     # How often a deferred ending notice re-dials a peer it cannot reach.  The
     # maintenance loop runs four times a second, which is far more often than a
     # connection attempt needs and would keep several in flight at once.
@@ -2533,9 +2552,9 @@ class LanRuntime:
             known = self._peer_name(pid)
         return known or fallback
 
-    def _sightings(self):
+    def _sightings(self, grace=None):
         """Every sighting this runtime still trusts: live ones, and lapsed ones
-        still inside ``SIGHTING_GRACE``.
+        still inside ``grace`` (``SIGHTING_GRACE`` by default).
 
         A lapsed sighting is a real answer to every question a live one answers
         -- where the device is, what it calls itself, what version it runs --
@@ -2550,15 +2569,23 @@ class LanRuntime:
         outside ``_lock``, which is what keeps ``_resolve`` -- the transport and
         the pairing repository -- out of the lock.
         """
+        limit = self.SIGHTING_GRACE if grace is None else grace
         now = time.monotonic()
         with self._lock:
+            # Always pruned at SIGHTING_GRACE, never at the caller's limit: a
+            # caller asking the shorter question (who is *here*) must not be
+            # able to throw away the longer answer (what we know about them).
             for pid in [
                 pid
                 for pid, (_, when) in self._lost_sightings.items()
                 if now - when > self.SIGHTING_GRACE
             ]:
                 del self._lost_sightings[pid]
-            sightings = {pid: info for pid, (info, _) in self._lost_sightings.items()}
+            sightings = {
+                pid: info
+                for pid, (info, when) in self._lost_sightings.items()
+                if now - when <= limit
+            }
             sightings.update(self._discovered)
         return sightings
 
@@ -3011,6 +3038,13 @@ class LanRuntime:
             # what emptied a row of its version and platform, and took it off
             # the list entirely when it was not paired.
             sightings = self._sightings()
+            # The same sightings, asked the shorter question: which of these
+            # devices is *here*, as opposed to which of them this machine can
+            # still describe (see PRESENCE_GRACE).  Membership reads this one and
+            # nothing else does, so a device that has gone quiet keeps its name,
+            # its address and the version on its row for five minutes while
+            # stopping being a device that is on the network.
+            present = self._sightings(self.PRESENCE_GRACE)
             with self._lock:
                 connecting = dict(self._connecting)
             # What each peer advertises about itself, keyed the way the rows
@@ -3041,7 +3075,12 @@ class LanRuntime:
             for pid, info in advertised.items():
                 if info.get("named") or not names.get(pid):
                     names[pid] = info["name"]
-            discovered_ids = set(advertised)
+            # Keyed the way `advertised` is -- through `_resolve` -- because the
+            # two are compared against each other and against the ids the
+            # pairing repository holds: a sighting can live under a hashed mDNS
+            # id while every row, and every `pid in ...` test below, is the
+            # resolved device id.
+            discovered_ids = {self._resolve(pid) for pid in present}
             # This machine's internet pairings, by device id.  Every row reads
             # them, not only the ones the pairing below draws: a device can hold
             # both routes at once — a pairing code is how two machines that have
@@ -3755,10 +3794,16 @@ class LanRuntime:
         Discovery keys peers by their hashed id and stores a
         row; the web devices API expects ``{id: {"name", "address", "port"}}``
         exactly like the legacy ``Application._snapshot_discovered_peers``.
+
+        "Discovered" means here now, so this reads the presence grace rather
+        than the sighting grace: the section this feeds is a picture of the
+        network, and a device that has stopped answering for a minute is not on
+        it.  (The device list's own rows are built in ``_refresh``, which needs
+        both answers — who is here, and what this machine knows about them.)
         """
         return {
             pid: {"name": info["name"], "address": info["address"], "port": info["port"]}
-            for pid, info in self._sightings().items()
+            for pid, info in self._sightings(self.PRESENCE_GRACE).items()
         }
 
     def resolved_hashes(self):
@@ -3832,6 +3877,29 @@ class LanRuntime:
             "visible",
             "VISIBILITY_TOGGLE_FAILED",
         )
+
+    def scan_devices(self):
+        """Ask the LAN who is here, and read the answers back.
+
+        What the window's refresh button calls.  The round is the discovery
+        layer's (``Discovery.scan``): it announces this device, asks the
+        network, and waits for the answers — so the device list the window reads
+        immediately afterwards is the one that was just asked for, rather than
+        the one the last background round happened to leave behind.
+
+        ``blocking=True`` because it waits for those answers: ``_pairing_ops``
+        is held across a non-blocking command, and holding it while a multicast
+        round completes would stall the receive path for as long as the round
+        takes.  It is still accounted for, so a stop waits for it.
+
+        Answers with the discovery flags, not with a device list: nothing about
+        the flags changes, so there is nothing to publish, and the list arrives
+        through the ``devices.changed`` the round's own sightings fire.  A scan
+        that could not run (browsing switched off) is then legible to the caller
+        instead of looking like a network with no devices on it.
+        """
+        self._command(self.discovery.scan, blocking=True)
+        return self.discovery_state()
 
     def _toggle_discovery(self, enabled, start, stop, key, code):
         # Deliberately outside ``_command``: the toggle only touches mDNS, and

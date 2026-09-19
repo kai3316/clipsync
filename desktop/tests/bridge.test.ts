@@ -69,12 +69,14 @@ describe("browser isolation", () => {
     await bridge.sendUrl("p", "https://example.com");
     await bridge.pushText("hello");
     await bridge.discoveryStatus();
+    await bridge.scanDevices();
     await bridge.setDiscoveryEnabled(false);
     await bridge.setDiscoveryVisible(true);
     expect(vi.mocked(invoke).mock.calls).toEqual([
       ["send_url", { deviceId: "p", url: "https://example.com" }],
       ["push_text", { text: "hello" }],
       ["discovery_status", undefined],
+      ["scan_devices", undefined],
       ["set_discovery_enabled", { enabled: false }],
       ["set_discovery_visible", { enabled: true }],
     ]);

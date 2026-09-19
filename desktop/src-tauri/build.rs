@@ -3,6 +3,7 @@ fn main() {
         tauri_build::AppManifest::new().commands(&[
             "get_app_status",
             "list_devices",
+            "scan_devices",
             "companion_status",
             "configure_companion",
             "list_history",

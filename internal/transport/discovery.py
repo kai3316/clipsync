@@ -7,12 +7,26 @@ other devices running ClipSync on the same local network.
 import contextlib
 import logging
 import platform
+import random
 import socket
 import threading
+import time
 from collections.abc import Callable
 
 import ifaddr
-from zeroconf import ServiceBrowser, ServiceInfo, Zeroconf
+from zeroconf import (
+    DNSOutgoing,
+    DNSQuestion,
+    RecordUpdateListener,
+    ServiceBrowser,
+    ServiceInfo,
+    Zeroconf,
+)
+
+# The wire numbers for a PTR question.  Not exported at the top level -- the
+# protocol constants have no public names -- and the alternative is writing
+# 12 and 1 into a query nobody can check.
+from zeroconf.const import _CLASS_IN, _FLAGS_QR_QUERY, _TYPE_PTR
 
 from internal.system.updater import running_shell
 from internal.transport.ids import peer_id_hash
@@ -21,21 +35,47 @@ from internal.version import __version__
 
 logger = logging.getLogger(__name__)
 
-# Grace window after ``start_browsing()`` during which a previously-known
-# peer must re-announce to stay "online".  Peers that do not re-announce
-# vanished while browsing was paused and are reported lost (see
-# ``_reconcile_after_resume``).
+# The presence round: how often this machine asks the network who is here, and
+# how long a name may go unheard before it is reported lost.
 #
-# Sized against the browser's own startup queries, which is the clock this
-# actually races.  A fresh ``ServiceBrowser`` asks four times: immediately, then
-# at +1 s, +4 s and +9 s (zeroconf's ``STARTUP_QUERIES`` and its ``n**2`` retry
-# delays), so the last question is asked ~14 s in.  A grace shorter than that
-# reports a peer lost between two of the browser's own questions — which is
-# exactly what a 4-second window did: the query at +5 s went out to peers the
-# reconcile had already dropped a second earlier.  The window is the browser's,
-# not the peer's: a peer that answers the fourth query is a peer that was there
-# all along, and one lost multicast answer is ordinary.
-RECONFIRM_GRACE_SECONDS = 20.0
+# The pair is the whole latency budget for "a device left": it is reported at
+# the first round after PRESENCE_TIMEOUT, so between 20 and 30 seconds -- and a
+# device has to miss two consecutive answers to get there, which is the budget
+# for one dropped multicast packet.  Both are worth more than they look: the
+# browser fires Added only on *novelty*, so before this a peer was reported lost
+# when its cached PTR lapsed (never, the library clamps it to 1125 s) and a peer
+# that had been reported lost could not come back at all until it restarted --
+# see _PresenceListener.
+PRESENCE_INTERVAL_SECONDS = 10.0
+PRESENCE_TIMEOUT_SECONDS = 20.0
+
+# Announce on every Nth round -- 60 seconds, deliberately half of the 120 s TTL
+# a peer caches our A records for.  A peer running this build re-hears us every
+# round anyway (it asks, we answer); a peer running an older build asks nothing
+# after its four startup queries, and this is the only thing keeping our address
+# from expiring in its cache.
+ANNOUNCE_EVERY_ROUNDS = 6
+
+# How long to wait for the answers to one query.  A peer that is there answers
+# in 20-120 ms (the library's own jitter), so this is generous for the normal
+# case and covers the one path that is slower: a record multicast in the last
+# second is held back for another second by the library's flood protection
+# (RFC 6762 section 14).  An answer that misses the window is not lost -- the
+# listener stamps it whenever it lands.
+SCAN_SETTLE_SECONDS = 0.6
+
+# A delivered record counts as "a peer spoke" only if its packet arrived just
+# now.  This is what separates that from "the cache handed back a record it has
+# held since the peer last spoke": the cache replay on listener registration and
+# the ten-second expiry sweep both deliver records whose ``created`` is old.
+PRESENCE_STALE_MILLIS = 2 * PRESENCE_INTERVAL_SECONDS * 1000
+
+# How long ``get_service_info`` may take when a peer's record is not in the
+# cache.  The library's own default is 3000 ms, and the presence round must not
+# be able to spend that per peer: a responder that sends a PTR without its
+# SRV/TXT additionals turns each re-read into a stall, and the round runs on a
+# thread the runtime is waiting on.
+_SERVICE_INFO_TIMEOUT_MS = 1000
 
 # How long the host-name and FQDN lookups may hold up address enumeration.  A
 # ceiling on a working-but-slow resolver, not a target: a name that resolves at
@@ -418,6 +458,51 @@ def _pick_best_address(
     return min(candidates, key=lambda ip: (rank(ip), ip))
 
 
+class _PresenceListener(RecordUpdateListener):
+    """Stamps every PTR this machine hears, so presence stops depending on the
+    browser.
+
+    The browser is the wrong clock for "is that device still there", because it
+    fires ``Added`` only on *novelty*: a peer that re-announces the same record
+    produces no event at all, an A/SRV/TXT that expires while its PTR lives is
+    never re-queried, and a PTR that has been reported lost is not announced as
+    Added again for as long as the cached copy lives -- and the library clamps a
+    PTR's TTL up to 1125 seconds (``_DNS_PTR_MIN_TTL``), so "as long as" is
+    measured in tens of minutes.  The record manager has no such opinion: every
+    answer packet is handed to every listener as it arrives.  That asymmetry is
+    the whole reason this class exists.
+
+    It runs on the zeroconf event-loop thread, so it does one dict assignment
+    and nothing else.  Two calls are forbidden from here and both are the
+    obvious next refactor: ``update_service`` (deadlocks from this thread) and
+    ``get_service_info`` (refuses to run on this thread).  Re-announcing because
+    a peer was heard is also the wrong shape -- see ``_presence_round``.
+    """
+
+    def __init__(self, owner: "Discovery"):
+        self._owner = owner
+
+    def async_update_records(self, zc, now, records) -> None:
+        owner = self._owner
+        service_type = owner._service_type.lower()
+        own = owner._instance_name
+        cutoff = now - PRESENCE_STALE_MILLIS
+        with owner._heard_lock:
+            for update in records:
+                record = update.new
+                if record.type != _TYPE_PTR or record.name.lower() != service_type:
+                    continue
+                # Two ways a record arrives without anybody having spoken:
+                # the registration replay (a record cached long ago, delivered
+                # with ``old is None`` so it is indistinguishable from a new
+                # one) and the ten-second sweep that delivers expired records.
+                if record.created < cutoff or record.is_expired(now):
+                    continue
+                alias = record.alias
+                if alias and alias != own:
+                    owner._heard[alias] = now / 1000.0
+
+
 class Discovery:
     """mDNS-based peer discovery."""
 
@@ -438,6 +523,7 @@ class Discovery:
         self._zc: Zeroconf | None = None
         self._service_info: ServiceInfo | None = None
         self._browser: ServiceBrowser | None = None
+        self._listener: _PresenceListener | None = None
         self._on_peer_found: Callable | None = None
         self._on_peer_lost: Callable | None = None
         self._lock = threading.Lock()
@@ -453,11 +539,22 @@ class Discovery:
         # plus a stop signal for the light poll in _network_watch_loop.
         self._netmon_stop = threading.Event()
         self._advertised_ips: frozenset[str] = frozenset()
-        # Post-resume reconcile bookkeeping (see start_browsing /
-        # _reconcile_after_resume): peers re-confirmed during the grace
-        # window + the timer that reports the rest lost.
-        self._reconfirm: set[str] = set()
-        self._reconcile_timer: threading.Timer | None = None
+        # Presence bookkeeping (see _presence_round): instance name -> the
+        # monotonic second its last PTR arrived.  Written from the zeroconf
+        # event loop by _PresenceListener and read by the presence thread, so
+        # it carries its own lock -- never _lock, which the browser thread
+        # holds while it works and which must not be held across a round.
+        self._heard: dict[str, float] = {}
+        self._heard_lock = threading.Lock()
+        # One round at a time.  A manual scan runs on the RPC thread and the
+        # loop's round on the presence thread; without this they would each
+        # announce, ask and settle at the same time.
+        self._scan_lock = threading.Lock()
+        # Our own instance name, read live by the listener, which runs on the
+        # event loop and so must not touch _service_info (lock-protected).
+        self._instance_name = ""
+        # Which round we are on, for the periodic announcement.
+        self._rounds = 0
 
     def set_callbacks(self, on_found: Callable, on_lost: Callable):
         """Set callbacks for peer discovery events.
@@ -639,14 +736,10 @@ class Discovery:
                 # retry later, instead of believing we are still broadcasting.
         with self._lock:
             self._service_info = registered
+            self._instance_name = registered.name if registered is not None else ""
 
         # Browse for peers
-        self._browser = ServiceBrowser(
-            self._zc,
-            self._service_type,
-            handlers=[self._on_service_state_change],
-        )
-        logger.info("Started browsing for peers")
+        self._open_browser()
 
         # Remember the advertised address set and start the watcher that
         # re-registers when the local interfaces change (Wi-Fi <-> Ethernet,
@@ -660,6 +753,11 @@ class Discovery:
             target=self._network_watch_loop,
             daemon=True,
             name="clipsync-netwatch",
+        ).start()
+        threading.Thread(
+            target=self._presence_loop,
+            daemon=True,
+            name="clipsync-presence",
         ).start()
 
     def _network_watch_loop(self):
@@ -695,6 +793,187 @@ class Discovery:
             # never tried again, leaving peers pointed at the dead address.
             self._restart_zeroconf()
 
+    # ── Presence ───────────────────────────────────────────────
+
+    def _presence_loop(self):
+        """Ask the network who is here, every ten seconds, forever.
+
+        Runs beside the browser rather than replacing it: the browser is what
+        resolves a service this machine has never seen, and this is what notices
+        one that stopped answering, one that is answering from a different
+        address, and one that came back after being reported lost.
+
+        Gated on the browse session, which is the important half: with browsing
+        paused this machine is not listening, and a round that ran anyway would
+        report every peer lost for the crime of going unheard by a machine that
+        had stopped listening.
+        """
+        while True:
+            # Spread the rounds: devices that started together (a wake, a
+            # reboot, two laptops opened at once) would otherwise ask in the
+            # same instant for the rest of the session.
+            delay = PRESENCE_INTERVAL_SECONDS * random.uniform(0.8, 1.2)
+            if self._netmon_stop.wait(delay):
+                return
+            if self._browser is None:
+                continue
+            try:
+                self._presence_round(
+                    announce=self._rounds % ANNOUNCE_EVERY_ROUNDS == 0
+                )
+            except Exception:
+                logger.debug("Presence round failed", exc_info=True)
+
+    def _presence_round(self, announce=False):
+        """One round: announce if it is due, ask, wait, read the answers back."""
+        with self._scan_lock:
+            zc = self._zc
+            if zc is None or self._browser is None:
+                return
+            self._rounds += 1
+            if announce:
+                self._announce(zc)
+            round_start = time.monotonic()
+            # A question with no known answers, deliberately.  The library's own
+            # service query carries the cached PTRs it is asking about, and a
+            # responder that is entitled to suppress those answers sends
+            # nothing at all — PTR, SRV, TXT and address alike — so a peer that
+            # is sitting there answering questions is never asked one it will
+            # answer.  That is how "the device is not discovered" happens while
+            # the device is on the network.
+            with contextlib.suppress(Exception):
+                zc.send(self._build_query())
+            self._netmon_stop.wait(SCAN_SETTLE_SECONDS)
+            if self._browser is None:
+                # Browsing was paused while we waited.
+                return
+            with self._heard_lock:
+                answered = [
+                    name
+                    for name, when in self._heard.items()
+                    if when >= round_start
+                ]
+            # Read back only the peers that answered just now, and only to
+            # refresh their row.  An answer carries SRV, TXT and the addresses
+            # as additionals beside the PTR, so this comes out of the cache;
+            # and it is what turns "a peer whose address changed" into
+            # something noticed within one round rather than whenever the
+            # browser next happened to fire.  A peer that is gone answered
+            # nothing, so it costs nothing here either — the sweep is what
+            # takes it off the list.
+            for name in answered:
+                if self._netmon_stop.is_set():
+                    return
+                try:
+                    self._handle_service_added(
+                        zc,
+                        self._service_type,
+                        name,
+                        timeout=_SERVICE_INFO_TIMEOUT_MS,
+                    )
+                except Exception:
+                    # A torn-down instance raises out of get_service_info
+                    # instead of returning None — _restart_zeroconf swaps and
+                    # closes the Zeroconf this round is holding.
+                    logger.debug("Presence re-read failed for %s", name, exc_info=True)
+            self._sweep_presence()
+
+    def _sweep_presence(self):
+        """Report every peer that has gone unheard for ``PRESENCE_TIMEOUT``.
+
+        A peer leaves the same way a goodbye takes it — out of ``_known_peers``,
+        then ``on_lost`` — because the question "is this device still here" has
+        one answer, and nothing else in the app has an opinion about it.
+
+        Asked per *peer*, not per name.  A peer that renamed itself has two
+        names pointing at it, and a per-name sweep would suppress each of them
+        for the other's sake, so a device that renamed and then left would stay
+        on the list for good.  A stamped name is dropped as it is swept, which is
+        what keeps the sweeps that follow from reporting the same peer again —
+        and a peer that answers later is stamped fresh and read back in, which is
+        how a device that was briefly unreachable returns within a round.
+        """
+        now = time.monotonic()
+        with self._heard_lock:
+            for name in [
+                name
+                for name, when in self._heard.items()
+                if now - when > PRESENCE_TIMEOUT_SECONDS
+            ]:
+                del self._heard[name]
+            heard = set(self._heard)
+        lost: list[str] = []
+        with self._lock:
+            for pid in [
+                pid for pid in self._known_peers if not self._still_heard(pid, heard)
+            ]:
+                del self._known_peers[pid]
+                lost.append(pid)
+            # Drop the names of the peers that just left: a name is how this
+            # machine answers "is that peer still here", and one that still
+            # names a peer it has already reported lost would vouch for it in
+            # the next sweep and let a goodbye report the same loss twice.
+            for name in [
+                name for name, pid in self._service_to_peer.items() if pid in lost
+            ]:
+                self._service_to_peer.pop(name, None)
+            on_lost = self._on_peer_lost
+        for pid in lost:
+            logger.info("Peer lost: %s", pid)
+            if on_lost:
+                try:
+                    on_lost(pid)
+                except Exception:
+                    logger.debug("on_lost callback failed for %s", pid, exc_info=True)
+
+    def _still_heard(self, pid, heard):
+        """Whether any of this peer's names is among the ones just heard.
+
+        A peer with no name at all is not heard: ``start_browsing`` clears the
+        mapping, so a peer that has not answered since the browse resumed is
+        exactly a peer this cannot vouch for.
+        """
+        names = [name for name, peer in self._service_to_peer.items() if peer == pid]
+        return any(name in heard for name in names)
+
+    def _build_query(self) -> DNSOutgoing:
+        """A PTR question for our own service type, with no known answers."""
+        out = DNSOutgoing(_FLAGS_QR_QUERY, True)
+        out.add_question(DNSQuestion(self._service_type, _TYPE_PTR, _CLASS_IN))
+        return out
+
+    def _announce(self, zc) -> None:
+        """Say this machine's record again, without re-registering it.
+
+        ``generate_service_broadcast`` rather than ``update_service``: the
+        latter removes and re-adds the registration — which resurrects a service
+        the user has just hidden — mutates the ``ServiceInfo`` that
+        ``is_advertising`` and the window's visibility indicator read, and
+        blocks for the better part of a second (three broadcasts, 225 ms apart)
+        while it does it.  The record has not changed, so all this has to do is
+        say it once more.
+        """
+        with self._lock:
+            info = self._service_info
+        if info is None:
+            return
+        with contextlib.suppress(Exception):
+            zc.send(zc.generate_service_broadcast(info, None))
+
+    def scan(self):
+        """Ask the network who is here, and read the answers back.
+
+        The round the loop runs, with the announcement always included: a
+        refresh is the one moment a reader has asked this machine to say
+        something as well as ask.  Blocks for about ``SCAN_SETTLE_SECONDS``, and
+        ``_scan_lock`` is what keeps it from overlapping a round already in
+        flight — a second click joins nothing and simply waits its turn.
+        """
+        try:
+            self._presence_round(announce=True)
+        except Exception:
+            logger.debug("Manual scan failed", exc_info=True)
+
     def stop(self):
         self._netmon_stop.set()
         self.stop_browsing()
@@ -721,16 +1000,7 @@ class Discovery:
 
     def stop_browsing(self):
         """Stop discovering new peers without affecting advertising."""
-        if self._browser:
-            self._browser.cancel()
-            self._browser = None
-            logger.info("Stopped browsing for peers")
-        # A pending post-resume reconcile belongs to the browse session we are
-        # pausing — cancel it so a later start_browsing() starts a fresh one
-        # instead of stacking timers.
-        if self._reconcile_timer is not None:
-            self._reconcile_timer.cancel()
-            self._reconcile_timer = None
+        self._close_browser()
 
     def start_browsing(self):
         """Resume discovering new peers. Requires start() to have been called."""
@@ -739,30 +1009,51 @@ class Discovery:
         if self._zc is None:
             return
         with self._lock:
-            # Snapshot the peers known before the pause: any that do NOT
-            # re-announce within the grace window vanished while we were not
-            # listening and must be reported lost (a paused browser fires no
-            # Removed events, so they would otherwise ghost forever).
-            stale = set(self._known_peers)
-            self._reconfirm.clear()
             # The new browser re-fires Added for every live service, so the
-            # name→id mapping is rebuilt from scratch.
+            # name→id mapping is rebuilt from scratch.  Until a peer answers
+            # the new browse nothing here vouches for it, which is deliberate:
+            # the mapping is the evidence a sweep reads (see _still_heard), and
+            # a peer whose evidence predates the pause is a peer this machine
+            # has not heard from since it started listening again.  The round
+            # that follows re-reads everyone who answers it, so a device that
+            # is there is back in the mapping before the sweep asks.
             self._service_to_peer.clear()
+        self._open_browser()
+
+    def _open_browser(self):
+        """Browse, and listen for the answers to the browsing.
+
+        One place because the browser is built from two call sites — ``start``
+        and ``start_browsing``, the second of which is also how
+        ``_restart_zeroconf`` recovers after a network change — and the presence
+        listener has to be attached on both.  It was two identical constructions
+        before, which is exactly how one path ends up without the listener.
+        """
         self._browser = ServiceBrowser(
             self._zc,
             self._service_type,
             handlers=[self._on_service_state_change],
         )
-        if self._reconcile_timer is not None:
-            self._reconcile_timer.cancel()
-        self._reconcile_timer = threading.Timer(
-            RECONFIRM_GRACE_SECONDS,
-            self._reconcile_after_resume,
-            args=(stale,),
-        )
-        self._reconcile_timer.daemon = True
-        self._reconcile_timer.start()
-        logger.info("Resumed browsing for peers")
+        self._listener = _PresenceListener(self)
+        with contextlib.suppress(Exception):
+            # No question: every record, and no replay of what the cache
+            # already holds.  The listener's freshness test rejects a replayed
+            # record anyway, so there is nothing to gain by asking for one.
+            self._zc.add_listener(self._listener, None)
+        logger.info("Started browsing for peers")
+
+    def _close_browser(self):
+        if self._browser is not None:
+            self._browser.cancel()
+            self._browser = None
+            logger.info("Stopped browsing for peers")
+        if self._listener is not None:
+            # Removed from the instance it was added to: _restart_zeroconf
+            # calls this before it swaps _zc, so ``self._zc`` is still the one
+            # that holds the listener.
+            with contextlib.suppress(Exception):
+                self._zc.remove_listener(self._listener)
+            self._listener = None
 
     def stop_advertising(self):
         """Unregister mDNS service without affecting browsing."""
@@ -818,6 +1109,10 @@ class Discovery:
             return
         with self._lock:
             self._service_info = info
+            # Read by the presence listener, which runs on the event loop and
+            # must not touch _service_info: the name is what tells our own
+            # record apart from a peer's when it comes back to us.
+            self._instance_name = info.name
             self._advertised_ips = frozenset(all_ips)
             self._virtual_ips = virtual
         logger.info("Resumed advertising this device on port %d", self._port)
@@ -880,8 +1175,17 @@ class Discovery:
         elif state_change.name == "Removed":
             self._handle_service_removed(name)
 
-    def _handle_service_added(self, zeroconf, service_type, name):
-        info = zeroconf.get_service_info(service_type, name)
+    def _handle_service_added(self, zeroconf, service_type, name, timeout=3000):
+        """Take one peer's answer and put it on the list.
+
+        ``timeout`` bounds the cache miss: the library's ``get_service_info``
+        waits its full timeout for a record that is not in the cache, and the
+        presence round calls this per peer, so it passes something shorter than
+        the three seconds a browser callback can afford to wait.  A responder
+        that sends its PTR without the SRV/TXT additionals is what makes that
+        path reachable at all.
+        """
+        info = zeroconf.get_service_info(service_type, name, timeout=timeout)
         if info is None:
             return
 
@@ -977,9 +1281,6 @@ class Discovery:
         with self._lock:
             existing = self._known_peers.get(peer_id_hash)
             self._service_to_peer[name] = peer_id_hash
-            # This peer just re-announced — the post-resume reconcile timer
-            # must not report it lost.
-            self._reconfirm.add(peer_id_hash)
             if existing is not None:
                 # Refresh on re-announcement: the peer's address may have
                 # changed (DHCP renewal, Wi-Fi reconnect, interface switch).
@@ -1048,6 +1349,13 @@ class Discovery:
             )
 
     def _handle_service_removed(self, name):
+        """A peer said goodbye (an mDNS removal), so stop counting it as here.
+
+        The other door out is ``_sweep_presence``, which is what decides a peer
+        that stopped answering without saying anything — the case a goodbye
+        cannot cover, because a device that is switched off, unplugged or out of
+        range never sends one.
+        """
         with self._lock:
             peer_id = self._service_to_peer.pop(name, None)
             if peer_id is None:
@@ -1072,33 +1380,3 @@ class Discovery:
             if on_lost:
                 on_lost(peer_id)
 
-    def _reconcile_after_resume(self, stale: set):
-        """Report lost any peer that did not re-announce after a browse resume.
-
-        Fires on the ``RECONFIRM_GRACE_SECONDS`` timer armed by
-        ``start_browsing()``.  ``_handle_service_added`` adds each live peer to
-        ``self._reconfirm`` as it re-announces, so ``stale - _reconfirm`` is
-        exactly the set of peers that vanished while browsing was paused.  They
-        leave ``_known_peers`` and fire ``on_lost`` — same effect a Removed
-        event would have had had we been listening.
-        """
-        lost: list[str] = []
-        with self._lock:
-            self._reconcile_timer = None
-            gone = stale - self._reconfirm
-            for pid in gone:
-                if pid in self._known_peers:
-                    del self._known_peers[pid]
-                lost.append(pid)
-            # Drop any service-name mapping still pointing at a lost peer so a
-            # later Added for the same name starts clean.
-            for name in [n for n, pid in self._service_to_peer.items() if pid in gone]:
-                self._service_to_peer.pop(name, None)
-            on_lost = self._on_peer_lost
-        for pid in lost:
-            logger.info("Peer lost after browse resume: %s", pid)
-            if on_lost:
-                try:
-                    on_lost(pid)
-                except Exception:
-                    logger.debug("on_lost callback failed for %s", pid, exc_info=True)

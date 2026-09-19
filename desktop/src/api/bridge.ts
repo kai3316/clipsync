@@ -78,6 +78,14 @@ export const bridge = {
   history: (query: string, offset: number, limit: number, kind: string, sort: string) =>
     command<HistoryPage>("list_history", { query, offset, limit, kind, sort }),
   devices: () => command<{ items: Device[] }>("list_devices"),
+  /** Ask the LAN who is here, then read the device list: what the refresh
+   *  button calls.  The sidecar announces this device, queries the network and
+   *  waits for the answers (about a second), so the list read immediately
+   *  afterwards is one that was just asked for rather than whatever the last
+   *  background round left behind.  Answers with the discovery flags — a scan
+   *  with discovery switched off changes nothing, and says so — and the
+   *  refreshed rows arrive through `devices.changed`. */
+  scanDevices: () => command<{ enabled: boolean; visible: boolean }>("scan_devices"),
   setDeviceNote: (deviceId: string, note: string) => command<{ ok: boolean }>("set_device_note", { deviceId, note }),
   connectDevice: (deviceId: string) => command<{ accepted: boolean }>("connect_device", { deviceId }),
   disconnectDevice: (deviceId: string) => command<{ disconnected: boolean }>("disconnect_device", { deviceId }),

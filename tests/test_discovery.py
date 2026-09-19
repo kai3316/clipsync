@@ -8,10 +8,18 @@ first is only what a peer older than that field can offer.
 """
 
 import os
+import socket
 import sys
+import time
 from types import SimpleNamespace
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+from zeroconf import DNSPointer, RecordUpdate  # noqa: E402
+
+# The wire numbers for the PTR records these tests hand the listener, the same
+# private constants the module under test imports for the question it asks.
+from zeroconf.const import _CLASS_IN, _TYPE_PTR  # noqa: E402
 
 from internal.system.updater import running_shell  # noqa: E402
 from internal.transport import discovery as discovery_module  # noqa: E402
@@ -158,7 +166,10 @@ def sighting(properties, address="192.168.1.7", name="Kitchen-9f2a._clipsync._tc
         addresses=[__import__("socket").inet_aton(address)],
         port=9999,
     )
-    zc = SimpleNamespace(get_service_info=lambda *_: info)
+    # ``timeout`` is how the presence round bounds a cache miss; the browser
+    # path leaves it to the library.  Both have to be accepted here, because
+    # the same method serves both.
+    zc = SimpleNamespace(get_service_info=lambda *_, **__: info)
     return zc, "_clipsync._tcp.local.", name
 
 
@@ -242,6 +253,200 @@ def test_the_same_sighting_twice_is_not_reported_twice(monkeypatch):
     subject._handle_service_added(*sighting(properties))
     subject._handle_service_added(*sighting(properties))
     assert len(seen) == 1
+
+
+# ── who is still here ───────────────────────────────────────────────────
+#
+# Presence is measured, not inferred: this machine asks the network who is
+# there every ten seconds, and a name that goes unheard for twenty is a device
+# that has left.  Nothing here needs a socket or a thread -- the round takes
+# the answers it is given.
+
+
+def rig(peers):
+    """A Discovery that runs presence rounds with no network and no waiting.
+
+    ``peers`` maps the label a peer advertises under to its device id.  The
+    fake zeroconf answers a round for every one of those names at the moment
+    the round asks, which is when a real answer arrives and what the presence
+    listener stamps ``_heard`` from.  Removing a name from the returned set is
+    what "the peer stopped answering" looks like from here: the record is still
+    in the cache and the round still asks, but no answer comes back.
+
+    The stop event returns immediately instead of waiting out the 600 ms settle
+    window, which is a real wait on a real network and not what is under test.
+    """
+    found, lost = [], []
+    subject = service()
+    subject._our_ip = "192.168.1.5"
+    subject.set_callbacks(lambda *args: found.append(args), lost.append)
+    infos = {
+        f"{label}._clipsync._tcp.local.": SimpleNamespace(
+            properties={b"device_id_hash": Discovery._hash_device_id(pid).encode()},
+            addresses=[socket.inet_aton("192.168.1.7")],
+            port=9999,
+        )
+        for label, pid in peers.items()
+    }
+    answering = set(infos)
+
+    def ask(_outgoing):
+        for name in answering:
+            subject._heard[name] = time.monotonic()
+
+    subject._zc = SimpleNamespace(
+        get_service_info=lambda _type, name, timeout=None: infos.get(name),
+        send=ask,
+        generate_service_broadcast=lambda info, ttl: object(),
+    )
+    subject._browser = SimpleNamespace()
+    subject._netmon_stop = SimpleNamespace(wait=lambda *_: False, is_set=lambda: False)
+    return subject, found, lost, answering
+
+
+def goes_silent(subject, answering):
+    """The peer is switched off: its last answer ages out, and none follows.
+
+    Cheaper than sleeping twenty seconds and the same thing -- what the sweep
+    reads is how long ago a name was stamped, not the wall clock.
+    """
+    with subject._heard_lock:
+        for name in subject._heard:
+            subject._heard[name] -= discovery_module.PRESENCE_TIMEOUT_SECONDS + 1
+    answering.clear()
+
+
+def pointer(alias, created, type_name="_clipsync._tcp.local.", ttl=4500):
+    """One PTR as an answer packet carries it: the service type it belongs to,
+    the instance it names, and when this machine received it."""
+    return DNSPointer(type_name, _TYPE_PTR, _CLASS_IN, ttl, alias, created)
+
+
+def deliver(subject, now, records):
+    """Hand one packet's worth of records to the presence listener.
+
+    Rebuilt per call, which is the same thing as the one long-lived instance the
+    round attaches: the listener carries nothing of its own — every stamp it
+    makes lands on the Discovery it was built from.
+    """
+    discovery_module._PresenceListener(subject).async_update_records(
+        None, now, [RecordUpdate(record) for record in records]
+    )
+
+
+def test_a_silent_peer_is_reported_lost():
+    subject, found, lost, answering = rig({"Kitchen-9f2a": "peer-2"})
+    peer = Discovery._hash_device_id("peer-2")
+
+    subject._presence_round()
+    assert [call[0] for call in found] == [peer]
+
+    goes_silent(subject, answering)
+    subject._presence_round()
+
+    assert lost == [peer]
+    assert subject._known_peers == {}
+
+
+def test_a_peer_that_answers_again_is_on_the_list_again():
+    """One answer is enough to come back, without re-announcing or restarting.
+
+    This is what the browser cannot do: it fires Added only on *novelty*, and
+    the cached PTR of a peer that was reported lost is not novel -- the library
+    holds it for tens of minutes.
+    """
+    subject, found, lost, answering = rig({"Kitchen-9f2a": "peer-2"})
+    peer = Discovery._hash_device_id("peer-2")
+
+    subject._presence_round()
+    goes_silent(subject, answering)
+    subject._presence_round()
+    assert lost == [peer]
+
+    answering.add("Kitchen-9f2a._clipsync._tcp.local.")
+    subject._presence_round()
+
+    assert [call[0] for call in found] == [peer, peer]
+
+
+def test_resuming_the_browse_does_not_lose_a_device_that_answers():
+    """A pause and resume is the one moment every device is unvouched for.
+
+    ``start_browsing`` clears the name→id map, and that map is the evidence a
+    sweep reads, so a device that answers the round which follows has to be
+    read back into it before the sweep asks -- or a resume flaps the whole list.
+    """
+    subject, found, lost, _answering = rig({"Kitchen-9f2a": "peer-2"})
+    peer = Discovery._hash_device_id("peer-2")
+    subject._presence_round()
+
+    with subject._lock:
+        subject._service_to_peer.clear()  # what start_browsing() does
+
+    subject._presence_round()
+
+    assert lost == []
+    assert [call[0] for call in found] == [peer]
+
+
+def test_only_a_pointer_that_just_arrived_counts_as_hearing_a_peer():
+    """The listener stamps what arrived, not what the cache still holds.
+
+    Registering a listener replays the cache, and the library's sweep delivers
+    records on their way out; both come back looking exactly like an answer
+    (``old`` is None either way).  A stamp from either would keep a device that
+    has been switched off on the list for as long as its record lives -- and the
+    library clamps a PTR's TTL up to 1125 seconds, so that is tens of minutes.
+    """
+    subject = service()
+    subject._instance_name = "Desktop-4c1d._clipsync._tcp.local."
+    now = 1_000_000.0
+    kitchen = "Kitchen-9f2a._clipsync._tcp.local."
+
+    deliver(subject, now, [pointer(kitchen, now)])
+    assert list(subject._heard) == [kitchen]
+
+    # Replayed from the cache, and swept out of it: neither is a peer talking.
+    subject._heard.clear()
+    deliver(
+        subject,
+        now,
+        [
+            pointer(kitchen, now - discovery_module.PRESENCE_STALE_MILLIS - 1),
+            pointer("Hall-3c4d._clipsync._tcp.local.", now - 500, ttl=0),
+        ],
+    )
+    assert subject._heard == {}
+
+    # Our own record coming back to us, and a printer's, which shares the
+    # multicast address and is not a peer.
+    deliver(
+        subject,
+        now,
+        [
+            pointer(subject._instance_name, now),
+            pointer("HP-1._ipp._tcp.local.", now, type_name="_ipp._tcp.local."),
+        ],
+    )
+    assert subject._heard == {}
+
+
+def test_the_question_claims_to_know_nothing():
+    """A known answer suppresses the whole reply, additionals included.
+
+    A responder entitled to suppress an answer sends nothing at all -- not the
+    PTR, and not the SRV, TXT and addresses that would have travelled beside it
+    -- so a question carrying the PTRs this machine already has cached is a
+    question a peer that is sitting right there is never asked.  That is how
+    "the device is not discovered" happens while the device is on the network,
+    and it is why the question is built by hand rather than by the library's own
+    service query.
+    """
+    question = service()._build_query()
+    assert [(q.name, q.type) for q in question.questions] == [
+        ("_clipsync._tcp.local.", _TYPE_PTR)
+    ]
+    assert question.answers == []
 
 
 # ── a tunnel is not a piece of wire ─────────────────────────────────────

@@ -75,6 +75,7 @@ class Discovery:
         self.browsing = False
         self.advertising = False
         self.renames = []
+        self.scans = 0
 
     def set_callbacks(self, found, lost):
         self.found, self.lost = found, lost
@@ -109,6 +110,11 @@ class Discovery:
 
     def stop_advertising(self):
         self.advertising = False
+
+    def scan(self):
+        # Counted: the real one asks the network and waits for the answers,
+        # which is the whole difference between a refresh and a redraw.
+        self.scans += 1
 
     def _wake_recovery(self):
         pass
@@ -915,6 +921,25 @@ def test_discovery_toggle_reports_when_the_state_did_not_change():
         assert runtime.discovery_state() == {"enabled": False, "visible": True}
     finally:
         assert runtime.stop()
+
+
+def test_a_manual_scan_asks_the_network_and_publishes_nothing(rig):
+    """The window's refresh button: one round, on the caller's behalf.
+
+    Nothing about discovery's own state changes, so nothing is published — the
+    device list reaches the window through the sightings the round fires.  It
+    answers with the flags instead, so a scan that could not run is legible to
+    the caller rather than looking like a network with no devices on it.
+    """
+    runtime, _, _, discovery, _, _, events, *_ = rig
+    assert runtime.scan_devices() == {"enabled": True, "visible": True}
+    assert discovery.scans == 1
+    assert events_named(events, "discovery.changed") == []
+
+    assert runtime.stop()
+    with pytest.raises(ApplicationError) as error:
+        runtime.scan_devices()
+    assert error.value.code == "LAN_NOT_RUNNING"
 
 
 def test_two_sided_confirmation_sas_and_persisted_trust(rig):
@@ -2455,14 +2480,18 @@ def test_discovered_peers_shape_matches_the_web_devices_api(rig):
     assert runtime.discovered_peers() == {
         hashed: {"name": "Remote-ad", "address": "127.0.0.1", "port": 9999}
     }
-    # A lapsed announcement is not a device that left, so the entry keeps the
-    # shape it is listed under — and it is the grace, not the goodbye, that
-    # eventually takes it away.
+    # A device that has gone quiet keeps the shape it is listed under: a
+    # goodbye (or a record that lapsed) is one round's worth of not being heard,
+    # and the round after it is what proves the device was never gone.
     discovery.lost(hashed)
     assert runtime.discovered_peers() == {
         hashed: {"name": "Remote-ad", "address": "127.0.0.1", "port": 9999}
     }
-    runtime.SIGHTING_GRACE = 0.0
+    # What takes it off the list is the grace on *membership*, not the one that
+    # decides what the row is made of: for as long as it is there at all, a
+    # quiet device is still the device this machine knows the name, address and
+    # version of.
+    runtime.PRESENCE_GRACE = 0.0
     assert runtime.discovered_peers() == {}
 
 

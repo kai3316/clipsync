@@ -257,6 +257,13 @@ class Dispatcher:
         if method == "devices.certs":
             validate_params(params, {})
             return self.app.require_runtime().certs()
+        if method == "devices.scan":
+            # Asks the LAN who is here before answering, which is what makes the
+            # window's refresh a refresh rather than a re-read of the last
+            # background round: it blocks for about a second, well inside the
+            # host's per-call timeout.
+            validate_params(params, {})
+            return self.app.require_runtime().scan_devices()
         if method == "url.send":
             validate_params(params, {
                 "device_id": (str, lambda v: 0 < len(v) <= 128),
