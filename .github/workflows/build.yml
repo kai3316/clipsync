@@ -54,69 +54,68 @@ jobs:
 
           What is new in this release:
 
-          - A device you rename is now shown under the new name everywhere, and
-            the `.local` name stops coming back.  What a device was called came
-            from its certificate: a name written once, when that identity was
-            first minted -- which on a machine that had never been renamed was
-            the machine's own `.local` name.  Every device that paired with it
-            took a copy of that name, and nothing ever revised either copy, so
-            renaming a device changed the name on that device alone and every
-            other machine went on showing the old one.  The `.local` name came
-            back on the machine that had paired with it: a peer's row falls back
-            to the stored record whenever its mDNS announcement lapses, and that
-            record held the certificate's copy -- which is why a Mac called
-            "Kais-MacBook-Air" was listed by the machine paired with it as
-            "Kais-MacBook-Air.local".  The certificate cannot be reissued to fix
-            this, because its fingerprint is what each paired device pins and a
-            new one reads as an impostor.  The name travels
-            beside it instead: every handshake announces the name the sender
-            answers with, and a device that hears a rename keeps it, so a
-            renamed device is shown correctly the next time the two connect --
-            no re-pairing, and nothing to do on the other machine.
+          - Downloading a file from the clipboard history fetches the file you
+            asked for, the first time.  A clip copied on another machine arrives
+            here as an offer, and the offer names the row the *other* machine
+            stored it as -- an id from that machine's own history, because each
+            device numbers its rows with a counter of its own.  The same clip
+            therefore has two different ids, and 下载 asked for the one this
+            window was showing: the peer looked that number up among its own
+            rows and answered with whatever its row of that number happened to
+            be.  So the first click failed, and every click after it sent the
+            file from the previous clip -- the two histories had drifted apart
+            by exactly the clips captured since.  The id from the offer is what
+            travels now, and a row whose offer this build cannot read offers no
+            download at all rather than one that would name the wrong record on
+            the other side.
 
-          - The settings page no longer undoes a change made elsewhere.  The
-            form was read when it first opened and never again, so a rename made
-            from the overview card, from the phone or from another window sat in
-            that page as the old value -- and saving any card on it wrote the
-            stale copy back, silently reverting the rename.  Opening the page
-            re-reads it now, unless there is an unsaved edit in it, in which
-            case the fields that actually changed are folded in and everything
-            else you have typed stays where it is.
+          - A device can be talked to, and removed, from its row on the devices
+            page.  打开聊天 was drawn only for a device paired by code and *not*
+            on this network, which left the commonest row in the list -- paired
+            and online, the machine in the next room -- with no way to open a
+            conversation from it, while the chat page offered the same device
+            one.  It is offered on whether the device answers, over either of the
+            two routes it can hold, and the row's menu carries it on every row,
+            dimmed with the reason where there is no answer.  移除设备 was drawn
+            only for a device with a local pairing, which made the device
+            reachable *only* over the internet the one row that could not be
+            taken out of the list: 解除互联网配对 ends the code pairing but
+            archives nothing and forgets the name you gave it.  The two removals
+            are told apart by their icons now as well -- the shield for
+            撤销信任, the cloud for 解除互联网配对 -- where a row holding both
+            pairings wore the same broken link twice.
 
-          - This device's own name follows the runtime on the web and the
-            phone.  It was written into the page once, when the server rendered
-            it, so a device renamed afterwards -- from the desktop window, from
-            the phone, from another browser -- kept the old name in the title
-            bar, the overview and the about card for as long as that page stayed
-            open.  Those read it from the overview the page already polls every
-            five seconds.
+          - A row says what the machine is.  The platform and architecture a
+            device advertises are shown as a chip: the same two facts the update
+            entries beside it are decided on, and what the refusal about two
+            devices not being on the same platform left the reader to guess at,
+            on a row that named no platform anywhere.  A device renamed here now
+            heads its row with the name you gave it, and the name the peer goes
+            by stays on the row underneath, so the row can still be matched
+            against the tray, the chat page and the pairing card, which call the
+            device by its own name.
 
-          - The 在线 chip beside an internet-paired device is re-read.  It is a
-            reading rather than an event -- the backend decides it when it is
-            read, over the last frames heard from that device -- so nothing
-            announced the moment that window lapsed, or the moment a device that
-            had gone quiet spoke again, and the peers were re-read only when the
-            tab opened or a pairing was made or broken.  Both directions stayed
-            wrong for as long as the page was open; that card is polled every
-            five seconds now, as the desktop window already polled it.
+          - The device list is ordered, and starts with this machine.  The rows
+            came over in device-id order, which is stable but says nothing, so a
+            machine that had just appeared sat wherever its id happened to fall
+            and the reader scanned the whole list to find it.  They are ranked
+            the way the tray ranks its own list -- what is up now, then a
+            handshake on its way, then the devices this machine knows and cannot
+            reach, then the ones merely seen -- and read within a rank by the
+            name each row shows.  Above them all is the machine you are sitting
+            at, with the name and the device id that another device needs in
+            order to pair with it: every peer row offered its id to copy while
+            the row for this machine offered nothing.  An empty list says how a
+            device gets into it, and the 配对 button that cannot be pressed says
+            why rather than sitting there dead.
 
-          - Muting a device in nearby chat reaches every surface.  The mute set
-            travels with the session list and the list is pushed, but the set
-            was not in the payload, so a phone or a second window that had not
-            done the muting went on counting an unread badge for a device the
-            user had already silenced.
-
-          - A nearby-chat device coming back online is announced.  Going offline
-            was: that edge is a timer running out.  Coming back has no timer --
-            it is the next frame from that device, whenever it comes -- and the
-            session list is what every surface draws that state from, so a
-            device that came back kept reading 离线 until something unrelated
-            moved the list.
-
-          - A sync pause armed or ended from the phone appears in the desktop
-            window at once, and so does a flip of the two LAN discovery
-            switches.  Both were read on the way into the page that draws them,
-            and both are taken from the events that already carry them now.
+          - A pairing request that ran out of time reads 已过期, not 已取消.  The
+            two were the same status, and they ask the reader for different
+            things: a cancellation is somebody's answer -- the other side said
+            no -- while an expiry is nobody's, and what it wants is another
+            attempt rather than a search for a fault at the other end.  The code
+            a device shows while it waits can be copied now, for a reader
+            comparing it with somebody standing at the other machine.
 
           The device name is now published in the mDNS record, to the local
           network.  That is what lets devices show the name you chose rather
