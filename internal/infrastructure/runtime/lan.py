@@ -2728,6 +2728,16 @@ class LanRuntime:
             previous = self._discovered.get(pid)
             self._discovered[pid] = row
         real = self._resolve(pid)
+        if named:
+            # The peer's own answer, written into the record every surface falls
+            # back to when the peer is not advertising — and the sighting this
+            # arrived on is the only word this machine ever gets that its user
+            # renamed it.  Kept in the sighting alone, the name lasted exactly as
+            # long as the announcement did: the row went back to the one written
+            # when the two last dialed, which is the name frozen on that peer's
+            # certificate, and the web companion — which reads the record and
+            # never the advertisement — showed that older name throughout.
+            self.pairing.set_peer_name(real, name)
         with self._lock:
             dialing = self._connecting.get(real, 0) > time.monotonic()
         if self.pairing.is_peer_paired(real) and (not dialing or previous != row):
@@ -4240,6 +4250,12 @@ class LanRuntime:
         if "device_name" in updated:
             self.sync.device_name = self.config.device_name
             self.transport.device_name = self.config.device_name
+            # ...and the identity, which is where the name the handshake
+            # announces is read from.  The certificate's own copy cannot follow
+            # a rename — every paired device pins its fingerprint — so the frame
+            # carries this one instead, and a rename that never reaches here is
+            # a rename the other side does not hear until both devices restart.
+            self.pairing.set_device_name(self.config.device_name)
             # ...and the advertisement, which is the third place our own name
             # is published and the only one that reaches the other devices.
             # Leaving it out is why the settings page had to promise the rename

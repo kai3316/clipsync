@@ -130,6 +130,47 @@ class PairingManager:
         """
         self._on_new_pairing = callback
 
+    def set_device_name(self, device_name: str):
+        """Rename this device — the name a peer is told when it connects.
+
+        The certificate's OU carries a name too, and it is the wrong one to
+        change: it is written once when the identity is minted, and every paired
+        device pins the fingerprint of the certificate it holds, so reissuing it
+        on a rename would read to all of them as a certificate change.  The name
+        travels in the identity frame instead (see
+        :meth:`TransportManager._send_identity`), and this is the copy it is
+        read from — stale here meant a rename never reached the other side at
+        all until both devices restarted.
+        """
+        name = (device_name or "").strip()
+        if not name:
+            return
+        with self._lock:
+            self._device_name = name
+            if self._identity is not None:
+                self._identity.device_name = name
+
+    def set_peer_name(self, device_id: str, device_name: str) -> bool:
+        """Record the name a peer gives itself; True when it changed.
+
+        The name on a peer's record was written when it was last heard from, and
+        the record is what every surface falls back to when the peer is not
+        advertising — so a device renamed on the other side went on being listed
+        here under the name it used to have.  Only the peer's own answer may be
+        written through, which is the caller's to decide: a name guessed from a
+        truncated instance label is not one.
+        """
+        name = (device_name or "").strip()
+        if not name:
+            return False
+        with self._lock:
+            peer = self._peers.get(device_id)
+            if peer is None or peer.device_name == name:
+                return False
+            logger.info("Peer %s is now called %s", device_id[:12], name)
+            peer.device_name = name
+            return True
+
     def load_or_create_identity(
         self,
         private_key_pem: str,

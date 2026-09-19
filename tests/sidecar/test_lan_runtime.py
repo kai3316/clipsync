@@ -551,12 +551,23 @@ def test_the_name_a_peer_publishes_outranks_the_one_recorded_for_it(rig):
     it can learn that the peer's settings changed; the name the peer publishes
     about itself is the peer's own answer, and it is the one to draw.
     """
-    runtime, _pairing, _transport, discovery, *_ = rig
+    runtime, pairing, _transport, discovery, *_ = rig
+    # Paired, so the row survives the sighting: a device that is away keeps its
+    # row, and the name on that row is the question here.
+    pairing.add_peer("remote", "Remote", pairing.get_peer_certificate("remote"), paired=True)
     hashed = peer_id_hash("remote")
     discovery.found(hashed, "Remote-ad", "127.0.0.1", 9999, "", "", "", "", True)
     assert runtime.devices()["items"][0]["name"] == "Remote-ad"
 
     discovery.found(hashed, "书房的笔记本", "127.0.0.1", 9999, "", "", "", "", True)
+    assert runtime.devices()["items"][0]["name"] == "书房的笔记本"
+
+    # ...and it stays renamed when the announcement goes away.  A sighting
+    # expires on the advertiser's schedule, so a name that only lived in one
+    # lasted exactly as long as that advertisement did: the row fell back to
+    # the name recorded when the two last dialed — the one frozen on the peer's
+    # certificate — and read as a device whose user had already renamed it.
+    discovery.lost(hashed)
     assert runtime.devices()["items"][0]["name"] == "书房的笔记本"
 
 

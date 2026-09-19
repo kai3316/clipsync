@@ -95,6 +95,21 @@ NO_PAIRING_MARKER = "\n#clipsync-no-pairing"
 # "port 0": an older build's frame is exactly what it always was.
 LISTEN_PORT_PREFIX = "#clipsync-listen="
 
+# Prepended to the identity frame's PEM: the name this device answers to now.
+# The certificate carries one too, in its OU, and that one is frozen — it is
+# written when the identity is minted, and reissuing the certificate on a rename
+# would change the fingerprint every paired peer pins.  A device renamed in the
+# settings therefore kept introducing itself under its old name for the life of
+# the certificate, and the peers that read it from there — everything that never
+# hears the mDNS advertisement, which is every dial across a subnet, a VPN or a
+# flaky LAN — listed it as a name its user had already changed.
+#
+# Same mechanism as the port above: a PEM comment line, before the PEM.  A
+# reader that does not know the field loads the same certificate (a PEM parser
+# scans for the BEGIN line) and pins the same DER, and a peer that sends no line
+# means "no name to say", which is an older build's frame exactly as it was.
+NAME_PREFIX = "#clipsync-name="
+
 # The first release that reads the marker above, and therefore the floor for
 # every dial this build makes on a user's behalf: a call to an older peer is a
 # pairing card on that screen, which is the one outcome the marker exists to
@@ -867,6 +882,7 @@ class TransportManager:
         cert_pem: str,
         no_auto_pairing: bool = False,
         listen_port: int = 0,
+        device_name: str = "",
     ):
         """Send our certificate PEM as the first application-level frame.
 
@@ -876,43 +892,67 @@ class TransportManager:
         *listen_port* prepends the port this device's own server accepts on, so
         the side that takes the call can dial back (see
         :data:`LISTEN_PORT_PREFIX`).  Zero sends nothing.
+
+        *device_name* prepends the name this device answers to now (see
+        :data:`NAME_PREFIX`), so the side that reads it can list this device
+        under the name its user chose rather than the one frozen on the
+        certificate.  Empty sends nothing.
         """
-        text = f"{LISTEN_PORT_PREFIX}{int(listen_port)}\n{cert_pem}" if listen_port else cert_pem
+        head = ""
+        if listen_port:
+            head += f"{LISTEN_PORT_PREFIX}{int(listen_port)}\n"
+        if device_name:
+            # A comment line ends at the newline, so a name that carries one
+            # would end the field early and leave the rest of it at the head of
+            # the PEM.  Sanitizing drops the control characters with it.
+            head += f"{NAME_PREFIX}{_sanitize_peer_str(device_name, 128)}\n"
+        text = head + cert_pem
         if no_auto_pairing:
             text += NO_PAIRING_MARKER
-        data = text.encode("ascii")
+        data = text.encode("utf-8")
         frame = struct.pack(">I", len(data)) + data
         sock.sendall(frame)
 
     @staticmethod
-    def _identity_payload(data: bytes) -> tuple[str, bool, int]:
-        """Split an identity frame into ``(cert_pem, no_auto_pairing, listen_port)``.
+    def _identity_payload(data: bytes) -> tuple[str, bool, int, str]:
+        """Split an identity frame into its fields and the certificate.
 
-        The marker is removed before the PEM reaches a parser or a pin, so a
-        frame that carries it is byte-for-byte the frame that did not.  The
-        listen-port line, when there is one, is removed from the returned PEM
-        too — a caller that pins the string should not be pinning a comment —
-        and reported as 0 when absent, which is what every frame from a build
-        older than the field looks like.
+        Returns ``(cert_pem, no_auto_pairing, listen_port, device_name)``.  The
+        marker and the leading comment lines are removed before the PEM reaches
+        a parser or a pin, so a frame that carries them is byte-for-byte the
+        frame that did not.
+
+        A field that is absent is reported as its "unknown" — 0, or "" — which
+        is what every frame from a build older than that field looks like.  The
+        name is decoded as UTF-8: device names are the user's to write, and this
+        application's users write them in Chinese.
         """
-        text = data.decode("ascii", errors="replace")
+        text = data.decode("utf-8", errors="replace")
         no_auto_pairing = text.endswith(NO_PAIRING_MARKER)
         if no_auto_pairing:
             text = text[: -len(NO_PAIRING_MARKER)]
         listen_port = 0
-        if text.startswith(LISTEN_PORT_PREFIX):
+        device_name = ""
+        # The lines before the PEM, in whatever order a sender wrote them.  The
+        # scan stops at the first line that is not one of ours — the PEM's own
+        # BEGIN — so a certificate that contains text resembling a prefix
+        # cannot have its body consumed.
+        while True:
             head, sep, rest = text.partition("\n")
-            if sep and rest:
-                # A line we cannot read is left in place: dropping it would
-                # drop the PEM with it, and an unreadable field is not worth
-                # an unreadable certificate.
+            if not sep or not rest:
+                break
+            # A line of ours whose value cannot be read is consumed like any
+            # other: it is not the PEM's BEGIN line, so leaving it in place
+            # would only put a comment in front of the certificate.
+            if head.startswith(LISTEN_PORT_PREFIX):
                 with contextlib.suppress(ValueError):
-                    listen_port = int(head[len(LISTEN_PORT_PREFIX) :])
-                if listen_port > 0:
-                    text = rest
-                else:
-                    listen_port = 0
-        return text, no_auto_pairing, listen_port
+                    listen_port = max(0, int(head[len(LISTEN_PORT_PREFIX) :]))
+            elif head.startswith(NAME_PREFIX):
+                device_name = _sanitize_peer_str(head[len(NAME_PREFIX) :])
+            else:
+                break
+            text = rest
+        return text, no_auto_pairing, listen_port, device_name
 
     @staticmethod
     def _recv_identity(sock: ssl.SSLSocket, timeout: float = 10.0) -> bytes | None:
@@ -1142,6 +1182,11 @@ class TransportManager:
         logger.info("[%s] connecting to %s:%d (peer_id=%s)", peer_name, address, port, peer_id[:12])
 
         def _connect():
+            # The peer is free to answer with a name of its own (see
+            # :meth:`_send_identity`), so the label this dial carried is rebound
+            # below — keeping every later log line, the stored record and the
+            # connection's own name on what the peer actually calls itself.
+            nonlocal peer_name
             sock = None
             ssl_sock = None
             peer_cert_pem = ""
@@ -1176,12 +1221,16 @@ class TransportManager:
                 # argument that stayed on this machine.  The port travels with
                 # it for the same reason: the accepting side is the one that
                 # needs to call back, and the socket only tells it where this
-                # call came from.
+                # call came from.  The name travels with it because the
+                # certificate's copy is the one written when the identity was
+                # minted, and a device renamed since would otherwise introduce
+                # itself here under a name its user has already changed.
                 self._send_identity(
                     ssl_sock,
                     identity.certificate_pem,
                     no_auto_pairing=no_auto_pairing,
                     listen_port=self._port,
+                    device_name=identity.device_name,
                 )
                 logger.info("[%s] sent identity frame", peer_name)
 
@@ -1217,8 +1266,8 @@ class TransportManager:
                     # side keeps is the address it just dialed, which reached
                     # the peer by definition.  Undecorated all the same, so
                     # nothing downstream pins a comment.
-                    peer_cert_pem, _server_flags, _peer_port = self._identity_payload(
-                        server_cert_data
+                    peer_cert_pem, _server_flags, _peer_port, server_device_name = (
+                        self._identity_payload(server_cert_data)
                     )
                     peer_cert = x509.load_pem_x509_certificate(peer_cert_pem.encode())
 
@@ -1241,6 +1290,13 @@ class TransportManager:
                             real_peer_id = _sanitize_peer_str(cn_attrs[0].value)
                     except Exception:
                         pass
+
+                    if server_device_name:
+                        # What the peer calls itself now, which is the name it
+                        # is listed under here — the label this dial carried was
+                        # this machine's own reading, and the certificate's copy
+                        # is the one frozen when the peer's identity was minted.
+                        peer_name = server_device_name
 
                     was_paired = self._pairing_mgr.is_peer_paired(real_peer_id)
                     logger.info(
@@ -2188,12 +2244,18 @@ class TransportManager:
             # Exchange identity at application level: send our cert,
             # then read the client's cert from its identity frame.
             identity = self._pairing_mgr.get_identity()
-            self._send_identity(ssl_sock, identity.certificate_pem)
+            # The name goes out with the certificate for the same reason as on
+            # the dial side: the certificate's own copy was written when this
+            # identity was minted, so a device renamed since would introduce
+            # itself here under the name its user has already changed.
+            self._send_identity(
+                ssl_sock, identity.certificate_pem, device_name=identity.device_name
+            )
 
             client_cert_data = self._recv_identity(ssl_sock)
             if client_cert_data:
-                peer_cert_pem, peer_no_auto_pairing, peer_listen_port = self._identity_payload(
-                    client_cert_data
+                peer_cert_pem, peer_no_auto_pairing, peer_listen_port, client_device_name = (
+                    self._identity_payload(client_cert_data)
                 )
                 peer_cert = x509.load_pem_x509_certificate(peer_cert_pem.encode())
 
@@ -2227,6 +2289,14 @@ class TransportManager:
                         peer_name = _sanitize_peer_str(ou_attrs[0].value)
                 except Exception:
                     pass
+
+                if client_device_name:
+                    # The name the peer's user chose, which is the one to list it
+                    # under -- the attribute above is written once, when that
+                    # device's identity is minted, and is the name it had then.
+                    # A peer older than the field sends none and keeps the
+                    # certificate's reading, which is all it has ever known.
+                    peer_name = client_device_name
 
                 logger.info(
                     "Identity from %s:%d — peer_id=%s, peer_name=%s",

@@ -1110,11 +1110,30 @@ class TestNearbyChatE2E:
     # ---- tests -------------------------------------------------------------
 
     def test_unpaired_tls_connection_establishes(self, rig):
-        assert DEV_B in rig.a.transport.get_connected_peers()
-        assert DEV_A in rig.b.transport.get_connected_peers()
+        a, b = rig.a, rig.b
+        assert DEV_B in a.transport.get_connected_peers()
+        assert DEV_A in b.transport.get_connected_peers()
         # Both devices know each other's certs but never paired.
-        assert not rig.a.pairing.is_peer_paired(DEV_B)
-        assert not rig.b.pairing.is_peer_paired(DEV_A)
+        assert not a.pairing.is_peer_paired(DEV_B)
+        assert not b.pairing.is_peer_paired(DEV_A)
+        # Each side names the other by what it says it is called.
+        assert dict(a.transport.get_connected_peers_with_names())[DEV_B] == NAME_B
+        assert dict(b.transport.get_connected_peers_with_names())[DEV_A] == NAME_A
+
+        # A rename travels with the next handshake and needs nothing else: no
+        # mDNS sighting carries it here, and the name on B's certificate cannot
+        # change -- it was written when that identity was minted, and every
+        # device that pinned it would read a reissued certificate as a change.
+        b.pairing.set_device_name("书房的本子")
+        a.transport.disconnect_peer(DEV_B)
+        assert _deadline(lambda: DEV_B not in a.transport.get_connected_peers()), (
+            "A never let go of B"
+        )
+        a.transport.connect_to_peer(DEV_B, NAME_B, "127.0.0.1", b.port)
+        assert _deadline(
+            lambda: dict(a.transport.get_connected_peers_with_names()).get(DEV_B) == "书房的本子",
+            timeout=10,
+        ), "B's rename never reached A over the handshake"
 
     def test_chat_invite_text_file_roundtrip_over_tls(self, rig):
         a, b = rig.a, rig.b
