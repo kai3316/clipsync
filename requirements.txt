@@ -1,4 +1,8 @@
 zeroconf>=0.132.0
+# Read directly for the adapter list behind every local address
+# (internal/transport/discovery.py): it is zeroconf's own dependency and reports
+# each adapter's description, which is what tells a tunnel from a wire.
+ifaddr>=0.2.0
 cryptography>=42.0.0
 Pillow>=10.0.0
 pystray>=0.19.0

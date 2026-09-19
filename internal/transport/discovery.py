@@ -5,17 +5,15 @@ other devices running ClipSync on the same local network.
 """
 
 import contextlib
-import json
 import logging
 import platform
 import socket
-import subprocess
 import threading
 from collections.abc import Callable
 
+import ifaddr
 from zeroconf import ServiceBrowser, ServiceInfo, Zeroconf
 
-from internal.platform import decode_console_output
 from internal.system.updater import running_shell
 from internal.transport.ids import peer_id_hash
 from internal.transport.ids import sanitize_peer_str as _sanitize_peer_str
@@ -27,7 +25,17 @@ logger = logging.getLogger(__name__)
 # peer must re-announce to stay "online".  Peers that do not re-announce
 # vanished while browsing was paused and are reported lost (see
 # ``_reconcile_after_resume``).
-RECONFIRM_GRACE_SECONDS = 4.0
+#
+# Sized against the browser's own startup queries, which is the clock this
+# actually races.  A fresh ``ServiceBrowser`` asks four times: immediately, then
+# at +1 s, +4 s and +9 s (zeroconf's ``STARTUP_QUERIES`` and its ``n**2`` retry
+# delays), so the last question is asked ~14 s in.  A grace shorter than that
+# reports a peer lost between two of the browser's own questions — which is
+# exactly what a 4-second window did: the query at +5 s went out to peers the
+# reconcile had already dropped a second earlier.  The window is the browser's,
+# not the peer's: a peer that answers the fourth query is a peer that was there
+# all along, and one lost multicast answer is ordinary.
+RECONFIRM_GRACE_SECONDS = 20.0
 
 # How long the host-name and FQDN lookups may hold up address enumeration.  A
 # ceiling on a working-but-slow resolver, not a target: a name that resolves at
@@ -93,9 +101,10 @@ def get_all_local_addresses():
         ip = (ip or "").strip()
         if not ip or ip == "0.0.0.0" or ip.startswith("127.") or ip.startswith("169.254."):
             return
-        # Privacy: only advertise RFC1918 private LAN addresses.  Public,
-        # VPN and virtual-adapter addresses are never useful for LAN discovery
-        # and would expose more of the machine's network topology than needed.
+        # Privacy: only advertise RFC1918 private addresses.  A public one is
+        # never useful for LAN discovery and would expose more of the machine's
+        # network topology than needed.  A tunnel's address is private by range
+        # and is dropped further down, where the adapters are known.
         if not _is_private_ip(ip):
             return
         if ip not in seen:
@@ -130,6 +139,8 @@ def get_all_local_addresses():
     for ip in _resolved_host_addresses(HOSTNAME_LOOKUP_TIMEOUT):
         _add(ip)
 
+    addresses = _advertisable(addresses, _adapter_kinds())
+
     # Cap the advertised set: more IPs than this means unusual network
     # topology (many adapters) — advertising them all only broadens exposure.
     MAX_ADVERTISED_IPS = 10  # noqa: N806
@@ -141,76 +152,159 @@ def get_all_local_addresses():
     return addresses
 
 
-def _get_interface_priorities():
-    priorities = {}
-    system = platform.system()
+# How good an address is to advertise, and to dial from, lowest first.
+#
+# ``virtual`` ranks worse than ``other`` deliberately.  ``other`` is the bucket
+# every real adapter lands in when its name says nothing this code recognises —
+# a Linux bridge, an unusual vendor string — and a tunnel that outranked one of
+# those would be preferred over the very wire a peer is plugged into.  A virtual
+# adapter is chosen only when it is the only address there is, which is the
+# machine reachable through nothing else.
+_ADAPTER_PRIORITY = {"ethernet": 0, "wifi": 1, "other": 2, "virtual": 3}
+
+# Substrings naming a tunnel or a virtual adapter rather than a piece of wire.
+# Matched against the adapter's *description* as well as its name, which is what
+# makes this independent of the interface language: Windows localizes the
+# friendly name and never the description.  Matching the friendly name alone
+# read a live tunnel as an ordinary adapter -- "VirtualNet" and "Heysocks" match
+# nothing in a keyword list built from "vpn"/"tunnel"/"tap" -- and then handed
+# its address to every peer on the LAN, which dialled it and found nothing.
+_VIRTUAL_MARKERS = (
+    "vpn",
+    "tunnel",
+    "tap",
+    "tun",
+    "wintun",
+    "wireguard",
+    "openvpn",
+    "nordlynx",
+    "tailscale",
+    "zerotier",
+    "clash",
+    "mihomo",
+    "singbox",
+    "sing-box",
+    "v2ray",
+    "xray",
+    "shadowsocks",
+    "socks",
+    "proxy",
+    "warp",
+    "teredo",
+    "ppp",
+    "bridge",
+    "br-",
+    "virtual",
+    "hyper-v",
+    "vethernet",
+    "vmware",
+    "virtualbox",
+    "vmnet",
+    "vbox",
+    "docker",
+    "wsl",
+    "veth",
+    "awdl",
+    "ipsec",
+    "loopback",
+    "bluetooth",
+)
+_WIFI_MARKERS = ("wi-fi", "wifi", "wlan", "wireless", "802.11", "airport")
+_ETHERNET_MARKERS = ("ethernet", "local area")
+
+# The interface's own name, where that is all a platform offers: macOS's ``en0``
+# and ``utun3``, Linux's ``eth0``/``enp3s0``/``wlp2s0``.  Prefixes rather than
+# substrings, because a name is short and a stray match inside one is not a hint.
+_WIRE_NAME_PREFIXES = ("en", "eth")
+_WIFI_NAME_PREFIXES = ("wl", "ww")
+
+
+def _kind_of(text: str, name: str = "") -> str:
+    """Which sort of adapter *text* describes: ethernet, wifi, virtual or other.
+
+    The tunnel test runs first, and that order is the point: "vEthernet (WSL)"
+    and "Hyper-V Virtual Ethernet Adapter" both contain "eth", and a virtual
+    adapter classified as a cable would be preferred over the real one beside it.
+
+    *name* is the interface's own name, which is all an ``ip``/``ifconfig``
+    world offers — ``en0``, ``eth0``, ``wlp2s0``, ``utun3``.  It carries the
+    same distinction the description does, and it is the *only* thing that does
+    where no description exists, so it is matched both ways round: as a prefix,
+    to tell a wire from a wireless one, and as text, where the markers above
+    catch the tunnels.  ``utun3`` is a tunnel because it holds "tun", not
+    because it does not hold "en".
+    """
+    haystack = (text or "").lower()
+    if any(marker in haystack for marker in _VIRTUAL_MARKERS):
+        return "virtual"
+    if any(marker in haystack for marker in _WIFI_MARKERS):
+        return "wifi"
+    if (name or "").lower().startswith(_WIRE_NAME_PREFIXES):
+        return "ethernet"
+    if (name or "").lower().startswith(_WIFI_NAME_PREFIXES):
+        return "wifi"
+    if any(marker in haystack for marker in _ETHERNET_MARKERS):
+        return "ethernet"
+    return "other"
+
+
+def _adapter_kinds() -> dict[str, str]:
+    """Every local IPv4 address, mapped to the kind of adapter carrying it.
+
+    One enumeration, three readers: ``get_all_local_addresses`` drops what must
+    not be advertised, ``_get_interface_priorities`` ranks the rest, and the
+    candidates a peer offers are ranked against our own tunnels.
+
+    Read from ``ifaddr`` — the same interface list zeroconf itself binds its
+    sockets to — rather than from the platform's own tooling.  It reports each
+    adapter's description ("VirtualNet Tunnel", "TAP-Windows Adapter V9",
+    "Intel(R) Ethernet Controller I226-V") next to its address, needs no process
+    spawn and no console codepage, and reads the same way on all three
+    platforms.  An enumeration that fails yields no kinds, which is the
+    behaviour every caller had before kinds existed.
+    """
+    kinds: dict[str, str] = {}
     try:
-        if system == "Windows":
-            result = subprocess.run(
-                [
-                    "powershell",
-                    "-NoProfile",
-                    "-Command",
-                    "Get-NetIPAddress -AddressFamily IPv4 "
-                    "| Select-Object IPAddress, InterfaceAlias "
-                    "| ConvertTo-Json",
-                ],
-                capture_output=True,
-                timeout=5,
-                # Raw bytes + decode_console_output: InterfaceAlias is
-                # localized ("以太网") and PowerShell writes it in the console
-                # output codepage, while text=True would decode with the ANSI
-                # one.  That mismatch raised UnicodeDecodeError inside
-                # subprocess's reader thread and returned EMPTY output, so IP
-                # detection silently found nothing; guessing the wrong codepage
-                # instead mangles the alias.  Only IPAddress is matched below.
-                # No console window: in the packaged (console=False) Windows
-                # build, spawning the console-mode powershell.exe without this
-                # flag flashes a black console box on every startup.
-                creationflags=subprocess.CREATE_NO_WINDOW,
-            )
-            if result.returncode != 0:
-                return priorities
-            entries = json.loads(decode_console_output(result.stdout))
-            if isinstance(entries, dict):
-                entries = [entries]
-            for e in entries:
-                ip = e.get("IPAddress", "")
-                iface = e.get("InterfaceAlias", "").lower()
-                if not ip:
+        for adapter in ifaddr.get_adapters():
+            # ``name`` is the interface's own name (``en0``, ``eth0``) and
+            # ``nice_name`` its description; on Windows the first is a GUID and
+            # the second is the vendor's words, and on POSIX it is the other way
+            # round.  Both go in, and the name half is offered to the prefix
+            # rules as well.
+            name = adapter.name or ""
+            text = f"{adapter.nice_name or ''} {name}"
+            for entry in adapter.ips:
+                if not getattr(entry, "is_IPv4", False):
                     continue
-                if any(k in iface for k in ("ethernet", "eth", "local area")):
-                    priorities[ip] = 0
-                elif any(k in iface for k in ("wi-fi", "wlan", "wireless", "wifi")):
-                    priorities[ip] = 1
-                elif any(k in iface for k in ("vpn", "tunnel", "tap", "ppp", "teredo")):
-                    priorities[ip] = 2
-                else:
-                    priorities[ip] = 3
-        else:
-            result = subprocess.run(["ifconfig"], capture_output=True, text=True, timeout=5)
-            iface = ""
-            for line in result.stdout.splitlines():
-                if line and line[0] not in ("\t", " "):
-                    iface = line.split(":")[0].split()[0].lower()
-                elif "inet " in line and iface:
-                    parts = line.strip().split()
-                    try:
-                        idx = parts.index("inet")
-                        ip = parts[idx + 1]
-                        if any(k in iface for k in ("eth", "en")):
-                            priorities[ip] = 0
-                        elif any(k in iface for k in ("wlan", "wl", "wi-fi")):
-                            priorities[ip] = 1
-                        elif any(k in iface for k in ("tun", "tap", "vpn", "ppp", "utun")):
-                            priorities[ip] = 2
-                        else:
-                            priorities[ip] = 3
-                    except (ValueError, IndexError):
-                        pass
-    except Exception:
-        pass
-    return priorities
+                kinds[entry.ip] = _kind_of(text, name)
+    except Exception as exc:
+        logger.debug("Could not classify the local adapters: %s", exc)
+    return kinds
+
+
+def _advertisable(addresses: list[str], kinds: dict[str, str]) -> list[str]:
+    """*addresses* without the tunnel ones, unless those are all there is.
+
+    A tunnel's address is private by range -- WireGuard's 10.x, OpenVPN's
+    172.16-31.x -- so it survives every other filter here, and it is still not
+    somewhere a peer on this network can reach us: the peer that dials it dials
+    a black hole and lists a device it cannot talk to.  The exception is a
+    machine whose only way to be reached IS the tunnel; that one advertises it,
+    because the alternative is advertising nothing at all.
+    """
+    reachable = [ip for ip in addresses if kinds.get(ip) != "virtual"]
+    return reachable or addresses
+
+
+def _get_interface_priorities() -> dict[str, int]:
+    """Sort key per local address, lowest wins (see ``_ADAPTER_PRIORITY``)."""
+    fallback = _ADAPTER_PRIORITY["other"]
+    return {ip: _ADAPTER_PRIORITY.get(kind, fallback) for ip, kind in _adapter_kinds().items()}
+
+
+def _virtual_addresses() -> set[str]:
+    """Addresses carried by a tunnel or a virtual adapter on this machine."""
+    return {ip for ip, kind in _adapter_kinds().items() if kind == "virtual"}
 
 
 def _get_local_address():
@@ -252,12 +346,51 @@ def _is_private_ip(ip: str) -> bool:
     return a == 10 or (a == 192 and b == 168) or (a == 172 and 16 <= b <= 31)
 
 
-def _pick_best_address(candidates: list[str], our_ip: str) -> str:
+def _route_source(ip: str) -> str | None:
+    """The local address this machine would reach *ip* from, or None.
+
+    A UDP socket that is connected and never written to sends nothing: this asks
+    the routing table a question, reads the answer off ``getsockname()`` and
+    closes the socket.  None means the OS has no route to it at all, which is a
+    real answer too — a peer's address this machine cannot reach is not the
+    address to dial it at, however ordinary the number looks.
+    """
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        sock.connect((ip, 5353))
+        return sock.getsockname()[0]
+    except OSError:
+        return None
+    finally:
+        sock.close()
+
+
+def _pick_best_address(
+    candidates: list[str], our_ip: str, virtual_ips: frozenset[str] = frozenset()
+) -> str:
     """Choose the remote address most likely reachable on the LAN.
 
-    Prefers an address on the same /24 subnet as our own (peers on the same
-    network share that prefix), then any private address, then the rest.
-    Falls back to the first candidate on a tie.
+    Ranked, best first:
+
+      0. on the same /24 as our own address — a peer on this network;
+      1. a private address this machine would reach over a real interface;
+      2. a private address it would reach through a tunnel of its own, which is
+         right for a peer that really is on the same VPN and wrong for one that
+         is on this network;
+      3. a private address it has no route to at all;
+      4. the rest.
+
+    Rank 1 against rank 2 is the one that matters with a VPN up.  Every private
+    address used to rank equally and the tie was broken by the *string*, so a
+    peer advertising both 192.168.1.238 and a tunnel's 10.8.0.2 was dialled at
+    the tunnel address — "10." sorts before "192." — from any machine not on its
+    own /24.  Which route a packet would leave by is the routing table's answer,
+    so the routing table is asked.
+
+    Falls back to the first candidate on a tie, and ties within a rank are still
+    broken by the address string: mDNS address order is unstable across
+    announcements, and index-based tie-breaking made the chosen address flap
+    between two same-rank interfaces.
     """
 
     def _subnet(ip: str) -> str:
@@ -269,9 +402,15 @@ def _pick_best_address(candidates: list[str], our_ip: str) -> str:
     def rank(ip: str) -> tuple:
         if _subnet(ip) == our_sub:
             return (0,)
-        if _is_private_ip(ip):
-            return (1,)
-        return (2,)
+        if not _is_private_ip(ip):
+            return (4,)
+        source = _route_source(ip)
+        if source is None:
+            # Nowhere to send it: this machine cannot reach that address at all.
+            return (3,)
+        if source in virtual_ips:
+            return (2,)
+        return (1,)
 
     # Tie-break by the address string, not the list index — mDNS address order
     # is unstable across announcements, so index-based tie-breaking made the
@@ -305,6 +444,11 @@ class Discovery:
         self._known_peers: dict[str, dict] = {}  # peer_id -> info
         self._service_to_peer: dict[str, str] = {}  # service_name -> peer_id
         self._our_ip = "127.0.0.1"
+        # This machine's own tunnel and virtual-adapter addresses, refreshed
+        # wherever the advertisement is rebuilt (see _advertised_ips).  A peer's
+        # candidate addresses are ranked against it, and the mDNS callback
+        # thread must not go looking for adapters to do that.
+        self._virtual_ips: frozenset[str] = frozenset()
         # Network-change watcher state: the set of addresses we advertised,
         # plus a stop signal for the light poll in _network_watch_loop.
         self._netmon_stop = threading.Event()
@@ -364,13 +508,18 @@ class Discovery:
         # instead of a device that advertises.
         return _clip_bytes(_sanitize_peer_str(name), 200)
 
-    def _service_props(self) -> dict[bytes, bytes]:
+    def _service_props(self, addresses: list[str] | None = None) -> dict[bytes, bytes]:
         """The TXT record we publish, for both registrations.
 
         Built in one place because it is published twice — once by ``start``
         and again by every ``start_advertising`` — and a field added to one
         copy only would be there or not depending on whether this device had
         been hidden and shown again.
+
+        *addresses* is the list the caller is also putting in the A records, so
+        that the two halves of one registration describe the same machine.  Left
+        out, it is enumerated here — which is what a caller with no A records to
+        fill in wants.
         """
         # Use the hashed device_id to avoid exposing the real device identity
         # in plaintext mDNS TXT records.
@@ -391,7 +540,9 @@ class Discovery:
         name = self._published_name()
         if name:
             props[b"n"] = name.encode("utf-8")
-        for i, ip in enumerate(get_all_local_addresses()):
+        if addresses is None:
+            addresses = get_all_local_addresses()
+        for i, ip in enumerate(addresses):
             props[f"alt_ip_{i}".encode()] = ip.encode()
         return props
 
@@ -430,8 +581,8 @@ class Discovery:
             logger.error("Failed to initialize mDNS: %s", e)
             return
 
-        props = self._service_props()
         all_ips = get_all_local_addresses()
+        props = self._service_props(all_ips)
         local_ip = _get_local_address()
         self._our_ip = local_ip
         logger.info("Registering mDNS on %s (all IPs: %s)", local_ip, all_ips)
@@ -439,10 +590,13 @@ class Discovery:
         # Register our service – use a truncated display name so the
         # real hostname is not broadcast in plaintext on the LAN.
         #
-        # Advertise ALL local addresses (not just the "best" one) so peers
+        # Advertise ALL our LAN addresses (not just the "best" one) so peers
         # on any of our subnets can reach us. Previously we only advertised
         # a single IP chosen by a fragile interface heuristic, which broke
-        # discovery whenever that IP belonged to a VPN/virtual adapter.
+        # discovery whenever that IP belonged to a VPN/virtual adapter -- so
+        # the lesson is that every address on a real adapter goes out, and the
+        # tunnel's is the one address that must not (it is not reachable from
+        # this network at all; see get_all_local_addresses).
         advertised = [socket.inet_aton(ip) for ip in all_ips]
         if not advertised:
             advertised = [socket.inet_aton(local_ip)]
@@ -500,6 +654,7 @@ class Discovery:
         # produce no sleep/wake event, so without this the stale mDNS
         # advertisement keeps pointing peers at a dead address.
         self._advertised_ips = frozenset(all_ips)
+        self._virtual_ips = frozenset(_virtual_addresses())
         self._netmon_stop.clear()
         threading.Thread(
             target=self._network_watch_loop,
@@ -633,10 +788,14 @@ class Discovery:
             return
         # Rebuild service info (IPs may have changed, and ServiceInfo
         # can't be re-registered after unregistration).
-        props = self._service_props()
         all_ips = get_all_local_addresses()
+        props = self._service_props(all_ips)
         local_ip = _get_local_address()
         self._our_ip = local_ip
+        # The tunnels moved with the addresses, and this is the pass that
+        # notices: a VPN coming up adds one, and every peer's candidate list is
+        # ranked against the set from here on.
+        virtual = frozenset(_virtual_addresses())
         advertised = [socket.inet_aton(ip) for ip in all_ips]
         if not advertised:
             advertised = [socket.inet_aton(local_ip)]
@@ -660,6 +819,7 @@ class Discovery:
         with self._lock:
             self._service_info = info
             self._advertised_ips = frozenset(all_ips)
+            self._virtual_ips = virtual
         logger.info("Resumed advertising this device on port %d", self._port)
 
     def _wake_recovery(self):
@@ -809,7 +969,10 @@ class Discovery:
         peer_display = peer_name or label
 
         our_ip = getattr(self, "_our_ip", None) or _get_local_address()
-        address = _pick_best_address(candidates, our_ip)
+        # Read off the instance rather than looked up: this runs on the
+        # browser's own thread, and the set was refreshed by whichever pass last
+        # built the advertisement — the same events that move it.
+        address = _pick_best_address(candidates, our_ip, self._virtual_ips)
 
         with self._lock:
             existing = self._known_peers.get(peer_id_hash)

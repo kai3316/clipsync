@@ -102,9 +102,7 @@ def test_a_rename_is_registered_rather_than_only_stored(monkeypatch):
         unregister_service=unregistered.append,
     )
     # Not None: this device is advertising.
-    subject._service_info = SimpleNamespace(
-        name=f"{subject._display_name}.{subject._service_type}"
-    )
+    subject._service_info = SimpleNamespace(name=f"{subject._display_name}.{subject._service_type}")
     old_label = subject._display_name
 
     subject.set_device_name("书房的笔记本")
@@ -126,9 +124,7 @@ def test_a_rename_of_only_the_hostname_changes_nothing_to_register(monkeypatch):
         register_service=registered.append,
         unregister_service=lambda _info: None,
     )
-    subject._service_info = SimpleNamespace(
-        name=f"{subject._display_name}.{subject._service_type}"
-    )
+    subject._service_info = SimpleNamespace(name=f"{subject._display_name}.{subject._service_type}")
 
     subject.set_device_name("sukai-desktop-two")
 
@@ -147,9 +143,7 @@ def test_renaming_to_the_same_name_is_not_a_change(monkeypatch):
         register_service=registered.append,
         unregister_service=lambda _info: None,
     )
-    subject._service_info = SimpleNamespace(
-        name=f"{subject._display_name}.{subject._service_type}"
-    )
+    subject._service_info = SimpleNamespace(name=f"{subject._display_name}.{subject._service_type}")
     subject.set_device_name("书房的台式机")
     assert registered == []
 
@@ -182,17 +176,22 @@ def discovered():
 def test_a_peer_that_published_its_name_is_listed_under_it(monkeypatch):
     fast_addresses(monkeypatch)
     subject, seen = discovered()
-    zc, service_type, name = sighting({
-        b"device_id_hash": Discovery._hash_device_id("peer-2").encode(),
-        b"n": "厨房的树莓派".encode(),
-        b"app": b"tauri",
-    })
+    zc, service_type, name = sighting(
+        {
+            b"device_id_hash": Discovery._hash_device_id("peer-2").encode(),
+            b"n": "厨房的树莓派".encode(),
+            b"app": b"tauri",
+        }
+    )
 
     subject._handle_service_added(zc, service_type, name)
 
     peer_id, peer_name, address, port, *_rest, named = seen[0]
     assert (peer_id, peer_name, address, port) == (
-        Discovery._hash_device_id("peer-2"), "厨房的树莓派", "192.168.1.7", 9999,
+        Discovery._hash_device_id("peer-2"),
+        "厨房的树莓派",
+        "192.168.1.7",
+        9999,
     )
     # Which application the peer runs travels with the rest of what it said: it
     # is not a property of the OS, and the device list needs it to know whether
@@ -205,9 +204,11 @@ def test_a_peer_that_published_nothing_falls_back_to_its_label(monkeypatch):
     """Older builds send no name; the truncated label is all they offer."""
     fast_addresses(monkeypatch)
     subject, seen = discovered()
-    zc, service_type, name = sighting({
-        b"device_id_hash": Discovery._hash_device_id("peer-2").encode(),
-    })
+    zc, service_type, name = sighting(
+        {
+            b"device_id_hash": Discovery._hash_device_id("peer-2").encode(),
+        }
+    )
 
     subject._handle_service_added(zc, service_type, name)
 
@@ -241,3 +242,74 @@ def test_the_same_sighting_twice_is_not_reported_twice(monkeypatch):
     subject._handle_service_added(*sighting(properties))
     subject._handle_service_added(*sighting(properties))
     assert len(seen) == 1
+
+
+# ── a tunnel is not a piece of wire ─────────────────────────────────────
+
+
+def test_a_tunnel_is_read_from_the_description_not_the_name(monkeypatch):
+    """The friendly name is whatever the vendor or the locale made it, and the
+    description is the product's own words.
+
+    "VirtualNet" and "Heysocks" match nothing a list of tunnel names would
+    hold, so a live tunnel read as an ordinary adapter -- and its address, being
+    private by range, went out to every peer on the LAN as one to dial.
+    """
+    kind = discovery_module._kind_of
+    assert kind("VirtualNet VirtualNet Tunnel") == "virtual"
+    assert kind("Heysocks TAP-Windows Adapter V9") == "virtual"
+    assert kind("WireGuard Tunnel WireGuard Tunnel") == "virtual"
+    # A real adapter, wherever its name is in a language this code cannot read.
+    assert kind("Wi-Fi MediaTek Wi-Fi 7 MT7925 Wireless LAN Card") == "wifi"
+    assert kind("Ethernet Intel(R) Ethernet Controller I226-V") == "ethernet"
+    # The ordering the whole classification rests on: a virtual adapter whose
+    # description contains a wire's word is still virtual.
+    assert kind("vEthernet (WSL) Hyper-V Virtual Ethernet Adapter") == "virtual"
+    # Where a name is all the platform offers, it carries the same distinction.
+    assert kind("en0", "en0") == "ethernet"
+    assert kind("utun3", "utun3") == "virtual"
+    assert kind("eth0", "eth0") == "ethernet"
+    assert kind("wlp2s0", "wlp2s0") == "wifi"
+    assert kind("br-1a2b3c", "br-1a2b3c") == "virtual"
+
+
+def test_a_tunnel_address_is_advertised_only_when_it_is_all_there_is(monkeypatch):
+    """A peer that dials a tunnel address is a peer that lists a dead device."""
+    kinds = {"192.168.31.250": "wifi", "172.19.0.1": "virtual"}
+    assert discovery_module._advertisable(["172.19.0.1", "192.168.31.250"], kinds) == [
+        "192.168.31.250"
+    ]
+    # Nothing left to offer but the tunnel: an address a peer may not reach
+    # beats no address at all.
+    assert discovery_module._advertisable(["172.19.0.1"], kinds) == ["172.19.0.1"]
+
+
+def test_a_peer_is_dialled_where_this_machine_would_reach_it(monkeypatch):
+    """Two private addresses used to rank equally, and the tie was the string.
+
+    So a peer advertising both its LAN address and its tunnel's was dialled at
+    the tunnel's — "10." and "172." sort before "192." — from any machine not
+    on its own /24.  Which of the two leaves over a real interface is the
+    routing table's answer, and it is the only thing asked.
+    """
+    virtual = frozenset({"172.19.0.1"})
+    pick = discovery_module._pick_best_address
+    routes = {}
+    monkeypatch.setattr(discovery_module, "_route_source", lambda ip: routes.get(ip))
+
+    # The peer's tunnel address would leave through ours; its LAN address would
+    # not.  This is the pair the old string tie-break got backwards.
+    routes.update({"10.8.0.2": "172.19.0.1", "192.168.1.238": "192.168.31.250"})
+    assert pick(["10.8.0.2", "192.168.1.238"], "192.168.31.250", virtual) == "192.168.1.238"
+
+    # A tunnel is a real route and a missing one is not: of two addresses that
+    # are not on our subnet, the one this machine can actually send to wins.
+    routes.clear()
+    routes.update({"10.8.0.2": None, "172.16.5.9": "172.19.0.1"})
+    assert pick(["10.8.0.2", "172.16.5.9"], "192.168.31.250", virtual) == "172.16.5.9"
+
+    # Same subnet still wins outright, whatever the routes say: this is the
+    # case that must never change, and it is most of them.
+    routes.clear()
+    routes.update({"10.8.0.2": "192.168.31.250", "192.168.31.238": "172.19.0.1"})
+    assert pick(["10.8.0.2", "192.168.31.238"], "192.168.31.250", virtual) == "192.168.31.238"
