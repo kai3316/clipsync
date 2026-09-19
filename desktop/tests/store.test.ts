@@ -51,24 +51,35 @@ describe("desktop application store", () => {
     await store.start();
     const emit = vi.mocked(bridge.subscribe).mock.calls[0][0];
     store.state.devices = [{ ...pairedDevice, id: "peer-1", name: "Studio" }];
-    const row = { id: "7", source_device: "peer-1" } as HistoryItem;
+    // "7" is this machine's row; "42" is the id the peer stored the clip as —
+    // different numbers for one clip, and the peer resolves against its own.
+    const row = { id: "7", source_device: "peer-1", offer_entry: "42" } as HistoryItem;
 
     expect(await store.downloadRemoteFile(row)).toBe(true);
-    expect(bridge.requestEntryFiles).toHaveBeenCalledExactlyOnceWith("7", "peer-1");
+    expect(bridge.requestEntryFiles).toHaveBeenCalledExactlyOnceWith("42", "peer-1");
     // The row waits — the button shows it is waiting — until the peer either
-    // starts sending or says why it cannot.
-    expect(store.state.remoteFilePending).toEqual(["peer-1:7"]);
+    // starts sending or says why it cannot.  Keyed by the id that was asked
+    // with, which is the id a refusal comes back carrying.
+    expect(store.state.remoteFilePending).toEqual(["peer-1:42"]);
 
     // The reason crosses the wire as a code, because the peer does not know
     // which language this window is in; it is worded here.
     emit({ type: "event", name: "clip.file.denied", session_id: "session",
-      data: { device_id: "peer-1", entry_id: "7", reason: "gone" } });
+      data: { device_id: "peer-1", entry_id: "42", reason: "gone" } });
     expect(store.state.remoteFilePending).toEqual([]);
     expect(store.state.notices.map((notice) => notice.message)).toEqual([
       t("{name} 没能发送这个文件：{reason}", {
         name: "Studio", reason: t("文件已被移动或删除"),
       }),
     ]);
+
+    // A row whose offer named no id this build can read has nothing to ask
+    // with — and asking with the row's own id would land on an unrelated record
+    // on the peer — so the ask is refused here instead of guessed at.
+    expect(await store.downloadRemoteFile(
+      { id: "8", source_device: "peer-1" } as HistoryItem,
+    )).toBe(false);
+    expect(bridge.requestEntryFiles).toHaveBeenCalledTimes(1);
   });
   it("queues incoming transfer requests using the runtime event and filename", async () => {
     const store = createApplicationStore();

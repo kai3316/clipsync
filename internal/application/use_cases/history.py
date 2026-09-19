@@ -306,6 +306,36 @@ def searchable(entry: dict) -> str:
 TEXT_READ_LIMIT = 100_000
 
 
+def offer_entry(entry: dict) -> str:
+    """The entry id the *publishing* device knows this row by, or "".
+
+    A file that lives on another machine arrives as an offer naming the id of
+    the row that published it — that machine's own history id, which this
+    machine's row does *not* have.  Both sides number rows with a local counter
+    of their own, so the two drift apart by however many clips each captured by
+    itself, and the ids collide silently: asking a peer for this row's id would
+    resolve, on that peer, to an unrelated record — an older file, or a clip
+    that is not a file at all.
+
+    So a download has to name *this* id, and this is where it is read out of the
+    stored offer.  It is the counterpart of ``source_device``: that is which
+    machine to ask, this is what to ask it for.
+
+    Empty for every row that is not a file offer, and for one whose payload is
+    not an offer this build can read (a newer ``OFFER_VERSION`` from a newer
+    peer) — the two cases a caller must not paper over by falling back to the
+    row's own id.
+    """
+    stored = (entry.get("types") or {}).get("FILE_REMOTE")
+    if not stored:
+        return ""
+    try:
+        return file_ref.entry_id_of(base64.b64decode(stored))
+    except (binascii.Error, ValueError, TypeError):
+        logger.debug("Unreadable file offer on entry %r", entry.get("entry_id"))
+        return ""
+
+
 def row_dto(entry: dict, source_label=None, preview_limit: int = 1000) -> dict:
     """One stored entry as a window reads it.
 
@@ -338,10 +368,17 @@ def row_dto(entry: dict, source_label=None, preview_limit: int = 1000) -> dict:
         else "",
         # The device *id* behind that name.  A row's file lives on the machine
         # that published it, and asking for it means naming that machine — the
-        # label is for reading, this is what a 下载 request carries.  Empty for a
-        # clip captured here, which is exactly the row a file offer resolves
-        # against on the other side.
+        # label is for reading, this is half of what a 下载 request carries, the
+        # other half being `offer_entry` below.  Empty for a clip captured here,
+        # which is exactly the row a file offer resolves against on the other
+        # side.
         "source_device": str(entry.get("source_device", "")),
+        # What to ask that device for.  The two travel together and mean nothing
+        # apart: a request names a device and an entry *belonging to that
+        # device's history*, and this row's own id is not it — see
+        # `offer_entry`.  Empty for every row but a remote file, where the
+        # window's action is 下载.
+        "offer_entry": offer_entry(entry),
         "source_app": str(entry.get("source_app", "")),
         "source_title": str(entry.get("source_title", ""))[:SOURCE_TITLE_LIMIT],
         # Which of the three routes carried it: "lan" for a peer on a direct

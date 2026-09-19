@@ -651,11 +651,25 @@ function remoteFileDevice(item: HistoryItem) {
   if (!id) return undefined;
   return state.devices.find((device) => device.id === id && device.connection_state === "online");
 }
+/** Whether the row names a file this window can actually ask for.
+ *
+ * A file offer names the entry the *publishing* device stored the clip as, and
+ * that id — not this row's — is what a request carries.  An offer this build
+ * cannot read (a newer version's shape) leaves the row with nothing to ask
+ * with, so it offers no download rather than one that would name the wrong
+ * entry over there.
+ */
+function remoteFileAskable(item: HistoryItem) {
+  return !!item.offer_entry;
+}
 function remoteFileBusy(item: HistoryItem) {
-  return state.remoteFilePending.includes(`${item.source_device || ""}:${item.id}`);
+  // Keyed by the id that goes on the wire, which is the id a refusal comes back
+  // with — see `downloadRemoteFile`.
+  return state.remoteFilePending.includes(`${item.source_device || ""}:${item.offer_entry || ""}`);
 }
 function remoteFileTitle(item: HistoryItem) {
   if (remoteFileBusy(item)) return t("已请求下载，正在等待那台设备");
+  if (!remoteFileAskable(item)) return t("这条记录无法下载");
   if (!remoteFileDevice(item)) return t("{name} 当前不在线", { name: item.source_name || t("未知") });
   return t("从 {name} 下载这个文件", { name: item.source_name || t("未知") });
 }
@@ -690,7 +704,7 @@ function historyMenu(event: MouseEvent, item: HistoryItem) {
     isRemoteFile(item)
       ? {
           id: "download-file", label: t("下载文件"), icon: Download,
-          disabled: !remoteFileDevice(item) || remoteFileBusy(item),
+          disabled: !remoteFileAskable(item) || !remoteFileDevice(item) || remoteFileBusy(item),
           run: () => downloadRemoteFile(item),
         }
       : null,
@@ -4306,7 +4320,7 @@ async function translateText() {
                      machine, so what the row offers is the ask.  It replaces
                      rather than sits beside the copy button — two buttons on one
                      row where only one of them can work is worse than one. -->
-                <button v-if="isRemoteFile(item)" class="icon-button" :aria-label="t('下载文件')" :title="remoteFileTitle(item)" :disabled="historyBusy || remoteFileBusy(item)" @click="downloadRemoteFile(item)"><Check v-if="remoteFileBusy(item)" :size="17" /><Download v-else :size="17" /></button>
+                <button v-if="isRemoteFile(item)" class="icon-button" :aria-label="t('下载文件')" :title="remoteFileTitle(item)" :disabled="historyBusy || remoteFileBusy(item) || !remoteFileAskable(item)" @click="downloadRemoteFile(item)"><Check v-if="remoteFileBusy(item)" :size="17" /><Download v-else :size="17" /></button>
                 <button class="icon-button" :class="{ pinned: item.pinned }" :aria-label="item.pinned ? t('取消收藏') : t('收藏')" :title="item.pinned ? t('取消收藏') : t('收藏')" :disabled="historyBusy" @click="store.pin(item)"><Pin :size="17" /></button>
                 <button class="icon-button" :aria-label="t('翻译记录')" :title="t('翻译记录')" :disabled="historyBusy || translateItemReading" @click="openTranslateItem(item)"><Globe :size="17" /></button>
                 <button v-if="isWebLink(item)" class="icon-button" :aria-label="t('在浏览器打开')" :title="t('在浏览器打开')" :disabled="historyBusy" @click="openHistoryLink(item)"><ExternalLink :size="17" /></button>

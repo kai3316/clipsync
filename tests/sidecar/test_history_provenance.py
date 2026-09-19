@@ -6,6 +6,7 @@ rows and has no other way to learn any of it: the list is the only payload it
 sees, and a row's own text does not say which machine it came from.
 """
 
+import base64
 from unittest.mock import Mock
 
 import pytest
@@ -18,6 +19,7 @@ from internal.application.use_cases.history import (
     HistoryUseCase,
     source_name,
 )
+from internal.clipboard import file_ref
 from internal.config.config import Config, PeerInfo, save
 
 
@@ -64,6 +66,36 @@ def test_a_row_ships_the_route_it_arrived_on():
     assert [item["transport"] for item in service.list()["items"]] == [
         "relay", "lan", "web", "",
     ]
+
+
+def test_a_remote_file_row_names_the_senders_entry_not_its_own():
+    """The two halves of a download, and why they are not the same number.
+
+    A file that lives on another machine is asked for by device *and* entry —
+    and the entry belongs to the history of that machine, which numbers its rows
+    with a counter of its own.  Sending this row's own id would name an unrelated
+    clip over there, so the id travels here inside the offer the clip arrived as
+    and is read back out, never assumed from the row.
+    """
+    payload = file_ref.offer("h-3", [{"name": "a.md", "size": 5, "kind": "file"}], 1)
+    item = use_case([row(
+        entry_id="7", source_device="peer-b",
+        types={"FILE_REMOTE": base64.b64encode(payload).decode()},
+    )]).list()["items"][0]
+
+    assert item["id"] == "7"
+    assert (item["source_device"], item["offer_entry"]) == ("peer-b", "h-3")
+
+
+def test_a_row_with_no_readable_offer_names_nothing():
+    """Which is what turns the download off rather than aiming it at this
+    machine's own id: a payload this build cannot parse (a newer offer from a
+    newer peer) leaves nothing honest to send."""
+    service = use_case([
+        row(entry_id="7", types={"FILE_REMOTE": base64.b64encode(b"not an offer").decode()}),
+        row(entry_id="8", types={"TEXT": base64.b64encode(b"hi").decode()}),
+    ])
+    assert [item["offer_entry"] for item in service.list()["items"]] == ["", ""]
 
 
 def test_a_title_longer_than_a_window_title_is_cut():

@@ -758,6 +758,9 @@ export const EN: Record<string, string> = {
   // as the page's own download rather than this row's.
   "下载文件": "Download file",
   "从 {name} 下载这个文件": "Download this file from {name}",
+  // The row itself cannot be asked for: its offer named no entry this build can
+  // read, so there is no id to send and no honest click to offer.
+  "这条记录无法下载": "This record cannot be downloaded",
   "已请求下载，正在等待那台设备": "Download requested — waiting for that device",
   "已请求下载，对方开始发送后可在文件传输里查看":
     "Download requested — it will appear under File transfers once that device starts sending",

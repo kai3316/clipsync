@@ -612,8 +612,18 @@ def test_history_dtos_do_not_expose_raw_payloads_or_paths(app):
         # carries — a device can be renamed on either side. An id, like the
         # row's own, not a path and not a payload.
         "source_device",
+        # ...and, for that same row, the id of the entry *on that device* to ask
+        # it for — the other half of the request, and not this row's `id` above.
+        # It is read out of the file offer the clip arrived as: an id the peer
+        # minted for its own history, so it names nothing here and is no more a
+        # stored payload than `source_device` is.
+        "offer_entry",
     }
     assert item["preview"] == "sample"
+    # A text row holds no offer, so there is nothing to name and no download to
+    # offer. The empty string is that answer, and it is why the window disables
+    # the action rather than sending this row's own id to the peer.
+    assert item["offer_entry"] == ""
     assert page["session_id"] == app.events.session_id
     assert dispatcher.call("history.set_pinned", {"entry_id": item["id"], "pinned": True})
     assert dispatcher.call("history.list", {})["items"][0]["pinned"] is True

@@ -93,6 +93,19 @@ export interface HistoryItem {
    */
   source_device?: string;
   /**
+   * What to ask that device for: the id of the history entry *on the device
+   * that published it*, read out of the file offer this row arrived as.
+   *
+   * Not the same number as `id`.  Every device numbers its own rows, so the
+   * peer's row for a clip and this machine's row for it are two unrelated
+   * integers that drift apart by however many clips each captured by itself —
+   * and a request names an entry belonging to the peer's history.  Only a row
+   * with a file on another device has one; empty for every other row, and for
+   * an offer this build cannot read, where the download is refused rather than
+   * attempted with the wrong number.
+   */
+  offer_entry?: string;
+  /**
    * Which link a remote clip arrived on: `"lan"` for a peer on a direct
    * connection, `"relay"` for one that came through the internet relay, and
    * `""` for a clip captured here or a row written before the route was

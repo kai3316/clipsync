@@ -1075,14 +1075,27 @@ export function createApplicationStore() {
      *
      * A row with no source device has nobody to ask: the clip was captured here,
      * so its file is already on this disk and 复制 is the action for it.
+     *
+     * What travels is the id from the row's *offer* (`offer_entry`), not the id
+     * of the row on screen.  History ids are numbered per machine, so the two
+     * are different numbers for the same clip: asked with the local one, the
+     * peer resolves it against its own rows and answers with whatever its row
+     * of that number happens to be — an older file, or a refusal.  That was the
+     * 下载 button's whole failure mode.  The two ids also key the pending mark
+     * apart from each other, which is why `key` is built from the id that goes
+     * on the wire: the refusal that clears the mark carries that same id back.
+     *
+     * A row whose offer this build cannot read has no id to ask with, and the
+     * click is refused rather than answered with a guess.
      */
     async downloadRemoteFile(item: HistoryItem) {
       const deviceId = item.source_device || "";
-      if (!deviceId) return false;
-      const key = `${deviceId}:${item.id}`;
+      const entryId = item.offer_entry || "";
+      if (!deviceId || !entryId) return false;
+      const key = `${deviceId}:${entryId}`;
       state.remoteFilePending = [key, ...state.remoteFilePending];
       try {
-        await bridge.requestEntryFiles(item.id, deviceId);
+        await bridge.requestEntryFiles(entryId, deviceId);
       } catch (error) {
         clearRemoteFilePending(key);
         // The three ways the ask never left, named rather than shown as a code:
