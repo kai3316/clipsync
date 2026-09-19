@@ -55,6 +55,7 @@ from internal.transport.connection import (
 )
 from internal.transport.discovery import Discovery
 from internal.transport.ids import peer_id_hash
+from internal.transport.peer_id import expand_id_forms
 from internal.transport.relay import (
     MAX_RELAY_PAYLOAD,
     RelayTransport,
@@ -2775,6 +2776,14 @@ class LanRuntime:
     def _relay_channels(self):
         return self.internet_pairing.channels()
 
+    def _archived_ids(self) -> set[str]:
+        """Every id form of the devices the user has removed.
+
+        Both forms because a sighting arrives hashed while the archive is keyed
+        by the real device id (see ``internal.transport.peer_id``).
+        """
+        return expand_id_forms(self.config.removed_peers)
+
     def _peer_found(
         self, pid, name, address, port, version="", os_name="", arch="", app="", named=False
     ):
@@ -2793,6 +2802,21 @@ class LanRuntime:
         the peer runs, and is empty for any build that predates the field.
         """
         if pid in (self.config.device_id, peer_id_hash(self.config.device_id)):
+            return
+        if pid in self._archived_ids():
+            # A removed device, heard again.  Removal is a decision the user
+            # made, and nothing tells the peer to stop announcing itself — so
+            # this is a sighting of a device that is deliberately not on the
+            # list, and keeping it draws a second row beside the archive entry
+            # it belongs to.  The archive row is what the list shows; restoring
+            # is the way back, and it drops this cache on the way in, so the
+            # sighting after that one counts again.
+            #
+            # The refresh is not for a row: a sighting is how a device the user
+            # removed under its bare mDNS id gets a real one, and the archive
+            # key follows it there (see _rekey_archived) — which is the id the
+            # row's own restore and purge buttons are handed.
+            self._refresh()
             return
         row = {
             "name": name,
@@ -3637,6 +3661,16 @@ class LanRuntime:
             self._pending_certs.pop(pid, None)
             self._cert_alert_seen.pop(pid, None)
         self.transport.forget_peer(pid)
+        # And this side's own memory of having seen it.  Discovery caches the
+        # record a peer announces (see Discovery.forget_peer), so a device that
+        # is restored comes back announcing the record it left with — which
+        # reads as "nothing changed, nothing to report" — and the sighting that
+        # is supposed to put its row back never reaches this runtime at all.
+        # Dropping the cache makes the next announcement news again.
+        try:
+            self.discovery.forget_peer(pid)
+        except Exception:
+            logger.debug("Could not drop the discovery record for %s", pid)
         # Removed is removed on every route: the code pairing carries no LAN pin,
         # so nothing else in this method would end it, and the peer would go on
         # reaching this machine over the relay while the list called it removed.
@@ -3694,6 +3728,23 @@ class LanRuntime:
                 self.transport.allow_peer(pid)
             except Exception:
                 logger.debug("Restore could not lift rejection")
+        # A restored device is one this runtime has to be able to *see* again:
+        # the peer never stopped announcing, so the announcement it makes next
+        # is the one already in discovery's cache and would be read as "no
+        # change".  Dropping the cache makes it news (see Discovery.forget_peer),
+        # and the scan asks for it now rather than at the next presence round —
+        # on a worker, because a scan waits out the settle window and this call
+        # is the window's own.
+        try:
+            self.discovery.forget_peer(pid)
+            threading.Thread(
+                target=self._background,
+                args=(self.discovery.scan,),
+                name="clipsync-restore-scan",
+                daemon=True,
+            ).start()
+        except Exception:
+            logger.debug("Restore could not refresh discovery for %s", pid)
         try:
             self._save_config()
         except Exception:

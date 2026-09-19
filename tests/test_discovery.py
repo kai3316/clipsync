@@ -254,6 +254,13 @@ def test_the_same_sighting_twice_is_not_reported_twice(monkeypatch):
     subject._handle_service_added(*sighting(properties))
     assert len(seen) == 1
 
+    # Unless the app has asked to forget the peer -- a device removed and then
+    # restored comes back announcing exactly this record, and this cache is
+    # what would read it as "nothing changed" and report nothing at all.
+    subject.forget_peer("peer-2")
+    subject._handle_service_added(*sighting(properties))
+    assert len(seen) == 2
+
 
 # ── who is still here ───────────────────────────────────────────────────
 #
@@ -273,8 +280,11 @@ def rig(peers):
     what "the peer stopped answering" looks like from here: the record is still
     in the cache and the round still asks, but no answer comes back.
 
-    The stop event returns immediately instead of waiting out the 600 ms settle
-    window, which is a real wait on a real network and not what is under test.
+    The stop event returns immediately instead of waiting out the settle
+    window (``SCAN_SETTLE_SECONDS``), which is a real wait on a real network and
+    not what is under test.  Nothing here sets ``_browse_since``, so the sweep
+    reports losses the moment it is asked -- the grace it grants a freshly
+    rebuilt browse is one test's subject, not this rig's default.
     """
     found, lost = [], []
     subject = service()
@@ -368,6 +378,23 @@ def test_a_peer_that_answers_again_is_on_the_list_again():
 
     assert [call[0] for call in found] == [peer, peer]
 
+    # And it counts even when the answer lands between two rounds.  The listener
+    # stamps it whenever the packet arrives, so an answer that missed the window
+    # is a round late rather than a device that stays off the list until it
+    # restarts -- which is what a round that read only what arrived *during* the
+    # window would make of it.  (A record held back a second by the library's
+    # flood protection is this, and so is any answer to somebody else's query.)
+    goes_silent(subject, answering)
+    subject._presence_round()
+    assert lost == [peer, peer]
+
+    with subject._heard_lock:
+        subject._heard["Kitchen-9f2a._clipsync._tcp.local."] = time.monotonic()
+    subject._presence_round()
+
+    assert [call[0] for call in found] == [peer, peer, peer]
+    assert lost == [peer, peer]
+
 
 def test_resuming_the_browse_does_not_lose_a_device_that_answers():
     """A pause and resume is the one moment every device is unvouched for.
@@ -376,17 +403,34 @@ def test_resuming_the_browse_does_not_lose_a_device_that_answers():
     sweep reads, so a device that answers the round which follows has to be
     read back into it before the sweep asks -- or a resume flaps the whole list.
     """
-    subject, found, lost, _answering = rig({"Kitchen-9f2a": "peer-2"})
+    subject, found, lost, answering = rig({"Kitchen-9f2a": "peer-2"})
     peer = Discovery._hash_device_id("peer-2")
     subject._presence_round()
 
-    with subject._lock:
-        subject._service_to_peer.clear()  # what start_browsing() does
+    def rebuild():
+        """What start_browsing() does, plus the clock it restarts with it."""
+        with subject._lock:
+            subject._service_to_peer.clear()
+            subject._browse_since = time.monotonic()
 
+    rebuild()
     subject._presence_round()
 
     assert lost == []
     assert [call[0] for call in found] == [peer]
+
+    # The other half of it is the round that runs before anyone has answered
+    # the new browse: the map is empty, so on the evidence available every peer
+    # looks gone, and a network change, a wake or a VPN toggle would empty the
+    # list on the way back up.  Silence is evidence only once it has had a
+    # timeout in which it could have been broken.
+    rebuild()
+    answering.clear()
+    goes_silent(subject, answering)
+    subject._presence_round()
+
+    assert lost == []
+    assert subject._known_peers != {}
 
 
 def test_only_a_pointer_that_just_arrived_counts_as_hearing_a_peer():

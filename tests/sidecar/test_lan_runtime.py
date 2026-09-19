@@ -76,6 +76,7 @@ class Discovery:
         self.advertising = False
         self.renames = []
         self.scans = 0
+        self.forgotten_peers = []
 
     def set_callbacks(self, found, lost):
         self.found, self.lost = found, lost
@@ -115,6 +116,12 @@ class Discovery:
         # Counted: the real one asks the network and waits for the answers,
         # which is the whole difference between a refresh and a redraw.
         self.scans += 1
+
+    def forget_peer(self, peer_id):
+        # Recorded: dropping the cached mDNS record is what makes a peer that
+        # comes back visible again, and the runtime's callers are the proof it
+        # happens on the way in and on the way out.
+        self.forgotten_peers.append(peer_id)
 
     def _wake_recovery(self):
         pass
@@ -1206,7 +1213,7 @@ def test_remote_reject_unpair_persist_revocation(rig, kind):
 
 
 def test_forget_archives_and_restore_returns_unpaired(rig):
-    runtime, pairing, transport, *_ = rig
+    runtime, pairing, transport, discovery, *_ = rig
     pairing.add_peer("remote", "Remote", pairing.get_peer_certificate("remote"), paired=True)
     transport.connected.add("remote")
     runtime._refresh()
@@ -1217,6 +1224,10 @@ def test_forget_archives_and_restore_returns_unpaired(rig):
     assert not pairing.is_peer_paired("remote")
     assert transport.sent[-1][1].msg_type == "pairing_unpair"
     assert transport.forgotten[-1] == "remote"
+    # The cached mDNS record goes with it.  That cache is what turns the next
+    # announcement into "nothing changed, nothing to report", and a removed
+    # device that is restored announces exactly the record it was removed with.
+    assert discovery.forgotten_peers == ["remote"]
     assert runtime.devices()["items"] == [
         {
             "id": "remote",
@@ -1243,9 +1254,21 @@ def test_forget_archives_and_restore_returns_unpaired(rig):
     assert transport.allowed[-1] == "remote"
     # Restored, but restored *unpaired* on purpose -- replaying trust would
     # create one-sided consent.  An unpaired device with no note, no pairing
-    # status, no archive entry and no presence has no row; what came back is
-    # the peer record, so the device reappears the moment it is seen again.
+    # status, no archive entry and no presence has no row.
     assert runtime.devices()["items"] == []
+    # What came back is the peer record *and* the ability to notice it again:
+    # the record the peer is still announcing is the one the cache held, so
+    # without dropping it here the restored device stayed off the list until
+    # the app was restarted and every record was novel.  The scan is the other
+    # half -- asking now, instead of at the next presence round -- and runs on
+    # a worker because it waits out the settle window.
+    assert discovery.forgotten_peers == ["remote", "remote"]
+    deadline = time.monotonic() + 5.0
+    while discovery.scans == 0 and time.monotonic() < deadline:
+        time.sleep(0.01)
+    assert discovery.scans == 1
+    discovery.found(peer_id_hash("remote"), "Remote-ad", "127.0.0.1", 9999)
+    assert [row["id"] for row in runtime.devices()["items"]] == ["remote"]
 
 
 def test_forget_keeps_discovered_address_and_never_clobbers_archive(rig):
@@ -1264,6 +1287,15 @@ def test_forget_keeps_discovered_address_and_never_clobbers_archive(rig):
     runtime.config.removed_peers["remote"].notes = "keep me"
     runtime.forget_device("remote")
     assert runtime.config.removed_peers["remote"].notes == "keep me"
+    # And removal is a decision, not a gap in presence: nothing tells the peer
+    # to stop announcing itself, so it keeps answering and every answer is a
+    # sighting.  Kept, that sighting drew a second, live row under the peer's
+    # hash id beside the archive entry that is meant to be the whole of what
+    # the list says about a removed device.
+    discovery.found(peer_id_hash("remote"), "Remote-ad", "127.0.0.1", 9999)
+    assert [(row["id"], row["archived"]) for row in runtime.devices()["items"]] == [
+        ("remote", True)
+    ]
 
 
 def test_purge_drops_archive_and_persists(rig):

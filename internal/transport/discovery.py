@@ -60,9 +60,15 @@ ANNOUNCE_EVERY_ROUNDS = 6
 # in 20-120 ms (the library's own jitter), so this is generous for the normal
 # case and covers the one path that is slower: a record multicast in the last
 # second is held back for another second by the library's flood protection
-# (RFC 6762 section 14).  An answer that misses the window is not lost -- the
-# listener stamps it whenever it lands.
-SCAN_SETTLE_SECONDS = 0.6
+# (RFC 6762 section 14).  It has to cover that one -- the reader below is what
+# puts a peer that was just swept back on the list, because the browser fires
+# nothing for a record it already holds and a swept peer re-answers with exactly
+# the record it was holding -- so the window is a second of deferral plus
+# delivery, not six tenths of the deferral it names.  An answer that lands late
+# anyway is still an answer: the listener stamps it when it lands, and the round
+# after this one reads back everything heard since this one stopped reading
+# (see _answered_since).
+SCAN_SETTLE_SECONDS = 1.5
 
 # A delivered record counts as "a peer spoke" only if its packet arrived just
 # now.  This is what separates that from "the cache handed back a record it has
@@ -555,6 +561,20 @@ class Discovery:
         self._instance_name = ""
         # Which round we are on, for the periodic announcement.
         self._rounds = 0
+        # When the last round stopped reading answers.  The round after it
+        # reads back everyone heard since then -- which is every answer that has
+        # arrived, whenever it arrived (guarded by _lock, like the peer table it
+        # feeds).  A peer that spoke is the only thing that can put it back on
+        # the list, because the browser fires nothing for a record it already
+        # holds, so no answer may fall between two rounds.
+        self._answered_since = 0.0
+        # When the current browse began collecting names.  Nothing may be
+        # reported lost before the browse that could have heard it has been up
+        # for a full timeout: start_browsing clears the name mapping, which is
+        # the evidence a sweep reads (see _still_heard), so a sweep in the gap
+        # between the rebuild and the first answers reports every peer lost for
+        # having been heard under a name this side had just thrown away.
+        self._browse_since = 0.0
 
     def set_callbacks(self, on_found: Callable, on_lost: Callable):
         """Set callbacks for peer discovery events.
@@ -834,6 +854,12 @@ class Discovery:
             if announce:
                 self._announce(zc)
             round_start = time.monotonic()
+            # Read back everyone heard since the last round stopped reading.
+            # The window is what decides which answers a round acts on, so this
+            # is what keeps a late answer from costing the device it came from:
+            # one round, instead of a place on the list.
+            with self._lock:
+                since = self._answered_since or round_start
             # A question with no known answers, deliberately.  The library's own
             # service query carries the cached PTRs it is asking about, and a
             # responder that is entitled to suppress those answers sends
@@ -844,6 +870,9 @@ class Discovery:
             with contextlib.suppress(Exception):
                 zc.send(self._build_query())
             self._netmon_stop.wait(SCAN_SETTLE_SECONDS)
+            window_end = time.monotonic()
+            with self._lock:
+                self._answered_since = window_end
             if self._browser is None:
                 # Browsing was paused while we waited.
                 return
@@ -851,16 +880,16 @@ class Discovery:
                 answered = [
                     name
                     for name, when in self._heard.items()
-                    if when >= round_start
+                    if when >= since
                 ]
-            # Read back only the peers that answered just now, and only to
-            # refresh their row.  An answer carries SRV, TXT and the addresses
-            # as additionals beside the PTR, so this comes out of the cache;
-            # and it is what turns "a peer whose address changed" into
-            # something noticed within one round rather than whenever the
-            # browser next happened to fire.  A peer that is gone answered
-            # nothing, so it costs nothing here either — the sweep is what
-            # takes it off the list.
+            # Read back the peers that answered -- everyone heard since the last
+            # round read, and only to refresh their row.  An answer carries SRV,
+            # TXT and the addresses as additionals beside the PTR, so this comes
+            # out of the cache; and it is what turns "a peer whose address
+            # changed" into something noticed within one round rather than
+            # whenever the browser next happened to fire.  A peer that is gone
+            # answered nothing, so it costs nothing here either — the sweep is
+            # what takes it off the list.
             for name in answered:
                 if self._netmon_stop.is_set():
                     return
@@ -902,6 +931,17 @@ class Discovery:
             ]:
                 del self._heard[name]
             heard = set(self._heard)
+        with self._lock:
+            browse_since = self._browse_since
+        if now - browse_since < PRESENCE_TIMEOUT_SECONDS:
+            # Silence only means "gone" once this browse has had a full timeout
+            # to hear from everyone, and the names above are the only evidence
+            # there is: start_browsing throws the mapping away, so for the
+            # timeout that follows a rebuilt browse *every* peer is unheard —
+            # the ones answering the round that just ran included.  Holding the
+            # report back for that one timeout is what keeps a network change,
+            # a wake or a VPN toggle from emptying the list on the way back up.
+            return
         lost: list[str] = []
         with self._lock:
             for pid in [
@@ -974,6 +1014,41 @@ class Discovery:
         except Exception:
             logger.debug("Manual scan failed", exc_info=True)
 
+    def forget_peer(self, peer_id: str) -> None:
+        """Drop what this side remembers about one peer, so it is news again.
+
+        What the app calls when a device is removed (or restored), and the
+        point is the *next* sighting rather than this one: ``_known_peers`` is
+        the cache that turns "that peer announced itself" into nothing at all,
+        because a peer whose record has not changed is not news and never
+        reaches the app (see ``_handle_service_added``).  A device that is
+        removed and comes back announces exactly the record it left with, so
+        without this it stays off the list until the app restarts and every
+        record is novel again.
+
+        Both id forms go: the hash the TXT record carries and the id the app
+        knows the peer by are two names for one peer, and callers hold
+        whichever they happen to have (see ``internal.transport.ids``).
+        """
+        ids = {peer_id, peer_id_hash(peer_id)}
+        with self._lock:
+            for pid in ids:
+                self._known_peers.pop(pid, None)
+            names = [
+                name for name, pid in self._service_to_peer.items() if pid in ids
+            ]
+            for name in names:
+                self._service_to_peer.pop(name, None)
+        if names:
+            # The stamps go with the names.  A stamp is evidence that a peer
+            # spoke, and this is the one caller saying it no longer counts as
+            # one -- the peer is about to be heard from again anyway, and that
+            # fresh stamp is what a later sweep reads.
+            with self._heard_lock:
+                for name in names:
+                    self._heard.pop(name, None)
+        logger.debug("Forgot peer %s", peer_id)
+
     def stop(self):
         self._netmon_stop.set()
         self.stop_browsing()
@@ -1035,6 +1110,14 @@ class Discovery:
             handlers=[self._on_service_state_change],
         )
         self._listener = _PresenceListener(self)
+        with self._lock:
+            # The clock the sweep measures silence against starts here, with the
+            # mapping this browse is about to rebuild (see _sweep_presence):
+            # until it has run for a timeout, nothing this side has not heard
+            # from yet can be reported lost.  Reading answers starts here too --
+            # a stamp older than this browse is a peer this side has not heard
+            # since it started listening again, whatever the cache still holds.
+            self._browse_since = self._answered_since = time.monotonic()
         with contextlib.suppress(Exception):
             # No question: every record, and no replay of what the cache
             # already holds.  The listener's freshness test rejects a replayed
