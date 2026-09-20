@@ -113,6 +113,7 @@
     "allow-update-download",
     "allow-update-open-folder",
     "allow-update-install",
+    "allow-update-install-ready",
     "allow-open-data-folder",
     "allow-share-file-to-phone",
     "allow-export-logs",

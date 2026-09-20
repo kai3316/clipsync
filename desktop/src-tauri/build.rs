@@ -108,6 +108,7 @@ fn main() {
             "update_download",
             "update_open_folder",
             "update_install",
+            "update_install_ready",
             "open_data_folder",
             "share_file_to_phone",
             "export_logs",
