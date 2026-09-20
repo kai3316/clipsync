@@ -54,59 +54,66 @@ jobs:
 
           What is new in this release:
 
-          - Devices are found, and stay found.  An mDNS record was announced
-            three times, 225 ms apart, as the application started, and never
-            again: a peer's cached address records expired two minutes later,
-            the library's own browser reports a device only when a record is
-            *new*, and the re-query that library schedules runs at three
-            quarters of a PTR lifetime, which is tens of minutes.  A machine
-            that was on the network the whole time became one nobody could see,
-            and the peers that were listed went the same way as their caches
-            aged.  This device asks the local network who is here every ten
-            seconds now, and answers that question when it is put to it.  One
-            question refreshes everybody: the answers are multicast, so a single
-            query updates every device's cache at once -- and it reaches a
-            device running an older build, because what answers is the library's
-            own responder rather than anything this release added.
+          - Any device on the network can be asked for its log.  Settings ->
+            诊断与维护 has 收集所有设备日志, which asks every device at once, and
+            each device row has 获取日志 in its menu for one at a time.  What
+            comes back is filed under 下载/ClipSync-logs/<device>-<time>.log,
+            named for the machine it came from and when it was taken, and the
+            folder is opened once the last device asked has answered -- a
+            device that never answers costs the folder opening itself, not the
+            logs the others sent.  The folder can also be opened from the same
+            card, which is where the files are.
 
-          - A device that has really gone leaves the list in about thirty
-            seconds.  It was five minutes, and before that nothing at all: a
-            device that is switched off, unplugged or out of range says nothing
-            on the way out, and a list that waits to be told goodbye keeps every
-            device that ever was.  Two rounds in a row without an answer is what
-            it takes now, which is also the budget for one dropped multicast
-            packet, and what a row is *made of* -- the name that device
-            published, the address a click would dial, the version the update
-            buttons are decided from -- is kept for the full five minutes.  A
-            device that is merely quiet is still a device this machine knows how
-            to reach.
+          - Neither direction needs a pairing, which is the point: a machine
+            that only misbehaves when it is talking to another one is usually
+            not paired with it, and asking it to be is asking the reader to
+            reproduce the problem while fixing it.  What keeps that from being
+            a way to read a stranger's log is the machine sharing it.  The
+            switch in the same card, 允许其他设备取走本机日志, is off in every
+            build that has not had it turned on; while it is off, every
+            request is answered with "not available" rather than with silence,
+            so the device that asked can say which of the two happened.  While
+            it is on the answer is always a redacted copy -- the whole log,
+            with this machine's home directory, config directory, web token and
+            pairing passwords taken out.
 
-          - A device that comes back is on the list again within one round.  It
-            does not have to re-announce itself first, and neither machine has
-            to be restarted.  A device that has been reported lost is one the
-            library will not report as new again -- it holds the cached record
-            for the rest of its lifetime -- so the question "is it here" is
-            answered from the answers themselves, every round, rather than from
-            the browser's idea of what is new.
+          - Sending an update to a device that is not paired now sends it.  The
+            exchange was designed for exactly that device, and the app layer
+            allowed it -- but the connection dropped the frames before any of
+            that ran, because the list of message types an unpaired peer may
+            send held the chat frames and the chunk bytes and nothing else.  So
+            the offer was handed to the link, reported as sent, and never
+            arrived; the peer's own installer request was dropped the same way.
+            Both ends of that exchange are admitted now, and so is the log
+            exchange above.  Two things keep the widened gate from being a way
+            to make a stranger's consent dialog appear: an update or log
+            transfer is accepted only when this machine is the one that asked
+            for it, and a plain file request from a device this machine has not
+            paired with is refused outright.
 
-          - 刷新设备 asks the network rather than redrawing what it last heard.
-            The button announces this device, queries the local network and
-            waits for the answers before the list is read, so what it shows is
-            the list that was just asked for.  With discovery switched off it
-            says so, instead of answering with a network that has no devices on
-            it.
+          - 立即安装 installs.  The command behind it was registered, documented
+            and called by the update card, and it was missing from the window's
+            own permission list -- which a Tauri command is checked against
+            before it runs -- so the one button that finishes an update sent by
+            another device could only answer 更新安装失败 while the archive sat
+            staged on disk.
 
-          - Every minute this device also announces itself, without being asked,
-            because a device still running an older build asks nothing after its
-            own startup.  Pausing discovery and resuming it no longer costs
-            anything either: the devices that answer the browse which just
-            started are read back in before anything is decided about them, so a
-            resume does not empty the list and fill it again.
+          - Removing a device and restoring it brings it back at once, and no
+            longer disappears it until the application is restarted.  Discovery
+            keeps the record a peer announces and reports nothing for a record
+            that has not changed; the restored device announced exactly what it
+            had announced before, so nothing was reported about it at all.
 
-          The device name is now published in the mDNS record, to the local
-          network.  That is what lets devices show the name you chose rather
-          than a truncation of it; a device still on its default name publishes
-          nothing, so a machine's hostname is not broadcast by it.
+          - A device no longer stays off one machine's list while the others
+            list it.  A peer's answer that the library's flood protection defers
+            by up to a second missed the second the round waited for it, and a
+            peer that had been swept was only put back by the round that reads
+            an answer -- so it was missing here, present there, and different on
+            every machine.  The round now waits a second of deferral plus
+            delivery, and reads back everyone heard since the last round rather
+            than only this one.  A device that has been removed and is heard
+            again no longer draws a live row beside the archive entry it
+            belongs to, either.
 
           1.0.7 published a macOS installer that cannot start at all, and its
           update check lives in the background process that never comes up, so
