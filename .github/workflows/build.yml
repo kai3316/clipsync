@@ -54,66 +54,18 @@ jobs:
 
           What is new in this release:
 
-          - Any device on the network can be asked for its log.  Settings ->
-            诊断与维护 has 收集所有设备日志, which asks every device at once, and
-            each device row has 获取日志 in its menu for one at a time.  What
-            comes back is filed under 下载/ClipSync-logs/<device>-<time>.log,
-            named for the machine it came from and when it was taken, and the
-            folder is opened once the last device asked has answered -- a
-            device that never answers costs the folder opening itself, not the
-            logs the others sent.  The folder can also be opened from the same
-            card, which is where the files are.
-
-          - Neither direction needs a pairing, which is the point: a machine
-            that only misbehaves when it is talking to another one is usually
-            not paired with it, and asking it to be is asking the reader to
-            reproduce the problem while fixing it.  What keeps that from being
-            a way to read a stranger's log is the machine sharing it.  The
-            switch in the same card, 允许其他设备取走本机日志, is off in every
-            build that has not had it turned on; while it is off, every
-            request is answered with "not available" rather than with silence,
-            so the device that asked can say which of the two happened.  While
-            it is on the answer is always a redacted copy -- the whole log,
-            with this machine's home directory, config directory, web token and
-            pairing passwords taken out.
-
-          - Sending an update to a device that is not paired now sends it.  The
-            exchange was designed for exactly that device, and the app layer
-            allowed it -- but the connection dropped the frames before any of
-            that ran, because the list of message types an unpaired peer may
-            send held the chat frames and the chunk bytes and nothing else.  So
-            the offer was handed to the link, reported as sent, and never
-            arrived; the peer's own installer request was dropped the same way.
-            Both ends of that exchange are admitted now, and so is the log
-            exchange above.  Two things keep the widened gate from being a way
-            to make a stranger's consent dialog appear: an update or log
-            transfer is accepted only when this machine is the one that asked
-            for it, and a plain file request from a device this machine has not
-            paired with is refused outright.
-
-          - 立即安装 installs.  The command behind it was registered, documented
-            and called by the update card, and it was missing from the window's
-            own permission list -- which a Tauri command is checked against
-            before it runs -- so the one button that finishes an update sent by
-            another device could only answer 更新安装失败 while the archive sat
-            staged on disk.
-
-          - Removing a device and restoring it brings it back at once, and no
-            longer disappears it until the application is restarted.  Discovery
-            keeps the record a peer announces and reports nothing for a record
-            that has not changed; the restored device announced exactly what it
-            had announced before, so nothing was reported about it at all.
-
-          - A device no longer stays off one machine's list while the others
-            list it.  A peer's answer that the library's flood protection defers
-            by up to a second missed the second the round waited for it, and a
-            peer that had been swept was only put back by the round that reads
-            an answer -- so it was missing here, present there, and different on
-            every machine.  The round now waits a second of deferral plus
-            delivery, and reads back everyone heard since the last round rather
-            than only this one.  A device that has been removed and is heard
-            again no longer draws a live row beside the archive entry it
-            belongs to, either.
+          - Sensitive-content filtering is off by default.  The categories
+            themselves are unchanged, and still where they were, in
+            Settings -> 剪贴板历史 -> 敏感内容过滤: tick one and matching text
+            is replaced with [FILTERED] before the clip reaches another
+            device.  What changed is the machine that never ticked one.  It
+            used to redact every category except 电子邮箱; it now redacts
+            nothing.  Rewriting what somebody copies is a decision to make
+            rather than a default to discover, and a pattern that fires on an
+            everyday clip is read, on the receiving end, as the clipboard
+            having lost the text.  A machine that already had categories
+            ticked keeps them ticked, and its 敏感内容过滤 boxes still show
+            which ones.
 
           1.0.7 published a macOS installer that cannot start at all, and its
           update check lives in the background process that never comes up, so
