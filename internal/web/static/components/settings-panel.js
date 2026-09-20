@@ -229,6 +229,10 @@
         // send straight to this device; false = each conversation and each
         // file waits for an answer here.
         chatOpenToAll: true,
+        // Whether another device may pull this machine's log.  Off by default
+        // and off here too: the log is a record of what this machine did, and
+        // the switch is the only thing that lets it leave.
+        logSharing: false,
 
         // Data locations
         dataDir: '',
@@ -599,6 +603,7 @@
         if (s.dedup_method !== undefined) this.dedupMethod = s.dedup_method || 'sha256';
         if (s.source_tracking_enabled !== undefined) this.sourceTracking = !!s.source_tracking_enabled;
         if (s.chat_open_to_all !== undefined) this.chatOpenToAll = !!s.chat_open_to_all;
+        if (s.log_sharing !== undefined) this.logSharing = !!s.log_sharing;
         if (s.plain_text_only !== undefined) this.plainTextOnly = !!s.plain_text_only;
         if (s.auto_update_check !== undefined) this.autoUpdateCheck = !!s.auto_update_check;
         if (s.data_dir !== undefined) this.dataDir = s.data_dir || '';
@@ -668,6 +673,23 @@
           .catch(function () {
             // Revert so the switch keeps saying what the server actually does.
             self.chatOpenToAll = !self.chatOpenToAll;
+            self.store.showToast(self.t('dialog.failed'), 2000);
+          });
+      },
+
+      toggleLogSharing: function () {
+        var self = this;
+        this.logSharing = !this.logSharing;
+        // Read when a request arrives rather than when the engine starts, so
+        // this takes effect on the very next device that asks -- nothing to
+        // re-apply and nothing to restart.
+        ClipsyncAPI.updateSettings({ log_sharing: this.logSharing })
+          .then(function (res) {
+            if (res && res.updated) self.store.mergeSettings(res.updated);
+          })
+          .catch(function () {
+            // Revert so the switch keeps saying what the server actually does.
+            self.logSharing = !self.logSharing;
             self.store.showToast(self.t('dialog.failed'), 2000);
           });
       },
@@ -2410,6 +2432,17 @@
                 '<!-- ═══════ Logs ═══════ -->' +
                 '<section v-if="activeSection === \'logs\'" class="settings-section">' +
                   '<h3 class="settings-section__title">{{ t(\'settings_window.logs_title\') }}</h3>' +
+                  // What other devices may do with this log, above the log
+                  // itself: it is the one switch on this page whose effect is
+                  // on someone else's screen, and the ask it answers is made
+                  // from the device list rather than from here.
+                  '<div class="settings-toggle-row" style="margin-bottom:8px">' +
+                    '<span class="settings-toggle-label">{{ t(\'settings_window.log_sharing\') }}</span>' +
+                    '<button class="settings-toggle" role="switch" :aria-checked="logSharing" :aria-label="t(\'settings_window.log_sharing\')" :class="{ \'settings-toggle--on\': logSharing }" @click="toggleLogSharing">' +
+                      '<span class="settings-toggle__knob"></span>' +
+                    '</button>' +
+                  '</div>' +
+                  '<p class="settings-hint">{{ t(\'settings_window.log_sharing_desc\') }}</p>' +
                   '<div class="settings-btn-grid" style="margin-bottom:12px">' +
                     '<button class="settings-btn" @click="loadLogs" :disabled="logsLoading">' +
                       '{{ logsLoading ? \'...\' : t(\'settings_window.logs_refresh\') }}' +

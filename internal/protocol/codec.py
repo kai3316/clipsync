@@ -154,6 +154,49 @@ CHAT_MSG_TYPES = frozenset(
 # file bytes from unpaired peers.
 UNPAIRED_GATE_MSG_TYPES = PAIRING_MSG_TYPES | CHAT_MSG_TYPES | frozenset({"file_chunk"})
 
+# The peer-to-peer exchanges that are deliberately open to unpaired devices --
+# an update passed between two builds of the same platform, and a log pulled
+# for debugging -- need more than the one frame type above: the answer to both
+# is an ordinary file transfer, whose control frames are not ``chat_*``.
+#
+# Two things make admitting them safe.  The app layer already restricts what an
+# unpaired sender can *achieve* with them: ``_on_peer_message`` routes the
+# update frames to handlers that check the sender's platform, and the transfer
+# manager checks ``kind`` against a ledger this machine armed by asking
+# (``set_update_guard`` / ``set_log_guard``) rather than against the sender's
+# own label.  And the one frame that is not covered by a ledger -- a plain
+# ``file_request``, whose only effect is to ask the user whether to accept a
+# transfer -- is refused outright for a sender this side has not paired with,
+# so the gate here cannot turn into a way to make a stranger's dialog appear.
+FILE_CONTROL_MSG_TYPES = frozenset(
+    {
+        "file_request",
+        "file_ack",
+        "file_reject",
+        "file_complete",
+        "file_chunk_ack",
+        "file_pause",
+        "file_resume",
+    }
+)
+UPDATE_MSG_TYPES = frozenset({"update_offer", "update_request", "update_unavailable"})
+LOG_MSG_TYPES = frozenset({"log_request", "log_denied"})
+
+# Everything one of those transfers consists of, chunk frame included, so the
+# app router can admit an unpaired sender to the transfer manager for exactly
+# these and no more.
+UNPAIRED_FILE_MSG_TYPES = FILE_CONTROL_MSG_TYPES | {"file_chunk"}
+
+UNPAIRED_GATE_MSG_TYPES = (
+    PAIRING_MSG_TYPES
+    | CHAT_MSG_TYPES
+    | FILE_CONTROL_MSG_TYPES
+    | UPDATE_MSG_TYPES
+    | LOG_MSG_TYPES
+    | frozenset({"file_chunk"})
+)
+
+
 # Internet-relay messages.  ``relay_enroll`` ({relay_secret}) is sent to an
 # already-paired peer over its encrypted LAN connection, so both sides can
 # derive the shared public-broker topic + key (internal/transport/relay.py).

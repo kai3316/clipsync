@@ -118,6 +118,12 @@ class Config:
     # can reach this one open a conversation and send a file; False holds both
     # for an explicit Allow on this machine.  See `internal/sync/nearby_chat.py`.
     chat_open_to_all: bool = True
+    # Whether other devices may pull this machine's application log.  Off by
+    # default: the log is a record of what this machine did, and a debug tool
+    # that hands it out unasked is not one anybody agreed to.  Turning it on
+    # answers whoever asks, paired or not -- there is no per-device list, and
+    # the answer is always a redacted copy (see `internal/data/logs.py`).
+    log_sharing: bool = False
     # Security
     encryption_enabled: bool = True
     encryption_password: str = ""  # runtime only — never persisted
@@ -397,6 +403,7 @@ _FIELD_RULES: dict[str, tuple] = {
     "notify_sync": ("bool",),
     "chat_muted_peers": ("strlist_nonnull",),
     "chat_open_to_all": ("bool",),
+    "log_sharing": ("bool",),
     "encryption_enabled": ("bool",),
     "encryption_password_hash": ("str",),
     "appearance_mode": ("str",),
@@ -662,6 +669,7 @@ def load() -> Config:
                 "notify_sync",
                 "chat_muted_peers",
                 "chat_open_to_all",
+                "log_sharing",
                 "encryption_enabled",
                 "encryption_password_hash",
                 "appearance_mode",
@@ -835,6 +843,7 @@ def save(cfg: Config, enc_mgr: "EncryptionManager | None" = None):
             "notify_sync": cfg.notify_sync,
             "chat_muted_peers": cfg.chat_muted_peers,
             "chat_open_to_all": cfg.chat_open_to_all,
+            "log_sharing": cfg.log_sharing,
             "encryption_enabled": cfg.encryption_enabled,
             "encryption_password_hash": cfg.encryption_password_hash,
             "appearance_mode": cfg.appearance_mode,

@@ -890,6 +890,20 @@ function deviceMenu(event: MouseEvent, device: Device) {
           run: () => fetchDeviceUpdate(device),
         }
       : null,
+    // The debug entry, offered on every reachable row rather than only on rows
+    // the sidecar has an opinion about: which device is misbehaving is exactly
+    // what one does not know yet, so the button that asks a device to explain
+    // itself cannot be gated on the list's own guess.  No pairing is needed, and
+    // the answer is the peer's decision — it hands over a redacted copy only if
+    // its own 允许其他设备取走本机日志 switch is on, and says so when it is not.
+    canDial(device)
+      ? {
+          id: "fetch-log", label: t("获取日志"), icon: FileDown, divider: true,
+          disabled: busy.value || !!logBusyId.value,
+          title: t("请该设备把它的日志发过来，存到「下载/ClipSync-logs」；对方关闭日志共享时会说明"),
+          run: () => fetchDeviceLog(device),
+        }
+      : null,
     device.update_blocked
       ? {
           id: "update-blocked", label: blockedUpdateLabel(device),
@@ -1719,6 +1733,14 @@ watch(() => state.updatePeerEvent, (answer) => {
   if (!answer || !answer.device_id) return;
   updateNotes.value = { ...updateNotes.value, [answer.device_id]: answer.message };
 });
+watch(() => state.logEvent, (answer) => {
+  // The same, for the log requests: the note left by the click said the ask was
+  // away, and this is what came back. It also counts the device off the collect
+  // run, which is what opens the folder once the last one has answered.
+  if (!answer || !answer.device_id) return;
+  logNotes.value = { ...logNotes.value, [answer.device_id]: answer.message };
+  settleCollectedLog(answer.device_id);
+});
 watch(aiPeerId, () => {
   aiPullPending.value = null;
   ++aiRemoteGeneration;
@@ -1852,6 +1874,16 @@ const updateBusyId = ref("");
 const updateNotes = ref<Record<string, string>>({});
 /** The device this machine is asking for a newer installer. */
 const fetchBusyId = ref("");
+/** The device this machine is asking for its log, and what came back.
+ *
+ * Kept apart from the update notes because the two are answers to different
+ * questions, and a device can be mid-way through both. */
+const logBusyId = ref("");
+const logNotes = ref<Record<string, string>>({});
+/** Whether the 收集所有设备日志 click is still asking.  The request is done the
+ *  moment every device has been dialed (the logs land afterwards, on their own),
+ *  so this is short — it is what keeps a second click from doubling the asks. */
+const collectingLogs = ref(false);
 const certificates = ref<DeviceCertificate[] | null>(null);
 const certDialog = ref<HTMLDialogElement | null>(null);
 const certAlertDialog = ref<HTMLDialogElement | null>(null);
@@ -2650,6 +2682,77 @@ async function fetchDeviceUpdate(device: Device) {
     };
   } finally {
     fetchBusyId.value = "";
+  }
+}
+/** Ask one device for its log.
+ *
+ * Needs no pairing, and the peer only answers if its own 允许其他设备取走本机日志
+ * switch is on — in which case what arrives is a redacted copy.  The request
+ * returns as soon as it is away; the file lands later and the row is told when
+ * it does, so the note left here is the promise, not the receipt.
+ */
+async function fetchDeviceLog(device: Device) {
+  if (logBusyId.value) return;
+  logBusyId.value = device.id;
+  try {
+    await bridge.collectDeviceLog(device.id);
+    logNotes.value = {
+      ...logNotes.value,
+      [device.id]: t("已向 {name} 索取日志，收到后放进「下载/ClipSync-logs」", { name: device.name }),
+    };
+  } catch (error: any) {
+    logNotes.value = {
+      ...logNotes.value,
+      [device.id]: error?.message || t("索取日志失败"),
+    };
+  } finally {
+    logBusyId.value = "";
+  }
+}
+/** The devices a 收集所有设备日志 click is still waiting on.
+ *
+ * The click is over the moment every device has been dialed; the logs land
+ * afterwards, one at a time over the next seconds.  This is what turns those
+ * arrivals back into the one thing the click promised: when the last of them is
+ * answered — with a log, with a refusal, or with a failure — the folder they
+ * went into is opened, once, already full.
+ *
+ * A device that never answers keeps the list non-empty and nothing opens; that
+ * is the one case the reader has to press the button for, and the button is
+ * beside the click that started it. */
+const collectPending = ref<string[]>([]);
+/** Ask every device on the network for its log, in one click.
+ *
+ * One dial per device, all of them at once: the sidecar answers with which
+ * devices it asked, and each log is announced as it lands.
+ */
+async function collectAllLogs() {
+  if (collectingLogs.value) return;
+  collectingLogs.value = true;
+  try {
+    const result = await bridge.collectAllLogs();
+    logNotes.value = {};
+    collectPending.value = result.devices.map((device) => device.device_id);
+    announce(result.requested
+      ? t("已向 {count} 台设备索取日志", { count: result.requested })
+      : t("没有可索取日志的设备"));
+  } catch (error: any) {
+    announce(error?.message || t("收集日志失败"));
+  } finally {
+    collectingLogs.value = false;
+  }
+}
+/** Take one device off the pending list; open the folder when it empties. */
+function settleCollectedLog(deviceId: string) {
+  if (!collectPending.value.includes(deviceId)) return;
+  collectPending.value = collectPending.value.filter((id) => id !== deviceId);
+  if (!collectPending.value.length) void openLogsFolder();
+}
+async function openLogsFolder() {
+  try {
+    await bridge.openLogsFolder();
+  } catch (error: any) {
+    announce(error?.message || t("打开日志文件夹失败"));
   }
 }
 async function showCertificates() {
@@ -3701,6 +3804,9 @@ async function saveSettings() {
       // Applied to the live engine, not on restart: the runtime hands it
       // straight to the running chat manager.
       chat_open_to_all: settings.value.chat_open_to_all,
+      // Read at request time by the running engine, so this one also needs no
+      // restart to take effect.
+      log_sharing: !!settings.value.log_sharing,
       app_filter_enabled: settings.value.app_filter_enabled,
       app_filter_mode: settings.value.app_filter_mode,
       app_filter_list: String(settings.value.app_filter_list || "").split(/\r?\n/).map(v => v.trim()).filter(Boolean),
@@ -5176,6 +5282,24 @@ async function translateText() {
                   <button type="button" @click="openAbout"><Info :size="17" />{{ t("关于") }}</button>
                   <button type="button" @click="restartOpen = true"><RotateCcw :size="17" />{{ t("重启应用") }}</button>
                 </div>
+                <!-- The debugging half of the card: one row that says what this
+                     machine will hand out, and two buttons that ask the other
+                     machines for theirs.  The switch is an ordinary saved
+                     setting; the asks are actions, and they are not gated on
+                     the switch — what this machine shares has nothing to do with
+                     whose logs it may read. -->
+                <fieldset>
+                  <legend>{{ t("设备日志") }}</legend>
+                  <label class="setting setting--check">
+                    <span class="setting-control"><input v-model="settings.log_sharing" type="checkbox" /><span>{{ t("允许其他设备取走本机日志") }}</span></span>
+                  </label>
+                  <p class="note setting-note">{{ t("开着时，网络上任何设备（无需配对）向你索取日志都会得到一份，其中已隐去本机路径、令牌和配对密码；关着时一律回复无法提供。") }}</p>
+                  <div class="setting-actions setting-actions--card">
+                    <button type="button" :disabled="collectingLogs" @click="collectAllLogs"><FileDown :size="17" />{{ t("收集所有设备日志") }}</button>
+                    <button type="button" @click="openLogsFolder"><FolderOpen :size="17" />{{ t("打开日志文件夹") }}</button>
+                  </div>
+                  <p class="note setting-note">{{ t("收来的日志存在「下载/ClipSync-logs」，文件名带设备名和收取时间。") }}</p>
+                </fieldset>
               </section>
               <div class="settings-save">
                 <button class="primary" type="submit" :disabled="settingsBusy || !settingsLoaded || passwordBlocked"><Save :size="17" />{{ settingsSaved ? t('已保存') : t('保存设置') }}</button>
@@ -5331,6 +5455,7 @@ async function translateText() {
               </div>
               <p v-if="probeResults[device.id]" class="note device-full" role="status">{{ t("连接测试：") }}{{ probeLabel(probeResults[device.id]) }}</p>
               <p v-if="updateNotes[device.id]" class="note device-full" role="status">{{ updateNotes[device.id] }}</p>
+              <p v-if="logNotes[device.id]" class="note device-full" role="status">{{ logNotes[device.id] }}</p>
               <!-- The chips under the name, one per route rather than one
                    sentence for both.  A paired-and-online pair of words named a
                    state without

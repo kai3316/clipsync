@@ -41,6 +41,8 @@ _SAFE_FIELDS = {
     "notify_sync",
     # Nearby chat's admission rule (see `internal/sync/nearby_chat.py`).
     "chat_open_to_all",
+    # Whether other devices may pull this machine's log (see `internal/data/logs.py`).
+    "log_sharing",
     "web_enabled",
     "web_port",
     "web_history_limit",
@@ -146,6 +148,8 @@ _MUTABLE_FIELDS = {
     "notify_sync",
     # Nearby chat's admission rule (see `internal/sync/nearby_chat.py`).
     "chat_open_to_all",
+    # Whether other devices may pull this machine's log (see `internal/data/logs.py`).
+    "log_sharing",
     "web_enabled",
     "web_port",
     "web_history_limit",

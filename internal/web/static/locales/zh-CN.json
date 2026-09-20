@@ -1389,5 +1389,7 @@
   "transfer.history_removed": "已从历史中删除",
   "transfer.history_remove_failed": "从历史中删除失败",
   "settings_window.chat_open_to_all": "任何人可直接发来消息和文件",
-  "settings_window.chat_open_to_all_desc": "关掉以后，附近设备要先经过你同意，才能发消息和文件给你。"
+  "settings_window.chat_open_to_all_desc": "关掉以后，附近设备要先经过你同意，才能发消息和文件给你。",
+  "settings_window.log_sharing": "允许其他设备取走本机日志",
+  "settings_window.log_sharing_desc": "开着时，网络上任何设备（无需配对）向你索取日志都会得到一份，其中已隐去本机路径、令牌和配对密码；关着时一律回复无法提供。"
 }

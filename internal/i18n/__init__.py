@@ -649,6 +649,8 @@ _EN: dict[str, str] = {
     "settings_window.max_reconnect_desc": "How many times to retry connecting to a lost peer (1–100). Restart required.",  # noqa: E501
     "settings_window.chat_open_to_all": "Anyone nearby can send messages and files",
     "settings_window.chat_open_to_all_desc": "Turn this off and a nearby device has to be allowed by you before its message or file arrives.",  # noqa: E501
+    "settings_window.log_sharing": "Let other devices take this device's log",
+    "settings_window.log_sharing_desc": "While this is on, any device on the network — paired or not — that asks for this device's log gets a copy, with this machine's paths, tokens and pairing passwords taken out. While it is off, every such request is answered with a refusal.",  # noqa: E501
     "settings_window.logging_section": "Logging & Notifications",
     "settings_window.log_level": "Log Level",
     "settings_window.enable_notifications": "Enable desktop notifications",
@@ -1582,6 +1584,8 @@ _ZH: dict[str, str] = {
     "settings_window.max_reconnect_desc": "尝试重新连接丢失对端的次数（1–100）。需重启。",
     "settings_window.chat_open_to_all": "任何人可直接发来消息和文件",
     "settings_window.chat_open_to_all_desc": "关掉以后，附近设备要先经过你同意，才能发消息和文件给你。",  # noqa: E501
+    "settings_window.log_sharing": "允许其他设备取走本机日志",
+    "settings_window.log_sharing_desc": "开着时，网络上任何设备（无需配对）向你索取日志都会得到一份，其中已隐去本机路径、令牌和配对密码；关着时一律回复无法提供。",  # noqa: E501
     "settings_window.logging_section": "日志与通知",
     "settings_window.log_level": "日志级别",
     "settings_window.enable_notifications": "启用桌面通知",

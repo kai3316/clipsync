@@ -1389,5 +1389,7 @@
   "transfer.history_removed": "Removed from history",
   "transfer.history_remove_failed": "Could not remove from history",
   "settings_window.chat_open_to_all": "Anyone nearby can send messages and files",
-  "settings_window.chat_open_to_all_desc": "Turn this off and a nearby device has to be allowed by you before its message or file arrives."
+  "settings_window.chat_open_to_all_desc": "Turn this off and a nearby device has to be allowed by you before its message or file arrives.",
+  "settings_window.log_sharing": "Let other devices take this device's log",
+  "settings_window.log_sharing_desc": "While this is on, any device on the network — paired or not — that asks for this device's log gets a copy, with this machine's paths, tokens and pairing passwords taken out. While it is off, every such request is answered with a refusal."
 }

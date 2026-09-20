@@ -24,6 +24,7 @@ from internal.clipboard.format import ClipboardContent, ContentType, SyncMessage
 from internal.clipboard.platform import create_monitor, create_reader, create_writer
 from internal.clipboard.source_tracker import is_app_allowed
 from internal.config.config import PeerInfo, config_dir, config_lock
+from internal.data.logs import stage_collected_log, write_share_copy
 from internal.infrastructure.persistence.relay_delivery import RelayDeliveryQueue
 from internal.infrastructure.runtime.internet_pairing import (
     InternetPairingService,
@@ -35,6 +36,7 @@ from internal.protocol.codec import (
     CLIP_FILE_MSG_TYPES,
     ENDING_MSG_TYPES,
     PAIRING_MSG_TYPES,
+    UNPAIRED_FILE_MSG_TYPES,
     decode_message,
     encode_frame,
     encode_message,
@@ -79,6 +81,12 @@ CLIP_FILE_WINDOW = 300.0
 # still bounded because what it leaves open is the one transfer kind that never
 # asks the user anything.
 UPDATE_WINDOW = 1800.0
+
+# How long a log request licenses the peer to send the file.  Generous for the
+# update window's reason — a log can be several megabytes and the answering side
+# builds the redacted copy before it sends — and bounded for the same one: what
+# a live entry permits is an unprompted transfer.
+LOG_WINDOW = 1800.0
 
 
 def _local_platform() -> tuple[str, str]:
@@ -376,6 +384,14 @@ class LanRuntime:
         # kind alone would let any device on the network drop a file on this
         # disk with nobody asked.
         self.file_transfer.set_update_guard(self._update_outstanding_for)
+        # A `log` blob is the same bargain: this machine asked that peer for its
+        # log, and the asking is the only thing that lets the answer in.
+        self.file_transfer.set_log_guard(self._log_outstanding_for)
+        # ...and a plain file from a device this machine has *not* paired with is
+        # refused before it can raise the accept prompt.  The exemption kinds
+        # above are the only ones an unpaired peer can get through, and the
+        # ledger behind each of them is written by a click on this side.
+        self.file_transfer.set_paired_guard(self.pairing.is_peer_paired)
         # The temp archives of folder sends, by transfer id, waiting to be
         # unlinked when their transfer reaches a terminal state.  Its own lock
         # rather than the runtime's: the completion callback runs on the
@@ -388,6 +404,10 @@ class LanRuntime:
         # guard above; a peer's answer that arrives inside the window is the only
         # update blob this side accepts.
         self._update_expectations: dict[str, float] = {}
+        # peer device_id -> monotonic deadline, the same ledger for logs: this
+        # machine asked that peer for its log, and an answer is welcome until
+        # the deadline.  Consulted by the log guard above.
+        self._log_expectations: dict[str, float] = {}
         # Resolves an entry id a peer asked for into this machine's own paths —
         # set by the application layer, which is what owns the history store.
         # A callback rather than a history reference because the runtime is
@@ -1611,8 +1631,209 @@ class LanRuntime:
             return False
         return (peer_os, peer_arch) == _local_platform()
 
+    # ── peer-to-peer log collection (debug) ─────────────────────────────
+    def _expect_log(self, pid: str) -> None:
+        """Record that this machine has asked *pid* for its log.
+
+        The answer is a ``kind="log"`` transfer, which — like an update blob —
+        skips the consent prompt, so this ledger rather than the frame's label
+        is what makes one acceptable.  See ``set_log_guard``."""
+        with self._lock:
+            self._log_expectations[pid] = time.monotonic() + LOG_WINDOW
+
+    def _log_outstanding_for(self, pid: str) -> bool:
+        """Whether *pid* was asked for its log and has not answered yet."""
+        with self._lock:
+            deadline = self._log_expectations.get(pid)
+            if deadline is None:
+                return False
+            if deadline <= time.monotonic():
+                self._log_expectations.pop(pid, None)
+                return False
+        return True
+
+    def collect_device_log(self, device_id: str) -> dict:
+        """Ask one device for its log; the file arrives as a transfer.
+
+        The same shape as :meth:`fetch_device_update`, and for the same reason:
+        a debug tool that answers "sent" without reaching anybody is worse than
+        one that says it could not, so an unreachable peer is an error here
+        rather than a spinner that ends in nothing.
+        """
+        return self._command(self._collect_device_log, device_id, blocking=True)
+
+    def _collect_device_log(self, device_id: str) -> dict:
+        pid = self._resolve(device_id)
+        if not self._known_device(pid):
+            raise ApplicationError("NOT_FOUND", "Device not found")
+        if not self._ask_for_log(pid):
+            raise ApplicationError(
+                "log.peer_unreachable",
+                f"Could not reach {self._peer_name(pid) or 'the device'}",
+            )
+        return {"sent": True}
+
+    def collect_all_logs(self) -> dict:
+        """Ask every device on the network for its log.
+
+        Returns when the requests are away, not when the logs arrive: each
+        answer is a transfer of its own that lands when it lands, and holding
+        the window's click open for however long the slowest device takes would
+        make a working feature look like a hung one.  Every arrival is announced
+        on its own (``log.collected``), which is where the user learns what came
+        back.
+        """
+        asked: list[str] = []
+        for row in self.devices().get("items", []):
+            pid = self._resolve(str(row.get("id") or ""))
+            if not pid or pid == self.config.device_id or row.get("archived"):
+                continue
+            if not self._known_device(pid):
+                continue
+            asked.append(pid)
+        # Dialing is what takes the time, and each peer is dialed on its own
+        # thread: one device that has gone quiet must not hold up the rest.
+        for pid in asked:
+            threading.Thread(
+                target=self._background,
+                args=(self._ask_for_log, pid),
+                name="log-ask",
+                daemon=True,
+            ).start()
+        logger.info("Asked %d device(s) for their logs", len(asked))
+        return {
+            "requested": len(asked),
+            "devices": [
+                {"device_id": pid, "name": self._peer_name(pid) or ""} for pid in asked
+            ],
+        }
+
+    def _known_device(self, pid: str) -> bool:
+        """Whether a device id names something this machine can try to reach.
+
+        Either form of the id is accepted, and so is either kind of evidence:
+        a sighting on the network (which is what an unpaired device has) or a
+        record in the pairing repository (which is what a paired one has, and
+        what a peer that is currently away still keeps)."""
+        if not pid:
+            return False
+        if self._address(pid):
+            return True
+        return pid in {p.device_id for p in self.pairing.get_known_peers()}
+
+    def _ask_for_log(self, pid: str) -> bool:
+        """Dial if needed and ask one peer for its log; True when the ask is away.
+
+        ``no_auto_pairing`` exactly as the update path has it: reading a log is
+        not a reason to ask anyone for a pairing code, and the request is a
+        single frame that the peer answers or refuses.
+        """
+        if pid not in self.transport.get_connected_peers():
+            connected = self._connect_and_wait(pid, no_auto_pairing=True)
+            if connected is None:
+                return False
+            pid = connected
+        try:
+            delivered = self.transport.send_to_peer(
+                pid,
+                encode_frame(
+                    {"msg_type": "log_request", "version": __version__},
+                    source_device=self.config.device_id,
+                ),
+            )
+        except Exception:
+            logger.warning("Failed to ask %s for its log", str(pid)[:12], exc_info=True)
+            return False
+        if not delivered:
+            logger.warning("Peer %s was not reachable for the log request", str(pid)[:12])
+            return False
+        # Armed only now the request is away, for ``_fetch_device_update``'s
+        # reason: an entry standing for a request that never left is a licence
+        # for a blob nobody asked for.
+        self._expect_log(pid)
+        logger.info("Asked peer %s for its log", str(pid)[:12])
+        return True
+
+    def _on_log_request(self, pid: str, payload: dict) -> None:
+        """A peer asks for this machine's log; share it if the user said so.
+
+        Both answers are sent, and the refusal is a frame rather than silence:
+        the requester's window is showing a request it cannot see the end of,
+        and "this device keeps its log to itself" is a different thing to tell
+        the user than "that device never answered".
+        """
+        if not getattr(self.config, "log_sharing", False):
+            logger.info("Refusing a log request from %s: sharing is off", str(pid)[:12])
+            self._answer_log_request(pid, "log_denied", "disabled")
+            return
+        # Building the copy reads and rewrites the whole log; it runs on its own
+        # thread so the connection's receive loop is not held for it.
+        threading.Thread(
+            target=self._background,
+            args=(self._serve_peer_log, pid),
+            name="log-serve",
+            daemon=True,
+        ).start()
+
+    def _serve_peer_log(self, pid: str) -> None:
+        """Answer a log request with a redacted copy of this machine's log."""
+        copy = write_share_copy(self.config)
+        if copy is None:
+            self._answer_log_request(pid, "log_denied", "no_log")
+            return
+        try:
+            self.file_transfer.send_file(
+                str(copy),
+                lambda data: self.transport.send_to_peer(pid, data),
+                kind="log",
+            )
+        except Exception:
+            logger.warning("Failed to serve the log to %s", str(pid)[:12], exc_info=True)
+            self._answer_log_request(pid, "log_denied", "failed")
+
+    def _answer_log_request(self, pid: str, msg_type: str, reason: str) -> None:
+        try:
+            self.transport.send_to_peer(
+                pid,
+                encode_frame(
+                    {"msg_type": msg_type, "version": __version__, "reason": reason},
+                    source_device=self.config.device_id,
+                ),
+            )
+        except Exception:
+            logger.debug("Could not answer %s about the log", str(pid)[:12], exc_info=True)
+
+    def _on_log_denied(self, pid: str, payload: dict) -> None:
+        """A device this machine asked keeps its log to itself.
+
+        The entry goes: nothing is coming, and leaving it standing would let a
+        transfer this side never asked for in for the rest of the window.
+        """
+        with self._lock:
+            self._log_expectations.pop(pid, None)
+        self._publish(
+            "log.unavailable",
+            {
+                "device_id": pid,
+                "name": self._peer_name(pid) or "",
+                "reason": str(payload.get("reason") or ""),
+            },
+        )
+
     def _on_file_received(self, transfer_id, saved_path, _file_name):
-        if self.file_transfer.take_received_kind(transfer_id) != "update":
+        kind, sender = self.file_transfer.take_received_info(transfer_id)
+        if kind == "log":
+            # A log this machine asked a peer for.  It is filed rather than
+            # handed to the received-files flow, and filing it means a move on
+            # disk, which is not the receive thread's to do.
+            threading.Thread(
+                target=self._file_peer_log,
+                args=(saved_path, sender),
+                name="log-blob",
+                daemon=True,
+            ).start()
+            return
+        if kind != "update":
             # Legacy beeped once per received file. The notification itself is
             # the host's job; only the sound is played here.
             self._play_transfer_sound()
@@ -1628,6 +1849,31 @@ class LanRuntime:
             name="update-blob",
             daemon=True,
         ).start()
+
+    def _file_peer_log(self, saved_path: str, sender: str) -> None:
+        """File a peer's log under ``~/Downloads/ClipSync-logs`` and say so.
+
+        Named for the device it came from, because several arrive at once and
+        the folder is the only thing the user sees afterwards.  A failure here
+        is published rather than raised: this runs on its own thread, and the
+        window is waiting for news either way.
+        """
+        pid = self._resolve(sender) if sender else ""
+        name = self._peer_name(pid) if pid else ""
+        try:
+            path = stage_collected_log(saved_path, name or str(pid or "")[:12])
+        except Exception as exc:
+            logger.warning("Could not file a log from %s: %s", str(pid)[:12], exc)
+            self._publish(
+                "log.failed",
+                {"device_id": pid, "name": name, "reason": "save_failed"},
+            )
+            return
+        logger.info("Filed a log from %s at %s", str(pid)[:12], path)
+        self._publish(
+            "log.collected",
+            {"device_id": pid, "name": name, "path": path},
+        )
 
     @staticmethod
     def _deliver_update_blob(sink, saved_path):
@@ -4785,6 +5031,21 @@ class LanRuntime:
             if trusted or self._same_platform_peer(payload):
                 self._on_update_unavailable(pid, payload)
             return
+        if kind == "log_request":
+            # A peer asking for this machine's log.  Answered from the setting
+            # rather than from anything about the asker: sharing is either on
+            # for the network or off, and the answer is always a redacted copy
+            # (see ``_on_log_request``).
+            if not via_relay:
+                self._on_log_request(pid, getattr(msg, "_raw_payload", {}) or {})
+            return
+        if kind == "log_denied":
+            # The answer to a request of ours, so it is read on the same terms
+            # the request was made under, and its only effect is to stop this
+            # side waiting.
+            if trusted or self._log_outstanding_for(pid):
+                self._on_log_denied(pid, getattr(msg, "_raw_payload", {}) or {})
+            return
         if kind in CLIP_FILE_MSG_TYPES:
             # Asked and answered on the LAN only.  The files travel over the
             # channel whose certificate is pinned, so a request that arrived
@@ -4872,7 +5133,15 @@ class LanRuntime:
         if kind.startswith("file_") or kind.startswith("speed_test"):
             # Dashboard transfers keep their LAN-only send closure (as legacy
             # did), so a relayed one could never answer anyway.
-            if trusted and not via_relay:
+            #
+            # An unpaired peer is admitted for the file frames an update or a log
+            # transfer is made of: the manager settles each request against a
+            # ledger this machine armed by asking, and refuses a plain file from
+            # an unpaired sender before it can raise the accept prompt (see
+            # FileTransferManager).  Speed tests still need the pairing: there is
+            # nothing on the other side of one but this machine's bandwidth.
+            allowed = trusted or kind in UNPAIRED_FILE_MSG_TYPES
+            if allowed and not via_relay:
                 self.file_transfer.handle_message(
                     kind,
                     getattr(msg, "_raw_payload", {}),

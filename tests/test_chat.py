@@ -22,8 +22,11 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from internal.protocol.codec import (
     CHAT_MSG_TYPES,
     FILE_TRANSFER_MSG_TYPES,
+    LOG_MSG_TYPES,
     PAIRING_MSG_TYPES,
+    UNPAIRED_FILE_MSG_TYPES,
     UNPAIRED_GATE_MSG_TYPES,
+    UPDATE_MSG_TYPES,
     decode_message,
     encode_binary_chunk,
     encode_frame,
@@ -692,14 +695,17 @@ class _UnpairedPairingMgr:
 
 
 class TestTransportGate:
-    """The unpaired gate must admit chat frames AND chat file bytes while
-    still blocking clipboard-transfer initiation."""
+    """The unpaired gate admits chat frames, chat file bytes, the transfer
+    control frames an update or a log exchange consists of, and the frames those
+    two exchanges are asked with — while still blocking clipboard traffic, which
+    has no ledger behind it and never reaches the manager from a stranger."""
 
-    def test_unpaired_gate_admits_chat_and_chunk_bytes_only(self):
+    def test_unpaired_gate_admits_the_exchanges_that_may_run_unpaired(self):
         frames = [
-            encode_frame({"msg_type": "file_request", "transfer_id": "d" * 32}),
             encode_frame({"msg_type": "chat_invite", "session_id": "c" * 16}),
             encode_binary_chunk("a" * 32, 0, 1, b"bytes"),
+            encode_frame({"msg_type": "log_request", "version": "1.0.28"}),
+            encode_frame({"msg_type": "update_request", "version": "1.0.28"}),
         ]
         conn = PeerConnection(
             "peer-1",
@@ -711,19 +717,57 @@ class TestTransportGate:
         conn.set_on_message(lambda msg, pid: received.append(getattr(msg, "msg_type", "")))
         try:
             conn.start()
-            assert _wait_until(lambda: len(received) >= 2), f"got {received}"
+            assert _wait_until(lambda: len(received) >= 4), f"got {received}"
         finally:
             conn.stop()
         assert "chat_invite" in received
         assert "file_chunk" in received
-        assert "file_request" not in received
+        assert "log_request" in received
+        assert "update_request" in received
+
+    def test_unpaired_gate_leaves_clipboard_traffic_out(self):
+        """The clipboard's own frames stay on the paired side of the gate.
+
+        `file_request` is admitted now — it is what an unpaired update or log
+        transfer arrives as — so what the gate no longer does for clipboard
+        traffic is done at the app layer instead: the transfer manager refuses a
+        plain `file`/`clip_file` from a sender this side has not paired with, so
+        the frame can no longer raise a consent prompt for a stranger.  The
+        clipboard's own frame types have no such carve-out and are still
+        dropped here.
+        """
+        frames = [
+            encode_frame({"msg_type": "clipboard", "content": {"text": "x"}}),
+            encode_frame({"msg_type": "clipboard_ack", "msg_id": "m" * 16}),
+            encode_frame({"msg_type": "chat_invite", "session_id": "c" * 16}),
+        ]
+        conn = PeerConnection(
+            "peer-1",
+            "Peer One",
+            _ScriptedSocket(frames),
+            pairing_mgr=_UnpairedPairingMgr(),
+        )
+        received = []
+        conn.set_on_message(lambda msg, pid: received.append(getattr(msg, "msg_type", "")))
+        try:
+            conn.start()
+            assert _wait_until(lambda: "chat_invite" in received), f"got {received}"
+        finally:
+            conn.stop()
+        assert "clipboard" not in received
+        assert "clipboard_ack" not in received
 
     def test_unpaired_gate_constant_shape(self):
         assert "file_chunk" in UNPAIRED_GATE_MSG_TYPES
-        assert "file_request" not in UNPAIRED_GATE_MSG_TYPES
-        assert "file_ack" not in UNPAIRED_GATE_MSG_TYPES
         assert "clipboard" not in UNPAIRED_GATE_MSG_TYPES
+        # Every frame the two unpaired exchanges are made of, control frames
+        # included — the answer to either is an ordinary file transfer.
+        assert all(t in UNPAIRED_GATE_MSG_TYPES for t in UNPAIRED_FILE_MSG_TYPES)
+        assert all(t in UNPAIRED_GATE_MSG_TYPES for t in UPDATE_MSG_TYPES | LOG_MSG_TYPES)
         assert all(t in UNPAIRED_GATE_MSG_TYPES for t in CHAT_MSG_TYPES)
+        # And nothing else: the gate is a list of what may pass, so a frame type
+        # nobody thought about is not silently inside it.
+        assert {"relay_enroll", "relay_ack"} & UNPAIRED_GATE_MSG_TYPES == set()
 
 
 class TestOfflineSendGuard:

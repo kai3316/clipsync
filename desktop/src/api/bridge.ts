@@ -266,6 +266,25 @@ export const bridge = {
     command<{ logs: string[]; problems: string[] }>("read_logs", { lines }),
   exportLogs: (defaultName: string) =>
     command<{ cancelled?: boolean; path?: string; bytes?: number }>("export_logs", { defaultName }),
+  /** Ask one device for its own log, for debugging.
+   *
+   *  Answered with an ordinary transfer the sidecar files under
+   *  `~/Downloads/ClipSync-logs/`, named for the device it came from.  The peer
+   *  only answers if its own 「允许其他设备取走本机日志」 switch is on; when it is
+   *  off, `log.unavailable` says so rather than nothing arriving. */
+  collectDeviceLog: (deviceId: string) =>
+    command<{ sent: boolean }>("collect_device_log", { deviceId }),
+  /** Ask every device on the network for its log.
+   *
+   *  Returns once the requests are away — each log lands afterwards and is
+   *  announced on its own — so the click reports how many devices were asked. */
+  collectAllLogs: () =>
+    command<{ requested: number; devices: { device_id: string; name: string }[] }>(
+      "collect_all_logs",
+    ),
+  /** Reveal the folder collected logs are filed in.  No path crosses the
+   *  boundary: the sidecar owns the folder and opens it. */
+  openLogsFolder: () => command<{ ok: boolean; folder: string }>("open_logs_folder"),
   diagnosticsReport: () => command<DiagnosticsReport>("diagnostics_report"),
   diagnosticsRequest: (action: DiagnosticAction) =>
     command<{ ok: boolean; error?: string }>("diagnostics_request", { action }),

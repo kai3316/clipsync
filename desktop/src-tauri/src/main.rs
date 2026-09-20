@@ -1150,6 +1150,44 @@ async fn forget_device(
         .await
 }
 
+/// Ask one device for its log, for debugging.
+///
+/// The peer answers with its own log as an ordinary transfer; what comes back
+/// is filed by the sidecar under the device's name, so no path crosses this
+/// boundary in either direction.
+#[tauri::command]
+async fn collect_device_log(
+    window: WebviewWindow,
+    host: State<'_, Host>,
+    device_id: String,
+) -> Result<Value, BridgeError> {
+    authorize(&window)?;
+    validate_id(&device_id)?;
+    host.bridge()
+        .await?
+        .call("logs.collect", json!({"device_id": device_id}))
+        .await
+}
+
+/// Ask every device on the network for its log.
+///
+/// Returns once the requests are away: each log arrives afterwards and is
+/// announced on its own, so the click reports how many devices were asked
+/// rather than waiting on the slowest one.
+#[tauri::command]
+async fn collect_all_logs(window: WebviewWindow, host: State<'_, Host>) -> Result<Value, BridgeError> {
+    authorize(&window)?;
+    host.bridge().await?.call("logs.collect_all", json!({})).await
+}
+
+/// Reveal the folder collected logs are filed in.
+#[tauri::command]
+async fn open_logs_folder(window: WebviewWindow, host: State<'_, Host>) -> Result<Value, BridgeError> {
+    authorize(&window)?;
+    // The folder is owned by the sidecar; no path crosses the boundary.
+    host.bridge().await?.call("logs.open_folder", json!({})).await
+}
+
 #[tauri::command]
 async fn restore_device(
     window: WebviewWindow,
@@ -2495,6 +2533,9 @@ fn main() {
             disconnect_device,
             offer_device_update,
             fetch_device_update,
+            collect_device_log,
+            collect_all_logs,
+            open_logs_folder,
             forget_device,
             restore_device,
             purge_device,

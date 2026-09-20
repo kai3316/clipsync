@@ -124,6 +124,10 @@ export function createApplicationStore() {
     // thing in the same words, and two spellings of one answer is how a reader
     // ends up wondering whether they are looking at two answers.
     updatePeerEvent: null as { revision: number; device_id: string; message: string } | null,
+    // What became of a log this window asked a device for: it arrived, the
+    // device keeps its log to itself, or the file could not be filed here. All
+    // three are the same row's answer, so all three land on the same ref.
+    logEvent: null as { revision: number; device_id: string; message: string } | null,
     // Update lifecycle, mirrored from `update.state` events and hydrated from
     // `update.status`; `updateCheck` holds the last manual lookup (null = never
     // checked), which is what drives the new-version line.
@@ -240,6 +244,18 @@ export function createApplicationStore() {
             name: peerLabel(data),
             version: String(data.version || ""),
           });
+    }
+    // The three answers to "send me your log".  A device that has sharing off
+    // says so in a word rather than staying silent, because the alternative —
+    // nothing arriving — is indistinguishable from a request that never left.
+    if (name === "log.collected") {
+      return t("已收到 {name} 的日志", { name: peerLabel(data) });
+    }
+    if (name === "log.unavailable") {
+      return t("{name} 没有共享日志", { name: peerLabel(data) });
+    }
+    if (name === "log.failed") {
+      return t("{name} 的日志没能保存到本机", { name: peerLabel(data) });
     }
     // The sidecar published this from the day the filter was wired and nothing
     // ever read it, so a clip that left the device with its sensitive values
@@ -687,6 +703,21 @@ export function createApplicationStore() {
               message: noticeMessage(event.name, data),
             };
           }
+          // The answer to a log this window asked for.  All three are the row's
+          // answer and all three are worth a notice: the log is filed silently
+          // otherwise, and the two refusals would leave the reader watching a
+          // folder that is not going to fill.
+          if (
+            event.name === "log.collected"
+            || event.name === "log.unavailable"
+            || event.name === "log.failed"
+          ) {
+            state.logEvent = {
+              revision: (state.logEvent?.revision || 0) + 1,
+              device_id: String(data.device_id || ""),
+              message: noticeMessage(event.name, data),
+            };
+          }
           // A nearby-chat message arriving.  Two ways it is not news, and both
           // are silence rather than a shorter notice:
           //
@@ -711,7 +742,7 @@ export function createApplicationStore() {
             alreadyReportedRemoval = removalNotices.has(peer);
             removalNotices.add(peer);
           }
-          if (!alreadyReportedRemoval && event.name && ["runtime.error", "pairing.request", "transfer.request", "chat.connect_timeout", "url.received", "device.connected", "device.disconnected", "sync.redacted", "device.connection_rejected", "device.connection_unreachable", "update.peer_unavailable", "update.peer_notice"].includes(event.name)) {
+          if (!alreadyReportedRemoval && event.name && ["runtime.error", "pairing.request", "transfer.request", "chat.connect_timeout", "url.received", "device.connected", "device.disconnected", "sync.redacted", "device.connection_rejected", "device.connection_unreachable", "update.peer_unavailable", "update.peer_notice", "log.collected", "log.failed", "log.unavailable"].includes(event.name)) {
             pushNotice(event.name, data);
           }
           if (event.name === "favorites.changed" || event.name === "data.changed" || event.type === "resync") favorites.invalidate();

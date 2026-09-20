@@ -228,6 +228,27 @@ export const EN: Record<string, string> = {
   "任何人可直接发来消息和文件": "Anyone nearby can send messages and files",
   "关掉以后，附近设备要先经过你同意，才能发消息和文件给你。":
     "Turn this off and a nearby device has to be allowed by you before its message or file arrives.",
+  "设备日志": "Device logs",
+  "允许其他设备取走本机日志": "Let other devices take this device's log",
+  "开着时，网络上任何设备（无需配对）向你索取日志都会得到一份，其中已隐去本机路径、令牌和配对密码；关着时一律回复无法提供。":
+    "While this is on, any device on the network — paired or not — that asks for this device's log gets a copy, with this machine's paths, tokens and pairing passwords taken out. While it is off, every such request is answered with a refusal.",
+  "收集所有设备日志": "Collect every device's log",
+  "打开日志文件夹": "Open the log folder",
+  "收来的日志存在「下载/ClipSync-logs」，文件名带设备名和收取时间。":
+    "Collected logs are saved under Downloads/ClipSync-logs, each file named for the device it came from and when it was taken.",
+  "已向 {count} 台设备索取日志": "Asked {count} devices for their logs",
+  "没有可索取日志的设备": "No device to ask for a log",
+  "收集日志失败": "Could not collect logs",
+  "打开日志文件夹失败": "Could not open the log folder",
+  "索取日志失败": "Could not ask for the log",
+  "已向 {name} 索取日志，收到后放进「下载/ClipSync-logs」":
+    "Asked {name} for its log; it will be filed under Downloads/ClipSync-logs",
+  "获取日志": "Get log",
+  "请该设备把它的日志发过来，存到「下载/ClipSync-logs」；对方关闭日志共享时会说明":
+    "Ask this device to send its log, to be filed under Downloads/ClipSync-logs. A device with log sharing off says so instead.",
+  "已收到 {name} 的日志": "Received the log from {name}",
+  "{name} 没有共享日志": "{name} is not sharing its log",
+  "{name} 的日志没能保存到本机": "The log from {name} could not be saved here",
   "手机 Companion": "Phone Companion",
   "手机访问地址": "Phone access address",
   "手机服务端口": "Phone service port",

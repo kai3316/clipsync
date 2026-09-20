@@ -246,6 +246,10 @@ class Dispatcher:
             # feature is meant to run in, and the reason both device lists carry
             # a button rather than only the newer one.
             "devices.fetch_update": "fetch_device_update",
+            # Pulling one device's log for debugging.  On the device row for the
+            # same reason the update fetches are: what it acts on is that device,
+            # and the answer is filed under its name.
+            "logs.collect": "collect_device_log",
         }
         if method in device_commands:
             validate_params(
@@ -379,6 +383,17 @@ class Dispatcher:
                 ("dest",),
             )
             return self.app.export_logs(params["dest"])
+        if method == "logs.open_folder":
+            # The folder the app files collected logs in, never a client path:
+            # the sidecar owns it and reveals it, exactly as the update and data
+            # folders are revealed.
+            validate_params(params, {})
+            return self.app.open_collected_logs()
+        if method == "logs.collect_all":
+            # Answers as soon as the requests are away; each device's log lands
+            # afterwards and is announced on its own (`log.collected`).
+            validate_params(params, {})
+            return self.app.require_runtime().collect_all_logs()
         if method == "companion.qr":
             validate_params(params, {})
             return self.app.companion_qr()
@@ -462,6 +477,10 @@ class Dispatcher:
                 # Nearby chat's admission rule.  Applied live, not on restart:
                 # the runtime pushes it straight into the live ChatManager.
                 "chat_open_to_all": (bool, lambda _: True),
+                # Whether other devices may pull this machine's log.  Read at
+                # the moment a request arrives (see `_on_log_request`), so the
+                # switch is live without anything to re-apply.
+                "log_sharing": (bool, lambda _: True),
                 "app_filter_enabled": (bool, lambda _: True),
                 "app_filter_mode": (str, lambda v: v in ("blacklist", "whitelist")),
                 "app_filter_list": (list, lambda v: len(v) <= 256 and all(

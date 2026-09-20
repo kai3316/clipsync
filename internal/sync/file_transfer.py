@@ -244,9 +244,10 @@ class FileTransferManager:
 
         # transfer_id -> dict (active transfers)
         self._transfers: dict[str, dict[str, Any]] = {}
-        # transfer_id -> kind ("file" | "update"), set just before the received
-        # callback fires so the caller can distinguish update blobs.
-        self._received_kinds: dict[str, str] = {}
+        # transfer_id -> (kind, sender_device_id), set just before the received
+        # callback fires so the caller can tell a received file from the
+        # transfers that take a different route ("update", "clip_file", "log").
+        self._received_kinds: dict[str, tuple[str, str]] = {}
         # Completed transfers history: list of dicts (newest first)
         self._history: list[dict[str, Any]] = []
         # Speed test state
@@ -260,6 +261,8 @@ class FileTransferManager:
         self._on_transfer_request: Callable[[str, str, int, str, Callable], None] | None = None
         self._clip_file_guard: Callable[[str, str], bool] | None = None
         self._update_guard: Callable[[str], bool] | None = None
+        self._log_guard: Callable[[str], bool] | None = None
+        self._paired_guard: Callable[[str], bool] | None = None
 
     # ------------------------------------------------------------------
     # Callback registration
@@ -334,13 +337,45 @@ class FileTransferManager:
         registered one keep."""
         self._update_guard = callback
 
+    def set_log_guard(self, callback: Callable[[str], bool]) -> None:
+        """*callback(sender_device_id) -> bool* -- whether a ``log`` blob from
+        that peer is one this side asked for.
+
+        The update guard's twin, and for the same reason: a ``log`` transfer
+        skips the accept prompt, so the ledger of requests this machine made is
+        what makes one acceptable — never the sender's label, which any device
+        on the network can write.
+        """
+        self._log_guard = callback
+
+    def set_paired_guard(self, callback: Callable[[str], bool]) -> None:
+        """*callback(sender_device_id) -> bool* -- whether this side has paired
+        with the sender.
+
+        Asked for one case only: an ordinary ``file`` request from a peer this
+        side has not paired with is refused before it can reach the accept
+        prompt.  Every other kind carries an exemption this machine granted, and
+        a prompt is not something a stranger on the network gets to raise — the
+        chat invitation is where an unpaired device asks, and it asks in its own
+        words.  With no guard registered nothing is refused, which is the
+        behaviour of every path that never registered one.
+        """
+        self._paired_guard = callback
+
     def take_received_kind(self, transfer_id: str) -> str:
         """Pop and return the kind of a received transfer, or "file" if unknown.
 
-        One of "file", "update" or "clip_file" — the latter being a file this
-        user pulled from a peer's history row.  Called from the
-        on-file-received callback."""
-        return self._received_kinds.pop(transfer_id, "file")
+        One of "file", "update", "clip_file" or "log" — the last two being, in
+        order, a file this user pulled from a peer's history row and a log this
+        user asked a peer for.  Called from the on-file-received callback."""
+        return self.take_received_info(transfer_id)[0]
+
+    def take_received_info(self, transfer_id: str) -> tuple[str, str]:
+        """Pop and return ``(kind, sender_device_id)`` for a received transfer.
+
+        The pair, because the routes that treat a blob as something other than a
+        file need both: what it is, and whose it is."""
+        return self._received_kinds.pop(transfer_id, ("file", ""))
 
     def set_on_transfer_request(
         self,
@@ -376,8 +411,9 @@ class FileTransferManager:
             Callable that takes encoded ``bytes`` and sends them to all
             connected peers (typically ``TransportManager.broadcast``).
         kind:
-            What the receiver should make of it: ``"file"``, ``"update"``, or
-            ``"clip_file"`` for a file a history row asked for.
+            What the receiver should make of it: ``"file"``, ``"update"``,
+            ``"clip_file"`` for a file a history row asked for, or ``"log"`` for
+            a log this machine was asked for and is answering with.
         entry_id:
             The history entry a ``clip_file`` send is answering, carried so the
             receiver can check the file against the request it made instead of
@@ -797,19 +833,46 @@ class FileTransferManager:
         if not isinstance(mime_type, str):
             mime_type = "application/octet-stream"
         kind = payload.get("kind", "file")
-        if kind not in ("file", "update", "clip_file"):
+        if kind not in ("file", "update", "clip_file", "log"):
             kind = "file"
 
-        # An `update` transfer is the one kind that reaches this disk without a
-        # prompt, and its label is the *sender's* to write.  So the exemption is
-        # not the label -- it is an outstanding request from this side for that
-        # peer's cached asset (see `set_update_guard`), which is what makes an
-        # update offerable to a device this machine has never paired with.
-        if kind == "update" and self._update_guard is not None and not self._update_guard(
-            sender_device_id
+        # An `update` transfer is the first of the kinds that reaches this disk
+        # without a prompt, and its label is the *sender's* to write.  So the
+        # exemption is not the label -- it is an outstanding request from this
+        # side for that peer's cached asset (see `set_update_guard`), which is
+        # what makes an update offerable to a device this machine has never
+        # paired with.  A `log` blob is the same shape: this machine asked that
+        # peer for its log, and the ledger is what that request wrote.
+        if kind in ("update", "log"):
+            guard = self._log_guard if kind == "log" else self._update_guard
+            if guard is not None and not guard(sender_device_id):
+                logger.warning(
+                    "Refusing %s transfer %s from %s: nothing on this side asked for it",
+                    kind,
+                    transfer_id[:8],
+                    str(sender_device_id)[:12],
+                )
+                self._send_as_frame(
+                    {"msg_type": "file_reject", "transfer_id": transfer_id}, send_fn
+                )
+                return
+
+        # The one kind with no exemption to carry it: a plain file asks the user
+        # to accept something, and an unpaired sender does not get to raise that
+        # prompt -- a dialog anyone on the network can make appear is not a
+        # question worth answering.  ``clip_file`` is refused here too, though it
+        # would only ever reach the prompt as well: its exemption is a request
+        # this machine made, and the one pull that arms it (``request_entry_files``)
+        # is paired-only by construction.
+        if (
+            kind in ("file", "clip_file")
+            and self._paired_guard is not None
+            and sender_device_id
+            and not self._paired_guard(sender_device_id)
         ):
             logger.warning(
-                "Refusing update transfer %s from %s: nothing on this side asked for it",
+                "Refusing %s transfer %s from unpaired peer %s",
+                kind,
                 transfer_id[:8],
                 str(sender_device_id)[:12],
             )
@@ -907,10 +970,10 @@ class FileTransferManager:
             and self._clip_file_guard is not None
             and self._clip_file_guard(sender_device_id, str(payload.get("entry", "")))
         )
-        if kind == "update" or wanted:
-            # An update blob is one the app asked for on its own, and its kind is
-            # set by the download path rather than by a peer, so it needs no
-            # second check.
+        if kind in ("update", "log") or wanted:
+            # An update blob is one the app asked for on its own, and a log blob
+            # one the app asked *this peer* for -- both are checked against this
+            # machine's own ledger above, so neither needs a second check.
             logger.info("Auto-accepting %s transfer %s", kind, transfer_id[:8])
             self.accept_transfer(transfer_id, send_fn)
         elif self._on_transfer_request is not None:
@@ -1321,7 +1384,14 @@ class FileTransferManager:
             self._add_to_history(transfer, True, saved_path=saved, status="success")
 
             if self._on_file_received is not None:
-                self._received_kinds[transfer_id] = transfer.get("kind", "file")
+                # The kind and the sender, kept together: the callback is handed
+                # a saved path and a file name, and the routes that act on a
+                # received blob (an update, a peer's log) act on the peer that
+                # sent it rather than on the path it landed at.
+                self._received_kinds[transfer_id] = (
+                    transfer.get("kind", "file"),
+                    str(transfer.get("peer_id") or ""),
+                )
                 self._on_file_received(transfer_id, saved, file_name)
             if self._on_transfer_complete is not None:
                 self._on_transfer_complete(transfer_id, True, False, "success")

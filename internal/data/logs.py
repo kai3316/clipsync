@@ -16,6 +16,7 @@ import os
 import re
 import shutil
 import sys
+import time
 from pathlib import Path
 
 # Read only the tail (last 256 KB) so an oversized log is not fully loaded
@@ -235,6 +236,99 @@ def log_path():
         return _log_dir() / LOG_FILE_NAME
     except Exception:
         return None
+
+
+# ── logs collected from other devices ────────────────────────────────
+#
+# A device that has turned log sharing on answers a peer's request with a
+# *redacted* copy of its whole current log (``write_share_copy``), and the
+# asking side files what arrives under ``collected_dir()`` — the same
+# ``~/Downloads`` the received-files and staged-update folders live in, so the
+# things a peer can leave on this disk are all in one place.
+COLLECTED_DIR_NAME = "ClipSync-logs"
+SHARE_DIR_NAME = "share"
+# How long a copy made for a peer is kept if its transfer never finished (the
+# send runs on a thread of its own, and a peer that disconnects mid-transfer
+# leaves the file behind).  An hour is well past any transfer that is still
+# going, and the sweep runs when the next copy is written rather than on a
+# timer, so a device that never shares again keeps nothing.
+SHARE_MAX_AGE = 3600.0
+
+
+def collected_dir(home: str | None = None) -> Path:
+    """Where logs collected from other devices are filed."""
+    return (Path(home) if home else Path.home()) / "Downloads" / COLLECTED_DIR_NAME
+
+
+def _safe_name(name: str) -> str:
+    """One path component's worth of a device name, never empty."""
+    cleaned = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "-", str(name or "")).strip(" .-")
+    return cleaned[:60] or "device"
+
+
+def write_share_copy(cfg, path: Path | str | None = None) -> Path | None:
+    """Write the whole current log, redacted, as a file to hand to a peer.
+
+    The same redaction the log viewer gets, applied to the whole file rather
+    than the tail: this copy leaves the machine, and the reason the tail is
+    capped (not loading an oversized log into memory) does not apply to a
+    reader that writes as it goes.
+
+    ``None`` when there is no log to share — a machine that has never written
+    one has nothing to answer with, which is a different answer from a device
+    that has sharing switched off (see ``_serve_peer_log``).
+    """
+    source = Path(path) if path is not None else log_path()
+    if source is None or not source.exists():
+        return None
+    target_dir = source.parent / SHARE_DIR_NAME
+    try:
+        target_dir.mkdir(parents=True, exist_ok=True)
+        _prune_shares(target_dir)
+        target = target_dir / f"clipsync-{int(time.time())}.log"
+        with (
+            open(source, encoding="utf-8", errors="replace") as reader,
+            open(target, "w", encoding="utf-8", newline="\n") as writer,
+        ):
+            for line in reader:
+                writer.write(redact_sensitive_line(line.rstrip("\n"), cfg) + "\n")
+    except OSError:
+        logging.getLogger(__name__).warning("Could not build a log copy to share", exc_info=True)
+        return None
+    return target
+
+
+def _prune_shares(target_dir: Path) -> None:
+    """Drop copies left by transfers that never finished."""
+    cutoff = time.time() - SHARE_MAX_AGE
+    for stale in target_dir.glob("clipsync-*.log"):
+        try:
+            if stale.stat().st_mtime < cutoff:
+                stale.unlink()
+        except OSError:
+            continue
+
+
+def stage_collected_log(saved_path: str, device_name: str, home: str | None = None) -> str:
+    """File a peer's log where the user can find it; returns its new path.
+
+    Named ``<device>-<time>.log`` in ``collected_dir()``: several devices are
+    collected at once, and what the user is looking for afterwards is whose log
+    this is and when it was taken.  Raises on any filesystem failure, so the
+    caller can report a collection that did not land rather than a folder that
+    is quietly missing one device.
+    """
+    target_dir = collected_dir(home)
+    target_dir.mkdir(parents=True, exist_ok=True)
+    stamp = time.strftime("%Y%m%d-%H%M%S")
+    stem = f"{_safe_name(device_name)}-{stamp}"
+    target = target_dir / f"{stem}.log"
+    suffix = 2
+    while target.exists():
+        target = target_dir / f"{stem}-{suffix}.log"
+        suffix += 1
+    shutil.move(str(saved_path), str(target))
+    return str(target)
 
 
 # Historic private alias — ``read_log_tail`` and the diagnostics report both

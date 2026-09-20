@@ -591,7 +591,7 @@ class SidecarApplication:
                 # session to reach this machine's clipboard.
                 "clipboard.copy",
                 "translate.text", "ai.profiles", "ai.profiles.update",
-                "logs.tail", "logs.export",
+                "logs.tail", "logs.export", "logs.open_folder",
                 "overview.get",
                 "app.open_link", "app.factory_reset",
                 "diagnostics.report", "diagnostics.request",
@@ -624,6 +624,9 @@ class SidecarApplication:
                 "devices.restore", "devices.purge", "devices.test", "devices.certs",
                 "devices.scan",
                 "devices.retrust", "devices.offer_update", "devices.fetch_update",
+                # Collecting logs from the network: the requests go out over the
+                # LAN session, and what comes back is filed by the runtime.
+                "logs.collect", "logs.collect_all",
                 "companion.configure",
                 "url.send", "clipboard.push", "discovery.status",
                 "discovery.set_enabled", "discovery.set_visible",
@@ -843,6 +846,26 @@ class SidecarApplication:
         from internal.system.file_manager import reveal_folder
 
         folder = _config_dir() / "backups" if which == "backups" else _config_dir()
+        try:
+            folder.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            raise ApplicationError("OPEN_FAILED", f"Could not create {folder}: {exc}") from None
+        ok, detail = reveal_folder(str(folder))
+        if not ok:
+            raise ApplicationError("OPEN_FAILED", f"Could not open {folder} ({detail})")
+        return {"ok": True, "folder": str(folder)}
+
+    def open_collected_logs(self) -> dict:
+        """Reveal the folder logs collected from other devices are filed in.
+
+        Created on the way in: the folder is where a collection *lands*, and a
+        user who asks to see it before anything has arrived should get the empty
+        folder rather than an error telling them nothing is there.
+        """
+        from internal.data.logs import collected_dir
+        from internal.system.file_manager import reveal_folder
+
+        folder = collected_dir()
         try:
             folder.mkdir(parents=True, exist_ok=True)
         except OSError as exc:
