@@ -20,6 +20,7 @@ import pytest
 from internal.application.errors import ApplicationError
 from internal.application.events import EventJournal
 from internal.clipboard.clipboard import ClipboardMonitor
+from internal.clipboard.filter import ALL_CATEGORIES
 from internal.clipboard.format import ClipboardContent, ContentType, SyncMessage
 from internal.clipboard.history_db import ClipboardHistoryDB as HistoryDB
 from internal.config.config import Config, PeerInfo
@@ -1343,6 +1344,10 @@ def test_confirmation_waits_for_real_connection(rig):
 def test_original_history_outgoing_redaction_and_rich_policy(rig):
     runtime, _, transport, _, clipboard, history, *_ = rig
     runtime.config.plain_text_only = True
+    # Redaction ships off, so this is a machine that turned it on — through the
+    # settings update the UI sends, which is the wiring this test is about.
+    runtime.config.filter_enabled_categories = ALL_CATEGORIES
+    runtime.apply_settings({"filter_enabled_categories": ALL_CATEGORIES})
     clipboard.content = ClipboardContent(
         {
             ContentType.TEXT: b"password=secret-value",

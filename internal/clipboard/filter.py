@@ -169,26 +169,23 @@ class ContentFilter:
             ("credit_card", _CREDIT_CARD_RE),
             ("ssn", _SSN_RE),
             ("api_key", _API_KEY_RE),
-            # Bare emails are their own opt-in category, NOT part of the
-            # default set: everyday text (signatures, pasted correspondence)
-            # is full of addresses, and redacting them by default corrupted
-            # far more legitimate clips on the receiving end than it
-            # protected anything.  Enable "email" explicitly to opt in.
+            # Bare emails are their own category, and the noisiest one:
+            # everyday text (signatures, pasted correspondence) is full of
+            # addresses, so redacting them corrupted far more legitimate clips
+            # on the receiving end than it protected anything.  It has never
+            # been part of any default set, and no more is any other category
+            # (see the constructor); "email" is a deliberate opt-in.
             ("email", _EMAIL_RE),
             ("private_key", _PRIVATE_KEY_RE),
             ("password", _PASSWORD_RE),
         ]
-        # Redaction is ON by default: None (unconfigured) enables every
-        # category except the opt-in "email" one, so fresh installs filter
-        # genuinely sensitive content out of the box.  A non-empty list
-        # enables just that subset; an EMPTY list means the user explicitly
-        # disabled redaction (distinct from the None default).
-        if enabled_categories is None:
-            self._enabled = [
-                c for c in dict.fromkeys(c for c, _ in self._all_patterns) if c != "email"
-            ]
-        else:
-            self._enabled = list(enabled_categories)
+        # Redaction is OFF by default: None (unconfigured) and [] (an explicit
+        # empty selection) both enable nothing, and only a named category is
+        # ever redacted.  Rewriting what a user copies on its way to another
+        # device is a decision for that user, not a default to opt out of --
+        # and a pattern that fires on an everyday clip is read, on the
+        # receiving end, as the clipboard having lost the text.
+        self._enabled = list(enabled_categories or [])
 
     @property
     def enabled_categories(self) -> list[str]:
@@ -196,13 +193,8 @@ class ContentFilter:
 
     @enabled_categories.setter
     def enabled_categories(self, categories: list[str] | None) -> None:
-        if categories is None:
-            # Not configured → every category except opt-in "email" (default).
-            self._enabled = [
-                c for c in dict.fromkeys(c for c, _ in self._all_patterns) if c != "email"
-            ]
-        else:
-            self._enabled = list(categories)
+        # Same rule as the constructor: unconfigured is off, and [] is off.
+        self._enabled = list(categories or [])
 
     @property
     def is_active(self) -> bool:

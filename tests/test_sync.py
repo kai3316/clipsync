@@ -190,7 +190,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from internal.clipboard import source_tracker
 from internal.clipboard.clipboard import strip_rich_formats
-from internal.clipboard.filter import ContentFilter
+from internal.clipboard.filter import ALL_CATEGORIES, ContentFilter
 from internal.clipboard.format import ClipboardContent
 from internal.clipboard.history_db import (
     ClipboardHistoryDB,
@@ -212,7 +212,9 @@ def _send_pipeline(
     """Mirror src/main.py _on_local_sync: strip FIRST, then filter."""
     msg_content = strip_rich_formats(content) if plain_text_only else content
     if filter_on:
-        f = ContentFilter()
+        # The categories are named, not defaulted: redaction ships off, and
+        # what this mirrors is a machine that turned it on.
+        f = ContentFilter(ALL_CATEGORIES)
         if f.is_active and f.is_sensitive(msg_content):
             msg_content = f.filter_content(msg_content)
     return msg_content
@@ -280,7 +282,7 @@ def test_two_secrets_local_two_entries_but_peer_one(tmp_path):
     # On the wire both redact to the same placeholder -> identical dedup
     # key (post-redaction bytes only; no original length/hash may leak
     # into the key) -> the peer coalesces them into ONE entry.
-    f = ContentFilter()
+    f = ContentFilter(ALL_CATEGORIES)
     red1 = f.filter_content(orig1)
     red2 = f.filter_content(orig2)
     assert red1.types[ContentType.TEXT] == b"[FILTERED]"
@@ -500,13 +502,13 @@ def _linux_shaped_clip(card_in_body: bool) -> ClipboardContent:
 
 def test_clean_multiformat_clip_passes_filter_byte_identical():
     clip = _linux_shaped_clip(card_in_body=False)
-    out = ContentFilter().filter_content(clip)
+    out = ContentFilter(ALL_CATEGORIES).filter_content(clip)
     assert out.types == clip.types  # every format untouched, clean RTF too
 
 
 def test_sensitive_multiformat_clip_drops_only_rtf():
     clip = _linux_shaped_clip(card_in_body=True)
-    out = ContentFilter().filter_content(clip)
+    out = ContentFilter(ALL_CATEGORIES).filter_content(clip)
     assert ContentType.RTF not in out.types  # unredactable payload gone
     assert out.types[ContentType.TEXT] == b"Pay [FILTERED] today"
     assert out.types[ContentType.HTML] == b"<p>Pay [FILTERED] today</p>"

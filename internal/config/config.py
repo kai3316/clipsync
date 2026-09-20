@@ -88,8 +88,8 @@ class Config:
     # on forever with nothing left to re-enable it.
     timed_pause_until: float = 0.0
     auto_start: bool = False
-    # None = not configured → all redaction categories enabled (default ON).
-    # [] = user explicitly disabled redaction. Non-empty = that subset.
+    # None = not configured → nothing redacted (default OFF), which is also
+    # what [] (an explicit empty selection) means.  Non-empty = that subset.
     filter_enabled_categories: list[str] | None = None
     private_key_pem: str = ""
     certificate_pem: str = ""
@@ -373,8 +373,8 @@ def _cleanup_stale_temps():
 #   "bool"     only a Python bool
 #   "int"      Python int (bool rejected)
 #   "float"    int or float (bool rejected), coerced to float
-#   "strlist"  list of strings, or None (the filter_enabled_categories
-#              sentinel meaning "all enabled")
+#   "strlist"  list of strings, or None (filter_enabled_categories stores a
+#              null until the user picks categories; both mean "none")
 #   "strdict"  dict mapping strings to plain strings (peer_relay_secrets)
 #   "hotkeys"  dict mapping shortcut-id strings to shortcut strings
 _FIELD_RULES: dict[str, tuple] = {
@@ -727,7 +727,17 @@ def load() -> Config:
             # Migrate from old plaintext password (now stored on next save as hash)
             if "encryption_password" in data and data["encryption_password"]:
                 cfg.encryption_password = data["encryption_password"]
-            # Migrate from old filter_sensitive bool
+            # Migrate from the old filter_sensitive bool.  A v1 config that had
+            # that switch ON named the five categories v1 knew about, and the
+            # named list is what keeps it on now that the category default is
+            # off — the switch itself is the only record of that choice, so it
+            # is still worth reading.  A v1 config that had it OFF (or never
+            # had it, which is the same thing) is left at the default.
+            #
+            # This replaces a rule that upgraded a v1 [] to None so redaction
+            # stayed ON: under v1 the empty list meant "everything" because
+            # that was the default, and both spellings now mean off, so there
+            # is nothing left for it to preserve.
             if "filter_sensitive" in data and not data.get("filter_enabled_categories"):  # noqa: SIM102
                 if data["filter_sensitive"]:
                     cfg.filter_enabled_categories = [
@@ -737,13 +747,6 @@ def load() -> Config:
                         "private_key",
                         "password",
                     ]
-            # Config v1 stored filter_enabled_categories=[] to mean "all
-            # categories enabled"; v2 distinguishes None=all from []=disabled.
-            # Preserve the old default for existing configs by upgrading []→None
-            # (so redaction stays ON), while a v2 save of [] remains a real
-            # "disable everything" choice.
-            if data.get("config_version", 1) < 2 and cfg.filter_enabled_categories == []:
-                cfg.filter_enabled_categories = None
             # v3: the phone companion (远程访问) is on by default, so a config
             # written while the default was OFF is brought forward.  Without
             # this, "on by default" only ever reaches a machine that has never

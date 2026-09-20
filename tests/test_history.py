@@ -206,7 +206,7 @@ def test_delete_by_id_removes_only_target(history_db):
 
 
 def test_filter_content_preserves_image_fmt():
-    from internal.clipboard.filter import ContentFilter
+    from internal.clipboard.filter import ALL_CATEGORIES, ContentFilter
 
     content = ClipboardContent(
         types={
@@ -215,7 +215,7 @@ def test_filter_content_preserves_image_fmt():
         },
         image_fmt="bmp",
     )
-    filtered = ContentFilter().filter_content(content)
+    filtered = ContentFilter(ALL_CATEGORIES).filter_content(content)
     assert filtered.image_fmt == "bmp", "filtered image must keep its format hint"
     assert filtered.types[ContentType.IMAGE_PNG] == content.types[ContentType.IMAGE_PNG]
 
@@ -301,9 +301,9 @@ def test_strip_keeps_rtf_only_clip_unchanged():
 
 
 def test_filter_drops_sensitive_rtf_keeps_redacted_text():
-    from internal.clipboard.filter import ContentFilter
+    from internal.clipboard.filter import ALL_CATEGORIES, ContentFilter
 
-    f = ContentFilter()
+    f = ContentFilter(ALL_CATEGORIES)
     c = _mk_content(
         {
             ContentType.TEXT: CARD_TEXT_BYTES,
@@ -319,9 +319,9 @@ def test_filter_drops_sensitive_rtf_keeps_redacted_text():
 
 
 def test_filter_rtf_only_sensitive_clip_becomes_plain_text():
-    from internal.clipboard.filter import ContentFilter
+    from internal.clipboard.filter import ALL_CATEGORIES, ContentFilter
 
-    f = ContentFilter()
+    f = ContentFilter(ALL_CATEGORIES)
     c = _mk_content({ContentType.RTF: RTF_CARD})
     out = f.filter_content(c)
     assert ContentType.RTF not in out.types
@@ -334,10 +334,10 @@ def test_strip_first_order_makes_tagged_card_detectable():
     # Digits split across inline tags are invisible to the filter on raw
     # markup but detectable after the plain-text strip — this locks in the
     # strip-then-filter order of the outgoing sync path.
-    from internal.clipboard.filter import ContentFilter
+    from internal.clipboard.filter import ALL_CATEGORIES, ContentFilter
 
     html = b"<span>4111</span><span>1111</span><span>1111</span><span>1111</span>"
-    f = ContentFilter()
+    f = ContentFilter(ALL_CATEGORIES)
     raw = _mk_content({ContentType.HTML: html})
     assert f.is_sensitive(raw) is False
     stripped = strip_rich_formats(raw)

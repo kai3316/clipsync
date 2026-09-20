@@ -18,7 +18,7 @@ unredacted — so each has a test rather than a comment.
 
 from internal.clipboard import file_ref
 from internal.clipboard.clipboard import strip_rich_formats
-from internal.clipboard.filter import ContentFilter
+from internal.clipboard.filter import ALL_CATEGORIES, ContentFilter
 from internal.clipboard.format import (
     HISTORY_ONLY_TYPES,
     ClipboardContent,
@@ -356,9 +356,9 @@ class TestTheFilterReadsAnOffer:
     text."""
 
     def _filter(self):
-        # Redaction is on by default except for the opt-in email category, so
-        # the default instance is the one a fresh install runs.
-        return ContentFilter()
+        # The categories are named rather than defaulted: redaction ships off,
+        # and what an offer is read against is a machine that turned it on.
+        return ContentFilter(ALL_CATEGORIES)
 
     def test_a_url_is_inspected_like_text(self):
         content = ClipboardContent(

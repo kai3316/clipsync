@@ -183,11 +183,14 @@
 
         // Content Filter
         filterEnabled: false,
-        filterCreditCard: true,
-        filterSSN: true,
-        filterApiKey: true,
-        filterPrivateKey: true,
-        filterPassword: true,
+        // Off until the load says otherwise: the category default is off, so
+        // a panel that starts with every box ticked shows a state the machine
+        // is not in.
+        filterCreditCard: false,
+        filterSSN: false,
+        filterApiKey: false,
+        filterPrivateKey: false,
+        filterPassword: false,
 
         // App Filter (which apps are monitored)
         appFilterEnabled: false,
@@ -566,16 +569,16 @@
         this.webToken = this.store.token || '';
         this.webLanIp = this.store.overview.localIp || '';
         if (s.filter_enabled_categories !== undefined) {
-          // null/undefined = not configured → all categories enabled (default).
-          // [] = explicitly disabled. Non-empty = that subset.
-          var cats = s.filter_enabled_categories;
-          var allOn = cats === null || cats === undefined;
-          this.filterEnabled = allOn || cats.length > 0;
-          this.filterCreditCard = allOn || cats.indexOf('credit_card') >= 0;
-          this.filterSSN = allOn || cats.indexOf('ssn') >= 0;
-          this.filterApiKey = allOn || cats.indexOf('api_key') >= 0;
-          this.filterPrivateKey = allOn || cats.indexOf('private_key') >= 0;
-          this.filterPassword = allOn || cats.indexOf('password') >= 0;
+          // null/undefined = not configured → nothing redacted (the default).
+          // [] = explicitly empty, which is the same thing. Non-empty = that
+          // subset, and the only thing that turns any of this on.
+          var cats = s.filter_enabled_categories || [];
+          this.filterEnabled = cats.length > 0;
+          this.filterCreditCard = cats.indexOf('credit_card') >= 0;
+          this.filterSSN = cats.indexOf('ssn') >= 0;
+          this.filterApiKey = cats.indexOf('api_key') >= 0;
+          this.filterPrivateKey = cats.indexOf('private_key') >= 0;
+          this.filterPassword = cats.indexOf('password') >= 0;
         }
         if (s.encryption_enabled !== undefined) this.encryptionEnabled = !!s.encryption_enabled;
         if (s.password_set !== undefined) this.passwordSet = !!s.password_set;

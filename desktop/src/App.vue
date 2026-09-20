@@ -3602,8 +3602,11 @@ function buildSettingsForm(loaded: Record<string, any>): Record<string, any> {
     app_filter_enabled: loaded.app_filter_enabled ?? false,
     app_filter_mode: loaded.app_filter_mode ?? "blacklist",
     app_filter_list: Array.isArray(loaded.app_filter_list) ? loaded.app_filter_list.join("\n") : "",
-    filter_enabled_categories: loaded.filter_enabled_categories ??
-      filterCategories.value.filter(([key]) => key !== "email").map(([key]) => key),
+    // Redaction ships off, so a machine that has never chosen categories
+    // (`null`) draws every box unchecked -- which is also what saving that
+    // form writes, and the two have to agree or the first save silently turns
+    // categories on that the reader never picked.
+    filter_enabled_categories: loaded.filter_enabled_categories ?? [],
     relay_brokers: Array.isArray(loaded.relay_brokers) ? loaded.relay_brokers.join("\n") : (loaded.relay_brokers || ""),
     relay_private_brokers: Array.isArray(loaded.relay_private_brokers) ? loaded.relay_private_brokers.join("\n") : (loaded.relay_private_brokers || ""),
     // The broker's limit is stored in bytes and typed in kilobytes, so the
