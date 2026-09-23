@@ -54,18 +54,42 @@ jobs:
 
           What is new in this release:
 
-          - Sensitive-content filtering is off by default.  The categories
-            themselves are unchanged, and still where they were, in
-            Settings -> 剪贴板历史 -> 敏感内容过滤: tick one and matching text
-            is replaced with [FILTERED] before the clip reaches another
-            device.  What changed is the machine that never ticked one.  It
-            used to redact every category except 电子邮箱; it now redacts
-            nothing.  Rewriting what somebody copies is a decision to make
-            rather than a default to discover, and a pattern that fires on an
-            everyday clip is read, on the receiving end, as the clipboard
-            having lost the text.  A machine that already had categories
-            ticked keeps them ticked, and its 敏感内容过滤 boxes still show
-            which ones.
+          - A file sent to a device paired over the internet arrives.  It used
+            to show 发送成功 on the sending side while the receiving device sat
+            at 接收 and never finished.  A relay is not a reliable link, and its
+            acknowledgement does not say otherwise: the one this app ships
+            carries 64 KiB in a single publish and drops anything larger, and
+            it acknowledges a chunk it then fails to push -- measured, 24
+            chunks of ~44 KiB sent back to back were acknowledged in full and
+            arrived two strong.  A relay transfer now runs its own delivery on
+            top of that: the receiving device reports every chunk it has
+            written to disk, the sender keeps two chunks in flight and resends
+            whatever those reports do not cover, and it starts at a pace this
+            kind of relay has been measured to carry, halving that pace
+            whenever a chunk comes back missing.  Nothing has to be filled in
+            for it to work, and a device still on the previous version receives
+            the file the way it always did -- a peer that reports no chunks
+            gets the old send, rather than a transfer waiting out a timeout it
+            was never going to pass.
+
+          - 发送成功 now means the other device has the file, and 传输超时
+            means it does not.  The old report only said the chunks had been
+            handed to the relay, which is how a transfer that never arrived
+            came to look finished where it was sent from.  A relay transfer
+            waits for the receiving device to confirm it has the whole file,
+            and reports the timeout when that confirmation does not come -- so
+            a transfer that cannot get through is now visible on the side that
+            sent it, not only on the side that waited.
+
+          - Settings -> 同步 -> 互联网同步 now carries both numbers a relay
+            needs.  单条消息大小上限 was already there, and 发送速率上限 is how
+            fast those chunks are offered; a rate change reaches the next
+            transfer started, where the size limit still needs a restart.  Both
+            defaults are what the default relay carries, 64 KB and 64 KB/s, so
+            a file transfer works on a fresh install -- and a private relay
+            that carries more is the one thing a bigger number here is for.
+            The size a chunk is cut to follows the size limit, so a relay that
+            carries 256 KB gets the chunk size that was measured against it.
 
           1.0.7 published a macOS installer that cannot start at all, and its
           update check lives in the background process that never comes up, so
