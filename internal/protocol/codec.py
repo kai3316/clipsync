@@ -142,6 +142,13 @@ CHAT_MSG_TYPES = frozenset(
         # kept) or fall through to clipboard handling where the empty "types"
         # payload is discarded by SyncManager's content.is_empty() check.
         "chat_typing",
+        # One file chunk written to disk ({session_id, transfer_id, index}),
+        # sent back by an internet receiver to the sender that asked for it on
+        # the offer.  Same backward compatibility as chat_typing: an older
+        # sender never asks, and an older receiver ignores the frame it is
+        # never sent.  A release that predates this type and somehow received
+        # one would drop it at the gate and keep the connection.
+        "chat_file_ack",
     }
 )
 

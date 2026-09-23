@@ -224,6 +224,10 @@ class ChatManager:
     - ``chat_file_offer``  ``{session_id, transfer_id, file_name, file_size, mime}``
     - ``chat_file_accept`` / ``chat_file_reject`` / ``chat_file_cancel``
       / ``chat_file_complete``  ``{session_id, transfer_id[, status]}``
+    - ``chat_file_ack``  ``{session_id, transfer_id, index}``  -- one chunk
+      written to disk on the receiving side.  Only an internet transfer sends
+      these, and only to a sender that asked for them on the offer; a peer
+      from before this existed ignores the frame (see the CHUNK_ACK_* block)
 
     File bytes ride the existing compact binary chunk framing
     (:func:`encode_binary_chunk`); the host router offers every decoded
@@ -250,7 +254,59 @@ class ChatManager:
     # counted it sent.  176 KiB lands at ~240 KB with the chunk header, leaving
     # the public broker room for its own framing.  LAN peers keep CHUNK_SIZE so
     # the wire format stays byte-identical for pre-update LAN peers.
+    #
+    # This is now the *reference* of a pair rather than the shipped answer: the
+    # shipped relay carries 64 KiB, so ``relay_chunk_for`` scales this down to
+    # ~44 KiB for the default setting.  It stays written down because the ratio
+    # between this chunk and MAX_RELAY_FRAME is the one that was measured, and
+    # scaling by a measured pair tracks the GCM tag, the JSON shell and the
+    # broker's framing alike.
     RELAY_CHUNK_SIZE = 176 * 1024
+    # ---- relay chunk acknowledgement (internet transfers) --------------------
+    # A relay deliverer is not a reliable one, and its own receipt does not say
+    # otherwise: a broker acknowledges a chunk (PUBACK, QoS 1) and then drops it
+    # when it cannot push the bytes fast enough.  Measured against the shipped
+    # private relay, 24 chunks of ~44 KiB sent back to back arrived 2 strong,
+    # while 40 of the same chunks offered at ~86 KB/s arrived 40/40 — the losses
+    # are shaped by rate, happen far below the relay's *size* limit, and are
+    # reported by nothing on the wire.  So an internet transfer runs its own
+    # flow control on top of the relay: the receiver acknowledges each chunk it
+    # has written, the sender keeps only a small window in flight and resends
+    # whatever the acks have not confirmed, and it starts slowly enough not to
+    # provoke the dropping it would otherwise have to repair.
+    #
+    # None of this applies to a LAN peer: TCP is already reliable there, so a
+    # LAN transfer keeps the blunt loop (and its wire format) untouched.
+    CHUNK_ACK_TIMEOUT = 3.0  # no ack progress for this long => resend the window
+    # Rounds a chunk may sit unacknowledged before the peer is taken for one
+    # that does not acknowledge at all — an older build, which knows nothing of
+    # ``chat_file_ack``.  Such a peer gets the blunt loop and the old behaviour,
+    # rather than an internet transfer that waits out every timeout and then
+    # fails something the pre-update app would have delivered (as well as it
+    # ever did).
+    CHUNK_ACK_GRACE = 3
+    # Chunks in flight at once.  Two of the default relay's ~44 KiB chunks is a
+    # ~90 KB burst, under the ~120 KB the relay takes before it starts dropping.
+    # LAN peers ignore it: their window is the whole file.
+    RELAY_CHUNK_WINDOW = 2
+    # How fast the window is allowed to move, in bytes/s.  A round that has to
+    # resend anything halves it; a round that does not nudges it back up toward
+    # the configured ceiling.  That is an estimate of what this relay is willing
+    # to carry, which a constant could not be: the same two figures that arrived
+    # 40/40 on the shipped relay delivered 6/24 on a public one.
+    RELAY_RATE_MIN = 8 * 1024
+    RELAY_RATE_GROWTH = 1.5
+    # Where the pace starts when the transport tagged no ceiling on the send
+    # closure — the host always tags the configured one for an internet peer, so
+    # this only covers a caller that built a closure without it.  It mirrors the
+    # shipped ``relay_max_bytes_per_second``.
+    RELAY_RATE_DEFAULT = 64 * 1024
+    # Chunks that may be resent before the transfer gives up.  The window is
+    # small and the rate halves on every loss, so a healthy relay converges in a
+    # round or two; a peer that is gone, or a relay that carries nothing at this
+    # size, has to end somewhere — and ending as "failed" is the outcome this
+    # whole mechanism exists to report honestly.
+    MAX_RETRANSMIT_ROUNDS = 40
     # How long a session may sit unanswered while open_to_all is off: the
     # sender waits this long for a ``chat_accept``, and the receiver's own
     # ``invited`` row is dropped after the same silence.  In the default mode
@@ -285,13 +341,13 @@ class ChatManager:
     def relay_chunk_for(cls, max_message_bytes: int) -> int:
         """The chunk size to send internet peers over a relay of this limit.
 
-        :data:`RELAY_CHUNK_SIZE` is the answer for the 256 KiB broker this app
-        ships against, and it stays the answer at that limit exactly — the
-        scale below is by the shipped pair, so the default relay's wire format
-        is untouched.  A different limit is that pair scaled rather than
-        recomputed from the envelope arithmetic: the shipped chunk was measured
-        against the shipped frame limit, and the ratio between them holds for
-        the GCM tag, the JSON shell and the broker's own framing alike.
+        :data:`RELAY_CHUNK_SIZE` is the measured answer for the 256 KiB relay
+        the pair below was taken from.  Any other limit is that pair scaled
+        rather than recomputed from the envelope arithmetic: the shipped chunk
+        was measured against the shipped frame limit, and the ratio between them
+        holds for the GCM tag, the JSON shell and the broker's own framing
+        alike.  The default setting (64 KiB, what the shipped relay carries)
+        therefore lands at ~44 KiB.
 
         Scaled by the *frame* limit rather than the payload, because the frame
         limit is the number the publish path actually refuses against (see
@@ -912,6 +968,17 @@ class ChatManager:
             # closure).  No total-size cap rides along with it: the transport
             # carries any file the app accepts.
             chunk_size = getattr(fn, "chunk_size", None) or self.CHUNK_SIZE
+            # ...and, for the same peers, chunk-at-a-time acknowledgement: the
+            # two tags ride one closure, so a peer that has a relay to be sized
+            # for is also a peer whose chunks need confirming (see the
+            # CHUNK_ACK_* block).  A LAN peer carries neither.
+            chunk_ack = bool(getattr(fn, "chunk_ack", False))
+            # The same closure carries the pace to hold, in bytes/s.  The setting
+            # lives on the config, which this class is never handed, and the tag
+            # is the one path a relay limit already travels to reach it.  0 or
+            # absent means "no ceiling known", which the acked path reads as its
+            # own minimum.
+            relay_rate = int(getattr(fn, "relay_rate", 0) or 0)
             # Mirror the incoming cap so a UI bug (or a fast-clicking user)
             # cannot spawn an unbounded number of chunk threads per session.
             outgoing_inflight = sum(1 for s in self._sends.values() if s["session"] is session)
@@ -943,6 +1010,13 @@ class ChatManager:
                 "chunk_size": chunk_size,
                 "accept_event": threading.Event(),
                 "complete_event": threading.Event(),
+                # Chunks the receiver has confirmed writing, and the wakeup the
+                # streaming thread waits on for them.  Only used when chunk_ack
+                # is set; empty and never set otherwise.
+                "chunk_ack": chunk_ack,
+                "relay_rate": relay_rate,
+                "acked": set(),
+                "ack_event": threading.Event(),
                 "cancel": False,
                 "_done_fired": False,
                 "send_fn": fn,
@@ -957,6 +1031,11 @@ class ChatManager:
                     "file_name": entry.file_name,
                     "file_size": size,
                     "chunk_size": chunk_size,
+                    # The sender's own declaration that it will wait for a
+                    # chat_file_ack per chunk, so this side knows to send them.
+                    # Absent from an older sender, which is exactly how a
+                    # receiver tells the two apart.
+                    "chunk_ack": chunk_ack,
                     "mime": "",
                 },
                 fn,
@@ -1285,6 +1364,8 @@ class ChatManager:
                 return bool(self._handle_file_cancel_msg(payload, sender_device_id))
             elif msg_type == "chat_file_complete":
                 return bool(self._handle_file_complete_msg(payload, sender_device_id))
+            elif msg_type == "chat_file_ack":
+                return bool(self._handle_file_ack(payload, sender_device_id))
         except Exception:
             # Never let a malformed frame kill the recv thread.
             logger.warning("chat: error handling %s", msg_type, exc_info=True)
@@ -1823,6 +1904,10 @@ class ChatManager:
                 "file_size": size,
                 "total_chunks": math.ceil(size / chunk_size),
                 "chunk_size": chunk_size,
+                # The sender asked for a chat_file_ack per chunk.  Strictly
+                # True: an older sender omits the field, and a peer that sends
+                # something else meant something else.
+                "chunk_ack": payload.get("chunk_ack") is True,
                 "accepted": False,
                 "fh": None,
                 "temp_path": None,
@@ -1952,6 +2037,36 @@ class ChatManager:
         self._fire("_on_sessions_changed")
         return True
 
+    def _handle_file_ack(self, payload, sender_id) -> bool:
+        """One chunk of ours that the receiver has written to its temp file.
+
+        Advisory, and treated as such: the index is recorded and the streaming
+        thread is woken to move its window on.  A peer could name an index that
+        was never sent, but all that buys it is an early hand-off to the
+        completion frame — the receiver's own size check is what decides whether
+        the file arrived, and the sender's strict report is waiting on that.
+        """
+        transfer_id = str(payload.get("transfer_id", ""))
+        index = payload.get("index")
+        # bool is an int in Python, and a JSON true here would land as index 1.
+        if not isinstance(index, int) or isinstance(index, bool) or index < 0:
+            return False
+        with self._lock:
+            state = self._sends.get(transfer_id)
+            if state is None or state["session"].peer_id != sender_id:
+                # Late acks for a transfer that already finished are ordinary —
+                # the state pops the moment the completion ack lands — so this
+                # is not worth a log line.
+                return False
+            if index >= state["total_chunks"]:
+                return False
+            state["acked"].add(index)
+            # Acknowledged chunks are liveness too: a window being resent is not
+            # a stalled transfer.
+            state["last_progress_mono"] = time.monotonic()
+            state["ack_event"].set()
+        return True
+
     def _handle_file_complete_msg(self, payload, sender_id) -> bool:
         transfer_id = str(payload.get("transfer_id", ""))
         status = str(payload.get("status", ""))
@@ -1995,6 +2110,7 @@ class ChatManager:
             return False
         transfer_id = str(raw_payload.get("transfer_id", ""))
         file_done_fired: list[tuple[str, str, bool, str, str]] = []
+        ack_wanted = False
         with self._lock:
             state = self._receives.get(transfer_id)
             if state is None:
@@ -2044,11 +2160,30 @@ class ChatManager:
                 entry = state["entry"]
                 entry.fraction = min(1.0, state["received_bytes"] / max(1, state["file_size"]))
                 sid, tid, fraction = state["session"].session_id, transfer_id, entry.fraction
+                # The sender asked to be told about every chunk it sends; only
+                # an internet transfer does (see the CHUNK_ACK_* block).
+                ack_wanted = bool(state.get("chunk_ack"))
         if file_done_fired:
             for sid_f, tid_f, ok_f, path_f, st_f in file_done_fired:
                 self._fire("_on_file_done", sid_f, tid_f, ok_f, path_f, st_f)
             return True
         self._fire("_on_file_progress", sid, tid, fraction)
+        if ack_wanted:
+            # The chunk is on disk, so the sender's window may move on.  Sent
+            # here — after the fire, outside the lock, on the recv thread —
+            # because the sender is blocked on this frame: making it queue
+            # behind another transfer's UI callbacks would stall the transfer
+            # a whole window at a time.  Repeat indexes are fine; the sender
+            # tracks them in a set.
+            self._send_frame(
+                {
+                    "msg_type": "chat_file_ack",
+                    "session_id": sid,
+                    "transfer_id": transfer_id,
+                    "index": index,
+                },
+                send_fn,
+            )
         with self._lock:
             state = self._receives.get(transfer_id)
             if (
@@ -2215,36 +2350,21 @@ class ChatManager:
             chunk_size = state.get("chunk_size") or self.CHUNK_SIZE
             send_fn = state["send_fn"]
             session = state["session"]
+            chunk_ack = bool(state.get("chunk_ack"))
             # Bind early: the failure paths below use these, and the stall
             # sweeper may have already popped the send state, so the inner
             # `state["session"].session_id` rebinds would NameError on sid.
             sid, tid = session.session_id, transfer_id
         try:
             with open(path, "rb") as fh:
-                for index in range(total_chunks):
-                    with self._lock:
-                        state = self._sends.get(transfer_id)
-                        if state is None or state["cancel"]:
-                            return
-                    chunk = fh.read(chunk_size)
-                    if not chunk:
-                        break
-                    frame = encode_binary_chunk(transfer_id, index, total_chunks, chunk)
-                    if not self._send_chunk_with_backoff(transfer_id, frame, send_fn):
-                        with self._lock:
-                            state = self._sends.pop(transfer_id, None)
-                            if state is not None:
-                                state["entry"].status = "failed"
-                                sid, tid = state["session"].session_id, transfer_id
-                        self._fire("_on_file_done", sid, tid, False, "", "peer_offline")
-                        return
-                    fraction = (index + 1) / total_chunks
-                    with self._lock:
-                        state = self._sends.get(transfer_id)
-                        if state is not None:
-                            state["entry"].fraction = fraction
-                            state["last_progress_mono"] = time.monotonic()
-                    self._fire("_on_file_progress", session.session_id, transfer_id, fraction)
+                if chunk_ack:
+                    outcome = self._stream_chunks_acked(
+                        transfer_id, session, fh, total_chunks, chunk_size, send_fn
+                    )
+                else:
+                    outcome = self._stream_chunks_blunt(
+                        transfer_id, session, fh, total_chunks, chunk_size, send_fn
+                    )
         except OSError:
             logger.error("chat: read failed for %s", path, exc_info=True)
             with self._lock:
@@ -2253,6 +2373,10 @@ class ChatManager:
                     state["entry"].status = "failed"
                     sid, tid = state["session"].session_id, transfer_id
             self._fire("_on_file_done", sid, tid, False, "", "error_disk")
+            return
+        if outcome in ("cancelled", "failed"):
+            # The streamer reported its own failure (or the user cancelled) and
+            # the send state is already gone; nothing left to send or say.
             return
         # Tell the receiver the byte stream is finished (also the only
         # trigger an empty-file receive ever gets), then wait briefly for
@@ -2266,7 +2390,15 @@ class ChatManager:
             },
             send_fn,
         )
-        complete_event.wait(timeout=self.COMPLETION_WAIT_TIMEOUT)
+        confirmed = complete_event.wait(timeout=self.COMPLETION_WAIT_TIMEOUT)
+        # A relay transfer reports success only on the receiver's own
+        # confirmation.  Every other path may take the transport's word for it —
+        # LAN's TCP either delivers a frame or drops the connection — but a relay
+        # takes a chunk and then discards it without saying so, which is exactly
+        # how a sender came to report 发送成功 while the other side sat at 接收
+        # forever.  Silence here is reported through the same status the accept
+        # timeout uses, rather than dressed up as a delivery.
+        unconfirmed = chunk_ack and not confirmed
         with self._lock:
             state = self._sends.pop(transfer_id, None)
             if state is None:
@@ -2275,14 +2407,16 @@ class ChatManager:
             if state["cancel"]:
                 return
             if err_status:
-                # The receiver reported a failure (e.g. size mismatch) — the
-                # transfer did NOT succeed.  The entry keeps the receiver's own
-                # code rather than collapsing to "declined": a decline is a
-                # decision the peer's user made, and this is a fault on the
-                # receiving side.  Reporting it as 已拒绝 is what sent a reader
-                # to ask the other person why they refused, over a transfer
-                # nobody had refused.
+                # Checked first: the receiver reported a failure (e.g. size
+                # mismatch), so it HAS answered and this is not the silent case
+                # below.  The entry keeps the receiver's own code rather than
+                # collapsing to "declined": a decline is a decision the peer's
+                # user made, and this is a fault on the receiving side.
+                # Reporting it as 已拒绝 is what sent a reader to ask the other
+                # person why they refused, over a transfer nobody had refused.
                 state["entry"].status = err_status
+            elif unconfirmed:
+                state["entry"].status = "failed"
             else:
                 state["entry"].status = "done"
                 state["entry"].fraction = 1.0
@@ -2291,11 +2425,240 @@ class ChatManager:
             logger.warning("chat: receiver rejected file %s (%s)", transfer_id[:8], err_status)
             self._fire("_on_file_done", sid, tid, False, err_status, "rejected")
             return
-        # The receiver may not ack within the wait window — the bytes were
-        # still handed to the transport and the entry is already "done", so
-        # report success either way.  (No separate "unconfirmed" status is
-        # surfaced; every UI renders the entry as delivered.)
+        if unconfirmed:
+            logger.warning(
+                "chat: %s acked every chunk but never confirmed the finished file",
+                transfer_id[:8],
+            )
+            self._fire("_on_file_done", sid, tid, False, "", "error_timeout")
+            return
+        # On the blunt path (LAN, or a peer too old to ack chunks) the receiver
+        # may not ack within the wait window — the bytes were still handed to
+        # the transport and the entry is already "done", so report success
+        # either way.  Over the relay the acks are the evidence, and a missing
+        # final one took the branch above.
         self._fire("_on_file_done", sid, tid, True, "", "success")
+
+    def _stream_chunks_blunt(
+        self, transfer_id, session, fh, total_chunks, chunk_size, send_fn, start_index: int = 0
+    ) -> str:
+        """Send every chunk once, as fast as the transport takes it.
+
+        The LAN path, and the fallback for an internet peer that never
+        acknowledges a chunk.  ``start_index`` resumes a file whose earlier
+        chunks are already on the wire (the fallback into this loop).  Returns
+        ``"blunt"`` when the byte stream is finished, ``"cancelled"`` when the
+        user ended the transfer, and ``"failed"`` when a chunk was refused for
+        good — that last one having already reported the failure and dropped
+        the send state.
+        """
+        for index in range(start_index, total_chunks):
+            with self._lock:
+                state = self._sends.get(transfer_id)
+                if state is None or state["cancel"]:
+                    return "cancelled"
+            sent = self._send_one_chunk(
+                transfer_id, session, fh, index, total_chunks, chunk_size, send_fn
+            )
+            if sent == "eof":
+                # The file shrank under us.  Stop where the bytes do: the
+                # receiver's own size check is what reports the shortfall.
+                break
+            if sent != "ok":
+                self._fail_send(transfer_id, session.session_id, "peer_offline")
+                return "failed"
+        return "blunt"
+
+    def _stream_chunks_acked(
+        self, transfer_id, session, fh, total_chunks, chunk_size, send_fn
+    ) -> str:
+        """Stream chunks a paced window at a time, on the receiver's receipts.
+
+        Returns ``"acked"`` once every chunk has been confirmed written,
+        ``"blunt"`` when the peer never confirmed one and the rest of the file
+        went out through :meth:`_stream_chunks_blunt` instead, ``"cancelled"``,
+        and ``"failed"`` — that last one having reported the failure and dropped
+        the send state itself.
+
+        See the CHUNK_ACK_* block for the measurements behind the shape: the
+        window is small, the pace starts at the configured ceiling and is cut in
+        half by any round that has to resend, and a chunk is only ever counted
+        delivered because the peer said so.  Nothing here reads the relay's own
+        acknowledgements — a broker confirms a chunk it then drops.
+        """
+        with self._lock:
+            state = self._sends.get(transfer_id)
+            if state is None or state["cancel"]:
+                return "cancelled"
+            acked: set[int] = state["acked"]
+            ack_event: threading.Event = state["ack_event"]
+            ceiling = max(
+                self.RELAY_RATE_MIN,
+                int(state.get("relay_rate") or 0) or self.RELAY_RATE_DEFAULT,
+            )
+        rate = ceiling
+        window_end = 0  # nothing at or after this index has been sent yet
+        in_flight: dict[int, float] = {}  # index -> when it last went out
+        lost_rounds = 0
+        round_no = 0
+        pace_at = time.monotonic()
+
+        while True:
+            with self._lock:
+                state = self._sends.get(transfer_id)
+                if state is None or state["cancel"]:
+                    return "cancelled"
+                confirmed = len(acked)
+            if confirmed >= total_chunks:
+                return "acked"
+            if confirmed == 0 and round_no >= self.CHUNK_ACK_GRACE:
+                # Not one receipt in this many rounds: this peer does not
+                # acknowledge chunks at all (see the CHUNK_ACK_GRACE block), so
+                # the rest of the file goes out the way it did before there were
+                # any acks.  Everything already sent is inside window_end, and
+                # the receiver overwrites a chunk it sees twice.
+                logger.info(
+                    "chat: %s unacked after %d rounds -- finishing blunt",
+                    transfer_id[:8],
+                    round_no,
+                )
+                return self._stream_chunks_blunt(
+                    transfer_id,
+                    session,
+                    fh,
+                    total_chunks,
+                    chunk_size,
+                    send_fn,
+                    start_index=min(in_flight) if in_flight else window_end,
+                )
+
+            # Whatever is still in flight is the last round's loss, and goes
+            # again before any new chunk takes the window.  Nothing new is
+            # admitted until the window has room, which is what stops a silent
+            # relay from being handed the whole file.
+            to_send = sorted(in_flight)
+            while len(to_send) < self.RELAY_CHUNK_WINDOW and window_end < total_chunks:
+                to_send.append(window_end)
+                window_end += 1
+            for index in to_send:
+                now = time.monotonic()
+                if now < pace_at:
+                    time.sleep(pace_at - now)
+                    now = time.monotonic()
+                sent = self._send_one_chunk(
+                    transfer_id, session, fh, index, total_chunks, chunk_size, send_fn
+                )
+                if sent == "refused":
+                    self._fail_send(transfer_id, session.session_id, "peer_offline")
+                    return "failed"
+                if sent == "eof":
+                    self._fail_send(transfer_id, session.session_id, "error_disk")
+                    return "failed"
+                in_flight[index] = time.monotonic()
+                pace_at = max(pace_at, now) + chunk_size / rate
+
+            # Wait out this window.  The deadline — not the absence of acks —
+            # is what ends the round: an ack for one chunk of the window says
+            # nothing about the other, so the round is over when they have all
+            # answered or when they have had long enough.
+            deadline = time.monotonic() + self.CHUNK_ACK_TIMEOUT
+            while in_flight:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    break
+                ack_event.wait(timeout=min(remaining, 0.25))
+                ack_event.clear()
+                with self._lock:
+                    state = self._sends.get(transfer_id)
+                    if state is None or state["cancel"]:
+                        return "cancelled"
+                    got = set(acked)
+                for index in [i for i in in_flight if i in got]:
+                    del in_flight[index]
+            round_no += 1
+
+            if not in_flight:
+                # A clean round: everything the window carried was confirmed.
+                # Try a little faster next time, up to the ceiling the settings
+                # asked for — this is the estimate of what the relay will take.
+                lost_rounds = 0
+                rate = min(ceiling, max(self.RELAY_RATE_MIN, int(rate * self.RELAY_RATE_GROWTH)))
+                continue
+            lost_rounds += 1
+            if lost_rounds > self.MAX_RETRANSMIT_ROUNDS:
+                logger.warning(
+                    "chat: dropping %s after %d unconfirmed rounds (%d/%d chunks acked)",
+                    transfer_id[:8],
+                    lost_rounds,
+                    confirmed,
+                    total_chunks,
+                )
+                # Tell the receiver to let the half-file go: without this it sits
+                # at 接收 until its own stall timeout, which is the shape of the
+                # bug this transfer mode exists to stop.
+                self._send_frame(
+                    {
+                        "msg_type": "chat_file_cancel",
+                        "session_id": session.session_id,
+                        "transfer_id": transfer_id,
+                    },
+                    send_fn,
+                )
+                self._fail_send(transfer_id, session.session_id, "error_timeout")
+                return "failed"
+            # A round that had to resend anything was too fast for this relay.
+            # Halving is the whole adaptation: the drop rate is a property of
+            # the pace, and this walks down to a pace that works, from whatever
+            # ceiling a user set, on a relay whose capacity nobody publishes.
+            rate = max(self.RELAY_RATE_MIN, rate // 2)
+            pace_at = time.monotonic()
+
+    def _send_one_chunk(
+        self, transfer_id, session, fh, index, total_chunks, chunk_size, send_fn
+    ) -> str:
+        """Read chunk *index* and hand it to the transport, retrying refusals.
+
+        Returns ``"ok"``, ``"eof"`` when the file has no such chunk (it shrank
+        after the offer was sized), or ``"refused"`` when the transport would
+        not take it.  The progress it reports never walks backwards, so a
+        window being resent does not make the bar retreat.
+        """
+        fh.seek(index * chunk_size)
+        chunk = fh.read(chunk_size)
+        if not chunk:
+            return "eof"
+        frame = encode_binary_chunk(transfer_id, index, total_chunks, chunk)
+        if not self._send_chunk_with_backoff(transfer_id, frame, send_fn):
+            return "refused"
+        fraction = (index + 1) / total_chunks
+        progressed = False
+        with self._lock:
+            state = self._sends.get(transfer_id)
+            if state is not None:
+                # Still alive, even when all this did was send a chunk again:
+                # the stall sweeper must not take a retransmitting transfer for
+                # a dead one.
+                state["last_progress_mono"] = time.monotonic()
+                if fraction > state["entry"].fraction:
+                    state["entry"].fraction = fraction
+                    progressed = True
+        if progressed:
+            self._fire("_on_file_progress", session.session_id, transfer_id, fraction)
+        return "ok"
+
+    def _fail_send(self, transfer_id: str, sid: str, status: str) -> None:
+        """Fail an outgoing transfer from the streaming thread.
+
+        Drops the send state, marks the entry and reports it.  *sid* is the
+        caller's session id, used when the state is already gone (the stall
+        sweeper pops sends too, and the report still has to name the session).
+        """
+        with self._lock:
+            state = self._sends.pop(transfer_id, None)
+            if state is not None:
+                state["entry"].status = "failed"
+                sid = state["session"].session_id
+        self._fire("_on_file_done", sid, transfer_id, False, "", status)
 
     def _send_frame_raw(self, data: bytes, send_fn: SendFn) -> bool:
         """Send pre-encoded bytes; False when the transport refused."""

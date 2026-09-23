@@ -212,6 +212,9 @@ def test_settings_round_trip_and_unknown_field_rejection(app):
             # The relay's per-message ceiling.  Read when the relay is built,
             # so the assertion is on what was stored and echoed back.
             "relay_max_message_bytes": 64 * 1024,
+            # ...and the pace it may offer those messages at, the other half of
+            # the same setting (read when a transfer is offered).
+            "relay_max_bytes_per_second": 128 * 1024,
         },
     )
     assert result["ok"] is True
@@ -223,6 +226,9 @@ def test_settings_round_trip_and_unknown_field_rejection(app):
     assert Dispatcher(app).call("settings.get", {})["settings"][
         "relay_max_message_bytes"
     ] == 64 * 1024
+    assert Dispatcher(app).call("settings.get", {})["settings"][
+        "relay_max_bytes_per_second"
+    ] == 128 * 1024
     with pytest.raises(ApplicationError):
         Dispatcher(app).call("settings.update", {"history_max_entries": 0})
     with pytest.raises(ApplicationError):
@@ -231,6 +237,8 @@ def test_settings_round_trip_and_unknown_field_rejection(app):
     # relay could never carry is refused rather than stored.
     with pytest.raises(ApplicationError):
         Dispatcher(app).call("settings.update", {"relay_max_message_bytes": 1024})
+    with pytest.raises(ApplicationError):
+        Dispatcher(app).call("settings.update", {"relay_max_bytes_per_second": 512})
     with pytest.raises(ApplicationError, match="Unexpected"):
         Dispatcher(app).call("settings.update", {"private_key_pem": "secret"})
 

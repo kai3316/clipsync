@@ -512,6 +512,134 @@ class TestInternetRelayFileTransfers:
         received = next(e for e in self.pair.b.get_messages(self.sid) if e["transfer_id"] == tid)
         assert open(received["saved_path"], "rb").read() == src.read_bytes()  # noqa: SIM115
 
+    @staticmethod
+    def _tagged(fn, rate: int = 8 * 1024 * 1024):
+        """Add the two tags an internet send closure carries.
+
+        ``LanRuntime._chat_send_fn`` sets both for a peer it can reach over the
+        relay — the request for a per-chunk acknowledgement, and the pace
+        ceiling — and a LAN closure carries neither.  The rate here is well
+        above anything a broker carries: the pacing itself is not what these
+        cases are about, and a real one would make them sleep.
+        """
+        fn.chunk_ack = True
+        fn.relay_rate = rate
+        return fn
+
+    def _relay_fn_acked(self, max_message_bytes: int = 64 * 1024, rate: int = 8 * 1024 * 1024):
+        return self._tagged(self._relay_fn(max_message_bytes), rate)
+
+    def _a_entry(self, tid):
+        msgs = self.pair.a.get_messages(self.sid)
+        return next((e for e in msgs if e["transfer_id"] == tid), None)
+
+    def _ack_indices(self) -> list:
+        """The chunk indexes B acknowledged, in the order it sent them."""
+        out = []
+        for frame in self.pair.frames_b_to_a:
+            payload = getattr(decode_message(frame), "_raw_payload", None) or {}
+            if payload.get("msg_type") == "chat_file_ack":
+                out.append(payload.get("index"))
+        return out
+
+    def test_an_internet_transfer_confirms_every_chunk_with_the_peer(self):
+        """The sender waits for the receiver's receipt, not the relay's.
+
+        A broker acknowledges a chunk (PUBACK, QoS 1) and then drops it when it
+        cannot push the bytes on, so the relay's own receipt says nothing about
+        whether the file arrived.  The offer declares that this transfer wants a
+        ``chat_file_ack`` per chunk, the receiver answers with one for each
+        chunk it writes, and the file still lands byte for byte.
+        """
+        import math
+
+        chunk = ChatManager.relay_chunk_for(64 * 1024)
+        src = self._source(chunk * 3 + 17)
+        tid = self.pair.a.send_file(self.sid, str(src), self._relay_fn_acked())
+        assert tid, "send_file returned None"
+        offer = next(
+            (getattr(decode_message(f), "_raw_payload", {}) or {})
+            for f in self.pair.frames_a_to_b
+            if (getattr(decode_message(f), "_raw_payload", {}) or {}).get("msg_type")
+            == "chat_file_offer"
+        )
+        assert offer["chunk_ack"] is True, "the offer did not ask for receipts"
+        assert _wait_until(lambda: (self._a_entry(tid) or {}).get("status") == "done")
+        received = self._b_entry(tid)
+        assert open(received["saved_path"], "rb").read() == src.read_bytes()  # noqa: SIM115
+        # Exactly one receipt per chunk, naming every index once.
+        total = math.ceil(src.stat().st_size / chunk)
+        assert sorted(self._ack_indices()) == list(range(total))
+        # ...and a LAN closure still asks for none, so the wire format a
+        # pre-update LAN peer sees is unchanged.
+        assert not getattr(self.pair.send_from_a, "chunk_ack", False)
+
+    def test_a_peer_that_never_acknowledges_chunks_still_gets_the_file(self, monkeypatch):
+        """A build from before ``chat_file_ack`` existed ignores the request.
+
+        Waiting out the ack timeout for every chunk, and then failing the
+        transfer, would break a pairing the older app would have delivered — so
+        after CHUNK_ACK_GRACE rounds with nothing confirmed the sender stops
+        waiting on receipts and streams the rest the old way.
+        """
+        monkeypatch.setattr(ChatManager, "CHUNK_ACK_GRACE", 1)
+        monkeypatch.setattr(ChatManager, "CHUNK_ACK_TIMEOUT", 0.05)
+        # An older receiver: it takes the chunks and answers none of them.
+        original = self.pair.b._send_frame
+
+        def no_acks(payload, send_fn, msg_id=""):
+            if payload.get("msg_type") == "chat_file_ack":
+                return True
+            return original(payload, send_fn, msg_id)
+
+        monkeypatch.setattr(self.pair.b, "_send_frame", no_acks)
+        chunk = ChatManager.relay_chunk_for(64 * 1024)
+        src = self._source(chunk * 2 + 5)
+        tid = self.pair.a.send_file(self.sid, str(src), self._relay_fn_acked())
+        assert tid, "send_file returned None"
+        assert _wait_until(lambda: (self._a_entry(tid) or {}).get("status") == "done"), (
+            "the fallback never finished the transfer"
+        )
+        assert self._ack_indices() == [], "the peer did send an acknowledgement"
+        assert open(self._b_entry(tid)["saved_path"], "rb").read() == src.read_bytes()  # noqa: SIM115
+
+    def test_a_relay_that_delivers_nothing_is_not_reported_as_sent(self, monkeypatch):
+        """The report this whole path exists to stop making.
+
+        A file reached nobody — the receiver sat at 接收 while the sender said
+        发送成功 — because a chunk counted as sent the moment the broker queued
+        it.  With nothing arriving, no chunk is ever confirmed and no delivery
+        ack comes back, so the transfer ends as a failure: unconfirmed is not
+        the same thing as delivered.
+        """
+        monkeypatch.setattr(ChatManager, "CHUNK_ACK_GRACE", 1)
+        monkeypatch.setattr(ChatManager, "CHUNK_ACK_TIMEOUT", 0.05)
+        monkeypatch.setattr(ChatManager, "COMPLETION_WAIT_TIMEOUT", 0.05)
+        done: list = []
+        self.pair.a.set_on_file_done(lambda *a: done.append(a))
+        # What a relay that takes everything and delivers nothing looks like
+        # from the sender: the chunk frames go out and never arrive, and so does
+        # the frame that says the stream is finished.  The offer and the accept
+        # still cross, as they do on a relay that carries small frames.
+        eaten = {"file_chunk", "chat_file_complete"}
+
+        def swallow(data):
+            raw = getattr(decode_message(data), "_raw_payload", None) or {}
+            if raw.get("msg_type") in eaten:
+                return True
+            return self.pair.send_from_a(data)
+
+        src = self._source(ChatManager.relay_chunk_for(64 * 1024) * 2 + 5)
+        tid = self.pair.a.send_file(self.sid, str(src), self._tagged(swallow))
+        assert tid, "send_file returned None"
+        assert _wait_until(lambda: bool(done)), "the sender never reported anything"
+        _sid, _tid, ok, _path, status = done[0]
+        assert ok is False, "a transfer nothing arrived for was reported as sent"
+        assert status == "error_timeout"
+        assert (self._a_entry(tid) or {}).get("status") == "failed"
+        # ...and the receiver, which received nothing, is not left looking done.
+        assert (self._b_entry(tid) or {}).get("status") != "done"
+
     def test_an_oversize_file_is_refused_before_any_offer(self):
         """Only ``MAX_FILE_SIZE`` refuses now — the relay's 5 MiB file cap is gone.
 

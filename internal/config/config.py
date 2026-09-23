@@ -246,15 +246,41 @@ class Config:
     # treatment as the translation API key.
     relay_username: str = "clipsync_mqtt"
     relay_password: str = "Y*CT$#qgn_Ft#p6JG+"
-    # The largest single message the relay will carry, in bytes.
+    # The largest single PUBLISH packet the relay will carry, in bytes — the
+    # whole packet, not just the payload this app hands the broker: the topic
+    # and the MQTT headers ride in front of it (relay.PUBLISH_OVERHEAD_BYTES),
+    # and a broker's documented limit counts them.
     #
     # A property of the server, not of this app: a broker that refuses a message
     # over its limit does so by dropping it, so a file chunk too large for it
-    # dies in flight while the sender has already counted it sent.  Lower this
-    # to the smallest message the relay in use will accept and every chunk is
-    # sized to fit under it.  256 KiB is what the public brokers carry and what
-    # this app has always assumed; a free tier commonly allows 64 KiB.
-    relay_max_message_bytes: int = 256 * 1024
+    # dies in flight while the sender has already counted it sent.  The shipped
+    # private relay drops it *and* disconnects the publisher, taking the whole
+    # relay session down with the chunk that missed the limit.
+    #
+    # 64 KiB is what that relay carries — measured: a 64209-byte envelope
+    # arrives, a 65573-byte one is refused.  Every chunk is published to the
+    # primary and its mirrors alike, so what a chunk has to fit is the narrowest
+    # relay in the list.  Raise this for a relay that carries more: the chunk
+    # size follows the setting (ChatManager.relay_chunk_for).
+    relay_max_message_bytes: int = 64 * 1024
+    # How fast this app will feed the relay, in bytes per second.
+    #
+    # The other half of what a relay refuses, and not a property of the server
+    # the way the size limit is — it is a *policy*: how much of a shared,
+    # rate-limited pipe this app is willing to take.  A broker accepts a burst
+    # and then silently discards what it cannot push at the rate it is going:
+    # measured on the shipped private relay, 24 chunks of ~44 KiB sent back to
+    # back arrived 2 strong, while 40 of the same chunks offered at ~86 KB/s
+    # arrived 40/40.  Nothing reports those losses — QoS 1 is acknowledged at
+    # the broker, not at the peer — so the sender's own flow control has to
+    # avoid provoking them, and this is the number it aims at.
+    #
+    # 64 KiB/s (512 kbit/s) sits under what the shipped relay carries with room
+    # for the chat, clipboard and receipt traffic sharing the same pipe.  Raise
+    # it for a relay of your own that is faster; the transfer will use the
+    # configured rate as its ceiling and back off below it when a chunk has to
+    # be resent.
+    relay_max_bytes_per_second: int = 64 * 1024
     # This device's own relay secret — generated lazily on first use and
     # never transmitted in the clear (enrollment rides the TLS LAN channel).
     relay_secret: str = ""
@@ -439,6 +465,7 @@ _FIELD_RULES: dict[str, tuple] = {
     "relay_username": ("str",),
     "relay_password": ("str",),
     "relay_max_message_bytes": ("int",),
+    "relay_max_bytes_per_second": ("int",),
     "relay_secret": ("str",),
     "peer_relay_secrets": ("strdict",),
     "netpair_secrets": ("strdict",),
@@ -474,6 +501,11 @@ _FIELD_RANGES: dict[str, tuple] = {
     # ceiling because past it the figure is no longer a broker's published
     # limit but a typo.
     "relay_max_message_bytes": (32 * 1024, 1024 * 1024),
+    # How much of the relay this app will use, in bytes/s.  The floor is a
+    # transfer slow enough to be useless and the ceiling is past what any of the
+    # shipped brokers carries, so a value in between is a preference rather than
+    # a typo (see the field comment for the measured rate this default clears).
+    "relay_max_bytes_per_second": (4 * 1024, 2 * 1024 * 1024),
 }
 
 # Sentinel returned by _validate_field when a value must be skipped.
@@ -705,6 +737,7 @@ def load() -> Config:
                 "relay_username",
                 "relay_password",
                 "relay_max_message_bytes",
+                "relay_max_bytes_per_second",
                 "relay_secret",
                 "peer_relay_secrets",
                 "netpair_secrets",
@@ -882,6 +915,7 @@ def save(cfg: Config, enc_mgr: "EncryptionManager | None" = None):
             "relay_username": cfg.relay_username,
             "relay_password": cfg.relay_password,
             "relay_max_message_bytes": cfg.relay_max_message_bytes,
+            "relay_max_bytes_per_second": cfg.relay_max_bytes_per_second,
             "relay_secret": cfg.relay_secret,
             "peer_relay_secrets": cfg.peer_relay_secrets,
             "netpair_secrets": cfg.netpair_secrets,

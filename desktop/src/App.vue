@@ -349,6 +349,24 @@ function brokerList(value: unknown): string[] {
 const DEFAULT_RELAY_MAX_MESSAGE_BYTES = 256 * 1024;
 const MIN_RELAY_MAX_MESSAGE_KB = 32;
 const MAX_RELAY_MAX_MESSAGE_KB = 1024;
+/* The other half of the same setting: how fast those chunks may be offered.
+ *
+ * A relay that refuses an oversized message also quietly drops most of a burst
+ * sent too soon after the last one — measured against the shipped relay, 24
+ * chunks back to back arrived 2 strong while the same chunks offered at ~86
+ * KB/s arrived 40/40 — so a file transfer paces itself at this rate, and backs
+ * further off by itself whenever chunks come back unconfirmed.  This number is
+ * the ceiling it starts from and never exceeds; 64 KiB/s (512 kbit/s) is what
+ * the shipped relay carries.  Kilobytes per second in the box, bytes per second
+ * on disk, like the row above.
+ *
+ * It is a setting rather than a constant because the pace a relay will carry is
+ * a property of that relay, which no broker publishes: a faster private relay
+ * wants a bigger number here, and the transfer still finds its own level.
+ */
+const DEFAULT_RELAY_MAX_BYTES_PER_SECOND = 64 * 1024;
+const MIN_RELAY_RATE_KB = 4;
+const MAX_RELAY_RATE_KB = 2048;
 // Security: the encryption password keeps the rules the pairing passphrase had
 // (settings_window.password_rule_* in the legacy panel; the sidecar enforces
 // the same rules server-side through netpair_passphrase_error).  The password
@@ -3619,15 +3637,22 @@ function buildSettingsForm(loaded: Record<string, any>): Record<string, any> {
       MIN_RELAY_MAX_MESSAGE_KB,
       MAX_RELAY_MAX_MESSAGE_KB,
     ),
+    relay_max_rate_kbs: clampNumber(
+      Math.round(Number(loaded.relay_max_bytes_per_second ?? DEFAULT_RELAY_MAX_BYTES_PER_SECOND) / 1024),
+      DEFAULT_RELAY_MAX_BYTES_PER_SECOND / 1024,
+      MIN_RELAY_RATE_KB,
+      MAX_RELAY_RATE_KB,
+    ),
   };
 }
 /** Config names the form spells differently.
  *
  * The sidecar reports what changed under the name the config stores it by, and
- * the one field whose form key is not that name is the relay's message limit —
- * typed in kilobytes, stored in bytes. */
+ * the fields whose form key is not that name are the relay's two limits — both
+ * typed in kilobytes, both stored in bytes. */
 const SETTINGS_FIELD_ALIASES: Record<string, string> = {
   relay_max_message_bytes: "relay_max_message_kb",
+  relay_max_bytes_per_second: "relay_max_rate_kbs",
 };
 /** Fold the settings another surface changed into the form, by name.
  *
@@ -3835,6 +3860,15 @@ async function saveSettings() {
         DEFAULT_RELAY_MAX_MESSAGE_BYTES / 1024,
         MIN_RELAY_MAX_MESSAGE_KB,
         MAX_RELAY_MAX_MESSAGE_KB,
+      ) * 1024,
+      // The pace those chunks are offered at, in KB/s in the box and bytes/s on
+      // disk.  Read when a transfer is offered rather than when the relay is
+      // built, so it reaches the next file sent and not one already running.
+      relay_max_bytes_per_second: clampNumber(
+        settings.value.relay_max_rate_kbs,
+        DEFAULT_RELAY_MAX_BYTES_PER_SECOND / 1024,
+        MIN_RELAY_RATE_KB,
+        MAX_RELAY_RATE_KB,
       ) * 1024,
       // Advanced/network fields.  Numbers are clamped to the sidecar's bounds so
       // a cleared input falls back instead of failing the whole save.
@@ -4960,6 +4994,21 @@ async function translateText() {
                     <span class="setting-control">
                       <input v-model.number="settings.relay_max_message_kb" :aria-label="t('单条消息大小上限')" type="number" :min="MIN_RELAY_MAX_MESSAGE_KB" :max="MAX_RELAY_MAX_MESSAGE_KB" step="1" />
                       <span class="note">{{ t("单位 KB。填中继服务器允许的单条消息上限，传输文件时每个数据块都会按它切分——超出会被服务器直接丢弃。免费中继常见 64 KB，公共中继为 256 KB。修改后需重启生效。") }}</span>
+                    </span>
+                  </label>
+                  <!-- The rate half of the same problem.  A relay that keeps a
+                       message under its ceiling still drops most of a burst
+                       sent too fast, and reports nothing when it does — so a
+                       file transfer paces itself at this ceiling, confirms
+                       every chunk with the other device, and slows down by
+                       itself when chunks go missing.  This is where a faster
+                       private relay is told it can carry more; a slower one is
+                       found on its own. -->
+                  <label class="setting">
+                    <span class="setting-name">{{ t("发送速率上限") }}</span>
+                    <span class="setting-control">
+                      <input v-model.number="settings.relay_max_rate_kbs" :aria-label="t('发送速率上限')" type="number" :min="MIN_RELAY_RATE_KB" :max="MAX_RELAY_RATE_KB" step="1" />
+                      <span class="note">{{ t("单位 KB/s。中继单块没超限也可能丢弃：连发太快时，服务器会悄悄丢掉其中大部分。传输文件时按这个速率匀速发送，逐块确认对方已收到，丢块时自动降速重传。免费中继约 64 KB/s，私有中继更快可调高。修改后对新发起的传输生效。") }}</span>
                     </span>
                   </label>
                   <!-- The panel's own 测试 button.  Last in the card, because it

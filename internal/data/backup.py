@@ -209,6 +209,10 @@ def create_backup(
             # over it.  Restoring onto a device that then talks to the same
             # broker needs the same number, or its chunks get dropped in flight.
             "relay_max_message_bytes": cfg.relay_max_message_bytes,
+            # ...and the pace those chunks are offered at, the other half of the
+            # same setting: a broker refuses a chunk past its ceiling, and drops
+            # most of a burst offered too fast.  Both numbers describe one relay.
+            "relay_max_bytes_per_second": cfg.relay_max_bytes_per_second,
             "relay_secret": cfg.relay_secret,
             "peer_relay_secrets": {
                 k: v
@@ -520,6 +524,7 @@ _APPLY_SCHEMA: dict[str, tuple] = {
     # Same bounds as config._FIELD_RANGES: applied on restore, so a hand-edited
     # backup cannot set a limit the running app would refuse.
     "relay_max_message_bytes": ("int", 32 * 1024, 1024 * 1024),
+    "relay_max_bytes_per_second": ("int", 4 * 1024, 2 * 1024 * 1024),
     "relay_secret": ("str",),
     "peer_relay_secrets": ("strdict",),
     "netpair_secrets": ("strdict",),

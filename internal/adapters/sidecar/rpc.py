@@ -541,6 +541,10 @@ class Dispatcher:
                     int,
                     lambda v: 32 * 1024 <= v <= 1024 * 1024,
                 ),
+                "relay_max_bytes_per_second": (
+                    int,
+                    lambda v: 4 * 1024 <= v <= 2 * 1024 * 1024,
+                ),
             }
             validate_params(params, fields)
             return self.app.update_settings(params)

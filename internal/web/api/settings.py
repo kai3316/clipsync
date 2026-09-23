@@ -88,6 +88,11 @@ _SAFE_FIELDS = {
     # control is the desktop settings page's, and this API is where that page
     # and a phone-side save meet.
     "relay_max_message_bytes",
+    # How much of the relay this app will use, in bytes/s.  Not a property of
+    # the server like the ceiling above but a preference about sharing it, so it
+    # belongs next to it: the two together are what make an internet file
+    # transfer arrive (see ChatManager's chunk acknowledgement).
+    "relay_max_bytes_per_second",
     "data_dir",
     "hotkeys",
     "hotkeys_enabled",
@@ -122,6 +127,9 @@ _RANGE_LIMITS = {
     # Mirrors config._FIELD_RANGES: a free broker commonly allows 64 KiB, and
     # 32 KiB is the floor below which file chunks get too small to be useful.
     "relay_max_message_bytes": (32 * 1024, 1024 * 1024),
+    # Mirrors config._FIELD_RANGES.  The floor is a transfer too slow to be
+    # worth starting and the ceiling is past what any shipped broker carries.
+    "relay_max_bytes_per_second": (4 * 1024, 2 * 1024 * 1024),
 }
 
 # Fields whose value must never reach the log.  Every update is logged, and the
@@ -184,6 +192,7 @@ _MUTABLE_FIELDS = {
     "relay_username",
     "relay_password",
     "relay_max_message_bytes",
+    "relay_max_bytes_per_second",
     # Legacy pairing passphrase (v1.0.84 unification: the single encryption
     # password in the Security tab now derives the netpair channel keys, so
     # the web UI no longer sends this field — it is kept only so an older

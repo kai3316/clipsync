@@ -2019,6 +2019,16 @@ class LanRuntime:
             # keep it, and the ones that lose it are exactly the ones already
             # parsing ``chunk_size`` out of the offer.
             send.chunk_size = ChatManager.relay_chunk_for(self.config.relay_max_message_bytes)
+            # The same closure says the relay is not to be trusted with a burst
+            # and asks the receiver to acknowledge every chunk it writes, which
+            # is what turns "the broker took it" into "the peer has it" (see
+            # ChatManager's CHUNK_ACK_* block).  A LAN peer carries neither tag,
+            # so its transfers keep the blunt loop and its wire format.
+            send.chunk_ack = True
+            # The pace the transfer may hold, in bytes/s: a policy setting, not
+            # a property the broker publishes, and the measured difference
+            # between a burst it drops and a rate it carries.
+            send.relay_rate = self.config.relay_max_bytes_per_second
         return send
 
     def _note_chat_sent(self, peer_id, msg):

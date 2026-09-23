@@ -477,7 +477,18 @@ def test_an_internet_only_peer_gets_relay_safe_file_chunks(relay_rig):
     # envelope, so chat must chunk relay-safe.  There is no cap on the file
     # itself — the relay limits one *message*, and chunking already cuts to it.
     send = runtime._chat_send_fn("remote")
-    assert send.chunk_size == ChatManager.RELAY_CHUNK_SIZE
+    # The chunk follows the configured ceiling rather than a constant, and the
+    # shipped ceiling is a 64 KiB relay, so the default chunk is the small one
+    # (RELAY_CHUNK_SIZE is the measured partner of a 256 KiB relay, below).
+    assert send.chunk_size == ChatManager.relay_chunk_for(
+        runtime.config.relay_max_message_bytes
+    )
+    assert send.chunk_size < ChatManager.RELAY_CHUNK_SIZE
+    # An internet transfer also asks the receiver to confirm every chunk -- the
+    # relay drops a burst it has already acknowledged, and nothing on the wire
+    # reports it -- and carries the pace to offer them at.
+    assert send.chunk_ack is True
+    assert send.relay_rate == runtime.config.relay_max_bytes_per_second
     assert not hasattr(send, "internet_cap")
 
     # ...and it has to be a number the relay will actually take.  Asserting it
@@ -485,28 +496,36 @@ def test_an_internet_only_peer_gets_relay_safe_file_chunks(relay_rig):
     # chunk was dropped at the broker, and this case passed throughout.  The cap
     # is on the *envelope*, and an envelope is 4/3 of the frame it carries plus
     # the tag and shell around it, so the check that matters is the one the
-    # sender runs — the frame this chunk size produces, through the packer.
+    # sender runs — the frame this chunk size produces, through the packer, at
+    # the limit the configured ceiling gives the transport (relay.py derives
+    # ``_max_frame`` from the same setting).
     key = derive_key("a-secret", "another-secret")
     tid = "0123456789abcdef0123456789abcdef"
+    limit = frame_limit_for(runtime.config.relay_max_message_bytes)
     assert pack_envelope(
-        encode_binary_chunk(tid, 0, 1, b"x" * send.chunk_size), key, time.time()
+        encode_binary_chunk(tid, 0, 1, b"x" * send.chunk_size), key, time.time(),
+        max_frame=limit,
     )
     # And the size that was wrong, on the same path, is refused rather than
     # published for the broker to drop.
     with pytest.raises(ValueError):
-        pack_envelope(encode_binary_chunk(tid, 0, 1, b"x" * (224 * 1024)), key, time.time())
+        pack_envelope(
+            encode_binary_chunk(tid, 0, 1, b"x" * (224 * 1024)), key, time.time(),
+            max_frame=limit,
+        )
 
-    # A relay with a smaller ceiling moves the chunk with it: the size the
+    # A relay with a larger ceiling moves the chunk with it: the size the
     # setting names is the size the sender has to cut to, and what proves the
-    # cut fits is the same packer the publish path runs.
-    relay_rig.config.relay_max_message_bytes = 64 * 1024
-    small = runtime._chat_send_fn("remote")
-    assert small.chunk_size == ChatManager.relay_chunk_for(64 * 1024)
+    # cut fits is the same packer the publish path runs.  At the 256 KiB this
+    # pair was measured against, the chunk is the constant itself.
+    relay_rig.config.relay_max_message_bytes = 256 * 1024
+    big = runtime._chat_send_fn("remote")
+    assert big.chunk_size == ChatManager.RELAY_CHUNK_SIZE
     assert pack_envelope(
-        encode_binary_chunk(tid, 0, 1, b"x" * small.chunk_size), key, time.time(),
-        max_frame=frame_limit_for(64 * 1024),
+        encode_binary_chunk(tid, 0, 1, b"x" * big.chunk_size), key, time.time(),
+        max_frame=frame_limit_for(256 * 1024),
     )
-    assert small.chunk_size < send.chunk_size
+    assert big.chunk_size > send.chunk_size
 
     # A LAN link coming up does not take the tag away.  The chunk size is fixed
     # when the offer is made — the receiver slices by the one it was told — and
@@ -516,7 +535,7 @@ def test_an_internet_only_peer_gets_relay_safe_file_chunks(relay_rig):
     # costs a LAN-connected peer a little framing and makes the route change
     # work.
     transport.connected.add("remote")
-    assert runtime._chat_send_fn("remote").chunk_size == small.chunk_size
+    assert runtime._chat_send_fn("remote").chunk_size == big.chunk_size
 
     # A peer with no relay credential is untouched: it has no fallback to size
     # for, and keeps the LAN wire format peers already speak.

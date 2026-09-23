@@ -69,16 +69,33 @@ MAX_RELAY_PAYLOAD = 256 * 1024  # refuse to publish anything larger than this
 # rather than written down, so it cannot drift when the payload cap moves.
 #   3/4 of the payload (base64's ratio), less the GCM tag, less room for the
 #   JSON shell — the largest frame whose envelope still fits under the cap.
-MAX_RELAY_FRAME = (MAX_RELAY_PAYLOAD - 64) * 3 // 4 - 16
+#
+# The envelope is not the whole packet either.  A broker's published limit is on
+# the PUBLISH packet, and in front of the payload sit the topic (a 2-byte length
+# prefix plus "clipsync/v1/" and 24 hex characters), the QoS-1 packet id and the
+# fixed header.  Measured against the shipped private relay: a 64209-byte
+# envelope arrives and a 65573-byte one is refused — a 65536-byte packet limit,
+# with exactly this framing accounting for the difference.  So a limit read off
+# a broker's own documentation ("64 KiB") has to be a packet budget, or a chunk
+# sized to the documented number overshoots by the framing and is refused for
+# it.  That is how the shipped default lost every chunk: the number was right
+# and what it was subtracted from was wrong.
+PUBLISH_OVERHEAD_BYTES = 64
 
 
 def frame_limit_for(max_payload: int) -> int:
-    """The largest frame whose envelope still fits under *max_payload* bytes.
+    """The largest frame whose PUBLISH packet still fits under *max_payload*.
 
-    The same derivation as :data:`MAX_RELAY_FRAME`, for a relay whose limit is
-    not this build's default — see ``Config.relay_max_message_bytes``.
+    *max_payload* is the whole packet — what a broker means by its message size
+    limit — so the topic and the MQTT headers are reserved out of it here.  The
+    same derivation as :data:`MAX_RELAY_FRAME`, for a relay whose limit is not
+    this build's default: see ``Config.relay_max_message_bytes``.
     """
-    return (max(64, int(max_payload)) - 64) * 3 // 4 - 16
+    return (max(64, int(max_payload)) - PUBLISH_OVERHEAD_BYTES - 64) * 3 // 4 - 16
+
+
+# Derived rather than written down, so the two cannot drift apart.
+MAX_RELAY_FRAME = frame_limit_for(MAX_RELAY_PAYLOAD)
 
 _SEEN_CAP = 512  # recent ciphertext hashes remembered
 

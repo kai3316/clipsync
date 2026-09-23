@@ -724,6 +724,7 @@ class _SettingsCfg:
         self.relay_username = ""
         self.relay_password = ""
         self.relay_max_message_bytes = 256 * 1024
+        self.relay_max_bytes_per_second = 64 * 1024
 
 
 @pytest.fixture()
@@ -863,13 +864,19 @@ def test_get_settings_exposes_relay_username_and_password_flag():
     # for it: the desktop settings page is where the control lives, and an API
     # that dropped the key would let a phone-side save reset it.
     assert data["settings"]["relay_max_message_bytes"] == 256 * 1024
+    # The pace is the same kind of value and belongs beside it: it is what a
+    # transfer does with a chunk that fits, and a phone-side save that dropped
+    # the key would reset it along with the ceiling.
+    assert data["settings"]["relay_max_bytes_per_second"] == 64 * 1024
     cfg.relay_username = "clipsync_mqtt"
     cfg.relay_password = "s3cret!"
     cfg.relay_max_message_bytes = 64 * 1024
+    cfg.relay_max_bytes_per_second = 128 * 1024
     data, _ = settings_api.get_settings(cfg)
     assert data["settings"]["relay_username"] == "clipsync_mqtt"
     assert data["settings"]["relay_password_set"] is True
     assert data["settings"]["relay_max_message_bytes"] == 64 * 1024
+    assert data["settings"]["relay_max_bytes_per_second"] == 128 * 1024
     assert "relay_password" not in data["settings"]
 
 

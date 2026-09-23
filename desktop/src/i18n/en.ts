@@ -903,6 +903,11 @@ export const EN: Record<string, string> = {
   "单条消息大小上限": "Max message size",
   "单位 KB。填中继服务器允许的单条消息上限，传输文件时每个数据块都会按它切分——超出会被服务器直接丢弃。免费中继常见 64 KB，公共中继为 256 KB。修改后需重启生效。":
     "In KB. Enter the largest single message your relay server accepts; file transfers cut every chunk to fit under it, since the server silently drops anything larger. A free tier commonly allows 64 KB, the public relays 256 KB. Takes effect after a restart.",
+  // The rate half of the same setting: the ceiling a file transfer paces
+  // itself at, and the number a faster private relay is told it can carry.
+  "发送速率上限": "Max send rate",
+  "单位 KB/s。中继单块没超限也可能丢弃：连发太快时，服务器会悄悄丢掉其中大部分。传输文件时按这个速率匀速发送，逐块确认对方已收到，丢块时自动降速重传。免费中继约 64 KB/s，私有中继更快可调高。修改后对新发起的传输生效。":
+    "In KB/s. A relay can drop chunks that are under its size limit too: sent back to back, most of them are quietly discarded. File transfers pace themselves at this rate, confirm each chunk with the other device, and slow down and resend on their own when chunks go missing. A free relay carries about 64 KB/s; raise this for a faster private one. Applies to transfers started after the change.",
   "中继离线": "Relay offline",
   "公共中继地址": "Public relay addresses",
   "私有中继地址": "Private relay addresses",
