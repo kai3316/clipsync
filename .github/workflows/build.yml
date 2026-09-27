@@ -54,42 +54,55 @@ jobs:
 
           What is new in this release:
 
-          - A file sent to a device paired over the internet arrives.  It used
-            to show 发送成功 on the sending side while the receiving device sat
-            at 接收 and never finished.  A relay is not a reliable link, and its
-            acknowledgement does not say otherwise: the one this app ships
-            carries 64 KiB in a single publish and drops anything larger, and
-            it acknowledges a chunk it then fails to push -- measured, 24
-            chunks of ~44 KiB sent back to back were acknowledged in full and
-            arrived two strong.  A relay transfer now runs its own delivery on
-            top of that: the receiving device reports every chunk it has
-            written to disk, the sender keeps two chunks in flight and resends
-            whatever those reports do not cover, and it starts at a pace this
-            kind of relay has been measured to carry, halving that pace
-            whenever a chunk comes back missing.  Nothing has to be filled in
-            for it to work, and a device still on the previous version receives
-            the file the way it always did -- a peer that reports no chunks
-            gets the old send, rather than a transfer waiting out a timeout it
-            was never going to pass.
+          - A file copied in the Finder on a Mac can be downloaded on Windows.
+            It used to arrive as the file's own name and nothing else -- a row
+            that could be copied and pasted, with no 下载 on it.  The Finder
+            puts the file's name on the pasteboard as plain text beside the
+            file itself, and the ranking that decides what a row *is* read the
+            text first, so a copy of 报告.pdf was stored, previewed and
+            described as the words "报告.pdf" rather than as the file.  The
+            list of paths behind that row had faults of its own -- names were
+            decoded in a way that damaged any that were not UTF-8, the result
+            was never checked against the file system, and a copy of several
+            files could keep only the first file's address -- so a copy that
+            did reach the other device could arrive with nothing to download
+            from.  A row built from a copy that carries both now reads as the
+            file, and every path in it is one this machine has checked it can
+            actually serve.
 
-          - 发送成功 now means the other device has the file, and 传输超时
-            means it does not.  The old report only said the chunks had been
-            handed to the relay, which is how a transfer that never arrived
-            came to look finished where it was sent from.  A relay transfer
-            waits for the receiving device to confirm it has the whole file,
-            and reports the timeout when that confirmation does not come -- so
-            a transfer that cannot get through is now visible on the side that
-            sent it, not only on the side that waited.
+          - The garbled names in the history list are gone.  Those rows came
+            from a Chinese Mac, and the '�' in them was made here: macOS's own
+            pbpaste answers in the *system* encoding rather than in UTF-8, so
+            a Chinese name left the Mac as GBK bytes, and the Windows
+            clipboard writer read them as UTF-8 and wrote U+FFFD for every
+            byte it could not read -- a character like any other, which this
+            machine then read back off its own clipboard, stored as a new entry
+            and synced on.  One bad decode became a row on both devices.  Text
+            is decoded by the clipboard's own rules now: strict UTF-8 first,
+            then the encodings the three platforms actually emit, and latin-1
+            last, which reads any byte string at all and so cannot be the step
+            where the text is lost.
 
-          - Settings -> 同步 -> 互联网同步 now carries both numbers a relay
-            needs.  单条消息大小上限 was already there, and 发送速率上限 is how
-            fast those chunks are offered; a rate change reaches the next
-            transfer started, where the size limit still needs a restart.  Both
-            defaults are what the default relay carries, 64 KB and 64 KB/s, so
-            a file transfer works on a fresh install -- and a private relay
-            that carries more is the one thing a bigger number here is for.
-            The size a chunk is cut to follows the size limit, so a relay that
-            carries 256 KB gets the chunk size that was measured against it.
+          - The file managers on Linux publish the same kind of data macOS
+            does, and their reader had the same faults, so both are fixed by
+            one parser rather than two that drift.  A Chinese file name copied
+            in Nautilus or Dolphin arrives whole, and a path that has gone
+            missing between the copy and the store is left out of the offer
+            instead of becoming a download that fails at the other end.
+
+          - Both devices want this version for a file copy to work end to end.
+            The Mac is where the offer is built and the name is read, and
+            Windows is where the arriving row is classified and the text is
+            written onto a clipboard; the missing button was one end standing
+            in for the other.  Nothing is lost by updating them one at a time
+            -- a device still on the previous version receives exactly what it
+            always did -- but the button appears when the device showing the
+            row has this version.  Entries already stored garbled cannot be
+            repaired: U+FFFD is not a misreading, it is a character that has
+            replaced what was there.  A file row whose name was plain ASCII
+            may recover on its own, because the offer is still stored inside
+            it; a row whose name was Chinese holds none, and that file has to
+            be copied again on the Mac.
 
           1.0.7 published a macOS installer that cannot start at all, and its
           update check lives in the background process that never comes up, so
