@@ -1270,6 +1270,37 @@ describe("history rendering", () => {
       })]));
     }
   });
+  it("offers the download on a row whose kind says text but whose offer is a file", async () => {
+    vi.clearAllMocks();
+    vi.mocked(bridge.devices).mockResolvedValue({ items: [
+      { id: "peer-1", name: "Studio", paired: true, connection_state: "online",
+        pairing_status: "paired", pairing_code: null, sas: null },
+    ] });
+    // What a Finder copy actually reaches this window as.  The Finder puts the
+    // file's *name* on the pasteboard as plain text beside the file, and the
+    // sidecar used to rank the text above the file — so a row that could be
+    // downloaded the whole time was labelled TEXT and offered 复制, which is the
+    // reported "no download button".  The offer is the evidence that survives
+    // the label, so the button is offered on it either way.
+    vi.mocked(bridge.history).mockResolvedValue({ session_id: "s", seq: 0, offset: 0, total: 1, items: [
+      historyRow({ id: "7", content_type: "TEXT", preview: "报告.pdf",
+        source_device: "peer-1", source_name: "Studio", offer_entry: "42" }),
+    ] });
+    const app = mountOn("history");
+    try {
+      await flushPromises();
+      expect(app.find('[aria-label="复制记录"]').exists()).toBe(false);
+      await app.get('[aria-label="下载文件"]').trigger("click");
+      await flushPromises();
+      expect(bridge.requestEntryFiles).toHaveBeenCalledExactlyOnceWith("42", "peer-1");
+      app.unmount();
+    } finally {
+      vi.mocked(bridge.devices).mockResolvedValue({ items: [] });
+      vi.mocked(bridge.history).mockResolvedValue(historyPage([historyRow({
+        preview: '<img src=x onerror="window.injected=true">',
+      })]));
+    }
+  });
   it("opens the hover card on an image row with the picture the sidecar drew", async () => {
     vi.clearAllMocks();
     vi.mocked(bridge.history).mockResolvedValue({ session_id: "s", seq: 0, offset: 0, total: 1, items: [

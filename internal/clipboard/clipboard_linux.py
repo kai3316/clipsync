@@ -12,6 +12,7 @@ import threading
 import time
 from io import BytesIO
 
+from internal.clipboard import file_ref, format
 from internal.clipboard.clipboard import ClipboardMonitor, ClipboardReader, ClipboardWriter
 from internal.clipboard.format import ClipboardContent, ContentType
 
@@ -298,7 +299,19 @@ class _ClipboardReader(ClipboardReader):
         """Read file URIs from clipboard (e.g. files copied in a file manager).
 
         Many Linux file managers copy file paths as ``text/uri-list``.
-        Also tries ``x-special/gnome-copied-files`` for Nautilus metadata.
+
+        The URIs are parsed and decoded by the shared rules
+        (`format.file_url_paths`, `file_ref.servable_paths`), because this is
+        the same data macOS publishes as ``public.file-url`` and a second
+        reading of it would be a second set of faults.  Three of them were
+        here: ``decode("utf-8", errors="replace")`` turned a name in any other
+        encoding into U+FFFD, ``unquote`` did the same to the percent-escapes
+        of one, and nothing checked that the result named a file — so a copy
+        of a file the user could see produced a FILE list that described
+        nothing, and the peer was left holding its name with no way to
+        download it.  The payload is `format.encode_paths` for the same
+        reason: it is the spelling the file really has, not a re-encoding of
+        it that a longer path would lose.
         """
         if not _can_read():
             return b""
@@ -317,26 +330,14 @@ class _ClipboardReader(ClipboardReader):
         for args, _name in tools:
             try:
                 result = subprocess.run(args, capture_output=True, timeout=2)
-                if result.returncode == 0 and result.stdout.strip():
-                    text = result.stdout.decode("utf-8", errors="replace")
-                    # Convert file:// URIs to paths
-                    paths = []
-                    for line in text.split("\n"):
-                        line = line.strip()
-                        if line and not line.startswith("#"):
-                            from urllib.parse import unquote, urlparse
-
-                            parsed = urlparse(line)
-                            # Only local files belong in a FILE entry — an
-                            # https:// URI has a non-empty "path" too, and
-                            # treating it as one produces a ghost file
-                            # reference on the receiving platform.
-                            if parsed.scheme not in ("", "file"):
-                                continue
-                            if parsed.path:
-                                paths.append(unquote(parsed.path))
-                    if paths:
-                        return "\n".join(paths).encode("utf-8")
+                if result.returncode != 0 or not result.stdout.strip():
+                    continue
+                # An https:// URI has a "path" too, and a relative one names
+                # nothing off this machine: both are dropped by the servable
+                # check rather than by a rule of their own.
+                paths = file_ref.servable_paths(format.file_url_paths(result.stdout))
+                if paths:
+                    return format.encode_paths(paths)
             except Exception:
                 continue
         return b""

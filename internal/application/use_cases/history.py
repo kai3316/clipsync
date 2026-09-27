@@ -23,7 +23,8 @@ from internal.clipboard.format import (
     HISTORY_ONLY_TYPES,
     ClipboardContent,
     ContentType,
-    split_paths,
+    decode_paths,
+    decode_text,
     strip_html,
 )
 
@@ -427,9 +428,7 @@ def text_of(types: dict) -> bytes | None:
     if ContentType.TEXT in types:
         return types[ContentType.TEXT]
     if ContentType.HTML in types:
-        return strip_html(
-            types[ContentType.HTML].decode("utf-8", errors="replace")
-        ).encode("utf-8")
+        return strip_html(decode_text(types[ContentType.HTML])).encode("utf-8")
     if ContentType.RTF in types:
         from internal.clipboard.filter import _rtf_to_text
 
@@ -552,7 +551,12 @@ class HistoryUseCase:
         except (ValueError, TypeError, binascii.Error) as exc:
             raise ApplicationError("DATA_INVALID", "History content requires recovery") from exc
         payload = text_of(types) if types else None
-        text = payload.decode("utf-8", errors="replace") if payload else ""
+        # `decode_text`, not a UTF-8 decode with replacement: a payload that
+        # arrived from a zh_CN Mac is GBK, and replacing it here would hand the
+        # caller a string of U+FFFD — one that a copy puts back on the clipboard
+        # as a *new* clip, which is how a name mangled at one end becomes a row
+        # on both.
+        text = decode_text(payload) if payload else ""
         # No content_type: the caller already has the row's own classification
         # from the list, and it is not the same thing as which format the text
         # was read out of — a clip stored as HTML whose TEXT payload won is
@@ -604,8 +608,10 @@ class HistoryUseCase:
                 return dict(NO_PREVIEW)
             return dict(NO_PREVIEW, kind="image", image=url, width=width, height=height)
         if ContentType.FILE in types:
-            raw = types[ContentType.FILE].decode("utf-8", errors="replace")
-            return _file_card(split_paths(raw))
+            # `decode_paths`: `_file_card` stats each of these, and a name that
+            # is not valid UTF-8 has to stay the name it is to be found and to be
+            # shown as itself rather than as replacement characters.
+            return _file_card(decode_paths(types[ContentType.FILE]))
         if ContentType.FILE_REMOTE in types:
             return _remote_file_card(types[ContentType.FILE_REMOTE])
         # Text, a link, markup, a vector image: the row's own preview is already
@@ -636,7 +642,7 @@ class HistoryUseCase:
             raise ApplicationError("DATA_INVALID", "History content requires recovery") from exc
         payload = text_of(types) if types else None
         ok, detail = self._open_url(
-            (payload.decode("utf-8", errors="replace") if payload else "").strip()
+            decode_text(payload).strip() if payload else ""
         )
         if not ok:
             if detail == "INVALID_URL":

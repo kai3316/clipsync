@@ -356,3 +356,351 @@ class TestFileCompleteTimeoutReason:
         # A wait timeout is not a dropped connection -- it must not be
         # reported as peer_offline.
         assert status == "error_timeout"
+
+
+# ── #5 text that is not UTF-8, on the way in and on the way out ───────
+#
+# The reported fault: 历史记录里有 ���֤������.pdf 这样的乱码.  A zh_CN Mac hands
+# its clipboard text over as GBK, and everything downstream treated a TEXT
+# payload as UTF-8 — so decoding it with errors="replace" did not merely show
+# it wrong, it replaced the name with U+FFFD for good.
+
+GBK_NAME = "软件验证报告.pdf"
+MOJIBAKE = "������֤����.pdf"
+
+
+def test_gbk_bytes_read_as_the_name_they_are():
+    from internal.clipboard.format import decode_text
+
+    assert decode_text(GBK_NAME.encode("gbk")) == GBK_NAME
+
+
+def test_utf8_bytes_are_untouched():
+    from internal.clipboard.format import decode_text
+
+    assert decode_text(GBK_NAME.encode("utf-8")) == GBK_NAME
+
+
+def test_no_byte_string_is_read_as_replacement_characters():
+    """Whatever comes out can be written back out, which U+FFFD cannot.
+
+    ``errors="replace"`` is what turned the GBK name into U+FFFD, and no amount
+    of decoding turns U+FFFD back into the byte it replaced — the damage is done
+    at the read.  Every codec this reader tries is instead an exact inverse of
+    itself on the byte-to-character direction, so the reading is checkable
+    without knowing which one answered: re-encoding with the codec the reader
+    *reports* has to reproduce the bytes exactly.
+
+    That is what makes a wrong guess survivable and a lossy one fatal.
+    ``b"bad-\\xb8-name"`` is read as halfwidth katakana, because shift-jis is
+    asked before latin-1 and accepts any byte in that range — a wrong reading,
+    but one that still carries every byte, so it can be re-read correctly later
+    by something that knows better.  Only the replacement character destroys
+    them, which is why there must never be one.
+    """
+    from internal.clipboard.format import decode_text_with_encoding
+
+    for raw in (b"\xff\x00\xfe\x01", b"bad-\xb8-name", b"\x81\x8d\x8f\x90\x9d"):
+        text, encoding = decode_text_with_encoding(raw)
+        assert "�" not in text, (raw, encoding)
+        assert text.encode(encoding) == raw, (raw, encoding, text)
+
+    # The reported name, in the encoding the report was about.
+    text, encoding = decode_text_with_encoding(GBK_NAME.encode("gbk"))
+    assert encoding == "gbk"
+    assert text == GBK_NAME
+
+
+def test_the_reader_can_say_which_encoding_it_had_to_guess():
+    from internal.clipboard.format import decode_text_with_encoding
+
+    assert decode_text_with_encoding(GBK_NAME.encode("gbk")) == (GBK_NAME, "gbk")
+    assert decode_text_with_encoding(GBK_NAME.encode("utf-8"))[1] == "utf-8"
+
+
+def test_the_reported_mojibake_is_what_a_lossy_read_would_have_produced():
+    """Pins the signature the report was diagnosed from.
+
+    ``���֤������.pdf`` is not a different name: it is these GBK bytes read as
+    UTF-8 with replacement, which is what every path that decoded a payload
+    that way produced.
+    """
+    lossy = GBK_NAME.encode("gbk").decode("utf-8", errors="replace")
+    assert lossy == MOJIBAKE
+    assert "�" in lossy
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Win32 clipboard API")
+def test_windows_write_keeps_a_peers_non_utf8_text(monkeypatch):
+    """The writer is where the U+FFFD was actually baked.
+
+    It has to decode a peer's bytes to put them on the clipboard, and it used
+    to do that as UTF-8 with replacement — so the clipboard held U+FFFD, the
+    poll read that back as a new row, and the mangled name was synced on.  The
+    text below is the reported file name arriving from the Mac.
+    """
+    from internal.clipboard import clipboard_windows as win
+
+    written = {}
+    writer = win._ClipboardWriter()
+    monkeypatch.setattr(
+        writer, "_set_global_format", lambda fmt, data: written.setdefault(fmt, data)
+    )
+    writer._set_text(GBK_NAME.encode("gbk"))
+
+    wide = written[win.CF_UNICODETEXT].decode("utf-16-le").rstrip("\x00")
+    assert wide == GBK_NAME
+    assert "�" not in wide
+
+
+def test_pbpaste_text_that_is_not_utf8_is_normalised_at_the_reader(monkeypatch):
+    """Same fault, one step earlier: the Mac reader is where it should stop.
+
+    ``pbpaste`` answers in the system encoding, and this is the only place that
+    knows the bytes came from *this* Mac rather than from a peer.
+    """
+    assert darwin._as_utf8(GBK_NAME.encode("gbk")) == GBK_NAME.encode("utf-8")
+    assert darwin._as_utf8(GBK_NAME.encode("utf-8")) == GBK_NAME.encode("utf-8")
+
+
+# ── #6 a file copy from the Finder ────────────────────────────────────
+
+
+def test_a_path_that_is_not_utf8_survives_storage_and_its_own_bytes():
+    """The bridge between a stored payload and a stat-able path.
+
+    ``os.fsencode``/``os.fsdecode`` cannot be that bridge, because what they do
+    with bytes that are not valid UTF-8 is a property of the *local* interpreter
+    — ``surrogateescape`` on POSIX, ``surrogatepass`` on Windows, where decoding
+    one raises instead of spelling it.  These two are spelled out for that
+    reason, and this pins the pair: if either is edited back to an ``os.`` call
+    or to a lossy decode, this fails on the machine where it was written.
+    """
+    from internal.clipboard.format import decode_path, decode_paths, encode_path, encode_paths
+
+    # GBK 报告.pdf, as the bytes a zh_CN Mac's pasteboard would have held.
+    raw = b"/Users/kai/Desktop/\xb1\xa8\xb8\xe6.pdf"
+
+    path = decode_path(raw)
+    assert encode_path(path) == raw, "the pair is not an exact inverse"
+    assert decode_paths(encode_paths([path, "/tmp/notes.txt"])) == [path, "/tmp/notes.txt"]
+
+    # Whatever the bytes are, the path still reads as a name rather than as
+    # replacement characters.
+    from internal.clipboard import file_ref
+
+    assert file_ref.file_name(path) == "报告.pdf"
+
+
+def test_a_file_url_is_decoded_without_losing_the_name():
+    """The Finder's own address for the file, percent-encoded UTF-8."""
+    from urllib.parse import quote
+
+    from internal.clipboard.format import file_url_paths
+
+    raw = ("file:///Users/kai/Desktop/" + quote(GBK_NAME)).encode("utf-8")
+    assert file_url_paths(raw) == ["/Users/kai/Desktop/" + GBK_NAME]
+
+
+def test_a_file_url_whose_bytes_are_not_utf8_survives_the_decoding():
+    """Percent-escapes are decoded to *bytes*, then spelled without loss.
+
+    ``unquote`` would decode these as UTF-8 and replace what it cannot read, so
+    the path would name nothing and the file would be reported as missing — a
+    good file producing no offer at all.  The invariant is the round trip: what
+    comes out re-encodes to exactly the bytes the pasteboard held.
+
+    Spelled with `format.encode_path` rather than ``os.fsencode``, which is the
+    same spelling only where ``sys.getfilesystemencodeerrors()`` is
+    ``surrogateescape``.  On Windows it is ``surrogatepass``, so a test written
+    with ``os.fsencode`` asserts the surrogates were re-encoded *as surrogates*
+    and fails against a decode that was perfectly lossless — the platform
+    difference `format.encode_path` exists to hide.
+    """
+    from internal.clipboard.format import encode_path, file_url_paths
+
+    raw = b"file:///Users/kai/Desktop/%B1%A8%B8%E6.pdf"  # GBK 报告.pdf
+
+    (path,) = file_url_paths(raw)
+
+    assert encode_path(path) == b"/Users/kai/Desktop/\xb1\xa8\xb8\xe6.pdf"
+    # And it still reads as the name it is, rather than as replacement chars —
+    # the check that does not go through the helper the code under test uses.
+    from internal.clipboard import file_ref
+
+    assert file_ref.file_name(path) == "报告.pdf"
+
+
+def test_the_shapes_a_pasteboard_publishes_a_file_in():
+    """Both platforms' lists, read by one parser.
+
+    macOS writes one ``public.file-url`` per item and Linux writes
+    ``text/uri-list``; a ``#`` comment is legal in the latter, and a bare path
+    is what ``pbpaste -Prefer`` answers with when it has no address to give —
+    which is also why an ordinary text copy must not come back as a path.
+    """
+    from internal.clipboard.format import file_url_paths
+
+    raw = (
+        b"# copied by the file manager\n"
+        b"file:///home/kai/a.txt\n"
+        b"/home/kai/plain%20name.txt\n"  # a bare path: %20 is four characters
+        b"https://example.com/a.txt\n"
+        b"\n"
+    )
+
+    assert file_url_paths(raw) == ["/home/kai/a.txt", "/home/kai/plain%20name.txt"]
+
+
+def test_a_bare_path_is_not_taken_for_a_url():
+    """``?`` and ``#`` are characters in a Linux file name, not a query.
+
+    Only a ``file:`` line is put through ``urlparse``, so a path spelled as
+    itself keeps everything after either one.
+    """
+    from internal.clipboard.format import file_url_paths
+
+    assert file_url_paths(b"/home/kai/q?uery#frag.txt") == ["/home/kai/q?uery#frag.txt"]
+
+
+def test_a_network_file_url_is_not_a_path_on_this_machine():
+    from internal.clipboard.format import file_url_paths
+
+    assert file_url_paths(b"file://nas.local/share/report.pdf") == []
+
+
+def test_only_absolute_existing_paths_are_served(tmp_path):
+    """`pbpaste -Prefer` answers with plain text when it has no file URL.
+
+    That text must not be read as a list of paths, which is what keeps an
+    ordinary text copy from being captured as a file.  The same rule keeps a
+    file manager's ``copy`` line, and a path that has since been deleted, out
+    of an offer a peer could click and watch fail.
+    """
+    from internal.clipboard import file_ref
+
+    real = tmp_path / GBK_NAME
+    real.write_bytes(b"pdf")
+
+    assert file_ref.servable_paths([str(real)]) == [str(real)]
+    assert file_ref.servable_paths(["报告.pdf"]) == []
+    assert file_ref.servable_paths([str(tmp_path / "gone.pdf")]) == []
+    # A file manager's own words, which only the absolute check keeps out.
+    assert file_ref.servable_paths(["copy", "cut", ""]) == []
+
+
+def test_get_files_returns_the_joined_paths_every_writer_expects(monkeypatch, tmp_path):
+    """The end of the chain: a real file becomes a FILE payload.
+
+    ``NSFilenamesPboardType`` is the branch that carries a whole multi-file
+    copy, and the one a Windows run can exercise end to end — its plist holds
+    absolute paths directly, where ``public.file-url`` holds an address.
+    """
+    import plistlib
+
+    first = tmp_path / GBK_NAME
+    second = tmp_path / "notes.txt"
+    first.write_bytes(b"pdf")
+    second.write_bytes(b"txt")
+
+    def plist_or_none(uti):
+        if uti != b"NSFilenamesPboardType":
+            return None
+        return plistlib.dumps([str(first), str(second)])
+
+    monkeypatch.setattr(darwin, "_pb_data_for_type", plist_or_none)
+
+    payload = darwin._ClipboardReader()._get_files()
+
+    assert payload
+    from internal.clipboard.format import decode_paths
+
+    assert decode_paths(payload) == [str(first), str(second)]
+    # And the offer a peer would receive can describe them.
+    from internal.clipboard import file_ref
+
+    assert file_ref.describe(str(first))["name"] == GBK_NAME
+
+
+def test_the_linux_reader_turns_a_uri_list_into_the_same_payload(monkeypatch, tmp_path):
+    """The same chain on Linux, which publishes the same data as macOS.
+
+    Driven here rather than on Linux: the reader reaches its tools through
+    ``subprocess`` and ``_can_read``, both of which can be answered on this
+    machine, so the wiring — pasteboard bytes in, stored payload out, offer
+    buildable from it — is checked on the machine CI runs on.  Two things
+    cannot be exercised here and are pinned elsewhere: a name that is not valid
+    UTF-8 (Windows file names are UTF-16, so no such path exists to make) is
+    `test_a_file_url_whose_bytes_are_not_utf8_survives_the_decoding`, and the
+    ``file://`` shape is `test_the_shapes_a_pasteboard_publishes_a_file_in` —
+    a Windows ``file:///C:/x`` address is deliberately not turned into
+    ``C:\\x`` by the parser, since no reader on this platform publishes one.
+    The bare-path line below is the other shape both platforms accept.
+    """
+    from internal.clipboard import clipboard_linux
+
+    real = tmp_path / GBK_NAME
+    real.write_bytes(b"pdf")
+
+    class Result:
+        returncode = 0
+        stdout = b"# copied by the file manager\n" + str(real).encode() + b"\n"
+
+    monkeypatch.setattr(clipboard_linux, "_can_read", lambda: True)
+    monkeypatch.setattr(clipboard_linux.subprocess, "run", lambda *a, **k: Result())
+
+    payload = clipboard_linux._ClipboardReader()._get_files()
+
+    from internal.clipboard import file_ref
+    from internal.clipboard.format import decode_paths
+
+    assert decode_paths(payload) == [str(real)]
+    assert file_ref.describe(str(real))["name"] == GBK_NAME
+
+
+def test_the_linux_reader_ignores_a_text_copy(monkeypatch):
+    """An ordinary text copy must not become a FILE entry.
+
+    ``xclip -t text/uri-list`` on a clipboard holding no URI list answers
+    non-zero or empty, and a file manager's own first line is a bare word.  The
+    absolute check is what keeps either out of an offer.
+    """
+    from internal.clipboard import clipboard_linux
+
+    class Result:
+        returncode = 0
+        stdout = b"copy\njust some text\n"
+
+    monkeypatch.setattr(clipboard_linux, "_can_read", lambda: True)
+    monkeypatch.setattr(clipboard_linux.subprocess, "run", lambda *a, **k: Result())
+
+    assert clipboard_linux._ClipboardReader()._get_files() == b""
+
+
+def test_a_file_clip_reads_as_a_file_row_not_as_its_own_name(tmp_path):
+    """A file copy arrives with the name as text *and* the file.
+
+    Reading TEXT first described such a clip as the words in its name, and the
+    row's kind is what decides between 复制 and 下载 — so a row with a
+    downloadable file in it showed 复制 and no download button.
+    """
+    path = str(tmp_path / GBK_NAME)
+    (tmp_path / GBK_NAME).write_bytes(b"pdf")
+    from internal.clipboard.format import encode_path
+
+    content = ClipboardContent(
+        types={
+            ContentType.TEXT: GBK_NAME.encode("utf-8"),
+            ContentType.FILE: encode_path(path),
+            ContentType.URL: ("file://" + path).encode("utf-8"),
+        },
+        timestamp=1000.0,
+    )
+    assert content.best_format()[0] == ContentType.FILE
+
+    db = ClipboardHistoryDB(storage_path=str(tmp_path / "h.db"), max_entries=50)
+    db.add(content)
+    row = db.get_all()[0]
+    assert row["content_type"] == "FILE"
+    assert GBK_NAME in row["text_preview"]
+

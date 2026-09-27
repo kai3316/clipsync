@@ -15,14 +15,21 @@ import ctypes.util
 import hashlib
 import logging
 import os
+import plistlib
 import subprocess
 import tempfile
 import threading
 import time
 from io import BytesIO
 
+from internal.clipboard import file_ref, format
 from internal.clipboard.clipboard import ClipboardMonitor, ClipboardReader, ClipboardWriter
-from internal.clipboard.format import ClipboardContent, ContentType
+from internal.clipboard.format import (
+    ClipboardContent,
+    ContentType,
+    decode_text_with_encoding,
+    encode_paths,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -340,6 +347,35 @@ def _pb_set_data_for_type(uti: bytes, data: bytes) -> bool:
 # ---------------------------------------------------------------------------
 
 
+def _as_utf8(raw: bytes) -> bytes:
+    """*raw* re-encoded as UTF-8, decoded by the clipboard's own rules first.
+
+    ``pbpaste`` answers in the *system* encoding, so on a localised Mac its
+    stdout is not UTF-8 — a zh_CN system hands back GBK — while every consumer
+    of a TEXT payload treats it as UTF-8.  Normalising here, at the one point
+    the bytes enter this process, is what keeps the guess from having to be made
+    again further out, where it is made by *replacing* what does not decode and
+    the text is lost rather than re-read.
+
+    A guess is logged with the encoding it settled on and the bytes it was
+    given: which encoding a localised ``pbpaste`` answered in is not something
+    this code can know, so the guess is the one detail worth having in a report
+    of garbled text.
+    """
+    try:
+        raw.decode("utf-8")
+    except UnicodeDecodeError:
+        text, encoding = decode_text_with_encoding(raw)
+        logger.info(
+            "pbpaste returned non-UTF-8 text (%d bytes, read as %s): %r",
+            len(raw),
+            encoding,
+            raw[:120],
+        )
+        return text.encode("utf-8")
+    return raw
+
+
 class _ClipboardReader(ClipboardReader):
     def read(self) -> ClipboardContent:
         content = ClipboardContent(timestamp=time.time())
@@ -376,23 +412,23 @@ class _ClipboardReader(ClipboardReader):
 
     def _get_text(self) -> bytes:
         # Prefer ctypes NSPasteboard → public.utf8-plain-text (guaranteed UTF-8).
-        # pbpaste -Prefer txt can return bytes in a legacy encoding (e.g. GBK)
-        # for CJK text, producing garbled characters when decoded as UTF-8.
         data = _pb_data_for_type(b"public.utf8-plain-text")
         if data:
             return data
 
-        # Fallback: pbpaste
+        # Fallback: pbpaste, whose stdout is in the system encoding rather than
+        # UTF-8.  Normalised on the way in: see `_as_utf8`.
         try:
             result = subprocess.run(
                 ["pbpaste", "-Prefer", "txt"],
                 capture_output=True,
                 timeout=2,
             )
-            if result.returncode == 0 and result.stdout:
-                return result.stdout
         except Exception:
             logger.debug("pbpaste text read failed", exc_info=True)
+            return b""
+        if result.returncode == 0 and result.stdout:
+            return _as_utf8(result.stdout)
         return b""
 
     def _get_html(self) -> bytes:
@@ -660,37 +696,56 @@ class _ClipboardReader(ClipboardReader):
     def _get_files(self) -> bytes:
         """Read file paths from the pasteboard (Finder copies, etc.).
 
-        On modern macOS, Finder copies files as ``public.file-url``.
-        Older apps may use ``NSFilenamesPboardType``.
+        Returns the newline-joined absolute paths that every writer expects back
+        and `split_paths` reads, or ``b""`` when the pasteboard names no file
+        this machine can still serve.
+
+        Getting this wrong is not a cosmetic defect, because a FILE payload is
+        the only place a path is ever written down: the offer a peer receives is
+        built from what `file_ref.describe` can stat out of these paths, and the
+        paths themselves never travel.  A path this reader spells wrong — a
+        ``file://`` URL left undecoded, a name whose percent-escapes were
+        decoded lossily — describes nothing, so the peer is left holding the
+        file's *name* with no way to ask for the file: a text row at the far end
+        that looks like a transfer fault and is a capture fault.
         """
-        # Method 1: public.file-url (macOS 10.13+)
-        raw = _pb_data_for_type(b"public.file-url")
-        if raw:
-            try:
-                url_str = raw.decode("utf-8", errors="replace").strip()
-                from urllib.parse import unquote, urlparse
-
-                parsed = urlparse(url_str)
-                path = unquote(parsed.path)
-                if path:
-                    return path.encode("utf-8")
-            except Exception:
-                logger.debug("Failed to parse public.file-url", exc_info=True)
-
-        # Method 2: NSFilenamesPboardType (legacy, pre-10.13)
+        # Method 1: NSFilenamesPboardType (legacy, pre-10.13).  Asked first
+        # because it is a *list*: Finder publishes every file of a multi-file
+        # copy here, where public.file-url carries one URL per pasteboard item.
         raw = _pb_data_for_type(b"NSFilenamesPboardType")
         if raw:
             try:
-                # Property list serialization — array of file path strings
-                import plistlib
-
-                paths = plistlib.loads(raw)
-                if isinstance(paths, list) and paths:
-                    return "\n".join(str(p) for p in paths).encode("utf-8")
+                paths = file_ref.servable_paths(plistlib.loads(raw))
+                if paths:
+                    logger.debug("Read %d file path(s) from NSFilenamesPboardType", len(paths))
+                    return encode_paths(paths)
             except Exception:
                 logger.debug("Failed to parse NSFilenamesPboardType", exc_info=True)
 
-        # Method 3: Try pbpaste for filenames (some apps)
+        # Method 2: public.file-url (macOS 10.13+), what Finder publishes.
+        raw = _pb_data_for_type(b"public.file-url")
+        if raw:
+            paths = file_ref.servable_paths(format.file_url_paths(raw))
+            if paths:
+                return encode_paths(paths)
+            # Worth a line of its own: a file *was* on the pasteboard and this
+            # machine could not turn it into a path, which is the capture-side
+            # fault above happening right here.
+            logger.info(
+                "public.file-url named no servable path (%d bytes: %r)",
+                len(raw),
+                raw[:200],
+            )
+
+        # Method 3: pbpaste, for a launchd context where the ctypes bridge could
+        # not reach the pasteboard at all.  ``-Prefer`` falls back to the next
+        # type it has when the one asked for is absent, so its answer is parsed
+        # as an address and then checked as a path rather than trusted as
+        # either — an ordinary text copy's plain text must not be read as a list
+        # of paths.  Both halves are `file_url_paths`' job: it reads a bare path
+        # as the bytes the name is, where a second attempt through `decode_text`
+        # would read a GBK name as the *display* spelling of it and hand back a
+        # path that stats nothing, losing a file that is sitting right there.
         try:
             result = subprocess.run(
                 ["pbpaste", "-Prefer", "public.file-url"],
@@ -698,10 +753,14 @@ class _ClipboardReader(ClipboardReader):
                 timeout=2,
             )
             if result.returncode == 0 and result.stdout.strip():
-                return result.stdout.strip()
+                paths = file_ref.servable_paths(format.file_url_paths(result.stdout))
+                if paths:
+                    logger.debug("Read %d file path(s) via pbpaste", len(paths))
+                    return encode_paths(paths)
         except Exception:
-            pass
+            logger.debug("pbpaste file-url read failed", exc_info=True)
 
+        logger.debug("No file paths on the pasteboard")
         return b""
 
     # -- URL via NSPasteboard -------------------------------------------

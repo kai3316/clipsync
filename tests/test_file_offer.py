@@ -299,9 +299,35 @@ class TestBestFormat:
         content = ClipboardContent(types={ContentType.FILE_REMOTE: b"{}"})
         assert content.best_format() == (ContentType.FILE_REMOTE, b"{}")
 
-    def test_an_offer_beside_a_real_format_does_not_win(self):
+    def test_an_offer_beside_a_real_format_wins(self):
+        """An offer beside a text payload is still a file row, not a text row.
+
+        This is the shape a Mac file copy arrives in: the Finder publishes the
+        file's *name* as plain text next to the file itself, so the offer never
+        comes alone.  Ranking TEXT first labelled those rows TEXT, and the row's
+        kind is what the window reads to choose between 复制 and 下载 — so the
+        download button was hidden on a row that had an offer sitting in it.
+        """
         content = ClipboardContent(
             types={ContentType.TEXT: b"hi", ContentType.FILE_REMOTE: b"{}"}
+        )
+        assert content.best_format()[0] == ContentType.FILE_REMOTE
+
+    def test_a_local_file_beside_its_own_name_wins_for_the_same_reason(self):
+        name = "报告.pdf".encode()
+        content = ClipboardContent(
+            types={ContentType.TEXT: name, ContentType.FILE: b"/tmp/" + name}
+        )
+        assert content.best_format()[0] == ContentType.FILE
+
+    def test_text_still_wins_over_a_url_and_an_image(self):
+        """The file branches moved; nothing else did."""
+        content = ClipboardContent(
+            types={
+                ContentType.TEXT: b"hi",
+                ContentType.URL: b"https://example.com",
+                ContentType.IMAGE_PNG: b"png",
+            }
         )
         assert content.best_format()[0] == ContentType.TEXT
 

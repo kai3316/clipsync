@@ -28,6 +28,8 @@ import os
 import re
 import unicodedata
 
+from internal.clipboard.format import decode_text, encode_path
+
 # Bumped only if the shape below changes incompatibly.  A peer that does not
 # know a version refuses the entry rather than guessing at it, which is the
 # right failure: the id inside it is used to look a row up.
@@ -59,10 +61,82 @@ def file_name(path: str) -> str:
 
     A folder copy often arrives with a trailing separator, which has no
     basename at all — the last real component is taken instead.
+
+    The result is always a name JSON can carry, for the reason `_json_safe`
+    gives; it is therefore a *reading* of a name, and callers that need to
+    reach the file itself use the path, never this.
     """
     trimmed = path.rstrip("/\\") or path
     name = os.path.basename(trimmed)
-    return unicodedata.normalize("NFC", name) or trimmed
+    return _json_safe(unicodedata.normalize("NFC", name) or trimmed)
+
+
+def _json_safe(name: str) -> str:
+    """*name* spelled so that JSON can carry it.
+
+    A path that is not valid UTF-8 reaches here as surrogates — that is what
+    `format.decode_path` produces, and keeping them is what lets ``os.stat``
+    find the file at all.  A lone surrogate has no UTF-8 encoding, so a name
+    holding one cannot be written into an offer, or into a history DTO a window
+    reads, by any route: ``json.dumps`` either raises or emits a document the
+    other end cannot decode.
+
+    So the bytes are decoded instead, by the same rules as any other text this
+    machine did not write in UTF-8 — which spells a Chinese name copied on a
+    GBK Mac correctly rather than as replacement characters.  Only a name whose
+    own encoding this machine could not spell is affected this way, and only
+    its spelling: the file is untouched, and it is served by path, which never
+    crosses the wire.
+    """
+    try:
+        name.encode("utf-8")
+    except UnicodeEncodeError:
+        try:
+            # The exact inverse of the decode that produced the surrogates,
+            # which is how this name arrived — and the reason it is written
+            # out here rather than left to ``os.fsencode``, whose error handler
+            # on Windows is not the one that made them.
+            return decode_text(encode_path(name))
+        except UnicodeEncodeError:
+            # Not a surrogateescape'd byte after all; nothing to recover.
+            return name.encode("utf-8", errors="replace").decode("utf-8")
+    return name
+
+
+def servable_paths(candidates) -> list[str]:
+    """The entries of *candidates* that name something this machine can serve.
+
+    One definition for the three platforms, because each of their readers has a
+    fallback that can hand over something which is not a list of paths at all —
+    ``pbpaste -Prefer`` answers with the plain text of an ordinary text copy
+    when it has no file address, and a file manager may write a bare word like
+    ``copy`` into the list it publishes.  Absolute, because a relative path
+    names nothing once it leaves this machine.  Existing, for the reason
+    `describe` gives: a path that has gone missing between the copy and the
+    capture can be neither described to a peer nor served to one, and carrying
+    it any further only defers the failure to a dead button at the far end.
+
+    A name that is not valid UTF-8 is kept, not filtered: it resolves through
+    ``os.stat`` here, and it is what the file is really called.
+
+    ``candidates`` that is not a sequence yields nothing, rather than being
+    iterated anyway — the plist branch hands over whatever ``plistlib.loads``
+    made of the payload, and iterating a mapping would yield its *keys*, which
+    a pasteboard that published something other than an array could spell as
+    paths.
+    """
+    if not isinstance(candidates, (list, tuple)):
+        return []
+    kept = []
+    for candidate in candidates or ():
+        if not isinstance(candidate, str) or not os.path.isabs(candidate):
+            continue
+        try:
+            os.stat(candidate)
+        except (OSError, ValueError):
+            continue
+        kept.append(candidate)
+    return kept
 
 
 def describe(path: str, max_name: int = MAX_NAME_CHARS) -> dict | None:

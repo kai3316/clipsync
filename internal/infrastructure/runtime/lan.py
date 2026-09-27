@@ -4932,29 +4932,44 @@ class LanRuntime:
         """
         try:
             types = getattr(content, "types", {}) or {}
-            for content_type in (ContentType.TEXT, ContentType.HTML, ContentType.RTF):
-                raw = types.get(content_type)
-                if not raw:
-                    continue
-                text = raw.decode("utf-8", errors="replace").strip()
-                if text:
-                    return text[:40]
-            # A file copy on macOS carries a `public.url` beside its paths, so
-            # the paths are asked first — the name of the thing beats a URI that
-            # is only a spelling of its path.  Same order, and the same line, as
-            # the history row this clip will become.
+            # A file copy on macOS carries a `public.url` beside its paths, and
+            # the Finder also puts the file's *name* on the pasteboard as plain
+            # text — so the file branches are asked first.  The name of the thing
+            # beats a URI that is only a spelling of its path, and beats the same
+            # name read back as text: what was copied is the file.  Same order,
+            # and the same line, as the history row this clip becomes (see
+            # `history_db._build_preview`), so the ledger and the row a reader
+            # finds afterwards agree about what was sent.
             raw = types.get(ContentType.FILE)
             if raw:
-                paths = format.split_paths(raw.decode("utf-8", errors="replace"))
+                # The *display* reading, not `decode_paths`: this line is shown,
+                # and a name that is not valid UTF-8 has to be read as the name
+                # it is — surrogates are not characters, and a lone one reaching
+                # the window is the same replacement character this is meant to
+                # avoid.  Spelled exactly as `history_db._build_preview` spells
+                # it, which is what the promise above comes to.
+                paths = format.split_paths(format.decode_text(raw))
                 if paths:
                     first = os.path.basename(paths[0]) or paths[0]
                     return first[:40] if len(paths) == 1 else f"{first[:40]} 等 {len(paths)} 个文件"
             offer = file_ref.parse(types.get(ContentType.FILE_REMOTE) or b"")
             if offer:
                 return file_summary(offer["files"], offer["total"])[:40]
+            for content_type in (ContentType.TEXT, ContentType.HTML, ContentType.RTF):
+                raw = types.get(content_type)
+                if not raw:
+                    continue
+                # `decode_text`, not a UTF-8 decode with replacement: this is the
+                # label for a clip on its way to another device, and a zh_CN
+                # Mac's GBK text would be listed here as U+FFFD — the same loss
+                # the clipboard writer used to inflict, shown in the send ledger
+                # instead of on the receiving clipboard.
+                text = format.decode_text(raw).strip()
+                if text:
+                    return text[:40]
             raw = types.get(ContentType.URL)
             if raw:
-                text = raw.decode("utf-8", errors="replace").strip()
+                text = format.decode_text(raw).strip()
                 if text:
                     return text[:40]
         except Exception:

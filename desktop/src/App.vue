@@ -652,8 +652,17 @@ async function openHistoryLink(item: HistoryItem) {
  * entry that published it — so it is the one row whose action is 下载 rather
  * than 复制.  Reading it off `content_type` and not the preview keeps that a
  * property of the row rather than of how its name happens to look.
+ *
+ * `offer_entry` is asked as well because the two come from different halves of
+ * the sidecar: the kind is the row's best format, the id is the offer stored
+ * inside it.  A copy that carries the file's name as text *and* the offer —
+ * which is exactly what the Finder puts on the pasteboard — was labelled TEXT
+ * by a ranking that preferred the text, and the row could be downloaded the
+ * whole time.  Where the id is there, the offer is there, whatever the row
+ * calls itself.
  */
 function isRemoteFile(item: HistoryItem) {
+  if (item.offer_entry) return true;
   return (item.content_type || "").toUpperCase() === "FILE_REMOTE";
 }
 /** The device a remote-file row came from, when this window can see it online.

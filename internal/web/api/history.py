@@ -8,6 +8,8 @@ import logging
 import time
 import uuid
 
+from internal.clipboard.format import decode_text
+
 logger = logging.getLogger(__name__)
 
 
@@ -407,7 +409,10 @@ def batch_favorite(body, history):
             full_text = ""
             if text_b64:
                 try:
-                    full_text = base64.b64decode(text_b64).decode("utf-8", errors="replace")
+                    # A favourite keeps this text for good, and a payload from a
+                    # zh_CN Mac is GBK: decoding it as UTF-8 with replacement
+                    # would freeze a name into U+FFFD inside the favourite.
+                    full_text = decode_text(base64.b64decode(text_b64))
                 except Exception:
                     full_text = ""
             content = full_text or entry.get("text_preview", "") or ""

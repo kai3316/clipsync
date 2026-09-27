@@ -8,6 +8,7 @@ from datetime import datetime
 from pathlib import Path
 
 from internal.application.errors import ApplicationError
+from internal.clipboard.format import decode_text
 from internal.data.favorites_export import build_favorites_export
 
 
@@ -323,7 +324,10 @@ class FavoritesUseCase:
             full_text = ""
             if isinstance(text_b64, str) and text_b64:
                 try:
-                    full_text = base64.b64decode(text_b64).decode("utf-8", errors="replace")
+                    # Same rule as the legacy web route that also favourites a
+                    # row: the text is kept for good, so it is decoded by the
+                    # clipboard's own rules rather than replaced into U+FFFD.
+                    full_text = decode_text(base64.b64decode(text_b64))
                 except Exception:
                     full_text = ""
             preview = full_text or str(entry.get("text_preview", "") or "")

@@ -30,7 +30,14 @@ from internal.clipboard.dedup import (
 from internal.clipboard.dedup import (
     make_dedup_key as _make_dedup_key,
 )
-from internal.clipboard.format import ClipboardContent, ContentType, split_paths, strip_html
+from internal.clipboard.format import (
+    ClipboardContent,
+    ContentType,
+    decode_paths,
+    decode_text,
+    split_paths,
+    strip_html,
+)
 from internal.config.config import _config_dir
 
 if TYPE_CHECKING:
@@ -42,26 +49,13 @@ logger = logging.getLogger(__name__)
 def _safe_decode(data: bytes) -> str:
     """Decode bytes to string, trying common encodings.
 
-    A UTF-16 BOM is checked first: very old entries (or a peer platform that
-    didn't normalize clipboard text to UTF-8) may store wide text raw.  Without
-    this the bytes fall through to the CJK single-byte attempts and render as
-    mojibake (the "history became garbled after update" report).
+    The rules live in `format.decode_text`, because the same payload is read in
+    more than one place — here for a row's preview, by a window reading a clip
+    back, and by the platform writers handed a peer's bytes — and a payload that
+    read as GBK in the list must not read as U+FFFD in any of the others.  This
+    name is kept because the callers below are all about a *stored* row.
     """
-    if data[:2] in (b"\xff\xfe", b"\xfe\xff"):
-        try:
-            return data.decode("utf-16")
-        except UnicodeDecodeError:
-            pass
-    try:
-        return data.decode("utf-8")
-    except UnicodeDecodeError:
-        pass
-    for enc in ("gbk", "gb2312", "gb18030", "big5", "shift-jis", "euc-kr"):
-        try:
-            return data.decode(enc)
-        except (UnicodeDecodeError, UnicodeEncodeError):
-            continue
-    return data.decode("utf-8", errors="replace")
+    return decode_text(data)
 
 
 # Dedup hash algorithm now lives in internal.clipboard.dedup.DEDUP_ALGO
@@ -93,13 +87,17 @@ def _build_preview(types: dict[ContentType, bytes]) -> str:
     a page showing them read it as "no content", and the phone's panel and the
     overview's activity feed read the same field, so a clip whose only format
     was a link or a file was blank in all three.
+
+    The file branches come before the text one because a file copy carries
+    both.  macOS is the plain case: the Finder publishes the file's name as
+    plain text next to the file itself, so reading TEXT first described a copy
+    of ``报告.pdf`` as the words "报告.pdf" and never as the file — which also
+    made the row's own kind wrong, and with it the row's action.  The name is
+    the same either way; what changes is that a file row now reads as one.
     """
-    if ContentType.TEXT in types:
-        text = _safe_decode(types[ContentType.TEXT])
-        return text[:200]
     # A file copy on macOS also puts a `public.url` on the pasteboard — its own
-    # `file://` address — so the file list is asked first: the name of the thing
-    # beats a URI that is only a spelling of its path.
+    # `file://` address — so the file list is asked before the URL branch: the
+    # name of the thing beats a URI that is only a spelling of its path.
     if ContentType.FILE in types:
         paths = split_paths(_safe_decode(types[ContentType.FILE]))
         if paths:
@@ -116,6 +114,9 @@ def _build_preview(types: dict[ContentType, bytes]) -> str:
             line = file_ref.summary(remote["files"], remote["total"])
             if line:
                 return line[:200]
+    if ContentType.TEXT in types:
+        text = _safe_decode(types[ContentType.TEXT])
+        return text[:200]
     if ContentType.URL in types:
         url = _safe_decode(types[ContentType.URL]).strip()
         if url:
@@ -847,9 +848,14 @@ class ClipboardHistoryDB:
         raw = labels_to_types(entry.get("types")).get(ContentType.FILE)
         if raw is None:
             return [], "not_a_file"
+        # `decode_paths`, not a UTF-8 decode: a stored path is whatever this
+        # machine's file system spells, and a name that is not valid UTF-8 comes
+        # back as surrogates — which `exists` resolves, and which a lossy decode
+        # would have turned into U+FFFD, quietly reporting "gone" for a file
+        # that is sitting right there.
         paths = [
             path
-            for path in split_paths(raw.decode("utf-8", errors="replace"))
+            for path in decode_paths(raw)
             if os.path.exists(path)
         ]
         if not paths:

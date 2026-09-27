@@ -19,7 +19,12 @@ from internal.clipboard.dib import (
     carries_alpha,
     header_size,
 )
-from internal.clipboard.format import ClipboardContent, ContentType, png_payload
+from internal.clipboard.format import (
+    ClipboardContent,
+    ContentType,
+    decode_text,
+    png_payload,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -641,11 +646,20 @@ class _ClipboardWriter(ClipboardWriter):
         return True
 
     def _set_text(self, data: bytes):
-        # errors="replace": a peer's TEXT bytes are not guaranteed UTF-8
-        # (Linux/older macOS peers send locale-encoded text).  A strict
-        # decode here would raise after EmptyClipboard() already wiped the
-        # user's clipboard, leaving it empty.
-        text = data.decode("utf-8", errors="replace")
+        # A peer's TEXT bytes are not guaranteed to be UTF-8 — a zh_CN macOS
+        # sends GBK, and a Windows legacy app writes the ANSI code page — so
+        # they are decoded by the clipboard's own rules rather than as strict
+        # UTF-8.
+        #
+        # ``errors="replace"`` here is not a fallback, it is data loss.  The
+        # U+FFFD it produces is written to the clipboard as a real character,
+        # and this machine then polls its own clipboard: the mangled text comes
+        # back as a new history row, is synced to the other device, and the
+        # original bytes are gone everywhere.  That is the "history shows
+        # ���֤������.pdf" report, whose file name arrived as GBK.  A strict
+        # decode would at least raise, but it would raise *after*
+        # EmptyClipboard() had already wiped what the user was holding.
+        text = decode_text(data)
         wide_text = text.encode("utf-16-le") + b"\x00\x00"
         self._set_global_format(CF_UNICODETEXT, wide_text)
 

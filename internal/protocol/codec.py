@@ -44,7 +44,12 @@ import zlib
 from io import BytesIO
 
 from internal.clipboard import file_ref
-from internal.clipboard.format import ClipboardContent, ContentType, SyncMessage, split_paths
+from internal.clipboard.format import (
+    ClipboardContent,
+    ContentType,
+    SyncMessage,
+    decode_paths,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -307,8 +312,12 @@ def _wire_types(content: ClipboardContent) -> dict[ContentType, bytes]:
     types = dict(content.types)
 
     if ContentType.FILE in types:
-        raw = types.pop(ContentType.FILE).decode("utf-8", errors="replace")
-        items = [item for item in (file_ref.describe(p) for p in split_paths(raw)) if item]
+        # `decode_paths`, not a UTF-8 decode: these are this machine's own paths,
+        # and a name that is not valid UTF-8 comes back as surrogates, which
+        # `describe` can still stat.  A lossy decode would turn it into U+FFFD
+        # and lose the file silently.
+        paths = decode_paths(types.pop(ContentType.FILE))
+        items = [item for item in (file_ref.describe(p) for p in paths) if item]
         # No entry id means this clip was never given a row — the history had an
         # identical one and folded it in — so there is nothing for a peer to ask
         # back for.  The row it duplicates was offered when *it* was captured.
@@ -318,6 +327,20 @@ def _wire_types(content: ClipboardContent) -> dict[ContentType, bytes]:
                 items[: file_ref.MAX_OFFER_ENTRIES],
                 total=len(items),
             )
+        elif not items:
+            # Said out loud because of what it costs: the paths do not travel,
+            # so a FILE list that describes nothing leaves the peer with the
+            # file's *name* — the text the Finder publishes beside it — and no
+            # way to ask for the file.  That reads at the far end as a text row
+            # that cannot be downloaded, which is a capture-side fault that
+            # looks like a transfer-side one.
+            logger.info(
+                "File clip describes no servable path (%d path(s) in the list) — "
+                "sending no offer",
+                len(paths),
+            )
+        elif not content.entry_id:
+            logger.debug("File clip has no history entry id — sending no offer")
 
     url = types.get(ContentType.URL)
     if url is not None and file_ref.is_local_path_url(url):
