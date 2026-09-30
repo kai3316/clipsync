@@ -1,12 +1,14 @@
 """Update verification and install policy.
 
 Covered here:
-  1. verify_update_blob: bad hash, old/equal version, missing release info
-     (P2P rejects + GitHub proceeds), GitHub double-checks too.
+  1. verify_update_blob: bad hash, old/equal version, missing release info —
+     the GitHub path proceeds, the P2P one falls back to the sending device's
+     declared digest and is refused only when there is neither.
   2. fetch_latest_asset_info: a release without a published digest.
   3. The install path: archive stashed under ``~/Downloads/clipsync-update/``
-     with a ready state, never auto-applied; a peer blob with a bad hash or
-     without a release reference is discarded / falls back to the server.
+     with a ready state, which the host applies on its own; a peer blob with a
+     bad hash or nothing at all to check against is discarded, and the second
+     case is a refusal in words rather than a silent re-download.
   4. auto_update_check switch OFF → the periodic loop makes zero requests
      (network layer guarded); the setting persists.
 """
@@ -99,13 +101,39 @@ def test_verify_rejects_not_newer_versions(tmp_path, release, current):
 
 
 def test_verify_no_release_info_p2p_rejected_github_ok(tmp_path):
-    path, _ = _write_blob(tmp_path)
+    path, payload = _write_blob(tmp_path)
     # P2P blob with nobody to answer to → must not install.
     ok, verdict = updater_mod.verify_update_blob(path, None, "1.0.0", source="p2p")
     assert not ok and verdict == "no_release_info"
     # A GitHub download was already size+hash-checked during download.
     ok, verdict = updater_mod.verify_update_blob(path, None, "1.0.0", source="github")
     assert ok and verdict == "ok"
+
+
+def test_verify_no_release_info_falls_back_to_the_senders_digest(tmp_path):
+    # The case the peer path exists for: no route to the release endpoint, so
+    # the sending device's declared digest is the only thing the bytes can be
+    # held to.  It is checked, and the verdict says which digest settled it —
+    # the two are not the same claim and the card words them differently.
+    path, payload = _write_blob(tmp_path)
+    digest = hashlib.sha256(payload).hexdigest()
+    ok, verdict = updater_mod.verify_update_blob(
+        path, None, "1.0.0", source="p2p", peer_digest=digest
+    )
+    assert ok and verdict == "peer_verified"
+    # A digest that does not describe the bytes is still a rejection.
+    ok, verdict = updater_mod.verify_update_blob(
+        path, None, "1.0.0", source="p2p", peer_digest=hashlib.sha256(b"other").hexdigest()
+    )
+    assert not ok and verdict == "hash_mismatch"
+    # And the sender's own claim about the version is held to the same rule a
+    # published one is: the archive is named for the release it is.
+    named = tmp_path / "ClipSync-1.0.0-windows-setup.exe"
+    named.write_bytes(payload)
+    ok, verdict = updater_mod.verify_update_blob(
+        str(named), None, "1.0.0", source="p2p", peer_digest=digest
+    )
+    assert not ok and verdict == "not_newer"
 
 
 # ══════════════════════════════════════════════════════════════════════

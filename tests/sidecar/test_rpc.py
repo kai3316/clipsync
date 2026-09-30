@@ -591,11 +591,12 @@ def test_clear_transfer_history_reports_the_count_it_deleted(app, monkeypatch):
 def test_update_status_starts_idle(app):
     # `source` is empty until something starts an update, and it is what tells
     # the host whether the archive it is looking at is this machine's own
-    # download or one a peer sent -- the two are installed differently.
+    # download or one a peer sent.  `verified` is empty beside it: neither word
+    # means anything until there is an archive to say it about.
     assert Dispatcher(app).call("update.status", {}) == {
         "state": {
             "phase": "idle", "fraction": 0, "downloaded": 0, "total": 0,
-            "error": "", "version": "", "path": "", "source": "",
+            "error": "", "version": "", "path": "", "source": "", "verified": "",
         }
     }
 

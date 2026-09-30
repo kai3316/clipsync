@@ -4,6 +4,7 @@ import { Eraser, ExternalLink, FileDown, FileUp, FolderOpen, FolderUp, RefreshCw
 import { bridge } from "../api/bridge";
 import { t } from "../i18n";
 import { openContextMenu } from "../lib/context-menu";
+import { fileReachable } from "../lib/device-row";
 import { copyText } from "../lib/clipboard";
 import { dateTime, size as formatSize, speed as formatSpeed } from "../i18n/format";
 import type { Device, Transfer } from "../api/types";
@@ -52,8 +53,12 @@ function activeStatus(item: Transfer): string {
   return "";
 }
 
-/** The peers a file can be sent to: paired and currently reachable over the LAN.
+/** The peers a file can be sent to: any device reachable over the LAN.
  *
+ * Pairing is not on the list.  A file is the same kind of act a chat message is
+ * — the sidecar takes one from an unpaired device on this network and prompts
+ * for it only when the user has turned that off — so requiring a pairing here
+ * made the same two devices able to talk and unable to send each other a file.
  * Same rule the send-URL dialog picks from (``App.vue::openSendUrlFromHost``),
  * and the same one the legacy transfers page applied: it listed connected
  * devices only, and refused to start an upload with no target chosen
@@ -77,8 +82,7 @@ const props = defineProps<{
 }>();
 const emit = defineEmits<{ dropped: [] }>();
 const targets = computed(() =>
-  (props.devices || []).filter((device) =>
-    device.paired && !device.relay && device.connection_state === "online"));
+  (props.devices || []).filter(fileReachable));
 /** The internet-paired devices this page cannot send to, so the picker's
  *  silence about them can be a sentence instead. */
 const relayOnlyTargets = computed(() =>

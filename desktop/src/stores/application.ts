@@ -226,10 +226,19 @@ export function createApplicationStore() {
     // because a click that produced neither would be indistinguishable from a
     // broken button: the request went out, and this is what came back.
     if (name === "update.peer_unavailable") {
-      // The device that was asked keeps only the installer its own upgrade
-      // downloaded, so "nothing to send" means the asking device is the one
-      // that has to fetch it -- from the same release, which its own update
-      // page does.
+      // Three different refusals, and the row has to tell them apart: the peer
+      // is not behind (nothing is wrong on either side), the peer is a different
+      // platform (this installer could never run there), or it has no installer
+      // of its own to hand over — the device that was asked keeps only the one
+      // its own upgrade downloaded, so the asking device is the one that has to
+      // fetch it, from the same release its own update page offers.
+      const reason = String(data.reason || "");
+      if (reason === "not_newer") {
+        return t("{name} 的版本不比本机旧，不需要这个更新", { name: peerLabel(data) });
+      }
+      if (reason === "other_platform") {
+        return t("{name} 与本机不是同一个平台，装不了这个安装包", { name: peerLabel(data) });
+      }
       return t("{name} 上没有可发送的安装包，请在本机检查更新", { name: peerLabel(data) });
     }
     if (name === "update.peer_notice") {

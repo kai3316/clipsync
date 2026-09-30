@@ -255,20 +255,31 @@ describe("transfer controls", () => {
     } finally { view.unmount(); }
   });
 
-  it("offers only paired, reachable devices as targets", async () => {
+  it("offers every reachable device as a target, paired or not", async () => {
+    // Pairing is deliberately not part of this: a device that is merely on the
+    // same network is as good a place to send a file as a paired one, which is
+    // what the setting beside it says in words.  What is left out is a device
+    // nothing can be sent to — one that is not on this network at all.
     const view = mount(TransfersView, {
       props: {
         devices: [
           device("dev-1", "Laptop"),
           device("dev-2", "Phone", { paired: false }),
           device("dev-3", "Old tower", { connection_state: "offline" }),
+          device("dev-4", "Cousin", { relay: true }),
+          // Seen but not connected.  Chat would offer it — an invitation is
+          // what dials a discovered peer — and a file may not: the send goes to
+          // a peer the transport already holds.
+          device("dev-5", "Waking up", { connection_state: "discovered" }),
         ],
       },
     });
     try {
       await flushPromises();
       const options = view.findAll("select option");
-      expect(options.map(option => option.text())).toEqual(["选择接收设备", "Laptop"]);
+      expect(options.map(option => option.text())).toEqual([
+        "选择接收设备", "Laptop", "Phone",
+      ]);
     } finally { view.unmount(); }
   });
 

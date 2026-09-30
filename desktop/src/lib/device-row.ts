@@ -41,6 +41,53 @@ export function chatReachable(device: Device): boolean {
   return Boolean(device.relay_paired && device.relay_online) || device.connection_state !== "offline";
 }
 
+/** Whether a file could be sent to this device right now.
+ *
+ * The direct link alone, unlike `chatReachable`: a file travels as 256 KiB
+ * chunks with pause/resume, which the public broker cannot carry and cannot
+ * resume, so an internet-paired device is not a target here however online the
+ * relay says it is.  Pairing is deliberately not part of it — the transfer page
+ * sends to whatever is on this network, exactly as the chat page does.
+ *
+ * A link that *exists*, not one that could be made.  `chatReachable` accepts a
+ * device that is merely discovered because an invitation is the thing that
+ * dials it; a file has no such handshake — the sidecar sends to a peer it is
+ * already connected to and refuses one it is not (``lan.py::_send_files``), so
+ * `discovered` and `connecting` rows would be targets that answer with
+ * NOT_CONNECTED the moment they are picked.
+ *
+ * `relay` marks a row that only exists on the relay, so its
+ * `connection_state` describes that route and says nothing about a local link
+ * that is not there. */
+export function fileReachable(device: Device): boolean {
+  return !device.relay && device.connection_state === "online";
+}
+
+/** What the device list calls this device's state, in one word.
+ *
+ * The row used to carry a pairing chip and a route chip side by side, so a
+ * device that was paired *and* connected read as two chips that partly agreed
+ * -- paired, and on the local link -- and the reader had to combine them.
+ * There are four states a device can be in, and each is one word:
+ *
+ *   syncing    paired and reachable — content moves in both directions
+ *   connected  reachable, not paired — chat and files work, nothing syncs
+ *   paired     paired, not reachable — known, and nothing is flowing
+ *   offline    neither
+ *
+ * Reaching for `chatReachable` rather than repeating the test: it is already the
+ * "a conversation would connect" rule, and the same routes carry both.
+ *
+ * A handshake in flight is not one of the four: it is something the user has to
+ * answer, not a state the device settled into, so callers keep showing
+ * `pairingInFlight` separately. */
+export function deviceStatus(device: Device): "syncing" | "connected" | "paired" | "offline" {
+  const paired = Boolean(device.paired || device.relay_paired);
+  const reachable = chatReachable(device);
+  if (paired) return reachable ? "syncing" : "paired";
+  return reachable ? "connected" : "offline";
+}
+
 /** What this list calls the device.
  *
  * The name the user gave it — the note on a local peer, the alias on one paired

@@ -176,7 +176,16 @@ class PeerProcess:
         self.closed = True
 
 
-def configure_pair(tmp_path, monkeypatch, encrypted, password):
+def configure_pair(tmp_path, monkeypatch, encrypted, password, *, file_open_to_all=True):
+    """Write two peer configurations and leave them ready for ``PeerProcess``.
+
+    *file_open_to_all* defaults to the product's own default, so a caller that
+    does not care gets the behaviour an installed application has.  This file's
+    own test asks for it off, because the accept and reject gates are what it
+    walks and neither of them exists while nothing has to be answered; a file
+    arriving from a device that is merely on the network is taken on its own
+    before either gate is reached.
+    """
     configs = []
     with ExitStack() as sockets:
         for name in ("left", "right"):
@@ -201,6 +210,7 @@ def configure_pair(tmp_path, monkeypatch, encrypted, password):
                 source_tracking_enabled=False, retry_capture_enabled=False,
                 sync_debounce=0.01, filter_enabled_categories=[],
                 file_receive_dir=str(tmp_path / name / "received"),
+                file_open_to_all=file_open_to_all,
             )
             identity = PairingManager(name, name).load_or_create_identity("", "")
             cfg.private_key_pem = identity.private_key_pem
@@ -238,7 +248,10 @@ def configure_pair(tmp_path, monkeypatch, encrypted, password):
 def test_real_rpc_pairing_bidirectional_copy_and_restart_trust(
     tmp_path, monkeypatch, encrypted, password
 ):
-    configure_pair(tmp_path, monkeypatch, encrypted, password)
+    # Off here and only here: this is the one test that walks the accept and
+    # reject gates over a real link, and both are skipped while a file from an
+    # unpaired peer is taken on arrival.
+    configure_pair(tmp_path, monkeypatch, encrypted, password, file_open_to_all=False)
     with ExitStack() as cleanup:
         left = PeerProcess(tmp_path / "left")
         cleanup.callback(left.close)

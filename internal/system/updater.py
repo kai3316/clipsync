@@ -203,6 +203,19 @@ def is_newer(latest: str, current: str) -> bool:
     return _is_newer(latest, current)
 
 
+def version_in_asset_name(name: str) -> str:
+    """The version an installer's filename carries, as a dotted string, or "".
+
+    The counterpart of :func:`_version_in_name` for callers that need to *show*
+    the version rather than rank by it: a peer-sent archive arrives with no
+    release info behind it, and its filename is then the only thing that says
+    which build it is.  Read through the same parser the ranking uses, so the
+    name a card prints and the order the cache sorts by cannot disagree.
+    """
+    parts = _version_in_name(name)
+    return ".".join(str(part) for part in parts) if parts else ""
+
+
 def _describe(exc: Exception | None) -> str:
     """One line naming why the release lookup failed.
 
@@ -438,6 +451,7 @@ def verify_update_blob(
     release_info: dict | None,
     current_version: str,
     source: str = "p2p",
+    peer_digest: str = "",
 ) -> tuple[bool, str]:
     """Decide whether an update blob may be installed.
 
@@ -445,19 +459,30 @@ def verify_update_blob(
     :func:`fetch_latest_asset_info` returned (None = GitHub unreachable or no
     verifiable digest).  *source* is "p2p" for a peer-sent blob or "github"
     for a file that :func:`download_latest_release` already size- and
-    hash-checked against the release API while downloading.
+    hash-checked against the release API while downloading.  *peer_digest* is
+    the SHA-256 the sending device declared for the same file.
 
-    Policy (correctness, not hardening): never install a package whose bytes
-    do not match the published asset, and never install one whose version is
-    not newer than the running build.  When no release info is available at
-    all, a P2P blob has nobody to answer to — reject it so the caller can fall
-    back to the GitHub path; a freshly downloaded GitHub file was already
-    verified against the API during download, so it may proceed.
+    Policy: never install a package whose bytes do not match what it is being
+    checked against, and never install one whose version is not newer than the
+    running build.  The published digest is always preferred, and when it is
+    available a mismatch is a rejection whatever the peer said.
+
+    When the release endpoint cannot be reached there is no published digest to
+    check against, and that is the one situation a peer-sent blob exists for —
+    the sending device has the installer, this one may have no route to GitHub
+    at all.  Refusing there would leave the feature unable to do the only thing
+    it is for, so the peer's own digest is accepted instead: it is what catches
+    a corrupt or truncated transfer, which is the part of the check that can be
+    settled without the network.  Authenticity rests on the exchange's own
+    gates — this machine asked *that* device for its cached asset (the ledger
+    the caller armed by asking), the offer had to claim this platform and a
+    newer version, and the link is TLS with a pinned certificate.
 
     Returns ``(ok, verdict)`` with verdict one of:
-      "ok"             verified and newer — safe to stage/apply
-      "no_release_info" P2P blob with no authoritative reference
-      "hash_mismatch"  bytes differ from the published asset
+      "ok"             verified against the published digest — safe to stage
+      "peer_verified"  verified against the sending device's digest only
+      "no_release_info" P2P blob with no digest to check at all
+      "hash_mismatch"  bytes differ from the digest they were checked against
       "not_newer"      release is not newer than the running version
     """
     if not release_info:
@@ -465,25 +490,54 @@ def verify_update_blob(
         # against the release API before saving the file.
         if source == "github":
             return True, "ok"
-        return False, "no_release_info"
+        return _verify_against(blob_path, peer_digest, "peer_verified", current_version)
 
     if not _is_newer(release_info.get("version", ""), current_version):
         return False, "not_newer"
 
     expected = release_info.get("sha256") or ""
     if not expected:
-        # No digest to compare against — treat like missing release info.
+        # No published digest to compare against.  The blob is still whatever
+        # the peer sent, so it gets the peer's own check — never a free pass.
         if source == "github":
             return True, "ok"
-        return False, "no_release_info"
-    try:
-        actual = sha256_file(blob_path)
-    except OSError as exc:
-        logger.warning("Cannot hash update blob %s: %s", blob_path, exc)
-        return False, "hash_mismatch"
-    if actual != expected.lower():
+        return _verify_against(blob_path, peer_digest, "peer_verified", current_version)
+
+    if not _matches(blob_path, expected):
         return False, "hash_mismatch"
     return True, "ok"
+
+
+def _matches(blob_path: str, expected: str) -> bool:
+    """Whether *blob_path* hashes to *expected*; False when it cannot be read."""
+    try:
+        return sha256_file(blob_path) == expected.lower()
+    except OSError as exc:
+        logger.warning("Cannot hash update blob %s: %s", blob_path, exc)
+        return False
+
+
+def _verify_against(
+    blob_path: str, digest: str, verdict: str, current_version: str = ""
+) -> tuple[bool, str]:
+    """Fallback check for a blob with no published digest: the sender's word.
+
+    A peer too old to declare one leaves nothing to check, which is the one
+    case that is still refused rather than trusted.
+
+    The archive's name is the release asset's name, so it carries the version
+    the sender claims to be sending.  Nothing else here can be checked against
+    the published release, so that claim is held to the same rule a published
+    one is: it has to be newer than what is running.
+    """
+    claimed = version_in_asset_name(os.path.basename(blob_path))
+    if current_version and claimed and not _is_newer(claimed, current_version):
+        return False, "not_newer"
+    if not digest:
+        return False, "no_release_info"
+    if not _matches(blob_path, digest):
+        return False, "hash_mismatch"
+    return True, verdict
 
 
 def download_latest_release(

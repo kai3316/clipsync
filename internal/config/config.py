@@ -118,6 +118,15 @@ class Config:
     # can reach this one open a conversation and send a file; False holds both
     # for an explicit Allow on this machine.  See `internal/sync/nearby_chat.py`.
     chat_open_to_all: bool = True
+    # File transfer's admission rule, the same shape as the chat one above
+    # because file transfer is the same kind of act: True (the default) lets any
+    # device that can reach this one send a file, and the transfer starts on
+    # arrival; False puts the Allow/Deny prompt in front of each one.
+    #
+    # Separate from `chat_open_to_all` rather than shared with it: a person may
+    # reasonably take a stranger's message and not a stranger's file.  Paired
+    # devices are unaffected either way -- they are prompted for both.
+    file_open_to_all: bool = True
     # Whether other devices may pull this machine's application log.  Off by
     # default: the log is a record of what this machine did, and a debug tool
     # that hands it out unasked is not one anybody agreed to.  Turning it on
@@ -429,6 +438,7 @@ _FIELD_RULES: dict[str, tuple] = {
     "notify_sync": ("bool",),
     "chat_muted_peers": ("strlist_nonnull",),
     "chat_open_to_all": ("bool",),
+    "file_open_to_all": ("bool",),
     "log_sharing": ("bool",),
     "encryption_enabled": ("bool",),
     "encryption_password_hash": ("str",),
@@ -701,6 +711,7 @@ def load() -> Config:
                 "notify_sync",
                 "chat_muted_peers",
                 "chat_open_to_all",
+                "file_open_to_all",
                 "log_sharing",
                 "encryption_enabled",
                 "encryption_password_hash",
@@ -879,6 +890,7 @@ def save(cfg: Config, enc_mgr: "EncryptionManager | None" = None):
             "notify_sync": cfg.notify_sync,
             "chat_muted_peers": cfg.chat_muted_peers,
             "chat_open_to_all": cfg.chat_open_to_all,
+            "file_open_to_all": cfg.file_open_to_all,
             "log_sharing": cfg.log_sharing,
             "encryption_enabled": cfg.encryption_enabled,
             "encryption_password_hash": cfg.encryption_password_hash,

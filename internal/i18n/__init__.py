@@ -246,6 +246,7 @@ _EN: dict[str, str] = {
     "notify.update_downloading": "Downloading update…",
     "notify.update_rejected_hash": "Update discarded: checksum mismatch",
     "notify.update_rejected_old": "Update discarded: not newer than the running version",
+    "notify.update_unverifiable": "Update discarded: nothing to check it against — the release server could not be reached and the sending device declared no checksum",
     "ui.web_start_failed2": "Failed to start on port {port}. Another process may already be using this port.",  # noqa: E501
     "ui.web_companion": "Remote access",
     "ui.web_start_failed": "Failed to start Remote access on port {port}.\n\nAnother process may already be using this port, or the server failed to bind.\n\nTried ports: {lo} - {hi}",  # noqa: E501
@@ -1201,6 +1202,7 @@ _ZH: dict[str, str] = {
     "notify.update_downloading": "正在下载更新…",
     "notify.update_rejected_hash": "已丢弃更新包：校验和不匹配",
     "notify.update_rejected_old": "已丢弃更新包：版本不高于当前版本",
+    "notify.update_unverifiable": "已丢弃更新包：无从校验——既连不上发布服务器，来源设备也没有声明校验和",
     "ui.web_start_failed2": "无法在端口 {port} 启动。可能另一个进程已占用该端口。",
     "ui.web_companion": "远程访问",
     "ui.web_start_failed": "无法在端口 {port} 启动 远程访问。\n\n可能另一个进程已占用该端口，或服务器绑定失败。\n\n尝试过的端口：{lo} - {hi}",  # noqa: E501

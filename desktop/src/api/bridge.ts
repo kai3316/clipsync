@@ -98,9 +98,17 @@ export const bridge = {
    *  The installer is the one this machine's own upgrade downloaded and kept,
    *  so the click either sends it or fails; nothing here downloads anything.
    *  A machine with nothing installed from this feature yet is refused with
-   *  `update.no_asset`, and the row says so. */
+   *  `update.no_asset`, and the row says so.
+   *
+   *  `reason` is the sidecar's word for what the peer did with the offer, and
+   *  it is what the row reports: "accepted" when the peer asked for the asset
+   *  (the transfer follows on its own), "not_newer" / "other_platform" when it
+   *  declined, "no_asset" and "send_failed" when this side could not serve, and
+   *  "no_answer" when the peer said nothing at all — an older build with no
+   *  answer frame.  The click used to report that a frame had left this machine,
+   *  which was equally true of an offer the peer threw away. */
   offerDeviceUpdate: (deviceId: string) =>
-    command<{ sent: boolean }>("offer_device_update", { deviceId }),
+    command<{ sent: boolean; reason: string }>("offer_device_update", { deviceId }),
   /** Ask a device on a newer build to send this one its installer, which is
    *  verified against the published release digest and then staged for install.
    *  The same exchange as `offerDeviceUpdate`, started from the older device —

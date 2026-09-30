@@ -9,6 +9,7 @@ thread-ownership and lock-ordering cases live with the transport itself.
 """
 
 import base64
+import hashlib
 import tempfile
 import time
 import zipfile
@@ -1619,9 +1620,12 @@ def test_receive_rich_policy_and_no_ack_for_unsupported_protocols(rig):
     # relay_enroll left this list when it was ported: it is paired-only and
     # refused rather than ignored, and its own cases live in
     # tests/sidecar/test_relay_delivery.py, where a paired peer is what sends it.
+    # file_request left it for the mirror reason: a file request is a protocol
+    # this build serves now (the transfer starts on arrival, unless the user has
+    # turned that off), so it answers by design — those cases are
+    # tests/test_file_transfer.py's.
     for kind in (
         "chat_text",
-        "file_request",
         "file_chunk",
         "relay_ack",
         "aiconfig_inv",
@@ -2178,7 +2182,10 @@ def test_the_send_click_carries_the_cached_installer_it_kept(rig, monkeypatch, t
     monkeypatch.setattr(updater, "get_cached_asset", lambda: str(cached))
     transport.sent.clear()
 
-    assert runtime.offer_device_update("remote") == {"sent": True}
+    # The click waits for the peer's answer (`_await_offer_answer`), and a peer
+    # that says nothing is reported as exactly that rather than as a send.
+    answer = runtime.offer_device_update("remote")
+    assert answer["sent"] is True and answer["reason"] == "no_answer"
     offers = [msg for _, msg in transport.sent if msg.msg_type == "update_offer"]
     assert offers[-1]._raw_payload["has_asset"] is True
     assert offers[-1]._raw_payload["asset"] == "ClipSync_1.0.9_x64-setup.exe"
@@ -2256,21 +2263,31 @@ def test_an_offer_from_a_newer_same_platform_peer_is_asked_for(rig, monkeypatch)
     assert events_named(runtime.events, "update.peer_notice")
 
 
-def test_an_offer_from_an_older_or_other_platform_peer_is_ignored(rig, monkeypatch):
+def test_an_offer_from_an_older_or_other_platform_peer_is_refused_in_words(rig, monkeypatch):
+    """A refused offer is answered, not swallowed.
+
+    The offering device's user clicked a button and is waiting on the answer;
+    silence there reads exactly like a transfer that is about to start.  Each
+    refusal carries the code for its own reason so that side can say which it
+    was instead of reporting a send that never happened.
+    """
     runtime, _, transport, *_ = rig
     transport.connected.add("remote")
     monkeypatch.setattr(lan, "_local_platform", lambda: ("windows", "amd64"))
     monkeypatch.setattr(lan, "__version__", "1.0.8")
 
-    for payload in (
-        {"version": "1.0.7", "os": "windows", "arch": "amd64"},  # older
-        {"version": "1.0.8", "os": "windows", "arch": "amd64"},  # same
-        {"version": "1.0.9", "os": "darwin", "arch": "arm64"},   # another platform
-        {"version": "1.0.9"},                                    # says nothing
+    for payload, reason in (
+        ({"version": "1.0.7", "os": "windows", "arch": "amd64"}, "not_newer"),   # older
+        ({"version": "1.0.8", "os": "windows", "arch": "amd64"}, "not_newer"),   # same
+        ({"version": "1.0.9", "os": "darwin", "arch": "arm64"}, "other_platform"),
+        ({"version": "1.0.9"}, "other_platform"),                                # says nothing
     ):
+        transport.sent.clear()
         transport.message(frame("update_offer", has_asset=True, **payload), "remote")
+        assert [msg.msg_type for _, msg in transport.sent] == ["update_unavailable"]
+        assert transport.sent[0][1]._raw_payload["reason"] == reason
 
-    assert transport.sent == []
+    # Nothing was asked for, so no blob is licensed to arrive.
     assert not runtime._update_outstanding_for("remote")
 
 
@@ -2298,7 +2315,7 @@ def test_an_update_blob_nobody_asked_for_is_refused(rig, tmp_path):
     pairing.add_peer("remote", "Remote", pairing.get_peer_certificate("remote"), paired=True)
     transport.connected.add("remote")
     staged = []
-    runtime.set_update_sink(staged.append)
+    runtime.set_update_sink(lambda path, sha256="": staged.append(path))
 
     transport.message(
         decode_message(
@@ -2343,6 +2360,97 @@ def test_an_expired_update_expectation_stops_licensing_an_upload(rig):
 
     assert not runtime._update_outstanding_for("remote")
     assert "remote" not in runtime._update_expectations
+
+
+def test_the_tick_asks_a_newer_peer_on_this_platform_without_a_click(rig, monkeypatch):
+    """自动更新: a device on this network that is ahead is asked for its build.
+
+    The click this replaces was the person noticing a version chip in a device
+    list and doing the version check by hand.  The request is the fetch
+    direction's own -- the same one the button makes -- so the ledger it arms
+    is the same licence for the blob that comes back.
+
+    Nothing here is taken on the sighting's word: the blob is checked against a
+    digest before it can be installed, exactly as a release download is.
+    """
+    runtime, _, transport, *_ = rig
+    monkeypatch.setattr(lan, "_local_platform", lambda: ("windows", "amd64"))
+    monkeypatch.setattr(lan, "__version__", "1.0.16")
+    transport.connected.add("remote")
+    alias = peer_id_hash("remote")
+    seen = {
+        "name": "Remote", "address": "127.0.0.1", "port": 9999,
+        "version": "1.0.17", "os": "windows", "arch": "amd64",
+    }
+    runtime._discovered[alias] = dict(seen)
+
+    runtime._tick()
+
+    # The fetch dials and waits, so it runs on its own thread; the ledger is
+    # written once the request is actually away, which is what to wait on.
+    deadline = time.monotonic() + 3
+    while time.monotonic() < deadline and not runtime._update_outstanding_for("remote"):
+        time.sleep(0.02)
+    assert runtime._update_outstanding_for("remote")
+    assert [msg.msg_type for _, msg in transport.sent] == ["update_request"]
+    # And the attempt is remembered against the version it was for, so the tick
+    # -- which runs several times a second -- does not ask again in the next one.
+    transport.sent.clear()
+    runtime._tick()
+    assert transport.sent == []
+
+
+@pytest.mark.parametrize(
+    "seen,why",
+    [
+        ({"version": "1.0.15"}, "older than this build"),
+        ({"version": "1.0.16"}, "the same build"),
+        ({"version": "1.0.17", "os": "darwin", "arch": "arm64"}, "another platform"),
+        ({"version": "1.0.11"}, "too old to be dialed without asking to pair"),
+        ({"version": ""}, "too old to advertise a version at all"),
+    ],
+)
+def test_the_tick_leaves_a_peer_it_cannot_be_updated_from_alone(rig, monkeypatch, seen, why):
+    """The other side of the same decision, one refusal per reason."""
+    runtime, _, transport, *_ = rig
+    monkeypatch.setattr(lan, "_local_platform", lambda: ("windows", "amd64"))
+    monkeypatch.setattr(lan, "__version__", "1.0.16")
+    transport.connected.add("remote")
+    runtime._discovered[peer_id_hash("remote")] = {
+        "name": "Remote", "address": "127.0.0.1", "port": 9999,
+        "os": "windows", "arch": "amd64", **seen,
+    }
+
+    runtime._tick()
+
+    # The tick starts a thread when it finds a candidate, so an absence has to
+    # outlast the tick itself to mean anything.
+    deadline = time.monotonic() + 0.5
+    while time.monotonic() < deadline:
+        time.sleep(0.02)
+    assert transport.sent == [], why
+    assert not runtime._update_outstanding_for("remote")
+
+
+def test_the_auto_update_setting_stops_the_tick_asking(rig, monkeypatch):
+    """The switch is the one the release check reads, and it stops both."""
+    runtime, _, transport, *_ = rig
+    monkeypatch.setattr(lan, "_local_platform", lambda: ("windows", "amd64"))
+    monkeypatch.setattr(lan, "__version__", "1.0.16")
+    runtime.config.auto_update_check = False
+    transport.connected.add("remote")
+    runtime._discovered[peer_id_hash("remote")] = {
+        "name": "Remote", "address": "127.0.0.1", "port": 9999,
+        "version": "1.0.17", "os": "windows", "arch": "amd64",
+    }
+
+    runtime._tick()
+
+    deadline = time.monotonic() + 0.5
+    while time.monotonic() < deadline:
+        time.sleep(0.02)
+    assert transport.sent == []
+    assert not runtime._update_outstanding_for("remote")
 
 
 def test_a_device_row_says_when_this_build_could_update_it(rig, monkeypatch):
@@ -2427,13 +2535,14 @@ def test_a_peer_sent_update_blob_reaches_the_update_sink(rig, tmp_path):
     runtime.file_transfer._output_dir = tmp_path
     pairing.add_peer("remote", "Remote", pairing.get_peer_certificate("remote"), paired=True)
     transport.connected.add("remote")
-    staged = []
-    runtime.set_update_sink(staged.append)
+    staged: list[tuple[str, str]] = []
+    runtime.set_update_sink(lambda path, sha256="": staged.append((path, sha256)))
     # An update blob is accepted because this side asked for it, not because the
     # frame says "update" -- see `test_an_update_blob_nobody_asked_for_is_refused`.
     runtime._expect_update("remote")
 
     payload = b"verified release archive"
+    digest = hashlib.sha256(payload).hexdigest()
     transport.message(
         decode_message(
             encode_frame(
@@ -2444,6 +2553,9 @@ def test_a_peer_sent_update_blob_reaches_the_update_sink(rig, tmp_path):
                     "file_size": len(payload),
                     "mime_type": "application/zip",
                     "kind": "update",
+                    # The sender declares what it is sending, because the receiver
+                    # may have no route to the release server to ask.
+                    "sha256": digest,
                 }
             )
         ),
@@ -2463,8 +2575,8 @@ def test_a_peer_sent_update_blob_reaches_the_update_sink(rig, tmp_path):
     deadline = time.monotonic() + 3
     while not staged and time.monotonic() < deadline:
         time.sleep(0.02)
-    assert staged == [str(tmp_path / "clipsync-windows.zip")]
-    assert Path(staged[0]).read_bytes() == payload
+    assert staged == [(str(tmp_path / "clipsync-windows.zip"), digest)]
+    assert Path(staged[0][0]).read_bytes() == payload
 
 
 def test_an_ordinary_received_file_never_reaches_the_update_sink(rig, tmp_path):
@@ -2473,7 +2585,7 @@ def test_an_ordinary_received_file_never_reaches_the_update_sink(rig, tmp_path):
     pairing.add_peer("remote", "Remote", pairing.get_peer_certificate("remote"), paired=True)
     transport.connected.add("remote")
     staged = []
-    runtime.set_update_sink(staged.append)
+    runtime.set_update_sink(lambda path, sha256="": staged.append(path))
 
     payload = b"ordinary file"
     transport.message(
@@ -2959,7 +3071,7 @@ def test_a_received_file_beeps_but_a_peer_update_blob_does_not(rig, tmp_path, mo
     assert played == [True]
 
     staged = []
-    runtime.set_update_sink(staged.append)
+    runtime.set_update_sink(lambda path, sha256="": staged.append(path))
     runtime._expect_update("remote")
     transport.message(
         decode_message(

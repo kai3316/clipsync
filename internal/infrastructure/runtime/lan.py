@@ -82,6 +82,33 @@ CLIP_FILE_WINDOW = 300.0
 # asks the user anything.
 UPDATE_WINDOW = 1800.0
 
+# How long the "send this device the update" click waits for the peer to say
+# whether it wants the asset.  The answer is one frame, and the peer answers
+# before it does anything else with the offer, so this only has to outlast a
+# round trip on a slow link — but it is a wait in front of a person who just
+# clicked a button, so it stays short.  A peer from a build with no answer frame
+# at all never sends one, and that is what the timeout reads as.
+OFFER_ANSWER_TIMEOUT = 4.0
+
+# How long after an automatic attempt at one peer before it is tried again.
+#
+# 自动更新 runs on its own, so the failure it has to survive is the ordinary
+# one: a peer advertising a build it cannot actually hand over — a machine that
+# upgraded by hand, a dev build of a newer version, an asset the receiving end
+# ends up refusing.  None of those is a reason to stop asking, and all of them
+# are a reason not to ask four times a second, which is what the maintenance
+# tick would do.  Long enough to be nothing like a loop, short enough that a
+# peer which fetches the release in the meantime is picked up the same session.
+AUTO_UPDATE_RETRY = 1800.0
+
+# How long after an automatic request of ours a peer's refusal is read as the
+# answer to it.  The peer answers "nothing to send" in one frame, so this only
+# has to outlast a slow link -- and it exists so that the automatic attempt's
+# own failure is not reported to somebody who never asked for it, while a
+# refusal arriving outside it (a click, at a peer that happens to have nothing)
+# still is.
+AUTO_UPDATE_ANSWER_WINDOW = 30.0
+
 # How long a log request licenses the peer to send the file.  Generous for the
 # update window's reason — a log can be several megabytes and the answering side
 # builds the redacted copy before it sends — and bounded for the same one: what
@@ -387,11 +414,14 @@ class LanRuntime:
         # A `log` blob is the same bargain: this machine asked that peer for its
         # log, and the asking is the only thing that lets the answer in.
         self.file_transfer.set_log_guard(self._log_outstanding_for)
-        # ...and a plain file from a device this machine has *not* paired with is
-        # refused before it can raise the accept prompt.  The exemption kinds
-        # above are the only ones an unpaired peer can get through, and the
-        # ledger behind each of them is written by a click on this side.
-        self.file_transfer.set_paired_guard(self.pairing.is_peer_paired)
+        # An ordinary file is the one kind with nothing written down on this
+        # side to license it, so the setting decides: on, it is taken on arrival
+        # like a chat attachment; off, it raises the accept prompt and the
+        # reader answers.  Pairing is deliberately not part of that question --
+        # the transfer page refused an unpaired sender outright, which made it
+        # unusable between two devices that simply had not paired, and left the
+        # rule different from chat's for no reason a reader could see.
+        self.file_transfer.set_file_open_to_all(bool(getattr(config, "file_open_to_all", True)))
         # The temp archives of folder sends, by transfer id, waiting to be
         # unlinked when their transfer reaches a terminal state.  Its own lock
         # rather than the runtime's: the completion callback runs on the
@@ -404,6 +434,34 @@ class LanRuntime:
         # guard above; a peer's answer that arrives inside the window is the only
         # update blob this side accepts.
         self._update_expectations: dict[str, float] = {}
+        # device_id -> (event, answer) for an update_offer this machine has sent
+        # and is waiting on.  The offer's answer is either the peer asking for
+        # the asset or its refusal, and the click that sent the offer reports
+        # what came back rather than the fact that a frame left.
+        self._offer_answers: dict[str, tuple[threading.Event, dict]] = {}
+        # (path, size, mtime) and the digest computed for it: the cached asset is
+        # one file, served unchanged to every peer that asks, and re-hashing ten
+        # megabytes per request is work with the same answer every time.
+        self._cached_digest_key: tuple | None = None
+        self._cached_digest_value = ""
+        # 自动更新: peer device_id -> (monotonic deadline, the version that was
+        # asked for).  One entry per peer this machine has tried to update itself
+        # *from*, written before the attempt rather than after it, because the
+        # attempt does not end at a moment this runtime can see -- it ends when
+        # the blob arrives, which is a different thread.  The version travels
+        # with the deadline so a peer that upgrades again is asked again without
+        # waiting the window out.
+        self._auto_update_tried: dict[str, tuple[float, str]] = {}
+        # peer device_id -> the version whose asset actually arrived from it.
+        # Without this a host that has no silent installer (and so stays on the
+        # old build after a successful fetch) would pull the same ten megabytes
+        # off the network every window, forever.
+        self._auto_update_served: dict[str, str] = {}
+        # One automatic fetch at a time -- the tick runs several times a second
+        # and the dial this starts is a real one -- and, per peer, how long a
+        # refusal of it counts as an answer to a question nobody asked.
+        self._auto_update_busy = False
+        self._auto_update_quiet: dict[str, float] = {}
         # peer device_id -> monotonic deadline, the same ledger for logs: this
         # machine asked that peer for its log, and an answer is welcome until
         # the deadline.  Consulted by the log guard above.
@@ -788,6 +846,11 @@ class LanRuntime:
         Only records go.  A running transfer is not a record, so this cannot
         disturb one — which is why the legacy panel's clear button sat on the
         history card rather than over both lists.
+
+        The count is what the user could see, because that is the number the
+        window says out loud; the background records it is counted past (an
+        update asset, a collected log) go with the rest of them, since the
+        question the button answers is "clear the history".
         """
         def run():
             cleared = len(self.file_transfer.get_history())
@@ -913,7 +976,14 @@ class LanRuntime:
 
     # ── peer-to-peer update exchange (M2) ────────────────────────────────
     def set_update_sink(self, sink) -> None:
-        """Where a peer-sent update blob goes (the update service's stage step)."""
+        """Where a peer-sent update blob goes (the update service's stage step).
+
+        Called as ``sink(path, sha256="")``, where *sha256* is the digest the
+        sending device declared for the blob.  It matters because the receiver
+        may have no route to the release server -- that is what the peer's copy
+        is for -- and the sender's digest is then the only thing the bytes can
+        be checked against.  Empty for a peer too old to declare one.
+        """
         self._update_sink = sink
 
     # ── files pulled from a peer's history ───────────────────────────────
@@ -1262,22 +1332,25 @@ class LanRuntime:
                 )
             pid = connected
         try:
-            self.transport.send_to_peer(
+            answer = self._await_offer_answer(
                 pid,
-                encode_frame(
-                    {
-                        "msg_type": "update_offer",
-                        "version": __version__,
-                        "os": _local_platform()[0],
-                        "arch": _local_platform()[1],
-                        # Whether an answer would carry bytes.  Always true from
-                        # here -- the cache above is the only source of an offer
-                        # -- but an older build sent this frame without one, and
-                        # the field is what its own receiver reads.
-                        "has_asset": True,
-                        "asset": os.path.basename(cached),
-                    },
-                    source_device=self.config.device_id,
+                lambda: self.transport.send_to_peer(
+                    pid,
+                    encode_frame(
+                        {
+                            "msg_type": "update_offer",
+                            "version": __version__,
+                            "os": _local_platform()[0],
+                            "arch": _local_platform()[1],
+                            # Whether an answer would carry bytes.  Always true from
+                            # here -- the cache above is the only source of an offer
+                            # -- but an older build sent this frame without one, and
+                            # the field is what its own receiver reads.
+                            "has_asset": True,
+                            "asset": os.path.basename(cached),
+                        },
+                        source_device=self.config.device_id,
+                    ),
                 ),
             )
         except Exception as exc:
@@ -1285,8 +1358,53 @@ class LanRuntime:
             raise ApplicationError(
                 "update.offer_failed", "The update could not be offered to that device"
             ) from exc
-        logger.info("Offered update %s to peer %s", __version__, str(pid)[:12])
-        return {"sent": True}
+        reason = answer.get("reason", "no_answer")
+        logger.info(
+            "Offered update %s to peer %s: %s", __version__, str(pid)[:12], reason
+        )
+        # *reason* rather than a bare boolean: "sent" was true of a no-op too,
+        # and the click that produced the offer is a person who expects the
+        # other device to move.  "accepted" is the peer asking for the asset
+        # (the transfer follows on its own); every other value is that peer
+        # saying why it will not, and is reported as itself.
+        return {"sent": True, "reason": reason}
+
+    def _await_offer_answer(self, pid: str, send) -> dict:
+        """Send an update offer and wait, briefly, for the peer's answer.
+
+        The answer is either an ``update_request`` (the peer wants the build,
+        and the transfer starts on its own) or an ``update_unavailable`` with a
+        reason.  Both arrive on the receive thread, so the wait must not hold
+        the runtime lock -- and it is bounded, because a peer from a build with
+        no answer frame at all will never send one and the caller's thread is
+        the window's.
+        """
+        answer: dict = {}
+        event = threading.Event()
+        with self._lock:
+            self._offer_answers[pid] = (event, answer)
+        try:
+            send()
+            event.wait(OFFER_ANSWER_TIMEOUT)
+        finally:
+            with self._lock:
+                self._offer_answers.pop(pid, None)
+        return answer
+
+    def _resolve_offer_answer(self, pid: str, reason: str) -> None:
+        """Record what *pid* did with the offer this machine just sent it."""
+        with self._lock:
+            entry = self._offer_answers.get(pid)
+        if entry is None:
+            return
+        event, answer = entry
+        answer["reason"] = reason
+        event.set()
+
+    def _offer_answer_pending_for(self, pid: str) -> bool:
+        """Whether an offer of ours to *pid* is still waiting for its answer."""
+        with self._lock:
+            return pid in self._offer_answers
 
     def fetch_device_update(self, device_id: str) -> dict:
         """Ask one peer for its cached build; the answer is staged for install.
@@ -1362,6 +1480,11 @@ class LanRuntime:
         running what it claims, the build has to be newer than this one, and it
         has to be for this platform.  Only then is anything asked for -- and
         what is asked for is one frame, which is what licenses the blob.
+
+        A refusal is answered rather than swallowed.  The offering device's user
+        clicked a button and is owed a reason: silence there is the same to them
+        as a transfer that is about to start, so the offer page would sit saying
+        it had been sent while nothing on this side ever moved.
         """
         version = str(payload.get("version") or "")
         peer_os = str(payload.get("os") or "")
@@ -1369,11 +1492,19 @@ class LanRuntime:
         mine_os, mine_arch = _local_platform()
         # An empty platform is a peer too old to say, not a match.
         same_platform = bool(peer_os) and peer_os == mine_os and peer_arch == mine_arch
-        if not same_platform or not updater.is_newer(version, __version__):
+        if not same_platform:
             logger.info(
-                "Ignoring update offer %r from %s: platform %s/%s vs %s/%s",
+                "Refusing update offer %r from %s: platform %s/%s vs %s/%s",
                 version, str(pid)[:12], peer_os, peer_arch, mine_os, mine_arch,
             )
+            self._say_no_update_here(pid, "other_platform")
+            return
+        if not updater.is_newer(version, __version__):
+            logger.info(
+                "Refusing update offer %r from %s: not newer than %s",
+                version, str(pid)[:12], __version__,
+            )
+            self._say_no_update_here(pid, "not_newer")
             return
         # The offer is only ever sent by a device whose device list was clicked,
         # and the dial behind it is the same one a chat invite makes: it carries
@@ -1440,27 +1571,81 @@ class LanRuntime:
         file it will refuse on arrival.  An empty version is a peer too old to
         say -- not newer, so it is served like any other.
         """
+        # A request is also how a peer accepts an offer this machine sent, and
+        # it is answered before anything is decided about serving: whether the
+        # asset goes out is this side's business, but the asking is the peer's
+        # answer either way, and the click that sent the offer is waiting.
+        self._resolve_offer_answer(pid, "accepted")
         if peer_version and not updater.is_newer(__version__, peer_version):
             logger.info(
                 "Peer %s asked for an update but runs %s", str(pid)[:12], peer_version
             )
-            self._say_no_update_here(pid)
+            self._say_no_update_here(pid, "not_newer")
             return
         cached = updater.get_cached_asset()
         if not cached:
             logger.info("Peer asked for an update, but none is cached")
-            self._say_no_update_here(pid)
+            self._say_no_update_here(pid, "no_asset")
             return
+        # The digest travels with the transfer because the asking device may have
+        # no route to the release server at all -- that is the whole reason it is
+        # asking a peer.  Without it the receiver has nothing to check the bytes
+        # against, and an unchecked installer is one it must refuse.
+        digest = self._cached_digest(cached)
         try:
-            self.file_transfer.send_file(
-                cached, lambda data: self.transport.send_to_peer(pid, data), kind="update"
+            transfer_id = self.file_transfer.send_file(
+                cached,
+                lambda data: self.transport.send_to_peer(pid, data),
+                kind="update",
+                sha256=digest,
             )
         except Exception:
             logger.exception("Failed to serve the cached update to a peer")
-            self._say_no_update_here(pid)
+            self._say_no_update_here(pid, "send_failed")
+            return
+        logger.info(
+            "Serving cached update %s to %s (transfer %s, digest %s)",
+            os.path.basename(cached),
+            str(pid)[:12],
+            str(transfer_id or "")[:8],
+            digest[:12] or "none",
+        )
 
-    def _say_no_update_here(self, pid: str) -> None:
-        """Tell a peer that asked for an update that this machine has none."""
+    def _cached_digest(self, path: str) -> str:
+        """The SHA-256 of *path*, memoized on ``(path, size, mtime)``.
+
+        Hashing a ten-megabyte installer costs a moment, and the cache is the
+        same file for every peer asked in a session, so the answer is kept until
+        the file it describes changes.  A failure is not fatal: the transfer
+        goes out without a digest, and the receiver refuses it for the reason it
+        would anyway rather than this side staying silent.
+        """
+        try:
+            stat = os.stat(path)
+        except OSError:
+            logger.debug("Cannot stat the cached asset %s", path, exc_info=True)
+            return ""
+        key = (path, stat.st_size, stat.st_mtime)
+        with self._lock:
+            if self._cached_digest_key == key:
+                return self._cached_digest_value
+        try:
+            digest = updater.sha256_file(path)
+        except Exception:
+            logger.warning("Cannot hash the cached asset %s", path, exc_info=True)
+            return ""
+        with self._lock:
+            self._cached_digest_key = key
+            self._cached_digest_value = digest
+        return digest
+
+    def _say_no_update_here(self, pid: str, reason: str = "") -> None:
+        """Tell a peer that asked for an update that this machine has none.
+
+        *reason* is a short code rather than a sentence: the asking device is
+        the one that knows what to say to its own user, and it may be running a
+        different build with its own wording for each case.
+        """
         try:
             self.transport.send_to_peer(
                 pid,
@@ -1470,6 +1655,7 @@ class LanRuntime:
                         "version": __version__,
                         "os": _local_platform()[0],
                         "arch": _local_platform()[1],
+                        "reason": reason,
                     },
                     source_device=self.config.device_id,
                 ),
@@ -1478,21 +1664,45 @@ class LanRuntime:
             logger.debug("Could not answer %s about the update", str(pid)[:12], exc_info=True)
 
     def _on_update_unavailable(self, pid: str, payload: dict) -> None:
-        """A peer we asked has no installer to send.
+        """A peer we asked -- or offered to -- has no installer to send.
 
         The refusal is the peer's word, and it is acted on as nothing more than
         news: no transfer is expected any more, so the ledger entry goes, and the
         window is told the click is over rather than left waiting on a file that
         is not coming.
+
+        *reason* says which answer this is.  "not_newer" and "other_platform" are
+        the peer declining an offer -- it is not behind, or the build is for a
+        different machine -- and neither is a failure on this side, so the window
+        can say what happened instead of showing it as one.
         """
+        reason = str(payload.get("reason") or "")
         with self._lock:
             self._update_expectations.pop(pid, None)
+        # A refusal is also the answer to an offer, when this is that exchange
+        # rather than an answer to a request; resolving an offer nobody sent is
+        # a no-op.  A peer from a build that sends no reason still answered, so
+        # an offer waiting on it ends either way.
+        self._resolve_offer_answer(pid, reason or "unavailable")
+        if self._auto_update_quiet_for(pid):
+            # 自动更新 asks on its own, so this refusal is an answer to a
+            # question the person did not ask: a device with nothing to hand
+            # over is not news about a button they pressed.  The next window
+            # tries again; the log is where the asking is recorded.
+            logger.info(
+                "Peer %s has no update to send: %s", str(pid)[:12], reason or "unavailable"
+            )
+            return
         self._publish(
             "update.peer_unavailable",
             {
                 "device_id": pid,
                 "name": self._peer_name(pid) or "",
                 "version": str(payload.get("version") or ""),
+                # Empty for a peer too old to say why; the window reads that as
+                # "no installer to send", which is what it used to be the only
+                # case of.
+                "reason": reason,
             },
         )
 
@@ -1572,6 +1782,135 @@ class LanRuntime:
         if (str(seen.get("os") or ""), str(seen.get("arch") or "")) != _local_platform():
             return False
         return updater.is_newer(version, __version__)
+
+    # ── 自动更新: the same exchange, started by this device on its own ──────
+    def _auto_update_from_peers(self) -> None:
+        """Update this machine from a peer that runs a newer build of it.
+
+        The same request :meth:`fetch_device_update` makes on a click, made
+        without one: a device on this network, on this platform, running a
+        newer build than this one is the whole of what 自动更新 is for, and a
+        person who has to notice that in a device list and ask for it is a
+        person doing the version check by hand.
+
+        Off with ``auto_update_check``, which is the same switch the release
+        lookup reads -- "check for updates automatically" is one decision, and
+        it would be a strange reading of it to keep polling GitHub while
+        refusing the copy sitting on the LAN.
+
+        One attempt at a time, and one per peer per :data:`AUTO_UPDATE_RETRY`
+        window (:meth:`_auto_update_candidate` is what holds that ledger).  The
+        tick runs several times a second, and the dial this starts is a real
+        one.
+        """
+        if not getattr(self.config, "auto_update_check", True):
+            return
+        if self._auto_update_busy:
+            return
+        candidate = self._auto_update_candidate(self._sightings())
+        if candidate is None:
+            return
+        pid, version = candidate
+        with self._lock:
+            self._auto_update_tried[pid] = (
+                time.monotonic() + AUTO_UPDATE_RETRY,
+                version,
+            )
+            self._auto_update_quiet[pid] = (
+                time.monotonic() + AUTO_UPDATE_ANSWER_WINDOW
+            )
+            self._auto_update_busy = True
+        logger.info(
+            "Peer %s runs %s, newer than %s here; asking it for the update",
+            str(pid)[:12], version, __version__,
+        )
+        # Its own thread: the fetch dials, and the tick holds the pairing lock.
+        threading.Thread(
+            target=self._background,
+            args=(self._auto_update_fetch, pid),
+            name="auto-update-fetch",
+            daemon=True,
+        ).start()
+
+    def _auto_update_candidate(self, sightings: dict) -> tuple[str, str] | None:
+        """The peer to try next, as ``(device_id, version)``, or None.
+
+        *sightings* is every device this machine still trusts, so the candidate
+        is one it could also have drawn as a row; :meth:`_update_fetchable`
+        is what makes a row offer the action, reused here for the same reason.
+
+        Of several, the newest -- a device two builds behind that reaches the
+        one three ahead in a single jump has less to do, and no peer is asked
+        anything until the fetch that is running finishes.
+
+        The sighting keys are the ids peers announce, which are not always the
+        ids this machine files them under, so each is resolved before it is
+        remembered: the ledger has to agree with the id the receive path
+        reports, or the record of what a peer has already handed over would
+        never match the question asked of it.
+        """
+        best: tuple[str, str] | None = None
+        now = time.monotonic()
+        for key, seen in sightings.items():
+            pid = self._resolve(key)
+            if not pid or pid == self.config.device_id:
+                continue
+            if not self._update_fetchable(seen):
+                continue
+            version = str(seen.get("version") or "")
+            if self._auto_update_served.get(pid) == version:
+                # Already fetched this exact build from that device.  It is here,
+                # staged or installed; asking again buys the same bytes.
+                continue
+            deadline, tried = self._auto_update_tried.get(pid, (0.0, ""))
+            if tried == version and now < deadline:
+                continue
+            if best is None or updater.is_newer(version, best[1]):
+                best = (pid, version)
+        return best
+
+    def _auto_update_fetch(self, pid: str) -> None:
+        """Ask *pid* for its build, quietly.  Runs on the fetch's own thread.
+
+        Quiet in both directions: the automatic attempt is not something the
+        person asked for, so a peer that turns out to have nothing to hand over
+        is a line in the log rather than a notice about a device they never
+        named.  What does reach them is the update card, once there are bytes
+        to show.
+        """
+        try:
+            # Through ``_command``, not straight to the callback: the fetch dials
+            # and waits, so it takes the same ``blocking=True`` route the click
+            # does -- the runtime held, the stop event checked, a failure wrapped
+            # -- and it is that path rather than a bare call because a runtime
+            # that started stopping between the tick and this thread should not
+            # dial anybody.
+            self._command(self._fetch_device_update, pid, blocking=True)
+        except ApplicationError as exc:
+            logger.info(
+                "Automatic update from %s did not start: %s", str(pid)[:12], exc.code
+            )
+        except Exception:
+            logger.warning(
+                "Automatic update from %s failed", str(pid)[:12], exc_info=True
+            )
+        finally:
+            # Released when the request is away, not when the answer comes: the
+            # answer is what the quiet window above is for, and the next
+            # candidate should not have to wait for it.
+            with self._lock:
+                self._auto_update_busy = False
+
+    def _auto_update_quiet_for(self, pid: str) -> bool:
+        """Whether a refusal from *pid* answers an automatic attempt of ours."""
+        with self._lock:
+            deadline = self._auto_update_quiet.get(pid)
+            if deadline is None:
+                return False
+            if deadline <= time.monotonic():
+                self._auto_update_quiet.pop(pid, None)
+                return False
+        return True
 
     def _update_blocked(self, seen: dict) -> str:
         """Why this row offers no update action, as a code the window renders.
@@ -1821,7 +2160,7 @@ class LanRuntime:
         )
 
     def _on_file_received(self, transfer_id, saved_path, _file_name):
-        kind, sender = self.file_transfer.take_received_info(transfer_id)
+        kind, sender, sha256 = self.file_transfer.take_received_info(transfer_id)
         if kind == "log":
             # A log this machine asked a peer for.  It is filed rather than
             # handed to the received-files flow, and filing it means a move on
@@ -1841,11 +2180,28 @@ class LanRuntime:
         sink = self._update_sink
         if sink is None:
             return
+        # The one thing 自动更新 cannot tell from its own ledger: that the attempt
+        # it started has ended in bytes rather than in a sentence.  Recorded
+        # against the version that was asked for, so this peer is not asked for
+        # the same build again -- a host with no silent installer may well stay
+        # on it, and that is no reason to pull the file across every window.
+        pid = self._resolve(sender) if sender else ""
+        if pid:
+            with self._lock:
+                served = self._auto_update_tried.get(pid, (0.0, ""))[1]
+                if served:
+                    self._auto_update_served[pid] = served
+        logger.info(
+            "Received update blob %s from %s (digest %s)",
+            os.path.basename(saved_path),
+            str(sender or "")[:12],
+            (sha256 or "")[:12] or "none",
+        )
         # Verification looks up the published digest (up to ~30s), so it must
         # not run on the transfer receive thread that called this.
         threading.Thread(
             target=self._deliver_update_blob,
-            args=(sink, saved_path),
+            args=(sink, saved_path, sha256),
             name="update-blob",
             daemon=True,
         ).start()
@@ -1876,9 +2232,9 @@ class LanRuntime:
         )
 
     @staticmethod
-    def _deliver_update_blob(sink, saved_path):
+    def _deliver_update_blob(sink, saved_path, sha256: str = ""):
         try:
-            sink(saved_path)
+            sink(saved_path, sha256=sha256)
         except Exception:
             logger.exception("Could not stage a peer-sent update blob")
 
@@ -2559,6 +2915,10 @@ class LanRuntime:
 
     def _tick_locked(self):
         self._refresh()
+        # After the refresh, so a peer that has just announced itself is a
+        # candidate on this tick rather than the next one.  The fetch it may
+        # start runs on its own thread -- see _auto_update_from_peers.
+        self._auto_update_from_peers()
         self.delivery.tick()
         # From the clock, not from the next pull: the panel waits for one event
         # per request before it stops saying "waiting to receive files", and a
@@ -4736,6 +5096,11 @@ class LanRuntime:
             # already live was admitted under the rule in force when it
             # opened, and is deliberately left alone.
             self.chat.set_open_to_all(bool(self.config.chat_open_to_all))
+        if "file_open_to_all" in updated:
+            # The transfer page's twin of the setting above, and read per
+            # request rather than per session, so it takes effect on the next
+            # file that arrives.
+            self.file_transfer.set_file_open_to_all(bool(self.config.file_open_to_all))
         if "internet_sync_enabled" in updated:
             self._apply_internet_sync_enabled(bool(self.config.internet_sync_enabled))
         self._publish("settings.live_applied", {"fields": list(updated)})
@@ -5049,11 +5414,19 @@ class LanRuntime:
                 self._on_update_offer(pid, getattr(msg, "_raw_payload", {}) or {})
             return
         if kind == "update_unavailable":
-            # The answer to an ``update_request``, so it is held to the same two
-            # callers that request may come from -- and to no more, since its
-            # only effect is to stop this side waiting.
+            # The answer to an ``update_request``, or a peer refusing an offer
+            # this machine sent.  Either way it is read only from a device this
+            # machine asked something of, and that is the ledger rather than the
+            # payload's claim about its own platform -- a refusal for
+            # ``other_platform`` names a platform that differs from ours by
+            # definition, so a same-platform test would drop the one answer the
+            # offering side is most likely to be waiting for.
             payload = getattr(msg, "_raw_payload", {}) or {}
-            if trusted or self._same_platform_peer(payload):
+            if (
+                trusted
+                or self._update_outstanding_for(pid)
+                or self._offer_answer_pending_for(pid)
+            ):
                 self._on_update_unavailable(pid, payload)
             return
         if kind == "log_request":

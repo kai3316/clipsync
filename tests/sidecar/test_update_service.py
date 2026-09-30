@@ -8,6 +8,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from internal.i18n import T
 from internal.system import update_service, updater
 from internal.system.update_service import (
     UpdateService,
@@ -81,27 +82,33 @@ def test_a_peer_blob_is_verified_against_the_release_digest(service, monkeypatch
         lambda timeout=None: {"version": "2.0.0", "sha256": "abc"},
     )
 
-    def verify(blob, release_info, current, source="p2p"):
-        seen.update(blob=blob, release_info=release_info, source=source)
+    def verify(blob, release_info, current, source="p2p", peer_digest=""):
+        seen.update(blob=blob, release_info=release_info, source=source, peer_digest=peer_digest)
         return True, "ok"
 
     monkeypatch.setattr(updater, "verify_update_blob", verify)
     monkeypatch.setattr(updater, "cache_asset", lambda p: cached.append(p))
-    service.finish_from_peer(path)
+    service.finish_from_peer(path, sha256="sender-digest")
     assert wait_for(lambda: service.status()["state"]["phase"] == "ready")
     assert seen == {
         "blob": path,
         "release_info": {"version": "2.0.0", "sha256": "abc"},
         "source": "p2p",
+        "peer_digest": "sender-digest",
     }
     # The digest pins the blob to that release, so the ready card can name it.
     assert service.status()["state"]["version"] == "2.0.0"
     assert cached == [path]
 
 
-def test_a_peer_blob_without_a_release_reference_falls_back_to_the_server(
+def test_a_peer_blob_without_a_release_reference_is_refused_not_re_downloaded(
     service, monkeypatch, tmp_path
 ):
+    # No published digest and no digest from the sender: the one arrival with
+    # nothing to check it against.  It used to be answered with a release-server
+    # download, which is the fetch that had just been shown not to work, and the
+    # card sat on a progress bar for a file that was already here — so the
+    # refusal is the answer, in its own words, and the blob goes with it.
     path = _write_asset(str(tmp_path))
     downloads = []
     monkeypatch.setattr(updater, "fetch_latest_asset_info", lambda timeout=None: None)
@@ -111,12 +118,11 @@ def test_a_peer_blob_without_a_release_reference_falls_back_to_the_server(
     )
     service.finish_from_peer(path)
     assert wait_for(lambda: service.status()["state"]["phase"] == "failed")
-    assert len(downloads) == 1
-    # Nothing authoritative could check the peer blob, so it is never staged —
-    # and, as in the legacy path, it is left in the receive folder rather than
-    # deleted behind the user's back.
-    assert Path(path).exists()
-    assert service.status()["state"]["error"] == "offline"
+    state = service.status()["state"]
+    assert downloads == []
+    assert not Path(path).exists()
+    assert state["error"] == T("notify.update_unverifiable")
+    assert state["source"] == "p2p"
 
 
 def test_a_peer_blob_that_fails_the_digest_is_discarded(service, monkeypatch, tmp_path):

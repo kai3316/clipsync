@@ -6,8 +6,14 @@ around them: the phase state machine both surfaces render (idle / downloading /
 ready / failed), the worker that drives a download to a verified archive, the
 periodic silent check, and the reveal action.
 
-Nothing is auto-applied on any platform — the verified archive is moved to
-``~/Downloads/clipsync-update/`` and the user replaces the old install by hand.
+Nothing here is auto-applied *by this module*: it verifies an archive and stages
+it.  Which of those the host then applies is the host's decision, and both of
+this app's hosts answer the same way — a staged archive is installed by itself,
+whether it came from a peer or from this machine's own download, because a
+machine that has the newer build on disk and is still running the old one is the
+state 自动更新 exists to avoid.  The manual paths are still here for the cases
+that need them: a platform with no silent installer, an install that failed and
+left the card showing a ready archive, and a download the user started by hand.
 """
 
 import logging
@@ -95,6 +101,11 @@ class UpdateService:
             # out of reach, so it is installed from the file already staged
             # rather than by fetching the same bytes again.
             "source": "",
+            # Which digest settled the archive, for the card that draws the
+            # ready state: "release" when the published asset's digest matched,
+            # "peer_verified" when only the sending device's own digest was
+            # available to check against.  Empty while nothing is staged.
+            "verified": "",
         }
         self._downloading = False
         self._installing = False
@@ -192,7 +203,13 @@ class UpdateService:
                 return {"ok": False, "started": False, "error": "update already in progress"}
             self._downloading = True
         self._set_state(
-            phase="downloading", fraction=0, downloaded=0, total=0, error="", source="github"
+            phase="downloading",
+            fraction=0,
+            downloaded=0,
+            total=0,
+            error="",
+            source="github",
+            verified="",
         )
         threading.Thread(
             target=self._download_worker, name="update-download", daemon=True
@@ -228,15 +245,26 @@ class UpdateService:
         self._pending_version = version
         self._finish(path, reason, "github")
 
-    def finish_from_peer(self, path: str) -> None:
+    def finish_from_peer(self, path: str, sha256: str = "") -> None:
         """A peer sent us its cached update asset (M2 P2P update).
+
+        *sha256* is the digest the sending device declared for the file, and it
+        is what the bytes are checked against when the release endpoint cannot
+        be reached -- see :func:`updater.verify_update_blob`.  Empty for a peer
+        too old to declare one.
 
         Runs on the caller's thread: the release lookup inside :meth:`_finish`
         can block, so the runtime hands this off the transfer receive thread.
         """
-        self._finish(path, None, "p2p")
+        self._finish(path, None, "p2p", peer_digest=sha256)
 
-    def _finish(self, path: str | None, reason: str | None, source: str = "github") -> None:
+    def _finish(
+        self,
+        path: str | None,
+        reason: str | None,
+        source: str = "github",
+        peer_digest: str = "",
+    ) -> None:
         """Verify, cache and stage an arrived asset, or surface the failure."""
         with self._lock:
             if self._installing:
@@ -251,9 +279,9 @@ class UpdateService:
             return
 
         # The GitHub path was already size- and hash-checked while downloading.
-        # A peer-sent blob has nobody to answer to, so it must be checked against
-        # the published digest — a lookup that can block for ~30s and therefore
-        # never runs on a UI or transfer thread.
+        # A peer-sent blob has nobody to answer to, so it must be checked — a
+        # lookup that can block for ~30s and therefore never runs on a UI or
+        # transfer thread.
         release_info = None
         if source != "github":
             try:
@@ -262,29 +290,29 @@ class UpdateService:
                 logger.debug("Release info lookup failed: %s", exc)
         ok, verdict = False, "no_release_info"
         try:
-            ok, verdict = updater.verify_update_blob(path, release_info, __version__, source=source)
+            ok, verdict = updater.verify_update_blob(
+                path, release_info, __version__, source=source, peer_digest=peer_digest
+            )
         except Exception:
             logger.exception("Update verification crashed")
             verdict = "hash_mismatch"
         if not ok:
             if verdict == "no_release_info":
-                # Nothing authoritative to verify a peer blob against — never
-                # install it. Fall back to the release-server download without
-                # asking peers again, so an unverifiable blob cannot ping-pong
-                # between devices.
                 logger.warning(
-                    "P2P update rejected: no release info to verify against — "
-                    "falling back to the release server"
+                    "Peer-sent update rejected: no published digest and no digest from "
+                    "the sending device to check it against"
                 )
-                self._pending_version = ""
-                self.start_download()
-                return
             self._discard(path, verdict, source)
             return
         if release_info:
             # The digest match pins this blob to that release, so its version is
             # authoritative for the ready card (a peer blob carries no version).
             self._pending_version = str(release_info.get("version", "")) or self._pending_version
+        elif not self._pending_version:
+            # Checked against the sender's own digest, so there is no release to
+            # name the build; the installer's filename carries it, and the card
+            # would otherwise show a version-less ready archive.
+            self._pending_version = updater.version_in_asset_name(os.path.basename(path))
 
         with self._lock:
             self._installing = True
@@ -305,19 +333,32 @@ class UpdateService:
             path=dest,
             fraction=1,
             source=source,
+            # Which digest settled it, so the card can say what was checked:
+            # "release" is the published asset, "peer_verified" is the sending
+            # device's own word and worth saying out loud.
+            verified="release" if verdict == "ok" else verdict,
         )
 
     def _discard(self, path: str, verdict: str, source: str = "github") -> None:
-        """Throw away a rejected blob and report why."""
+        """Throw away a rejected blob and report why.
+
+        The file goes, every time.  A blob this machine refused to install is
+        not something to leave lying in a Downloads folder under the name of a
+        release: it is a file a person could double-click, and the answer to
+        "why not" is the one thing about it worth keeping.
+        """
         try:
             os.remove(path)
         except OSError:
             logger.debug("Could not remove rejected update blob", exc_info=True)
-        key = (
-            "notify.update_rejected_hash"
-            if verdict == "hash_mismatch"
-            else "notify.update_rejected_old"
-        )
+        # The verdicts that need their own words: a digest that did not match, a
+        # release that is not newer, and an arrival with nothing at all to check
+        # it against -- which is a different sentence from either, because
+        # nothing about the file was found to be wrong.
+        key = {
+            "hash_mismatch": "notify.update_rejected_hash",
+            "no_release_info": "notify.update_unverifiable",
+        }.get(verdict, "notify.update_rejected_old")
         self._set_state(phase="failed", error=T(key), source=source)
 
     # ── reveal ───────────────────────────────────────────────────────────
@@ -413,7 +454,19 @@ class UpdateService:
         return True
 
     def _auto_check_worker(self) -> None:
-        """Silent check: only surfaces a result when an update is available."""
+        """Silent check: fetch and stage what it finds, or say nothing.
+
+        The check does not stop at the announcement.  It used to -- it published
+        ``update.available`` and left the download to a click in the update card
+        -- which meant a machine that had been told about a newer build was
+        still on the old one until somebody went and looked at a page.  The
+        whole of 自动更新 is that nobody has to: the check finds it, the worker
+        fetches it, and the host installs what :meth:`_finish` stages.
+
+        A failed download is not worth a word here.  Nobody is watching, the
+        state goes to ``failed`` where the card can show it, and the next
+        interval tries the same thing again.
+        """
         try:
             result = updater.check_for_update(timeout=AUTO_CHECK_TIMEOUT)
         except Exception as exc:
@@ -424,5 +477,10 @@ class UpdateService:
             # request that finishes during shutdown is not re-joined.
             if self._worker is threading.current_thread():
                 self._worker = None
-        if result.get("available") and not self._shutting_down:
-            self._notify_available(result)
+        if not result.get("available") or self._shutting_down:
+            return
+        self._notify_available(result)
+        logger.info(
+            "Automatic update check found %s; downloading it", result.get("latest", "")
+        )
+        self.start_download()

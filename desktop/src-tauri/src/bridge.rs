@@ -182,30 +182,30 @@ fn hides_main_window(value: &Value) -> bool {
     value["type"] == "event" && value["name"] == "app.window_close_requested"
 }
 
-/// Whether a sidecar frame is an update a peer sent, checked and staged here.
+/// Whether a sidecar frame is an update that has been checked, verified and
+/// staged, and should therefore be installed now.
 ///
-/// Two things the frame has to say, and both are load-bearing: `ready` is what
-/// makes the archive installable at all, and `source` is what tells a peer's
-/// blob from this machine's own download. Whether the file is still on disk is
-/// the installer's own question, asked a moment later.
+/// One thing the frame has to say: `ready` is what makes the archive
+/// installable at all. Whether the file is still on disk is the installer's own
+/// question, asked a moment later.
 ///
-/// The `source` field is the whole of this test's reason to exist. A local
-/// download reaches `ready` when the reader clicked 下载更新 and asked for a
-/// file, not for a restart — the card is in front of them with a button. A peer
-/// blob reaches it because somebody *else* clicked 发送更新, and the reader here
-/// asked for nothing: the receiving side answers an offer with a request of its
-/// own (see `_on_update_offer`), so the archive arriving is the exchange working
-/// as designed, and an update left staged is one the machine that can least
-/// reach the release endpoint has to finish by hand.
-///
-/// `source` is absent on a sidecar older than it, and absent reads as "not a
-/// peer's" — the same silence this frame got before the field existed.
-fn peer_sent_update(value: &Value) -> bool {
+/// The source is deliberately *not* part of the test. It used to be — only a
+/// peer's blob installed by itself, on the reasoning that a local download
+/// reached `ready` because the reader clicked 下载更新 and a peer blob reached
+/// it because somebody else did — and the effect was a machine that had already
+/// downloaded and verified a newer build sitting on it, waiting for a click
+/// nobody was going to make. What 更新 means is that the machine ends up on the
+/// new build; every step between the check and the install is the machine's to
+/// take. The archive is verified before it is staged on either path (`source`
+/// only says which digest settled it), the installer is the same one this
+/// machine's own download produced, and it relaunches the app when it is done —
+/// so there is nothing left here to ask a reader that the file itself has not
+/// already answered.
+fn staged_update(value: &Value) -> bool {
     if value["type"] != "event" || value["name"] != "update.state" {
         return false;
     }
-    let state = &value["data"]["state"];
-    state["phase"] == "ready" && state["source"] == "p2p"
+    value["data"]["state"]["phase"] == "ready"
 }
 
 pub struct Bridge {
@@ -572,22 +572,22 @@ impl Bridge {
                     });
                     return Ok(());
                 }
-                if peer_sent_update(&value) {
-                    // The exchange's last step, and the one that was missing: a
-                    // peer's archive is checked and staged by the sidecar, and
-                    // then installed without a click.  Nobody here asked for
-                    // anything, which is the point — the receiving side already
-                    // answered the offer with a request of its own, and the
-                    // bytes were held to the published release digest before
-                    // they were staged, so there is nothing left to ask a
-                    // reader that the file itself has not already answered.
+                if staged_update(&value) {
+                    // The last step, and the one that used to be missing: the
+                    // archive is checked and staged by the sidecar, and then
+                    // installed without a click.  The reader here may have asked
+                    // for nothing at all — the automatic check runs on its own,
+                    // and a peer's blob arrives because somebody else clicked —
+                    // so waiting for a click would leave the machine on the old
+                    // build with the new one already on disk.
                     //
                     // Spawned rather than awaited, for the reason the restart
                     // above gives: this runs on the stdout reader, and an
                     // install that stops the sidecar must not be started from
                     // inside the task that reads it.  A refusal is not fatal —
                     // the card still draws the ready archive with its own
-                    // button, which is how the reader finishes by hand.
+                    // button, which is how the reader finishes by hand, and it
+                    // is the only way on a platform with no silent installer.
                     let bridge = self.clone();
                     let handle = app.clone();
                     tauri::async_runtime::spawn(async move {

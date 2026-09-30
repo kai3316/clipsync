@@ -129,6 +129,7 @@ export const EN: Record<string, string> = {
   "离线": "Offline",
   "已连接": "Connected",
   "已配对": "Paired",
+  "正在同步": "Syncing",
   "未配对": "Not paired",
   "已发现": "Discovered",
   "已移除的设备": "Removed device",
@@ -228,6 +229,9 @@ export const EN: Record<string, string> = {
   "任何人可直接发来消息和文件": "Anyone nearby can send messages and files",
   "关掉以后，附近设备要先经过你同意，才能发消息和文件给你。":
     "Turn this off and a nearby device has to be allowed by you before its message or file arrives.",
+  "任何人可直接向我发送文件": "Anyone nearby can send me a file",
+  "关掉以后，别人发来的文件会先问你是否接收。聊天的收发不受这个开关影响。":
+    "Turn this off and an incoming file asks you first. Chat is unaffected either way.",
   "设备日志": "Device logs",
   "允许其他设备取走本机日志": "Let other devices take this device's log",
   "开着时，网络上任何设备（无需配对）向你索取日志都会得到一份，其中已隐去本机路径、令牌和配对密码；关着时一律回复无法提供。":
@@ -758,8 +762,8 @@ export const EN: Record<string, string> = {
   // ── Updates ──────────────────────────────────────────────────────────
   "软件更新": "Software update",
   "自动检查更新": "Check for updates automatically",
-  "每约 6 小时检查一次 GitHub 是否有新版本；关闭后后台不再发起任何更新请求。":
-    "Checks GitHub for a new version about every 6 hours; when off, no update requests are made in the background.",
+  "每约 6 小时检查一次 GitHub 是否有新版本，同时留意同一网络、同一平台的其他设备；发现更新的版本会自动下载、校验并安装，完成后应用自动重启。关闭后后台不再发起任何更新请求。":
+    "Checks GitHub for a new version about every 6 hours, and also watches for other devices on this network and platform. A newer version is downloaded, verified and installed on its own, and the app restarts when it is done. When off, no update requests are made in the background.",
   "立即检查更新": "Check for updates now",
   "正在检查…": "Checking…",
   "已是最新版本": "Up to date",
@@ -769,6 +773,8 @@ export const EN: Record<string, string> = {
   "正在安装更新，完成后应用会自动重启。":
     "Installing the update. The app restarts on its own when it finishes.",
   "新版本 {version} 已就绪": "Version {version} is ready",
+  "已核对来源设备声明的摘要：本机连不上发布服务器，无法与官方摘要比对。":
+    "Checked against the checksum the sending device declared: this machine cannot reach the release server, so the published checksum could not be compared.",
   "更新失败": "Update failed",
   "更新下载失败": "Update download failed",
   "更新安装失败": "Update install failed",
@@ -878,12 +884,19 @@ export const EN: Record<string, string> = {
   "已把更新发送给 {name}": "Sending the update to {name}",
   "本机还没有安装包可发送：本机只保留自己升级时下载的那一个，对方可自行检查更新":
     "Nothing to send: this machine only keeps the installer its own upgrade downloaded, and has none. The other device can run its own update check",
-  "已向 {name} 索取安装包，收到后可在更新页安装":
-    "Asked {name} for its installer; install it from the update page once it arrives",
+  "已向 {name} 索取安装包，收到后会自动安装并重启":
+    "Asked {name} for its installer; this app installs it and restarts on its own once it arrives",
   "发送更新失败": "Could not send the update",
   "获取更新失败": "Could not fetch the update",
   "{name} 上没有可发送的安装包，请在本机检查更新":
     "{name} has no installer to send; run an update check here to download it",
+  "{name} 的版本不比本机旧，不需要这个更新":
+    "{name} is not on an older version — it does not need this update",
+  "{name} 与本机不是同一个平台，装不了这个安装包":
+    "{name} is on a different platform and cannot install this package",
+  "对方没有可以发送的安装包": "The other device has no installer to send",
+  "已通知 {name}，但对方没有回应":
+    "Told {name}, but it did not answer — its build may be too old to reply",
   "{name} 有新版本 {version}，可在设备列表向它获取":
     "{name} has version {version}; get it from that device in the device list",
   "{name} 正在把新版本 {version} 发送过来":

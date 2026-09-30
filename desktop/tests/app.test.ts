@@ -119,7 +119,7 @@ vi.mock("../src/api/bridge", () => ({
     connectDevice: vi.fn().mockResolvedValue({ accepted: true }),
     disconnectDevice: vi.fn().mockResolvedValue({ disconnected: true }),
     forgetDevice: vi.fn().mockResolvedValue({ forgotten: true }),
-    offerDeviceUpdate: vi.fn().mockResolvedValue({ sent: true }),
+    offerDeviceUpdate: vi.fn().mockResolvedValue({ sent: true, reason: "accepted" }),
     fetchDeviceUpdate: vi.fn().mockResolvedValue({ sent: true }),
     restoreDevice: vi.fn().mockResolvedValue({ restored: true }),
     purgeDevice: vi.fn().mockResolvedValue({ purged: true }),
@@ -1886,7 +1886,7 @@ describe("history rendering", () => {
     }
   });
   it("carries an update in whichever direction the two builds are apart", async () => {
-    vi.mocked(bridge.offerDeviceUpdate).mockResolvedValue({ sent: true });
+    vi.mocked(bridge.offerDeviceUpdate).mockResolvedValue({ sent: true, reason: "accepted" });
     vi.mocked(bridge.fetchDeviceUpdate).mockResolvedValue({ sent: true });
     vi.mocked(bridge.devices).mockResolvedValue({ items: [
       // Online, because an update can only be offered down a live local link:
@@ -1931,13 +1931,14 @@ describe("history rendering", () => {
       expect(bridge.offerDeviceUpdate).toHaveBeenCalledExactlyOnceWith("t");
       expect(app.text()).toContain("已把更新发送给 Studio");
       // And the other way round, off the same list: the device that is behind
-      // asks, and says so while it waits for the blob.
+      // asks, and says so while it waits for the blob -- which it is not asked
+      // to install afterwards: a staged archive is applied by the app itself.
       const fetches = app.findAll('[aria-label="获取更新"]');
       expect(fetches).toHaveLength(1);
       await fetches[0].trigger("click");
       await flushPromises();
       expect(bridge.fetchDeviceUpdate).toHaveBeenCalledExactlyOnceWith("n");
-      expect(app.text()).toContain("已向 Newer 索取安装包，收到后可在更新页安装");
+      expect(app.text()).toContain("已向 Newer 索取安装包，收到后会自动安装并重启");
       // The same two actions on the row's own menu, which is where a reader who
       // wants to push a version to a device looks first: what the version is,
       // and the entry that sends it.  Nothing is clicked here -- both actions
@@ -1980,7 +1981,7 @@ describe("history rendering", () => {
     } finally {
       app.unmount();
       vi.mocked(bridge.devices).mockResolvedValue({ items: [] });
-      vi.mocked(bridge.offerDeviceUpdate).mockReset().mockResolvedValue({ sent: true });
+      vi.mocked(bridge.offerDeviceUpdate).mockReset().mockResolvedValue({ sent: true, reason: "accepted" });
       vi.mocked(bridge.fetchDeviceUpdate).mockReset().mockResolvedValue({ sent: true });
     }
   });
@@ -1990,7 +1991,7 @@ describe("history rendering", () => {
     // starts nothing.  Downloading one here to pass on would be the same file
     // from the same place, fetched twice, on the machine that does not need it
     // -- the device being offered can fetch it itself.
-    vi.mocked(bridge.offerDeviceUpdate).mockResolvedValue({ sent: true });
+    vi.mocked(bridge.offerDeviceUpdate).mockResolvedValue({ sent: true, reason: "accepted" });
     vi.mocked(bridge.devices).mockResolvedValue({ items: [
       { id: "t", name: "Studio", paired: false, connection_state: "discovered",
         pairing_status: "", pairing_code: null, sas: null,
@@ -2015,7 +2016,7 @@ describe("history rendering", () => {
     } finally {
       app.unmount();
       vi.mocked(bridge.devices).mockResolvedValue({ items: [] });
-      vi.mocked(bridge.offerDeviceUpdate).mockReset().mockResolvedValue({ sent: true });
+      vi.mocked(bridge.offerDeviceUpdate).mockReset().mockResolvedValue({ sent: true, reason: "accepted" });
       vi.mocked(bridge.updateDownload).mockClear();
     }
   });
@@ -2047,7 +2048,7 @@ describe("history rendering", () => {
     } finally {
       app.unmount();
       vi.mocked(bridge.devices).mockResolvedValue({ items: [] });
-      vi.mocked(bridge.offerDeviceUpdate).mockReset().mockResolvedValue({ sent: true });
+      vi.mocked(bridge.offerDeviceUpdate).mockReset().mockResolvedValue({ sent: true, reason: "accepted" });
     }
   });
   it("stamps a relayed chat message with its receipt instead of repainting the clipboard", async () => {

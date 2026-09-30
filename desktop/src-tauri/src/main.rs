@@ -2017,6 +2017,20 @@ pub(crate) async fn install_staged_update(
     {
         return Err(BridgeError::new("NOT_FOUND", "No verified update is staged"));
     }
+    // The staged archive comes first, when it is one this process can run.  It
+    // is the file the sidecar downloaded itself and checked against the
+    // published release digest, so running it is one fetch rather than two --
+    // and with the automatic check fetching releases on its own, going through
+    // the plugin instead would make the second fetch the usual case rather than
+    // the rare one.  It is also the only route that works when the release
+    // endpoint is unreachable, which is what the staged archive exists for.
+    if is_runnable_installer(&path) {
+        return run_staged_installer(app, bridge, &path, &version).await;
+    }
+    // The plugin otherwise, and it is not redundant: it is the only route on a
+    // platform whose release asset is a `.dmg` or a `.deb` -- a file a person
+    // opens rather than one a process runs -- and the sidecar keeps no copy of
+    // those for exactly that reason.
     if let Ok(updater) = updater(app) {
         match updater.check().await {
             Ok(Some(update)) => return fetch_and_install(app, bridge, update).await,
@@ -2030,6 +2044,16 @@ pub(crate) async fn install_staged_update(
         }
     }
     run_staged_installer(app, bridge, &path, &version).await
+}
+
+/// Whether a staged archive is one this process may run for the reader.
+///
+/// The shape test `run_staged_installer` makes, hoisted so the choice between
+/// it and the plugin can be made before either runs.  Only the release's own
+/// NSIS installer is that kind of file — the sidecar's asset matcher picked it,
+/// and this is what re-checks that it still is one.
+fn is_runnable_installer(path: &str) -> bool {
+    cfg!(target_os = "windows") && path.to_ascii_lowercase().ends_with("-setup.exe")
 }
 
 /// Run the installer the sidecar staged, on the one platform where that is a

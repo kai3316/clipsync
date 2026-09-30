@@ -162,8 +162,11 @@ CHAT_MSG_TYPES = frozenset(
 # so it must be admitted here too.  This is safe: the app router gives chat
 # right-of-first-refusal on ``file_chunk`` (ChatManager.handle_binary_chunk),
 # and FileTransferManager no-ops frames with unknown transfer_ids, so an
-# unpaired peer still cannot initiate clipboard transfers — only chat carries
-# file bytes from unpaired peers.
+# unpaired peer cannot attach bytes to a transfer this machine never opened.
+#
+# An unpaired peer *can* open one of its own — see the note below
+# ``FILE_CONTROL_MSG_TYPES``: a plain ``file_request`` is taken on arrival by
+# default, the same as a chat attachment.
 UNPAIRED_GATE_MSG_TYPES = PAIRING_MSG_TYPES | CHAT_MSG_TYPES | frozenset({"file_chunk"})
 
 # The peer-to-peer exchanges that are deliberately open to unpaired devices --
@@ -171,15 +174,20 @@ UNPAIRED_GATE_MSG_TYPES = PAIRING_MSG_TYPES | CHAT_MSG_TYPES | frozenset({"file_
 # for debugging -- need more than the one frame type above: the answer to both
 # is an ordinary file transfer, whose control frames are not ``chat_*``.
 #
-# Two things make admitting them safe.  The app layer already restricts what an
-# unpaired sender can *achieve* with them: ``_on_peer_message`` routes the
-# update frames to handlers that check the sender's platform, and the transfer
-# manager checks ``kind`` against a ledger this machine armed by asking
-# (``set_update_guard`` / ``set_log_guard``) rather than against the sender's
-# own label.  And the one frame that is not covered by a ledger -- a plain
-# ``file_request``, whose only effect is to ask the user whether to accept a
-# transfer -- is refused outright for a sender this side has not paired with,
-# so the gate here cannot turn into a way to make a stranger's dialog appear.
+# What makes admitting them safe is that the app layer decides what an unpaired
+# sender can *achieve* with them: ``_on_peer_message`` routes the update frames
+# to handlers that check the sender's platform, and the transfer manager checks
+# ``kind`` against a ledger this machine armed by asking (``set_update_guard`` /
+# ``set_log_guard``) rather than against the sender's own label.
+#
+# The one frame with no ledger behind it is a plain ``file_request``, and the
+# gate here is deliberately not where it is answered: the transfer manager is.
+# Its effect is either a transfer taken on arrival (``file_open_to_all``, on by
+# default, which is what chat does with an attachment) or the accept prompt when
+# that setting is off -- a dialog a device on this network can raise, which is
+# the same thing chat already allows and what the setting is there to say.  It
+# is not a way in: the bytes arrive as a transfer the receiver can cancel, into
+# the receive directory, and refusing the prompt leaves nothing behind.
 FILE_CONTROL_MSG_TYPES = frozenset(
     {
         "file_request",

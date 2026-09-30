@@ -472,6 +472,12 @@ export interface UpdateState {
   error: string;
   version: string;
   path: string;
+  /** Which digest settled the staged archive: "release" for the published
+   *  asset's, "peer_verified" for the sending device's own when the release
+   *  server could not be reached.  Empty while nothing is staged, and on a
+   *  sidecar older than the field — both of which read as "nothing to say",
+   *  which is what the card does with it. */
+  verified?: string;
 }
 
 export interface UpdateStatusResult {

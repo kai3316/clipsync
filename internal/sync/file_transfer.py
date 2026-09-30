@@ -71,6 +71,13 @@ STALL_GRACE = 5.0  # seconds -- silence with gaps => request retransmit
 PAUSED_MAX_SECONDS = 1800.0  # seconds -- pause left this long is abandoned
 SPEED_TEST_CHUNKS = 20  # number of chunks for speed test (~1.3 MB)
 MAX_HISTORY = 50  # max completed transfers to remember
+# Kinds that travel through this manager but are not a user's file transfer: an
+# update asset a peer served and a log this machine asked a peer for.  Both are
+# background exchange between devices -- nobody picked a file and nobody is
+# waiting on the row -- and both are reported where they belong (the update card
+# and the log notice).  Listed in the transfers panel they read as an ordinary
+# send stuck on "等待对方接受…", inviting a click that has nothing to act on.
+UI_HIDDEN_KINDS = ("update", "log")
 MAX_FILE_SIZE = 2 * 1024**3  # 2 GiB -- maximum accepted file size
 
 # Real-time rate estimation: the transfer panel shows a live speed + ETA for
@@ -244,10 +251,12 @@ class FileTransferManager:
 
         # transfer_id -> dict (active transfers)
         self._transfers: dict[str, dict[str, Any]] = {}
-        # transfer_id -> (kind, sender_device_id), set just before the received
-        # callback fires so the caller can tell a received file from the
+        # transfer_id -> (kind, sender_device_id, sha256), set just before the
+        # received callback fires so the caller can tell a received file from the
         # transfers that take a different route ("update", "clip_file", "log").
-        self._received_kinds: dict[str, tuple[str, str]] = {}
+        # The digest is the sender's own declaration, and only an update carries
+        # one -- see `take_received_info`.
+        self._received_kinds: dict[str, tuple[str, str, str]] = {}
         # Completed transfers history: list of dicts (newest first)
         self._history: list[dict[str, Any]] = []
         # Speed test state
@@ -262,7 +271,10 @@ class FileTransferManager:
         self._clip_file_guard: Callable[[str, str], bool] | None = None
         self._update_guard: Callable[[str], bool] | None = None
         self._log_guard: Callable[[str], bool] | None = None
-        self._paired_guard: Callable[[str], bool] | None = None
+        # Whether an unpaired peer may send a file at all.  Off by default here
+        # and turned on by the runtime from the configuration, which is where
+        # the setting lives; a manager nobody configured keeps the strict rule.
+        self._file_open_to_all = False
 
     # ------------------------------------------------------------------
     # Callback registration
@@ -348,19 +360,23 @@ class FileTransferManager:
         """
         self._log_guard = callback
 
-    def set_paired_guard(self, callback: Callable[[str], bool]) -> None:
-        """*callback(sender_device_id) -> bool* -- whether this side has paired
-        with the sender.
+    def set_file_open_to_all(self, open_to_all: bool) -> None:
+        """Whether a file may arrive from a device this side has not paired with.
 
-        Asked for one case only: an ordinary ``file`` request from a peer this
-        side has not paired with is refused before it can reach the accept
-        prompt.  Every other kind carries an exemption this machine granted, and
-        a prompt is not something a stranger on the network gets to raise — the
-        chat invitation is where an unpaired device asks, and it asks in its own
-        words.  With no guard registered nothing is refused, which is the
-        behaviour of every path that never registered one.
+        The file-transfer twin of the chat setting, and the same trade: with it
+        on, an ordinary ``file`` request from an unpaired peer on this network is
+        taken on arrival, exactly as a chat attachment already is; with it off,
+        the request raises the accept prompt like any other and the reader
+        decides.  Neither mode leaves the sender's label deciding anything — a
+        prompt nobody may refuse is what this replaced, and before that an
+        outright refusal, which made the transfer page unusable between two
+        devices that simply had not paired.
+
+        The kinds that never prompt (``update``, ``log``, ``clip_file``) are
+        unaffected: each is licensed by a ledger this machine wrote when it
+        asked, and no setting makes one of those acceptable.
         """
-        self._paired_guard = callback
+        self._file_open_to_all = open_to_all
 
     def take_received_kind(self, transfer_id: str) -> str:
         """Pop and return the kind of a received transfer, or "file" if unknown.
@@ -370,12 +386,16 @@ class FileTransferManager:
         user asked a peer for.  Called from the on-file-received callback."""
         return self.take_received_info(transfer_id)[0]
 
-    def take_received_info(self, transfer_id: str) -> tuple[str, str]:
-        """Pop and return ``(kind, sender_device_id)`` for a received transfer.
+    def take_received_info(self, transfer_id: str) -> tuple[str, str, str]:
+        """Pop ``(kind, sender_device_id, sha256)`` for a received transfer.
 
-        The pair, because the routes that treat a blob as something other than a
-        file need both: what it is, and whose it is."""
-        return self._received_kinds.pop(transfer_id, ("file", ""))
+        All three, because the routes that treat a blob as something other than
+        a file need them: what it is, whose it is, and -- for an update -- the
+        digest the sender declared for it, which is what the bytes are checked
+        against when the release endpoint cannot be reached.  The digest is
+        empty for every kind that carries none.
+        """
+        return self._received_kinds.pop(transfer_id, ("file", "", ""))
 
     def set_on_transfer_request(
         self,
@@ -400,6 +420,7 @@ class FileTransferManager:
         kind: str = "file",
         entry_id: str = "",
         origin_paths: list[str] | None = None,
+        sha256: str = "",
     ) -> str:
         """Start sending *file_path* to all connected peers.
 
@@ -425,6 +446,12 @@ class FileTransferManager:
             to be carried into the history entry: the archive is a temp file its
             maker reclaims when the transfer ends, so a retry cannot go back to
             *file_path* and has to rebuild from these.
+        sha256:
+            The digest of *file_path*, declared for the receiver's benefit.  Only
+            an ``update`` send carries one, and it is what lets the receiver
+            check the bytes when it cannot reach the release server to check them
+            against the published asset — the case a peer-sent installer exists
+            for.  Omitted from the frame when empty, like *entry_id*.
 
         Returns
         -------
@@ -452,6 +479,7 @@ class FileTransferManager:
                 "transfer_id": transfer_id,
                 "type": "outgoing",
                 "kind": kind,
+                "sha256": sha256,
                 "file_path": str(file_path),
                 "origin_paths": [str(path) for path in (origin_paths or [])],
                 "file_name": file_name,
@@ -481,6 +509,8 @@ class FileTransferManager:
         }
         if entry_id:
             request["entry"] = entry_id
+        if sha256:
+            request["sha256"] = sha256
         self._send_as_frame(request, broadcast_fn)
 
         logger.info(
@@ -857,30 +887,13 @@ class FileTransferManager:
                 )
                 return
 
-        # The one kind with no exemption to carry it: a plain file asks the user
-        # to accept something, and an unpaired sender does not get to raise that
-        # prompt -- a dialog anyone on the network can make appear is not a
-        # question worth answering.  ``clip_file`` is refused here too, though it
-        # would only ever reach the prompt as well: its exemption is a request
-        # this machine made, and the one pull that arms it (``request_entry_files``)
-        # is paired-only by construction.
-        if (
-            kind in ("file", "clip_file")
-            and self._paired_guard is not None
-            and sender_device_id
-            and not self._paired_guard(sender_device_id)
-        ):
-            logger.warning(
-                "Refusing %s transfer %s from unpaired peer %s",
-                kind,
-                transfer_id[:8],
-                str(sender_device_id)[:12],
-            )
-            self._send_as_frame(
-                {"msg_type": "file_reject", "transfer_id": transfer_id}, send_fn
-            )
-            return
-
+        # A plain file is the one kind with no ledger behind it, so nothing is
+        # decided here: the setting decides it at the bottom of this method, and
+        # for every sender alike.  Pairing is not what makes a transfer possible
+        # here any more than it is what makes a conversation possible -- a chat
+        # attachment has never asked whether the two devices had paired, and a
+        # file has no stronger claim to.
+        #
         # Validate/coerce file_size -- a malformed value must not crash the
         # message handler or slip an absurd file into the pipeline.
         raw_size = payload.get("file_size", 0)
@@ -933,6 +946,11 @@ class FileTransferManager:
                 "transfer_id": transfer_id,
                 "type": "incoming",
                 "kind": kind,
+                # The sender's own digest of what it is about to send, declared
+                # on the request.  Only an update carries one, and it is what
+                # `take_received_info` hands the update service so the bytes can
+                # be checked when the release endpoint cannot be reached.
+                "sha256": str(payload.get("sha256") or ""),
                 "peer_id": sender_device_id,
                 "file_name": file_name,
                 "file_size": file_size,
@@ -975,6 +993,16 @@ class FileTransferManager:
             # one the app asked *this peer* for -- both are checked against this
             # machine's own ledger above, so neither needs a second check.
             logger.info("Auto-accepting %s transfer %s", kind, transfer_id[:8])
+            self.accept_transfer(transfer_id, send_fn)
+        elif self._file_open_to_all:
+            # A plain file with nothing asked for on this side, and the setting
+            # is what decides it -- the same answer, in the same words, that the
+            # chat layer gives an attachment it was not expecting.  No prompt is
+            # raised because the reader has already said, in the settings, that
+            # files on this network do not need one.
+            logger.info(
+                "Auto-accepting %s transfer %s (open to all)", kind, transfer_id[:8]
+            )
             self.accept_transfer(transfer_id, send_fn)
         elif self._on_transfer_request is not None:
             self._on_transfer_request(transfer_id, file_name, file_size, mime_type, send_fn)
@@ -1391,6 +1419,7 @@ class FileTransferManager:
                 self._received_kinds[transfer_id] = (
                     transfer.get("kind", "file"),
                     str(transfer.get("peer_id") or ""),
+                    str(transfer.get("sha256") or ""),
                 )
                 self._on_file_received(transfer_id, saved, file_name)
             if self._on_transfer_complete is not None:
@@ -1906,10 +1935,17 @@ class FileTransferManager:
           (instantaneous rate over the last few seconds of real progress —
           0 while paused/awaiting/stalled), and ``eta_seconds`` derived from
           that live rate.
+
+        Background kinds (:data:`UI_HIDDEN_KINDS`) are left out: they hold their
+        entries in ``_transfers`` exactly as any other send does, so the ticks,
+        the timeout sweeps and the cancel paths still see them -- only this
+        list, which is what a panel draws, does not.
         """
         result: list[dict] = []
         with self._lock:
             for tid, t in self._transfers.items():
+                if t.get("kind") in UI_HIDDEN_KINDS:
+                    continue
                 direction = "up" if t.get("type") == "outgoing" else "down"
                 state = t.get("state", "unknown")
                 total = max(t.get("total_chunks", 1), 1)
@@ -1944,12 +1980,20 @@ class FileTransferManager:
         return result
 
     def get_history(self) -> list[dict]:
-        """Return completed transfer history (newest first)."""
+        """Return completed transfer history (newest first).
+
+        Background kinds (:data:`UI_HIDDEN_KINDS`) are left out, for the reason
+        :meth:`get_transfers` gives.  They are still recorded -- the entries are
+        real, and ``clear_history`` takes them with everything else -- but a
+        finished update asset is not one of the user's file transfers.
+        """
         with self._lock:
-            return list(self._history)
+            return [
+                entry for entry in self._history if entry.get("kind") not in UI_HIDDEN_KINDS
+            ]
 
     def clear_history(self) -> None:
-        """Delete all transfer history entries."""
+        """Delete all transfer history entries, background kinds included."""
         with self._lock:
             self._history.clear()
 
@@ -2045,6 +2089,14 @@ class FileTransferManager:
             # Destination peer (outgoing transfers) so a failed row can be
             # retried against the same device without re-picking one.
             "peer_id": transfer.get("peer_id", ""),
+            # What the transfer was: "file" for the ones the reader started,
+            # and "update"/"log"/"clip_file" for the ones the application did.
+            # Carried into the history rather than dropped here because the
+            # transfer list is a list of *files the reader moved*, and an
+            # installer this application fetched for itself is not one of those
+            # -- the API that serves the list is where that is settled, and it
+            # can only settle it if the kind travelled this far.
+            "kind": transfer.get("kind", "file"),
             "saved_path": saved_path,
             "timestamp": time.time(),
         }

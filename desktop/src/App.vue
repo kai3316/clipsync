@@ -14,7 +14,7 @@ import { aiCompareState, aiEntryKey, aiDiffCounts, buildAiLocalIndex } from "./l
 import { aiItemCount, aiTreeGroups, type AiGroup, type AiNode, type AiRow } from "./lib/aiconfig-tree";
 import { aiTargets, type AiTarget } from "./lib/aiconfig-targets";
 import { formatPairingCode, isPairingCodeComplete } from "./lib/pairing-code";
-import { PAIRING_LIVE_STATUSES, chatReachable, deviceLabel, deviceRank, platformLabel } from "./lib/device-row";
+import { PAIRING_LIVE_STATUSES, chatReachable, deviceLabel, deviceRank, deviceStatus, pairingInFlight, platformLabel } from "./lib/device-row";
 import { openContextMenu, type ContextMenuItem } from "./lib/context-menu";
 import { copyText } from "./lib/clipboard";
 import { announce, clearStatus, statusMessage } from "./lib/status";
@@ -2466,6 +2466,45 @@ function localChannelState(device: Device) {
   return device.reconnecting ? "connecting" : (device.connection_state || "offline");
 }
 
+/** The state chip's words: one word for the four states a device can be in.
+ *
+ * 正在同步 is the new one, and it is the state that had no word before: paired
+ * *and* reachable, which is the only combination where content actually moves
+ * in both directions.  The statuses a handshake passes through are not here —
+ * see `pairingInFlight`, which the row shows beside this chip while one is
+ * live, because a request waiting on an answer is something to act on rather
+ * than a state the device has settled into. */
+function deviceStatusLabel(device: Device) {
+  return ({
+    syncing: t("正在同步"),
+    connected: t("已连接"),
+    paired: t("已配对"),
+    offline: t("离线"),
+  } as Record<string, string>)[deviceStatus(device)] || t("离线");
+}
+/** The state chip's colour, reusing the channel shades the two chips it
+ *  replaces already used. */
+function deviceStatusState(device: Device) {
+  return ({
+    syncing: "paired",
+    connected: "online",
+    paired: "paired",
+    offline: "offline",
+  } as Record<string, string>)[deviceStatus(device)] || "offline";
+}
+/** The state chip's icon: the pairing shield where a pairing is half of what
+ *  the word means, the plug where reachability is all of it. */
+function deviceStatusIcon(device: Device) {
+  const status = deviceStatus(device);
+  return status === "connected" || status === "offline" ? Plug : ShieldCheck;
+}
+/** What the one word cannot carry: which route it is reachable on, and what a
+ *  retry is doing.  Both used to be a chip of their own. */
+function deviceStatusTitle(device: Device) {
+  if (device.relay) return `${t("互联网配对")} · ${connectionLabel(device)}`;
+  return localChannelLabel(device);
+}
+
 /** A device's internet pairing, joined to the device row by device id.
  *
  * The relay's peer list and this machine's device list are two views of the
@@ -2671,10 +2710,10 @@ async function offerDeviceUpdate(device: Device) {
   if (updateBusyId.value) return;
   updateBusyId.value = device.id;
   try {
-    await bridge.offerDeviceUpdate(device.id);
+    const { reason } = await bridge.offerDeviceUpdate(device.id);
     updateNotes.value = {
       ...updateNotes.value,
-      [device.id]: t("已把更新发送给 {name}", { name: device.name }),
+      [device.id]: offerNote(device, reason),
     };
   } catch (error: any) {
     updateNotes.value = {
@@ -2685,13 +2724,37 @@ async function offerDeviceUpdate(device: Device) {
     updateBusyId.value = "";
   }
 }
+/** What the device row says after a 发送更新 click, per the peer's answer.
+ *
+ * The click used to report that a frame had left this machine, which was also
+ * true of an offer the peer threw away — the button said 已把更新发送给 X and
+ * nothing on the other device ever moved.  The sidecar now waits for the answer
+ * (`lan.py::_await_offer_answer`), so this can report what actually happened:
+ * the peer asking for the asset is the only outcome that is a send. */
+function offerNote(device: Device, reason: string) {
+  const name = device.name;
+  switch (reason) {
+    case "accepted":
+      return t("已把更新发送给 {name}", { name });
+    case "not_newer":
+      return t("{name} 的版本不比本机旧，不需要这个更新", { name });
+    case "other_platform":
+      return t("{name} 与本机不是同一个平台，装不了这个安装包", { name });
+    case "no_asset":
+      return t("对方没有可以发送的安装包");
+    default:
+      return t("已通知 {name}，但对方没有回应", { name });
+  }
+}
 /** Ask a device that is on a newer build to send this one its installer.
  *
  * The direction the feature is meant to run in, and the reason the older
  * device's list carries a button at all: this side is the one that is behind.
  * The blob is verified against the published release digest on arrival and then
- * staged, so the update card takes over from here — this function only owes the
- * row a sentence for the wait.
+ * staged, and a staged archive is installed by itself — so this function owes
+ * the row a sentence for the wait and nothing else.  It used to say the install
+ * was the reader's to do from the update page, which stopped being true when
+ * both hosts started applying what the sidecar stages.
  */
 async function fetchDeviceUpdate(device: Device) {
   if (fetchBusyId.value) return;
@@ -2700,7 +2763,7 @@ async function fetchDeviceUpdate(device: Device) {
     await bridge.fetchDeviceUpdate(device.id);
     updateNotes.value = {
       ...updateNotes.value,
-      [device.id]: t("已向 {name} 索取安装包，收到后可在更新页安装", { name: device.name }),
+      [device.id]: t("已向 {name} 索取安装包，收到后会自动安装并重启", { name: device.name }),
     };
   } catch (error: any) {
     updateNotes.value = {
@@ -3841,6 +3904,9 @@ async function saveSettings() {
       // Applied to the live engine, not on restart: the runtime hands it
       // straight to the running chat manager.
       chat_open_to_all: settings.value.chat_open_to_all,
+      // The file-transfer page's own admission rule, handed to the running
+      // transfer manager on save exactly as the chat one is.
+      file_open_to_all: settings.value.file_open_to_all,
       // Read at request time by the running engine, so this one also needs no
       // restart to take effect.
       log_sharing: !!settings.value.log_sharing,
@@ -5113,6 +5179,14 @@ async function translateText() {
                   <span class="setting-control"><input v-model="settings.chat_open_to_all" type="checkbox" /><span>{{ t("任何人可直接发来消息和文件") }}</span></span>
                 </label>
                 <p class="note setting-note">{{ t("关掉以后，附近设备要先经过你同意，才能发消息和文件给你。") }}</p>
+                <!-- The file-transfer page's own copy of that rule.  Two rows
+                     rather than one because they answer two questions: chat is
+                     a conversation someone wants, and an unsolicited file is
+                     not the same act.  Paired devices are prompted either way. -->
+                <label class="setting setting--check">
+                  <span class="setting-control"><input v-model="settings.file_open_to_all" type="checkbox" /><span>{{ t("任何人可直接向我发送文件") }}</span></span>
+                </label>
+                <p class="note setting-note">{{ t("关掉以后，别人发来的文件会先问你是否接收。聊天的收发不受这个开关影响。") }}</p>
               </section>
               <section v-show="showSettingsCard('advanced')" id="settings-advanced" class="settings-section">
                 <h2>{{ t("网络与高级") }}</h2>
@@ -5292,7 +5366,7 @@ async function translateText() {
                     :disabled="autoUpdateCheckBusy" :aria-label="t('自动检查更新')"
                     @change="toggleAutoUpdateCheck(($event.target as HTMLInputElement).checked)" /><span>{{ t("自动检查更新") }}</span></span>
                 </label>
-                <p class="note setting-note">{{ t("每约 6 小时检查一次 GitHub 是否有新版本；关闭后后台不再发起任何更新请求。") }}</p>
+                <p class="note setting-note">{{ t("每约 6 小时检查一次 GitHub 是否有新版本，同时留意同一网络、同一平台的其他设备；发现更新的版本会自动下载、校验并安装，完成后应用自动重启。关闭后后台不再发起任何更新请求。") }}</p>
                 <div class="setting-actions setting-actions--card">
                   <button type="button" :disabled="!updateAvailableForUi || updateChecking
                       || updateState.phase === 'downloading' || updateState.phase === 'installing'"
@@ -5313,16 +5387,27 @@ async function translateText() {
                 <p v-if="updateState.phase === 'installing'" class="update-available setting-block setting-block--card" role="status">{{ t("正在安装更新，完成后应用会自动重启。") }}</p>
                 <template v-if="updateState.phase === 'ready'">
                   <p class="update-available setting-block setting-block--card" role="status">{{ t("新版本 {version} 已就绪", { version: updateState.version }) }}</p>
+                  <!-- Which check settled it, and only when it was the weaker
+                       one: an archive from a peer on this network is held to
+                       the published release digest whenever the release server
+                       can be reached, and to the sending device's own digest
+                       when it cannot. The second case is what the peer path
+                       exists for — refusing there would leave the feature
+                       unable to do the one thing it is for — but a reader who
+                       is about to restart into a new build is owed the
+                       difference, and it is not visible anywhere else. -->
+                  <p v-if="updateState.verified === 'peer_verified'" class="note setting-note">{{ t("已核对来源设备声明的摘要：本机连不上发布服务器，无法与官方摘要比对。") }}</p>
                   <p v-if="!updateInstallable || updateReadyManual" class="note setting-note">{{ t("请退出当前应用，然后用下方文件替换旧版本。剪贴板历史与设备仍保留在本机。") }}</p>
                   <p class="update-ready-path selectable setting-block">{{ updateState.path }}</p>
                   <div class="setting-actions setting-actions--card">
                     <!-- The archive is on disk and already checked — this
                          machine's own download, or the one a peer sent, held to
-                         the published release digest before it was staged. So
-                         the install reads what is here rather than fetching the
-                         same release a second time, which is the whole of what
-                         the peer path is for: a machine that cannot reach the
-                         release endpoint. What that install still cannot do is
+                         a digest before it was staged (the line above says which
+                         one when it was not the release's). So the install reads
+                         what is here rather than fetching the same release a
+                         second time, which is the whole of what the peer path is
+                         for: a machine that cannot reach the release endpoint.
+                         What that install still cannot do is
                          replace this build with a file a person opens, and the
                          host says so instead of failing — the sentence above
                          and the folder beside it are the rest of that answer. -->
@@ -5517,28 +5602,29 @@ async function translateText() {
               <p v-if="probeResults[device.id]" class="note device-full" role="status">{{ t("连接测试：") }}{{ probeLabel(probeResults[device.id]) }}</p>
               <p v-if="updateNotes[device.id]" class="note device-full" role="status">{{ updateNotes[device.id] }}</p>
               <p v-if="logNotes[device.id]" class="note device-full" role="status">{{ logNotes[device.id] }}</p>
-              <!-- The chips under the name, one per route rather than one
-                   sentence for both.  A paired-and-online pair of words named a
-                   state without
-                   naming a route: a peer sitting on the relay with no way in
-                   from this network read exactly like one in the next room.
-                   The local chip is the connection the engine holds; the
-                   internet chip is the relay's own view of the same device,
-                   joined by device id.  A device with no internet pairing says
-                   so rather than showing nothing, because "not paired over the
-                   internet" and "paired and away" are two different answers. -->
+              <!-- The chips under the name.  One word for the device's state —
+                   正在同步 / 已连接 / 已配对 / 离线 — and then one chip per fact the
+                   word cannot carry.
+                   The state used to be two chips, a pairing one and a local-route
+                   one, so a device that was paired *and* connected read as two
+                   words the reader had to combine, and 已配对 beside 离线 named a
+                   state without saying whether anything was flowing.  Which route
+                   it is reachable on, and whether a retry is in flight, moved into
+                   the state chip's tooltip: 本地·在线 and 重连中 2/5 were never
+                   things a reader scanned the list for.
+                   The internet chip stays its own: the relay's view of the same
+                   device is a separate link's fact, and a row can hold both. -->
               <span class="device-channels">
-                <!-- A device paired by code says which pairing it is rather
-                     than 已配对, and then not the local chip at all: 本地·离线
-                     on a device that has no local route reads as a fault, and
-                     there is nothing here it could ever say but that. -->
-                <span v-if="device.relay" class="channel channel--paired"><ShieldCheck :size="12" />{{ t("互联网配对") }}</span>
-                <template v-else>
-                  <span class="channel channel--paired"><ShieldCheck :size="12" />{{ pairingLabel(device) }}</span>
-                  <span class="channel" :class="`channel--${localChannelState(device)}`" :title="t('本地连接')">
-                    <Plug :size="12" />{{ localChannelLabel(device) }}
-                  </span>
-                </template>
+                <!-- A handshake on its way is not one of the four states: it is
+                     an answer the user owes somebody, so it is shown beside the
+                     state rather than as one. -->
+                <span v-if="pairingInFlight(device)" class="channel channel--connecting">
+                  <ShieldCheck :size="12" />{{ pairingLabel(device) }}
+                </span>
+                <span class="channel" :class="`channel--${deviceStatusState(device)}`"
+                  :title="deviceStatusTitle(device)">
+                  <component :is="deviceStatusIcon(device)" :size="12" />{{ deviceStatusLabel(device) }}
+                </span>
                 <!-- Only on a row that holds an internet pairing.  Every row
                      used to carry 互联网·未配对, which put 未配对 on one row twice
                      with two meanings — the chip beside it is the *local*

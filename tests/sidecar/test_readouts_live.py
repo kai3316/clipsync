@@ -217,10 +217,9 @@ def test_speed_test_and_the_history_summary_over_a_real_link(tmp_path, monkeypat
         source = tmp_path / "summary.bin"
         source.write_bytes(payload)
         transfer_id = left.call("transfers.send", paths=[str(source)])["transfer_id"]
-        wait_for(right, "transfers.list", lambda r: any(
-            row["id"] == transfer_id and row["status"] == "pending" for row in r["active"]))
-        assert right.call(
-            "transfers.action", action="accept", transfer_id=transfer_id)["ok"]
+        # Nothing accepts it: a file from another device is taken on arrival by
+        # default (`file_open_to_all`), the same as a chat attachment, so the
+        # transfer never stops at `pending`.
         finished = wait_for(right, "transfers.list", lambda r: any(
             row["id"] == transfer_id and row["status"] == "completed"
             for row in r["history"]))
