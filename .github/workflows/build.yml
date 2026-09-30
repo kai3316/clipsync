@@ -54,55 +54,46 @@ jobs:
 
           What is new in this release:
 
-          - A file copied in the Finder on a Mac can be downloaded on Windows.
-            It used to arrive as the file's own name and nothing else -- a row
-            that could be copied and pasted, with no 下载 on it.  The Finder
-            puts the file's name on the pasteboard as plain text beside the
-            file itself, and the ranking that decides what a row *is* read the
-            text first, so a copy of 报告.pdf was stored, previewed and
-            described as the words "报告.pdf" rather than as the file.  The
-            list of paths behind that row had faults of its own -- names were
-            decoded in a way that damaged any that were not UTF-8, the result
-            was never checked against the file system, and a copy of several
-            files could keep only the first file's address -- so a copy that
-            did reach the other device could arrive with nothing to download
-            from.  A row built from a copy that carries both now reads as the
-            file, and every path in it is one this machine has checked it can
-            actually serve.
+          - Updating is automatic now, in both directions.  The desktop
+            application already installed any version it downloaded; what this
+            adds is where the file can come from.  A device on the same network
+            and the same platform that is already on a newer build can hand its
+            installer over, and the older device takes it, checks it and
+            restarts on the new version without anyone pressing a button --
+            which matters most exactly when GitHub cannot be reached, the case
+            that used to end in a card that said a new version existed and
+            never installed it.  The release digests remain the last word
+            whenever they can be fetched; a peer too old to declare a digest
+            for the file it sends is refused rather than trusted.
 
-          - The garbled names in the history list are gone.  Those rows came
-            from a Chinese Mac, and the '�' in them was made here: macOS's own
-            pbpaste answers in the *system* encoding rather than in UTF-8, so
-            a Chinese name left the Mac as GBK bytes, and the Windows
-            clipboard writer read them as UTF-8 and wrote U+FFFD for every
-            byte it could not read -- a character like any other, which this
-            machine then read back off its own clipboard, stored as a new entry
-            and synced on.  One bad decode became a row on both devices.  Text
-            is decoded by the clipboard's own rules now: strict UTF-8 first,
-            then the encodings the three platforms actually emit, and latin-1
-            last, which reads any byte string at all and so cannot be the step
-            where the text is lost.
+          - Sending a file no longer needs a pairing.  A device that is merely
+            discovered on this network -- the state chat has accepted since it
+            arrived -- is now a target in 文件传输 as well, and a file arriving
+            from one is taken on its own, the same way a chat attachment is.
+            The old rule refused an unpaired sender at the application layer
+            even though the protocol had already let the frame through, so two
+            machines that simply had not paired could see each other, chat, and
+            not send a file.  The setting beside the chat one turns the
+            automatic acceptance off and puts the prompt back.
 
-          - The file managers on Linux publish the same kind of data macOS
-            does, and their reader had the same faults, so both are fixed by
-            one parser rather than two that drift.  A Chinese file name copied
-            in Nautilus or Dolphin arrives whole, and a path that has gone
-            missing between the copy and the store is left out of the offer
-            instead of becoming a download that fails at the other end.
+          - The device list says one thing per device.  A row used to carry a
+            pairing chip and a route chip side by side, so "paired" and "on the
+            local link" were two badges that partly agreed and had to be
+            combined by the reader, and a device that was neither paired nor
+            reachable was described the same way as one that was merely idle.
+            There are four states and each is one word now: 正在同步 for a
+            paired device that is reachable, 已连接 for a reachable one that is
+            not paired, 已配对 for one that is paired but not reachable, and
+            离线 for neither.  A pairing handshake in progress is still shown
+            on its own, because it is something to answer rather than a state
+            the device has settled into.
 
-          - Both devices want this version for a file copy to work end to end.
-            The Mac is where the offer is built and the name is read, and
-            Windows is where the arriving row is classified and the text is
-            written onto a clipboard; the missing button was one end standing
-            in for the other.  Nothing is lost by updating them one at a time
-            -- a device still on the previous version receives exactly what it
-            always did -- but the button appears when the device showing the
-            row has this version.  Entries already stored garbled cannot be
-            repaired: U+FFFD is not a misreading, it is a character that has
-            replaced what was there.  A file row whose name was plain ASCII
-            may recover on its own, because the offer is still stored inside
-            it; a row whose name was Chinese holds none, and that file has to
-            be copied again on the Mac.
+          - The installer a peer sends no longer appears in 文件传输, and the
+            log bundles a device collects do not either.  Neither is a file
+            exchange between two people, and each was being drawn as one --
+            an update offer sat in the list waiting for an 同意 that would
+            never be asked for.  Progress during an update is on the update
+            card, where it belongs.
 
           1.0.7 published a macOS installer that cannot start at all, and its
           update check lives in the background process that never comes up, so
