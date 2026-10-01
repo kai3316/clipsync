@@ -225,6 +225,18 @@ def clip(text, msg_id="message", **kwargs):
     )
 
 
+def connect(pairing, transport, pid="remote"):
+    """Pair with *pid* and mark its link up.
+
+    A clipboard push is handed to each paired peer that is connected, one send
+    apiece, so a test that counts what left this machine has to give the runtime
+    a peer to send to.  The rig's own ``remote`` is unpaired and offline, which
+    is what most of these tests want and none of the counting ones do.
+    """
+    pairing.add_peer(pid, pid.title(), pairing.get_peer_certificate(pid), paired=True)
+    transport.connected.add(pid)
+
+
 @pytest.fixture
 def rig():
     config = Config(
@@ -860,29 +872,31 @@ def test_received_nav_url_opens_only_paired_http_urls(rig):
     ]
 
 
-def test_push_text_writes_clipboard_history_and_broadcasts_once(rig):
-    runtime, _, transport, _, clipboard, history, events, *_ = rig
+def test_push_text_writes_clipboard_history_and_sends_once(rig):
+    runtime, pairing, transport, _, clipboard, history, events, *_ = rig
+    connect(pairing, transport)
     assert runtime.push_text("  hello peers  ") == {"ok": True, "len": 11, "sent": True}
     assert [item.types[ContentType.TEXT] for item in clipboard.writes] == [b"hello peers"]
     assert [item.types[ContentType.TEXT] for item in history.items] == [b"hello peers"]
-    assert len(transport.broadcasts) == 1
-    message = transport.broadcasts[0]
+    assert [pid for pid, _ in transport.sent] == ["remote"]
+    message = transport.sent[0][1]
     assert message.content.types[ContentType.TEXT] == b"hello peers"
     assert message.source_device == "local"
     assert events_named(events, "history.changed")
-    # Our own write must not be captured and broadcast a second time.
+    # Our own write must not be captured and sent a second time.
     assert runtime.sync._monitor.suppress_until > time.time()
 
 
 def test_push_text_reports_a_refused_clipboard_write(rig):
-    runtime, _, transport, _, clipboard, history, *_ = rig
+    runtime, pairing, transport, _, clipboard, history, *_ = rig
+    connect(pairing, transport)
     clipboard.success = False
     with pytest.raises(ApplicationError) as error:
         runtime.push_text("blocked")
     assert error.value.code == "CLIPBOARD_WRITE_FAILED"
     assert error.value.retryable
     assert history.items == []
-    assert transport.broadcasts == []
+    assert transport.sent == []
 
 
 def test_discovery_toggles_publish_the_resulting_state(rig):
@@ -1343,7 +1357,8 @@ def test_confirmation_waits_for_real_connection(rig):
 
 
 def test_original_history_outgoing_redaction_and_rich_policy(rig):
-    runtime, _, transport, _, clipboard, history, *_ = rig
+    runtime, pairing, transport, _, clipboard, history, *_ = rig
+    connect(pairing, transport)
     runtime.config.plain_text_only = True
     # Redaction ships off, so this is a machine that turned it on — through the
     # settings update the UI sends, which is the wiring this test is about.
@@ -1357,19 +1372,20 @@ def test_original_history_outgoing_redaction_and_rich_policy(rig):
     )
     runtime.sync._do_read_and_send()
     assert history.items[-1].types == clipboard.content.types
-    outgoing = transport.broadcasts[-1]
+    outgoing = transport.sent[-1][1]
     assert outgoing.content.types == {ContentType.TEXT: b"[FILTERED]"}
     assert outgoing.source_device == "local"
 
 
 def test_app_filter_drops_before_history_and_network(rig):
-    runtime, _, transport, _, clipboard, history, *_ = rig
+    runtime, pairing, transport, _, clipboard, history, *_ = rig
+    connect(pairing, transport)
     runtime.config.app_filter_enabled = True
     runtime.config.app_filter_list = ["secret*"]
     runtime.sync._monitor.last_source_app = {"process": "secret.exe"}
     clipboard.content = ClipboardContent({ContentType.TEXT: b"private"})
     runtime.sync._do_read_and_send()
-    assert not history.items and not transport.broadcasts
+    assert not history.items and not transport.sent
 
 
 def test_transfer_snapshot_normalizes_progress_and_pause(rig, monkeypatch):

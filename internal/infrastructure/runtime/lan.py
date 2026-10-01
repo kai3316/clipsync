@@ -5178,13 +5178,54 @@ class LanRuntime:
             self._error("CLIPBOARD_TOO_LARGE")
             return False
         if not self._stop_event.is_set() and self.config.sync_enabled:
-            self.transport.broadcast(data)
-            self._publish_relay(data)
+            self._send_local_sync(data)
             return True
         return False
 
-    def _publish_relay(self, data: bytes) -> None:
+    def _send_local_sync(self, data: bytes) -> None:
+        """Hand one clipboard frame to each paired peer: LAN first, relay after.
+
+        ``transport.broadcast`` answers only whether *some* peer took the frame,
+        which is not enough to decide who still needs the relay copy — a peer
+        counted as served by another peer's success would be handed nothing.  A
+        per-peer send makes the choice answerable per peer, and the relay then
+        carries the frame only to the ones whose LAN send actually failed, which
+        is the fallback chat has always used (``_chat_send_fn``).
+
+        What this stops is the mirror running between two devices that are
+        already on the same network: every clip left this machine for whatever
+        public broker the peer was enrolled on, whether or not it was sitting on
+        the same desk.  What it costs is the redundant copy that used to cover a
+        link dying between the connected-set read and the send — the relay
+        ledger and its offline queue still cover a publish that *fails*, but not
+        a LAN write that succeeded and then went nowhere.  ``send_to_peer``
+        reports what it can; the rest is the price of the content staying local.
+
+        The pairing filter is ``broadcast``'s own: clipboard content never
+        reaches an unpaired peer on either channel.
+        """
+        lan_delivered = set()
+        try:
+            connected = list(self.transport.get_connected_peers() or ())
+        except Exception:
+            logger.debug("Local sync: connected peers unavailable", exc_info=True)
+            connected = []
+        for pid in connected:
+            try:
+                if not self.pairing.is_peer_paired(pid):
+                    continue
+                if self.transport.send_to_peer(pid, data):
+                    lan_delivered.add(pid)
+            except Exception:
+                logger.debug("Local sync: LAN send to %s failed", str(pid)[:12], exc_info=True)
+        self._publish_relay(data, lan_delivered=lan_delivered)
+
+    def _publish_relay(self, data: bytes, lan_delivered=()) -> None:
         """Mirror a clipboard frame to every internet-reachable peer.
+
+        *lan_delivered* names the peers the local link already carried it to;
+        they are skipped, so the broker is handed a clip only when this machine
+        could not put it on the wire itself.
 
         Delivery metadata is only tracked for clipboard frames (chat and file
         frames keep their best-effort mirror with no ledger): a successful
@@ -5223,6 +5264,8 @@ class LanRuntime:
         for peer_id, peer_secret in (self.config.peer_relay_secrets or {}).items():
             if not peer_secret or peer_id in netpair_secrets or peer_id in removed:
                 continue
+            if peer_id in lan_delivered:
+                continue
             peer = self.config.peers.get(peer_id)
             if peer is None or not getattr(peer, "paired", False):
                 continue
@@ -5234,6 +5277,8 @@ class LanRuntime:
         for peer_id, peer_secret in netpair_secrets.items():
             if not peer_secret or peer_id == self.config.device_id or peer_id in removed:
                 continue  # a stray self-entry must never mirror to ourselves
+            if peer_id in lan_delivered:
+                continue
             # Same key the peer's own channel will be read under: the session
             # key when the handshake has happened, the code-derived one until
             # then (see ``netpair_key_for``).
@@ -5580,9 +5625,15 @@ class LanRuntime:
                     source_device=self.config.device_id,
                 ),
             )
-        if accepted:
+        if accepted and via_relay:
             # An internet-reachable sender gets the receipt on the relay too —
-            # that is the ack its ledger row is waiting for.
+            # that is the ack its ledger row is waiting for.  Only for a frame
+            # that arrived that way: a clip the local link carried has no relay
+            # row behind it (the sender mirrors only what its LAN send failed to
+            # deliver), so this ack would settle nothing and would put a frame
+            # per clip on the broker for an exchange that never needed it.  The
+            # transport-level receipt above is what settles that clip, and the
+            # sender has read it off the LAN since ``_receive``'s relay_ack arm.
             self._maybe_send_relay_ack(msg, pid)
 
     def _maybe_send_relay_ack(self, msg, pid):

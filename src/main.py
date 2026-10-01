@@ -2368,11 +2368,38 @@ class Application:
                 T("sync.oversize", size=size_mb),
             )
             return
-        self.transport_mgr.broadcast(data)
-        # Internet mode mirrors the frame to public-relay channels so paired
-        # peers outside the LAN receive it too (LAN delivery stays primary;
-        # receivers' dedup collapses double deliveries).
-        self._relay_publish_frame(data)
+        self._send_local_sync(data)
+
+    def _send_local_sync(self, data: bytes) -> None:
+        """Hand one clipboard frame to each paired peer: LAN first, relay after.
+
+        ``broadcast`` answers only whether *some* peer took the frame, which
+        cannot say who still needs the relay copy — a peer counted as served by
+        another peer's success would be handed nothing.  Sending per peer and
+        mirroring only the ones that failed keeps the relay what it is for chat
+        (``_chat_send_fn``): the cross-network route, not a second copy of every
+        clip between two devices that are already on the same network.  What
+        that costs is the redundant copy which used to cover a link dying
+        between the connected-set read and the send.
+
+        The pairing filter is ``broadcast``'s own — clipboard content never
+        reaches an unpaired peer on either channel.
+        """
+        lan_delivered = set()
+        try:
+            connected = list(self.transport_mgr.get_connected_peers() or [])
+        except Exception:
+            logger.debug("Local sync: connected peers unavailable", exc_info=True)
+            connected = []
+        for pid in connected:
+            try:
+                if not self.pairing_mgr.is_peer_paired(pid):
+                    continue
+                if self.transport_mgr.send_to_peer(pid, data):
+                    lan_delivered.add(pid)
+            except Exception:
+                logger.debug("Local sync: LAN send to %s failed", str(pid)[:12], exc_info=True)
+        self._relay_publish_frame(data, lan_delivered=lan_delivered)
 
     def _on_peer_message(self, msg, peer_id: str | None = None, *, via_relay: bool = False) -> None:
         """Route one decoded frame.  *via_relay* marks frames that arrived
@@ -8430,8 +8457,12 @@ class Application:
         # an older one — this is what bootstraps both directions.
         self._send_relay_enroll(peer_id)
 
-    def _relay_publish_frame(self, frame_bytes: bytes) -> None:
+    def _relay_publish_frame(self, frame_bytes: bytes, lan_delivered=()) -> None:
         """Mirror an outbound clipboard frame to all enrolled paired peers.
+
+        *lan_delivered* names the peers the local link already carried it to;
+        they are skipped, so the broker is handed a clip only when this machine
+        could not put it on the wire itself.
 
         A device that is BOTH a LAN-paired relay-enroll peer (its secret
         learned via ``relay_enroll``) AND an internet pairing-code peer
@@ -8473,6 +8504,8 @@ class Application:
         for pid, peer_secret in list(self.cfg.peer_relay_secrets.items()):
             if pid in netpair_secrets:
                 continue  # reached via the netpair channel below — no double send
+            if pid in lan_delivered:
+                continue
             peer = self.cfg.peers.get(pid)
             if peer is None or not peer.paired or not peer_secret:
                 continue
@@ -8506,6 +8539,8 @@ class Application:
                 continue
             if pid == self.cfg.device_id:
                 continue  # a stray self-entry must never mirror to ourselves
+            if pid in lan_delivered:
+                continue
             # The key the peer's own channel is read under: the agreed session
             # key once the handshake has happened, the code-derived one until
             # then (see ``_netpair_key_for``).

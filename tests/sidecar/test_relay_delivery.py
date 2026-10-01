@@ -437,6 +437,31 @@ def chat_frame(kind, msg_id, **payload):
     return encode_frame({"msg_type": kind, **payload}, msg_id=msg_id, source_device="local")
 
 
+def test_a_clip_the_lan_carried_is_not_mirrored_to_the_broker(relay_rig):
+    """The mirror is a fallback, not a second copy of every clip.
+
+    Every clip used to leave this machine for whatever public broker the peer
+    was enrolled on, whether or not that peer was on the same desk.  The relay
+    now carries only what the LAN could not hand over, which is the rule chat
+    already followed (``test_a_chat_frame_takes_the_relay_only_when_the_lan_send_fails``);
+    ``test_a_relayed_clipboard_send_is_ledgered_and_acked`` is the other
+    direction, a peer the LAN cannot reach at all.
+    """
+    runtime, relay, transport = relay_rig.runtime, relay_rig.relay, relay_rig.transport
+
+    transport.connected.add("remote")
+    assert runtime._on_local_sync(clipboard_message("m7"))
+
+    # The clip went out to the paired peer on the LAN ...
+    carried = [m for _pid, m in transport.sent if getattr(m, "msg_type", "") == "clipboard"]
+    assert [m.msg_id for m in carried] == ["m7"]
+    # ... so the broker was never handed it, and nothing waits on a receipt
+    # that no one is going to send: a clip carried locally is settled by the
+    # transport-level receipt, not by a relay_ack.
+    assert relay.published == []
+    assert runtime.relay_delivery_status()["items"] == []
+
+
 def test_a_chat_frame_takes_the_relay_only_when_the_lan_send_fails(relay_rig):
     runtime, relay, transport = relay_rig.runtime, relay_rig.relay, relay_rig.transport
     send = runtime._chat_send_fn("remote")
@@ -994,7 +1019,14 @@ def test_a_relay_secret_offered_over_the_relay_is_refused(relay_rig):
     )
 
     assert config.peer_relay_secrets == {}
-    assert transport.sent == []
+    # This machine offers its OWN relay secret to a peer whose LAN link has just
+    # come up (``_publish_presence``), the test's own ``connected.add`` is what
+    # triggers it, and the offer is made from the maintenance thread — so it
+    # lands on either side of this line and ``transport.sent`` being empty is a
+    # coin toss.  The offer is not a reply to the refused frame and not the
+    # fall-through into the clipboard path that this asserts; nothing else went
+    # out, on either count.
+    assert [m for _pid, m in transport.sent if getattr(m, "msg_type", "") != "relay_enroll"] == []
     # ...and it did not fall through to the clipboard path on its way out.
     assert relay_rig.history.items == []
 
