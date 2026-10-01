@@ -54,46 +54,18 @@ jobs:
 
           What is new in this release:
 
-          - Updating is automatic now, in both directions.  The desktop
-            application already installed any version it downloaded; what this
-            adds is where the file can come from.  A device on the same network
-            and the same platform that is already on a newer build can hand its
-            installer over, and the older device takes it, checks it and
-            restarts on the new version without anyone pressing a button --
-            which matters most exactly when GitHub cannot be reached, the case
-            that used to end in a card that said a new version existed and
-            never installed it.  The release digests remain the last word
-            whenever they can be fetched; a peer too old to declare a digest
-            for the file it sends is refused rather than trusted.
-
-          - Sending a file no longer needs a pairing.  A device that is merely
-            discovered on this network -- the state chat has accepted since it
-            arrived -- is now a target in 文件传输 as well, and a file arriving
-            from one is taken on its own, the same way a chat attachment is.
-            The old rule refused an unpaired sender at the application layer
-            even though the protocol had already let the frame through, so two
-            machines that simply had not paired could see each other, chat, and
-            not send a file.  The setting beside the chat one turns the
-            automatic acceptance off and puts the prompt back.
-
-          - The device list says one thing per device.  A row used to carry a
-            pairing chip and a route chip side by side, so "paired" and "on the
-            local link" were two badges that partly agreed and had to be
-            combined by the reader, and a device that was neither paired nor
-            reachable was described the same way as one that was merely idle.
-            There are four states and each is one word now: 正在同步 for a
-            paired device that is reachable, 已连接 for a reachable one that is
-            not paired, 已配对 for one that is paired but not reachable, and
-            离线 for neither.  A pairing handshake in progress is still shown
-            on its own, because it is something to answer rather than a state
-            the device has settled into.
-
-          - The installer a peer sends no longer appears in 文件传输, and the
-            log bundles a device collects do not either.  Neither is a file
-            exchange between two people, and each was being drawn as one --
-            an update offer sat in the list waiting for an 同意 that would
-            never be asked for.  Progress during an update is on the update
-            card, where it belongs.
+          - A clip is no longer mirrored to the internet when the peer is on
+            this network.  Every frame went to the broker as well as over the
+            local link, so two machines on the same desk still put what you
+            copied on a public broker; the key changed who could read it, not
+            whether it left.  The relay is now what chat has always used it as
+            -- the route to a peer the local link cannot reach.  Each frame is
+            offered to every paired peer that is connected, one send apiece,
+            and the broker is handed only the ones it could not be delivered
+            to, which also means no receipt is waited on for a clip that
+            arrived locally.  The cost is the redundant copy that used to
+            cover a link dropping between the send and its arrival; a publish
+            that fails is still queued and retried exactly as before.
 
           1.0.7 published a macOS installer that cannot start at all, and its
           update check lives in the background process that never comes up, so
