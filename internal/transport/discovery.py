@@ -516,7 +516,14 @@ class Discovery:
     def _hash_device_id(device_id: str) -> str:
         return peer_id_hash(device_id)
 
-    def __init__(self, device_id: str, device_name: str, port: int, service_type: str):
+    def __init__(
+        self,
+        device_id: str,
+        device_name: str,
+        port: int,
+        service_type: str,
+        on_error: Callable[[], None] | None = None,
+    ):
         self._device_id = device_id
         self._device_name = device_name
         self._device_id_hash = self._hash_device_id(device_id)
@@ -526,6 +533,10 @@ class Discovery:
         self._display_name = self._label(device_name, self._device_id_hash)
         self._port = port
         self._service_type = service_type
+        # Called when the registration thread could not publish this device.
+        # start() returns before that thread does, so this is the only way the
+        # fact reaches whoever wired the object up.
+        self._on_error = on_error
         self._zc: Zeroconf | None = None
         self._service_info: ServiceInfo | None = None
         self._browser: ServiceBrowser | None = None
@@ -545,6 +556,10 @@ class Discovery:
         # plus a stop signal for the light poll in _network_watch_loop.
         self._netmon_stop = threading.Event()
         self._advertised_ips: frozenset[str] = frozenset()
+        # Set while the registration worker is inside register_service().
+        # start_advertising() reads it so a hide/show toggle that lands during
+        # startup cannot race the first registration into a second one.
+        self._registering = threading.Event()
         # Presence bookkeeping (see _presence_round): instance name -> the
         # monotonic second its last PTR arrived.  Written from the zeroconf
         # event loop by _PresenceListener and read by the presence thread, so
@@ -691,83 +706,31 @@ class Discovery:
         logger.info("Renamed this device to %s on the LAN", name)
 
     def start(self):
-        """Register our service and start browsing for peers."""
+        """Open mDNS, start browsing, and register our own service.
+
+        The registration is the expensive half — the conflict probe zeroconf
+        runs before it will advertise costs it well over a second on every
+        launch (see :meth:`_register_service`) — so the browser, the interface
+        watcher and the presence loop are started here and the registration is
+        handed to a worker thread.  Startup is then bounded by opening the
+        sockets, and this device is discoverable a moment later instead of the
+        whole application waiting on it.
+        """
         try:
             self._zc = Zeroconf()
         except Exception as e:
             logger.error("Failed to initialize mDNS: %s", e)
             return
 
-        all_ips = get_all_local_addresses()
-        props = self._service_props(all_ips)
-        local_ip = _get_local_address()
-        self._our_ip = local_ip
-        logger.info("Registering mDNS on %s (all IPs: %s)", local_ip, all_ips)
-
-        # Register our service – use a truncated display name so the
-        # real hostname is not broadcast in plaintext on the LAN.
-        #
-        # Advertise ALL our LAN addresses (not just the "best" one) so peers
-        # on any of our subnets can reach us. Previously we only advertised
-        # a single IP chosen by a fragile interface heuristic, which broke
-        # discovery whenever that IP belonged to a VPN/virtual adapter -- so
-        # the lesson is that every address on a real adapter goes out, and the
-        # tunnel's is the one address that must not (it is not reachable from
-        # this network at all; see get_all_local_addresses).
-        advertised = [socket.inet_aton(ip) for ip in all_ips]
-        if not advertised:
-            advertised = [socket.inet_aton(local_ip)]
-        info = ServiceInfo(
-            type_=self._service_type,
-            name=f"{self._display_name}.{self._service_type}",
-            addresses=advertised,
-            port=self._port,
-            properties=props,
-        )
-
-        # Same rule as start_advertising(): _service_info is only set once
-        # zeroconf has accepted the registration, so is_advertising() never
-        # claims we are discoverable while we are not.
-        registered = None
-        try:
-            self._zc.register_service(info)
-            registered = info
-            logger.info("Registered mDNS service on port %d", self._port)
-        except Exception as e:
-            # A registration failure must not leave us undiscoverable —
-            # retry once under a name with an extra distinguishing suffix
-            # instead of only logging and giving up.
-            logger.warning("mDNS registration failed (%s) — retrying with altered name", e)
-            try:
-                retry_info = ServiceInfo(
-                    type_=self._service_type,
-                    name=f"{self._display_name}-x.{self._service_type}",
-                    addresses=advertised,
-                    port=self._port,
-                    properties=props,
-                )
-                self._zc.register_service(retry_info)
-                registered = retry_info
-                logger.info("Registered mDNS service on retry name")
-            except Exception as e2:
-                logger.warning("mDNS retry registration also failed: %s", e2)
-                # Both attempts failed — leave _service_info None so
-                # is_advertising() reports False and start_advertising() can
-                # retry later, instead of believing we are still broadcasting.
-        with self._lock:
-            self._service_info = registered
-            self._instance_name = registered.name if registered is not None else ""
-
         # Browse for peers
         self._open_browser()
 
-        # Remember the advertised address set and start the watcher that
-        # re-registers when the local interfaces change (Wi-Fi <-> Ethernet,
-        # VPN toggle, DHCP renewal moving us to another subnet) — those
-        # produce no sleep/wake event, so without this the stale mDNS
-        # advertisement keeps pointing peers at a dead address.
-        self._advertised_ips = frozenset(all_ips)
-        self._virtual_ips = frozenset(_virtual_addresses())
+        # Start the watcher that re-registers when the local interfaces change
+        # (Wi-Fi <-> Ethernet, VPN toggle, DHCP renewal moving us to another
+        # subnet) — those produce no sleep/wake event, so without this the
+        # stale mDNS advertisement keeps pointing peers at a dead address.  The
+        # watcher owns the advertised-address bookkeeping from here on: it is
+        # the pass that notices a change, and it re-reads the set as it goes.
         self._netmon_stop.clear()
         threading.Thread(
             target=self._network_watch_loop,
@@ -779,6 +742,116 @@ class Discovery:
             daemon=True,
             name="clipsync-presence",
         ).start()
+
+        self._registering.set()
+        threading.Thread(
+            target=self._register_soon,
+            daemon=True,
+            name="clipsync-mdns-register",
+        ).start()
+
+    def _register_soon(self):
+        """Publish our service from a worker, once the sockets are up."""
+        try:
+            published = self._register_service()
+        except Exception:
+            # A registration that raised must not take the process down; the
+            # network watcher re-registers when the address set next changes,
+            # and is_advertising() still reports the truth in the meantime.
+            logger.warning("mDNS registration failed", exc_info=True)
+            published = False
+        finally:
+            self._registering.clear()
+        if not published and not self._netmon_stop.is_set() and self._on_error is not None:
+            # Both attempts failed, so this device is on the network but
+            # invisible on it.  Swallowed here (there is no caller left), so it
+            # is reported instead.  Not while stopping: a registration that
+            # loses the race with stop() is not a fault to report.
+            with contextlib.suppress(Exception):
+                self._on_error()
+
+    def _register_service(self) -> bool:
+        """Build and publish our service record.  Requires ``start()``.
+
+        Advertise ALL our LAN addresses (not just the "best" one) so peers on
+        any of our subnets can reach us.  Previously we only advertised a
+        single IP chosen by a fragile interface heuristic, which broke
+        discovery whenever that IP belonged to a VPN/virtual adapter -- so the
+        lesson is that every address on a real adapter goes out, and the
+        tunnel's is the one address that must not (it is not reachable from
+        this network at all; see get_all_local_addresses).
+
+        Shared with :meth:`start_advertising`, which is what an interface
+        change and a hide/show cycle both go through.
+
+        ``cooperating_responders=True`` is what keeps this off the startup
+        critical path: without it zeroconf probes for a name conflict by asking
+        the network three times, 500 ms apart, and waits that out before it
+        will advertise.  The instance label is already unique per device (see
+        :meth:`_label`), and two ClipSync instances that did collide are handled
+        the way they always were -- the retry below publishes under a
+        distinguishing suffix.
+        """
+        zc = self._zc
+        if zc is None:
+            return False
+        all_ips = get_all_local_addresses()
+        props = self._service_props(all_ips)
+        local_ip = _get_local_address()
+        self._our_ip = local_ip
+        # The tunnels moved with the addresses, and this is the pass that
+        # notices: a VPN coming up adds one, and every peer's candidate list is
+        # ranked against the set from here on.
+        virtual = frozenset(_virtual_addresses())
+        advertised = [socket.inet_aton(ip) for ip in all_ips]
+        if not advertised:
+            advertised = [socket.inet_aton(local_ip)]
+        logger.info("Registering mDNS on %s (all IPs: %s)", local_ip, all_ips)
+
+        # A truncated display name, so the real hostname is not broadcast in
+        # plaintext on the LAN.
+        registered = None
+        try:
+            info = ServiceInfo(
+                type_=self._service_type,
+                name=f"{self._display_name}.{self._service_type}",
+                addresses=advertised,
+                port=self._port,
+                properties=props,
+            )
+            zc.register_service(info, cooperating_responders=True)
+            registered = info
+            logger.info("Registered mDNS service on port %d", self._port)
+        except Exception as e:
+            # A registration failure must not leave us undiscoverable -- retry
+            # once under a name with an extra distinguishing suffix instead of
+            # only logging and giving up.
+            logger.warning("mDNS registration failed (%s) — retrying with altered name", e)
+            try:
+                retry_info = ServiceInfo(
+                    type_=self._service_type,
+                    name=f"{self._display_name}-x.{self._service_type}",
+                    addresses=advertised,
+                    port=self._port,
+                    properties=props,
+                )
+                zc.register_service(retry_info, cooperating_responders=True)
+                registered = retry_info
+                logger.info("Registered mDNS service on retry name")
+            except Exception as e2:
+                logger.warning("mDNS retry registration also failed: %s", e2)
+                # Both attempts failed -- leave _service_info None so
+                # is_advertising() reports False and start_advertising() can
+                # retry later, instead of believing we are still broadcasting.
+        with self._lock:
+            # Published only once zeroconf has accepted it, so is_advertising()
+            # never claims we are discoverable while we are not.
+            self._service_info = registered
+            self._instance_name = registered.name if registered is not None else ""
+            if registered is not None:
+                self._advertised_ips = frozenset(all_ips)
+                self._virtual_ips = virtual
+        return registered is not None
 
     def _network_watch_loop(self):
         """Rebuild mDNS when the local IP set changes (no sleep involved).
@@ -1160,45 +1233,15 @@ class Discovery:
                 return
         if self._zc is None:
             return
+        if self._registering.is_set():
+            # The startup worker is already inside register_service(); it
+            # publishes into _service_info itself.  Racing it here would
+            # register the same instance twice.
+            return
         # Rebuild service info (IPs may have changed, and ServiceInfo
         # can't be re-registered after unregistration).
-        all_ips = get_all_local_addresses()
-        props = self._service_props(all_ips)
-        local_ip = _get_local_address()
-        self._our_ip = local_ip
-        # The tunnels moved with the addresses, and this is the pass that
-        # notices: a VPN coming up adds one, and every peer's candidate list is
-        # ranked against the set from here on.
-        virtual = frozenset(_virtual_addresses())
-        advertised = [socket.inet_aton(ip) for ip in all_ips]
-        if not advertised:
-            advertised = [socket.inet_aton(local_ip)]
-        info = ServiceInfo(
-            type_=self._service_type,
-            name=f"{self._display_name}.{self._service_type}",
-            addresses=advertised,
-            port=self._port,
-            properties=props,
-        )
-        # Publish into self._service_info only AFTER register_service()
-        # succeeds.  Assigning first meant a failed registration still left the
-        # attribute set, and the `is not None` guard above then rejected every
-        # later attempt -- the device stayed permanently undiscoverable, with
-        # is_advertising() cheerfully reporting True.
-        try:
-            self._zc.register_service(info)
-        except Exception as e:
-            logger.warning("Failed to re-register mDNS: %s", e)
-            return
-        with self._lock:
-            self._service_info = info
-            # Read by the presence listener, which runs on the event loop and
-            # must not touch _service_info: the name is what tells our own
-            # record apart from a peer's when it comes back to us.
-            self._instance_name = info.name
-            self._advertised_ips = frozenset(all_ips)
-            self._virtual_ips = virtual
-        logger.info("Resumed advertising this device on port %d", self._port)
+        if self._register_service():
+            logger.info("Resumed advertising this device on port %d", self._port)
 
     def _wake_recovery(self):
         """Rebuild mDNS after wake-from-sleep (the transport's wake callback).

@@ -6,8 +6,10 @@ import os
 import socket
 import ssl
 import struct
+import sys
 import threading
 import time
+import traceback
 import uuid
 from collections.abc import Callable
 from pathlib import Path
@@ -750,6 +752,66 @@ class TransportManager:
         self._close_socket(sock)
         raise OSError("Transport stopped")
 
+    def _dial(self, address, port, timeout):
+        """Connect a socket this manager owns, so stopping can interrupt it.
+
+        `socket.create_connection` builds the socket itself and only hands it back
+        once connected, which leaves the whole dial -- resolve, then connect, both
+        of which can outlast a stop -- with nothing registered to close.  On a stop
+        the socket sets were closed, the dial came back connected a moment later
+        and registered a live peer, and the drain then waited for a thread that was
+        never going to be interrupted.
+
+        Measured, that is what the shutdown defect was: the drain reported
+        `clipsync-connect` still inside `create_connection` at the five-second
+        deadline, the runtime never released ownership, and the caller logged a
+        bare timeout.  The socket is registered *before* it connects, so
+        `stop_server` closing it aborts the dial where it stands.
+        """
+        last = None
+        for family, kind, proto, _, sockaddr in socket.getaddrinfo(
+            address, port, type=socket.SOCK_STREAM
+        ):
+            sock = socket.socket(family, kind, proto)
+            sock.settimeout(timeout)
+            try:
+                # Raises OSError("Transport stopped") if a stop landed first.
+                self._track_socket(sock)
+            except BaseException:
+                sock.close()
+                raise
+            try:
+                sock.connect(sockaddr)
+                # A closed socket can still report a successful connect: the
+                # peer's listen backlog accepted it before the close landed, and
+                # `connect` returns as soon as the kernel has it queued.  Handing
+                # that back would be worse than a failed dial -- the caller goes
+                # on to wrap it, and every later operation fails somewhere less
+                # obvious than here.  Re-checked under the same lock that closes
+                # them, so a stop cannot slide in between.
+                with self._lock:
+                    if not self._running or sock.fileno() == -1:
+                        raise OSError("Transport stopped")
+                return sock
+            except OSError as exc:
+                # Closed from under us: that is a stop, and it is not a dial
+                # failure to retry against the next address.
+                if not self._running or sock.fileno() == -1:
+                    sock.close()
+                    raise OSError("Transport stopped") from None
+                last = exc
+                self._forget_socket(sock)
+                sock.close()
+        if last is not None:
+            raise last
+        raise OSError(f"No address for {address}:{port}")
+
+    def _forget_socket(self, sock):
+        with self._lock:
+            group = self._pending_sockets.get(threading.current_thread())
+            if group is not None:
+                group.discard(sock)
+
     def _wrap_socket(self, context, sock, **kwargs):
         # Register the SSL wrapper before its blocking handshake: wrap_socket
         # detaches the raw fd, so closing only the raw socket cannot interrupt it.
@@ -836,6 +898,18 @@ class TransportManager:
 
             if server_side:
                 ssl_context = ssl.create_default_context(ssl.Purpose.CLIENT_AUTH)
+            elif verify_peer_id:
+                # A dial to a *specific* device: built without the platform trust
+                # store, because `create_default_context(Purpose.SERVER_AUTH)`
+                # loads it and `load_verify_locations` only ever *adds* to
+                # whatever is there.  The old shape therefore meant
+                # `CERT_REQUIRED` accepted a chain to the pinned certificate **or
+                # to any of the ~250 public roots on this machine**, with
+                # `check_hostname` off so no name had to match either -- a pin
+                # that let a publicly-signed impostor terminate the handshake.
+                # Measured: the store still held 251 CA roots after the pin was
+                # loaded.
+                ssl_context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
             else:
                 ssl_context = ssl.create_default_context(ssl.Purpose.SERVER_AUTH)
 
@@ -955,6 +1029,21 @@ class TransportManager:
         return text, no_auto_pairing, listen_port, device_name
 
     @staticmethod
+    def _restore_timeout(sock: ssl.SSLSocket, timeout: float | None) -> None:
+        """Put a socket's timeout back, without letting that become the error.
+
+        ``SSLSocket.settimeout`` raises ``RuntimeError("handshake not done yet")``
+        once the socket has been closed underneath it — its ``_sslobj`` is gone —
+        and this runs from ``finally`` blocks, where an exception replaces whatever
+        actually went wrong.  That is how a peer closing the connection
+        mid-handshake came to be logged as "connect failed: handshake not done
+        yet", which names nothing: the reason was a socket the peer had already
+        dropped.  A timeout that cannot be restored is not a failure of its own.
+        """
+        with contextlib.suppress(Exception):
+            sock.settimeout(timeout)
+
+    @staticmethod
     def _recv_identity(sock: ssl.SSLSocket, timeout: float = 10.0) -> bytes | None:
         """Read the first frame from the peer — expected to be their cert PEM."""
         prev_timeout = sock.gettimeout()
@@ -980,7 +1069,7 @@ class TransportManager:
             logger.warning("Failed to read identity frame: %s", e)
             return None
         finally:
-            sock.settimeout(prev_timeout)
+            TransportManager._restore_timeout(sock, prev_timeout)
 
     @staticmethod
     def _send_rejection(sock: ssl.SSLSocket):
@@ -1032,7 +1121,7 @@ class TransportManager:
             pass
         finally:
             with contextlib.suppress(Exception):
-                sock.settimeout(prev_timeout)
+                TransportManager._restore_timeout(sock, prev_timeout)
         if data and _REJECT_MARKER.startswith(data):
             # A torn marker (only ever a rejection: frames start with a zero
             # length byte, the marker with \\xff).  Treat it as rejected —
@@ -1126,13 +1215,47 @@ class TransportManager:
                 while self._callbacks:
                     remaining = deadline - time.monotonic()
                     if remaining <= 0:
+                        self._report_stragglers(workers)
                         return False
                     self._callback_done.wait(remaining)
                 self._prune_workers()
+                if self._workers:
+                    self._report_stragglers(workers)
                 return not self._workers and self._stop_calls == 1
         finally:
             with self._lock:
                 self._stop_calls -= 1
+
+    def _report_stragglers(self, workers) -> None:
+        """Name what a failed drain was waiting for, and where it is stuck.
+
+        The alternative is the shape this used to have: the caller logs "did not
+        release ownership within its budget", which says a stage was slow but not
+        which one, and the answer is not recoverable after the fact -- the threads
+        are gone by the time anyone reads the log.  A stack per live thread is the
+        whole diagnosis, and it is what found the shutdown defect:
+        `clipsync-connect` still inside `create_connection`.
+        """
+        live = [worker for worker in workers if worker.is_alive()]
+        pending = sorted(self._callbacks)
+        logger.warning(
+            "Transport drain incomplete: %d worker(s) %s, %d callback group(s) %s",
+            len(live),
+            [worker.name for worker in live] or "-",
+            len(pending),
+            pending or "-",
+        )
+        frames = sys._current_frames()
+        for worker in live:
+            frame = frames.get(worker.ident)
+            if frame is None:
+                continue
+            stack = traceback.extract_stack(frame, limit=6)
+            where = " <- ".join(
+                f"{os.path.basename(entry.filename)}:{entry.lineno} {entry.name}"
+                for entry in reversed(stack)
+            )
+            logger.warning("  %s is in: %s", worker.name, where)
 
     def connect_to_peer(
         self, peer_id: str, peer_name: str, address: str, port: int, no_auto_pairing: bool = False
@@ -1193,8 +1316,10 @@ class TransportManager:
             real_peer_id = ""
             try:
                 logger.info("[%s] TCP connecting to %s:%d", peer_name, address, port)
-                sock = socket.create_connection((address, port), timeout=10)
-                self._track_socket(sock)
+                # Through `_dial`, not `socket.create_connection`: the socket has
+                # to be registered before it connects, or a stop during the dial
+                # has nothing to close and this thread outlives the teardown.
+                sock = self._dial(address, port, 10)
                 logger.info("[%s] TCP connected, starting TLS handshake", peer_name)
 
                 # Peers are stored under their real device id, but discovery may
@@ -1261,6 +1386,26 @@ class TransportManager:
                     return
 
                 real_peer_id = peer_id
+                if not server_cert_data:
+                    # No identity frame at all.  This used to fall through and
+                    # build the connection anyway, with the id this side *dialed*
+                    # and that id's pinned fingerprint -- so the peer's identity
+                    # was never established, and the connection was still treated
+                    # as that (possibly paired) device.  An attacker who answers
+                    # the dial and then says nothing inherited the trust; so did an
+                    # honest peer merely slower than the 10 s identity read, whose
+                    # late frame was then dropped as a bad one.  A dial that did
+                    # not authenticate anyone is not a connection to whoever was
+                    # dialed.
+                    logger.warning(
+                        "[%s] no identity frame from %s:%d — refusing the dial",
+                        peer_name,
+                        address,
+                        port,
+                    )
+                    self._notify_connect_rejected(peer_name, peer_id)
+                    ssl_sock.close()
+                    return
                 if server_cert_data:
                     # The peer's own listen port is not used here: what this
                     # side keeps is the address it just dialed, which reached
@@ -1349,6 +1494,29 @@ class TransportManager:
                 with self._lock:
                     if not self._running:
                         logger.debug("[%s] server stopped, discarding new connection", peer_name)
+                        conn.set_on_disconnect(None)
+                        conn.stop()
+                        return
+                    # The user may have decided something about this peer while the
+                    # dial was in flight -- the connect, TLS and identity exchange
+                    # take a round trip each.  断开连接 records a hold and 移除设备
+                    # records a rejection, and both used to be consulted only on the
+                    # inbound path, so a dial that started before the click finished
+                    # after it and put the peer straight back: the button looked
+                    # like it did nothing, and the device went on receiving
+                    # clipboard broadcasts, which is exactly the state a user
+                    # disconnects a machine to leave.  Re-checked here, in the same
+                    # critical section that installs it, so there is no window
+                    # between the check and the installation.
+                    if real_peer_id and (
+                        real_peer_id in self._rejected_peer_ids
+                        or self._hold_active(real_peer_id)
+                    ):
+                        logger.info(
+                            "[%s] peer was disconnected or removed while this dial was "
+                            "in flight — discarding the connection",
+                            peer_name,
+                        )
                         conn.set_on_disconnect(None)
                         conn.stop()
                         return
@@ -1617,6 +1785,21 @@ class TransportManager:
             conn.set_on_disconnect(None)
             conn.stop()
 
+    def _hold_active(self, peer_id: str) -> bool:
+        """`_on_hold` without the lock, for a caller already holding it.
+
+        Split because `_connect` re-checks the hold inside the critical section
+        that installs a dialed connection, and calling the locking version there
+        would deadlock on a non-reentrant lock.
+        """
+        deadline = self._connect_holds.get(peer_id)
+        if deadline is None:
+            return False
+        if deadline <= time.monotonic():
+            self._connect_holds.pop(peer_id, None)
+            return False
+        return True
+
     def _on_hold(self, peer_id: str) -> bool:
         """Whether a manual disconnect is still keeping this peer out.
 
@@ -1624,13 +1807,7 @@ class TransportManager:
         of the disconnects still in force.
         """
         with self._lock:
-            deadline = self._connect_holds.get(peer_id)
-            if deadline is None:
-                return False
-            if deadline <= time.monotonic():
-                self._connect_holds.pop(peer_id, None)
-                return False
-            return True
+            return self._hold_active(peer_id)
 
     def forget_peer(self, peer_id: str):
         """Disconnect and permanently reject this peer.

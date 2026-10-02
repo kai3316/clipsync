@@ -18,7 +18,6 @@ from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 logger = logging.getLogger(__name__)
 
 _NONCE_LEN = 12  # bytes
-_TAG_LEN = 16  # AES-GCM tag is 16 bytes
 _AES_KEY_LEN = 32
 _PBKDF2_ITERATIONS = 600_000
 _PW_VERIFY_ITERATIONS = 100_000  # for password verification token

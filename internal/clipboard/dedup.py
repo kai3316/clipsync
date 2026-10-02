@@ -122,16 +122,6 @@ def labels_to_types(labels: dict | None) -> dict[ContentType, bytes]:
     return out
 
 
-def types_to_labels(types: dict[ContentType, bytes]) -> dict[str, str]:
-    """Encode a ContentType->bytes map into the persisted label->base64 form."""
-    inverse = {ct: label for label, ct in LABEL_TYPE_MAP.items()}
-    return {
-        inverse[ct]: base64.b64encode(data).decode("ascii")
-        for ct, data in types.items()
-        if ct in inverse
-    }
-
-
 def merge_types(
     existing: dict[ContentType, bytes], incoming: dict[ContentType, bytes]
 ) -> tuple[dict[ContentType, bytes], bool]:

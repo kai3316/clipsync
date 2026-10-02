@@ -121,14 +121,6 @@ def _rtf_to_text(data: bytes) -> str:
 
 ALL_CATEGORIES = ["credit_card", "ssn", "api_key", "private_key", "password"]
 
-CATEGORY_LABELS: dict[str, str] = {
-    "credit_card": "Credit card numbers",
-    "ssn": "Social Security numbers (XXX-XX-XXXX)",
-    "api_key": "API keys & tokens (sk-*, Bearer, key-*)",
-    "private_key": "Private key blocks (PEM)",
-    "password": "Password-like patterns (password=...)",
-}
-
 # The literal placeholder that replaces redacted sensitive content in
 # synced clipboard text.  Keep the string in sync with the sub pattern in
 # ``ContentFilter.filter_content`` below.

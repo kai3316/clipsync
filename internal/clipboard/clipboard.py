@@ -84,9 +84,6 @@ class ClipboardMonitor(ABC):
     # this timestamp (seconds since epoch).  Set via suppress_for().
     suppress_until: float = 0.0
 
-    # SHA256 hash of the last content captured (used for dedup).
-    _last_content_hash: str = ""
-
     # Source app info captured at the moment of the last clipboard change.
     # Set by platform-specific monitors before calling the callback.
     last_source_app: dict | None = None

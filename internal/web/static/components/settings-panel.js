@@ -97,8 +97,7 @@
       'settings_window.clipboard_behavior', 'settings_window.paste_to_top',
       'settings_window.low_memory_mode', 'settings_window.retry_capture',
       'settings_window.source_tracking', 'settings_window.plain_text_only',
-      'settings_window.dedup_method', 'hotkeys.enabled', 'hotkeys.title',
-      'settings_window.save_advanced',
+            'settings_window.save_advanced',
     ],
     logs: [
       'settings_window.logs_title', 'settings_window.logs_refresh',
@@ -249,10 +248,6 @@
         aiConfigCustomPaths: [],
         aiConfigProfiles: [],
         aiConfigSaving: false,
-
-        // Hotkeys
-        hotkeys: {},
-        hotkeysEnabled: false,
 
         // Notifications (per-event toggles)
         notifyDeviceConnect: true,
@@ -419,18 +414,6 @@
         return ['DEBUG', 'INFO', 'WARNING', 'ERROR'];
       },
 
-      hotkeyFields: function () {
-        var names = [
-          'paste_1', 'paste_2', 'paste_3', 'paste_4',
-          'paste_5', 'paste_6', 'paste_7', 'paste_8', 'paste_9',
-          'paste_plain', 'toggle_monitor', 'show_window',
-        ];
-        var self = this;
-        return names.map(function (n) {
-          return { key: n, value: self.hotkeys[n] || '' };
-        });
-      },
-
       sectionTabs: function () {
         // Plain-text labels, no emoji — the settings_nav.* translations no
         // longer carry emoji prefixes, so there is no icon column here.
@@ -541,10 +524,6 @@
         this.dirtySections[section] = true;
       },
 
-      hotkeyLabel: function (key) {
-        return this.t('hotkeys.' + key);
-      },
-
       populateFromCache: function () {
         var self = this;
         this._skipDirty = true;
@@ -610,8 +589,6 @@
         if (s.plain_text_only !== undefined) this.plainTextOnly = !!s.plain_text_only;
         if (s.auto_update_check !== undefined) this.autoUpdateCheck = !!s.auto_update_check;
         if (s.data_dir !== undefined) this.dataDir = s.data_dir || '';
-        if (s.hotkeys) this.hotkeys = Object.assign({}, s.hotkeys);
-        if (s.hotkeys_enabled !== undefined) this.hotkeysEnabled = !!s.hotkeys_enabled;
         // Re-enable dirty tracking on the next tick so the watchers fired by
         // the assignments above don't mark freshly-loaded values as unsaved.
         this.$nextTick(function () { self._skipDirty = false; });
@@ -1208,8 +1185,6 @@
           dedup_method: self.dedupMethod,
           source_tracking_enabled: self.sourceTracking,
           plain_text_only: !!self.plainTextOnly,
-          hotkeys: self.hotkeys,
-          hotkeys_enabled: self.hotkeysEnabled,
         }).then(function (res) {
           if (res && res.updated) self.store.mergeSettings(res.updated);
           self.dirtySections['advanced'] = false;
@@ -1845,11 +1820,6 @@
       sourceTracking: function () { this.markDirty('advanced'); },
       plainTextOnly: function () { this.markDirty('advanced'); },
       dedupMethod: function () { this.markDirty('advanced'); },
-      hotkeysEnabled: function () { this.markDirty('advanced'); },
-      hotkeys: {
-        deep: true,
-        handler: function () { this.markDirty('advanced'); },
-      },
       dataDir: function () { this.markDirty('data'); },
       aiConfigTools: {
         deep: true,
@@ -2413,20 +2383,6 @@
                     '</select>' +
                   '</div>' +
 
-                  '<div class="settings-toggle-row">' +
-                    '<span class="settings-toggle-label">{{ t(\'hotkeys.enabled\') }}</span>' +
-                    '<button class="settings-toggle" role="switch" :aria-checked="hotkeysEnabled" :aria-label="t(\'hotkeys.enabled\')" :class="{ \'settings-toggle--on\': hotkeysEnabled }" @click="hotkeysEnabled = !hotkeysEnabled">' +
-                      '<span class="settings-toggle__knob"></span>' +
-                    '</button>' +
-                  '</div>' +
-                  '<h4 style="font-size:12px;color:var(--clipsync-fg-muted);margin:16px 0 4px">{{ t(\'hotkeys.title\') }}</h4>' +
-                  '<p class="settings-hint" style="margin-bottom:10px">{{ t(\'hotkeys.hint\') }}</p>' +
-                  '<div class="settings-hotkeys">' +
-                    '<div v-for="hk in hotkeyFields" :key="hk.key" class="settings-hotkey-row">' +
-                      '<span class="settings-hotkey-label">{{ hotkeyLabel(hk.key) }}</span>' +
-                      '<input type="text" class="settings-input settings-hotkey-input" v-model="hotkeys[hk.key]" :placeholder="hk.value">' +
-                    '</div>' +
-                  '</div>' +
                   '<button class="settings-btn settings-btn--accent" @click="saveAdvanced" :disabled="advancedSaving" style="width:100%;margin-top:12px">' +
                     '{{ advancedSaving ? \'...\' : t(\'settings_window.save_advanced\') }}' +
                   '</button>' +

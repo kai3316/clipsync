@@ -79,7 +79,9 @@ class _FakeZeroconf:
         self.unregistered = []
         self._fail_times = fail_times
 
-    def register_service(self, info):
+    def register_service(self, info, **_kwargs):
+        # **_kwargs: the real call passes cooperating_responders=True, which is
+        # what keeps the conflict probe off the startup path.
         if self._fail_times > 0:
             self._fail_times -= 1
             raise OSError("no route to host")
@@ -104,8 +106,13 @@ def test_failed_registration_can_be_retried(disco):
     only logged -- so the `if self._service_info is not None: return` guard at
     the top rejected every later attempt.  The device stayed undiscoverable for
     the rest of the process while is_advertising() reported True.
+
+    Two failures, because the registration itself retries once under a
+    distinguishing instance name: the first attempt fails on the plain label,
+    the retry fails on the "-x" one, and the next call has to try again rather
+    than read either failure as "already registered".
     """
-    disco._zc = _FakeZeroconf(fail_times=1)
+    disco._zc = _FakeZeroconf(fail_times=2)
     disco.start_advertising()
     assert disco._service_info is None
     assert disco.is_advertising is False

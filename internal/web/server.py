@@ -15,6 +15,7 @@ import logging
 import mimetypes
 import os
 import posixpath
+import re
 import socket
 import socketserver
 import sys
@@ -91,6 +92,14 @@ def _sanitize_upload_filename(name: str) -> str:
     sanitizer).  Strips path separators, traversal components, control
     characters, trailing dots/spaces and Windows-reserved names so an
     illegal name cannot raise OSError/ValueError or escape the upload dir.
+
+    The character set that has to go is the one Windows itself refuses, and
+    ``:`` is the one that does not fail loudly: NTFS reads ``notes:1.txt`` as a
+    data stream on a file called ``notes``, so the upload reports the name it was
+    given while the directory listing shows ``notes`` -- a file the user cannot
+    find and cannot delete by the name they were shown.  The download path
+    already rejects ``:`` for the same reason (see the file route); this is that
+    rule applied at the other end.
     """
     name = str(name or "").replace("\\", "/")
     name = os.path.basename(name)
@@ -100,8 +109,11 @@ def _sanitize_upload_filename(name: str) -> str:
     name = name.rstrip(" .")
     if not name:
         name = "uploaded_file"
-    name = "".join(ch for ch in name if ch >= " " and ch != "\x7f")
-    if not name:
+    name = re.sub(r'[<>:"/\\|?*\x00-\x1f\x7f]', "-", name)
+    name = name.rstrip(" .-")
+    if not name or name.strip("-") == "":
+        # A name made entirely of the characters just replaced has nothing left
+        # to identify it, and a directory of "-" is worse than a generic one.
         name = "uploaded_file"
     base = name.split(".")[0].upper()
     if base in _WINDOWS_RESERVED_NAMES:
@@ -415,7 +427,19 @@ def _build_file_response(filepath: str, mime: str = "application/octet-stream"):
             json.dumps({"error": "not found"}).encode("utf-8"),
         )
 
-    fsize = os.path.getsize(filepath)
+    try:
+        fsize = os.path.getsize(filepath)
+    except OSError:
+        # Between the `isfile` check and here the file can go away -- another
+        # client's DELETE, or the user in their file manager.  Returning 404 is
+        # the answer the caller can act on; letting the OSError escape aborts the
+        # request before any response is written, and the client sees a dropped
+        # connection instead of "gone".
+        return (
+            404,
+            {"Content-Type": "application/json"},
+            json.dumps({"error": "not found"}).encode("utf-8"),
+        )
     fname = os.path.basename(filepath)
     try:
         fname.encode("latin-1")
@@ -818,6 +842,15 @@ class WebServer:
             ports.update(p for p in line.split(",") if p)
         return ports
 
+    # The answer to the last firewall check, per requested port set.  The
+    # startup path asks this question on every launch, and a reading costs a
+    # couple of processes on a Windows whose netsh output cannot be parsed --
+    # seconds of PowerShell.  The rule is machine-wide state that only this
+    # application rewrites, and the one function that rewrites it
+    # (_open_firewall) clears this.
+    _fw_read_cache: dict[tuple[str, ...], tuple[bool, str]] = {}
+    _fw_cache_lock = threading.Lock()
+
     @staticmethod
     def _firewall_rule_ports() -> set[str] | None:
         """The ports the ClipSync inbound rule allows, or None if unreadable.
@@ -834,11 +867,127 @@ class WebServer:
         ``{"Any"}`` for a rule that allows everything and ``set()`` when no
         such rule exists.  ``None`` means the question could not be answered,
         which is not the same answer as "no".
+
+        Three readers, cheapest first: the firewall store itself (milliseconds,
+        and no language involved), netsh (tens of milliseconds, but its field
+        labels are localized) and the PowerShell cmdlets (seconds).
         """
+        ports = WebServer._firewall_rule_ports_registry()
+        if ports is not None:
+            return ports
         ports = WebServer._firewall_rule_ports_netsh()
         if ports is not None:
             return ports
         return WebServer._firewall_rule_ports_cim()
+
+    @staticmethod
+    def _firewall_rule_ports_registry() -> set[str] | None:
+        """Read the rule's ports straight out of the firewall store.
+
+        The rule is a value in the registry, so this is a read of one key
+        rather than a process start: a few milliseconds against the tens that
+        netsh costs and the seconds that loading PowerShell costs.  It is also
+        language-proof -- the store holds ``LPort=19990`` whatever the OS
+        display language is, which is the whole problem with reading netsh
+        output (see :meth:`_firewall_rule_ports_netsh`).
+
+        Returns ``None`` when the question cannot be answered here (a
+        non-Windows platform, a locked-down key, a rule that is not there), so
+        the caller can fall back rather than read it as "no ports".
+        """
+        if sys.platform != "win32":
+            return None
+        import winreg
+
+        key_path = (
+            r"SYSTEM\CurrentControlSet\Services\SharedAccess"
+            r"\Parameters\FirewallPolicy\FirewallRules"
+        )
+        wanted = WebServer.FW_RULE_NAME.casefold()
+        ports: set[str] = set()
+        seen = False
+        try:
+            with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, key_path) as key:
+                _subkeys, value_count, _changed = winreg.QueryInfoKey(key)
+                for index in range(value_count):
+                    try:
+                        _name, data, _kind = winreg.EnumValue(key, index)
+                    except OSError:
+                        continue
+                    text = str(data)
+                    # The store's own version prefix ("v2.33|") is not a field
+                    # and splits into a token no comparison will match.
+                    fields = text.split("|")
+                    if not any(
+                        field.casefold() == f"name={wanted}" for field in fields
+                    ):
+                        continue
+                    seen = True
+                    for field in fields:
+                        if not field.startswith("LPort="):
+                            continue
+                        ports.update(
+                            p for p in field[len("LPort=") :].split(",") if p
+                        )
+        except OSError:
+            return None
+        if not seen:
+            # No rule of that name: an answer, and the same one the other
+            # readers give for it.
+            return set()
+        return ports or None
+
+    @staticmethod
+    def check_firewall_rule_cached(
+        ports: int | list[int] | None = None,
+    ) -> tuple[bool, str]:
+        """``check_firewall_rule`` with the answer remembered for this process.
+
+        The startup path asks this question on every launch, and on a Windows
+        whose netsh output this cannot read the answer costs a PowerShell
+        start (seconds) each time.  The rule is machine-wide state that only
+        this application rewrites, and the one function that rewrites it
+        (``_open_firewall``) clears this cache — so within a process the first
+        answer stands.  Diagnostics asks the uncached question, which is the
+        one whose whole job is to report what is true right now.
+        """
+        if sys.platform != "win32":
+            return (True, "")
+        key = tuple(str(p) for p in ([ports] if isinstance(ports, int) else (ports or [])))
+        with WebServer._fw_cache_lock:
+            hit = WebServer._fw_read_cache.get(key)
+        if hit is not None:
+            return hit
+        answer = WebServer.check_firewall_rule(ports)
+        if answer[1] == "Unknown":
+            # A question that could not be answered is not an answer, and the
+            # very next thing a caller does with it can change it (a repair
+            # that writes the rule).  Only a definite reading is worth keeping.
+            return answer
+        with WebServer._fw_cache_lock:
+            WebServer._fw_read_cache[key] = answer
+        return answer
+
+    @staticmethod
+    def _firewall_repair_is_safe() -> bool:
+        """Whether a repair could put back what it is about to remove.
+
+        netsh only writes the rule from an elevated process, so an
+        unelevated one that deletes first and then fails to add leaves the
+        machine with *no* rule where it had a working one — worse than the
+        mismatch it set out to fix, and with the app unable to restore it.
+        Ask the OS before removing anything.
+        """
+        if sys.platform != "win32":
+            return True
+        try:
+            import ctypes
+
+            return bool(ctypes.windll.shell32.IsUserAnAdmin())
+        except Exception:
+            # Cannot prove elevation: treat it as absent, so the worst case is
+            # a rule left alone rather than one destroyed.
+            return False
 
     @staticmethod
     def check_firewall_rule(ports: int | list[int] | None = None) -> tuple[bool, str]:
@@ -884,7 +1033,10 @@ class WebServer:
             ports.append(web_port)
         import subprocess
 
-        ok, detail = WebServer.check_firewall_rule(ports)
+        # The cached question: this runs on every launch, and on a Windows
+        # whose netsh output this cannot read, the uncached one costs a
+        # PowerShell start every time.
+        ok, detail = WebServer.check_firewall_rule_cached(ports)
         if ok:
             return True
         if detail.startswith("Wrong port"):
@@ -897,8 +1049,19 @@ class WebServer:
             # the add that follows needs elevation, so if that is refused the
             # machine is left with no rule at all.  A rule readable enough to
             # say "wrong ports" is not serving what we need, so removing it
-            # costs nothing.
+            # costs nothing -- but only where the add behind it can be
+            # expected to land.  Unelevated, "delete then fail to add" is the
+            # one outcome strictly worse than doing nothing, and every launch
+            # used to attempt it: ask first.
+            if not WebServer._firewall_repair_is_safe():
+                logger.info(
+                    "Firewall rule needs updating (%s), but replacing it needs "
+                    "administrator rights — leaving the existing rule alone",
+                    detail,
+                )
+                return False
             logger.info("Replacing the firewall rule (%s)", detail)
+            WebServer._fw_read_cache.clear()
             try:  # noqa: SIM105
                 subprocess.run(
                     [
@@ -945,6 +1108,7 @@ class WebServer:
             )
             if result.returncode == 0:
                 logger.info("Firewall rule created for port %s", ",".join(map(str, ports)))
+                WebServer._fw_read_cache.clear()
                 return True
             else:
                 stderr = decode_console_output(result.stderr).strip()
@@ -959,6 +1123,9 @@ class WebServer:
                     or stdout
                     or "no output — ClipSync is probably not running as administrator",
                 )
+                # The rule was removed (or a second one attempted) and netsh
+                # did not take: whatever the last read said is no longer true.
+                WebServer._fw_read_cache.clear()
                 return False
         except Exception as e:
             logger.warning("Firewall setup error: %s", e)
@@ -1249,25 +1416,34 @@ class WebServer:
                 return result
 
             def _send_json(inner_self, data, status=200):  # noqa: N805
+                body = json.dumps(data, ensure_ascii=False).encode("utf-8")
                 inner_self.send_response(status)
                 inner_self.send_header("Content-Type", "application/json; charset=utf-8")
+                # Stated rather than implied by closing the connection.  The
+                # handler never sets `protocol_version`, so this is HTTP/1.0 and
+                # a missing length would still work -- but only until somebody
+                # raises that to 1.1 as a performance idea, at which point every
+                # response without one hangs until it times out.
+                inner_self.send_header("Content-Length", str(len(body)))
                 inner_self.send_header("Cache-Control", "no-cache")
                 inner_self.send_header("Access-Control-Allow-Origin", "*")
                 inner_self.send_header("Referrer-Policy", "no-referrer")
                 inner_self.send_header("X-Content-Type-Options", "nosniff")
                 inner_self.end_headers()
                 with contextlib.suppress(OSError):
-                    inner_self.wfile.write(json.dumps(data, ensure_ascii=False).encode("utf-8"))
+                    inner_self.wfile.write(body)
 
             def _send_html(inner_self, html: str, status=200):  # noqa: N805
+                body = html.encode("utf-8")
                 inner_self.send_response(status)
                 inner_self.send_header("Content-Type", "text/html; charset=utf-8")
+                inner_self.send_header("Content-Length", str(len(body)))
                 inner_self.send_header("Cache-Control", "no-cache")
                 inner_self.send_header("Referrer-Policy", "no-referrer")
                 inner_self.send_header("X-Content-Type-Options", "nosniff")
                 inner_self.end_headers()
                 with contextlib.suppress(OSError):
-                    inner_self.wfile.write(html.encode("utf-8"))
+                    inner_self.wfile.write(body)
 
             @staticmethod
             def _page_lang() -> str:
@@ -1382,8 +1558,16 @@ class WebServer:
                     return
 
                 full_path = os.path.normpath(os.path.join(static_dir, safe_path))
-                # Ensure we don't escape the static directory
-                if not full_path.startswith(os.path.normpath(static_dir)):
+                # Ensure we don't escape the static directory.  Compared by path
+                # component, not by string prefix: a sibling directory whose name
+                # merely starts with the same characters (``static-evil`` beside
+                # ``static``) satisfies ``startswith`` while being outside.  The
+                # ``..`` test above already blocks the traversal that would reach
+                # one, so this is the second line rather than the first -- and a
+                # second line that cannot be defeated by a directory name is the
+                # point of having one.
+                root = os.path.normpath(static_dir)
+                if full_path != root and not full_path.startswith(root + os.sep):
                     inner_self._send_json({"error": "forbidden"}, 403)
                     return
 
@@ -1710,36 +1894,45 @@ class WebServer:
                     if isinstance(_page_q, list) and _page_q and _page_q[0] == "mobile":
                         page = _page_q[0]
                     start_path = f"/{page}.html" if page else "/"
+                    # The token is percent-encoded here for the same reason the
+                    # HTML interpolation encodes it (see `_interpolate_html`):
+                    # `_token_ok` compares against exactly one `token` parameter,
+                    # and a user-set token containing `&` or `+` would otherwise
+                    # arrive split in two or with the `+` read as a space -- a
+                    # 403 on the start_url and on every icon, which is a PWA that
+                    # installs and then cannot open.  The default token is
+                    # URL-safe, which is why this only ever bit a custom one.
+                    token = urllib.parse.quote(cfg.web_token or "", safe="")
                     manifest = {
                         "name": "ClipSync Web",
                         "short_name": "ClipSync",
                         "id": start_path,
                         "scope": "/",
-                        "start_url": f"{start_path}?token={cfg.web_token}",
+                        "start_url": f"{start_path}?token={token}",
                         "display": "standalone",
                         "background_color": "#0A0E1E",
                         "theme_color": "#05060D",
                         "icons": [
                             {
-                                "src": f"/icon-192.png?token={cfg.web_token}",
+                                "src": f"/icon-192.png?token={token}",
                                 "sizes": "192x192",
                                 "type": "image/png",
                                 "purpose": "any",
                             },
                             {
-                                "src": f"/icon-512.png?token={cfg.web_token}",
+                                "src": f"/icon-512.png?token={token}",
                                 "sizes": "512x512",
                                 "type": "image/png",
                                 "purpose": "any",
                             },
                             {
-                                "src": f"/icon-192.png?token={cfg.web_token}",
+                                "src": f"/icon-192.png?token={token}",
                                 "sizes": "192x192",
                                 "type": "image/png",
                                 "purpose": "maskable",
                             },
                             {
-                                "src": f"/icon-512.png?token={cfg.web_token}",
+                                "src": f"/icon-512.png?token={token}",
                                 "sizes": "512x512",
                                 "type": "image/png",
                                 "purpose": "maskable",
@@ -2260,6 +2453,16 @@ class WebServer:
                     return
 
                 inner_self._send_json({"error": "not found"}, 404)
+
+            # PUT is the same operation as PATCH for the one route that offers it
+            # (``/api/favorites``, an upsert), and the CORS header has always
+            # advertised it.  ``BaseHTTPRequestHandler`` answers an unimplemented
+            # method with a bare 501 before any of this runs, so clients that
+            # read the advertisement and followed it -- and the route module,
+            # which dispatches on ``("PATCH", "PUT")`` -- were answered by the
+            # HTTP layer instead of by the handler.
+            def do_PUT(inner_self):  # noqa: N805
+                return inner_self.do_PATCH()
 
         # ── Create and start the HTTP server ──────────────────────
         try:

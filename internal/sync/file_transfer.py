@@ -28,12 +28,13 @@ Transfer flow (receiver):
 
 import base64
 import contextlib
+import hashlib
 import logging
 import os
 import threading
 import time
 import uuid
-from collections import deque
+from collections import OrderedDict, deque
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -224,6 +225,13 @@ class FileTransferManager:
 
     CHUNK_SIZE = CHUNK_SIZE
 
+    # How many recently reported transfer ids `_fire_complete_once` remembers.
+    # The set only exists to close a race between two threads looking at one
+    # transfer, which lasts milliseconds; a few hundred ids is generous, and the
+    # bound is what keeps a long-running process from accumulating one per
+    # transfer it ever finished.
+    _NOTIFIED_MEMORY = 512
+
     def __init__(
         self,
         device_id: str,
@@ -262,7 +270,14 @@ class FileTransferManager:
         # Speed test state
         self._speed_test: dict[str, Any] | None = None
         self._lock = threading.Lock()
-
+        # Transfers whose terminal callback has already gone out.  The guarded
+        # case is one the ledger can no longer answer: the finalizing thread
+        # removes a transfer before it reports the outcome, so a second caller
+        # arriving in that gap has no dict entry to consult (see
+        # `_fire_complete_once`).  Bounded, like the transfers dict: an id is
+        # only in here while some other thread could still be racing for it.
+        self._notified: OrderedDict[str, None] = OrderedDict()
+        self._notified_lock = threading.Lock()
         # ---- UI callbacks ----
         self._on_transfer_progress: Callable[[str, float], None] | None = None
         self._on_transfer_complete: Callable[[str, bool, bool, str], None] | None = None
@@ -305,23 +320,77 @@ class FileTransferManager:
         state for the same transfer (e.g. ``cancel_transfer`` sets ``cancelled``
         while the send loop is mid-chunk and wakes to the same flag).  Without
         a once-guard the callback — and the notification / web push built on it
-        — would fire twice for one transfer.  The guard flag lives on the
-        transfer dict so it survives whichever path removes the transfer.
+        — would fire twice for one transfer.
+
+        A transfer this call cannot see is not automatically over: the finalizing
+        thread removes it up front (``_finish_now``) and reports the outcome once
+        its own side effects are done, so a concurrent caller arriving in that
+        gap must not report it a second time.  ``_complete_fired`` is still on
+        the dict the finalizer holds, and the finalizer is bound to call this
+        itself — so finding neither the dict entry nor the flag means nobody has
+        reported it and this caller may.
         """
         with self._lock:
             transfer = self._transfers.get(transfer_id)
-            if transfer is None:
-                # Already removed (and its terminal callback fired by cleanup).
-                return
-            if transfer.get("_complete_fired"):
-                return
-            transfer["_complete_fired"] = True
+            if transfer is not None:
+                if transfer.get("_complete_fired") or transfer.get("_complete_notified"):
+                    return
+                transfer["_complete_fired"] = True
+            else:
+                # The finalizer claims the ending with `_complete_fired` before
+                # it removes the entry, so a dict miss with the flag set is that
+                # same ending seen from the outside; a miss without it is a
+                # transfer that was never claimed here at all.
+                with self._notified_lock:
+                    if transfer_id in self._notified:
+                        return
+                    self._notified[transfer_id] = None
+                    self._notified.move_to_end(transfer_id)
+                    while len(self._notified) > self._NOTIFIED_MEMORY:
+                        # Only the recent past matters: a race is between two
+                        # threads looking at one transfer, and that window closes
+                        # in milliseconds.  Bounded so a long-running process
+                        # cannot accumulate an id per transfer it ever finished.
+                        self._notified.popitem(last=False)
+        if transfer is not None:
+            transfer["_complete_notified"] = True
+        self._notify_complete(transfer_id, success, cancelled, status)
+
+    def _notify_complete(
+        self, transfer_id: str, success: bool, cancelled: bool, status: str
+    ) -> None:
+        """Hand one terminal event to the owner.  Never while holding the lock."""
         cb = self._on_transfer_complete
         if cb is not None:
             try:
                 cb(transfer_id, success, cancelled, status)
             except Exception:
                 logger.exception("transfer complete callback failed")
+
+    def _finish_now(self, transfer_id: str, transfer: dict) -> bool:
+        """Claim a transfer's ending, if this caller is the one ending it.
+
+        Returns False when the transfer has already been ended -- cancelled,
+        failed, or finalized on another thread -- in which case every part of the
+        terminal sequence (the history row, the frame to the peer, the completion
+        callback) must be skipped rather than repeated.
+
+        This is a *claim*, not a report: it marks the transfer finished and takes
+        it out of the ledger, and the caller then does its side effects (deliver
+        the file, write the history row, answer the peer) and ends with
+        ``_fire_complete_once``.  Reporting here instead would announce the
+        completion before the file had been handed to the receiver.  Removing the
+        entry is what makes the claim atomic: a cancel can only recognize a live
+        transfer, so once this returns True the ending is this caller's.
+        """
+        with self._lock:
+            if self._transfers.get(transfer_id) is not transfer:
+                return False
+            if transfer.get("_complete_fired"):
+                return False
+            transfer["_complete_fired"] = True
+            self._transfers.pop(transfer_id, None)
+        return True
 
     def set_on_file_received(self, callback: Callable[[str, str, str], None]) -> None:
         """*callback(transfer_id, saved_path, file_name)* -- called after a file is
@@ -385,6 +454,31 @@ class FileTransferManager:
         order, a file this user pulled from a peer's history row and a log this
         user asked a peer for.  Called from the on-file-received callback."""
         return self.take_received_info(transfer_id)[0]
+
+    def _temp_path(self, transfer_id) -> Path:
+        """The partial file one transfer writes into, inside the receive dir.
+
+        One definition, because the path is built from a **peer-supplied string**
+        and every ``self._output_dir / f".{transfer_id}.part"`` used to do it by
+        hand.  A ``transfer_id`` of ``../../../../escaped`` therefore produced
+        ``<receive dir>/../../../../escaped.part``, and the payload was written
+        outside the receive directory entirely -- verified, and reachable under
+        the default settings, because ``file_open_to_all`` means no prompt stands
+        between whoever is on the network and this path.
+
+        ``_sanitize_file_name`` does not cover it: that guard is for the *final*
+        name, and the ``.part`` is created long before anything moves onto it.
+
+        So the id is reduced to a fixed-length digest of itself, which cannot
+        carry a separator or a ``..`` however it is spelled, keeps the name
+        short, and collides only if the id does.  ``uuid4().hex`` is what every
+        sender generates, so an honest peer's id is unaffected -- and this cannot
+        be tightened to "32 hex" the way ``nearby_chat`` does, because the
+        transfer API itself accepts other ids.
+        """
+        raw = transfer_id if isinstance(transfer_id, str) else str(transfer_id)
+        digest = hashlib.sha256(raw.encode("utf-8", "replace")).hexdigest()
+        return self._output_dir / f".{digest}.part"
 
     def take_received_info(self, transfer_id: str) -> tuple[str, str, str]:
         """Pop ``(kind, sender_device_id, sha256)`` for a received transfer.
@@ -547,7 +641,7 @@ class FileTransferManager:
                 return
 
             transfer["state"] = "receiving"
-            temp_path = self._output_dir / f".{transfer_id}.part"
+            temp_path = self._temp_path(transfer_id)
             try:
                 transfer["temp_fh"] = open(str(temp_path), "wb")  # noqa: SIM115
             except OSError as exc:
@@ -600,7 +694,7 @@ class FileTransferManager:
             if temp_fh is not None:
                 with contextlib.suppress(Exception):
                     temp_fh.close()
-            temp_path = self._output_dir / f".{transfer_id}.part"
+            temp_path = self._temp_path(transfer_id)
             if temp_path.exists():
                 with contextlib.suppress(OSError):
                     temp_path.unlink()
@@ -649,7 +743,7 @@ class FileTransferManager:
         if transfer and transfer.get("temp_fh") is not None:
             with contextlib.suppress(Exception):
                 transfer["temp_fh"].close()
-            _safe_remove(self._output_dir / f".{transfer_id}.part")
+            _safe_remove(self._temp_path(transfer_id))
 
         self._send_as_frame(
             {"msg_type": "file_reject", "transfer_id": transfer_id},
@@ -927,6 +1021,26 @@ class FileTransferManager:
         now = time.time()
         with self._lock:
             existing = self._transfers.get(transfer_id)
+            if existing is not None and existing.get("type") == "outgoing":
+                # A request reusing the id of a transfer *this* machine is
+                # sending.  The id is not a secret -- `send_file` broadcasts it to
+                # every connected peer as part of the request -- so any device on
+                # the network could name it and, without this guard, replace this
+                # side's outgoing entry with its own: the attacker's file_name and
+                # file_size were what the UI then showed, the real send vanished
+                # from the list, and its chunk thread exited silently while the
+                # 90-second completion window kept burning.  Refusing is the only
+                # answer that keeps the two directions of one id apart; a genuine
+                # peer never reuses an id it just saw.
+                logger.warning(
+                    "Refusing file_request for %s: that id belongs to a transfer "
+                    "this machine is sending",
+                    transfer_id[:8],
+                )
+                self._send_as_frame(
+                    {"msg_type": "file_reject", "transfer_id": transfer_id}, send_fn
+                )
+                return
             if (
                 existing is not None
                 and existing.get("type") == "incoming"
@@ -1007,9 +1121,19 @@ class FileTransferManager:
         elif self._on_transfer_request is not None:
             self._on_transfer_request(transfer_id, file_name, file_size, mime_type, send_fn)
         else:
-            # No UI callback registered -- auto-accept for headless operation
-            logger.info("Auto-accepting transfer %s (no UI callback registered)", transfer_id[:8])
-            self.accept_transfer(transfer_id, send_fn)
+            # Nowhere to raise the prompt, and the setting says files need one.
+            # This used to auto-accept here -- "headless operation" -- which read
+            # the absence of a UI as consent: a build with no callback, or one
+            # whose callback had not been registered yet at the moment the frame
+            # arrived, took the file although the reader had explicitly turned
+            # that off.  Refusing is the only answer consistent with the setting,
+            # and the sender is told rather than left waiting.
+            logger.warning(
+                "Refusing %s transfer %s: file_open_to_all is off and no prompt is "
+                "registered to ask about it",
+                kind, transfer_id[:8],
+            )
+            self.reject_transfer(transfer_id, send_fn)
 
     def _handle_file_chunk(
         self, payload: dict, send_fn: Callable[[bytes], None], sender_device_id: str = ""
@@ -1208,8 +1332,8 @@ class FileTransferManager:
 
         if temp_fh is None:
             logger.error("No open temp file for transfer %s", transfer_id[:8])
-            with self._lock:
-                self._transfers.pop(transfer_id, None)
+            if not self._finish_now(transfer_id, transfer):
+                return
             # Record the failure so it shows up in the transfers history
             # instead of vanishing silently.
             self._add_to_history(transfer, False, status="error_internal")
@@ -1221,8 +1345,7 @@ class FileTransferManager:
                 },
                 send_fn,
             )
-            if self._on_transfer_complete:
-                self._on_transfer_complete(transfer_id, False, False, "error_internal")
+            self._fire_complete_once(transfer_id, False, False, "error_internal")
             return
 
         # Guard against concurrent finalization from _handle_file_chunk and
@@ -1235,7 +1358,7 @@ class FileTransferManager:
                 return
             fresh["_finalizing"] = True
 
-        temp_path = self._output_dir / f".{transfer_id}.part"
+        temp_path = self._temp_path(transfer_id)
 
         try:
             # Chunks are streamed to the temp file as they arrive; only the
@@ -1347,8 +1470,8 @@ class FileTransferManager:
                     received_bytes,
                 )
                 _safe_remove(temp_path)
-                with self._lock:
-                    self._transfers.pop(transfer_id, None)
+                if not self._finish_now(transfer_id, transfer):
+                    return
                 # Record the failure so it shows up in the transfers history.
                 self._add_to_history(transfer, False, status="error_size_mismatch")
                 self._send_as_frame(
@@ -1359,8 +1482,7 @@ class FileTransferManager:
                     },
                     send_fn,
                 )
-                if self._on_transfer_complete:
-                    self._on_transfer_complete(transfer_id, False, False, "error_size_mismatch")
+                self._fire_complete_once(transfer_id, False, False, "error_size_mismatch")
                 return
 
             # Move to final destination, avoiding name collisions
@@ -1370,8 +1492,8 @@ class FileTransferManager:
                     "Path traversal blocked for transfer %s: %s", transfer_id[:8], file_name
                 )
                 _safe_remove(temp_path)
-                with self._lock:
-                    self._transfers.pop(transfer_id, None)
+                if not self._finish_now(transfer_id, transfer):
+                    return
                 # Record the failure so it shows up in the transfers history.
                 self._add_to_history(transfer, False, status="error_security")
                 self._send_as_frame(
@@ -1382,13 +1504,25 @@ class FileTransferManager:
                     },
                     send_fn,
                 )
-                if self._on_transfer_complete:
-                    self._on_transfer_complete(transfer_id, False, False, "error_security")
+                self._fire_complete_once(transfer_id, False, False, "error_security")
                 return
+            # The file goes into place BEFORE the ending is claimed, and that
+            # order is the fix for a silent loss: `_finish_now` pops the transfer
+            # out of `_transfers`, so anything that failed after it left a
+            # transfer nobody could report on.  A hostile name (`evil.txt:stream`,
+            # an over-long path) made `os.replace` raise, the placeholder was
+            # cleaned up, and the exception escaped past this method's own except
+            # because `_reserve_dest_name` sat outside the `try` -- so the
+            # verified file was discarded, no history row and no `file_complete`
+            # were written, the sender timed out 90 s later, and the `.part`
+            # stayed on disk.  Losing the bytes is one thing; losing them with
+            # nothing anywhere saying so is the part that made this hard to find.
+            #
             # Claim the name atomically, then move the payload onto our own
-            # placeholder (see _reserve_dest_name).
-            dest_path = _reserve_dest_name(dest_path)
+            # placeholder (see _reserve_dest_name).  Both are inside the `try`,
+            # so a bad name reports an error like any other disk failure.
             try:
+                dest_path = _reserve_dest_name(dest_path)
                 os.replace(str(temp_path), str(dest_path))
             except (OSError, ValueError):
                 # Never leave the zero-byte placeholder behind: it would show
@@ -1396,8 +1530,24 @@ class FileTransferManager:
                 _safe_remove(dest_path)
                 raise
 
-            with self._lock:
-                self._transfers.pop(transfer_id, None)
+            # Now the ending can be claimed.  Everything after this point --
+            # delivering the file, the history row, the frame to the peer, the
+            # completion callback -- belongs to exactly one caller, and a cancel
+            # that got here first has already delivered its own history row and
+            # told the user.
+            if not self._finish_now(transfer_id, transfer):
+                # A cancel claimed it while the file was moving, so it owns the
+                # report.  The bytes are on disk and complete, so they stay --
+                # deleting a file the user can see would be worse than the
+                # duplicate report this avoids -- but this side does not announce
+                # a second outcome for it.
+                logger.info(
+                    "Transfer %s was reported by a cancel while it was landing; "
+                    "the file is at %s",
+                    transfer_id[:8],
+                    _mask_path(str(dest_path)),
+                )
+                return
 
             self._send_as_frame(
                 {"msg_type": "file_complete", "transfer_id": transfer_id, "status": "success"},
@@ -1422,8 +1572,7 @@ class FileTransferManager:
                     str(transfer.get("sha256") or ""),
                 )
                 self._on_file_received(transfer_id, saved, file_name)
-            if self._on_transfer_complete is not None:
-                self._on_transfer_complete(transfer_id, True, False, "success")
+            self._fire_complete_once(transfer_id, True, False, "success")
 
         except (OSError, ValueError) as exc:
             logger.error("I/O error finalizing transfer %s: %s", transfer_id[:8], exc)
@@ -1431,16 +1580,19 @@ class FileTransferManager:
                 with contextlib.suppress(Exception):
                     temp_fh.close()
             _safe_remove(temp_path)
-            with self._lock:
-                self._transfers.pop(transfer_id, None)
+            # An I/O error here is usually the cancel path having closed this
+            # temp file and deleted the .part under us.  In that case the
+            # transfer is already over and already reported: this must not add a
+            # second "error_disk" row beside the "cancelled" one.
+            if not self._finish_now(transfer_id, transfer):
+                return
             # Record the failure so it shows up in the transfers history.
             self._add_to_history(transfer, False, status="error_disk")
             self._send_as_frame(
                 {"msg_type": "file_complete", "transfer_id": transfer_id, "status": "error_disk"},
                 send_fn,
             )
-            if self._on_transfer_complete:
-                self._on_transfer_complete(transfer_id, False, False, "error_disk")
+            self._fire_complete_once(transfer_id, False, False, "error_disk")
 
     def _retransmit_wait(self, transfer_id: str, total_chunks: int) -> None:
         """Wait for retransmitted chunks, then re-trigger finalization.
@@ -1549,7 +1701,7 @@ class FileTransferManager:
             if temp_fh is not None:
                 with contextlib.suppress(Exception):
                     temp_fh.close()
-            _safe_remove(self._output_dir / f".{transfer_id}.part")
+            _safe_remove(self._temp_path(transfer_id))
 
         if transfer is not None and transfer.get("type") == "outgoing":
             success = status == "success"
@@ -1569,13 +1721,21 @@ class FileTransferManager:
         """Sender: receiver reports missing chunks → retransmit them."""
         transfer_id = payload.get("transfer_id", "")
         missing = payload.get("missing_chunks", [])
-        with self._lock:
-            transfer = self._transfers.get(transfer_id)
-        if transfer is None or transfer.get("type") != "outgoing":
-            return
         if not missing:
             return  # all good, nothing to retransmit
-        transfer["_retransmit_queue"] = missing
+        with self._lock:
+            transfer = self._transfers.get(transfer_id)
+            if transfer is None or transfer.get("type") != "outgoing":
+                return
+            # Written under the lock the sender consumes it under.  This used to
+            # be a plain assignment after a separate locked lookup, so an
+            # acknowledgement arriving between the send loop's own `pop` and its
+            # send could be overwritten -- and a request that is overwritten is a
+            # request no one answers, which is the failure this mechanism exists
+            # to prevent.  The receiver reports its whole missing set each round,
+            # so replacing is right; what has to be atomic is replacing versus
+            # taking.
+            transfer["_retransmit_queue"] = missing
         logger.info(
             "Transfer %s: receiver requests %d missing chunks",
             transfer_id[:8],
@@ -2280,7 +2440,7 @@ class FileTransferManager:
             if transfer.get("temp_fh") is not None:
                 with contextlib.suppress(Exception):
                     transfer["temp_fh"].close()
-            _safe_remove(self._output_dir / f".{tid}.part")
+            _safe_remove(self._temp_path(tid))
 
             logger.info(
                 "Cleaned up stale transfer %s (%s)",

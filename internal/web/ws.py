@@ -21,10 +21,18 @@ logger = logging.getLogger(__name__)
 _WS_MAGIC = b"258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
 
 # Frame opcodes
+_OP_CONT = 0x0  # continuation of a fragmented message
 _OP_TEXT = 0x1
+_OP_BINARY = 0x2
 _OP_CLOSE = 0x8
 _OP_PING = 0x9
 _OP_PONG = 0xA
+
+# The largest message one client may send, reassembled across fragments.  The
+# single-frame extended-length path already refused anything larger; this is the
+# same ceiling applied to a message that arrives in pieces, which is otherwise
+# how a client could grow the reassembly buffer without bound.
+_MAX_MESSAGE_BYTES = 1024 * 1024
 
 # Broadcasts bound each client's send to a shorter deadline than the steady-
 # state 5s socket timeout, so one client that stops reading (backing up its
@@ -51,6 +59,10 @@ class WebSocketClient:
         # several intervals (phone asleep, cable pulled) so a zombie
         # connection is not reported as "connected" forever.
         self.last_recv = time.monotonic()
+        # Set by `_read_one_frame` when it answered a control frame, so the
+        # message-reassembly loop knows the frame it just consumed was not part
+        # of the message and waits for the next one instead of returning.
+        self._last_was_control = False
         # A stalled client (phone asleep, cable pulled) must not block a
         # broadcast forever: bound every send/recv on this socket so
         # sendall() raises instead of blocking indefinitely.  This also
@@ -103,82 +115,155 @@ class WebSocketClient:
     def recv_frame(self, timeout: float = 0.05) -> bytes | None:
         """Receive one complete frame payload (unmasked text data).
         Returns None if no data or connection closed.
+
+        Fragmented messages are reassembled before returning (RFC 6455 §5.4) and
+        an unmasked client frame closes the connection with 1002 (§5.1).  Both
+        used to be ignored: the FIN bit was read and never consulted, a
+        continuation frame fell through to the unknown-opcode branch and was
+        dropped, and an unmasked payload was used as if it were text.  A browser
+        sending one small frame never exercised either path, which is why this
+        only matters for a client that fragments -- a proxy, or a mobile WebView
+        with a large payload.
         """
         try:
             if not self._wait_readable(timeout):
                 return None
-            # Read first 2 bytes
-            header = self._recv_exact(2)
-            if header is None:
-                self._closed = True
-                return None
-
-            first_byte, second_byte = header[0], header[1]
-            opcode = first_byte & 0x0F
-            masked = (second_byte & 0x80) != 0
-            payload_len = second_byte & 0x7F
-            # Any successfully-read frame proves the connection is alive —
-            # browsers auto-answer our ping with a pong, which lands here and
-            # refreshes last_recv even though we discard the payload.
-            self.last_recv = time.monotonic()
-
-            # Handle extended payload length
-            if payload_len == 126:
-                ext = self._recv_exact(2)
-                if ext is None:
-                    self._closed = True
+            message = bytearray()
+            message_started = False
+            while True:
+                # Control frames are handled inside _read_one_frame, which
+                # answers them and leaves `_last_was_control` set.  The loop then
+                # goes round again, because a keepalive that arrives between two
+                # fragments belongs to the connection and not to the message
+                # being assembled -- and the next `_wait_readable` at the top is
+                # what waits for that next fragment.
+                self._last_was_control = False
+                payload, opcode, final, masked = self._read_one_frame()
+                if self._last_was_control and not self._closed:
+                    continue
+                if payload is None:
                     return None
-                payload_len = struct.unpack("!H", ext)[0]
-            elif payload_len == 127:
-                ext = self._recv_exact(8)
-                if ext is None:
-                    self._closed = True
+                if not masked:
+                    # §5.1: every client-to-server frame must be masked, and a
+                    # server that receives one unmasked must fail the connection.
+                    logger.debug("WS unmasked client frame from %s — closing", self.addr[0])
+                    self._fail_connection(1002, "unmasked client frame")
                     return None
-                payload_len = struct.unpack("!Q", ext)[0]
-                if payload_len > 1024 * 1024:  # 1 MB max
-                    self._closed = True
+                if opcode == _OP_CONT:
+                    if not message_started:
+                        # Continuation with nothing to continue.
+                        self._fail_connection(1002, "unexpected continuation")
+                        return None
+                    message += payload
+                else:
+                    if message_started:
+                        # A new data frame before the previous message finished.
+                        self._fail_connection(1002, "interleaved data frame")
+                        return None
+                    message += payload
+                    message_started = True
+                if len(message) > _MAX_MESSAGE_BYTES:
+                    # Accumulating fragments is how a client could otherwise grow
+                    # this buffer without bound, one legal frame at a time.
+                    self._fail_connection(1009, "message too large")
                     return None
-
-            # Read mask key (client-to-server frames MUST be masked)
-            if masked:
-                mask_key = self._recv_exact(4)
-                if mask_key is None:
-                    self._closed = True
-                    return None
-            else:
-                mask_key = None
-
-            # Read payload
-            payload = self._recv_exact(payload_len)
-            if payload is None:
-                self._closed = True
-                return None
-
-            # Unmask if needed
-            if mask_key:
-                payload = bytes(b ^ mask_key[i % 4] for i, b in enumerate(payload))
-
-            # Handle control frames
-            if opcode == _OP_CLOSE:
-                self._send_frame(_OP_CLOSE, b"")
-                self._closed = True
-                return None
-            elif opcode == _OP_PING:
-                self._send_frame(_OP_PONG, payload)
-                return None
-            elif opcode == _OP_PONG:
-                return None
-            elif opcode == _OP_TEXT:
-                return payload
-            else:
-                logger.debug("WS unknown opcode: %d", opcode)
-                return None
+                if final:
+                    return bytes(message)
 
         except (OSError, ConnectionError) as e:
             logger.debug("WS recv error (%s): %s", self.addr[0], e)
             self._closed = True
             return None
 
+    def _read_one_frame(self):
+        """Read one frame.  Returns ``(payload, opcode, final, masked)``.
+
+        ``opcode`` is None for a control frame, which has already been handled
+        and whose return says only whether the loop should carry on.
+        ``payload`` is None when the connection ended.
+        """
+        header = self._recv_exact(2)
+        if header is None:
+            self._closed = True
+            return None, None, False, False
+
+        first_byte, second_byte = header[0], header[1]
+        opcode = first_byte & 0x0F
+        final = (first_byte & 0x80) != 0
+        masked = (second_byte & 0x80) != 0
+        payload_len = second_byte & 0x7F
+        # Any successfully-read frame proves the connection is alive —
+        # browsers auto-answer our ping with a pong, which lands here and
+        # refreshes last_recv even though we discard the payload.
+        self.last_recv = time.monotonic()
+
+        # Handle extended payload length
+        if payload_len == 126:
+            ext = self._recv_exact(2)
+            if ext is None:
+                self._closed = True
+                return None, None, False, False
+            payload_len = struct.unpack("!H", ext)[0]
+        elif payload_len == 127:
+            ext = self._recv_exact(8)
+            if ext is None:
+                self._closed = True
+                return None, None, False, False
+            payload_len = struct.unpack("!Q", ext)[0]
+            if payload_len > _MAX_MESSAGE_BYTES:
+                self._closed = True
+                return None, None, False, False
+
+        # Control frames carry at most 125 bytes and may never be fragmented
+        # (§5.5); a longer one is a protocol error, not a large ping.
+        if opcode in (_OP_CLOSE, _OP_PING, _OP_PONG) and (payload_len > 125 or not final):
+            self._fail_connection(1002, "malformed control frame")
+            return None, None, False, False
+
+        # Read mask key (client-to-server frames MUST be masked)
+        if masked:
+            mask_key = self._recv_exact(4)
+            if mask_key is None:
+                self._closed = True
+                return None, None, False, False
+        else:
+            mask_key = None
+
+        # Read payload
+        payload = self._recv_exact(payload_len)
+        if payload is None:
+            self._closed = True
+            return None, None, False, False
+
+        # Unmask if needed
+        if mask_key:
+            payload = bytes(b ^ mask_key[i % 4] for i, b in enumerate(payload))
+
+        # Handle control frames.  Answering one is not the end of the message
+        # that may be in flight, so these paths leave `_last_was_control` set for
+        # the reassembly loop to notice (close ends the connection instead).
+        if opcode == _OP_CLOSE:
+            self._send_frame(_OP_CLOSE, b"")
+            self._closed = True
+            return None, None, False, False
+        if opcode == _OP_PING:
+            self._send_frame(_OP_PONG, payload)
+            self._last_was_control = True
+            return None, None, False, False
+        if opcode == _OP_PONG:
+            self._last_was_control = True
+            return None, None, False, False
+        if opcode in (_OP_TEXT, _OP_BINARY, _OP_CONT):
+            return payload, opcode, final, masked
+        logger.debug("WS unknown opcode: %d", opcode)
+        self._fail_connection(1002, "unknown opcode")
+        return None, None, False, False
+
+    def _fail_connection(self, code: int, reason: str) -> None:
+        """Close with a status code, as §7.1.7 requires for a protocol error."""
+        with contextlib.suppress(Exception):
+            self._send_frame(_OP_CLOSE, struct.pack("!H", code) + reason.encode()[:123])
+        self._closed = True
     def serve(self):
         """Run a read loop until the client disconnects.
 

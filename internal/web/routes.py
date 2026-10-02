@@ -274,6 +274,22 @@ def _redact_sensitive_line(line: str, cfg) -> str:
     return redact_sensitive_line(line, cfg)
 
 
+def _open_url_quietly(url: str) -> None:
+    """Hand a URL to the desktop browser, off the request thread.
+
+    The client is told the URL was accepted; whether a browser came up is the
+    desktop's business and not something this route can report usefully.  A
+    failure is logged rather than raised, because it happens on a thread with no
+    caller left to raise to.
+    """
+    try:
+        import webbrowser
+
+        webbrowser.open(url)
+    except Exception:
+        logger.warning("Could not open %s in the desktop browser", url, exc_info=True)
+
+
 def dispatch(
     method,
     path,
@@ -780,9 +796,17 @@ def _dispatch(
             if target_device and target_device != cfg.device_id and on_nav_url:
                 on_nav_url(url, target_device)
             else:
-                import webbrowser
-
-                webbrowser.open(url)
+                # Off this thread: `webbrowser.open` blocks until the OS hands
+                # the URL to a browser, and this runs on a connection worker.
+                # The pool is 64 connections, so a page that opens a few links in
+                # a row could take every slot and answer 503 to everything else
+                # while it waits for a browser to come up.
+                threading.Thread(
+                    target=_open_url_quietly,
+                    args=(url,),
+                    daemon=True,
+                    name="clipsync-web-nav",
+                ).start()
             logger.info("Web nav: %s -> %s", url[:80], target_device[:12] or "local")
             return _json_response({"ok": True})
 

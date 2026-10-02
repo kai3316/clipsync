@@ -192,7 +192,23 @@ class PhonePush:
         )
 
     def _aiconfig_file(self, data):
-        self._ws.broadcast("aiconfig_file", data.get("event") or {})
+        """One AI-config event, forwarded under the name its own `type` carries.
+
+        The runtime publishes these flat: ``ai_config._emit`` builds
+        ``{"type": "aiconfig_file", ...}`` and ``lan.py`` hands the dict
+        straight to ``events.publish``, which forwards the payload untouched.
+        Reading a nested ``event`` key therefore found nothing and broadcast an
+        empty object, so a pull started from the phone reported no per-file
+        progress at all while the same pull from the window reported all of it.
+
+        ``type`` names the broadcast rather than travelling inside it: this one
+        channel carries both ``aiconfig_file`` (the per-file result, whose
+        payload the page validates on ``rel_path``/``status``) and
+        ``aiconfig_inventory`` (the answer to a refresh), and only that field
+        says which arrived.
+        """
+        payload = {k: v for k, v in data.items() if k != "type"}
+        self._ws.broadcast(str(data.get("type") or "aiconfig_file"), payload)
 
     # ---------------------------------------------------------- favourites
 

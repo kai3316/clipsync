@@ -279,8 +279,12 @@ class SidecarApplication:
         set_source = getattr(self.runtime, "set_clip_file_source", None)
         if set_source is not None:
             set_source(self._repository.file_entry_paths)
-        self.runtime.start()
+        # A failed start must leave the runtime reachable: _stop_runtime() is
+        # what the lifecycle rollback calls to release whatever the start had
+        # already acquired, and a reference dropped here is a half-built
+        # runtime nobody can shut down.
         self.internet_pairing = getattr(self.runtime, "internet_pairing", None)
+        self.runtime.start()
 
     # ``LanRuntime.stop()`` documents False as "retain this runtime, history and
     # identity and retry".  A drain that missed its budget is usually one
@@ -349,6 +353,10 @@ class SidecarApplication:
             on_send_url=lambda: self.events.publish("app.send_url_requested", {}),
             on_window_close=lambda: self.events.publish("app.window_close_requested", {}),
         )
+        # Assigned before start(), so a companion whose port bind failed is
+        # still the object _stop_companion() shuts down (its stop() is
+        # idempotent) instead of an orphan holding the port.  The start's own
+        # exception travels on to the lifecycle, which reports it.
         self.companion.start()
 
     def _stop_companion(self):

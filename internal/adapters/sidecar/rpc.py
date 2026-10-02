@@ -477,6 +477,12 @@ class Dispatcher:
                 # Nearby chat's admission rule.  Applied live, not on restart:
                 # the runtime pushes it straight into the live ChatManager.
                 "chat_open_to_all": (bool, lambda _: True),
+                # File transfer's, the same shape and the same live apply (see
+                # LanRuntime.apply_settings).  It is on the desktop's settings
+                # form, which submits every control it shows in one call -- so
+                # leaving it out of this table did not mean "ignore it", it
+                # meant every save from that page was refused whole.
+                "file_open_to_all": (bool, lambda _: True),
                 # Whether other devices may pull this machine's log.  Read at
                 # the moment a request arrives (see `_on_log_request`), so the
                 # switch is live without anything to re-apply.

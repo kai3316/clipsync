@@ -21,6 +21,13 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 
 from internal.protocol.codec import decode_message
+
+
+def decode_frame(data):
+    """A frame the manager sent, decoded, for the tests that inspect one."""
+    return decode_message(data)
+
+
 from internal.sync import file_transfer as file_transfer_mod
 from internal.sync.file_transfer import (
     CHUNK_SIZE,
@@ -40,6 +47,12 @@ class TestFileTransferManager:
         self.tmp_dir = tempfile.mkdtemp()
         self.output_dir = os.path.join(self.tmp_dir, "output")
         self.mgr = FileTransferManager("test-device", self.output_dir)
+        # The production default, and what `LanRuntime` configures a manager
+        # with.  Stated rather than assumed: the manager's own default is the
+        # strict one, and until this line existed these tests relied on a "no
+        # prompt registered" fallback that auto-accepted regardless of the
+        # setting.  A test that wants the prompt registers one itself.
+        self.mgr.set_file_open_to_all(True)
         self.sent_frames: list[bytes] = []
 
     def teardown_method(self):
@@ -102,7 +115,9 @@ class TestFileTransferManager:
     # ------------------------------------------------------------------
 
     def test_handle_file_request_creates_pending_transfer(self):
-        # Suppress auto-accept to test pending state
+        # The setting off plus a prompt registered is the state a pending
+        # transfer exists in; with the setting on there is nothing pending.
+        self.mgr.set_file_open_to_all(False)
         self.mgr.set_on_transfer_request(lambda *a: None)
         self.mgr.handle_message(
             "file_request",
@@ -128,8 +143,10 @@ class TestFileTransferManager:
     # ------------------------------------------------------------------
 
     def test_reject_transfer_sends_file_reject(self):
-        # First create a pending incoming transfer.  Without a callback the
-        # manager auto-accepts headlessly, which is no longer rejectable.
+        # A pending incoming transfer, which needs the prompt registered and the
+        # setting off: with the setting on the file is taken on arrival and is
+        # no longer rejectable.
+        self.mgr.set_file_open_to_all(False)
         self.mgr.set_on_transfer_request(lambda *a: None)
         self.mgr.handle_message(
             "file_request",
@@ -201,6 +218,68 @@ class TestFileTransferManager:
             if self._decode_sent(i).get("msg_type") == "file_complete"
         ]
         assert any(c["transfer_id"] == tid and c["status"] == "success" for c in completes)
+
+    def test_a_cancel_after_the_file_lands_cannot_report_a_disk_error(self):
+        """One transfer, one ending — whichever path gets there first.
+
+        Cancelling closes the temp file and deletes the ``.part``.  If that
+        happens while the finalize path is between moving the file and recording
+        the transfer, the finalize path used to find its temp file gone, take
+        the I/O-error branch, and report "error_disk" as well — so one transfer
+        the user cancelled produced two history rows and two notifications.
+
+        The ending is now claimed before the file is moved, so the cancel cannot
+        get in behind it: a cancel at this point finds the transfer finished and
+        does nothing.  Injecting it at the moment the success frame goes out is
+        the last place the race window used to be open.
+        """
+        file_data = b"cancel me mid-finalize"
+        tid = "recv-cancel-race"
+        completions = []
+        self.mgr.set_on_transfer_complete(lambda *args: completions.append(args))
+
+        self.mgr.handle_message(
+            "file_request",
+            {
+                "transfer_id": tid,
+                "file_name": "racy.txt",
+                "file_size": len(file_data),
+                "mime_type": "text/plain",
+            },
+            self._broadcast_fn,
+        )
+
+        real_send = self.mgr._send_as_frame
+        fired = []
+
+        def send_then_try_to_cancel(frame, send_fn):
+            real_send(frame, send_fn)
+            if frame.get("status") == "success" and not fired:
+                fired.append(True)
+                assert self.mgr.cancel_transfer(tid, self._broadcast_fn) is False, (
+                    "the transfer was still live after its ending was claimed"
+                )
+
+        self.mgr._send_as_frame = send_then_try_to_cancel
+        self.mgr.handle_message(
+            "file_chunk",
+            {
+                "transfer_id": tid,
+                "chunk_index": 0,
+                "total_chunks": 1,
+                "data": base64.b64encode(file_data).decode("ascii"),
+            },
+            self._broadcast_fn,
+        )
+        time.sleep(0.2)
+        self.mgr._send_as_frame = real_send
+
+        assert fired, "the injection point never ran"
+        statuses = [row.get("status") for row in self.mgr.get_history()]
+        # One row, and it is the ending that got there first: the file did land,
+        # and the refused cancel added nothing beside it.
+        assert statuses == ["success"], f"one transfer produced {statuses}"
+        assert len(completions) == 1, f"the completion callback ran {len(completions)} times"
 
     def test_receive_file_multi_chunk_out_of_order(self):
         """Chunks arrive in reverse order — should still assemble correctly."""
@@ -463,8 +542,13 @@ class TestDuplicateFileRequest:
             "kind": "file",
         }
 
-    def test_duplicate_request_keeps_active_receive_state(self, tmp_path):
+    def _manager(self, tmp_path):
         mgr = FileTransferManager(device_id="self", output_dir=str(tmp_path))
+        mgr.set_file_open_to_all(True)
+        return mgr
+
+    def test_duplicate_request_keeps_active_receive_state(self, tmp_path):
+        mgr = self._manager(tmp_path)
         sends = []
         send_fn = lambda data: sends.append(data) or True  # noqa: E731
 
@@ -502,6 +586,7 @@ class TestDeleteHistoryById:
 
     def _mgr(self, tmp_path, *ids):
         mgr = FileTransferManager(device_id="self", output_dir=str(tmp_path))
+        mgr.set_file_open_to_all(True)
         mgr._history = [{"transfer_id": i, "file_name": i + ".txt"} for i in ids]
         return mgr
 
@@ -526,6 +611,12 @@ class TestStalledIncomingTransfer:
         self.tmp_dir = tempfile.mkdtemp()
         self.output_dir = os.path.join(self.tmp_dir, "output")
         self.mgr = FileTransferManager("test-device", self.output_dir)
+        # The production default, and what `LanRuntime` configures a manager
+        # with.  Stated rather than assumed: the manager's own default is the
+        # strict one, and until this line existed these tests relied on a "no
+        # prompt registered" fallback that auto-accepted regardless of the
+        # setting.  A test that wants the prompt registers one itself.
+        self.mgr.set_file_open_to_all(True)
         self.sent_frames: list[bytes] = []
 
     def teardown_method(self):
@@ -643,7 +734,10 @@ class TestStalledIncomingTransfer:
 
         time.sleep(fast_stall_grace * 6)  # long enough to stall, if it counted
 
-        part = Path(self.output_dir) / f".{tid}.part"
+        # Through the manager's own builder: the partial file is named after a
+        # digest of the id, not the id, because the id arrives from a peer and
+        # used to be interpolated straight into this path.
+        part = self.mgr._temp_path(tid)
         assert part.exists(), "partial file was discarded during a pause"
         with self.mgr._lock:
             assert tid in self.mgr._transfers
@@ -662,7 +756,197 @@ class TestStalledIncomingTransfer:
         self.mgr.cleanup_stale_transfers()
         with self.mgr._lock:
             assert tid not in self.mgr._transfers
-        assert not (Path(self.output_dir) / f".{tid}.part").exists()
+        assert not self.mgr._temp_path(tid).exists()
+
+
+class TestAPeerCannotChooseWhereBytesLand:
+    """The partial file is built from a peer-supplied ``transfer_id``.
+
+    Every ``self._output_dir / f".{transfer_id}.part"`` used to interpolate it
+    raw, so an id of ``../../../../escaped`` wrote the payload four directories
+    above the receive directory.  Reachable with the shipped defaults: the id
+    arrives on a ``file_request``, and ``file_open_to_all`` (on by default) means
+    no prompt stands in the way.  ``_sanitize_file_name`` never applied -- that
+    guards the *final* name, and the ``.part`` is created long before anything is
+    moved onto it.
+    """
+
+    def test_a_traversing_transfer_id_cannot_leave_the_receive_directory(self, tmp_path):
+        out = tmp_path / "recv"
+        out.mkdir()
+        manager = FileTransferManager("self-dev", str(out))
+        manager.set_file_open_to_all(True)
+        canary = tmp_path / "escaped.part"
+
+        manager.handle_message(
+            "file_request",
+            {
+                "transfer_id": "../../../escaped",
+                "file_name": "harmless.txt",
+                "file_size": 4,
+                "mime_type": "text/plain",
+            },
+            lambda data: None,
+        )
+        manager.handle_message(
+            "file_chunk",
+            {
+                "transfer_id": "../../../escaped",
+                "chunk_index": 0,
+                "total_chunks": 1,
+                "data": base64.b64encode(b"evil").decode("ascii"),
+            },
+            lambda data: None,
+        )
+        time.sleep(0.2)
+
+        assert not canary.exists(), "the payload was written outside the receive dir"
+        # And what it did write is inside, under a name the id cannot steer.
+        for path in out.glob(".*.part"):
+            assert path.resolve().parent == out.resolve()
+
+    def test_the_temp_path_ignores_every_shape_of_traversal(self, tmp_path):
+        out = tmp_path / "recv"
+        out.mkdir()
+        manager = FileTransferManager("self-dev", str(out))
+        root = out.resolve()
+
+        for hostile in (
+            "../escaped",
+            "../../../../escaped",
+            "..\\..\\escaped",
+            "/absolute/escaped",
+            "C:/absolute/escaped",
+            "sub/../../escaped",
+            ".../.../escaped",
+            "",
+        ):
+            path = manager._temp_path(hostile)
+            assert path.resolve().parent == root, hostile
+            assert path.name == f".{manager._temp_path(hostile).name[1:]}"
+
+    def test_an_honest_transfer_id_still_round_trips(self, tmp_path):
+        """The digest must not collide for distinct ids, and the same id must
+        map to the same file -- the pause/resume path looks it up again."""
+        import uuid
+
+        out = tmp_path / "recv"
+        out.mkdir()
+        manager = FileTransferManager("self-dev", str(out))
+
+        ids = [uuid.uuid4().hex for _ in range(50)]
+        paths = [manager._temp_path(value) for value in ids]
+        assert len({path.name for path in paths}) == len(ids)
+        assert manager._temp_path(ids[0]) == manager._temp_path(ids[0])
+
+
+class TestAHostileNameCannotLoseTheFileSilently:
+    """A name that cannot be written must be reported, not swallowed.
+
+    Finalisation used to claim the ending (``_finish_now`` pops the transfer)
+    *before* reserving the name and moving the file, and ``_reserve_dest_name``
+    sat outside the ``try``.  A name that made the move fail therefore escaped
+    past the method's own ``except``: the verified bytes were discarded with no
+    history row and no ``file_complete``, and the sender timed out 90 s later.
+    """
+
+    def _receive_one(self, tmp_path, file_name):
+        out = tmp_path / "recv"
+        out.mkdir()
+        manager = FileTransferManager("self-dev", str(out))
+        manager.set_file_open_to_all(True)
+        sent: list[dict] = []
+        chunks = [os.urandom(CHUNK_SIZE), os.urandom(64)]
+        payload = b"".join(chunks)
+        history: list[dict] = []
+        manager._add_to_history = lambda *a, **k: history.append({"args": a, "kwargs": k})
+
+        manager.handle_message(
+            "file_request",
+            {
+                "transfer_id": "hostile1",
+                "file_name": file_name,
+                "file_size": len(payload),
+                "mime_type": "application/octet-stream",
+            },
+            lambda data: sent.append(decode_frame(data)),
+        )
+        for index, chunk in enumerate(chunks):
+            manager.handle_message(
+                "file_chunk",
+                {
+                    "transfer_id": "hostile1",
+                    "chunk_index": index,
+                    "total_chunks": len(chunks),
+                    "data": base64.b64encode(chunk).decode("ascii"),
+                },
+                lambda data: sent.append(decode_frame(data)),
+            )
+        deadline = time.time() + 5
+        while time.time() < deadline and not any(
+            getattr(frame, "msg_type", "") == "file_complete" for frame in sent
+        ):
+            time.sleep(0.02)
+        return manager, sent, history
+
+    def test_a_name_that_cannot_be_written_is_reported(self, tmp_path):
+        manager, sent, history = self._receive_one(tmp_path, "evil.txt:stream")
+
+        completes = [f for f in sent if getattr(f, "msg_type", "") == "file_complete"]
+        assert completes, "the sender was never told the transfer ended"
+        # Reported as a failure, and recorded, rather than vanishing.
+        assert completes[-1]._raw_payload["status"] != "success"
+        assert history, "the failure was not recorded in the transfers history"
+
+    def test_an_over_long_name_is_reported_rather_than_swallowed(self, tmp_path):
+        manager, sent, history = self._receive_one(tmp_path, "x" * 400 + ".bin")
+
+        completes = [f for f in sent if getattr(f, "msg_type", "") == "file_complete"]
+        assert completes, "the sender was never told the transfer ended"
+        assert completes[-1]._raw_payload["status"] != "success"
+        assert history, "the failure was not recorded in the transfers history"
+
+
+class TestARequestCannotTakeOverASend:
+    """`send_file` broadcasts the transfer_id to every connected peer, so a peer
+    that names it can otherwise replace this side's outgoing transfer."""
+
+    def test_a_request_reusing_a_sending_id_is_refused(self, tmp_path):
+        out = tmp_path / "recv"
+        out.mkdir()
+        manager = FileTransferManager("self-dev", str(out))
+        manager.set_file_open_to_all(True)
+        sent: list[dict] = []
+        manager._send_as_frame = lambda payload, fn=None: sent.append(payload)
+
+        source = tmp_path / "mine.txt"
+        source.write_bytes(b"content")
+        manager.send_file(str(source), lambda data: None)
+        with manager._lock:
+            outgoing = [t for t in manager._transfers.values() if t["type"] == "outgoing"]
+        assert outgoing, "the send was not registered"
+        transfer_id = outgoing[0]["transfer_id"]
+        before = dict(manager._transfers[transfer_id])
+
+        manager.handle_message(
+            "file_request",
+            {
+                "transfer_id": transfer_id,
+                "file_name": "attacker.bin",
+                "file_size": 10,
+                "mime_type": "application/octet-stream",
+            },
+            lambda data: None,
+            "attacker-peer",
+        )
+
+        # The outgoing transfer is untouched, and the attacker was told no.
+        assert manager._transfers[transfer_id] is not None
+        assert manager._transfers[transfer_id]["type"] == "outgoing"
+        assert manager._transfers[transfer_id] == before
+        # `sent` starts with the send's own outgoing request; the refusal is what
+        # was added by the hostile frame.
+        assert [f["msg_type"] for f in sent][-1] == "file_reject"
 
 
 # ═════════════════════════════════════════════════════════════════════════

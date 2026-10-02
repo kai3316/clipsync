@@ -16,7 +16,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from internal.config.config import Config, PeerInfo
+from internal.config.config import FIELD_RULES, Config, PeerInfo
 
 if TYPE_CHECKING:
     from internal.clipboard.history_db import ClipboardHistoryDB
@@ -488,81 +488,80 @@ _APP_FILTER_MODES = {"blacklist", "whitelist"}
 _UI_BACKENDS = {"ctk", "webview"}
 _LOG_LEVELS = {"DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"}
 
-# Per-field validation rules applied during restore.  A backup's config.json
-# is untrusted input, so every field is type- and range-checked before it is
-# written onto the live Config.  A missing rule means the field is simply not
-# applied (unknown / not part of the known schema).  Rule shapes:
-#   ("int", lo, hi)      Python int (bool rejected); clamped to [lo, hi]
-#   ("float",)           int or float (bool rejected); coerced to float
-#   ("float", lo, hi)    as above, clamped to the inclusive range
-#   ("bool",)            only a Python bool
-#   ("str",)             any string
-#   ("enum", set)        string in the given set
-#   ("enum", set, True)  string normalized to upper-case, then checked
-#   ("strlist",)         list of strings, or None (the Config default for
-#                        filter_enabled_categories meaning "all enabled")
-#   ("strlist_nonnull",) list of strings; null is rejected (falls through to
-#                        the field's list default) — used for relay_brokers /
-#                        ai_config_paths whose consumers call list() on them
-#   ("strdict",)         dict with str keys AND str values; non-str pairs are
-#                        dropped (used for the hotkey-id → shortcut map)
-_APPLY_SCHEMA: dict[str, tuple] = {
-    "device_name": ("str",),
-    "port": ("int", 1, 65535),
-    "service_type": ("str",),
-    "sync_enabled": ("bool",),
-    "auto_start": ("bool",),
-    "filter_enabled_categories": ("strlist",),
-    # Internet relay sync + AI-config watch list — round-trip with the export
-    # added above.  relay_brokers / ai_config_paths are strlist_nonnull so a
-    # hand-edited backup writing null cannot set them to None.
-    "internet_sync_enabled": ("bool",),
-    "relay_brokers": ("strlist_nonnull",),
-    "relay_private_brokers": ("strlist_nonnull",),
-    "relay_username": ("str",),
-    "relay_password": ("str",),
-    # Same bounds as config._FIELD_RANGES: applied on restore, so a hand-edited
-    # backup cannot set a limit the running app would refuse.
-    "relay_max_message_bytes": ("int", 32 * 1024, 1024 * 1024),
-    "relay_max_bytes_per_second": ("int", 4 * 1024, 2 * 1024 * 1024),
-    "relay_secret": ("str",),
-    "peer_relay_secrets": ("strdict",),
-    "netpair_secrets": ("strdict",),
-    "netpair_aliases": ("strdict",),
-    "netpair_dh_key": ("str",),
-    "netpair_peer_keys": ("strdict",),
-    "ai_config_tools": ("strlist_nonnull",),
-    "ai_config_custom_paths": ("strlist_nonnull",),
-    "history_max_entries": ("int", 10, 10000),
-    "history_max_age_days": ("float", 0, 36500),
-    "file_receive_dir": ("str",),
-    "sync_debounce": ("float",),
-    "clipboard_poll_interval": ("float",),
-    "max_reconnect_attempts": ("int", 0, 1000),
-    "transfer_timeout": ("float",),
+# Per-field validation rules applied during restore.  A backup's config.json is
+# untrusted input, so every field is type- and range-checked before it is written
+# onto the live Config.
+#
+# The rule for each field is *derived* from ``config.FIELD_RULES``, which is the
+# single table that says what a field is and what it may hold.  This file used to
+# keep a second, hand-written copy, and the two had drifted: it accepted
+# ``web_history_limit`` up to 100000 and ``max_reconnect_attempts`` up to 1000,
+# so a restored backup passed the restore and was then silently clamped to 500
+# and 100 by the next ``config.load()`` -- the restore reported success while
+# changing the value.  Derived, a bound cannot be true here and false there.
+#
+#   int / float with bounds  the numeric fields, clamped to their inclusive range
+#   bool / str               as in FIELD_RULES
+#   strlist[_nonnull]        list of strings; null allowed only for "strlist"
+#   strdict                  str -> str mappings (hotkey bindings and friends)
+#   enum                     the closed sets a field chooses between, which
+#                            FIELD_RULES cannot express because it only checks
+#                            the type: a hand-edited backup must not install
+#                            ``language: "klingon"``.
+_BACKUP_KIND = {
+    "int": "int",
+    "float": "float",
+    "bool": "bool",
+    "str": "str",
+    "strlist": "strlist",
+    "strlist_nonnull": "strlist_nonnull",
+    "strdict": "strdict",
+    # Hotkey bindings are a str -> str map on restore too; FIELD_RULES calls the
+    # shape "hotkeys" to say what it is for, not what it must be.
+    "hotkeys": "strdict",
+}
+
+# The fields whose value must come from a closed set, and that set.
+_ENUM_RULES: dict[str, tuple] = {
     "log_level": ("enum", _LOG_LEVELS, True),
-    "notifications_enabled": ("bool",),
-    "encryption_enabled": ("bool",),
     "appearance_mode": ("enum", _APPEARANCE_MODES),
     "language": ("enum", _LANGUAGES),
-    "paste_to_top": ("bool",),
-    "low_memory_mode": ("bool",),
-    "retry_capture_enabled": ("bool",),
     "dedup_method": ("enum", _DEDUP_METHODS),
-    "plain_text_only": ("bool",),
-    "app_filter_enabled": ("bool",),
     "app_filter_mode": ("enum", _APP_FILTER_MODES),
-    "app_filter_list": ("strlist",),
-    "source_tracking_enabled": ("bool",),
     "ui_backend": ("enum", _UI_BACKENDS),
-    "ui_animation_enabled": ("bool",),
-    "sound_enabled": ("bool",),
-    "web_enabled": ("bool",),
-    "web_port": ("int", 1, 65535),
-    "web_history_limit": ("int", 1, 100000),
-    "hotkeys": ("strdict",),
-    "hotkeys_enabled": ("bool",),
 }
+
+# Fields a backup carries but a restore deliberately does not apply.  Each is a
+# secret or a live handle rather than a preference: ``private_key_pem`` and
+# ``certificate_pem`` are the device identity a restore must not overwrite (the
+# local device keeps its own), ``web_token`` and ``translate_api_key`` are
+# credentials, and ``timed_pause_until`` is armed by a timer this path would not
+# set.  Listed rather than merely omitted, so "not restored" is a decision a
+# reader can find.
+_NOT_RESTORED = frozenset(
+    {
+        # Identity: pinned to this machine, re-minted rather than imported.
+        "device_id", "private_key_pem", "certificate_pem", "encryption_password_hash",
+        # Credentials.
+        "web_token", "translate_api_key",
+        # Live handles and machine state.
+        "timed_pause_until",
+    }
+)
+
+_APPLY_SCHEMA: dict[str, tuple] = {}
+for _name, _rule in FIELD_RULES.items():
+    if _name in _NOT_RESTORED:
+        continue
+    _kind = _ENUM_RULES.get(_name) or (_BACKUP_KIND.get(_rule[0]),)
+    if _kind[0] is None:
+        # A rule shape this path does not restore.  Loud rather than silent: an
+        # unmapped kind means a field was added upstream and not considered here.
+        raise RuntimeError(f"backup: no restore rule for {_name!r} ({_rule[0]!r})")
+    if len(_rule) == 3:
+        _kind = (_kind[0], _rule[1], _rule[2])
+    _APPLY_SCHEMA[_name] = _kind
+del _name, _rule, _kind
 
 # "peers" is handled separately (structured list-of-dicts, merged into
 # cfg.peers) rather than through the scalar setattr path above.

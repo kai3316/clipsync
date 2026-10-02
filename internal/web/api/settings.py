@@ -14,7 +14,7 @@ import logging
 import os
 from datetime import datetime
 
-from internal.config.config import _config_path
+from internal.config.config import FIELD_RULES, _config_path
 from internal.config.config import save as save_config
 from internal.i18n import T
 
@@ -96,6 +96,12 @@ _SAFE_FIELDS = {
     # transfer arrive (see ChatManager's chunk acknowledgement).
     "relay_max_bytes_per_second",
     "data_dir",
+    # Reachable only for an older companion build that still sends them: this
+    # panel's hotkey editor is gone (the desktop's sidecar bundle does not
+    # contain the hotkey backend at all, so the switch changed nothing there),
+    # and the legacy Tk application keeps its own editor.  One switch that
+    # changes nothing is worse than no switch, so the wire keeps accepting the
+    # fields -- an older page still loads -- while nothing offers them.
     "hotkeys",
     "hotkeys_enabled",
     # AI-config sync profiles (refactor round 1): enabled tool keys + user
@@ -110,29 +116,27 @@ _SAFE_FIELDS = {
     "timed_pause_until",
 }
 
-# Numeric fields the API accepts, with inclusive (lo, hi) bounds.  The web
-# frontend validates its own forms, but this endpoint is reachable from any
-# LAN client holding the token — a nonsense value (web_port = 1,
-# sync_debounce = 99) gets persisted and can leave the network layer
-# unable to start after a restart, so validate on the server too.
+# Numeric fields the API accepts, with inclusive (lo, hi) bounds.  Derived from
+# ``config.FIELD_RULES``, the one table that owns them, so a bound cannot be
+# true here and false on load -- which is what happened to
+# ``max_reconnect_attempts`` (100 here, 1000 in the restore path) and
+# ``web_history_limit`` (500 here, 100000 there).
 _RANGE_LIMITS = {
-    "web_port": (1024, 65535),
-    "port": (1024, 65535),
-    "web_history_limit": (1, 500),
-    "history_max_entries": (10, 10000),
-    # Retention window in days; 0 disables age-based pruning entirely.
-    "history_max_age_days": (0, 36500),
-    "sync_debounce": (0.05, 10.0),
-    "clipboard_poll_interval": (0.1, 60.0),
-    "max_reconnect_attempts": (0, 100),
-    "transfer_timeout": (5, 3600),
-    # Mirrors config._FIELD_RANGES: a free broker commonly allows 64 KiB, and
-    # 32 KiB is the floor below which file chunks get too small to be useful.
-    "relay_max_message_bytes": (32 * 1024, 1024 * 1024),
-    # Mirrors config._FIELD_RANGES.  The floor is a transfer too slow to be
-    # worth starting and the ceiling is past what any shipped broker carries.
-    "relay_max_bytes_per_second": (4 * 1024, 2 * 1024 * 1024),
+    name: (rule[1], rule[2]) for name, rule in FIELD_RULES.items() if len(rule) == 3
 }
+
+# The HTTP surface refuses the privileged ports, which the config's own floor
+# does not: an API client asking for port 80 is asking this machine to serve
+# something it will not be allowed to bind after a restart.  A low port already
+# in config.json is left alone -- that decision was made on the machine, not
+# over the network.
+_PRIVILEGED_PORT_FLOOR = 1024
+for _port_field in ("port", "web_port"):
+    _RANGE_LIMITS[_port_field] = (
+        max(_RANGE_LIMITS[_port_field][0], _PRIVILEGED_PORT_FLOOR),
+        _RANGE_LIMITS[_port_field][1],
+    )
+del _port_field
 
 # Fields whose value must never reach the log.  Every update is logged, and the
 # log is served to any client holding the web token (`GET /api/logs`), so a line
@@ -205,6 +209,8 @@ _MUTABLE_FIELDS = {
     # value is never echoed back — only netpair_password_set is exposed.
     "netpair_password",
     "data_dir",
+    # Kept for the same reason as in _SAFE_FIELDS above: nothing offers them,
+    # and an older companion build that sends them still round-trips.
     "hotkeys",
     "hotkeys_enabled",
     "ai_config_tools",

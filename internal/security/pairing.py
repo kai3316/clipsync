@@ -11,7 +11,12 @@ Security model:
 
 Threats addressed:
 - Eavesdropping: TLS 1.3 encrypts all traffic.
-- Impersonation: Certificate pinning prevents MITM after first pairing.
+- Impersonation: Certificate pinning prevents MITM after first pairing, and the
+  handshake now proves the peer holds the private key for the certificate it
+  names (see ``sign_handshake_nonce`` / ``verify_handshake_nonce``): a pinned
+  certificate *copied* off the wire used to be enough to be taken for its owner,
+  because the accepting side never obtained the certificate the peer actually
+  presented over TLS.
 - Brute-force pairing: 8-digit code (10^8 space) + rate limiting (5 attempts).
 - Rogue devices: Only paired peers can connect.
 """
@@ -312,6 +317,98 @@ class PairingManager:
             if not peer:
                 return False
             return peer.fingerprint.replace(":", "").upper() == fingerprint.replace(":", "").upper()
+
+    # -- handshake proof of key possession -----------------------------
+    #
+    # Why this exists.  The accepting side built its TLS context with
+    # `CERT_NONE`, so it never asked for a client certificate and
+    # `getpeercert(binary_form=True)` was always None -- which made the
+    # "bind the TLS-presented certificate to the app-layer one" check a few
+    # lines later dead code.  Everything the accept path believed about a peer
+    # (its device id, whether its certificate matched the pin, whether it was
+    # paired) therefore came from a PEM the peer merely *claimed* in its identity
+    # frame.  That PEM is not a secret: the server sends its own to any client
+    # before reading anything, so one unauthenticated connection to a device is
+    # enough to obtain it.  Copying a paired device's PEM into an identity frame
+    # was consequently enough to be taken for that device.
+    #
+    # Measured, Python offers no way to request a certificate without also
+    # validating it: `CERT_OPTIONAL` aborts the handshake on a self-signed client
+    # certificate (`SSLCertVerificationError: self-signed certificate`), and
+    # every ClipSync device's certificate is self-signed.  So the proof is made
+    # at the application layer instead, over the Ed25519 key the certificate
+    # already carries: each side signs a nonce the other chose, and a signature
+    # that verifies against the certificate's public key can only have been made
+    # by whoever holds that certificate's private key.
+
+    NONCE_BYTES = 32
+
+    @staticmethod
+    def make_handshake_nonce() -> str:
+        """A fresh nonce for one handshake, as hex."""
+        return secrets.token_hex(PairingManager.NONCE_BYTES)
+
+    def sign_handshake_nonce(self, peer_nonce: str, own_nonce: str) -> str:
+        """Prove we hold the private key for our certificate.
+
+        The message covers *both* nonces, so a signature harvested from one
+        handshake cannot be replayed into another, and our own nonce cannot be
+        reflected back at us as the peer's answer.
+
+        The two are **sorted** before signing, which is what makes the two sides
+        agree: this side signs *(their nonce, ours)* and the verifier holds
+        *(peer nonce, own nonce)* from the opposite point of view, so a message
+        that depends on which end is talking would never verify.  Measured, it did
+        not -- the first version had each side sign its own nonce first, and every
+        signature failed to check out.
+        """
+        identity = self._identity
+        if identity is None or not peer_nonce or not own_nonce:
+            return ""
+        message = PairingManager.handshake_message(peer_nonce, own_nonce)
+        try:
+            return identity.private_key.sign(message).hex()
+        except Exception:
+            logger.debug("Could not sign the handshake nonce", exc_info=True)
+            return ""
+
+    @staticmethod
+    def handshake_message(first: str, second: str) -> bytes:
+        """The bytes both sides sign and check, independent of who is which.
+
+        Sorted, because the two ends hold the same pair with the arguments
+        swapped: whichever is talking calls them *(peer, own)*, and the other
+        calls the same two *(own, peer)*.  A canonical order is the only thing
+        that makes one signature verifiable from both ends -- and it keeps both
+        nonces in the message, so neither the replay nor the reflection the
+        docstring above rules out becomes possible.
+        """
+        low, high = sorted((str(first), str(second)))
+        return f"{low}{high}".encode()
+
+    def verify_handshake_nonce(
+        self, certificate_pem: str, peer_nonce: str, own_nonce: str, signature: str
+    ) -> bool:
+        """Whether *signature* proves the sender holds *certificate_pem*'s key.
+
+        Read as: the peer signed the nonce we sent, and mixed in the nonce it
+        sent, using the key belonging to the certificate it named.  Anything
+        else -- no signature, a malformed one, a signature by a different key --
+        is False, and the caller decides what that costs.
+        """
+        if not signature or not peer_nonce or not own_nonce or not certificate_pem:
+            return False
+        try:
+            certificate = x509.load_pem_x509_certificate(certificate_pem.encode())
+            public_key = certificate.public_key()
+            public_key.verify(
+                bytes.fromhex(signature),
+                PairingManager.handshake_message(peer_nonce, own_nonce),
+            )
+            return True
+        except Exception:
+            logger.debug("Handshake nonce signature did not verify", exc_info=True)
+            return False
 
     def generate_pairing_code(self, peer_id: str) -> str:
         """Generate a pairing code for a peer. Returns the code to display."""

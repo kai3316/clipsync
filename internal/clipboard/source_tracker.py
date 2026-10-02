@@ -27,6 +27,15 @@ _SYSTEM = platform.system()
 _cache_lock = threading.Lock()
 _cache_expires: float = 0.0
 _cache_value: dict | None = None
+# Whether the cached entry is an answer at all.  "There is no foreground
+# application" is a real answer -- Windows hands back a null window handle,
+# macOS's osascript exits non-zero, Linux has no xdotool -- and it has to be
+# cached like any other.  Keyed on ``_cache_value is not None`` it never was, so
+# the 500 ms window expired in exactly the case it was written for: the
+# multi-format writes one copy produces (TEXT, HTML, RTF) arrive within a few
+# hundred milliseconds of each other, and each one re-ran the OS query instead of
+# the cached miss.
+_cache_valid = False
 _CACHE_TTL = 0.5  # 500 ms
 
 
@@ -36,22 +45,35 @@ def get_active_app_info() -> dict | None:
     Returns a dict with keys ``name``, ``process``, and ``title``, or
     ``None`` when the active application cannot be determined.
 
-    The result is cached for 500 ms so that rapid successive calls
-    (e.g., from the clipboard monitor polling loop) do not hammer the
-    OS with repeated queries.
+    The result — a miss included — is cached for 500 ms so that rapid successive
+    calls (e.g., from the clipboard monitor polling loop) do not hammer the OS
+    with repeated queries.
     """
-    global _cache_expires, _cache_value
-    now = time.time()
+    global _cache_expires, _cache_value, _cache_valid
     with _cache_lock:
-        if _cache_value is not None and now < _cache_expires:
+        if _cache_valid and time.time() < _cache_expires:
             return _cache_value
 
     info = _get_active_app_info_impl()
     with _cache_lock:
         _cache_value = info
-        _cache_expires = now + _CACHE_TTL
+        # Stamped after the query, not before: the query can take up to its own
+        # timeout (macOS and Linux shell out), and a lifetime measured from
+        # before it would leave a cache entry that is already half expired when
+        # it is written.
+        _cache_expires = time.time() + _CACHE_TTL
+        _cache_valid = True
 
     return info
+
+
+def _clear_cache() -> None:
+    """Drop the cached answer (tests, and any caller that needs a live reading)."""
+    global _cache_value, _cache_expires, _cache_valid
+    with _cache_lock:
+        _cache_value = None
+        _cache_expires = 0.0
+        _cache_valid = False
 
 
 def is_app_allowed(app_info: dict | None, cfg) -> bool:

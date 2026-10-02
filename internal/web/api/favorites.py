@@ -8,11 +8,9 @@ from pathlib import Path
 
 from internal.config.config import _config_dir
 from internal.data.favorites_export import build_favorites_export as _build_favorites_export
-from internal.infrastructure.persistence.favorites import SCHEMA, FavoritesRepository
+from internal.infrastructure.persistence.favorites import FavoritesRepository
 
 _FAV_DB_PATH: str | None = None
-_SCHEMA = SCHEMA
-_MIGRATIONS = ["ALTER TABLE favorites ADD COLUMN position INTEGER NOT NULL DEFAULT 0"]
 
 
 def _get_db_path() -> str:

@@ -581,14 +581,32 @@ class TestTheConsentGateIsOurs:
         assert gate.requested == ["a.txt"]
 
     def test_with_no_guard_registered_the_label_earns_nothing(self, tmp_path):
-        """Headless operation auto-accepts an ordinary file for want of a UI,
-        but that fallback must not be reachable by choosing a kind."""
+        """A `clip_file` label is not a licence, whichever way the setting is.
+
+        With the setting off and no prompt to raise, the frame is refused — but
+        refused as an *ordinary file*, not accepted on the strength of its kind.
+        That is the property this holds: the exemption is the outstanding request
+        this machine wrote, and a kind nobody asked for gets the same answer as
+        any other unexpected push.
+        """
+        sent: list[dict] = []
         manager = FileTransferManager("self-dev", output_dir=str(tmp_path))
+        manager.set_file_open_to_all(False)
+        manager._send_as_frame = lambda payload, fn=None: sent.append(payload)
+
         _request(manager, "clip_file", entry="h-1")
 
-        # Accepted for want of anyone to ask, not on the strength of the label:
-        # with a prompt registered and no guard the same frame prompts, which is
-        # the test above.
+        assert manager.get_transfers() == []
+        assert [frame["msg_type"] for frame in sent] == ["file_reject"]
+
+    def test_with_no_guard_and_open_to_all_the_label_still_decides_nothing(self, tmp_path):
+        """And with the setting on it is taken like any other file would be —
+        the answer comes from the setting, not from the word `clip_file`."""
+        manager = FileTransferManager("self-dev", output_dir=str(tmp_path))
+        manager.set_file_open_to_all(True)
+
+        _request(manager, "clip_file", entry="h-1")
+
         states = {t["transfer_id"]: t["state"] for t in manager.get_transfers()}
         assert states.get("t-1") not in (None, "rejected")
 
@@ -613,6 +631,49 @@ class TestTheConsentGateIsOurs:
         _request(manager, "file", entry="h-1")
 
         assert gate.requested == ["a.txt"]
+
+    def test_an_ordinary_file_is_refused_when_the_prompt_cannot_be_raised(self, tmp_path):
+        """A missing prompt is not consent.
+
+        `file_open_to_all = False` is the reader saying files need asking about.
+        A build whose callback is absent -- or whose frame arrives before the
+        runtime registers one -- used to read that absence as "headless, take
+        it" and auto-accept, which is the opposite of the setting.  Refusing is
+        the only answer consistent with it, and the sender is told rather than
+        left waiting.
+        """
+        sent: list[dict] = []
+        manager = FileTransferManager("self-dev", output_dir=str(tmp_path))
+        manager.set_file_open_to_all(False)
+        manager._send_as_frame = lambda payload, fn=None: sent.append(payload)
+
+        _request(manager, "file", entry="h-1")
+
+        assert [frame["msg_type"] for frame in sent] == ["file_reject"]
+        assert manager.get_transfers() == []
+
+    def test_a_pending_prompt_still_gets_the_frame_before_it_can_be_answered(self, tmp_path):
+        """The same rule from the other side: with the setting off and a prompt
+        registered, the request reaches the prompt rather than being refused."""
+        manager = FileTransferManager("self-dev", output_dir=str(tmp_path))
+        gate = _Recorder()
+        manager.set_file_open_to_all(False)
+        manager.set_on_transfer_request(gate.on_request)
+
+        _request(manager, "file", entry="h-1")
+
+        assert gate.requested == ["a.txt"]
+
+    def test_the_open_to_all_setting_still_takes_a_file_with_no_prompt(self, tmp_path):
+        """And the setting's own case, so the refusal above is not the answer to
+        everything: on, an ordinary file is taken on arrival as it always was."""
+        manager = FileTransferManager("self-dev", output_dir=str(tmp_path))
+        manager.set_file_open_to_all(True)
+
+        _request(manager, "file", entry="h-1")
+
+        states = {t["transfer_id"]: t["state"] for t in manager.get_transfers()}
+        assert states.get("t-1") not in (None, "rejected")
 
 
 class TestTheSenderCarriesTheEntry:

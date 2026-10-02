@@ -400,22 +400,36 @@ def _cleanup_stale_temps():
         pass
 
 
-# Per-field type rules applied when loading config.json.  A hand-edited or
-# partially corrupted file must degrade field-by-field (skip the bad value,
-# keep the default) instead of resetting the whole identity because one value
-# has the wrong type.  Rule shapes mirror backup.py's _APPLY_SCHEMA:
-#   "str"      any string
-#   "bool"     only a Python bool
-#   "int"      Python int (bool rejected)
-#   "float"    int or float (bool rejected), coerced to float
-#   "strlist"  list of strings, or None (filter_enabled_categories stores a
-#              null until the user picks categories; both mean "none")
-#   "strdict"  dict mapping strings to plain strings (peer_relay_secrets)
-#   "hotkeys"  dict mapping shortcut-id strings to shortcut strings
-_FIELD_RULES: dict[str, tuple] = {
+# The one place a config field's type and its inclusive bounds are written
+# down.  Everything that reads or writes config.json validates against this:
+# load() here, a restore in ``internal/data/backup.py``, and the web settings
+# API in ``internal/web/api/settings.py`` (which adds a privileged-port floor of
+# its own for the two port fields).
+#
+# It used to be three tables -- type rules here, a second type-and-bounds table
+# in backup.py, a third bounds-only table in the settings API -- and the three
+# had drifted apart: the same field was (1, 65535) on load and (1024, 65535) over
+# HTTP, and a restored ``web_history_limit`` of 100000 was accepted by the
+# restore and then silently clamped to 500 by the next load.  A bound written
+# twice is a bound that disagrees.
+#
+# Rule shapes:
+#   (kind, lo, hi)  a numeric field, clamped into the inclusive range
+#   ("int",)        Python int (bool rejected)
+#   ("float",)      int or float (bool rejected), coerced to float
+#   ("str",)        any string
+#   ("bool",)       only a Python bool
+#   ("strlist",)    list of strings, or None (a null means "none configured")
+#   ("strlist_nonnull",)  list of strings; null is rejected
+#   ("strdict",)    dict mapping strings to plain strings
+#   ("hotkeys",)    dict mapping shortcut-id strings to shortcut strings
+#
+# NaN/±Infinity are rejected rather than clamped: Python's json module
+# round-trips them, and a crafted value must not reach a later sleep() or
+# settimeout().
+FIELD_RULES: dict[str, tuple] = {
     "device_id": ("str",),
     "device_name": ("str",),
-    "port": ("int",),
     "service_type": ("str",),
     "sync_enabled": ("bool",),
     "timed_pause_until": ("float",),
@@ -423,13 +437,7 @@ _FIELD_RULES: dict[str, tuple] = {
     "filter_enabled_categories": ("strlist",),
     "private_key_pem": ("str",),
     "certificate_pem": ("str",),
-    "history_max_entries": ("int",),
-    "history_max_age_days": ("float",),
     "file_receive_dir": ("str",),
-    "sync_debounce": ("float",),
-    "clipboard_poll_interval": ("float",),
-    "max_reconnect_attempts": ("int",),
-    "transfer_timeout": ("float",),
     "log_level": ("str",),
     "notifications_enabled": ("bool",),
     "notify_device_connect": ("bool",),
@@ -461,10 +469,8 @@ _FIELD_RULES: dict[str, tuple] = {
     "favorites_path": ("str",),
     "data_dir": ("str",),
     "web_enabled": ("bool",),
-    "web_port": ("int",),
     "web_token": ("str",),
     "web_token_disabled": ("bool",),
-    "web_history_limit": ("int",),
     "translate_url": ("str",),
     "translate_api_key": ("str",),
     "hotkeys": ("hotkeys",),
@@ -474,8 +480,6 @@ _FIELD_RULES: dict[str, tuple] = {
     "relay_private_brokers": ("strlist_nonnull",),
     "relay_username": ("str",),
     "relay_password": ("str",),
-    "relay_max_message_bytes": ("int",),
-    "relay_max_bytes_per_second": ("int",),
     "relay_secret": ("str",),
     "peer_relay_secrets": ("strdict",),
     "netpair_secrets": ("strdict",),
@@ -484,38 +488,36 @@ _FIELD_RULES: dict[str, tuple] = {
     "netpair_peer_keys": ("strdict",),
     "ai_config_tools": ("strlist_nonnull",),
     "ai_config_custom_paths": ("strlist_nonnull",),
-}
-
-# Inclusive numeric bounds applied to numeric fields on load.  load()/restore
-# only type-check; without clamping a hand-edited config.json (or a crafted
-# backup restored into it, which coerces floats without bounds) could write
-# clipboard_poll_interval=0 → CPU busy-spin or port=70000 → OverflowError when
-# a socket binds at startup.  Bounds mirror the web settings API's
-# _RANGE_LIMITS (internal/web/api/settings.py) so load and the web UI agree;
-# port/web_port use the full 1-65535 (like backup restore) rather than the
-# API's privileged-port cut at 1024, so a valid low port is never mangled.
-_FIELD_RANGES: dict[str, tuple] = {
-    "port": (1, 65535),
-    "web_port": (1, 65535),
-    "web_history_limit": (1, 500),
-    "history_max_entries": (10, 10000),
+    # -- numeric fields, with the bounds that used to live in FIELD_RANGES ---
+    # 1-65535 rather than the settings API's 1024 cut: a low port that is
+    # already in the file is a working configuration, not something to mangle.
+    "port": ("int", 1, 65535),
+    "web_port": ("int", 1, 65535),
+    "web_history_limit": ("int", 1, 500),
+    "history_max_entries": ("int", 10, 10000),
     # Retention window in days; 0 disables age-based pruning entirely.
-    "history_max_age_days": (0, 36500),
-    "sync_debounce": (0.05, 10.0),
-    "clipboard_poll_interval": (0.1, 60.0),
-    "max_reconnect_attempts": (0, 100),
-    "transfer_timeout": (5, 3600),
+    "history_max_age_days": ("float", 0, 36500),
+    "sync_debounce": ("float", 0.05, 10.0),
+    "clipboard_poll_interval": ("float", 0.1, 60.0),
+    "max_reconnect_attempts": ("int", 0, 100),
+    "transfer_timeout": ("float", 5, 3600),
     # A free broker's 64 KiB sits inside this range with room on both sides:
     # 32 KiB is the floor because below it a file chunk gets too small to be
     # worth the round trip (see ``ChatManager.relay_chunk_for``), and 1 MiB the
     # ceiling because past it the figure is no longer a broker's published
     # limit but a typo.
-    "relay_max_message_bytes": (32 * 1024, 1024 * 1024),
+    "relay_max_message_bytes": ("int", 32 * 1024, 1024 * 1024),
     # How much of the relay this app will use, in bytes/s.  The floor is a
     # transfer slow enough to be useless and the ceiling is past what any of the
     # shipped brokers carries, so a value in between is a preference rather than
     # a typo (see the field comment for the measured rate this default clears).
-    "relay_max_bytes_per_second": (4 * 1024, 2 * 1024 * 1024),
+    "relay_max_bytes_per_second": ("int", 4 * 1024, 2 * 1024 * 1024),
+}
+
+# The numeric subset, for the callers that only need the bounds (the settings
+# API's own range check).  Derived, never written by hand.
+FIELD_RANGES: dict[str, tuple[int, int]] = {
+    name: (rule[1], rule[2]) for name, rule in FIELD_RULES.items() if len(rule) == 3
 }
 
 # Sentinel returned by _validate_field when a value must be skipped.
@@ -527,7 +529,7 @@ def _validate_field(key: str, value: object):
 
     Never raises; an invalid value simply leaves the Config default in place.
     """
-    rule = _FIELD_RULES.get(key)
+    rule = FIELD_RULES.get(key)
     if rule is None:
         return value  # not in the schema — caller's explicit list governs
     kind = rule[0]
@@ -538,22 +540,20 @@ def _validate_field(key: str, value: object):
     if kind == "int":
         if not isinstance(value, int) or isinstance(value, bool):
             return _SKIP_FIELD
-        limits = _FIELD_RANGES.get(key)
-        if limits is not None:
-            return max(limits[0], min(limits[1], value))
+        if len(rule) == 3:
+            return max(rule[1], min(rule[2], value))
         return value
     if kind == "float":
         if not isinstance(value, (int, float)) or isinstance(value, bool):
             return _SKIP_FIELD
         value = float(value)
-        limits = _FIELD_RANGES.get(key)
-        if limits is not None:
+        if len(rule) == 3:
             # NaN/±Infinity aren't JSON numbers in principle, but Python's
             # json module round-trips them; reject rather than clamp so a
             # crafted value can't poison a later sleep()/settimeout().
             if not math.isfinite(value):
                 return _SKIP_FIELD
-            return max(limits[0], min(limits[1], value))
+            return max(rule[1], min(rule[2], value))
         return value
     if kind == "strlist":
         if value is None:

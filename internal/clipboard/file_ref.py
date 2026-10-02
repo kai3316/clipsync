@@ -220,19 +220,6 @@ def entry_id_of(payload: bytes) -> str:
     return parsed["entry"] if parsed else ""
 
 
-def is_dir_only(payload: bytes) -> bool:
-    """Whether every item in a stored offer is a folder.
-
-    Nothing is served for one of these *by path*: the sender archives folders,
-    so a download of a folder arrives as one archive and the receiving end
-    reports the archive's own name.
-    """
-    parsed = parse(payload)
-    if not parsed or not parsed["files"]:
-        return False
-    return all(item["kind"] == "dir" for item in parsed["files"])
-
-
 def human_size(num_bytes: int) -> str:
     """A size written the way the window's own formatter writes one.
 

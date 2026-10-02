@@ -266,11 +266,6 @@ class InternetPairingService:
             return keys
         return []
 
-    def channel_key(self, topic: str) -> bytes | None:
-        """The key to *publish* on *topic* under, or None when it is not ours."""
-        keys = self.netpair_keys_for_topic(topic)
-        return keys[0] if keys else None
-
     def ensure_relay_secret(self) -> str:
         """This machine's own relay secret, generated and persisted on first use.
 

@@ -1,5 +1,6 @@
 """Owned LAN discovery, two-sided pairing and clipboard sync without a GUI."""
 
+import inspect
 import logging
 import os
 import platform
@@ -155,7 +156,18 @@ class _OwnedSyncManager(SyncManager):
 class _OwnedDiscovery(Discovery):
     def __init__(self, owner, *args, **kwargs):
         self._owner = owner
+        # The registration runs on its own thread (see Discovery.start), so a
+        # failure has no caller to raise to.  Report it the way this runtime
+        # reports every other background failure, or a device that is on the
+        # LAN but not advertising looks like a device nobody is running.
+        kwargs.setdefault("on_error", self._registration_failed)
         super().__init__(*args, **kwargs)
+
+    def _registration_failed(self):
+        self._owner._publish(
+            "runtime.error",
+            {"code": "MDNS_REGISTER_FAILED", "message": "Could not advertise on the LAN"},
+        )
 
     def _network_watch_loop(self):
         return self._owner._background(super()._network_watch_loop)
@@ -2869,7 +2881,45 @@ class LanRuntime:
         elif self.relay is not None:
             self._close_relay()
 
+    @staticmethod
+    def _stop_stage(stop, budget: float):
+        """Call one teardown stage, handing it what is left of the deadline.
+
+        A stage that takes a timeout gets the remainder rather than a budget of
+        its own; one that does not is bounded by the sockets it closes.  Decided
+        by signature instead of by `except TypeError`, because swallowing a
+        TypeError from inside a stage would hide the stage's own bug -- and it is
+        the only reason the fakes in the tests can keep a no-argument
+        `stop_server()`.
+        """
+        try:
+            parameters = inspect.signature(stop).parameters
+        except (TypeError, ValueError):
+            return stop()
+        if not parameters:
+            return stop()
+        return stop(budget)
+
     def _cleanup(self):
+        # One deadline for the whole teardown, not one per stage.
+        #
+        # The outer budget is `STOP_TIMEOUT` -- the caller joins this thread for
+        # exactly that long and reports "did not release ownership within its
+        # budget" if it is still running.  Each stage below has a natural
+        # 5-second budget of its own (a socket accept loop, a drain of admitted
+        # callbacks), and giving each of them the full five seconds is how the
+        # outer one came to be exceeded with no indication of which stage did it.
+        # Measured on this machine, the transport drain was the stage that lost:
+        # `runtime.stop()` returned False at 5.01 s with `clipsync-lan-stop`
+        # still inside `stop_server`.
+        #
+        # So every wait from here on is against this deadline, and a stage that
+        # cannot finish says what it was waiting for.
+        deadline = time.monotonic() + self.STOP_TIMEOUT
+
+        def remaining() -> float:
+            return max(0.0, deadline - time.monotonic())
+
         self._start_done.wait()
         ok = True
         # Disable first, so a capture already reading cannot record or send.
@@ -2887,20 +2937,49 @@ class LanRuntime:
         ):
             if name not in self._started:
                 continue
+            if remaining() <= 0:
+                logger.warning("LAN runtime teardown gave up before %s", name)
+                ok = False
+                break
+            started = time.monotonic()
             try:
-                complete = stop()
+                complete = self._stop_stage(stop, remaining())
                 if complete is False:
                     ok = False
                 else:
                     self._started.discard(name)
             except Exception:
                 ok = False
-                logger.warning("LAN runtime: RESOURCE_STOP_FAILED")
+                logger.warning("LAN runtime: RESOURCE_STOP_FAILED (%s)", name)
+            elapsed = time.monotonic() - started
+            if elapsed > 1.0:
+                logger.warning(
+                    "LAN runtime teardown: %s took %.1fs (%s)",
+                    name, elapsed, "ok" if ok else "incomplete",
+                )
         if self._maintenance is not None and self._maintenance.ident is not None:
-            self._maintenance.join()
+            # Bounded, and the one wait here that used to be unbounded: the loop
+            # parks on a refresh interval, so it should exit promptly -- and if it
+            # does not, the join was what held the outer budget open with nothing
+            # to show for it.
+            self._maintenance.join(remaining())
+            if self._maintenance.is_alive():
+                logger.warning(
+                    "LAN runtime teardown: the state loop did not stop within the budget"
+                )
+                ok = False
         with self._idle:
-            while self._active:
-                self._idle.wait()
+            # A straggling background task holds ownership: say so rather than
+            # let the caller report a bare timeout.
+            if self._active and remaining() > 0:
+                self._idle.wait(remaining())
+            if self._active:
+                logger.warning(
+                    "LAN runtime teardown: %d background task(s) still running: %s",
+                    len(self._active),
+                    sorted(thread.name for thread in self._active),
+                )
+                ok = False
             self._cleanup_ok = ok
 
     def _maintenance_loop(self):
@@ -5577,12 +5656,21 @@ class LanRuntime:
             # Dashboard transfers keep their LAN-only send closure (as legacy
             # did), so a relayed one could never answer anyway.
             #
-            # An unpaired peer is admitted for the file frames an update or a log
-            # transfer is made of: the manager settles each request against a
-            # ledger this machine armed by asking, and refuses a plain file from
-            # an unpaired sender before it can raise the accept prompt (see
-            # FileTransferManager).  Speed tests still need the pairing: there is
-            # nothing on the other side of one but this machine's bandwidth.
+            # An unpaired peer is admitted here for everything the file family
+            # carries, and the manager is what settles each kind: an update or a
+            # log blob against a ledger this machine armed by asking, and a
+            # `clip_file` against the download that asked for it.  A **plain**
+            # file from an unpaired sender is not refused by pairing -- pairing
+            # is deliberately not part of that question (see
+            # `set_file_open_to_all`) -- it is settled by the `file_open_to_all`
+            # setting: on (the default), taken on arrival into the receive
+            # directory; off, the accept prompt.  This comment used to say the
+            # manager "refuses a plain file from an unpaired sender before it can
+            # raise the accept prompt", which is the opposite of what it does and
+            # would have led a reader to believe pairing was the gate.
+            #
+            # Speed tests still need the pairing: there is nothing on the other
+            # side of one but this machine's bandwidth.
             allowed = trusted or kind in UNPAIRED_FILE_MSG_TYPES
             if allowed and not via_relay:
                 self.file_transfer.handle_message(

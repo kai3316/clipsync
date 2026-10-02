@@ -164,14 +164,21 @@ CHAT_MSG_TYPES = frozenset(
 # and FileTransferManager no-ops frames with unknown transfer_ids, so an
 # unpaired peer cannot attach bytes to a transfer this machine never opened.
 #
-# An unpaired peer *can* open one of its own — see the note below
+# The set itself is built below, once the two families it composes have been
+# defined -- ``FILE_CONTROL_MSG_TYPES``, ``UPDATE_MSG_TYPES`` and
+# ``LOG_MSG_TYPES`` all arrive after this comment.  There used to be a second,
+# narrower assignment right here that the later one silently replaced: harmless
+# at runtime, but it read as the real gate, and a reader checking what an
+# unpaired peer may send found a list that had not been in force since the line
+# below it was added.  See that assignment for what is admitted and why.
+#
+# An unpaired peer *can* open a transfer of its own -- see the note at
 # ``FILE_CONTROL_MSG_TYPES``: a plain ``file_request`` is taken on arrival by
 # default, the same as a chat attachment.
-UNPAIRED_GATE_MSG_TYPES = PAIRING_MSG_TYPES | CHAT_MSG_TYPES | frozenset({"file_chunk"})
 
 # The peer-to-peer exchanges that are deliberately open to unpaired devices --
 # an update passed between two builds of the same platform, and a log pulled
-# for debugging -- need more than the one frame type above: the answer to both
+# for debugging -- need more than chat's frame types: the answer to both
 # is an ordinary file transfer, whose control frames are not ``chat_*``.
 #
 # What makes admitting them safe is that the app layer decides what an unpaired
@@ -207,6 +214,11 @@ LOG_MSG_TYPES = frozenset({"log_request", "log_denied"})
 # these and no more.
 UNPAIRED_FILE_MSG_TYPES = FILE_CONTROL_MSG_TYPES | {"file_chunk"}
 
+# Everything an unpaired peer may send at the transport gate: the pairing and
+# chat families, the two deliberately-open peer exchanges, and the binary chunk
+# frame that carries the bytes for all of them.  ``file_request`` is in here
+# through ``FILE_CONTROL_MSG_TYPES`` -- see the note above for why that is
+# taken on arrival rather than refused.
 UNPAIRED_GATE_MSG_TYPES = (
     PAIRING_MSG_TYPES
     | CHAT_MSG_TYPES

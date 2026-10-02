@@ -93,6 +93,84 @@ class TestFlavorMergeEdges:
 # ── 1b. Flavor merge: SQLite backend ──────────────────────────────────
 
 
+class TestCoalesceWindowAfterClear:
+    """A wipe must not swallow the next capture.
+
+    The tight window exists to fold one clip captured in several formats into a
+    single entry.  With no rows left there is nothing to fold into, and the two
+    ways that came out wrong were both silent: the capture was dropped, or the
+    id an offer names belonged to a different row.
+    """
+
+    def _hist(self, tmp_path):
+        return ClipboardHistoryDB(storage_path=str(tmp_path / "h.db"))
+
+    def test_the_first_capture_after_a_clear_is_stored(self, tmp_path):
+        h = self._hist(tmp_path)
+        h.add(_plain())
+        h.clear()
+
+        # Same content, well inside DEDUP_WINDOW of the capture before the wipe.
+        entry_id = h.add(_plain())
+
+        assert entry_id, "the capture after a clear was dropped instead of stored"
+        entries = h.get_all()
+        assert len(entries) == 1
+        assert entries[0]["text_preview"]
+
+    def test_a_file_offer_after_a_clear_names_the_new_row(self, tmp_path):
+        """The id this returns is what a file offer carries to the peer.
+
+        An empty id meant the offer was never sent, so the other device saw a
+        filename with a download button that did nothing.
+        """
+        h = self._hist(tmp_path)
+        file_content = _content({ContentType.FILE: b"/tmp/notes.txt\n"})
+        h.add(file_content)
+        h.clear()
+
+        entry_id = h.add(file_content)
+
+        assert entry_id
+        assert entry_id == h.get_all()[0]["entry_id"]
+
+    def test_a_true_duplicate_inside_the_window_is_still_dropped(self, tmp_path):
+        """The fix must not turn the coalesce window off.
+
+        Two captures of one clip, the second adding nothing the first lacks,
+        stay one entry — that is what the window is for, and it has to hold
+        whether or not a wipe happened in between.
+        """
+        h = self._hist(tmp_path)
+        first = h.add(_plain())
+        assert h.add(_plain()) == first
+        assert len(h.get_all()) == 1
+
+        h.clear()
+        after_clear = h.add(_plain())
+        assert after_clear
+        assert h.add(_plain()) == after_clear
+        assert len(h.get_all()) == 1
+
+    def test_a_recapture_after_a_clear_merges_the_row_it_lands_on(self, tmp_path):
+        """A row that does hold the key is the one that gets the new flavor.
+
+        The tight window folds a second capture into the row the content is
+        already in, and the id it returns is that row's — the same row an offer
+        then names.
+        """
+        h = self._hist(tmp_path)
+        h.add(_plain())
+        h.clear()
+
+        # Plain first, then the same body with HTML: one row, upgraded.
+        entry_id = h.add(_plain())
+        assert h.add(_rich()) == entry_id
+        entries = h.get_all()
+        assert len(entries) == 1
+        assert ContentType.HTML in labels_to_types(entries[0]["types"])
+
+
 class TestFlavorMergeDb:
     def _hist(self, tmp_path):
         return ClipboardHistoryDB(storage_path=str(tmp_path / "h.db"))

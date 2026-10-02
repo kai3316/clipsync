@@ -69,12 +69,16 @@ class SyncManager:
         # a second clipboard event would otherwise start a parallel read that
         # broadcasts stale content out of order (and can drop the newest copy).
         self._read_lock = threading.Lock()
+        # The last hash this manager handled in either direction, written by the
+        # local capture path and by a remote write and read by both as "we just
+        # saw this".  There used to be a second field beside it holding the same
+        # value at every write, which made one of the two checks that read them
+        # unreachable.
         self._last_local_hash: str | None = None
-        self._last_content_hash: str = ""
-        # Monotonic time the hash fields above were last set.  Bounds how long
-        # they keep suppressing re-captures (mirrors DEDUP_RING_TTL), so a
-        # deliberate re-copy of the same content after the window is treated
-        # as new instead of being suppressed forever.
+        # Monotonic time it was last set.  Bounds how long it keeps suppressing
+        # re-captures (mirrors DEDUP_RING_TTL), so a deliberate re-copy of the
+        # same content after the window is treated as new instead of being
+        # suppressed forever.
         self._last_hash_ts: float = 0.0
         self._dedup_ring: list[tuple[str, float]] = []  # (hash, monotonic_ts)
         self._sync_debounce = sync_debounce
@@ -178,7 +182,6 @@ class SyncManager:
         """
         with self._lock:
             self._last_local_hash = None
-            self._last_content_hash = ""
             self._last_hash_ts = 0.0
             self._dedup_ring.clear()
             self._monitor.suppress_until = 0.0
@@ -349,7 +352,6 @@ class SyncManager:
             self._remote_apply_times.append(time.time())
             self._dedup_ring_remember(content_hash)
             self._last_local_hash = content_hash
-            self._last_content_hash = content_hash
             self._last_hash_ts = time.monotonic()
 
         return True
@@ -426,7 +428,6 @@ class SyncManager:
         """
         with self._lock:
             self._last_local_hash = None
-            self._last_content_hash = ""
             self._last_hash_ts = 0.0
 
     def _do_read_and_send_locked(self):
@@ -476,7 +477,7 @@ class SyncManager:
             return
 
         # Content-based dedup — a single canonical hash for all loop-prevention
-        # state (_last_local_hash, _last_content_hash, dedup ring).
+        # state (_last_local_hash, dedup ring).
         content_hash = content.hash_key()
 
         with self._lock:
@@ -484,18 +485,18 @@ class SyncManager:
             # may enter history or reach the network once the user paused.
             if not self._enabled:
                 return
-            # Catches duplicate captures (same content re-read after debounce).
-            # Bounded by the same TTL as the dedup ring, so a deliberate
-            # re-copy of the last content after DEDUP_RING_TTL is treated as
-            # new instead of being suppressed forever.
-            if (
-                content_hash == self._last_content_hash
-                and time.monotonic() - self._last_hash_ts <= DEDUP_RING_TTL
-            ):
-                return
-            # Skip if we just sent this content (loop prevention) — same TTL
-            # bound, so an echoed-back remote write stops suppressing once the
-            # ring window has passed.
+            # One reading, two jobs: a duplicate capture (the same content
+            # re-read after the debounce) and this machine's own write coming
+            # back off the clipboard.  Bounded by the same TTL as the dedup
+            # ring, so a deliberate re-copy of the last content after
+            # DEDUP_RING_TTL is treated as new instead of being suppressed
+            # forever, and an echoed-back remote write stops suppressing once
+            # the ring window has passed.
+            #
+            # This was two checks over two fields every writer set to the same
+            # value, so the second could only be reached when the first was
+            # already false -- an unreachable branch whose two comments read as
+            # though they meant different things.
             if (
                 content_hash == self._last_local_hash
                 and time.monotonic() - self._last_hash_ts <= DEDUP_RING_TTL
@@ -506,7 +507,6 @@ class SyncManager:
             if self._dedup_seen(content_hash):
                 return
 
-            self._last_content_hash = content_hash
             self._last_local_hash = content_hash
             self._last_hash_ts = time.monotonic()
 
