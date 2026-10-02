@@ -65,10 +65,36 @@ KEEPALIVE_COUNT = 6  # TCP keepalive: failed probes before declaring the connect
 ANON_CONN_MAX_LIFE = 60
 
 # Rejection frame sent after identity exchange when the accepting side
-# refuses the connection (peer in _rejected_peer_ids).  The connecting
-# side reads this before creating a PeerConnection and knows not to
-# schedule a reconnect.
+# refuses the connection (peer in _rejected_peer_ids, or a pinned device that
+# could not prove it holds its certificate's key).  The connecting side reads
+# this before creating a PeerConnection and knows not to schedule a reconnect.
+#
+# The marker carries a one-byte reason after it, because the *reason* decides
+# what the other end should say and do, and it cannot work that out itself:
+# "this device forgot us" and "this device will not trust us until we re-pair"
+# look identical from the dialling side -- it has the identity it always had and
+# the peer simply stopped accepting it.  Without the code the user gets one
+# vague toast for two different situations, one of which has an action
+# ("re-pair with it") and one of which does not.
 _REJECT_MARKER = b"\xff\xff\xff\xffRJCT"
+
+# Rejection reasons.  Zero is reserved for a marker from a build that predates
+# the reason byte, so a peer older than this field is reported as unspecified
+# rather than silently mislabelled as something specific.
+REJECT_UNSPECIFIED = 0
+# The peer removed this device; pairing must be redone from *its* side.
+REJECT_REMOVED = 1
+# The peer has this device pinned, but this device could not prove it holds the
+# key behind the certificate it presented.  Either it is an older build (the
+# peer cannot tell that from an impostor) or it is copying that certificate.
+# The fix is an explicit re-pair on both sides, which replaces the pin.
+REJECT_IDENTITY_UNPROVEN = 2
+
+_REJECT_REASONS = {
+    REJECT_UNSPECIFIED: "unspecified",
+    REJECT_REMOVED: "removed",
+    REJECT_IDENTITY_UNPROVEN: "identity-unproven",
+}
 
 # Appended to the identity frame's PEM by a dialer whose connection is not a
 # pairing request — a chat invite, an update offer, an update fetch.  The
@@ -698,12 +724,14 @@ class TransportManager:
         """
         self._on_connect_rejected = callback
 
-    def _notify_connect_rejected(self, peer_name: str, peer_id: str) -> None:
+    def _notify_connect_rejected(
+        self, peer_name: str, peer_id: str, reason: int = REJECT_UNSPECIFIED
+    ) -> None:
         cb = self._on_connect_rejected
         if cb is None:
             return
         try:
-            self._invoke_callback(cb, peer_name, peer_id)
+            self._invoke_callback(cb, peer_name, peer_id, reason)
         except Exception:
             logger.debug("on_connect_rejected callback failed", exc_info=True)
 
@@ -1128,18 +1156,25 @@ class TransportManager:
             TransportManager._restore_timeout(sock, prev_timeout)
 
     @staticmethod
-    def _send_rejection(sock: ssl.SSLSocket):
-        """Send a rejection marker so the peer knows not to reconnect."""
+    def _send_rejection(sock: ssl.SSLSocket, reason: int = REJECT_UNSPECIFIED):
+        """Send a rejection marker so the peer knows why not to reconnect.
+
+        *reason* is one of ``REJECT_*``: the dialling side cannot work out which
+        it is, and one of them has an action for the user.
+        """
         with contextlib.suppress(Exception):
-            sock.sendall(_REJECT_MARKER)
+            code = reason if 0 <= reason <= 255 else REJECT_UNSPECIFIED
+            sock.sendall(_REJECT_MARKER + bytes([code]))
 
     def _check_rejection(
         self, sock: ssl.SSLSocket, timeout: float = 0.25, max_wait: float = 1.0
-    ) -> tuple[bool, bytes]:
+    ) -> tuple[int, bytes]:
         """Check whether the server sent the application-level rejection
         marker right after its identity frame.
 
-        Returns ``(rejected, leftover_bytes)`` where *leftover_bytes* holds
+        Returns ``(reason, leftover_bytes)`` -- *reason* being one of the
+        ``REJECT_*`` codes, zero when this was not a rejection -- where
+        *leftover_bytes* holds
         anything read during the probe that was NOT part of a rejection —
         the caller must hand it to the new PeerConnection so the first
         application frame stays intact.
@@ -1153,15 +1188,20 @@ class TransportManager:
         """
         prev_timeout = sock.gettimeout()
         deadline = time.monotonic() + max_wait
+        # One byte past the marker, because the reason rides after it.  Reading
+        # only the marker and stopping is how the reason got lost: the probe saw
+        # a marker with nothing after it in the same segment and reported
+        # "unspecified" for every rejection, however specific the sender had been.
+        want = len(_REJECT_MARKER) + 1
         data = b""
         try:
-            while len(data) < len(_REJECT_MARKER):
+            while len(data) < want:
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
                     break
                 try:
                     sock.settimeout(min(timeout, remaining))
-                    chunk = sock.recv(len(_REJECT_MARKER) - len(data))
+                    chunk = sock.recv(want - len(data))
                 except TimeoutError:
                     if data and _REJECT_MARKER.startswith(data):
                         continue  # possible torn marker — keep probing
@@ -1169,8 +1209,6 @@ class TransportManager:
                 if not chunk:
                     break  # remote closed mid-probe
                 data += chunk
-                if data == _REJECT_MARKER:
-                    return True, b""
                 if not _REJECT_MARKER.startswith(data):
                     break  # application data — definitely not a rejection
         except Exception:
@@ -1178,18 +1216,62 @@ class TransportManager:
         finally:
             with contextlib.suppress(Exception):
                 TransportManager._restore_timeout(sock, prev_timeout)
-        if data and _REJECT_MARKER.startswith(data):
-            # A torn marker (only ever a rejection: frames start with a zero
-            # length byte, the marker with \\xff).  Treat it as rejected —
-            # discarding it and reading on would hit a garbage "frame" and
-            # reconnect into an endless reject loop.
+        if data.startswith(_REJECT_MARKER):
+            if len(data) > len(_REJECT_MARKER):
+                return data[len(_REJECT_MARKER)], b""
+            # A marker whose reason byte has not arrived (or never will, from a
+            # build that predates it).  Still a rejection: frames start with a
+            # zero length byte and the marker with 0xff, so this cannot be the
+            # start of anything else, and discarding it would leave the frame
+            # reader to read four 0xff bytes as a 0xFFFFFFFF length.
             logger.debug(
-                "[%s] torn %d-byte reject marker after probe budget — treating as rejection",
+                "[%s] %d-byte reject marker with no reason byte — treating as unspecified",
                 self._device_name,
                 len(data),
             )
-            return True, b""
-        return False, data
+            return REJECT_UNSPECIFIED, b""
+        return 0, data
+
+    @staticmethod
+    def _read_rejection_marker(sock: ssl.SSLSocket) -> int | None:
+        """Consume a rejection marker from *sock*, returning its reason.
+
+        Called *before* the frame reader, and that ordering is the whole point:
+        the marker begins with four ``0xff`` bytes, which the frame reader reads
+        as a length header of 0xFFFFFFFF and discards.  Every rejection therefore
+        used to reach the dial as "the peer sent no identity frame" or "the peer
+        vanished", with the reason gone before anything could report it.
+
+        Returns the reason code, or None when the next bytes are not a marker.
+        """
+        prev_timeout = sock.gettimeout()
+        sock.settimeout(0.25)
+        want = len(_REJECT_MARKER) + 1
+        try:
+            data = b""
+            while len(data) < want:
+                try:
+                    chunk = sock.recv(want - len(data))
+                except TimeoutError:
+                    break
+                if not chunk:
+                    break
+                data += chunk
+                # Divergence is only possible *within* the marker's length: the
+                # reason byte follows it, so by the time `data` is longer than the
+                # marker the prefix test would compare against a longer string and
+                # reject the very marker it just matched.
+                if len(data) <= len(_REJECT_MARKER) and not _REJECT_MARKER.startswith(data):
+                    return None
+            if not data.startswith(_REJECT_MARKER):
+                return None
+            if len(data) > len(_REJECT_MARKER):
+                return data[len(_REJECT_MARKER)]
+            return REJECT_UNSPECIFIED
+        except Exception:
+            return None
+        finally:
+            TransportManager._restore_timeout(sock, prev_timeout)
 
     def start_server(self):
         attempted = False
@@ -1486,25 +1568,30 @@ class TransportManager:
                         )
 
                 # Check if the server rejected us at the application level
-                # (e.g. we were forgotten by this peer).  The server sends
-                # a rejection marker after its identity frame.  The probe is
-                # brief when there is no rejection; anything it consumes that
-                # isn't the marker is replayed into the connection below so
-                # the first application frame stays intact.
-                rejected, probe_leftover = self._check_rejection(ssl_sock)
-                if rejected:
+                # (e.g. we were forgotten by this peer, or it will not trust this
+                # certificate until we re-pair).  The server sends a rejection
+                # marker after its identity frame, with a reason byte that says
+                # which -- the two look identical from here otherwise, and only one
+                # of them has an action for the user.  The probe is brief when
+                # there is no rejection; anything it consumes that isn't the marker
+                # is replayed into the connection below so the first application
+                # frame stays intact.
+                reject_reason, probe_leftover = self._check_rejection(ssl_sock)
+                if reject_reason:
                     logger.info(
-                        "[%s] peer explicitly rejected this connection — "
-                        "clearing saved address to prevent auto-reconnect",
+                        "[%s] peer rejected this connection (%s) — clearing saved "
+                        "address to prevent auto-reconnect",
                         peer_name,
+                        _REJECT_REASONS.get(reject_reason, f"code {reject_reason}"),
                     )
                     with self._lock:
                         self._peer_addresses.pop(peer_id, None)
                         self._reconnect_attempts.pop(peer_id, None)
                     # Surface the refusal to the app layer (e.g. a web toast) —
                     # otherwise a "Connect" click on a peer that removed us
-                    # looks like a silent no-op.
-                    self._notify_connect_rejected(peer_name, peer_id)
+                    # looks like a silent no-op, and a peer that needs re-pairing
+                    # looks like a device that mysteriously stopped working.
+                    self._notify_connect_rejected(peer_name, peer_id, reject_reason)
                     ssl_sock.close()
                     return
 
@@ -1526,7 +1613,9 @@ class TransportManager:
                         address,
                         port,
                     )
-                    self._notify_connect_rejected(peer_name, peer_id)
+                    self._notify_connect_rejected(
+                        peer_name, peer_id, reject_reason or REJECT_UNSPECIFIED
+                    )
                     ssl_sock.close()
                     return
                 if server_cert_data:
@@ -2658,16 +2747,49 @@ class TransportManager:
                 if should_refuse_unproven(
                     self._pairing_mgr, peer_id, proved, claimed_version=client_version
                 ):
+                    # A pinned device that cannot prove it holds the key behind
+                    # the certificate it presented.  This side does not check the
+                    # client certificate at the TLS layer -- it cannot, because
+                    # every ClipSync certificate is self-signed (see
+                    # `_build_ssl_context`) -- so this is the check that decides
+                    # whether the peer is the device it names.
+                    #
+                    # Refused, and told why: the two ways to arrive here are an
+                    # older build and an impostor presenting a copied
+                    # certificate, and they are indistinguishable from here.
+                    # Saying nothing would leave a user whose peer merely needs
+                    # updating with a device that stopped working and no reason
+                    # given, so the marker carries `REJECT_IDENTITY_UNPROVEN` and
+                    # the other end can offer the one action that fixes it.
                     logger.warning(
-                        "Incoming connection from %s:%d claims %s at handshake version "
-                        "%d and did not produce the proof it promised — refusing",
+                        "[%s] incoming connection at %s:%d claims %s but cannot "
+                        "prove it holds that certificate's key (handshake version "
+                        "%d, no valid proof) — refusing; re-pairing is required",
+                        peer_id[:12],
                         addr[0],
                         addr[1],
                         peer_id[:12],
                         client_version,
                     )
-                    self._send_rejection(ssl_sock)
+                    self._send_rejection(ssl_sock, REJECT_IDENTITY_UNPROVEN)
                     ssl_sock.close()
+                    # The user has to be told, and this is the one refusal with an
+                    # action attached: re-pairing replaces the pin, which is the
+                    # user saying "yes, this is that device".  Reported through the
+                    # same channel as a changed certificate, because it is the same
+                    # prompt -- the device is paired here with a certificate, and
+                    # this connection presented one that could not be proven.
+                    # Throttled there, so a peer reconnecting in a loop is answered
+                    # once with the certificate from the prompt actually shown.
+                    if self._on_security_alert and peer_id:
+                        self._invoke_callback(
+                            self._on_security_alert,
+                            peer_name or peer_id,
+                            peer_id,
+                            self._pairing_mgr.get_peer_fingerprint(peer_id) or "",
+                            fingerprint_pem(peer_cert_pem),
+                            peer_cert_pem,
+                        )
                     return
 
                 try:
@@ -2702,7 +2824,7 @@ class TransportManager:
                         "pairing must be redone from that device",
                         peer_id[:12],
                     )
-                    self._send_rejection(ssl_sock)
+                    self._send_rejection(ssl_sock, REJECT_REMOVED)
                     ssl_sock.close()
                     return
                 # A manual disconnect holds the peer off without the marker and

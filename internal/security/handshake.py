@@ -41,46 +41,55 @@ PROOF_VERSION = 1
 
 
 def should_refuse_unproven(pairing_mgr, claimed_device_id, proved, claimed_version=0):
-    """Whether an incoming peer must be refused for failing to prove itself.
+    """Whether an incoming pinned peer must be refused for failing to prove itself.
 
-    The policy, in one place, because it is the security decision and it is one
-    boolean away from being wrong in either direction:
+    Two cases, and the whole decision is which of them refuses:
 
     * a peer that *proved* possession is the device it claims -- accepted;
-    * a peer that claimed `PROOF_VERSION` or later and did **not** prove itself is
-      refused.  It promised a signature it did not produce, and the only peers that
-      do that are ones lying about who they are or about what they are running;
-    * a peer that did not claim that version is a build from before this feature.
-      It is accepted, because refusing it would take every existing pairing down on
-      the first upgrade, and because the *pin* is what refuses an impersonator in
-      that case: a copied certificate is not the pinned one, so `add_peer` raises
-      `CertificateChangedError` and the connection dies.  The residual risk lives
-      here, and the caller logs it (`pinned-but-unproven`).
+    * a peer that did not, claiming a device this machine has pinned -- refused.
 
-    The middle case is what makes this a gate rather than a report, and the version
-    claim is what makes the middle case decidable.  An earlier version of this
-    function refused every unproven peer claiming a pinned device -- which is the
-    middle and bottom cases together -- and that would have broken every existing
-    pairing the moment one side upgraded.
+    **Refused regardless of the handshake version it claims, and that is the
+    decision this function exists to record.**  An earlier version of it used the
+    version as a way out: a peer claiming the current version had promised a
+    signature and was refused, while a peer claiming an older one was accepted as
+    "a build from before the feature".  That distinction does not hold, because the
+    claim is free -- an impostor holding a copied certificate simply says it is an
+    older build, and is accepted.  A gate any attacker can walk through by choosing
+    a number is not a gate; it was a report wearing a gate's clothes.
+
+    The cost is real and it was chosen deliberately: a peer running a build from
+    before the proof existed is *also* refused, and the way back is to re-pair,
+    which replaces the pin -- that is the user saying "yes, this is that device".
+    Both ends are told, so the failure is legible instead of a device that quietly
+    stops syncing; `REJECT_IDENTITY_UNPROVEN` is what carries that.
+
+    `claimed_version` is still accepted and still logged -- it is how an operator
+    tells "an old build" from "something echoing an old build" -- but it no longer
+    decides anything.
     """
     if proved:
         return False
     if not claimed_device_id:
         return False
-    if int(claimed_version or 0) < PROOF_VERSION:
-        return False
     return bool(pairing_mgr.get_peer_certificate(claimed_device_id))
 
 
 def proof_state(proved, claimed_device_id, pinned, claimed_version=0):
-    """A word for the log: how well this peer established who it is."""
+    """A word for the log: how this peer established who it is.
+
+    Diagnostic only; nothing branches on it.  The version is reported because a
+    reader trying to work out why a peer could not prove itself wants to know
+    whether it even tried.
+    """
     if proved:
         return "proved"
     if pinned:
-        return "pinned-but-unproven"
+        return f"pinned-unproven-v{int(claimed_version or 0)}"
+    if not claimed_device_id:
+        return "new-device"
     if int(claimed_version or 0) >= PROOF_VERSION:
-        return "promised-a-proof-and-did-not"
-    return "older-build" if claimed_device_id else "new-device"
+        return "unpinned-promised-a-proof"
+    return f"unpinned-v{int(claimed_version or 0)}"
 
 
 def encode_identity(

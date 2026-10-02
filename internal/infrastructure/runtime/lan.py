@@ -52,6 +52,7 @@ from internal.sync.nearby_chat import CHAT_MSG_TYPES, ChatManager
 from internal.system import updater
 from internal.system.archive import ArchiveEmptyError, create_archive
 from internal.transport.connection import (
+    _REJECT_REASONS,
     MAX_FRAME_SIZE,
     NO_PAIRING_MARKER_SINCE,
     TransportManager,
@@ -127,6 +128,23 @@ def _local_platform() -> tuple[str, str]:
     platform.
     """
     return platform.system().lower(), (platform.machine() or "").lower()
+
+
+def _reject_reason_name(reason) -> str:
+    """The wire reason as a word the app layer and the UI can switch on.
+
+    A name rather than the number, because the number would have to be duplicated
+    in the TypeScript and in the phone client, and a duplicated constant is one
+    that drifts.  Unknown codes come back spelled as the code, so a newer peer's
+    reason is still reported rather than silently reported as "unspecified".
+    """
+    try:
+        code = int(reason or 0)
+    except (TypeError, ValueError):
+        return "unspecified"
+    if code in _REJECT_REASONS:
+        return _REJECT_REASONS[code]
+    return f"code-{code}"
 
 
 def _short_fingerprint(certificate_pem):
@@ -3705,13 +3723,26 @@ class LanRuntime:
         self._refresh()
         return {"trusted": True}
 
-    def _connect_rejected(self, name, pid):
+    def _connect_rejected(self, name, pid, reason=0):
         real = self._resolve(pid)
         with self._lock:
             self._connecting.pop(real, None)
         # The peer's name rides along so the phone can toast "«name» refused"
         # instead of a bare device id (legacy read it from the pairing repo).
-        self._publish("device.connection_rejected", {"device_id": pid, "name": name or ""})
+        #
+        # The reason rides along too, because the two refusals need different
+        # words and only one of them has an action: "it removed this device" is
+        # final until the user re-pairs *there*, while "it will not trust this
+        # certificate" is fixed by re-pairing here.  A single vague "refused"
+        # leaves the user with a device that stopped working and nothing to do.
+        self._publish(
+            "device.connection_rejected",
+            {
+                "device_id": pid,
+                "name": name or "",
+                "reason": _reject_reason_name(reason),
+            },
+        )
         self._refresh()
 
     def _persist(self):

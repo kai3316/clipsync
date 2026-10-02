@@ -67,6 +67,11 @@ export const EN: Record<string, string> = {
   // its user removed, so this names the state and the repair.
   "{name} 已将本机移除 — 需要重新在对方配对":
     "{name} has removed this device — pair again from that device",
+  // The other refusal the peer can send: it has this device pinned but could not
+  // verify who this is. Usually an older build on this machine, which is why the
+  // sentence names the upgrade as the likely fix as well as the re-pair.
+  "{name} 无法证明自己的身份 — 请在「设备」页对它重新配对（该设备若为旧版本，升级后即可正常连接）":
+    "{name} could not prove its identity — pair again with it from the Devices page (if that device is on an older version, updating it also restores the connection)",
   "找不到 {name} — 请确认该设备已开启 ClipSync 且在同一网络":
     "Can't find {name} — make sure it is running ClipSync and on the same network",
   // The certificate-change prompt. Wording follows the legacy dialog's.

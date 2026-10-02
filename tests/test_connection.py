@@ -17,8 +17,13 @@ import pytest
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from internal.transport.connection import (
+    _REJECT_MARKER,
+    _REJECT_REASONS,
     FRAME_HEADER_SIZE,
     MAX_FRAME_SIZE,
+    REJECT_IDENTITY_UNPROVEN,
+    REJECT_REMOVED,
+    REJECT_UNSPECIFIED,
     TransportManager,
 )
 
@@ -395,3 +400,88 @@ class TestPinningMeansThePin:
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
+
+
+class TestTheRejectionMarkerCarriesAReason:
+    """Three reasons, and only one of them has an action for the user.
+
+    From the dialling side they are indistinguishable -- it has the identity it
+    always had and the peer stopped accepting it -- so the reason has to travel
+    in the marker or it is lost.  It also has to survive the *frame reader*, which
+    reads the marker's four ``0xff`` bytes as a length header of 0xFFFFFFFF and
+    discards them: every rejection used to reach the dial as "no identity frame",
+    with the reason gone before anything could report it.
+    """
+
+    def _pair(self):
+        left, right = socket.socketpair()
+        for sock in (left, right):
+            sock.settimeout(5)
+        return left, right
+
+    def test_each_reason_survives_the_round_trip(self):
+        for reason in (
+            REJECT_UNSPECIFIED,
+            REJECT_REMOVED,
+            REJECT_IDENTITY_UNPROVEN,
+        ):
+            sender, receiver = self._pair()
+            try:
+                TransportManager._send_rejection(sender, reason)
+                assert TransportManager._read_rejection_marker(receiver) == reason
+            finally:
+                sender.close()
+                receiver.close()
+
+    def test_the_probe_reports_the_reason_too(self):
+        """The path the dial actually uses, not only the direct reader."""
+        manager = TransportManager("dev-1", "Device 1", 9999, MockPairingManager())
+        sender, receiver = self._pair()
+        try:
+            TransportManager._send_rejection(sender, REJECT_IDENTITY_UNPROVEN)
+            reason, leftover = manager._check_rejection(receiver)
+            assert reason == REJECT_IDENTITY_UNPROVEN
+            assert leftover == b""
+        finally:
+            sender.close()
+            receiver.close()
+
+    def test_a_marker_without_a_reason_byte_is_unspecified(self):
+        """A build that predates the reason byte must not be mislabelled."""
+        manager = TransportManager("dev-1", "Device 1", 9999, MockPairingManager())
+        sender, receiver = self._pair()
+        try:
+            sender.sendall(_REJECT_MARKER)
+            reason, _leftover = manager._check_rejection(receiver)
+            assert reason == REJECT_UNSPECIFIED
+        finally:
+            sender.close()
+            receiver.close()
+
+    def test_ordinary_traffic_is_not_mistaken_for_a_rejection(self):
+        """The probe runs on every connect, so a false positive would be fatal."""
+        manager = TransportManager("dev-1", "Device 1", 9999, MockPairingManager())
+        sender, receiver = self._pair()
+        try:
+            # A frame header (length zero) is what an idle peer sends.
+            sender.sendall(b"\x00\x00\x00\x00")
+            reason, leftover = manager._check_rejection(receiver, timeout=0.1, max_wait=0.2)
+            assert reason == 0
+            # The bytes must come back, or the first application frame is eaten.
+            assert leftover == b"\x00\x00\x00\x00"
+        finally:
+            sender.close()
+            receiver.close()
+
+    def test_the_dial_reports_the_reason_it_was_given(self):
+        """The reason must reach the app layer, or it cannot be shown."""
+        seen = []
+        manager = TransportManager("dev-1", "Device 1", 9999, MockPairingManager())
+        manager.set_on_connect_rejected(lambda name, pid, reason: seen.append(reason))
+        manager._notify_connect_rejected("Peer", "peer-1", REJECT_IDENTITY_UNPROVEN)
+        assert seen == [REJECT_IDENTITY_UNPROVEN]
+
+    def test_every_reason_has_a_name_for_the_log(self):
+        """A bare code in a log line sends the reader to the source."""
+        for reason in (REJECT_UNSPECIFIED, REJECT_REMOVED, REJECT_IDENTITY_UNPROVEN):
+            assert _REJECT_REASONS.get(reason), f"reason {reason} has no name"

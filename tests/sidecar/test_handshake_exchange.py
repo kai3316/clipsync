@@ -137,40 +137,55 @@ class TestTheTwoHonestDevicesProveThemselves:
 class TestThePolicyDecidesTheRightQuestion:
     """The security decision: which case refuses, and which must not.
 
-    Shaped by a mistake: the first version of this policy refused *every* unproven
-    peer claiming a pinned device, which would have taken down every existing
-    pairing the moment one side upgraded, because a peer running a build from
-    before this feature sends no proof either.  The version claim is what separates
-    the two situations without guessing.
+    Shaped by two mistakes, both recorded here because both looked reasonable:
+
+    1. The first version refused *every* unproven peer claiming a pinned device,
+       with no way to tell an older build from an impostor.
+    2. The second used the handshake version to tell them apart -- a peer claiming
+       the current version had promised a signature and was refused, an older one
+       was accepted.  The claim is free, so an impostor just says "older build".
+       A gate an attacker opens by choosing a number is not a gate.
+
+    The decision now is strict: unproven plus pinned is refused, whatever version
+    is claimed, and the other end is told to re-pair.
     """
 
     def test_a_proved_peer_is_accepted(self, tmp_path):
         victim, _peer = paired_pair(tmp_path)
         assert not should_refuse_unproven(victim, "peer-device", proved=True, claimed_version=1)
 
-    def test_a_peer_that_promised_a_proof_and_omitted_it_is_refused(self, tmp_path):
-        """The case that makes this a gate rather than a report.
-
-        A peer claiming the proof version has promised a signature, and an attacker
-        holding a copied certificate produces none.  Keying the gate on the *claim*
-        rather than on the field's presence is what stops "say nothing" from being
-        a way through.
-        """
+    def test_an_unproven_claim_on_a_pinned_device_is_refused(self, tmp_path):
         victim, _peer = paired_pair(tmp_path)
         assert should_refuse_unproven(victim, "peer-device", proved=False, claimed_version=1)
 
-    def test_an_older_build_keeps_working(self, tmp_path):
-        """Version 0 is a build from before this feature, and it is not refused.
+    def test_claiming_an_old_version_does_not_open_the_gate(self, tmp_path):
+        """The load-bearing assertion of the strict policy.
 
-        Refusing it would break every existing pairing on the first upgrade; the
-        pin is what refuses an impersonator in this case, because a copied
-        certificate is not the pinned one.
+        An impostor holding a copied certificate sends no proof.  It can also send
+        any version it likes.  Neither gets it through, which is the difference
+        between a gate and a report.
         """
         victim, _peer = paired_pair(tmp_path)
-        assert not should_refuse_unproven(victim, "peer-device", proved=False, claimed_version=0)
+        for version in (0, 1, 2, 99):
+            assert should_refuse_unproven(
+                victim, "peer-device", proved=False, claimed_version=version
+            ), f"claiming version {version} was accepted without a proof"
+
+    def test_a_forged_signature_does_not_open_the_gate(self, tmp_path):
+        """The full attack: the right version, a signature by another key."""
+        victim, peer = paired_pair(tmp_path)
+        stranger = identity("attacker-device", tmp_path, "Attacker")
+        victim_nonce = victim.make_handshake_nonce()
+        stranger_nonce = stranger.make_handshake_nonce()
+        forged = stranger.sign_handshake_nonce(victim_nonce, stranger_nonce)
+        proved = victim.verify_handshake_nonce(
+            peer.get_identity().certificate_pem, stranger_nonce, victim_nonce, forged
+        )
+        assert not proved
+        assert should_refuse_unproven(victim, "peer-device", proved, claimed_version=1)
 
     def test_an_unproven_stranger_is_first_contact_not_an_attack(self, tmp_path):
-        """There is no pin to copy before the first pairing, so nothing to refuse."""
+        """No pin means nothing to refuse on: the pairing code establishes trust."""
         victim, _peer = paired_pair(tmp_path)
         assert not should_refuse_unproven(
             victim, "never-seen-device", proved=False, claimed_version=1
@@ -180,13 +195,18 @@ class TestThePolicyDecidesTheRightQuestion:
         victim, _peer = paired_pair(tmp_path)
         assert not should_refuse_unproven(victim, "", proved=False, claimed_version=1)
 
-    def test_the_log_says_which_kind_of_unproven_peer_this_is(self, tmp_path):
-        """Every case named, because two of them do not refuse and a reader needs
-        to be able to tell which happened."""
+    def test_the_log_says_which_kind_of_unproven_peer_this_is(self):
+        """Diagnostic only -- nothing branches on these -- but a reader working out
+        why a peer could not prove itself wants to know whether it even tried."""
         assert proof_state(True, "peer-device", True) == "proved"
-        assert proof_state(False, "peer-device", True) == "pinned-but-unproven"
-        assert proof_state(False, "peer-device", False, claimed_version=0) == "older-build"
+        assert proof_state(False, "peer-device", True, claimed_version=0) == "pinned-unproven-v0"
+        assert proof_state(False, "peer-device", True, claimed_version=1) == "pinned-unproven-v1"
         assert proof_state(False, "", False) == "new-device"
+        assert (
+            proof_state(False, "stranger", False, claimed_version=1)
+            == "unpinned-promised-a-proof"
+        )
+        assert proof_state(False, "stranger", False, claimed_version=0) == "unpinned-v0"
 
 
 class TestTheVersionSurvivesTheExchange:

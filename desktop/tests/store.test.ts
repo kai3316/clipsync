@@ -557,6 +557,46 @@ describe("desktop application store", () => {
     store.dispose();
   });
 
+  it("separates the refusal that can be repaired here from the one that cannot", async () => {
+    // Two refusals, one sentence each, because the repairs are on different
+    // devices: a removal is undone at the peer, while a certificate this side
+    // will not trust is undone by re-pairing here.  A single sentence would send
+    // half the users to the wrong screen, which is what the reason byte on the
+    // wire exists to prevent.
+    const store = createApplicationStore();
+    await store.start();
+    const emit = vi.mocked(bridge.subscribe).mock.calls[0][0];
+    store.state.devices = [pairedDevice];
+    emit({ type: "event", name: "device.connection_rejected", session_id: "session",
+      data: { device_id: "peer", name: "Pixel", reason: "identity-unproven" } });
+    emit({ type: "event", name: "device.connection_rejected", session_id: "session",
+      data: { device_id: "other", name: "Laptop", reason: "removed" } });
+    expect(store.state.notices.map((notice) => notice.message)).toEqual([
+      t(
+        "{name} 无法证明自己的身份 — 请在「设备」页对它重新配对（该设备若为旧版本，升级后即可正常连接）",
+        { name: "Pixel" },
+      ),
+      t("{name} 已将本机移除 — 需要重新在对方配对", { name: "Laptop" }),
+    ]);
+    store.dispose();
+  });
+
+  it("falls back to the removal wording for a reason it does not know", async () => {
+    // A newer sidecar may name a reason this build has never heard of.  Reporting
+    // the removal wording is what every refusal meant before the reason existed,
+    // and it is better than dropping the notice and leaving a silent no-op.
+    const store = createApplicationStore();
+    await store.start();
+    const emit = vi.mocked(bridge.subscribe).mock.calls[0][0];
+    store.state.devices = [pairedDevice];
+    emit({ type: "event", name: "device.connection_rejected", session_id: "session",
+      data: { device_id: "peer", name: "Pixel", reason: "code-77" } });
+    expect(store.state.notices.map((notice) => notice.message)).toEqual([
+      t("{name} 已将本机移除 — 需要重新在对方配对", { name: "Pixel" }),
+    ]);
+    store.dispose();
+  });
+
   it("still reports an action the runtime refused without an event", async () => {
     const store = createApplicationStore();
     await store.start();

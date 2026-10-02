@@ -193,6 +193,27 @@ export function createApplicationStore() {
     // reason next to the bare `{accepted: false}` answer, so the click never
     // looks like a silent no-op; the wording is legacy's, advice included.
     if (name === "device.connection_rejected") {
+      // The other device answered our connection with an explicit refusal, and it
+      // tells us which refusal: one of these can be repaired here and the other
+      // only at the other device, so a single sentence would send half the users
+      // to the wrong screen.
+      //
+      // `reason` is the name the sidecar sends, not a number, so this switch and
+      // the one in Python cannot drift apart on a constant that has to be written
+      // twice.  An unrecognised name (a newer sidecar) falls through to the
+      // removal wording, which is what every refusal meant before the reason
+      // existed.
+      const reason = String((data as Record<string, unknown>).reason || "");
+      if (reason === "identity-unproven") {
+        // This side has that device pinned, and the connection could not prove
+        // it holds the key behind the certificate it presented.  Usually an older
+        // build on the other machine; occasionally something copying its
+        // certificate, which is exactly why the two are treated alike.
+        return t(
+          "{name} 无法证明自己的身份 — 请在「设备」页对它重新配对（该设备若为旧版本，升级后即可正常连接）",
+          { name: peerLabel(data) },
+        );
+      }
       // The other device answered our connection with an explicit refusal,
       // which it only sends for a peer its user removed. Say what happened and
       // where it can be undone: the repair is at the other device, and this
